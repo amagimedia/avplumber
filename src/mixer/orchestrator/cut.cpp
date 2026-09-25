@@ -44,14 +44,14 @@ int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t st
 }
 
 void MixerOrchestrator::readyCutTask(
-        std::shared_ptr<NodeManager> nodes,
-        std::shared_ptr<MixerState> state,
-        std::shared_ptr<SharedTimeline> timeline,
-        std::shared_ptr<TransitionScheduler> scheduler,
+        const std::shared_ptr<NodeManager>& nodes,
+        const std::shared_ptr<MixerState>& state,
+        const std::shared_ptr<SharedTimeline>& timeline,
+        const std::shared_ptr<TransitionScheduler>& scheduler,
         uint64_t transition_generation,
         bool new_pgm_is_slot_a,
         std::string new_pgm_scene,
-        std::string ready_edge_name,
+        const std::string& ready_edge_name,
         av::Timestamp ready_edge_initial_ts,
         int64_t earliest_switch_pts_ms,
         bool require_new_ready_frame) {

@@ -199,10 +199,11 @@ __device__ __forceinline__ void composite_body(
     if (tile_x >= pw || tile_y >= ph) return;   // block-uniform: no thread reaches the barrier below
 
     // Per-block culling: one bit per layer whose rect touches this tile.
-    __shared__ unsigned int hit[AVP_RECT_MAX_LAYERS / 32];
+    extern __shared__ unsigned int hit[];
     const int threads = blockDim.x * blockDim.y;
     const int tid = threadIdx.y * blockDim.x + threadIdx.x;
-    for (int w = tid; w < AVP_RECT_MAX_LAYERS / 32; w += threads) hit[w] = 0;
+    const int words = (n + 31) / 32;
+    for (int w = tid; w < words; w += threads) hit[w] = 0;
     __syncthreads();
     for (int i = tid; i < n; i += threads) {
         const AvpRectLayer &L = layers[i];
@@ -222,7 +223,7 @@ __device__ __forceinline__ void composite_body(
 #pragma unroll
         for (int c = 0; c < lanes; ++c) acc[p][c] = kChroma ? float(clear_uv) : float(clear_y);
 
-    for (int w = 0; w < AVP_RECT_MAX_LAYERS / 32; ++w) {
+    for (int w = 0; w < words; ++w) {
         unsigned int bits = hit[w];
         while (bits) {
             const int bit = __ffs(bits) - 1;

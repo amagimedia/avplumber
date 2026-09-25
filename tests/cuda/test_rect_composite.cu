@@ -217,15 +217,15 @@ static void drawBatched(const Fmt &cf, Frame &canvas, const std::vector<AvpRectL
     for (const auto &e : table) any_rgb = any_rgb || e.kind >= AVP_RECT_KIND_RGB;
     const int clear0 = cf.planes == 1 ? 0 : clearValue(cf, 0);
     if (cf.planes == 1)
-        composite_planes_packed4<<<grid, block>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
+        composite_planes_packed4<<<grid, block, (table.size() + 31) / 32 * sizeof(unsigned int)>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
             canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
             clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
     else if (any_rgb)
-        composite_planes<<<grid, block>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
+        composite_planes<<<grid, block, (table.size() + 31) / 32 * sizeof(unsigned int)>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
             canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
             clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
     else
-        composite_planes_yuv<<<grid, block>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
+        composite_planes_yuv<<<grid, block, (table.size() + 31) / 32 * sizeof(unsigned int)>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
             canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
             clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
     check(cudaGetLastError(), "composite launch");
@@ -269,7 +269,7 @@ static void scenario(const char *name, const Fmt &cf, int cw, int ch, const std:
 int main() {
     std::mt19937 rng(7);
     AvpRectLayer *dev_table = nullptr;
-    check(cudaMalloc(&dev_table, sizeof(AvpRectLayer) * AVP_RECT_MAX_LAYERS), "table alloc");
+    check(cudaMalloc(&dev_table, sizeof(AvpRectLayer) * 512), "table alloc");
 
     Frame a(NV12, 640, 360, &rng), b(NV12, 1280, 720, &rng), c(NV12, 302, 170, &rng);
     Frame pa(P210, 640, 360, &rng), pb(P210, 1280, 720, &rng);
@@ -304,6 +304,17 @@ int main() {
                             col * 540, row * 240, 540, 240});
         }
         scenario("nv12 grid16", NV12, 1080, 1920, grid, 2, dev_table);
+    }
+
+    // Exercise culling-mask word boundaries and every bit up to the layer limit.
+    for (int count : {31, 32, 33, 255, 256, 257, 310, 511, 512}) {
+        std::vector<Layer> grid;
+        for (int i = 0; i < count; ++i)
+            grid.push_back({AVP_RECT_KIND_YUV, i % 2 ? &a : &b, nullptr, nullptr,
+                           0, 0, i % 2 ? 640 : 1280, i % 2 ? 360 : 720,
+                           (i % 32) * 16, (i / 32) * 32, 16, 32});
+        const std::string label = "nv12 layers " + std::to_string(count);
+        scenario(label.c_str(), NV12, 512, 512, grid, 2, dev_table);
     }
 
     // 4. P210 canvas (HLG): P210 sources, NV12 promoted, graphics converted with the HLG transfer.

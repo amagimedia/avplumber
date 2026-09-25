@@ -541,8 +541,52 @@ void inactive_prewarm_retains_live_frames_without_rendering() {
     CHECK(!mix.prepare(rate.time(110), true));
 }
 
+void staged_input_readiness_preserves_old_output() {
+    using namespace avp::mixer;
+    TickGrid rate(av::Rational(25, 1));
+    Playout<int> mix(3, rate, 120, TimestampMode::Presentation);
+    mix.setActive(1, false);
+    mix.setActive(2, false);
+    CHECK(!mix.readyAtNextTick(1, 0));
+    for (int tick = 0; tick < 12; ++tick) {
+        const auto now = rate.time(tick) + mix.latencyNs();
+        mix.push(0, tick, rate.time(tick));
+        if (tick == 2) {
+            mix.setPrewarm(1, true);
+            // This source's first frame belongs to a later output tick.
+            mix.push(1, 105, rate.time(5));
+        }
+        CHECK(mix.readyAtNextTick(0, now));
+        if (tick >= 2 && tick < 5) CHECK(!mix.readyAtNextTick(1, now));
+        if (tick == 5) {
+            CHECK(mix.readyAtNextTick(1, now));
+            mix.setActive(1, true);
+            mix.setPrewarm(1, false);
+        }
+        if (tick == 6) {
+            mix.setPrewarm(2, true); // a missing source must not stop the old layout
+            CHECK(!mix.readyAtNextTick(2, now));
+        }
+        if (tick == 8) {
+            // Supersede preparation: discard its future frame, keep active input 1.
+            mix.push(2, 220, rate.time(20));
+            CHECK(!mix.readyAtNextTick(2, now));
+            mix.setPrewarm(2, false);
+            CHECK(mix.queued(2) == 0 && !mix.readyAtNextTick(2, now));
+        }
+        const auto *frame = mix.prepare(now, false);
+        CHECK(frame && frame->index == tick && *frame->frames[0] == tick);
+        if (tick >= 5) CHECK(frame->frames[1] && *frame->frames[1] == 105);
+        mix.commit();
+    }
+    CHECK(mix.missedDeadlines() == 0);
+    mix.setActive(1, false);
+    CHECK(!mix.readyAtNextTick(1, rate.time(20)));
+}
+
 int main(int argc, char **argv) {
     const std::pair<const char *, void (*)()> cases[] = {
+        {"staged_input_readiness_preserves_old_output", staged_input_readiness_preserves_old_output},
         {"inactive_prewarm_retains_live_frames_without_rendering", inactive_prewarm_retains_live_frames_without_rendering},
         {"complete_jitter_plateau_is_not_rate_drift", complete_jitter_plateau_is_not_rate_drift},
         {"stale_burst_is_not_retimestamped_as_fresh", stale_burst_is_not_retimestamped_as_fresh},

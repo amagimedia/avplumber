@@ -9,10 +9,12 @@
 #include "../../../deps/cuda_loader/cuda_drvapi_dynlink_gl.h"
 #include "cuda_rect_sampler.h"
 #include "cuda_rect_texture.h"
+#include "DeferredRelease.hpp"
 
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <memory>
@@ -25,7 +27,7 @@ extern "C" {
 #include <libdrm/drm_fourcc.h>
 }
 
-class DRMPrimeToCUDA: public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class DRMPrimeToCUDA: public NodeSISO<av::VideoFrame, av::VideoFrame>, public IReturnsObjects {
 protected:
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVBufferRef* hw_frames_ctx_ = nullptr;
@@ -69,6 +71,9 @@ protected:
         }
     };
     struct ImportEntry {
+        // Cleanup can outlive the importer node; keep its CUDA context alive.
+        explicit ImportEntry(std::shared_ptr<HWAccelDevice> device): device(std::move(device)) {}
+        std::shared_ptr<HWAccelDevice> device;
         ImportKey key;
         int dup_fd = -1;                    // keeps the allocation (and its inode) alive while cached
         EGLImageKHR image = EGL_NO_IMAGE_KHR;
@@ -93,6 +98,8 @@ protected:
         }
     };
     std::vector<std::shared_ptr<ImportEntry>> imports_;
+    std::shared_ptr<DeferredRelease<ImportEntry>> cleanup_;
+    std::shared_ptr<DeferredRelease<ImportEntry>::Budget> import_budget_;
     // Owner of a zero-copy output frame's buffer: pins the import entry and the DRM input frame.
     struct ZeroCopyOwner {
         std::shared_ptr<ImportEntry> entry;
@@ -106,7 +113,8 @@ protected:
     size_t max_imports_ = 64;
     int64_t import_ttl_ms_ = 3000;
     int64_t last_purge_ms_ = 0;
-    uint64_t cache_hits_ = 0, fresh_imports_ = 0;
+    std::atomic<uint64_t> cache_hits_{0}, fresh_imports_{0}, expired_imports_{0}, evicted_imports_{0};
+    std::atomic<const char*> phase_{"idle"};
 
     static inline const char* safe_str(const char* s) { return s ? s : ""; }
 
@@ -278,12 +286,14 @@ protected:
     }
 
     void purgeImports(int64_t now_ms, bool all) {
+        if (!all && !import_ttl_ms_) return; // retain a recycling producer's allocation pool
         if (!all && last_purge_ms_ && now_ms - last_purge_ms_ < std::min<int64_t>(1000, import_ttl_ms_)) return;
         last_purge_ms_ = now_ms;
         for (auto it = imports_.begin(); it != imports_.end();) {
-            if (all || now_ms - (*it)->last_used_ms >= import_ttl_ms_)
-                it = imports_.erase(it);   // released now, or when the last zero-copy frame dies
-            else
+            if (all || (it->use_count() == 1 && now_ms - (*it)->last_used_ms >= import_ttl_ms_)) {
+                if (!all) ++expired_imports_;
+                it = imports_.erase(it); // last release only queues worker cleanup
+            } else
                 ++it;
         }
     }
@@ -300,17 +310,34 @@ protected:
         }
         ImportKey key{st.st_dev, st.st_ino, (uint32_t)width, (uint32_t)height, (uint32_t)pl.pitch,
                       layer.format, obj.format_modifier, (uint64_t)pl.offset};
-        purgeImports(now_ms, false);
         for (auto &e : imports_) {
             if (e->key == key) {
                 e->last_used_ms = now_ms;
                 ++cache_hits_;
-                return e;
+                auto entry = e; // expiry can erase other slots and invalidate the vector reference
+                purgeImports(now_ms, false);
+                return entry;
             }
         }
+        purgeImports(now_ms, false);
+        if (imports_.size() >= max_imports_) {
+            auto oldest = imports_.end();
+            for (auto it = imports_.begin(); it != imports_.end(); ++it) {
+                if (it->use_count() == 1 &&
+                    (oldest == imports_.end() || (*it)->last_used_ms < (*oldest)->last_used_ms))
+                    oldest = it;
+            }
+            // Never forget a registration still used by a frame: returning
+            // allocations must find it rather than create a second registration.
+            if (oldest == imports_.end()) return nullptr;
+            imports_.erase(oldest);
+            ++evicted_imports_;
+        }
+        phase_ = "cleanup_admission";
+        auto entry = cleanup_->tryMake(import_budget_, hwaccel_);
+        if (!entry) return nullptr; // process() releases the input and its browser slot.
+        phase_ = "egl_context";
         if (!ensureEGL()) return nullptr;
-
-        auto entry = std::make_shared<ImportEntry>();
         ImportEntry &e = *entry;
         e.key = key;
         e.last_used_ms = now_ms;
@@ -335,6 +362,7 @@ protected:
             attrs[a++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT; attrs[a++] = (EGLint)(obj.format_modifier >> 32);
         }
         attrs[a++] = EGL_NONE;
+        phase_ = "egl_import";
         e.image = eglCreateImage(egl_dpy_, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, (EGLClientBuffer)NULL, attrs);
         if (e.image == EGL_NO_IMAGE_KHR) {
             logstream << "drm2cuda: eglCreateImage failed width=" << width << " height=" << height
@@ -342,6 +370,7 @@ protected:
             return nullptr;
         }
 
+        phase_ = "cuda_register";
         bool ok = !CHECK_CU(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx));
         if (ok) {
             ok = !CHECK_CU(cuGraphicsEGLRegisterImage(&e.resource, e.image, CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY)) &&
@@ -357,6 +386,7 @@ protected:
             ok = false;
         }
         if (ok && zero_copy_ && e.frame.frameType == CU_EGL_FRAME_TYPE_ARRAY) {
+            phase_ = "cuda_texture";
             // Sampling handle for the compositor: exact texels, unnormalized coordinates.
             CUDA_RESOURCE_DESC res{};
             CUDA_TEXTURE_DESC td{};
@@ -374,21 +404,13 @@ protected:
         }
         if (!ok)
             return nullptr;
-        if (imports_.size() >= max_imports_) {
-            auto oldest = std::min_element(imports_.begin(), imports_.end(),
-                [](const std::shared_ptr<ImportEntry> &l, const std::shared_ptr<ImportEntry> &r) {
-                    // Prefer dropping idle imports; live frames still own their
-                    // entry even if every cached allocation is currently in use.
-                    if ((l.use_count() == 1) != (r.use_count() == 1)) return l.use_count() == 1;
-                    return l->last_used_ms < r->last_used_ms; });
-            imports_.erase(oldest);
-        }
         ++fresh_imports_;
         if (fresh_imports_ <= 2 || fresh_imports_ % 64 == 0)
             logstream << "drm2cuda: imported allocation " << width << "x" << height << " type="
                       << (e.frame.frameType == CU_EGL_FRAME_TYPE_PITCH ? "pitch" : "array")
                       << (zero_copy_ ? " zero-copy" : "")
-                      << " cached=" << imports_.size() + 1 << " hits=" << cache_hits_ << " imports=" << fresh_imports_;
+                      << " cached=" << imports_.size() + 1 << " hits=" << cache_hits_.load()
+                      << " imports=" << fresh_imports_.load();
         imports_.push_back(entry);
         return entry;
     }
@@ -426,7 +448,9 @@ protected:
 
     bool import_to_cuda(const AVDRMFrameDescriptor* desc, int width, int height, AVPixelFormat swfmt,
                         const av::VideoFrame &in, av::VideoFrame &dst) {
+        phase_ = "frames_context";
         if (!ensureCudaFramesCtx(width, height, swfmt)) return false;
+        phase_ = "cache_lookup";
         std::shared_ptr<ImportEntry> e = findOrImport(desc, width, height, wallclock.pts());
         if (!e) return false;
         if (zero_copy_ && wrapMapped(e, in, width, height, dst))
@@ -472,11 +496,32 @@ protected:
 
 public:
     using NodeSISO::NodeSISO;
+    Parameters getObject(const std::string key) override {
+        if (key != "import_stats") throw Error("drm_prime_to_cuda: unknown object " + key);
+        const auto counts = cleanup_->counts();
+        const auto timing = cleanup_->diagnostics(import_budget_);
+        return {{"hits", cache_hits_.load()}, {"imports", fresh_imports_.load()},
+                {"expired", expired_imports_.load()}, {"evicted", evicted_imports_.load()},
+                {"instance_imports_alive", counts.first}, {"instance_cleanup_pending", counts.second},
+                {"phase", phase_.load()}, {"admission_dropped", timing.declined},
+                {"instance_released", timing.released}, {"instance_releasing_ms", timing.releasing_ms},
+                {"instance_release_total_ms", timing.release_ms}, {"instance_release_max_ms", timing.max_release_ms}};
+    }
+    void stop() override {
+        cleanup_->close(import_budget_);
+        NodeSingleInput<av::VideoFrame>::stop();
+    }
     virtual void process() {
+        struct ResetPhase {
+            std::atomic<const char*>& phase;
+            ~ResetPhase() { phase = "idle"; }
+        } reset{phase_};
+        phase_ = "input";
         av::VideoFrame in = this->source_->get();
         if (!in) return;
         if (in.raw()->format != AV_PIX_FMT_DRM_PRIME) {
             // pass through if not DRM PRIME
+            phase_ = "output";
             this->sink_->put(in);
             return;
         }
@@ -512,6 +557,7 @@ public:
             out.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);
         }
         out.setComplete(true);
+        phase_ = "output";
         this->sink_->put(out);
     }
     DRMPrimeToCUDA(std::unique_ptr<typename NodeSISO<av::VideoFrame,av::VideoFrame>::SourceType> &&source,
@@ -538,9 +584,20 @@ public:
         r->zero_copy_ = params.value("zero_copy", false);
         const int max_imports = params.value("max_imports", 64);
         r->import_ttl_ms_ = params.value("import_ttl_ms", int64_t(3000));
-        if (max_imports <= 0 || r->import_ttl_ms_ <= 0)
-            throw Error("drm_prime_to_cuda: max_imports and import_ttl_ms must be positive");
+        if (max_imports <= 0 || r->import_ttl_ms_ < 0)
+            throw Error("drm_prime_to_cuda: max_imports must be positive and import_ttl_ms nonnegative (0 retains imports)");
         r->max_imports_ = size_t(max_imports);
+        const int cleanup_interval_us = params.value("cleanup_interval_us", 0);
+        if (cleanup_interval_us < 0)
+            throw Error("drm_prime_to_cuda: cleanup_interval_us must be nonnegative");
+        const auto interval = std::chrono::microseconds(cleanup_interval_us);
+        using CleanupObjects = InstanceSharedObjects<DeferredRelease<ImportEntry>>;
+        CleanupObjects::emplace(nci.instance, "drm_import_cleanup", CleanupObjects::PolicyIfExists::Ignore, interval);
+        r->cleanup_ = CleanupObjects::get(nci.instance, "drm_import_cleanup");
+        if (r->cleanup_->interval() != interval)
+            throw Error("drm_prime_to_cuda: cleanup_interval_us must match across the instance");
+        // Include retired imports awaiting destruction, not just cache entries.
+        r->import_budget_ = std::make_shared<DeferredRelease<ImportEntry>::Budget>(2 * r->max_imports_);
         if (!params.count("hwaccel")) {
             throw Error("drm_prime_to_cuda requires hwaccel parameter (CUDA device)");
         }

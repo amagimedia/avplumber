@@ -173,6 +173,15 @@ public:
         started_ = true;
     }
 
+    // Readiness for an atomic layout switch, without advancing the output clock.
+    bool readyAtNextTick(size_t input, int64_t now_ns) const {
+        if (!index_) return false;
+        const auto scheduled = std::max(*index_, rate_.atOrBefore(now_ns - latency_ns_));
+        const auto &state = inputs_.at(input);
+        return (state.held_index && *state.held_index <= scheduled) ||
+               (!state.queue.empty() && state.queue.front().index <= scheduled);
+    }
+
     const Stats &stats(size_t input) const { return inputs_.at(input).stats; }
     void resetInput(size_t input, std::optional<int64_t> valid_from_ns = {}, bool preserve_warm = false) {
         if (pending_) throw std::logic_error("commit mixer decision before resetting");

@@ -73,7 +73,7 @@ public:
         ack_queue_->enqueue(frame_count);
     }
     std::shared_ptr<DmabufReleaseAckQueue> releaseQueue() const {
-        return ack_queue_;
+        return std::atomic_load(&ack_queue_);
     }
     bool ensureConnected() {
         if (conn_fd_ >= 0) return true;
@@ -234,7 +234,8 @@ class IPCDMABUFSource: public NodeSingleOutput<av::VideoFrame>,
                        public ReportsFinishByFlag,
                        public IVideoFormatSource,
                        public IFrameRateSource,
-                       public ITimeBaseSource {
+                       public ITimeBaseSource,
+                       public IReturnsObjects {
 protected:
     static constexpr uint32_t PIX_FMT_RGBA = ('R' << 24 | 'G' << 16 | 'B' << 8 | 'A');
     static constexpr uint32_t PIX_FMT_BGRA = ('B' << 24 | 'G' << 16 | 'R' << 8 | 'A');
@@ -242,6 +243,8 @@ protected:
     static constexpr uint32_t MAX_DIMENSION = 16384;
 
     UnixFdpassClient receiver_;
+    std::atomic<uint64_t> received_{0};
+    std::atomic<const char*> phase_{"idle"};
     int width_ = 0;
     int height_ = 0;
     av::Rational frame_rate_{0, 1};
@@ -301,11 +304,18 @@ public:
     virtual av::PixelFormat pixelFormat() { return av::PixelFormat(AV_PIX_FMT_DRM_PRIME); }
     virtual av::Rational frameRate() { return frame_rate_; }
     virtual av::Rational timeBase() { return {1, 1000000}; }
+    Parameters getObject(const std::string key) override {
+        if (key != "frame_stats") throw Error("ipc_dmabuf_source: unknown object " + key);
+        const auto stats = receiver_.releaseQueue()->stats();
+        return {{"received", received_.load()}, {"released", stats.released},
+                {"ack_sent", stats.sent}, {"ack_pending", stats.pending}, {"phase", phase_.load()}};
+    }
     virtual void stop() {
         receiver_.interrupt();
         this->finished_ = true;
     }
     virtual void process() {
+        phase_ = "receive";
         TexInfo ti{};
         int dmabuf_fd = -1;
         if (!receiver_.recvTexInfoAndFD(ti, dmabuf_fd)) {
@@ -313,6 +323,7 @@ public:
             return;
         }
 
+        ++received_;
         uint64_t object_size = 0;
         if (!validateTexInfo(ti, object_size)) {
             close(dmabuf_fd);
@@ -408,7 +419,9 @@ public:
         height_ = ti.height;
 
         vfrm.setComplete(true);
+        phase_ = "output";
         this->sink_->put(vfrm);
+        phase_ = "idle";
     }
     static std::shared_ptr<IPCDMABUFSource> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;

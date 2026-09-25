@@ -1,6 +1,7 @@
 #include "../node_common.hpp"
 #include "../../cuda.hpp"
 #include "../../hwaccel.hpp"
+#include "../../avbuffer.hpp"
 
 extern "C" {
 #include <libavutil/hwcontext_cuda.h>
@@ -33,10 +34,6 @@ public:
     CurrentContext& operator=(const CurrentContext&) = delete;
 };
 
-struct FramePoolDeleter {
-    void operator()(AVBufferRef* ref) const { av_buffer_unref(&ref); }
-};
-
 // A private stream and bounded staging allocation isolate this node's work.
 // Destruction also covers partial initialization and failed kernel launches.
 struct UploadResources {
@@ -46,7 +43,7 @@ struct UploadResources {
     CUfunction kernel = nullptr;
     CUdeviceptr packed = 0;
     void* staging = nullptr;
-    std::unique_ptr<AVBufferRef, FramePoolDeleter> frames;
+    avp::AvBufferRef frames;
 
     ~UploadResources() {
         if (!context) return;

@@ -16,12 +16,12 @@ constexpr int64_t kWipeSwitchGraceMs = 500;
 // Generation checks prevent an interrupted wipe from changing new routing.
 // ---------------------------------------------------------------------------
 void MixerOrchestrator::runWipeMidpointAndCleanup(
-        std::shared_ptr<NodeManager> nodes,
-        std::shared_ptr<MixerState> state,
-        std::shared_ptr<SharedTimeline> timeline,
-        std::shared_ptr<TransitionScheduler> scheduler,
+        const std::shared_ptr<NodeManager>& nodes,
+        const std::shared_ptr<MixerState>& state,
+        const std::shared_ptr<SharedTimeline>& timeline,
+        const std::shared_ptr<TransitionScheduler>& scheduler,
         uint64_t transition_generation,
-        std::string scene_name,
+        const std::string& scene_name,
         bool new_pgm_is_slot_a,
         int64_t remaining_ms) {
 
@@ -200,19 +200,18 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
 // in steady state; it is started here and stopped at the end of the wipe.
 // ---------------------------------------------------------------------------
 int64_t MixerOrchestrator::prepareWipe(
-        std::shared_ptr<NodeManager> nodes,
-        std::shared_ptr<MixerState> state,
-        std::shared_ptr<SharedTimeline> timeline,
-        std::shared_ptr<TransitionScheduler> scheduler,
+        const std::shared_ptr<NodeManager>& nodes,
+        const std::shared_ptr<MixerState>& state,
+        const std::shared_ptr<SharedTimeline>& timeline,
+        const std::shared_ptr<TransitionScheduler>& scheduler,
         uint64_t transition_generation,
-        std::string scene_name,
-        std::string wipe_file,
+        const std::string& scene_name,
+        const std::string& wipe_file,
         double duration_sec,
         bool new_pgm_is_slot_a,
         int64_t earliest_visible_pts_ms) {
     std::string overlay_edge_name;
     av::Timestamp overlay_initial_ts = NOTS;
-    int64_t prep_ms = wallclock.pts();
 
     // Only the serialized transition worker reuses wipe nodes. Finish retiring
     // the previous clip outside the control mutex, then recheck cancellation.
@@ -233,7 +232,7 @@ int64_t MixerOrchestrator::prepareWipe(
         resetInputIf(nodes, state->wipe_base_fps_name);
         orch.startGroup(state->wipe_group_name);
 
-        prep_ms = wallclock.pts();
+        const int64_t prep_ms = wallclock.pts();
         timeline->clearKey(state->wipe_otm_name, "outputs");
         orch.setNodeObject(state->wipe_otm_name, "outputs", Parameters(3u));       // 0b11 both direct + wipe_in
         timeline->set(state->wipe_otm_name, "outputs", prep_ms, Parameters(3u));

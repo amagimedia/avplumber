@@ -64,7 +64,7 @@ class MixerOrchestrator {
     // Caller holds state_->mutex; restores live program after failed preparation.
     void restoreProgramRouting();
     void abortTransition(uint64_t generation) noexcept;
-    void startFadeWhenReady(std::string scene_name, double duration_sec, int64_t requested_pts,
+    void startFadeWhenReady(const std::string& scene_name, double duration_sec, int64_t requested_pts,
                            uint64_t generation, av::Timestamp initial_ts, int64_t deadline_ms);
     void startFade(const std::string& scene_name, double duration_sec, int64_t start_ms,
                    uint64_t transition_generation);
@@ -79,43 +79,43 @@ class MixerOrchestrator {
     // `scheduler` is forwarded into the locally-constructed MixerOrchestrator so
     // any future scheduler-using helper called from this path won't blow up with
     // "transition scheduler is not configured".
-    static void deferredCleanup(std::shared_ptr<NodeManager> nodes,
-                                 std::shared_ptr<MixerState> state,
-                                 std::shared_ptr<SharedTimeline> timeline,
-                                 std::shared_ptr<TransitionScheduler> scheduler,
+    static void deferredCleanup(const std::shared_ptr<NodeManager>& nodes,
+                                 const std::shared_ptr<MixerState>& state,
+                                 const std::shared_ptr<SharedTimeline>& timeline,
+                                 const std::shared_ptr<TransitionScheduler>& scheduler,
                                  uint64_t transition_generation,
                                  bool new_pgm_is_slot_a,
                                  std::string new_pgm_scene,
                                  int64_t end_pts_ms);
-    static void readyCutTask(std::shared_ptr<NodeManager> nodes,
-                             std::shared_ptr<MixerState> state,
-                             std::shared_ptr<SharedTimeline> timeline,
-                             std::shared_ptr<TransitionScheduler> scheduler,
+    static void readyCutTask(const std::shared_ptr<NodeManager>& nodes,
+                             const std::shared_ptr<MixerState>& state,
+                             const std::shared_ptr<SharedTimeline>& timeline,
+                             const std::shared_ptr<TransitionScheduler>& scheduler,
                              uint64_t transition_generation,
                              bool new_pgm_is_slot_a,
                              std::string new_pgm_scene,
-                             std::string ready_edge_name,
+                             const std::string& ready_edge_name,
                              av::Timestamp ready_edge_initial_ts,
                              int64_t earliest_switch_pts_ms,
                              bool require_new_ready_frame);
 
     // Wipe lifecycle: midpoint scene switch (immediate, hidden behind opaque wipe)
     // + end-of-wipe teardown.
-    static void runWipeMidpointAndCleanup(std::shared_ptr<NodeManager> nodes,
-                                          std::shared_ptr<MixerState> state,
-                                          std::shared_ptr<SharedTimeline> timeline,
-                                          std::shared_ptr<TransitionScheduler> scheduler,
+    static void runWipeMidpointAndCleanup(const std::shared_ptr<NodeManager>& nodes,
+                                          const std::shared_ptr<MixerState>& state,
+                                          const std::shared_ptr<SharedTimeline>& timeline,
+                                          const std::shared_ptr<TransitionScheduler>& scheduler,
                                           uint64_t transition_generation,
-                                          std::string scene_name,
+                                          const std::string& scene_name,
                                           bool new_pgm_is_slot_a,
                                           int64_t remaining_ms);
-    static int64_t prepareWipe(std::shared_ptr<NodeManager> nodes,
-                               std::shared_ptr<MixerState> state,
-                               std::shared_ptr<SharedTimeline> timeline,
-                               std::shared_ptr<TransitionScheduler> scheduler,
+    static int64_t prepareWipe(const std::shared_ptr<NodeManager>& nodes,
+                               const std::shared_ptr<MixerState>& state,
+                               const std::shared_ptr<SharedTimeline>& timeline,
+                               const std::shared_ptr<TransitionScheduler>& scheduler,
                                uint64_t transition_generation,
-                               std::string scene_name,
-                               std::string wipe_file,
+                               const std::string& scene_name,
+                               const std::string& wipe_file,
                                double duration_sec,
                                bool new_pgm_is_slot_a,
                                int64_t earliest_visible_pts_ms);

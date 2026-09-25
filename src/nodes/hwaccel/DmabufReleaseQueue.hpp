@@ -21,6 +21,7 @@ class DmabufReleaseAckQueue {
     std::deque<std::array<uint8_t, DMABUF_RELEASE_ACK_BYTES>> pending_;
     size_t front_offset_ = 0;
     bool retired_ = false;
+    uint64_t released_frames_ = 0, sent_messages_ = 0;
     std::atomic<bool> interrupted_{false};
 
     void append(uint64_t frame, DmabufAckKind kind) {
@@ -62,11 +63,17 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return !pending_.empty();
     }
+    struct Stats { uint64_t released, sent; size_t pending; };
+    Stats stats() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return {released_frames_, sent_messages_, pending_.size()};
+    }
     void enqueue(uint64_t frame) {
         bool retired;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             append(frame, DmabufAckKind::Frame);
+            ++released_frames_;
             retired = retired_;
         }
         if (retired) flush(); // The receiver no longer services this connection.
@@ -89,7 +96,10 @@ public:
                 ack.size() - front_offset_, MSG_DONTWAIT | MSG_NOSIGNAL);
             if (sent > 0) {
                 front_offset_ += static_cast<size_t>(sent);
-                if (front_offset_ == ack.size()) { pending_.pop_front(); front_offset_ = 0; }
+                if (front_offset_ == ack.size()) {
+                    pending_.pop_front(); front_offset_ = 0;
+                    ++sent_messages_;
+                }
             } else if (sent < 0 && errno == EINTR) {
                 continue;
             } else {

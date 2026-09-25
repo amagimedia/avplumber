@@ -83,7 +83,13 @@ void CudaRectDraw::ensureKernels() {
         AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_kernel_, module_, "composite_planes_yuv")) ||
         AVP_CHECK_CU(cuModuleGetFunction(&composite_packed_kernel_, module_, "composite_planes_packed4")))
         throw Error("cuda_rect_overlay: cannot load the composite kernel");
-    const size_t bytes = sizeof(AvpRectLayer) * AVP_RECT_MAX_LAYERS;
+    int shared_limit = 0;
+    CUdevice device;
+    if (AVP_CHECK_CU(cuCtxGetDevice(&device)) ||
+        AVP_CHECK_CU(cuDeviceGetAttribute(&shared_limit, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, device)) ||
+        max_layers_ <= 0 || (size_t(max_layers_) + 31) / 32 * sizeof(unsigned int) > size_t(shared_limit))
+        throw Error("cuda_rect_overlay: max_layers exceeds the kernel's shared memory capacity");
+    const size_t bytes = sizeof(AvpRectLayer) * max_layers_;
     if (AVP_CHECK_CU(cuMemHostAlloc((void **)&table_host_, bytes, 0)) ||
         AVP_CHECK_CU(cuMemAlloc(&table_device_, bytes)))
         throw Error("cuda_rect_overlay: cannot allocate the rect table");
@@ -202,8 +208,8 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
     bool any_rgb = false;
     for (const DrawOp &op : ops) {
         if (!op.src || !op.src->raw()) continue;
-        if (n >= AVP_RECT_MAX_LAYERS)
-            throw Error("cuda_rect_overlay: more than " + std::to_string(AVP_RECT_MAX_LAYERS) + " layers in one frame");
+        if (n >= max_layers_)
+            throw Error("cuda_rect_overlay: more than " + std::to_string(max_layers_) + " layers in one frame");
         fillTableEntry(op, canvas, table_host_[n]);
         any_rgb = any_rgb || table_host_[n].kind >= AVP_RECT_KIND_RGB;
         ++n;
@@ -239,7 +245,7 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
     // 128x8 luma tiles per block; gridDim.z spans the planes.
     if (AVP_CHECK_CU(cuLaunchKernel(kernel,
                                     (canvas_w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas_h + 7) / 8,
-                                    planes, 32, 8, 1, 0, stream, args, nullptr)))
+                                    planes, 32, 8, 1, (unsigned(n) + 31) / 32 * sizeof(unsigned int), stream, args, nullptr)))
         throw Error("cuda_rect_overlay: composite launch failed");
 }
 

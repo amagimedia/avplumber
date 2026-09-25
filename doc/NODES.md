@@ -758,6 +758,12 @@ Parameters:
 -   `hwaccel` (string, optional) - name of `hwaccel` object; when set, a matching `hw_frames_ctx` is attached for downstream filters/encoders
 -   `fps` (rational string, optional) - publishes the sender's requested frame rate to downstream nodes; frame timestamps use a `1/1000000` time base
 
+`node.object.get <node> frame_stats` reports the receiver phase and received-frame
+count, plus released frames, sent ACK messages and pending ACK messages on the
+current connection. ACK counters reset on reconnection; the received count does
+not. Lifecycle drain markers also count as sent messages. Pending ACKs distinguish
+frames already released by the graph from frames still referenced downstream.
+
 ### `ipc_socket_audio_source`
 
 Receive audio frames over a UNIX domain socket. Expects a simple header followed by interleaved float32 PCM.
@@ -793,6 +799,20 @@ Parameters:
     sampling by the CUDA compositor's RGB-to-YUV path. Other consumers, including
     packed RGB canvases, require `false`; the compositor rejects unsupported
     texture-backed combinations before submitting draw work.
+-   `cleanup_interval_us` (int, default `0`) - minimum pause between retired
+    import releases on the shared cleanup worker; `0` disables pacing. All importers
+    in an instance must use the same value. Incoming frames needing a new import
+    are dropped while cleanup is pending or their import budget is full; cached
+    imports continue normally. Dropped inputs release their browser capture slots.
+    Closing an importer bypasses pacing for its retired allocations. Pacing is
+    opt-in: a longer cleanup backlog retains DMA-BUF memory longer, and the
+    1 ms experiment did not make the 110-source workload reliable.
+
+`node.object.get <node> import_stats` includes the current import phase, an
+`admission_dropped` frame counter, and instance-wide cleanup count and timings
+(milliseconds). `instance_releasing_ms` measures an in-progress destruction;
+`instance_release_max_ms` measures completed jobs. These counters distinguish
+admission drops from EGL/CUDA import work without per-frame logs.
 
 ### `v210_to_cuda`
 

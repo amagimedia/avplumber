@@ -40,17 +40,21 @@ def wait_for(predicate, timeout=10):
     raise AssertionError("aux condition timed out")
 
 
-def subscription_flags():
+def control_json(command):
     async def read():
         connection = AvpConnection("127.0.0.1", 18777)
         await connection.connect()
         try:
-            queues = json.loads(await connection.command("queues.json"))
-            assert all("subscription_active" not in q for q in queues if q["name"] == "mixer_final_out")
-            return {q["name"]: q["subscription_active"] for q in queues if "subscription_active" in q}
+            return json.loads(await connection.command(command))
         finally:
             await connection.disconnect()
     return asyncio.run(read())
+
+
+def subscription_flags():
+    queues = control_json("queues.json")
+    assert all("subscription_active" not in q for q in queues if q["name"] == "mixer_final_out")
+    return {q["name"]: q["subscription_active"] for q in queues if "subscription_active" in q}
 
 
 def main():
@@ -102,6 +106,61 @@ def main():
             expected = {name: name in (bus.edges[0], bus.edges[-1], bus.pgm_edge)
                         for name in [*bus.edges, bus.pgm_edge]}
             assert subscription_flags() == expected
+            # Hold a direct cut pending long enough for AUX to poll repeatedly.
+            # Its hidden target must not appear as a user-selected preview.
+            app.mixer.cut("red")
+            wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
+            wait_for(lambda: bus.preview == "")
+            for preview in ("", "red"):
+                if preview:
+                    app.mixer.preview(preview)
+                    wait_for(lambda: bus.preview == preview)
+                app.mixer.cut("blue", start_pts_ms=int(time.monotonic() * 1000) + 500)
+                until = time.monotonic() + .25
+                while time.monotonic() < until:
+                    status = control_json("mixer.status mixer")
+                    assert status["pvw_scene"] == preview, status
+                    assert bus.state()["pvw_scene"] == preview
+                    assert bus.preview == preview
+                    time.sleep(.01)
+                wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
+                assert control_json("mixer.status mixer")["pgm_scene"] == "blue"
+                wait_for(lambda: bus.preview == "")
+            for scene in ("red", "blue") * 10:
+                app.mixer.cut(scene)
+                assert bus.state()["pvw_scene"] == ""
+                assert bus.preview == ""
+                time.sleep(.01)
+            wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
+            # An unavailable new input must leave the old AUX running, then
+            # release the abandoned subscription. A newer request cancels it.
+            app.mixer.preview("red")
+            wait_for(lambda: bus.state()["pvw_scene"] == "red")
+            def assign(scenes):
+                bus.assign({"expected_revision": bus.state()["revision"], "scenes": scenes})
+            assign(["red"] * 8)
+            wait_for(lambda: not subscription_flags()[bus.edges[-1]])
+            blue_fps = app.avp.node(f"fps_{args.sources - 1}")
+            blue_fps.stopAndWait()
+            time.sleep(.3)
+            before = edge.enqueued_total
+            assign(["blue"] * 8)
+            wait_for(lambda: bool(bus.state().get("composition_error")))
+            assert not bus.state()["suspended"]
+            assert edge.enqueued_total - before >= 3
+            assert not subscription_flags()[bus.edges[-1]]
+            assign(["blue"] * 8)
+            assign(["red"] * 8)
+            wait_for(lambda: not bus.state()["composition_pending"])
+            assert not bus.state()["composition_error"]
+            assert not subscription_flags()[bus.edges[-1]]
+            blue_fps.start()
+            assign(["blue"] * 8)
+            wait_for(lambda: not bus.state()["composition_pending"])
+            assert not bus.state()["composition_error"]
+            assert subscription_flags()[bus.edges[-1]]
+            assign(list(config["aux_buses"][0]["scenes"]))
+            wait_for(lambda: not bus.state()["composition_pending"])
             app.mixer.preview("blue")
             wait_for(lambda: bus.state()["pvw_scene"] == "blue")
             initial = bus.state()
@@ -136,7 +195,7 @@ def main():
             bus.assign({"expected_revision": current["revision"], "scenes": current["scenes"]})
             wait_for(lambda: edge.enqueued_total >= before + 30)
             assert not errors, errors
-            print("PASS: aux cadence, repeated pads, preview, revision conflict, stalled consumer, empty queues and PGM continuity", flush=True)
+            print("PASS: aux staging, timeout, cancellation, cadence, repeated pads, preview, revision conflict, stalled consumer and PGM continuity", flush=True)
         finally:
             gate.blocked = False
             app.stop()

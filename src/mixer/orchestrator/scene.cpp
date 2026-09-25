@@ -292,7 +292,6 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     rewriteCameraOutputsForSlot(slot_bit, scene);
     applyRoutedSceneRoutesForSlot(is_slot_a, scene, wallclock.pts(), true);
 
-    state_->pvw_scene_name = scene_name;
 }
 
 void MixerOrchestrator::scheduleSceneControls(const SceneDefinition& scene, int64_t at_pts_ms) {
@@ -323,6 +322,9 @@ void MixerOrchestrator::preview(const std::string& scene_name) {
     timeline_->clearKey(slot.post_otm_name, "outputs");
     setNodeObject(slot.post_otm_name, "outputs", Parameters(1u));
     timeline_->set(slot.post_otm_name, "outputs", prep_ms, Parameters(1u));
+    // Direct transitions also load this slot; only an explicit preview should
+    // publish its scene to the control UI and AUX preview follower.
+    state_->pvw_scene_name = scene_name;
     logstream << "mixer preview armed: scene=" << scene_name
               << " slot=" << (pvw_is_slot_a ? 'A' : 'B')
               << " post_otm " << slot.post_otm_name << "->1";

@@ -7,7 +7,6 @@
 // precomputed per canvas plane: index 0 is luma, 1 is the interleaved chroma
 // plane, both in lane-group units (luma samples, chroma pairs).
 
-#define AVP_RECT_MAX_LAYERS 256
 // Luma samples per thread in the composite kernel (chroma pairs: half). Block 32x8 threads
 // therefore covers a 128x8 luma tile; the launch grid is sized from this.
 #define AVP_RECT_PX 4

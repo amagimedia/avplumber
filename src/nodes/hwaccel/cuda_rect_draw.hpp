@@ -32,13 +32,14 @@ public:
         float hdr_peak = 1000.f;
     };
 
-    CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas)
-        : hwaccel_(std::move(hw)), canvas_(canvas) {}
+    CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int max_layers = 256)
+        : hwaccel_(std::move(hw)), canvas_(canvas), max_layers_(max_layers) {}
     ~CudaRectDraw() { unload(); }
     CudaRectDraw(const CudaRectDraw &) = delete;
     CudaRectDraw &operator=(const CudaRectDraw &) = delete;
 
     const Canvas &canvas() const { return canvas_; }
+    int maxLayers() const { return max_layers_; }
     void setColor(AVColorTransferCharacteristic transfer, float sdr_white, float hdr_peak) {
         canvas_.transfer = transfer;
         canvas_.sdr_white = sdr_white;
@@ -67,6 +68,7 @@ public:
 private:
     std::shared_ptr<HWAccelDevice> hwaccel_;
     Canvas canvas_;
+    const int max_layers_;
     AVCUDADeviceContext *cuda_dev_ = nullptr;
     CUmodule module_ = nullptr;
     CUfunction composite_kernel_ = nullptr;       // full: YUV, promote and RGB(A) layers

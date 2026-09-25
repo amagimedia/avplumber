@@ -18,7 +18,9 @@ int main() {
     auto receiver = std::make_shared<DmabufReleaseAckQueue>(old_pair[0]);
     auto frame = receiver;
     receiver->enqueue(11);
+    assert(receiver->stats().released == 1 && receiver->stats().pending == 1);
     assert(receiver->flush());
+    assert(receiver->stats().sent == 1 && receiver->stats().pending == 0);
     expectAck(old_pair[1], DmabufAckKind::Frame, 11);
 
     receiver->interrupt();

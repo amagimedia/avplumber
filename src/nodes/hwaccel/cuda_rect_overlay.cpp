@@ -1,5 +1,6 @@
 #include "../node_common.hpp"
 #include "../../hwaccel.hpp"
+#include "../../avbuffer.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
 #include "../../mixer/primitives/source_mask.hpp"
 #include "../../SharedTimeline.hpp"
@@ -50,7 +51,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                         public IInputsObjects,
                         public IReturnsObjects,
                         public IFlushable {
-    AVBufferRef *out_frames_ref_ = nullptr;
+    avp::AvBufferRef out_frames_ref_;
     CudaRectDraw draw_;   // owns the canvas geometry, format and color contract
 
     // An unspecified canvas color preserves the node's metadata inheritance for non-mixer callers.
@@ -68,6 +69,11 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
 
     std::vector<LayerSpec> default_layers_;
     std::optional<Parameters> pending_composition_;
+    std::optional<Parameters> staged_composition_; // render thread only; latest request replaces it
+    avp::mixer::SourceMask staged_mask_;
+    int64_t staged_deadline_ns_ = 0;
+    std::atomic<bool> composition_preparing_{false};
+    std::string composition_error_; // protected by layers_mutex_
     bool aux_ = false;
     std::atomic<bool> suspended_{false};
     std::atomic<uint64_t> output_drops_{0};
@@ -127,7 +133,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             if (input_ready_) { cuEventDestroy(input_ready_); input_ready_ = nullptr; }
         }
         draw_.unload();
-        av_buffer_unref(&out_frames_ref_);
+        out_frames_ref_.reset();
     }
 
     std::vector<LayerSpec> mergeLayersForTick(const av::VideoFrame *metadata_source) {
@@ -176,7 +182,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         }
 
         av::VideoFrame outf;
-        int r = av_hwframe_get_buffer(out_frames_ref_, outf.raw(), 0);
+        int r = av_hwframe_get_buffer(out_frames_ref_.get(), outf.raw(), 0);
         if (r < 0)
             throw Error(std::string("cuda_rect_overlay: av_hwframe_get_buffer failed: ") + av::error2string(r));
         outf.setComplete(true);   // av_hwframe_get_buffer set hw_frames_ctx, format and size
@@ -218,20 +224,20 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             logstream << "cuda_rect_overlay: out frame=" << frame_counter_;
 
         ++frame_counter_;
-        if (!this->sink_->put(std::move(outf), aux_)) ++output_drops_;
+        if (!this->sink_->put(outf, aux_)) ++output_drops_;
     }
 
 public:
     using NodeSingleOutput<av::VideoFrame>::NodeSingleOutput;
 
-    CudaRectOverlay(std::unique_ptr<Sink<av::VideoFrame>> &&sink, std::shared_ptr<HWAccelDevice> hw, int cw, int ch,
-                    AVPixelFormat sw_fmt, std::vector<LayerSpec> layers, std::string metadata_key, int dbg_n)
+    CudaRectOverlay(std::unique_ptr<Sink<av::VideoFrame>> &&sink, const std::shared_ptr<HWAccelDevice>& hw, int cw, int ch,
+                    AVPixelFormat sw_fmt, std::vector<LayerSpec> layers, std::string metadata_key, int dbg_n, int max_layers)
         : NodeSingleOutput<av::VideoFrame>(std::move(sink)),
-          draw_(hw, CudaRectDraw::Canvas{cw, ch, sw_fmt}),
+          draw_(hw, CudaRectDraw::Canvas{cw, ch, sw_fmt}, max_layers),
           default_layers_(std::move(layers)),
           metadata_key_(std::move(metadata_key)),
           debug_log_every_n_(dbg_n) {
-        out_frames_ref_ = av_hwframe_ctx_alloc(hw->deviceContext());
+        out_frames_ref_.reset(av_hwframe_ctx_alloc(hw->deviceContext()));
         if (!out_frames_ref_)
             throw Error("cuda_rect_overlay: av_hwframe_ctx_alloc failed");
         AVHWFramesContext *fc = (AVHWFramesContext *)out_frames_ref_->data;
@@ -239,7 +245,7 @@ public:
         fc->sw_format = sw_fmt;
         fc->width = cw;
         fc->height = ch;
-        int err = av_hwframe_ctx_init(out_frames_ref_);
+        int err = av_hwframe_ctx_init(out_frames_ref_.get());
         if (err < 0)
             throw Error(std::string("cuda_rect_overlay: av_hwframe_ctx_init (output) failed: ") +
                         av::error2string(err));
@@ -269,6 +275,11 @@ public:
     Parameters getObject(const std::string key) override {
         if (key != "status") throw Error("cuda_rect_overlay: unknown object " + key);
         Parameters result = {{"suspended", suspended_.load()}, {"output_drops", output_drops_.load()}};
+        if (aux_) {
+            std::lock_guard<std::mutex> lock(layers_mutex_);
+            result["composition_pending"] = pending_composition_.has_value() || composition_preparing_.load();
+            result["composition_error"] = composition_error_;
+        }
         if (mixer_state_) {
             std::lock_guard<std::mutex> lock(mixer_state_->mutex);
             result["pvw_scene"] = mixer_state_->pvw_scene_name;
@@ -293,6 +304,31 @@ public:
         return source_edges_[0];
     }
 
+    void auxInputs(avp::mixer::SourceMask active, avp::mixer::SourceMask preparing = {}) {
+        const auto keep = active | preparing;
+        for (size_t i = 0; i < subscriptions_.size(); ++i) {
+            if (!keep.test(i)) {
+                subscriptions_[i]->enable(false);
+                source_edges_[i]->clear();
+            }
+            // Promote a warmed input without discarding its eligible frames.
+            playout_->setPrewarm(i, keep.test(i));
+            playout_->setActive(i, active.test(i));
+            playout_->setPrewarm(i, preparing.test(i));
+            if (!stopping_ && keep.test(i)) subscriptions_[i]->enable(true);
+        }
+        std::lock_guard<std::mutex> lock(masks_mutex_);
+        sent_eof_ = false;
+        active_inputs_ = applied_active_mask_ = active;
+        prewarm_inputs_ = applied_prewarm_mask_ = preparing;
+    }
+
+    void applyAuxComposition(const Parameters &value, avp::mixer::SourceMask mask) {
+        auxInputs(mask);
+        std::lock_guard<std::mutex> lock(layers_mutex_);
+        default_layers_ = avp::mixer::parseLayersArray(value.at("layers"));
+    }
+
     void processClocked() {
         if (aux_) {
             std::optional<Parameters> update;
@@ -301,28 +337,23 @@ public:
                 update.swap(pending_composition_);
             }
             if (update) {
-                auto mask = avp::mixer::parseSourceMask(update->at("active_inputs"));
+                const auto mask = avp::mixer::parseSourceMask(update->at("active_inputs"));
                 const bool enabled = update->value("enabled", true);
-                if (!enabled) mask = {};
-                suspended_.store(!enabled);
+                const bool resume = suspended_.exchange(!enabled);
                 blocked_ticks_ = 0;
-                for (size_t i = 0; i < subscriptions_.size(); ++i) {
-                    if (!mask.test(i) || !applied_active_mask_.test(i)) {
-                        subscriptions_[i]->enable(false);
-                        source_edges_[i]->clear();
-                        playout_->resetInput(i);
-                    }
+                staged_composition_.reset();
+                composition_preparing_ = false;
+                if (!enabled || resume || !frame_counter_) {
+                    applyAuxComposition(*update, enabled ? mask : avp::mixer::SourceMask{});
+                    warmup_started_pts_ = wallclock.pts();
+                } else {
+                    staged_mask_ = mask;
+                    staged_deadline_ns_ = avp::mixer::monotonicNs() +
+                        std::max<int64_t>(250000000, 2 * playout_->latencyNs());
+                    staged_composition_ = std::move(update);
+                    composition_preparing_ = true;
+                    auxInputs(applied_active_mask_, mask);
                 }
-                {
-                    std::lock_guard<std::mutex> lock(layers_mutex_);
-                    default_layers_ = avp::mixer::parseLayersArray(update->at("layers"));
-                }
-                {
-                    std::lock_guard<std::mutex> lock(masks_mutex_);
-                    active_inputs_ = mask;
-                }
-                if (!stopping_)
-                    for (size_t i = 0; i < subscriptions_.size(); ++i) subscriptions_[i]->enable(mask.test(i));
             }
             if (suspended_) { event_wait_->wait(100); return; }
         }
@@ -379,6 +410,25 @@ public:
                 source_edges_[i]->pop();
             }
         }
+        if (staged_composition_) {
+            const auto now_ns = avp::mixer::monotonicNs();
+            bool ready = true;
+            for (size_t i = 0; i < source_edges_.size(); ++i)
+                if (staged_mask_.test(i) && !playout_->readyAtNextTick(i, now_ns)) ready = false;
+            if (ready || now_ns >= staged_deadline_ns_) {
+                if (ready) {
+                    applyAuxComposition(*staged_composition_, staged_mask_);
+                    active = staged_mask_;
+                } else {
+                    auxInputs(active);
+                    std::lock_guard<std::mutex> lock(layers_mutex_);
+                    if (!pending_composition_)
+                        composition_error_ = "Aux inputs not ready; keeping the previous layout";
+                }
+                staged_composition_.reset();
+                composition_preparing_ = false;
+            }
+        }
         if (playout_->finished()) {
             av::VideoFrame eof;
             eof.setPts(NOTS);
@@ -386,8 +436,8 @@ public:
             sent_eof_ = true;
             return;
         }
-        const bool require_all = warmup_timeout_ms_ <= 0 ||
-            wallclock.pts() - warmup_started_pts_ < warmup_timeout_ms_;
+        const bool require_all = (!aux_ || !frame_counter_) &&
+            (warmup_timeout_ms_ <= 0 || wallclock.pts() - warmup_started_pts_ < warmup_timeout_ms_);
         const auto *decision = playout_->prepare(avp::mixer::monotonicNs(), require_all);
         if (!decision) {
             this->findSourceWithData(avp::mixer::waitMilliseconds(
@@ -415,6 +465,8 @@ public:
         }
         playout_->commit();
         if (aux_ && blocked_ticks_ >= 3) {
+            staged_composition_.reset();
+            composition_preparing_ = false;
             for (size_t i = 0; i < subscriptions_.size(); ++i) {
                 subscriptions_[i]->enable(false);
                 source_edges_[i]->clear();
@@ -481,7 +533,7 @@ public:
                 av::VideoFrame eof_out;
                 eof_out.setPts(NOTS);
                 sent_eof_ = true;
-                this->sink_->put(std::move(eof_out));
+                this->sink_->put(eof_out);
                 return;
             }
         }
@@ -530,7 +582,7 @@ public:
             av::VideoFrame eof_out;
             eof_out.setPts(NOTS);
             sent_eof_ = true;
-            this->sink_->put(std::move(eof_out));
+            this->sink_->put(eof_out);
             return;
         }
 
@@ -692,7 +744,7 @@ public:
         if (key == "composition") {
             if (!aux_) throw Error("composition requires aux_mode");
             auto layers = avp::mixer::parseLayersArray(value.at("layers"));
-            if (layers.size() > AVP_RECT_MAX_LAYERS) throw Error("aux: too many layers");
+            if (layers.size() > size_t(draw_.maxLayers())) throw Error("aux: too many layers");
             const auto mask = avp::mixer::parseSourceMask(value.at("active_inputs"));
             for (const auto &layer : layers)
                 if (layer.input < 0 || size_t(layer.input) >= source_edges_.size()) throw Error("aux: invalid input index");
@@ -701,6 +753,7 @@ public:
             {
                 std::lock_guard<std::mutex> lock(layers_mutex_);
                 pending_composition_ = value;
+                composition_error_.clear();
             }
             stop_event_.signal();
         } else if (key == "active_inputs") {
@@ -735,6 +788,7 @@ public:
             for (auto &edge : source_edges_) edge->producedEvent().signal();
         } else if (key == "layers") {
             auto new_layers = avp::mixer::parseLayersArray(value);
+            if (new_layers.size() > size_t(draw_.maxLayers())) throw Error("cuda_rect_overlay: too many layers");
             std::lock_guard<std::mutex> lock(layers_mutex_);
             default_layers_ = std::move(new_layers);
         }
@@ -765,7 +819,9 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     if (src_names.size() > avp::mixer::SourceMask::kBits)
         throw Error("cuda_rect_overlay: at most 128 inputs supported");
     std::vector<LayerSpec> layers = avp::mixer::parseLayersParam(params);
-    if (layers.size() > AVP_RECT_MAX_LAYERS) throw Error("cuda_rect_overlay: too many layers");
+    const int max_layers = params.value("max_layers", 256);
+    if (max_layers <= 0) throw Error("cuda_rect_overlay: max_layers must be positive");
+    if (layers.size() > size_t(max_layers)) throw Error("cuda_rect_overlay: too many layers");
     for (size_t i = 0; i < layers.size(); ++i)
         if (size_t(layers[i].input < 0 ? int(i) : layers[i].input) >= src_names.size())
             throw Error("cuda_rect_overlay: layer input out of range");
@@ -799,7 +855,7 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
 
     auto node = std::make_shared<CudaRectOverlay>(
         make_unique<EdgeSink<av::VideoFrame>>(out_edge), std::move(hw), cw, ch, sw_fmt, std::move(layers), mdkey,
-        dbg);
+        dbg, max_layers);
     if (params.contains("color")) {
         const auto color = params.at("color").get<std::string>();
         const AVColorTransferCharacteristic trc = color == "sdr" ? AVCOL_TRC_BT709 :

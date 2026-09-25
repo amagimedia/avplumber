@@ -9,10 +9,10 @@ namespace avp::mixer {
 // removed via timeline. The scheduler decides when this runs.
 // ---------------------------------------------------------------------------
 void MixerOrchestrator::deferredCleanup(
-        std::shared_ptr<NodeManager> nodes,
-        std::shared_ptr<MixerState> state,
-        std::shared_ptr<SharedTimeline> timeline,
-        std::shared_ptr<TransitionScheduler> scheduler,
+        const std::shared_ptr<NodeManager>& nodes,
+        const std::shared_ptr<MixerState>& state,
+        const std::shared_ptr<SharedTimeline>& timeline,
+        const std::shared_ptr<TransitionScheduler>& scheduler,
         uint64_t transition_generation,
         bool new_pgm_is_slot_a,
         std::string new_pgm_scene,
@@ -76,7 +76,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     guard.release();
 }
 
-void MixerOrchestrator::startFadeWhenReady(std::string scene_name, double duration_sec,
+void MixerOrchestrator::startFadeWhenReady(const std::string& scene_name, double duration_sec,
         int64_t requested_pts, uint64_t generation, av::Timestamp initial_ts, int64_t deadline_ms) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!transitionIsCurrent(state_, generation, MixerState::TransitionMode::Crossfade)) return;
