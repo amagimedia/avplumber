@@ -79,7 +79,7 @@
   $: tip = lastRoute[lastRoute.length - 1] || end;
   $: approach = lastRoute[lastRoute.length - 2] || start;
   $: angle = Math.atan2(tip.y - approach.y, tip.x - approach.x) * 180 / Math.PI;
-  $: width = flow.subscribed > 0 ? 3 : 1.5;
+  $: width = flow.subscribed > 0 ? 2 : 1.5;
   $: mid = {
     x: (start.x + end.x) / 2,
     y: (start.y + end.y) / 2
