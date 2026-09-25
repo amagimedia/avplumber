@@ -107,6 +107,23 @@ export class ProcessManager implements WindowControl {
     };
   }
 
+  // The caller must have reaped its consumer process before recovering buffers.
+  // Never recycle a worker containing windows outside that consumer's source set.
+  public async recover(ids: readonly string[]): Promise<void> {
+    const owned = new Set(ids);
+    const affected = new Set(ids.map((id) => this.owners.get(id)).filter((w) => w !== undefined));
+    const restart: BrowserWorker[] = [];
+    for (const worker of affected) {
+      const { windows } = await worker.status();
+      if (!windows.some((w) => owned.has(w.id) && w.stats.quarantinedFrameCount > 0)) continue;
+      if (windows.some((w) => !owned.has(w.id))) {
+        throw new ConflictError('Cannot recover a browser worker shared with another consumer');
+      }
+      restart.push(worker);
+    }
+    for (const worker of restart) await worker.restart();
+  }
+
   private requireOwner(id: string): BrowserWorker {
     const worker = this.owners.get(id);
     if (!worker) throw new NotFoundError(`No window with id "${id}"`);

@@ -14,4 +14,5 @@ export interface WindowControl {
   update(id: string, url: string): WindowSnapshot | Promise<WindowSnapshot>;
   show(id: string, visible: boolean): WindowSnapshot | Promise<WindowSnapshot>;
   status(): StatusReport | Promise<StatusReport>;
+  recover?(ids: readonly string[]): Promise<void>;
 }

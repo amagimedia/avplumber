@@ -35,6 +35,7 @@ export interface BrowserWorker {
   readonly hasCapacity: boolean;
   start(): Promise<void>;
   stop(): Promise<void>;
+  restart(): Promise<void>;
   open(config: WindowConfig): Promise<WindowSnapshot>;
   close(id: string): Promise<void>;
   closeAll(): Promise<void>;
@@ -156,6 +157,15 @@ export class ElectronWorkerProcess implements BrowserWorker {
         this.desired.delete(config.id);
         throw err;
       }
+    });
+  }
+
+  public async restart(): Promise<void> {
+    return this.enqueue(async () => {
+      await this.stop();
+      await this.start();
+      await this.restoreDesiredWindows();
+      this.restarts += 1;
     });
   }
 

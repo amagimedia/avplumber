@@ -181,3 +181,21 @@ describe('unknown routes', () => {
     expect(res.body.code).toBe('RouteNotFound');
   });
 });
+
+describe('POST /workers/recover', () => {
+  it('validates ids before calling the supervisor', async () => {
+    const manager = Object.assign(buildManager(), { recover: vi.fn().mockResolvedValue(undefined) });
+    const app = buildServer(manager).app;
+    expect((await request(app).post('/workers/recover').send({ ids: ['win-1'] })).status).toBe(200);
+    expect(manager.recover).toHaveBeenCalledWith(['win-1']);
+    expect((await request(app).post('/workers/recover').send({ ids: '../invalid' })).status).toBe(400);
+    expect((await request(app).post('/workers/recover').send({ ids: ['../invalid'] })).status).toBe(400);
+    expect(manager.recover).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports unsupported recovery and worker failures', async () => {
+    expect((await request(buildServer(buildManager()).app).post('/workers/recover').send({ ids: [] })).status).toBe(409);
+    const manager = Object.assign(buildManager(), { recover: vi.fn().mockRejectedValue(new Error('worker failed')) });
+    expect((await request(buildServer(manager).app).post('/workers/recover').send({ ids: ['win-1'] })).status).toBe(500);
+  });
+});

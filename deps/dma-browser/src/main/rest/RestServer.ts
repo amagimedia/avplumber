@@ -47,6 +47,26 @@ export class RestServer {
   }
 
   private registerRoutes(): void {
+    this.app.post('/workers/recover', (req, res, next) => {
+      void (async () => {
+        try {
+          if (!this.manager.recover) {
+            res.status(409).json({ error: 'Browser recovery requires the multiprocess supervisor' });
+            return;
+          }
+          if (!Array.isArray(req.body?.ids)) {
+            res.status(400).json({ error: 'Expected a list of window ids' });
+            return;
+          }
+          const ids = req.body.ids.map((id: unknown) => this.cfg.validateId({ id }).id);
+          await this.manager.recover(ids);
+          res.json({ ok: true });
+        } catch (err) {
+          next(err);
+        }
+      })();
+    });
+
     this.app.post('/window/open', (req, res, next) => {
       void (async () => {
         try {

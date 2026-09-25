@@ -167,7 +167,7 @@ class SetupRuntime:
         # Adopt an existing explicit show when adding setup controls to a demo.
         def start():
             try:
-                self._start(self.media_dir / "mixer.demo.json")
+                self._start_recovering(self.media_dir / "mixer.demo.json", None)
                 self._status("running", "Existing mixer ready. Apply replaces it with the selected generic sources.")
             except Exception as exc:
                 self._status("error", str(exc))
@@ -224,15 +224,54 @@ class SetupRuntime:
 
     def _stop(self):
         if self.process and self.process.poll() is None:
-            os.killpg(self.process.pid, signal.SIGINT)
+            process = self.process
+            print(f"Stopping mixer process {process.pid}", flush=True)
+            try:
+                os.killpg(process.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
             try:
                 # Large graphs stop input groups serially; killing them early
                 # leaves browser DMA-BUF frames quarantined and blocks restart.
-                self.process.wait(timeout=120)
+                process.wait(timeout=120)
             except subprocess.TimeoutExpired:
-                os.killpg(self.process.pid, signal.SIGKILL)
-                self.process.wait()
+                print("Mixer shutdown timed out; killing process before browser recovery", flush=True)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=10)
+            print(f"Mixer process exited ({process.returncode})", flush=True)
         self.process = None
+
+    def _recover_browsers(self, shows):
+        from pyplumber.mixer.dmabuf_inputs import rest_request
+        if self.process and self.process.poll() is None:
+            raise RuntimeError("Cannot recover browser buffers while the mixer is running")
+        ids = sorted({s["id"] for show in shows for s in show.get("sources", []) if s["kind"] == "browser"})
+        if not ids:
+            return False
+        status = rest_request(self.browser_url, "GET", "/status") or {}
+        if not any(w["id"] in ids and w.get("stats", {}).get("quarantinedFrameCount", 0)
+                   for w in status.get("windows", [])):
+            return False
+        self._status("starting", "Recovering browser workers…")
+        rest_request(self.browser_url, "POST", "/workers/recover", {"ids": ids})
+        return True
+
+    def _start_recovering(self, config, previous):
+        shows = [json.loads(config.read_bytes()), json.loads(previous or b"{}")]
+        self._recover_browsers(shows)
+        self._close_removed_browsers(shows[1], shows[0])
+        try:
+            self._start(config)
+        except Exception:
+            self._stop()
+            # Disconnect/quarantine notification can arrive after the first
+            # status check. Retry only when a worker was actually recovered.
+            if self.closing.is_set() or not self._recover_browsers(shows):
+                raise
+            self._start(config)
 
     def _start(self, config):
         self.process = subprocess.Popen(
@@ -294,8 +333,7 @@ class SetupRuntime:
             self._stop()
             stopped = True
             recipe_show = json.loads(config.read_bytes())
-            self._close_removed_browsers(json.loads(previous or b"{}"), recipe_show)
-            self._start(config)
+            self._start_recovering(config, previous)
             if settings is not None:
                 staged = self.recipe_path.with_suffix(".pending.json")
                 staged.write_text(json.dumps(recipe, indent=2) + "\n")
@@ -309,11 +347,10 @@ class SetupRuntime:
             try:
                 if stopped:
                     self._stop()
-                    self._close_removed_browsers(recipe_show, json.loads(previous or b"{}"))
                 if previous is not None:
                     config.write_bytes(previous)
                     if stopped and not self.closing.is_set():
-                        self._start(config)
+                        self._start_recovering(config, json.dumps(recipe_show).encode())
                         with self.lock:
                             self.revision += 1
                         message += "; previous setup restored."

@@ -44,6 +44,7 @@ def runtime(tmp_path, monkeypatch):
     manager.process = SimpleNamespace(poll=lambda: None)
     monkeypatch.setattr(manager, '_stop', lambda: None)
     monkeypatch.setattr(manager, '_close_removed_browsers', lambda *_: None)
+    monkeypatch.setattr(manager, '_recover_browsers', lambda *_: False)
     monkeypatch.setattr(manager, '_start', lambda _: None)
     return manager
 
@@ -487,3 +488,108 @@ def test_192_scenes_expand(tmp_path):
     recipe = recipe_for({**DEFAULT_SETTINGS, "scene_count": 192})
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     assert len(show["scenes"]) == 192
+
+
+def test_shutdown_reaps_killed_child_before_recovery(tmp_path, monkeypatch):
+    import signal
+    import subprocess
+    from unittest.mock import Mock
+    events = []
+    process = Mock(pid=1234, returncode=None)
+    process.poll.return_value = None
+    def wait(timeout):
+        events.append(('wait', timeout))
+        if timeout == 120:
+            raise subprocess.TimeoutExpired('mixer', timeout)
+        process.returncode = -signal.SIGKILL
+    process.wait.side_effect = wait
+    monkeypatch.setattr('setup_runtime.os.killpg', lambda pid, sig: events.append(('signal', sig)))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager.process = process
+    manager._stop()
+    assert events == [('signal', signal.SIGINT), ('wait', 120), ('signal', signal.SIGKILL), ('wait', 10)]
+    assert manager.process is None
+
+
+def test_browser_recovery_requires_dead_consumer(tmp_path, monkeypatch):
+    calls = []
+    def request(url, method, path, body=None):
+        calls.append((method, path, body))
+        return {'windows': [{'id': 'browser', 'stats': {'quarantinedFrameCount': 6}}]}
+    monkeypatch.setattr('pyplumber.mixer.dmabuf_inputs.rest_request', request)
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    shows = [{'sources': [{'id': 'browser', 'kind': 'browser'}]}]
+    manager.process = SimpleNamespace(poll=lambda: None)
+    with pytest.raises(RuntimeError, match='while the mixer is running'):
+        manager._recover_browsers(shows)
+    assert calls == []
+    manager.process = SimpleNamespace(poll=lambda: -9)
+    assert manager._recover_browsers(shows)
+    assert calls[-1] == ('POST', '/workers/recover', {'ids': ['browser']})
+
+
+def test_late_quarantine_retries_requested_setup_once(runtime, monkeypatch):
+    config = runtime.media_dir / 'mixer.demo.json'
+    config.write_text('{"sources": []}')
+    events = []
+    checks = iter([False, True])
+    monkeypatch.setattr(runtime, '_recover_browsers', lambda _: next(checks))
+    monkeypatch.setattr(runtime, '_stop', lambda: events.append('reaped'))
+    def start(path):
+        events.append('start')
+        if events.count('start') == 1:
+            raise RuntimeError('quarantined buffers')
+    monkeypatch.setattr(runtime, '_start', start)
+    runtime._start_recovering(config, None)
+    assert events == ['start', 'reaped', 'start']
+
+
+def test_permanent_start_failure_is_not_retried(runtime, monkeypatch):
+    config = runtime.media_dir / 'mixer.demo.json'
+    config.write_text('{"sources": []}')
+    from unittest.mock import Mock
+    start = Mock(side_effect=RuntimeError('invalid encoder'))
+    monkeypatch.setattr(runtime, '_start', start)
+    with pytest.raises(RuntimeError, match='invalid encoder'):
+        runtime._start_recovering(config, None)
+    assert start.call_count == 1
+
+
+def test_recovery_precedes_removing_quarantined_windows(runtime, monkeypatch):
+    config = runtime.media_dir / 'mixer.demo.json'
+    current = {'sources': [{'id': 'current', 'kind': 'browser'}]}
+    previous = {'sources': [{'id': 'removed', 'kind': 'browser'}]}
+    config.write_text(json.dumps(current))
+    events = []
+    monkeypatch.setattr(runtime, '_recover_browsers', lambda shows: events.append(('recover', shows)))
+    monkeypatch.setattr(runtime, '_close_removed_browsers', lambda *shows: events.append(('close', shows)))
+    monkeypatch.setattr(runtime, '_start', lambda _: events.append(('start', None)))
+    runtime._start_recovering(config, json.dumps(previous).encode())
+    assert events == [('recover', [current, previous]), ('close', (previous, current)), ('start', None)]
+
+
+def test_unreaped_process_blocks_browser_recovery(tmp_path, monkeypatch):
+    import subprocess
+    from unittest.mock import Mock
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    process = Mock(pid=1234)
+    process.poll.return_value = None
+    process.wait.side_effect = subprocess.TimeoutExpired('mixer', 10)
+    manager.process = process
+    monkeypatch.setattr('setup_runtime.os.killpg', lambda *_: None)
+    with pytest.raises(subprocess.TimeoutExpired):
+        manager._stop()
+    assert manager.process is process
+    with pytest.raises(RuntimeError, match='while the mixer is running'):
+        manager._recover_browsers([])
+
+
+def test_healthy_browsers_are_not_restarted(tmp_path, monkeypatch):
+    calls = []
+    def request(url, method, path, body=None):
+        calls.append(path)
+        return {'windows': [{'id': 'browser', 'stats': {'quarantinedFrameCount': 0}}]}
+    monkeypatch.setattr('pyplumber.mixer.dmabuf_inputs.rest_request', request)
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    assert not manager._recover_browsers([{'sources': [{'id': 'browser', 'kind': 'browser'}]}])
+    assert calls == ['/status']

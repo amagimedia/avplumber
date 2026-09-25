@@ -26,6 +26,7 @@ class FakeWorker implements BrowserWorker {
   public readonly windows = new Map<string, WindowSnapshot>();
   public started = false;
   public stopped = false;
+  public restarts = 0;
 
   constructor(
     public readonly index: number,
@@ -47,6 +48,13 @@ class FakeWorker implements BrowserWorker {
 
   public async stop(): Promise<void> {
     this.stopped = true;
+  }
+
+  public async restart(): Promise<void> {
+    this.restarts++;
+    for (const [id, window] of this.windows) {
+      this.windows.set(id, { ...window, stats: { ...window.stats, quarantinedFrameCount: 0 } });
+    }
   }
 
   public async open(config: WindowConfig): Promise<WindowSnapshot> {
@@ -173,5 +181,32 @@ describe('ProcessManager', () => {
     expect(workers.map((worker) => worker.windows.size)).toEqual([7, 7, 6]);
     expect((await manager.status()).maxWindows).toBe(20);
     await expect(manager.open(config(20))).rejects.toBeInstanceOf(CapacityError);
+  });
+});
+
+describe('quarantined consumer recovery', () => {
+  it('restarts only affected workers and preserves desired windows', async () => {
+    const workers = [new FakeWorker(0, 9010, 2), new FakeWorker(1, 9011, 2)];
+    const manager = new ProcessManager(workers);
+    await manager.start();
+    for (let i = 0; i < 4; i++) await manager.open(config(i));
+    const first = workers[0]!.windows.get(config(0).id)!;
+    workers[0]!.windows.set(first.id, { ...first, stats: { ...first.stats, quarantinedFrameCount: 6 } });
+    await manager.recover([0, 1, 2, 3].map((i) => config(i).id));
+    expect(workers.map((w) => w.restarts)).toEqual([1, 0]);
+    expect((await manager.status()).windows).toHaveLength(4);
+    await manager.recover([0, 1, 2, 3].map((i) => config(i).id));
+    expect(workers.map((w) => w.restarts)).toEqual([1, 0]);
+  });
+
+  it('does not restart a worker shared with another consumer', async () => {
+    const worker = new FakeWorker(0, 9010, 2);
+    const manager = new ProcessManager([worker]);
+    await manager.open(config(0));
+    await manager.open(config(1));
+    const first = worker.windows.get(config(0).id)!;
+    worker.windows.set(first.id, { ...first, stats: { ...first.stats, quarantinedFrameCount: 6 } });
+    await expect(manager.recover([first.id])).rejects.toThrow('shared with another consumer');
+    expect(worker.restarts).toBe(0);
   });
 });
