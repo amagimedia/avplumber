@@ -7,6 +7,7 @@ import threading
 import uuid
 
 from .config import AuxBus, ConfigError, _parse_rendition, scene_layers
+from .control import source_mask_param
 
 
 def aux_fps(fps):
@@ -84,7 +85,7 @@ def composition(cfg, scenes, preview):
     layers.append({"input": len(indices), "dst_x": xs[2], "dst_y": 0,
                    "dst_w": w - xs[2], "dst_h": ys[2], "fit": "contain", "z": len(layers)})
     mask = sum(1 << i for i in {layer["input"] for layer in layers})
-    return {"layers": layers, "active_inputs": str(mask) if mask >= 1 << 64 else mask}
+    return {"layers": layers, "active_inputs": source_mask_param(mask)}
 
 
 class AuxMultiview:

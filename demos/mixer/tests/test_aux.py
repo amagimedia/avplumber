@@ -33,7 +33,7 @@ def test_repeated_scenes_and_occurrences_share_pads(cfg):
     result = composition(cfg, ["repeat"] * 8, "full")
     assert len(result["layers"]) == 18
     assert {l["input"] for l in result["layers"]} == {0, 64}
-    assert int(result["active_inputs"]) == (1 << 64) | 1
+    assert result["active_inputs"] == "1" + "0" * 63 + "1"
     assert sum(l.get("blend", False) for l in result["layers"]) == 8
     assert len({l["z"] for l in result["layers"]}) == 18
 
@@ -42,6 +42,15 @@ def test_empty_preview_and_tiles_keep_only_real_pgm(cfg):
     result = composition(cfg, [None] * 8, "")
     assert len(result["layers"]) == 1
     assert result["layers"][0]["input"] == 64
+
+
+@pytest.mark.parametrize("count", [63, 64, 96, 127])
+def test_aux_mask_addresses_high_source_and_program_pads(cfg, count):
+    cfg = replace(cfg, sources=tuple(Source(f"s{i}", "video", f"clip{i}.mp4", 1920, 1080)
+                                    for i in range(count)),
+                  scenes=(Scene("last", (Item(f"s{count - 1}", Rect(0, 0, 1080, 1920)),)),))
+    wire = composition(cfg, ["last"] + [None] * 7, "")["active_inputs"]
+    assert wire == ((1 << 63) | (1 << 62) if count == 63 else "0" * (count - 1) + "11")
 
 
 def test_capacity_reserves_any_preview(cfg):

@@ -11,6 +11,11 @@ class AvpProtocolError(RuntimeError):
     pass
 
 
+def source_mask_param(mask: int):
+    """Native pad masks use a number up to 64 bits, then an LSB-first bit string."""
+    return mask if mask < 1 << 64 else f"{mask:b}"[::-1]
+
+
 class AvpConnection:
     """One serialized connection to AVPlumber's line-oriented TCP protocol."""
 

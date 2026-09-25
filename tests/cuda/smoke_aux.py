@@ -3,6 +3,7 @@
 Run from the repository root with its CUDA Python module on PYTHONPATH.
 Generates two small clips; uses private UDP ports and never changes a live show.
 """
+import argparse
 import asyncio
 import json
 from pathlib import Path
@@ -53,6 +54,10 @@ def subscription_flags():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sources", type=int, choices=(2, 64, 96), default=2,
+                        help="Use tiny independent decoders to exercise the wide aux mask")
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="avp-aux-") as directory:
         root = Path(directory)
         sources = []
@@ -66,6 +71,9 @@ def main():
         scenes.append({"id": "repeat", "items": [
             {"source": "red", "dst": {"x": -40, "y": 0, "w": 200, "h": 240}, "fit": "stretch"},
             {"source": "red", "dst": {"x": 160, "y": 240, "w": 160, "h": 240}, "fit": "stretch"}]})
+        sources[1:1] = [{**sources[0], "id": f"unused{i}"} for i in range(args.sources - 2)]
+        for source in sources:
+            source["independent"] = True
         config = {"canvas": {"width": 320, "height": 480, "fps": 60}, "sources": sources, "scenes": scenes,
                   "initial_scene": "red", "renditions": [{"id": "pgm", "target": "janus", "port": 15004}],
                   "aux_buses": [{"id": "mv", "scenes": ["red", "blue", "repeat", None, None, None, None, None],
@@ -91,7 +99,9 @@ def main():
             edge = app.avp.getEdge(bus.output_edge)
             main_edge = app.avp.getEdge("mixer_final_out")
             wait_for(lambda: edge.enqueued_total >= 30)
-            assert subscription_flags() == {name: True for name in [*bus.edges, bus.pgm_edge]}
+            expected = {name: name in (bus.edges[0], bus.edges[-1], bus.pgm_edge)
+                        for name in [*bus.edges, bus.pgm_edge]}
+            assert subscription_flags() == expected
             app.mixer.preview("blue")
             wait_for(lambda: bus.state()["pvw_scene"] == "blue")
             initial = bus.state()
@@ -99,7 +109,7 @@ def main():
             assert bus.assign({"expected_revision": initial["revision"], "scenes": [None] * 8})["conflict"]
             app.mixer.cut("blue")
             app.mixer.preview("red")
-            expected = {bus.edges[0]: True, bus.edges[1]: False, bus.pgm_edge: True}
+            expected[bus.edges[-1]] = False
             wait_for(lambda: subscription_flags() == expected)
             time.sleep(1)
             # Stall the first consumer: the compositor must suspend, unsubscribe
