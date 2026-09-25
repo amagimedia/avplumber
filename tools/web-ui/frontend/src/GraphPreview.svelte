@@ -3,7 +3,9 @@
 
   import { NodeEditor, ClassicPreset } from 'rete';
   import { AreaPlugin, AreaExtensions } from 'rete-area-plugin';
-  import { AutoArrangePlugin } from 'rete-auto-arrange-plugin';
+  import { AutoArrangePlugin, ArrangeAppliers } from 'rete-auto-arrange-plugin';
+  import ELK from 'elkjs/lib/elk-api.js';
+  import ElkWorker from 'elkjs/lib/elk-worker.min.js?worker';
   import { SveltePlugin, Presets as SveltePresets } from 'rete-svelte-plugin/svelte';
   import GraphConnection from './GraphConnection.svelte';
   import GraphNode from './GraphNode.svelte';
@@ -19,6 +21,11 @@
   export let minZoom = 0;
   let rebuilding = false;
   let rebuildRequested = false;
+  let cancelLayout;
+  const layoutCache = new Map();
+  // Apply only after checking that this layout still matches the requested view.
+  class LayoutOnly extends ArrangeAppliers.StandardApplier { async apply() {} }
+  const createLayoutEngine = () => new ELK({ workerFactory: () => new ElkWorker() });
 
   const dispatch = createEventDispatcher();
 
@@ -137,10 +144,11 @@
       node.width = el.offsetWidth;
       node.height = el.offsetHeight;
       const bounds = el.getBoundingClientRect();
+      const rows = new Map([...el.querySelectorAll('.port[data-testid]')]
+        .map(row => [row.getAttribute('data-testid'), row]));
       for (const side of ['input', 'output']) {
         for (const key of Object.keys(node[side === 'input' ? 'inputs' : 'outputs'])) {
-          const row = [...el.querySelectorAll('[data-testid]')]
-            .find(item => item.getAttribute('data-testid') === `${side}-${key}`);
+          const row = rows.get(`${side}-${key}`);
           const socket = row?.querySelector(`[data-testid="${side}-socket"]`);
           if (!socket) throw new Error('Socket did not render: ' + key);
           const rect = socket.getBoundingClientRect();
@@ -153,33 +161,58 @@
           row.title = key;
         }
       }
-      await area.resize(node.id, node.width, node.height);
+
     }
   }
 
-  async function layoutGraph() {
-    const { result } = await arrange.layout({ options: {
-      'elk.algorithm': 'layered', 'elk.direction': verticalFlow ? 'DOWN' : 'RIGHT',
-      'elk.edgeRouting': 'ORTHOGONAL',
-      'elk.layered.spacing.nodeNodeBetweenLayers': focusedLayout ? '44' : '90',
-      'elk.spacing.nodeNode': '44',
-      'elk.spacing.edgeNode': '24',
-      'elk.layered.spacing.edgeNodeBetweenLayers': '24',
-      'elk.spacing.edgeEdge': '12',
-      'elk.layered.spacing.edgeEdgeBetweenLayers': '12',
-      'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
-      'elk.padding': '[top=24,left=24,bottom=24,right=24]'
-    } });
-    if (!area || !editor) return;
-    const connections = new Map(editor.getConnections().map(connection => [connection.id, connection]));
-    for (const edge of result.edges || []) {
-      const connection = connections.get(edge.id);
-      if (!connection) continue;
-      connection.__route = (edge.sections || []).map(section =>
+  async function layoutGraph(connections, key) {
+    let result = layoutCache.get(key);
+    if (!result) {
+      arrange.elk ||= createLayoutEngine();
+      const cancelled = new Promise(resolve => {
+        cancelLayout = () => {
+          cancelLayout = null;
+          arrange.elk?.terminateWorker();
+          arrange.elk = null;
+          resolve(null);
+        };
+      });
+      const layout = await Promise.race([arrange.layout({ connections, applier: new LayoutOnly(), options: {
+        'elk.algorithm': 'layered', 'elk.direction': verticalFlow ? 'DOWN' : 'RIGHT',
+        'elk.edgeRouting': 'ORTHOGONAL',
+        'elk.layered.spacing.nodeNodeBetweenLayers': focusedLayout ? '44' : '90',
+        'elk.spacing.nodeNode': '44', 'elk.spacing.edgeNode': '24',
+        'elk.layered.spacing.edgeNodeBetweenLayers': '24',
+        'elk.spacing.edgeEdge': '12', 'elk.layered.spacing.edgeEdgeBetweenLayers': '12',
+        'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
+        'elk.padding': '[top=24,left=24,bottom=24,right=24]'
+      } }), cancelled]);
+      cancelLayout = null;
+      if (!layout || rebuildRequested || !area) return false;
+      result = layout.result;
+      if (layoutCache.size >= 4) layoutCache.delete(layoutCache.keys().next().value);
+      layoutCache.set(key, result);
+    }
+    // Connections are not mounted yet: moving a node must not redraw every edge.
+    for (let i = 0; i < result.children.length; i += 40) {
+      if (rebuildRequested || !area) return false;
+      await Promise.all(result.children.slice(i, i + 40).map(async node => {
+        await area.resize(node.id, node.width, node.height);
+        await area.translate(node.id, { x: node.x, y: node.y });
+      }));
+      await nextFrame();
+    }
+    const routes = new Map((result.edges || []).map(edge => [edge.id, edge.sections || []]));
+    for (let i = 0; i < connections.length; i++) {
+      if (rebuildRequested || !area) return false;
+      const connection = connections[i];
+      connection.__route = (routes.get(connection.id) || []).map(section =>
         [section.startPoint, ...(section.bendPoints || []), section.endPoint]);
-      await area.update('connection', connection.id);
+      await editor.addConnection(connection);
+      if (i % 40 === 39) await nextFrame();
     }
     await fitGraph();
+    return true;
   }
 
   async function fitGraph() {
@@ -194,6 +227,7 @@
 
   async function rebuildGraph() {
     rebuildRequested = true;
+    cancelLayout?.();
     if (rebuilding || !editor || !area) return;
     rebuilding = true;
     try {
@@ -216,6 +250,7 @@
     clearNodeDomHandlers();
 
     await editor.clear();
+    if (rebuildRequested || !editor) return;
 
     // 1) Create nodes with ports (queue names are port keys)
     for (const n of graphNodes) {
@@ -226,6 +261,7 @@
 
       const label = `${n.label || n.name}\n${n.type || ''}${n.working ? '' : ' (OFF)'}`.trim();
       const node = new ClassicPreset.Node(label);
+      node.id = n.name;
       node.width = compactFocus ? 180 : 300;
       node.__vertical = verticalFlow;
 
@@ -239,6 +275,10 @@
       await editor.addNode(node);
       nodeByName.set(n.name, node);
       nodeNameById.set(node.id, n.name);
+      if (nodeByName.size % 40 === 0) {
+        await nextFrame();
+        if (rebuildRequested || !editor) return;
+      }
     }
 
     // 2) Create connections based on shared queue names: producer(dst) -> consumer(src)
@@ -258,6 +298,7 @@
       }
     }
 
+    const connections = [];
     for (const [qName, srcNodeName] of producers.entries()) {
       const srcNode = nodeByName.get(srcNodeName);
       if (!srcNode || !srcNode.outputs[qName]) continue;
@@ -270,16 +311,20 @@
           // attach queue metadata for rendering (read-only)
           // eslint-disable-next-line no-param-reassign
           conn.__queueName = qName;
-          await editor.addConnection(conn);
+          connections.push(conn);
         } catch (_) {
           // ignore duplicate/invalid connections
         }
       }
     }
 
-    // 3) Measure and deterministic layout (dependency order)
+    // Stable IDs allow bounded layout reuse when switching back to a view.
+    connections.sort((a, b) => JSON.stringify([a.source, a.sourceOutput, a.target])
+      .localeCompare(JSON.stringify([b.source, b.sourceOutput, b.target])));
+    connections.forEach((connection, i) => { connection.id = `queue-${i}`; });
     await measureAndApplyNodeSizes();
-    await layoutGraph();
+    if (rebuildRequested || !area) return;
+    if (!await layoutGraph(connections, `${lastGraphKey}|${compactFocus}`)) return;
 
     // 4) Enable node selection by clicking node DOM
     await attachNodeClickHandlers();
@@ -307,6 +352,8 @@
       area = new AreaPlugin(container);
       const render = new SveltePlugin();
       arrange = new AutoArrangePlugin();
+      arrange.elk.terminateWorker();
+      arrange.elk = createLayoutEngine();
 
       // Presets
       render.addPreset(
@@ -343,6 +390,9 @@
 
   onDestroy(() => {
     resizeObserver?.disconnect();
+    cancelLayout?.();
+    arrange?.elk?.terminateWorker();
+    layoutCache.clear();
     try {
       if (area) area.destroy();
     } catch (_) {
