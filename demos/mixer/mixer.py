@@ -43,7 +43,8 @@ except ImportError:
 
 DEFAULT_FPS = 30
 FPS_DEN = 1
-HWACCEL = "@gpu"
+# Instance-owned: a global (@) device survives shutdown until CUDA static teardown.
+HWACCEL = "mixer_gpu"
 MIXER_NAME = "mixer"
 ROUTER_GROUP = "mixer_preheat_router"
 OUTPUT_GROUP = "output"

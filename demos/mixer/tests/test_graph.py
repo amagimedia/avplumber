@@ -734,7 +734,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     if source_filter:
         assert nodes["source_filter_0"]["graph"] == source_filter
         assert nodes["source_filter_0"]["src"] == "input_0_fps"
-        assert nodes["source_filter_0"]["hwaccel"] == "@gpu"
+        assert nodes["source_filter_0"]["hwaccel"] == "mixer_gpu"
         assert nodes["source_filter_0"]["group"] == "input_0"
         assert [n for n in nodes if n and n.startswith("source_filter_")] == ["source_filter_0"]
     else:

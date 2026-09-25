@@ -186,6 +186,13 @@ bool NodeWrapper::stop(bool inhibit_actions) {
     std::unique_lock<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
     if (threadWorks()) {
         std::shared_ptr<Node> node = node_;
+        if (!node) {
+            // Processing finished, but the thread may still be destroying its
+            // local node reference. stopAndWait() must join it without retrying.
+            if (inhibit_actions) stop_requested_ = true;
+            dowork_ = false;
+            return false;
+        }
         std::shared_ptr<IStoppable> node_stoppable = std::dynamic_pointer_cast<IStoppable>(node);
         if (node_stoppable) {
             if (inhibit_actions) stop_requested_ = true;
@@ -361,6 +368,7 @@ void NodeWrapper::threadFunction() {
             }
         }
         try {
+            std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
             node_ = nullptr;
         } catch (std::exception &e) {
             logstream << "Destroying node " << name_ << " failed: " << e.what();
