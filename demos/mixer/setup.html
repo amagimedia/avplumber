@@ -42,6 +42,8 @@ label input, label select { display: block; width: 100%; margin-top: 5px; }
 .source small { font-size: 11px; color: var(--muted); display: block; }
 .source b { font-size: 13px; }
 .source input[type=number] { width: 76px; padding: 6px; text-align: right; }
+.source-group { margin-top: 18px; }
+.source-group h2 { margin-bottom: 8px; color: var(--muted); }
 .dot { width: 8px; height: 8px; display: inline-block; border-radius: 50%; margin-right: 6px; }
 .allocation { display: flex; height: 5px; overflow: hidden; background: var(--edge); margin: 10px 0; }
 .right { position: sticky; top: 14px; }
@@ -111,12 +113,14 @@ const $ = id => document.getElementById(id);
 const types = [
  {id:'sdr420',name:'SDR · 4:2:0 · NVDEC',detail:'H.264 patterns · NVDEC',color:'#439a86'},
  {id:'hlg420',name:'HDR · 4:2:0 · NVDEC',detail:'HEVC 10-bit HLG patterns · NVDEC',color:'#5a87b5'},
- {id:'hlg422',name:'HDR · 4:2:2',detail:'HLG v210 · GPU unpack',color:'#ac8bce',max:4},
- {id:'sdr422',name:'SDR · 4:2:2',detail:'10-bit v210 bars · GPU unpack',color:'#d5a35f'},
+ {id:'hlg422',name:'HDR · 4:2:2 · HW upload',detail:'10-bit HLG v210 · CPU → GPU + unpack',color:'#ac8bce',max:4},
+ {id:'sdr422',name:'SDR · 4:2:2 · HW upload',detail:'10-bit v210 bars · CPU → GPU + unpack',color:'#d5a35f'},
  {id:'browser',name:'Browser',detail:'Bundled transparent test page · maximum 32',color:'#d47f95',max:32},
- {id:'sdr420_raw',name:'SDR · 4:2:0 · raw upload',detail:'Raw NV12 · CPU → GPU · 1 upload unit',color:'#78aa62'},
- {id:'hlg420_raw',name:'HDR · 4:2:0 · raw upload',detail:'Raw P010 · CPU → GPU · 2 upload units · no NVDEC',color:'#818bcf'}
+ {id:'sdr420_raw',name:'SDR · 4:2:0 · HW upload',detail:'8-bit NV12 · CPU → GPU · 1 upload unit',color:'#78aa62'},
+ {id:'hlg420_raw',name:'HDR · 4:2:0 · HW upload',detail:'10-bit HLG P010 · CPU → GPU · 2 upload units',color:'#818bcf'}
 ];
+// Presentation order is independent of the saved recipe's weight indices.
+const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]]];
 const presets = {balanced:[8,4,2,0,2,0,0],equal:[1,1,1,1,1,1,1],light:[2,1,0,0,0,0,0]};
 const sourceBudgets=()=>[
  [[2],[1],4,'HDR 4:2:2'],[[4],[1],32,'Browser'],
@@ -144,7 +148,11 @@ function sourceEnabled(i){
  return i===0||i===4||i===5||(bit_depth===10&&(i===1||i===6||chroma==='422'));
 }
 const controls=$('source-controls');
-types.forEach((t,i)=>{
+sourceGroups.forEach(([name,indices])=>{
+ const group=document.createElement('section');group.className='source-group';
+ const heading=document.createElement('h2');heading.textContent=name;group.append(heading);
+ indices.forEach(i=>{
+ const t=types[i];
  const row=document.createElement('div');row.className='source';
  row.innerHTML=`<div><b><span class="dot" style="background:${t.color}"></span>${t.name}</b><small>${t.detail}</small></div><input id="count-${t.id}" type="number" min="0" max="${t.max??sourceLimit()}" step="1" aria-label="${t.name} sources">`;
  const input=row.querySelector('input');
@@ -158,7 +166,8 @@ types.forEach((t,i)=>{
  input.addEventListener('blur',()=>{
   if(Number.isInteger(sourceValues[i])&&sourceValues[i]>=0)input.value=sourceValues[i];
   update();
- });controls.append(row);
+ });group.append(row);
+ });controls.append(group);
 });
 function allocate(total,values){
  const scale=Math.max(...values);if(!scale)throw Error('Add at least one source.');
@@ -204,7 +213,7 @@ function update(){
    source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts],
    bitrate_kbps:bitrate,browser_ring_size:integer('browser-ring-size',1,64)};
  types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(document.activeElement!==input&&(Number(input.value)!==counts[i]||input.value===''))input.value=counts[i];input.max=sourceMaximum(i);});
- $('allocation').replaceChildren(...types.map((t,i)=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=t.color;return span}));
+ $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
  $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${fps<=30?40:20} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]}/${Math.min(28,Math.floor(700/fps))} units (NV12 = 1, P010 = 2). Capacity depends on codec and content.`;
  $('canvas-label').textContent=`${width} × ${height} · ${fps} fps · ${portrait?'portrait':'landscape'}`;
  const eight=currentSettings.bit_depth===8;
