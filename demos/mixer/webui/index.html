@@ -4,6 +4,7 @@
 <title>AVPlumber mixer</title>
 <style>
   :root {
+    color-scheme: dark;
     --bg: #0b0d10; --panel: #14181d; --edge: #232b34; --edge-soft: #1b222a;
     --text: #e8edf2; --muted: #8b98a5;
     --pgm: #e5484d; --pgm-dim: #3a1416; --pvw: #30a46c; --pvw-dim: #0f2a1d;
@@ -34,6 +35,7 @@
   #program-output { display: block; width: 100%; flex: 1; min-height: 0; border: 0; background: #050607; }
   header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   header a { color: var(--muted); font-size: 12px; }
+  header a:hover { color: var(--accent); }
   h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
   #counts { color: var(--muted); font-variant-numeric: tabular-nums; }
   #conn { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }

@@ -110,7 +110,7 @@
 
   {#if q}
     <g class="fill-marker" transform={`translate(${tip.x}, ${tip.y}) rotate(${angle})`} aria-hidden="true">
-      <rect x="-26" y="-3" width="16" height="6" rx="2" fill="#0f172a" stroke={stroke} stroke-width="1" />
+      <rect x="-26" y="-3" width="16" height="6" rx="2" fill="var(--bg)" stroke={stroke} stroke-width="1" />
       <rect x="-25" y="-2" width={14 * flow.maxFill} height="4" rx="1" fill={stroke} />
     </g>
   {/if}
@@ -149,28 +149,28 @@
   .fill-marker { pointer-events: none; }
 
   .badge-bg {
-    fill: rgba(2, 6, 23, 0.9);
-    stroke: rgba(229, 231, 235, 0.25);
+    fill: var(--panel);
+    stroke: var(--edge);
     stroke-width: 1px;
   }
 
   .badge-text {
     font-size: 14px;
-    fill: #e5e7eb;
+    fill: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
       monospace;
     text-shadow: 0 0 2px #000;
   }
 
   .badge-bar-bg {
-    fill: rgba(229, 231, 235, 0.14);
+    fill: var(--edge-soft);
     stroke: rgba(229, 231, 235, 0.18);
     stroke-width: 1px;
   }
 
   .badge-bar-text {
     font-size: 12px;
-    fill: #e5e7eb;
+    fill: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
       monospace;
     text-shadow: 0 0 2px #000;

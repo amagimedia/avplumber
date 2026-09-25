@@ -394,10 +394,10 @@
     position: relative;
     flex: 1;
     min-height: 280px;
-    border: 1px solid #111827;
+    border: 1px solid var(--edge-soft);
     border-radius: 0.25rem;
     overflow: hidden;
-    background: #020617;
+    background: var(--bg);
     display: flex;
     flex-direction: column;
   }
@@ -408,7 +408,7 @@
     width: 100%;
   }
 
-  .graph-loading { position:absolute; padding:16px; color:#94a3b8; }
+  .graph-loading { position:absolute; padding:16px; color:var(--muted); }
 
   .rete-error {
     position: absolute;
@@ -417,16 +417,16 @@
     left: 0.25rem;
     right: 0.25rem;
     padding: 0.25rem 0.4rem;
-    background: rgba(127, 29, 29, 0.9);
-    color: #fee2e2;
+    background: var(--pgm-dim);
+    color: var(--pgm);
     font-size: 0.75rem;
     border-radius: 0.25rem;
   }
 
   /* selected node highlight (set by GraphPreview via DOM class) */
   .rete-wrap :global(.avp-selected) {
-    outline: 2px solid rgba(59, 130, 246, 0.95);
+    outline: 2px solid var(--accent);
     outline-offset: 1px;
-    box-shadow: 0 0 0 2px rgba(2, 6, 23, 0.75);
+    box-shadow: 0 0 0 2px var(--bg);
   }
 </style>

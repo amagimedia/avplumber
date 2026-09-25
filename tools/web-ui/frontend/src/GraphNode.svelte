@@ -35,8 +35,8 @@
 </div>
 
 <style>
-  .node { position:relative; box-sizing:border-box; background:#132035; border:1px solid #475569; border-radius:6px; padding-bottom:8px; color:#e2e8f0; cursor:pointer; font-family:system-ui,sans-serif; }
-  .node:hover { border-color:#94a3b8; }
+  .node { position:relative; box-sizing:border-box; background:var(--panel); border:1px solid var(--edge); border-radius:8px; padding-bottom:8px; color:var(--text); cursor:pointer; font-family:inherit; }
+  .node:hover { border-color:var(--muted); }
   .title { padding:10px 12px; white-space:pre-line; overflow-wrap:anywhere; font-size:15px; line-height:1.35; }
   .ports { display:flex; min-height:28px; }
   .port { width:50%; min-width:0; position:relative; display:flex; align-items:center; box-sizing:border-box; }
@@ -47,5 +47,5 @@
   .port :global(.socket-ref) { position:absolute; top:8px; width:12px; height:12px; }
   .port :global(.input-socket) { left:-7px; }
   .port :global(.output-socket) { right:-7px; }
-  .port :global(.socket) { width:12px; height:12px; margin:0; border:1px solid #a5b4fc; background:#64748b; vertical-align:top; }
+  .port :global(.socket) { width:12px; height:12px; margin:0; border:1px solid var(--muted); background:var(--edge); vertical-align:top; }
 </style>

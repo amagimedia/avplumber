@@ -18,6 +18,8 @@
   let instances = [];
   let currentInstanceId = null;
   let requestedInstanceId = new URLSearchParams(window.location.search).get('instance');
+  const mixerUrl = new URL('/', window.location.href);
+  mixerUrl.port = '7681';
   let instanceGeneration = 0;
   let requestedGeneration = -1;
 
@@ -830,7 +832,9 @@
 
 <div class="app-root">
   <header class="topbar">
-    <div class="title">avplumber web-ui</div>
+    <h1 class="title">AVPlumber graph</h1>
+    <a href={mixerUrl.href}>Mixer</a>
+    <a href={new URL('/setup/', mixerUrl).href}>Setup</a>
     <div class="status">
       <span class="badge {wsConnected ? 'badge-connected' : 'badge-disconnected'}">
         WS: {wsConnected ? 'connected' : 'disconnected'}

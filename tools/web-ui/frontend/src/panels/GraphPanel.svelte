@@ -99,12 +99,11 @@
 
 <style>
   .toolbar { flex-wrap: wrap; }
-  .toolbar .graph-back { background:#2563eb; border-color:#60a5fa; color:#fff; font-weight:700; padding:6px 14px; }
-  .toolbar .graph-back:hover { background:#1d4ed8; }
+  .toolbar .graph-back { border-color:var(--accent); color:var(--accent); font-weight:600; }
   .breadcrumb { padding: 6px 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .group-browser { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:12px; padding:16px; overflow:auto; }
   .group-browser button { display:flex; flex-direction:column; align-items:flex-start; padding:16px; gap:8px; }
   .group-browser strong { font-size:16px; }
-  .group-browser span { color:#94a3b8; }
+  .group-browser span { color:var(--muted); }
   .toolbar button, .toolbar label { white-space: nowrap; flex-shrink: 0; }
 </style>
