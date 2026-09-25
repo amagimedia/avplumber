@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,10 @@ MIN_BITRATE_KBPS, MAX_BITRATE_KBPS = 500, 40000
 DEFAULT_SETTINGS = dict(resolution="1920x1080", orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
                         bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60))
+
+
+def _browser_ids(*shows):
+    return {s["id"] for show in shows for s in show.get("sources", []) if s["kind"] == "browser"}
 
 
 def source_counts(total, weights, fps=25):
@@ -223,23 +228,19 @@ class SetupRuntime:
         recipe["aux_buses"] = buses
 
     def _stop(self):
-        if self.process and self.process.poll() is None:
-            process = self.process
+        process = self.process
+        if process and process.poll() is None:
             print(f"Stopping mixer process {process.pid}", flush=True)
-            try:
+            with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
             try:
                 # Large graphs stop input groups serially; killing them early
                 # leaves browser DMA-BUF frames quarantined and blocks restart.
                 process.wait(timeout=120)
             except subprocess.TimeoutExpired:
                 print("Mixer shutdown timed out; killing process before browser recovery", flush=True)
-                try:
+                with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 process.wait(timeout=10)
             print(f"Mixer process exited ({process.returncode})", flush=True)
         self.process = None
@@ -248,7 +249,7 @@ class SetupRuntime:
         from pyplumber.mixer.dmabuf_inputs import rest_request
         if self.process and self.process.poll() is None:
             raise RuntimeError("Cannot recover browser buffers while the mixer is running")
-        ids = sorted({s["id"] for show in shows for s in show.get("sources", []) if s["kind"] == "browser"})
+        ids = sorted(_browser_ids(*shows))
         if not ids:
             return False
         status = rest_request(self.browser_url, "GET", "/status") or {}
@@ -259,8 +260,8 @@ class SetupRuntime:
         rest_request(self.browser_url, "POST", "/workers/recover", {"ids": ids})
         return True
 
-    def _start_recovering(self, config, previous):
-        shows = [json.loads(config.read_bytes()), json.loads(previous or b"{}")]
+    def _start_recovering(self, config, previous_show):
+        shows = [json.loads(config.read_bytes()), previous_show or {}]
         self._recover_browsers(shows)
         self._close_removed_browsers(shows[1], shows[0])
         try:
@@ -308,12 +309,11 @@ class SetupRuntime:
 
     def _close_removed_browsers(self, old_show, new_show):
         from pyplumber.mixer.dmabuf_inputs import rest_request
-        old_ids = {s["id"] for s in old_show.get("sources", []) if s["kind"] == "browser"}
-        new_ids = {s["id"] for s in new_show.get("sources", []) if s["kind"] == "browser"}
-        if old_ids - new_ids:
+        removed = _browser_ids(old_show) - _browser_ids(new_show)
+        if removed:
             status = rest_request(self.browser_url, "GET", "/status") or {}
             existing = {w["id"] for w in status.get("windows", [])}
-            for name in sorted((old_ids - new_ids) & existing):
+            for name in sorted(removed & existing):
                 rest_request(self.browser_url, "POST", "/window/close", {"id": name})
 
     def _apply(self, recipe, settings):
@@ -333,7 +333,7 @@ class SetupRuntime:
             self._stop()
             stopped = True
             recipe_show = json.loads(config.read_bytes())
-            self._start_recovering(config, previous)
+            self._start_recovering(config, json.loads(previous or b"{}"))
             if settings is not None:
                 staged = self.recipe_path.with_suffix(".pending.json")
                 staged.write_text(json.dumps(recipe, indent=2) + "\n")
@@ -350,7 +350,7 @@ class SetupRuntime:
                 if previous is not None:
                     config.write_bytes(previous)
                     if stopped and not self.closing.is_set():
-                        self._start_recovering(config, json.dumps(recipe_show).encode())
+                        self._start_recovering(config, recipe_show)
                         with self.lock:
                             self.revision += 1
                         message += "; previous setup restored."

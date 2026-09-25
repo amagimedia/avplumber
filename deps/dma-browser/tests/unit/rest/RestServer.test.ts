@@ -8,7 +8,7 @@ import {
   NotFoundError,
   ValidationError,
 } from '../../../src/main/rest/errors';
-import type { WindowManager } from '../../../src/main/WindowManager';
+import type { WindowControl } from '../../../src/main/WindowControl';
 import type { WindowConfig, WindowSnapshot } from '../../../src/main/config/WindowConfig';
 
 function snapshotFor(cfg: WindowConfig): WindowSnapshot {
@@ -33,8 +33,8 @@ function snapshotFor(cfg: WindowConfig): WindowSnapshot {
   };
 }
 
-function buildManager(overrides: Partial<WindowManager> = {}): WindowManager {
-  const mgr = {
+function buildManager(overrides: Partial<WindowControl> = {}): WindowControl {
+  return {
     open: vi.fn(),
     close: vi.fn(),
     closeAll: vi.fn().mockResolvedValue(undefined),
@@ -44,10 +44,9 @@ function buildManager(overrides: Partial<WindowManager> = {}): WindowManager {
     status: vi.fn().mockReturnValue({ windows: [], count: 0, maxWindows: 8 }),
     ...overrides,
   };
-  return mgr as unknown as WindowManager;
 }
 
-function buildServer(mgr: WindowManager) {
+function buildServer(mgr: WindowControl) {
   return new RestServer(mgr, { host: '127.0.0.1', port: 0 }, new ConfigService());
 }
 
@@ -184,7 +183,7 @@ describe('unknown routes', () => {
 
 describe('POST /workers/recover', () => {
   it('validates ids before calling the supervisor', async () => {
-    const manager = Object.assign(buildManager(), { recover: vi.fn().mockResolvedValue(undefined) });
+    const manager = buildManager({ recover: vi.fn().mockResolvedValue(undefined) });
     const app = buildServer(manager).app;
     expect((await request(app).post('/workers/recover').send({ ids: ['win-1'] })).status).toBe(200);
     expect(manager.recover).toHaveBeenCalledWith(['win-1']);
@@ -195,7 +194,7 @@ describe('POST /workers/recover', () => {
 
   it('reports unsupported recovery and worker failures', async () => {
     expect((await request(buildServer(buildManager()).app).post('/workers/recover').send({ ids: [] })).status).toBe(409);
-    const manager = Object.assign(buildManager(), { recover: vi.fn().mockRejectedValue(new Error('worker failed')) });
+    const manager = buildManager({ recover: vi.fn().mockRejectedValue(new Error('worker failed')) });
     expect((await request(buildServer(manager).app).post('/workers/recover').send({ ids: ['win-1'] })).status).toBe(500);
   });
 });

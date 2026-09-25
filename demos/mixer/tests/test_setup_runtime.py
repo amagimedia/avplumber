@@ -564,7 +564,7 @@ def test_recovery_precedes_removing_quarantined_windows(runtime, monkeypatch):
     monkeypatch.setattr(runtime, '_recover_browsers', lambda shows: events.append(('recover', shows)))
     monkeypatch.setattr(runtime, '_close_removed_browsers', lambda *shows: events.append(('close', shows)))
     monkeypatch.setattr(runtime, '_start', lambda _: events.append(('start', None)))
-    runtime._start_recovering(config, json.dumps(previous).encode())
+    runtime._start_recovering(config, previous)
     assert events == [('recover', [current, previous]), ('close', (previous, current)), ('start', None)]
 
 

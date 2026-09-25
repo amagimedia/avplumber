@@ -12,7 +12,7 @@ TRANSFER_TAGS = {"sdr": "bt709", "hlg": "arib-std-b67", "pq": "smpte2084"}
 OPERATORS = ("none", "linear", "gamma", "clip", "reinhard", "hable", "mobius")
 COLOR_KEYS = ("color_trc", "color_primaries", "colorspace", "color_range")
 TEN_BIT_FORMATS = ("p010le", "p210le", "yuv420p10le", "yuv422p10le", "yuv444p10le")
-SEMIPLANAR_FORMATS = ("nv12", "nv16", "p010le", "p210le")   # what tonemap_cuda reads and writes
+SEMIPLANAR_FORMATS = ("nv12", "nv16", "p010le", "p210le")
 # HDR10 static metadata for PQ outputs: the mixer masters on BT.2020 primaries with D65 white.
 MASTERING_PRIMARIES = {"bt2020": {"primaries": [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],
                                   "white_point": [0.3127, 0.3290]}}
@@ -96,7 +96,7 @@ def validate_conversion(target, pixel_format, *, source_format, tonemap, sdr_whi
     if not all(isfinite(v) for v in (sdr_white, hdr_peak, desat, param)) or not (1 <= sdr_white <= hdr_peak <= 10000 and hdr_peak >= 100 and desat >= 0 and param >= 0):
         raise ValueError("require finite 1 <= sdr_white <= hdr_peak <= 10000, hdr_peak >= 100, desat >= 0 and param >= 0")
     if source_format and source_format not in YUV_FORMATS:
-        raise ValueError(f"unsupported source pixel format {source_format!r}; color conversion requires CUDA YUV")
+        raise ValueError(f"unsupported source pixel format {source_format!r}; color conversion requires YUV storage")
     return target
 
 

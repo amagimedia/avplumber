@@ -9,7 +9,7 @@ Typical usage
     from pyplumber.node import InputRec, Demux, DecVideo, Realtime, ForceFPS
 
     avp = AVPlumber()
-    avp.executeCommandsFromString('hwaccel.init { "name": "@gpu", "type": "cuda" }')
+    avp.executeCommandsFromString('hwaccel.init { "name": "mixer_gpu", "type": "cuda" }')
     avp.edges.planCapacity("*", 3)
 
     # Build input decode chains externally (the caller owns input groups)
@@ -20,7 +20,7 @@ Typical usage
                               "group": f"input_{i}"}))
 
     mx = MixerGraphBuilder(avp, name="mixer", canvas=(1920, 1080), fps=(30, 1),
-                           hwaccel="@gpu", timeline="mixer_tl", enable_wipe=True)
+                           hwaccel="mixer_gpu", timeline="mixer_tl", enable_wipe=True)
     mx.add_source("cam0", pre_otm_edge="cam0_fps", input_group="input_0")
     mx.add_source("cam1", pre_otm_edge="cam1_fps", input_group="input_1")
     mx.add_scene("fullcam0", {"cam0": {"graph": "scale_cuda=w=1920:h=1080", "dst_x": 0, "dst_y": 0}})

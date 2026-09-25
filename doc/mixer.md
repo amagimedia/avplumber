@@ -22,6 +22,23 @@ graph builder is `pyplumber/mixer/graph.py`; the native control implementation i
 The mixer carries video frames only. It has no audio routing, VAD, speaker
 selection, face tracking, or camera policy.
 
+## Backend boundary and lifetime
+
+Shared code owns scene geometry, color intent, routing, subscriptions and timing.
+`pyplumber/mixer/backend.py` defines node/filter construction; `backends/cuda.py`
+implements it. Native fade requests use `src/mixer/transition_control.hpp`, with
+CUDA command translation in `src/mixer/backends/cuda/`. Registered CUDA nodes
+and kernels remain under `src/nodes/hwaccel/`.
+
+A future Vulkan backend belongs alongside those CUDA implementations. PGM, AUX
+and wipes use the same backend; its hardware handles and synchronization stay
+private. Device creation, input interop and encoders remain explicit integration
+boundaries. CUDA is currently the only implemented backend.
+
+The demo uses the instance-owned device name `mixer_gpu`. Names prefixed with
+`@` are process-global and need host-managed teardown before GPU libraries exit;
+they must not be introduced as a shortcut for sharing PGM/AUX resources.
+
 ## Graph
 
 Each source supplies one CUDA video-frame edge. A source can either fan out to

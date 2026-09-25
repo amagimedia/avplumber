@@ -107,8 +107,6 @@ export class ProcessManager implements WindowControl {
     };
   }
 
-  // The caller must have reaped its consumer process before recovering buffers.
-  // Never recycle a worker containing windows outside that consumer's source set.
   public async recover(ids: readonly string[]): Promise<void> {
     const owned = new Set(ids);
     const affected = new Set(ids.map((id) => this.owners.get(id)).filter((w) => w !== undefined));

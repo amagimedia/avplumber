@@ -14,5 +14,7 @@ export interface WindowControl {
   update(id: string, url: string): WindowSnapshot | Promise<WindowSnapshot>;
   show(id: string, visible: boolean): WindowSnapshot | Promise<WindowSnapshot>;
   status(): StatusReport | Promise<StatusReport>;
+  // The caller must reap its consumer first and supply all of its window ids.
+  // Implementations must refuse to restart workers shared with other consumers.
   recover?(ids: readonly string[]): Promise<void>;
 }

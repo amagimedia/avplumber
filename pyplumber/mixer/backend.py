@@ -4,6 +4,11 @@ from typing import Protocol, runtime_checkable
 
 @runtime_checkable
 class MixerBackend(Protocol):
+    """Construct processing nodes/filters; callers own device lifetime and timing.
+
+    PGM, AUX and wipes share one backend. Hardware handles and synchronization
+    stay inside its implementations; ``params`` refer to devices by graph name.
+    """
     name: str
     hardware_format: str
 
