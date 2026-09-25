@@ -33,6 +33,7 @@
   #program-panel .format { margin-left: auto; color: var(--muted); font-size: 12px; }
   #program-output { display: block; width: 100%; flex: 1; min-height: 0; border: 0; background: #050607; }
   header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  header a { color: var(--muted); font-size: 12px; }
   h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
   #counts { color: var(--muted); font-variant-numeric: tabular-nums; }
   #conn { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -105,7 +106,8 @@
 <section id="controls" aria-label="Mixer controls">
 <header>
   <h1>AVPlumber mixer</h1>
-  <a href="/setup/" style="color:var(--muted);font-size:12px">Setup</a>
+  <a href="/setup/">Setup</a>
+  <a id="graph-view" target="_blank" rel="noopener">Graph view</a>
   <span id="counts">— unique sources · — scenes</span>
   <span id="conn" hidden></span>
 </header>
@@ -436,6 +438,10 @@ addEventListener("keydown", (event) => {
   else if (event.key.toLowerCase() === "w") { event.preventDefault(); take("wipe", undefined, currentWipe); }
   else if (event.key.toLowerCase() === "d") { event.preventDefault(); $("direct").click(); }
 });
+
+const graphUrl = new URL("/", location.href);
+graphUrl.port = "22222";
+$("graph-view").href = graphUrl.href;
 
 // Share the existing WebRTC player, including its latency/RTT display. Assign
 // once; only a setup restart needs to reconnect the player.
