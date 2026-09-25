@@ -73,8 +73,10 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
         # previous slot plus one and resyncs only when the average drift passes 20 ms.
         # A paint gap longer than 100 ms (a page that stopped painting) resyncs at once,
         # so the next paint is not stamped late and discarded as stale.
+        # round_up: number the first paint (and any resync) to the next canvas tick,
+        # not the nearest, so a paint always precedes the tick it is shown at.
         api.SmoothTimestamps({
-            "fps": f"{fps}/1", "discontinuity_threshold": 0.1,
+            "fps": f"{fps}/1", "discontinuity_threshold": 0.1, "round_up": True,
             "src": raw_edge, "dst": smooth_edge, "group": processing_group,
             "name": f"{prefix}_smooth", "auto_restart": "panic"}),
         api.FilterVideo({

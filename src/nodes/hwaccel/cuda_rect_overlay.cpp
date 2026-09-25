@@ -24,6 +24,7 @@ extern "C" {
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -86,6 +87,12 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     std::string metadata_key_;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
+    // Playout counters snapshotted every 60 frames for the status object; the
+    // control thread never touches playout_ itself.
+    std::mutex playout_stats_mutex_;
+    std::vector<std::array<uint64_t, 3>> playout_stats_published_;   // repeats, discarded, overflow
+    uint64_t published_missed_deadlines_ = 0;
+    uint64_t published_frames_ = 0;
 
     std::string last_ops_desc_;
     bool sent_eof_ = false;
@@ -275,6 +282,23 @@ public:
     Parameters getObject(const std::string key) override {
         if (key != "status") throw Error("cuda_rect_overlay: unknown object " + key);
         Parameters result = {{"suspended", suspended_.load()}, {"output_drops", output_drops_.load()}};
+        {
+            std::lock_guard<std::mutex> lock(playout_stats_mutex_);
+            Parameters playout = Parameters::object();
+            playout["frames"] = published_frames_;
+            playout["missed_deadlines"] = published_missed_deadlines_;
+            uint64_t repeats = 0, discarded = 0, overflow = 0;
+            Parameters per_input = Parameters::array();
+            for (const auto &st : playout_stats_published_) {
+                repeats += st[0]; discarded += st[1]; overflow += st[2];
+                per_input.push_back({{"repeats", st[0]}, {"discarded", st[1]}, {"overflow", st[2]}});
+            }
+            playout["repeats"] = repeats;
+            playout["discarded"] = discarded;
+            playout["overflow"] = overflow;
+            playout["per_input"] = per_input;
+            result["playout"] = playout;
+        }
         if (aux_) {
             std::lock_guard<std::mutex> lock(layers_mutex_);
             result["composition_pending"] = pending_composition_.has_value() || composition_preparing_.load();
@@ -474,6 +498,18 @@ public:
             }
             suspended_ = true;
             logstream << "aux: suspended after encoder backpressure; reapply composition to resume";
+        }
+        if (frame_counter_ % 60 == 0) {
+            std::vector<std::array<uint64_t, 3>> snapshot;
+            snapshot.reserve(sources.size());
+            for (size_t i = 0; i < sources.size(); ++i) {
+                const auto &st = playout_->stats(i);
+                snapshot.push_back({st.repeats, st.discarded, st.overflow});
+            }
+            std::lock_guard<std::mutex> lock(playout_stats_mutex_);
+            playout_stats_published_ = std::move(snapshot);
+            published_missed_deadlines_ = playout_->missedDeadlines();
+            published_frames_ = frame_counter_;
         }
         if (debug_log_every_n_ > 0 && frame_counter_ % debug_log_every_n_ == 0) {
             std::ostringstream stats;

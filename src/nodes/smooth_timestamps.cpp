@@ -31,6 +31,11 @@ protected:
     double resync_threshold_sec_ = 0.02;   // resync when |avg(drift)| exceeds this
     int min_samples_before_resync_ = 150;   // ignore early timestamps noise
     double discontinuity_sec_ = 2.0;       // hard reset if input discontinuity exceeds this
+    // Video: when (re)aligning the smoothed timeline to an input timestamp, take
+    // the next output tick instead of the nearest one. A consumer that renders
+    // slot k at tick(k)+latency then always receives the frame before its tick,
+    // instead of up to half a tick after it when the input's phase rounded down.
+    bool round_up_ = false;
 
     // drift estimation (sliding window)
     int drift_window_ = 300;               // samples
@@ -39,6 +44,11 @@ protected:
 
     static constexpr bool IsVideo = std::is_same_v<T, av::VideoFrame>;
     static constexpr bool IsAudio = std::is_same_v<T, av::AudioSamples>;
+
+    av::Timestamp alignToInput(const av::Timestamp in_pts, const av::Rational out_tb) const {
+        if (!round_up_ || !in_pts.isValid()) return rescaleTS(in_pts, out_tb);
+        return { av_rescale_q_rnd(in_pts.timestamp(), in_pts.timebase().getValue(), out_tb.getValue(), AV_ROUND_UP), out_tb };
+    }
 
     av::Rational currentOutTimebaseFor(const T& frame) const {
         if constexpr (IsVideo) {
@@ -159,7 +169,7 @@ public:
             if (!started_) {
                 started_ = true;
                 if (in_pts_valid) {
-                    next_out_pts_ = rescaleTS(in_pts, out_tb);
+                    next_out_pts_ = alignToInput(in_pts, out_tb);
                     last_in_pts_ = in_pts;
                 } else {
                     next_out_pts_ = av::Timestamp(0, out_tb);
@@ -178,7 +188,7 @@ public:
             if (in_pts_valid && last_in_pts_.isValid()) {
                 double in_jump = (in_pts - last_in_pts_).seconds();
                 if (std::fabs(in_jump) > discontinuity_sec_) {
-                    next_out_pts_ = rescaleTS(in_pts, out_tb);
+                    next_out_pts_ = alignToInput(in_pts, out_tb);
                     drift_window_sec_.clear();
                     drift_sum_sec_ = 0.0;
                 }
@@ -203,7 +213,7 @@ public:
             if (in_pts_valid && drift_window_ > 0 && (int)drift_window_sec_.size() >= min_samples_before_resync_) {
                 const double drift_avg_sec = drift_sum_sec_ / (double)drift_window_sec_.size();
                 if (std::fabs(drift_avg_sec) > resync_threshold_sec_) {
-                    out_pts = rescaleTS(in_pts, out_tb);
+                    out_pts = alignToInput(in_pts, out_tb);
                     drift_window_sec_.clear();
                     drift_sum_sec_ = 0.0;
                 }
@@ -265,6 +275,10 @@ public:
         }
         if (params.count("min_samples_before_resync")) {
             r->min_samples_before_resync_ = params.at("min_samples_before_resync").get<int>();
+        }
+        if (params.count("round_up")) {
+            if constexpr (!IsVideo) throw Error("smooth_timestamps: round_up applies to video only");
+            r->round_up_ = params.at("round_up").get<bool>();
         }
         if (params.count("discontinuity_threshold")) {
             r->discontinuity_sec_ = params.at("discontinuity_threshold").get<double>();

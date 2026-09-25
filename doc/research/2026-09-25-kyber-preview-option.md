@@ -138,3 +138,24 @@ Current state:
 - `canvas.latency_ms` is back to the default two frames on the live recipe;
   the one-frame trial is still open (restart, tab reload, watch compositor
   repeat counters).
+
+## Playout buffer trial: round-up alignment + 25 ms (2026-09-25 evening)
+
+Browser paint timing sampled from the DMA-BUF service (16 windows, 72k paints
+over 75 s): p99 lateness +4.3 ms, p99.9 +7.3 ms, worst +9 ms, none beyond
+12 ms. With nearest-tick numbering a browser can additionally sit up to 8.3 ms
+behind its assigned tick, so the one-frame buffer had negative worst-case
+margin while two frames had ~14 ms.
+
+Change: `smooth_timestamps` gained `round_up`, used by the browser chain, so
+the first paint and any resync are numbered to the next canvas tick instead of
+the nearest. The compositor now publishes playout counters (repeats, discards,
+overflow, missed deadlines, per input) in its `status` object, readable with
+`node.object.get <compositor> status`, no debug logging needed.
+
+Live result with `canvas.latency_ms = 25`: over 13,020 frames per program
+compositor at steady state, 0 repeats, 0 missed deadlines, 5 discards (drift
+housekeeping from browsers at 60.02 fps). Viewers at 60 fps, 10–12 ms jitter
+buffer, no loss. Program latency 8.3 ms lower than the two-frame default with
+the same worst-case margin. Startup still shows ~60 repeats in the first 90 s
+while browsers reconnect and prewarm fills.
