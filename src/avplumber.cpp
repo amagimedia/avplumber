@@ -1005,8 +1005,8 @@ public:
             if (duration_sec <= 0)
                 throw Error("mixer.fade: duration_sec must be > 0");
             const auto curve = avp::mixer::parseFadeCurve(req.value("curve", std::string("linear")));
-            std::optional<std::array<uint8_t, 3>> dip;
-            if (req.contains("color"))
+            std::optional<std::array<uint8_t, 3>> dip;   // "color": null mixes, like no color
+            if (req.contains("color") && !req.at("color").is_null())
                 dip = avp::mixer::parseDipColor(req.at("color").get<std::string>());
             auto orch = mixerOrchestrator(mixer_name);
             orch.fade(scene_name, duration_sec, start_pts_ms, curve, dip);
