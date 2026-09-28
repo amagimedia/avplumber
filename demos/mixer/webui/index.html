@@ -752,32 +752,29 @@ function renderCounts() {
 }
 function renderMeters() {
   const gpus = state.gpus || [];
-  const color = (pct) => pct > 85 ? "var(--pgm)" : pct > 70 ? "var(--warn)" : "var(--ok)";
-  const meter = (name, pct, text) => {
-    const m = el("span", "meter", `${name} `), bar = el("i");
-    bar.style.setProperty("--v", `${Number.isFinite(pct) ? pct : 0}%`);
-    bar.style.setProperty("--c", color(pct));
-    m.append(bar, el("b", "", text ?? (Number.isFinite(pct) ? `${pct}%` : "—")));
-    return m;
-  };
   $("gpu").hidden = !gpus.length;
-  if (!gpus.length) return $("meters").replaceChildren();
+  if (!gpus.length) return;
   // One meter per metric whatever the GPU count, so the bar keeps its width: it shows the busiest GPU
-  // (for VRAM the fullest) and its title lists every GPU.
+  // (for VRAM the fullest) and its title lists every GPU. The meters are updated in place; rebuilt, they
+  // would close the tooltip under the cursor every second.
   const gib = (mib) => (mib / 1024).toFixed(1);
   const vram = (g) => Number.isFinite(g.memory_used_mib) && g.memory_total_mib > 0 ?
     {pct: Math.round(g.memory_used_mib / g.memory_total_mib * 100), text: `${gib(g.memory_used_mib)} / ${gib(g.memory_total_mib)} GB`} : null;
   const pctText = (pct) => Number.isFinite(pct) ? `${pct}%` : "—";
   const many = gpus.length > 1;
-  const worst = (name, value, text) => {
-    const top = gpus.reduce((a, b) => ((value(b) ?? -1) > (value(a) ?? -1) ? b : a));
-    const m = meter(many ? `${name} ×${gpus.length}` : name, value(top), text(top));
+  const metrics = [...[["GPU", "gpu"], ["ENC", "encoder"], ["DEC", "decoder"]].map(([name, key]) => [name, (g) => g[key], (g) => pctText(g[key])]),
+                   ["VRAM", (g) => vram(g)?.pct, (g) => vram(g)?.text ?? "—"]];
+  if (!$("meters").children.length) $("meters").append(...metrics.map(() => { const m = el("span", "meter", " "); m.append(el("i"), el("b")); return m; }));
+  metrics.forEach(([name, value, text], i) => {
+    const m = $("meters").children[i], [bar, b] = m.children;
+    const top = gpus.reduce((a, g) => ((value(g) ?? -1) > (value(a) ?? -1) ? g : a)), pct = value(top);
+    m.firstChild.data = `${many ? `${name} ×${gpus.length}` : name} `;
+    bar.style.setProperty("--v", `${Number.isFinite(pct) ? pct : 0}%`);
+    bar.style.setProperty("--c", pct > 85 ? "var(--pgm)" : pct > 70 ? "var(--warn)" : "var(--ok)");
+    b.textContent = text(top);
     if (many) m.title = [`${name}: busiest of ${gpus.length} GPUs`, ...gpus.map((g) => `GPU ${g.index}: ${text(g)}`)].join("\n");
-    return m;
-  };
-  $("meters").replaceChildren(
-    ...[["GPU", "gpu"], ["ENC", "encoder"], ["DEC", "decoder"]].map(([name, key]) => worst(name, (g) => g[key], (g) => pctText(g[key]))),
-    worst("VRAM", (g) => vram(g)?.pct, (g) => vram(g)?.text ?? "—"));
+    else m.removeAttribute("title");   // a single GPU's meters show the group's title
+  });
 }
 
 /* ---------- styled dropdown ---------- */
