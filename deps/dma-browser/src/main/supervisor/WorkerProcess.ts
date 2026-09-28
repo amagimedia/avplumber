@@ -138,6 +138,8 @@ export class ElectronWorkerProcess implements BrowserWorker {
       exited.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000)),
     ]);
+    // TypeScript keeps the null narrowing from the early return across the await above.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (!graceful && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGKILL');
       await exited;

@@ -80,6 +80,8 @@ export class AudioCapturePipeline {
       }
     });
     const target = document.documentElement;
+    // lib.dom types it non-null, but a preload can run before the parser creates <html>.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (target) observer.observe(target, { childList: true, subtree: true });
   }
 
