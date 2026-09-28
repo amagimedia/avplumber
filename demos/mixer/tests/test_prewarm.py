@@ -47,7 +47,7 @@ class NativeEngine:
         def start():
             self.started.add(name)
             self.events.append("start " + name)
-        return SimpleNamespace(startNodes=start)
+        return SimpleNamespace(startNodes=start, stopNodes=lambda: self.events.append("stop " + name))
 
     def node(self, name):
         return SimpleNamespace(isWorking=self.nodes[name]["group"] in self.started)
@@ -67,6 +67,7 @@ class NativeEngine:
 
     def shutdown(self):
         self.shutdown_complete = True
+        self.events.append("shutdown")
 
 
 def application(native_boundary, **kwargs):
@@ -207,6 +208,15 @@ def test_stop_waits_for_the_engine_shutdown(native_boundary):
     app.start()
     app.stop()
     assert app.avp.shutdown_complete
+
+
+def test_stop_asks_every_input_group_before_the_serial_shutdown(native_boundary):
+    app = application(native_boundary)
+    app.start()
+    app.stop()
+    events = app.avp.events
+    stops = [events.index("stop " + group) for group in app.input_groups]
+    assert len(stops) == 2 and max(stops) < events.index("shutdown") == len(events) - 1
 
 
 def test_consumed_prewarm_frame_still_proves_readiness(native_boundary, monkeypatch):

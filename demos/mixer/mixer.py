@@ -291,6 +291,11 @@ class MixerApplication:
             bus.stop()
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.stop()
+        # shutdown() stops one group after another, so a large show took minutes; stopNodes()
+        # only signals the group's own thread. Asking every input group first leaves shutdown()
+        # joining groups that stop concurrently (its group order was never defined anyway).
+        for group in self.input_groups:
+            self.avp.group(group).stopNodes()
         self.avp.shutdown()
 
 
