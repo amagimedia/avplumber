@@ -205,18 +205,18 @@
     <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_stream.hpp#L8-L31"><code>src/nodes/hwaccel/cuda_stream.hpp:8</code></a>
       <code>makeCudaStreamDevice</code>: same context, new stream (<code>cuStreamCreate</code> flag <code>0x1</code> at
       <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_stream.hpp#L26">line 26</a>)</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L1035-L1038"><code>src/nodes/hwaccel/cuda_rect_overlay.cpp:1035</code></a>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L1026-L1029"><code>src/nodes/hwaccel/cuda_rect_overlay.cpp:1026</code></a>
       <code>aux_mode</code> wraps the device and publishes it under <code>output_hwaccel</code></li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L204-L217"><code>src/nodes/hwaccel/cuda_rect_overlay.cpp:204</code></a>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L202-L217"><code>src/nodes/hwaccel/cuda_rect_overlay.cpp:202</code></a>
       the aux stream waits on each producer stream's event</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L149"><code>pyplumber/mixer/aux.py:149</code></a>
       names the stream device <code>aux_&lt;id&gt;_gpu</code>; used by the compositor
-      (<a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L187">187</a>),
+      (<a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L186">186</a>),
       colour conversion (<a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L197">197</a>)
       and NVENC (<a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L207">207</a>)</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L388"><code>demos/mixer/mixer.py:388</code></a>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L393"><code>demos/mixer/mixer.py:393</code></a>
       creates the main device with no stream of its own, so FFmpeg uses the default stream</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L87-L126"><code>src/nodes/hwaccel/v210_to_cuda.cpp:87</code></a>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L86-L134"><code>src/nodes/hwaccel/v210_to_cuda.cpp:86</code></a>
       private upload stream for <code>v210_to_cuda</code> and <code>raw_to_cuda</code></li>
     <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#aux_buses">config.md · aux_buses</a></li>
   </ul>

@@ -69,7 +69,7 @@
   <span class="pill impl">Status: Implemented, not deployed</span> <span class="note">Compatibility audit pending.</span>
 
   <h2>1. The GL context in each browser importer</h2>
-  <p>Each browser page has its own <code>drm_prime_to_cuda</code> node; the demo runs 32. Importing a page frame needs only an EGL display: <code>eglCreateImage</code> already takes <code>EGL_NO_CONTEXT</code>, and CUDA registers the EGL image directly. The node still created an OpenGL context and a 2×2 pbuffer, and made it current before every import. Nothing drew with it.</p>
+  <p>Each browser page has its own <code>drm_prime_to_cuda</code> node; the demo runs 32. Importing a page frame needs only an EGL display: <code>eglCreateImage</code> already takes <code>EGL_NO_CONTEXT</code>, and CUDA registers the EGL image directly. The node still created an OpenGL context and a 2×2 pbuffer, and made it current before every import. Nothing drew with it. Both importers, <code>drm_prime_to_cuda</code> and <code>drm_prime_to_egl_image</code>, now share one display-only setup, <code>EglDmabufDisplay</code>.</p>
 
   <figure>
     <div class="diagram">
@@ -159,7 +159,7 @@
   </figure>
 
   <h2>2. The global CUDA context</h2>
-  <p>A constructor in <code>src/cuda.cpp</code> ran at process start and created a CUDA context on device 0. Every CUDA node runs in the context of its <code>hwaccel</code> device instead. The only thing other code read was the <code>has_errors</code> flag, which does not need a context.</p>
+  <p>A constructor in <code>src/cuda.cpp</code> ran at process start and created a CUDA context on device 0. Every CUDA node runs in the context of its <code>hwaccel</code> device instead. The only thing other code read was the <code>has_errors</code> flag, which does not need a context. A later cleanup also dropped <code>CUDAState::device</code>, which nothing read once the context was gone: start-up now only counts devices, and <code>CUDAState</code> holds just <code>has_errors</code>.</p>
 
   <figure>
     <div class="diagram">
@@ -210,12 +210,12 @@
         </g>
       </svg>
     </div>
-    <figcaption>The removed step (red) only allocated. The flag (amber) is still set when the driver or device is missing, and the three nodes that check it are unchanged. The 60–100 MB is an estimate.</figcaption>
+    <figcaption>The removed step (red) only allocated. The flag (amber) is still set when the driver or device is missing, and the three nodes that check it are unchanged. The 60–100 MB is an estimate. The diagram shows the first change; the <code>cuDeviceGet(0)</code> step has since gone too.</figcaption>
   </figure>
 
   <h2>At a glance</h2>
   <ul class="cards">
-    <li><b>What</b><code>drm_prime_to_cuda</code> keeps only an initialized EGL display: no GL context, no pbuffer, no <code>eglMakeCurrent</code> per import. <code>init_global_cuda</code> stops calling <code>cuCtxCreate</code> and keeps only device lookup and the error flag.</li>
+    <li><b>What</b><code>drm_prime_to_cuda</code> keeps only an initialized EGL display: no GL context, no pbuffer, no <code>eglMakeCurrent</code> per import. <code>init_global_cuda</code> stops calling <code>cuCtxCreate</code>; it only counts devices and sets the error flag, and <code>CUDAState</code> no longer has a <code>device</code> field.</li>
     <li><b>Why</b>Neither context drew anything, but each held device memory. The importer's context existed 32 times, once per browser page. <code>drm_prime_to_egl_image</code> already imports the same DMA-BUFs without a GL context.</li>
     <li><b>Latency</b>0 frames on program and on command-to-screen: neither context sat on the frame path. Each new DMA-BUF import (a cache miss, not every frame) skips one <code>eglMakeCurrent</code> call on the CPU; not measured.</li>
     <li><b>Side effects</b>Less VRAM held per process, so more headroom for browser pages and compositors. No thread has a CUDA context current at start any more: code that called CUDA without binding its hwaccel context would now fail instead of running on the hidden global one. The start-up error log reads "failed to find a CUDA device".</li>
@@ -226,12 +226,13 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_cuda.cpp#L118-L133">src/nodes/hwaccel/drm_prime_to_cuda.cpp#L118-L133</a>: <code>ensureEGL</code> sets up the display only; the comment explains why.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_cuda.cpp#L285">drm_prime_to_cuda.cpp#L285</a>: <code>eglCreateImage</code> with <code>EGL_NO_CONTEXT</code>; <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_cuda.cpp#L295">L295</a> registers the image with CUDA in the hwaccel context.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_cuda.cpp#L486-L491">drm_prime_to_cuda.cpp#L486-L491</a>: the destructor; the display is process-global and never terminated.</li>
-    <li>Precedent: <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_egl_image.cpp#L118-L123">src/nodes/hwaccel/drm_prime_to_egl_image.cpp#L118-L123</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_egl_image.cpp#L201">L201</a>, the same display-only import.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/cuda.cpp#L25-L33">src/cuda.cpp#L25-L33</a>: no context at start, only <code>cuDeviceGet</code> and <code>has_errors</code>; <a href="https://github.com/amagimedia/avplumber/blob/develop/src/cuda.hpp#L3-L8">src/cuda.hpp#L3-L8</a>: <code>CUDAState</code> without <code>cu_ctx</code>.</li>
-    <li>Flag readers: <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L105">v210_to_cuda.cpp#L105</a>, <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_to_egl_image.cpp#L373">cuda_to_egl_image.cpp#L373</a>, <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/neural_net/nvof/nvof_fruc.cpp#L584">nvof_fruc.cpp#L584</a>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/EglDmabufDisplay.hpp#L11-L55">src/nodes/hwaccel/EglDmabufDisplay.hpp#L11-L55</a>: the display-only setup both importers share; the comment explains why.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_cuda.cpp#L112-L117">src/nodes/hwaccel/drm_prime_to_cuda.cpp#L112-L117</a>: <code>ensureEGL</code> opens it.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_cuda.cpp#L237">drm_prime_to_cuda.cpp#L237</a>: <code>eglCreateImage</code> with <code>EGL_NO_CONTEXT</code>; <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_cuda.cpp#L247">L247</a> registers the image with CUDA in the hwaccel context.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_cuda.cpp#L438-L443">drm_prime_to_cuda.cpp#L438-L443</a>: the destructor; the display is process-global and never terminated.</li>
+    <li>The other importer: <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_egl_image.cpp#L100-L114">src/nodes/hwaccel/drm_prime_to_egl_image.cpp#L100-L114</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/drm_prime_to_egl_image.cpp#L158">L158</a>, the same display-only import.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/cuda.cpp#L20-L31">src/cuda.cpp#L20-L31</a>: no context and no device handle at start, only <code>cuDeviceGetCount</code> and <code>has_errors</code>; <a href="https://github.com/amagimedia/avplumber/blob/develop/src/cuda.hpp#L3-L6">src/cuda.hpp#L3-L6</a>: <code>CUDAState</code> holds only <code>has_errors</code>.</li>
+    <li>Flag readers: <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L109">v210_to_cuda.cpp#L109</a>, <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_to_egl_image.cpp#L373">cuda_to_egl_image.cpp#L373</a>, <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/neural_net/nvof/nvof_fruc.cpp#L584">nvof_fruc.cpp#L584</a>.</li>
     <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/doc/NODES.md#drm_prime_to_cuda">NODES.md · drm_prime_to_cuda</a>; the 32 browser windows are in <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md#mixer-demo-capacity">capacity.md · Mixer demo capacity</a>.</li>
   </ul>
   <p class="note">This change is not deployed yet, and a compatibility audit for other apps that use avplumber is pending. Line numbers refer to the branch that carries it.</p>

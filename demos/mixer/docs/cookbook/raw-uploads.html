@@ -210,7 +210,7 @@
       <li>Host RAM: one pinned 3.1 MB buffer per source, about 87 MB for 28 (computed, not measured).</li>
       <li>CPU: one copy per frame instead of two. PCIe: same bytes.</li>
     </ul></li>
-    <li><b>Risk</b><p>Unproven: the traces show contention, not that pinned staging and a private stream remove it. The source thread still blocks on its own stream sync each frame. The private stream first waits for work already queued on the shared device stream, so it is not fully decoupled. Pinned memory is locked RAM the OS cannot page out.</p></li>
+    <li><b>Risk</b><p>Unproven: the traces show contention, not that pinned staging and a private stream remove it. The source thread still blocks on its own stream sync each frame. Before its first write into the frame, the private stream waits on the GPU for work already queued on the shared device stream (<code>PacketToCuda::waitForReaders()</code>), so it is not fully decoupled. <code>raw_to_cuda</code> waits before its copy; <code>v210_to_cuda</code> waits only between the staging copy and the unpack kernel, so the copy overlaps. Pinned memory is locked RAM the OS cannot page out.</p></li>
     <li><b>Switch it off</b><p>Off by default: <code>canvas.raw_upload</code> is <code>"hwupload"</code> (vanilla FFmpeg). <code>"pinned"</code> opts in, and is set only for the 110-source A/B test. It becomes the default only if it clearly removes the stall with no latency cost; otherwise the node is deleted.</p></li>
   </ul>
 
@@ -229,13 +229,15 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L87-L92">src/nodes/hwaccel/v210_to_cuda.cpp L87–92</a>: why pinned staging and a private stream</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L124-L127">src/nodes/hwaccel/v210_to_cuda.cpp L124–127</a>: non-blocking stream and pinned buffer allocation</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L195-L210">src/nodes/hwaccel/v210_to_cuda.cpp L195–210</a>: copy into staging, enqueue, sync before handing on</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L279-L309">src/nodes/hwaccel/v210_to_cuda.cpp L279–309</a>: <code>RawToCuda</code>: wait for the device stream, then <code>cuMemcpy2DAsync</code> per plane</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L141-L190">pyplumber/mixer/inputs.py L141–190</a>: <code>build_raw420_input</code>, both chains and the one-frame prefetch</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L28-L30">pyplumber/mixer/config.py L28–30</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L385-L387">L385–387</a>: the <code>raw_upload</code> switch and its default</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L707-L712">demos/mixer/mixer.py L707–712</a>: the demo passes the switch to each raw source</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L86-L91">src/nodes/hwaccel/v210_to_cuda.cpp L86–91</a>: why pinned staging and a private stream</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L128-L132">src/nodes/hwaccel/v210_to_cuda.cpp L128–132</a>: non-blocking stream and pinned buffer allocation</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L206-L221">src/nodes/hwaccel/v210_to_cuda.cpp L206–221</a>: copy into staging, enqueue, sync before handing on</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L152-L157">src/nodes/hwaccel/v210_to_cuda.cpp L152–157</a>: <code>PacketToCuda::waitForReaders()</code>, the private stream waits for the device stream on the GPU; <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L92-L95">L92–95</a> why</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L298-L312">src/nodes/hwaccel/v210_to_cuda.cpp L298–312</a>: <code>RawToCuda</code>: <code>waitForReaders()</code> first, then <code>cuMemcpy2DAsync</code> per plane</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L257-L267">src/nodes/hwaccel/v210_to_cuda.cpp L257–267</a>: <code>V210ToCuda</code>: staging copy, <code>waitForReaders()</code>, then the unpack kernel</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L137-L183">pyplumber/mixer/inputs.py L137–183</a>: <code>build_raw420_input</code>, both chains and the one-frame prefetch</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L28-L30">pyplumber/mixer/config.py L28–30</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L388-L390">L388–390</a>: the <code>raw_upload</code> switch and its default</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L698-L702">demos/mixer/mixer.py L698–702</a>: the demo passes the switch to each raw source</li>
   </ul>
   <p>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md#why-uploads-limit-this-mix">capacity.md · Why uploads limit this mix</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md#upload-headroom-and-browser-allocation-bursts">Upload headroom</a> (the measurements); <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#canvas">config.md · canvas</a> (<code>raw_upload</code>); <a href="https://github.com/amagimedia/avplumber/blob/develop/doc/NODES.md#raw_to_cuda">NODES.md · raw_to_cuda</a> (node reference).</p>
   <p class="note">Line numbers match the change under review and resolve on develop once it merges.</p>
