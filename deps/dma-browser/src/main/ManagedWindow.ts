@@ -164,8 +164,7 @@ export class ManagedWindow implements IManagedWindow {
       maxDelayMs: RELOAD_MAX_DELAY_MS,
       reload: () => {
         if (this.destroyed || !this.win || this.win.isDestroyed()) return;
-        this.watchdog?.start();
-        void this.loadUrl(this.config.url);
+        this.startLoading(this.config.url);
       },
     });
     const recover = (reason: string): void => {
@@ -237,8 +236,7 @@ export class ManagedWindow implements IManagedWindow {
     this.config = { ...this.config, url };
     this.opts.logger.forWindow(this.id).write(`update url=${url}`);
     this.reloader?.reset();
-    this.watchdog?.start();
-    void this.loadUrl(url);
+    this.startLoading(url);
   }
 
   public show(visible: boolean): void {
@@ -312,6 +310,14 @@ export class ManagedWindow implements IManagedWindow {
       visible: this.visible,
       stats,
     };
+  }
+
+  /** Loads without waiting: the watchdog and the did-*-load handlers track the outcome. */
+  private startLoading(url: string): void {
+    this.watchdog?.start();
+    this.loadUrl(url).catch((err: unknown) => {
+      this.opts.logger.forWindow(this.id).write(`loadURL failed: ${String(err)}`);
+    });
   }
 
   private async loadUrl(url: string): Promise<void> {

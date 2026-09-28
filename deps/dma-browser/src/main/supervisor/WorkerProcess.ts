@@ -288,18 +288,16 @@ export class ElectronWorkerProcess implements BrowserWorker {
     if (this.restartTimer !== null || this.stopping) return;
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
-      void this.enqueue(async () => {
-        try {
-          await this.start();
-          await this.restoreDesiredWindows();
-        } catch (err) {
-          console.error(
-            `dma-browser worker ${String(this.index)} restart failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          this.scheduleRestart();
-        }
+      this.enqueue(async () => {
+        await this.start();
+        await this.restoreDesiredWindows();
+      }).catch((err: unknown) => {
+        console.error(
+          `dma-browser worker ${String(this.index)} restart failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        this.scheduleRestart();
       });
     }, this.opts.restartDelayMs);
   }
