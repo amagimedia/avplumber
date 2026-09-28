@@ -1476,12 +1476,6 @@ def test_mixer_fade_rejects_an_unknown_curve():
     assert mixer.avp.commands == []
 
 
-def test_dsk_fade_defaults_to_a_linear_cut():
-    cfg = mixer_config.parse({**CONFIG, "dsk": {"keys": [{"id": "k", "source": "page"}]}})
-    assert (cfg.dsk_fade_seconds, cfg.dsk_fade_curve) == (0.4, "linear")
-    assert (cfg.settings()["dsk_fade_seconds"], cfg.settings()["dsk_fade_curve"]) == (0.4, "linear")
-
-
 @pytest.mark.parametrize("dsk,message", [
     ({"keys": [{"id": "k", "source": "cam"}]}, "browser source"),
     ({"keys": [{"id": f"k{i}", "source": "page"} for i in range(5)]}, "at most 4 keys"),

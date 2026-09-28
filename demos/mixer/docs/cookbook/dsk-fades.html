@@ -196,14 +196,14 @@
 
   <h2>At a glance</h2>
   <ul class="cards">
-    <li><b>What</b>Each key fades in or out: <code>mixer.dsk {key, on, fade_seconds, curve}</code>. Config defaults are <code>dsk.fade_seconds</code> (0) and <code>dsk.fade_curve</code> (linear). Curves: linear, ease-in, ease-out, ease-in-out. The Web UI has a seconds field with a curve menu in the Keys card header, and a curve menu next to Fade in the take bar.</li>
+    <li><b>What</b>Each key fades in or out: <code>mixer.dsk {key, on, fade_seconds, curve}</code>. Config defaults are <code>dsk.fade_seconds</code> (0.4; 0 cuts) and <code>dsk.fade_curve</code> (linear). Curves: linear, ease-in, ease-out, ease-in-out. The Web UI has a seconds field with a curve menu in the Keys card header, and a curve menu next to Fade in the take bar.</li>
     <li><b>Why</b>Keys could only cut. A second compositor would copy the M/E's A/B design for no gain: a key fade needs one weight per layer, not a second full frame.</li>
     <li><b>Latency</b>Program latency: +0 frames. The keyer stays one pass clocked by the program and adds no playout buffer. Command to screen: unchanged. The fade starts on the next program frame (≤ 1 frame, 40 ms at 25 fps), the same frame a cut would switch on. A fade then takes <code>fade_seconds</code> to reach full level, by design.</li>
     <li><b>Side effects</b>None while <code>fade_seconds</code> is 0: the command and the kernel are the old ones. A fade does not force a preview keyframe; a cut still does, because a cut changes the picture at once. A command fades only the keys it flips; another key's running fade continues.</li>
     <li><b>Cost</b>0 nodes, 0 queues, 0 threads, no new buffers. Two small headers (curve 66 lines, envelope 94 lines). One extra kernel entry: 80 registers, launched only on fade frames. On the T4 test host, a 1080×1920 16-tile composite plus a key takes 0.139 ms per frame, of a 40 ms frame budget. That is the whole pass, not the fade's extra cost.</li>
     <li><b>Proof</b>On the T4 test host, the three existing entries compile to byte-identical machine code: <code>composite_planes</code>, <code>_yuv</code> and <code>_packed4</code> keep 16,578 / 2,530 / 2,770 SASS lines and 79 / 58 / 64 registers. All composite tests pass, including 5 fade cases: opacity 0.5, 0.02, 0.97, premultiplied, and HLG 10-bit.</li>
     <li><b>Risk</b>A fading-out key is still drawn until its level reaches 0. A faded layer that is not a blended RGBA source draws opaque, with a one-time warning. If the program PTS goes backwards, the fade restarts from the current level instead of jumping. Fixed on the way: toggling one key cleared every key's held frame from the control thread, which raced the render thread and could blank keys that stayed on air.</li>
-    <li><b>Switch it off</b>Leave <code>fade_seconds</code> at 0, the default. A 0-second <code>mixer.dsk</code> sends exactly the old cut command. With no key below full opacity, the host picks the old kernel entries.</li>
+    <li><b>Switch it off</b>Set <code>dsk.fade_seconds</code> to 0 (the default is 0.4). A 0-second <code>mixer.dsk</code> sends exactly the old cut command. With no key below full opacity, the host picks the old kernel entries.</li>
   </ul>
 
   <h2>Where in the code</h2>

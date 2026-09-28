@@ -71,9 +71,6 @@ def keyframe_command(node: str) -> str:
     return f"node.object.set {node} trigger true"
 
 
-KEYFRAME_COMMAND = keyframe_command(JANUS_KEYFRAME_NODE)
-
-
 class RtcpFeedbackGroup:
     """Manage feedback for multiple independently encoded renditions."""
 
