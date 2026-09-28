@@ -541,6 +541,38 @@ void inactive_prewarm_retains_live_frames_without_rendering() {
     CHECK(!mix.prepare(rate.time(110), true));
 }
 
+void warm_reset_repeats_a_late_source_instead_of_waiting() {
+    // A saturated source runs four ticks behind its timestamps. A warm scene
+    // load flips at the next deadline and repeats that source's held picture;
+    // it does not wait for the source's first frame inside the new window.
+    using namespace avp::mixer;
+    const TickGrid rate(av::Rational(30, 1));
+    Playout<int> mix(2, rate, {}, TimestampMode::Presentation);
+    for (size_t input : {0, 1}) {
+        mix.setPrewarm(input, true);
+        mix.setActive(input, false);
+    }
+    for (int tick = 0; tick < 30; ++tick) {
+        mix.push(0, tick, rate.time(tick));
+        if (tick >= 4) mix.push(1, 100 + tick - 4, rate.time(tick - 4));
+        CHECK(mix.prepare(rate.time(tick) + mix.latencyNs(), true));
+        mix.commit();
+    }
+    // The compositor's warm_reset: valid from one period before the playout window.
+    const auto now = rate.time(30) + mix.latencyNs();
+    for (size_t input : {0, 1}) {
+        mix.setActive(input, true);
+        mix.resetInput(input, now - mix.latencyNs() - rate.time(1), true);
+    }
+    mix.push(0, 30, rate.time(30));
+    mix.push(1, 126, rate.time(26));   // still behind the new window: discarded
+    const auto *frame = mix.prepare(now, true);
+    CHECK(frame && frame->index == 30);
+    CHECK(*frame->frames[0] == 30 && *frame->frames[1] == 125);
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 0);
+}
+
 void staged_input_readiness_preserves_old_output() {
     using namespace avp::mixer;
     TickGrid rate(av::Rational(25, 1));
@@ -639,6 +671,7 @@ int main(int argc, char **argv) {
         {"input_offset_selects_a_late_source_one_tick_later", input_offset_selects_a_late_source_one_tick_later},
         {"staged_input_readiness_preserves_old_output", staged_input_readiness_preserves_old_output},
         {"inactive_prewarm_retains_live_frames_without_rendering", inactive_prewarm_retains_live_frames_without_rendering},
+        {"warm_reset_repeats_a_late_source_instead_of_waiting", warm_reset_repeats_a_late_source_instead_of_waiting},
         {"complete_jitter_plateau_is_not_rate_drift", complete_jitter_plateau_is_not_rate_drift},
         {"stale_burst_is_not_retimestamped_as_fresh", stale_burst_is_not_retimestamped_as_fresh},
         {"rational_source_drift_does_not_amplify", rational_source_drift_does_not_amplify},

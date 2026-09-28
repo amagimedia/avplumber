@@ -158,6 +158,7 @@ def test_both_slots_share_rate_and_delay_without_second_resampler(native_boundar
         node = app.avp.nodes[f"mixer_comp_{slot}"]
         assert node["fps"] == "60/1"
         assert node["latency_ms"] == 50
+        assert "warmup_timeout_ms" not in node   # a cold load must not flip to a partial canvas
         snapshot = app.avp.nodes[f"mixer_snapshot_{slot}"]
         assert snapshot["src"] == node["dst"]
         assert snapshot["fps"] == "60/1"

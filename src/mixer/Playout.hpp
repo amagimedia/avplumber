@@ -202,13 +202,16 @@ public:
         auto &state = inputs_.at(input);
         if (preserve_warm && state.prewarm && valid_from_ns) {
             // Scene geometry may change while source identity stays fixed.
-            // Retain only frames in the current playout window, never an old
-            // held picture from a source that stopped while the slot was idle.
+            // Retain only frames in the current playout window. A source running
+            // late keeps its held picture and repeats it, so require_all does not
+            // hold the new scene back for it; a picture older than the queue
+            // budget is from a source that stopped while the slot was idle.
             while (!state.queue.empty() && rate_.time(state.queue.front().index) < *valid_from_ns) {
                 state.queue.pop_front();
                 ++state.stats.discarded;
             }
-            if (state.held_index && rate_.time(*state.held_index) < *valid_from_ns) {
+            if (state.held_index &&
+                    rate_.time(*state.held_index + int64_t(kQueueCapacity)) < *valid_from_ns) {
                 state.held.reset();
                 state.held_index.reset();
             }
