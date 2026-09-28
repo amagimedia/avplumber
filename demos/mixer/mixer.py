@@ -297,8 +297,8 @@ class MixerApplication:
             bus.stop()
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.stop()
-        # After a panic the graph is already shutting down under the manager lock; group() would
-        # wait for it holding the GIL that failing nodes need to report. shutdown() waits without.
+        # After a panic the graph is already shutting down under the manager lock and its groups
+        # are stopping; group() would only wait for that. shutdown() below waits for it anyway.
         if self.avp.manager.shouldWork:
             # shutdown() stops one group after another, so a large show took minutes; stopNodes()
             # only signals the group's own thread. Asking every input and aux group first leaves
