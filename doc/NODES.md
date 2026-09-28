@@ -265,6 +265,7 @@ Duplicate and drop frames to achieve requested FPS
 1 input, 1 output: `av::VideoFrame`
 
 -   `fps` (string of rational) - target FPS as a string, e.g. `25` or `30000/1001`
+-   `center_phase` (bool, default `false`) - shift input timestamps by a constant, chosen on the first frame and again after a discontinuity, so that frame lands exactly on an output tick. Timestamp jitter below half a frame (e.g. from `realtime` with `set_pts`) then never duplicates or drops frames, whatever the source's phase. Output timestamps move by less than half a frame.
 
 ### `smooth_timestamps`
 
