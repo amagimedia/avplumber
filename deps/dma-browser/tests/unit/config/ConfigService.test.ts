@@ -90,6 +90,14 @@ describe('ConfigService.validateId / validateUpdateUrl / validateShow', () => {
     expect(() => svc.validateId({})).toThrow(ValidationError);
   });
 
+  it('validateIds checks the list and every id', () => {
+    expect(svc.validateIds({ ids: ['win-1', 'win-2'] })).toEqual(['win-1', 'win-2']);
+    expect(svc.validateIds({ ids: [] })).toEqual([]);
+    expect(() => svc.validateIds({ ids: 'win-1' })).toThrow(ValidationError);
+    expect(() => svc.validateIds({ ids: ['../invalid'] })).toThrow(ValidationError);
+    expect(() => svc.validateIds(null)).toThrow(ValidationError);
+  });
+
   it('validateUpdateUrl checks id + url', () => {
     expect(svc.validateUpdateUrl({ id: 'win-1', url: 'https://x/' })).toEqual({
       id: 'win-1',

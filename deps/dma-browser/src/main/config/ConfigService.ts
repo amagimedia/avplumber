@@ -91,6 +91,13 @@ export class ConfigService {
     return { id };
   }
 
+  public validateIds(input: unknown): string[] {
+    if (!isRecord(input) || !Array.isArray(input.ids)) {
+      throw new ValidationError('Expected a list of window ids');
+    }
+    return input.ids.map((id: unknown) => this.validateId({ id }).id);
+  }
+
   public validateUpdateUrl(input: unknown): UpdateUrlPayload {
     const { id } = this.validateId(input);
     const obj = input as Record<string, unknown>;
