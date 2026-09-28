@@ -56,6 +56,8 @@ JANUS_DEFAULT_VIDEO_PT = 96
 JANUS_DEFAULT_VIDEO_SSRC = 0x41565001
 JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 4_500
 PREHEAT_POLL_INTERVAL_SEC = 0.02
+# More --input sources than this are scaled to the canonical size and routed (see _register_sources).
+DIRECT_INPUT_LIMIT = 32
 
 
 @dataclass(frozen=True)
@@ -139,6 +141,9 @@ class GraphOptions:
         ids = self.dmabuf_inputs
         if len(ids) != len(set(ids)):
             raise ValueError("dmabuf window ids must be unique")
+        if ids and len(self.inputs) > DIRECT_INPUT_LIMIT:
+            raise ValueError(f"dmabuf:// inputs need --config above {DIRECT_INPUT_LIMIT} --input sources: "
+                             "scale_cuda cannot read zero-copy browser frames")
         if self.janus_output:
             if not self.janus_host:
                 raise ValueError("janus_host is required for Janus output")
@@ -453,7 +458,7 @@ def _build_input(
 def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int, color: str = "") -> bool:
     # Keep the legacy --input routing threshold: larger catalogues use a small
     # router selecting the 16 visible positions, without per-layout branches.
-    if len(input_edges) <= 32:
+    if len(input_edges) <= DIRECT_INPUT_LIMIT:
         for index, (edge, url) in enumerate(zip(input_edges, urls)):
             browser = is_dmabuf_url(url)   # packed RGB, always SDR; decoded files follow --input-color
             mixer.add_source(f"source_{index}", pre_otm_edge=edge, input_group=_input_group(index),
@@ -632,7 +637,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     avp = _init_avp(options, api)
     input_edges = [
         _build_input(avp, api, index, url, loop=options.loop_inputs, fps=options.fps,
-                     normalize=len(options.inputs) > 32, options=options)
+                     normalize=len(options.inputs) > DIRECT_INPUT_LIMIT, options=options)
         for index, url in enumerate(options.inputs)
     ]
     canvas = (CANVAS_WIDTH, CANVAS_HEIGHT)

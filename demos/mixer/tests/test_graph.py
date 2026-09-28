@@ -6,7 +6,7 @@ import pytest
 
 from pyplumber.mixer import config as mixer_config
 from pyplumber.mixer.color import Color
-from mixer import GraphOptions, build_application, infer_output_format, parse_args
+from mixer import DIRECT_INPUT_LIMIT, GraphOptions, build_application, infer_output_format, parse_args
 
 
 class FakeNode:
@@ -413,6 +413,13 @@ def test_cli_parses_dmabuf_options():
         parse_args(["--input", "dmabuf://x", "--janus-output", "--dmabuf-size", "wide"])
     with pytest.raises(ValueError):
         GraphOptions(inputs=("dmabuf://", ), output="p.mp4").validate()
+
+
+def test_dmabuf_inputs_are_rejected_on_the_scaled_input_path():
+    inputs = tuple(f"{i}.mp4" for i in range(DIRECT_INPUT_LIMIT)) + ("dmabuf://page_00",)
+    GraphOptions(inputs=inputs[1:], output="p.mp4").validate()
+    with pytest.raises(ValueError, match="--config"):
+        GraphOptions(inputs=inputs, output="p.mp4").validate()
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
