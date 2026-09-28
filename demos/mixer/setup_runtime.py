@@ -29,6 +29,10 @@ STOP_TIMEOUT_SEC = 60
 # each stops (<= 5 s), boots Electron and reopens its pages four at a time, every open
 # bounded by the worker's 10 s request timeout.
 RECOVER_TIMEOUT_SEC = 180
+# Waits before restarting a mixer that exited on its own (a crash or a node panic). The
+# sequence starts over once a mixer has run for HEALTHY_RUN_SEC.
+RETRY_DELAYS_SEC = (2, 5, 15, 60)
+HEALTHY_RUN_SEC = 300
 # The demo is 1080p only: every source is a unique 1920x1080 input, in either orientation.
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
@@ -187,6 +191,8 @@ class SetupRuntime:
         self.closing = threading.Event()
         self.process = None
         self.worker = None
+        self.retries = 0
+        self.retry_timer = None
         self.phase = "idle"
         self.message = "Choose settings and apply to start the mixer."
         self.settings = None
@@ -195,7 +201,7 @@ class SetupRuntime:
 
     def status(self):
         with self.lock:
-            if self.phase == "running" and self.process.poll() is not None:
+            if self.phase == "running" and self.process and self.process.poll() is not None:
                 self.phase, self.message = "error", f"Mixer exited ({self.process.returncode}). Apply to retry."
             return dict(phase=self.phase, message=self.message, settings=self.settings, revision=self.revision)
 
@@ -229,6 +235,7 @@ class SetupRuntime:
         with self.lock:
             if self.closing.is_set() or (self.worker and self.worker.is_alive()):
                 raise RuntimeError("A setup change is already in progress")
+            self._cancel_retry()
             self.phase, self.message = "preparing", "Preparing assets…"
             self.worker = threading.Thread(target=self._apply, args=(recipe, settings), daemon=True)
             self.worker.start()
@@ -312,6 +319,57 @@ class SetupRuntime:
             if self.closing.is_set() or not self._recover_browsers(shows):
                 raise
             self._start(config)
+        # Every mixer that reached air is watched, a restored previous show included.
+        threading.Thread(target=self._watch, args=(self.process,), daemon=True).start()
+
+    def _watch(self, process):
+        started = time.monotonic()
+        code = process.wait()
+        with self.stop_lock:   # a deliberate _stop() replaces self.process before releasing it
+            if self.process is not process or self.closing.is_set():
+                return
+        with self.lock:
+            if time.monotonic() - started >= HEALTHY_RUN_SEC:
+                self.retries = 0
+        self._schedule_retry(f"Mixer exited ({code})")
+
+    def _schedule_retry(self, reason):
+        with self.lock:
+            others = self.worker and self.worker.is_alive() and self.worker is not threading.current_thread()
+            if self.closing.is_set() or others:
+                return   # shutting down, or a setup change owns the mixer now
+            delay = RETRY_DELAYS_SEC[min(self.retries, len(RETRY_DELAYS_SEC) - 1)]
+            self.retries += 1
+            self.phase, self.message = "error", f"{reason}; restarting in {delay} s. Apply restarts it now."
+            timer = threading.Timer(delay, lambda: self._retry(timer))
+            timer.daemon = True
+            self.retry_timer = timer
+            timer.start()
+
+    def _cancel_retry(self):
+        """Call with self.lock held."""
+        if self.retry_timer:
+            self.retry_timer.cancel()
+        self.retry_timer = None
+
+    def _retry(self, timer):
+        with self.lock:
+            if self.retry_timer is not timer or self.closing.is_set() or (self.worker and self.worker.is_alive()):
+                return   # cancelled, superseded or shutting down
+            self.retry_timer = None
+            self.phase, self.message = "starting", "Restarting mixer…"
+            self.worker = threading.Thread(target=self._restart, daemon=True)
+            self.worker.start()
+
+    def _restart(self):
+        try:
+            self._start_recovering(self.media_dir / "mixer.demo.json", None)
+            with self.lock:
+                self.revision += 1
+                self.phase, self.message = "running", "Mixer ready (restarted automatically)."
+        except Exception as exc:
+            self._stop()
+            self._schedule_retry(f"Mixer restart failed: {exc}")
 
     def _start(self, config):
         self.process = subprocess.Popen(
@@ -380,6 +438,7 @@ class SetupRuntime:
             with self.lock:
                 self.settings = recipe.get("setup")
                 self.revision += 1
+                self.retries = 0
                 self.phase, self.message = "running", "Mixer ready."
         except Exception as exc:
             message = str(exc)
@@ -407,6 +466,8 @@ class SetupRuntime:
         """Stop the mixer cleanly first: the container's stop grace period is spent on it,
         not on setup work that `closing` already cancels."""
         self.closing.set()
+        with self.lock:
+            self._cancel_retry()
         self._stop()
         if self.worker:
             self.worker.join(timeout=20)

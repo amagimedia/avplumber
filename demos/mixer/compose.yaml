@@ -31,7 +31,8 @@ services:
   mixer:
     extends: {file: ../dmabuf-browser/compose.yaml, service: avplumber}
     <<: *mixer-image
-    restart: "no"
+    # webui.py restarts a mixer that exits on its own; this restarts webui.py itself.
+    restart: unless-stopped
     # webui.py (PID 1) stops the mixer cleanly on SIGTERM so browser frames are released,
     # not quarantined: setup_runtime.STOP_TIMEOUT_SEC + 10 s reap + 20 s setup worker join.
     stop_grace_period: 90s

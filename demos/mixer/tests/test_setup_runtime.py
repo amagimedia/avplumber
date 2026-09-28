@@ -8,8 +8,8 @@ from urllib.request import Request, urlopen
 import pytest
 
 import prepare_demo
-from setup_runtime import (DEFAULT_SETTINGS, RECOVER_TIMEOUT_SEC, STOP_TIMEOUT_SEC, SetupRuntime, browser_limit,
-                           nvdec_limit, raw_upload_units, recipe_for, source_counts)
+from setup_runtime import (DEFAULT_SETTINGS, HEALTHY_RUN_SEC, RECOVER_TIMEOUT_SEC, RETRY_DELAYS_SEC, STOP_TIMEOUT_SEC,
+                           SetupRuntime, browser_limit, nvdec_limit, raw_upload_units, recipe_for, source_counts)
 from webui import serve
 
 
@@ -46,8 +46,34 @@ def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(manager, '_stop', lambda: None)
     monkeypatch.setattr(manager, '_close_removed_browsers', lambda *_: None)
     monkeypatch.setattr(manager, '_recover_browsers', lambda *_: False)
-    monkeypatch.setattr(manager, '_start', lambda _: None)
+    monkeypatch.setattr(manager, '_start', lambda _: setattr(manager, 'process', SimpleNamespace(poll=lambda: None)))
+    monkeypatch.setattr(manager, '_watch', lambda _: None)
     return manager
+
+
+class FakeTimer:
+    def __init__(self, delay, function):
+        self.delay, self.function, self.cancelled, self.daemon = delay, function, False, False
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        self.cancelled = True
+
+
+@pytest.fixture
+def timers(monkeypatch):
+    created = []
+    monkeypatch.setattr('setup_runtime.threading.Timer', lambda *a: created.append(FakeTimer(*a)) or created[-1])
+    return created
+
+
+def crash(runtime, code=-11):
+    """The running mixer exits on its own; the real watcher sees it."""
+    process = SimpleNamespace(wait=lambda: code, poll=lambda: code)
+    runtime.process = process
+    SetupRuntime._watch(runtime, process)
 
 
 def test_prepare_failure_keeps_old_show_and_process(runtime, monkeypatch):
@@ -590,6 +616,93 @@ def test_recovery_timeout_is_not_recovered_again_by_the_rollback(runtime, monkey
     assert len(recoveries) == 1
     assert 'still busy' in runtime.status()['message']
     assert json.loads(config.read_text()) == {'old': True}
+
+
+def test_unexpected_exit_restarts_after_a_growing_capped_backoff(runtime, timers):
+    config = runtime.media_dir / 'mixer.demo.json'
+    config.write_text('{"sources": []}')
+    starts = []
+    started = runtime._start
+    runtime._start = lambda path: (starts.append(path), started(path))
+    revision = runtime.revision
+    for attempt, delay in enumerate([*RETRY_DELAYS_SEC, RETRY_DELAYS_SEC[-1]]):
+        crash(runtime)
+        assert timers[-1].delay == delay
+        assert runtime.status()['phase'] == 'error'
+        assert f'Mixer exited (-11); restarting in {delay} s' in runtime.status()['message']
+        timers[-1].function()
+        runtime.worker.join(3)
+        assert len(starts) == attempt + 1
+        assert runtime.status()['phase'] == 'running'
+    assert runtime.status()['revision'] == revision + len(starts)
+
+
+def test_a_healthy_run_resets_the_backoff(runtime, timers, monkeypatch):
+    runtime.retries = 3
+    clock = iter([0.0, HEALTHY_RUN_SEC])
+    monkeypatch.setattr('setup_runtime.time.monotonic', lambda: next(clock))
+    crash(runtime)
+    assert timers[-1].delay == RETRY_DELAYS_SEC[0]
+
+
+def test_failed_restart_backs_off_further(runtime, timers):
+    (runtime.media_dir / 'mixer.demo.json').write_text('{"sources": []}')
+    def fail(_):
+        raise RuntimeError('GPU lost')
+    runtime._start = fail
+    crash(runtime)
+    timers[-1].function()
+    runtime.worker.join(3)
+    assert timers[-1].delay == RETRY_DELAYS_SEC[1]
+    assert 'Mixer restart failed: GPU lost; restarting in 5 s' in runtime.status()['message']
+
+
+def test_deliberate_stops_and_setup_changes_are_not_retried(runtime, timers):
+    process = SimpleNamespace(wait=lambda: 0)
+    runtime.process = None   # _stop() replaced it
+    SetupRuntime._watch(runtime, process)
+    runtime.worker = SimpleNamespace(is_alive=lambda: True)   # an Apply owns the mixer
+    crash(runtime)
+    runtime.worker = None
+    runtime.closing.set()
+    crash(runtime)
+    assert timers == []
+
+
+def test_real_process_stop_is_not_a_crash_but_a_kill_is(tmp_path, timers):
+    import subprocess
+    import sys
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    def spawn_watched():
+        manager.process = subprocess.Popen(
+            [sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGINT, lambda *_: exit(0)); '
+                                   'print(flush=True); time.sleep(30)'],
+            stdout=subprocess.PIPE, start_new_session=True)
+        manager.process.stdout.readline()   # its SIGINT handler is installed
+        watcher = threading.Thread(target=manager._watch, args=(manager.process,))
+        watcher.start()
+        return watcher
+    watcher = spawn_watched()
+    manager._stop()   # two threads wait on one Popen: the watcher must still see a deliberate stop
+    watcher.join(5)
+    assert not watcher.is_alive() and timers == []
+    watcher = spawn_watched()
+    manager.process.kill()
+    watcher.join(5)
+    assert [t.delay for t in timers] == [RETRY_DELAYS_SEC[0]]
+    manager.process.stdout.close()
+
+
+def test_apply_cancels_a_pending_restart(runtime, timers, monkeypatch):
+    crash(runtime)
+    pending = timers[-1]
+    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_: (runtime.media_dir / 'mixer.demo.json').write_text('{}'))
+    runtime.apply(DEFAULT_SETTINGS)
+    runtime.worker.join(3)
+    assert pending.cancelled and runtime.retries == 0
+    applied = runtime.worker
+    pending.function()   # fired just before it was cancelled
+    assert runtime.worker is applied and runtime.status()['message'] == 'Mixer ready.'
 
 
 def test_rest_timeout_names_the_request(monkeypatch):
