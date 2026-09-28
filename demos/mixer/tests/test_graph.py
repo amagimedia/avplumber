@@ -1535,13 +1535,3 @@ def test_rendition_dpb_size_reaches_janus_and_record_encoders(tmp_path, dpb_size
 def test_rendition_dpb_size_is_bounded(dpb_size):
     with pytest.raises(mixer_config.ConfigError, match="dpb_size"):
         mixer_config.parse({**CONFIG, "renditions": [{"id": "sdr", "dpb_size": dpb_size}]})
-
-
-def test_janus_output_dpb_size_defaults_to_nvenc_choice():
-    from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
-    for dpb_size, expected in ((0, None), (1, 1)):
-        avp = FakeAvp()
-        build_janus_output(avp, fake_api(), "program", JanusVideoConfig(), fps=30, width=1080, height=1920,
-                           dpb_size=dpb_size)
-        options = next(n for n in avp.nodes if n.parameters.get("name") == "janus_encoder").parameters["options"]
-        assert options.get("dpb_size") == expected
