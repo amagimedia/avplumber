@@ -1,489 +1,1313 @@
 <!doctype html>
+<html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AVPlumber mixer</title>
 <style>
+  /* The mixer UI is deliberately dark-only. */
   :root {
     color-scheme: dark;
-    --bg: #0b0d10; --panel: #14181d; --edge: #232b34; --edge-soft: #1b222a;
-    --text: #e8edf2; --muted: #8b98a5;
+    --bg: #0b0d10; --panel: #14181d; --raised: #1b2129; --edge: #232b34;
+    --text: #e8edf2; --muted: #8b98a5; --faint: #5d6874;
     --pgm: #e5484d; --pgm-dim: #3a1416; --pvw: #30a46c; --pvw-dim: #0f2a1d;
-    --accent: #f5a524; --wipe: #6e8bf5;
+    --accent: #f5a524; --wipe: #6e8bf5; --warn: #f5a524; --ok: #30a46c;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
+  html, body { height: 100%; }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body {
-    margin: 0; background: var(--bg); color: var(--text); height: 100dvh; overflow: hidden;
+    margin: 0; background: var(--bg); color: var(--text); overflow: hidden;
     font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    padding: 14px;
+    display: flex; flex-direction: column; gap: 12px; padding-inline: 16px; padding-block: 12px;
   }
-  #workspace { display: grid; height: 100%;
-               grid-template-columns: minmax(260px, var(--controls-size, 1fr)) 16px
-                                      minmax(280px, var(--program-size, calc((100dvh - 140px) * 9 / 16))); }
-  #controls { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow: hidden; }
-  #controls > :not(#scenes) { flex-shrink: 0; }
-  #splitter { cursor: col-resize; touch-action: none; position: relative; outline: none; }
-  #splitter::after { content: ""; position: absolute; left: 7px; top: 0; bottom: 0;
-                     width: 2px; border-radius: 2px; background: var(--edge); }
-  #splitter:hover::after, #splitter:focus-visible::after, .resizing #splitter::after { background: var(--accent); }
-  body.resizing { cursor: col-resize; user-select: none; }
-  .resizing iframe { pointer-events: none; }
-  #program-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
-                   border: 1px solid var(--edge); border-radius: 10px; background: var(--panel); }
-  #program-panel header { padding: 12px 14px; border-bottom: 1px solid var(--edge); }
-  #program-panel h2 { margin: 0; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--pgm); }
-  #program-panel .format { margin-left: auto; color: var(--muted); font-size: 12px; }
-  #program-output { display: block; width: 100%; flex: 1; min-height: 0; border: 0; background: #050607; }
-  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-  header a { color: var(--muted); font-size: 12px; }
-  header a:hover { color: var(--accent); }
-  h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
-  #counts { color: var(--muted); font-variant-numeric: tabular-nums; }
-  #conn { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
-  #conn.bad { color: var(--pgm); }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Segmented controls and slots clip their children, so their rings go inside. */
+  .seg button:focus-visible, .slot button:focus-visible { outline-offset: -2px; }
 
-  #buses { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .bus { border: 1px solid var(--edge); border-radius: 10px; padding: 14px 16px; background: var(--panel); }
-  .bus h2 { margin: 0 0 6px; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
-  .bus .scene { font-size: clamp(18px, 3.4vw, 30px); font-weight: 600; word-break: break-word; }
+  /* ---------- top bar ---------- */
+  #top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  #top h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
+  .link { color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+  .link:hover { color: var(--accent); }
+  #counts { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #counts b { color: var(--text); font-weight: 600; }
+  #conn { margin-left: auto; color: var(--pgm); font-size: 12px; }
+  #stats { flex: 0 1 auto; min-width: 0; display: flex; justify-content: flex-end; margin-left: auto; }
+  #stats, .vstats { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #conn:not([hidden]) + #stats { margin-left: 0; }
+  .group { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+  #meters { display: contents; }
+  .meter { display: flex; align-items: center; gap: 6px; }
+  .meter i { position: relative; width: 38px; height: 5px; border-radius: 3px; background: var(--edge); overflow: hidden; }
+  .meter i::after { content: ""; position: absolute; inset: 0 auto 0 0; width: var(--v); background: var(--c, var(--ok)); border-radius: 3px; }
+  .meter b { color: var(--text); font-weight: 600; min-width: 3.2ch; text-align: right; }
+  .meter b[data-level="good"] { color: var(--ok); }
+  .meter b[data-level="warn"] { color: var(--warn); }
+  .meter b[data-level="bad"] { color: var(--pgm); }
+
+  /* ---------- shared controls ---------- */
+  .seg { display: inline-flex; border: 1px solid var(--edge); border-radius: 7px; overflow: hidden; background: var(--panel); }
+  .seg button { border: 0; background: none; padding: 4px 10px; font-size: 12px; cursor: pointer; color: var(--muted); }
+  .seg button + button { border-left: 1px solid var(--edge); }
+  .seg button[aria-pressed="true"] { background: var(--raised); color: var(--text); }
+  .seg button:disabled { color: var(--faint); cursor: not-allowed; }
+  .viewers-ctl { display: inline-flex; align-items: center; gap: 14px; white-space: nowrap; }
+  .seg-label { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .btn { border: 1px solid var(--edge); border-radius: 8px; padding: 9px 16px; cursor: pointer; font-weight: 600; background: var(--raised); }
+  .btn:hover { border-color: var(--muted); }
+  .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .mini { width: 26px; height: 26px; padding: 0; border: 1px solid var(--edge); border-radius: 6px; background: var(--panel);
+          cursor: pointer; line-height: 1; font-size: 14px; display: inline-grid; place-items: center; }
+  .mini:hover { border-color: var(--muted); }
+  .mini[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .mini svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  /* Names that share a prefix and differ in their tail, like grid_32_078, lose their start instead. */
+  .tail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; min-width: 0; }
+  .title { margin: 0; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+
+  /* Styled dropdown: a button and a listbox, no native select */
+  .dd { position: relative; min-width: 0; }
+  .dd-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--edge); border-radius: 7px;
+            background: var(--raised); padding: 4px 8px 4px 10px; cursor: pointer; font-size: 13px; font-weight: 600; max-width: 100%; }
+  .dd-btn span { overflow: hidden; text-overflow: ellipsis; }
+  .dd-btn:hover { border-color: var(--muted); }
+  .dd-btn svg { flex: none; width: 10px; height: 10px; stroke: var(--muted); fill: none; stroke-width: 2; transition: transform .12s; }
+  .dd-btn[aria-expanded="true"] svg { transform: rotate(180deg); }
+  .dd-menu { position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; min-width: 230px; margin: 0; padding: 6px;
+             list-style: none; background: var(--panel); border: 1px solid var(--edge); border-radius: 9px;
+             box-shadow: 0 12px 32px rgb(0 0 0 / .5); }
+  .dd-menu .grp { font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--faint); padding: 6px 8px 3px; }
+  .dd-menu [role="option"] { display: grid; grid-template-columns: 12px 1fr; column-gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+  .dd-menu [role="option"]:hover, .dd-menu [role="option"]:focus { background: var(--raised); outline: none; }
+  .dd-menu [role="option"]::before { content: ""; grid-row: span 2; align-self: center; width: 7px; height: 7px; border-radius: 50%; background: var(--dot, var(--faint)); }
+  .dd-menu [aria-selected="true"] { color: var(--accent); }
+  .dd-menu .meta { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .dd.up .dd-menu { top: auto; bottom: calc(100% + 6px); }   /* the take bar sits at the bottom of the window */
+  /* A fade: its seconds field joined to a curve menu that shows the curve's shape. */
+  .fade-ctl { display: inline-flex; }
+  .fade-ctl .field { border-right: 0; border-radius: 8px 0 0 8px; }
+  .fade-ctl .field span { padding-right: 8px; }
+  /* Arrow keys still step; the hover spinner would cover the value in these narrow fields. */
+  .fade-ctl input { appearance: textfield; }
+  .fade-ctl input::-webkit-inner-spin-button { display: none; }
+  .fade-ctl .dd { display: flex; }
+  .fade-ctl .dd-btn { border-radius: 0 8px 8px 0; padding: 0 5px; }
+  .fade-ctl .dd-btn > :not(.glyph) { display: none; }
+  .dd-btn svg.glyph { width: 14px; height: 10px; stroke: var(--text); stroke-width: 1.6; stroke-linecap: round; transform: none; }
+  .fade-ctl .dd-menu { min-width: 150px; }
+
+  /* ---------- workspace ---------- */
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(480px, 1fr) auto; gap: 14px; }
+  .card { border: 1px solid var(--edge); border-radius: 10px; background: var(--panel); }
+
+  #deck { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; container-type: inline-size; }
+  #deck > :not(#scenes-card) { flex-shrink: 0; }
+  #buses { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .bus { padding: 12px 16px; }
+  .bus .scene { font-size: clamp(18px, 2.2vw, 26px); font-weight: 600; word-break: break-word; font-family: var(--mono); letter-spacing: -.01em; }
+  .bus .state { color: var(--muted); font-size: 12px; margin-top: 2px; }
   .bus.pgm { border-color: var(--pgm); background: linear-gradient(var(--pgm-dim), var(--panel) 70%); }
-  .bus.pgm h2 { color: var(--pgm); }
+  .bus.pgm .title { color: var(--pgm); }
   .bus.pvw { border-color: var(--pvw); background: linear-gradient(var(--pvw-dim), var(--panel) 70%); }
-  .bus.pvw h2 { color: var(--pvw); }
-  .state { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .bus.pvw .title { color: var(--pvw); }
 
-  #scenes { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-            flex: 1; min-height: 0; overflow-y: auto; align-content: start; padding: 2px; }
-  .tile {
-    display: flex; align-items: baseline; gap: 8px; text-align: left; cursor: pointer;
-    background: var(--panel); color: var(--text); border: 1px solid var(--edge);
-    border-radius: 8px; padding: 10px 12px; font: inherit; min-height: 46px;
+  #row2 { display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, 2fr); gap: 12px; }
+  #row2.single { grid-template-columns: minmax(0, 1fr); }
+  .widget { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .widget header { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; }
+  .widget header .note { font-size: 11px; color: var(--faint); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .widget header .note.warn { color: var(--warn); }
+  /* The longer "Program preview slots" title keeps its note on the same line down to a 1366 px window. */
+  #slots-card header { column-gap: 7px; }
+  /* The key fade stays on the title line, compact and pulled into its height so the card does not grow;
+     the note gives way to it (see trimTakebar). */
+  #keys-card header { flex-wrap: nowrap; }
+  #keys-card .note { flex: 1 1 0; width: 0; }   /* never widens the card; each key's tooltip says it too */
+  .key-fade { margin-left: auto; align-self: center; flex: none; margin-block: -5px; }
+  .key-fade .field { border-radius: 7px 0 0 7px; }
+  .key-fade .field input { width: 2.8em; padding: 3px 2px 3px 7px; font-size: 12px; }
+  .key-fade .field span { padding-right: 6px; font-size: 11px; }
+  .key-fade .dd-btn { border-radius: 0 7px 7px 0; }
+  .key-fade .dd-btn svg.glyph { width: 12px; height: 9px; }
+  .key-fade .dd-menu { left: auto; right: 0; }
+  #keys { display: grid; grid-template-columns: repeat(2, minmax(min-content, 1fr)); gap: 6px; }
+  #row2.single #keys { grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
+  .key { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid var(--edge); border-radius: 7px;
+         background: var(--raised); cursor: pointer; font-size: 13px; text-align: left; }
+  .key::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+  .key[aria-pressed="true"] { border-color: var(--pgm); }
+  .key[aria-pressed="true"]::before { background: var(--pgm); box-shadow: 0 0 6px var(--pgm); }
+  #slots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  .slot { display: flex; min-width: 0; border: 1px solid var(--edge); border-radius: 7px; background: var(--raised); overflow: hidden; }
+  .slot:has(.assign[aria-pressed="true"]) { border-color: var(--accent); }
+  .slot button { border: 0; background: none; cursor: pointer; font-size: 12px; padding: 6px 7px; }
+  .slot .assign { flex: 1; min-width: 0; text-align: left; display: flex; flex-direction: column; gap: 1px; padding: 4px 6px; }
+  .slot .assign b { color: var(--muted); font-weight: 600; font-size: 10.5px; letter-spacing: .08em; }
+  .slot .assign span { font: 11.5px var(--mono); }
+  .slot .assign.empty { color: var(--faint); }
+  .slot .assign.empty .tail { direction: ltr; }   /* the "empty" placeholder keeps its start, like the mockup */
+  .slot .clear { color: var(--muted); border-left: 1px solid var(--edge); padding-inline: 5px; }
+  .slot .clear:hover { color: var(--text); }
+
+  #scenes-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #scenes-card > header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--edge); }
+  .newtab { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--edge); border-radius: 7px;
+            background: var(--raised); padding: 4px 10px; font-size: 12px; font-weight: 600; color: inherit; text-decoration: none; }
+  .newtab:hover { border-color: var(--accent); color: var(--accent); }
+  .newtab svg { width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+  #chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--edge); border-radius: 999px; background: none; padding: 2px 10px; font-size: 12px; cursor: pointer; color: var(--muted); }
+  .chip span { color: var(--faint); margin-left: 4px; font-variant-numeric: tabular-nums; }
+  .chip[aria-pressed="true"] { border-color: var(--muted); color: var(--text); background: var(--raised); }
+
+  /* A phone-wide deck keeps the scene list's height: the filter chips stay on one row that scrolls sideways. */
+  @container (max-width: 440px) {
+    #chips { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: 4px;
+             mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent); }
+    #chips::-webkit-scrollbar { display: none; }
+    .chip { flex: none; padding-inline: 8px; }
   }
+  /* A phone-wide deck: two columns keep slot names whole. */
+  @container (max-width: 440px) { #slots { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+  #scenes { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; display: grid; gap: 8px;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); align-content: start; }
+  .tile { display: flex; align-items: baseline; gap: 8px; text-align: left; cursor: pointer; background: var(--raised);
+          border: 1px solid var(--edge); border-radius: 8px; padding: 9px 11px; min-height: 42px; font-family: var(--mono); font-size: 12.5px; }
   .tile:hover { border-color: var(--muted); }
-  .tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .tile .n { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; min-width: 1.2em; }
+  .tile .n { color: var(--muted); font-size: 11px; min-width: 1.1em; font-variant-numeric: tabular-nums; font-family: inherit; }
   .tile .label { overflow-wrap: anywhere; }
   .tile.pgm { border-color: var(--pgm); background: var(--pgm-dim); }
   .tile.pvw { border-color: var(--pvw); background: var(--pvw-dim); }
+  #scenes.armed .tile:hover { border-color: var(--accent); }
+  #graph { flex: 1; min-height: 0; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  #graph svg { flex: 1; min-height: 0; width: 100%; min-width: 480px; }
+  #graph .node rect { fill: var(--raised); stroke: var(--edge); }
+  #graph .node.hot rect { stroke: var(--accent); }
+  #graph .node text { fill: var(--text); font: 600 12px ui-sans-serif, system-ui, sans-serif; }
+  #graph .node text.sub { fill: var(--muted); font: 11px var(--mono); }
+  #graph .node { cursor: pointer; }
+  #graph .node:hover rect, #graph .node:focus-visible rect { stroke: var(--text); }
+  #graph .node:focus-visible { outline: none; }
+  #graph .node circle { fill: var(--ok); }
+  #graph .node.warn circle { fill: var(--warn); }
+  #graph .node.stale circle { fill: var(--faint); }   /* no fresh state: health unknown */
+  #graph .edge { stroke: var(--faint); stroke-width: 1.5; fill: none; }
+  #graph .edge.sub { stroke-dasharray: 4 4; }
 
-  footer { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
-           border: 1px solid var(--edge); border-radius: 10px; padding: 12px; background: var(--panel); }
-  button.take { border: 1px solid var(--edge); border-radius: 8px; padding: 10px 18px; cursor: pointer;
-                font: inherit; font-weight: 600; color: var(--text); background: #1b2129; }
-  button.take:hover { border-color: var(--muted); }
+  #takebar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; }
   #cut { border-color: var(--pgm); } #fade { border-color: var(--pvw); }
-  #wipes { display: flex; flex-wrap: wrap; gap: 8px; }
-  #wipes button { border-color: var(--wipe); }
-  #wipes button.only { color: var(--text); }
-  #direct { border-color: var(--edge); }
-  #direct[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-  label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
-  [hidden] { display: none !important; }   /* the rule above would otherwise win */
-  input { background: #0e1216; color: var(--text); border: 1px solid var(--edge); border-radius: 6px;
-          padding: 7px 9px; font: inherit; }
-  input#fade_seconds { width: 5em; }
-  input#wipe_file { min-width: 16em; flex: 1; }
-  .sep { flex: 1 1 auto; }
-  #hint { color: var(--muted); font-size: 12px; }
-  #error { color: var(--pgm); min-height: 1.2em; font-size: 13px; }
+  .wipe { border-color: var(--wipe); }
+  #wipes { display: inline-flex; flex-wrap: wrap; gap: 8px; }
+  .field { display: inline-flex; align-items: center; border: 1px solid var(--edge); border-radius: 8px; background: var(--raised); overflow: hidden; }
+  .field input { width: 4.4em; border: 0; background: none; color: var(--text); font: inherit; padding: 8px 4px 8px 10px; font-variant-numeric: tabular-nums; }
+  .field input:focus { outline: none; }
+  .field:focus-within { border-color: var(--accent); }
+  .field span { color: var(--muted); padding-right: 10px; font-size: 12px; }
+  #wipe-file { width: 16em; padding-right: 10px; }
+  #fade-s { width: 3em; }
+  .vsep { width: 1px; align-self: stretch; background: var(--edge); margin-inline: 2px; }
+  /* Right-aligned on the row it fits whole on, wrapping as a unit; hidden when no row is wide enough (see trimTakebar). */
+  #hint { margin-left: auto; max-width: 100%; white-space: nowrap; overflow: hidden; color: var(--faint); font-size: 11.5px; }
+  #hint kbd { font: 11px var(--mono); color: var(--muted); }
+  #error { flex-basis: 100%; color: var(--pgm); font-size: 12.5px; }
   #error:empty { display: none; }
-  #aux-slots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
-  #aux-slots > div { display: flex; min-width: 0; }
-  #aux-slots button { background: var(--panel); color: var(--text); border: 1px solid var(--edge);
-                      border-radius: 5px; padding: 6px; cursor: pointer; }
-  #aux-slots button:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #aux-slots button[aria-pressed="true"] { border-color: var(--accent); }
-  #dsk { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  #dsk button { background: var(--panel); color: var(--text); border: 1px solid var(--edge); }
-  #dsk button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-  #output-choice { background: var(--panel); color: var(--text); border: 1px solid var(--edge); }
-  @media (max-width: 820px) {
-    body { height: auto; min-height: 100dvh; overflow: auto; }
-    #workspace { grid-template-columns: 1fr; height: auto; gap: 16px; }
-    #splitter { display: none; }
-    #controls { overflow: visible; }
-    #scenes { flex: none; overflow: visible; }
-    #program-panel { height: min(90dvh, calc(100vw * 16 / 9 + 110px)); min-height: 420px; }
+
+  /* ---------- monitor wall ---------- */
+  #wall { display: flex; gap: 12px; min-height: 0; align-items: flex-start; }
+  .viewer { display: flex; flex-direction: column; overflow: visible; min-width: 0; container-type: inline-size; }
+  .viewer > header { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; white-space: nowrap; padding: 8px 10px; border-bottom: 1px solid var(--edge); min-height: 45px; }
+  .viewer .lbl { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .viewer .lbl::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--tally, var(--faint)); }
+  .viewer .close { margin-left: auto; flex: none; }
+  /* A narrow paged viewer packs its header; if the label still does not fit, only the tally dot stays
+     (.tight, set by fitHeader) so the pager and × stay on the card. */
+  @container (max-width: 380px) {
+    .viewer.paged > header { gap: 5px; padding-inline: 6px; }
+    .viewer.paged .lbl { letter-spacing: .1em; }
+    .viewer.paged .pager { gap: 2px; }
+    .viewer.paged .pager .pg { min-width: 2.3em; }
   }
-  @media (max-width: 620px) { #buses { grid-template-columns: 1fr; } }
+  .viewer > header.tight .lbl { font-size: 0; letter-spacing: 0; gap: 0; }
+  .pager { display: inline-flex; align-items: center; gap: 4px; }
+  .pager .pg { position: relative; min-width: 3.1em; text-align: center; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .pager .pg i { position: absolute; left: 0; bottom: -4px; height: 2px; width: 0; background: var(--accent); border-radius: 1px; }
+  .screen { position: relative; aspect-ratio: 9 / 16; width: 100%; background: #050607; overflow: hidden; user-select: none; }
+  /* A transparent layer over the player: its <video controls> would pause on a click and take the
+     keyboard focus into its cross-origin frame, which ends the shortcuts. */
+  .screen::after { content: ""; position: absolute; inset: 0; }
+  /* The player page puts its <video> (object-fit: contain) above a stats footer whose height depends on
+     how often it wraps. The frame is wide enough to keep that footer on one line even with six GPUs in
+     its stats: 49 px tall, 60 px with the codec picker. The frame is that much taller than the screen,
+     centred and clipped, so the picture is limited by height and fills the screen exactly, which the
+     overlays rely on. */
+  .screen iframe { position: absolute; top: 0; left: 50%; width: max(100%, 4096px); height: calc(100% + var(--chrome, 49px));
+                   transform: translateX(-50%); border: 0; background: #050607; }
+  .ovl { position: absolute; inset: 0; }
+  /* This viewer's stream stats, one line under its screen; layoutWall leaves room for the row. */
+  .viewer { --vstats-h: 27px; }
+  .vstats { display: flex; align-items: center; justify-content: space-between; gap: 10px; height: var(--vstats-h); box-sizing: border-box;
+            padding-inline: 10px; border-top: 1px solid var(--edge); white-space: nowrap; overflow: hidden; }
+  .vstats b { text-align: left; }   /* the spare room falls after the value, into the gap */
+  .vstats b.ms { min-width: 6ch; }   /* "—", "186 ms" and "1.2 s" take the same room, so new numbers never move the row */
+  .vstats .u { margin-left: .25em; }
+  /* At the minimum viewer width the row packs, the unit spacing last. */
+  @container (max-width: 300px) {
+    .vstats { gap: 6px; padding-inline: 6px; }
+    .vstats .meter { gap: 4px; }
+    .vstats b.ms { min-width: 5ch; }
+    .vstats .u { margin-left: 0; }
+  }
+  /* Over the screen's corner, outside it, so the header keeps its width for the output name. */
+  .viewer { position: relative; }
+  .viewer .open { position: absolute; right: 8px; bottom: calc(var(--vstats-h) + 8px); z-index: 1; color: var(--text); background: rgb(0 0 0 / .62);
+                  border-color: transparent; opacity: 0; transition: opacity .12s; }
+  .viewer:hover .open, .viewer .open:focus-visible { opacity: 1; }
+  .viewer .open:hover { border-color: var(--muted); }
+  .screen:focus-visible { outline: none; }
+  .screen:focus-visible:not(:fullscreen)::after { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: inherit; }
+  /* Full screen keeps the picture's aspect: --fh is its height, the frame and the overlays follow it,
+     and the overlay's shadow covers the rest of the frame, the player's footer included. */
+  .screen:fullscreen { --fh: min(100vh, 100vw / var(--ar)); }
+  .screen:fullscreen iframe { top: calc(50% - var(--fh) / 2); height: calc(var(--fh) + var(--chrome, 49px)); }
+  .screen:fullscreen .ovl { margin: auto; width: calc(var(--fh) * var(--ar)); height: var(--fh); box-shadow: 0 0 0 100vmax #050607; }
+  .ovl .box { position: absolute; border: 2px solid transparent; }
+  .ovl .box.pgm { border-color: var(--pgm); } .ovl .box.pvw { border-color: var(--pvw); }
+  .ovl .tag { position: absolute; display: flex; font: 10.5px/1.3 var(--mono); color: #e8edf2; background: rgb(0 0 0 / .62);
+              padding: 1px 5px; border-radius: 3px; white-space: nowrap; }
+  .ovl .tag b { flex: none; font-weight: inherit; margin-right: 1ch; }
+  .ovl .tag i { flex: none; font-style: normal; color: var(--muted); margin-left: 5px; }
+  .ovl p { position: absolute; inset: 45% 10px auto; margin: 0; text-align: center; color: var(--muted); font-size: 12.5px; }
+
+  @media (max-width: 900px) {
+    body { overflow: auto; height: auto; min-height: 100%; }
+    main { grid-template-columns: minmax(0, 1fr); }
+    #scenes-card { min-height: 420px; max-height: 80vh; }   /* keeps the viewers within reach below */
+    #wall { flex-wrap: wrap; }
+    .viewer { width: 100% !important; max-width: 440px; }
+    #stats { margin-left: 0; justify-content: flex-start; }
+    .group { flex-wrap: wrap; row-gap: 4px; }
+  }
+  @media (max-width: 560px) { #buses, #row2 { grid-template-columns: minmax(0, 1fr); } #hint { display: none; } }
 </style>
 
-<main id="workspace">
-<section id="controls" aria-label="Mixer controls">
-<header>
+<header id="top">
   <h1>AVPlumber mixer</h1>
-  <a href="/setup/">Setup</a>
-  <a id="graph-view" target="_blank" rel="noopener">Graph view</a>
-  <span id="counts">— unique sources · — scenes</span>
-  <span id="conn" hidden></span>
+  <a class="link" href="/setup/">Setup</a>
+  <a class="link" id="graph-link" target="_blank" rel="noopener" title="Opens the live graph view in a new tab">Graph view ↗</a>
+  <span id="counts"></span>
+  <span class="viewers-ctl"><span class="seg-label">Viewers</span>
+    <span class="seg" id="viewer-count" role="group" aria-label="Number of viewers">
+      <button type="button" data-n="1">1</button><button type="button" data-n="2">2</button>
+    </span></span>
+  <span id="conn" role="status" hidden></span>
+  <span id="stats">
+    <span class="group" id="gpu" role="group" aria-label="GPU" title="GPU load from nvidia-smi, refreshed every second" hidden>
+      <span id="meters"></span>
+    </span>
+  </span>
 </header>
 
-<div id="buses">
-  <section class="bus pgm"><h2>Program</h2><div class="scene" id="pgm">—</div>
-    <div class="state" id="pgm_state">on air</div></section>
-  <section class="bus pvw"><h2>Preview</h2><div class="scene" id="pvw">—</div>
-    <div class="state" id="pvw_state">ready</div></section>
-</div>
+<main>
+  <section id="deck" aria-label="Mixer controls">
+    <div id="buses">
+      <section class="card bus pgm"><h2 class="title">Program</h2><div class="scene" id="pgm">—</div><div class="state" id="pgm-state">on air</div></section>
+      <section class="card bus pvw"><h2 class="title">Preview</h2><div class="scene" id="pvw">—</div><div class="state" id="pvw-state">ready</div></section>
+    </div>
 
-<div id="aux-slots" hidden aria-label="Multiview assignments"></div>
-<div id="dsk" hidden aria-label="Downstream keys"></div>
-<div id="scenes"></div>
+    <div id="row2" hidden>
+      <section class="card widget" id="keys-card" aria-label="Downstream keys" hidden>
+        <header><h2 class="title">Keys</h2><span class="note">dirty feed only</span>
+          <span class="fade-ctl key-fade" id="key-fade"><label class="field" title="Key fade · empty or 0 cuts"><input id="key-fade-s" type="number" min="0" max="10" step="0.1" placeholder="0" aria-label="Key fade in seconds, empty or 0 cuts"><span>s</span></label></span></header>
+        <div id="keys"></div>
+      </section>
+      <section class="card widget" id="slots-card" aria-label="Program preview scene slots" hidden>
+        <header><h2 class="title">Program preview slots</h2><span class="note" id="slot-note"></span></header>
+        <div id="slots"></div>
+      </section>
+    </div>
 
-<footer>
-  <button class="take" id="cut" type="button">Cut</button>
-  <button class="take" id="fade" type="button">Fade</button>
-  <span id="wipes"></span>
-  <button class="take" id="direct" type="button" aria-pressed="false">Direct: off</button>
-  <label>Fade <input id="fade_seconds" type="number" min="0.1" step="0.1" value="0.5"> s</label>
-  <label id="wipe_custom" hidden>Wipe <input id="wipe_file" type="text"
-         placeholder="clip with alpha, path on the mixer host"></label>
-  <span class="sep"></span>
-  <span id="hint">1–9 pick a scene · C cut · F fade · W wipe · D direct</span>
-</footer>
-<div id="error"></div>
-</section>
-<div id="splitter" role="separator" tabindex="0" aria-label="Resize controls and program preview"
-     aria-orientation="vertical" aria-controls="controls program-panel"
-     title="Drag to resize panes. Arrow keys resize when focused."></div>
-<aside id="program-panel" aria-label="Live program preview">
-  <header><h2>Program</h2><select id="output-choice" hidden aria-label="View output"></select><span class="format">Live</span></header>
-  <iframe id="program-output" title="Live mixer program"
-          allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>
-</aside>
+    <section class="card" id="scenes-card">
+      <header>
+        <span class="seg" role="group" aria-label="Deck view">
+          <button type="button" id="tab-scenes" aria-pressed="true">Scenes</button><button type="button" id="tab-graph" aria-pressed="false">Signal flow</button>
+        </span>
+        <div id="chips" role="group" aria-label="Scene filter"></div>
+        <a class="newtab" id="graph-open" target="_blank" rel="noopener" hidden>Open full graph in new tab
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 2h3v3M10 2 5.5 6.5"/></svg></a>
+      </header>
+      <div id="scenes"></div>
+      <div id="graph" hidden></div>
+    </section>
+
+    <footer class="card" id="takebar">
+      <button class="btn" id="cut" type="button" title="Cut (C)" aria-keyshortcuts="C">Cut</button>
+      <button class="btn" id="fade" type="button" title="Fade (F)" aria-keyshortcuts="F">Fade</button>
+      <span class="fade-ctl" id="fade-ctl"><label class="field"><input id="fade-s" type="number" min="0.1" step="0.1" value="0.5" aria-label="Fade duration in seconds"><span>s</span></label></span>
+      <span class="vsep"></span>
+      <span id="wipes"></span>
+      <label class="field" id="wipe-custom" hidden><input id="wipe-file" type="text" placeholder="wipe clip path on the mixer host" aria-label="Wipe clip path on the mixer host"></label>
+      <span class="vsep"></span>
+      <button class="btn" id="direct" type="button" aria-pressed="false" title="Picks take to program (D)" aria-keyshortcuts="D">Direct: off</button>
+      <span id="hint" aria-hidden="true"><kbd>1–9</kbd> scene · <kbd>C</kbd> cut · <kbd>F</kbd> fade · <kbd>W</kbd> wipe · <kbd>D</kbd> direct<span id="hint-pages" hidden> · <kbd>[ ]</kbd> <kbd>R</kbd> pages</span></span>
+      <div id="error" role="alert"></div>
+    </footer>
+  </section>
+
+  <section id="wall" aria-label="Monitor wall"></section>
 </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
-const splitter = $("splitter");
-let splitPercent = null;
-let draggingSplit = false;
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("avplumber.mixer." + k); return v === null ? d : JSON.parse(v); } catch (_) { return d; } },
+  set(k, v) { try { localStorage.setItem("avplumber.mixer." + k, JSON.stringify(v)); } catch (_) {} },
+};
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+// Polling redraws every second; rebuilding unchanged DOM would drop focus and hover.
+function changed(node, data) {
+  const signature = JSON.stringify(data);
+  if (node.dataset.signature === signature) return false;
+  node.dataset.signature = signature;
+  return true;
+}
+// A group rebuilt after its data changed, e.g. by the button just pressed, moves the keyboard focus
+// to the new button with the same data-focus key.
+function rebuild(node, children) {
+  const key = node.contains(document.activeElement) ? document.activeElement.dataset.focus : undefined;
+  node.replaceChildren(...children);
+  if (key !== undefined) [...node.querySelectorAll("[data-focus]")].find((b) => b.dataset.focus === key)?.focus();
+}
+// A name whose end tells it apart; <bdi> keeps its own order inside the right-to-left box.
+function tail(className, text) {
+  const node = el("span", className ? `tail ${className}` : "tail"), inner = el("bdi", "", text);
+  inner.dir = "ltr";
+  node.append(inner);
+  return node;
+}
 
-function setSplit(percent) {
-  const available = $("workspace").clientWidth - 16;
-  if (available < 540) return;
-  const minimum = 260 / available * 100, maximum = 100 - 280 / available * 100;
-  splitPercent = Math.max(minimum, Math.min(maximum, percent));
-  $("workspace").style.setProperty("--controls-size", `${splitPercent}fr`);
-  $("workspace").style.setProperty("--program-size", `${100 - splitPercent}fr`);
-  splitter.setAttribute("aria-valuemin", Math.round(minimum));
-  splitter.setAttribute("aria-valuemax", Math.round(maximum));
-  splitter.setAttribute("aria-valuenow", Math.round(splitPercent));
-}
-function saveSplit() {
-  try { localStorage.setItem("avplumber.mixer.split", String(splitPercent)); } catch (_) {}
-}
-try {
-  const saved = Number(localStorage.getItem("avplumber.mixer.split"));
-  if (saved > 0 && saved < 100) setSplit(saved);
-} catch (_) {}
-if (splitPercent === null) setSplit($("controls").clientWidth / ($("workspace").clientWidth - 16) * 100);
-splitter.onpointerdown = (event) => {
-  if (event.button !== 0) return;
-  event.preventDefault();
-  draggingSplit = true;
-  splitter.setPointerCapture(event.pointerId);
-  document.body.classList.add("resizing");
-};
-splitter.onpointermove = (event) => {
-  if (!draggingSplit) return;
-  const box = $("workspace").getBoundingClientRect();
-  setSplit((event.clientX - box.left - 8) / (box.width - 16) * 100);
-};
-function finishSplit() {
-  if (!draggingSplit) return;
-  draggingSplit = false;
-  document.body.classList.remove("resizing");
-  saveSplit();
-}
-splitter.onpointerup = splitter.onpointercancel = splitter.onlostpointercapture = finishSplit;
-splitter.onkeydown = (event) => {
-  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-  event.preventDefault();
-  const percent = event.key === "Home" ? 0 : event.key === "End" ? 100
-    : (splitPercent ?? 65) + (event.key === "ArrowLeft" ? -2 : 2);
-  setSplit(percent);
-  saveSplit();
-};
-addEventListener("resize", () => { if (splitPercent !== null) setSplit(splitPercent); });
-let scenes = [];          // [{id, name}]
-const sceneGroups = { random: 0, grid: 1, fullscreen: 2, pip: 3, alpha_overlay: 5 };
-function sceneGroup(id) {
-  const layout = id.match(/^(random|grid|fullscreen|pip|alpha_overlay)_/);
-  return layout ? sceneGroups[layout[1]] : 4;
-}
-let selected = "";        // scene the take buttons act on
-let direct = false;       // a pick goes straight to program
-let pgm = "", pvw = "", transition = "idle";
-let touched = { fade: false, wipe: false };   // stop polling from overwriting typing
-let currentTransition = "cut";  // what a pick uses in direct mode; the config may change it
-let tookTransition = false;      // once the operator picks one, stop following the config
-let wipes = [];                  // the library published by the mixer
-let currentWipe = null;          // the clip a direct-mode wipe uses
+/* ---------- mixer state ---------- */
+let state = null;                // last good /api/state
+let stale = false;               // the last /api/state poll failed
+let scenes = [];                 // [{id, name}], sorted like the tiles
+let visible = [];                // scene ids behind the tiles, in the order 1–9 picks them
+let selected = "";               // scene the take buttons act on
+let direct = false;              // a pick goes straight to program
+let directTouched = false;       // once the operator toggles it, stop following the config
+let currentTransition = "cut";   // what a pick uses in direct mode; the config may change it
+let tookTransition = false;      // once the operator takes one, stop following the config
+// Stop polling from overwriting typing, or a curve the operator picked.
+const touched = {fade: false, wipe: false, keyFade: false, fadeCurve: false, keyCurve: false};
+let wipes = null;                // the library published by the mixer; null until the first state so an empty one still renders
+let currentWipe = null;          // the clip W and a direct-mode wipe use
+let armedSlot = null;            // multiview slot waiting for a scene
+let setupRevision;
+let filter = store.get("filter", "all"), tab = store.get("tab", "scenes");
 
-let aux = null, armedSlot = null;
-async function assignAux(slot, scene) {
-  if (!aux) return;
-  const assignments = [...aux.scenes];
-  assignments[slot] = scene;
+const settings = () => state?.settings || {};
+const auxBuses = () => state?.aux_buses || [];
+const layoutOf = (aux) => aux.layout || "pgm_pvw_grid";   // older mixers only have the scene multiview
+const isPages = (aux) => layoutOf(aux) === "source_pages";
+const auxError = (aux) => aux.error || aux.composition_error;
+const auxById = (id) => auxBuses().find((aux) => aux.id === id);
+// Slot edits go to the scene multiview a viewer shows, else to the first one the mixer has.
+const gridAux = () => auxById(viewers.find((v) => !v.el.hidden && v.grid)?.grid) ||
+                      auxBuses().find((aux) => !isPages(aux)) || null;
+const codecName = (codec) => ({h264: "H.264", h265: "H.265"})[codec] || String(codec || "").toUpperCase();
+const canvasText = (c) => `${c.width}×${c.height}p${c.fps}`;
+// Mixers from before the working_format option always composed in nv12.
+const rangeText = (c) => {
+  const format = c.working_format || "nv12";
+  return `${format === "nv12" ? "SDR" : "HDR"}${format === "p210le" ? " 4:2:2" : ""}`;
+};
+const formatText = (c) => c ? `${canvasText(c)} ${rangeText(c)}` : "";
+
+async function api(path, body) {
+  const response = await fetch(path, body === undefined ? undefined :
+    {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const reply = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(reply.error || `${response.status} ${response.statusText}`);
+  return reply;
+}
+function showError(message) { $("error").textContent = message || ""; }
+async function command(body, onSuccess) {
   try {
-    await api("/api/command", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({command: "aux", bus: aux.id, expected_revision: aux.revision, scenes: assignments})});
-    armedSlot = null;
     showError("");
+    await api("/api/command", body);
+    onSuccess?.();
   } catch (exc) { showError(exc.message); }
   await refresh();
 }
-function renderAux(state) {
-  aux = state.aux_buses?.[0] || null;
-  $("aux-slots").hidden = !aux;
-  if (!aux) return;
-  $("aux-slots").replaceChildren(...aux.scenes.map((scene, i) => {
-    const cell = document.createElement("div"), button = document.createElement("button"), clear = document.createElement("button");
-    button.textContent = `M${i + 1} · ${scene || "empty"}`;
-    button.title = aux.composition_error || (aux.composition_pending ? "Preparing new sources; current multiview stays live" :
-      aux.suspended ? "Aux suspended; assign a scene to resume" : "Click, then choose a scene");
-    button.setAttribute("aria-pressed", String(armedSlot === i));
-    button.onclick = () => { armedSlot = armedSlot === i ? null : i; renderAux(state); };
-    clear.textContent = "×"; clear.title = `Clear M${i+1}`;
-    clear.onclick = () => assignAux(i, null);
-    cell.append(button, clear); return cell;
-  }));
-}
 
-async function setKey(key, on) {
-  try {
-    await api("/api/command", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({command: "dsk", key, on})});
-    showError("");
-  } catch (exc) { showError(exc.message); }
-  await refresh();
+/* ---------- takes ---------- */
+// A number field reads "" both when empty and when it holds no number; only empty means *empty*.
+function fieldSeconds(id, empty, message) {
+  if (!$(id).validity.badInput) return Number($(id).value) || empty;
+  showError(message);
+  return null;
 }
-function renderDsk(state) {
-  const keys = state.dsk || [];
-  $("dsk").hidden = !keys.length;
-  $("dsk").replaceChildren(...(keys.length ? [Object.assign(document.createElement("span"), {textContent: "DSK"})] : []),
-    ...keys.map((key) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = key.id;
-      button.title = `${key.on ? "Take off" : "Put on"} air (dirty feeds only; clean stays unkeyed)`;
-      button.setAttribute("aria-pressed", String(key.on));
-      button.onclick = () => setKey(key.id, !key.on);
-      return button;
-    }));
-}
-
-function showError(message) {
-  $("error").textContent = message || "";
-}
-
-async function api(path, options) {
-  const response = await fetch(path, options);
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `${response.status} ${response.statusText}`);
-  return body;
-}
-
-async function take(command, scene, wipe) {
-  const payload = { command, scene: scene ?? selected };
-  if (command === "fade") payload.duration_sec = Number($("fade_seconds").value) || 0.5;
-  if (command === "wipe") {
-    payload.wipe_file = wipe ? wipe.path : $("wipe_file").value.trim();
-    if (!payload.wipe_file) return showError("Enter a wipe clip path on the mixer host");
-    if (wipe && wipe.duration_seconds) payload.duration_sec = wipe.duration_seconds;
+function take(kind, scene = selected, wipe = currentWipe) {
+  const payload = {command: kind, scene};
+  if (kind === "fade") {
+    payload.duration_sec = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
+    if (payload.duration_sec === null) return;
+    if (curves.fade.value !== "linear") payload.curve = curves.fade.value;   // linear: today's command
   }
-  if (command !== "preview") { currentTransition = command; tookTransition = true; }
-  if (command === "wipe") currentWipe = wipe || currentWipe;
-  try {
-    showError("");
-    await api("/api/command", { method: "POST", headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify(payload) });
-    await refresh();
-  } catch (exc) { showError(String(exc.message || exc)); }
+  if (kind === "wipe") {
+    payload.wipe_file = wipe ? wipe.path : $("wipe-file").value.trim();
+    if (!payload.wipe_file) return showError("Enter a wipe clip path on the mixer host");
+    if (wipe?.duration_seconds) payload.duration_sec = wipe.duration_seconds;
+  }
+  if (kind !== "preview") { currentTransition = kind; tookTransition = true; }
+  if (kind === "wipe") currentWipe = wipe || currentWipe;
+  return command(payload);
 }
-
 function pick(scene) {
-  if (armedSlot !== null && aux) return assignAux(armedSlot, scene);
+  if (armedSlot !== null && gridAux()) return assignSlot(armedSlot, scene);
   selected = scene;
-  return take(direct ? currentTransition : "preview", scene, currentWipe);
+  return take(direct ? currentTransition : "preview", scene);
 }
-
+function setDirect(on) {
+  direct = on;
+  $("direct").setAttribute("aria-pressed", String(on));
+  $("direct").textContent = `Direct: ${on ? "on" : "off"}`;
+  renderBuses();
+}
 // One button per clip: during a live show a wipe must be one click away.
 function renderWipes(library) {
   if (JSON.stringify(library) === JSON.stringify(wipes)) return;
   wipes = library;
   currentWipe = library.find((w) => w.id === currentWipe?.id) || library[0] || null;
-  $("wipe_custom").hidden = library.length > 0;
-  $("wipes").replaceChildren(...library.map((clip, index) => {
-    const button = document.createElement("button");
+  $("wipe-custom").hidden = library.length > 0;
+  $("wipes").replaceChildren(...(library.length ? library : [null]).map((clip) => {
+    const button = el("button", "btn wipe", library.length > 1 ? clip.name || clip.id : "Media wipe");
     button.type = "button";
-    button.className = "take" + (library.length === 1 ? " only" : "");
-    button.textContent = library.length === 1 ? "Media wipe" : clip.name || clip.id;
-    button.title = `${clip.path}${clip.duration_seconds ? ` · ${clip.duration_seconds}s` : ""}`;
+    if (clip) button.title = `${clip.path}${clip.duration_seconds ? ` · ${clip.duration_seconds} s` : ""}`;
     button.onclick = () => take("wipe", undefined, clip);
     return button;
   }));
-  if (!library.length) {
-    const button = document.createElement("button");
-    button.type = "button"; button.className = "take"; button.textContent = "Media wipe";
-    button.onclick = () => take("wipe");
-    $("wipes").append(button);
-  }
+}
+function applySettings(s) {
+  renderWipes(Array.isArray(s.wipes) ? s.wipes : []);
+  if (typeof s.direct === "boolean" && !directTouched) setDirect(s.direct);
+  if (s.fade_seconds && !touched.fade) $("fade-s").value = s.fade_seconds;
+  if (s.fade_curve && !touched.fadeCurve) curves.fade.set(s.fade_curve);
+  if (s.dsk_fade_seconds !== undefined && !touched.keyFade) $("key-fade-s").value = s.dsk_fade_seconds || "";
+  if (s.dsk_fade_curve && !touched.keyCurve) curves.key.set(s.dsk_fade_curve);
+  if (s.transition && !tookTransition) currentTransition = s.transition;
+  if (s.wipe_file && !touched.wipe && !wipes.length) $("wipe-file").value = s.wipe_file;
 }
 
+/* ---------- deck ---------- */
+function renderBuses() {
+  const status = state?.status || {};
+  $("pgm").textContent = status.pgm_scene || "—";
+  $("pvw").textContent = status.pvw_scene || "—";
+  const transition = status.transition || "idle";
+  $("pgm-state").textContent = transition === "idle" ? "on air" : `on air · ${transition}`;
+  $("pvw-state").textContent = direct ? `picks take to program with ${currentTransition}` : "ready";
+}
+function renderKeys() {
+  const keys = state.dsk || [];
+  $("keys-card").hidden = !keys.length;
+  if (!changed($("keys"), keys)) return;
+  rebuild($("keys"), keys.map((key) => {
+    const name = key.id.replaceAll("_", " "), label = name[0].toUpperCase() + name.slice(1);
+    const button = el("button", "key");
+    button.append(el("span", "", label));
+    button.type = "button";
+    button.dataset.focus = key.id;
+    button.setAttribute("aria-pressed", String(key.on));
+    button.title = `${label} · ${key.on ? "take off" : "put on"} air · dirty feeds only`;
+    // An empty field cuts, even when the config fades by default.
+    button.onclick = () => {
+      const fade_seconds = fieldSeconds("key-fade-s", 0, "Enter the key fade in seconds, or leave it empty to cut");
+      if (fade_seconds !== null) command({command: "dsk", key: key.id, on: !key.on, fade_seconds, curve: curves.key.value});
+    };
+    return button;
+  }));
+}
+function renderSlots() {
+  const aux = gridAux(), keys = Boolean(state?.dsk?.length);
+  if (!aux) armedSlot = null;
+  $("slots-card").hidden = !aux;
+  $("row2").hidden = !aux && !keys;
+  $("row2").classList.toggle("single", !aux || !keys);
+  $("scenes").classList.toggle("armed", armedSlot !== null);
+  if (!aux) return;
+  const problem = auxError(aux) || (aux.suspended ? "suspended · assign a scene to resume" : "");
+  $("slot-note").textContent = armedSlot !== null ? `pick a scene for M${armedSlot + 1}` : problem ||
+    (aux.composition_pending ? "preparing sources · the program preview stays live" : "click a slot, then a scene · ⇧1–8");
+  $("slot-note").classList.toggle("warn", armedSlot === null && Boolean(problem));
+  if (!changed($("slots"), [aux.scenes, armedSlot])) return;
+  rebuild($("slots"), aux.scenes.map((scene, i) => {
+    const cell = el("div", "slot");
+    const assign = el("button", "assign" + (scene ? "" : " empty"));
+    assign.type = "button";
+    assign.dataset.focus = `assign${i}`;
+    assign.setAttribute("aria-pressed", String(armedSlot === i));
+    assign.append(el("b", "", `M${i + 1}`), tail("", scene || "empty"));
+    assign.title = scene ? `${scene} · click, then a scene to replace` : "Click, then a scene";
+    assign.onclick = () => { armedSlot = armedSlot === i ? null : i; renderSlots(); };
+    const clear = el("button", "clear", "×");
+    clear.type = "button";
+    clear.dataset.focus = `clear${i}`;
+    clear.setAttribute("aria-label", `Clear M${i + 1}`);
+    clear.onclick = () => assignSlot(i, null);
+    cell.append(assign, clear);
+    return cell;
+  }));
+}
+function assignSlot(slot, scene) {
+  const aux = gridAux();
+  if (!aux) return;
+  const assignments = [...aux.scenes];
+  assignments[slot] = scene;
+  // A stale expected_revision comes back as an error; the refresh then loads the current assignments.
+  return command({command: "aux", bus: aux.id, expected_revision: aux.revision, scenes: assignments},
+                 () => { armedSlot = null; });
+}
+
+// Tile order and filter chips follow the demo's scene families; anything else is "Other".
+const GROUPS = [["random", "Random"], ["grid", "Grid"], ["fullscreen", "Fullscreen"], ["pip", "PiP"], ["other", "Other"], ["alpha_overlay", "Alpha"]];
+const groupOf = (id) => id.match(/^(random|grid|fullscreen|pip|alpha_overlay)_/)?.[1] || "other";
+const groupRank = (id) => GROUPS.findIndex(([g]) => g === groupOf(id));
+function renderChips() {
+  const counts = GROUPS.map(([g, name]) => [g, name, scenes.filter((s) => groupOf(s.id) === g).length]).filter(([, , n]) => n);
+  if (!counts.some(([g]) => g === filter)) filter = "all";
+  if (!changed($("chips"), [counts, filter])) return;
+  rebuild($("chips"), (counts.length > 1 ? [["all", "All", scenes.length], ...counts] : []).map(([g, name, n]) => {
+    const chip = el("button", "chip", name);
+    chip.type = "button";
+    chip.dataset.focus = g;
+    chip.setAttribute("aria-pressed", String(filter === g));
+    chip.append(el("span", "", String(n)));
+    chip.onclick = () => { filter = g; store.set("filter", g); renderChips(); renderScenes(); };
+    return chip;
+  }));
+}
 function renderScenes() {
-  const list = $("scenes");
-  const signature = JSON.stringify(scenes);
-  if (list.dataset.signature !== signature) {
-    list.replaceChildren(...scenes.map((scene, index) => {
-      const tile = document.createElement("button");
+  const shown = scenes.filter((s) => filter === "all" || groupOf(s.id) === filter);
+  visible = shown.map((s) => s.id);
+  if (changed($("scenes"), shown)) {
+    $("scenes").replaceChildren(...shown.map((scene, i) => {
+      const tile = el("button", "tile");
       tile.type = "button";
-      tile.className = "tile";
       tile.dataset.scene = scene.id;
-      tile.innerHTML = `<span class="n">${index < 9 ? index + 1 : ""}</span>`;
-      const label = document.createElement("span");
-      label.className = "label";
-      label.textContent = scene.name || scene.id;
-      tile.append(label);
+      tile.append(el("span", "n", i < 9 ? String(i + 1) : ""), el("span", "label", scene.name || scene.id));
       tile.onclick = () => pick(scene.id);
       return tile;
     }));
-    list.dataset.signature = signature;
   }
-  for (const tile of list.children) {
+  const {pgm_scene: pgm, pvw_scene: pvw} = state?.status || {};
+  for (const tile of $("scenes").children) {
     tile.classList.toggle("pgm", tile.dataset.scene === pgm);
     tile.classList.toggle("pvw", tile.dataset.scene === pvw && pvw !== pgm);
   }
 }
-
-function applySettings(settings) {
-  renderWipes(Array.isArray(settings.wipes) ? settings.wipes : []);
-  if (typeof settings.direct === "boolean" && !$("direct").dataset.user) setDirect(settings.direct);
-  if (settings.fade_seconds && !touched.fade) $("fade_seconds").value = settings.fade_seconds;
-  if (settings.transition && !tookTransition) currentTransition = settings.transition;
-  if (settings.wipe_file && !touched.wipe && !wipes.length) $("wipe_file").value = settings.wipe_file;
+function setTab(next) {
+  tab = next;
+  store.set("tab", next);
+  $("tab-scenes").setAttribute("aria-pressed", String(tab === "scenes"));
+  $("tab-graph").setAttribute("aria-pressed", String(tab === "graph"));
+  $("scenes").hidden = $("chips").hidden = tab !== "scenes";
+  $("graph").hidden = $("graph-open").hidden = tab !== "graph";
+  renderGraph();
 }
 
-function setDirect(value) {
-  direct = value;
-  const button = $("direct");
-  button.setAttribute("aria-pressed", String(value));
-  button.textContent = `Direct: ${value ? "on" : "off"}`;
-  $("pvw_state").textContent = value ? `picks take to program with ${currentTransition}` : "ready";
-}
-
-let setupRevision;
-let refreshing = false;
-async function refresh() {
-  if (refreshing) return;
-  refreshing = true;
-  try {
-    const state = await api("/api/state");
-    if (state.setup_revision !== undefined) {
-      if (setupRevision !== undefined && setupRevision !== state.setup_revision) {
-        selected = ""; tookTransition = false;
-        delete $("direct").dataset.user;
-        touched.fade = touched.wipe = false;
-        $("program-output").src = $("program-output").src;
-      }
-      setupRevision = state.setup_revision;
-    }
-    const status = state.status || {};
-    pgm = status.pgm_scene || ""; pvw = status.pvw_scene || ""; transition = status.transition || "idle";
-    const named = (state.settings && state.settings.scenes) || null;
-    scenes = named ? named.map((s) => ({ id: s.id, name: s.name })) : (state.scenes || []).map((id) => ({ id }));
-    scenes.sort((a, b) => sceneGroup(a.id) - sceneGroup(b.id) || a.id.localeCompare(b.id, undefined, { numeric: true }));
-    $("counts").textContent = `${state.settings?.source_count ?? "—"} unique sources · ${scenes.length} scenes`;
-    const canvas = state.settings?.canvas;
-    const codecs = state.settings?.preview_codecs;
-    const outputs = state.settings?.preview_outputs || [];
-    const choices = [{bus: "program", label: state.dsk?.length ? "Program dirty" : "Program"}, ...outputs];
-    const selector = $("output-choice");
-    if (selector.dataset.signature !== JSON.stringify(choices)) {
-      const old = selector.value;
-      selector.replaceChildren(...choices.map(o => { const option = document.createElement("option"); option.value = o.bus; option.textContent = o.label; return option; }));
-      selector.value = choices.some(o => o.bus === old) ? old : "program";
-      selector.dataset.signature = JSON.stringify(choices);
-    }
-    selector.hidden = choices.length < 2;
-    if (codecs?.length) {
-      const url = new URL($("program-output").src);
-      const output = outputs.find(o => o.bus === selector.value);
-      if (output) {
-        url.searchParams.set("mountpoint", output.mountpoint);
-        url.searchParams.set("codec", "h264"); url.searchParams.set("outputs", "h264");
-      } else {
-        url.searchParams.delete("mountpoint");
-        url.searchParams.set("outputs", codecs.join(","));
-        if (!codecs.includes(url.searchParams.get("codec"))) url.searchParams.set("codec", codecs[0]);
-      }
-      if (url.href !== $("program-output").src) $("program-output").src = url.href;
-      document.querySelector("#program-panel h2").textContent = output ? output.label : choices[0].label;
-    }
-    if (canvas) {
-      const viewingAux = outputs.find(o => o.bus === selector.value);
-      const chroma = canvas.working_format === "p210le" ? "4:2:2" : "4:2:0";
-      const mode = `${canvas.working_format === "nv12" ? "SDR · 8-bit" : "HDR · 10-bit"} · ${chroma}`;
-      const format = `${canvas.width}×${canvas.height}p${viewingAux?.fps || canvas.fps} · ${viewingAux?.color === "sdr" ? "SDR · 8-bit · 4:2:0" : mode}`;
-      document.querySelector("#program-panel .format").textContent = format;
-    }
-    const sourceCounts = state.settings?.source_counts;
-    if (sourceCounts) {
-      $("counts").textContent += ` (${[[sourceCounts.video, "NVDEC"], [sourceCounts.browser, "browser"], [sourceCounts.v210, "raw 422"], [sourceCounts.nv12, "raw SDR 420"], [sourceCounts.p010, "raw HDR 420"]].filter(([count]) => count > 0).map(([count, label]) => `${count} ${label}`).join(" · ")})`;
-    }
-    if (!selected || !scenes.some((scene) => scene.id === selected)) selected = pvw || pgm;
-    applySettings(state.settings || {});
-    $("pgm").textContent = pgm || "—";
-    $("pvw").textContent = pvw || "—";
-    $("pgm_state").textContent = transition === "idle" ? "on air" : `on air · ${transition}`;
-    $("conn").hidden = true;
-    renderScenes();
-    renderAux(state);
-    renderDsk(state);
-  } catch (exc) {
-    $("conn").textContent = exc.message || String(exc);
-    $("conn").classList.add("bad");
-    $("conn").hidden = false;
-  } finally {
-    refreshing = false;
-  }
-}
-
-$("cut").onclick = () => take("cut");
-$("output-choice").onchange = () => refresh();
-$("fade").onclick = () => take("fade");
-$("direct").onclick = () => { $("direct").dataset.user = "1"; setDirect(!direct); };
-$("fade_seconds").oninput = () => { touched.fade = true; };
-$("wipe_file").oninput = () => { touched.wipe = true; };
-
-addEventListener("keydown", (event) => {
-  if (event.target.tagName === "INPUT" || event.metaKey || event.ctrlKey || event.altKey) return;
-  const digit = Number(event.key);
-  const shiftedDigit = Number(event.code.replace("Digit", ""));
-  if (event.shiftKey && aux && shiftedDigit >= 1 && shiftedDigit <= 8) {
-    event.preventDefault(); assignAux(shiftedDigit - 1, selected || null); return;
-  }
-  if (digit >= 1 && digit <= 9 && scenes[digit - 1]) { event.preventDefault(); pick(scenes[digit - 1].id); return; }
-  const keys = { c: "cut", f: "fade" };
-  const command = keys[event.key.toLowerCase()];
-  if (command) { event.preventDefault(); take(command); }
-  else if (event.key.toLowerCase() === "w") { event.preventDefault(); take("wipe", undefined, currentWipe); }
-  else if (event.key.toLowerCase() === "d") { event.preventDefault(); $("direct").click(); }
-});
-
+/* ---------- signal flow ---------- */
 const graphUrl = new URL("/", location.href);
 graphUrl.port = "22222";
-$("graph-view").href = graphUrl.href;
+function graphHref(expand) {
+  const url = new URL(graphUrl);
+  if (expand) url.searchParams.set("expand", expand);
+  return url.href;
+}
+$("graph-link").href = $("graph-open").href = graphHref();
 
-// Share the existing WebRTC player, including its latency/RTT display. Assign
-// once; only a setup restart needs to reconnect the player.
-const programUrl = new URL(location.href);
-programUrl.port = new URLSearchParams(location.search).get("preview_port") || "8080";
-programUrl.pathname = "/";
-programUrl.search = "";
-programUrl.hash = "";
-programUrl.searchParams.set("codec", new URLSearchParams(location.search).get("codec") === "h264" ? "h264" : "h265");
-$("program-output").src = programUrl.href;
+const SVG = "http://www.w3.org/2000/svg";
+function svg(tag, attrs, text) {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+// Stages, not nodes: the full graph has several nodes per source (hundreds at 100 sources), so the
+// deck shows one box per stage with what the state reports, and each box opens that stage expanded.
+function graphModel() {
+  const s = settings(), status = state.status || {}, keys = state.dsk || [], mixer = state.mixer || "mixer";
+  const outputs = s.preview_outputs || [], canvas = s.canvas ? canvasText(s.canvas) : "";
+  const port = (o) => [o.port && `port ${o.port}`, o.fps && `p${o.fps}`].filter(Boolean).join(" · ");
+  const encoders = [
+    ...(s.preview_codecs || []).map((codec) => ({title: `${codecName(codec)} ${keys.length ? "dirty" : "program"}`,
+                                                  sub: canvas, keyed: true})),
+    ...outputs.filter((o) => !auxById(o.bus)).map((o) => ({title: `${codecName(o.codec)} clean`, sub: port(o), keyed: false})),
+  ];
+  const aux = auxBuses().map((a) => {
+    const out = outputs.find((o) => o.bus === a.id);
+    const sub = auxError(a) ? "error" : a.suspended ? "suspended"
+      : isPages(a) ? `page ${a.page + 1}/${a.pages}${a.auto ? " · auto" : ""}`
+      : `${a.scenes.filter(Boolean).length}/${a.scenes.length} slots${a.composition_pending ? " · pending" : ""}`;
+    return {id: a.id, grid: !isPages(a), title: out?.label || a.id, sub,
+            tip: auxError(a) || a.id, warn: Boolean(auxError(a) || a.suspended), hot: isPages(a) && Boolean(a.auto),
+            encoder: out && {title: codecName(out.codec), sub: port(out)}};   // its row names the bus
+  });
+  return {
+    sources: `${s.source_count ?? "—"} sources`, canvas, transition: status.transition || "idle",
+    keys: keys.length ? `${keys.filter((k) => k.on).length} of ${keys.length} on` : null,
+    me: [mixer, `${mixer}_a`, `${mixer}_b`, "mixer_preheat_router"].join(","),
+    // The transition nodes live in the M/E's own group; the wipe chain and its clip loader have their own.
+    transitionGroups: [mixer, `${mixer}_wipe`, `${mixer}_wipe_load`].join(","), encoders, aux, stale,
+  };
+}
+function renderGraph() {
+  if (tab !== "graph" || !state || $("graph").contains(document.activeElement)) return;
+  const m = graphModel();
+  if (!changed($("graph"), m)) return;
+  const ROW = 48, H44 = 44;
+  const encY = (i) => 8 + i * ROW;
+  const programRows = Math.max(1, m.encoders.length);
+  const chainY = 8 + (programRows * ROW - 4) / 2 - H44 / 2, cy = chainY + H44 / 2;
+  const auxTop = encY(programRows) + 46;
+  const auxY = (i) => auxTop + i * 80;
+  const height = Math.max(100, (m.aux.length ? auxY(m.aux.length - 1) + H44 : Math.max(encY(programRows) - 4, chainY + H44)) + 26);
+  const srcY = (height - 80) / 2, scy = srcY + 40;
+  // Columns: sources, M/E and the multiviews, transition, keyer, encoders; 40 units between boxes.
+  const SRC = [10, 120], ME = [170, 120], TR = [330, 110], KEY = [480, 110], ENC = [630, 140];
+  const end = ([x, w]) => x + w, gap = (a, b) => (end(a) + b[0]) / 2;
+  const keyerX = end(m.keys ? KEY : TR);      // where the keyed program leaves the chain
+  const root = svg("svg", {viewBox: `0 0 ${end(ENC) + 10} ${height}`, preserveAspectRatio: "xMidYMid meet", role: "img",
+    "aria-label": "Signal flow by stage: sources feed the M/E and the multiviews; the program passes the transition and the keyer to the encoders"});
+  const edge = (d, dashed) => root.append(svg("path", {class: `edge${dashed ? " sub" : ""}`, d}));
+  const node = (x, y, w, h, title, sub, expand, extra = {}) => {
+    const g = svg("g", {class: `node${extra.hot ? " hot" : ""}${extra.warn ? " warn" : ""}${m.stale ? " stale" : ""}`, role: "link", tabindex: "0",
+                        "aria-label": `Open ${title} expanded in the full graph`, "data-expand": expand});
+    g.append(svg("rect", {x, y, width: w, height: h, rx: 7}));
+    if (extra.tip) g.append(svg("title", {}, extra.tip));
+    // Every stage shows its health: ok while /api/state is fresh, aux buses warn on error or suspension.
+    g.append(svg("circle", {cx: x + w - 11, cy: y + 12, r: 4}));
+    g.append(svg("text", {x: x + 10, y: y + 19}, title), svg("text", {class: "sub", x: x + 10, y: y + 35}, sub));
+    root.append(g);
+  };
+  const toEncoder = (y) => `H${gap(KEY, ENC)} V${y + 22} H${ENC[0]}`;
+  edge(`M${end(SRC)} ${scy} H${gap(SRC, ME)} V${cy} H${ME[0]}`);
+  edge(`M${end(ME)} ${cy} H${TR[0]}`);
+  if (m.keys) edge(`M${end(TR)} ${cy} H${KEY[0]}`);
+  m.encoders.forEach((e, i) => edge(e.keyed || !m.keys ? `M${keyerX} ${cy} ${toEncoder(encY(i))}`
+                                                       : `M${end(TR)} ${cy} H${gap(TR, KEY)} V${chainY + H44 + 26} ${toEncoder(encY(i))}`));
+  // A scene multiview takes the program from where the keyer (or without keys, the transition) is.
+  const tap = m.keys ? KEY : TR;
+  m.aux.forEach((a, i) => {
+    edge(`M${end(SRC)} ${scy} H${gap(SRC, ME)} V${auxY(i) + 22} H${ME[0]}`, true);
+    if (a.grid) edge(`M${tap[0] + tap[1] / 2} ${chainY + H44} V${auxY(i) - 18} H${ME[0] + ME[1] / 2} V${auxY(i)}`, true);
+    if (a.encoder) edge(`M${end(ME)} ${auxY(i) + 22} H${ENC[0]}`);
+  });
+  node(SRC[0], srcY, SRC[1], 80, "Sources", m.sources, "input_*");
+  node(ME[0], chainY, ME[1], H44, "M/E", m.canvas, m.me);
+  node(TR[0], chainY, TR[1], H44, "Transition", m.transition, m.transitionGroups, {hot: m.transition !== "idle"});
+  if (m.keys) node(KEY[0], chainY, KEY[1], H44, "Keyer", m.keys, "output");
+  m.encoders.forEach((e, i) => node(ENC[0], encY(i), ENC[1], H44, e.title, e.sub, "output"));
+  m.aux.forEach((a, i) => {
+    node(ME[0], auxY(i), ME[1], H44, a.title, a.sub, `aux_${a.id}`, {hot: a.hot, warn: a.warn, tip: a.tip});
+    if (a.encoder) node(ENC[0], auxY(i), ENC[1], H44, a.encoder.title, a.encoder.sub, `aux_${a.id}`, {hot: a.hot, warn: a.warn});   // each bus encodes in its own group
+  });
+  $("graph").replaceChildren(root);
+  // A title that would run into its status dot is condensed to end before it.
+  for (const g of root.querySelectorAll(".node")) {
+    const t = g.querySelector("text:not(.sub)"), fit = Number(g.querySelector("rect").getAttribute("width")) - 30;
+    if (t.getComputedTextLength() > fit) { t.setAttribute("textLength", fit); t.setAttribute("lengthAdjust", "spacingAndGlyphs"); }
+  }
+}
+const openStage = (e) => {
+  const stage = e.target.closest(".node");
+  if (!stage || (e.type === "keydown" && e.key !== "Enter")) return;
+  window.open(graphHref(stage.dataset.expand), "_blank", "noopener");
+};
+$("graph").addEventListener("click", openStage);
+$("graph").addEventListener("keydown", openStage);
+$("graph").addEventListener("focusout", () => setTimeout(renderGraph));
+
+/* ---------- top bar ---------- */
+function renderCounts() {
+  const s = settings(), c = s.source_counts || {};
+  // DSK keys are browser sources; the header lists them apart from the browser sources in scenes.
+  const keys = new Set((s.dsk_keys || []).map((k) => k.source)).size;
+  const kinds = [[c.video, "NVDEC"], [c.browser - keys, "browser"], [c.nv12, "raw 4:2:0"], [c.p010, "raw 10-bit 4:2:0"],
+                 [c.v210, "raw 4:2:2"], [keys, "keys"]].filter(([n]) => n > 0).map(([n, what]) => `${n} ${what}`);
+  const parts = [[s.source_count ?? "—", " sources"], [scenes.length, " scenes"], ...kinds.map((t) => ["", t])];
+  if (s.canvas) parts.push(["", formatText(s.canvas)]);
+  if (!changed($("counts"), parts)) return;
+  $("counts").title = parts.map(([n, text]) => `${n}${text}`).join(" · ");
+  $("counts").replaceChildren(...parts.flatMap(([n, text], i) => [...(i ? [" · "] : []), ...(n === "" ? [] : [el("b", "", String(n))]), text]));
+}
+function renderMeters() {
+  const gpus = state.gpus || [];
+  const color = (pct) => pct > 85 ? "var(--pgm)" : pct > 70 ? "var(--warn)" : "var(--ok)";
+  const meter = (name, pct, text) => {
+    const m = el("span", "meter", `${name} `), bar = el("i");
+    bar.style.setProperty("--v", `${Number.isFinite(pct) ? pct : 0}%`);
+    bar.style.setProperty("--c", color(pct));
+    m.append(bar, el("b", "", text ?? (Number.isFinite(pct) ? `${pct}%` : "—")));
+    return m;
+  };
+  $("gpu").hidden = !gpus.length;
+  if (!gpus.length) return $("meters").replaceChildren();
+  // One meter per metric whatever the GPU count, so the bar keeps its width: it shows the busiest GPU
+  // (for VRAM the fullest) and its title lists every GPU.
+  const gib = (mib) => (mib / 1024).toFixed(1);
+  const vram = (g) => Number.isFinite(g.memory_used_mib) && g.memory_total_mib > 0 ?
+    {pct: Math.round(g.memory_used_mib / g.memory_total_mib * 100), text: `${gib(g.memory_used_mib)} / ${gib(g.memory_total_mib)} GB`} : null;
+  const pctText = (pct) => Number.isFinite(pct) ? `${pct}%` : "—";
+  const many = gpus.length > 1;
+  const worst = (name, value, text) => {
+    const top = gpus.reduce((a, b) => ((value(b) ?? -1) > (value(a) ?? -1) ? b : a));
+    const m = meter(many ? `${name} ×${gpus.length}` : name, value(top), text(top));
+    if (many) m.title = [`${name}: busiest of ${gpus.length} GPUs`, ...gpus.map((g) => `GPU ${g.index}: ${text(g)}`)].join("\n");
+    return m;
+  };
+  $("meters").replaceChildren(
+    ...[["GPU", "gpu"], ["ENC", "encoder"], ["DEC", "decoder"]].map(([name, key]) => worst(name, (g) => g[key], (g) => pctText(g[key]))),
+    worst("VRAM", (g) => vram(g)?.pct, (g) => vram(g)?.text ?? "—"));
+}
+
+/* ---------- styled dropdown ---------- */
+const closeMenus = (keep) => document.querySelectorAll(".dd-menu:not([hidden])")
+  .forEach((menu) => menu !== keep && menu.dispatchEvent(new Event("dd-close")));
+function dropdown(onChange) {
+  const root = el("div", "dd"), btn = el("button", "dd-btn"), text = el("span"), menu = el("ul", "dd-menu");
+  btn.type = "button";
+  btn.setAttribute("aria-haspopup", "listbox");
+  btn.setAttribute("aria-expanded", "false");
+  btn.append(text);
+  btn.insertAdjacentHTML("beforeend", '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 3.5 5 7l3.5-3.5"/></svg>');
+  menu.setAttribute("role", "listbox");
+  menu.hidden = true;
+  let options = [], value = null, label = "";
+  const items = () => [...menu.querySelectorAll('[role="option"]')];
+  function set(v) {
+    value = v;
+    text.textContent = options.find((o) => o.value === v)?.label ?? "";
+    btn.setAttribute("aria-label", `${label}: ${text.textContent}`);
+    for (const li of items()) li.setAttribute("aria-selected", String(li.dataset.value === v));
+  }
+  function setOptions(next) {
+    if (!changed(menu, next)) return;
+    options = next;
+    let group = null;
+    menu.replaceChildren(...next.flatMap((o) => {
+      const nodes = [];
+      if (o.group !== group) {
+        group = o.group;
+        const g = el("li", "grp", group);
+        g.setAttribute("role", "presentation");
+        nodes.push(g);
+      }
+      const li = el("li");
+      li.setAttribute("role", "option");
+      li.tabIndex = -1;
+      li.dataset.value = o.value;
+      li.style.setProperty("--dot", o.dot);
+      li.append(el("span", "", o.label), el("span", "meta", o.meta));
+      li.onclick = () => { close(); set(o.value); onChange(o.value); btn.focus(); };
+      nodes.push(li);
+      return nodes;
+    }));
+    set(value);
+  }
+  function open() {
+    closeMenus(menu);
+    menu.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+    (items().find((li) => li.dataset.value === value) || items()[0])?.focus();
+  }
+  function close() { menu.hidden = true; btn.setAttribute("aria-expanded", "false"); }
+  menu.addEventListener("dd-close", close);
+  btn.onclick = () => (menu.hidden ? open() : close());
+  btn.onkeydown = (e) => { if (["ArrowDown", "ArrowUp"].includes(e.key)) { e.preventDefault(); open(); } };
+  menu.onkeydown = (e) => {
+    const list = items(), i = list.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") list[Math.min(list.length - 1, i + 1)].focus();
+    else if (e.key === "ArrowUp") list[Math.max(0, i - 1)].focus();
+    else if (e.key === "Enter" || e.key === " ") document.activeElement.click();
+    else if (e.key === "Escape") { close(); btn.focus(); }
+    // Tab moves on from the button, as if the menu had not been open.
+    else if (e.key === "Tab") { close(); btn.focus(); return; }
+    else return;
+    e.preventDefault(); e.stopPropagation();
+  };
+  root.append(btn, menu);
+  function setLabel(next) { label = next; set(value); }
+  return {root, set, setOptions, setLabel};
+}
+document.addEventListener("pointerdown", (e) => closeMenus(e.target.closest?.(".dd")?.querySelector(".dd-menu")));
+
+/* ---------- fade curves ---------- */
+// The presets of src/mixer/primitives/fade_curve.hpp; linear is the default everywhere. The button shows
+// the curve's shape: each path is the exact curve, level against time, as a Bézier from (1,9) to (13,1).
+const CURVES = [["linear", "Linear", "even speed", "M1 9 13 1"], ["ease-in", "Ease in", "starts slow", "M1 9Q7 9 13 1"],
+                ["ease-out", "Ease out", "ends slow", "M1 9Q7 1 13 1"], ["ease-in-out", "Ease in-out", "slow start and end", "M1 9C5 9 9 1 13 1"]];
+function curveMenu(label, touchedKey) {
+  const menu = {value: "linear"};
+  const dd = dropdown((value) => { menu.set(value); touched[touchedKey] = true; });
+  const btn = dd.root.firstChild;
+  btn.insertAdjacentHTML("afterbegin", '<svg class="glyph" viewBox="0 0 14 10" aria-hidden="true"><path/></svg>');
+  dd.setLabel(label);
+  dd.setOptions(CURVES.map(([value, text, meta]) => ({value, label: text, meta, group: "Curve", dot: "var(--muted)"})));
+  menu.set = (value) => {
+    const curve = CURVES.find(([v]) => v === value);
+    if (!curve) return;
+    dd.set(menu.value = value);
+    btn.title = btn.getAttribute("aria-label");
+    btn.querySelector(".glyph path").setAttribute("d", curve[3]);
+  };
+  menu.set("linear");
+  menu.root = dd.root;
+  return menu;
+}
+const curves = {fade: curveMenu("Fade curve", "fadeCurve"), key: curveMenu("Key fade curve", "keyCurve")};
+curves.fade.root.classList.add("up");
+$("fade-ctl").append(curves.fade.root);
+$("key-fade").append(curves.key.root);
+
+/* ---------- viewer outputs ---------- */
+const query = new URLSearchParams(location.search);
+const playerBase = new URL(location.href);
+playerBase.port = query.get("preview_port") || "8080";
+playerBase.pathname = "/";
+playerBase.search = playerBase.hash = "";
+// The player's own H.265 message sits in the footer the viewers clip, so the page never asks for a
+// codec the browser cannot receive.
+const h265Playable = (() => {
+  try { return RTCRtpReceiver.getCapabilities("video").codecs.some((c) => c.mimeType.toLowerCase() === "video/h265"); }
+  catch (_) { return false; }
+})();
+const playable = (codec) => codec !== "h265" || h265Playable;
+// ?codec= picks the program's default codec; HDR otherwise, where the browser can play it.
+const defaultCodec = (codecs) => [query.get("codec"), "h265", "h264"].find((c) => codecs.includes(c) && playable(c)) || codecs[0];
+// The dirty program plays from the player's own mountpoints in the preview codecs; every other output
+// is an H.264 mountpoint of its own.
+function playerUrl(output, codec) {
+  const url = new URL(playerBase);
+  const codecs = settings().preview_codecs;
+  if (output) {
+    url.searchParams.set("mountpoint", output.mountpoint);
+    url.searchParams.set("codec", "h264");
+    url.searchParams.set("outputs", "h264");
+  } else {
+    if (codecs?.length) url.searchParams.set("outputs", codecs.join(","));
+    url.searchParams.set("codec", codec);
+  }
+  return url.href;
+}
+// Program entries are "program", or "program:<codec>" when the mixer encodes the program twice.
+const isProgramValue = (value) => value === "program" || value.startsWith("program:");
+// Dirty renditions publish only their codec; like the player's own picker, H.265 is the HDR one.
+// On an SDR canvas both are SDR, so the codec names them.
+const RANGE_OF_CODEC = {h264: "SDR", h265: "HDR"};
+function programOptions(s, keys) {
+  const codecs = s.preview_codecs?.length ? s.preview_codecs : ["h265", "h264"].filter(playable);
+  const preferred = defaultCodec(codecs), name = keys ? "Program dirty" : "Program";
+  // The player shows its codec picker when the mixer has two program codecs.
+  const base = {group: "Program", dot: "var(--pgm)", program: true, chrome: s.preview_codecs?.length > 1 ? 60 : 49};
+  // Without the mixer's codecs yet, or with one, a single entry keeps the value saved by older pages.
+  if (!s.preview_codecs?.length || codecs.length < 2) {
+    return [{...base, value: "program", label: name, preferred: true, url: playerUrl(null, preferred),
+             unplayable: !playable(preferred),
+             meta: [keys && "with keys", s.preview_codecs?.length && codecName(preferred), formatText(s.canvas)].filter(Boolean).join(" · ")}];
+  }
+  const hdr = (s.canvas?.working_format || "nv12") !== "nv12";
+  return codecs.filter(playable).map((codec) => ({
+    ...base, value: `program:${codec}`, label: `${name} · ${(hdr && RANGE_OF_CODEC[codec]) || codecName(codec)}`,
+    preferred: codec === preferred, url: playerUrl(null, codec),
+    meta: [keys && "with keys", codecName(codec), s.canvas && canvasText(s.canvas)].filter(Boolean).join(" · "),
+  }));
+}
+function outputOptions() {
+  const s = settings(), keys = Boolean(state?.dsk?.length);
+  return [...programOptions(s, keys), ...(s.preview_outputs || []).map((o) => {
+    // Older mixers publish aux outputs without a layout, so the bus decides what an output is.
+    const aux = auxById(o.bus), layout = aux ? layoutOf(aux) : null, pages = aux && isPages(aux);
+    const meta = !aux ? ["no keys", `${codecName(o.codec)} ${String(o.color || "").toUpperCase()}`.trim(), o.fps && `p${o.fps}`]
+      : pages ? [`${aux.total} sources`, `${aux.pages} pages`, o.fps && `p${o.fps}`]
+      : ["PGM · PVW", `${aux.scenes.length} scene slots`, o.fps && `p${o.fps}`];
+    return {value: o.bus, group: aux ? "Monitoring" : "Program", layout, label: o.label || o.bus, url: playerUrl(o), chrome: 49,
+            unplayable: !playable(o.codec),
+            dot: !aux ? "var(--pgm)" : pages ? "var(--accent)" : "var(--pvw)", meta: meta.filter(Boolean).join(" · ")};
+  })];
+}
+
+/* ---------- monitor wall ---------- */
+// The deck keeps four slot columns and one row of filter chips; two viewers need a window about
+// 1140 px wide, three never fit.
+const MIN_VIEWER = 300, DECK_MIN = 480;
+const pageFlips = new Map();     // source_pages bus → {page, auto, at}: when this page was first seen
+let viewers = [];
+let viewersTouched = false;      // once the operator adds or closes one, the first state adds none
+const savedViewers = store.get("viewers", null);
+const validSaved = Array.isArray(savedViewers) && savedViewers.length >= 1 && savedViewers.length <= 2 &&
+                   savedViewers.every((v) => typeof v === "string");
+const saveViewers = () => store.set("viewers", viewers.map((v) => v.out));
+// A saved output the mixer no longer offers, or "program" from a page without codec entries, plays the
+// default program.
+const optionOf = (v, options) => options.find((o) => o.value === v.out) || options.find((o) => o.preferred) || options[0];
+// Canvas pixels of an output: an aux bus reports its own, the program has the mixer's.
+function canvasSize(aux) {
+  const c = settings().canvas;
+  return aux?.canvas ? [aux.canvas.w, aux.canvas.h] : c ? [c.width, c.height] : [9, 16];
+}
+// The slots widget and the pager follow what the viewers show.
+const redraw = () => (state ? render() : layoutWall());
+
+function addViewer(out) {
+  const v = {out, el: el("section", "card viewer"), head: el("header"), src: null};
+  v.dd = dropdown((value) => { v.out = value; saveViewers(); redraw(); });
+  v.pager = el("span", "pager");
+  v.pager.setAttribute("role", "group");
+  v.pager.setAttribute("aria-label", "Multiviewer pages");
+  v.pager.innerHTML = '<button class="mini" type="button" aria-label="Previous page">‹</button><span class="pg" aria-live="polite"><span></span><i></i></span>' +
+                      '<button class="mini" type="button" aria-label="Next page">›</button>' +
+                      '<button class="mini" type="button"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M10 6a4 4 0 1 1-1.2-2.85"/><path d="M9.2 1v2.3H6.9"/></svg></button>';
+  const [prev, pg, next, auto] = v.pager.children;
+  prev.onclick = () => pageCommand(v.bus, {step: -1});
+  next.onclick = () => pageCommand(v.bus, {step: 1});
+  auto.onclick = () => pageCommand(v.bus, {auto: !auxById(v.bus)?.auto});
+  Object.assign(v, {pg: pg.firstChild, dwell: pg.lastChild, auto});
+  v.close = el("button", "mini close", "×");
+  v.close.type = "button";
+  v.close.onclick = () => { viewersTouched = true; viewers.splice(viewers.indexOf(v), 1); v.el.remove(); saveViewers(); redraw(); };
+  // The screen clips the player's footer and blocks clicks into it; its numbers show in the row under
+  // the screen (stream stats), and the rest of the player (status, errors) is one click away.
+  v.open = el("a", "mini open");
+  v.open.target = "_blank";
+  v.open.rel = "noopener";
+  v.open.title = "Open in the player: status, errors, all stats";
+  v.open.setAttribute("aria-label", "Open this output in the player");
+  v.open.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 2h3v3M10 2 5.5 6.5"/></svg>';
+  v.head.append(el("span", "lbl", "Output"), v.dd.root, v.pager, v.close);
+  v.screen = el("div", "screen");
+  v.frame = el("iframe");
+  v.frame.setAttribute("allow", "autoplay; fullscreen; picture-in-picture");
+  v.frame.allowFullscreen = true;
+  v.frame.tabIndex = -1;   // like the click layer: Tab would reach the player's controls and end the shortcuts
+  v.ovl = el("div", "ovl");
+  v.screen.append(v.frame, v.ovl);
+  v.screen.title = "Double-click or Enter for full screen";
+  v.screen.tabIndex = 0;
+  v.screen.setAttribute("role", "button");
+  const fullscreen = () => (document.fullscreenElement ? document.exitFullscreen() : v.screen.requestFullscreen?.())?.catch?.(() => {});
+  v.screen.ondblclick = fullscreen;
+  v.screen.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); fullscreen(); } };
+  v.statsRow = el("div", "vstats");
+  v.statsRow.setAttribute("role", "group");
+  v.statsRow.setAttribute("aria-label", "Stream stats");
+  v.meters = Object.fromEntries(Object.keys(STREAM_MEANING).map((key) => {
+    const m = el("span", "meter", `${key.toUpperCase()} `);
+    m.append(el("b", key === "fps" ? "" : "ms", "—"));
+    v.statsRow.append(m);
+    return [key, m];
+  }));
+  v.el.append(v.head, v.screen, v.statsRow, v.open);
+  $("wall").append(v.el);
+  viewers.push(v);
+}
+function refreshViewer(v, options) {
+  const opt = optionOf(v, options), aux = auxById(opt.value), size = canvasSize(aux);
+  v.opt = opt;
+  v.dd.setOptions(options);
+  v.dd.set(opt.value);
+  v.el.style.setProperty("--tally", opt.dot);
+  v.frame.style.setProperty("--chrome", `${opt.chrome}px`);
+  v.frame.title = opt.label;
+  v.screen.setAttribute("aria-label", `${opt.label}: full screen`);
+  v.screen.style.aspectRatio = `${size[0]} / ${size[1]}`;
+  v.screen.style.setProperty("--ar", size[0] / size[1]);
+  v.grid = aux && !isPages(aux) ? aux.id : null;
+  v.bus = aux && isPages(aux) ? aux.id : null;
+  v.pager.hidden = !v.bus;
+  v.el.classList.toggle("paged", Boolean(v.bus));
+  if (v.bus) renderPager(v, aux);
+  renderOverlay(v, aux, size, opt.unplayable ? "This browser cannot play H.265" : "");
+  // The program plays at once; other outputs wait for the state that names their mountpoints.
+  // A viewer hidden for lack of room drops its stream.
+  const src = !v.el.hidden && !opt.unplayable && (state || isProgramValue(v.out)) ? opt.url : "";
+  if (v.src !== src) {
+    v.src = src; v.stats = null; v.frame.src = src || "about:blank"; v.frame.hidden = !src;   // about:blank is white
+    renderStream(v);   // a new source drops the previous one's stats
+  }
+  v.open.href = opt.url;
+  v.open.hidden = !src;
+}
+function renderPager(v, aux) {
+  const page = `${aux.page + 1}/${aux.pages}`;
+  if (v.pg.textContent !== page) v.pg.textContent = page;   // a live region: rewriting it would re-announce
+  v.pg.parentElement.title = `Sources ${aux.first}–${aux.first + aux.tiles.length - 1} of ${aux.total}`;
+  v.auto.setAttribute("aria-pressed", String(aux.auto));
+  v.auto.title = `Rotate every ${aux.rotate_s} s (R)`;
+  v.auto.setAttribute("aria-label", `Rotate pages every ${aux.rotate_s} seconds`);
+  // The bar runs from when polling first saw this page, so it trails the mixer by up to one poll.
+  // With reduced motion it steps at the poll rate instead of animating.
+  const at = pageFlips.get(aux.id)?.at ?? null, key = `${aux.id}@${at}`;
+  if (v.dwellKey === key && !reduced) return;
+  v.dwellKey = key;
+  const done = at === null ? 0 : Math.min(1, (performance.now() - at) / 1000 / aux.rotate_s);
+  v.dwell.style.transition = "none";
+  v.dwell.style.width = `${done * 100}%`;
+  if (at === null || reduced || done >= 1) return;
+  v.dwell.getBoundingClientRect();   // commit the start width before animating to the end
+  v.dwell.style.transition = `width ${(1 - done) * aux.rotate_s}s linear`;
+  v.dwell.style.width = "100%";
+}
+function trackPages() {
+  for (const aux of auxBuses()) if (isPages(aux)) {
+    const seen = pageFlips.get(aux.id);
+    const flipped = seen && (seen.page !== aux.page || (!seen.auto && aux.auto));
+    pageFlips.set(aux.id, {page: aux.page, auto: aux.auto, at: !aux.auto ? null : flipped ? performance.now() : seen?.at ?? performance.now()});
+  }
+}
+const KIND_TAGS = {video: "dec", browser: "web", nv12: "raw", p010: "raw", v210: "raw"};
+// Labels and tally boxes are HTML on top of the video, placed in the canvas pixels the mixer reports.
+function renderOverlay(v, aux, [cw, ch], note) {
+  const items = [];
+  if (aux && isPages(aux)) {
+    for (const t of aux.tiles || []) items.push({r: t, text: t.id, kind: t.id.startsWith("dsk_") ? "key" : KIND_TAGS[t.kind] || t.kind, bottom: true});
+  } else if (aux) {
+    const status = state.status || {};
+    for (const cell of aux.cells || []) {
+      if (cell.role === "slot") items.push({r: cell, lead: `M${cell.slot + 1} ·`, text: aux.scenes[cell.slot] || "—", bottom: true});
+      else items.push({r: cell, box: cell.role, lead: `${cell.role.toUpperCase()} ·`,
+                       text: (cell.role === "pgm" ? status.pgm_scene : aux.pvw_scene ?? status.pvw_scene) || "—"});
+    }
+  }
+  if (!changed(v.ovl, [items, cw, ch, note])) return;
+  const pct = (n, of) => `${n / of * 100}%`;
+  v.ovl.replaceChildren(...items.flatMap(({r, box, lead, text, kind, bottom}) => {
+    const nodes = [];
+    if (box) {
+      const b = el("div", `box ${box}`);
+      Object.assign(b.style, {left: pct(r.x, cw), top: pct(r.y, ch), width: pct(r.w, cw), height: pct(r.h, ch)});
+      nodes.push(b);
+    }
+    const tag = el("span", "tag");
+    if (lead) tag.append(el("b", "", lead));
+    tag.append(tail("", text));
+    tag.style.left = pct(r.x + 10, cw);
+    tag.style.maxWidth = pct(r.w - 20, cw);
+    tag.style.top = pct(bottom ? r.y + r.h - 10 : r.y + 10, ch);
+    if (bottom) tag.style.transform = "translateY(-100%)";
+    if (kind) tag.append(el("i", "", kind));
+    nodes.push(tag);
+    return nodes;
+  }), ...(note ? [el("p", "", note)] : []));
+}
+function pageCommand(bus, change) {
+  if (bus) command({command: "aux_page", bus, ...change});
+}
+// [ ] and R act on the Multiviewer a viewer shows, else on the first one the mixer has.
+function pagesBus() {
+  return viewers.find((v) => !v.el.hidden && v.bus)?.bus ||
+         auxBuses().find(isPages)?.id || null;
+}
+// What a second viewer shows first: a multiviewer, else any other output, else the program again.
+function secondOutput() {
+  const all = outputOptions(), first = viewers[0] && optionOf(viewers[0], all);
+  const options = all.filter((o) => o !== first);
+  return options.find((o) => o.layout === "source_pages") || options.find((o) => o.layout) ||
+         options.find((o) => !o.program) || options[0] || first;
+}
+function layoutWall() {
+  const main = document.querySelector("main"), narrow = matchMedia("(max-width: 900px)").matches;
+  const room = main.clientWidth - DECK_MIN - 14, options = outputOptions();
+  const aspectOf = (v) => { const [w, h] = canvasSize(auxById(optionOf(v, options).value)); return w / h; };
+  // The video gets what is left between the header and the stats row, inside the card's borders.
+  const height = main.clientHeight - viewers[0].head.offsetHeight - viewers[0].statsRow.offsetHeight - 3;
+  // A second viewer only when both keep a usable size; the choice is kept for a larger window.
+  const fitsTwo = narrow || Math.min(height * aspectOf(viewers[0]), (room - 12) / 2) >= MIN_VIEWER;
+  const two = $("viewer-count").children[1];
+  two.disabled = !fitsTwo;
+  two.title = fitsTwo ? "" : "Window too narrow for two viewers";
+  for (const b of $("viewer-count").children) b.setAttribute("aria-pressed", String(Number(b.dataset.n) === viewers.length));
+  viewers.forEach((v, i) => {
+    v.el.hidden = i > 0 && !fitsTwo;
+    v.close.hidden = viewers.length < 2;
+    v.close.setAttribute("aria-label", `Close viewer ${i + 1}`);
+    v.dd.setLabel(`Output of viewer ${i + 1}`);
+    refreshViewer(v, options);
+  });
+  const shown = viewers.filter((v) => !v.el.hidden);
+  if (narrow) shown.forEach((v) => (v.el.style.width = ""));
+  else {
+    const share = (room - (shown.length - 1) * 12) / shown.length;
+    shown.forEach((v) => (v.el.style.width = `${Math.floor(Math.max(240, Math.min(height * aspectOf(v), share)))}px`));
+  }
+  shown.forEach(fitHeader);
+  trimTakebar();   // the deck got its width
+}
+// The OUTPUT label shows whenever the header has room for it.
+function fitHeader(v) {
+  v.head.classList.remove("tight");
+  const over = (n) => n && n.scrollWidth > n.clientWidth;   // the output name shrinks before the header overflows
+  v.head.classList.toggle("tight", over(v.head) || over(v.head.querySelector(".dd-btn span")));
+}
+// A take bar separator is only shown between two controls on the same row, never at a row end, and
+// the key hint, like the Keys card's note beside the key fade, only when it fits whole.
+function trimTakebar() {
+  for (const hint of [$("hint"), document.querySelector("#keys-card .note")])
+    hint.style.visibility = hint.scrollWidth > hint.clientWidth ? "hidden" : "";
+  const seps = [...document.querySelectorAll("#takebar .vsep")];
+  seps.forEach((sep) => (sep.hidden = false));
+  const sameRow = (a, b) => { const r = a.getBoundingClientRect(), q = b.getBoundingClientRect(); return q.top < r.bottom && q.bottom > r.top; };
+  const shown = (node, step) => { while (node?.hidden || node?.offsetParent === null) node = node[step]; return node; };
+  seps.forEach((sep) => (sep.hidden = ![shown(sep.previousElementSibling, "previousElementSibling"),
+                                        shown(sep.nextElementSibling, "nextElementSibling")].every((n) => n && sameRow(sep, n))));
+}
+// main also shrinks when the top bar wraps, e.g. while the connection error shows.
+new ResizeObserver(layoutWall).observe(document.querySelector("main"));
+for (const b of $("viewer-count").children) b.onclick = () => {
+  const n = Number(b.dataset.n);
+  viewersTouched = true;
+  while (viewers.length > n) viewers.pop().el.remove();
+  if (viewers.length < n) addViewer(secondOutput().value);
+  saveViewers();
+  redraw();
+};
+
+/* ---------- stream stats ---------- */
+// The screen clips the player's stats footer, so each player posts its numbers to this page about once
+// per second, and its viewer shows them under the screen.
+const STREAM_STALE_MS = 3000;
+const STREAM_MEANING = {
+  lat: "Latency: median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. " +
+       "Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.",
+  rtt: "RTT: WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.",
+  fps: "FPS: frames this browser decoded per second during the latest sample (receiver side, not the mixer's output rate).",
+  buf: "Buffer: average receiver jitter-buffer residence during the latest sample; not end-to-end latency.",
+};
+addEventListener("message", (e) => {
+  const v = e.origin === playerBase.origin && viewers.find((x) => x.frame.contentWindow === e.source);
+  if (!v || e.data?.type !== "avp-preview-stats") return;
+  // The frame keeps its window across a source change, so a message the previous player posted just
+  // before it navigated would otherwise be filed under the new output.
+  if (!v.src || e.data.search !== new URL(v.src).search) return;
+  v.stats = {data: e.data, at: performance.now()};
+  renderStream(v);
+});
+function renderStream(v) {
+  const data = v.stats && performance.now() - v.stats.at <= STREAM_STALE_MS ? v.stats.data : null;
+  const text = (x) => (typeof x === "string" ? x : "");
+  const status = data ? text(data.status) : "No stats from its player in the last 3 s";
+  // Same thresholds as the player's latency and RTT colours.
+  const level = (ms) => (ms === null ? "" : ms <= 200 ? "good" : ms <= 400 ? "warn" : "bad");
+  const stat = (key, value, unit, coloured, detail = "") => {
+    const n = Number.isFinite(value) ? Math.round(value) : null, m = v.meters[key], b = m.lastElementChild;
+    // From 1000 ms on, seconds ("1.2 s", "12 s") keep the value inside its reserved width.
+    const [num, u] = n === null ? ["—", ""] : unit === "ms" && n >= 1000 ? [String(n < 9950 ? (n / 1000).toFixed(1) : Math.round(n / 1000)), "s"]
+                                                                          : [String(n), unit];
+    if (b.textContent !== num + u) b.replaceChildren(num, ...(u ? [el("span", "u", u)] : []));
+    if (coloured) b.dataset.level = level(n);
+    m.title = [STREAM_MEANING[key], detail, status].filter(Boolean).join("\n");
+  };
+  stat("lat", data?.latency?.ms, "ms", true, text(data?.latency?.title));
+  stat("rtt", data?.rtt_ms, "ms", true);
+  stat("fps", data?.fps, "", false);
+  stat("buf", data?.buffer_ms, "ms", false);
+}
+
+/* ---------- polling ---------- */
+function render() {
+  const s = settings(), status = state.status || {};
+  scenes = s.scenes ? s.scenes.map((x) => ({id: x.id, name: x.name})) : (state.scenes || []).map((id) => ({id}));
+  scenes.sort((a, b) => groupRank(a.id) - groupRank(b.id) || a.id.localeCompare(b.id, undefined, {numeric: true}));
+  if (!selected || !scenes.some((scene) => scene.id === selected)) selected = status.pvw_scene || status.pgm_scene || "";
+  applySettings(s);
+  trackPages();
+  layoutWall();   // first: the slots widget and the page keys follow what the viewers show
+  renderCounts(); renderMeters(); renderBuses(); renderKeys(); renderSlots(); renderChips(); renderScenes();
+  $("hint-pages").hidden = !pagesBus();
+  $("hint").title = ["1–9 scene · C cut · F fade · W wipe · D direct", pagesBus() && "[ ] page · R rotate",
+                     gridAux() && "⇧1–8 slot"].filter(Boolean).join(" · ");
+  trimTakebar();
+  renderGraph();
+}
+let polling = false, pollAgain = false;
+async function refresh() {
+  if (polling) { pollAgain = true; return; }
+  polling = true;
+  try {
+    const next = await api("/api/state");
+    if (next.setup_revision !== undefined) {
+      if (setupRevision !== undefined && setupRevision !== next.setup_revision) {
+        selected = ""; armedSlot = null;
+        directTouched = tookTransition = false;
+        for (const k in touched) touched[k] = false;
+        viewers.forEach((v) => (v.src = null));   // reconnect every player to the new graph
+      }
+      setupRevision = next.setup_revision;
+    }
+    if (!state && !validSaved && !viewersTouched) {
+      state = next;
+      // With both monitors the first viewer shows the Program preview: its PGM tile keeps air in view.
+      const grid = outputOptions().find((o) => o.layout === "pgm_pvw_grid");
+      if (grid && outputOptions().some((o) => o.layout === "source_pages")) viewers[0].out = grid.value;
+      const second = secondOutput();
+      if (!second.program) addViewer(second.value);
+      saveViewers();
+    }
+    state = next;
+    $("conn").hidden = true;
+    stale = false;
+    render();
+  } catch (exc) {
+    $("conn").textContent = exc.message || String(exc);
+    $("conn").hidden = false;
+    stale = true;
+    renderGraph();
+  } finally {
+    polling = false;
+    if (pollAgain) { pollAgain = false; refresh(); }
+  }
+}
+
+/* ---------- controls ---------- */
+$("cut").onclick = () => take("cut");
+$("fade").onclick = () => take("fade");
+$("direct").onclick = () => { directTouched = true; setDirect(!direct); };
+$("fade-s").oninput = () => { touched.fade = true; };
+$("key-fade-s").oninput = () => { touched.keyFade = true; };
+$("wipe-file").oninput = () => { touched.wipe = true; };
+$("tab-scenes").onclick = () => setTab("scenes");
+$("tab-graph").onclick = () => setTab("graph");
+
+addEventListener("keydown", (e) => {
+  if (e.target.closest?.("input, .dd-menu") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const shifted = Number(e.code.replace("Digit", ""));
+  if (e.shiftKey && gridAux() && shifted >= 1 && shifted <= 8) { e.preventDefault(); assignSlot(shifted - 1, selected || null); return; }
+  const digit = Number(e.key);
+  if (digit >= 1 && digit <= 9 && visible[digit - 1]) { e.preventDefault(); pick(visible[digit - 1]); return; }
+  const k = e.key.toLowerCase(), bus = pagesBus();
+  if (k === "c") take("cut");
+  else if (k === "f") take("fade");
+  else if (k === "w") take("wipe");
+  else if (k === "d") $("direct").click();
+  else if (bus && e.key === "[") pageCommand(bus, {step: -1});
+  else if (bus && e.key === "]") pageCommand(bus, {step: 1});
+  else if (bus && k === "r") pageCommand(bus, {auto: !auxById(bus).auto});
+  else return;
+  e.preventDefault();
+});
+
+(validSaved ? savedViewers : ["program"]).forEach(addViewer);
+setTab(tab === "graph" ? "graph" : "scenes");
+viewers.forEach(renderStream);
 refresh();
 setInterval(refresh, 1000);
+setInterval(() => viewers.forEach(renderStream), 1000);   // a player that stopped posting shows "—" after STREAM_STALE_MS
 addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>
