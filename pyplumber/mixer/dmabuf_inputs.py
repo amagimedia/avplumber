@@ -10,6 +10,7 @@ The REST helpers open the windows and wait for their sockets.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import time
@@ -129,24 +130,35 @@ def open_browser_windows(base_url: str, ids: List[str], page_url: str, width: in
 
 
 def open_windows(base_url: str, windows: List[dict]) -> None:
-    """Reuse matching windows; recreate only pages whose capture settings changed."""
+    """Reuse matching windows; recreate only pages whose capture settings changed.
+
+    Each open waits for its page load and a browser worker process opens one page at a time,
+    so the changed pages open concurrently with one request in flight per worker."""
     status = rest_request(base_url, "GET", "/status") or {}
     existing = {w["id"]: w for w in status.get("windows", [])}
+    changed = []
     for spec in windows:
         wanted = {**spec, "audio": False}
         current = existing.get(spec["id"])
         if current and current.get("stats", {}).get("quarantinedFrameCount", 0):
             raise RuntimeError(f"Browser {spec['id']} has quarantined DMA-BUF frames; restart its browser worker")
-        if current and all(current.get(key) == value for key, value in wanted.items()):
-            continue
-        if current:
-            rest_request(base_url, "POST", "/window/close", {"id": spec["id"]})
+        if not current or any(current.get(key) != value for key, value in wanted.items()):
+            changed.append((wanted, current is not None))
+
+    def reopen(wanted, exists):
+        if exists:
+            rest_request(base_url, "POST", "/window/close", {"id": wanted["id"]})
         opened = rest_request(base_url, "POST", "/window/open", wanted)
         ignored = [key for key in ("ringSize", "holdLastFrame") if key in wanted
                    and (opened or {}).get(key) != wanted[key]]
         if ignored:
             raise RuntimeError(f"Browser service did not apply {', '.join(ignored)}; "
                                "update dma-browser before starting the mixer")
+
+    # A single-process browser service reports no workers: one request at a time.
+    with ThreadPoolExecutor(max_workers=len(status.get("workers") or [None])) as pool:
+        for opening in [pool.submit(reopen, *change) for change in changed]:
+            opening.result()
 
 
 def refresh_windows(base_url: str, ids: List[str]) -> None:

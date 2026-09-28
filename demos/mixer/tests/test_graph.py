@@ -468,6 +468,32 @@ def test_unchanged_browser_windows_survive_reconfiguration(monkeypatch):
     ]
 
 
+def test_changed_browser_windows_open_concurrently_one_per_worker(monkeypatch):
+    import threading
+    import time
+    from pyplumber.mixer import dmabuf_inputs
+
+    lock, in_flight, peak, order = threading.Lock(), [0], [0], []
+
+    def fake_rest(base_url, method, path, body=None):
+        if path == "/status":
+            return {"windows": [{"id": "page_00"}], "workers": [{"index": 0}, {"index": 1}]}
+        with lock:
+            order.append((path, body["id"]))
+            in_flight[0] += 1
+            peak[0] = max(peak[0], in_flight[0])
+        time.sleep(0.02)
+        with lock:
+            in_flight[0] -= 1
+        return body
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_rest)
+    dmabuf_inputs.open_browser_windows("http://b", [f"page_{i:02d}" for i in range(4)], "http://p", 480, 270, 60)
+    assert peak[0] == 2
+    assert sorted(order) == sorted([("/window/close", "page_00")] + [("/window/open", f"page_{i:02d}") for i in range(4)])
+    assert order.index(("/window/close", "page_00")) < order.index(("/window/open", "page_00"))
+
+
 def test_quarantined_browser_is_not_reused_or_recreated(monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
 
