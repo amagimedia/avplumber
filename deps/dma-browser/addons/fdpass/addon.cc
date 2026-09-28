@@ -18,6 +18,8 @@
 #include <cstdlib>
 #include <inttypes.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
@@ -114,8 +116,10 @@ class Server {
       const char *v = std::getenv("FDPASS_LOG_FRAMES");
       logf(path_, "[fdpass] frame logging enabled (FDPASS_LOG_FRAMES=%s) build=%s %s", (v ? v : "<unset>"), __DATE__, __TIME__);
     }
+    wake_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (wake_fd_ < 0) { logf(path_, "[fdpass] eventfd() failed errno=%d (%s)", errno, strerror(errno)); return false; }
     listen_fd_ = bindListener();
-    if (listen_fd_ < 0) return false;
+    if (listen_fd_ < 0) { ::close(wake_fd_); wake_fd_ = -1; return false; }
     running_.store(true);
     accept_thread_ = std::thread([this]() { this->acceptLoop(); });
     logf(path_, "[fdpass] Server.start OK path=%s fd=%d", path_.c_str(), listen_fd_);
@@ -130,6 +134,7 @@ class Server {
     const bool ok = ::dup3(ls, listen_fd_, O_CLOEXEC) >= 0;
     if (!ok) logf(path_, "[fdpass] dup3 failed errno=%d (%s)", errno, strerror(errno));
     ::close(ls);
+    wake();  // poll() still waits on the replaced socket
     logf(path_, "[fdpass] socket file re-bound path=%s ok=%d", path_.c_str(), ok);
     return ok;
   }
@@ -137,7 +142,7 @@ class Server {
   std::vector<uint64_t> stop() {
     bool expected = true;
     if (!running_.compare_exchange_strong(expected, false)) return {};
-    if (listen_fd_ >= 0) { ::shutdown(listen_fd_, SHUT_RDWR); }
+    wake();
     if (accept_thread_.joinable()) accept_thread_.join();
     std::vector<int> clients;
     {
@@ -162,6 +167,8 @@ class Server {
       emit_release(path_, frame_count, false);
     }
     if (listen_fd_ >= 0) { ::close(listen_fd_); listen_fd_ = -1; }
+    ::close(wake_fd_);
+    wake_fd_ = -1;
     if (unlink_on_stop_ && !path_.empty()) { ::unlink(path_.c_str()); }
     return abandoned;
   }
@@ -413,39 +420,53 @@ class Server {
     }
   }
 
-  void pollClientAcks() {
-    std::vector<int> clients;
-    {
-      std::lock_guard<std::mutex> lk(clients_mu_);
-      clients = clients_;
-    }
-    for (int fd : clients) readClientAcks(fd);
+  void wake() {
+    const uint64_t one = 1;
+    if (::write(wake_fd_, &one, sizeof(one)) < 0) {}  // EAGAIN: a wakeup is already pending
   }
 
+  // Sleeps in poll() until an ACK, a connection or wake(); clients are read before accepting so a
+  // stale revents never meets a reused descriptor.
   void acceptLoop() {
-    for (;;) {
-      if (!running_.load()) break;
-      int cfd = ::accept(listen_fd_, nullptr, nullptr);
-      if (cfd < 0) {
-        if (errno == EINTR) continue;
-        if (errno != EAGAIN && errno != EWOULDBLOCK) { std::fprintf(stderr, "[fdpass] accept error errno=%d (%s)\n", errno, strerror(errno)); std::fflush(stderr); emit_log(path_, std::string("[fdpass] accept error errno=") + std::to_string(errno)); }
-        pollClientAcks();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        continue;
-      }
-      int fdflags = ::fcntl(cfd, F_GETFD, 0);
-      if (fdflags >= 0) ::fcntl(cfd, F_SETFD, fdflags | FD_CLOEXEC);
-      // Set non-blocking on client to avoid blocking sends
-      int sflags = ::fcntl(cfd, F_GETFL, 0);
-      if (sflags >= 0) ::fcntl(cfd, F_SETFL, sflags | O_NONBLOCK);
+    std::vector<pollfd> fds;
+    while (running_.load()) {
+      fds.assign({{wake_fd_, POLLIN, 0}, {listen_fd_, POLLIN, 0}});
       {
         std::lock_guard<std::mutex> lk(clients_mu_);
-        clients_.push_back(cfd);
-        ack_states_[cfd].generation = ++next_client_generation_;
+        for (int fd : clients_) fds.push_back({fd, POLLIN, 0});
       }
-      std::fprintf(stderr, "[fdpass] client accepted fd=%d (path=%s)\n", cfd, path_.c_str()); std::fflush(stderr);
-      emit_log(path_, std::string("[fdpass] client accepted path=") + path_);
+      if (::poll(fds.data(), fds.size(), -1) < 0) {
+        if (errno != EINTR) acceptLoopError("poll");
+        continue;
+      }
+      uint64_t wakeups;
+      if (fds[0].revents && ::read(wake_fd_, &wakeups, sizeof(wakeups)) < 0) {}  // resets the counter
+      for (size_t i = 2; i < fds.size(); ++i)
+        if (fds[i].revents) readClientAcks(fds[i].fd);
+      while (fds[1].revents) {
+        int cfd = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK);
+        if (cfd < 0) {
+          if (errno == EINTR) continue;
+          if (errno != EAGAIN && errno != EWOULDBLOCK) acceptLoopError("accept");
+          break;
+        }
+        {
+          std::lock_guard<std::mutex> lk(clients_mu_);
+          clients_.push_back(cfd);
+          ack_states_[cfd].generation = ++next_client_generation_;
+        }
+        std::fprintf(stderr, "[fdpass] client accepted fd=%d (path=%s)\n", cfd, path_.c_str()); std::fflush(stderr);
+        emit_log(path_, std::string("[fdpass] client accepted path=") + path_);
+      }
     }
+  }
+
+  // A persistent error (e.g. EMFILE) leaves the descriptor ready; pause so poll() cannot spin.
+  void acceptLoopError(const char *call) {
+    const int e = errno;
+    std::fprintf(stderr, "[fdpass] %s error errno=%d (%s)\n", call, e, strerror(e)); std::fflush(stderr);
+    emit_log(path_, std::string("[fdpass] ") + call + " error errno=" + std::to_string(e));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
   void removeClient(int fd, bool drained = false, uint64_t generation = 0) {
@@ -458,10 +479,12 @@ class Server {
     // Retire recipients before accept() can reuse this descriptor.
     releaseClientFrames(fd, drained);
     ::close(fd);
+    wake();  // close() does not end a poll() on fd; the connection lingers until poll() returns
   }
 
   std::string path_;
   int listen_fd_;
+  int wake_fd_ = -1;
   std::atomic<bool> running_;
   std::thread accept_thread_;
   std::mutex clients_mu_;
