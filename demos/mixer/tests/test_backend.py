@@ -107,3 +107,58 @@ def test_source_pages_bus_skips_the_program_tap_and_labels_outputs(native_bounda
     settings = json.loads(app.avp.commands_registered["mixer.settings"](""))
     assert [(o["bus"], o["label"], o["layout"]) for o in settings["preview_outputs"]] == [
         *([("mv", "Program preview", "pgm_pvw_grid")] if scene_view else []), ("mv2", "Multiviewer", "source_pages")]
+
+
+def test_pacing_loops_and_single_threaded_gpu_graphs(native_boundary, tmp_path, monkeypatch):
+    """Source pacing spreads over PACING_LOOPS event loops by index (outputs keep
+    "default"); graphs of CUDA filters and setparams run without FFmpeg slice threads."""
+    from mixer import PACING_LOOPS
+    from pyplumber.mixer import dmabuf_inputs
+    nodes, builder = native_boundary
+    class Engine(FakeAvp):
+        def addNode(self, node, **kwargs):
+            super().addNode(node)
+    api = fake_api()
+    api.AVPlumber = Engine
+    api.CudaRectOverlay = nodes.CudaRectOverlay
+    api.MixerGraphBuilder = builder
+    (tmp_path / "page.sock").touch()
+    monkeypatch.setattr(dmabuf_inputs, "rest_request",
+                        lambda base, method, path, body=None: body if path == "/window/open" else {"windows": []})
+    video = [{"id": f"video{i}", "kind": "video", "path": f"clip{i}.mp4", "width": 1920, "height": 1080,
+              "color": "sdr"} for i in range(PACING_LOOPS)]
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps({
+        "canvas": {"width": 1080, "height": 1920, "fps": 25},
+        "sources": [*video,
+                    {"id": "page", "kind": "browser", "color": "sdr", "url": "https://example.org/",
+                     "width": 1920, "height": 1080},
+                    {"id": "raw", "kind": "nv12", "path": "raw.nv12", "width": 320, "height": 180, "color": "sdr"},
+                    {"id": "gen", "kind": "v210", "path": "gen.v210", "width": 1920, "height": 1080, "color": "sdr"}],
+        "wipes": [{"id": "swoosh", "path": "/media/swoosh.mov"}],
+        "scenes": [{"id": "full", "items": [{"source": "video0", "dst": {"x": 0, "y": 0, "w": 1080, "h": 1920}}]}],
+        "renditions": [{"id": "program", "port": 5004}],
+        "aux_buses": [{"id": "mv", "scenes": ["full"] * 8, "renditions": [{"id": "monitor", "port": 5008}]}],
+    }))
+    app = build_application(GraphOptions(config=str(path), janus_output=True,
+                                         dmabuf_socket_dir=str(tmp_path)), api=api)
+    graph = {n.parameters["name"]: n.parameters for n in app.avp.nodes if "name" in n.parameters}
+
+    source_pacing = {**{f"{kind}_{i}": i for kind in ("realtime", "fps") for i in (*range(PACING_LOOPS), 5, 6)},
+                     f"input_{PACING_LOOPS}_smooth": PACING_LOOPS}
+    assert {name: graph[name].get("event_loop") for name in source_pacing} == {
+        name: f"pacing_{index % PACING_LOOPS}" for name, index in source_pacing.items()}
+    assert graph[f"input_{PACING_LOOPS}_smooth"]["event_loop"] == "pacing_0"   # wraps around
+    other_pacing = [name for name, p in graph.items()
+                    if p["type"] in ("realtime", "force_fps", "smooth_timestamps") and name not in source_pacing]
+    assert {"janus_fps", "aux_mv_fps", "mixer_wipe_rt"} <= set(other_pacing)
+    assert not [name for name in other_pacing if "event_loop" in graph[name]]
+
+    filters = {name: p for name, p in graph.items() if p["type"] == "filter_video"}
+    single = {name for name, p in filters.items() if p.get("threads") == 1}
+    assert {"mixer_color_video0", "scale_program", "aux_mv_sdr", "mixer_out_sel_transition",
+            f"input_{PACING_LOOPS}_timestamp"} <= single
+    # CPU work (the wipe decode conversion) keeps FFmpeg's threads.
+    assert "mixer_wipe_fmt" in filters and "mixer_wipe_fmt" not in single
+    # A raw source's setpts and hwupload graphs do no CPU slice work either.
+    assert {"filter_5", "upload_5"} <= single

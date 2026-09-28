@@ -364,6 +364,19 @@ def _input_group(index: int) -> str:
     return f"input_{index}"
 
 
+# Event loops shared by the sources' pacing nodes (realtime, force_fps, smooth_timestamps).
+# One loop's cost grows with the square of the sources it paces: each wake-up rescans
+# every pending fd wait and every timer insert walks the sorted list. One loop at
+# 100 sources used 43 % of a core, delaying realtime's timestamps and holding decoders;
+# 4 loops cut that term 16x (about 33 sources each at 130) for three more mostly idle
+# threads. Output, aux and wipe pacing keep the "default" loop to themselves.
+PACING_LOOPS = 4
+
+
+def _pacing_loop(index: int) -> str:
+    return f"pacing_{index % PACING_LOOPS}"
+
+
 def _init_avp(avp_options, api):
     """AVPlumber instance + control server + CUDA hwaccel — shared by both the
     --input and --config build paths."""
@@ -402,12 +415,14 @@ def _build_input(
             api, prefix=f"input_{index}",
             socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
             width=width, height=height, fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
-            source_group=group, processing_group=group, hold=True, browser_ring_size=options.browser_ring_size)
+            source_group=group, processing_group=group, hold=True, browser_ring_size=options.browser_ring_size,
+            event_loop=_pacing_loop(index))
         for node in nodes:
             avp.addNode(node)
     else:
         fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
-                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop, continuous_loop=True)
+                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop, continuous_loop=True,
+                               event_loop=_pacing_loop(index))
     if not normalize:
         return fps_edge
     normalized_edge = f"input_{index}_normalized"
@@ -660,7 +675,8 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
                 width=source.width, height=source.height, fps=cfg.fps, drm_hwaccel=None,
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True,
-                preserve_alpha=source.id in blended_sources, browser_ring_size=cfg.browser_ring_size)
+                preserve_alpha=source.id in blended_sources, browser_ring_size=cfg.browser_ring_size,
+                event_loop=_pacing_loop(index))
             for node in nodes:
                 avp.addNode(node)
         elif source.kind == "v210":
@@ -670,15 +686,17 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
             edge = build_v210_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                color=source.color.tags)
+                color=source.color.tags, event_loop=_pacing_loop(index))
         elif source.kind in ("nv12", "p010"):
             edge = build_raw420_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 pixel_format="p010le" if source.kind == "p010" else "nv12",
-                group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)
+                group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
+                event_loop=_pacing_loop(index))
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
-                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True)
+                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
+                               event_loop=_pacing_loop(index))
         if source.filter_graph:
             filtered_edge = f"input_{index}_filtered"
             avp.addNode(api.FilterVideo({

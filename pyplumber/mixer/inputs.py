@@ -23,7 +23,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
                 realtime_params: Optional[dict] = None, decoder_params: Optional[dict] = None,
                 decoded_filter: str = "", decoded_filter_threads: Optional[int] = None,
                 pause_params: Optional[dict] = None,
-                auto_restart: Optional[str] = "group") -> str:
+                auto_restart: Optional[str] = "group", event_loop: Optional[str] = None) -> str:
     """Add the chain for one source and return its output edge (``input_<tag>_fps``).
 
     ``auto_restart="group"`` restarts the chain when a live source drops; pass
@@ -36,7 +36,8 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     ``seek <sync_team> now <ts>`` re-cues the input (the replay demo's wiring).
     ``hwaccel=None`` keeps decoded frames on the CPU; ``decoded_filter`` runs
     before speed, pause and realtime pacing, with ``decoded_filter_threads``
-    slice threads when given (FFmpeg's default otherwise).
+    slice threads when given (FFmpeg's default otherwise).  ``event_loop`` names the event loop that runs the
+    pacing nodes (the instance's ``"default"`` loop when omitted).
     """
     edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
     restart = {} if auto_restart is None else {"auto_restart": auto_restart}
@@ -79,21 +80,23 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
         }))
         realtime_src = edge("paused")
     return _pace(avp, api, tag, realtime_src, fps=fps, fps_den=fps_den, group=group,
-                 sync_team=sync_team, realtime_params=realtime_params)
+                 sync_team=sync_team, realtime_params=realtime_params, event_loop=event_loop)
 
 
 def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
-          sync_team: Optional[str] = None, realtime_params: Optional[dict] = None) -> str:
+          sync_team: Optional[str] = None, realtime_params: Optional[dict] = None,
+          event_loop: Optional[str] = None) -> str:
     """``realtime(set_pts) -> force_fps`` tail shared by every source chain:
     rebase onto the host clock, then fix the rate. Returns ``input_<tag>_fps``."""
+    loop = {} if event_loop is None else {"event_loop": event_loop}
     avp.addNode(api.Realtime({
         "name": f"realtime_{tag}", "src": src, "dst": f"input_{tag}_realtime",
-        "set_pts": True, "group": group,
+        "set_pts": True, "group": group, **loop,
         **({} if sync_team is None else {"team": sync_team}), **(realtime_params or {}),
     }))
     avp.addNode(api.ForceFPS({
         "name": f"fps_{tag}", "src": f"input_{tag}_realtime", "dst": f"input_{tag}_fps",
-        "fps": f"{fps}/{fps_den}", "group": group,
+        "fps": f"{fps}/{fps_den}", "group": group, **loop,
     }))
     return f"input_{tag}_fps"
 
@@ -105,7 +108,7 @@ def v210_row_stride(width: int) -> int:
 
 def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                        pixel_format: str, fps: int, fps_den: int = 1,
-                       hwaccel: str = "@gpu", loop: bool = False) -> str:
+                       hwaccel: str = "@gpu", loop: bool = False, event_loop: Optional[str] = None) -> str:
     """CPU/GPU interop source: raw NV12/P010 -> paced CPU frames -> CUDA upload.
 
     Pacing before upload bounds transfer work to the requested frame rate. No NVDEC
@@ -124,7 +127,8 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
                        decoder_params={"codec": "rawvideo", "pixel_format": pixel_format},
                        # InputRec seeks back to PTS zero at each loop. Count frames
                        # before pacing; setpts changes metadata only, not pixels.
-                       decoded_filter=f"setpts=N*{fps_den}/({fps}*TB)", decoded_filter_threads=threads)
+                       decoded_filter=f"setpts=N*{fps_den}/({fps}*TB)", decoded_filter_threads=threads,
+                       event_loop=event_loop)
     output = f"input_{tag}_uploaded"
     avp.addNode(api.FilterVideo({"name": f"upload_{tag}", "src": edge, "dst": output,
                                 "graph": "hwupload", "hwaccel": hwaccel, "threads": threads, "group": group}))
@@ -133,7 +137,7 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
 
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                      fps: int, fps_den: int = 1, hwaccel: str = "@gpu", loop: bool = False,
-                     color: Optional[dict] = None) -> str:
+                     color: Optional[dict] = None, event_loop: Optional[str] = None) -> str:
     """Headerless packed v210 file -> GPU unpack (P210, 10-bit 4:2:2) -> paced output edge.
 
     ``input_rec -> demux -> v210_to_cuda -> realtime(set_pts) -> force_fps``.
@@ -159,4 +163,4 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
         "fps": f"{fps}/{fps_den}", "timebase": "1/90000", "sw_format": "p210le",
         "group": group, **restart, **(color or {}),
     }))
-    return _pace(avp, api, tag, edge("cuda"), fps=fps, fps_den=fps_den, group=group)
+    return _pace(avp, api, tag, edge("cuda"), fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)

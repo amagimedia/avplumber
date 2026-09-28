@@ -37,12 +37,14 @@ def window_id(url: str) -> str:
 def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height: int, fps: int,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
                             processing_group: str, hold: bool = False,
-                            preserve_alpha: bool = False, browser_ring_size: int | None = None) -> Tuple[list, str]:
+                            preserve_alpha: bool = False, browser_ring_size: int | None = None,
+                            event_loop: str | None = None) -> Tuple[list, str]:
     """Return the node list and the final CUDA edge for one browser socket.
 
     With *hold*, a ``repeat_last_frame`` node re-emits the last frame at *fps*
     while the page is not painting, so static pages keep feeding the mixer.
-    *preserve_alpha* retains alpha-bearing DRM formats for blended scene items."""
+    *preserve_alpha* retains alpha-bearing DRM formats for blended scene items.
+    *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted)."""
     if browser_ring_size is None:
         browser_ring_size = default_browser_ring_size(fps)
     drm_edge, assumed_edge, raw_edge, smooth_edge, cuda_edge = (
@@ -79,7 +81,8 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
         api.SmoothTimestamps({
             "fps": f"{fps}/1", "discontinuity_threshold": 0.1, "round_up": True,
             "src": raw_edge, "dst": smooth_edge, "group": processing_group,
-            "name": f"{prefix}_smooth", "auto_restart": "panic"}),
+            "name": f"{prefix}_smooth", "auto_restart": "panic",
+            **({} if event_loop is None else {"event_loop": event_loop})}),
         api.FilterVideo({
             # Chromium exports premultiplied colour. Keep its alpha association
             # through the GPU graph so the compositor applies opacity only once.
