@@ -231,11 +231,12 @@ class _AuxOutput:
         self.thread.start()
 
     def stop(self):
+        """Stop the page thread and RTCP listener. The application stops the group together
+        with all others (demos/mixer MixerApplication.stop), and not after a panic."""
         self.stopped.set()
         if self.thread:
             self.thread.join(timeout=1)
         self.listener.stop()
-        self.avp.group(self.group).stopNodes()
 
 
 class AuxMultiview(_AuxOutput):

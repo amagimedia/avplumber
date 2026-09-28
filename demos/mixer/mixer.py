@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -291,11 +292,14 @@ class MixerApplication:
             bus.stop()
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.stop()
-        # shutdown() stops one group after another, so a large show took minutes; stopNodes()
-        # only signals the group's own thread. Asking every input group first leaves shutdown()
-        # joining groups that stop concurrently (its group order was never defined anyway).
-        for group in self.input_groups:
-            self.avp.group(group).stopNodes()
+        # After a panic the graph is already shutting down under the manager lock; group() would
+        # wait for it holding the GIL that failing nodes need to report. shutdown() waits without.
+        if self.avp.manager.shouldWork:
+            # shutdown() stops one group after another, so a large show took minutes; stopNodes()
+            # only signals the group's own thread. Asking every input and aux group first leaves
+            # shutdown() joining groups that stop concurrently (its group order was never defined).
+            for group in (*self.input_groups, *(bus.group for bus in self.aux_buses)):
+                self.avp.group(group).stopNodes()
         self.avp.shutdown()
 
 
@@ -859,12 +863,15 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _run_application(application, options)
     except KeyboardInterrupt:
-        pass
+        return
     finally:
         application.stop()
+    # Nothing is on air any more; a supervisor (setup_runtime) restarts the mixer on this exit.
+    sys.exit("Mixer graph shut down after a node failure (auto_restart panic); exiting")
 
 
 def _run_application(application: MixerApplication, options: GraphOptions) -> None:
+    """Run until interrupted; return when a node panic has shut the graph down."""
     if options.webui_url:
         application.avp.registerWithWebUI(options.webui_url, "mixer", "")
     application.start()
@@ -880,7 +887,7 @@ def _run_application(application: MixerApplication, options: GraphOptions) -> No
         f"{', '.join(targets)} at {options.fps} fps; control port "
         f"{options.remote_control_port or 'disabled'}"
     )
-    while True:
+    while application.avp.manager.shouldWork:
         time.sleep(1)
         if options.webui_url:
             application.avp.heartbeat()

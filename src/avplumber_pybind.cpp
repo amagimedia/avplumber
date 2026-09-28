@@ -653,6 +653,10 @@ PYBIND11_MODULE(_avplumber, m) {
             }
             return out;
         })
+        // False once shutdown() began, including one a panic started on its own thread. An
+        // atomic read: unlike the calls above it never waits for the manager lock, which a
+        // shutdown holds until every node has stopped.
+        .def_property_readonly("shouldWork", &NodeManager::shouldWork)
     ;
 
     py::class_<NodeGroup, std::shared_ptr<NodeGroup>>(m, "NodeGroup")

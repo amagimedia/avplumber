@@ -36,6 +36,7 @@ class NativeEngine:
         self.ready = False
         self.shutdown_complete = False
         self.edges = SimpleNamespace(planCapacity=lambda *_: None)
+        self.manager = SimpleNamespace(shouldWork=True)
 
     def addNode(self, node):
         self.nodes[node.parameters["name"]] = node.parameters
@@ -217,6 +218,42 @@ def test_stop_asks_every_input_group_before_the_serial_shutdown(native_boundary)
     events = app.avp.events
     stops = [events.index("stop " + group) for group in app.input_groups]
     assert len(stops) == 2 and max(stops) < events.index("shutdown") == len(events) - 1
+
+
+def test_stop_after_a_panic_leaves_groups_to_the_running_shutdown(native_boundary):
+    app = application(native_boundary)
+    app.start()
+    app.avp.manager.shouldWork = False
+    app.stop()
+    assert not any(event.startswith("stop ") for event in app.avp.events)
+    assert app.avp.events[-1] == "shutdown"
+
+
+def test_panic_ends_the_run_loop_and_the_process_fails(native_boundary, monkeypatch):
+    import mixer
+    app = application(native_boundary)
+    app.start = lambda: None
+    sleeps = []
+    def sleep(_seconds):
+        sleeps.append(_seconds)
+        app.avp.manager.shouldWork = len(sleeps) < 3
+    monkeypatch.setattr(mixer.time, "sleep", sleep)
+    monkeypatch.setattr(mixer, "build_application", lambda _options: app)
+    with pytest.raises(SystemExit, match="auto_restart panic") as exit_:
+        mixer.main(["--input", "a.mp4", "--output", "p.ts"])
+    assert len(sleeps) == 3 and exit_.value.code
+    assert app.avp.events[-1] == "shutdown"
+
+
+def test_interrupt_stops_cleanly_without_failing(native_boundary, monkeypatch):
+    import mixer
+    app = application(native_boundary)
+    def interrupted(*_):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(mixer, "build_application", lambda _options: app)
+    monkeypatch.setattr(mixer, "_run_application", interrupted)
+    mixer.main(["--input", "a.mp4", "--output", "p.ts"])
+    assert app.avp.events[-1] == "shutdown"
 
 
 def test_consumed_prewarm_frame_still_proves_readiness(native_boundary, monkeypatch):
