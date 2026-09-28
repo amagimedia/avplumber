@@ -94,9 +94,11 @@ def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
         "set_pts": True, "group": group, **loop,
         **({} if sync_team is None else {"team": sync_team}), **(realtime_params or {}),
     }))
+    # set_pts stamps the wall clock at release: center_phase keeps its jitter from flipping frames
+    # between output ticks (duplicate + drop pairs) on sources whose phase sits half a frame off.
     avp.addNode(api.ForceFPS({
         "name": f"fps_{tag}", "src": f"input_{tag}_realtime", "dst": f"input_{tag}_fps",
-        "fps": f"{fps}/{fps_den}", "group": group, **loop,
+        "fps": f"{fps}/{fps_den}", "center_phase": True, "group": group, **loop,
     }))
     return f"input_{tag}_fps"
 

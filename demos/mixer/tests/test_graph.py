@@ -298,6 +298,8 @@ def test_configured_fps_reaches_input_mixer_and_outputs():
     nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
 
     assert nodes["fps_0"]["fps"] == "60/1"
+    assert nodes["fps_0"]["center_phase"] is True   # set_pts jitter never flips frames between ticks
+    assert "center_phase" not in nodes["program_fps"]
     assert "normalize_0" not in nodes
     assert nodes["program_fps"]["fps"] == "60/1"
     assert nodes["program_encoder"]["options"]["g"] == 120
