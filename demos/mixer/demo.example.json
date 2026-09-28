@@ -3,7 +3,7 @@
   "scene_count": 24,
   "seed": 7,
   "canvas": {
-    "width": 1280, "height": 720, "fps": 30,
+    "width": 1920, "height": 1080, "fps": 30,
     "working_format": "p210le", "color": "hlg"
   },
   "generation": {"seconds": 2, "sdr_encoder": "h264_nvenc", "hdr_encoder": "hevc_nvenc"},
@@ -12,12 +12,6 @@
     {"id": "hlg420", "kind": "generated", "color": "hlg", "chroma": "420", "weight": 4},
     {"id": "hlg422", "kind": "generated", "color": "hlg", "chroma": "422", "weight": 2},
     {"id": "sdr422", "kind": "generated", "color": "sdr", "chroma": "422", "weight": 2},
-    {
-      "id": "bunny", "kind": "download", "color": "sdr", "weight": 0,
-      "url": "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4",
-      "attribution": "(c) copyright 2008, Blender Foundation / www.bigbuckbunny.org",
-      "license": "https://creativecommons.org/licenses/by/3.0/"
-    },
     {"id": "browser", "kind": "browser", "pattern": "alpha", "weight": 0}
   ],
   "layouts": {

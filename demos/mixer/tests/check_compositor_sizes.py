@@ -1,7 +1,7 @@
 """NVIDIA integration check: one compositor input changes size and buffer pool.
 
-Run on the NVIDIA build host with three 60fps H.264 fixtures: red 640x360,
-lime 1280x720 and blue 360x640. CPU download exists only for pixel assertions.
+Run on the NVIDIA build host with three 60fps H.264 fixtures: red 1920x1080,
+lime 2560x1440 and blue 1080x1920. CPU download exists only for pixel assertions.
 """
 import argparse
 import json

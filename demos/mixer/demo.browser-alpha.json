@@ -3,7 +3,7 @@
   "scene_count": 4,
   "seed": 7,
   "canvas": {
-    "width": 1280, "height": 720, "fps": 30,
+    "width": 1920, "height": 1080, "fps": 30,
     "working_format": "p210le", "color": "hlg"
   },
   "generation": {"seconds": 2},

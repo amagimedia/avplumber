@@ -559,7 +559,7 @@ CONFIG = {
     "canvas": {"width": 1920, "height": 1080, "fps": 60},
     "sources": [
         {"id": "cam", "kind": "video", "path": "/media/cam.mp4", "width": 1920, "height": 1080},
-        {"id": "page", "kind": "browser", "color": "sdr", "url": "https://example.org/", "width": 1280, "height": 720},
+        {"id": "page", "kind": "browser", "color": "sdr", "url": "https://example.org/", "width": 1920, "height": 1080},
     ],
     "wipes": [{"id": "swoosh", "path": "/media/swoosh.mov"}],
     "control": {"direct": False, "fade_seconds": 0.8},
@@ -685,7 +685,7 @@ def test_config_rejects_duplicate_locations_and_bad_references():
         mc.scene_layers(cfg, cfg.scenes[0])
     probed = mc.with_probed_sizes(cfg, probe=lambda path: (640, 360))
     assert (probed.source("cam").width, probed.source("cam").height) == (640, 360)
-    assert probed.source("page").width == 1280          # declared sizes are kept
+    assert probed.source("page").width == 1920          # declared sizes are kept
     # cover of a 16:9 clip into the full 16:9 box keeps the whole frame
     assert mc.scene_layers(probed, probed.scenes[0])["cam"]["crop"] == {"x": 0, "y": 0, "w": 640, "h": 360}
 
@@ -791,7 +791,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert "alias_0" not in nodes  # shared fan-out belongs to the reusable builder
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
     assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
-    assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1280, "height": 720,
+    assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
                              "fps": 60, "audio": False, "ringSize": 6}
     assert nodes["input_1_to_cuda"]["max_imports"] == 32
     assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 1000
@@ -1512,6 +1512,30 @@ def _decode_doc(tmp_path, **source):
     path = tmp_path / "show.json"
     path.write_text(json.dumps(doc))
     return doc, path
+
+
+@pytest.mark.parametrize("fps", [25, 30, 50, 60])
+def test_nvdec_output_edge_keeps_the_default_at_every_rate(tmp_path, fps):
+    doc, path = _decode_doc(tmp_path)
+    doc["canvas"]["fps"] = fps
+    path.write_text(json.dumps(doc))
+    app = build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
+    plans = dict(app.avp.edges.plans)
+    assert "input_0_decoded" not in plans
+    assert "input_1_decoded" not in plans   # the raw source's CPU decoder keeps the default
+    nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
+    decode = nodes["decode_0"]
+    assert (decode["hwaccel"], decode["pixel_format"]) == ("mixer_gpu", "?cuda")
+    assert "codec_map" not in decode and "options" not in decode
+    assert nodes["upload_1"]["graph"] == "hwupload"   # raw uploads at its own size, after pacing
+
+
+@pytest.mark.parametrize("fps", [30, 60])
+def test_cli_file_inputs_keep_the_default_decoded_frames(fps):
+    app = build_application(GraphOptions(inputs=("a.mp4", "b.mp4"), output="p.mp4", fps=fps), api=fake_api())
+    plans = dict(app.avp.edges.plans)
+    assert "input_0_decoded" not in plans and "input_1_decoded" not in plans
+    assert plans["*"] == 3
 
 
 @pytest.mark.parametrize("dpb_size", [0, 1, 4])

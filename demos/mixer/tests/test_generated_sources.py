@@ -9,7 +9,7 @@ np = pytest.importorskip("numpy")
 from frame_codes import generate, read_code
 
 
-@pytest.mark.parametrize("width,height,fps", [(1920, 1080, 60), (1280, 720, 24), (640, 360, 30)])
+@pytest.mark.parametrize("width,height,fps", [(1920, 1080, 60), (1920, 1080, 25), (1080, 1920, 30)])
 def test_generated_source_has_requested_size_rate_and_frame_ids(tmp_path, width, height, fps):
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         pytest.skip("requires FFmpeg and ffprobe")

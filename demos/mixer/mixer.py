@@ -90,7 +90,7 @@ class GraphOptions:
     wipe_cache_mb: float = 0.0          # opt-in GPU clip cache; otherwise decode per take
     # Browser pages from the DMA-BUF demo as sources: --input dmabuf://<window-id>
     dmabuf_socket_dir: str = "/tmp/dma-page"
-    dmabuf_size: tuple[int, int] = (1280, 720)
+    dmabuf_size: tuple[int, int] = (1920, 1080)
     dmabuf_open: str | None = None       # page URL: open the named windows before building
     dmabuf_rest: str = "http://127.0.0.1:9009"
     browser_ring_size: int | None = None
@@ -798,7 +798,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--remote-control-port", type=int, default=7777)
     add("--dmabuf-socket-dir", default="/tmp/dma-page",
         help="dma-browser socket directory for dmabuf://<window-id> inputs")
-    add("--dmabuf-size", default="1280x720", metavar="WxH",
+    add("--dmabuf-size", default="1920x1080", metavar="WxH",
         help="browser window size for dmabuf:// inputs")
     add("--dmabuf-open", metavar="URL",
         help="open the dmabuf:// windows with this page through the dma-browser REST API")

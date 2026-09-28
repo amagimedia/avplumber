@@ -30,7 +30,7 @@ including the recursive submodule checkout. Run from the repository root:
 docker compose -f demos/mixer/compose.yaml up --build
 ```
 
-Open **<http://127.0.0.1:7681/setup/>**, choose resolution, FPS, unique sources,
+Open **<http://127.0.0.1:7681/setup/>**, choose orientation, FPS, unique sources,
 scenes, mode and source counts, then click **Apply setup**. The instance generates
 its assets and starts the mixer. No JSON editing or downloads are required.
 **8-bit** uses an SDR NV12 canvas and H.264 output only; the player hides its
@@ -59,7 +59,7 @@ and 41 at 60 fps**. The 25 fps ceiling is experimental above
 the 100-source baseline. Higher rates retain a budget of
 2,500 input frames per second, rounded down. It allows at most **32 browser sources**
 and **192 scenes**. The browser service defaults to four workers with eight windows
-each. Source mix, resolution and bit depth also affect capacity; a mixed-source
+each. Source mix, orientation and bit depth also affect capacity; a mixed-source
 budget does not mean the GPU can decode that many simultaneous videos. Combined
 SDR/HDR NVDEC inputs are capped at **40** for 25/30 fps and **20** for 50/60 fps.
 Raw uploads share **28/23/14/11** units at 25/30/50/60 fps: an SDR NV12 source
@@ -86,8 +86,7 @@ Start with generic media, then optionally choose a mixed-source preset:
 | Preset | Source proportions |
 | --- | --- |
 | [`demo.example.json`](demo.example.json) | Generated SDR/HLG 420/422 sources only, plus generated wipes. No media downloads. |
-| [`demo.equal.json`](demo.equal.json) | Equal weights for generated SDR 420, HLG 420, HLG 422, SDR 422, Bunny and browser sources. |
-| [`demo.cinematic.json`](demo.cinematic.json) | The same categories, with two generated HLG 420 inputs replaced by public PQ and HLG movie clips at the default count. |
+| [`demo.equal.json`](demo.equal.json) | Equal weights for generated SDR 420, HLG 420, HLG 422, SDR 422 and browser sources. |
 
 Copy a preset to the media directory, then edit it; no registration or Python changes are needed:
 
@@ -107,10 +106,10 @@ cp demos/mixer/demo.equal.json media/demo.json
 Apply edits with `docker compose -f demos/mixer/compose.yaml restart mixer`.
 The mixer prepares missing assets and prints the allocated source counts before
 starting. Edit **`media/demo.json`**; `media/mixer.demo.json` is generated and
-overwritten on startup. Independent inputs may read the same cached clip.
+overwritten on startup. Every generated source has its own clip, its ID burned in.
 
-Both mixed presets use steady bars behind transparent overlays. For a run with
-no media downloads, copy `demo.example.json` instead; it uses synthetic sources
+`demo.equal.json` uses steady bars behind transparent overlays. For a run
+without browsers, copy `demo.example.json` instead; it uses synthetic sources
 only. See the [recipe reference](docs/recipe.md) for custom proportions, asset
 URLs and preparation without Compose.
 

@@ -20,7 +20,9 @@ DEMO_DIR = Path(__file__).resolve().parent
 # ratio to it, so an HDR output stays proportionally richer without a second control.
 DEFAULT_BITRATE_KBPS = 6000
 MIN_BITRATE_KBPS, MAX_BITRATE_KBPS = 500, 40000
-DEFAULT_SETTINGS = dict(resolution="1920x1080", orientation="portrait", fps=60, bit_depth=10, chroma="422",
+# The demo is 1080p only: every source is a unique 1920x1080 input, in either orientation.
+PROGRAM_SIZE = (1920, 1080)
+DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
                         bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60),
                         dsk=[], clean_feed=False)
@@ -64,9 +66,8 @@ def recipe_for(settings):
                     "bitrate_kbps": DEFAULT_BITRATE_KBPS, "browser_ring_size": default_browser_ring_size(settings.get("fps")),
                     "dsk": [], "clean_feed": False, **settings}
     if not isinstance(settings, dict) or set(settings) != set(DEFAULT_SETTINGS):
-        raise ValueError("Expected resolution, orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
-    for key, choices in (("resolution", ("1920x1080", "1280x720")),
-                         ("orientation", ("portrait", "landscape")),
+        raise ValueError("Expected orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
+    for key, choices in (("orientation", ("portrait", "landscape")),
                          ("fps", (25, 30, 50, 60)),
                          ("bit_depth", (8, 10)),
                          ("chroma", ("420", "422")),
@@ -100,7 +101,7 @@ def recipe_for(settings):
     if settings["chroma"] == "420" and any(weights[2:4]):
         raise ValueError("4:2:0 mode supports 4:2:0 and browser sources only")
     counts = source_counts(settings["source_count"], weights, settings["fps"], len(dsk))
-    width, height = map(int, settings["resolution"].split("x"))
+    width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
     recipe["browser_ring_size"] = settings["browser_ring_size"]

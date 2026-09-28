@@ -26,7 +26,7 @@ services:
       DMA_BROWSER_WINDOWS_PER_PROCESS: 8
       # Sources, then the downstream-key windows (prepare_demo.DSK_WINDOWS): keys
       # export DMA-BUFs at the graphic's own size, not a transparent full frame.
-      DMA_BROWSER_ALLOWED_DIMS: 1920x1080,1080x1920,1280x720,1016x172,1920x80,152x152,304x152
+      DMA_BROWSER_ALLOWED_DIMS: 1920x1080,1080x1920,1016x172,1920x80,152x152,304x152
 
   mixer:
     extends: {file: ../dmabuf-browser/compose.yaml, service: avplumber}

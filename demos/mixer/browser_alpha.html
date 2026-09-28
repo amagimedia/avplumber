@@ -21,6 +21,9 @@
 <div id="patches"></div>
 <div id="marker"></div>
 <script>
+  // prepare_demo embeds the browser source's id as data-source; name the window by it.
+  const source = document.documentElement.dataset.source;
+  if (source) document.querySelector('header').textContent = `${source} · alpha over video`;
   for (const alpha of [0, 0.25, 0.5, 0.75, 1]) {
     const column = document.createElement('div');
     column.className = 'column';

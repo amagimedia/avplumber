@@ -1,6 +1,7 @@
 """Recipe expansion plus real CPU asset preparation; no mixer or GPU required."""
 from collections import Counter
 import base64
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -61,7 +62,7 @@ def test_wipes_move_and_cover_the_midpoint(tmp_path, fps, pattern):
 
 def test_source_counts_layout_counts_and_reproducible_geometry(recipe, tmp_path):
     doc, _, allocation = plan(recipe, tmp_path)
-    assert allocation == dict(sdr420=8, hlg420=4, hlg422=2, sdr422=2, bunny=0, browser=0)
+    assert allocation == dict(sdr420=8, hlg420=4, hlg422=2, sdr422=2, browser=0)
     assert len(doc["sources"]) == len({s["id"] for s in doc["sources"]}) == 16
     assert len(doc["scenes"]) == 24
     assert Counter(s["id"].rsplit("_", 1)[0] for s in doc["scenes"]) == {
@@ -103,14 +104,32 @@ def test_raw_420_assets_are_animated_exact_size_and_cached(recipe, tmp_path, sto
     show, jobs, _ = plan(recipe, tmp_path)
     assert [s["kind"] for s in show["sources"]] == [storage, storage]
     raw_jobs = [(p, writer) for p, writer in jobs.items() if p.suffix == f".{storage}"]
-    assert len(raw_jobs) == 1  # distinct chains can reuse the cached clip
-    path, writer = raw_jobs[0]
-    ensure_asset(path, writer)
+    assert [p.name.split(f"_{color}_")[0] for p, _ in raw_jobs] == ["raw_000", "raw_001"]
     frame_size = int(96 * 64 * bytes_per_pixel)
-    data = path.read_bytes()
-    assert len(data) == frame_size * 4
-    assert data[:frame_size] != data[frame_size:2 * frame_size]
-    ensure_asset(path, lambda _: pytest.fail("cached raw clip must not be regenerated"))
+    for path, writer in raw_jobs:
+        ensure_asset(path, writer)
+        data = path.read_bytes()
+        assert len(data) == frame_size * 4
+        assert data[:frame_size] != data[frame_size:2 * frame_size]
+        ensure_asset(path, lambda _: pytest.fail("cached raw clip must not be regenerated"))
+    # Same pattern, but every source burns in its own id: no shared picture or file.
+    assert raw_jobs[0][0].read_bytes() != raw_jobs[1][0].read_bytes()
+
+
+def test_hlg_id_plate_keeps_the_10_bit_signal(recipe, tmp_path):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("requires FFmpeg")
+    import numpy as np
+    from hdr_patterns import frame_planes
+    recipe.update(source_count=1, scene_count=1, layouts={"fullscreen": 1})
+    recipe["inputs"] = [{"id": "raw", "kind": "generated", "color": "hlg", "chroma": "420",
+                          "storage": "p010", "pattern": "0", "weight": 1}]
+    [(path, writer)] = [(p, w) for p, w in plan(recipe, tmp_path)[1].items() if p.suffix == ".p010"]
+    ensure_asset(path, writer)
+    luma = np.frombuffer(path.read_bytes()[:96 * 64 * 2], "<u2").reshape(64, 96) >> 6
+    changed = np.count_nonzero(luma != frame_planes(96, 64, 0, 4, 0)[0])
+    # Only the plate differs; an 8-bit overlay would requantize the whole frame.
+    assert 0 < changed <= 7 * 30  # the "RAW_000" plate: 7x30 font pixels at scale 1
 
 
 @pytest.mark.parametrize("color,chroma", [("hlg", "420"), ("sdr", "422")])
@@ -129,8 +148,8 @@ def test_sdr_pattern_pool_keeps_cellauto_opt_in(recipe, tmp_path):
     recipe["source_count"] = 3
     spec["patterns"] = ["bars", "gradients"]
     sources = plan(recipe, tmp_path)[0]["sources"]
-    assert sources[0]["path"] == sources[2]["path"] != sources[1]["path"]
-    assert len({s["id"] for s in sources}) == 3
+    assert [s["path"].split("_")[-2] for s in sources] == ["bars", "gradients", "bars"]
+    assert len({s["id"] for s in sources}) == len({s["path"] for s in sources}) == 3
     assert all(s["independent"] for s in sources)
     del spec["patterns"]
     spec["pattern"] = "cellauto"
@@ -171,15 +190,15 @@ def test_large_grids_cover_canvas_with_distinct_sources(recipe, tmp_path, capaci
 
 @pytest.mark.parametrize("count", [1, 3, 16, 32])
 def test_layouts_stay_inside_portrait_canvas(recipe, tmp_path, count):
-    recipe["canvas"].update(width=720, height=1280)
+    recipe["canvas"].update(width=1080, height=1920)
     recipe["source_count"] = count
     doc = plan(recipe, tmp_path)[0]
     for scene in doc["scenes"]:
         for i in scene["items"]:
             r = i["dst"]
             assert r["w"] > 0 and r["h"] > 0
-            assert 0 <= r["x"] < r["x"] + r["w"] <= 720
-            assert 0 <= r["y"] < r["y"] + r["h"] <= 1280
+            assert 0 <= r["x"] < r["x"] + r["w"] <= 1080
+            assert 0 <= r["y"] < r["y"] + r["h"] <= 1920
 
 
 def test_alpha_overlay_preserves_blend_and_requires_browser(recipe, tmp_path):
@@ -206,30 +225,20 @@ def test_browser_alpha_recipe_covers_sdr_and_hdr_with_an_embedded_page(tmp_path)
     browser = next(source for source in cfg.sources if source.kind == "browser")
     prefix, payload = browser.location.split(",", 1)
     assert prefix == "data:text/html;base64"
-    assert base64.b64decode(payload) == (directory / "browser_alpha.html").read_bytes()
+    page = (directory / "browser_alpha.html").read_bytes()
+    assert base64.b64decode(payload) == page.replace(b"<html", b'<html data-source="overlay_000"', 1)
 
 
-def test_equal_recipe_has_six_source_types_and_32_scenes(tmp_path):
+def test_equal_recipe_has_five_source_types_and_32_scenes(tmp_path):
     recipe = json.loads((Path(__file__).resolve().parents[1] / "demo.equal.json").read_text())
     doc, _, allocation = plan(recipe, tmp_path)
-    assert list(allocation.values()) == [3, 3, 3, 3, 2, 2]
+    assert list(allocation.values()) == [4, 3, 3, 3, 3]
     assert len(doc["sources"]) == 16 and len(doc["scenes"]) == 32
     assert len([s for s in doc["scenes"] if s["id"].startswith("alpha_overlay_")]) == 8
     assert doc["canvas"]["fps"] == 60
     assert (doc["canvas"]["width"], doc["canvas"]["height"]) == (1080, 1920)
     assert (doc["sources"][0]["width"], doc["sources"][0]["height"]) == (1920, 1080)
     assert {s["items"][0]["source"] for s in doc["scenes"] if s["id"].startswith("alpha_overlay_")} == {"sdr420_001"}
-
-
-def test_cinematic_recipe_keeps_http_hdr_and_smooth_422_inputs(tmp_path):
-    recipe = json.loads((Path(__file__).resolve().parents[1] / "demo.cinematic.json").read_text())
-    doc, _, allocation = plan(recipe, tmp_path)
-    assert len(doc["sources"]) == 16 and len(doc["scenes"]) == 32
-    assert allocation["sol_pq"] == allocation["sol_hlg"] == 1
-    assert allocation["hlg422"] == 3
-    assert [scene["items"][0]["source"] for scene in doc["scenes"][:2]] == ["sol_pq_000", "sol_hlg_000"]
-    assert (doc["canvas"]["width"], doc["canvas"]["height"], doc["canvas"]["fps"]) == (1080, 1920, 60)
-    assert all(source["url"].startswith("https://") for source in recipe["inputs"][:2])
 
 
 @pytest.mark.parametrize("field,value", [("source_count", 129), ("source_count", 0), ("scene_count", 0)])
@@ -250,13 +259,19 @@ def test_conflicting_rtp_rtcp_pairs_fail_before_creating_assets(recipe, tmp_path
 def test_downloads_are_opt_in_and_reused(recipe, tmp_path, monkeypatch):
     doc, jobs, _ = plan(recipe, tmp_path)
     assert not any("downloads" in p.parts for p in jobs)
-    recipe["inputs"] = [recipe["inputs"][-2]]
-    recipe["inputs"][0]["weight"] = 1
+    movie = {"id": "movie", "kind": "download", "color": "sdr", "weight": 1, "url": "https://example.org/movie.mp4"}
+    recipe["inputs"] = [movie]
+    with pytest.raises(ValueError, match="one source only"):   # 16 sources would share one clip
+        plan(recipe, tmp_path)
+    recipe["inputs"] = [movie, {**movie, "id": "again"}]
+    recipe["source_count"] = 2
+    with pytest.raises(ValueError, match="one source only"):   # two entries, one clip
+        plan(recipe, tmp_path)
+    recipe["inputs"] = [movie]
+    recipe["source_count"] = 1
     doc, jobs, _ = plan(recipe, tmp_path)
     downloads = [p for p in jobs if "downloads" in p.parts]
-    assert len(downloads) == 1
-    assert len({s["path"] for s in doc["sources"]}) == 1
-    assert len(parse(doc).sources) == 16  # Independent decode chains, one cached movie.
+    assert len(downloads) == 1 and len(parse(doc).sources) == 1
     import io
     responses = []
 
@@ -317,7 +332,8 @@ def test_prepare_demo_produces_playable_media_and_mapped_config(recipe, tmp_path
                 assert stream["color_space"] == "bt2020nc"
             else:
                 assert (stream["codec_name"], stream["pix_fmt"]) == ("h264", "yuv420p")
-    assert local(cfg.source("hlg422_000").location).read_bytes() != local(cfg.source("hlg422_001").location).read_bytes()
+    generated = [local(source.location) for source in cfg.sources]
+    assert len({hashlib.sha256(media.read_bytes()).digest() for media in generated}) == len(generated) == 16
     wipe = local(cfg.wipes[0].path)
     assert wipe.parent == root / "media_wipes"
     assert probe(wipe)["pix_fmt"] == "argb"

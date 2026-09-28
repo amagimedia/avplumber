@@ -279,7 +279,7 @@ def test_raw_only_mix_keeps_a_steady_alpha_background(tmp_path):
     recipe = recipe_for({**DEFAULT_SETTINGS, "source_count": 2, "weights": [0, 0, 0, 0, 1, 1]})
     show, jobs, _ = prepare_demo.plan(recipe, tmp_path)
     assert recipe["alpha_background"] == "sdr420_raw_000"
-    assert any(path.name == "sdr_420_bars_nv12.nv12" for path in jobs)
+    assert any(path.name == "sdr420_raw_000_sdr_420_bars_nv12.nv12" for path in jobs)
     assert len(show["sources"]) == 2
 
 
@@ -412,17 +412,17 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
                          "renditions": [{"id": "monitor", "port": 5012, "width": 1080, "height": 1920, "fps": 30}]}]
     (runtime.media_dir / "mixer.demo.json").write_text(json.dumps(old))
     runtime.process = None
-    recipe = recipe_for({**DEFAULT_SETTINGS, "resolution": "1280x720", "orientation": "landscape",
+    recipe = recipe_for({**DEFAULT_SETTINGS, "orientation": "landscape",
                          "fps": 50, "scene_count": 1, "layout": "fullscreen"})
     show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
     runtime._preserve_aux(recipe, show)
     cfg = parse(prepare_demo.plan(recipe, runtime.media_dir)[0])
     assert cfg.aux_buses[0].scenes == (old["scenes"][0]["id"], *([None] * 7))
     r = cfg.aux_buses[0].renditions[0]
-    assert (r.width, r.height, r.fps, r.bitrate_kbps) == (1280, 720, 25, 4500)
+    assert (r.width, r.height, r.fps, r.bitrate_kbps) == (1920, 1080, 25, 4500)
     pages = cfg.aux_buses[1]
     assert (pages.layout, pages.rotate_s, pages.scenes) == ("source_pages", 8.0, ())
-    assert (pages.renditions[0].width, pages.renditions[0].height, pages.renditions[0].fps) == (1280, 720, 25)
+    assert (pages.renditions[0].width, pages.renditions[0].height, pages.renditions[0].fps) == (1920, 1080, 25)
 
 
 @pytest.mark.parametrize("limit,tiles", [(256, 2), (512, 6)])

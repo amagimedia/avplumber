@@ -68,7 +68,6 @@ summary { cursor: pointer; }
 <div class="stack">
 <section class="card"><div class="card-title"><h2>Mixer</h2></div>
 <div class="fields">
-<label>Program resolution<select id="resolution"><option value="1920x1080">1080p · 1920 × 1080</option><option value="1280x720">720p · 1280 × 720</option></select></label>
 <label>Orientation<select id="orientation"><option value="portrait">Portrait · 9:16</option><option value="landscape">Landscape · 16:9</option></select></label>
 <label>Frames per second<select id="fps"><option>25</option><option>30</option><option>50</option><option selected>60</option></select></label>
 <label>Mode<select id="mode"><option value="10:422">HDR · 10-bit · 4:2:2</option><option value="10:420">HDR · 10-bit · 4:2:0</option><option value="8:420">SDR · 8-bit · 4:2:0</option></select></label>
@@ -212,7 +211,7 @@ function update(){
  const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,192),bitrate=integer('bitrate',500,40000);
  if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
  if(resizeValues||sourceValues.reduce((a,b)=>a+b,0)!==sourceCount||overBudget(sourceValues))sourceValues=sourceCounts(sourceCount,resizeValues||sourceValues);
- const counts=sourceValues,[sourceWidth,sourceHeight]=$('resolution').value.split('x').map(Number);
+ const counts=sourceValues,[sourceWidth,sourceHeight]=[1920,1080];
  const portrait=$('orientation').value==='portrait',width=portrait?sourceHeight:sourceWidth,height=portrait?sourceWidth:sourceHeight;
  const video=sourceCount-counts[4],browser=counts[4],mode=$('layout').value;
  const layouts={fullscreen:2};
@@ -220,7 +219,7 @@ function update(){
   for(const n of [2,4,8,16,32,64])if(n<=sourceCount)layouts[`grid_${n}`]=mode==='grids'?2:1;
   if(mode==='balanced'){layouts.pip=3;layouts.random=3;if(video&&browser)layouts.alpha_overlay=2;}
  }
- currentSettings={resolution:$('resolution').value,orientation:$('orientation').value,fps,
+ currentSettings={orientation:$('orientation').value,fps,
    source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts],
    bitrate_kbps:bitrate,browser_ring_size:integer('browser-ring-size',1,64),
    dsk:dskPages(),clean_feed:$('clean-feed').checked&&dskPages().length>0};
@@ -273,7 +272,7 @@ async function refresh(){
     const s=status.settings;
     previousDepth=s.bit_depth??10;
     $('mode').value=`${previousDepth}:${s.chroma??(previousDepth===8?'420':'422')}`;
-    for(const [id,key] of Object.entries({resolution:'resolution',orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps','browser-ring-size':'browser_ring_size'}))if(s[key]!==undefined)$(id).value=s[key];
+    for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps','browser-ring-size':'browser_ring_size'}))if(s[key]!==undefined)$(id).value=s[key];
     document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;
     if(s.browser_ring_size===undefined)$('browser-ring-size').value=Number($('fps').value)<=30?6:9;
     sourceValues=types.map((_,i)=>s.weights[i]??0);syncCounts();

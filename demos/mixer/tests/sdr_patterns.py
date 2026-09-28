@@ -23,15 +23,19 @@ GENERATORS = {
 
 
 def render(directory: pathlib.Path, name: str, graph: str, size: str, fps: int, seconds: int,
-           encoder: str, ffmpeg: str) -> pathlib.Path:
+           encoder: str, ffmpeg: str, overlay=None) -> pathlib.Path:
+    """*overlay* is (extra FFmpeg input arguments, filter_complex over [0:v] and [1:v],
+    stdin bytes for that input), e.g. prepare_demo.id_overlay()."""
     raw = encoder == "rawvideo"
     out = directory / f"{name}.{'nv12' if raw else 'mp4'}"
     source = f"{graph}{':' if '=' in graph else '='}size={size}:rate={fps}"
-    subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", source, "-t", str(seconds),
+    inputs, graph_filter, data = overlay or ([], None, None)
+    subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", source, *inputs,
+                    *(["-filter_complex", graph_filter] if graph_filter else []), "-t", str(seconds),
                     "-c:v", encoder,
                     *(["-f", "rawvideo", "-pix_fmt", "nv12"] if raw else
                       ["-b:v", "12M", "-maxrate", "16M", "-g", str(fps), "-pix_fmt", "yuv420p"]), str(out)],
-                   check=True)
+                   input=data, check=True)
     return out
 
 

@@ -268,7 +268,7 @@ Repeated file/URL declarations are rejected by default. For load testing, mark
 **every declaration of the repeated location** with `"independent": true`:
 each ID then opens its own input chain (or browser window). Referencing one ID
 in several scenes still shares that one chain. The demo recipe uses this opt-in
-to vary the independent input count while reusing cached media files.
+for downloaded and file inputs, which several sources may read.
 
 ## wipes
 

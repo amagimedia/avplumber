@@ -13,13 +13,17 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 from pathlib import Path
+import random
 import shutil
 import subprocess
 import sys
 import tempfile
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+import numpy as np
 
 DEMO_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(DEMO_DIR.parents[1]))
@@ -109,27 +113,63 @@ def download(path, url):
             raise ValueError(f"incomplete download: {url}")
 
 
-def render_hlg420(path, width, height, fps, seconds, variant, encoder, ffmpeg):
+# 3x5 glyphs for source ids, one octal digit per row (4 is the left pixel). The
+# mixer image's FFmpeg has no drawtext (no libfreetype), so ids are drawn here.
+GLYPHS = dict(zip("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_-", (
+    "75557 26227 71747 71717 55711 74717 74757 71222 75757 75717 25755 65656 34443 65556 74647 74644 34553 "
+    "55755 72227 11152 55655 44447 57755 65555 25552 65644 25563 65655 34216 72222 55557 55552 55775 55255 "
+    "55222 71247 00007 00700").split()))
+
+
+def id_overlay(source_id, width, height, seconds):
+    """FFmpeg input and filter that burn *source_id* into every frame, so no two
+    sources share a file or a picture. The plate circles a spot of its own and
+    the orbit closes on the loop: every source visibly moves on every frame, even
+    steady bars. Returns the render() overlay tuple; the plate goes over [0:v]."""
+    text = source_id.upper()
+    mask = np.pad([[int(GLYPHS[c][row], 8) >> (2 - col) & 1 if col < 3 else 0 for c in text for col in range(4)]
+                   for row in range(5)], 1)
+    scale = max(1, min(height // 90, width // mask.shape[1]))
+    # 190 is about HLG reference white after the gray-to-limited-range conversion,
+    # so labels do not glare at peak on HDR sources; SDR shows light grey.
+    plate = (np.kron(mask, np.ones((scale, scale), np.uint8)) * 190).astype(np.uint8)[:height, :width]
+    h, w = plate.shape
+    rng = random.Random(source_id)
+    radius = height // 24
+    x, y = (radius + rng.randrange(max(0, room - 2 * radius) + 1) for room in (width - w, height - h))
+    phase = rng.uniform(0, 2 * math.pi)
+    orbit = f"2*PI*t/{seconds}+{phase:.4f}"
+    return (["-f", "rawvideo", "-pix_fmt", "gray", "-video_size", f"{w}x{h}", "-i", "pipe:0"],
+            # format=auto keeps 10-bit sources at 10 bits; the default is 8-bit yuv420.
+            f"[0:v][1:v]overlay=format=auto:x={x}+{radius}*cos({orbit}):y={y}+{radius}*sin({orbit})",
+            plate.tobytes())
+
+
+def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, source_id):
     # Offline conversion of a native HLG signal, not SDR samples tagged as HDR.
-    raw = path.with_suffix(".v210")
+    raw = path.with_name(path.name + ".src.v210")
     write_hlg(raw, width, height, fps * seconds, source=variant)
-    pixel_format = "yuv420p10le" if encoder == "libx265" else "p010le"
-    options = (["-f", "rawvideo"] if encoder == "rawvideo" else
+    inputs, graph, data = id_overlay(source_id, width, height, seconds)
+    pixel_format = {"libx265": "yuv420p10le", "v210": "yuv422p10le"}.get(encoder, "p010le")
+    options = (["-f", "rawvideo"] if encoder in ("rawvideo", "v210") else
                ["-profile:v", "main10", "-b:v", "12M", "-g", str(fps)])
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-f", "v210", "-video_size", f"{width}x{height}",
-                    "-framerate", str(fps), "-i", str(raw), "-an",
-                    "-vf", "setparams=range=limited:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
+                    "-framerate", str(fps), "-i", str(raw), *inputs, "-an", "-filter_complex",
+                    graph + ",setparams=range=limited:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
                     "-c:v", encoder,
                     "-pix_fmt", pixel_format, *options,
                     "-color_range", "tv", "-color_trc", "arib-std-b67", "-color_primaries", "bt2020",
-                    "-colorspace", "bt2020nc", str(path)], check=True)
+                    "-colorspace", "bt2020nc", str(path)], input=data, check=True)
+    raw.unlink()
 
 
-def render_sdr422(path, width, height, fps, seconds, variant, ffmpeg):
+def render_sdr422(path, width, height, fps, seconds, variant, ffmpeg, source_id):
     pattern = "smptehdbars" if variant == 0 else "smptebars"
+    inputs, graph, data = id_overlay(source_id, width, height, seconds)
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-f", "lavfi", "-i",
-                    f"{pattern}=size={width}x{height}:rate={fps}", "-t", str(seconds),
-                    "-an", "-c:v", "v210", "-pix_fmt", "yuv422p10le", "-f", "rawvideo", str(path)], check=True)
+                    f"{pattern}=size={width}x{height}:rate={fps}", *inputs, "-filter_complex", graph,
+                    "-t", str(seconds), "-an", "-c:v", "v210", "-pix_fmt", "yuv422p10le", "-f", "rawvideo",
+                    str(path)], input=data, check=True)
 
 
 def positive_int(value, name):
@@ -166,7 +206,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     input_ids = [s["id"] for s in inputs]
     if len(set(input_ids)) != len(input_ids):
         raise ValueError("input ids must be unique")
-    sources, jobs, allocation = [], {}, {}
+    sources, jobs, allocation, clips = [], {}, {}, set()
     size = f"{asset_width}x{asset_height}"
 
     def runtime_path(path):
@@ -211,22 +251,24 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if not raw and chroma == "420" and encoder not in (("h264_nvenc", "libx264") if color == "sdr" else ("hevc_nvenc", "libx265")):
                     raise ValueError(f"{name}: use h264_nvenc/libx264 for SDR or hevc_nvenc/libx265 for HDR")
                 storage = raw or ("v210" if chroma == "422" else encoder)
-                # Version cache names when changing generation semantics.
+                # Version cache names when changing generation semantics. Every
+                # source has its own file, with its id burned in (id_overlay), so
+                # no two inputs share decode input or page cache; the name holds
+                # all that shapes the content, so re-applying reuses the file.
                 extension = raw or ("v210" if chroma == "422" else "mp4")
-                version = "v2" if color == "hlg" or chroma == "422" else "v1"
-                path = media_dir / "assets" / f"synthetic_{version}_{size}_{fps}fps_{seconds}s" / f"{color}_{chroma}_{pattern}_{storage}.{extension}"
-                if chroma == "422":
-                    if color == "hlg":
-                        writer = lambda out, pattern=pattern: write_hlg(out, asset_width, asset_height, fps * seconds, source=int(pattern))
-                    else:
-                        writer = lambda out, pattern=pattern: render_sdr422(
-                            out, asset_width, asset_height, fps, seconds, int(pattern), ffmpeg)
-                elif color == "hlg":
-                    writer = lambda out, pattern=pattern, encoder="rawvideo" if raw else encoder: render_hlg420(
-                        out, asset_width, asset_height, fps, seconds, int(pattern), encoder, ffmpeg)
+                path = (media_dir / "assets" / f"synthetic_v3_{size}_{fps}fps_{seconds}s" /
+                        f"{source['id']}_{color}_{chroma}_{pattern}_{storage}.{extension}")
+                encoder = "v210" if chroma == "422" else "rawvideo" if raw else encoder
+                if color == "hlg":
+                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"]: render_hlg(
+                        out, asset_width, asset_height, fps, seconds, int(pattern), encoder, ffmpeg, sid)
+                elif chroma == "422":
+                    writer = lambda out, pattern=pattern, sid=source["id"]: render_sdr422(
+                        out, asset_width, asset_height, fps, seconds, int(pattern), ffmpeg, sid)
                 else:
-                    writer = lambda out, pattern=pattern, encoder="rawvideo" if raw else encoder: render(
-                        out.parent, out.stem, GENERATORS[pattern], size, fps, seconds, encoder, ffmpeg)
+                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"]: render(
+                        out.parent, out.stem, GENERATORS[pattern], size, fps, seconds, encoder, ffmpeg,
+                        id_overlay(sid, asset_width, asset_height, seconds))
                 jobs[path] = writer
                 source.update(kind=raw or ("v210" if chroma == "422" else "video"),
                               path=runtime_path(path), width=asset_width, height=asset_height)
@@ -234,7 +276,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if "pattern" in spec:
                     if spec["pattern"] != "alpha" or "url" in spec:
                         raise ValueError(f"{name}: browser pattern must be alpha, without a url")
-                    url = page_url(DEMO_DIR / "browser_alpha.html")
+                    url = page_url(DEMO_DIR / "browser_alpha.html", source=source["id"])
                 else:
                     url = spec["url"]
                 source.update(kind="browser", url=url, width=spec.get("width", width), height=spec.get("height", height), color="sdr")
@@ -250,6 +292,10 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                     path = media_dir / spec["path"]
                     if not path.is_relative_to(media_dir) or ".." in path.parts or not path.is_file():
                         raise ValueError(f"{name}: file path must exist under --media-dir")
+                # Every source is an independent input: never two reading one clip.
+                if path in clips:
+                    raise ValueError(f"{name}: a download or file feeds one source only (weight 1, unique clip)")
+                clips.add(path)
                 source.update(kind="video", path=runtime_path(path))
             sources.append(source)
     # Graphics need fewer pixels than the program; the compositor scales them
