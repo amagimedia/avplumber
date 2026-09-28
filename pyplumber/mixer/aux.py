@@ -64,7 +64,8 @@ def parse_aux_buses(values, cfg):
         renditions = obj.get("renditions", [])
         if len(renditions) != 1:
             raise ConfigError("v1 aux requires one SDR/H.264 Janus rendition")
-        r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", **renditions[0]},
+        # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
+        r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
                              f"aux {bid}", cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps))
         if (r.target != "janus" or r.codec != "h264_nvenc" or r.color != "sdr" or
                 (r.width, r.height, r.fps) != (cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps))):
@@ -208,7 +209,7 @@ class _AuxOutput:
                              rtcp_bind=options.janus_rtcp_bind, rtcp_port=0),
             fps=fps, width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
             codec="h264_nvenc", preset=r.preset, profile=r.profile or "high", enc_format="nv12",
-            prefix=self.prefix, failure_mode="off")
+            prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size)
 
     def state(self):
         with self.lock:

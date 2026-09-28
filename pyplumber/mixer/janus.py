@@ -96,6 +96,15 @@ class RtcpFeedbackGroup:
             listener.stop()
 
 
+def dpb_options(dpb_size: int) -> dict:
+    """NVENC encoder options for a *dpb_size* reference-frame DPB; 0 keeps NVENC's choice.
+
+    With B-frames off a P-frame references only its predecessor, so a DPB of 1
+    frees the unused reference surfaces. ``refs`` stays unset: it also changes
+    how many references each frame may search."""
+    return {"dpb_size": dpb_size} if dpb_size else {}
+
+
 def add_nodes(avp, api, specs, **defaults):
     """Build and register nodes from ``(node_type, params)`` pairs, filling in shared
     parameters (``group``, ``auto_restart``) a node does not set itself."""
@@ -107,7 +116,8 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                        width: int, height: int, hwaccel: str = "@gpu", fps_den: int = 1,
                        group: str = "output", codec: str = "", profile: str = "",
                        preset: str = "p7", enc_format: str = "nv12", color=None,
-                       hdr_metadata=None, prefix: str = "janus", failure_mode: str = "panic"):
+                       hdr_metadata=None, prefix: str = "janus", failure_mode: str = "panic",
+                       dpb_size: int = 0):
     """Add ``force_fps -> keyframe -> nvenc -> bsf -> rtp mux -> output``; return the RTCP listener.
 
     Defaults to HEVC (Main/Main10), which current Safari and Chrome negotiate
@@ -115,6 +125,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     same bitrate and it carries 10-bit + HDR signaling. ``enc_format`` is the
     encoder's CUDA input (``p010le`` keeps 10-bit, ``nv12`` is 8-bit) and
     ``color`` supplies the VUI so an HLG program signals BT.2020/arib-std-b67.
+    ``dpb_size`` sets the encoder's reference DPB (:func:`dpb_options`); 0 leaves it to NVENC.
     """
     node_name = lambda suffix: f"{prefix}_{suffix}"
     keyframe_node = node_name("force_keyframe")
@@ -149,7 +160,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                 "preset": preset, "profile": profile, "tune": "ull", "rc": "cbr",
                 "rc-lookahead": 0, "zerolatency": 1, "delay": 0, "forced-idr": 1,
                 "no-scenecut": 1, "strict_gop": 1, "aud": 1, "spatial-aq": 1, "temporal-aq": 0,
-                **(color or {}),
+                **dpb_options(dpb_size), **(color or {}),
             },
         }),
         ("Bsf", {"name": node_name("repeat_headers"), "src": node_name("encoded"), "dst": node_name("repeat_headers"),

@@ -23,7 +23,7 @@ from pyplumber.mixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_ur
                                     open_windows, refresh_windows, wait_for_sockets, window_id)
 from pyplumber.mixer.inputs import build_input, build_v210_input, build_raw420_input
 from pyplumber.mixer.janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE,
-                           JanusVideoConfig, RtcpFeedbackGroup, add_nodes, build_janus_output)
+                           JanusVideoConfig, RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options)
 
 try:
     from .layouts import (
@@ -517,7 +517,7 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
                       **({"hdr_metadata": hdr_metadata} if hdr_metadata else {}),
                       "options": {"b": bitrate, "maxrate": bitrate, "bufsize": bitrate,
                                   "g": max(1, round(r.fps / FPS_DEN)) * 2, "bf": 0, "preset": r.preset,
-                                  "tune": "ll", "profile": profile, **color}}),
+                                  "tune": "ll", "profile": profile, **dpb_options(r.dpb_size), **color}}),
         ("Mux", {"name": name("mux"), "src": [name("encoded")], "dst": name("muxed"), "ts_sort_wait": 0}),
         ("Output", {"name": name("output"), "src": name("muxed"), "url": r.target,
                     "format": infer_output_format(r.target, output_format), "auto_restart": "panic"}),
@@ -583,7 +583,8 @@ def _build_renditions(avp, api, options: GraphOptions, renditions, feeds, *,
             ),
             fps=r.fps, fps_den=FPS_DEN, width=r.width, height=r.height, hwaccel=HWACCEL, group=OUTPUT_GROUP,
             codec=codec, profile=r.profile, preset=r.preset, enc_format=enc_format, color=target.tags,
-            hdr_metadata=_hdr_metadata(r, target), prefix="janus" if not listeners else f"janus_{r.id}"))
+            hdr_metadata=_hdr_metadata(r, target), prefix="janus" if not listeners else f"janus_{r.id}",
+            dpb_size=r.dpb_size))
     return RtcpFeedbackGroup(listeners) if len(listeners) > 1 else next(iter(listeners), None)
 
 

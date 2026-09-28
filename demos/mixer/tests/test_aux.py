@@ -300,3 +300,9 @@ def test_latency_budget_counts_the_pgm_delay(cfg, kind, limit):
         mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=latency)
         with pytest.raises(error):
             kind(avp, None, mixer, cfg25, parse_aux_buses([spec], cfg25)[0]).build(None)
+
+
+def test_aux_monitors_default_to_one_reference_frame(cfg):
+    assert parse_aux_buses([bus_json()], cfg)[0].renditions[0].dpb_size == 1
+    custom = bus_json(renditions=[{"id": "monitor", "port": 5010, "dpb_size": 0}])
+    assert parse_aux_buses([custom], cfg)[0].renditions[0].dpb_size == 0

@@ -1462,3 +1462,45 @@ def test_dsk_config_rejects_invalid_keys(dsk, message):
 def test_rendition_feed_is_clean_or_dirty():
     with pytest.raises(mixer_config.ConfigError, match="feed must be one of"):
         mixer_config.parse({**CONFIG, "renditions": [{"id": "x", "feed": "keyed"}]})
+
+
+def _decode_doc(tmp_path, **source):
+    """A portrait show with one 1920x1080 clip and one raw source."""
+    doc = {"canvas": {"width": 1080, "height": 1920, "fps": 25},
+           "sources": [{"id": "cam", "kind": "video", "path": "/media/cam.mp4", "width": 1920, "height": 1080, **source},
+                       {"id": "raw", "kind": "nv12", "path": str(tmp_path / "raw.nv12"), "width": 320, "height": 180,
+                        "color": "sdr"}],
+           "scenes": [{"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1080, "h": 1920}},
+                                               {"source": "raw", "dst": {"x": 0, "y": 0, "w": 540, "h": 304}}]}]}
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps(doc))
+    return doc, path
+
+
+@pytest.mark.parametrize("dpb_size", [0, 1, 4])
+def test_rendition_dpb_size_reaches_janus_and_record_encoders(tmp_path, dpb_size):
+    doc, path = _decode_doc(tmp_path)
+    doc["renditions"] = [{"id": "sdr", "port": 5004, "dpb_size": dpb_size},
+                         {"id": "rec", "target": str(tmp_path / "rec.mp4"), "dpb_size": dpb_size}]
+    path.write_text(json.dumps(doc))
+    app = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
+    nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
+    for encoder in ("janus_encoder", "rec_encoder"):
+        assert nodes[encoder]["options"].get("dpb_size") == (dpb_size or None)
+        assert "refs" not in nodes[encoder]["options"]
+
+
+@pytest.mark.parametrize("dpb_size", [-1, 17])
+def test_rendition_dpb_size_is_bounded(dpb_size):
+    with pytest.raises(mixer_config.ConfigError, match="dpb_size"):
+        mixer_config.parse({**CONFIG, "renditions": [{"id": "sdr", "dpb_size": dpb_size}]})
+
+
+def test_janus_output_dpb_size_defaults_to_nvenc_choice():
+    from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
+    for dpb_size, expected in ((0, None), (1, 1)):
+        avp = FakeAvp()
+        build_janus_output(avp, fake_api(), "program", JanusVideoConfig(), fps=30, width=1080, height=1920,
+                           dpb_size=dpb_size)
+        options = next(n for n in avp.nodes if n.parameters.get("name") == "janus_encoder").parameters["options"]
+        assert options.get("dpb_size") == expected

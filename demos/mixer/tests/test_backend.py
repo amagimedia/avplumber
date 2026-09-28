@@ -91,6 +91,9 @@ def test_source_pages_bus_skips_the_program_tap_and_labels_outputs(native_bounda
     assert [layer["input"] for layer in pages["layers"]] == list(range(12))
     assert pages["latency_ms"] == 80
     assert pages["max_layers"] == 12 and graph["mixer_wipe_overlay"]["max_layers"] == 2
+    # Monitors keep one NVENC reference frame; the program output leaves it to NVENC.
+    assert graph["aux_mv2_encoder"]["options"]["dpb_size"] == 1
+    assert "dpb_size" not in graph["janus_encoder"]["options"]
     if scene_view:
         assert graph["program_aux_tap"]["dst"][1:] == ["aux_mv_pgm"]
         # Same playout latency; the PGM pad (after the 13 sources) is shown one tick later instead.
@@ -98,6 +101,7 @@ def test_source_pages_bus_skips_the_program_tap_and_labels_outputs(native_bounda
         assert graph["aux_mv_comp"]["pgm_delay_frames"] == 1
         assert graph["aux_mv_comp"]["src"][-1] == "aux_mv_pgm"   # the delayed input is the last one
         assert "pgm_delay_frames" not in pages
+        assert graph["aux_mv_encoder"]["options"]["dpb_size"] == 1
     else:
         assert "program_aux_tap" not in graph
     settings = json.loads(app.avp.commands_registered["mixer.settings"](""))

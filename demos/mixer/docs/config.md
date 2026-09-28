@@ -149,6 +149,7 @@ output costs an encode, not another composite.
 | `tonemap_desat` | `0` | highlight desaturation; `0` keeps saturation |
 | `max_cll`, `max_fall` | derived | HDR10 static metadata for **PQ** outputs, nits. Defaults: MaxCLL = `tonemap_peak`×100, MaxFALL = 40% of it; `max_fall` may not exceed MaxCLL. Needs nv-codec-headers 13 and driver ≥ 570 (`Dockerfile.cuda`), else the SEIs are silently absent. HLG needs none |
 | `tonemap_param` | `0` | operator knee in reference-white units; `0` = operator default (0.3 mobius/reinhard, 1.8 gamma). mobius must be below 1.0; `0.9` keeps 90% of SDR white untouched |
+| `dpb_size` | `0` | NVENC reference frames kept, 0–16; `0` lets NVENC choose. Without B-frames `1` is enough and frees the other reference surfaces; it may cost quality at low bitrates, so measure before setting it on a program output. Aux monitors default to `1` |
 
 With no `renditions` the demo builds its usual single output from the command
 line flags.

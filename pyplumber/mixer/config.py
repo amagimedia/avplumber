@@ -37,6 +37,7 @@ MAX_DSK_KEYS = 4          # the downstream keyer stays one small pass: program +
 FADE_CURVES = ("linear", "ease-in", "ease-out", "ease-in-out")
 DEFAULT_FADE_CURVE = "linear"
 MAX_KEY_FADE_SECONDS = 10.0   # the keyer's fade_inputs limit (cuda_rect_overlay kMaxKeyFadeMs)
+MAX_DPB_SIZE = 16             # H.264/HEVC allow at most 16 reference frames
 
 
 def fade_curve(value: Any, where: str) -> str:
@@ -119,6 +120,7 @@ class Rendition:
 
     color: str = ""                # empty: inherit canvas, except H.264/tonemap imply SDR
     feed: str = "dirty"            # "clean" omits the downstream keys; without keys both are the program
+    dpb_size: int = 0              # NVENC reference frames kept (dpb_size); 0 lets NVENC choose
 
     @property
     def aspect(self) -> str:
@@ -327,6 +329,8 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
     if rendition.tonemap == "mobius" and rendition.tonemap_param >= 1:
         # The Möbius shoulder maps [knee, peak] onto [knee, 1]; at knee 1.0 it degenerates to clip.
         raise ConfigError(f"{where}: mobius tonemap_param must be below 1.0 (0.9 keeps 90% of SDR white linear)")
+    if not 0 <= rendition.dpb_size <= MAX_DPB_SIZE:
+        raise ConfigError(f"{where}: dpb_size must be from 0 (NVENC decides) to {MAX_DPB_SIZE}")
     if rendition.fps > fps:
         raise ConfigError(f"{where}: fps {rendition.fps} exceeds the canvas rate {fps}; "
                           "a rendition can only re-time the program downwards")
