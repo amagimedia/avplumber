@@ -163,7 +163,8 @@ void MixerOrchestrator::initializeRoutedRoutes() {
 }
 
 void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
-                                                   const std::string& new_pgm_scene) {
+                                                   const std::string& new_pgm_scene,
+                                                   bool picture_changed) {
     const auto scene_it = state_->scenes.find(new_pgm_scene);
     if (scene_it == state_->scenes.end())
         return;
@@ -185,7 +186,7 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
     // The encoder must not make the receiver wait for the next periodic keyframe:
     // a cut changes the whole picture, and a P-frame carrying it can exceed what
     // the receiver can recover from. The node coalesces bursts into one keyframe.
-    if (!state_->keyframe_node_name.empty()) {
+    if (picture_changed && !state_->keyframe_node_name.empty()) {
         try {
             setNodeObject(state_->keyframe_node_name, "trigger", Parameters(true));
         } catch (const std::exception& e) {

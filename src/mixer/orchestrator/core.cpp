@@ -186,7 +186,7 @@ void MixerOrchestrator::interruptTransition() {
     }
     const auto generation = ++state_->transition_generation;
     TransitionGuard guard([&] { abortTransition(generation); });
-    restoreProgramRouting();
+    restoreProgramRouting(previous_mode != MixerState::TransitionMode::Cut);
     if (previous_mode == MixerState::TransitionMode::Wipe && !state_->wipe_group_name.empty()) {
         // Group management retires the old decoder independently. Waiting here
         // would add teardown time to every correction, including a hard cut.
@@ -209,14 +209,14 @@ void MixerOrchestrator::interruptTransition() {
                                                              : "returned to the program picture");
 }
 
-void MixerOrchestrator::restoreProgramRouting() {
+void MixerOrchestrator::restoreProgramRouting(bool picture_changed) {
     // Remove scheduled controls as well as routes; cancelling a worker alone
     // cannot cancel a future selector flip.
     if (auto scene = state_->scenes.find(state_->transition_scene_name); scene != state_->scenes.end()) {
         for (const auto& control : scene->second.controls)
             timeline_->clearKey(control.node_name, control.key);
     }
-    applyPostTransitionRouting(state_->pgm_is_slot_a, state_->pgm_scene_name);
+    applyPostTransitionRouting(state_->pgm_is_slot_a, state_->pgm_scene_name, picture_changed);
     scheduleSceneControls(state_->scenes.at(state_->pgm_scene_name), wallclock.pts());
     for (const auto& [name, key, value] : std::vector<std::tuple<std::string, std::string, int>>{
             {state_->wipe_selector_name, "active", 0}, {state_->wipe_otm_name, "outputs", 1}}) {
@@ -239,7 +239,7 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
             logstream << "mixer: transition abort cleanup failed: " << e.what();
         }
     };
-    cleanup([&] { restoreProgramRouting(); });
+    cleanup([&] { restoreProgramRouting(mode != MixerState::TransitionMode::Cut); });
     if (mode == MixerState::TransitionMode::Wipe && !state_->wipe_group_name.empty())
         cleanup([&] { stopGroup(state_->wipe_group_name); });
     // Remove slot substitution even when the target never produced a frame.
