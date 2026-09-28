@@ -104,11 +104,13 @@ Eligible scenes use fixed, filter-free sources and compositor geometry, without
 route changes or scene control commands. Several scene definitions share the
 same input queues: this does not continuously render every scene. An idle slot
 advances its playout queues without allocating output surfaces or launching
-composition kernels. Direct cuts reuse only frames within the current playout
-window; an old held picture from a stalled source cannot prove readiness.
+composition kernels. Cuts, fades and wipes reuse only frames within the current
+playout window. A source running late keeps its held picture, so the new scene
+flips at the next deadline and repeats it; a held picture older than the
+eight-frame queue budget, from a stalled source, cannot prove readiness.
 There is no GPU download/upload or additional source decoding. The existing
 frame rate, playout delay, visible routing and ready-frame gate are retained.
-Preview, fade and wipe preparation still use their ordinary reset path.
+Preview preparation still uses the ordinary reset path.
 
 The price is additional CPU reference/queue handling and potentially more VRAM
 because decoded surfaces remain referenced longer. It is not zero-cost.
