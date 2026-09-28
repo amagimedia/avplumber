@@ -39,7 +39,7 @@ MAX_DSK_KEYS = 4          # the downstream keyer stays one small pass: program +
 # did before curves existed.
 FADE_CURVES = ("linear", "ease-in", "ease-out", "ease-in-out")
 DEFAULT_FADE_CURVE = "linear"
-MAX_KEY_FADE_SECONDS = 10.0   # the keyer's fade_inputs limit (cuda_rect_overlay kMaxKeyFadeMs)
+MAX_KEY_FADE_SECONDS = 10.0   # cuda_rect_overlay rejects fade_inputs duration_ms above 10000
 MAX_DPB_SIZE = 16             # H.264/HEVC allow at most 16 reference frames
 
 

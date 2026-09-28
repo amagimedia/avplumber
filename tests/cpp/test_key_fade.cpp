@@ -141,6 +141,22 @@ void roundedTimestamps() {
     assert(key.level(ms(kT0 + 29 * period)) == 1);
 }
 
+// A span that is not a whole number of periods ends on the first frame at or after its end.
+void fractionalSpans() {
+    KeyFade key;
+    key.retarget(true, 1.25 * kPeriod, FadeCurve::Linear, frameTime(0), kPeriod);
+    assert(near(key.level(frameTime(0)), 0.8));
+    assert(key.level(frameTime(1)) == 1);
+    // Reversed after 2 of 5 frames (level 0.4): 0.4 * 5 = 2 periods back to 0.
+    KeyFade back;
+    back.retarget(true, 5 * kPeriod, FadeCurve::Linear, frameTime(0), kPeriod);
+    back.level(frameTime(0));
+    back.level(frameTime(1));
+    back.retarget(false, 5 * kPeriod, FadeCurve::Linear, frameTime(2), kPeriod);
+    assert(near(back.level(frameTime(2)), 0.2));
+    assert(back.level(frameTime(3)) == 0);
+}
+
 void independentKeys() {
     std::vector<KeyFade> keys(2);
     keys[0].retarget(true, 0.2, FadeCurve::Linear, frameTime(0), kPeriod);
@@ -164,5 +180,6 @@ int main() {
     startsAtCommand();
     timestampJumps();
     roundedTimestamps();
+    fractionalSpans();
     independentKeys();
 }
