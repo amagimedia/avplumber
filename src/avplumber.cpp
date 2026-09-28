@@ -31,6 +31,7 @@
 #include "rest_client.hpp"
 #include "SharedTimeline.hpp"
 #include "mixer/primitives/MixerState.hpp"
+#include "mixer/primitives/compositor_color.hpp"
 #include "mixer/orchestrator/MixerOrchestrator.hpp"
 using avp::mixer::MixerOrchestrator;
 using avp::mixer::MixerState;
@@ -993,7 +994,8 @@ public:
         };
 
         // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,"start_pts_ms":123456789,
-        //             "curve":"linear"}; curve is linear (default), ease-in, ease-out or ease-in-out
+        //             "curve":"linear","color":"#000000"}; curve is linear (default), ease-in, ease-out or
+        //             ease-in-out; a color (opaque RGB) dips through it instead of mixing
         commands_["mixer.fade"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.fade", arg);
             std::string mixer_name = req.at("mixer").get<std::string>();
@@ -1003,8 +1005,11 @@ public:
             if (duration_sec <= 0)
                 throw Error("mixer.fade: duration_sec must be > 0");
             const auto curve = avp::mixer::parseFadeCurve(req.value("curve", std::string("linear")));
+            std::optional<std::array<uint8_t, 3>> dip;
+            if (req.contains("color"))
+                dip = avp::mixer::parseDipColor(req.at("color").get<std::string>());
             auto orch = mixerOrchestrator(mixer_name);
-            orch.fade(scene_name, duration_sec, start_pts_ms, curve);
+            orch.fade(scene_name, duration_sec, start_pts_ms, curve, dip);
         };
 
         // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0,"start_pts_ms":123456789}
@@ -1110,6 +1115,13 @@ public:
             if (cfg.contains("hwaccel")) state->hwaccel_name = cfg["hwaccel"].get<std::string>();
             if (cfg.contains("fps_num")) state->fps_num = cfg["fps_num"].get<int>();
             if (cfg.contains("fps_den")) state->fps_den = cfg["fps_den"].get<int>();
+            if (cfg.contains("color")) {
+                // The compositors' canvas color (sdr, hlg, pq): a dip colour is converted for it.
+                const auto transfer = avp::mixer::graphicTransfer(cfg["color"].get<std::string>());
+                if (transfer == AVCOL_TRC_UNSPECIFIED)
+                    throw Error("mixer.init: color must be sdr, hlg or pq");
+                state->canvas_transfer = transfer;
+            }
             if (cfg.contains("switch_margin_ms")) {
                 state->switch_margin_ms = cfg["switch_margin_ms"].get<int64_t>();
                 if (state->switch_margin_ms < 0)

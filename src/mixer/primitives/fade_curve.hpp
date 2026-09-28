@@ -53,4 +53,20 @@ inline std::string fadeCurveExpression(FadeCurve curve, const std::string& progr
     return "(st(0," + progress + ");" + shape + ")";
 }
 
+/// A dip (fade through a colour) runs the curve once per half: y(x) = C(2x)/2
+/// before the midpoint and 1/2 + C(2x-1)/2 from it, so y(1/2) == 1/2 exactly for
+/// every curve, and 1-y too; transition_cuda shows the colour alone at 1/2.
+inline double dipCurveAt(FadeCurve curve, double x) {
+    x = std::min(1.0, std::max(0.0, x));
+    return x < 0.5 ? 0.5 * fadeCurveAt(curve, 2 * x) : 0.5 + 0.5 * fadeCurveAt(curve, 2 * x - 1);
+}
+
+/// dipCurveAt as an FFmpeg expression of `progress` (clamped as for
+/// fadeCurveExpression), term for term. Progress lives in variable 1 because
+/// the curve uses variable 0; the result is parenthesised for "1-" + result.
+inline std::string dipCurveExpression(FadeCurve curve, const std::string& progress) {
+    return "(st(1," + progress + ");if(lt(ld(1),0.5),0.5*(" + fadeCurveExpression(curve, "2*ld(1)") +
+           "),0.5+0.5*(" + fadeCurveExpression(curve, "2*ld(1)-1") + ")))";
+}
+
 }  // namespace avp::mixer

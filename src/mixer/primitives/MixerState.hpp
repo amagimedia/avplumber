@@ -12,6 +12,10 @@
 #include "source_mask.hpp"
 #include "../transition_control.hpp"
 
+extern "C" {
+#include <libavutil/pixfmt.h>
+}
+
 namespace avp::mixer {
 
 struct SourceLayout {
@@ -72,6 +76,8 @@ struct MixerState : public InstanceShared<MixerState> {
 
     int fps_num = 30, fps_den = 1;
     int64_t switch_margin_ms = 100;
+    /// The compositors' canvas transfer (mixer.init "color"); a dip colour is converted for it.
+    AVColorTransferCharacteristic canvas_transfer = AVCOL_TRC_BT709;
 
     enum class TransitionMode { Idle, Cut, Crossfade, Wipe };
     std::atomic<TransitionMode> transition_mode{TransitionMode::Idle};
