@@ -89,6 +89,16 @@ summary { cursor: pointer; }
 <p class="hint" id="allocation-note"></p>
 <details><summary>What gets generated?</summary><p>SDR 4:2:0 uses animated test patterns and colour bars. Choose H.264/NVDEC or raw NV12 frames uploaded to the GPU. Raw upload uses no decoder engine but increases disk and CPU-to-GPU traffic. HLG uses HDR bars and moving highlights, with HEVC/NVDEC or raw P010 upload. 4:2:2 inputs use packed v210 clips and GPU unpacking; browser sources use the bundled transparent test page.</p><p>Each input is independent, but several inputs may read the same generated file. Increasing the source count does not create that many different movies.</p></details>
 </section>
+<section class="card"><div class="card-title"><h2>Downstream keys</h2></div>
+<p class="hint">Alpha browser graphics keyed over the finished program, above transitions and wipes. Each page is one more browser source and counts against the source and browser limits. Keys start off; switch them on the mixer page.</p>
+<div class="fields" id="dsk-pages">
+<label><input type="checkbox" value="lower_third"> Lower third · animated name plate</label>
+<label><input type="checkbox" value="ticker"> Ticker · second lower-third layer</label>
+<label><input type="checkbox" value="bug_left"> Corner bug · top left</label>
+<label><input type="checkbox" value="bug_right"> Clock bug · top right</label>
+</div>
+<label><input type="checkbox" id="clean-feed"> Clean feed: also encode the SDR program without keys (one more H.264 encode)</label>
+</section>
 <section class="card"><div class="card-title"><h2>Included with every setup</h2></div>
 <p class="hint">Two generated wipes: diagonal sweep and sliding panels. Each lasts two seconds at the selected FPS. Wipe caching is off.</p>
 <p class="hint" id="scene-description"></p>
@@ -122,8 +132,9 @@ const types = [
 // Presentation order is independent of the saved recipe's weight indices.
 const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]]];
 const presets = {balanced:[8,4,2,0,2,0,0],equal:[1,1,1,1,1,1,1],light:[2,1,0,0,0,0,0]};
+const dskPages=()=>[...document.querySelectorAll('#dsk-pages input:checked')].map(i=>i.value);
 const sourceBudgets=()=>[
- [[2],[1],4,'HDR 4:2:2'],[[4],[1],32,'Browser'],
+ [[2],[1],4,'HDR 4:2:2'],[[4],[1],32-dskPages().length,'Browser'],
  [[0,1],[1,1],Number($('fps').value)<=30?40:20,'Combined NVDEC'],
  [[5,6],[1,2],Math.min(28,Math.floor(700/Number($('fps').value))),'Raw 4:2:0 upload units']
 ];
@@ -139,7 +150,7 @@ function sourceMaximum(index){
 }
 let sourceValues=sourceCounts(Number($('sources').value),presets.balanced), currentSettings=null, busy=false, online=false, loaded=false, previousDepth=10;
 let resizeValues=null, submitting=false, submission=0;
-const sourceLimit = () => Number($('fps').value)===25?110:Math.floor(2500/Number($('fps').value));
+const sourceLimit = () => (Number($('fps').value)===25?110:Math.floor(2500/Number($('fps').value)))-dskPages().length;
 function outputMode(){
  const [depth,chroma]=$('mode').value.split(':');return {bit_depth:Number(depth),chroma};
 }
@@ -211,7 +222,8 @@ function update(){
  }
  currentSettings={resolution:$('resolution').value,orientation:$('orientation').value,fps,
    source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts],
-   bitrate_kbps:bitrate,browser_ring_size:integer('browser-ring-size',1,64)};
+   bitrate_kbps:bitrate,browser_ring_size:integer('browser-ring-size',1,64),
+   dsk:dskPages(),clean_feed:$('clean-feed').checked&&dskPages().length>0};
  types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(document.activeElement!==input&&(Number(input.value)!==counts[i]||input.value===''))input.value=counts[i];input.max=sourceMaximum(i);});
  $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
  $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${fps<=30?40:20} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]}/${Math.min(28,Math.floor(700/fps))} units (NV12 = 1, P010 = 2). Capacity depends on codec and content.`;
@@ -221,10 +233,12 @@ function update(){
  const hdrKbps=Math.max(1,Math.round(bitrate*8000/6000));
  $('output-description').textContent=eight?`H.264 / SDR at ${bitrate} kbit/s. HDR encoding is off.`
    :`H.264 / SDR at ${bitrate} kbit/s and H.265 / HLG at ${hdrKbps} kbit/s.`;
+ const keys=currentSettings.dsk.length;
+ $('output-description').textContent+=keys?` ${keys} downstream key${keys>1?'s':''} on the program${currentSettings.clean_feed?'; the SDR output also has a clean copy without keys':''}.`:'';
  $('input-size').textContent=`Generated inputs: ${sourceWidth} × ${sourceHeight} at ${fps} fps`;
  $('summary-title').textContent=`${height>width?'Portrait':'Landscape'} ${sourceHeight}p${fps}`;
  $('source-total').textContent=sourceCount;$('scene-total').textContent=sceneCount;$('fps-total').textContent=fps;
- $('engine-split').textContent=`${counts[0]+counts[1]} NVDEC · ${counts[2]+counts[3]} v210 → CUDA · ${counts[5]} raw NV12 upload · ${counts[6]} raw P010 upload · ${browser} browser. ${eight?'H.264 only.':'Two encoded outputs.'}`;
+ $('engine-split').textContent=`${counts[0]+counts[1]} NVDEC · ${counts[2]+counts[3]} v210 → CUDA · ${counts[5]} raw NV12 upload · ${counts[6]} raw P010 upload · ${browser} browser${currentSettings.dsk.length?` + ${currentSettings.dsk.length} key`:''}. ${(eight?1:2)+(currentSettings.clean_feed?1:0)} encoded program output${eight&&!currentSettings.clean_feed?'':'s'}.`;
  const sceneCounts=allocate(sceneCount,Object.values(layouts));
  $('scene-description').textContent=Object.keys(layouts).map((name,i)=>`${sceneCounts[i]} ${name.replaceAll('_',' ')}`).filter((_,i)=>sceneCounts[i]>0).join(' · ');
  $('error').textContent='';
@@ -260,6 +274,7 @@ async function refresh(){
     previousDepth=s.bit_depth??10;
     $('mode').value=`${previousDepth}:${s.chroma??(previousDepth===8?'420':'422')}`;
     for(const [id,key] of Object.entries({resolution:'resolution',orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps','browser-ring-size':'browser_ring_size'}))if(s[key]!==undefined)$(id).value=s[key];
+    document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;
     if(s.browser_ring_size===undefined)$('browser-ring-size').value=Number($('fps').value)<=30?6:9;
     sourceValues=types.map((_,i)=>s.weights[i]??0);syncCounts();
    }
@@ -310,7 +325,7 @@ $('mode').addEventListener('input',()=>{
  previousDepth=bit_depth;
  syncCounts();update();
 });
-document.querySelectorAll('.fields input,.fields select').forEach(input=>{
+document.querySelectorAll('.fields input,.fields select,#clean-feed').forEach(input=>{
  if(input.id!=='mode')input.addEventListener('input',update);
 });
 $('fps').addEventListener('input',()=>{

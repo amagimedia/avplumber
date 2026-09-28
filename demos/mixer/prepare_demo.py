@@ -27,9 +27,41 @@ sys.path.insert(0, str(DEMO_DIR / "tests"))
 sys.path.insert(0, str(DEMO_DIR.parents[1] / "tests/cuda"))
 
 from sdr_patterns import GENERATORS, render  # noqa: E402
-from demo_recipe import allocate, scenes  # noqa: E402
+from demo_recipe import DSK_PAGES, allocate, scenes  # noqa: E402
 from hdr_patterns import write_hlg  # noqa: E402
-from pyplumber.mixer.config import MAX_SOURCES, default_browser_ring_size, parse  # noqa: E402
+from pyplumber.mixer.config import MAX_DSK_KEYS, MAX_SOURCES, default_browser_ring_size, parse  # noqa: E402
+
+# Janus RTP port of the clean SDR program; 5004/5006 carry the keyed program and
+# 5008 the multiview. Clean is SDR only: one more H.264 encode fits beside
+# the keyed SDR and HDR ones on a single NVENC, a clean HEVC would not.
+CLEAN_PORT = 5010
+
+
+def page_url(path: Path) -> str:
+    """Embed a demo page, so browser inputs need no web server."""
+    return "data:text/html;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+# Browser window of each key page. The browser service exports only allowlisted
+# sizes (DMA_BROWSER_ALLOWED_DIMS), so these are fixed; keep that list in step.
+DSK_WINDOWS = {"lower_third": (1016, 172), "ticker": (1920, 80), "bug_left": (152, 152), "bug_right": (304, 152)}
+
+
+def dsk_rects(width: int, height: int) -> dict:
+    """Canvas rectangle of each key page: its window scaled by the canvas's short
+    side over 1080, so 1080p canvases map the window 1:1. The ticker spans the
+    canvas width. Chromium paints only the graphic, never a transparent canvas."""
+    even = lambda v: max(2, round(v / 2) * 2)
+    unit = min(width, height)
+    size = {page: (even(w * unit / 1080), even(h * unit / 1080)) for page, (w, h) in DSK_WINDOWS.items()}
+    size["ticker"] = (width, even(DSK_WINDOWS["ticker"][1] * width / DSK_WINDOWS["ticker"][0]))
+    margin = even(unit * 0.03)
+    ticker_y = height - margin - size["ticker"][1]
+    (plate_w, plate_h), (bug_w, bug_h), (clock_w, clock_h) = size["lower_third"], size["bug_left"], size["bug_right"]
+    return {"ticker": (0, ticker_y, *size["ticker"]),
+            "lower_third": (margin, ticker_y - margin - plate_h, plate_w, plate_h),
+            "bug_left": (margin, margin, bug_w, bug_h),
+            "bug_right": (width - margin - clock_w, margin, clock_w, clock_h)}
 
 
 def ensure_asset(path: Path, writer) -> None:
@@ -198,8 +230,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if "pattern" in spec:
                     if spec["pattern"] != "alpha" or "url" in spec:
                         raise ValueError(f"{name}: browser pattern must be alpha, without a url")
-                    page = (DEMO_DIR / "browser_alpha.html").read_bytes()
-                    url = "data:text/html;base64," + base64.b64encode(page).decode("ascii")
+                    url = page_url(DEMO_DIR / "browser_alpha.html")
                 else:
                     url = spec["url"]
                 source.update(kind="browser", url=url, width=spec.get("width", width), height=spec.get("height", height), color="sdr")
@@ -228,13 +259,34 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
         wipes.append({"id": pattern, "name": name, "path": runtime_path(wipe), "duration_seconds": 2})
     scene_list = scenes(sources, width, height, scene_count, recipe["layouts"], seed,
                         alpha_background=recipe.get("alpha_background"))
+    # Keys are added after scene generation: ordinary sources that scenes could
+    # use, but generated layouts should not scatter graphics into grids.
+    pages = recipe.get("dsk", [])
+    if (not isinstance(pages, list) or len(set(pages)) != len(pages) or len(pages) > MAX_DSK_KEYS
+            or any(page not in DSK_PAGES for page in pages)):
+        raise ValueError(f"dsk must list up to {MAX_DSK_KEYS} distinct pages from {DSK_PAGES}")
+    rects, keys = dsk_rects(width, height), []
+    for page in pages:
+        x, y, w, h = rects[page]
+        window_w, window_h = DSK_WINDOWS[page]
+        sources.append({"id": f"dsk_{page}", "kind": "browser", "url": page_url(DEMO_DIR / "dsk" / f"{page}.html"),
+                        "width": window_w, "height": window_h, "color": "sdr"})
+        keys.append({"id": page, "source": f"dsk_{page}", "dst": {"x": x, "y": y, "w": w, "h": h}})
+    renditions = recipe["renditions"]
+    if recipe.get("clean_feed"):
+        if not pages:
+            raise ValueError("clean_feed needs at least one dsk page")
+        sdr = renditions[0]   # the recipe's first rendition is the H.264/SDR program
+        renditions = [*renditions, {**sdr, "id": f"{sdr['id']}_clean", "feed": "clean", "port": CLEAN_PORT}]
     doc = {"canvas": canvas, "sources": sources, "scenes": scene_list,
            "browser_ring_size": recipe.get("browser_ring_size", default_browser_ring_size(fps)),
-           "initial_scene": scene_list[0]["id"], "renditions": recipe["renditions"],
+           "initial_scene": scene_list[0]["id"], "renditions": renditions,
            "wipes": wipes,
            "wipe_color": "sdr", "control": {"direct": True, "transition": "cut", "default_wipe": "diagonal"}}
     if "aux_buses" in recipe:
         doc["aux_buses"] = recipe["aux_buses"]
+    if keys:
+        doc["dsk"] = {"keys": keys}
     if "max_compositor_layers" in recipe:
         doc["max_compositor_layers"] = recipe["max_compositor_layers"]
     cfg = parse(doc)

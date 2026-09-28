@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>DSK lower third</title>
+<!-- Downstream key: the window is the graphic's own rectangle, so every size is in vh/vw of
+     that strip. Transparent outside the plate; only transform and opacity animate, which
+     Chromium runs on its compositor without relayout or main-thread paint. -->
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  body { font-family: system-ui, sans-serif; color: white; }
+  #plate { position: absolute; left: 0; top: 12%; width: 100%; height: 76%;
+           display: flex; align-items: stretch; will-change: transform, opacity; }
+  #accent { width: 2.2%; background: #ff5a1f; }
+  #text { flex: 1; background: linear-gradient(90deg, #101c2bee 0 70%, #101c2b00); padding: 0 4%;
+          display: flex; flex-direction: column; justify-content: center; }
+  #name { font-size: 30vh; font-weight: 700; line-height: 1.1; white-space: nowrap; }
+  #role { font-size: 17vh; opacity: .85; white-space: nowrap; }
+  .in  { animation: in  .6s cubic-bezier(.2, .8, .2, 1) both; }
+  .out { animation: out .4s ease-in both; }
+  @keyframes in  { from { transform: translateX(-104%); opacity: 0; } to { transform: none; opacity: 1; } }
+  @keyframes out { to { transform: translateX(-104%); opacity: 0; } }
+</style>
+<div id="plate"><div id="accent"></div>
+  <div id="text"><div id="name"></div><div id="role"></div></div></div>
+<script>
+  const people = [["Ada Lovelace", "Analyst · Engine No. 1"], ["Grace Hopper", "Compiler desk"],
+                  ["Alan Turing", "Codebreaking correspondent"], ["Hedy Lamarr", "Spread spectrum, live"]];
+  const plate = document.getElementById("plate");
+  let i = 0;
+  function show() {
+    [document.getElementById("name").textContent, document.getElementById("role").textContent] = people[i++ % people.length];
+    plate.className = "in";
+    setTimeout(() => { plate.className = "out"; }, 5200);
+  }
+  show();
+  setInterval(show, 6000);
+</script>
+</html>

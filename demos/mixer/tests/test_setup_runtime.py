@@ -593,3 +593,46 @@ def test_healthy_browsers_are_not_restarted(tmp_path, monkeypatch):
     manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
     assert not manager._recover_browsers([{'sources': [{'id': 'browser', 'kind': 'browser'}]}])
     assert calls == ['/status']
+
+
+@pytest.mark.parametrize("bit_depth", [8, 10])
+def test_dsk_pages_are_browser_sources_with_clean_copies_of_each_output(tmp_path, bit_depth):
+    settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "chroma": "420" if bit_depth == 8 else "422",
+                "weights": [4, 0, 0, 0, 1], "dsk": ["lower_third", "bug_left", "bug_right"], "clean_feed": True}
+    show, _, _ = prepare_demo.plan(recipe_for(settings), tmp_path)
+    from pyplumber.mixer.config import parse
+    cfg = parse(show)
+    keys = {k.id: k for k in cfg.dsk_keys}
+    assert list(keys) == ["lower_third", "bug_left", "bug_right"]
+    for key in keys.values():
+        source = cfg.source(key.source)
+        # The window is the graphic's own size (an allowlisted browser size), never a
+        # transparent full canvas; a 1080-wide canvas maps it 1:1.
+        assert source.kind == "browser" and (source.width, source.height) == prepare_demo.DSK_WINDOWS[key.id]
+        assert (key.dst.w, key.dst.h) == (source.width, source.height)
+        assert key.dst.x + key.dst.w <= cfg.canvas_w and key.dst.y + key.dst.h <= cfg.canvas_h
+        assert key.on is False
+    # Generated scenes do not scatter the key pages into grids.
+    assert not any(item.source.startswith("dsk_") for scene in cfg.scenes for item in scene.items)
+    feeds = [(r.id, r.feed, r.port) for r in cfg.renditions]
+    # Clean is SDR only, to spare the encoder: keyed SDR (+ HDR) plus one clean H.264.
+    if bit_depth == 8:
+        assert feeds == [("sdr", "dirty", 5004), ("sdr_clean", "clean", 5010)]
+    else:
+        assert feeds == [("sdr", "dirty", 5004), ("hdr", "dirty", 5006), ("sdr_clean", "clean", 5010)]
+    assert cfg.renditions[-1].codec == "h264_nvenc"
+
+
+def test_dsk_pages_take_their_share_of_the_source_budget():
+    limit = 2500 // 60
+    recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 3, "dsk": ["lower_third", "bug_left", "bug_right"]})
+    with pytest.raises(ValueError, match="source_count"):
+        recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 2, "dsk": ["lower_third", "bug_left", "bug_right"]})
+    assert source_counts(40, [1, 0, 0, 0, 10], 25, reserved_browsers=3)[4] == 29   # 32 browsers minus 3 keys
+
+
+@pytest.mark.parametrize("changes", [{"dsk": ["nope"]}, {"dsk": ["ticker", "ticker"]}, {"dsk": "ticker"},
+                                     {"clean_feed": True}, {"dsk": ["ticker"], "clean_feed": 1}])
+def test_dsk_settings_are_bounded(changes):
+    with pytest.raises(ValueError):
+        recipe_for({**DEFAULT_SETTINGS, **changes})

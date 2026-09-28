@@ -6,6 +6,8 @@ import random
 
 LAYOUTS = ("fullscreen", "grid_2", "grid_4", "grid_8", "grid_16", "grid_32", "grid_64",
            "pip", "random", "alpha_overlay")
+# Downstream-key pages under dsk/, keyed over the finished program in this order.
+DSK_PAGES = ("lower_third", "ticker", "bug_left", "bug_right")
 
 
 def allocate(total, weights):

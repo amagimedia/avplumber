@@ -143,6 +143,7 @@ output costs an encode, not another composite.
 | `preset` | `"p7"` | NVENC quality preset |
 | `port` | — | Janus target: overrides the RTP port from the command line |
 | `color` | automatic | `sdr`, `hlg`, or `pq`; H.264 always requires SDR, HEVC otherwise inherits the canvas |
+| `feed` | `"dirty"` | `"clean"` encodes the program without the [downstream keys](#dsk); without keys both are the program |
 | `tonemap` | none | requests an SDR output from an HDR canvas: `clip` (exact SDR, hard-clipped highlights), `mobius` (see `tonemap_param`), `hable`, `reinhard`, `gamma`, `linear`, `none` |
 | `tonemap_peak` | `10` | HDR peak in units of 100 nits, minimum `2.03` |
 | `tonemap_desat` | `0` | highlight desaturation; `0` keeps saturation |
@@ -331,6 +332,37 @@ over earlier ones.
 Padding is always black. `cover` needs the source size, which is declared or
 probed. `initial_scene` names the scene on program at start (default: the
 first one).
+
+## dsk
+
+Downstream keys: up to four alpha browser graphics (bugs, lower thirds)
+drawn over the finished program, above transitions and wipes. Renditions with
+`"feed": "clean"` receive the program without them; the multiview PGM tile
+shows the keyed program.
+
+```json
+"dsk": {"keys": [
+  {"id": "bug", "source": "logo_page", "dst": {"x": 32, "y": 32, "w": 152, "h": 152}},
+  {"id": "strap", "source": "strap_page", "dst": {"x": 32, "y": 1640, "w": 1016, "h": 172}, "on": true}
+]}
+```
+
+| field | default | meaning |
+| --- | --- | --- |
+| `id` | — | unique key name, used by `mixer.dsk` and the control page |
+| `source` | — | a **browser** source id; its alpha is always kept. Scenes may use the same source |
+| `dst` | whole canvas | `x`, `y`, `w`, `h` on the canvas; the window is scaled into it |
+| `on` | `false` | on air at start |
+
+Keys are ordinary sources and count toward the source limit. Size the browser
+window to the graphic (and allow that size in `DMA_BROWSER_ALLOWED_DIMS`),
+not to the canvas: Chromium then paints and exports only the graphic's pixels.
+
+The keyer is one compositor pass clocked by the program: every program frame
+renders at once over the newest frame of each key, so it adds no playout
+latency and a late browser paint never delays the program. Keys cut on and off
+(`mixer.dsk {"key": "bug", "on": true}`); with all keys off the program frame
+passes through without GPU work. With no keys declared the graph has no keyer.
 
 ## Known limitations
 

@@ -117,6 +117,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     // An explicit fps opts live, monotonic-PTS inputs into shared playout.
     // Unclocked callers retain the established timestamp-driven behavior.
     std::unique_ptr<avp::mixer::Playout<av::VideoFrame>> playout_;
+    // Downstream keying: this input's frames drive the output (see processKeyed).
+    std::optional<size_t> clock_input_;
     av::Rational frame_rate_{0, 1};
     std::atomic<uint64_t> input_generation_{0};
     std::atomic<int64_t> input_valid_from_ns_{0};
@@ -165,6 +167,13 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     bool hwSwFormatMatch(const av::VideoFrame &f) const {
         const AVPixelFormat fmt = CudaRectDraw::frameSwFormat(f);
         return fmt != AV_PIX_FMT_NONE && avp::mixer::canvasAccepts(fmt, draw_.canvas().sw_fmt);
+    }
+
+    void requireDrawable(const av::VideoFrame &f) const {
+        if (f.raw()->format != AV_PIX_FMT_CUDA)
+            throw Error("cuda_rect_overlay: input must be AV_PIX_FMT_CUDA");
+        if (!hwSwFormatMatch(f))
+            throw Error("cuda_rect_overlay: input hw sw_format mismatch node sw_format");
     }
 
     void processComposite(av::Timestamp pts, const std::vector<const av::VideoFrame *> &sources,
@@ -267,7 +276,7 @@ public:
 
     void stop() override {
         NodeMultiInput<av::VideoFrame>::stop();
-        for (auto &subscription : subscriptions_) subscription->close();
+        for (auto &subscription : subscriptions_) if (subscription) subscription->close();
     }
 
     void flush() override {
@@ -425,10 +434,7 @@ public:
                     break;
                 }
                 if (frameUsable(*frame)) {
-                    if (frame->raw()->format != AV_PIX_FMT_CUDA)
-                        throw Error("cuda_rect_overlay: input must be AV_PIX_FMT_CUDA");
-                    if (!hwSwFormatMatch(*frame))
-                        throw Error("cuda_rect_overlay: input hw sw_format mismatch node sw_format");
+                    requireDrawable(*frame);
                     playout_->push(i, *frame, frame->pts().timestamp({1, 1000000000}));
                 }
                 source_edges_[i]->pop();
@@ -524,7 +530,73 @@ public:
         }
     }
 
+    // Each clock-input frame renders at once, at its own PTS, over the newest
+    // frame of every other active input. Keys are sampled and held, never
+    // waited for: no playout buffer delays the clock input and a late key
+    // cannot stall it. With no key visible the frame passes through untouched.
+    void processKeyed() {
+        if (sent_eof_) return;
+        const size_t clock = *clock_input_;
+        av::VideoFrame *program = source_edges_[clock]->peek();
+        auto active = activeInputs();
+        if (program && hasTimeline() && frameUsable(*program))
+            if (auto value = tlGetRaw("active_inputs", program->pts()))
+                active = avp::mixer::parseSourceMask(*value);
+        if (active != applied_active_mask_) {
+            for (size_t i = 0; i < source_edges_.size(); ++i) {
+                if (i == clock || active.test((int)i)) continue;
+                held_[i] = av::VideoFrame();
+                held_valid_[i] = false;
+            }
+            for (size_t i = 0; i < subscriptions_.size(); ++i)
+                if (subscriptions_[i]) subscriptions_[i]->enable(active.test((int)i) && !stopping_);
+            applied_active_mask_ = active;
+        }
+        for (size_t i = 0; i < source_edges_.size(); ++i) {
+            if (i == clock) continue;
+            while (auto *frame = source_edges_[i]->peek()) {
+                if (active.test((int)i) && frameUsable(*frame)) {
+                    requireDrawable(*frame);
+                    held_[i] = *frame;
+                    held_valid_[i] = true;
+                }
+                source_edges_[i]->pop();
+            }
+        }
+        if (!program) {
+            this->waitForInput();
+            return;
+        }
+        av::VideoFrame frame = *program;
+        source_edges_[clock]->pop();
+        if (isEofMarker(frame)) {
+            sent_eof_ = true;
+            this->sink_->put(frame);
+            return;
+        }
+        if (!frameUsable(frame)) return;
+        requireDrawable(frame);
+        std::vector<const av::VideoFrame *> sources(source_edges_.size(), nullptr);
+        sources[clock] = &frame;
+        bool keyed = false;
+        for (size_t i = 0; i < sources.size(); ++i) {
+            if (i == clock || !held_valid_[i]) continue;
+            sources[i] = &held_[i];
+            keyed = true;
+        }
+        if (keyed) {
+            processComposite(frame.pts(), sources, &frame);
+        } else {
+            ++frame_counter_;
+            this->sink_->put(frame);
+        }
+    }
+
     void process() override {
+        if (clock_input_) {
+            processKeyed();
+            return;
+        }
         if (playout_) {
             processClocked();
             return;
@@ -717,10 +789,7 @@ public:
             av::VideoFrame *p = this->source_edges_[i]->peek();
             if (!p || input_eof_[i] || !frameUsable(*p) || p->pts() != min_ts)
                 continue;
-            if (p->raw()->format != AV_PIX_FMT_CUDA)
-                throw Error("cuda_rect_overlay: input must be AV_PIX_FMT_CUDA");
-            if (!hwSwFormatMatch(*p))
-                throw Error("cuda_rect_overlay: input hw sw_format mismatch node sw_format");
+            requireDrawable(*p);
             av::VideoFrame consumed = *p;
             // Metadata must follow the retained frame before the queue slot is released.
             if (meta_src == p) meta_src = &held_[i];
@@ -831,7 +900,7 @@ public:
     }
 
     av::Rational frameRate() override {
-        if (playout_) return frame_rate_;
+        if (playout_ || clock_input_) return frame_rate_;
         if (!source_edges_.empty()) {
             auto source = source_edges_.front()->findNodeUp<IFrameRateSource>();
             if (source) return source->frameRate();
@@ -917,7 +986,16 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     if (params.count("active_inputs"))
         node->active_inputs_ = avp::mixer::parseSourceMask(params["active_inputs"]);
     node->warmup_timeout_ms_ = params.value("warmup_timeout_ms", (int64_t)0);
-    if (params.contains("fps")) {
+    if (params.contains("clock_input")) {
+        // fps is the clock input's rate here: it paces key subscriptions, not a playout.
+        if (aux || !params.contains("fps") || params.contains("latency_ms"))
+            throw Error("cuda_rect_overlay: clock_input needs fps and excludes aux_mode and latency_ms");
+        const int clock = params.at("clock_input").get<int>();
+        if (clock < 0 || size_t(clock) >= src_names.size())
+            throw Error("cuda_rect_overlay: clock_input out of range");
+        node->clock_input_ = size_t(clock);
+        node->frame_rate_ = parseRatio(params.at("fps"));
+    } else if (params.contains("fps")) {
         node->frame_rate_ = parseRatio(params.at("fps"));
         std::optional<double> latency_ms;
         if (params.contains("latency_ms")) latency_ms = params.at("latency_ms").get<double>();
@@ -936,15 +1014,25 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
         node->draw_.ensureDevice();
         if (AVP_CHECK_CU(cuEventCreate(&node->input_ready_, CU_EVENT_DISABLE_TIMING)))
             throw Error("aux: cannot create readiness event");
+        if (!params.contains("subscriptions")) throw Error("aux: subscriptions are required");
+    }
+    if (params.contains("subscriptions")) {
+        if (!aux && !node->clock_input_) throw Error("cuda_rect_overlay: subscriptions need aux_mode or clock_input");
         const auto names = jsonToStringList(params.at("subscriptions"));
-        if (names.size() != src_names.size()) throw Error("aux: subscriptions must match inputs");
+        if (names.size() != src_names.size()) throw Error("cuda_rect_overlay: subscriptions must match inputs");
         for (const auto &name : names) {
+            // A keyer's clock input is an ordinary edge: an empty name subscribes nothing.
+            if (name.empty() && !aux) {
+                node->subscriptions_.push_back(nullptr);
+                continue;
+            }
             auto subscription = InstanceSharedObjects<avp::mixer::FrameSubscription>::get(nci.instance, name);
             subscription->configure(node->frame_rate_);
             node->subscriptions_.push_back(subscription);
         }
-        node->setObject("composition", {{"layers", params.at("layers")}, {"active_inputs", params.value("active_inputs", Parameters(0))}});
     }
+    if (aux)
+        node->setObject("composition", {{"layers", params.at("layers")}, {"active_inputs", params.value("active_inputs", Parameters(0))}});
 
     return node;
 }

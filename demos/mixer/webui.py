@@ -7,6 +7,7 @@ mixer needs no HTTP server of its own and the page needs no build step:
     GET  /              the page
     GET  /api/state     status + scenes + settings in one round trip
     POST /api/command   {"command": "cut"|"fade"|"wipe"|"preview", "scene": ...}
+                        {"command": "dsk", "key": ..., "on": true|false}
 
 The bridge owns a single serialized control connection and reconnects when the
 mixer restarts, so the page can stay open across a demo restart.
@@ -117,14 +118,16 @@ class MixerBridge:
             state["settings"]["transition"] = self.transition
         if state["settings"].get("aux_buses"):
             state["aux_buses"] = json.loads(self.command("mixer.aux_status", timeout) or "[]")
+        if state["settings"].get("dsk_keys"):
+            state["dsk"] = json.loads(self.command("mixer.dsk_status", timeout) or "[]")
         return state
 
     def take(self, request: dict) -> None:
         command = request.get("command")
-        if command == "aux":
+        if command in ("aux", "dsk"):
             payload = {k: v for k, v in request.items() if k != "command"}
-            result = json.loads(self.command("mixer.aux " + json.dumps(payload)) or "{}")
-            if result.get("error"):
+            result = json.loads(self.command(f"mixer.{command} " + json.dumps(payload)) or "{}")
+            if isinstance(result, dict) and result.get("error"):
                 raise ValueError(result["error"])
             return
         if command not in TAKE_COMMANDS:

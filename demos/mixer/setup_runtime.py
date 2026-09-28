@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-from demo_recipe import allocate
+from demo_recipe import DSK_PAGES, allocate
 from pyplumber.mixer.config import default_browser_ring_size
 
 DEMO_DIR = Path(__file__).resolve().parent
@@ -22,18 +22,21 @@ DEFAULT_BITRATE_KBPS = 6000
 MIN_BITRATE_KBPS, MAX_BITRATE_KBPS = 500, 40000
 DEFAULT_SETTINGS = dict(resolution="1920x1080", orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
-                        bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60))
+                        bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60),
+                        dsk=[], clean_feed=False)
+BROWSER_LIMIT = 32
 
 
 def _browser_ids(*shows):
     return {s["id"] for show in shows for s in show.get("sources", []) if s["kind"] == "browser"}
 
 
-def source_counts(total, weights, fps=25):
+def source_counts(total, weights, fps=25, reserved_browsers=0):
+    """*reserved_browsers* are downstream-key pages: browser inputs outside the weighted mix."""
     counts = allocate(total, weights)
     # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
     for indices, costs, limit, name in (
-            ((2,), (1,), 4, "HDR 4:2:2"), ((4,), (1,), 32, "Browser"),
+            ((2,), (1,), 4, "HDR 4:2:2"), ((4,), (1,), BROWSER_LIMIT - reserved_browsers, "Browser"),
             ((0, 1), (1, 1), 40 if fps <= 30 else 20, "Combined NVDEC"),
             ((5, 6), (1, 2), min(28, 700 // fps), "Raw 4:2:0 upload units")):
         group = [(i, cost) for i, cost in zip(indices, costs) if i < len(weights)]
@@ -47,7 +50,7 @@ def source_counts(total, weights, fps=25):
             remaining = [0 if i in indices else w for i, w in enumerate(weights)]
             if not any(remaining):
                 raise ValueError(f"{name} is limited to {limit}; enable another source type")
-            counts = source_counts(total - size, remaining, fps)
+            counts = source_counts(total - size, remaining, fps, reserved_browsers)
             for (i, _), count in zip(group, capped):
                 counts[i] = count
             break
@@ -58,7 +61,8 @@ def recipe_for(settings):
     """Accept only the bounded generic setup controls, never paths or commands."""
     if isinstance(settings, dict):
         settings = {"bit_depth": 10, "chroma": "420" if settings.get("bit_depth") == 8 else "422",
-                    "bitrate_kbps": DEFAULT_BITRATE_KBPS, "browser_ring_size": default_browser_ring_size(settings.get("fps")), **settings}
+                    "bitrate_kbps": DEFAULT_BITRATE_KBPS, "browser_ring_size": default_browser_ring_size(settings.get("fps")),
+                    "dsk": [], "clean_feed": False, **settings}
     if not isinstance(settings, dict) or set(settings) != set(DEFAULT_SETTINGS):
         raise ValueError("Expected resolution, orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
     for key, choices in (("resolution", ("1920x1080", "1280x720")),
@@ -69,8 +73,14 @@ def recipe_for(settings):
                          ("layout", ("balanced", "grids", "fullscreen"))):
         if settings[key] not in choices:
             raise ValueError(f"Unsupported {key}")
+    dsk = settings["dsk"]
+    if (not isinstance(dsk, list) or len(set(dsk)) != len(dsk) or any(page not in DSK_PAGES for page in dsk)):
+        raise ValueError(f"dsk must list distinct pages from {', '.join(DSK_PAGES)}")
+    if not isinstance(settings["clean_feed"], bool) or settings["clean_feed"] and not dsk:
+        raise ValueError("clean_feed must be a boolean and needs at least one dsk page")
     # Higher rates use the 100-at-25-fps baseline; 25 fps retains the experimental 110-input ceiling.
-    source_limit = 110 if settings["fps"] == 25 else 2500 // settings["fps"]
+    # Key pages are sources too: they take their share of the same budget.
+    source_limit = (110 if settings["fps"] == 25 else 2500 // settings["fps"]) - len(dsk)
     for key, maximum in (("source_count", source_limit), ("scene_count", 192), ("browser_ring_size", 64)):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:
@@ -89,7 +99,7 @@ def recipe_for(settings):
         raise ValueError("8-bit mode supports a 4:2:0 canvas only")
     if settings["chroma"] == "420" and any(weights[2:4]):
         raise ValueError("4:2:0 mode supports 4:2:0 and browser sources only")
-    counts = source_counts(settings["source_count"], weights, settings["fps"])
+    counts = source_counts(settings["source_count"], weights, settings["fps"], len(dsk))
     width, height = map(int, settings["resolution"].split("x"))
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
@@ -132,6 +142,7 @@ def recipe_for(settings):
                         if counts[index] == 1 and index in (0, 5):
                             source["pattern"] = "bars"
                         break
+    recipe["dsk"], recipe["clean_feed"] = dsk, settings["clean_feed"]
     recipe["setup"] = settings
     recipe["layouts"] = layouts
     return recipe

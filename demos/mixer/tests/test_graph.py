@@ -90,7 +90,13 @@ class FakeMixer:
         self.sources = []
         self.scenes = {}
         self.initial_scene = None
+        self.aux_routes = []
+        self.fps_num, self.fps_den = parameters.get("fps", (30, 1))
+        self.hwaccel = parameters.get("hwaccel")
         self.instances.append(self)
+
+    def add_aux_destination(self, source, edge):
+        self.aux_routes.append((source, edge))
 
     def add_source(self, name, **parameters):
         self.sources.append((name, parameters))
@@ -143,6 +149,7 @@ def fake_api():
         "assume_video_format",
         "bsf",
         "clip_cache",
+        "cuda_rect_overlay",
         "dec_video",
         "demux",
         "drm_prime_to_cuda",
@@ -172,6 +179,7 @@ def fake_api():
             "assume_video_format": "AssumeVideoFormat",
             "bsf": "Bsf",
             "clip_cache": "ClipCache",
+            "cuda_rect_overlay": "CudaRectOverlay",
             "dec_video": "DecVideo",
             "demux": "Demux",
             "drm_prime_to_cuda": "DrmPrimeToCuda",
@@ -1260,3 +1268,85 @@ def test_compositor_layer_budget_json_and_cli(tmp_path, monkeypatch, override, e
 def test_invalid_compositor_layer_budget(value):
     with pytest.raises(mixer_config.ConfigError, match="max_compositor_layers"):
         mixer_config.parse({**CONFIG, "max_compositor_layers": value})
+
+
+DSK_KEYS = {"keys": [{"id": "bug", "source": "page", "dst": {"x": 1700, "y": 40, "w": 160, "h": 90}, "on": True},
+                     {"id": "strap", "source": "page"}]}
+
+
+def _dsk_app(tmp_path, monkeypatch, renditions, canvas=CONFIG["canvas"]):
+    from pyplumber.mixer import dmabuf_inputs
+    (tmp_path / "page.sock").touch()
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps({**CONFIG, "canvas": canvas, "dsk": DSK_KEYS, "renditions": renditions}))
+    FakeMixer.instances.clear()
+    app = build_application(GraphOptions(config=str(path), janus_output=True, dmabuf_socket_dir=str(tmp_path)),
+                            api=fake_api())
+    return app, {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
+
+
+def test_dsk_keys_the_program_after_the_mixer_with_one_small_program_clocked_pass(tmp_path, monkeypatch):
+    app, nodes = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    keyer = nodes["dsk_comp"]
+    assert keyer["src"] == ["mixer_final_out", "dsk_key_bug", "dsk_key_strap"]
+    assert keyer["subscriptions"] == ["", "dsk_key_bug", "dsk_key_strap"]
+    assert keyer["clock_input"] == 0 and "latency_ms" not in keyer
+    assert keyer["max_layers"] == 3 and keyer["metadata_key"] == "dsk_layers_v1"
+    assert keyer["layers"][0] == {"dst_x": 0, "dst_y": 0, "dst_w": 1920, "dst_h": 1080}
+    assert keyer["layers"][1] == {"input": 1, "dst_x": 1700, "dst_y": 40, "dst_w": 160, "dst_h": 90, "z": 1, "blend": True}
+    assert keyer["layers"][2]["dst_w"] == 1920 and keyer["layers"][2]["blend"] is True
+    assert keyer["active_inputs"] == 0b011   # program plus the key declared on
+    assert FakeMixer.instances[-1].aux_routes == [("page", "dsk_key_bug"), ("page", "dsk_key_strap")]
+    # Keys need their alpha even when no scene blends the page.
+    assert nodes["input_1_to_cuda"]["drop_alpha"] is False
+    # No clean rendition: no split, the only encoder reads the keyed program.
+    assert "split_clean" not in nodes
+    assert nodes["scale_sdr"]["src"] == "program_dirty"
+
+
+def test_dsk_clean_and_dirty_renditions_each_keep_sdr_and_hdr(tmp_path, monkeypatch):
+    renditions = [{"id": "sdr", "port": 5004, "codec": "h264_nvenc"}, {"id": "hdr", "port": 5006, "codec": "hevc_nvenc"},
+                  {"id": "sdr_clean", "port": 5010, "codec": "h264_nvenc", "feed": "clean"},
+                  {"id": "hdr_clean", "port": 5012, "codec": "hevc_nvenc", "feed": "clean"}]
+    hlg = {**CONFIG["canvas"], "working_format": "p210le", "color": "hlg"}
+    app, nodes = _dsk_app(tmp_path, monkeypatch, renditions, canvas=hlg)
+    assert nodes["split_clean"]["src"] == "mixer_final_out"
+    assert nodes["split_clean"]["dst"] == ["program_clean", "dsk_program"]
+    assert nodes["dsk_comp"]["src"][0] == "dsk_program"
+    assert nodes["split_renditions"]["src"] == "program_dirty"
+    assert nodes["split_renditions_clean"]["src"] == "program_clean"
+    assert nodes["scale_hdr_clean"]["src"] == "program_rendition_hdr_clean"
+    settings = json.loads(app.avp.commands_registered["mixer.settings"](""))
+    assert settings["dsk_keys"] == [{"id": "bug", "source": "page"}, {"id": "strap", "source": "page"}]
+    assert settings["preview_codecs"] == ["h264", "h265"]
+    assert [(o["bus"], o["label"], o["port"]) for o in settings["preview_outputs"]] == [
+        ("clean_sdr_clean", "Program clean · SDR", 5010), ("clean_hdr_clean", "Program clean · HDR", 5012)]
+
+
+def test_dsk_command_cuts_keys_on_and_off(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    handler = app.avp.commands_registered["mixer.dsk"]
+    assert json.loads(handler(json.dumps({"key": "strap", "on": True}))) == [
+        {"id": "bug", "source": "page", "on": True}, {"id": "strap", "source": "page", "on": True}]
+    assert app.avp.commands[-1] == "node.object.set dsk_comp active_inputs 7"
+    handler(json.dumps({"key": "bug", "on": False}))
+    assert app.avp.commands[-1] == "node.object.set dsk_comp active_inputs 5"
+    with pytest.raises(mixer_config.ConfigError):
+        handler(json.dumps({"key": "nope", "on": True}))
+
+
+@pytest.mark.parametrize("dsk,message", [
+    ({"keys": [{"id": "k", "source": "cam"}]}, "browser source"),
+    ({"keys": [{"id": f"k{i}", "source": "page"} for i in range(5)]}, "at most 4 keys"),
+    ({"keys": [{"id": "k", "source": "page"}, {"id": "k", "source": "page"}]}, "duplicate"),
+    ({"keys": [{"id": "k", "source": "page", "on": 1}]}, "on must be a boolean"),
+])
+def test_dsk_config_rejects_invalid_keys(dsk, message):
+    with pytest.raises(mixer_config.ConfigError, match=message):
+        mixer_config.parse({**CONFIG, "dsk": dsk})
+
+
+def test_rendition_feed_is_clean_or_dirty():
+    with pytest.raises(mixer_config.ConfigError, match="feed must be one of"):
+        mixer_config.parse({**CONFIG, "renditions": [{"id": "x", "feed": "keyed"}]})

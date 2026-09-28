@@ -92,6 +92,9 @@
                       border-radius: 5px; padding: 6px; cursor: pointer; }
   #aux-slots button:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #aux-slots button[aria-pressed="true"] { border-color: var(--accent); }
+  #dsk { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #dsk button { background: var(--panel); color: var(--text); border: 1px solid var(--edge); }
+  #dsk button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
   #output-choice { background: var(--panel); color: var(--text); border: 1px solid var(--edge); }
   @media (max-width: 820px) {
     body { height: auto; min-height: 100dvh; overflow: auto; }
@@ -122,6 +125,7 @@
 </div>
 
 <div id="aux-slots" hidden aria-label="Multiview assignments"></div>
+<div id="dsk" hidden aria-label="Downstream keys"></div>
 <div id="scenes"></div>
 
 <footer>
@@ -243,6 +247,29 @@ function renderAux(state) {
     clear.onclick = () => assignAux(i, null);
     cell.append(button, clear); return cell;
   }));
+}
+
+async function setKey(key, on) {
+  try {
+    await api("/api/command", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({command: "dsk", key, on})});
+    showError("");
+  } catch (exc) { showError(exc.message); }
+  await refresh();
+}
+function renderDsk(state) {
+  const keys = state.dsk || [];
+  $("dsk").hidden = !keys.length;
+  $("dsk").replaceChildren(...(keys.length ? [Object.assign(document.createElement("span"), {textContent: "DSK"})] : []),
+    ...keys.map((key) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = key.id;
+      button.title = `${key.on ? "Take off" : "Put on"} air (dirty feeds only; clean stays unkeyed)`;
+      button.setAttribute("aria-pressed", String(key.on));
+      button.onclick = () => setKey(key.id, !key.on);
+      return button;
+    }));
 }
 
 function showError(message) {
@@ -369,7 +396,7 @@ async function refresh() {
     const canvas = state.settings?.canvas;
     const codecs = state.settings?.preview_codecs;
     const outputs = state.settings?.preview_outputs || [];
-    const choices = [{bus: "program", label: "Program"}, ...outputs.map(o => ({...o, label: `Multiview · ${o.color.toUpperCase()}`}))];
+    const choices = [{bus: "program", label: state.dsk?.length ? "Program dirty" : "Program"}, ...outputs];
     const selector = $("output-choice");
     if (selector.dataset.signature !== JSON.stringify(choices)) {
       const old = selector.value;
@@ -390,13 +417,13 @@ async function refresh() {
         if (!codecs.includes(url.searchParams.get("codec"))) url.searchParams.set("codec", codecs[0]);
       }
       if (url.href !== $("program-output").src) $("program-output").src = url.href;
-      document.querySelector("#program-panel h2").textContent = output ? "Multiview" : "Program";
+      document.querySelector("#program-panel h2").textContent = output ? output.label : choices[0].label;
     }
     if (canvas) {
       const viewingAux = outputs.find(o => o.bus === selector.value);
       const chroma = canvas.working_format === "p210le" ? "4:2:2" : "4:2:0";
       const mode = `${canvas.working_format === "nv12" ? "SDR · 8-bit" : "HDR · 10-bit"} · ${chroma}`;
-      const format = `${canvas.width}×${canvas.height}p${viewingAux?.fps || canvas.fps} · ${viewingAux ? "SDR · 8-bit · 4:2:0" : mode}`;
+      const format = `${canvas.width}×${canvas.height}p${viewingAux?.fps || canvas.fps} · ${viewingAux?.color === "sdr" ? "SDR · 8-bit · 4:2:0" : mode}`;
       document.querySelector("#program-panel .format").textContent = format;
     }
     const sourceCounts = state.settings?.source_counts;
@@ -411,6 +438,7 @@ async function refresh() {
     $("conn").hidden = true;
     renderScenes();
     renderAux(state);
+    renderDsk(state);
   } catch (exc) {
     $("conn").textContent = exc.message || String(exc);
     $("conn").classList.add("bad");

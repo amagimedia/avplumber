@@ -17,6 +17,8 @@ from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS, hdr_metadata, 
 from pyplumber.mixer.backend import mixer_backend
 from pyplumber.mixer import clipcache
 from pyplumber.mixer import config as mixer_config
+from pyplumber.mixer.config import FEEDS
+from pyplumber.mixer.dsk import DownstreamKeyer, register_dsk_commands
 from pyplumber.mixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
                                     open_windows, refresh_windows, wait_for_sockets, window_id)
 from pyplumber.mixer.inputs import build_input, build_v210_input, build_raw420_input
@@ -521,24 +523,38 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
     ], group=OUTPUT_GROUP)
 
 
-def _build_renditions(avp, api, options: GraphOptions, renditions, mixer_edge: str, *,
+def _rendition_target(r, working_format, color):
+    """Encoder and color contract of a rendition, from the canvas when it declares neither."""
+    codec = r.codec or ("hevc_nvenc" if working_format in TEN_BIT_FORMATS else "h264_nvenc")
+    return codec, rendition_color(color, codec, r.color or None, r.tonemap)
+
+
+def _build_renditions(avp, api, options: GraphOptions, renditions, feeds, *,
                       canvas, working_format: str, color="sdr", backend=None):
     """One encoder per rendition, all fed from the single composited program.
 
     The compositor renders once at the canvas rate; a rendition converts,
     re-times and rescales that picture for its own target, so extra renditions
-    cost an encode, not another composite.
+    cost an encode, not another composite. *feeds* maps a rendition feed
+    (dirty/clean) to its program edge; a plain edge serves every feed.
     """
     backend = mixer_backend(backend)
-    edges = [mixer_edge]
-    if len(renditions) > 1:
-        edges = [f"program_rendition_{r.id}" for r in renditions]
-        avp.addNode(api.Split({"name": "split_renditions", "src": mixer_edge, "dst": edges,
-                               "group": OUTPUT_GROUP, "on_error": "panic"}))
+    if isinstance(feeds, str):
+        feeds = dict.fromkeys(FEEDS, feeds)
+    edges = {}
+    for feed in FEEDS:
+        group = [r for r in renditions if r.feed == feed]
+        if len(group) == 1:
+            edges[group[0].id] = feeds[feed]
+        elif group:
+            split = [f"program_rendition_{r.id}" for r in group]
+            avp.addNode(api.Split({"name": "split_renditions" + ("" if feed == "dirty" else f"_{feed}"),
+                                   "src": feeds[feed], "dst": split, "group": OUTPUT_GROUP, "on_error": "panic"}))
+            edges.update((r.id, e) for r, e in zip(group, split))
     listeners = []
-    for r, edge in zip(renditions, edges):
-        codec = r.codec or ("hevc_nvenc" if working_format in TEN_BIT_FORMATS else "h264_nvenc")
-        target = rendition_color(color, codec, r.color or None, r.tonemap)
+    for r in renditions:
+        edge = edges[r.id]
+        codec, target = _rendition_target(r, working_format, color)
         # 10-bit stays P010 for HEVC (Main10 carries depth and HDR); H.264 and 8-bit encode NV12.
         ten_bit = target.transfer != "sdr" or (working_format in TEN_BIT_FORMATS and "hevc" in codec)
         enc_format = "p010le" if ten_bit else "nv12"
@@ -632,6 +648,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                           color=cfg.out_color, wipe_color=cfg.wipe_color or None)
     aliases = cfg.alias_counts
     blended_sources = {item.source for scene in cfg.scenes for item in scene.items if item.blend}
+    blended_sources |= {key.source for key in cfg.dsk_keys}
     input_edges: list[str] = []
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
@@ -681,28 +698,46 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
     from pyplumber.mixer.aux import AuxMultiview, register_aux_commands
     aux = tuple(AuxMultiview(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses)
+    keyer = DownstreamKeyer(avp, api, mixer, cfg, group=OUTPUT_GROUP) if cfg.dsk_keys else None
+    renditions = cfg.renditions or _flag_renditions(options, *canvas)
     program = mixer.build()
+    feeds = dict.fromkeys(FEEDS, program)
+    if keyer:
+        feeds = {**feeds, **keyer.build(program, clean=any(r.feed == "clean" for r in renditions))}
+        register_dsk_commands(avp, keyer)
     if aux:
+        # The multiview PGM tile shows what goes to air: the keyed program.
         tapped = "program_after_aux_tap"
         avp.addNode(api.OneToMany({
-            "name": "program_aux_tap", "src": program, "dst": [tapped, *(b.pgm_edge for b in aux)],
+            "name": "program_aux_tap", "src": feeds["dirty"], "dst": [tapped, *(b.pgm_edge for b in aux)],
             "outputs": 1, "subscribed_outputs": {b.pgm_edge: b.pgm_edge for b in aux}, "group": OUTPUT_GROUP,
         }))
-        program = tapped
+        feeds["dirty"] = tapped
         for bus in aux:
             bus.build(options)
         register_aux_commands(avp, aux)
     settings_data = cfg.settings()
+    preview_outputs = []
+    if keyer:
+        for r in renditions:
+            if r.feed != "clean" or r.target != "janus":
+                continue
+            codec, target = _rendition_target(r, cfg.working_format, cfg.out_color)
+            preview_outputs.append({"bus": f"clean_{r.id}", "label": f"Program clean · {'SDR' if target.transfer == 'sdr' else 'HDR'}",
+                                    "rendition": r.id, "codec": "h265" if "hevc" in codec else "h264",
+                                    "color": "sdr" if target.transfer == "sdr" else "hdr",
+                                    "port": r.port, "mountpoint": r.port, "fps": r.fps})
     if aux:
         settings_data["aux_buses"] = [b.bus.id for b in aux]
-        settings_data["preview_outputs"] = [
-            {"bus": b.bus.id, "rendition": r.id, "codec": "h264", "color": "sdr", "port": r.port,
-             "mountpoint": r.port, "fps": r.fps} for b in aux for r in b.bus.renditions]
+        preview_outputs += [
+            {"bus": b.bus.id, "label": "Multiview · SDR", "rendition": r.id, "codec": "h264", "color": "sdr",
+             "port": r.port, "mountpoint": r.port, "fps": r.fps} for b in aux for r in b.bus.renditions]
+    if preview_outputs:
+        settings_data["preview_outputs"] = preview_outputs
     settings = json.dumps(settings_data, separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
-    listener = _build_renditions(avp, api, options, cfg.renditions or _flag_renditions(options, *canvas),
-                                 program, canvas=canvas, working_format=cfg.working_format, color=cfg.out_color,
-                                 backend=mixer.backend)
+    listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
+                                 working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False,
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers), aux_buses=aux)
 

@@ -30,6 +30,8 @@ MAX_SOURCES = 128         # cuda_rect_overlay active_inputs is a 128-bit pad mas
 DEFAULT_MAX_COMPOSITOR_LAYERS = 256
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
+FEEDS = ("dirty", "clean")
+MAX_DSK_KEYS = 4          # the downstream keyer stays one small pass: program + up to four keys
 
 
 def default_browser_ring_size(fps):
@@ -94,6 +96,7 @@ class Rendition:
     max_fall: int = 0
 
     color: str = ""                # empty: inherit canvas, except H.264/tonemap imply SDR
+    feed: str = "dirty"            # "clean" omits the downstream keys; without keys both are the program
 
     @property
     def aspect(self) -> str:
@@ -132,6 +135,15 @@ class Scene:
 
 
 @dataclass(frozen=True)
+class DskKey:
+    """One downstream key: an alpha browser source drawn over the finished program."""
+    id: str
+    source: str
+    dst: Rect
+    on: bool = False
+
+
+@dataclass(frozen=True)
 class AuxBus:
     id: str
     scenes: Tuple[Optional[str], ...]
@@ -157,6 +169,7 @@ class MixerConfig:
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBus, ...] = ()
+    dsk_keys: Tuple[DskKey, ...] = ()
     browser_ring_size: Optional[int] = None
     max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS
 
@@ -176,7 +189,8 @@ class MixerConfig:
         default = next((w for w in self.wipes if w.id == self.default_wipe), None)
         preview_codecs = list(dict.fromkeys(
             "h265" if "hevc" in (r.codec or ("h264_nvenc" if self.working_format == "nv12" else "hevc_nvenc")) else "h264"
-            for r in self.renditions if r.target == "janus"))
+            for r in self.renditions if r.target == "janus" and r.feed == "dirty"))
+        keys = {"dsk_keys": [{"id": k.id, "source": k.source} for k in self.dsk_keys]} if self.dsk_keys else {}
         return {"source_count": len(self.sources), "browser_ring_size": self.browser_ring_size,
                 "preview_codecs": preview_codecs,
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
@@ -186,7 +200,7 @@ class MixerConfig:
                 "direct": self.direct, "fade_seconds": self.fade_seconds,
                 "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
-                "wipes": wipes}
+                "wipes": wipes, **keys}
 
     @property
     def alias_counts(self) -> Dict[str, int]:
@@ -272,6 +286,8 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
             Color.parse(rendition.color)
         except ValueError as e:
             raise ConfigError(f"{where}: {e}") from e
+    if rendition.feed not in FEEDS:
+        raise ConfigError(f"{where}: feed must be one of {FEEDS}")
     if rendition.width <= 0 or rendition.height <= 0:
         raise ConfigError(f"{where}: width and height must be positive")
     if rendition.fps <= 0 or rendition.bitrate_kbps <= 0:
@@ -423,7 +439,32 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        initial_scene=initial, working_format=working_format, latency_ms=latency_ms, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     from .aux import parse_aux_buses
-    return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg))
+    return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
+                   dsk_keys=_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))
+
+
+def _parse_dsk(dsk: Any, sources: Dict[str, Source], canvas_w: int, canvas_h: int) -> Tuple[DskKey, ...]:
+    """Keys are ordinary sources, so scenes may use them too; each one here is
+    alpha-blended over the finished program, above transitions and wipes."""
+    if not isinstance(dsk, dict) or not isinstance(dsk.get("keys", []), list):
+        raise ConfigError("dsk must be an object with a keys list")
+    keys: List[DskKey] = []
+    for i, k in enumerate(dsk.get("keys", [])):
+        where = f"dsk.keys[{i}]"
+        if not isinstance(k, dict) or "id" not in k:
+            raise ConfigError(f"{where}: id required")
+        source = sources.get(k.get("source"))
+        if source is None or source.kind != "browser":
+            raise ConfigError(f"{where}: source must be a browser source (keys need its alpha)")
+        on = k.get("on", False)
+        if not isinstance(on, bool):
+            raise ConfigError(f"{where}: on must be a boolean")
+        dst = _rect(k["dst"], where + ".dst") if "dst" in k else Rect(0, 0, canvas_w, canvas_h)
+        keys.append(DskKey(str(k["id"]), source.id, dst, on))
+        _unique(keys, where)
+    if len(keys) > MAX_DSK_KEYS:
+        raise ConfigError(f"dsk: at most {MAX_DSK_KEYS} keys")
+    return tuple(keys)
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")

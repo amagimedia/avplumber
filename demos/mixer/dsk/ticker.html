@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>DSK ticker</title>
+<!-- Second lower-third layer: a crawl under the name plate. The window is the strip itself.
+     The text is duplicated so one translateX loop of -50% scrolls seamlessly. -->
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  body { font-family: system-ui, sans-serif; color: white; display: flex; }
+  #tag { flex: none; padding: 0 2vh; background: #ff5a1f; font: 700 52vh/100vh system-ui, sans-serif; }
+  #band { flex: 1; overflow: hidden; background: #101c2bdd; }
+  #crawl { display: inline-block; white-space: nowrap; font-size: 50vh; line-height: 100vh;
+           will-change: transform; animation: crawl 40s linear infinite; }
+  @keyframes crawl { to { transform: translateX(-50%); } }
+</style>
+<div id="tag">LIVE</div>
+<div id="band"><div id="crawl"></div></div>
+<script>
+  const items = ["Downstream keyer on air: clean feed stays unkeyed", "Four browser keys, one GPU pass",
+                 "Keys cut on and off at the next program frame", "Scenes and transitions run underneath"];
+  const line = items.map((t) => `${t}   •   `).join("");
+  document.getElementById("crawl").textContent = line + line;
+</script>
+</html>
