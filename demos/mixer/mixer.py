@@ -661,7 +661,8 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
                                             "height": s.height, "fps": s.fps or cfg.fps,
-                                            "ringSize": cfg.browser_ring_size} for s in browsers])
+                                            "ringSize": cfg.browser_ring_size,
+                                            "holdLastFrame": s.hold_last_frame} for s in browsers])
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
                          options.preheat_timeout_sec)
 

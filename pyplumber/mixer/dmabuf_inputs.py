@@ -121,7 +121,7 @@ def open_browser_windows(base_url: str, ids: List[str], page_url: str, width: in
     if browser_ring_size is None:
         browser_ring_size = default_browser_ring_size(fps)
     open_windows(base_url, [{"id": name, "url": page_url, "width": width, "height": height, "fps": fps,
-                            "ringSize": browser_ring_size}
+                            "ringSize": browser_ring_size, "holdLastFrame": True}
                             for name in ids])
 
 
@@ -139,8 +139,11 @@ def open_windows(base_url: str, windows: List[dict]) -> None:
         if current:
             rest_request(base_url, "POST", "/window/close", {"id": spec["id"]})
         opened = rest_request(base_url, "POST", "/window/open", wanted)
-        if "ringSize" in wanted and (opened or {}).get("ringSize") != wanted["ringSize"]:
-            raise RuntimeError("Browser service did not apply ringSize; update dma-browser before starting the mixer")
+        ignored = [key for key in ("ringSize", "holdLastFrame") if key in wanted
+                   and (opened or {}).get(key) != wanted[key]]
+        if ignored:
+            raise RuntimeError(f"Browser service did not apply {', '.join(ignored)}; "
+                               "update dma-browser before starting the mixer")
 
 
 def refresh_windows(base_url: str, ids: List[str]) -> None:

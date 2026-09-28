@@ -440,13 +440,14 @@ def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
         ("GET", "/status"), ("POST", "/window/close"), ("POST", "/window/open"), ("POST", "/window/open")]
     assert calls[1][2] == {"id": "page_00"}
     assert calls[3][2] == {"id": "page_01", "url": "http://p", "width": 480, "height": 270, "fps": 60,
-                           "audio": False, "ringSize": 9}
+                           "audio": False, "ringSize": 9, "holdLastFrame": True}
 
 
 def test_unchanged_browser_windows_survive_reconfiguration(monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
 
-    unchanged = dict(id="page_00", url="http://p", width=480, height=270, fps=60, audio=False, ringSize=9)
+    unchanged = dict(id="page_00", url="http://p", width=480, height=270, fps=60, audio=False, ringSize=9,
+                     holdLastFrame=True)
     calls = []
 
     def fake_rest(base_url, method, path, body=None):
@@ -481,7 +482,8 @@ def test_quarantined_browser_is_not_reused_or_recreated(monkeypatch):
 
 def test_browser_ring_change_reopens_window_and_requires_support(monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
-    window = dict(id="page_00", url="http://p", width=480, height=270, fps=25, audio=False, ringSize=11)
+    window = dict(id="page_00", url="http://p", width=480, height=270, fps=25, audio=False, ringSize=11,
+                  holdLastFrame=True)
     calls = []
     def request(base, method, path, body=None):
         calls.append((path, body))
@@ -492,6 +494,11 @@ def test_browser_ring_change_reopens_window_and_requires_support(monkeypatch):
     assert calls[-1] == ("/window/open", {**window, "ringSize": 6})
     monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *_: {"windows": []})
     with pytest.raises(RuntimeError, match="did not apply ringSize"):
+        dmabuf_inputs.open_browser_windows("http://b", ["page_00"], "http://p", 480, 270, 25, 6)
+    # A service that predates holdLastFrame fails once instead of being recreated every start.
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda base, method, path, body=None: (
+        {"windows": []} if path == "/status" else {k: v for k, v in body.items() if k != "holdLastFrame"}))
+    with pytest.raises(RuntimeError, match="did not apply holdLastFrame; update dma-browser"):
         dmabuf_inputs.open_browser_windows("http://b", ["page_00"], "http://p", 480, 270, 25, 6)
 
 
@@ -507,7 +514,7 @@ def test_browser_failure_precedes_native_initialization(monkeypatch):
         build_application(GraphOptions(inputs=("dmabuf://page_00",), output="p.mp4", dmabuf_open="http://p"), api=fake_api())
     monkeypatch.setattr(mixer, "open_windows", fail)
     cfg = SimpleNamespace(fps=60, latency_ms=None, browser_ring_size=11, max_compositor_layers=256, sources=[SimpleNamespace(
-        kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60)])
+        kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60, hold_last_frame=True)])
     with pytest.raises(RuntimeError, match="browser unavailable"):
         mixer._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api())
 
@@ -763,6 +770,23 @@ def test_browser_alpha_preservation_follows_scene_blending(tmp_path, monkeypatch
     assert layer.get("blend", False) is blend
 
 
+def test_browser_hold_last_frame_defaults_on_and_reaches_the_window(tmp_path, monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+    cam, page = CONFIG["sources"]
+    assert mixer_config.parse(CONFIG).source("page").hold_last_frame is True
+    for sources in ([cam, {**page, "hold_last_frame": "false"}], [{**cam, "hold_last_frame": True}, page]):
+        with pytest.raises(mixer_config.ConfigError, match="hold_last_frame must be a boolean on a browser source"):
+            mixer_config.parse({**CONFIG, "sources": sources})
+    (tmp_path / "page.sock").touch()
+    opened = []
+    monkeypatch.setattr(dmabuf_inputs, "rest_request",
+                        lambda base, method, p, body=None: opened.append(body) or fake_browser_rest(base, method, p, body))
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps({**CONFIG, "sources": [cam, {**page, "hold_last_frame": False}]}))
+    build_application(GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)), api=fake_api())
+    assert opened[-1]["holdLastFrame"] is False
+
+
 @pytest.mark.parametrize("source_filter", ["", "tonemap_cuda=transfer_in=sdr:transfer_out=hlg,scale_cuda=format=p210le"])
 def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypatch, source_filter):
     import json as _json
@@ -799,7 +823,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
     assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
-                             "fps": 60, "audio": False, "ringSize": 6}
+                             "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}
     assert nodes["input_1_to_cuda"]["max_imports"] == 32
     assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 1000
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}

@@ -81,6 +81,7 @@ class Source:
     height: int = 0
     fps: int = 0                   # browser paint rate; 0 = canvas fps
     loop: bool = True
+    hold_last_frame: bool = True   # browser: repeat the last frame while a failed page reloads
     # Empty fields require complete decoded frame metadata. Raw inputs must
     # declare a contract because their bytes carry no color metadata.
     color_trc: str = ""
@@ -286,6 +287,9 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
         raise ConfigError(f"{where}: custom filter requires filter_output_format (CUDA YUV storage)")
     if source_filter and kind == "browser":
         raise ConfigError(f"{where}: browser source filters are unsupported; preserve packed RGB alpha")
+    hold_last_frame = s.get("hold_last_frame", True)
+    if not isinstance(hold_last_frame, bool) or "hold_last_frame" in s and kind != "browser":
+        raise ConfigError(f"{where}: hold_last_frame must be a boolean on a browser source")
     try:
         color = declared_color(s)
         if kind != "video" and color is None:
@@ -301,7 +305,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
         raise ConfigError(f"{where}: {e}") from e
     return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)),
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
-                  loop=bool(s.get("loop", True)), filter_graph=source_filter,
+                  loop=bool(s.get("loop", True)), hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, **(color.tags if color else {}))
 
 

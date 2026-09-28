@@ -60,7 +60,7 @@ pinned indefinitely.
 Cached handles do not withhold frame-release acknowledgments. For example,
 `"browser_ring_size": 6` uses a six-frame ceiling for every browser source.
 Smaller limits can reduce VRAM but drop paints when downstream retains all slots.
-The browser service must support the `ringSize` window option; update it together
+The browser service must support the `ringSize` and `holdLastFrame` window options; update it together
 with the mixer. The setup page exposes the same setting and resets it to the default when FPS changes. Without a JSON config,
 use `--browser-ring-size` with `--dmabuf-open`.
 
@@ -216,6 +216,7 @@ decoder.
 | `color` | browser, v210, nv12, p010 | required color contract (`sdr`, `hlg`, `pq`); browser and NV12 sources must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
 | `url`, `width`, `height` | browser | page and the window it is rendered in (all three required) |
 | `fps` | browser | paint rate; defaults to the canvas rate |
+| `hold_last_frame` | browser | default `true`: while a failed or crashed page reloads, repeat its last frame. `false` shows Chromium's empty error page (transparent or black) instead |
 | `width`, `height` | video | optional; probed with ffprobe at load when absent |
 | `loop` | both | default `true` |
 | `filter` | video/v210/nv12/p010 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
