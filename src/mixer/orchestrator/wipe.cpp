@@ -35,9 +35,8 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
             return;
         MixerOrchestrator orch(nodes, state, timeline, scheduler);
 
-        // Keep a prewarmed scene intact at the wipe midpoint.
-        if (state->pvw_scene_name != scene_name)
-            orch.loadSceneIntoSlot(new_pgm_is_slot_a, scene_name);
+        // wipe() loaded the scene into this slot and the generation check keeps
+        // it there; reloading would reset the compositor just before it is revealed.
 
         // Same post-scene OTM flip as cutInternal: out_sel will read PVW `sc*_direct`, so that slot's
         // `one_to_many` must have outputs=1. If it stays 0 (idle default), frames are popped from

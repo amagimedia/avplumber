@@ -12,13 +12,13 @@ namespace avp::mixer {
 // incoming direct edge has produced a fresh frame; preloaded PVW cuts only wait
 // for the scheduled PTS.
 // ---------------------------------------------------------------------------
-int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t start_pts_ms, bool warm_cut) {
+int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t start_pts_ms) {
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
 
     if (state_->pvw_scene_name == scene_name) {
         logstream << "mixer cut: reusing preloaded PVW scene=" << scene_name;
     } else {
-        loadSceneIntoSlot(pvw_is_slot_a, scene_name, warm_cut);
+        loadSceneIntoSlot(pvw_is_slot_a, scene_name, true);
     }
 
     int64_t prep_ms = wallclock.pts();
@@ -123,7 +123,7 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms,
         state_->cut_latency->timing.begin(scene_name, was_preloaded, pvw_is_slot_a ? 0 : 1, received);
 
     scheduleSceneControls(state_->scenes.at(scene_name), cut_ms);
-    cutInternal(scene_name, cut_ms, true);
+    cutInternal(scene_name, cut_ms);
 
     const auto& new_slot = state_->pvwSlot();
     std::string ready_edge_name = firstDstEdgeName(nodes_, new_slot.post_otm_name);

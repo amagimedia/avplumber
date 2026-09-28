@@ -72,9 +72,11 @@ class MixerOrchestrator {
     int64_t resolveTransitionStartPts(int64_t requested_start_pts_ms) const;
 
     // Core hard-cut logic: ensure PVW is configured, enable cameras, write timeline entries.
-    // Does NOT modify pgm_is_slot_a, pgm_scene_name, or transition_mode.
+    // Cut, fade and wipe all load a prewarmed scene with a warm reset, so no transition
+    // leaves its slot cold for the next take. Does NOT modify pgm_is_slot_a,
+    // pgm_scene_name, or transition_mode.
     // Caller must hold state_->mutex. Returns cleanup_ms timestamp.
-    int64_t cutInternal(const std::string& scene_name, int64_t start_pts_ms, bool warm_cut = false);
+    int64_t cutInternal(const std::string& scene_name, int64_t start_pts_ms);
 
     // Complete crossfade routing and state once the final frame is presented.
     // `scheduler` is forwarded into the locally-constructed MixerOrchestrator so
