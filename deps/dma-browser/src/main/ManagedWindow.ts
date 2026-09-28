@@ -167,10 +167,10 @@ export class ManagedWindow implements IManagedWindow {
         this.startLoading(this.config.url);
       },
     });
-    const recover = (reason: string): void => {
+    const recover = (reason: string, hold = true): void => {
       if (this.destroyed) return;
       // Until a clean load, the error page and a half-loaded reload are not sent.
-      if (this.config.holdLastFrame ?? true) this.frameChannel?.hold(true);
+      if (hold && (this.config.holdLastFrame ?? true)) this.frameChannel?.hold(true);
       const delayMs = this.reloader?.failed() ?? null;
       const action =
         delayMs === null ? 'reload already pending' : `reloading page in ${delayMs} ms`;
@@ -180,7 +180,8 @@ export class ManagedWindow implements IManagedWindow {
 
     this.watchdog = new LoadWatchdog({
       timeoutMs: this.opts.loadWatchdogMs,
-      onTimeout: () => recover('load watchdog timeout'),
+      // A slow page is still painting its own content: reload it, but keep sending.
+      onTimeout: () => recover('load watchdog timeout', false),
     });
 
     wc.on('did-finish-load', () => {

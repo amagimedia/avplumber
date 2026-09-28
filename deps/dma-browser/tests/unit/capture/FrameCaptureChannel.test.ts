@@ -144,19 +144,35 @@ describe('FrameCaptureChannel retained frame lifetime', () => {
     const contents = new EventEmitter() as WebContents & EventEmitter;
     channel.attach(contents);
     await channel.start();
+    contents.emit('paint', makeTexture(29), {}, image());   // the frame the consumer keeps repeating
+    await Promise.resolve();
     channel.hold(true);
     const held = makeTexture(30);
     contents.emit('paint', held, {}, image());
-    expect(fdpass.broadcastFd).not.toHaveBeenCalled();
+    expect(fdpass.broadcastFd).toHaveBeenCalledTimes(1);
     expect(held.texture.release).toHaveBeenCalledTimes(1);
     expect(channel.getStats().droppedReasons).toEqual({held: 1});
     channel.hold(false);
     const resumed = makeTexture(31);
     contents.emit('paint', resumed, {}, image());
     await Promise.resolve();
-    expect(fdpass.broadcastFd).toHaveBeenCalledTimes(1);
+    expect(fdpass.broadcastFd).toHaveBeenCalledTimes(2);
     expect(resumed.texture.release).not.toHaveBeenCalled();
-    expect(channel.getStats().txFrameCount).toBe(1);
+    expect(channel.getStats().txFrameCount).toBe(2);
+    await channel.stop();
+  });
+
+  it('sends paints while held until a first frame went out', async () => {
+    const channel = new FrameCaptureChannel({socketPath: '/tmp/dma-page/held-first.sock',
+      allowedDims: AllowedDims.fromList(['1080x1920']), log: logSink()});
+    const contents = new EventEmitter() as WebContents & EventEmitter;
+    channel.attach(contents);
+    await channel.start();
+    channel.hold(true);
+    contents.emit('paint', makeTexture(32), {}, image());
+    await Promise.resolve();
+    expect(fdpass.broadcastFd).toHaveBeenCalledTimes(1);
+    expect(channel.getStats().droppedReasons).toEqual({});
     await channel.stop();
   });
 

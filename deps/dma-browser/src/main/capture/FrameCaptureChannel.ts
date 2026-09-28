@@ -177,7 +177,8 @@ export class FrameCaptureChannel implements ICaptureChannel {
         this.dropFrame('no_texture');
         return;
       }
-      if (this.held) {
+      // Holding needs a frame to hold: until one was sent, the page's paints go through.
+      if (this.held && this.stats.txFrameCount > 0) {
         this.dropFrame('held');
         this.releaseTexture(tex);
         return;
