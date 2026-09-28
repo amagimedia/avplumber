@@ -1,5 +1,6 @@
 #pragma once
 #include "../util.hpp"
+#include "primitives/fade_curve.hpp"
 #include <cstdint>
 
 namespace avp::mixer {
@@ -8,6 +9,7 @@ struct FadeRequest {
     int64_t start_ms;
     double duration_sec;
     bool destination_is_a;
+    FadeCurve curve = FadeCurve::Linear;  // shapes progress along the transition, either direction
 };
 
 struct TransitionCommand {

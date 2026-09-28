@@ -300,6 +300,7 @@ always outranks these; they are the state a fresh browser tab picks up.
 | `direct` | `true` | a scene pick goes straight to program rather than loading preview |
 | `transition` | `"cut"` | what a direct-mode pick takes with: `cut`, `fade` or `wipe` |
 | `fade_seconds` | `0.5` | length of a fade |
+| `fade_curve` | `"linear"` | easing of a fade: `linear`, `ease-in` (t²), `ease-out` (1−(1−t)²) or `ease-in-out` (3t²−2t³); a take may pick its own (`mixer.fade {..., "curve": "ease-in"}`); a `mixer.fade` without `curve` is linear |
 | `default_wipe` | first wipe | the clip a direct-mode wipe uses |
 
 The mixer publishes this over the control protocol as `mixer.settings`.

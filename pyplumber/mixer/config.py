@@ -32,6 +32,17 @@ DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
 FEEDS = ("dirty", "clean")
 MAX_DSK_KEYS = 4          # the downstream keyer stays one small pass: program + up to four keys
+# Fade easing presets, the names src/mixer/primitives/fade_curve.hpp parses; linear is what fades
+# did before curves existed.
+FADE_CURVES = ("linear", "ease-in", "ease-out", "ease-in-out")
+DEFAULT_FADE_CURVE = "linear"
+
+
+def fade_curve(value: Any, where: str) -> str:
+    """A fade curve preset name; *where* names the field or command in the error."""
+    if not isinstance(value, str) or value not in FADE_CURVES:
+        raise ConfigError(f"{where} must be one of {', '.join(FADE_CURVES)}")
+    return value
 
 
 def default_browser_ring_size(fps):
@@ -162,6 +173,7 @@ class MixerConfig:
     initial_scene: str = ""
     direct: bool = True            # control surfaces: scene picks go straight to program
     fade_seconds: float = DEFAULT_FADE_SECONDS
+    fade_curve: str = DEFAULT_FADE_CURVE   # what an M/E fade eases with unless a take picks its own
     transition: str = DEFAULT_TRANSITION   # what a pick takes with in direct mode
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
@@ -197,7 +209,7 @@ class MixerConfig:
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources)
                                   for kind in ("video", "browser", "v210", "nv12", "p010")},
-                "direct": self.direct, "fade_seconds": self.fade_seconds,
+                "direct": self.direct, "fade_seconds": self.fade_seconds, "fade_curve": self.fade_curve,
                 "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
                 "wipes": wipes, **keys}
@@ -324,6 +336,7 @@ def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:
     if fade_seconds <= 0:
         raise ConfigError("control.fade_seconds must be positive")
     return {"direct": bool(control.get("direct", True)), "fade_seconds": fade_seconds,
+            "fade_curve": fade_curve(control.get("fade_curve", DEFAULT_FADE_CURVE), "control.fade_curve"),
             "transition": transition, "default_wipe": default_wipe}
 
 

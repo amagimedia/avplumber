@@ -57,7 +57,7 @@ void MixerOrchestrator::deferredCleanup(
 // All timeline values are computed from the pre-flip state.
 // ---------------------------------------------------------------------------
 void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
-                             int64_t start_pts_ms) {
+                             int64_t start_pts_ms, FadeCurve curve) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
     if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid fade duration");
@@ -70,14 +70,16 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     cutInternal(scene_name, start);
     const auto initial = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->pvwSlot().post_otm_name));
     postTransitionTask("mixer.fade.ready", 0,
-        [orch = *this, scene_name, duration_sec, start, generation, initial]() mutable {
-            orch.startFadeWhenReady(scene_name, duration_sec, start, generation, initial, wallclock.pts() + 2000);
+        [orch = *this, scene_name, duration_sec, curve, start, generation, initial]() mutable {
+            orch.startFadeWhenReady(scene_name, duration_sec, curve, start, generation, initial,
+                                    wallclock.pts() + 2000);
         });
     guard.release();
 }
 
 void MixerOrchestrator::startFadeWhenReady(const std::string& scene_name, double duration_sec,
-        int64_t requested_pts, uint64_t generation, av::Timestamp initial_ts, int64_t deadline_ms) {
+        FadeCurve curve, int64_t requested_pts, uint64_t generation, av::Timestamp initial_ts,
+        int64_t deadline_ms) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!transitionIsCurrent(state_, generation, MixerState::TransitionMode::Crossfade)) return;
     TransitionGuard guard([&] { abortTransition(generation); });
@@ -94,17 +96,19 @@ void MixerOrchestrator::startFadeWhenReady(const std::string& scene_name, double
             throw Error("mixer.fade: target scene did not produce a fresh frame within 2 seconds");
         }
         postTransitionTask("mixer.fade.ready", 2,
-            [orch = *this, scene_name, duration_sec, requested_pts, generation, initial_ts, deadline_ms]() mutable {
-                orch.startFadeWhenReady(scene_name, duration_sec, requested_pts, generation, initial_ts, deadline_ms);
+            [orch = *this, scene_name, duration_sec, curve, requested_pts, generation, initial_ts,
+             deadline_ms]() mutable {
+                orch.startFadeWhenReady(scene_name, duration_sec, curve, requested_pts, generation,
+                                        initial_ts, deadline_ms);
             });
         guard.release();
         return;
     }
-    startFade(scene_name, duration_sec, std::max(requested_pts, wallclock.pts()), generation);
+    startFade(scene_name, duration_sec, curve, std::max(requested_pts, wallclock.pts()), generation);
     guard.release();
 }
 
-void MixerOrchestrator::startFade(const std::string& scene_name, double duration_sec,
+void MixerOrchestrator::startFade(const std::string& scene_name, double duration_sec, FadeCurve curve,
                                  int64_t start_ms, uint64_t transition_generation) {
     // Capture all needed values from pre-flip state
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
@@ -119,7 +123,7 @@ void MixerOrchestrator::startFade(const std::string& scene_name, double duration
     // 2. Update the preheated transition while its input branches are idle.
     // Legacy callers may construct MixerState without mixer.init.
     const auto control = state_->transition_control ? state_->transition_control : transitionControl("cuda");
-    const auto command = control({start_ms, duration_sec, pvw_is_slot_a});
+    const auto command = control({start_ms, duration_sec, pvw_is_slot_a, curve});
     const std::string transition_node_name = !state_->transition_node_name.empty()
         ? state_->transition_node_name
         : (state_->source_switcher_name.empty() ? transition_node_name_

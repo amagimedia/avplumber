@@ -992,7 +992,8 @@ public:
             orch.prewarmCuts(req.at("scenes").get<std::vector<std::string>>());
         };
 
-        // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,"start_pts_ms":123456789}
+        // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,"start_pts_ms":123456789,
+        //             "curve":"linear"}; curve is linear (default), ease-in, ease-out or ease-in-out
         commands_["mixer.fade"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.fade", arg);
             std::string mixer_name = req.at("mixer").get<std::string>();
@@ -1001,8 +1002,9 @@ public:
             int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
             if (duration_sec <= 0)
                 throw Error("mixer.fade: duration_sec must be > 0");
+            const auto curve = avp::mixer::parseFadeCurve(req.value("curve", std::string("linear")));
             auto orch = mixerOrchestrator(mixer_name);
-            orch.fade(scene_name, duration_sec, start_pts_ms);
+            orch.fade(scene_name, duration_sec, start_pts_ms, curve);
         };
 
         // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0,"start_pts_ms":123456789}

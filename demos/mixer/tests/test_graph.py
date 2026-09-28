@@ -771,7 +771,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         "preview_codecs": [],
         "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
         "source_counts": {"video": 1, "browser": 1, "v210": 0, "nv12": 0, "p010": 0},
-        "direct": False, "fade_seconds": 0.8, "transition": "cut",
+        "direct": False, "fade_seconds": 0.8, "fade_curve": "linear", "transition": "cut",
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
         "wipes": [{"id": "swoosh", "name": "swoosh", "path": "/media/swoosh.mov",
@@ -1227,8 +1227,14 @@ def test_control_section_carries_the_defaults_the_surfaces_start_from():
     # An undeclared canvas rate is 30, and a pick cuts directly to program.
     assert (cfg.fps, cfg.direct, cfg.fade_seconds, cfg.transition) == (30, True, 0.5, "cut")
     assert cfg.settings()["transition"] == "cut"
-    chosen = mc.parse({**doc, "control": {"transition": "wipe", "fade_seconds": 1.5, "direct": False}})
+    assert cfg.fade_curve == cfg.settings()["fade_curve"] == "linear"
+    chosen = mc.parse({**doc, "control": {"transition": "wipe", "fade_seconds": 1.5, "direct": False,
+                                          "fade_curve": "ease-in-out"}})
     assert (chosen.transition, chosen.fade_seconds, chosen.direct) == ("wipe", 1.5, False)
+    assert chosen.settings()["fade_curve"] == "ease-in-out"
+    for bad in ("smooth", "", None, 1):
+        with pytest.raises(mc.ConfigError, match="control.fade_curve must be one of linear, ease-in"):
+            mc.parse({**doc, "control": {"fade_curve": bad}})
     with pytest.raises(mc.ConfigError, match="control.transition must be"):
         mc.parse({**doc, "control": {"transition": "dissolve"}})
     with pytest.raises(mc.ConfigError, match="needs a wipe library"):
@@ -1337,6 +1343,27 @@ def test_dsk_command_cuts_keys_on_and_off(tmp_path, monkeypatch):
     assert app.avp.commands[-1] == "node.object.set dsk_comp active_inputs 5"
     with pytest.raises(mixer_config.ConfigError):
         handler(json.dumps({"key": "nope", "on": True}))
+
+
+@pytest.mark.parametrize("curve,sent", [("linear", None), ("ease-in", "ease-in"), ("ease-in-out", "ease-in-out")])
+def test_mixer_fade_sends_a_curve_only_when_it_is_not_linear(curve, sent):
+    from pyplumber.mixer.graph import MixerGraphBuilder
+    mixer = MixerGraphBuilder.__new__(MixerGraphBuilder)   # fade() only needs the engine and the name
+    mixer.avp, mixer.name = FakeAvp(), "mixer"
+    mixer.fade("cam", duration_sec=0.5, curve=curve)
+    command = mixer.avp.commands[-1]
+    assert command.startswith("mixer.fade ")
+    assert json.loads(command[len("mixer.fade "):]) == {
+        "mixer": "mixer", "scene": "cam", "duration_sec": 0.5, **({"curve": sent} if sent else {})}
+
+
+def test_mixer_fade_rejects_an_unknown_curve():
+    from pyplumber.mixer.graph import MixerGraphBuilder
+    mixer = MixerGraphBuilder.__new__(MixerGraphBuilder)
+    mixer.avp, mixer.name = FakeAvp(), "mixer"
+    with pytest.raises(mixer_config.ConfigError, match="fade curve must be one of"):
+        mixer.fade("cam", curve="bounce")
+    assert mixer.avp.commands == []
 
 
 @pytest.mark.parametrize("dsk,message", [
