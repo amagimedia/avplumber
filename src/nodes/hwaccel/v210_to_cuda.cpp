@@ -146,8 +146,15 @@ protected:
     void check(CUresult result, const char* operation) const { checkCuda(result, node_, operation); }
     // Further allocations, with the context current.
     virtual void initializeDevice() {}
-    // Queue the work that turns gpu_.staging into `frame` on gpu_.stream.
+    // Queue the work that turns gpu_.staging into `frame` on gpu_.stream, calling
+    // waitForReaders() before the first write into `frame`.
     virtual void enqueue(AVFrame* frame) = 0;
+    // The frame came from av_hwframe_get_buffer, so any reads of a recycled picture were
+    // queued on the device stream before its release: wait for them, on the GPU only.
+    void waitForReaders() {
+        check(cuEventRecord(gpu_.readers_done, device_stream_), "record device stream");
+        check(cuStreamWaitEvent(gpu_.stream, gpu_.readers_done, 0), "wait for device stream");
+    }
 
     template <typename Child> static std::shared_ptr<Child> build(NodeCreationInfo& nci) {
         auto device = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, nci.params.at("hwaccel"));
@@ -204,9 +211,6 @@ public:
             // Staging allows arbitrary AVPacket/MXL host buffers without registering their pages.
             std::memcpy(gpu_.staging, packet.data(), packet_size_);
             try {
-                // After av_hwframe_get_buffer: the reads of a recycled frame were queued before its release.
-                check(cuEventRecord(gpu_.readers_done, device_stream_), "record device stream");
-                check(cuStreamWaitEvent(gpu_.stream, gpu_.readers_done, 0), "wait for device stream");
                 enqueue(output.raw());
                 check(cuStreamSynchronize(gpu_.stream), "complete frame");
             } catch (...) {
@@ -257,6 +261,7 @@ class V210ToCuda : public PacketToCuda {
                         &frame->data[1], &frame->linesize[1],
                         &frame->data[2], &frame->linesize[2], &semiplanar};
         check(cuMemcpyHtoDAsync(gpu_.packed, gpu_.staging, packet_size_, gpu_.stream), "upload");
+        waitForReaders();   // the copy fills gpu_.packed; only the unpack writes the frame
         check(cuLaunchKernel(gpu_.kernel, (width_ / 2 + 31) / 32, (height_ + 7) / 8, 1,
                              32, 8, 1, 0, gpu_.stream, args, nullptr), "unpack");
     }
@@ -291,6 +296,7 @@ class RawToCuda : public PacketToCuda {
     size_t heights_[4] = {};
 
     void enqueue(AVFrame* frame) override {
+        waitForReaders();
         for (int i = 0; i < 4 && linesizes_[i]; ++i) {
             CUDA_MEMCPY2D copy = {};
             copy.srcMemoryType = CU_MEMORYTYPE_HOST;
