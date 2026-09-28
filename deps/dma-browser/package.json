@@ -8,7 +8,7 @@
     "build": "tsc -b",
     "start": "npm run build && bin/run.sh",
     "start:nvidia": "npm run build && DMA_BROWSER_FORCE_NVIDIA=1 bin/run.sh",
-    "lint": "eslint . --max-warnings 0",
+    "lint": "eslint . --max-warnings 0 --report-unused-disable-directives",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
