@@ -84,8 +84,7 @@ void MixerOrchestrator::startFadeWhenReady(const std::string& scene_name, double
     if (!transitionIsCurrent(state_, generation, MixerState::TransitionMode::Crossfade)) return;
     TransitionGuard guard([&] { abortTransition(generation); });
     const auto ready = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->pvwSlot().post_otm_name));
-    auto snapshot = InstanceSharedObjects<avp::mixer::OutputSnapshot>::get(
-        nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
+    auto snapshot = outputSnapshot();
     bool output_held;
     {
         std::lock_guard<std::mutex> snapshot_lock(snapshot->mutex);

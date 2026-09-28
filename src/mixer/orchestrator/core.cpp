@@ -176,8 +176,7 @@ void MixerOrchestrator::interruptTransition() {
     // would stack. In every other mode the program slot keeps rendering, so the
     // direct branch restored below is already the right picture.
     const bool freeze = previous_mode == MixerState::TransitionMode::Crossfade;
-    auto snapshot = InstanceSharedObjects<avp::mixer::OutputSnapshot>::get(
-        nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
+    auto snapshot = outputSnapshot();
     if (freeze) {
         std::lock_guard<std::mutex> lock(snapshot->mutex);
         if (!snapshot->output_connected)
@@ -186,7 +185,7 @@ void MixerOrchestrator::interruptTransition() {
     }
     const auto generation = ++state_->transition_generation;
     TransitionGuard guard([&] { abortTransition(generation); });
-    restoreProgramRouting(previous_mode != MixerState::TransitionMode::Cut);
+    restoreProgramRouting(previous_mode);
     if (previous_mode == MixerState::TransitionMode::Wipe && !state_->wipe_group_name.empty()) {
         // Group management retires the old decoder independently. Waiting here
         // would add teardown time to every correction, including a hard cut.
@@ -209,7 +208,16 @@ void MixerOrchestrator::interruptTransition() {
                                                              : "returned to the program picture");
 }
 
-void MixerOrchestrator::restoreProgramRouting(bool picture_changed) {
+void MixerOrchestrator::restoreProgramRouting(MixerState::TransitionMode dropped) {
+    bool picture_changed = dropped != MixerState::TransitionMode::Cut;
+    if (!picture_changed) {
+        // A cut that interrupted a crossfade froze its blend; dropping this cut
+        // too puts the live program back on air.
+        auto snapshot = outputSnapshot();
+        std::lock_guard<std::mutex> lock(snapshot->mutex);
+        picture_changed = snapshot->frames.holding() ||
+            snapshot->frames.replaces(state_->pgmSourceSwitcherIndex());
+    }
     // Remove scheduled controls as well as routes; cancelling a worker alone
     // cannot cancel a future selector flip.
     if (auto scene = state_->scenes.find(state_->transition_scene_name); scene != state_->scenes.end()) {
@@ -239,7 +247,7 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
             logstream << "mixer: transition abort cleanup failed: " << e.what();
         }
     };
-    cleanup([&] { restoreProgramRouting(mode != MixerState::TransitionMode::Cut); });
+    cleanup([&] { restoreProgramRouting(mode); });
     if (mode == MixerState::TransitionMode::Wipe && !state_->wipe_group_name.empty())
         cleanup([&] { stopGroup(state_->wipe_group_name); });
     // Remove slot substitution even when the target never produced a frame.
@@ -249,9 +257,13 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
     state_->transition_mode = MixerState::TransitionMode::Idle;
 }
 
-void MixerOrchestrator::finishSnapshot() {
-    auto snapshot = InstanceSharedObjects<avp::mixer::OutputSnapshot>::get(
+std::shared_ptr<OutputSnapshot> MixerOrchestrator::outputSnapshot() const {
+    return InstanceSharedObjects<OutputSnapshot>::get(
         nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
+}
+
+void MixerOrchestrator::finishSnapshot() {
+    auto snapshot = outputSnapshot();
     std::lock_guard<std::mutex> lock(snapshot->mutex);
     snapshot->frames.finish();
     snapshot->frames.arm(wallclock.pts() * 1000000, false);

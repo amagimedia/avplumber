@@ -12,6 +12,8 @@
 
 namespace avp::mixer {
 
+struct OutputSnapshot;
+
 class MixerOrchestrator {
     std::shared_ptr<NodeManager> nodes_;
     std::shared_ptr<MixerState> state_;
@@ -55,17 +57,20 @@ class MixerOrchestrator {
     /// source_switcher reset that cut+fade cleanup paths used to duplicate.
     /// Caller must hold state_->mutex. Wipe end has different semantics
     /// (timeline-driven, doesn't immediately mutate node objects) and uses
-    /// its own logic. `picture_changed` false (an interrupted cut never flipped) skips
+    /// its own logic. `picture_changed` false (the on-air picture stays the same) skips
     /// the encoder keyframe request.
     void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene,
                                     bool picture_changed = true);
 
     void ensureIdle() const;
     void interruptTransition();
+    std::shared_ptr<OutputSnapshot> outputSnapshot() const;
     void finishSnapshot();
     // Caller holds state_->mutex; restores live program after failed preparation.
-    // `picture_changed` is false when the dropped transition was a cut that had not flipped.
-    void restoreProgramRouting(bool picture_changed);
+    // Requests a keyframe unless the dropped transition was a cut that had not flipped
+    // and no frozen picture is on air: the caller then finishes the snapshot, which
+    // replaces a frozen picture with the live program.
+    void restoreProgramRouting(MixerState::TransitionMode dropped);
     void abortTransition(uint64_t generation) noexcept;
     void startFadeWhenReady(const std::string& scene_name, double duration_sec, FadeCurve curve,
                            int64_t requested_pts, uint64_t generation, av::Timestamp initial_ts,
