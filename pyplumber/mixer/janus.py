@@ -64,7 +64,14 @@ class JanusVideoConfig:
 
 
 JANUS_KEYFRAME_NODE = "janus_force_keyframe"
-KEYFRAME_COMMAND = f"node.object.set {JANUS_KEYFRAME_NODE} trigger true"
+
+
+def keyframe_command(node: str) -> str:
+    """Ask a force_keyframe node for a keyframe; it coalesces bursts and keeps its min interval."""
+    return f"node.object.set {node} trigger true"
+
+
+KEYFRAME_COMMAND = keyframe_command(JANUS_KEYFRAME_NODE)
 
 
 class RtcpFeedbackGroup:
@@ -156,5 +163,5 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     return api.RtcpFeedbackListener(
         bind_host=janus.rtcp_bind, bind_port=janus.rtcp_port, janus_host=janus.host,
         janus_rtcp_port=janus.rtcp_port_remote, media_ssrc=janus.ssrc,
-        on_keyframe_request=lambda _request: avp.executeCommandsFromString(f"node.object.set {keyframe_node} trigger true"),
+        on_keyframe_request=lambda _request: avp.executeCommandsFromString(keyframe_command(keyframe_node)),
     )

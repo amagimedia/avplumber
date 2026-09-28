@@ -26,4 +26,12 @@ int main() {
     // Fit is resolved against the original scene before shrinking into the tile.
     assert(ops[2].layer.dst_w == 160 && ops[2].layer.dst_h == 90);
     assert(ops[2].layer.dst_x == 0 && ops[2].layer.dst_y == 74);
+
+    // Opacity is not read from JSON; a fully faded layer resolves to nothing, a partial fade is carried.
+    auto faded = parseLayersArray(Parameters::parse(R"([{"input":0,"blend":true,"opacity":0.5},{"input":0,"blend":true}])"));
+    assert(faded[0].opacity == 1.f);
+    faded[0].opacity = 0.f;
+    faded[1].opacity = 0.5f;
+    const auto fops = resolveDrawOps(sources, faded, 320, 480, AV_PIX_FMT_NV12);
+    assert(fops.size() == 2 && !fops[0].src && fops[1].src == &frame && fops[1].layer.opacity == 0.5f);
 }

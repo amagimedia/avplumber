@@ -30,11 +30,19 @@ struct LayerSpec {
     int crop_h = 0;
     int z = 0;   // draw order: lower first, ties by source index
     bool blend = false;   // honour the source's alpha instead of overwriting
+    // Weight on a blended RGBA layer's alpha, in (0, 1]; other layer kinds draw opaque. 0 or
+    // less draws nothing. Set per frame by the downstream keyer's key fades and never parsed
+    // from JSON, so layer descriptions and per-frame metadata cannot change it.
+    float opacity = 1.f;
+
+    /// The source this layer draws: `input`, or its position in the legacy one-layer-per-input order.
+    size_t sourceIndex(size_t position) const { return input < 0 ? position : size_t(input); }
 
     bool operator==(const LayerSpec &other) const {
         return input == other.input && tile.x == other.tile.x && tile.y == other.tile.y &&
                tile.w == other.tile.w && tile.h == other.tile.h && scene_w == other.scene_w && scene_h == other.scene_h &&
                dst_x == other.dst_x && dst_y == other.dst_y && z == other.z && blend == other.blend &&
+               opacity == other.opacity &&
                crop_x == other.crop_x && crop_y == other.crop_y &&
                crop_w == other.crop_w && crop_h == other.crop_h &&
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
@@ -138,17 +146,18 @@ inline void applyLayerMetadata(std::vector<LayerSpec> &layers, const char *json)
 }
 
 /// Resolve each layer against its source frame: crop/destination clipping, chroma alignment,
-/// fit/contain placement, then z-order. Missing sources and empty rectangles yield ops with
-/// src == nullptr; a placement rejected by geometry keeps a negative src_w so the log can name it.
+/// fit/contain placement, then z-order. Missing sources, fully transparent layers (opacity <= 0)
+/// and empty rectangles yield ops with src == nullptr; a placement rejected by geometry keeps a
+/// negative src_w so the log can name it.
 inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame *> &sources,
                                           const std::vector<LayerSpec> &layers,
                                           int canvas_w, int canvas_h, AVPixelFormat canvas_fmt) {
     std::vector<DrawOp> ops;
     ops.reserve(layers.size());
     for (size_t i = 0; i < layers.size(); ++i) {
-        const size_t input = layers[i].input < 0 ? i : size_t(layers[i].input);
+        const size_t input = layers[i].sourceIndex(i);
         const av::VideoFrame *srcp = input < sources.size() ? sources[input] : nullptr;
-        if (!srcp || !srcp->raw()) {
+        if (!srcp || !srcp->raw() || !(layers[i].opacity > 0.f)) {
             ops.push_back({});
             continue;
         }

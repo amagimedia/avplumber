@@ -182,8 +182,10 @@ __device__ __forceinline__ float sample_alpha_tex(unsigned long long tex, int sx
 // kRgb=false compiles a lean YUV-only body (no transfer math, far fewer registers) for scenes
 // without packed-RGB layers; the host picks the entry point per frame. kLanes and kChroma are
 // compile-time so the per-sample loops unroll and the accumulators stay in registers:
-// <1,false> luma, <2,true> chroma pairs, <4,false> packed RGB canvas.
-template <bool kRgb, int kLanes, bool kChroma>
+// <1,false> luma, <2,true> chroma pairs, <4,false> packed RGB canvas. kOpacity=true also
+// weights each blended RGBA layer's alpha by its table `mul` (a key fade); only the
+// composite_planes_opacity entry sets it, so the other entries keep their code.
+template <bool kRgb, int kLanes, bool kChroma, bool kOpacity = false>
 __device__ __forceinline__ void composite_body(
     const AvpRectLayer *__restrict__ layers, int n,
     unsigned char *dst_y, int y_pitch, unsigned char *dst_uv, int uv_pitch,
@@ -268,6 +270,7 @@ __device__ __forceinline__ void composite_body(
             const float xs = float(sw) / dw, ys = float(sh) / dh;
             const int step = L.step, r_off = L.r_off, g_off = L.g_off, b_off = L.b_off, a_off = L.a_off;
             const int premultiplied = L.premultiplied;
+            const float opacity = kOpacity ? L.mul : 1.f;
 #pragma unroll 1
             for (int p = 0; p < px; ++p) {
                 const int X = X0 + p;
@@ -290,7 +293,10 @@ __device__ __forceinline__ void composite_body(
                                 rgb[c] = a > 0.f ? min(rgb[c] / a, 255.f) : 0.f;
                         convert_graphic_rgb(rgb, transfer, white, peak);
                         const float luma = graphic_luma(rgb, transfer) * dst_scale;
-                        acc[p][0] = stored_code(min(max(a * luma + (1.f - a) * acc[p][0], 0.f), maxv));
+                        // Opacity weights coverage only: the colour above was un-premultiplied
+                        // by the sampled alpha, so a fading key keeps its colours.
+                        const float w = kOpacity ? a * opacity : a;
+                        acc[p][0] = stored_code(min(max(w * luma + (1.f - w) * acc[p][0], 0.f), maxv));
                     }
                     continue;
                 }
@@ -331,7 +337,9 @@ __device__ __forceinline__ void composite_body(
                     acc[p][1] = stored_code(min(max(cr, 0.f), maxv));
                 } else {
                     if (cnt == 0 || sum_a <= 0.f) continue;
-                    const float r = sum[0] / sum_a, g = sum[1] / sum_a, b = sum[2] / sum_a, a = sum_a / cnt;
+                    // The colour is alpha-weighted, so opacity scales only the block coverage.
+                    const float r = sum[0] / sum_a, g = sum[1] / sum_a, b = sum[2] / sum_a;
+                    const float a = kOpacity ? sum_a / cnt * opacity : sum_a / cnt;
                     graphic_chroma(r, g, b, transfer, cb, cr);
                     cb *= dst_scale; cr *= dst_scale;
                     acc[p][0] = stored_code(min(max(a * cb + (1.f - a) * acc[p][0], 0.f), maxv));
@@ -399,6 +407,12 @@ extern "C" __global__ void __launch_bounds__(256) composite_planes(AVP_COMPOSITE
 extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv(AVP_COMPOSITE_ARGS) {
     if (blockIdx.z) composite_body<false, 2, true>(AVP_COMPOSITE_PASS);
     else composite_body<false, 1, false>(AVP_COMPOSITE_PASS);
+}
+// Semiplanar YUV canvas where a blended RGBA layer is faded (table mul < 1): composite_planes
+// plus the opacity weight. The host picks it only for such frames.
+extern "C" __global__ void __launch_bounds__(256) composite_planes_opacity(AVP_COMPOSITE_ARGS) {
+    if (blockIdx.z) composite_body<true, 2, true, true>(AVP_COMPOSITE_PASS);
+    else composite_body<true, 1, false, true>(AVP_COMPOSITE_PASS);
 }
 // Packed 8-bit RGB canvas with 4 bytes per pixel (rgb0/bgr0/rgba/bgra), same-format sources (gridDim.z = 1).
 extern "C" __global__ void __launch_bounds__(256) composite_planes_packed4(AVP_COMPOSITE_ARGS) {

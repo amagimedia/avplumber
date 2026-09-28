@@ -342,11 +342,18 @@ drawn over the finished program, above transitions and wipes. Renditions with
 shows the keyed program.
 
 ```json
-"dsk": {"keys": [
+"dsk": {"fade_seconds": 0.5, "fade_curve": "ease-in-out", "keys": [
   {"id": "bug", "source": "logo_page", "dst": {"x": 32, "y": 32, "w": 152, "h": 152}},
   {"id": "strap", "source": "strap_page", "dst": {"x": 32, "y": 1640, "w": 1016, "h": 172}, "on": true}
 ]}
 ```
+
+| field | default | meaning |
+| --- | --- | --- |
+| `fade_seconds` | `0.4` | how long a key change fades, 0 to 10; `0` cuts |
+| `fade_curve` | `"linear"` | easing of a key fade, the same presets as `control.fade_curve` |
+
+Each key:
 
 | field | default | meaning |
 | --- | --- | --- |
@@ -362,9 +369,24 @@ not to the canvas: Chromium then paints and exports only the graphic's pixels.
 The keyer is one compositor pass clocked by the program: every program frame
 renders at once over each key's frame stamped for that tick (matched by
 timestamp, as scene sources are), so it adds no playout latency, steady motion
-stays steady, and a late browser paint never delays the program. Keys cut on and off
-(`mixer.dsk {"key": "bug", "on": true}`); with all keys off the program frame
-passes through without GPU work. With no keys declared the graph has no keyer.
+stays steady, and a late browser paint never delays the program. Off keys keep
+receiving frames (without drawing them), so a key switched on appears on the
+very next program frame. The cost is browser ring slots, not copies: a key,
+on or off, holds its source's frames stamped ahead of the program (usually the
+program latency plus about two frames, at most seven), so a key source also
+shown in scenes or on a multiview may need a larger `browser_ring_size`. With
+all keys off the program frame passes through without GPU work. With no keys declared the graph has no keyer.
+
+`mixer.dsk {"key": "bug", "on": true, "fade_seconds": 0.5, "curve": "ease-out"}`
+puts a key on or off air; `fade_seconds` and `curve` default to the `dsk` ones
+above. A fade starts on the first program frame after the command, even if the
+key's browser has not painted yet: a late first paint joins the ramp part-way
+rather than delaying it. Keys fade independently; a key switched back
+mid-fade turns around from the level it reached, at the same pace. A command
+that leaves a key as it is changes nothing, even a cut sent while that key is
+still fading. A cut (`0`) also asks the preview encoder for a keyframe, as an
+M/E cut does; a fade does not. Like the M/E's, that keyframe goes to the first
+Janus rendition only, even when that rendition is a clean feed.
 
 ## Known limitations
 

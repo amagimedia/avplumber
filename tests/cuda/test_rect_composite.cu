@@ -1,15 +1,19 @@
 // NVIDIA integration test of the single-launch composite kernel against the
 // per-layer kernels it replaced (legacy_rect_kernels.cuh): the same layer set
 // drawn both ways must give identical canvases (NV12 and P210, scale/blit, NV12->P210 promotion,
-// opaque RGB and blended RGBA, overlapping z-order, partial off-canvas rects).
+// opaque RGB and blended RGBA, overlapping z-order, partial off-canvas rects),
+// and checks key fades (composite_planes_opacity) against the full-opacity canvas.
 // Then times both paths on a 1080x1920 sixteen-box grid.
 //   nvcc -std=c++17 -O2 tests/cuda/test_rect_composite.cu -lcuda -o /tmp/test_rect_composite
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -78,7 +82,7 @@ struct Frame {   // a semiplanar surface
 };
 
 struct Rgba {   // packed 8-bit RGBA (bgra-like order chosen by offsets)
-    int w, h; Plane px; int step = 4, r_off = 2, g_off = 1, b_off = 0, a_off = 3;
+    int w, h; Plane px; int step = 4, r_off = 2, g_off = 1, b_off = 0, a_off = 3, premultiplied = 0;
     Rgba(int w_, int h_, std::mt19937 *rng) : w(w_), h(h_), px(w_ * 4, h_, rng) {}
 };
 
@@ -105,6 +109,7 @@ struct Layer {
     const RgbaTex *tex = nullptr;   // *_TEX kinds: same pixels as rgb, fetched through the texture
     int cx, cy, cw, ch;       // crop (source pixels)
     int dx, dy, dw, dh;       // destination on the canvas (luma pixels), chroma-aligned
+    float opacity = 1.f;      // RGBA kinds: the key-fade weight, the table's mul
 };
 
 static int clearValue(const Fmt &f, int plane) { return plane ? 1 << (f.depth - 1) : 16 << (f.depth - 8); }
@@ -140,7 +145,7 @@ static void drawLayered(const Fmt &cf, Frame &canvas, const std::vector<Layer> &
                     L.rgb->step, L.rgb->r_off, L.rgb->g_off, L.rgb->b_off, L.rgb->a_off,
                     canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
                     L.dx, L.dy, L.dw, L.dh, canvas.w, canvas.h, cf.bytes, cf.shift, dst_scale, cf.sub_x, cf.sub_y,
-                    transfer, 203.f, 1000.f, 0);
+                    transfer, 203.f, 1000.f, L.rgb->premultiplied);
             check(cudaGetLastError(), "rgb launch");
             continue;
         }
@@ -176,6 +181,8 @@ static void fillTable(const Fmt &cf, const std::vector<Layer> &layers, std::vect
         AvpRectLayer e{};
         if (L.kind >= AVP_RECT_KIND_RGB) {
             e.kind = L.kind; e.step = L.rgb->step; e.r_off = L.rgb->r_off; e.g_off = L.rgb->g_off; e.b_off = L.rgb->b_off; e.a_off = L.rgb->a_off;
+            e.premultiplied = L.rgb->premultiplied;
+            e.mul = L.kind == AVP_RECT_KIND_RGBA || L.kind == AVP_RECT_KIND_RGBA_TEX ? L.opacity : 1.f;
             if (L.tex) { e.src[0] = L.tex->tex; e.src_pitch[0] = 0; }
             else { e.src[0] = (unsigned long long)(uintptr_t)L.rgb->px.dev; e.src_pitch[0] = L.rgb->px.pitch; }
             e.sx[0] = L.cx; e.sy[0] = L.cy; e.sw[0] = L.cw; e.sh[0] = L.ch;
@@ -213,22 +220,26 @@ static void drawBatched(const Fmt &cf, Frame &canvas, const std::vector<AvpRectL
     int ox, oy, chroma_w = 0, chroma_h = 0;
     if (cf.planes > 1) { planeRegion(cf, 0, 0, canvas.w, canvas.h, 1, ox, oy, chroma_w, chroma_h); chroma_w /= 2 * cf.bytes; }
     const dim3 grid((canvas.w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas.h + 7) / 8, cf.planes), block(32, 8);
-    bool any_rgb = false;
-    for (const auto &e : table) any_rgb = any_rgb || e.kind >= AVP_RECT_KIND_RGB;
+    // The entry CudaRectDraw::draw picks.
+    bool any_rgb = false, any_fade = false;
+    for (const auto &e : table) {
+        any_rgb = any_rgb || e.kind >= AVP_RECT_KIND_RGB;
+        any_fade = any_fade || ((e.kind == AVP_RECT_KIND_RGBA || e.kind == AVP_RECT_KIND_RGBA_TEX) && e.mul < 1.f);
+    }
+    const auto kernel = cf.planes == 1 ? composite_planes_packed4 : any_fade ? composite_planes_opacity
+                      : any_rgb ? composite_planes : composite_planes_yuv;
     const int clear0 = cf.planes == 1 ? 0 : clearValue(cf, 0);
-    if (cf.planes == 1)
-        composite_planes_packed4<<<grid, block, (table.size() + 31) / 32 * sizeof(unsigned int)>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
-            canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
-            clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
-    else if (any_rgb)
-        composite_planes<<<grid, block, (table.size() + 31) / 32 * sizeof(unsigned int)>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
-            canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
-            clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
-    else
-        composite_planes_yuv<<<grid, block, (table.size() + 31) / 32 * sizeof(unsigned int)>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
-            canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
-            clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
+    kernel<<<grid, block, (table.size() + 31) / 32 * sizeof(unsigned int)>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
+        canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
+        clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
     check(cudaGetLastError(), "composite launch");
+}
+
+// The code of the sample at row r, byte c of a downloaded plane.
+static int codeAt(const std::vector<unsigned char> &buf, const Plane &p, int r, int c, int bytes, int shift) {
+    if (bytes == 1) return buf[size_t(r) * p.pitch + c];
+    uint16_t w; memcpy(&w, &buf[size_t(r) * p.pitch + c], 2);
+    return w >> shift;
 }
 
 // Bit-exact except where a blended sample rounds differently because nvcc contracts
@@ -238,9 +249,7 @@ static void comparePlanes(const Plane &a, const Plane &b, int width_bytes, int b
     size_t samples = 0, off_by_one = 0;
     for (int r = 0; r < a.rows; ++r)
         for (int c = 0; c < width_bytes; c += bytes) {
-            int va, vb;
-            if (bytes == 2) { uint16_t wa, wb; memcpy(&wa, &A[size_t(r) * a.pitch + c], 2); memcpy(&wb, &B[size_t(r) * b.pitch + c], 2); va = wa >> shift; vb = wb >> shift; }
-            else { va = A[size_t(r) * a.pitch + c]; vb = B[size_t(r) * b.pitch + c]; }
+            const int va = codeAt(A, a, r, c, bytes, shift), vb = codeAt(B, b, r, c, bytes, shift);
             ++samples;
             if (va == vb) continue;
             if (va - vb == 1 || vb - va == 1) { ++off_by_one; continue; }
@@ -264,6 +273,48 @@ static void scenario(const char *name, const Fmt &cf, int cw, int ch, const std:
     if (cf.planes > 1)
         comparePlanes(ref.uv, out.uv, cw * cf.bytes, cf.bytes, cf.shift, (std::string(name) + " chroma").c_str());
     std::cout << "PASS " << name << " (" << layers.size() << " layers, " << cf.name << " " << cw << "x" << ch << ")\n";
+}
+
+// Key fades (composite_planes_opacity). Opacity scales only a key's coverage, so each sample of the
+// canvas with the top layer at `opacity` lies on the line from the canvas without that layer (bg) to
+// the canvas with it at full opacity: bg + opacity * (full - bg), within the roundings of the three
+// launches (two codes). Layers below the faded one, RGBA at opacity 1 included, draw as they always do.
+static void fadeScenario(const char *name, const Fmt &cf, int cw, int ch, std::vector<Layer> layers, int transfer,
+                         AvpRectLayer *dev_table) {
+    auto draw = [&](const std::vector<Layer> &set) {
+        auto canvas = std::make_unique<Frame>(cf, cw, ch, nullptr);
+        std::vector<AvpRectLayer> table;
+        fillTable(cf, set, table);
+        drawBatched(cf, *canvas, table, dev_table, transfer);
+        check(cudaDeviceSynchronize(), "sync");
+        return canvas;
+    };
+    const float opacity = layers.back().opacity;
+    const auto bg = draw(std::vector<Layer>(layers.begin(), layers.end() - 1));
+    layers.back().opacity = 1.f;
+    const auto full = draw(layers);
+    layers.back().opacity = opacity;
+    const auto faded = draw(layers);
+    auto compare = [&](Plane Frame::*plane, int width_bytes, const char *what) {
+        const Plane &p = (*bg).*plane;
+        const auto B = p.download(), F = ((*full).*plane).download(), O = ((*faded).*plane).download();
+        size_t keyed = 0;
+        for (int r = 0; r < p.rows; ++r)
+            for (int c = 0; c < width_bytes; c += cf.bytes) {
+                const int vb = codeAt(B, p, r, c, cf.bytes, cf.shift), vf = codeAt(F, p, r, c, cf.bytes, cf.shift);
+                const int vo = codeAt(O, p, r, c, cf.bytes, cf.shift);
+                if (std::abs(vf - vb) > 8) ++keyed;
+                const float want = vb + opacity * (vf - vb);
+                if (std::abs(vo - want) > 2.f)
+                    throw std::runtime_error(std::string(name) + " " + what + ": row " + std::to_string(r) + " byte " +
+                                             std::to_string(c) + " is " + std::to_string(vo) + ", want " + std::to_string(want) +
+                                             " (bg " + std::to_string(vb) + ", full " + std::to_string(vf) + ")");
+            }
+        if (!keyed) throw std::runtime_error(std::string(name) + " " + what + ": the key changes nothing; the test is vacuous");
+    };
+    compare(&Frame::y, cw * cf.bytes * cf.lanes0, "plane0");
+    compare(&Frame::uv, cw * cf.bytes, "chroma");
+    std::cout << "PASS " << name << " (opacity " << opacity << ", " << cf.name << " " << cw << "x" << ch << ")\n";
 }
 
 int main() {
@@ -358,6 +409,30 @@ int main() {
             {AVP_RECT_KIND_YUV, &pb, nullptr, nullptr, 0, 0, 1280, 720, 0, 0, 1080, 608},
             {AVP_RECT_KIND_RGB_TEX, nullptr, &g, &tg, 0, 0, 400, 300, 640, 40, 400, 300},
             {AVP_RECT_KIND_RGBA_TEX, nullptr, &g2, &tg2, 0, 0, 128, 64, 0, 0, 1080, 1920},
+        }, 0, dev_table);
+    }
+
+    // 8. Key fades: straight and premultiplied alpha, pointer and texture sources, a key at
+    // opacity 1 under the faded one, near-zero opacity, NV12 and P210 HLG canvases.
+    {
+        Rgba gp(200, 100, &rng);
+        gp.premultiplied = 1;
+        RgbaTex tg2(g2);
+        const std::vector<Layer> under = {
+            {AVP_RECT_KIND_YUV, &b, nullptr, nullptr, 0, 0, 1280, 720, 0, 0, 1080, 608},
+            {AVP_RECT_KIND_RGBA, nullptr, &g, nullptr, 0, 0, 400, 300, 0, 0, 1080, 1920},   // a key on air at 1
+        };
+        for (float opacity : {0.5f, 0.02f, 0.97f}) {
+            auto layers = under;
+            layers.push_back({AVP_RECT_KIND_RGBA, nullptr, &g2, nullptr, 0, 0, 128, 64, 302, 100, 512, 256, opacity});
+            fadeScenario("nv12 key fade", NV12, 1080, 1920, layers, 2, dev_table);
+        }
+        auto premul = under;
+        premul.push_back({AVP_RECT_KIND_RGBA, nullptr, &gp, nullptr, 0, 0, 200, 100, 40, 1500, 1000, 300, 0.5f});
+        fadeScenario("nv12 premultiplied key fade", NV12, 1080, 1920, premul, 2, dev_table);
+        fadeScenario("p210 hlg texture key fade", P210, 1080, 1920, {
+            {AVP_RECT_KIND_YUV, &pb, nullptr, nullptr, 0, 0, 1280, 720, 0, 0, 1080, 608},
+            {AVP_RECT_KIND_RGBA_TEX, nullptr, &g2, &tg2, 0, 0, 128, 64, 0, 0, 1080, 1920, 0.4f},
         }, 0, dev_table);
     }
 

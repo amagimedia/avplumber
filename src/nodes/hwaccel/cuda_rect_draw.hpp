@@ -59,7 +59,8 @@ public:
 
     /// Compose the frame: background where nothing draws, then every resolved op in order, in one
     /// kernel launch. Validates each source's color tags against the canvas contract first.
-    /// `color_src` decides the clear level (JPEG-range sources clear to 0).
+    /// `color_src` decides the clear level (JPEG-range sources clear to 0). A layer's opacity
+    /// below 1 weights a blended RGBA source's alpha; other kinds cannot fade and draw opaque.
     void draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src);
 
     /// sw_format of a hardware frame, AV_PIX_FMT_NONE when it has no frames context.
@@ -74,6 +75,8 @@ private:
     CUfunction composite_kernel_ = nullptr;       // full: YUV, promote and RGB(A) layers
     CUfunction composite_yuv_kernel_ = nullptr;   // lean: no packed-RGB layers in the table
     CUfunction composite_packed_kernel_ = nullptr; // packed 4-byte RGB canvases
+    CUfunction composite_opacity_kernel_ = nullptr; // full, plus faded RGBA layers (LayerSpec::opacity < 1)
+    bool opacity_warned_ = false;   // an op with opacity < 1 on a kind that cannot blend, logged once
     // Rect table: pinned host staging + device copy, one entry per op, reused every frame
     // (the node synchronizes the stream after each frame).
     AvpRectLayer *table_host_ = nullptr;

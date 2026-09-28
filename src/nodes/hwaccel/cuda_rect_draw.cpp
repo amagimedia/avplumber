@@ -81,7 +81,8 @@ void CudaRectDraw::ensureKernels() {
     if (AVP_CHECK_CU(cuModuleLoadDataEx(&module_, image.c_str(), 0, nullptr, nullptr)) ||
         AVP_CHECK_CU(cuModuleGetFunction(&composite_kernel_, module_, "composite_planes")) ||
         AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_kernel_, module_, "composite_planes_yuv")) ||
-        AVP_CHECK_CU(cuModuleGetFunction(&composite_packed_kernel_, module_, "composite_planes_packed4")))
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_packed_kernel_, module_, "composite_planes_packed4")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_opacity_kernel_, module_, "composite_planes_opacity")))
         throw Error("cuda_rect_overlay: cannot load the composite kernel");
     int shared_limit = 0;
     CUdevice device;
@@ -105,7 +106,7 @@ void CudaRectDraw::unload() {
         if (table_host_) { AVP_CHECK_CU(cuMemFreeHost(table_host_)); table_host_ = nullptr; }
         AVP_CHECK_CU(cuModuleUnload(module_));
         module_ = nullptr;
-        composite_kernel_ = composite_yuv_kernel_ = composite_packed_kernel_ = nullptr;
+        composite_kernel_ = composite_yuv_kernel_ = composite_packed_kernel_ = composite_opacity_kernel_ = nullptr;
     }
 }
 
@@ -148,6 +149,7 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
         const int a_off = packedAlphaOffset(src_sw_fmt);
         const bool blend = L.blend && a_off >= 0;
         out.step = rgb_step; out.r_off = r_off; out.g_off = g_off; out.b_off = b_off; out.a_off = a_off;
+        out.mul = blend ? L.opacity : 1.f;
 #if LIBAVUTIL_VERSION_MAJOR >= 60
         out.premultiplied = src->alpha_mode == AVALPHA_MODE_PREMULTIPLIED;
 #endif
@@ -205,13 +207,23 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
     ensureKernels();
     const AVPixelFormat sw_fmt = canvas_.sw_fmt;
     int n = 0;
-    bool any_rgb = false;
+    bool any_rgb = false, any_fade = false;
     for (const DrawOp &op : ops) {
         if (!op.src || !op.src->raw()) continue;
         if (n >= max_layers_)
             throw Error("cuda_rect_overlay: more than " + std::to_string(max_layers_) + " layers in one frame");
+        const AvpRectLayer &entry = table_host_[n];
         fillTableEntry(op, canvas, table_host_[n]);
-        any_rgb = any_rgb || table_host_[n].kind >= AVP_RECT_KIND_RGB;
+        any_rgb = any_rgb || entry.kind >= AVP_RECT_KIND_RGB;
+        if (op.layer.opacity < 1.f) {
+            if (entry.kind == AVP_RECT_KIND_RGBA || entry.kind == AVP_RECT_KIND_RGBA_TEX) {
+                any_fade = true;
+            } else if (!opacity_warned_) {
+                // Not an error: a key without alpha (or on a packed canvas) still cuts cleanly.
+                opacity_warned_ = true;
+                logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
+            }
+        }
         ++n;
     }
     const int planes = av_pix_fmt_count_planes(sw_fmt);
@@ -241,7 +253,8 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
                     &canvas_w, &canvas_h, &chroma_w, &chroma_h,
                     &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y,
                     &clear0_i, &clear1_i, &transfer, &sdr_white, &hdr_peak};
-    const CUfunction kernel = planes == 1 ? composite_packed_kernel_ : any_rgb ? composite_kernel_ : composite_yuv_kernel_;
+    const CUfunction kernel = planes == 1 ? composite_packed_kernel_ : any_fade ? composite_opacity_kernel_
+        : any_rgb ? composite_kernel_ : composite_yuv_kernel_;
     // 128x8 luma tiles per block; gridDim.z spans the planes.
     if (AVP_CHECK_CU(cuLaunchKernel(kernel,
                                     (canvas_w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas_h + 7) / 8,

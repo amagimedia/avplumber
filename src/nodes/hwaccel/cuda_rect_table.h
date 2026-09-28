@@ -28,6 +28,6 @@ struct AvpRectLayer {
     int dx[2], dy[2], dw[2], dh[2];   // destination rect per canvas plane, lane groups
     int kind;
     int src_bytes, src_shift;         // PROMOTE: source storage; YUV: same as the canvas
-    float mul;                        // PROMOTE: code multiplier; YUV: 1
+    float mul;                        // PROMOTE: code multiplier; YUV, RGB: 1; RGBA: opacity in (0, 1]
     int step, r_off, g_off, b_off, a_off, premultiplied;   // RGB(A)
 };

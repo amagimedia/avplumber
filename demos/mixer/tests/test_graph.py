@@ -93,6 +93,7 @@ class FakeMixer:
         self.aux_routes = []
         self.fps_num, self.fps_den = parameters.get("fps", (30, 1))
         self.hwaccel = parameters.get("hwaccel")
+        self.keyframe_node = parameters.get("keyframe_node")
         self.instances.append(self)
 
     def add_aux_destination(self, source, edge):
@@ -1283,12 +1284,12 @@ DSK_KEYS = {"keys": [{"id": "bug", "source": "page", "dst": {"x": 1700, "y": 40,
                      {"id": "strap", "source": "page"}]}
 
 
-def _dsk_app(tmp_path, monkeypatch, renditions, canvas=CONFIG["canvas"]):
+def _dsk_app(tmp_path, monkeypatch, renditions, canvas=CONFIG["canvas"], dsk=DSK_KEYS):
     from pyplumber.mixer import dmabuf_inputs
     (tmp_path / "page.sock").touch()
     monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
     path = tmp_path / "show.json"
-    path.write_text(json.dumps({**CONFIG, "canvas": canvas, "dsk": DSK_KEYS, "renditions": renditions}))
+    path.write_text(json.dumps({**CONFIG, "canvas": canvas, "dsk": dsk, "renditions": renditions}))
     FakeMixer.instances.clear()
     app = build_application(GraphOptions(config=str(path), janus_output=True, dmabuf_socket_dir=str(tmp_path)),
                             api=fake_api())
@@ -1333,16 +1334,88 @@ def test_dsk_clean_and_dirty_renditions_each_keep_sdr_and_hdr(tmp_path, monkeypa
         ("clean_sdr_clean", "Program clean · SDR", 5010), ("clean_hdr_clean", "Program clean · HDR", 5012)]
 
 
+KEYFRAME = "node.object.set janus_force_keyframe trigger true"
+
+
 def test_dsk_command_cuts_keys_on_and_off(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     handler = app.avp.commands_registered["mixer.dsk"]
-    assert json.loads(handler(json.dumps({"key": "strap", "on": True}))) == [
+    assert json.loads(handler(json.dumps({"key": "strap", "on": True, "fade_seconds": 0}))) == [
         {"id": "bug", "source": "page", "on": True}, {"id": "strap", "source": "page", "on": True}]
-    assert app.avp.commands[-1] == "node.object.set dsk_comp active_inputs 7"
-    handler(json.dumps({"key": "bug", "on": False}))
-    assert app.avp.commands[-1] == "node.object.set dsk_comp active_inputs 5"
+    # A cut is exactly the pre-fade command, and asks the preview encoder for a keyframe like an M/E cut.
+    assert app.avp.commands[-2:] == ["node.object.set dsk_comp active_inputs 7", KEYFRAME]
+    handler(json.dumps({"key": "bug", "on": False, "fade_seconds": 0}))
+    assert app.avp.commands[-2:] == ["node.object.set dsk_comp active_inputs 5", KEYFRAME]
+    # A key that is already off changes nothing on screen: no keyframe.
+    count = len(app.avp.commands)
+    handler(json.dumps({"key": "bug", "on": False, "fade_seconds": 0}))
+    assert KEYFRAME not in app.avp.commands[count:]
+    # Without fade_seconds a key change fades over the show default (0.4 s).
+    handler(json.dumps({"key": "bug", "on": True}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 7, "duration_ms": 400, "curve": "linear"}'
     with pytest.raises(mixer_config.ConfigError):
         handler(json.dumps({"key": "nope", "on": True}))
+
+
+def test_dsk_cut_without_a_preview_encoder_sends_no_keyframe(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    app.mixer.keyframe_node = None
+    app.avp.commands_registered["mixer.dsk"](json.dumps({"key": "strap", "on": True, "fade_seconds": 0}))
+    assert app.avp.commands[-1] == "node.object.set dsk_comp active_inputs 7"
+
+
+def test_dsk_command_fades_keys_with_a_curve(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    handler = app.avp.commands_registered["mixer.dsk"]
+    rows = json.loads(handler(json.dumps({"key": "strap", "on": True, "fade_seconds": 0.75, "curve": "ease-out"})))
+    assert rows[1] == {"id": "strap", "source": "page", "on": True}
+    assert app.avp.commands[-1] == ('node.object.set dsk_comp fade_inputs '
+                                    '{"active_inputs": 7, "duration_ms": 750, "curve": "ease-out"}')
+    handler(json.dumps({"key": "bug", "on": False, "fade_seconds": 2}))
+    # A fade changes the picture gradually, so it asks for no keyframe.
+    assert app.avp.commands[-1] == ('node.object.set dsk_comp fade_inputs '
+                                    '{"active_inputs": 5, "duration_ms": 2000, "curve": "linear"}')
+    assert KEYFRAME not in app.avp.commands
+
+
+@pytest.mark.parametrize("request_, message", [
+    ({"fade_seconds": 10.5}, "dsk fade_seconds must be a number of seconds from 0 to 10"),
+    ({"fade_seconds": -1}, "fade_seconds"),
+    ({"fade_seconds": True}, "fade_seconds"),
+    ({"fade_seconds": "1"}, "fade_seconds"),
+    ({"curve": "bounce"}, "dsk curve must be one of linear, ease-in, ease-out, ease-in-out"),
+])
+def test_dsk_command_rejects_bad_fades_before_changing_anything(tmp_path, monkeypatch, request_, message):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    sent = list(app.avp.commands)
+    with pytest.raises(mixer_config.ConfigError, match=message):
+        app.avp.commands_registered["mixer.dsk"](json.dumps({"key": "strap", "on": True, **request_}))
+    assert app.avp.commands == sent
+    assert json.loads(app.avp.commands_registered["mixer.dsk_status"](""))[1]["on"] is False
+
+
+def test_dsk_command_the_keyer_rejects_switches_nothing(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+
+    def reject(commands):
+        raise RuntimeError("cuda_rect_overlay: fade_inputs requires clock_input")
+    monkeypatch.setattr(app.avp, "executeCommandsFromString", reject)
+    with pytest.raises(RuntimeError):
+        app.avp.commands_registered["mixer.dsk"](json.dumps({"key": "strap", "on": True, "fade_seconds": 1}))
+    assert [row["on"] for row in json.loads(app.avp.commands_registered["mixer.dsk_status"](""))] == [True, False]
+
+
+def test_dsk_config_fade_is_the_command_default(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}],
+                      dsk={**DSK_KEYS, "fade_seconds": 1.2, "fade_curve": "ease-in"})
+    settings = json.loads(app.avp.commands_registered["mixer.settings"](""))
+    assert (settings["dsk_fade_seconds"], settings["dsk_fade_curve"]) == (1.2, "ease-in")
+    handler = app.avp.commands_registered["mixer.dsk"]
+    handler(json.dumps({"key": "strap", "on": True}))
+    assert app.avp.commands[-1] == ('node.object.set dsk_comp fade_inputs '
+                                    '{"active_inputs": 7, "duration_ms": 1200, "curve": "ease-in"}')
+    handler(json.dumps({"key": "strap", "on": False, "fade_seconds": 0}))   # the page's empty field: a cut
+    assert app.avp.commands[-2:] == ["node.object.set dsk_comp active_inputs 3", KEYFRAME]
 
 
 @pytest.mark.parametrize("curve,sent", [("linear", None), ("ease-in", "ease-in"), ("ease-in-out", "ease-in-out")])
@@ -1366,11 +1439,20 @@ def test_mixer_fade_rejects_an_unknown_curve():
     assert mixer.avp.commands == []
 
 
+def test_dsk_fade_defaults_to_a_linear_cut():
+    cfg = mixer_config.parse({**CONFIG, "dsk": {"keys": [{"id": "k", "source": "page"}]}})
+    assert (cfg.dsk_fade_seconds, cfg.dsk_fade_curve) == (0.4, "linear")
+    assert (cfg.settings()["dsk_fade_seconds"], cfg.settings()["dsk_fade_curve"]) == (0.4, "linear")
+
+
 @pytest.mark.parametrize("dsk,message", [
     ({"keys": [{"id": "k", "source": "cam"}]}, "browser source"),
     ({"keys": [{"id": f"k{i}", "source": "page"} for i in range(5)]}, "at most 4 keys"),
     ({"keys": [{"id": "k", "source": "page"}, {"id": "k", "source": "page"}]}, "duplicate"),
     ({"keys": [{"id": "k", "source": "page", "on": 1}]}, "on must be a boolean"),
+    ({"fade_seconds": 11, "keys": []}, "dsk.fade_seconds must be a number of seconds from 0 to 10"),
+    ({"fade_seconds": -0.1, "keys": []}, "dsk.fade_seconds"),
+    ({"fade_curve": "Linear", "keys": []}, "dsk.fade_curve must be one of"),
 ])
 def test_dsk_config_rejects_invalid_keys(dsk, message):
     with pytest.raises(mixer_config.ConfigError, match=message):

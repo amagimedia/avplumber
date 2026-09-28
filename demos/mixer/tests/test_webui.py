@@ -156,6 +156,13 @@ def test_takes_reach_the_mixer_as_control_commands(client):
     ]
 
 
+def test_key_fades_reach_the_mixer_unchanged(client):
+    bridge = FakeBridge({"mixer.dsk": "[]"})
+    url, _ = client(bridge)
+    assert post(url, {"command": "dsk", "key": "bug", "on": True, "fade_seconds": 0.5, "curve": "ease-out"})[0] == 200
+    assert bridge.sent == ['mixer.dsk {"key": "bug", "on": true, "fade_seconds": 0.5, "curve": "ease-out"}']
+
+
 @pytest.mark.parametrize("payload, expected", [
     ({"command": "reboot", "scene": "a"}, "command must be one of"),
     ({"command": "cut"}, "needs a scene"),

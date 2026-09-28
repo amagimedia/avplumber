@@ -36,6 +36,7 @@ MAX_DSK_KEYS = 4          # the downstream keyer stays one small pass: program +
 # did before curves existed.
 FADE_CURVES = ("linear", "ease-in", "ease-out", "ease-in-out")
 DEFAULT_FADE_CURVE = "linear"
+MAX_KEY_FADE_SECONDS = 10.0   # the keyer's fade_inputs limit (cuda_rect_overlay kMaxKeyFadeMs)
 
 
 def fade_curve(value: Any, where: str) -> str:
@@ -43,6 +44,16 @@ def fade_curve(value: Any, where: str) -> str:
     if not isinstance(value, str) or value not in FADE_CURVES:
         raise ConfigError(f"{where} must be one of {', '.join(FADE_CURVES)}")
     return value
+
+
+DEFAULT_DSK_FADE_SECONDS = 0.4   # keys fade in and out unless a command or the show says 0 (cut)
+
+
+def key_fade_seconds(value: Any, where: str) -> float:
+    """A downstream key fade length; 0 is a cut."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= MAX_KEY_FADE_SECONDS:
+        raise ConfigError(f"{where} must be a number of seconds from 0 to {MAX_KEY_FADE_SECONDS:g}")
+    return float(value)
 
 
 def default_browser_ring_size(fps):
@@ -182,6 +193,8 @@ class MixerConfig:
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBus, ...] = ()
     dsk_keys: Tuple[DskKey, ...] = ()
+    dsk_fade_seconds: float = DEFAULT_DSK_FADE_SECONDS   # what a key change fades over unless the command says; 0 cuts
+    dsk_fade_curve: str = DEFAULT_FADE_CURVE
     browser_ring_size: Optional[int] = None
     max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS
 
@@ -202,7 +215,8 @@ class MixerConfig:
         preview_codecs = list(dict.fromkeys(
             "h265" if "hevc" in (r.codec or ("h264_nvenc" if self.working_format == "nv12" else "hevc_nvenc")) else "h264"
             for r in self.renditions if r.target == "janus" and r.feed == "dirty"))
-        keys = {"dsk_keys": [{"id": k.id, "source": k.source} for k in self.dsk_keys]} if self.dsk_keys else {}
+        keys = {"dsk_keys": [{"id": k.id, "source": k.source} for k in self.dsk_keys],
+                "dsk_fade_seconds": self.dsk_fade_seconds, "dsk_fade_curve": self.dsk_fade_curve} if self.dsk_keys else {}
         return {"source_count": len(self.sources), "browser_ring_size": self.browser_ring_size,
                 "preview_codecs": preview_codecs,
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
@@ -453,12 +467,13 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     from .aux import parse_aux_buses
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
-                   dsk_keys=_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))
+                   **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))
 
 
-def _parse_dsk(dsk: Any, sources: Dict[str, Source], canvas_w: int, canvas_h: int) -> Tuple[DskKey, ...]:
+def _parse_dsk(dsk: Any, sources: Dict[str, Source], canvas_w: int, canvas_h: int) -> Dict[str, Any]:
     """Keys are ordinary sources, so scenes may use them too; each one here is
-    alpha-blended over the finished program, above transitions and wipes."""
+    alpha-blended over the finished program, above transitions and wipes.
+    Returns the MixerConfig dsk_* fields."""
     if not isinstance(dsk, dict) or not isinstance(dsk.get("keys", []), list):
         raise ConfigError("dsk must be an object with a keys list")
     keys: List[DskKey] = []
@@ -477,7 +492,9 @@ def _parse_dsk(dsk: Any, sources: Dict[str, Source], canvas_w: int, canvas_h: in
         _unique(keys, where)
     if len(keys) > MAX_DSK_KEYS:
         raise ConfigError(f"dsk: at most {MAX_DSK_KEYS} keys")
-    return tuple(keys)
+    return {"dsk_keys": tuple(keys),
+            "dsk_fade_seconds": key_fade_seconds(dsk.get("fade_seconds", DEFAULT_DSK_FADE_SECONDS), "dsk.fade_seconds"),
+            "dsk_fade_curve": fade_curve(dsk.get("fade_curve", DEFAULT_FADE_CURVE), "dsk.fade_curve")}
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")

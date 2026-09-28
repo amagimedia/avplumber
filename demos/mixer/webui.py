@@ -8,7 +8,7 @@ mixer needs no HTTP server of its own and the page needs no build step:
     GET  /api/state     status + scenes + settings in one round trip
     POST /api/command   {"command": "cut"|"fade"|"wipe"|"preview", "scene": ...}
                         (a fade may carry "curve": "linear"|"ease-in"|"ease-out"|"ease-in-out")
-                        {"command": "dsk", "key": ..., "on": true|false}
+                        {"command": "dsk", "key": ..., "on": true|false, "fade_seconds"?: s, "curve"?: ...}
 
 The bridge owns a single serialized control connection and reconnects when the
 mixer restarts, so the page can stay open across a demo restart.

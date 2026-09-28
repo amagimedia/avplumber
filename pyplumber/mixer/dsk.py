@@ -4,16 +4,19 @@ The keyer runs after transitions and wipes, so a clean feed still carries every
 scene and M/E transition and only the keys are missing. It is one compositor
 pass clocked by the program (``clock_input``): each program frame renders at
 once over every key's frame stamped for that tick, so keying adds no playout
-latency and a late browser paint never stalls the program. Keys only cut on
-and off; with none on, the program frame passes through without any GPU work.
+latency and a late browser paint never stalls the program. A key cuts or fades
+on and off, each on its own; with none visible, the program frame passes through
+without any GPU work.
 """
 from __future__ import annotations
 
 import json
+import logging
 import threading
 
-from .config import ConfigError
+from .config import ConfigError, fade_curve, key_fade_seconds
 from .control import source_mask_param
+from .janus import keyframe_command
 
 
 class DownstreamKeyer:
@@ -26,11 +29,12 @@ class DownstreamKeyer:
         self.lock = threading.Lock()
         for key, edge in zip(self.keys, self.edges):
             # Keys subscribe to the shared source like an aux bus: the source
-            # never waits for the keyer, and an idle key receives nothing.
+            # never waits for the keyer. Off keys stay subscribed, so a key comes
+            # on with the next program frame.
             mixer.add_aux_destination(key.source, edge)
 
-    def _mask(self):
-        return source_mask_param(1 | sum(1 << (i + 1) for i, k in enumerate(self.keys) if self.on[k.id]))
+    def _mask(self, on: dict):
+        return source_mask_param(1 | sum(1 << (i + 1) for i, k in enumerate(self.keys) if on[k.id]))
 
     def build(self, program: str, *, clean: bool) -> dict:
         """Key *program*; return the edge of each feed. A clean edge exists only when asked for."""
@@ -52,7 +56,7 @@ class DownstreamKeyer:
             "fps": f"{self.mixer.fps_num}/{self.mixer.fps_den}",
             "hwaccel": self.mixer.hwaccel, "width": w, "height": h,
             "sw_format": self.cfg.working_format, "color": self.cfg.out_color.transfer,
-            "max_layers": len(layers), "layers": layers, "active_inputs": self._mask(),
+            "max_layers": len(layers), "layers": layers, "active_inputs": self._mask(self.on),
             # Program frames carry the scene compositor's per-frame layer metadata;
             # a distinct key keeps it from rearranging the keyer's layers.
             "metadata_key": "dsk_layers_v1",
@@ -61,13 +65,33 @@ class DownstreamKeyer:
         return feeds
 
     def set(self, request) -> dict:
+        """Put *key* on or off air. fade_seconds and curve default to the config's dsk ones;
+        0 seconds cuts. Only a key that changes takes this fade: the keyer never restarts
+        another key's, and a command that leaves *key* as it is (a cut included) lets its
+        running fade finish."""
         key, on = request.get("key"), request.get("on")
         if key not in self.on or not isinstance(on, bool):
             raise ConfigError("dsk needs a known key and a boolean on")
+        seconds = key_fade_seconds(request.get("fade_seconds", self.cfg.dsk_fade_seconds), "dsk fade_seconds")
+        curve = fade_curve(request.get("curve", self.cfg.dsk_fade_curve), "dsk curve")
+        duration_ms = round(seconds * 1000)
         with self.lock:
+            changed = self.on[key] != on
+            mask = self._mask({**self.on, key: on})
+            # self.on changes only once the keyer took the command, so a rejected one reports nothing switched.
+            if duration_ms:
+                self.avp.executeCommandsFromString(f"node.object.set {self.node_name} fade_inputs " + json.dumps(
+                    {"active_inputs": mask, "duration_ms": duration_ms, "curve": curve}))
+            else:
+                self.avp.executeCommandsFromString(f"node.object.set {self.node_name} active_inputs {json.dumps(mask)}")
+                # Like an M/E cut: a key cut changes the picture at once, so the preview receiver
+                # should not wait for the next periodic keyframe. A fade changes it gradually.
+                if changed and self.mixer.keyframe_node:
+                    try:
+                        self.avp.executeCommandsFromString(keyframe_command(self.mixer.keyframe_node))
+                    except Exception as exc:   # the key already switched; a missed keyframe only delays the preview
+                        logging.getLogger(__name__).warning("dsk: keyframe trigger failed: %s", exc)
             self.on[key] = on
-            self.avp.executeCommandsFromString(
-                f"node.object.set {self.node_name} active_inputs {json.dumps(self._mask())}")
             return self.state()
 
     def state(self) -> list:
