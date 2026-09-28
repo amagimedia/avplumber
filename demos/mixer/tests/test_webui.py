@@ -11,6 +11,7 @@ import urllib.request
 
 import pytest
 
+from pyplumber.mixer.control import mixer_command
 from webui import GpuStats, MixerBridge, serve
 
 
@@ -167,13 +168,35 @@ def test_a_burst_of_takes_collapses_to_its_newest_in_order():
     for count, scene in enumerate("abcd", 1):
         takes.append(threading.Thread(target=take, args=(scene,)))
         takes[-1].start()
-        while bridge._newest_take < count:   # each take arrives after the previous one
+        while bridge._take_arrivals < count:   # each take arrives after the previous one
             time.sleep(0.001)
     gate.set()   # the mixer answers the first take
     for thread in takes:
         thread.join(5)
     assert bridge.sent == ['mixer.cut {"scene":"a","mixer":"mixer"}', 'mixer.cut {"scene":"d","mixer":"mixer"}']
     assert sent == {"a": True, "b": False, "c": False, "d": True}
+
+
+def test_a_preview_never_supersedes_a_waiting_program_take():
+    bridge = FakeBridge()
+    bridge.gates["mixer.preview"] = gate = threading.Event()
+    requests = [{"command": "preview", "scene": "b"}, {"command": "cut", "scene": "b"},
+                {"command": "preview", "scene": "c"}, {"command": "interrupt"}]
+    sent = [None] * len(requests)
+
+    def take(i):
+        sent[i] = bridge.take(requests[i])
+    takes = []
+    for i in range(len(requests)):
+        takes.append(threading.Thread(target=take, args=(i,)))
+        takes[-1].start()
+        while bridge._take_arrivals < i + 1:
+            time.sleep(0.001)
+    gate.set()   # the mixer answers the first preview
+    for thread in takes:
+        thread.join(5)
+    assert bridge.sent == [mixer_command(r.pop("command"), "mixer", **r) for r in requests]
+    assert sent == [True] * len(requests)
 
 
 def test_status_endpoint_sends_only_mixer_status(client):
