@@ -480,11 +480,10 @@
         return Number.isFinite(value) ? value : null;
       };
       window.setInterval(() => {
-        const latency = document.getElementById("cut-latency");
         window.parent.postMessage({
           type: "avp-preview-stats",
           search: window.location.search,
-          latency: { ms: shown("cut-latency"), text: latency.textContent, title: latency.title },
+          latency: { ms: shown("cut-latency"), title: document.getElementById("cut-latency").title },
           rtt_ms: shown("rtt-value"),
           fps: shown("receiver-fps"),
           buffer_ms: shown("receiver-buffer"),
