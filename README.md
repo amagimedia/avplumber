@@ -190,7 +190,7 @@ Each node is described by a JSON object consisting of the following fields:
 * `group` (string) - used for grouping together nearby nodes. Example: transcoder that will have separate input and output groups so that when input URL is changed, only demuxer and decoders will be restarted, not encoders and muxer.
 * `auto_restart` (string) - optional:
   * `off` (default) - let the node stop without restarting
-  * `on` - restart single node when it finishes/crashes
+  * `on` - restart single node when it finishes/crashes. A restart that fails (e.g. the node can't be created) is reported like a node error and retried every second until it succeeds, the node is stopped or the instance shuts down
   * `group` - restart the whole group to which the node belongs
   * `panic` - when the node finishes/crashes, shutdown the whole avplumber instance
 * `src` (string for single-input nodes, list of strings for multi-input nodes) - source edge

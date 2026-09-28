@@ -53,6 +53,7 @@ protected:
     Parameters params_;
     std::recursive_mutex start_stop_mutex_;
     void threadFunction();
+    void reportException(const std::string &message);
     #ifdef PYTHON_MODULE
     // Keep null by default: constructing py::none() may touch refcounts on non-Python threads.
     py::object python_node_object_ {};
@@ -104,6 +105,10 @@ public:
         return true;
     }
     bool start();
+    // auto_restart "on": an exception leaving the restart thread would std::terminate the
+    // instance, so like a group's management thread, report a failed start() and retry it
+    // every second until it succeeds, stop() is requested or the instance shuts down.
+    void startRetrying();
     bool stop(bool inhibit_actions = true);
     bool interrupt(bool optional = false);
     Parameters getObject(const std::string);

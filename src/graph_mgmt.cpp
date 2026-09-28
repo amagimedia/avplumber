@@ -167,6 +167,35 @@ void NodeWrapper::setObject(const std::string object_name, const Parameters& p) 
     inpobj->setObject(object_name, p);
 }
 
+void NodeWrapper::startRetrying() {
+    while (true) {
+        std::string error;
+        try {
+            start();
+            return;
+        } catch (std::exception &e) {
+            error = e.what();
+        } catch (...) {
+            error = "unknown non-std exception";
+        }
+        logstream << "Node " << name_ << " restart failed: " << error << ", retrying in 1 s";
+        reportException(error);
+        wallclock.sleepms(1000);
+        if (!manager_->shouldWork() || stop_requested_) {
+            logstream << "Node " << name_ << " stopped or instance shutting down, no more restart attempts";
+            return;
+        }
+    }
+}
+
+void NodeWrapper::reportException(const std::string &message) {
+    try {
+        manager_->instanceData().notifyException(name_, type_, message);
+    } catch (std::exception &callback_error) {
+        logstream << "Exception callback failed for node " << name_ << ": " << callback_error.what();
+    }
+}
+
 bool NodeWrapper::stopAndWait() {
     bool r = interrupt(true);
     if (!r) {
@@ -233,6 +262,8 @@ bool NodeWrapper::stop(bool inhibit_actions) {
         stopNodeAndSinks();
         return true;
     } else {
+        // Also ends startRetrying() on a node whose auto_restart attempts keep failing.
+        if (inhibit_actions) stop_requested_ = true;
         dowork_ = false;
         // node is destroyed in thread function only if it was started, so a special case for not-yet-started nodes
         // and non-blocking nodes is necessary:
@@ -353,19 +384,11 @@ void NodeWrapper::threadFunction() {
         } catch (std::exception &e) {
             logstream << "Node " << name_ << " failed: " << e.what();
             last_error_ = e.what();
-            try {
-                manager_->instanceData().notifyException(name_, type_, last_error_);
-            } catch (std::exception &callback_error) {
-                logstream << "Exception callback failed for node " << name_ << ": " << callback_error.what();
-            }
+            reportException(last_error_);
         } catch (...) {
             last_error_ = "unknown non-std exception";
             logstream << "Node " << name_ << " failed: " << last_error_;
-            try {
-                manager_->instanceData().notifyException(name_, type_, last_error_);
-            } catch (std::exception &callback_error) {
-                logstream << "Exception callback failed for node " << name_ << ": " << callback_error.what();
-            }
+            reportException(last_error_);
         }
         try {
             std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
@@ -454,15 +477,7 @@ std::shared_ptr< NodeWrapper > NodeManager::createNode(Parameters& params, const
                     if (!n) return;
                     logstream << "Node " << n->name() << " finished, restarting";
                     start_thread(std::string("R:") + n->name(), [n]() {
-                        // An exception leaving a thread calls std::terminate: one failed restart
-                        // would end the whole instance. Log it; the node stays stopped.
-                        try {
-                            n->start();
-                        } catch (std::exception &e) {
-                            logstream << "Node " << n->name() << " restart failed: " << e.what();
-                        } catch (...) {
-                            logstream << "Node " << n->name() << " restart failed: unknown non-std exception";
-                        }
+                        n->startRetrying();
                     }).detach();
                 };
             } else if (mode == "group" || mode == "restart_group") {
