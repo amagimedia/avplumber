@@ -197,8 +197,8 @@
     <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md#why-uploads-limit-this-mix">Why uploads limit this mix</a>.</p>
   <p class="note">Raw uploads are the other exception to the single stream. <code>v210_to_cuda</code> (4:2:2 raw) creates a private non-blocking stream per source and
     synchronizes it before publishing, so consumers get a complete frame. <code>raw_to_cuda</code> (NV12 and P010 raw)
-    does the same, but only with the opt-in <code>canvas.raw_upload: "pinned"</code>. By default NV12 and P010 still upload
-    through FFmpeg <code>hwupload</code> on the default stream; see <a href="raw-uploads.html">Raw uploads</a>.</p>
+    does the same with <code>canvas.raw_upload: "pinned"</code>, which every show the setup builds uses. With the library
+    default, <code>"hwupload"</code>, NV12 and P010 upload through FFmpeg <code>hwupload</code> on the default stream; see <a href="raw-uploads.html">Raw uploads</a>.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">

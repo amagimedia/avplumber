@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="How the AVPlumber mixer setup sizes each source type per frame rate: an NVDEC budget of decoded frames per second, a fifth browser worker and pinned raw uploads fill 110 inputs at 25 and 30 fps.">
+  <title>Rate-aware capacity budgets · Mixer optimization cookbook</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+    .measured { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 14px 0 0; max-width: 640px; }
+    .measured table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .measured th, .measured td { padding: 8px 14px; border-bottom: 1px solid var(--line); text-align: right; color: var(--body); white-space: nowrap; }
+    .measured tr:last-child td { border-bottom: 0; }
+    .measured th:first-child, .measured td:first-child { text-align: left; }
+    .measured th { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; }
+    .measured td:last-child { color: #edf4ff; }
+    .measured.wide { max-width: none; }
+    .measured .was { color: var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Rate-aware capacity budgets: 110 inputs at 25 and 30 fps</h1>
+  <p class="lede">The setup page caps each source type per frame rate. NVDEC now gets a budget of decoded frames per second instead of a fixed stream count, and a fifth browser worker plus pinned raw uploads fill 110 inputs at 25 and 30 fps. Neither 110 ceiling is a validated limit yet.</p>
+  <span class="pill optin">Status: Experimental, measured at 25 and 30 fps</span>
+
+  <h2>The budgets, before and after</h2>
+  <div class="measured wide">
+    <table>
+      <thead><tr><th>Rate</th><th>NVDEC</th><th>Browser</th><th>Raw upload units</th><th>Sum of the three</th><th>Source ceiling</th></tr></thead>
+      <tbody>
+        <tr><td>25 fps</td><td>40</td><td><span class="was">32 →</span> 40</td><td><span class="was">28 →</span> 30</td><td><span class="was">100 →</span> 110</td><td>110</td></tr>
+        <tr><td>30 fps</td><td><span class="was">40 →</span> 36</td><td><span class="was">32 →</span> 40</td><td><span class="was">23 →</span> 34</td><td><span class="was">95 →</span> 110</td><td><span class="was">83 →</span> 110</td></tr>
+        <tr><td>50 fps</td><td><span class="was">20 →</span> 22</td><td>32</td><td>14</td><td><span class="was">66 →</span> 68</td><td>50</td></tr>
+        <tr><td>60 fps</td><td><span class="was">20 →</span> 18</td><td>32</td><td>11</td><td><span class="was">63 →</span> 61</td><td>41</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li><b>NVDEC</b> counts SDR and HDR decodes together: 1100 decoded frames per second divided by the rate, rounded down, at most 40.</li>
+    <li><b>Browser</b> counts windows, and the downstream-key pages are windows too. Four keys at 25 or 30 fps leave 40 − 4 = 36 browser sources. The browser service's default capacity rose from 32 to 40 windows, eight per worker, so it starts five workers instead of four.</li>
+    <li><b>Raw upload units</b> cover raw 4:2:0 files: an NV12 source is 1 unit, a P010 source 2, because its frames are twice the bytes. 30 at 25 fps and 34 at 30 fps; other rates keep 700 frames per second divided by the rate (14 at 50, 11 at 60).</li>
+    <li><b>Source ceiling</b> is 110 at 25 and 30 fps, otherwise 2500 divided by the rate. Key pages count against it too. At 50 and 60 fps it is lower than the sum of the three budgets (50 against 68, 41 against 61), so not every budget can be filled at once.</li>
+  </ul>
+  <p>The 110 ceiling at 25 fps is older than these changes; before them, the three budgets only added up to 100. The setup page still calls anything above 100 (25 fps) or 83 (30 fps) experimental. When a weighted mix overflows a budget, the excess is shared out among the other enabled types. A request that overflows a budget with no other type enabled is rejected. The v210 4:2:2 sources are outside these three budgets: HDR 4:2:2 has its own cap of 4, SDR 4:2:2 only the source ceiling.</p>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 760 300" role="img" aria-labelledby="dec-t dec-d">
+        <title id="dec-t">NVDEC decoded frames per second at each rate, old rule versus new rule</title>
+        <desc id="dec-d">Old rule: 40 streams at 25 and 30 fps, 20 at 50 and 60 fps, giving 1000, 1200, 1000 and 1200 decoded frames per second. New rule: 40, 36, 22 and 18 streams, giving 1000, 1080, 1100 and 1080. The budget line sits at 1100. Measured NVDEC load: 81 to 82 percent at 25 fps and 88.5 percent at 30 fps with the new rule.</desc>
+        <g font-family="system-ui, sans-serif" font-size="12">
+          <!-- legend -->
+          <rect x="96" y="8" width="14" height="14" rx="2" fill="#182236" stroke="#a4b4ca" stroke-width="1.5"/>
+          <text x="116" y="19" fill="#b5c4d8">Old rule: 40 streams at 30 fps and below, else 20</text>
+          <rect x="420" y="8" width="14" height="14" rx="2" fill="#57dbc2"/>
+          <text x="440" y="19" fill="#b5c4d8">New rule: 1100 ÷ fps, at most 40</text>
+
+          <!-- scale: baseline y=250, 0.16 px per decoded frame/s -->
+          <g stroke="#26354a" stroke-width="1">
+            <line x1="96" y1="250" x2="744" y2="250"/>
+            <line x1="96" y1="170" x2="744" y2="170"/>
+            <line x1="96" y1="90" x2="744" y2="90"/>
+          </g>
+          <g fill="#a4b4ca" font-size="11" text-anchor="end">
+            <text x="88" y="254">0</text>
+            <text x="88" y="174">500</text>
+            <text x="88" y="94">1000</text>
+          </g>
+          <line x1="96" y1="74" x2="744" y2="74" stroke="#f5a524" stroke-width="1.5" stroke-dasharray="6 4"/>
+          <text x="88" y="72" fill="#f5a524" font-size="11" text-anchor="end">1100</text>
+
+          <!-- 25 fps, center 180 -->
+          <rect x="126" y="90" width="52" height="160" rx="4" fill="#182236" stroke="#a4b4ca" stroke-width="1.5"><title>25 fps, old rule: 40 × 25 = 1000 decoded frames/s</title></rect>
+          <rect x="182" y="90" width="52" height="160" rx="4" fill="#57dbc2"><title>25 fps, new rule: 40 × 25 = 1000 decoded frames/s, measured 81–82 % NVDEC</title></rect>
+          <!-- 30 fps, center 340 -->
+          <rect x="286" y="58" width="52" height="192" rx="4" fill="#182236" stroke="#a4b4ca" stroke-width="1.5"><title>30 fps, old rule: 40 × 30 = 1200 decoded frames/s</title></rect>
+          <rect x="342" y="77.2" width="52" height="172.8" rx="4" fill="#57dbc2"><title>30 fps, new rule: 36 × 30 = 1080 decoded frames/s, measured 88.5 % NVDEC</title></rect>
+          <!-- 50 fps, center 500 -->
+          <rect x="446" y="90" width="52" height="160" rx="4" fill="#182236" stroke="#a4b4ca" stroke-width="1.5"><title>50 fps, old rule: 20 × 50 = 1000 decoded frames/s</title></rect>
+          <rect x="502" y="74" width="52" height="176" rx="4" fill="#57dbc2"><title>50 fps, new rule: 22 × 50 = 1100 decoded frames/s, not measured</title></rect>
+          <!-- 60 fps, center 660 -->
+          <rect x="606" y="58" width="52" height="192" rx="4" fill="#182236" stroke="#a4b4ca" stroke-width="1.5"><title>60 fps, old rule: 20 × 60 = 1200 decoded frames/s</title></rect>
+          <rect x="662" y="77.2" width="52" height="172.8" rx="4" fill="#57dbc2"><title>60 fps, new rule: 18 × 60 = 1080 decoded frames/s, not measured</title></rect>
+
+          <!-- values above bars -->
+          <g fill="#edf4ff" font-size="11" text-anchor="middle">
+            <text x="152" y="84">1000</text><text x="208" y="84">1000</text>
+            <text x="312" y="52">1200</text><text x="368" y="68">1080</text>
+            <text x="472" y="84">1000</text><text x="528" y="68">1100</text>
+            <text x="632" y="52">1200</text><text x="688" y="68">1080</text>
+          </g>
+          <!-- stream counts inside bars -->
+          <g font-size="11" text-anchor="middle">
+            <text x="152" y="242" fill="#a4b4ca">40</text><text x="208" y="242" fill="#080d17">40</text>
+            <text x="312" y="242" fill="#a4b4ca">40</text><text x="368" y="242" fill="#080d17">36</text>
+            <text x="472" y="242" fill="#a4b4ca">20</text><text x="528" y="242" fill="#080d17">22</text>
+            <text x="632" y="242" fill="#a4b4ca">20</text><text x="688" y="242" fill="#080d17">18</text>
+          </g>
+          <!-- group labels -->
+          <g text-anchor="middle">
+            <text x="180" y="270" fill="#edf4ff" font-weight="600">25 fps</text>
+            <text x="340" y="270" fill="#edf4ff" font-weight="600">30 fps</text>
+            <text x="500" y="270" fill="#edf4ff" font-weight="600">50 fps</text>
+            <text x="660" y="270" fill="#edf4ff" font-weight="600">60 fps</text>
+            <text x="180" y="290" fill="#b5c4d8" font-size="11">new: measured 81–82 %</text>
+            <text x="340" y="290" fill="#b5c4d8" font-size="11">new: measured 88.5 %</text>
+            <text x="500" y="290" fill="#a4b4ca" font-size="11">not measured</text>
+            <text x="660" y="290" fill="#a4b4ca" font-size="11">not measured</text>
+          </g>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Decoded frames per second is streams × rate; numbers inside the bars are streams. The dashed line is the 1100 frames/s budget, an estimate of about 90 % NVDEC that assumes load grows in proportion to decoded frames. Only the two new-rule points at 25 and 30 fps are measured. The old rule asked 1200 frames/s of NVDEC at 30 and 60 fps but 1000 at 25 and 50.</figcaption>
+  </figure>
+
+  <h2>Why a frames-per-second budget</h2>
+  <p>NVDEC load follows decoded frames per second, not the stream count. 40 streams at 25 fps is 1000 decoded frames/s and measured 81 % on the T4. Scaled in proportion, 1100 frames/s is about 90 %: an estimate, not a measurement, and the gap to 100 % leaves room for content that is harder to decode. The 30 fps run checks it: 36 × 30 = 1080 frames/s, where proportional scaling from 81–82 % predicts about 87.5–88.6 %, measured 88.5 %.</p>
+  <p>The browser and raw budgets at 25 and 30 fps are what fills 110 with NVDEC at its cap: 40 − 4 key pages = 36 browser sources, plus 30 raw sources at 25 fps or 34 at 30. With FFmpeg <code>hwupload</code>, 28 raw sources at 25 fps and 23 at 30 were measured; the rest rely on pinned uploads.</p>
+
+  <h2>Pinned uploads for every setup-built show</h2>
+  <p>The setup builds each show from <code>demo.example.json</code>, which now sets <code>"raw_upload": "pinned"</code> on the canvas. The recipe's canvas passes into the mixer config unchanged, so every raw 4:2:0 source (NV12 or P010) the setup creates, at any rate, uploads through <code>raw_to_cuda</code>: pinned staging on the source's own CUDA stream, one uploaded frame held ahead of pacing. The v210 4:2:2 sources keep their own <code>v210_to_cuda</code> path. The library default stays <code>"hwupload"</code>, so hand-written configs are unchanged. <a href="raw-uploads.html">Raw uploads and the CUDA driver lock</a> explains the mechanism.</p>
+
+  <h2>Measured at 110 inputs</h2>
+  <p>T4 16 GB test host, 1080p sources, each source its own media (<a href="real-inputs.html">real inputs</a>), pinned raw uploads, four downstream-key pages included in the 110.</p>
+  <div class="measured">
+    <table>
+      <thead><tr><th>Metric</th><th>25 fps</th><th>30 fps</th></tr></thead>
+      <tbody>
+        <tr><td>NVDEC + browser + raw + keys</td><td>40 + 36 + 30 + 4</td><td>36 + 36 + 34 + 4</td></tr>
+        <tr><td>NVDEC</td><td>81–82 %</td><td>88.5 %</td></tr>
+        <tr><td>GPU SM</td><td>about 59–60 %</td><td>77 %</td></tr>
+        <tr><td>NVENC</td><td>33 %</td><td>39 %</td></tr>
+        <tr><td>VRAM</td><td>9.6–10.1 GB</td><td>10.9 GB</td></tr>
+        <tr><td>Host CPU idle</td><td>44 %</td><td>29 %</td></tr>
+        <tr><td>Browser CPU</td><td>—</td><td>4.25 cores</td></tr>
+        <tr><td>avplumber CPU</td><td>—</td><td>5.1 cores</td></tr>
+        <tr><td>Upload threads' lock wait</td><td>—</td><td>2.2 s per 10 s</td></tr>
+        <tr><td>Repeated source frames</td><td>0 in steady state</td><td>1 raw source, about 10/s</td></tr>
+        <tr><td>Median cut latency</td><td>70–78 ms</td><td>66 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A dash means this page has no figure from that run. The 25 fps CPU idle is from after the browser image update; <a href="browser-handoff.html">Browser frame hand-off</a> has that show's browser and avplumber CPU. At 30 fps, one of the 34 raw sources duplicated and dropped about 10 frames/s each: its <code>force_fps</code> counters read 9621 frames in, 3214 duplicated, 3205 dropped, input estimated at 29.97 fps. That was before source pacers used <a href="force-fps-center-phase.html"><code>force_fps</code> center_phase</a>; the run after the fix is still pending.</p>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b><p>Per-rate source budgets in the setup: NVDEC at 1100 decoded frames/s (40/36/22/18 at 25/30/50/60 fps), 40 browser windows at 30 fps and below (32 otherwise), 30 and 34 raw upload units at 25 and 30 fps, and a 110-source ceiling at 25 and 30 fps. The browser service defaults to five workers, and the setup's shows use pinned raw uploads.</p></li>
+    <li><b>Why</b><p>The old NVDEC rule was not proportional to decoded frames: it allowed 1200 frames/s at 30 and 60 fps but 1000 at 25 and 50. A frames/s budget aims at the same NVDEC load at every rate; 50 and 60 fps are not measured. The extra browser worker and pinned uploads fill 110 inputs at 25 and 30 fps.</p></li>
+    <li><b>Latency</b><p>0 frames added to program and to command-to-screen: a budget only decides how many sources of each type the setup builds, and adds no node, queue or buffer. Pinned uploads hold one uploaded frame per raw source ahead of pacing; that is prefetch, not delay (<a href="raw-uploads.html">raw uploads</a>), and there is no latency A/B against <code>hwupload</code> yet. Median cut latency with 110 inputs measured 70–78 ms at 25 fps and 66 ms at 30 fps.</p></li>
+    <li class="flag"><b>Side effects</b><ul>
+      <li>50 fps allows 22 NVDEC sources and 60 fps 18, instead of 20.</li>
+      <li>30 fps allows 110 sources (was 83), 40 browser windows (was 32) and 34 raw units (was 23), with 36 NVDEC (was 40).</li>
+      <li>25 fps allows 40 browser windows (was 32) and 30 raw units (was 28).</li>
+      <li>Every setup-built show uses pinned uploads for its NV12 and P010 sources, at every rate.</li>
+    </ul></li>
+    <li><b>Cost</b><p>At 110 inputs, VRAM 9.6–10.1 GB (25 fps) and 10.9 GB (30 fps) of 16 GB. Host CPU idle falls from 44 % at 25 fps to 29 % at 30 fps. One more browser worker process. One pinned staging buffer of host RAM per raw source. Code: three small budget functions, repeated in the setup page's JavaScript.</p></li>
+    <li><b>Risk</b><p>Not validated: no long soak at either rate. At 30 fps NVDEC sits at 88.5 %, close to the 90 % estimate. With pinned uploads at 30 fps, the upload threads still waited on a lock for 2.2 s per 10 s, so contention remains; there is no <code>hwupload</code> A/B at 110 yet. The rules live in Python and in the page's JavaScript; a change to one needs the other. <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md">capacity.md</a> keeps an earlier 42-browser experiment at 110 and its caveats.</p></li>
+    <li><b>Switch it off</b><ul>
+      <li>Pick at most 100 sources at 25 fps or 83 at 30 fps, the baselines in capacity.md. The new per-type caps still apply below them.</li>
+      <li>Set <code>canvas.raw_upload</code> to <code>"hwupload"</code> in <code>demo.example.json</code>.</li>
+      <li>Set <code>MIXER_BROWSER_CAPACITY=32</code> for four workers, and keep browser sources plus key pages at 32 or fewer: the setup still offers 40 at 25 and 30 fps, and the browser service refuses windows beyond its capacity.</li>
+      <li>The budget rules have no runtime switch. To restore the old values in the table above, edit <code>browser_limit()</code>, <code>nvdec_limit()</code>, <code>raw_upload_units()</code> and the source ceiling in <code>setup_runtime.py</code>, and their twins in <code>setup.html</code>.</li>
+    </ul></li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/setup_runtime.py#L29-L44">demos/mixer/setup_runtime.py#L29-L44</a>: <code>browser_limit()</code>, <code>nvdec_limit()</code> and <code>raw_upload_units()</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/setup_runtime.py#L51-L59">demos/mixer/setup_runtime.py#L51-L59</a>: the budget groups in <code>source_counts()</code>, with key pages taken off the browser budget and P010 at 2 units; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/setup_runtime.py#L60-L73">L60-L73</a> the excess shared out, or the error when no other type is enabled.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/setup_runtime.py#L97-L99">demos/mixer/setup_runtime.py#L97-L99</a>: the source ceiling, minus key pages; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/setup_runtime.py#L120">L120</a> every setup show starts from <code>demo.example.json</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/setup.html#L135-L141">demos/mixer/setup.html#L135-L141</a>: the same budgets in the setup page; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/setup.html#L154">L154</a> the source ceiling; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/setup.html#L211">L211</a> the "experimental" text above 100 or 83.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/demo.example.json#L8">demos/mixer/demo.example.json#L8</a>: <code>"raw_upload": "pinned"</code>; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/prepare_demo.py#L331">demos/mixer/prepare_demo.py#L331</a> the recipe's canvas goes into the mixer config as is.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L199">pyplumber/mixer/config.py#L199</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L392-L394">L392-L394</a>: the library default stays <code>"hwupload"</code>; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L698-L703">demos/mixer/mixer.py#L698-L703</a> NV12 and P010 sources pass <code>pinned</code> when it is <code>"pinned"</code>; <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L174-L185">pyplumber/mixer/inputs.py#L174-L185</a> the pinned chain with <code>raw_to_cuda</code> and one uploaded frame ahead of pacing.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/compose.yaml#L25-L26">demos/mixer/compose.yaml#L25-L26</a>: 40 browser windows by default, eight per worker; <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/main/supervisor/config.ts#L34-L35">deps/dma-browser/src/main/supervisor/config.ts#L34-L35</a> the worker count is windows ÷ 8, rounded up; <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/main/supervisor/ProcessManager.ts#L40-L43">ProcessManager.ts#L40-L43</a> a window beyond capacity is refused.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md">capacity.md</a> (the baseline table, the 110-input paragraphs and the 42-browser experiment); <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#canvas">config.md · canvas</a> (<code>raw_upload</code>).</li>
+  </ul>
+  <p class="note">Line numbers match the change under review and resolve on develop once it merges.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>

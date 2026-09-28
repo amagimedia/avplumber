@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Continuous timestamps for looped files in the AVPlumber mixer: input_rec shifts each new pass by the length of the previous one, so a wrap no longer makes realtime resync and cost the source a frame.">
+  <title>Looped clips keep counting across the wrap · Mixer optimization cookbook</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+    .diagram svg { min-width: 420px; max-width: 640px; margin: 0 auto; }
+    .changes { padding-left: 20px; }
+    .changes li { margin: 10px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Looped clips keep counting across the wrap</h1>
+  <p class="lede">A looped file used to restart at its first timestamp on every pass, and each wrap cost the source a frame. With <code>loop_continuous_ts</code>, <code>input_rec</code> shifts each new pass by the length of the one before, so timestamps keep rising and a wrap looks like any other frame.</p>
+  <span class="pill impl">Status: Implemented</span>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 480 292" role="img" aria-labelledby="wrap-t wrap-d">
+        <title id="wrap-t">Timestamps of a 2 s clip looped for three passes, before and after</title>
+        <desc id="wrap-d">Before: each pass runs from 0 to 2 s and then jumps back to 0; at each of the two wraps realtime resyncs and a frame is lost. After: pass 2 carries the file's timestamps plus 2 s and pass 3 plus 4 s, so the timestamps rise in one straight line from 0 to 6 s.</desc>
+        <g font-family="system-ui, sans-serif" font-size="11">
+          <text x="0" y="16" fill="#edf4ff" font-size="13" font-weight="600">Illustration · a 2 s clip looped for three passes</text>
+          <line x1="0" y1="32" x2="24" y2="32" stroke="#e5484d" stroke-width="2" stroke-dasharray="6 4"/>
+          <text x="30" y="36" fill="#b5c4d8">Before · file timestamps</text>
+          <line x1="190" y1="32" x2="214" y2="32" stroke="#30a46c" stroke-width="2"/>
+          <text x="220" y="36" fill="#b5c4d8">After · loop_continuous_ts</text>
+
+          <!-- plot: x = 56 + 68 * seconds, y = 250 - 28 * PTS seconds -->
+          <g stroke="#26354a">
+            <line x1="56" y1="194" x2="464" y2="194"/>
+            <line x1="56" y1="138" x2="464" y2="138"/>
+            <line x1="56" y1="82" x2="464" y2="82"/>
+          </g>
+          <g stroke="#26354a" stroke-dasharray="2 4">
+            <line x1="192" y1="82" x2="192" y2="250"/>
+            <line x1="328" y1="82" x2="328" y2="250"/>
+          </g>
+          <line x1="56" y1="250" x2="464" y2="250" stroke="#3a4a62"/>
+          <line x1="56" y1="82" x2="56" y2="250" stroke="#3a4a62"/>
+          <g fill="#a4b4ca" text-anchor="end">
+            <text x="48" y="68">PTS</text>
+            <text x="48" y="254">0 s</text>
+            <text x="48" y="198">2 s</text>
+            <text x="48" y="142">4 s</text>
+            <text x="48" y="86">6 s</text>
+          </g>
+          <g fill="#a4b4ca" text-anchor="middle">
+            <text x="56" y="266">0 s</text>
+            <text x="192" y="266">2 s</text>
+            <text x="328" y="266">4 s</text>
+            <text x="464" y="266">6 s</text>
+            <text x="124" y="266">pass 1</text>
+            <text x="260" y="266">pass 2</text>
+            <text x="396" y="266">pass 3</text>
+            <text x="260" y="286">playback time</text>
+          </g>
+
+          <path d="M56 250 L464 82" stroke="#30a46c" stroke-width="2" fill="none"/>
+          <path d="M56 250 L192 194 L192 250 L328 194 L328 250 L464 194" stroke="#e5484d" stroke-width="2" stroke-dasharray="6 4" fill="none"/>
+
+          <g fill="#30a46c" stroke="#101827" stroke-width="2">
+            <circle cx="192" cy="194" r="4.5"/>
+            <circle cx="328" cy="138" r="4.5"/>
+          </g>
+          <g fill="#e5484d" stroke="#101827" stroke-width="2">
+            <circle cx="192" cy="250" r="4.5"/>
+            <circle cx="328" cy="250" r="4.5"/>
+          </g>
+          <g fill="#b5c4d8">
+            <text x="186" y="184" text-anchor="end">+2 s</text>
+            <text x="322" y="128" text-anchor="end">+4 s</text>
+            <text x="197" y="222">resync</text>
+            <text x="333" y="222">resync</text>
+            <text x="262" y="240">before</text>
+            <text x="440" y="76" text-anchor="end">after</text>
+          </g>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Illustration, not a measurement. Red dashed: every pass restarts at the file's first timestamp; at each wrap (red dot) <code>realtime</code> resyncs and the source loses a frame. Green: pass 2 carries the file's timestamps + 2 s and pass 3 + 4 s, so the line never steps back. In pass 1 the two lines are the same.</figcaption>
+  </figure>
+
+  <h2>What went wrong at the wrap</h2>
+  <p>File sources from a mixer config loop by default (<code>--input</code> URLs loop with <code>--loop-inputs</code>), and each generated source loops its own clip, 2 s long unless the recipe says otherwise (see <a href="real-inputs.html">Real 1080p inputs</a>). At the end of the file <code>input_rec</code> seeks back to the start, and the next packets carry the file's first timestamps again.</p>
+  <p><code>realtime(set_pts)</code> releases each frame when its timestamp is due. The first frame of a new pass looked one loop length overdue, so <code>realtime</code> resynced and released it at once, one frame period early. <code>force_fps</code> then got two frames for one output tick and dropped one: a stutter at every wrap, on every looped file source.</p>
+  <p>A mixer run with 2 s generated clips, measured when the change was made, showed it: <code>force_fps</code> estimated the input at 60.5 fps, dropped about 0.9 frames per second per source, and every wrap logged three warnings. These numbers come from that run, not from the smoke test below or the 110-source show.</p>
+
+  <h2>How the shift works</h2>
+  <ol class="changes">
+    <li><b>Measure each pass.</b> For every packet, <code>input_rec</code> tracks the earliest timestamp and the latest timestamp + duration of the video stream, or of all streams in a file without video. It reads the PTS (the DTS when there is no PTS) and keeps the minimum and maximum over the whole pass, not the last packet's value, so B-frame reordering does not shorten the span. A packet without a duration counts as one frame at the stream's average frame rate, when the file declares one.</li>
+    <li><b>Add the span at each forward wrap.</b> Both loop points, end of file and <code>stop_ts</code>, go through <code>loopForward()</code>, which adds the finished pass's span to a running <code>loop_offset_</code> and then seeks to <code>start_ts</code>. A 2 s clip at 25 fps runs from PTS 0 to 1.96 s, and its last frame lasts 0.04 s: span 2 s. Pass 2 is shifted by 2 s, pass 3 by 4 s.</li>
+    <li><b>Shift every stream by the same offset.</b> Just before a packet leaves <code>input_rec</code>, its PTS and DTS get <code>loop_offset_</code>. Audio gets the video's offset, so audio and video stay in sync.</li>
+    <li><b>Control stays on file timestamps.</b> <code>stop_ts</code> and seek-at entries compare the file's own timestamps, taken before the shift, and seek targets still resolve in the file. Only forward loops add to the offset; a reverse-playback loop adds nothing.</li>
+  </ol>
+
+  <h2>Where the mixer turns it on</h2>
+  <ul class="changes">
+    <li><b>NVDEC file sources.</b> Both mixer entry points, <code>--input</code> URLs and sources from a config, call <code>build_input(…, continuous_loop=True)</code>. <code>input_rec</code> gets <code>loop_continuous_ts</code> only when the source also loops.</li>
+    <li><b>Raw v210 files and pinned raw NV12/P010 files.</b> <code>_raw_file_packets</code> sets <code>loop_continuous_ts</code> to the source's <code>loop</code>. <code>v210_to_cuda</code> and <code>raw_to_cuda</code> copy the packet PTS onto the CUDA frame, so the shift reaches <code>realtime</code>.</li>
+    <li><b>Unchanged.</b> The default raw NV12/P010 chain (<code>hwupload</code>) already counts frames with <code>setpts</code> before pacing, so its timestamps were already continuous. The playlist and replay demos seek, so they keep the default. Browser sources do not use <code>input_rec</code>.</li>
+  </ul>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b><code>input_rec</code> gains <code>loop_continuous_ts</code> (default false). Each forward loop adds the previous pass's span to a running offset, and every packet's PTS and DTS carry it. The mixer turns it on for its free-running file loops: NVDEC sources, v210 files and pinned raw NV12/P010 files.</li>
+    <li><b>Why</b><p>A wrap sent the timestamps back one loop length. <code>realtime</code> resynced and released the next pass's first frame a frame early, so each looped source lost a frame and stuttered at every wrap: in a mixer run with 2 s clips, about 0.9 drops/s per source and three log warnings per wrap.</p><p>It also helps <a href="force-fps-center-phase.html"><code>force_fps</code> center_phase</a>, which picks its phase on the first frame and again only after a discontinuity it detects. A resync restarts <code>realtime</code>'s release times at a new phase, which could leave a source off-center after a wrap. With nothing moving at a wrap, the chosen phase holds across passes.</p></li>
+    <li><b>Latency</b>0 frames added to program and to command-to-screen latency: no queue, buffer, wait or node. A wrap no longer releases a frame early.</li>
+    <li class="flag"><b>Side effects</b>Timestamps of a looped input keep rising instead of repeating the file's range. Only the nodes between <code>input_rec</code> and <code>realtime</code> (demux, the decoder or raw upload node, any decoded filter) see shifted timestamps; <code>realtime(set_pts)</code> restamps every frame onto the host clock, so nothing after it changes. A chain that seeks would aim at file timestamps while its packets carry shifted ones, which is why seeking chains keep the default.</li>
+    <li><b>Cost</b>0 nodes, 0 queues, 0 VRAM, no new thread or lock. Per packet, a few timestamp comparisons and additions. Code: +54/−3 lines in <code>input_rec.cpp</code> and a 141-line smoke test.</li>
+    <li><b>Risk</b>Low. The span follows the video stream, by design: a file whose audio runs a frame longer or shorter than its video still gets the video's offset, so its audio overlaps or leaves a gap at the wrap by that difference. The mixer's file sources route only video. Not for chains that seek.</li>
+    <li><b>Switch it off</b>Pass <code>continuous_loop=False</code> at the two <code>build_input</code> calls in <code>mixer.py</code>, and set <code>loop_continuous_ts</code> to false in <code>_raw_file_packets</code> for the raw chains. On a hand-built graph, leave <code>loop_continuous_ts</code> at its default, false. No runtime switch.</li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/input_rec.cpp#L69-L75"><code>src/nodes/input_rec.cpp:69-75</code></a>: the flag, <code>loop_offset_</code> and the current pass's start and end.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/input_rec.cpp#L543-L550"><code>src/nodes/input_rec.cpp:543-550</code></a>: <code>loopForward()</code> adds the pass span to the offset, then seeks to <code>start_ts</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/input_rec.cpp#L551-L579"><code>src/nodes/input_rec.cpp:551-579</code></a>: <code>continueLoopTimeline()</code> measures the pass on the video stream and shifts PTS and DTS.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/input_rec.cpp#L784-L787"><code>src/nodes/input_rec.cpp:784-787</code></a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/input_rec.cpp#L887-L890"><code>887-890</code></a>: end of file and <code>stop_ts</code> both loop through <code>loopForward()</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/input_rec.cpp#L878-L882"><code>src/nodes/input_rec.cpp:878-882</code></a>: the file PTS is kept for seek-at entries (<a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/input_rec.cpp#L913">L913</a>), and the shift runs just before the packet is sent.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/input_rec.cpp#L1163-L1165"><code>src/nodes/input_rec.cpp:1163-1165</code></a>: the <code>loop_continuous_ts</code> parameter.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L46-L48"><code>pyplumber/mixer/inputs.py:46-48</code></a>: <code>build_input</code> sets <code>loop_continuous_ts</code> to <code>loop and continuous_loop</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L116-L125"><code>pyplumber/mixer/inputs.py:116-125</code></a>: <code>_raw_file_packets</code>, the head of the v210 and pinned raw chains.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L166-L168"><code>pyplumber/mixer/inputs.py:166-168</code></a>: the default raw chain counts frames with <code>setpts</code> instead.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L430-L432"><code>demos/mixer/mixer.py:430-432</code></a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L705-L707"><code>705-707</code></a>: the mixer's two <code>build_input</code> calls pass <code>continuous_loop=True</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L308"><code>pyplumber/mixer/config.py:308</code></a>: config sources loop unless <code>loop</code> is false; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/prepare_demo.py#L197"><code>demos/mixer/prepare_demo.py:197</code></a>: generated clips last 2 s by default.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/tests/smoke_input_loop.py"><code>tests/smoke_input_loop.py</code></a>: the default loop repeats its timestamps; continuous mp4 (B-frames + AAC) and rawvideo step one frame period across wraps; paced through <code>realtime(set_pts)</code>, the default loop shows early steps and the continuous one stays within 4 ms of the period.</li>
+  </ul>
+  <p>Markdown reference: <a href="https://github.com/amagimedia/avplumber/blob/develop/doc/NODES.md#input_rec">NODES.md · input_rec</a> documents <code>loop_continuous_ts</code>.</p>
+  <p class="note">Line numbers match the change under review and resolve on develop once it merges.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>

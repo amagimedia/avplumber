@@ -77,13 +77,26 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Mixer optimization cookbook</h1>
-  <p class="lede intro">Every source is a unique, independent 1080p25 input processed every frame, so no optimization may take a shortcut that <a href="real-inputs.html">real inputs</a> would not allow. Each change is explained with what it does, why, what it costs, its risk and how to switch it off before it ships.</p>
+  <p class="lede intro">Every source is a unique, independent input of at least 1080p25, processed every frame, so no optimization may take a shortcut that <a href="real-inputs.html">real inputs</a> would not allow. Each change is explained with what it does, why, what it costs, its risk and how to switch it off before it ships.</p>
 
   <h2 class="group">Live</h2>
   <ul class="entries">
     <li><a href="cuda-streams.html"><span class="pill live">Live</span><b>One main CUDA stream, one per monitor</b><span class="sum">The program runs on one CUDA stream; each aux monitor gets its own non-blocking stream, so a slow monitor cannot stall the program.</span></a></li>
     <li><a href="multiviewer.html"><span class="pill live">Live</span><b>Multiviewer: 100 sources, 12 at a time</b><span class="sum">Pages of 12 equal tiles. Only the 12 on screen send frames, so off-page sources cost no GPU work and no VRAM.</span></a></li>
-    <li><a href="browser-handoff.html"><span class="pill live">Implemented, deployed on the test host</span><b>Browser frame hand-off</b><span class="sum">The browser's frame socket thread waits in poll() instead of waking every millisecond, and failed pages reload without dropping the mixer's connection. The new browser image used 1.2 fewer cores at 110 sources.</span></a></li>
+    <li><a href="browser-handoff.html"><span class="pill live">Implemented, deployed on the test host</span><b>Browser frame hand-off</b><span class="sum">The browser's frame socket thread waits in poll() instead of waking every millisecond, and failed pages reload without dropping the mixer's connection, holding their last frame while they do. The new browser image used 1.2 fewer cores at 110 sources; the hold is not measured yet.</span></a></li>
+    <li><a href="browser-paint-grid.html"><span class="pill impl">Implemented, measured on the live demo</span><b>Browser paints numbered on the canvas grid</b><span class="sum">Each browser paint takes the previous tick plus one instead of its arrival rounded to the nearest tick. On a 64-source 30 fps show, browser repeats and discards fell from 1,234 and 1,237 to 7 and 25. DSK keys are drawn by timestamp.</span></a></li>
+  </ul>
+
+  <h2 class="group">Being measured</h2>
+  <ul class="entries">
+    <li><a href="capacity-budgets.html"><span class="pill optin">Experimental, measured at 25 and 30 fps</span><b>Rate-aware capacity budgets</b><span class="sum">NVDEC gets 1100 decoded frames/s instead of a fixed stream count (40/36/22/18 at 25/30/50/60 fps); a fifth browser worker and pinned raw uploads fill 110 inputs at 25 and 30 fps. NVDEC measured 81–82 % at 25 fps and 88.5 % at 30.</span></a></li>
+    <li><a href="force-fps-center-phase.html"><span class="pill impl">Implemented, measuring</span><b>Centred force_fps phase</b><span class="sum">Source pacers shift a source's timestamps so its first frame lands on an output tick, so timing jitter no longer turns into a repeated frame plus a dropped one. Before it, one raw source at 30 fps repeated and dropped about 10 frames/s each.</span></a></li>
+    <li><a href="raw-uploads.html"><span class="pill optin">Setup default, A/B pending</span><b>Raw uploads and the CUDA driver lock</b><span class="sum">Raw NV12 and P010 frames go through a pinned buffer on the source’s own stream instead of a synchronous copy that holds a lock the whole mixer shares. The setup’s 110-input shows use it for 30 raw sources at 25 fps and 34 at 30; no A/B against hwupload yet.</span></a></li>
+  </ul>
+
+  <h2 class="group">Implemented</h2>
+  <ul class="entries">
+    <li><a href="loop-continuous-timestamps.html"><span class="pill impl">Implemented</span><b>Looped clips keep counting across the wrap</b><span class="sum">A looped file's next pass is shifted by the length of the one before, so timestamps keep rising and a wrap no longer costs the source a frame: about 0.9 drops/s per source with 2 s clips before.</span></a></li>
   </ul>
 
   <h2 class="group">Implemented, not deployed</h2>
@@ -96,11 +109,6 @@
     <li><a href="nvenc-dpb.html"><span class="pill impl">Implemented, not deployed</span><b>One reference frame for monitor encoders</b><span class="sum">The two monitor encoders keep one NVENC reference frame, because without B-frames each frame is predicted from the previous one.</span></a></li>
     <li><a href="event-loops.html"><span class="pill impl">Implemented, not deployed</span><b>Event-loop sharding</b><span class="sum">Source pacing timers spread over four event-loop threads, so wake-up cost stops growing with the square of the source count.</span></a></li>
     <li><a href="contexts.html"><span class="pill impl">Implemented, not deployed</span><b>Unused GPU contexts</b><span class="sum">Removes an OpenGL context in every browser importer and a process-wide CUDA context. Both held memory and drew nothing.</span></a></li>
-  </ul>
-
-  <h2 class="group">Opt-in, pending measurement</h2>
-  <ul class="entries">
-    <li><a href="raw-uploads.html"><span class="pill optin">Opt-in, pending measurement</span><b>Raw uploads and the CUDA driver lock</b><span class="sum">Upload raw NV12 through a pinned buffer on the source’s own stream, so 28 synchronous copies stop holding a lock the whole mixer shares.</span></a></li>
   </ul>
 
   <h2 class="group">Proposed, not in code</h2>

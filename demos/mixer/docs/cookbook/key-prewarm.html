@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Every downstream key stays subscribed and the keyer always holds its latest frame, so a key cut or fade-in starts on the very next program frame instead of 1–2 frames later.">
+  <meta name="description" content="Every downstream key stays subscribed and the keyer always has its frames queued, so a key cut or fade-in starts on the very next program frame instead of 1–2 frames later.">
   <title>Prewarmed DSK keys · Mixer optimization cookbook</title>
   <style>
     :root {
@@ -130,7 +130,7 @@
   <figure>
     <div class="diagram">
       <svg viewBox="0 0 700 200" role="img" aria-labelledby="t2">
-        <title id="t2">The browser page paints continuously. Its frames always reach the keyer, which keeps each key's latest frame and draws a key only when its level is above 0. With no key visible the program passes through.</title>
+        <title id="t2">The browser page paints continuously. Its frames always reach the keyer, which queues up to 6 frames per key, picks the one stamped for the program tick, and draws a key only when its level is above 0. With no key visible the program passes through.</title>
         <defs>
           <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
             <path d="M0 0 L10 5 L0 10 Z" fill="#a4b4ca"/>
@@ -147,7 +147,7 @@
 
           <rect x="398" y="20" width="150" height="56" rx="8" fill="#101827" stroke="#57dbc2"/>
           <text x="473" y="44" text-anchor="middle" font-weight="600">Keyer</text>
-          <text x="473" y="62" text-anchor="middle" fill="#a4b4ca">holds latest frame</text>
+          <text x="473" y="62" text-anchor="middle" fill="#a4b4ca">queues up to 6 frames</text>
 
           <rect x="398" y="118" width="150" height="56" rx="28" fill="#3a2a0c" stroke="#f5a524"/>
           <text x="473" y="142" text-anchor="middle" fill="#f5a524" font-weight="600">level &gt; 0 ?</text>
@@ -177,21 +177,21 @@
 
   <h2>At a glance</h2>
   <ul class="cards">
-    <li><b>What</b>The keyer enables every key subscription once, the first time it runs, and keeps it. It takes each key’s frames whether the key is on or off and keeps the latest one. It draws only keys whose level is above 0.</li>
+    <li><b>What</b>The keyer enables every key subscription once, the first time it runs, and keeps it. It takes each key’s frames whether the key is on or off and queues up to 6 of them; at each program frame it draws the key’s frame stamped for that tick. It draws only keys whose level is above 0.</li>
     <li><b>Why</b>Before, a key subscribed only while on. Turning a key on then waited for the page’s next paint. Every scene source is already prewarmed; keys were the exception.</li>
     <li><b>Latency</b>Key on, by cut or fade-in: 1–2 program frames → 0 extra frames. It starts on the very next program frame after the command. Program latency: unchanged; the keyer still never waits for a key.</li>
     <li><b>Side effects</b>None on the program path. With no key visible the program frame still passes through without GPU work, as before.</li>
     <li><b>Cost</b>0 nodes, 0 queues, 0 threads. The browser already renders these pages all the time; this only delivers frames that were being dropped. Off keys add a queue step per key frame and no GPU work. Memory: an off key now keeps the same frames an on key does, a held frame plus up to 6 queued frames waiting for their program tick. Key frames are small; the largest demo key is 1016×172.</li>
-    <li><b>Risk</b>Low. A key switched on shows the page’s latest paint. If the page has not painted since, that frame is older, exactly as for a key already on air.</li>
+    <li><b>Risk</b>Low. A key switched on shows the page’s paint stamped for that program tick. If the page has not painted since, that frame is older, exactly as for a key already on air.</li>
     <li><b>Switch it off</b>No runtime switch. Going back means restoring the per-command enable, which brings the 1–2 frame wait back.</li>
   </ul>
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L588-L593">src/nodes/hwaccel/cuda_rect_overlay.cpp#L588-L593</a>: <code>processKeyed</code> and the comment that states the rule.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L611-L615">L611-L615</a>: every key subscription enabled once (<code>keys_subscribed_</code>, <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L129">L129</a>).</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L616-L631">L616-L631</a>: every key’s frames are queued, on or off; the queue bound <code>kKeyQueue</code> is at <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L127">L127</a>.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L659">L659</a>: a key is drawn only when it has a frame and its level is above 0; <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L663-L668">L663-L668</a> the pass-through with no key visible.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L583-L588">src/nodes/hwaccel/cuda_rect_overlay.cpp#L583-L588</a>: <code>processKeyed</code> and the comment that states the rule.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L602-L606">L602-L606</a>: every key subscription enabled once (<code>keys_subscribed_</code>, <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L129">L129</a>).</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L607-L622">L607-L622</a>: every key’s frames are queued, on or off; <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L636-L649">L636-L649</a> the frame stamped for the program tick is taken; the queue bound <code>kKeyQueue</code> is at <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L127">L127</a>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L650">L650</a>: a key is drawn only when it has a frame and its level is above 0; <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L654-L659">L654-L659</a> the pass-through with no key visible.</li>
     <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#dsk">config.md · dsk</a> (“Off keys keep receiving frames …”).</li>
   </ul>
   <p class="note">This change is not deployed yet; line numbers refer to the branch that carries it.</p>
