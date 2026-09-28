@@ -100,7 +100,9 @@ CUDA transition filter. The media wipe graph is predeclared; the orchestrator
 loads the selected clip. A new take can interrupt an ongoing transition using
 the current output picture.
 
-`mixer.status <name>` returns the current PGM/PVW scene and transition state.
+`mixer.status <name>` returns the current PGM/PVW scene and transition state,
+and under `playout` each slot compositor's (`A`, `B`) running `frames`, `repeats`
+and `missed_deadlines`, published every 60 output frames.
 `mixer.scenes <name>` lists registered scenes.
 
 The alpha media path decodes the wipe in software and uploads it to the mixer

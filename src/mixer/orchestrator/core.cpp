@@ -279,7 +279,7 @@ std::vector<std::string> MixerOrchestrator::sceneNames() const {
 }
 
 Parameters MixerOrchestrator::status() const {
-    std::lock_guard<std::mutex> lock(state_->mutex);
+    std::unique_lock<std::mutex> lock(state_->mutex);
     Parameters s;
     s["pgm_scene"] = state_->pgm_scene_name;
     s["pvw_scene"] = state_->pvw_scene_name;
@@ -300,6 +300,21 @@ Parameters MixerOrchestrator::status() const {
         case MixerState::TransitionMode::Crossfade: s["transition"] = "crossfade"; break;
         case MixerState::TransitionMode::Wipe: s["transition"] = "wipe"; break;
     }
+    // Stall counters of both slot compositors, which take turns on program. Each
+    // publishes them every 60 frames; one that is restarting is skipped, not waited for.
+    const std::pair<const char*, std::string> slots[] = {
+        {"A", state_->slot_a.compositor_name}, {"B", state_->slot_b.compositor_name}};
+    lock.unlock();
+    Parameters playout = Parameters::object();
+    for (const auto& [slot, name] : slots) {
+        Parameters node_status;
+        const auto node = nodes_->node_if_exists(name);
+        if (!node || !node->getObjectTry("status", node_status) || !node_status.contains("playout")) continue;
+        auto& counters = node_status["playout"];
+        playout[slot] = {{"frames", counters["frames"]}, {"repeats", counters["repeats"]},
+                         {"missed_deadlines", counters["missed_deadlines"]}};
+    }
+    s["playout"] = playout;
     return s;
 }
 
