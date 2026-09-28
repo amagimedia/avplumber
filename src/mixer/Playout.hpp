@@ -43,6 +43,7 @@ private:
         bool ended = false;
         bool active = true;
         bool prewarm = false;
+        int64_t offset_ticks = 0;   // configuration: survives resetInput
         Stats stats;
     };
     TickGrid rate_;
@@ -74,18 +75,31 @@ public:
             throw std::invalid_argument("mixer latency_ms exceeds the six-frame buffer budget");
     }
 
+    // Presentation mode: treat this input's frames as `ticks` output ticks later than
+    // stamped, e.g. a source that is itself rendered one tick behind its timestamps,
+    // without raising the latency of every other input. The slot index moves, not the
+    // nanosecond timestamp, so rates whose tick is not a whole number of ns stay exact.
+    void setInputOffset(size_t input, int64_t ticks) {
+        if (timestamp_mode_ != TimestampMode::Presentation)
+            throw std::invalid_argument("mixer input offset requires presentation timestamps");
+        if (ticks < 0 || ticks > int64_t(kQueueCapacity) ||
+            latency_ns_ + rate_.time(ticks) > rate_.time(kQueueCapacity - 2))
+            throw std::invalid_argument("mixer latency plus input offset exceeds the six-frame buffer budget");
+        inputs_.at(input).offset_ticks = ticks;
+    }
+
     void push(size_t input, Frame frame, int64_t timestamp_ns) {
         if (pending_) throw std::logic_error("commit mixer decision before pushing");
         auto &state = inputs_.at(input);
         if (!state.active && !state.prewarm) return;
-        if (state.valid_from_ns && timestamp_ns < *state.valid_from_ns) {
+        if (state.valid_from_ns && timestamp_ns + rate_.time(state.offset_ticks) < *state.valid_from_ns) {
             ++state.stats.discarded;
             return;
         }
         state.ended = false;
         int64_t slot;
         if (timestamp_mode_ == TimestampMode::Presentation) {
-            slot = rate_.nearestIndex(timestamp_ns);
+            slot = rate_.nearestIndex(timestamp_ns) + state.offset_ticks;
             if (state.next_index && slot < *state.next_index - 1) {
                 state.stats.discarded += state.queue.size();
                 state.queue.clear();

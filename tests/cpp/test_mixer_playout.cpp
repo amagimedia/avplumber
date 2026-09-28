@@ -584,8 +584,59 @@ void staged_input_readiness_preserves_old_output() {
     CHECK(!mix.readyAtNextTick(1, rate.time(20)));
 }
 
+void input_offset_selects_a_late_source_one_tick_later() {
+    using namespace avp::mixer;
+    const TickGrid rate(av::Rational(25, 1));
+    const auto run = [&](std::optional<int64_t> offset, bool check_shift) {
+        Playout<int> mix(2, rate, 80, TimestampMode::Presentation);
+        if (offset) mix.setInputOffset(1, *offset);
+        std::vector<std::pair<int, int>> chosen;
+        int next[2] = {};
+        for (int tick = 0; tick < 50; ++tick) {
+            const auto now = rate.time(tick) + mix.latencyNs() + 100000;
+            for (int input = 0; input < 2; ++input) {
+                while (true) {
+                    const int id = next[input];
+                    // Input 1 is rendered downstream of the same clock: it reaches the
+                    // playout 5 ms either side of its unshifted deadline.
+                    const auto arrival = input == 0 ? rate.time(id) + 1000000
+                        : rate.time(id) + mix.latencyNs() + (id % 2 ? 5000000 : -5000000);
+                    if (arrival > now) break;
+                    mix.push(input, 100 * input + id, rate.time(id));
+                    ++next[input];
+                }
+            }
+            const auto *decision = mix.prepare(now);
+            CHECK(decision && decision->index == tick && *decision->frames[0] == tick);
+            chosen.emplace_back(*decision->frames[0], decision->frames[1] ? *decision->frames[1] : -1);
+            if (check_shift) CHECK(tick ? *decision->frames[1] == 100 + tick - 1 : !decision->frames[1]);
+            mix.commit();
+        }
+        if (check_shift) CHECK(mix.stats(1).repeats == 0 && mix.stats(1).discarded == 0);
+        else CHECK(mix.stats(1).repeats > 0 && mix.stats(1).discarded > 0);   // the jitter the offset absorbs
+        CHECK(mix.stats(0).repeats == 0 && mix.missedDeadlines() == 0);
+        return chosen;
+    };
+    run(1, true);
+    // A zero offset selects exactly what an unconfigured input does.
+    CHECK(run(0, false) == run(std::nullopt, false));
+
+    Playout<int> cadence(1, rate, 80);
+    bool threw = false;
+    try { cadence.setInputOffset(0, 1); } catch (const std::invalid_argument &) { threw = true; }
+    CHECK(threw);
+    Playout<int> budget(1, rate, 120, TimestampMode::Presentation);
+    budget.setInputOffset(0, 3);   // 3 + 3 ticks fill the six-frame budget
+    for (int64_t ticks : {-1, 4}) {
+        threw = false;
+        try { budget.setInputOffset(0, ticks); } catch (const std::invalid_argument &) { threw = true; }
+        CHECK(threw);
+    }
+}
+
 int main(int argc, char **argv) {
     const std::pair<const char *, void (*)()> cases[] = {
+        {"input_offset_selects_a_late_source_one_tick_later", input_offset_selects_a_late_source_one_tick_later},
         {"staged_input_readiness_preserves_old_output", staged_input_readiness_preserves_old_output},
         {"inactive_prewarm_retains_live_frames_without_rendering", inactive_prewarm_retains_live_frames_without_rendering},
         {"complete_jitter_plateau_is_not_rate_drift", complete_jitter_plateau_is_not_rate_drift},

@@ -1084,8 +1084,8 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     node->warmup_timeout_ms_ = params.value("warmup_timeout_ms", (int64_t)0);
     if (params.contains("clock_input")) {
         // fps is the clock input's rate here: it paces key subscriptions, not a playout.
-        if (aux || !params.contains("fps") || params.contains("latency_ms"))
-            throw Error("cuda_rect_overlay: clock_input needs fps and excludes aux_mode and latency_ms");
+        if (aux || !params.contains("fps") || params.contains("latency_ms") || params.contains("pgm_delay_frames"))
+            throw Error("cuda_rect_overlay: clock_input needs fps and excludes aux_mode, latency_ms and pgm_delay_frames");
         const int clock = params.at("clock_input").get<int>();
         if (clock < 0 || size_t(clock) >= src_names.size())
             throw Error("cuda_rect_overlay: clock_input out of range");
@@ -1106,6 +1106,18 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
             src_names.size(), avp::mixer::TickGrid(node->frame_rate_), latency_ms, avp::mixer::TimestampMode::Presentation);
         node->input_generation_.store(1);
         logstream << "cuda_rect_overlay: latency_ms=" << node->playout_->latencyNs() / 1000000.0;
+        // A Program preview's last input is the finished program, which arrives one frame after
+        // the sources it is made of: match it that many frames back instead of raising the
+        // latency of every input.
+        if (params.contains("pgm_delay_frames")) {
+            try {
+                node->playout_->setInputOffset(src_names.size() - 1, params.at("pgm_delay_frames").get<int64_t>());
+            } catch (const std::invalid_argument &e) {
+                throw Error(std::string("cuda_rect_overlay: pgm_delay_frames: ") + e.what());
+            }
+        }
+    } else if (params.contains("pgm_delay_frames")) {
+        throw Error("cuda_rect_overlay: pgm_delay_frames requires fps without clock_input");
     }
     if (aux) {
         if (!node->playout_) throw Error("aux: fps is required");

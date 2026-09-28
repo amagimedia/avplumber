@@ -138,6 +138,7 @@ class _AuxOutput:
 
     Subclasses define the composition and the background thread that keeps it current."""
     pgm_edge = None   # the edge the program tap feeds, for layouts that show PGM
+    pgm_delay_frames = 0   # ticks the PGM input (the last one) is matched back; see AuxMultiview
 
     def __init__(self, avp, api, mixer, cfg, bus):
         self.avp, self.api, self.mixer, self.cfg, self.bus = avp, api, mixer, cfg, bus
@@ -165,11 +166,16 @@ class _AuxOutput:
         main = main_latency if main_latency is not None else 2000 / self.cfg.fps
         return max(main, 2000 / aux_fps(self.cfg.fps))
 
+    def compositor_params(self):
+        """Layout-specific compositor parameters."""
+        return {}
+
     def build(self, options):
         from .janus import JanusVideoConfig, build_janus_output
         fps = aux_fps(self.cfg.fps)
         latency = self.latency_ms()
-        if latency > 6000 / fps:
+        # Playout::setInputOffset's budget: the PGM delay is history the compositor keeps as well.
+        if latency + self.pgm_delay_frames * 1000 / fps > 6000 / fps:
             raise ConfigError("main plus aux latency exceeds the six-frame aux history budget")
         inputs = self.inputs()
         for edge in [*inputs, self.output_edge, *(f"{self.prefix}_{suffix}" for suffix in
@@ -184,7 +190,7 @@ class _AuxOutput:
             "aux_mode": True, "subscriptions": inputs, "mixer": self.mixer.name,
             "max_layers": self.layer_budget(),
             "group": self.group, "auto_restart": "off", "on_error": "off",
-            **self.current_composition(),
+            **self.compositor_params(), **self.current_composition(),
         }, api=self.api), early_create=True)
         r = self.bus.renditions[0]
         converted = f"{self.prefix}_sdr"
@@ -245,9 +251,13 @@ class AuxMultiview(_AuxOutput):
     def inputs(self):
         return [*self.edges, self.pgm_edge]
 
-    def latency_ms(self):
-        # Allow one aux frame for the rendered PGM tile to arrive.
-        return super().latency_ms() + 1000 / aux_fps(self.cfg.fps)
+    # The PGM tile is the finished program (the last input), which reaches this bus a
+    # frame after the sources it is made of. Matching it one frame back keeps every
+    # other input at the normal latency instead of holding all of them a frame longer.
+    pgm_delay_frames = 1
+
+    def compositor_params(self):
+        return {"pgm_delay_frames": self.pgm_delay_frames}
 
     def current_composition(self):
         return composition(self.cfg, self.scenes, self.preview)

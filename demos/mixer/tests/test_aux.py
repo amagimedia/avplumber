@@ -268,3 +268,35 @@ def test_encoder_backpressure_suspension_survives_automatic_updates_only(cfg, mo
     assert avp.published[-1] == {**page_composition(cfg, 1), "enabled": False}
     pages.turn({"page": 3})
     assert avp.published[-1] == page_composition(cfg, 3)
+
+
+def test_multiview_shows_pgm_one_tick_late_at_the_main_latency(cfg):
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=None)
+    view = AuxMultiview(None, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
+    pages = AuxSourcePages(None, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0])
+    # 60 fps program, 30 fps aux: two aux ticks, not the main default of two 60 fps ticks.
+    assert view.latency_ms() == pages.latency_ms() == 2000 / 30
+    cfg25 = replace(cfg, fps=25)
+    for latency, expected in ((None, 80), (120, 120), (20, 80)):
+        mixer.latency_ms = latency
+        assert AuxMultiview(None, None, mixer, cfg25, parse_aux_buses([bus_json()], cfg25)[0]).latency_ms() == expected
+    mixer.latency_ms = None
+    assert view.compositor_params() == {"pgm_delay_frames": 1}
+    assert view.inputs()[-1] == view.pgm_edge   # the delay applies to the last input
+    assert pages.compositor_params() == {}
+
+
+class _Built(Exception):
+    pass
+
+
+@pytest.mark.parametrize("kind,limit", [(AuxMultiview, 200), (AuxSourcePages, 240)])
+def test_latency_budget_counts_the_pgm_delay(cfg, kind, limit):
+    """At 25 fps six ticks are 240 ms, and the multiview's PGM input is held one tick more."""
+    cfg25 = replace(cfg, fps=25)
+    spec = bus_json() if kind is AuxMultiview else pages_json()
+    avp = SimpleNamespace(edges=SimpleNamespace(planCapacity=lambda *_: (_ for _ in ()).throw(_Built())))
+    for latency, error in ((limit, _Built), (limit + 1, ConfigError)):
+        mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=latency)
+        with pytest.raises(error):
+            kind(avp, None, mixer, cfg25, parse_aux_buses([spec], cfg25)[0]).build(None)

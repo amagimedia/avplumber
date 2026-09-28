@@ -415,6 +415,13 @@ Each bus needs its own Janus RTP/RTCP port pair. Setup changes keep the buses:
 scene slots that no longer exist are cleared, and source pages follow the new
 source list.
 
+The PGM tile of a `pgm_pvw_grid` bus runs one aux frame behind the other tiles:
+the finished program reaches the bus a frame after the sources it is made of,
+so that pad alone is shown a tick later instead of delaying every pad.
+
+A bus's playout buffer is the main `latency_ms`, but at least two aux frames:
+80 ms at 25 and 50 fps, 66.7 ms at 30 and 60 fps by default.
+
 ## Known limitations
 
 - **128 sources per show, or 127 with aux.** Every source is a pad on the compositor;
