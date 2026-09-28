@@ -37,9 +37,13 @@ from pyplumber.mixer.config import MAX_DSK_KEYS, MAX_SOURCES, default_browser_ri
 CLEAN_PORT = 5010
 
 
-def page_url(path: Path) -> str:
-    """Embed a demo page, so browser inputs need no web server."""
-    return "data:text/html;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+def page_url(path: Path, **data) -> str:
+    """Embed a demo page, so browser inputs need no web server. *data* become
+    data- attributes of its <html> element, e.g. the rate the window paints at."""
+    page = path.read_bytes()
+    attrs = "".join(f' data-{key}="{value}"' for key, value in data.items())
+    page = page.replace(b"<html", b"<html" + attrs.encode(), 1)
+    return "data:text/html;base64," + base64.b64encode(page).decode("ascii")
 
 
 # Browser window of each key page. The browser service exports only allowlisted
@@ -269,7 +273,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     for page in pages:
         x, y, w, h = rects[page]
         window_w, window_h = DSK_WINDOWS[page]
-        sources.append({"id": f"dsk_{page}", "kind": "browser", "url": page_url(DEMO_DIR / "dsk" / f"{page}.html"),
+        sources.append({"id": f"dsk_{page}", "kind": "browser", "url": page_url(DEMO_DIR / "dsk" / f"{page}.html", fps=fps),
                         "width": window_w, "height": window_h, "color": "sdr"})
         keys.append({"id": page, "source": f"dsk_{page}", "dst": {"x": x, "y": y, "w": w, "h": h}})
     renditions = recipe["renditions"]

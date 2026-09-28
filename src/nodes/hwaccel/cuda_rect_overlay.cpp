@@ -20,6 +20,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <deque>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -119,6 +120,11 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     std::unique_ptr<avp::mixer::Playout<av::VideoFrame>> playout_;
     // Downstream keying: this input's frames drive the output (see processKeyed).
     std::optional<size_t> clock_input_;
+    // Key frames waiting for the program tick they are stamped for. They arrive
+    // about one playout latency ahead of that program frame; the bound stops a key
+    // on an unrelated clock from retaining its producer's frames indefinitely.
+    static constexpr size_t kKeyQueue = 6;
+    std::vector<std::deque<av::VideoFrame>> key_queue_;
     av::Rational frame_rate_{0, 1};
     std::atomic<uint64_t> input_generation_{0};
     std::atomic<int64_t> input_valid_from_ns_{0};
@@ -530,10 +536,13 @@ public:
         }
     }
 
-    // Each clock-input frame renders at once, at its own PTS, over the newest
-    // frame of every other active input. Keys are sampled and held, never
-    // waited for: no playout buffer delays the clock input and a late key
-    // cannot stall it. With no key visible the frame passes through untouched.
+    // Each clock-input frame renders at once, at its own PTS, over every other
+    // active input's newest frame stamped at or before that tick, as the scene
+    // playout matches sources (nearest tick). Matching by timestamp rather than
+    // arrival keeps steady motion steady: arrival order races the program frame
+    // and alternately repeats and skips key frames. Keys are never waited for,
+    // so no playout buffer delays the clock input and a late key cannot stall
+    // it. With no key visible the frame passes through untouched.
     void processKeyed() {
         if (sent_eof_) return;
         const size_t clock = *clock_input_;
@@ -545,6 +554,7 @@ public:
         if (active != applied_active_mask_) {
             for (size_t i = 0; i < source_edges_.size(); ++i) {
                 if (i == clock || active.test((int)i)) continue;
+                key_queue_[i].clear();
                 held_[i] = av::VideoFrame();
                 held_valid_[i] = false;
             }
@@ -557,8 +567,13 @@ public:
             while (auto *frame = source_edges_[i]->peek()) {
                 if (active.test((int)i) && frameUsable(*frame)) {
                     requireDrawable(*frame);
-                    held_[i] = *frame;
-                    held_valid_[i] = true;
+                    auto &queue = key_queue_[i];
+                    queue.push_back(*frame);
+                    if (queue.size() > kKeyQueue) {
+                        held_[i] = std::move(queue.front());
+                        held_valid_[i] = true;
+                        queue.pop_front();
+                    }
                 }
                 source_edges_[i]->pop();
             }
@@ -576,11 +591,21 @@ public:
         }
         if (!frameUsable(frame)) return;
         requireDrawable(frame);
+        // A key frame belongs to the tick nearest its timestamp.
+        const av::Timestamp tick_end = addTS(frame.pts(),
+            av::Timestamp(1, av::Rational(frame_rate_.getDenominator(), 2 * frame_rate_.getNumerator())));
         std::vector<const av::VideoFrame *> sources(source_edges_.size(), nullptr);
         sources[clock] = &frame;
         bool keyed = false;
         for (size_t i = 0; i < sources.size(); ++i) {
-            if (i == clock || !held_valid_[i]) continue;
+            if (i == clock) continue;
+            auto &queue = key_queue_[i];
+            while (!queue.empty() && queue.front().pts() < tick_end) {
+                held_[i] = std::move(queue.front());
+                held_valid_[i] = true;
+                queue.pop_front();
+            }
+            if (!held_valid_[i]) continue;
             sources[i] = &held_[i];
             keyed = true;
         }
@@ -995,6 +1020,7 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
             throw Error("cuda_rect_overlay: clock_input out of range");
         node->clock_input_ = size_t(clock);
         node->frame_rate_ = parseRatio(params.at("fps"));
+        node->key_queue_.resize(src_names.size());
     } else if (params.contains("fps")) {
         node->frame_rate_ = parseRatio(params.at("fps"));
         std::optional<double> latency_ms;

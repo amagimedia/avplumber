@@ -3,9 +3,9 @@
 The keyer runs after transitions and wipes, so a clean feed still carries every
 scene and M/E transition and only the keys are missing. It is one compositor
 pass clocked by the program (``clock_input``): each program frame renders at
-once over the newest frame of every key, so keying adds no playout latency and
-a late browser paint never stalls the program. Keys only cut on and off; with
-none on, the program frame passes through without any GPU work.
+once over every key's frame stamped for that tick, so keying adds no playout
+latency and a late browser paint never stalls the program. Keys only cut on
+and off; with none on, the program frame passes through without any GPU work.
 """
 from __future__ import annotations
 

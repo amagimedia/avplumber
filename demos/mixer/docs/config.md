@@ -359,8 +359,9 @@ window to the graphic (and allow that size in `DMA_BROWSER_ALLOWED_DIMS`),
 not to the canvas: Chromium then paints and exports only the graphic's pixels.
 
 The keyer is one compositor pass clocked by the program: every program frame
-renders at once over the newest frame of each key, so it adds no playout
-latency and a late browser paint never delays the program. Keys cut on and off
+renders at once over each key's frame stamped for that tick (matched by
+timestamp, as scene sources are), so it adds no playout latency, steady motion
+stays steady, and a late browser paint never delays the program. Keys cut on and off
 (`mixer.dsk {"key": "bug", "on": true}`); with all keys off the program frame
 passes through without GPU work. With no keys declared the graph has no keyer.
 
