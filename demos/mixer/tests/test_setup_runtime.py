@@ -8,8 +8,8 @@ from urllib.request import Request, urlopen
 import pytest
 
 import prepare_demo
-from setup_runtime import (DEFAULT_SETTINGS, STOP_TIMEOUT_SEC, SetupRuntime, browser_limit, nvdec_limit,
-                           raw_upload_units, recipe_for, source_counts)
+from setup_runtime import (DEFAULT_SETTINGS, RECOVER_TIMEOUT_SEC, STOP_TIMEOUT_SEC, SetupRuntime, browser_limit,
+                           nvdec_limit, raw_upload_units, recipe_for, source_counts)
 from webui import serve
 
 
@@ -560,8 +560,8 @@ def test_concurrent_stops_signal_the_mixer_once(tmp_path, monkeypatch):
 
 def test_browser_recovery_requires_dead_consumer(tmp_path, monkeypatch):
     calls = []
-    def request(url, method, path, body=None):
-        calls.append((method, path, body))
+    def request(url, method, path, body=None, timeout=60):
+        calls.append((method, path, body, timeout))
         return {'windows': [{'id': 'browser', 'stats': {'quarantinedFrameCount': 6}}]}
     monkeypatch.setattr('pyplumber.mixer.dmabuf_inputs.rest_request', request)
     manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
@@ -572,7 +572,34 @@ def test_browser_recovery_requires_dead_consumer(tmp_path, monkeypatch):
     assert calls == []
     manager.process = SimpleNamespace(poll=lambda: -9)
     assert manager._recover_browsers(shows)
-    assert calls[-1] == ('POST', '/workers/recover', {'ids': ['browser']})
+    assert calls[-1] == ('POST', '/workers/recover', {'ids': ['browser']}, RECOVER_TIMEOUT_SEC)
+
+
+def test_recovery_timeout_is_not_recovered_again_by_the_rollback(runtime, monkeypatch):
+    config = runtime.media_dir / 'mixer.demo.json'
+    config.write_text('{"old": true}')
+    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_: config.write_text('{"new": true}'))
+    recoveries = []
+    def recover(shows):
+        recoveries.append(shows)
+        raise TimeoutError('Browser POST /workers/recover: no answer within 180 s')
+    monkeypatch.setattr(runtime, '_recover_browsers', recover)
+    monkeypatch.setattr(runtime, '_start', lambda _: pytest.fail('must not start while workers restart'))
+    runtime.apply(DEFAULT_SETTINGS)
+    runtime.worker.join(3)
+    assert len(recoveries) == 1
+    assert 'still busy' in runtime.status()['message']
+    assert json.loads(config.read_text()) == {'old': True}
+
+
+def test_rest_timeout_names_the_request(monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+    def urlopen(request, timeout):
+        assert timeout == 7
+        raise TimeoutError('timed out')
+    monkeypatch.setattr(dmabuf_inputs.urllib.request, 'urlopen', urlopen)
+    with pytest.raises(TimeoutError, match='POST /workers/recover: no answer within 7 s'):
+        dmabuf_inputs.rest_request('http://browser', 'POST', '/workers/recover', {}, timeout=7)
 
 
 def test_late_quarantine_retries_requested_setup_once(runtime, monkeypatch):

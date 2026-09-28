@@ -10,6 +10,11 @@ import {
   ValidationError,
   WorkerUnavailableError,
 } from '../rest/errors';
+import { forEachBounded } from '../support/concurrency';
+
+// Pages a restarted worker reloads at once. Each /window/open waits for its page load, so
+// serial restores cost a worker's whole page count in load times.
+const RESTORE_CONCURRENCY = 4;
 
 interface DesiredWindow {
   readonly config: WindowConfig;
@@ -307,7 +312,7 @@ export class ElectronWorkerProcess implements BrowserWorker {
   }
 
   private async restoreDesiredWindows(): Promise<void> {
-    for (const desired of this.desired.values()) {
+    await forEachBounded([...this.desired.values()], RESTORE_CONCURRENCY, async (desired) => {
       try {
         await this.request('POST', '/window/open', desired.config);
       } catch (err) {
@@ -316,7 +321,7 @@ export class ElectronWorkerProcess implements BrowserWorker {
       if (desired.visible) {
         await this.request('POST', '/window/show', { id: desired.config.id, show: true });
       }
-    }
+    });
   }
 
   private async waitUntilReady(): Promise<void> {

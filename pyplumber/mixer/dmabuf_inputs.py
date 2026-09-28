@@ -102,16 +102,19 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
     return nodes, cuda_edge
 
 
-def rest_request(base_url: str, method: str, path: str, body=None):
+def rest_request(base_url: str, method: str, path: str, body=None, timeout: float = 60):
+    """A TimeoutError means the service may still be carrying the request out."""
     data = None if body is None else json.dumps(body).encode("utf-8")
     request = urllib.request.Request(f"{base_url}{path}", data=data, method=method,
                                      headers={"content-type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = response.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read(2048).decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"Browser {method} {path}: HTTP {exc.code}: {detail or exc.reason}") from exc
+    except TimeoutError as exc:
+        raise TimeoutError(f"Browser {method} {path}: no answer within {timeout:g} s") from exc
     return json.loads(payload) if payload else None
 
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { WindowConfig, WindowSnapshot } from '../../../src/main/config/WindowConfig';
 import { ProcessManager } from '../../../src/main/supervisor/ProcessManager';
 import type { BrowserWorker, WorkerStatus } from '../../../src/main/supervisor/WorkerProcess';
@@ -198,6 +198,33 @@ describe('quarantined consumer recovery', () => {
     expect((await manager.status()).windows).toHaveLength(4);
     await manager.recover([0, 1, 2, 3].map((i) => config(i).id));
     expect(workers.map((w) => w.restarts)).toEqual([1, 0]);
+  });
+
+  it('restarts affected workers concurrently', async () => {
+    const workers = [new FakeWorker(0, 9010, 1), new FakeWorker(1, 9011, 1)];
+    const manager = new ProcessManager(workers);
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const entered: number[] = [];
+    for (const worker of workers) {
+      await manager.open(config(worker.index));
+      const window = worker.windows.get(config(worker.index).id)!;
+      worker.windows.set(window.id, {
+        ...window,
+        stats: { ...window.stats, quarantinedFrameCount: 6 },
+      });
+      const restart = worker.restart.bind(worker);
+      worker.restart = async () => {
+        entered.push(worker.index);
+        await gate;
+        await restart();
+      };
+    }
+    const recovering = manager.recover([config(0).id, config(1).id]);
+    await vi.waitFor(() => expect(entered).toEqual([0, 1]));
+    release();
+    await recovering;
+    expect(workers.map((w) => w.restarts)).toEqual([1, 1]);
   });
 
   it('does not restart a worker shared with another consumer', async () => {

@@ -25,6 +25,10 @@ MIN_BITRATE_KBPS, MAX_BITRATE_KBPS = 500, 40000
 # MixerApplication.stop), so this only bounds a hung stop. compose.yaml's stop_grace_period
 # covers it plus the reap and the setup worker join in close().
 STOP_TIMEOUT_SEC = 60
+# /workers/recover answers once the affected browser workers have restarted, concurrently:
+# each stops (<= 5 s), boots Electron and reopens its pages four at a time, every open
+# bounded by the worker's 10 s request timeout.
+RECOVER_TIMEOUT_SEC = 180
 # The demo is 1080p only: every source is a unique 1920x1080 input, in either orientation.
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
@@ -292,7 +296,7 @@ class SetupRuntime:
                    for w in status.get("windows", [])):
             return False
         self._status("starting", "Recovering browser workers…")
-        rest_request(self.browser_url, "POST", "/workers/recover", {"ids": ids})
+        rest_request(self.browser_url, "POST", "/workers/recover", {"ids": ids}, timeout=RECOVER_TIMEOUT_SEC)
         return True
 
     def _start_recovering(self, config, previous_show):
@@ -384,7 +388,11 @@ class SetupRuntime:
                     self._stop()
                 if previous is not None:
                     config.write_bytes(previous)
-                    if stopped and not self.closing.is_set():
+                    if stopped and isinstance(exc, TimeoutError):
+                        # The browser service may still be restarting workers; restoring now would
+                        # recover them a second time. The next Apply starts from a settled service.
+                        message += "; the browser service is still busy, apply again when it settles."
+                    elif stopped and not self.closing.is_set():
                         self._start_recovering(config, recipe_show)
                         with self.lock:
                             self.revision += 1

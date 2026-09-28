@@ -1,6 +1,7 @@
 import type { WindowConfig, WindowSnapshot } from '../config/WindowConfig';
 import type { StatusReport, WindowControl } from '../WindowControl';
 import { CapacityError, ConflictError, NotFoundError } from '../rest/errors';
+import { settleAll } from '../support/concurrency';
 import type { BrowserWorker, WorkerStatus } from './WorkerProcess';
 
 export interface MultiprocessStatusReport extends StatusReport {
@@ -119,7 +120,8 @@ export class ProcessManager implements WindowControl {
       }
       restart.push(worker);
     }
-    for (const worker of restart) await worker.restart();
+    // Each restart boots Electron and reloads its pages; one after another took 40-75 s.
+    await settleAll(restart.map(async (worker) => worker.restart()));
   }
 
   private requireOwner(id: string): BrowserWorker {
