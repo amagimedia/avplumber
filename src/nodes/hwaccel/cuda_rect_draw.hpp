@@ -6,6 +6,7 @@
 #include "../../hwaccel.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
 #include "cuda_rect_table.h"
+#include "graphic_color.h"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -28,8 +29,8 @@ public:
         AVPixelFormat sw_fmt = AV_PIX_FMT_NONE;
         // Canvas transfer; unspecified skips color validation and treats graphics as SDR.
         AVColorTransferCharacteristic transfer = AVCOL_TRC_UNSPECIFIED;
-        float sdr_white = 203.f;
-        float hdr_peak = 1000.f;
+        float sdr_white = kGraphicSdrWhite;
+        float hdr_peak = kGraphicHdrPeak;
     };
 
     CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int max_layers = 256)

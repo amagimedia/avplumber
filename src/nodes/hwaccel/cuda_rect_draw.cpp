@@ -30,11 +30,6 @@ int checkCu(CUresult err, const char *func) {
 
 namespace {
 
-/// Transfer id the RGB conversion takes: 0 = HLG, 1 = PQ, 2 = SDR (BT.709).
-int kernelTransfer(AVColorTransferCharacteristic trc) {
-    return trc == AVCOL_TRC_ARIB_STD_B67 ? 0 : trc == AVCOL_TRC_SMPTE2084 ? 1 : 2;
-}
-
 /// Samples per lane group of plane 0: 1 for luma, the packed step for RGB canvases.
 int plane0Lanes(AVPixelFormat fmt) {
     const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fmt);
