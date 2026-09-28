@@ -8,19 +8,19 @@ from urllib.request import Request, urlopen
 import pytest
 
 import prepare_demo
-from setup_runtime import DEFAULT_SETTINGS, SetupRuntime, browser_limit, raw_upload_units, recipe_for, source_counts
+from setup_runtime import DEFAULT_SETTINGS, SetupRuntime, browser_limit, nvdec_limit, raw_upload_units, recipe_for, source_counts
 from webui import serve
 
 
 @pytest.mark.parametrize('count', [1, 8, 16, 32, 41, 42, 48, 50, 64, 83, 96, 100, 110])
 @pytest.mark.parametrize('fps', [25, 30, 50, 60])
 def test_generic_setups_expand(tmp_path, count, fps):
-    maximum = {25: 110, 30: 83, 50: 50, 60: 41}[fps]
+    maximum = {25: 110, 30: 110, 50: 50, 60: 41}[fps]
     if count > maximum:
         with pytest.raises(ValueError, match=f"source_count must be an integer from 1 to {maximum}"):
             recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
         return
-    if count > (40 if fps <= 30 else 20) + browser_limit(fps) + 4:
+    if count > nvdec_limit(fps) + browser_limit(fps) + 4:
         with pytest.raises(ValueError, match="enable another source type"):
             recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
         return
@@ -202,13 +202,13 @@ def test_bitrate_outside_the_range_is_rejected(value):
 
 
 @pytest.mark.parametrize("bit_depth", [8, 10])
-@pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 83), (50, 50), (60, 41)])
+@pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 110), (50, 50), (60, 41)])
 def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
     settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "fps": fps,
                 "chroma": "420" if bit_depth == 8 else "422",
                 "source_count": maximum, "scene_count": 192,
                 "weights": [1, 0, 0, 0 if bit_depth == 8 else 1, 1, 1, 0]}
-    feasible = min(maximum, (40 if fps <= 30 else 20) + browser_limit(fps) + raw_upload_units(fps))
+    feasible = min(maximum, nvdec_limit(fps) + browser_limit(fps) + raw_upload_units(fps))
     assert recipe_for({**settings, "source_count": feasible})["source_count"] == feasible
     with pytest.raises(ValueError, match="source_count"):
         recipe_for({**settings, "source_count": maximum + 1})
@@ -258,7 +258,7 @@ def test_hdr_raw_420_uses_p010_without_nvdec(tmp_path, chroma):
         recipe_for({**settings, "bit_depth": 8, "chroma": "420"})
 
 
-@pytest.mark.parametrize("fps,limit", [(25, 15), (30, 11), (50, 7), (60, 5)])
+@pytest.mark.parametrize("fps,limit", [(25, 15), (30, 17), (50, 7), (60, 5)])
 def test_hdr_raw_upload_counts_twice_toward_byte_budget(fps, limit):
     weights = [0, 0, 0, 0, 0, 0, 1]
     assert source_counts(limit, weights, fps)[6] == limit
@@ -268,7 +268,7 @@ def test_hdr_raw_upload_counts_twice_toward_byte_budget(fps, limit):
     assert mixed[5] + 2 * mixed[6] <= raw_upload_units(fps)
 
 
-@pytest.mark.parametrize("fps,limit", [(25, 40), (30, 40), (50, 20), (60, 20)])
+@pytest.mark.parametrize("fps,limit", [(25, 40), (30, 36), (50, 22), (60, 18)])
 def test_sdr_and_hdr_share_nvdec_budget(fps, limit):
     counts = source_counts(48, [100, 100, 0, 0, 1, 0, 0], fps)
     assert counts[0] + counts[1] == limit
@@ -323,12 +323,12 @@ def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expecte
 
 
 def test_browser_only_limit():
-    settings = {**DEFAULT_SETTINGS, 'fps': 30, 'source_count': 32, 'weights': [0, 0, 0, 0, 1]}
+    settings = {**DEFAULT_SETTINGS, 'fps': 50, 'source_count': 32, 'weights': [0, 0, 0, 0, 1]}
     assert next(s for s in recipe_for(settings)['inputs'] if s['kind'] == 'browser')['weight'] == 32
     with pytest.raises(ValueError, match='Browser is limited to 32'):
         recipe_for({**settings, 'source_count': 33})
     with pytest.raises(ValueError, match='enable another source type'):
-        source_counts(37, [0, 0, 1, 0, 1], 30)
+        source_counts(37, [0, 0, 1, 0, 1], 50)
 
 
 def test_failed_first_start_does_not_leave_show_for_resume(runtime, monkeypatch):
@@ -472,7 +472,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
     assert len(calls) == len(expected)
 
 
-@pytest.mark.parametrize("fps, maximum", [(25, 30), (30, 23), (50, 14), (60, 11)])
+@pytest.mark.parametrize("fps, maximum", [(25, 30), (30, 34), (50, 14), (60, 11)])
 def test_raw_upload_budget(fps, maximum):
     settings = {**DEFAULT_SETTINGS, "fps": fps, "source_count": maximum,
                 "weights": [0, 0, 0, 0, 0, 1]}

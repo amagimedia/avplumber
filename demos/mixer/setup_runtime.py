@@ -27,14 +27,21 @@ DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="42
                         bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60),
                         dsk=[], clean_feed=False)
 BROWSER_LIMIT = 32
-# The experimental 110-input ceiling at 25 fps adds a fifth browser worker (8 windows) and two
-# pinned raw uploads; other rates keep the measured baseline.
+# The experimental 110-input ceilings at 25 and 30 fps add a fifth browser worker (8 windows) and
+# pinned raw uploads (30 at 25 fps; 34 at 30 fps, where NVDEC is meant to carry 36 instead of 40).
+# Other rates keep the measured baseline.
 def browser_limit(fps):
-    return 40 if fps == 25 else BROWSER_LIMIT
+    return 40 if fps <= 30 else BROWSER_LIMIT
+
+
+def nvdec_limit(fps):
+    # 40 streams at 25 fps (1000 decoded frames/s) measured 81% NVDEC on the T4; about
+    # 1100 frames/s stays near 90% at any rate, leaving room for content-dependent swings.
+    return min(40, 1100 // fps)
 
 
 def raw_upload_units(fps):
-    return 30 if fps == 25 else 700 // fps
+    return {25: 30, 30: 34}.get(fps, 700 // fps)
 
 
 def _browser_ids(*shows):
@@ -47,7 +54,7 @@ def source_counts(total, weights, fps=25, reserved_browsers=0):
     # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
     for indices, costs, limit, name in (
             ((2,), (1,), 4, "HDR 4:2:2"), ((4,), (1,), browser_limit(fps) - reserved_browsers, "Browser"),
-            ((0, 1), (1, 1), 40 if fps <= 30 else 20, "Combined NVDEC"),
+            ((0, 1), (1, 1), nvdec_limit(fps), "Combined NVDEC"),
             ((5, 6), (1, 2), raw_upload_units(fps), "Raw 4:2:0 upload units")):
         group = [(i, cost) for i, cost in zip(indices, costs) if i < len(weights)]
         if sum(counts[i] * cost for i, cost in group) > limit:
@@ -87,9 +94,9 @@ def recipe_for(settings):
         raise ValueError(f"dsk must list distinct pages from {', '.join(DSK_PAGES)}")
     if not isinstance(settings["clean_feed"], bool) or settings["clean_feed"] and not dsk:
         raise ValueError("clean_feed must be a boolean and needs at least one dsk page")
-    # Higher rates use the 100-at-25-fps baseline; 25 fps retains the experimental 110-input ceiling.
+    # Higher rates use the 100-at-25-fps baseline; 25 and 30 fps have the experimental 110-input ceiling.
     # Key pages are sources too: they take their share of the same budget.
-    source_limit = (110 if settings["fps"] == 25 else 2500 // settings["fps"]) - len(dsk)
+    source_limit = (110 if settings["fps"] <= 30 else 2500 // settings["fps"]) - len(dsk)
     for key, maximum in (("source_count", source_limit), ("scene_count", 192), ("browser_ring_size", 64)):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:
