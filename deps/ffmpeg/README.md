@@ -51,13 +51,20 @@ and the filter changes) is base-independent.
     on NV12 CUDA frames; pixels outside the band are unchanged. Carries forward
     the filter from `1876208` and its FFmpeg 8.1 adaptation in `6dcda46` without
     changing its kernel or option defaults. The same patch applies to 8.0 and 8.1.
+11. **`transition_cuda` dip** — mode `dip` fades main to a solid colour over
+    alpha 0–0.5 and the colour to overlay over 0.5–1; the runtime `color`
+    option takes `Y:Cb:Cr` as 8-bit limited-range codes (fractions allowed),
+    which the filter scales to each frame's depth and range. A dip sample
+    reads only the picture still visible, none at 0.5; fade and wipe modes
+    are unchanged.
 
 ## FFmpeg 8 notes
 
 - `AVFrame.pkt_pos` is gone: `transition_cuda`'s legacy `pos` expression
   variable evaluates to `NAN`; `crop_cuda` guards it by API version.
 - The `C` command-support marker left `-filters` output; the mixer Dockerfile
-  checks the transition's `mode` option in filter help instead.
+  checks the transition's runtime `mode` and `color` options and the `dip`
+  mode in filter help instead.
 - FFmpeg 8 validates CUDA input formats at filter init, so the AVP filter node
   attaches `hw_frames_ctx` / `hw_device_ctx` between allocation and
   initialisation (segmented graph parser); the metadata-driven crop node does

@@ -1050,14 +1050,13 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
         dbg, max_layers);
     if (params.contains("color")) {
         const auto color = params.at("color").get<std::string>();
-        const AVColorTransferCharacteristic trc = color == "sdr" ? AVCOL_TRC_BT709 :
-            color == "hlg" ? AVCOL_TRC_ARIB_STD_B67 : color == "pq" ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_UNSPECIFIED;
+        const AVColorTransferCharacteristic trc = avp::mixer::graphicTransfer(color);
         if (trc == AVCOL_TRC_UNSPECIFIED)
             throw Error("cuda_rect_overlay: color must be sdr, hlg or pq");
         if (trc != AVCOL_TRC_BT709 && av_pix_fmt_desc_get(sw_fmt)->comp[0].depth < 10)
             throw Error("cuda_rect_overlay: HDR canvas requires 10-bit storage");
-        const float sdr_white = params.value("sdr_white", 203.f);
-        const float hdr_peak = params.value("hdr_peak", 1000.f);
+        const float sdr_white = params.value("sdr_white", avp::mixer::kGraphicSdrWhite);
+        const float hdr_peak = params.value("hdr_peak", avp::mixer::kGraphicHdrPeak);
         if (!(sdr_white >= 1.f && sdr_white <= hdr_peak && hdr_peak >= 100.f && hdr_peak <= 10000.f))
             throw Error("cuda_rect_overlay: invalid display white/peak");
         node->draw_.setColor(trc, sdr_white, hdr_peak);

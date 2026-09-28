@@ -329,11 +329,12 @@ async def test_direct_is_on_by_default_and_mixer_settings_apply():
         assert str(app.query_one("#direct").label) == "Direct: OFF"
 
 
-def test_fade_take_eases_with_the_configured_curve():
+@pytest.mark.parametrize("color", [None, "#ffffff"])
+def test_fade_take_uses_the_configured_curve_and_colour(color):
     class CurveConnection(FakeConnection):
         async def command(self, command):
             if command.startswith("mixer.settings"):
-                return json.dumps({"fade_curve": "ease-out"})
+                return json.dumps({"fade_curve": "ease-out", "fade_color": color})
             if command.startswith("mixer.fade "):
                 self.commands.append(command)
                 self.program = json.loads(command.partition(" ")[2])["scene"]
@@ -352,6 +353,7 @@ def test_fade_take_eases_with_the_configured_curve():
             await pilot.pause()
             fades = [c for c in connection.commands if c.startswith("mixer.fade ")]
             assert [json.loads(c.partition(" ")[2]) for c in fades] == [
-                {"mixer": "mixer", "scene": "grid_4_page_0", "duration_sec": 0.25, "curve": "ease-out"}]
+                {"mixer": "mixer", "scene": "grid_4_page_0", "duration_sec": 0.25, "curve": "ease-out",
+                 **({"color": color} if color else {})}]
 
     asyncio.run(exercise())

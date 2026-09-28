@@ -891,7 +891,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         "preview_codecs": [],
         "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
         "source_counts": {"video": 1, "browser": 1, "v210": 0, "nv12": 0, "p010": 0},
-        "direct": False, "fade_seconds": 0.8, "fade_curve": "linear", "transition": "cut",
+        "direct": False, "fade_seconds": 0.8, "fade_curve": "linear", "fade_color": None, "transition": "cut",
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
         "wipes": [{"id": "swoosh", "name": "swoosh", "path": "/media/swoosh.mov",
@@ -1348,13 +1348,18 @@ def test_control_section_carries_the_defaults_the_surfaces_start_from():
     assert (cfg.fps, cfg.direct, cfg.fade_seconds, cfg.transition) == (30, True, 0.5, "cut")
     assert cfg.settings()["transition"] == "cut"
     assert cfg.fade_curve == cfg.settings()["fade_curve"] == "linear"
+    assert cfg.fade_color is cfg.settings()["fade_color"] is None   # a fade mixes unless the show picks a dip
     chosen = mc.parse({**doc, "control": {"transition": "wipe", "fade_seconds": 1.5, "direct": False,
-                                          "fade_curve": "ease-in-out"}})
+                                          "fade_curve": "ease-in-out", "fade_color": "#FFFFFF"}})
     assert (chosen.transition, chosen.fade_seconds, chosen.direct) == ("wipe", 1.5, False)
     assert chosen.settings()["fade_curve"] == "ease-in-out"
+    assert chosen.settings()["fade_color"] == "#ffffff"
     for bad in ("smooth", "", None, 1):
         with pytest.raises(mc.ConfigError, match="control.fade_curve must be one of linear, ease-in"):
             mc.parse({**doc, "control": {"fade_curve": bad}})
+    for bad in ("black", "#fff", "#00000080", "000000", 0):
+        with pytest.raises(mc.ConfigError, match="control.fade_color must be a #RRGGBB colour or null"):
+            mc.parse({**doc, "control": {"fade_color": bad}})
     with pytest.raises(mc.ConfigError, match="control.transition must be"):
         mc.parse({**doc, "control": {"transition": "dissolve"}})
     with pytest.raises(mc.ConfigError, match="needs a wipe library"):
@@ -1547,6 +1552,25 @@ def test_mixer_fade_sends_a_curve_only_when_it_is_not_linear(curve, sent):
     assert command.startswith("mixer.fade ")
     assert json.loads(command[len("mixer.fade "):]) == {
         "mixer": "mixer", "scene": "cam", "duration_sec": 0.5, **({"curve": sent} if sent else {})}
+
+
+@pytest.mark.parametrize("color,sent", [(None, None), ("#000000", "#000000"), ("#FFA500", "#ffa500")])
+def test_mixer_fade_dips_only_when_given_a_color(color, sent):
+    from pyplumber.mixer.graph import MixerGraphBuilder
+    mixer = MixerGraphBuilder.__new__(MixerGraphBuilder)
+    mixer.avp, mixer.name = FakeAvp(), "mixer"
+    mixer.fade("cam", duration_sec=0.5, curve="ease-in", color=color)
+    assert json.loads(mixer.avp.commands[-1][len("mixer.fade "):]) == {
+        "mixer": "mixer", "scene": "cam", "duration_sec": 0.5, "curve": "ease-in", **({"color": sent} if sent else {})}
+
+
+def test_mixer_fade_rejects_a_color_it_cannot_dip_through():
+    from pyplumber.mixer.graph import MixerGraphBuilder
+    mixer = MixerGraphBuilder.__new__(MixerGraphBuilder)
+    mixer.avp, mixer.name = FakeAvp(), "mixer"
+    with pytest.raises(mixer_config.ConfigError, match="fade color must be a #RRGGBB colour"):
+        mixer.fade("cam", color="#00000080")
+    assert mixer.avp.commands == []
 
 
 def test_mixer_fade_rejects_an_unknown_curve():

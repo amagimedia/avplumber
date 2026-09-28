@@ -92,6 +92,7 @@ The control protocol accepts JSON objects:
 mixer.preview {"mixer":"mixer","scene":"grid_4_page_0"}
 mixer.cut {"mixer":"mixer","scene":"grid_4_page_0"}
 mixer.fade {"mixer":"mixer","scene":"grid_4_page_0","duration_sec":0.5}
+mixer.fade {"mixer":"mixer","scene":"grid_4_page_0","duration_sec":1,"color":"#000000"}
 mixer.wipe {"mixer":"mixer","scene":"grid_4_page_0","wipe_file":"<path>/wipe.mov"}
 ```
 
@@ -99,6 +100,22 @@ Cut, Fade and transparent media-file Wipe are supported. Fade uses the permanent
 CUDA transition filter. The media wipe graph is predeclared; the orchestrator
 loads the selected clip. A new take can interrupt an ongoing transition using
 the current output picture.
+
+A fade with `"color"` (opaque RGB such as `"#000000"`, in libavutil colour
+syntax) is a dip: program fades to that colour over the first half and the
+colour fades to the new scene over the second. Between them the colour holds
+alone for one frame period, so a frame shows it at any rate and start phase;
+the halves share the rest of the duration. The `curve` shapes each half. The
+colour is converted once per take for the canvas (`mixer.init` `"color"`:
+`sdr`, `hlg` or `pq`, default `sdr`) with the compositor's RGB-graphics
+maths, so it is never raw RGB in YUV planes: black is
+Y 16 and white Y 235 (8-bit SDR), and on HLG white is graphics white (203 nits,
+75% signal), not peak. The same `transition_cuda` pass does the dip, reading
+only the picture still visible (none during the hold), so a dip costs no more
+than a crossfade: two launches per frame, no extra buffers or passes, and
+nothing while no transition runs. Readiness, timing, interruption and cleanup
+are the crossfade's; an interrupted dip keeps the picture it had reached,
+which at the midpoint is the solid colour.
 
 `mixer.status <name>` returns the current PGM/PVW scene and transition state,
 and under `playout` each slot compositor's (`A`, `B`) running `frames`, `repeats`
@@ -120,7 +137,7 @@ The demo uses these CUDA operations:
 
 - optional `scale_cuda` and `pad_cuda` for homogeneous catalogue inputs;
 - `cuda_rect_overlay` for per-layer scaling and scene composition;
-- `transition_cuda` for fades;
+- `transition_cuda` for fades and dips;
 - NVDEC and NVENC at the graph boundaries.
 
 ## Generic demo

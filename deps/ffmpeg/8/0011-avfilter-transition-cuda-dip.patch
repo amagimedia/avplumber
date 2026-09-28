@@ -1,0 +1,228 @@
+From ce9c616de1bce2bb8aec4c9702c5e60a9741175d Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Tue, 29 Sep 2026 00:35:16 +0200
+Subject: [PATCH] avfilter/transition_cuda: dip through a solid color
+
+Add mode "dip" and a runtime "color" option (Y:Cb:Cr as 8-bit limited-range
+codes, fractions allowed). Alpha 0..0.5 fades main to the color and
+0.5..1 the color to overlay, so the color alone fills the frame at 0.5.
+The host scales the codes to each frame's depth and range once per frame
+and passes Cb/Cr per plane; both kernels take them and branch on the
+uniform mode before any fade or wipe work. A dip sample reads only the
+picture still visible (none at 0.5), so it costs at most what a fade does.
+The overlay's alpha plane does not apply to a dip.
+---
+ libavfilter/vf_transition_cuda.c  | 90 ++++++++++++++++++++++++++-----
+ libavfilter/vf_transition_cuda.cu | 36 ++++++++++++-
+ 2 files changed, 112 insertions(+), 14 deletions(-)
+
+diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
+index 77132f84ce..cf74f22350 100644
+--- a/libavfilter/vf_transition_cuda.c
++++ b/libavfilter/vf_transition_cuda.c
+@@ -100,2 +100,3 @@ enum TransitionMode {
+     TRANSITION_MODE_WIPE_UP,
++    TRANSITION_MODE_DIP,
+     TRANSITION_MODE_NB
+@@ -138,2 +139,4 @@ typedef struct TransitionCUDAContext {
+     float alpha_coef;
++    char *dip_color_str;
++    float dip_color[3];     ///< Y, Cb, Cr as 8-bit limited-range codes
+ 
+@@ -191,2 +194,48 @@ static int set_expr(AVExpr **pexpr, const char *expr, const char *option, void *
+ 
++/**
++ * Parse the dip color "Y:Cb:Cr": 8-bit limited-range codes, fractions allowed
++ * so a 10-bit frame keeps full precision. Invalid input keeps the old color.
++ */
++static int set_dip_color(AVFilterContext *avctx, const char *arg)
++{
++    TransitionCUDAContext *s = avctx->priv;
++    float v[3];
++    char tail;
++
++    if (!arg || sscanf(arg, "%f:%f:%f%c", &v[0], &v[1], &v[2], &tail) != 3 ||
++        !(v[0] >= 0.f && v[0] <= 255.f && v[1] >= 0.f && v[1] <= 255.f &&
++          v[2] >= 0.f && v[2] <= 255.f)) {
++        av_log(avctx, AV_LOG_ERROR, "Invalid dip color '%s': expected Y:Cb:Cr codes from 0 to 255\n",
++               arg ? arg : "");
++        return AVERROR(EINVAL);
++    }
++    memcpy(s->dip_color, v, sizeof(v));
++    return 0;
++}
++
++/**
++ * The dip color in the codes of the frame's depth and range, per plane:
++ * [p][0] for even samples and [p][1] for odd ones, so an interleaved Cb/Cr
++ * plane gets Cb then Cr and every other plane one component twice.
++ */
++static void dip_plane_codes(const float color[3], enum AVColorRange range,
++                            const AVPixFmtDescriptor *desc, float codes[4][2])
++{
++    const int depth = desc->comp[0].depth;
++    const float max = (1 << depth) - 1;
++    int seen[4] = { 0 };
++
++    for (int c = 0; c < 3; c++) {
++        const int p = desc->comp[c].plane;
++        float v = color[c];
++        if (range == AVCOL_RANGE_JPEG)
++            v = c ? (v - 128.f) / 224.f * max + (1 << (depth - 1)) : (v - 16.f) / 219.f * max;
++        else
++            v *= 1 << (depth - 8);
++        codes[p][1] = av_clipf(v, 0.f, max);
++        if (!seen[p]++)
++            codes[p][0] = codes[p][1];
++    }
++}
++
+ /**
+@@ -228,5 +277,7 @@ static int transition_cuda_call_kernel(
+     float alpha_coef,
+-    int transition_mode) {
++    int transition_mode,
++    const float dip[2]) {
+ 
+     CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++    float dip_even = dip[0], dip_odd = dip[1];
+ 
+@@ -239,3 +290,4 @@ static int transition_cuda_call_kernel(
+         &alpha_coef,
+-        &transition_mode
++        &transition_mode,
++        &dip_even, &dip_odd
+     };
+@@ -263,5 +315,7 @@ static int transition_cuda_call_kernel_word(
+     float alpha_coef,
+-    int transition_mode) {
++    int transition_mode,
++    const float dip[2]) {
+ 
+     CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++    float dip_even = dip[0], dip_odd = dip[1];
+ 
+@@ -273,3 +327,4 @@ static int transition_cuda_call_kernel_word(
+         &alpha_coef,
+-        &transition_mode
++        &transition_mode,
++        &dip_even, &dip_odd
+     };
+@@ -346,2 +401,7 @@ static int transition_cuda_blend(FFFrameSync *fs)
+ 
++    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(ctx->in_format_main);
++    float dip[4][2] = { { 0 } };
++    if (ctx->transition_mode == TRANSITION_MODE_DIP)
++        dip_plane_codes(ctx->dip_color, input_main->color_range, desc, dip);
++
+     // Word-stored formats (P010/P210, planar 10-bit) arrive as identical
+@@ -350,3 +410,2 @@ static int transition_cuda_blend(FFFrameSync *fs)
+ 
+-    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(ctx->in_format_main);
+     if (desc->comp[0].depth > 8) {
+@@ -367,3 +426,3 @@ static int transition_cuda_blend(FFFrameSync *fs)
+                 AV_CEIL_RSHIFT(input_overlay->height, sub_y),
+-                lanes, shift, ctx->alpha_coef, ctx->transition_mode);
++                lanes, shift, ctx->alpha_coef, ctx->transition_mode, dip[p]);
+         }
+@@ -381,3 +440,3 @@ static int transition_cuda_blend(FFFrameSync *fs)
+         input_overlay->data[3], input_overlay->linesize[3], 1, 1,
+-        ctx->alpha_coef, ctx->transition_mode);
++        ctx->alpha_coef, ctx->transition_mode, dip[0]);
+ 
+@@ -393,3 +452,3 @@ static int transition_cuda_blend(FFFrameSync *fs)
+             0, 0, 0, 0,
+-            ctx->alpha_coef, ctx->transition_mode);
++            ctx->alpha_coef, ctx->transition_mode, dip[1]);
+         break;
+@@ -403,3 +462,3 @@ static int transition_cuda_blend(FFFrameSync *fs)
+             input_overlay->data[3], input_overlay->linesize[3], 2, 2,
+-            ctx->alpha_coef, ctx->transition_mode);
++            ctx->alpha_coef, ctx->transition_mode, dip[1]);
+ 
+@@ -411,3 +470,3 @@ static int transition_cuda_blend(FFFrameSync *fs)
+             input_overlay->data[3], input_overlay->linesize[3], 2, 2,
+-            ctx->alpha_coef, ctx->transition_mode);
++            ctx->alpha_coef, ctx->transition_mode, dip[2]);
+         break;
+@@ -425,3 +484,3 @@ static int transition_cuda_blend(FFFrameSync *fs)
+                 0, 0, 0, 0,
+-                ctx->alpha_coef, ctx->transition_mode);
++                ctx->alpha_coef, ctx->transition_mode, dip[p]);
+         break;
+@@ -475,3 +534,3 @@ static av_cold int transition_cuda_init(AVFilterContext *avctx)
+     ctx->fs.on_event = &transition_cuda_blend;
+-    return 0;
++    return set_dip_color(avctx, ctx->dip_color_str);
+ }
+@@ -643,2 +702,7 @@ static int transition_cuda_process_command(AVFilterContext *avctx,
+ 
++    if (!strcmp(cmd, "color")) {
++        ret = set_dip_color(avctx, args);
++        return ret < 0 ? ret : av_opt_set(ctx, "color", args, 0);
++    }
++
+     if (strcmp(cmd, "alpha"))
+@@ -676,2 +740,4 @@ static const AVOption transition_cuda_options[] = {
+         { "wipe_up",    "wipe from bottom to top", 0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_WIPE_UP },   .flags = RUNTIME_FLAGS, .unit = "mode" },
++        { "dip",        "fade main to color below alpha 0.5, then color to overlay (overlay alpha ignored)", 0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_DIP }, .flags = RUNTIME_FLAGS, .unit = "mode" },
++    { "color", "set the dip color as Y:Cb:Cr 8-bit limited-range codes, scaled to each frame's depth and range", OFFSET(dip_color_str), AV_OPT_TYPE_STRING, { .str = "16:128:128" }, 0, 0, RUNTIME_FLAGS },
+     { "eof_action", "Action to take when encountering EOF from secondary input ",
+diff --git a/libavfilter/vf_transition_cuda.cu b/libavfilter/vf_transition_cuda.cu
+index 86a2eaf2b7..6f21f5b59a 100644
+--- a/libavfilter/vf_transition_cuda.cu
++++ b/libavfilter/vf_transition_cuda.cu
+@@ -20,2 +20,20 @@
+ 
++/*
++ * Dip (mode 5): alpha 0..0.5 fades main to the color, 0.5..1 the color to
++ * overlay, so the color alone fills the frame at 0.5. Only the picture still
++ * visible is read, and at 0.5 neither is. `c` is this sample's color code
++ * (Cb on even and Cr on odd samples of an interleaved plane); the overlay's
++ * alpha plane does not apply. Stores round to nearest.
++ */
++template <typename T>
++__device__ static inline void dip_sample(T *main, const T *overlay, int shift, float alpha_coef, float c)
++{
++    const float a = 2.f * alpha_coef;
++    const float w = a <= 1.f ? 1.f - a : a - 1.f;   // weight of the picture still visible
++    float v = c;
++    if (w > 0.f)
++        v += w * (float((a <= 1.f ? *main : *overlay) >> shift) - c);
++    *main = (T)((T)(v + 0.5f) << shift);
++}
++
+ extern "C" {
+@@ -28,3 +46,4 @@ __global__ void Transition_Cuda(
+     int alpha_adj_x, int alpha_adj_y,
+-    float alpha_coef, int transition_mode)
++    float alpha_coef, int transition_mode,
++    float dip_even, float dip_odd)
+ {
+@@ -38,2 +57,8 @@ __global__ void Transition_Cuda(
+ 
++    if (transition_mode == 5) {
++        dip_sample(main + x + y*main_linesize, overlay + x + y*overlay_linesize, 0,
++                   alpha_coef, x & 1 ? dip_odd : dip_even);
++        return;
++    }
++
+     float alpha = alpha_coef;
+@@ -67,3 +92,4 @@ __global__ void Transition_Cuda_Word(
+     int lanes, int shift,
+-    float alpha_coef, int transition_mode)
++    float alpha_coef, int transition_mode,
++    float dip_even, float dip_odd)
+ {
+@@ -77,2 +103,8 @@ __global__ void Transition_Cuda_Word(
+ 
++    if (transition_mode == 5) {
++        dip_sample(main + x + y*main_linesize, overlay + x + y*overlay_linesize, shift,
++                   alpha_coef, x & 1 ? dip_odd : dip_even);
++        return;
++    }
++
+     float alpha = alpha_coef;
+-- 
+2.55.0
+

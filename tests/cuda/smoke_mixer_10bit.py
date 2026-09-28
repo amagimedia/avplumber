@@ -5,7 +5,8 @@ P210 runs ingest packed v210 (HLG and SDR-promoted families) through
 v210_to_cuda; P010 and planar 444 runs upload labeled CPU fixtures. Scene A is a
 two-tile grid (scaled path), scene B is source 0 fullscreen (copy path), and
 the transition blends them at exact binary-fraction alphas so the float
-arithmetic reproduces bit-exactly on the CPU. Run on the NVIDIA host with the
+arithmetic reproduces bit-exactly on the CPU; dips pass through a solid colour
+at 1/4, 1/2 (the colour alone) and 3/4. Run on the NVIDIA host with the
 FFmpeg 8.1 avplumber module; the download is solely the verification boundary.
 """
 
@@ -24,7 +25,10 @@ W, H, FRAMES = 384, 216, 6
 # while it was waiting for input, dropping the other scene's queued tail.
 # ``--tail-margin N`` generates N extra frames and stops after the scored ones.
 TAIL_MARGIN = 0
-TRANSITIONS = (("fade", 0.0), ("fade", 0.25), ("fade", 1.0), ("wipe_left", 0.5))
+TRANSITIONS = (("fade", 0.0), ("fade", 0.25), ("fade", 1.0), ("wipe_left", 0.5),
+               ("dip", 0.25), ("dip", 0.5), ("dip", 0.75))
+# The dip colour as transition_cuda takes it: Y, Cb, Cr at 8-bit limited-range scale; x4 is exact.
+DIP_COLOR = (180.25, 100.0, 200.0)
 
 
 def planes444(index, source):
@@ -95,10 +99,16 @@ def scene_a(family, index, n=2):
 
 def blend(a_planes, b_planes, mode, coef):
     """transition_cuda word arithmetic: per-plane wipe position over that
-    plane's own pixel width, round-half-up store."""
+    plane's own pixel width, round-half-up store. A dip reads one side: A
+    towards the colour below alpha 1/2, the colour towards B above."""
     out = []
-    for pa, pb in zip(a_planes, b_planes):
+    for pa, pb, color in zip(a_planes, b_planes, DIP_COLOR):
         width = pa.shape[1]
+        if mode == "dip":
+            a, code = 2 * coef, color * 4
+            source, weight = (pa, 1 - a) if a <= 1 else (pb, a - 1)
+            out.append(np.floor(code + weight * (source - code) + 0.5).astype(np.int64))
+            continue
         if mode == "fade":
             alpha = np.full(width, coef)
         else:  # wipe_left
@@ -162,7 +172,8 @@ def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacit
         FilterVideo({"name": "trans", "src": ["scene_a", "scene_b"], "dst": "mixed",
                      "hwaccel": "mix_gpu", "dst_frame_rate": "60/1",
                      "defer_preliminary_init": True,
-                     "graph": f"transition_cuda=alpha='{coef}':mode={mode}:eval=init"}),
+                     "graph": f"transition_cuda=alpha='{coef}':mode={mode}:eval=init"
+                              + (":color='%g:%g:%g'" % DIP_COLOR if mode == "dip" else "")}),
         FilterVideo({"name": "verify", "src": "mixed", "dst": "result", "hwaccel": "mix_gpu",
                      "graph": f"hwdownload,format={fmt}"}),
     ]

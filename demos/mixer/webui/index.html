@@ -97,6 +97,11 @@
   .fade-ctl .dd-btn > :not(.glyph) { display: none; }
   .dd-btn svg.glyph { width: 14px; height: 10px; stroke: var(--text); stroke-width: 1.6; stroke-linecap: round; transform: none; }
   .fade-ctl .dd-menu { min-width: 150px; }
+  /* The M/E fade's colour menu follows its curve menu: the curve button gives up its rounded end. */
+  #fade-ctl .dd:not(.dip) .dd-btn { border-radius: 0; border-right: 0; }
+  .dd-btn svg.swatch { width: 12px; height: 12px; stroke: var(--muted); stroke-width: 1.2; }
+  .dip .dd-menu [role="option"]::before { box-shadow: 0 0 0 1px var(--muted); }
+  .dip-picker { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; pointer-events: none; }
 
   /* ---------- workspace ---------- */
   main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(480px, 1fr) auto; gap: 14px; }
@@ -453,6 +458,7 @@ function take(kind, scene = selected, wipe = currentWipe) {
     payload.duration_sec = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
     if (payload.duration_sec === null) return;
     if (curves.fade.value !== "linear") payload.curve = curves.fade.value;   // linear: today's command
+    if (fadeColor.hex()) payload.color = fadeColor.hex();                  // mix: no colour
   }
   if (kind === "wipe") {
     payload.wipe_file = wipe ? wipe.path : $("wipe-file").value.trim();
@@ -492,6 +498,7 @@ function applySettings(s) {
   if (typeof s.direct === "boolean" && !directTouched) setDirect(s.direct);
   if (s.fade_seconds && !touched.fade) $("fade-s").value = s.fade_seconds;
   if (s.fade_curve && !touched.fadeCurve) curves.fade.set(s.fade_curve);
+  if (store.get("fadeColor", null) === null) fadeColor.seed(s.fade_color || null);
   if (s.dsk_fade_seconds !== undefined && !touched.keyFade) $("key-fade-s").value = s.dsk_fade_seconds || "";
   if (s.dsk_fade_curve && !touched.keyCurve) curves.key.set(s.dsk_fade_curve);
   if (s.transition && !tookTransition) currentTransition = s.transition;
@@ -860,6 +867,54 @@ const curves = {fade: curveMenu("Fade curve", "fadeCurve"), key: curveMenu("Key 
 curves.fade.root.classList.add("up");
 $("fade-ctl").append(curves.fade.root);
 $("key-fade").append(curves.key.root);
+
+/* ---------- fade colour ---------- */
+// Mix crossfades; a colour dips through it, fully shown halfway (mixer.fade "color"). The button's
+// swatch shows the choice. A viewer's pick, and their custom colour, are remembered in this browser;
+// until they pick, the mixer's control.fade_color (null: mix) decides.
+const DIPS = {black: ["Black", "#000000"], white: ["White", "#ffffff"]};
+const fadeColor = (() => {
+  let choice = store.get("fadeColor", "mix"), custom = store.get("fadeCustom", "#000000");
+  if (choice !== "custom" && !DIPS[choice]) choice = "mix";
+  const hex = () => choice === "custom" ? custom : DIPS[choice]?.[1] ?? null;
+  // A native colour input, visually hidden: Safari opens none that is display: none.
+  const picker = el("input", "dip-picker");
+  picker.type = "color";
+  picker.tabIndex = -1;
+  picker.setAttribute("aria-hidden", "true");
+  const dd = dropdown((value) => {
+    store.set("fadeColor", choice = value);
+    if (value === "custom") {
+      picker.value = custom;
+      try { picker.showPicker(); } catch (_) { picker.click(); }   // older browsers lack showPicker
+    }
+    paint();
+  });
+  picker.oninput = () => { store.set("fadeCustom", custom = picker.value); store.set("fadeColor", choice = "custom"); paint(); };
+  const btn = dd.root.firstChild;
+  btn.insertAdjacentHTML("afterbegin", '<svg class="glyph swatch" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.5"/></svg>');
+  dd.root.classList.add("dip", "up");
+  dd.root.append(picker);
+  dd.setLabel("Fade colour");
+  function paint() {
+    dd.setOptions([{value: "mix", label: "Mix", meta: "crossfade", group: "Fade", dot: "transparent"},
+      ...Object.entries(DIPS).map(([value, [label, color]]) => ({value, label, meta: color, group: "Dip through", dot: color})),
+      {value: "custom", label: "Custom…", meta: custom, group: "Dip through", dot: custom}]);
+    dd.set(choice);
+    btn.title = btn.getAttribute("aria-label");
+    btn.querySelector(".swatch circle").style.fill = hex() || "none";
+  }
+  // The config's colour, for a viewer who has not picked: a preset, or shown as custom. Nothing is stored.
+  function seed(color) {
+    const preset = Object.keys(DIPS).find((k) => DIPS[k][1] === color);
+    if (color && !preset) custom = color;
+    choice = !color ? "mix" : preset || "custom";
+    paint();
+  }
+  paint();
+  $("fade-ctl").append(dd.root);
+  return {hex, seed};
+})();
 
 /* ---------- viewer outputs ---------- */
 const query = new URLSearchParams(location.search);

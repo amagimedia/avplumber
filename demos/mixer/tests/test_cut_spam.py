@@ -98,6 +98,7 @@ def test_payloads_match_the_web_ui():
                           {"id": "b", "path": "/b.mov", "duration_seconds": 0}]}
     payloads = transition_payloads(settings)
     assert payloads["fade"] == {"duration_sec": 0.8, "curve": "ease-in"}
+    assert transition_payloads({"fade_color": "#000000"})["fade"] == {"duration_sec": 0.5, "color": "#000000"}
     assert payloads["wipe"] == {"wipe_file": "/b.mov"}   # unknown length: the mixer probes the clip
     assert transition_payloads({})["fade"] == {"duration_sec": 0.5}
     assert transition_payloads({})["wipe"] is None

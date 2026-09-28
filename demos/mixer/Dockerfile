@@ -84,7 +84,8 @@ RUN cd /tmp/ffmpeg \
 
 RUN /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda ' \
     && /usr/local/bin/ffmpeg -hide_banner -h filter=transition_cuda \
-       | awk '$1 == "mode" && $3 ~ /T/ { found = 1 } END { exit !found }'
+       | awk '$1 == "mode" && $3 ~ /T/ { m = 1 } $1 == "dip" { d = 1 } $1 == "color" && $3 ~ /T/ { c = 1 } \
+              END { exit !(m && d && c) }'
 
 WORKDIR /build
 

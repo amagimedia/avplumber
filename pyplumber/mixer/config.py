@@ -50,6 +50,15 @@ def fade_curve(value: Any, where: str) -> str:
     return value
 
 
+def fade_color(value: Any, where: str) -> Optional[str]:
+    """A dip colour "#RRGGBB" (lower-cased), or None for a plain mix; *where* names the field or command."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        raise ConfigError(f"{where} must be a #RRGGBB colour or null")
+    return value.lower()
+
+
 DEFAULT_DSK_FADE_SECONDS = 0.4   # keys fade in and out unless a command or the show says 0 (cut)
 
 
@@ -193,6 +202,7 @@ class MixerConfig:
     direct: bool = True            # control surfaces: scene picks go straight to program
     fade_seconds: float = DEFAULT_FADE_SECONDS
     fade_curve: str = DEFAULT_FADE_CURVE   # what an M/E fade eases with unless a take picks its own
+    fade_color: Optional[str] = None       # "#rrggbb": what an M/E fade dips through unless a take picks; None mixes
     transition: str = DEFAULT_TRANSITION   # what a pick takes with in direct mode
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
@@ -233,6 +243,7 @@ class MixerConfig:
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources)
                                   for kind in ("video", "browser", "v210", "nv12", "p010")},
                 "direct": self.direct, "fade_seconds": self.fade_seconds, "fade_curve": self.fade_curve,
+                "fade_color": self.fade_color,
                 "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
                 "wipes": wipes, **keys}
@@ -365,6 +376,7 @@ def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:
         raise ConfigError("control.fade_seconds must be positive")
     return {"direct": bool(control.get("direct", True)), "fade_seconds": fade_seconds,
             "fade_curve": fade_curve(control.get("fade_curve", DEFAULT_FADE_CURVE), "control.fade_curve"),
+            "fade_color": fade_color(control.get("fade_color"), "control.fade_color"),
             "transition": transition, "default_wipe": default_wipe}
 
 
