@@ -315,8 +315,37 @@ document.querySelectorAll('[data-preset]').forEach(button=>button.onclick=()=>{
  sourceValues=presets[preset].map((n,i)=>preset==='equal'&&!sourceEnabled(i)?0:n);
  syncCounts();update();
 });
+// Nearest kind a mode can carry for each one it cannot: same engine first
+// (NVDEC stays NVDEC, upload stays upload), then same colour.
+const MODE_SUBSTITUTES={8:{1:0,2:5,3:5,6:5},10:{2:6,3:5}};
+// Kinds outside every budget (v210 SDR 4:2:2) grow no further than the HDR 4:2:2
+// budget when filled automatically; typing a count can still go higher.
+const autoFillCap=i=>sourceBudgets().some(([indices])=>indices.includes(i))?sourceMaximum(i):Math.min(sourceMaximum(i),4);
+function adaptToMode(){
+ const substitutes=MODE_SUBSTITUTES[outputMode().bit_depth];
+ sourceValues.forEach((n,i)=>{if(n&&!sourceEnabled(i)){sourceValues[substitutes[i]]+=n;sourceValues[i]=0;}});
+ // Trim what now exceeds a budget, costliest kind first, then give each trimmed
+ // source to the allowed kind with the most headroom. The total holds when
+ // the mode has room for it, and shrinks to the mode's capacity otherwise.
+ let spill=0;
+ for(const [indices,costs,limit] of sourceBudgets()){
+  let used=indices.reduce((n,i,k)=>n+sourceValues[i]*costs[k],0);
+  for(let k=indices.length-1;k>=0&&used>limit;k--){
+   const i=indices[k],cut=Math.min(sourceValues[i],Math.ceil((used-limit)/costs[k]));
+   sourceValues[i]-=cut;used-=cut*costs[k];spill+=cut;
+  }
+ }
+ for(;spill>0;spill--){
+  let best=-1,room=0;
+  types.forEach((_,i)=>{const r=sourceEnabled(i)?autoFillCap(i)-sourceValues[i]:0;if(r>room){room=r;best=i;}});
+  if(best<0)break;
+  sourceValues[best]++;
+ }
+ $('sources').value=sourceValues.reduce((a,b)=>a+b,0);
+}
 $('mode').addEventListener('input',()=>{
  const {bit_depth,chroma}=outputMode();
+ adaptToMode();
  if(bit_depth===10&&previousDepth===8){
   const hdr=Math.ceil(sourceValues[0]/2);
   sourceValues[0]-=hdr;sourceValues[1]+=hdr;

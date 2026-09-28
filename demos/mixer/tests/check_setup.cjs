@@ -59,6 +59,7 @@ const { chromium } = require('playwright');
     await reset();
     await page.locator('#mode').selectOption('8:420');
     await page.locator('#count-browser').fill('0');
+    await page.locator('#count-sdr420_raw').fill('0');   // the default 4:2:2 upload became NV12
     const onlySource = page.locator('#count-sdr420');
     await onlySource.fill('');
     assert.equal(await onlySource.inputValue(), '');
@@ -78,6 +79,19 @@ const { chromium } = require('playwright');
     await reset({...sdr, source_count: 8, weights: [0, 0, 0, 0, 8, 0, 0]});
     await page.locator('#mode').selectOption('10:420');
     assert.deepEqual((await apply()).weights, [0, 0, 0, 0, 8, 0, 0], 'browser-only setup must not gain decoders');
+
+    // Leaving HDR 4:2:2 keeps each source on its engine where the mode allows, trims
+    // what exceeds a budget and refills the headroom: 100 mixed sources with four
+    // keys become the SDR 25 fps maximum of 40 NVDEC + 28 browser + 28 NV12.
+    await reset({...sdr, fps: 25, source_count: 100, bit_depth: 10, chroma: '422',
+      weights: [20, 19, 4, 19, 19, 10, 9], dsk: ['lower_third', 'ticker', 'bug_left', 'bug_right']});
+    await page.locator('#mode').selectOption('8:420');
+    const light = await apply();
+    assert.deepEqual(light.weights, [40, 0, 0, 0, 28, 28, 0], 'SDR keeps a full, in-budget mix');
+    assert.equal(light.source_count, 96);
+    await reset({...sdr, fps: 25, source_count: 30, bit_depth: 10, chroma: '422', weights: [10, 5, 4, 3, 5, 2, 1]});
+    await page.locator('#mode').selectOption('10:420');
+    assert.deepEqual((await apply()).weights, [10, 5, 0, 0, 5, 5, 5], '4:2:2 uploads become 4:2:0 uploads of the same colour');
 
     for (const [fps, maximum] of [[25, 110], [30, 83], [50, 50], [60, 41]]) {
       await reset();
@@ -130,13 +144,14 @@ const { chromium } = require('playwright');
       const raw = page.locator('#count-hlg420_raw');
       assert.equal(await raw.isEnabled(), true);
       await raw.fill('3');
-      assert.equal((await apply()).weights[6], 3);
+      const hdr = await apply();
+      assert.equal(hdr.weights[6], 3);
       assert.match(await page.locator('#engine-split').textContent(), /3 raw P010 upload/);
       await page.locator('#mode').selectOption('8:420');
       assert.equal(await raw.isDisabled(), true);
       const sdr = await apply();
       assert.equal(sdr.weights[6], 0);
-      assert.equal(sdr.weights[5], 3);
+      assert.equal(sdr.weights[5], 3 + hdr.weights[2] + hdr.weights[3], 'P010 and 4:2:2 uploads stay uploads, as NV12');
     }
     await reset();
     for (const [fps, ring] of [[25, 6], [50, 9], [30, 6], [60, 9]]) {
