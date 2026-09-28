@@ -1508,28 +1508,14 @@ def _decode_doc(tmp_path, **source):
     return doc, path
 
 
-@pytest.mark.parametrize("fps", [25, 30, 50, 60])
-def test_nvdec_output_edge_keeps_the_default_at_every_rate(tmp_path, fps):
-    doc, path = _decode_doc(tmp_path)
-    doc["canvas"]["fps"] = fps
-    path.write_text(json.dumps(doc))
+def test_clips_decode_on_the_gpu_and_raw_sources_upload_after_pacing(tmp_path):
+    _, path = _decode_doc(tmp_path)
     app = build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
-    plans = dict(app.avp.edges.plans)
-    assert "input_0_decoded" not in plans
-    assert "input_1_decoded" not in plans   # the raw source's CPU decoder keeps the default
     nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
     decode = nodes["decode_0"]
     assert (decode["hwaccel"], decode["pixel_format"]) == ("mixer_gpu", "?cuda")
     assert "codec_map" not in decode and "options" not in decode
     assert nodes["upload_1"]["graph"] == "hwupload"   # raw uploads at its own size, after pacing
-
-
-@pytest.mark.parametrize("fps", [30, 60])
-def test_cli_file_inputs_keep_the_default_decoded_frames(fps):
-    app = build_application(GraphOptions(inputs=("a.mp4", "b.mp4"), output="p.mp4", fps=fps), api=fake_api())
-    plans = dict(app.avp.edges.plans)
-    assert "input_0_decoded" not in plans and "input_1_decoded" not in plans
-    assert plans["*"] == 3
 
 
 @pytest.mark.parametrize("dpb_size", [0, 1, 4])

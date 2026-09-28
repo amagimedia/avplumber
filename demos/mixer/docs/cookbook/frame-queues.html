@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="An opt-in, rate-aware change that keeps one decoded frame instead of three on each NVDEC source's decoder-to-realtime edge at 30 fps and below: about 255 MB of VRAM freed across 40 sources, no added latency, less slack before a repeated frame.">
+  <meta name="description" content="A proposed, rate-aware change, not in the code: keep one decoded frame instead of three on each NVDEC source's decoder-to-realtime edge at 30 fps and below, for about 255 MB of VRAM across 40 sources, no added latency, and less slack before a repeated frame.">
   <title>Frame queues · Mixer optimization cookbook</title>
   <style>
     :root {
@@ -69,12 +69,12 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>One decoded frame in flight per NVDEC source</h1>
-  <p class="lede">At 30&nbsp;fps and below, each NVDEC source can park one decoded frame before pacing instead of three, freeing about 255&nbsp;MB of VRAM across 40 sources with no added latency.</p>
-  <span class="pill optin">Status: Opt-in, pending measurement</span>
+  <p class="lede">At 30&nbsp;fps and below, each NVDEC source could park one decoded frame before pacing instead of three. That would free about 255&nbsp;MB of VRAM across 40 sources with no added latency.</p>
+  <span class="pill proposed">Status: Proposed, not in code</span>
 
   <ul class="figures">
     <li><b>3 → 1</b><span>decoded frames parked per NVDEC source, only at ≤30&nbsp;fps</span></li>
-    <li><b>≈255 MB</b><span>VRAM freed across 40 sources at 1080p, up to ~320&nbsp;MB (estimate, not measured)</span></li>
+    <li><b>≈255 MB</b><span>VRAM it would free across 40 sources at 1080p, up to ~320&nbsp;MB (estimate, not measured)</span></li>
     <li><b>0 frames</b><span>added to program or command-to-screen latency</span></li>
   </ul>
 
@@ -115,7 +115,7 @@
         <text x="650" y="84" fill="#edf4ff" font-size="14" text-anchor="middle">compositor</text>
 
         <!-- After -->
-        <text x="10" y="178" fill="#edf4ff" font-size="15" font-weight="600">Opt-in · capacity 1, only at ≤30 fps</text>
+        <text x="10" y="178" fill="#edf4ff" font-size="15" font-weight="600">Proposed · capacity 1, only at ≤30 fps</text>
         <rect x="10" y="202" width="118" height="58" rx="8" fill="#101827" stroke="#6e8bf5" stroke-width="1.5"/>
         <text x="69" y="227" fill="#edf4ff" font-size="14" text-anchor="middle">NVDEC</text>
         <text x="69" y="246" fill="#a4b4ca" font-size="11" text-anchor="middle">runs ahead</text>
@@ -146,7 +146,7 @@
     <div class="diagram">
       <svg viewBox="0 0 720 220" role="img" aria-labelledby="d2t d2d">
         <title id="d2t">Which capacity, and when</title>
-        <desc id="d2d">The queue allocates a power of two at or above capacity plus one, with one slot spare. Capacity 3 and 2 both hold 3 frames; only capacity 1 holds 1. Capacity 1 is used only at 30 fps or below, where one frame is 33 to 40 ms of slack. At 50 and 60 fps the default 3 frames stay, about 50 ms at 60 fps.</desc>
+        <desc id="d2d">The queue allocates a power of two at or above capacity plus one, with one slot spare. Capacity 3 and 2 both hold 3 frames; only capacity 1 holds 1. Capacity 1 would be used only at 30 fps or below, where one frame is 33 to 40 ms of slack. At 50 and 60 fps the default 3 frames stay, about 50 ms at 60 fps.</desc>
         <text x="10" y="24" fill="#a4b4ca" font-size="12">capacity</text>
         <text x="100" y="24" fill="#a4b4ca" font-size="12">slots = 2ⁿ ≥ capacity + 1</text>
         <text x="330" y="24" fill="#a4b4ca" font-size="12">frames</text>
@@ -177,7 +177,7 @@
         <rect x="100" y="166" width="26" height="26" rx="4" fill="#6e8bf5"/>
         <rect x="132" y="166" width="26" height="26" rx="4" fill="#26354a" stroke="#3a4a63"/>
         <text x="350" y="185" fill="#edf4ff" font-size="16" font-weight="600" text-anchor="middle">1</text>
-        <text x="400" y="176" fill="#30a46c" font-size="13" font-weight="600">opt-in · ≤30 fps only</text>
+        <text x="400" y="176" fill="#30a46c" font-size="13" font-weight="600">proposed · ≤30 fps only</text>
         <text x="400" y="194" fill="#a4b4ca" font-size="12">1 frame = 33–40 ms of slack</text>
       </svg>
     </div>
@@ -190,27 +190,26 @@
     <li><b>Why</b><p>That edge is always full, so its size is pure VRAM held in the decoder's frame pool. Two fewer 1080p frames of 3.19&nbsp;MiB × 40 sources ≈ 255&nbsp;MB, up to ~320&nbsp;MB (estimate).</p></li>
     <li><b>Latency</b><p>None: 0&nbsp;frames on program and on command-to-screen. <code>realtime</code> releases file frames at their timestamps, however far the decoder runs ahead. A live input's decoded queue is normally empty anyway.</p></li>
     <li class="flag"><b>Side effects</b><p>Less slack before a decode hiccup forces a repeated frame: 1 frame (33–40&nbsp;ms) instead of 3. Loop wraps are the likely trigger: 2&nbsp;s test clips wrap about 20 times a second across 40 sources.</p></li>
-    <li><b>Cost</b><p>VRAM: about 255&nbsp;MB less across 40 sources (estimate). No new nodes, queues or threads. No extra GPU or CPU work. One constant and a small rate check in <code>mixer.py</code>, passed as <code>decoded_capacity</code> on both build paths.</p></li>
+    <li><b>Cost</b><p>VRAM: about 255&nbsp;MB less across 40 sources (estimate). No new nodes, queues or threads. No extra GPU or CPU work. A rate check in <code>mixer.py</code> and one <code>planCapacity</code> call per NVDEC source on both build paths.</p></li>
     <li><b>Risk</b><p>A rise in repeated frames on file sources. The edge queue is bounded and never allocates (<code>try_enqueue</code>), so capacity&nbsp;1 is a hard cap on parked frames.</p></li>
-    <li><b>Switch it off</b><p><code>NVDEC_DECODED_CAPACITY = None</code> in <code>demos/mixer/mixer.py</code>. That is today's default; <code>NVDEC_DECODED_CAPACITY = 1</code> turns it on at ≤30&nbsp;fps. Setting it to&nbsp;2 does not halve the change: it behaves like&nbsp;3.</p></li>
+    <li><b>Switch it off</b><p>Nothing to switch today: the code has no such setting, and every decoded edge keeps the instance default of&nbsp;3. If it is built, it should be off by default. Capacity&nbsp;2 would not halve the change: it behaves like&nbsp;3.</p></li>
   </ul>
 
-  <h2>Before enabling</h2>
-  <p>Turn it on as its own measured step, with nothing else changing. First record a repeat-rate baseline at capacity&nbsp;3: <code>force_fps</code> duplicated counters and compositor repeats per hour. Then set capacity&nbsp;1 and compare. Any regression is then attributable to this change. Keep it off if repeats rise.</p>
+  <h2>Before building it</h2>
+  <p>Ship it as its own measured step, with nothing else changing. First record a repeat-rate baseline at capacity&nbsp;3: <code>force_fps</code> duplicated counters and compositor repeats per hour. Then set capacity&nbsp;1 and compare. Any regression is then attributable to this change. Keep it off if repeats rise.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L407-L419"><code>demos/mixer/mixer.py:407-419</code></a> — <code>NVDEC_DECODED_CAPACITY</code> (off by default) and the ≤30&nbsp;fps rule in <code>nvdec_decoded_capacity</code>.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L442"><code>demos/mixer/mixer.py:442</code></a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L716"><code>:716</code></a> — the two build paths that pass it.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L390"><code>demos/mixer/mixer.py:390</code></a> — the instance-wide default of&nbsp;3.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L48-L50"><code>pyplumber/mixer/inputs.py:48-50</code></a> — <code>build_input</code> plans the decoded edge before creating it.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L390"><code>demos/mixer/mixer.py:390</code></a> — the instance-wide default of&nbsp;3, which every decoded edge uses today.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L425"><code>demos/mixer/mixer.py:425</code></a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L699"><code>:699</code></a> — the two build paths, where a per-source plan would go.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L55-L56"><code>pyplumber/mixer/inputs.py:55-56</code></a> — <code>build_input</code>'s decoder writes <code>input_&lt;n&gt;_decoded</code>.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/graph_core.hpp#L569-L573"><code>src/graph_core.hpp:569-573</code></a> — edges use a bounded, non-allocating <code>try_enqueue</code>.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/graph_core.hpp#L801-L805"><code>src/graph_core.hpp:801-805</code></a> — a planned capacity overrides the default when the edge is created.</li>
     <li><a href="https://github.com/cameron314/readerwriterqueue/blob/2dee33ae3edd1e454ac34fea0a27017613355eff/readerwriterqueue.h#L116"><code>deps/readerwriterqueue/readerwriterqueue.h:116</code></a> — the power-of-two rounding.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/realtime.cpp#L121"><code>src/nodes/realtime.cpp:121</code></a> — <code>realtime</code> peeks at the head frame without taking it.</li>
     <li><a href="https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavcodec/nvdec.c#L315"><code>libavcodec/nvdec.c:315</code></a> (FFmpeg&nbsp;8.1) — the NVDEC output frame pool grows on demand.</li>
   </ul>
-  <p class="note">Line numbers are from the branch that carries this change; they may shift once it lands on <code>develop</code>.</p>
+  <p class="note">No branch carries this change. Line numbers are from the current mixer branch; they may shift on <code>develop</code>.</p>
   <p>Related doc: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md">Mixer demo capacity</a>, the 40-source NVDEC workload this saving is sized for. No Markdown section covers this change yet.</p>
 
   <footer><a href="index.html">← All cookbook pages</a></footer>
