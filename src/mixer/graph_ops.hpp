@@ -30,6 +30,9 @@ void resetInputIf(const std::shared_ptr<NodeManager>& nodes, const std::string& 
 void resetSlotNormFps(const std::shared_ptr<NodeManager>& nodes, const MixerState& st);
 
 bool nodeWorkingIfExists(const std::shared_ptr<NodeManager>& nodes, const std::string& name);
+/// True while any node of the group still runs. Reads each node without the group's lock,
+/// which a stop in progress holds until its last node has stopped.
+bool groupWorking(const std::shared_ptr<NodeManager>& nodes, const std::string& group_name);
 std::shared_ptr<NodeWrapper> workingConsumerForEdge(const std::shared_ptr<NodeManager>& nodes,
                                                     const std::string& edge_name);
 /// Stores the value in the wrapper's parameters and applies it when the node exists; false when

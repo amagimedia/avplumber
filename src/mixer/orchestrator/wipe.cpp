@@ -212,11 +212,19 @@ int64_t MixerOrchestrator::prepareWipe(
     std::string overlay_edge_name;
     av::Timestamp overlay_initial_ts = NOTS;
 
-    // Only the serialized transition worker reuses wipe nodes. Finish retiring
-    // the previous clip outside the control mutex, then recheck cancellation.
+    // Only the serialized transition worker reuses wipe nodes. Retire the previous
+    // clip outside the control mutex without joining its threads here: a take queued
+    // behind this task must not wait for decoder teardown, so poll with cancellation.
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) return -1;
     try {
-        nodes->group(state->wipe_group_name)->stopNodesAndWait();
+        nodes->group(state->wipe_group_name)->stopNodes();
+        for (int64_t waited = 0; groupWorking(nodes, state->wipe_group_name); waited += kPollMs) {
+            if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
+                return -1;
+            if (waited >= kWipeReadyTimeoutMs)
+                throw Error("previous wipe clip did not stop within " + std::to_string(kWipeReadyTimeoutMs) + " ms");
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+        }
         std::lock_guard<std::mutex> lock(state->mutex);
         if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
             return -1;
