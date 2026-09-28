@@ -1,5 +1,4 @@
 #define EGL_EGLEXT_PROTOTYPES 1
-#define GL_GLEXT_PROTOTYPES 1
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
@@ -45,8 +44,6 @@ protected:
 
     // EGL state
     EGLDisplay egl_dpy_ = EGL_NO_DISPLAY;
-    EGLContext egl_ctx_ = EGL_NO_CONTEXT;
-    EGLSurface egl_surf_ = EGL_NO_SURFACE;
 
     bool have_dma_buf_import_ = false;
     bool have_mods_ = false;
@@ -59,7 +56,7 @@ protected:
     // One EGL image + CUDA registration per physical DMA-BUF allocation. The
     // producer recycles a small pool of buffers, so after warm-up every frame
     // is one device copy from the mapped EGL frame instead of a fresh import
-    // (EGL image, GL copy, glFinish, CUDA map/unmap, destroy) per frame.
+    // (EGL image, CUDA registration and map, unregister, destroy) per frame.
     struct ImportKey {
         dev_t st_dev = 0;
         ino_t st_ino = 0;
@@ -118,16 +115,11 @@ protected:
 
     static inline const char* safe_str(const char* s) { return s ? s : ""; }
 
+    // Importing a DMA-BUF (eglCreateImage with EGL_NO_CONTEXT) and registering the image
+    // with CUDA need only an initialized display, so no GL context or pbuffer is created:
+    // each one would cost device memory per node (same setup as drm_prime_to_egl_image).
     bool ensureEGL() {
-        if (egl_ctx_ != EGL_NO_CONTEXT) {
-            // Re-bind on every call: cuCtxPushCurrent/PopCurrent each frame can
-            // release the GL context on the current thread, so we must restore it.
-            if (!eglMakeCurrent(egl_dpy_, egl_surf_, egl_surf_, egl_ctx_)) {
-                logstream << "drm2cuda: eglMakeCurrent (re-bind) failed: " << eglGetError();
-                return false;
-            }
-            return true;
-        }
+        if (egl_dpy_ != EGL_NO_DISPLAY) return true;
 
         EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
         if (dpy == EGL_NO_DISPLAY) {
@@ -139,69 +131,13 @@ protected:
             logstream << "drm2cuda: eglInitialize failed";
             return false;
         }
-
-        if (!eglBindAPI(EGL_OPENGL_API)) {
-            logstream << "drm2cuda: eglBindAPI(EGL_OPENGL_API) failed: " << eglGetError();
-            return false;
-        }
         logstream << "drm2cuda: EGL vendor: " << safe_str(eglQueryString(dpy, EGL_VENDOR));
-
-        static const EGLint ctx_config_attribs[] = {EGL_STENCIL_SIZE,
-            0,
-            EGL_DEPTH_SIZE,
-            0,
-            EGL_BUFFER_SIZE,
-            32,
-            EGL_ALPHA_SIZE,
-            8,
-            EGL_RENDERABLE_TYPE,
-            EGL_OPENGL_BIT,
-            EGL_SURFACE_TYPE,
-            EGL_PBUFFER_BIT,
-            EGL_NONE};
-        
-        EGLConfig cfg = nullptr;
-        EGLint num = 0;
-        if (!eglChooseConfig(dpy, ctx_config_attribs, &cfg, 1, &num) || num < 1) {
-            logstream << "drm2cuda: eglChooseConfig failed";
-            return false;
-        }
-
-        static int ctx_pbuffer_attribs[] = {EGL_WIDTH, 2, EGL_HEIGHT, 2, EGL_NONE};
-        EGLSurface surf = eglCreatePbufferSurface(dpy, cfg, ctx_pbuffer_attribs);
-        if (surf == EGL_NO_SURFACE) {
-            logstream << "drm2cuda: eglCreatePbufferSurface failed: " << eglGetError();
-            return false;
-        }
-        
-        static const int ctx_attribs[] = {
-            #ifdef _DEBUG
-                EGL_CONTEXT_OPENGL_DEBUG,
-                EGL_TRUE,
-            #endif
-                EGL_CONTEXT_OPENGL_PROFILE_MASK,
-                EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-                EGL_CONTEXT_MAJOR_VERSION,
-                3,
-                EGL_CONTEXT_MINOR_VERSION,
-                3,
-                EGL_NONE,
-        };
-        
-        EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctx_attribs);
-        if (ctx == EGL_NO_CONTEXT) {
-            logstream << "drm2cuda: eglCreateContext failed: " << eglGetError();
-            eglDestroySurface(dpy, surf);
-            return false;
-        }
 
         const char* exts = eglQueryString(dpy, EGL_EXTENSIONS);
         have_dma_buf_import_ = exts && strstr(exts, "EGL_EXT_image_dma_buf_import");
         have_mods_ = exts && strstr(exts, "EGL_EXT_image_dma_buf_import_modifiers");
         if (!have_dma_buf_import_) {
             logstream << "drm2cuda: EGL_EXT_image_dma_buf_import missing";
-            eglDestroyContext(dpy, ctx);
-            eglDestroySurface(dpy, surf);
             return false;
         }
         // Resolve extension function pointers at runtime to avoid link-time deps
@@ -220,28 +156,11 @@ protected:
         }
         if (!p_eglCreateImageKHR_ || !p_eglDestroyImageKHR_) {
             logstream << "drm2cuda: failed to load eglCreateImageKHR/eglDestroyImageKHR";
-            eglDestroyContext(dpy, ctx);
-            eglDestroySurface(dpy, surf);
-            return false;
-        }
-        if (!eglMakeCurrent(dpy, surf, surf, ctx)) {
-            logstream << "drm2cuda: eglMakeCurrent failed: " << eglGetError();
-            eglDestroyContext(dpy, ctx);
-            eglDestroySurface(dpy, surf);
             return false;
         }
 
-        // Commit — only store members after full successful init
+        // Commit — only store the display after full successful init
         egl_dpy_ = dpy;
-        egl_surf_ = surf;
-        egl_ctx_ = ctx;
-
-        auto get_string = [](GLenum key) {
-            const char* s = (const char*)glGetString(key);
-            return s ? std::string(s) : std::string("null");
-        };
-        logstream << "gl: " << get_string(GL_VENDOR) << " / " << get_string(GL_RENDERER) << " / " << get_string(GL_VERSION);
-
         return true;
     }
 
@@ -336,7 +255,7 @@ protected:
         phase_ = "cleanup_admission";
         auto entry = cleanup_->tryMake(import_budget_, hwaccel_);
         if (!entry) return nullptr; // process() releases the input and its browser slot.
-        phase_ = "egl_context";
+        phase_ = "egl_display";
         if (!ensureEGL()) return nullptr;
         ImportEntry &e = *entry;
         e.key = key;
@@ -568,10 +487,7 @@ public:
         if (cuda_dev_ctx_) purgeImports(0, true);
         av_buffer_unref(&hw_frames_ctx_);
         // The default EGLDisplay is process-global: other nodes and zero-copy frames still in
-        // flight own images on it, so release only this node's context and surface and never
-        // eglTerminate (same rule as drm_prime_to_egl_image).
-        if (egl_ctx_ != EGL_NO_CONTEXT) eglDestroyContext(egl_dpy_, egl_ctx_);
-        if (egl_surf_ != EGL_NO_SURFACE) eglDestroySurface(egl_dpy_, egl_surf_);
+        // flight own images on it, so never eglTerminate (same rule as drm_prime_to_egl_image).
     }
 
     static std::shared_ptr<DRMPrimeToCUDA> create(NodeCreationInfo &nci) {
