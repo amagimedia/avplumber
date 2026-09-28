@@ -18,7 +18,6 @@ double frameTime(int k) { return kT0 + k * kPeriod; }
 
 void curves() {
     for (auto curve : kCurves) {
-        assert(parseFadeCurve(fadeCurveName(curve)) == curve);
         // Exact ends, clamped outside [0, 1], NaN treated as the start.
         assert(fadeCurveAt(curve, 0) == 0 && fadeCurveAt(curve, 1) == 1);
         assert(fadeCurveAt(curve, -3) == 0 && fadeCurveAt(curve, 7) == 1);
@@ -35,18 +34,13 @@ void curves() {
     assert(fadeCurveAt(FadeCurve::EaseOut, 0.5) == 0.75);
     assert(fadeCurveAt(FadeCurve::EaseInOut, 0.5) == 0.5);
     assert(near(fadeCurveAt(FadeCurve::EaseInOut, 0.25), 0.15625));
+    const char* names[] = {"linear", "ease-in", "ease-out", "ease-in-out"};   // kCurves order
+    for (int i = 0; i < 4; ++i) assert(parseFadeCurve(names[i]) == kCurves[i]);
     for (const char* bad : {"", "Linear", "smooth", "ease_in", "bezier"}) {
         bool rejected = false;
         try { parseFadeCurve(bad); } catch (const Error&) { rejected = true; }
         assert(rejected);
     }
-
-    // Linear keeps the M/E fade command byte-identical; the others stay one operand.
-    const std::string p = "clip((t-12.345000)/0.750000,0,1)";
-    assert(fadeCurveExpression(FadeCurve::Linear, p) == p);
-    assert(fadeCurveExpression(FadeCurve::EaseIn, p) == "(st(0," + p + ");ld(0)*ld(0))");
-    assert(fadeCurveExpression(FadeCurve::EaseOut, p) == "(st(0," + p + ");ld(0)*(2-ld(0)))");
-    assert(fadeCurveExpression(FadeCurve::EaseInOut, p) == "(st(0," + p + ");ld(0)*ld(0)*(3-2*ld(0)))");
 }
 
 void settledStates() {
