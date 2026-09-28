@@ -147,6 +147,16 @@ void timestampJumps() {
     assert(key.level(back + 100) == 1 && !key.fading());
 }
 
+// Timestamps rounded to milliseconds (60 fps in a 1/1000 time base) still end a fade on its Nth frame.
+void roundedTimestamps() {
+    const double period = 1 / 60.0;
+    auto ms = [](double t) { return std::round(t * 1000) / 1000; };
+    KeyFade key;
+    key.retarget(true, 30 * period, FadeCurve::Linear, kT0, period);
+    for (int k = 0; k < 29; ++k) assert(key.level(ms(kT0 + k * period)) < 1);
+    assert(key.level(ms(kT0 + 29 * period)) == 1);
+}
+
 void independentKeys() {
     std::vector<KeyFade> keys(2);
     keys[0].retarget(true, 0.2, FadeCurve::Linear, frameTime(0), kPeriod);
@@ -169,5 +179,6 @@ int main() {
     reversal();
     startsAtCommand();
     timestampJumps();
+    roundedTimestamps();
     independentKeys();
 }

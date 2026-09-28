@@ -32,6 +32,7 @@ class KeyFade {
     double last_t_ = 0;     // time of the latest level() call
     double span_ = 0;       // seconds from from_ to target_; 0 when settled
     double duration_ = 0;   // seconds for a full 0 <-> 1 swing
+    double period_ = 0;     // program frame period, seconds
     FadeCurve curve_ = FadeCurve::Linear;
 
     double targetLevel() const { return target_ ? 1.0 : 0.0; }
@@ -61,6 +62,7 @@ public:
         target_ = on;
         curve_ = curve;
         duration_ = cut ? 0 : duration_s;
+        period_ = period;
         start(t - period);
     }
 
@@ -72,13 +74,14 @@ public:
         if (span_ == 0) return last_;
         if (t < last_t_) start(t);
         last_t_ = t;
-        // The tolerance absorbs the rounding of timestamps converted to seconds, so
-        // the Nth frame of an N-period fade lands exactly on the target.
-        const double x = (t - anchor_) / span_;
-        if (x >= 1 - 1e-6) {
+        // The ramp ends on the frame nearest its end: half a period absorbs timestamps
+        // rounded to their time base (milliseconds at 60 fps), so the Nth frame of an
+        // N-period fade lands exactly on the target.
+        if (t - anchor_ >= span_ - period_ / 2) {
             settle();
             return last_;
         }
+        const double x = (t - anchor_) / span_;
         last_ = std::min(1.0, std::max(0.0, from_ + (targetLevel() - from_) * fadeCurveAt(curve_, x)));
         return last_;
     }
