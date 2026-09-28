@@ -20,6 +20,11 @@ DEMO_DIR = Path(__file__).resolve().parent
 # ratio to it, so an HDR output stays proportionally richer without a second control.
 DEFAULT_BITRATE_KBPS = 6000
 MIN_BITRATE_KBPS, MAX_BITRATE_KBPS = 500, 40000
+# A clean mixer stop releases browser DMA-BUF frames; a killed one leaves them quarantined
+# until /workers/recover restarts the browser workers. Groups stop concurrently (mixer.py
+# MixerApplication.stop), so this only bounds a hung stop. compose.yaml's stop_grace_period
+# covers it plus the reap and the setup worker join in close().
+STOP_TIMEOUT_SEC = 60
 # The demo is 1080p only: every source is a unique 1920x1080 input, in either orientation.
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
@@ -172,6 +177,9 @@ class SetupRuntime:
         self.mixer_args = list(mixer_args)
         self.browser_url = browser_url
         self.lock = threading.Lock()
+        # Held for a whole _stop(): a second caller must not signal a mixer that is already
+        # stopping (a second SIGINT would abort its clean shutdown).
+        self.stop_lock = threading.Lock()
         self.closing = threading.Event()
         self.process = None
         self.worker = None
@@ -256,22 +264,21 @@ class SetupRuntime:
         recipe["aux_buses"] = buses
 
     def _stop(self):
-        process = self.process
-        if process and process.poll() is None:
-            print(f"Stopping mixer process {process.pid}", flush=True)
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGINT)
-            try:
-                # Large graphs stop input groups serially; killing them early
-                # leaves browser DMA-BUF frames quarantined and blocks restart.
-                process.wait(timeout=120)
-            except subprocess.TimeoutExpired:
-                print("Mixer shutdown timed out; killing process before browser recovery", flush=True)
+        with self.stop_lock:
+            process = self.process
+            if process and process.poll() is None:
+                print(f"Stopping mixer process {process.pid}", flush=True)
                 with suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=10)
-            print(f"Mixer process exited ({process.returncode})", flush=True)
-        self.process = None
+                    os.killpg(process.pid, signal.SIGINT)
+                try:
+                    process.wait(timeout=STOP_TIMEOUT_SEC)
+                except subprocess.TimeoutExpired:
+                    print("Mixer shutdown timed out; killing process before browser recovery", flush=True)
+                    with suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=10)
+                print(f"Mixer process exited ({process.returncode})", flush=True)
+            self.process = None
 
     def _recover_browsers(self, shows):
         from pyplumber.mixer.dmabuf_inputs import rest_request
@@ -389,7 +396,10 @@ class SetupRuntime:
             self._status("error", message)
 
     def close(self):
+        """Stop the mixer cleanly first: the container's stop grace period is spent on it,
+        not on setup work that `closing` already cancels."""
         self.closing.set()
+        self._stop()
         if self.worker:
             self.worker.join(timeout=20)
-        self._stop()
+        self._stop()   # a mixer the cancelled setup work started meanwhile

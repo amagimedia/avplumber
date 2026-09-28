@@ -32,6 +32,9 @@ services:
     extends: {file: ../dmabuf-browser/compose.yaml, service: avplumber}
     <<: *mixer-image
     restart: "no"
+    # webui.py (PID 1) stops the mixer cleanly on SIGTERM so browser frames are released,
+    # not quarantined: setup_runtime.STOP_TIMEOUT_SEC + 10 s reap + 20 s setup worker join.
+    stop_grace_period: 90s
     # CUDA, DMA-BUF and graph queues need more than 1024 descriptors at 64 sources.
     ulimits:
       nofile: {soft: 65536, hard: 65536}

@@ -8,7 +8,8 @@ from urllib.request import Request, urlopen
 import pytest
 
 import prepare_demo
-from setup_runtime import DEFAULT_SETTINGS, SetupRuntime, browser_limit, nvdec_limit, raw_upload_units, recipe_for, source_counts
+from setup_runtime import (DEFAULT_SETTINGS, STOP_TIMEOUT_SEC, SetupRuntime, browser_limit, nvdec_limit,
+                           raw_upload_units, recipe_for, source_counts)
 from webui import serve
 
 
@@ -504,7 +505,7 @@ def test_shutdown_reaps_killed_child_before_recovery(tmp_path, monkeypatch):
     process.poll.return_value = None
     def wait(timeout):
         events.append(('wait', timeout))
-        if timeout == 120:
+        if timeout == STOP_TIMEOUT_SEC:
             raise subprocess.TimeoutExpired('mixer', timeout)
         process.returncode = -signal.SIGKILL
     process.wait.side_effect = wait
@@ -512,7 +513,48 @@ def test_shutdown_reaps_killed_child_before_recovery(tmp_path, monkeypatch):
     manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
     manager.process = process
     manager._stop()
-    assert events == [('signal', signal.SIGINT), ('wait', 120), ('signal', signal.SIGKILL), ('wait', 10)]
+    assert events == [('signal', signal.SIGINT), ('wait', STOP_TIMEOUT_SEC), ('signal', signal.SIGKILL), ('wait', 10)]
+    assert manager.process is None
+
+
+def exiting_process(events):
+    """A mixer that exits once `exited` is set after its SIGINT."""
+    from unittest.mock import Mock
+    exited = threading.Event()
+    process = Mock(pid=1234, returncode=0)
+    process.poll.side_effect = lambda: 0 if exited.is_set() else None
+    process.wait.side_effect = lambda timeout: events.append('exited') if exited.wait(3) else None
+    return process, exited
+
+
+def test_close_stops_the_mixer_before_waiting_for_setup_work(tmp_path, monkeypatch):
+    import signal
+    events = []
+    process, exited = exiting_process(events)
+    monkeypatch.setattr('setup_runtime.os.killpg', lambda pid, sig: (events.append(sig), exited.set()))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager.process = process
+    manager.worker = SimpleNamespace(join=lambda timeout: events.append('joined'))
+    manager.close()
+    assert events == [signal.SIGINT, 'exited', 'joined']
+
+
+def test_concurrent_stops_signal_the_mixer_once(tmp_path, monkeypatch):
+    import signal
+    import time
+    events = []
+    process, exited = exiting_process(events)
+    monkeypatch.setattr('setup_runtime.os.killpg', lambda pid, sig: events.append(sig))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager.process = process
+    stops = [threading.Thread(target=manager._stop) for _ in range(2)]
+    for stop in stops:
+        stop.start()
+        time.sleep(0.05)   # the second one waits for the first
+    exited.set()
+    for stop in stops:
+        stop.join(3)
+    assert events == [signal.SIGINT, 'exited']
     assert manager.process is None
 
 
