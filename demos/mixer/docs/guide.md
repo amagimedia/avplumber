@@ -13,7 +13,7 @@ The interface provides:
 - separate **Program** (on-air) and **Preview** (ready) buses;
 - a scrollable strip of fullscreen and grid scenes;
 - fullscreen and paged 2-box, 4-box, 8-box, and 16-box layouts;
-- immediate Cut, timed Fade, and transparent media-file Wipe transitions;
+- immediate Cut, timed Fade (a mix, or a dip through a colour), and transparent media-file Wipe transitions;
 - editable fade duration and media-wipe file path;
 - Direct mode for putting scene and layout selections straight on air; and
 - connection status, transition status, and manual Reconnect.
@@ -23,6 +23,12 @@ Cut, Fade, and Media Wipe take the selected scene to Program. With Direct mode
 on, scene and layout selections use the current transition immediately (Cut by default). The
 take buttons and adjacent selector share this choice. Fade uses the configured
 duration; Media Wipe uses the file path and the clip's duration.
+
+A fade mixes, or dips: program fades to a solid colour, shown alone at the
+midpoint, then the colour fades to the new scene, in the same fade duration and
+at no more GPU cost than a mix. The web UI's colour menu beside the fade curve picks Mix,
+Black, White or a custom colour and remembers the choice per browser; the TUI
+uses `control.fade_color` from the config (see config.md).
 
 A new take interrupts an unfinished transition. The mixer retains its current
 output picture, including a partial fade or wipe, while preparing the new scene.

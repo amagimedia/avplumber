@@ -304,6 +304,7 @@ always outranks these; they are the state a fresh browser tab picks up.
 | `transition` | `"cut"` | what a direct-mode pick takes with: `cut`, `fade` or `wipe` |
 | `fade_seconds` | `0.5` | length of a fade |
 | `fade_curve` | `"linear"` | easing of a fade: `linear`, `ease-in` (t²), `ease-out` (1−(1−t)²) or `ease-in-out` (3t²−2t³); a take may pick its own (`mixer.fade {..., "curve": "ease-in"}`); a `mixer.fade` without `curve` is linear |
+| `fade_color` | `null` | `null` mixes; `"#RRGGBB"` makes a fade a dip through that colour, fully shown at the midpoint, with `fade_curve` shaping each half; converted for the canvas color (HLG/PQ white is 203-nit graphics white); a take may pick its own (`mixer.fade {..., "color": "#000000"}`); a `mixer.fade` without `color` mixes |
 | `default_wipe` | first wipe | the clip a direct-mode wipe uses |
 
 The mixer publishes this over the control protocol as `mixer.settings`.
