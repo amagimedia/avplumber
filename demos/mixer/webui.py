@@ -7,7 +7,8 @@ mixer needs no HTTP server of its own and the page needs no build step:
     GET  /              the page
     GET  /api/state     status + scenes + settings in one round trip
     POST /api/command   {"command": "cut"|"fade"|"wipe"|"preview", "scene": ...}
-                        (a fade may carry "curve": "linear"|"ease-in"|"ease-out"|"ease-in-out")
+                        (a fade may carry "curve": "linear"|"ease-in"|"ease-out"|"ease-in-out",
+                        and "color": "#RRGGBB" to dip through that colour instead of mixing)
                         {"command": "dsk", "key": ..., "on": true|false, "fade_seconds"?: s, "curve"?: ...}
 
 The bridge owns a single serialized control connection and reconnects when the

@@ -176,6 +176,7 @@ class MixerTui(App):
         self._transition_chosen = False   # an operator pick outranks the config
         self._wipes: dict[str, dict] = {}
         self._fade_curve = "linear"   # control.fade_curve from mixer.settings; the TUI has no picker
+        self._fade_color = None       # control.fade_color: a fade dips through it; None mixes
         self.scenes: list[str] = []
         self.selected_scene = ""
         self.pgm_scene = ""
@@ -353,6 +354,8 @@ class MixerTui(App):
                 payload["duration_sec"] = duration
                 if self._fade_curve != "linear":
                     payload["curve"] = self._fade_curve
+                if self._fade_color:
+                    payload["color"] = self._fade_color
             elif transition == "wipe":
                 chosen = self.query_one("#wipe_choice", Select).value
                 wipe = self._wipes.get(chosen) if chosen is not Select.BLANK else None
@@ -443,6 +446,7 @@ class MixerTui(App):
         if "fade_seconds" in settings:
             self.query_one("#fade_duration", Input).value = str(settings["fade_seconds"])
         self._fade_curve = str(settings.get("fade_curve") or "linear")
+        self._fade_color = settings.get("fade_color") or None
         if settings.get("transition") and not self._transition_chosen:
             self.query_one("#direct_transition", Select).value = str(settings["transition"])
         library = settings.get("wipes") or []

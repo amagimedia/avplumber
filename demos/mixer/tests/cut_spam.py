@@ -79,6 +79,8 @@ def transition_payloads(settings):
     fade = {"duration_sec": settings.get("fade_seconds") or 0.5}
     if settings.get("fade_curve", "linear") != "linear":
         fade["curve"] = settings["fade_curve"]
+    if settings.get("fade_color"):
+        fade["color"] = settings["fade_color"]
     clips = settings.get("wipes") or []
     clip = next((w for w in clips if w.get("id") == settings.get("default_wipe")), clips[0] if clips else {})
     wipe = {"wipe_file": clip.get("path") or settings.get("wipe_file")}
