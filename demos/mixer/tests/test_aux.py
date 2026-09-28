@@ -281,10 +281,7 @@ def test_multiview_shows_pgm_one_tick_late_at_the_main_latency(cfg):
     for latency, expected in ((None, 80), (120, 120), (20, 80)):
         mixer.latency_ms = latency
         assert AuxMultiview(None, None, mixer, cfg25, parse_aux_buses([bus_json()], cfg25)[0]).latency_ms() == expected
-    mixer.latency_ms = None
-    assert view.compositor_params() == {"pgm_delay_frames": 1}
     assert view.inputs()[-1] == view.pgm_edge   # the delay applies to the last input
-    assert pages.compositor_params() == {}
 
 
 class _Built(Exception):

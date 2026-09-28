@@ -167,10 +167,6 @@ class _AuxOutput:
         main = main_latency if main_latency is not None else 2000 / self.cfg.fps
         return max(main, 2000 / aux_fps(self.cfg.fps))
 
-    def compositor_params(self):
-        """Layout-specific compositor parameters."""
-        return {}
-
     def build(self, options):
         from .janus import JanusVideoConfig, build_janus_output
         fps = aux_fps(self.cfg.fps)
@@ -191,7 +187,8 @@ class _AuxOutput:
             "aux_mode": True, "subscriptions": inputs, "mixer": self.mixer.name,
             "max_layers": self.layer_budget(),
             "group": self.group, "auto_restart": "off", "on_error": "off",
-            **self.compositor_params(), **self.current_composition(),
+            **({"pgm_delay_frames": self.pgm_delay_frames} if self.pgm_delay_frames else {}),
+            **self.current_composition(),
         }, api=self.api), early_create=True)
         r = self.bus.renditions[0]
         converted = f"{self.prefix}_sdr"
@@ -256,9 +253,6 @@ class AuxMultiview(_AuxOutput):
     # frame after the sources it is made of. Matching it one frame back keeps every
     # other input at the normal latency instead of holding all of them a frame longer.
     pgm_delay_frames = 1
-
-    def compositor_params(self):
-        return {"pgm_delay_frames": self.pgm_delay_frames}
 
     def current_composition(self):
         return composition(self.cfg, self.scenes, self.preview)
