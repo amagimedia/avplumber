@@ -10,6 +10,7 @@ extern "C" {
 }
 
 #include <string>
+#include <utility>
 
 namespace avp::mixer {
 
@@ -212,18 +213,14 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
         if (!op.src || !op.src->raw()) continue;
         if (n >= max_layers_)
             throw Error("cuda_rect_overlay: more than " + std::to_string(max_layers_) + " layers in one frame");
-        const AvpRectLayer &entry = table_host_[n];
-        fillTableEntry(op, canvas, table_host_[n]);
+        AvpRectLayer &entry = table_host_[n];
+        fillTableEntry(op, canvas, entry);
         any_rgb = any_rgb || entry.kind >= AVP_RECT_KIND_RGB;
-        if (op.layer.opacity < 1.f) {
-            if (entry.kind == AVP_RECT_KIND_RGBA || entry.kind == AVP_RECT_KIND_RGBA_TEX) {
-                any_fade = true;
-            } else if (!opacity_warned_) {
-                // Not an error: a key without alpha (or on a packed canvas) still cuts cleanly.
-                opacity_warned_ = true;
-                logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
-            }
-        }
+        const bool fades = entry.kind >= AVP_RECT_KIND_RGB && entry.mul < 1.f;   // only a blended RGBA mul is below 1
+        any_fade = any_fade || fades;
+        // Not an error: a key without alpha (or on a packed canvas) still cuts cleanly.
+        if (op.layer.opacity < 1.f && !fades && !std::exchange(opacity_warned_, true))
+            logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
         ++n;
     }
     const int planes = av_pix_fmt_count_planes(sw_fmt);

@@ -30,9 +30,9 @@ struct LayerSpec {
     int crop_h = 0;
     int z = 0;   // draw order: lower first, ties by source index
     bool blend = false;   // honour the source's alpha instead of overwriting
-    // Weight on a blended RGBA layer's alpha, in (0, 1]; other layer kinds draw opaque. 0 or
-    // less draws nothing. Set per frame by the downstream keyer's key fades and never parsed
-    // from JSON, so layer descriptions and per-frame metadata cannot change it.
+    // Weight on a blended RGBA layer's alpha, in (0, 1]; other layer kinds draw opaque. Set
+    // per frame by the downstream keyer's key fades (a key at 0 is left out, not drawn) and
+    // never parsed from JSON, so layer descriptions and per-frame metadata cannot change it.
     float opacity = 1.f;
 
     /// The source this layer draws: `input`, or its position in the legacy one-layer-per-input order.
@@ -146,9 +146,8 @@ inline void applyLayerMetadata(std::vector<LayerSpec> &layers, const char *json)
 }
 
 /// Resolve each layer against its source frame: crop/destination clipping, chroma alignment,
-/// fit/contain placement, then z-order. Missing sources, fully transparent layers (opacity <= 0)
-/// and empty rectangles yield ops with src == nullptr; a placement rejected by geometry keeps a
-/// negative src_w so the log can name it.
+/// fit/contain placement, then z-order. Missing sources and empty rectangles yield ops with
+/// src == nullptr; a placement rejected by geometry keeps a negative src_w so the log can name it.
 inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame *> &sources,
                                           const std::vector<LayerSpec> &layers,
                                           int canvas_w, int canvas_h, AVPixelFormat canvas_fmt) {
@@ -157,7 +156,7 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
     for (size_t i = 0; i < layers.size(); ++i) {
         const size_t input = layers[i].sourceIndex(i);
         const av::VideoFrame *srcp = input < sources.size() ? sources[input] : nullptr;
-        if (!srcp || !srcp->raw() || !(layers[i].opacity > 0.f)) {
+        if (!srcp || !srcp->raw()) {
             ops.push_back({});
             continue;
         }
