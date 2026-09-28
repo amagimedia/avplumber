@@ -46,7 +46,8 @@
   .meter b[data-level="good"] { color: var(--ok); }
   .meter b[data-level="warn"] { color: var(--warn); }
   .meter b[data-level="bad"] { color: var(--pgm); }
-  .meter b.ms { min-width: 6ch; }   /* "—", "186 ms" and "1.2 s" take the same room, so new numbers never move the row */
+  .meter b.ms { min-width: 6ch; }
+  #lat b { text-align: left; }   /* "—", "186 ms" and "1.2 s" take the same room, so new numbers never move the row */
   .meter .u { margin-left: .25em; }
 
   /* ---------- shared controls ---------- */
@@ -57,7 +58,7 @@
   .seg button:disabled { color: var(--faint); cursor: not-allowed; }
   .viewers-ctl { display: inline-flex; align-items: center; gap: 14px; white-space: nowrap; }
   .seg-label { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
-  .btn { border: 1px solid var(--edge); border-radius: 8px; padding: 9px 16px; cursor: pointer; font-weight: 600; background: var(--raised); }
+  .btn { border: 1px solid var(--edge); border-radius: 7px; padding: 4px 10px; cursor: pointer; font-size: 13px; font-weight: 600; background: var(--raised); }
   .mini { width: 26px; height: 26px; padding: 0; border: 1px solid var(--edge); border-radius: 6px; background: var(--panel);
           cursor: pointer; line-height: 1; font-size: 14px; display: inline-grid; place-items: center; }
   .btn:hover, .mini:hover, .dd-btn:hover, .tile:hover { border-color: var(--muted); }
@@ -86,13 +87,13 @@
   .dd.up .dd-menu { top: auto; bottom: calc(100% + 6px); }   /* the take bar sits at the bottom of the window */
   /* A fade: its seconds field joined to a curve menu that shows the curve's shape. */
   .fade-ctl { display: inline-flex; }
-  .fade-ctl .field { border-right: 0; border-radius: 8px 0 0 8px; }
+  .fade-ctl .field { border-right: 0; border-radius: 7px 0 0 7px; }
   .fade-ctl .field span { padding-right: 8px; }
   /* Arrow keys still step; the hover spinner would cover the value in these narrow fields. */
   .fade-ctl input { appearance: textfield; }
   .fade-ctl input::-webkit-inner-spin-button { display: none; }
   .fade-ctl .dd { display: flex; }
-  .fade-ctl .dd-btn { border-radius: 0 8px 8px 0; padding: 0 5px; }
+  .fade-ctl .dd-btn { border-radius: 0 7px 7px 0; padding: 0 5px; }
   .fade-ctl .dd-btn > :not(.glyph) { display: none; }
   .dd-btn svg.glyph { width: 14px; height: 10px; stroke: var(--text); stroke-width: 1.6; stroke-linecap: round; transform: none; }
   .fade-ctl .dd-menu { min-width: 150px; }
@@ -195,20 +196,22 @@
   #graph .edge { stroke: var(--faint); stroke-width: 1.5; fill: none; }
   #graph .edge.sub { stroke-dasharray: 4 4; }
 
-  #takebar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; }
+  #takebar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 12px; }
   #cut { border-color: var(--pgm); } #fade { border-color: var(--pvw); }
   .wipe { border-color: var(--wipe); }
-  #wipes { display: inline-flex; flex-wrap: wrap; gap: 8px; }
-  .field { display: inline-flex; align-items: center; border: 1px solid var(--edge); border-radius: 8px; background: var(--raised); overflow: hidden; }
-  .field input { width: 4.4em; border: 0; background: none; color: var(--text); font: inherit; padding: 8px 4px 8px 10px; font-variant-numeric: tabular-nums; }
+  #wipes { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+  .field { display: inline-flex; align-items: center; border: 1px solid var(--edge); border-radius: 7px; background: var(--raised); overflow: hidden; }
+  .field input { width: 4.4em; border: 0; background: none; color: var(--text); font: inherit; font-size: 13px; padding: 4px 4px 4px 10px; font-variant-numeric: tabular-nums; }
   .field input:focus { outline: none; }
   .field:focus-within { border-color: var(--accent); }
   .field span { color: var(--muted); padding-right: 10px; font-size: 12px; }
   #wipe-file { width: 16em; padding-right: 10px; }
   #fade-s { width: 3em; }
   .vsep { width: 1px; align-self: stretch; background: var(--edge); margin-inline: 2px; }
-  /* Right-aligned on the row it fits whole on, wrapping as a unit; hidden when no row is wide enough (see trimTakebar). */
-  #hint { margin-left: auto; max-width: 100%; white-space: nowrap; overflow: hidden; color: var(--faint); font-size: 11.5px; }
+  /* Right-aligned in the space the controls' last row leaves, never on a row of its own: keys only when
+     the words do not fit, hidden when the keys do not either (see trimTakebar). */
+  #hint { flex: 1 1 0; min-width: 0; text-align: right; white-space: nowrap; overflow: hidden; color: var(--faint); font-size: 11.5px; }
+  #hint.short .w { display: none; }
   #hint kbd { font: 11px var(--mono); color: var(--muted); }
   #error { flex-basis: 100%; color: var(--pgm); font-size: 12.5px; }
   #error:empty { display: none; }
@@ -344,7 +347,7 @@
       <label class="field" id="wipe-custom" hidden><input id="wipe-file" type="text" placeholder="wipe clip path on the mixer host" aria-label="Wipe clip path on the mixer host"></label>
       <span class="vsep"></span>
       <button class="btn" id="direct" type="button" aria-pressed="false" title="Picks take to program (D)" aria-keyshortcuts="D">Direct: off</button>
-      <span id="hint" aria-hidden="true"><kbd>1–9</kbd> scene · <kbd>C</kbd> cut · <kbd>F</kbd> fade · <kbd>W</kbd> wipe · <kbd>D</kbd> direct<span id="hint-pages" hidden> · <kbd>[ ]</kbd> <kbd>R</kbd> pages</span></span>
+      <span id="hint" aria-hidden="true"><kbd>1–9</kbd><span class="w"> scene</span> · <kbd>C</kbd><span class="w"> cut</span> · <kbd>F</kbd><span class="w"> fade</span> · <kbd>W</kbd><span class="w"> wipe</span> · <kbd>D</kbd><span class="w"> direct</span><span id="hint-pages" hidden> · <kbd>[ ]</kbd> <kbd>R</kbd><span class="w"> pages</span></span></span>
       <div id="error" role="alert"></div>
     </footer>
   </section>
@@ -1132,10 +1135,13 @@ function fitHeader(v) {
   v.head.classList.toggle("tight", over(v.head) || over(v.head.querySelector(".dd-btn span")));
 }
 // A take bar separator is only shown between two controls on the same row, never at a row end, and
-// the key hint, like the Keys card's note beside the key fade, only when it fits whole.
+// the key hint, like the Keys card's note beside the key fade, only when it fits whole (the hint first
+// drops its words).
 function trimTakebar() {
-  for (const hint of [$("hint"), document.querySelector("#keys-card .note")])
-    hint.style.visibility = hint.scrollWidth > hint.clientWidth ? "hidden" : "";
+  const hint = $("hint"), over = (n) => n.scrollWidth > n.clientWidth;
+  hint.classList.remove("short");
+  hint.classList.toggle("short", over(hint));
+  for (const n of [hint, document.querySelector("#keys-card .note")]) n.style.visibility = over(n) ? "hidden" : "";
   const seps = [...document.querySelectorAll("#takebar .vsep")];
   seps.forEach((sep) => (sep.hidden = false));
   const sameRow = (a, b) => { const r = a.getBoundingClientRect(), q = b.getBoundingClientRect(); return q.top < r.bottom && q.bottom > r.top; };
