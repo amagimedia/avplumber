@@ -55,8 +55,8 @@ def parse_aux_buses(values, cfg):
                 raise ConfigError("rotate_s must be 1 to 60 seconds")
             scenes = ()
         else:
-            if preset != "pgm_pvw_grid" or layout.get("rows", 2) != 2 or layout.get("cols", 4) != 4:
-                raise ConfigError("aux layout is pgm_pvw_grid (2 rows by 4 columns) or source_pages")
+            if preset != "pgm_pvw_grid" or layout.get("rows", 2) != 2 or layout.get("cols", 4) != 4 or "rotate_s" in obj:
+                raise ConfigError("aux layout is pgm_pvw_grid (2 rows by 4 columns, no rotate_s) or source_pages")
             if len(cfg.sources) + 1 > 128:
                 raise ConfigError("multiview needs one pad per unique source plus PGM; limit is 128")
             scenes = obj.get("scenes", [None] * 8)
@@ -348,7 +348,8 @@ class AuxSourcePages(_AuxOutput):
                 except Exception as exc:
                     self.error = str(exc)
                 due = self.bus.rotate_s
-        return min(max(due, 0.05), 0.5)
+            # A held page or a single page has nothing due: check back at the slow rate.
+            return min(max(due, 0.05), 0.5) if self.auto and self.pages > 1 else 0.5
 
     def run(self):
         while not self.stopped.wait(self._tick()):

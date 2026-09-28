@@ -124,7 +124,8 @@ def test_source_pages_bus_validation(cfg):
     assert (bus.layout, bus.scenes, bus.rotate_s) == ("source_pages", (), 8.0)
     assert parse_aux_buses([pages_json()], cfg)[0].rotate_s == 5.0
     for invalid in (pages_json(scenes=["full"] * 8), pages_json(layout={"preset": "source_pages", "cols": 3}),
-                    pages_json(rotate_s=0.5), pages_json(rotate_s=True), bus_json(layout={"preset": "mosaic"})):
+                    pages_json(rotate_s=0.5), pages_json(rotate_s=True), bus_json(layout={"preset": "mosaic"}),
+                    bus_json(rotate_s=5)):
         with pytest.raises(ConfigError):
             parse_aux_buses([invalid], cfg)
     # Without a PGM pad a page view takes one source more than a multiview.
@@ -200,7 +201,7 @@ def test_rotation_advances_pages_until_held(cfg, monkeypatch):
     assert bus.page == 1 and len(published) == 1
     bus.turn({"page": 4})
     clock[0] += 50
-    bus._tick()
+    assert bus._tick() == 0.5   # a held page is never due: no 50 ms polling
     assert bus.page == 4
     bus.turn({"auto": True})
     clock[0] += 2.5
