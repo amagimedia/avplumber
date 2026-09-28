@@ -114,24 +114,24 @@ class Server {
       const char *v = std::getenv("FDPASS_LOG_FRAMES");
       logf(path_, "[fdpass] frame logging enabled (FDPASS_LOG_FRAMES=%s) build=%s %s", (v ? v : "<unset>"), __DATE__, __TIME__);
     }
-    int ls = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (ls < 0) { logf(path_, "[fdpass] socket() failed errno=%d (%s)", errno, strerror(errno)); return false; }
-    sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    if (path_.size() >= sizeof(addr.sun_path)) { logf(path_, "[fdpass] path too long for AF_UNIX (%zu >= %zu)", path_.size(), sizeof(addr.sun_path)); ::close(ls); return false; }
-    std::strncpy(addr.sun_path, path_.c_str(), sizeof(addr.sun_path) - 1);
-    if (::unlink(path_.c_str()) < 0 && errno != ENOENT) { logf(path_, "[fdpass] unlink(%s) failed errno=%d (%s)", path_.c_str(), errno, strerror(errno)); }
-    if (::bind(ls, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) { logf(path_, "[fdpass] bind(%s) failed errno=%d (%s)", path_.c_str(), errno, strerror(errno)); ::close(ls); return false; }
-    if (::chmod(path_.c_str(), 0777) < 0) { logf(path_, "[fdpass] chmod(%s,0777) failed errno=%d (%s)", path_.c_str(), errno, strerror(errno)); }
-    if (::listen(ls, 512) < 0) { logf(path_, "[fdpass] listen(%s) failed errno=%d (%s)", path_.c_str(), errno, strerror(errno)); ::close(ls); ::unlink(path_.c_str()); return false; }
-    listen_fd_ = ls;
-    // Set non-blocking on the listening socket to avoid blocking accept
-    int lflags = ::fcntl(listen_fd_, F_GETFL, 0);
-    if (lflags >= 0) ::fcntl(listen_fd_, F_SETFL, lflags | O_NONBLOCK);
+    listen_fd_ = bindListener();
+    if (listen_fd_ < 0) return false;
     running_.store(true);
     accept_thread_ = std::thread([this]() { this->acceptLoop(); });
     logf(path_, "[fdpass] Server.start OK path=%s fd=%d", path_.c_str(), listen_fd_);
     return true;
+  }
+
+  // Replaces a listening socket whose file was removed (e.g. by a /tmp cleaner). dup3 swaps it in
+  // under the same descriptor, so the accept thread and connected clients are unaffected.
+  bool rebind() {
+    int ls = bindListener();
+    if (ls < 0) return false;
+    const bool ok = ::dup3(ls, listen_fd_, O_CLOEXEC) >= 0;
+    if (!ok) logf(path_, "[fdpass] dup3 failed errno=%d (%s)", errno, strerror(errno));
+    ::close(ls);
+    logf(path_, "[fdpass] socket file re-bound path=%s ok=%d", path_.c_str(), ok);
+    return ok;
   }
 
   std::vector<uint64_t> stop() {
@@ -287,6 +287,21 @@ class Server {
     size_t used = 0;
     uint64_t generation = 0;
   };
+
+  // Non-blocking listening socket bound to path_, or -1.
+  int bindListener() {
+    int ls = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (ls < 0) { logf(path_, "[fdpass] socket() failed errno=%d (%s)", errno, strerror(errno)); return -1; }
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    if (path_.size() >= sizeof(addr.sun_path)) { logf(path_, "[fdpass] path too long for AF_UNIX (%zu >= %zu)", path_.size(), sizeof(addr.sun_path)); ::close(ls); return -1; }
+    std::strncpy(addr.sun_path, path_.c_str(), sizeof(addr.sun_path) - 1);
+    if (::unlink(path_.c_str()) < 0 && errno != ENOENT) { logf(path_, "[fdpass] unlink(%s) failed errno=%d (%s)", path_.c_str(), errno, strerror(errno)); }
+    if (::bind(ls, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) { logf(path_, "[fdpass] bind(%s) failed errno=%d (%s)", path_.c_str(), errno, strerror(errno)); ::close(ls); return -1; }
+    if (::chmod(path_.c_str(), 0777) < 0) { logf(path_, "[fdpass] chmod(%s,0777) failed errno=%d (%s)", path_.c_str(), errno, strerror(errno)); }
+    if (::listen(ls, 512) < 0) { logf(path_, "[fdpass] listen(%s) failed errno=%d (%s)", path_.c_str(), errno, strerror(errno)); ::close(ls); ::unlink(path_.c_str()); return -1; }
+    return ls;
+  }
 
   void beginFrameBroadcast(uint64_t frame_count) {
     std::lock_guard<std::mutex> lk(pending_mu_);
@@ -469,7 +484,12 @@ Napi::Value CreateServer(const Napi::CallbackInfo &info) {
     return env.Null();
   }
   std::string path = info[0].As<Napi::String>().Utf8Value();
-  if (g_servers.find(path) != g_servers.end()) return Napi::Boolean::New(env, true);
+  auto existing = g_servers.find(path);
+  if (existing != g_servers.end()) {
+    // Idempotent, except that a server whose socket file vanished re-binds it.
+    const bool vanished = ::access(path.c_str(), F_OK) < 0 && errno == ENOENT;
+    return Napi::Boolean::New(env, !vanished || existing->second->rebind());
+  }
   auto srv = std::make_unique<Server>(path);
   if (!srv->start()) return Napi::Boolean::New(env, false);
   g_servers.emplace(path, std::move(srv));

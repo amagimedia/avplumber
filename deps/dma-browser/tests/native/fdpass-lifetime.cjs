@@ -86,6 +86,14 @@ async function scenario(name, run) {
     await send(5n);
     assert.deepEqual(fdpass.closeServer(path), [5n]);
   });
+  await scenario('rebind', async ({path, send, connect}) => {
+    await connect();
+    fs.unlinkSync(path);
+    assert.equal(fdpass.createServer(path), true);
+    assert.ok(fs.existsSync(path), 'a vanished socket file must be re-bound');
+    await connect();
+    assert.equal((await send(6n)).sent, 2, 'existing and new consumers both receive');
+  });
   await scenario('backpressure', async ({send, connect}) => {
     await connect(false);
     let dropped = 0;
