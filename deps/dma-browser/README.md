@@ -89,6 +89,10 @@ must cover `DMA_BROWSER_MAX_WINDOWS`. The public API always enforces
 Frames go to `/tmp/dma-page/{id}.sock` (dmabuf FD + 48-byte TexInfo header).
 Audio (when `audio: true`) goes to `/tmp/dma-page/{id}-audio.sock` (raw interleaved float32 PCM).
 
+A main-frame load failure, a load exceeding `DMA_BROWSER_LOAD_WATCHDOG_MS` (30 s by default), or a
+renderer crash reloads the page after 1 s, doubling up to 30 s while reloads keep failing. The
+sockets stay open, so consumers keep their connection and held frames.
+
 ### Frame lifetime and transport counters
 
 Rebuild the `fdpass` addon and avplumber together when updating the DMA-BUF

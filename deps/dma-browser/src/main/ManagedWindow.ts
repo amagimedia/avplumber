@@ -4,6 +4,7 @@ import { AudioCaptureChannel } from './capture/AudioCaptureChannel';
 import { FrameCaptureChannel } from './capture/FrameCaptureChannel';
 import type { AllowedDims } from './capture/AllowedDims';
 import { LoadWatchdog } from './LoadWatchdog';
+import { isPageLoadFailure, PageReloader } from './PageReloader';
 import type { Logger } from './support/Logger';
 import type { WindowConfig, WindowSnapshot, WindowStats } from './config/WindowConfig';
 
@@ -21,6 +22,9 @@ html, body, #root, #app {
 * { overscroll-behavior: none !important; }
 ::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
 `.trim();
+
+const RELOAD_MIN_DELAY_MS = 1000;
+const RELOAD_MAX_DELAY_MS = 30_000;
 
 const FULLSCREEN_JS = [
   'try {',
@@ -96,6 +100,7 @@ export class ManagedWindow implements IManagedWindow {
   private frameChannel: FrameCaptureChannel | null = null;
   private audioChannel: AudioCaptureChannel | null = null;
   private watchdog: LoadWatchdog | null = null;
+  private reloader: PageReloader | null = null;
   private visible = false;
   private destroyed = false;
 
@@ -152,46 +157,60 @@ export class ManagedWindow implements IManagedWindow {
     this.frameChannel.attach(wc);
     wc.setFrameRate(this.config.fps);
 
+    // Recovery reloads the page only: the capture channel and its socket stay up, so the
+    // consumer keeps its connection and the frames it holds.
+    this.reloader = new PageReloader({
+      minDelayMs: RELOAD_MIN_DELAY_MS,
+      maxDelayMs: RELOAD_MAX_DELAY_MS,
+      reload: () => {
+        if (this.destroyed || !this.win || this.win.isDestroyed()) return;
+        this.watchdog?.start();
+        void this.loadUrl(this.config.url);
+      },
+    });
+    const recover = (reason: string): void => {
+      if (this.destroyed) return;
+      const delayMs = this.reloader?.failed() ?? null;
+      const action =
+        delayMs === null ? 'reload already pending' : `reloading page in ${delayMs} ms`;
+      log.write(`${reason}; ${action}`);
+      console.error(`dma-browser window ${this.id}: ${reason}; ${action}`);
+    };
+
     this.watchdog = new LoadWatchdog({
       timeoutMs: this.opts.loadWatchdogMs,
-      onTimeout: () => {
-        log.write('load watchdog timeout; hard reloading');
-        void this.hardReload();
-      },
+      onTimeout: () => recover('load watchdog timeout'),
     });
 
     wc.on('did-finish-load', () => {
       this.watchdog?.clear();
+      this.reloader?.loaded();
     });
 
     wc.on('did-fail-load', (_e, errorCode, errorDesc, url, isMainFrame) => {
-      log.write(
-        `did-fail-load: code=${errorCode} desc=${errorDesc} url=${url} mainFrame=${String(isMainFrame)}`,
-      );
-      this.watchdog?.clear();
-      void this.hardReload();
+      const line = `did-fail-load: code=${errorCode} desc=${errorDesc} url=${url}`;
+      if (isPageLoadFailure(errorCode, isMainFrame)) {
+        this.watchdog?.clear();
+        recover(line);
+      } else {
+        log.write(`${line} mainFrame=${String(isMainFrame)}`);
+      }
+    });
+
+    wc.on('render-process-gone', (_e, details) => {
+      recover(`render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`);
     });
 
     wc.on('console-message', (_e, level, message, line, source) => {
       log.write(`[renderer level=${level}] ${message} (${source}:${line})`);
     });
 
+    // Best effort: these reject asynchronously when the frame navigates away or its renderer dies.
     const applyOverlays = (): void => {
-      try {
-        void wc.insertCSS(FULLSCREEN_CSS);
-      } catch {
-        // ignore
-      }
-      try {
-        void wc.executeJavaScript(FULLSCREEN_JS, true);
-      } catch {
-        // ignore
-      }
-      try {
-        void wc.executeJavaScript(AUTOPLAY_JS, true);
-      } catch {
-        // ignore
-      }
+      const ignore = (): void => undefined;
+      wc.insertCSS(FULLSCREEN_CSS).catch(ignore);
+      wc.executeJavaScript(FULLSCREEN_JS, true).catch(ignore);
+      wc.executeJavaScript(AUTOPLAY_JS, true).catch(ignore);
     };
     wc.on('dom-ready', applyOverlays);
     wc.on('did-navigate', applyOverlays);
@@ -205,6 +224,7 @@ export class ManagedWindow implements IManagedWindow {
   public refresh(): void {
     if (!this.win || this.win.isDestroyed()) return;
     this.opts.logger.forWindow(this.id).write('refresh');
+    this.reloader?.reset();
     try {
       this.win.webContents.reloadIgnoringCache();
     } catch {
@@ -216,6 +236,7 @@ export class ManagedWindow implements IManagedWindow {
     if (!this.win || this.win.isDestroyed()) return;
     this.config = { ...this.config, url };
     this.opts.logger.forWindow(this.id).write(`update url=${url}`);
+    this.reloader?.reset();
     this.watchdog?.start();
     void this.loadUrl(url);
   }
@@ -236,6 +257,8 @@ export class ManagedWindow implements IManagedWindow {
     this.opts.logger.forWindow(this.id).write('destroy');
     this.watchdog?.clear();
     this.watchdog = null;
+    this.reloader?.reset();
+    this.reloader = null;
     if (this.frameChannel) {
       await this.frameChannel.stop();
       this.frameChannel = null;
@@ -304,16 +327,5 @@ export class ManagedWindow implements IManagedWindow {
     } catch (err) {
       this.opts.logger.forWindow(this.id).write(`loadURL failed: ${String(err)}`);
     }
-  }
-
-  private async hardReload(): Promise<void> {
-    if (this.destroyed) return;
-    const cfg = this.config;
-    this.opts.logger.forWindow(this.id).write('hard reload begin');
-    await this.destroy();
-    // Recreate with the same config.
-    this.destroyed = false;
-    this.config = cfg;
-    await this.create();
   }
 }
