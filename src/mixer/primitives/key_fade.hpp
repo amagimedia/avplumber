@@ -19,7 +19,6 @@
 // slowly, like an ease-in fade-in.
 #include "fade_curve.hpp"
 
-#include <algorithm>
 #include <cmath>
 
 namespace avp::mixer {
@@ -54,14 +53,12 @@ public:
 
     /// Starts a fade towards `on`, anchored at t - period (see above).
     /// A duration that is not positive (or NaN) is a cut: the level snaps to the
-    /// target. Retargeting to the current target keeps the running fade, except
-    /// that a cut still snaps it.
+    /// target. Retargeting to the current target keeps the running fade.
     void retarget(bool on, double duration_s, FadeCurve curve, double t, double period) {
-        const bool cut = !(duration_s > 0);
-        if (on == target_ && !cut) return;
+        if (on == target_) return;
         target_ = on;
         curve_ = curve;
-        duration_ = cut ? 0 : duration_s;
+        duration_ = duration_s > 0 ? duration_s : 0;
         period_ = period;
         start(t - period);
     }
@@ -81,17 +78,9 @@ public:
             settle();
             return last_;
         }
-        const double x = (t - anchor_) / span_;
-        last_ = std::min(1.0, std::max(0.0, from_ + (targetLevel() - from_) * fadeCurveAt(curve_, x)));
+        last_ = from_ + (targetLevel() - from_) * fadeCurveAt(curve_, (t - anchor_) / span_);
         return last_;
     }
-
-    bool target() const { return target_; }
-    /// The level returned by the latest level() call (or the settled level).
-    double current() const { return last_; }
-    bool fading() const { return span_ > 0; }
-    /// The key needs its feed and a draw: it is on, or still fading out.
-    bool visible() const { return target_ || last_ > 0; }
 };
 
 }  // namespace avp::mixer

@@ -128,17 +128,15 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     std::vector<std::deque<av::VideoFrame>> key_queue_;
     bool keys_subscribed_ = false;   // render thread: every key subscription enabled once
     // Key fades. The control thread records, per key, how the latest command that
-    // flipped it asked for the change (under masks_mutex_); the render thread copies
-    // that into key_change_seen_ and steps one envelope per key at each program frame.
+    // flipped it asked for the change; the render thread reads that as it steps one
+    // envelope per key at each program frame. Both under masks_mutex_.
     struct KeyChange {
         double duration_s = 0;   // 0: cut
         avp::mixer::FadeCurve curve = avp::mixer::FadeCurve::Linear;
     };
     std::vector<KeyChange> key_change_;
-    std::vector<KeyChange> key_change_seen_;
     std::vector<avp::mixer::KeyFade> key_fade_;
     std::vector<float> key_opacity_;   // per input, for this program frame; the clock input stays 1
-    static constexpr double kMaxKeyFadeMs = 10000;
     av::Rational frame_rate_{0, 1};
     std::atomic<uint64_t> input_generation_{0};
     std::atomic<int64_t> input_valid_from_ns_{0};
@@ -556,30 +554,27 @@ public:
         }
     }
 
-    // One envelope step per key for the program frame at `pts`. A key whose fade
-    // target differs from `active` starts the change its latest command asked for.
+    // One envelope step per key for the program frame at `pts`, under masks_mutex_.
+    // A key whose fade target differs from `active` starts the change its latest
+    // command asked for.
     void stepKeyFades(av::Timestamp pts, avp::mixer::SourceMask active, bool cut) {
         const double t = pts.seconds();
         const double period = av_q2d(av_inv_q(frame_rate_.getValue()));
         for (size_t i = 0; i < key_fade_.size(); ++i) {
             if (i == *clock_input_) continue;
-            auto &fade = key_fade_[i];
-            const bool on = active.test((int)i);
-            if (on != fade.target()) {
-                const KeyChange &change = key_change_seen_[i];
-                fade.retarget(on, cut ? 0.0 : change.duration_s, change.curve, t, period);
-            }
-            key_opacity_[i] = float(fade.level(t));
+            const KeyChange &change = key_change_[i];
+            key_fade_[i].retarget(active.test((int)i), cut ? 0.0 : change.duration_s, change.curve, t, period);
+            key_opacity_[i] = float(key_fade_[i].level(t));
         }
     }
 
-    // Each clock-input frame renders at once, at its own PTS, over every other
-    // active input's newest frame stamped at or before that tick, as the scene
-    // playout matches sources (nearest tick). Matching by timestamp rather than
-    // arrival keeps steady motion steady: arrival order races the program frame
-    // and alternately repeats and skips key frames. Keys are never waited for,
-    // so no playout buffer delays the clock input and a late key cannot stall
-    // it. With no key visible the frame passes through untouched.
+    // Each clock-input frame renders at once, at its own PTS, over every key
+    // above fade level 0, using its newest frame stamped at or before that tick,
+    // as the scene playout matches sources (nearest tick). Matching by timestamp
+    // rather than arrival keeps steady motion steady: arrival order races the
+    // program frame and alternately repeats and skips key frames. Keys are never
+    // waited for, so no playout buffer delays the clock input and a late key
+    // cannot stall it. With no key visible the frame passes through untouched.
     //
     // Key fades: each key's opacity follows a KeyFade envelope stepped at every
     // program frame's PTS. A fade starts at the first program frame after the
@@ -594,20 +589,16 @@ public:
         if (sent_eof_) return;
         const size_t clock = *clock_input_;
         av::VideoFrame *program = source_edges_[clock]->peek();
-        avp::mixer::SourceMask active;
-        {
-            std::lock_guard<std::mutex> lock(masks_mutex_);
-            active = active_inputs_;
-            key_change_seen_ = key_change_;   // same size: no allocation
-        }
-        bool timeline_mask = false;   // a timeline switches keys with cuts
-        if (program && hasTimeline() && frameUsable(*program))
-            if (auto value = tlGetRaw("active_inputs", program->pts())) {
-                active = avp::mixer::parseSourceMask(*value);
-                timeline_mask = true;
-            }
         // Step the envelopes on the frame about to be drawn (EOF markers have no PTS).
-        if (program && frameUsable(*program)) stepKeyFades(program->pts(), active, timeline_mask);
+        if (program && frameUsable(*program)) {
+            std::optional<avp::mixer::SourceMask> timeline_mask;   // a timeline switches keys with cuts
+            if (hasTimeline())
+                if (auto value = tlGetRaw("active_inputs", program->pts()))
+                    timeline_mask = avp::mixer::parseSourceMask(*value);
+            // A few keys' arithmetic: the control thread is held off no longer than that.
+            std::lock_guard<std::mutex> lock(masks_mutex_);
+            stepKeyFades(program->pts(), timeline_mask.value_or(active_inputs_), timeline_mask.has_value());
+        }
         if (!keys_subscribed_) {
             for (auto &subscription : subscriptions_)
                 if (subscription) subscription->enable(!stopping_);
@@ -947,7 +938,7 @@ public:
             KeyChange change;
             if (fade) {
                 const double ms = value.value("duration_ms", 0.0);
-                if (!(ms >= 0 && ms <= kMaxKeyFadeMs))
+                if (!(ms >= 0 && ms <= 10000))
                     throw Error("cuda_rect_overlay: fade_inputs duration_ms must be 0 to 10000");
                 change.duration_s = ms / 1000;
                 change.curve = avp::mixer::parseFadeCurve(value.value("curve", std::string("linear")));
@@ -1093,7 +1084,6 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
         node->frame_rate_ = parseRatio(params.at("fps"));
         node->key_queue_.resize(src_names.size());
         node->key_change_.resize(src_names.size());
-        node->key_change_seen_.resize(src_names.size());
         node->key_opacity_.assign(src_names.size(), 1.f);
         // Keys configured on come up fully on, as before fades existed.
         for (size_t i = 0; i < src_names.size(); ++i)

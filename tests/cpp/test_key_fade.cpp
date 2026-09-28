@@ -51,8 +51,8 @@ void curves() {
 
 void settledStates() {
     KeyFade off, on(true);
-    assert(off.level(kT0) == 0 && !off.visible() && !off.fading() && !off.target());
-    assert(on.level(kT0) == 1 && on.visible() && !on.fading() && on.target());
+    assert(off.level(kT0) == 0 && off.level(frameTime(50)) == 0);
+    assert(on.level(kT0) == 1 && on.level(frameTime(50)) == 1);
 }
 
 // A fade of N periods changes over exactly N frames, starting on the first frame after the command.
@@ -60,46 +60,36 @@ void rampEndpoints() {
     for (auto curve : kCurves) {
         KeyFade in;
         in.retarget(true, 5 * kPeriod, curve, frameTime(0), kPeriod);
-        for (int k = 0; k < 4; ++k) {
-            assert(in.fading() && in.visible());
-            assert(near(in.level(frameTime(k)), fadeCurveAt(curve, (k + 1) / 5.0)));
-        }
-        assert(in.level(frameTime(4)) == 1 && !in.fading());
+        for (int k = 0; k < 4; ++k) assert(near(in.level(frameTime(k)), fadeCurveAt(curve, (k + 1) / 5.0)));
+        assert(in.level(frameTime(4)) == 1);
 
         KeyFade out(true);
         out.retarget(false, 5 * kPeriod, curve, frameTime(0), kPeriod);
-        for (int k = 0; k < 4; ++k) {
-            // Transition progress is curved the same way in both directions.
-            assert(near(out.level(frameTime(k)), 1 - fadeCurveAt(curve, (k + 1) / 5.0)));
-            assert(out.visible() && !out.target());
-        }
-        assert(out.level(frameTime(4)) == 0 && !out.fading() && !out.visible());
+        // Transition progress is curved the same way in both directions.
+        for (int k = 0; k < 4; ++k) assert(near(out.level(frameTime(k)), 1 - fadeCurveAt(curve, (k + 1) / 5.0)));
+        assert(out.level(frameTime(4)) == 0);
     }
 }
 
 void cuts() {
     KeyFade key;
     key.retarget(true, 0, FadeCurve::EaseIn, kT0, kPeriod);
-    assert(!key.fading() && key.level(kT0) == 1);
+    assert(key.level(kT0) == 1);
     key.retarget(false, std::numeric_limits<double>::quiet_NaN(), FadeCurve::Linear, kT0, kPeriod);
-    assert(key.level(kT0) == 0 && !key.visible());
+    assert(key.level(kT0) == 0);
 
-    // A cut during a fade snaps; so does a cut to the target already being faded to.
+    // A cut during a fade snaps.
     key.retarget(true, 1.0, FadeCurve::Linear, frameTime(0), kPeriod);
     assert(near(key.level(frameTime(0)), 0.04));
-    key.retarget(true, 0, FadeCurve::Linear, frameTime(1), kPeriod);
-    assert(key.level(frameTime(1)) == 1 && !key.fading());
-    key.retarget(false, 1.0, FadeCurve::Linear, frameTime(2), kPeriod);
-    assert(near(key.level(frameTime(2)), 0.96));
-    key.retarget(true, 0, FadeCurve::Linear, frameTime(3), kPeriod);
-    assert(key.level(frameTime(3)) == 1);
+    key.retarget(false, 0, FadeCurve::Linear, frameTime(1), kPeriod);
+    assert(key.level(frameTime(1)) == 0);
 }
 
 void reversal() {
     KeyFade key;
     key.retarget(true, 1.0, FadeCurve::Linear, frameTime(0), kPeriod);
-    for (int k = 0; k < 10; ++k) key.level(frameTime(k));
-    assert(near(key.current(), 0.4));
+    for (int k = 0; k < 9; ++k) key.level(frameTime(k));
+    assert(near(key.level(frameTime(9)), 0.4));
 
     // Re-sending the running target does not restart the fade.
     key.retarget(true, 3.0, FadeCurve::EaseIn, frameTime(10), kPeriod);
@@ -110,16 +100,16 @@ void reversal() {
     double previous = 0.44;
     for (int k = 11; k < 21; ++k) {
         const double level = key.level(frameTime(k));
-        assert(near(previous - level, 0.04) && key.visible());
+        assert(near(previous - level, 0.04));
         previous = level;
     }
-    assert(key.level(frameTime(21)) == 0 && !key.visible());
+    assert(key.level(frameTime(21)) == 0);
 
     // A curved reversal is continuous too: its first step is one curve step from the shown level.
     KeyFade eased;
     eased.retarget(true, 1.0, FadeCurve::EaseIn, frameTime(0), kPeriod);
-    for (int k = 0; k < 13; ++k) eased.level(frameTime(k));
-    const double shown = eased.current();
+    for (int k = 0; k < 12; ++k) eased.level(frameTime(k));
+    const double shown = eased.level(frameTime(12));
     assert(near(shown, 0.52 * 0.52));
     eased.retarget(false, 1.0, FadeCurve::EaseIn, frameTime(13), kPeriod);
     const double span = shown;   // seconds left at the full-swing pace of 1 s
@@ -144,7 +134,7 @@ void timestampJumps() {
     assert(near(key.level(back + kPeriod), 0.44));
     assert(near(key.level(back + 2 * kPeriod), 0.48));
     // Forwards past the end: lands on the target.
-    assert(key.level(back + 100) == 1 && !key.fading());
+    assert(key.level(back + 100) == 1);
 }
 
 // Timestamps rounded to milliseconds (60 fps in a 1/1000 time base) still end a fade on its Nth frame.
