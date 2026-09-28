@@ -17,7 +17,7 @@ std::vector<TransitionCommand> fadeCommand(const FadeRequest& request) {
         const auto& c = *request.dip;
         send("color", std::to_string(c[0]) + ":" + std::to_string(c[1]) + ":" + std::to_string(c[2]));
         send("mode", "dip");
-        progress = dipCurveExpression(request.curve, clip);
+        progress = dipCurveExpression(request.curve, clip, request.dip_hold);
     } else {
         send("mode", "fade");
         progress = fadeCurveExpression(request.curve, clip);

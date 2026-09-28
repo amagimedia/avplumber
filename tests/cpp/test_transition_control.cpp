@@ -38,11 +38,12 @@ int main() {
             assert(commands.back().value.at("argument") == (to_a ? "1-" + progress : progress));
         }
     }
-    // A dip sets its colour, then the mode, then alpha, which runs the curve once per half.
-    const std::string linear_dip = "(st(1," + clip + ");if(lt(ld(1),0.5),0.5*(2*ld(1)),0.5+0.5*(2*ld(1)-1)))";
+    // A dip sets its colour, then the mode, then alpha, which runs the curve once per half
+    // around the request's hold.
+    const std::string linear_dip = avp::mixer::dipCurveExpression(avp::mixer::FadeCurve::Linear, clip, 0.04 / 0.75);
     for (bool to_a : {false, true}) {
         const auto commands = control({12345, 0.75, to_a, avp::mixer::FadeCurve::Linear,
-                                       std::array<float, 3>{16.f, 128.f, 128.f}});
+                                       std::array<float, 3>{16.f, 128.f, 128.f}, 0.04 / 0.75});
         assert(commands.size() == 3);
         assert(commands[0].value == filterCommand("color", "16.000000:128.000000:128.000000"));
         assert(commands[1].value == filterCommand("mode", "dip"));
@@ -52,8 +53,8 @@ int main() {
                                 std::array<float, 3>{180.25f, 128.f, 128.f}});
     assert(eased[0].value.at("argument") == "180.250000:128.000000:128.000000");
     assert(eased[2].value.at("argument") ==
-           "(st(1," + clip + ");if(lt(ld(1),0.5),0.5*((st(0,2*ld(1));ld(0)*ld(0))),"
-           "0.5+0.5*((st(0,2*ld(1)-1);ld(0)*ld(0)))))");
+           "(st(1," + clip + ");if(lt(ld(1),0.5),0.5*((st(0,ld(1)/0.5);ld(0)*ld(0))),"
+           "if(lt(ld(1),0.5),0.5,0.5+0.5*((st(0,(ld(1)-0.5)/0.5);ld(0)*ld(0))))))");
     bool rejected = false;
     try { avp::mixer::transitionControl("vulkan"); }
     catch (const std::exception&) { rejected = true; }

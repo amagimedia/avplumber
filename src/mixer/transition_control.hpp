@@ -17,6 +17,7 @@ struct FadeRequest {
     bool destination_is_a;
     FadeCurve curve = FadeCurve::Linear;  // shapes progress along the transition, either direction
     DipCodes dip = std::nullopt;  // set: dip through this colour instead of mixing; the curve shapes each half
+    double dip_hold = 0;  // the dip colour's hold alone, as a share of the duration (dipHoldEnd)
 };
 
 struct TransitionCommand {

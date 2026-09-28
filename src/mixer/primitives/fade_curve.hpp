@@ -10,6 +10,7 @@
 #include "../../util.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <string>
 
 namespace avp::mixer {
@@ -53,20 +54,37 @@ inline std::string fadeCurveExpression(FadeCurve curve, const std::string& progr
     return "(st(0," + progress + ");" + shape + ")";
 }
 
-/// A dip (fade through a colour) runs the curve once per half: y(x) = C(2x)/2
-/// before the midpoint and 1/2 + C(2x-1)/2 from it, so y(1/2) == 1/2 exactly for
-/// every curve, and 1-y too; transition_cuda shows the colour alone at 1/2.
-inline double dipCurveAt(FadeCurve curve, double x) {
+/// A dip (fade through a colour) runs the curve once per half around a hold:
+/// y(x) = C(x/lo)/2 before it, exactly 1/2 over [lo, hi) and 1/2 + C((x-hi)/lo)/2
+/// from hi, so y is 1/2 there in either direction (1-y too) and transition_cuda
+/// shows the colour alone. `hold` is the hold's share of the dip, one frame
+/// period / duration: a half-open window one period wide always contains a
+/// frame of the 1/fps grid, whatever the start phase, whereas the bare midpoint
+/// (hold 0) is seldom a frame. The dip keeps its duration. Clamped to [0, 1/2],
+/// NaN counts as 0. Returns hi; lo = 1 - hi is exact, so y(1) == 1 exactly.
+inline double dipHoldEnd(double hold) {
+    return 0.5 + 0.5 * std::min(0.5, std::max(0.0, hold));
+}
+
+inline double dipCurveAt(FadeCurve curve, double x, double hold) {
     x = std::min(1.0, std::max(0.0, x));
-    return x < 0.5 ? 0.5 * fadeCurveAt(curve, 2 * x) : 0.5 + 0.5 * fadeCurveAt(curve, 2 * x - 1);
+    const double hi = dipHoldEnd(hold), lo = 1 - hi;
+    if (x < lo) return 0.5 * fadeCurveAt(curve, x / lo);
+    return x < hi ? 0.5 : 0.5 + 0.5 * fadeCurveAt(curve, (x - hi) / lo);
 }
 
 /// dipCurveAt as an FFmpeg expression of `progress` (clamped as for
-/// fadeCurveExpression), term for term. Progress lives in variable 1 because
-/// the curve uses variable 0; the result is parenthesised for "1-" + result.
-inline std::string dipCurveExpression(FadeCurve curve, const std::string& progress) {
-    return "(st(1," + progress + ");if(lt(ld(1),0.5),0.5*(" + fadeCurveExpression(curve, "2*ld(1)") +
-           "),0.5+0.5*(" + fadeCurveExpression(curve, "2*ld(1)-1") + ")))";
+/// fadeCurveExpression), term for term: %.17g round-trips, so the bounds are
+/// dipCurveAt's doubles. Progress lives in variable 1 because the curve uses
+/// variable 0; the result is parenthesised for "1-" + result.
+inline std::string dipCurveExpression(FadeCurve curve, const std::string& progress, double hold) {
+    const double end = dipHoldEnd(hold);
+    char lo[32], hi[32];
+    std::snprintf(lo, sizeof lo, "%.17g", 1 - end);
+    std::snprintf(hi, sizeof hi, "%.17g", end);
+    return "(st(1," + progress + ");if(lt(ld(1)," + lo + "),0.5*(" +
+           fadeCurveExpression(curve, "ld(1)/" + std::string(lo)) + "),if(lt(ld(1)," + hi + "),0.5,0.5+0.5*(" +
+           fadeCurveExpression(curve, "(ld(1)-" + std::string(hi) + ")/" + lo) + "))))";
 }
 
 }  // namespace avp::mixer
