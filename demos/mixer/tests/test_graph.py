@@ -299,7 +299,8 @@ def test_configured_fps_reaches_input_mixer_and_outputs():
     assert nodes["program_fps"]["fps"] == "60/1"
     assert nodes["program_encoder"]["options"]["g"] == 120
     assert nodes["janus_fps"]["fps"] == "60/1"
-    assert nodes["janus_encoder"]["options"]["g"] == 60
+    # Janus GOP spans the default 3 s keyframe period (JanusVideoConfig.keyframe_interval_sec).
+    assert nodes["janus_encoder"]["options"]["g"] == 180
     assert "level" not in nodes["janus_encoder"]["options"]
     assert FakeMixer.instances[-1].parameters["fps"] == (60, 1)
 
@@ -811,7 +812,7 @@ def test_transitions_trigger_a_keyframe_only_when_streaming():
     assert FakeMixer.instances[-1].parameters["keyframe_node"] == "janus_force_keyframe"
     node = next(n for n in application.avp.nodes if n.parameters.get("name") == "janus_force_keyframe")
     assert node.parameters["min_interval_ms"] == 150
-    assert node.parameters["interval_sec"] == "1/1"
+    assert node.parameters["interval_sec"] == "3/1"
 
     FakeMixer.instances.clear()
     build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
@@ -1207,7 +1208,7 @@ def test_planar_working_formats_are_rejected_up_front(fmt):
 def test_fractional_janus_rate_uses_one_second_gop():
     from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
     avp = FakeAvp()
-    build_janus_output(avp, fake_api(), "program", JanusVideoConfig(), fps=60000, fps_den=1001,
+    build_janus_output(avp, fake_api(), "program", JanusVideoConfig(keyframe_interval_sec=1), fps=60000, fps_den=1001,
                        width=1920, height=1080)
     nodes = {n.parameters["name"]: n.parameters for n in avp.nodes}
     assert nodes["janus_fps"]["fps"] == "60000/1001"
