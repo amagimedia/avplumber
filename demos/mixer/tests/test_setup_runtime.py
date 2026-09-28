@@ -705,6 +705,70 @@ def test_apply_cancels_a_pending_restart(runtime, timers, monkeypatch):
     assert runtime.worker is applied and runtime.status()['message'] == 'Mixer ready.'
 
 
+def test_api_answers_409_to_a_concurrent_apply_without_asking_the_mixer(runtime, monkeypatch):
+    runtime.worker = SimpleNamespace(is_alive=lambda: True)   # the first Apply is stopping the mixer
+    monkeypatch.setattr(runtime, '_preserve_aux', lambda *_: pytest.fail('must not query the live mixer'))
+    server = serve(SimpleNamespace(), '127.0.0.1', 0, setup=runtime)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        request = Request(f'http://127.0.0.1:{server.server_port}/api/setup', data=json.dumps(DEFAULT_SETTINGS).encode(),
+                          headers={'Content-Type': 'application/json'})
+        with pytest.raises(HTTPError) as error:
+            urlopen(request, timeout=3)
+        assert error.value.code == 409
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_torn_write_never_reaches_the_show(tmp_path, monkeypatch):
+    from pathlib import Path
+    from setup_runtime import _write_atomic
+    path = tmp_path / 'mixer.demo.json'
+    path.write_text('{"old": true}')
+    def torn(self, text):
+        Path.write_bytes(self, text[:4].encode())
+        raise OSError('disk full')
+    monkeypatch.setattr(Path, 'write_text', torn)
+    with pytest.raises(OSError, match='disk full'):
+        _write_atomic(path, '{"new": true}')
+    assert path.read_text() == '{"old": true}'
+
+
+def test_live_aux_assignments_survive_resume(runtime, monkeypatch):
+    settings = {**DEFAULT_SETTINGS, "bit_depth": 8, "chroma": "420", "weights": [4, 0, 0, 0, 1]}
+    config = runtime.media_dir / "mixer.demo.json"
+    recipe = recipe_for(settings)
+    show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
+    scene_ids = [s["id"] for s in show["scenes"]]
+    recipe["aux_buses"] = show["aux_buses"] = [{"id": "mv", "scenes": [scene_ids[0]] * 8,
+                                                "renditions": [{"id": "monitor", "port": 5008}]}]
+    config.write_text(json.dumps(show))
+    runtime.recipe_path.write_text(json.dumps(recipe))
+    live = [scene_ids[1], None, scene_ids[-1], *([None] * 5)]
+    runtime.remember_aux("mv", live)
+    runtime.remember_aux("unknown", live)
+    assert json.loads(config.read_text())["aux_buses"][0]["scenes"] == live
+    def prepare(recipe, directory):
+        generated, _, _ = prepare_demo.plan(recipe, directory)
+        config.write_text(json.dumps(generated))
+    monkeypatch.setattr(prepare_demo, "prepare", prepare)
+    runtime.process = None   # a container restart: nothing is running
+    runtime.apply()          # resume
+    runtime.worker.join(3)
+    assert runtime.status()["phase"] == "running", runtime.status()
+    assert json.loads(config.read_text())["aux_buses"][0]["scenes"] == live
+
+
+def test_stale_preparation_directories_are_removed_on_start(tmp_path):
+    for stale in (tmp_path / ".prepare-abc", tmp_path / "assets" / "clips" / ".prepare-def"):
+        stale.mkdir(parents=True)
+        (stale / "clip.nv12").write_bytes(b"partial")
+    (tmp_path / "assets" / "clips" / "kept.nv12").write_bytes(b"complete")
+    SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    assert sorted(p.name for p in tmp_path.rglob("*")) == ["assets", "clips", "kept.nv12"]
+
+
 def test_rest_timeout_names_the_request(monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
     def urlopen(request, timeout):

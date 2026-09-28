@@ -8,6 +8,7 @@ path; use ``tui.py`` to preview and take scenes manually.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import sys
 import time
@@ -393,10 +394,11 @@ def _pacing_loop(index: int) -> str:
     return f"pacing_{index % PACING_LOOPS}"
 
 
-def _init_avp(avp_options, api):
+def _init_avp(avp_options, api, on_error: ExitStack):
     """AVPlumber instance + control server + CUDA hwaccel — shared by both the
-    --input and --config build paths."""
+    --input and --config build paths. A failed or interrupted build shuts it down."""
     avp = api.AVPlumber()
+    on_error.callback(avp.shutdown)
     if avp_options.remote_control_port:
         avp.enableControlServer(avp_options.remote_control_port)
     avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
@@ -631,9 +633,17 @@ def _application(avp, mixer, options: GraphOptions, input_edges, listener, **ext
 def build_application(options: GraphOptions, api=None) -> MixerApplication:
     options.validate()
     api = api or load_avp_api()
+    # Native threads left running by an exception or Ctrl-C mid-build hang interpreter exit.
+    with ExitStack() as on_error:
+        application = _build(options, api, on_error)
+        on_error.pop_all()
+    return application
+
+
+def _build(options: GraphOptions, api, on_error: ExitStack) -> MixerApplication:
     if options.config:
         return _build_from_config(options, mixer_config.with_probed_sizes(mixer_config.load(
-            options.config, max_compositor_layers=options.max_compositor_layers)), api)
+            options.config, max_compositor_layers=options.max_compositor_layers)), api, on_error)
     dmabuf_ids = options.dmabuf_inputs
     if dmabuf_ids:
         if options.dmabuf_open:
@@ -643,7 +653,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{name}.sock" for name in dmabuf_ids],
                          options.preheat_timeout_sec)
 
-    avp = _init_avp(options, api)
+    avp = _init_avp(options, api, on_error)
     input_edges = [
         _build_input(avp, api, index, url, loop=options.loop_inputs, fps=options.fps,
                      normalize=len(options.inputs) > DIRECT_INPUT_LIMIT, options=options)
@@ -661,7 +671,8 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
                         browser_windows=tuple(options.dmabuf_inputs))
 
 
-def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", api) -> MixerApplication:
+def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", api,
+                       on_error: ExitStack) -> MixerApplication:
     """Sources, wipes and scenes from a JSON document; one chain per source."""
     options = replace(options, fps=cfg.fps, max_compositor_layers=cfg.max_compositor_layers)
     if options.mixer_latency_ms is None and cfg.latency_ms is not None:
@@ -677,7 +688,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
 
     # Browser REST failures must occur before native control threads exist;
     # otherwise Python can print a traceback yet hang during interpreter exit.
-    avp = _init_avp(options, api)
+    avp = _init_avp(options, api, on_error)
     canvas = (cfg.canvas_w, cfg.canvas_h)
     mixer = _make_builder(avp, api, options, canvas=canvas, fps=cfg.fps, working_format=cfg.working_format,
                           color=cfg.out_color, wipe_color=cfg.wipe_color or None)
@@ -859,7 +870,10 @@ def parse_size(text: str) -> tuple[int, int]:
 
 def main(argv: list[str] | None = None) -> None:
     options = parse_args(argv)
-    application = build_application(options)
+    try:
+        application = build_application(options)
+    except KeyboardInterrupt:
+        return   # the build shut down what it had started
     try:
         _run_application(application, options)
     except KeyboardInterrupt:

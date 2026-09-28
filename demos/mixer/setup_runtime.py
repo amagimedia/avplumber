@@ -6,6 +6,7 @@ from contextlib import suppress
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -55,6 +56,13 @@ def nvdec_limit(fps):
 
 def raw_upload_units(fps):
     return {25: 30, 30: 34}.get(fps, 700 // fps)
+
+
+def _write_atomic(path, text):
+    """A crash mid-write must not leave resume or a restart a torn show or recipe."""
+    staged = path.with_name(f".{path.name}.tmp")
+    staged.write_text(text)
+    os.replace(staged, path)
 
 
 def _browser_ids(*shows):
@@ -180,6 +188,9 @@ class SetupRuntime:
     def __init__(self, media_dir, recipe_path, bridge, mixer_args=(), browser_url="http://127.0.0.1:9009"):
         self.media_dir = Path(media_dir).resolve()
         self.media_dir.mkdir(parents=True, exist_ok=True)
+        # prepare_demo stages every file in a .prepare-* directory; a killed preparation leaves it.
+        for stale in self.media_dir.glob("**/.prepare-*"):
+            shutil.rmtree(stale, ignore_errors=True)
         self.recipe_path = Path(recipe_path)
         self.bridge = bridge
         self.mixer_args = list(mixer_args)
@@ -224,7 +235,15 @@ class SetupRuntime:
         self.worker = threading.Thread(target=start, daemon=True)
         self.worker.start()
 
+    def _check_idle(self):
+        """Call with self.lock held."""
+        if self.closing.is_set() or (self.worker and self.worker.is_alive()):
+            raise RuntimeError("A setup change is already in progress")
+
     def apply(self, settings=None):
+        # Before _preserve_aux asks the live mixer, which a running change may be stopping.
+        with self.lock:
+            self._check_idle()
         recipe = recipe_for(settings) if settings is not None else json.loads(self.recipe_path.read_text())
         # Plan validation happens before stopping the live mixer or writing files.
         from prepare_demo import plan
@@ -233,8 +252,7 @@ class SetupRuntime:
             self._preserve_aux(recipe, show)
             plan(recipe, self.media_dir)
         with self.lock:
-            if self.closing.is_set() or (self.worker and self.worker.is_alive()):
-                raise RuntimeError("A setup change is already in progress")
+            self._check_idle()
             self._cancel_retry()
             self.phase, self.message = "preparing", "Preparing assets…"
             self.worker = threading.Thread(target=self._apply, args=(recipe, settings), daemon=True)
@@ -273,6 +291,18 @@ class SetupRuntime:
                     assignments[i] = None
             bus["scenes"] = assignments
         recipe["aux_buses"] = buses
+
+    def remember_aux(self, bus_id, scenes):
+        """Persist an operator's multiview assignment, so a resume or restart shows the same tiles."""
+        with self.lock:   # an Apply carries live assignments over itself (_preserve_aux)
+            if self.worker and self.worker.is_alive():
+                return
+            for path in (self.media_dir / "mixer.demo.json", self.recipe_path):
+                doc = json.loads(path.read_text()) if path.exists() else {}
+                bus = next((b for b in doc.get("aux_buses", []) if b.get("id") == bus_id), None)
+                if bus is not None and bus.get("scenes") != scenes:
+                    bus["scenes"] = scenes
+                    _write_atomic(path, json.dumps(doc, indent=2) + "\n")
 
     def _stop(self):
         with self.stop_lock:
@@ -432,9 +462,7 @@ class SetupRuntime:
             recipe_show = json.loads(config.read_bytes())
             self._start_recovering(config, json.loads(previous or b"{}"))
             if settings is not None:
-                staged = self.recipe_path.with_suffix(".pending.json")
-                staged.write_text(json.dumps(recipe, indent=2) + "\n")
-                staged.replace(self.recipe_path)
+                _write_atomic(self.recipe_path, json.dumps(recipe, indent=2) + "\n")
             with self.lock:
                 self.settings = recipe.get("setup")
                 self.revision += 1
@@ -446,7 +474,7 @@ class SetupRuntime:
                 if stopped:
                     self._stop()
                 if previous is not None:
-                    config.write_bytes(previous)
+                    _write_atomic(config, previous.decode())
                     if stopped and isinstance(exc, TimeoutError):
                         # The browser service may still be restarting workers; restoring now would
                         # recover them a second time. The next Apply starts from a settled service.

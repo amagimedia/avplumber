@@ -123,14 +123,15 @@ class MixerBridge:
             state["dsk"] = json.loads(self.command("mixer.dsk_status", timeout) or "[]")
         return state
 
-    def take(self, request: dict) -> None:
+    def take(self, request: dict):
+        """Returns the mixer's answer to an aux, aux_page or dsk command."""
         command = request.get("command")
         if command in ("aux", "aux_page", "dsk"):
             payload = {k: v for k, v in request.items() if k != "command"}
             result = json.loads(self.command(f"mixer.{command} " + json.dumps(payload)) or "{}")
             if isinstance(result, dict) and result.get("error"):
                 raise ValueError(result["error"])
-            return
+            return result
         if command not in TAKE_COMMANDS:
             raise ValueError(f"command must be one of {', '.join(TAKE_COMMANDS)}")
         payload = {k: v for k, v in request.items() if k not in ("command", "mixer")}
@@ -214,13 +215,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
-            self.bridge.take(json.loads(body or b"{}"))
+            request = json.loads(body or b"{}")
+            result = self.bridge.take(request)
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
             return
         except Exception as exc:
             self._send_json(502, {"error": str(exc)})
             return
+        if self.setup_manager and request.get("command") == "aux":
+            try:
+                self.setup_manager.remember_aux(request.get("bus"), result["scenes"])
+            except Exception as exc:   # the tiles are live; only their persistence failed
+                print(f"Could not persist aux {request.get('bus')}: {exc}", flush=True)
         self._send_json(200, {"ok": True})
 
 

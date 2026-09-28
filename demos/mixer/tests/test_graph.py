@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,6 +45,7 @@ class FakeAvp:
         self.control_port = None
         self.ready = False
         self.edges = FakeEdges()
+        self.shut_down = False
 
     def addNode(self, node):
         self.nodes.append(node)
@@ -72,6 +74,9 @@ class FakeAvp:
 
     def setReady(self):
         self.ready = True
+
+    def shutdown(self):
+        self.shut_down = True
 
     def group(self, _name):
         return FakeGroup()
@@ -339,6 +344,24 @@ def test_record_and_janus_outputs_split_program_video():
     assert nodes["program_encoder"]["codec"] == "h264_nvenc" and nodes["program_encoder"]["options"]["b"] == "8000k"
 
 
+@pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError])
+def test_interrupted_or_failed_build_shuts_the_engine_down(error):
+    engines = []
+    class Engine(FakeAvp):
+        def __init__(self):
+            super().__init__()
+            engines.append(self)
+        def addNode(self, node):
+            raise error("mid-build")
+    api = fake_api()
+    api.AVPlumber = Engine
+    with pytest.raises(error):
+        build_application(GraphOptions(inputs=("input.mp4",), output="program.mp4"), api=api)
+    assert [engine.shut_down for engine in engines] == [True]
+    application = build_application(GraphOptions(inputs=("input.mp4",), output="program.mp4"), api=fake_api())
+    assert not application.avp.shut_down
+
+
 def test_output_target_is_required():
     with pytest.raises(ValueError, match="--output or --janus-output"):
         build_application(GraphOptions(inputs=("input.mp4",)), api=fake_api())
@@ -544,7 +567,7 @@ def test_browser_failure_precedes_native_initialization(monkeypatch):
     cfg = SimpleNamespace(fps=60, latency_ms=None, browser_ring_size=11, max_compositor_layers=256, sources=[SimpleNamespace(
         kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60, hold_last_frame=True)])
     with pytest.raises(RuntimeError, match="browser unavailable"):
-        mixer._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api())
+        mixer._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api(), ExitStack())
 
 
 def test_startup_failure_shuts_down_application(monkeypatch):
