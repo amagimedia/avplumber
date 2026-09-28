@@ -90,3 +90,50 @@ For a network measurement, run the browser at the viewer's location. Record
 packet loss, freezes, browser frame rate and network RTT alongside the latency;
 keep failed samples visible. Fade and media-wipe onset/completion require
 separate pixel checks and are not covered by this CUT probe.
+
+## Cut spam gate
+
+`tests/cut_spam.py` checks that a setup survives an operator hammering the
+take shortcuts. It drives the web UI API as the page does and reads the
+mixer's cut probe: command receipt to the first encoded frame of the new scene
+([mixer_cut_latency.md](../../../doc/mixer_cut_latency.md)). That is encoder
+output, not the click-to-display latency measured above.
+
+1. **Baseline:** 15 spaced cuts, each waited for.
+2. **Spam:** 60 s of takes at 4 per second with ±50% jitter, weighted
+   cut:fade:wipe 6:2:2, each to another random scene (every scene except `aux*`).
+   Takes are sent in order without waiting for them; state is polled at 10 Hz.
+3. **Recovery:** a 2 s pause, then 15 spaced cuts.
+
+Run it on the mixer host against the web UI. The mixer must run with
+`--cut-latency-encoder <encoder>`. The script changes the live program and needs
+only the Python standard library. It exits 0 on PASS; `--json` prints one object.
+`--url` defaults to a forwarded web UI on 127.0.0.1:17681; on the host, pass its
+own port.
+
+```sh
+python3 demos/mixer/tests/cut_spam.py --url http://127.0.0.1:7681
+python3 demos/mixer/tests/cut_spam.py --url http://127.0.0.1:7681 \
+  --scene-prefix fullscreen --seed 1 --json > /tmp/cut-spam.json
+```
+
+Limits scale with the show rate (canvas fps): *F* is one frame.
+
+| Criterion | Limit | Override |
+| --- | --- | --- |
+| No errors | every request and command succeeds; “transition already in progress” rejections are listed separately | — |
+| Setup running | `/api/setup` stays `running` at the same revision, when the web UI manages the mixer | — |
+| Spam p95 / max | max(150 ms, 8 F) / max(300 ms, 15 F) | `--spam-p95-ms`, `--spam-max-ms` |
+| Recovery median | baseline median × 1.25 + 1 F | `--recovery-p50-ms` |
+| Recovery max | max(120 ms, 6 F) | `--recovery-max-ms` |
+| Program on last target | after the spam and at the end, the last accepted take's scene is on program with no transition running, within max(take length, 1 s) + the spam max limit | — |
+
+Every take cancels a cut measurement that is still pending. Spam therefore
+measures only cuts that reach the encoder before the next command (125–375 ms
+at 4 per second). Fades and wipes add load but are not measured. Read the spam
+percentiles together with the reported measured/sent cut ratio: a falling
+ratio means that cuts are becoming slower than the command gap.
+
+A setup (source count and kinds, canvas and fps, GPU) is a supported default only
+if it passes this gate at the default settings. Keep its JSON result with the
+setup's other measurements.
