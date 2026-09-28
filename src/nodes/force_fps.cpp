@@ -19,8 +19,8 @@ private:
     av::Timestamp last_printed_stats_ = NOTS;
     // center_phase: input timestamps shift by a constant, chosen on the first frame (again after a
     // discontinuity), that puts that frame exactly on an output tick. Rounding onto the grid then has
-    // half a frame of slack either way, so jitter below that (e.g. realtime's set_pts wall clock)
-    // neither duplicates nor drops, whatever the source's phase.
+    // half a frame of slack either way, so timestamp deviations below that (e.g. realtime's set_pts
+    // schedule rounded to whole milliseconds) neither duplicate nor drop, whatever the source's phase.
     bool center_phase_ = false;
     av::Timestamp phase_ = NOTS;   // in the input time base
 
