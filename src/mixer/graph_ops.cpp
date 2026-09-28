@@ -30,6 +30,15 @@ bool nodeWorkingIfExists(const std::shared_ptr<NodeManager>& nodes, const std::s
     return w && w->isWorking();
 }
 
+bool groupWorking(const std::shared_ptr<NodeManager>& nodes, const std::string& group_name) {
+    const auto group = nodes->group(group_name);
+    for (const auto& [_, node] : nodes->allNodes()) {
+        if (node && node->group() == group && node->isWorking())
+            return true;
+    }
+    return false;
+}
+
 static bool nodeConsumesEdge(const std::shared_ptr<NodeWrapper>& node, const std::string& edge_name) {
     if (!node)
         return false;

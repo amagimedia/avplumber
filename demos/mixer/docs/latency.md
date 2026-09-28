@@ -100,10 +100,17 @@ mixer's cut probe: command receipt to the first encoded frame of the new scene
 output, not the click-to-display latency measured above.
 
 1. **Baseline:** 15 spaced cuts, each waited for.
-2. **Spam:** 60 s of takes at 4 per second with ±50% jitter, weighted
+2. **Bursts:** 10 times, 5 cuts 50 ms apart, as keyboard auto-repeat sends
+   them: each without waiting for the previous reply. The web UI may coalesce
+   them; only the last is measured, as its probe latency plus its HTTP reply
+   time, which bounds how long it queued behind the take before it.
+3. **Spam:** 60 s of takes at 4 per second with ±50% jitter, weighted
    cut:fade:wipe 6:2:2, each to another random scene (every scene except `aux*`).
-   Takes are sent in order without waiting for them; state is polled at 10 Hz.
-3. **Recovery:** a 2 s pause, then 15 spaced cuts.
+   Takes are sent in order without waiting for them to complete.
+4. **Recovery:** a 2 s pause, then 15 spaced cuts.
+
+The script polls `GET /api/status` (`mixer.status` alone) at up to 10 Hz, never
+the five-command `/api/state`.
 
 Run it on the mixer host against the web UI. The mixer must run with
 `--cut-latency-encoder <encoder>`. The script changes the live program and needs
@@ -117,22 +124,43 @@ python3 demos/mixer/tests/cut_spam.py --url http://127.0.0.1:7681 \
   --scene-prefix fullscreen --seed 1 --json > /tmp/cut-spam.json
 ```
 
-Limits scale with the show rate (canvas fps): *F* is one frame.
+Latency limits are relative to the run's own baseline, so each setup is judged
+on what hammering adds to its spaced cuts. *F* is one frame at the show rate
+(canvas fps); *B50* and *Bmax* are the baseline median and maximum.
 
 | Criterion | Limit | Override |
 | --- | --- | --- |
 | No errors | every request and command succeeds; “transition already in progress” rejections are listed separately | — |
 | Setup running | `/api/setup` stays `running` at the same revision, when the web UI manages the mixer | — |
-| Spam p95 / max | max(150 ms, 8 F) / max(300 ms, 15 F) | `--spam-p95-ms`, `--spam-max-ms` |
-| Recovery median | baseline median × 1.25 + 1 F | `--recovery-p50-ms` |
-| Recovery max | max(120 ms, 6 F) | `--recovery-max-ms` |
+| Spam and burst p95 / max | B50 + 2 F + 10 ms / B50 + 4 F + 10 ms | `--spam-p95-ms`, `--spam-max-ms` |
+| Spam and burst measured | at least 90% of the eligible cuts (bursts: of their last cuts) | `--measured-ratio-min` |
+| Recovery median | B50 + 1 F | `--recovery-p50-ms` |
+| Recovery max | Bmax + 1 F | `--recovery-max-ms` |
+| Program missed deadlines | 0 from the bursts to the end, summed over both slot compositors | — |
+| Program repeats | 0 over the same window | `--playout-repeats-max` |
 | Program on last target | after the spam and at the end, the last accepted take's scene is on program with no transition running, within max(take length, 1 s) + the spam max limit | — |
 
-Every take cancels a cut measurement that is still pending. Spam therefore
-measures only cuts that reach the encoder before the next command (125–375 ms
-at 4 per second). Fades and wipes add load but are not measured. Read the spam
-percentiles together with the reported measured/sent cut ratio: a falling
-ratio means that cuts are becoming slower than the command gap.
+Every take cancels a cut measurement that is still pending, so a spam cut
+followed by a take sooner than its own latency is never measured, however
+healthy the mixer (at 4 per second the gaps are 125–375 ms). The ratio counts
+only eligible cuts: those whose next take came at least the spam max limit
+later. An eligible cut left unmeasured took longer than that limit or lost its
+probe. A setup so slow that no cut is eligible fails and asks for a lower
+`--rate`. The latency percentiles use every measured cut. A take the web UI
+coalesced is counted apart, not as sent.
+
+The program counters come from `mixer.status` `playout`: each slot compositor
+publishes its playout `missed_deadlines` and per-input `repeats` every 60 output
+frames. A missed deadline is an output tick the compositor did not produce; an
+idle or warming slot does not count one. A repeat is a tick on which a source
+had no new frame; 0 fits sources at the show rate, so pass the expected count
+for slower sources or a deliberately saturated setup.
+
+Fade and wipe start latency (command to the first blended frame) is not
+measurable yet and is reported as such: the probe samples cuts only. It needs a
+`cut_latency`-style `transition` sample in `mixer.status` (`id`, `kind`,
+`scene`, `state`, `ms`) from command receipt to the first encoded frame of the
+fade or wipe branch.
 
 A setup (source count and kinds, canvas and fps, GPU) is a supported default only
 if it passes this gate at the default settings. Keep its JSON result with the

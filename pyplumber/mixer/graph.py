@@ -601,6 +601,13 @@ class MixerGraphBuilder:
 
     def _build_compositors(self) -> None:
         """Build both slots around the native shared output clock."""
+        # No warmup_timeout_ms: after a scene load a slot waits for every active input
+        # rather than emitting a partial canvas. A cold load admits only frames stamped
+        # after it, which the playout reaches one latency (two frames by default) later,
+        # so a one-frame bound would put a black canvas on program at every cold cut.
+        # A warm load of a prewarmed scene already flips at the next deadline: a late
+        # source repeats its held picture (Playout::resetInput). The orchestrator bounds
+        # a take that waits on a dead source.
         active_pgm = self._active_inputs_mask(self._initial_scene_def())
         timing = {} if self.latency_ms is None else {"latency_ms": self.latency_ms}
         for slot in ("a", "b"):

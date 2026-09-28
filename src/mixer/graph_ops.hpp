@@ -15,6 +15,9 @@ namespace avp::mixer::graph {
 /// Poll period of every readiness wait in the orchestrator.
 constexpr int64_t kPollMs = 5;
 constexpr int64_t kWipeReadyTimeoutMs = 5000;
+/// How long a cut or fade waits for its target slot's first fresh frame before it gives
+/// up and keeps the program, so a dead source never parks the mixer in a transition.
+constexpr int64_t kTakeReadyTimeoutMs = 2000;
 
 void resetInputIf(const std::shared_ptr<NodeManager>& nodes, const std::string& name);
 
@@ -27,6 +30,9 @@ void resetInputIf(const std::shared_ptr<NodeManager>& nodes, const std::string& 
 void resetSlotNormFps(const std::shared_ptr<NodeManager>& nodes, const MixerState& st);
 
 bool nodeWorkingIfExists(const std::shared_ptr<NodeManager>& nodes, const std::string& name);
+/// True while any node of the group still runs. Reads each node without the group's lock,
+/// which a stop in progress holds until its last node has stopped.
+bool groupWorking(const std::shared_ptr<NodeManager>& nodes, const std::string& group_name);
 std::shared_ptr<NodeWrapper> workingConsumerForEdge(const std::shared_ptr<NodeManager>& nodes,
                                                     const std::string& edge_name);
 /// Stores the value in the wrapper's parameters and applies it when the node exists; false when

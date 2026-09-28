@@ -6,18 +6,24 @@ mixer needs no HTTP server of its own and the page needs no build step:
 
     GET  /              the page
     GET  /api/state     status + scenes + settings in one round trip
+    GET  /api/status    mixer.status alone, for scripts that poll often
     POST /api/command   {"command": "cut"|"fade"|"wipe"|"preview", "scene": ...}
                         (a fade may carry "curve": "linear"|"ease-in"|"ease-out"|"ease-in-out")
                         {"command": "dsk", "key": ..., "on": true|false, "fade_seconds"?: s, "curve"?: ...}
+                        A cut, fade or wipe superseded by a newer one before it reached
+                        the mixer answers {"ok": true, "superseded": true}.
 
 The bridge owns a single serialized control connection and reconnects when the
-mixer restarts, so the page can stay open across a demo restart.
+mixer restarts, so the page can stay open across a demo restart. Takes must not
+queue behind polling: every tab shares one /api/state reply for STATE_TTL_S, and
+a burst of program takes (keyboard auto-repeat) collapses to its newest one.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import csv
 import json
 import logging
@@ -34,6 +40,8 @@ from pyplumber.mixer.control import AvpConnection, mixer_command
 
 PAGE = Path(__file__).with_name("webui") / "index.html"
 TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")
+PROGRAM_TAKES = ("cut", "fade", "wipe")
+STATE_TTL_S = 0.2
 
 
 class GpuStats:
@@ -81,6 +89,18 @@ class MixerBridge:
         self._connection = AvpConnection(host, port)
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, daemon=True, name="mixer-bridge").start()
+        self._init_sharing()
+
+    def _init_sharing(self) -> None:
+        """State every HTTP thread shares: the cached /api/state reply and the take queue."""
+        self._state_lock = threading.Lock()
+        self._state: dict | None = None
+        self._state_at = self._changed_at = float("-inf")
+        self._takes = threading.Condition()
+        self._take_arrivals = 0
+        self._take_queue: collections.deque[int] = collections.deque()   # waiting, in arrival order
+        self._waiting_program: int | None = None
+        self._take_running = False
 
     def _run(self, coro, timeout: float | None = None):
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -104,13 +124,25 @@ class MixerBridge:
                 self._run(self._connection.connect())
                 return self._run(self._connection.command(line, budget), budget)
 
+    def status(self, timeout: float | None = None) -> dict:
+        return json.loads(self.command(f"mixer.status {self.mixer}", timeout) or "{}")
+
     def state(self, timeout: float | None = None) -> dict:
-        """Everything the page redraws from, in one poll. A caller polling a mixer that is still
-        building its graph passes a longer `timeout`: the mixer runs control commands on the
-        thread that is busy starting nodes, so replies stall for seconds during startup even
-        though they take a millisecond once it is running."""
+        """Everything the page redraws from, in one poll. Polls within STATE_TTL_S of each
+        other share one reply, and a poll arriving while another is in flight waits for it,
+        so any number of tabs costs one set of commands; a take or key change expires it.
+        A caller polling a mixer that is still building its graph passes a longer `timeout`:
+        the mixer runs control commands on the thread that is busy starting nodes, so replies
+        stall for seconds during startup even though they take a millisecond once it is running."""
+        with self._state_lock:
+            now = time.monotonic()
+            if self._state is None or now - self._state_at >= STATE_TTL_S or self._state_at <= self._changed_at:
+                self._state, self._state_at = self._query_state(timeout), now
+            return dict(self._state)   # callers add their own top-level keys
+
+    def _query_state(self, timeout: float | None) -> dict:
         state: dict = {"mixer": self.mixer}
-        state["status"] = json.loads(self.command(f"mixer.status {self.mixer}", timeout) or "{}")
+        state["status"] = self.status(timeout)
         state["scenes"] = json.loads(self.command(f"mixer.scenes {self.mixer}", timeout) or "[]")
         try:
             state["settings"] = json.loads(self.command(f"mixer.settings {self.mixer}", timeout) or "{}")
@@ -125,11 +157,15 @@ class MixerBridge:
         return state
 
     def take(self, request: dict):
-        """Returns the mixer's answer to an aux, aux_page or dsk command."""
+        """Returns the mixer's answer to an aux, aux_page or dsk command; for a take, whether it was sent
+        (False when a newer program take superseded it unsent)."""
         command = request.get("command")
         if command in ("aux", "aux_page", "dsk"):
             payload = {k: v for k, v in request.items() if k != "command"}
-            result = json.loads(self.command(f"mixer.{command} " + json.dumps(payload)) or "{}")
+            try:
+                result = json.loads(self.command(f"mixer.{command} " + json.dumps(payload)) or "{}")
+            finally:
+                self._changed_at = time.monotonic()
             if isinstance(result, dict) and result.get("error"):
                 raise ValueError(result["error"])
             return result
@@ -138,7 +174,38 @@ class MixerBridge:
         payload = {k: v for k, v in request.items() if k not in ("command", "mixer")}
         if command != "interrupt" and not payload.get("scene"):
             raise ValueError(f"{command} needs a scene")
-        self.command(mixer_command(command, self.mixer, **payload))
+        return self._send_in_order(mixer_command(command, self.mixer, **payload), command in PROGRAM_TAKES)
+
+    def _send_in_order(self, line: str, program: bool) -> bool:
+        """Takes reach the mixer one at a time, in arrival order. A cut, fade or wipe sets the
+        whole program state, so a newer one supersedes the one still waiting: a burst collapses
+        to its last take, which is never dropped or overtaken. A preview or interrupt changes
+        only part of it; it is never superseded and never supersedes a program take."""
+        with self._takes:
+            self._take_arrivals += 1
+            mine = self._take_arrivals
+            if program:
+                if self._waiting_program is not None:
+                    self._take_queue.remove(self._waiting_program)
+                    self._takes.notify_all()   # the superseded take answers now
+                self._waiting_program = mine
+            self._take_queue.append(mine)
+            while mine in self._take_queue and (self._take_running or self._take_queue[0] != mine):
+                self._takes.wait()
+            if mine not in self._take_queue:
+                return False
+            self._take_queue.popleft()
+            if self._waiting_program == mine:
+                self._waiting_program = None
+            self._take_running = True
+        try:
+            self.command(line)
+        finally:
+            with self._takes:
+                self._take_running = False
+                self._changed_at = time.monotonic()
+                self._takes.notify_all()
+        return True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -173,13 +240,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, Path(__file__).with_name("setup.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/setup" and self.setup_manager:
             self._send_json(200, self.setup_manager.status())
-        elif path == "/api/state":
+        elif path in ("/api/state", "/api/status"):
             if self.setup_manager:
                 status = self.setup_manager.status()
                 if status["phase"] in ("idle", "starting"):
                     self._send_json(503, {"error": status["message"]})
                     return
             try:
+                if path == "/api/status":
+                    self._send_json(200, self.bridge.status())
+                    return
                 state = self.bridge.state()
                 state["gpus"] = self.gpu.snapshot()
                 if self.setup_manager:
@@ -229,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.setup_manager.remember_aux(request.get("bus"), result["scenes"])
             except Exception as exc:   # the tiles are live; only their persistence failed
                 print(f"Could not persist aux {request.get('bus')}: {exc}", flush=True)
-        self._send_json(200, {"ok": True})
+        self._send_json(200, {"ok": True, "superseded": True} if result is False else {"ok": True})
 
 
 def serve(bridge: MixerBridge, bind: str, port: int, setup=None) -> ThreadingHTTPServer:

@@ -30,6 +30,7 @@ def playout_binary(tmp_path_factory):
     "input_offset_selects_a_late_source_one_tick_later",
     "staged_input_readiness_preserves_old_output",
     "inactive_prewarm_retains_live_frames_without_rendering",
+    "warm_reset_keeps_a_late_source_on_cadence",
     "complete_jitter_plateau_is_not_rate_drift",
     "stale_burst_is_not_retimestamped_as_fresh",
     "rational_source_drift_does_not_amplify",
@@ -54,6 +55,7 @@ def playout_binary(tmp_path_factory):
     "sixteen_independent_phases",
     "bounded_queue_counts_overflow",
     "missed_deadlines_do_not_catch_up_in_bursts",
+    "idle_and_warm_up_gaps_are_not_missed_deadlines",
 ])
 def test_mixer_playout(playout_binary, case):
     result = subprocess.run([str(playout_binary), case], capture_output=True, text=True, timeout=10)

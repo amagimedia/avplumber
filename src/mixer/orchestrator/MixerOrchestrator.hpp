@@ -12,6 +12,8 @@
 
 namespace avp::mixer {
 
+struct OutputSnapshot;
+
 class MixerOrchestrator {
     std::shared_ptr<NodeManager> nodes_;
     std::shared_ptr<MixerState> state_;
@@ -55,14 +57,20 @@ class MixerOrchestrator {
     /// source_switcher reset that cut+fade cleanup paths used to duplicate.
     /// Caller must hold state_->mutex. Wipe end has different semantics
     /// (timeline-driven, doesn't immediately mutate node objects) and uses
-    /// its own logic.
-    void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene);
+    /// its own logic. `picture_changed` false (the on-air picture stays the same) skips
+    /// the encoder keyframe request.
+    void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene,
+                                    bool picture_changed = true);
 
     void ensureIdle() const;
     void interruptTransition();
+    std::shared_ptr<OutputSnapshot> outputSnapshot() const;
     void finishSnapshot();
     // Caller holds state_->mutex; restores live program after failed preparation.
-    void restoreProgramRouting();
+    // Requests a keyframe unless the dropped transition was a cut that had not flipped
+    // and no frozen picture is on air: the caller then finishes the snapshot, which
+    // replaces a frozen picture with the live program.
+    void restoreProgramRouting(MixerState::TransitionMode dropped);
     void abortTransition(uint64_t generation) noexcept;
     void startFadeWhenReady(const std::string& scene_name, double duration_sec, FadeCurve curve,
                            int64_t requested_pts, uint64_t generation, av::Timestamp initial_ts,
@@ -72,9 +80,11 @@ class MixerOrchestrator {
     int64_t resolveTransitionStartPts(int64_t requested_start_pts_ms) const;
 
     // Core hard-cut logic: ensure PVW is configured, enable cameras, write timeline entries.
-    // Does NOT modify pgm_is_slot_a, pgm_scene_name, or transition_mode.
+    // Cut, fade and wipe all load a prewarmed scene with a warm reset, so no transition
+    // leaves its slot cold for the next take. Does NOT modify pgm_is_slot_a,
+    // pgm_scene_name, or transition_mode.
     // Caller must hold state_->mutex. Returns cleanup_ms timestamp.
-    int64_t cutInternal(const std::string& scene_name, int64_t start_pts_ms, bool warm_cut = false);
+    int64_t cutInternal(const std::string& scene_name, int64_t start_pts_ms);
 
     // Complete crossfade routing and state once the final frame is presented.
     // `scheduler` is forwarded into the locally-constructed MixerOrchestrator so

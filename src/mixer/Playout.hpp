@@ -56,6 +56,9 @@ private:
     std::vector<size_t> consume_;
     bool started_ = false;
     uint64_t missed_deadlines_ = 0;
+    // The ticks before the first commit after a reset were held for warm-up or not
+    // clocked at all (a node idles an inactive playout); they are not missed deadlines.
+    bool reset_since_commit_ = false;
 
 public:
     Playout(size_t inputs, TickGrid rate, std::optional<double> latency_ms = {},
@@ -180,7 +183,8 @@ public:
                 ++input.stats.repeats;
             }
         }
-        if (started_) missed_deadlines_ += pending_->index - *index_;
+        if (started_ && !reset_since_commit_) missed_deadlines_ += pending_->index - *index_;
+        reset_since_commit_ = false;
         index_ = pending_->index + 1;
         pending_.reset();
         waiting_deadline_.reset();
@@ -200,19 +204,27 @@ public:
     void resetInput(size_t input, std::optional<int64_t> valid_from_ns = {}, bool preserve_warm = false) {
         if (pending_) throw std::logic_error("commit mixer decision before resetting");
         auto &state = inputs_.at(input);
+        reset_since_commit_ = true;
         if (preserve_warm && state.prewarm && valid_from_ns) {
             // Scene geometry may change while source identity stays fixed.
-            // Retain only frames in the current playout window, never an old
-            // held picture from a source that stopped while the slot was idle.
-            while (!state.queue.empty() && rate_.time(state.queue.front().index) < *valid_from_ns) {
-                state.queue.pop_front();
-                ++state.stats.discarded;
-            }
-            if (state.held_index && rate_.time(*state.held_index) < *valid_from_ns) {
+            // A held picture older than the queue budget is from a source that
+            // stopped while the slot was idle; without one, retain only frames in
+            // the current playout window. A source running late keeps its held
+            // picture, so require_all does not hold the new scene back for it, and
+            // every frame after it, even before the window, so it keeps its cadence
+            // instead of repeating until it reaches the window. Frames arrive in
+            // order: anything stamped after the held tick is newer.
+            auto from = *valid_from_ns;
+            if (state.held_index && rate_.time(*state.held_index + int64_t(kQueueCapacity)) < from) {
                 state.held.reset();
                 state.held_index.reset();
             }
-            state.valid_from_ns = valid_from_ns;
+            if (state.held_index) from = std::min(from, rate_.time(*state.held_index) + 1);
+            while (!state.queue.empty() && rate_.time(state.queue.front().index) < from) {
+                state.queue.pop_front();
+                ++state.stats.discarded;
+            }
+            state.valid_from_ns = from;
             waiting_deadline_.reset();
             return;
         }

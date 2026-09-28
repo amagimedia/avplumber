@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 
 import pytest
 
+from pyplumber.mixer.control import mixer_command
 from webui import GpuStats, MixerBridge, serve
 
 
@@ -23,9 +25,14 @@ class FakeBridge(MixerBridge):
         self.sent: list[str] = []
         self.replies = replies or {}
         self.fail_take = fail_take
+        self.gates: dict[str, threading.Event] = {}   # a command prefix waits for its event
+        self._init_sharing()
 
     def command(self, line: str, timeout: float | None = None):
         self.sent.append(line)
+        for prefix, gate in self.gates.items():
+            if line.startswith(prefix):
+                assert gate.wait(5)
         if self.fail_take and line.startswith(self.fail_take):
             raise RuntimeError("mixer said no")
         for prefix, reply in self.replies.items():
@@ -116,6 +123,87 @@ def test_state_is_one_round_trip_of_status_scenes_and_settings(client):
     assert body["scenes"] == ["a", "b"]
     assert body["settings"]["direct"] is True
     assert bridge.sent == ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
+
+
+STATE_REPLIES = {"mixer.status": '{"pgm_scene":"a"}', "mixer.scenes": '["a","b"]', "mixer.settings": "{}"}
+ONE_POLL = ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
+
+
+def test_polls_share_one_state_until_it_expires_or_a_take_lands(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("webui.time.monotonic", lambda: now[0])
+    bridge = FakeBridge(STATE_REPLIES)
+    first = bridge.state()
+    first["gpus"] = []   # a caller's own keys stay out of the shared reply
+    assert "gpus" not in bridge.state()
+    assert bridge.sent == ONE_POLL
+    now[0] += 0.2
+    bridge.state()
+    assert bridge.sent == ONE_POLL * 2
+    bridge.take({"command": "cut", "scene": "b"})
+    bridge.state()
+    assert bridge.sent == ONE_POLL * 2 + ['mixer.cut {"scene":"b","mixer":"mixer"}'] + ONE_POLL
+
+
+def test_concurrent_polls_cost_one_set_of_commands():
+    bridge = FakeBridge(STATE_REPLIES)
+    bridge.gates["mixer.status"] = gate = threading.Event()
+    polls = [threading.Thread(target=bridge.state) for _ in range(3)]
+    for poll in polls:
+        poll.start()
+    gate.set()
+    for poll in polls:
+        poll.join(5)
+    assert bridge.sent == ONE_POLL
+
+
+def test_a_burst_of_takes_collapses_to_its_newest_in_order():
+    bridge = FakeBridge()
+    bridge.gates["mixer.cut"] = gate = threading.Event()
+    sent = {}
+
+    def take(scene):
+        sent[scene] = bridge.take({"command": "cut", "scene": scene})
+    takes = []
+    for count, scene in enumerate("abcd", 1):
+        takes.append(threading.Thread(target=take, args=(scene,)))
+        takes[-1].start()
+        while bridge._take_arrivals < count:   # each take arrives after the previous one
+            time.sleep(0.001)
+    gate.set()   # the mixer answers the first take
+    for thread in takes:
+        thread.join(5)
+    assert bridge.sent == ['mixer.cut {"scene":"a","mixer":"mixer"}', 'mixer.cut {"scene":"d","mixer":"mixer"}']
+    assert sent == {"a": True, "b": False, "c": False, "d": True}
+
+
+def test_a_preview_never_supersedes_a_waiting_program_take():
+    bridge = FakeBridge()
+    bridge.gates["mixer.preview"] = gate = threading.Event()
+    requests = [{"command": "preview", "scene": "b"}, {"command": "cut", "scene": "b"},
+                {"command": "preview", "scene": "c"}, {"command": "interrupt"}]
+    sent = [None] * len(requests)
+
+    def take(i):
+        sent[i] = bridge.take(requests[i])
+    takes = []
+    for i in range(len(requests)):
+        takes.append(threading.Thread(target=take, args=(i,)))
+        takes[-1].start()
+        while bridge._take_arrivals < i + 1:
+            time.sleep(0.001)
+    gate.set()   # the mixer answers the first preview
+    for thread in takes:
+        thread.join(5)
+    assert bridge.sent == [mixer_command(r.pop("command"), "mixer", **r) for r in requests]
+    assert sent == [True] * len(requests)
+
+
+def test_status_endpoint_sends_only_mixer_status(client):
+    bridge = FakeBridge(STATE_REPLIES)
+    url, _ = client(bridge)
+    assert get(url, "/api/status") == (200, {"pgm_scene": "a"})
+    assert bridge.sent == ["mixer.status mixer"]
 
 
 def test_state_survives_a_mixer_without_settings(client):

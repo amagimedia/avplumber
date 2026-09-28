@@ -35,9 +35,8 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
             return;
         MixerOrchestrator orch(nodes, state, timeline, scheduler);
 
-        // Keep a prewarmed scene intact at the wipe midpoint.
-        if (state->pvw_scene_name != scene_name)
-            orch.loadSceneIntoSlot(new_pgm_is_slot_a, scene_name);
+        // wipe() loaded the scene into this slot and the generation check keeps
+        // it there; reloading would reset the compositor just before it is revealed.
 
         // Same post-scene OTM flip as cutInternal: out_sel will read PVW `sc*_direct`, so that slot's
         // `one_to_many` must have outputs=1. If it stays 0 (idle default), frames are popped from
@@ -213,11 +212,19 @@ int64_t MixerOrchestrator::prepareWipe(
     std::string overlay_edge_name;
     av::Timestamp overlay_initial_ts = NOTS;
 
-    // Only the serialized transition worker reuses wipe nodes. Finish retiring
-    // the previous clip outside the control mutex, then recheck cancellation.
+    // Only the serialized transition worker reuses wipe nodes. Retire the previous
+    // clip outside the control mutex without joining its threads here: a take queued
+    // behind this task must not wait for decoder teardown, so poll with cancellation.
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) return -1;
     try {
-        nodes->group(state->wipe_group_name)->stopNodesAndWait();
+        nodes->group(state->wipe_group_name)->stopNodes();
+        for (int64_t waited = 0; groupWorking(nodes, state->wipe_group_name); waited += kPollMs) {
+            if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
+                return -1;
+            if (waited >= kWipeReadyTimeoutMs)
+                throw Error("previous wipe clip did not stop within " + std::to_string(kWipeReadyTimeoutMs) + " ms");
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+        }
         std::lock_guard<std::mutex> lock(state->mutex);
         if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
             return -1;

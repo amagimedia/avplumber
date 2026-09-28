@@ -12,13 +12,13 @@ namespace avp::mixer {
 // incoming direct edge has produced a fresh frame; preloaded PVW cuts only wait
 // for the scheduled PTS.
 // ---------------------------------------------------------------------------
-int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t start_pts_ms, bool warm_cut) {
+int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t start_pts_ms) {
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
 
     if (state_->pvw_scene_name == scene_name) {
         logstream << "mixer cut: reusing preloaded PVW scene=" << scene_name;
     } else {
-        loadSceneIntoSlot(pvw_is_slot_a, scene_name, warm_cut);
+        loadSceneIntoSlot(pvw_is_slot_a, scene_name, true);
     }
 
     int64_t prep_ms = wallclock.pts();
@@ -56,6 +56,13 @@ void MixerOrchestrator::readyCutTask(
         int64_t earliest_switch_pts_ms,
         bool require_new_ready_frame) {
     int64_t waited_ms = 0;
+    // Keep the program picture; abortTransition ignores a superseded generation.
+    auto give_up = [&](const char* reason) {
+        logstream << "mixer ready cut: " << reason << " for scene=" << new_pgm_scene
+                  << " edge=" << ready_edge_name << " waited_ms=" << waited_ms;
+        std::lock_guard<std::mutex> lock(state->mutex);
+        MixerOrchestrator(nodes, state, timeline, scheduler).abortTransition(transition_generation);
+    };
     while (true) {
         if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Cut))
             return;
@@ -63,18 +70,15 @@ void MixerOrchestrator::readyCutTask(
         bool edge_ready = !require_new_ready_frame;
         if (require_new_ready_frame) {
             auto edge = nodes->edges()->findAny(ready_edge_name);
-            if (!edge) {
-                logstream << "mixer ready cut: missing ready edge " << ready_edge_name
-                          << " for scene=" << new_pgm_scene;
-                std::lock_guard<std::mutex> lock(state->mutex);
-                MixerOrchestrator(nodes, state, timeline, scheduler).abortTransition(transition_generation);
-                return;
-            }
+            if (!edge)
+                return give_up("missing ready edge");
             av::Timestamp ts = edge->lastTS();
             edge_ready = ts.isValid() && (!ready_edge_initial_ts.isValid() || ts > ready_edge_initial_ts);
         }
         if (edge_ready && time_ready)
             break;
+        if (waited_ms >= kTakeReadyTimeoutMs)
+            return give_up("no fresh frame in time, keeping the program");
         std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
         waited_ms += kPollMs;
     }
@@ -123,7 +127,7 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms,
         state_->cut_latency->timing.begin(scene_name, was_preloaded, pvw_is_slot_a ? 0 : 1, received);
 
     scheduleSceneControls(state_->scenes.at(scene_name), cut_ms);
-    cutInternal(scene_name, cut_ms, true);
+    cutInternal(scene_name, cut_ms);
 
     const auto& new_slot = state_->pvwSlot();
     std::string ready_edge_name = firstDstEdgeName(nodes_, new_slot.post_otm_name);

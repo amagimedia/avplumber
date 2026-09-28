@@ -225,6 +225,30 @@ void missed_deadlines_do_not_catch_up_in_bursts() {
     CHECK(!mix.prepare(85000000));
 }
 
+void idle_and_warm_up_gaps_are_not_missed_deadlines() {
+    // A slot compositor stops clocking an idle playout and holds its output while a
+    // reloaded scene warms up; neither gap is a deadline the output missed.
+    using namespace avp::mixer;
+    const TickGrid rate(av::Rational(30, 1));
+    Playout<int> mix(1, rate, {}, TimestampMode::Presentation);
+    for (int tick = 0; tick < 10; ++tick) {
+        mix.push(0, tick, rate.time(tick));
+        CHECK(mix.prepare(rate.time(tick) + mix.latencyNs()));
+        mix.commit();
+    }
+    mix.setActive(0, false);   // idle: ticks 10..19 are never prepared
+    mix.setActive(0, true);
+    mix.push(0, 20, rate.time(20));
+    CHECK(!mix.prepare(rate.time(19) + mix.latencyNs(), true));
+    CHECK(mix.prepare(rate.time(20) + mix.latencyNs(), true));
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 0);
+    mix.push(0, 22, rate.time(22));   // a tick the running output really skips
+    CHECK(mix.prepare(rate.time(22) + mix.latencyNs()));
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 1);
+}
+
 void latency_and_backpressure() {
     avp::mixer::Playout<int> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)), 50.0);
     mix.push(0, 42, 0);
@@ -541,6 +565,43 @@ void inactive_prewarm_retains_live_frames_without_rendering() {
     CHECK(!mix.prepare(rate.time(110), true));
 }
 
+void warm_reset_keeps_a_late_source_on_cadence() {
+    // A saturated source runs four ticks behind its timestamps. A warm scene
+    // load flips at the next deadline without waiting for the source's first
+    // frame inside the new window, and keeps that source's frames after its
+    // held picture: it neither repeats nor skips across the reset.
+    using namespace avp::mixer;
+    const TickGrid rate(av::Rational(30, 1));
+    Playout<int> mix(2, rate, {}, TimestampMode::Presentation);
+    for (size_t input : {0, 1}) {
+        mix.setPrewarm(input, true);
+        mix.setActive(input, false);
+    }
+    for (int tick = 0; tick < 30; ++tick) {
+        mix.push(0, tick, rate.time(tick));
+        if (tick >= 4) mix.push(1, 100 + tick - 4, rate.time(tick - 4));
+        CHECK(mix.prepare(rate.time(tick) + mix.latencyNs(), true));
+        mix.commit();
+    }
+    const auto late = mix.stats(1);
+    // The compositor's warm_reset: valid from one period before the playout window.
+    const auto now = rate.time(30) + mix.latencyNs();
+    for (size_t input : {0, 1}) {
+        mix.setActive(input, true);
+        mix.resetInput(input, now - mix.latencyNs() - rate.time(1), true);
+    }
+    for (int tick = 30; tick < 32; ++tick) {
+        mix.push(0, tick, rate.time(tick));
+        mix.push(1, 100 + tick - 4, rate.time(tick - 4));   // behind the new window, after the held picture
+        const auto *frame = mix.prepare(rate.time(tick) + mix.latencyNs(), true);
+        CHECK(frame && frame->index == tick);
+        CHECK(*frame->frames[0] == tick && *frame->frames[1] == 100 + tick - 4);
+        mix.commit();
+    }
+    CHECK(mix.stats(1).repeats == late.repeats && mix.stats(1).discarded == late.discarded);
+    CHECK(mix.missedDeadlines() == 0);
+}
+
 void staged_input_readiness_preserves_old_output() {
     using namespace avp::mixer;
     TickGrid rate(av::Rational(25, 1));
@@ -639,6 +700,7 @@ int main(int argc, char **argv) {
         {"input_offset_selects_a_late_source_one_tick_later", input_offset_selects_a_late_source_one_tick_later},
         {"staged_input_readiness_preserves_old_output", staged_input_readiness_preserves_old_output},
         {"inactive_prewarm_retains_live_frames_without_rendering", inactive_prewarm_retains_live_frames_without_rendering},
+        {"warm_reset_keeps_a_late_source_on_cadence", warm_reset_keeps_a_late_source_on_cadence},
         {"complete_jitter_plateau_is_not_rate_drift", complete_jitter_plateau_is_not_rate_drift},
         {"stale_burst_is_not_retimestamped_as_fresh", stale_burst_is_not_retimestamped_as_fresh},
         {"rational_source_drift_does_not_amplify", rational_source_drift_does_not_amplify},
@@ -663,6 +725,7 @@ int main(int argc, char **argv) {
         {"sixteen_independent_phases", sixteen_independent_phases},
         {"bounded_queue_counts_overflow", bounded_queue_counts_overflow},
         {"missed_deadlines_do_not_catch_up_in_bursts", missed_deadlines_do_not_catch_up_in_bursts},
+        {"idle_and_warm_up_gaps_are_not_missed_deadlines", idle_and_warm_up_gaps_are_not_missed_deadlines},
     };
     try {
         for (const auto &test : cases) {
