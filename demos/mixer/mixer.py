@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 import json
+import logging
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -45,6 +46,7 @@ except ImportError:
     )
 
 
+log = logging.getLogger("mixer")
 DEFAULT_FPS = 30
 FPS_DEN = 1
 # Instance-owned: a global (@) device survives shutdown until CUDA static teardown.
@@ -238,11 +240,13 @@ class MixerApplication:
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
 
     def start(self) -> None:
+        started = time.monotonic()
         for group in self.input_groups:
             self.avp.group(group).startNodes()
         if self.browser_windows:
             refresh_windows(self.dmabuf_rest, list(self.browser_windows))
         self._wait_for_edges(self.input_edges, "input readiness")
+        log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
         if self.routed_inputs:
             self.avp.group(ROUTER_GROUP).startNodes()
             self._wait_for_node("layout_preheat_router")
@@ -283,12 +287,12 @@ class MixerApplication:
         self.avp.setReady()
         for bus in self.aux_buses:
             bus.start()
-        print(
-            "Generic mixer preheat complete: compositors and transition ready",
-            flush=True,
-        )
+        log.info("Generic mixer preheat complete: compositors and transition ready in %.1f s",
+                 time.monotonic() - started)
 
     def stop(self) -> None:
+        started = time.monotonic()
+        log.info("Stopping the graph")
         for bus in self.aux_buses:
             bus.stop()
         if self.rtcp_feedback_listener is not None:
@@ -302,6 +306,7 @@ class MixerApplication:
             for group in (*self.input_groups, *(bus.group for bus in self.aux_buses)):
                 self.avp.group(group).stopNodes()
         self.avp.shutdown()
+        log.info("Graph stopped in %.1f s", time.monotonic() - started)
 
 
 def load_avp_api():
@@ -869,11 +874,14 @@ def parse_size(text: str) -> tuple[int, int]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     options = parse_args(argv)
+    started = time.monotonic()
     try:
         application = build_application(options)
     except KeyboardInterrupt:
         return   # the build shut down what it had started
+    log.info("Graph built in %.1f s", time.monotonic() - started)
     try:
         _run_application(application, options)
     except KeyboardInterrupt:

@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import csv
 import json
+import logging
 import subprocess
 import threading
 import signal
@@ -252,6 +253,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--dmabuf-rest", default="http://127.0.0.1:9009")
     parser.add_argument("--mixer-args", nargs=argparse.REMAINDER, default=[])
     args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     bridge = MixerBridge(args.host, args.port, args.mixer, transition=args.transition)
     setup = None
     if args.manage_setup:

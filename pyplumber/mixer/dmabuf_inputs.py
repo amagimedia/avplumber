@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -134,6 +135,7 @@ def open_windows(base_url: str, windows: List[dict]) -> None:
 
     Each open waits for its page load and a browser worker process opens one page at a time,
     so the changed pages open concurrently with one request in flight per worker."""
+    started = time.monotonic()
     status = rest_request(base_url, "GET", "/status") or {}
     existing = {w["id"]: w for w in status.get("windows", [])}
     changed = []
@@ -159,6 +161,8 @@ def open_windows(base_url: str, windows: List[dict]) -> None:
     with ThreadPoolExecutor(max_workers=len(status.get("workers") or [None])) as pool:
         for opening in [pool.submit(reopen, *change) for change in changed]:
             opening.result()
+    logging.getLogger(__name__).info("Browser windows ready: %d of %d opened in %.1f s",
+                                     len(changed), len(windows), time.monotonic() - started)
 
 
 def refresh_windows(base_url: str, ids: List[str]) -> None:

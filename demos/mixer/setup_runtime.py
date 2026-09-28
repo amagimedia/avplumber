@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -17,6 +18,8 @@ from demo_recipe import DSK_PAGES, allocate
 from pyplumber.mixer.config import default_browser_ring_size
 
 DEMO_DIR = Path(__file__).resolve().parent
+# Phase markers with durations: restart timings are read from the container log.
+log = logging.getLogger("setup")
 # bitrate_kbps is the SDR (H.264) program bitrate. The recipe's other renditions keep their
 # ratio to it, so an HDR output stays proportionally richer without a second control.
 DEFAULT_BITRATE_KBPS = 6000
@@ -229,6 +232,7 @@ class SetupRuntime:
             try:
                 self._start_recovering(self.media_dir / "mixer.demo.json", None)
                 self._status("running", "Existing mixer ready. Apply replaces it with the selected generic sources.")
+                log.info("Mixer ready (existing show)")
             except Exception as exc:
                 self._status("error", str(exc))
         self._status("starting", "Starting existing mixer…")
@@ -308,17 +312,18 @@ class SetupRuntime:
         with self.stop_lock:
             process = self.process
             if process and process.poll() is None:
-                print(f"Stopping mixer process {process.pid}", flush=True)
+                started = time.monotonic()
+                log.info("Stopping mixer process %s", process.pid)
                 with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGINT)
                 try:
                     process.wait(timeout=STOP_TIMEOUT_SEC)
                 except subprocess.TimeoutExpired:
-                    print("Mixer shutdown timed out; killing process before browser recovery", flush=True)
+                    log.warning("Mixer shutdown timed out; killing process before browser recovery")
                     with suppress(ProcessLookupError):
                         os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=10)
-                print(f"Mixer process exited ({process.returncode})", flush=True)
+                log.info("Mixer process exited (%s) in %.1f s", process.returncode, time.monotonic() - started)
             self.process = None
 
     def _recover_browsers(self, shows):
@@ -333,7 +338,10 @@ class SetupRuntime:
                    for w in status.get("windows", [])):
             return False
         self._status("starting", "Recovering browser workers…")
+        started = time.monotonic()
+        log.info("Recovering browser workers with quarantined frames")
         rest_request(self.browser_url, "POST", "/workers/recover", {"ids": ids}, timeout=RECOVER_TIMEOUT_SEC)
+        log.info("Browser workers recovered in %.1f s", time.monotonic() - started)
         return True
 
     def _start_recovering(self, config, previous_show):
@@ -371,6 +379,7 @@ class SetupRuntime:
             delay = RETRY_DELAYS_SEC[min(self.retries, len(RETRY_DELAYS_SEC) - 1)]
             self.retries += 1
             self.phase, self.message = "error", f"{reason}; restarting in {delay} s. Apply restarts it now."
+            log.warning("%s; restarting in %d s", reason, delay)
             timer = threading.Timer(delay, lambda: self._retry(timer))
             timer.daemon = True
             self.retry_timer = timer
@@ -392,20 +401,24 @@ class SetupRuntime:
             self.worker.start()
 
     def _restart(self):
+        started = time.monotonic()
         try:
             self._start_recovering(self.media_dir / "mixer.demo.json", None)
             with self.lock:
                 self.revision += 1
                 self.phase, self.message = "running", "Mixer ready (restarted automatically)."
+            log.info("Mixer ready: restarted in %.1f s", time.monotonic() - started)
         except Exception as exc:
             self._stop()
             self._schedule_retry(f"Mixer restart failed: {exc}")
 
     def _start(self, config):
+        started = time.monotonic()
         self.process = subprocess.Popen(
             [sys.executable, "-u", str(DEMO_DIR / "mixer.py"), "--config", str(config),
              "--remote-control-port", str(self.bridge.port), "--dmabuf-rest", self.browser_url,
              *self.mixer_args], start_new_session=True)
+        log.info("Mixer process %s started", self.process.pid)
         deadline = time.monotonic() + 180
         last_problem = "waiting for mixer control"
         while not self.closing.wait(.5):
@@ -426,6 +439,7 @@ class SetupRuntime:
                     expected.update(f"aux_{bid}_encoded" for bid in state.get("settings", {}).get("aux_buses", []))
                     encoded = {q["name"] for q in queues if q["enqueued_total"] > 0}
                     if expected <= encoded:
+                        log.info("Mixer encoding in %.1f s", time.monotonic() - started)
                         return
                     last_problem = "waiting for encoded output"
             except Exception as exc:
@@ -450,10 +464,13 @@ class SetupRuntime:
         previous = None
         stopped = False
         recipe_show = {}
+        started = time.monotonic()
         try:
             previous = config.read_bytes() if had_previous else None
             # Complete missing assets while the old mixer continues to run.
+            log.info("Preparing assets")
             prepare(recipe, self.media_dir)
+            log.info("Assets ready in %.1f s", time.monotonic() - started)
             if self.closing.is_set():
                 raise RuntimeError("Setup server is stopping")
             self._status("starting", "Restarting mixer…")
@@ -468,6 +485,7 @@ class SetupRuntime:
                 self.revision += 1
                 self.retries = 0
                 self.phase, self.message = "running", "Mixer ready."
+            log.info("Mixer ready: setup applied in %.1f s", time.monotonic() - started)
         except Exception as exc:
             message = str(exc)
             try:
@@ -489,6 +507,7 @@ class SetupRuntime:
             except Exception as rollback:
                 message += f"; recovery failed: {rollback}"
             self._status("error", message)
+            log.error("Setup failed after %.1f s: %s", time.monotonic() - started, message)
 
     def close(self):
         """Stop the mixer cleanly first: the container's stop grace period is spent on it,

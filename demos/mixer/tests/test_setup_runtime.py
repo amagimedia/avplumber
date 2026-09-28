@@ -483,7 +483,7 @@ def test_invalid_preserved_aux_rejected_before_preparation(runtime, monkeypatch)
 
 @pytest.mark.parametrize("hdr", [False, True])
 def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
-    monkeypatch.setattr("setup_runtime.subprocess.Popen", lambda *a, **kw: SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr("setup_runtime.subprocess.Popen", lambda *a, **kw: SimpleNamespace(pid=1234, poll=lambda: None))
     monkeypatch.setattr(runtime.closing, "wait", lambda _: False)
     runtime.bridge.state = lambda **kw: {"status": {"pgm_scene": "full"},
         "settings": {"preview_codecs": ["h264", "h265"] if hdr else ["h264"], "aux_buses": ["mv"]}}
@@ -767,6 +767,18 @@ def test_stale_preparation_directories_are_removed_on_start(tmp_path):
     (tmp_path / "assets" / "clips" / "kept.nv12").write_bytes(b"complete")
     SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
     assert sorted(p.name for p in tmp_path.rglob("*")) == ["assets", "clips", "kept.nv12"]
+
+
+def test_apply_logs_timed_phases_and_ready(runtime, monkeypatch, caplog):
+    import logging
+    config = runtime.media_dir / 'mixer.demo.json'
+    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_: config.write_text('{}'))
+    with caplog.at_level(logging.INFO, logger='setup'):
+        runtime.apply(DEFAULT_SETTINGS)
+        runtime.worker.join(3)
+    messages = [r.getMessage() for r in caplog.records if r.name == 'setup']
+    assert messages[0] == 'Preparing assets'
+    assert messages[1].startswith('Assets ready in ') and messages[-1].startswith('Mixer ready: setup applied in ')
 
 
 def test_rest_timeout_names_the_request(monkeypatch):
