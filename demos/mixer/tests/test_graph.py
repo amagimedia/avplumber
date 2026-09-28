@@ -1518,11 +1518,20 @@ def _decode_doc(tmp_path, **source):
 def test_clips_decode_on_the_gpu_and_raw_sources_upload_after_pacing(tmp_path):
     _, path = _decode_doc(tmp_path)
     app = build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
+    plans = dict(app.avp.edges.plans)   # decoded frames keep the default edge capacity
+    assert "input_0_decoded" not in plans and "input_1_decoded" not in plans
     nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
     decode = nodes["decode_0"]
     assert (decode["hwaccel"], decode["pixel_format"]) == ("mixer_gpu", "?cuda")
     assert "codec_map" not in decode and "options" not in decode
     assert nodes["upload_1"]["graph"] == "hwupload"   # raw uploads at its own size, after pacing
+
+
+def test_cli_file_inputs_keep_the_default_decoded_frames():
+    app = build_application(GraphOptions(inputs=("a.mp4", "b.mp4"), output="p.mp4"), api=fake_api())
+    plans = dict(app.avp.edges.plans)
+    assert "input_0_decoded" not in plans and "input_1_decoded" not in plans
+    assert plans["*"] == 3
 
 
 @pytest.mark.parametrize("dpb_size", [0, 1, 4])
