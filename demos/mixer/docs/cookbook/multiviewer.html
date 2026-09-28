@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="How the mixer's Multiviewer aux shows 100 sources 12 at a time: pages of equal tiles, and why off-page sources cost no frames, no GPU work and no VRAM.">
+  <title>Multiviewer: 100 sources, 12 at a time · Mixer optimization cookbook</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+    kbd { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 0 5px; font: 0.88em system-ui, sans-serif; }
+    svg .t { fill: #edf4ff; font: 600 14px system-ui, sans-serif; }
+    svg .m { fill: #a4b4ca; font: 12.5px system-ui, sans-serif; }
+    svg .tile { fill: #edf4ff; font: 600 11px system-ui, sans-serif; }
+    svg .ar { stroke: #a4b4ca; stroke-width: 2; fill: none; }
+    svg .ok { stroke: #30a46c; }
+    svg .off { stroke: #3b4a61; stroke-dasharray: 4 4; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+  <h1>Multiviewer: 100 sources, 12 at a time</h1>
+  <p class="lede">The Multiviewer aux shows every source in pages of 12 equal tiles, and only the 12 on screen send it frames.</p>
+  <span class="pill live">Status: Live</span>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 820 300" role="img" aria-labelledby="d1t">
+        <title id="d1t">100 source subscriptions: 12 enabled ones feed one compositor and one encoder; 88 disabled ones return at once with no frame.</title>
+        <defs>
+          <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#a4b4ca"/></marker>
+          <marker id="headok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#30a46c"/></marker>
+          <marker id="headoff" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#3b4a61"/></marker>
+          <pattern id="srcoff" x="24" y="60" width="20" height="20" patternUnits="userSpaceOnUse">
+            <rect x="0.5" y="0.5" width="15" height="15" rx="3" fill="#1a2536" stroke="#26354a"/>
+          </pattern>
+          <pattern id="srcon" x="24" y="60" width="20" height="20" patternUnits="userSpaceOnUse">
+            <rect width="16" height="16" rx="3" fill="#30a46c"/>
+          </pattern>
+        </defs>
+
+        <text x="120" y="34" text-anchor="middle" class="t">100 sources</text>
+        <text x="120" y="50" text-anchor="middle" class="m">already decoded for the program</text>
+        <rect x="24" y="60" width="200" height="200" fill="url(#srcoff)"/>
+        <rect x="24" y="60" width="200" height="20" fill="url(#srcon)"/>
+        <rect x="24" y="80" width="40" height="20" fill="url(#srcon)"/>
+        <text x="120" y="284" text-anchor="middle" class="m"><tspan fill="#30a46c">■</tspan> 12 on this page   <tspan fill="#a4b4ca">■</tspan> 88 off-page</text>
+
+        <path d="M226 72 H262" class="ar ok" marker-end="url(#headok)"/>
+        <path d="M226 190 H262" class="ar off" marker-end="url(#headoff)"/>
+
+        <rect x="268" y="40" width="170" height="64" rx="8" fill="#112a22" stroke="#30a46c"/>
+        <text x="353" y="66" text-anchor="middle" class="t">subscription on</text>
+        <text x="353" y="86" text-anchor="middle" class="m">enqueue the frame</text>
+
+        <rect x="268" y="150" width="170" height="82" rx="8" fill="#141c2b" stroke="#26354a"/>
+        <text x="353" y="174" text-anchor="middle" class="t">subscription off</text>
+        <text x="353" y="194" text-anchor="middle" class="m">lock attempt + atomic check</text>
+        <text x="353" y="212" text-anchor="middle" class="m">→ return</text>
+
+        <path d="M438 72 H474" class="ar ok" marker-end="url(#headok)"/>
+        <rect x="480" y="40" width="130" height="64" rx="8" fill="#101827" stroke="#57dbc2"/>
+        <text x="545" y="66" text-anchor="middle" class="t">compositor</text>
+        <text x="545" y="86" text-anchor="middle" class="m">1 pass · 12 tiles</text>
+
+        <path d="M610 72 H646" class="ar ok" marker-end="url(#headok)"/>
+        <rect x="652" y="40" width="148" height="64" rx="8" fill="#101827" stroke="#6e8bf5"/>
+        <text x="726" y="66" text-anchor="middle" class="t">H.264 encoder</text>
+        <text x="726" y="86" text-anchor="middle" class="m">+8 % ENC · 48 MB</text>
+
+        <path d="M726 104 V136" class="ar ok" marker-end="url(#headok)"/>
+        <rect x="652" y="142" width="148" height="56" rx="8" fill="#101827" stroke="#26354a"/>
+        <text x="726" y="166" text-anchor="middle" class="t">Janus → web UI</text>
+        <text x="726" y="184" text-anchor="middle" class="m">names drawn in HTML</text>
+
+        <path d="M438 191 H474" class="ar off" marker-end="url(#headoff)"/>
+        <rect x="480" y="162" width="150" height="58" rx="8" fill="#0b1220" stroke="#26354a" stroke-dasharray="4 4"/>
+        <text x="555" y="186" text-anchor="middle" class="m">no frame · no GPU work</text>
+        <text x="555" y="204" text-anchor="middle" class="m">no VRAM</text>
+
+        <rect x="480" y="236" width="320" height="44" rx="8" fill="#2a1416" stroke="#e5484d"/>
+        <text x="640" y="256" text-anchor="middle" class="t" style="font-size:13px">Program: untouched</text>
+        <text x="640" y="273" text-anchor="middle" class="m">no PGM tap · the bus never delays the program</text>
+      </svg>
+    </div>
+    <figcaption>The bus subscribes to all 100 sources. A page turn opens the 12 subscriptions it shows and closes the rest. A closed subscription drops the frame at the producer, before any queue.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 822 400" role="img" aria-labelledby="d2t">
+        <title id="d2t">Portrait canvas to scale: 9 pages of 12 tiles of 536 by 300, against one rejected page of 100 tiles of about 150 by 84.</title>
+        <defs>
+          <marker id="head2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#a4b4ca"/></marker>
+          <!-- Scale 0.15: canvas 1080×1920 → 162×288; grid cell 540×320 → 81×48; tile 536×300 at (2,10) → 80.4×45 at (0.3,1.5). -->
+          <pattern id="p1" x="20" y="60" width="81" height="48" patternUnits="userSpaceOnUse">
+            <rect x="0.3" y="1.5" width="80.4" height="45" rx="2" fill="#30a46c"/>
+          </pattern>
+          <pattern id="p2" x="222" y="60" width="81" height="48" patternUnits="userSpaceOnUse">
+            <rect x="0.3" y="1.5" width="80.4" height="45" rx="2" fill="#1f6b48"/>
+          </pattern>
+          <pattern id="p9" x="424" y="60" width="81" height="48" patternUnits="userSpaceOnUse">
+            <rect x="0.3" y="1.5" width="80.4" height="45" rx="2" fill="#1f6b48"/>
+          </pattern>
+          <!-- Rejected wall: 7 columns of ~150×84 tiles → 22.5×12.6 on a 23.1×13.8 pitch. -->
+          <pattern id="stamp" x="640" y="61" width="23.1" height="13.8" patternUnits="userSpaceOnUse">
+            <rect width="22.5" height="12.6" fill="#a93a3e"/>
+          </pattern>
+        </defs>
+
+        <!-- Page 1 -->
+        <text x="101" y="34" text-anchor="middle" class="t">Page 1 of 9</text>
+        <text x="101" y="50" text-anchor="middle" class="m">s1–s12 · 536×300 tiles</text>
+        <rect x="20" y="60" width="162" height="288" rx="4" fill="#0b1220" stroke="#26354a"/>
+        <rect x="20" y="60" width="162" height="288" fill="url(#p1)"/>
+        <g text-anchor="middle" class="tile">
+          <text x="60.5" y="88">s1</text><text x="141.5" y="88">s2</text>
+          <text x="60.5" y="136">s3</text><text x="141.5" y="136">s4</text>
+          <text x="60.5" y="184">s5</text><text x="141.5" y="184">s6</text>
+          <text x="60.5" y="232">s7</text><text x="141.5" y="232">s8</text>
+          <text x="60.5" y="280">s9</text><text x="141.5" y="280">s10</text>
+          <text x="60.5" y="328">s11</text><text x="141.5" y="328">s12</text>
+        </g>
+
+        <!-- Page 2 -->
+        <text x="303" y="34" text-anchor="middle" class="t">Page 2 of 9</text>
+        <text x="303" y="50" text-anchor="middle" class="m">s13–s24</text>
+        <rect x="222" y="60" width="162" height="288" rx="4" fill="#0b1220" stroke="#26354a"/>
+        <rect x="222" y="60" width="162" height="288" fill="url(#p2)"/>
+
+        <!-- Page 9 -->
+        <text x="505" y="34" text-anchor="middle" class="t">Page 9 of 9</text>
+        <text x="505" y="50" text-anchor="middle" class="m">s97–s100</text>
+        <rect x="424" y="60" width="162" height="288" rx="4" fill="#0b1220" stroke="#26354a"/>
+        <rect x="424" y="60" width="162" height="96" fill="url(#p9)"/>
+        <g text-anchor="middle" class="tile">
+          <text x="464.5" y="88">s97</text><text x="545.5" y="88">s98</text>
+          <text x="464.5" y="136">s99</text><text x="545.5" y="136">s100</text>
+        </g>
+
+        <g class="ar">
+          <path d="M188 204 H214" marker-end="url(#head2)"/>
+          <path d="M390 204 H416" marker-end="url(#head2)"/>
+          <path d="M505 352 V370 H101 V356" marker-end="url(#head2)"/>
+        </g>
+        <text x="201" y="196" text-anchor="middle" class="m">5 s</text>
+        <text x="403" y="196" text-anchor="middle" class="m">… 5 s</text>
+        <text x="303" y="388" text-anchor="middle" class="m">auto: next page every rotate_s (default 5 s) · ‹ n/N › holds one</text>
+
+        <path d="M613 20 V380" stroke="#26354a" stroke-width="1"/>
+
+        <!-- Rejected -->
+        <text x="721" y="34" text-anchor="middle" class="t">Rejected: one page</text>
+        <text x="721" y="50" text-anchor="middle" class="m">100 tiles of ~150×84</text>
+        <rect x="640" y="60" width="162" height="288" rx="4" fill="#0b1220" stroke="#26354a"/>
+        <rect x="640" y="61" width="161.7" height="193.2" fill="url(#stamp)"/>
+        <rect x="640" y="254.2" width="22.5" height="12.6" fill="#a93a3e"/>
+        <rect x="663.1" y="254.2" width="22.5" height="12.6" fill="#a93a3e"/>
+        <path d="M650 72 L792 336 M792 72 L650 336" stroke="#e5484d" stroke-width="4" stroke-linecap="round" opacity=".85"/>
+      </svg>
+    </div>
+    <figcaption>The 1080×1920 portrait canvas, to scale. 100 sources make 9 pages of 2×6 tiles; the last page holds 4 (derived). A landscape canvas uses 4×3. The postage-stamp wall on the right fits all 100, but each tile is about 150×84: too small to judge a picture.</figcaption>
+  </figure>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>An aux bus with layout <code>source_pages</code>. It shows every source in equal 16:9 tiles, 12 per page: 2×6 on the portrait 1080×1920 canvas (tiles of about 536×300), 4×3 on landscape. Pages turn every <code>rotate_s</code> (default 5 s). The operator holds a page with <code>mixer.aux_page {bus, page|step|auto}</code>.</li>
+    <li><b>Why</b>100 sources on one canvas give tiles of about 150×84, too small to judge. Paging keeps tiles readable. Delivering only the page on screen keeps the other 88 sources off the GPU.</li>
+    <li><b>Latency</b>Program: 0 frames. The bus reads sources the M/E already decodes and never delays the program. The aux draws with the main mixer's deadline (<code>latency_ms</code>, 2 frames by default). A page turn keeps the old page on screen until the 12 new sources are ready at the next tick; if they are not ready within 250 ms (or twice the aux latency, whichever is longer), the old page stays.</li>
+    <li><b>Side effects</b>
+      <ul>
+        <li>A page turn closes 12 subscriptions and opens 12; a closed one's queue is cleared.</li>
+        <li>Picking a page stops rotation until ⟳ (or <code>{"auto": true}</code>).</li>
+        <li>Source names exist only in the web UI. The stream itself carries no labels.</li>
+      </ul>
+    </li>
+    <li><b>Cost</b>One compositor pass of 12 tiles per aux frame. One H.264 encoder: +8 % ENC and 48 MB (measured). No PGM tap. One edge per source (capacity 1), but only the 12 shown carry frames. An off-page source costs a lock attempt and an atomic check per frame: no frame, no GPU work, no VRAM. One Python thread turns the pages.</li>
+    <li class="flag"><b>Risk</b>In auto rotation each source is on screen one page in nine, so it returns every 45 s at the default 5 s (derived). A fault on an off-page source shows only when its page comes up. Hold its page, or put it in a scene multiview, to watch it continuously.</li>
+    <li><b>Switch it off</b>Remove the bus from <code>aux_buses</code>. <code>mixer.aux_page {"bus", "auto": false}</code> stops rotation; <code>{"bus", "auto": true}</code> resumes it.</li>
+  </ul>
+
+  <h2>In the web UI</h2>
+  <p>The viewer header carries the page control <code style="white-space:nowrap">‹ n/N › ⟳</code>: previous, page number, next, auto rotation. <kbd>[</kbd> <kbd>]</kbd> and <kbd>R</kbd> do the same. The source names are HTML over the video, placed from the tile geometry the mixer reports, so the encoder never draws text.</p>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L47-L56"><code>pyplumber/mixer/aux.py:47–56</code></a>: <code>source_pages</code> and <code>rotate_s</code> validation (1–60 s, default 5)</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L115-L126"><code>pyplumber/mixer/aux.py:115–126</code></a>: <code>page_grid</code>, the 2×6 / 4×3 tile geometry</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L129-L134"><code>pyplumber/mixer/aux.py:129–134</code></a>: <code>page_composition</code>, the page's layers and its <code>active_inputs</code> mask</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L163-L165"><code>pyplumber/mixer/aux.py:163–165</code></a>: the aux takes the main mixer's latency; <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L171-L208">L171–208</a> build one compositor and one H.264 encoder</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L291-L352"><code>pyplumber/mixer/aux.py:291–352</code></a>: <code>AuxSourcePages</code>, with <code>turn</code> (hold, step, auto) and <code>_tick</code> (rotation)</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L373-L378"><code>pyplumber/mixer/aux.py:373–378</code></a>: the <code>mixer.aux_page</code> control command</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L366-L383"><code>src/nodes/hwaccel/cuda_rect_overlay.cpp:366–383</code></a>: the compositor opens the shown sources' subscriptions and closes the rest; <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L406-L414">L406–414</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L469-L486">L469–486</a> warm the next page before it goes on screen</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/mixer/primitives/frame_subscription.hpp#L37-L46"><code>src/mixer/primitives/frame_subscription.hpp:37–46</code></a>: <code>publish</code>, the lock attempt and atomic check where an off-page frame stops</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/one_to_many.cpp#L39-L41"><code>src/nodes/one_to_many.cpp:39–41</code></a>: the source fan-out calls <code>publish</code> once per frame and subscriber</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/webui/index.html#L946-L955"><code>demos/mixer/webui/index.html:946–955</code></a>: the pager in the viewer header; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/webui/index.html#L1037-L1041">L1037–1041</a>: source names over the video</li>
+    <li>Tests: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/tests/test_aux.py#L151-L152"><code>demos/mixer/tests/test_aux.py:151–152</code></a> (536×300 tiles), <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/tests/test_aux.py#L174">L174</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/tests/test_aux.py#L192">L192</a> (hold, step, rotation)</li>
+  </ul>
+  <p>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#aux_buses"><code>config.md</code> → aux_buses</a> (layouts, <code>rotate_s</code>, <code>mixer.aux_page</code>).</p>
+
+  <p class="note">+8 % ENC and 48 MB are measured. Figures marked derived are arithmetic from 100 sources and 12 tiles per page. Line numbers follow the current mixer branch and may shift on develop.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>

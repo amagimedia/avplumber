@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Event-loop sharding in the AVPlumber mixer: spread the sources' pacing timers over four event-loop threads so wake-up cost stops growing with the square of the source count.">
+  <title>Event-loop sharding · Mixer optimization cookbook</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+    .diagram svg { min-width: 320px; max-width: 560px; margin: 0 auto; }
+    .math { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin: 14px 0 0; }
+    .math p { margin: 4px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Event-loop sharding</h1>
+  <p class="lede">Split the sources' pacing timers across four event-loop threads, so one thread no longer wakes for every source and rescans every source on each wake-up.</p>
+  <span class="pill impl">Status: Implemented, not deployed</span>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 360 262" role="img" aria-labelledby="lanes-t lanes-d">
+      <title id="lanes-t">One shared loop versus four sharded loops</title>
+      <desc id="lanes-d">With one loop, a slow timer callback delays every source queued behind it. With four loops, the stall delays only the sources on its own loop.</desc>
+      <text x="0" y="14" fill="#edf4ff" font-size="13" font-weight="600">Before · 1 loop, all sources</text>
+      <rect x="0" y="22" width="360" height="30" rx="6" fill="#101827" stroke="#26354a"/>
+      <text x="6" y="41" fill="#a4b4ca" font-size="11">default</text>
+      <g font-size="11" text-anchor="middle" fill="#080d17">
+        <rect x="56" y="27" width="22" height="20" rx="3" fill="#30a46c"/><text x="67" y="41">s0</text>
+        <rect x="80" y="27" width="22" height="20" rx="3" fill="#30a46c"/><text x="91" y="41">s1</text>
+        <rect x="104" y="27" width="22" height="20" rx="3" fill="#30a46c"/><text x="115" y="41">s2</text>
+        <rect x="128" y="27" width="70" height="20" rx="3" fill="#f5a524"/><text x="163" y="41">s3 slow</text>
+        <rect x="200" y="27" width="22" height="20" rx="3" fill="#e5484d"/><text x="211" y="41">s4</text>
+        <rect x="224" y="27" width="22" height="20" rx="3" fill="#e5484d"/><text x="235" y="41">s5</text>
+        <rect x="248" y="27" width="22" height="20" rx="3" fill="#e5484d"/><text x="259" y="41">s6</text>
+        <rect x="272" y="27" width="22" height="20" rx="3" fill="#e5484d"/><text x="283" y="41">s7</text>
+        <rect x="296" y="27" width="58" height="20" rx="3" fill="#e5484d"/><text x="325" y="41">… s99</text>
+      </g>
+      <text x="0" y="70" fill="#e5484d" font-size="11">Every source after the stall runs late.</text>
+
+      <text x="0" y="100" fill="#edf4ff" font-size="13" font-weight="600">After · 4 loops, source i on pacing_{i % 4}</text>
+      <g font-size="11">
+        <rect x="0" y="108" width="360" height="28" rx="6" fill="#101827" stroke="#26354a"/>
+        <text x="6" y="126" fill="#a4b4ca">pacing_0</text>
+        <rect x="0" y="140" width="360" height="28" rx="6" fill="#101827" stroke="#26354a"/>
+        <text x="6" y="158" fill="#a4b4ca">pacing_1</text>
+        <rect x="0" y="172" width="360" height="28" rx="6" fill="#101827" stroke="#26354a"/>
+        <text x="6" y="190" fill="#a4b4ca">pacing_2</text>
+        <rect x="0" y="204" width="360" height="28" rx="6" fill="#101827" stroke="#26354a"/>
+        <text x="6" y="222" fill="#a4b4ca">pacing_3</text>
+      </g>
+      <g font-size="11" text-anchor="middle" fill="#080d17">
+        <rect x="64" y="112" width="26" height="20" rx="3" fill="#30a46c"/><text x="77" y="126">s0</text>
+        <rect x="92" y="112" width="26" height="20" rx="3" fill="#30a46c"/><text x="105" y="126">s4</text>
+        <rect x="120" y="112" width="26" height="20" rx="3" fill="#30a46c"/><text x="133" y="126">s8</text>
+        <rect x="148" y="112" width="58" height="20" rx="3" fill="#30a46c"/><text x="177" y="126">… s96</text>
+
+        <rect x="64" y="144" width="26" height="20" rx="3" fill="#30a46c"/><text x="77" y="158">s1</text>
+        <rect x="92" y="144" width="26" height="20" rx="3" fill="#30a46c"/><text x="105" y="158">s5</text>
+        <rect x="120" y="144" width="26" height="20" rx="3" fill="#30a46c"/><text x="133" y="158">s9</text>
+        <rect x="148" y="144" width="58" height="20" rx="3" fill="#30a46c"/><text x="177" y="158">… s97</text>
+
+        <rect x="64" y="176" width="26" height="20" rx="3" fill="#30a46c"/><text x="77" y="190">s2</text>
+        <rect x="92" y="176" width="26" height="20" rx="3" fill="#30a46c"/><text x="105" y="190">s6</text>
+        <rect x="120" y="176" width="30" height="20" rx="3" fill="#30a46c"/><text x="135" y="190">s10</text>
+        <rect x="152" y="176" width="58" height="20" rx="3" fill="#30a46c"/><text x="181" y="190">… s98</text>
+
+        <rect x="64" y="208" width="70" height="20" rx="3" fill="#f5a524"/><text x="99" y="222">s3 slow</text>
+        <rect x="136" y="208" width="26" height="20" rx="3" fill="#e5484d"/><text x="149" y="222">s7</text>
+        <rect x="164" y="208" width="30" height="20" rx="3" fill="#e5484d"/><text x="179" y="222">s11</text>
+        <rect x="196" y="208" width="58" height="20" rx="3" fill="#e5484d"/><text x="225" y="222">… s99</text>
+      </g>
+      <text x="0" y="252" fill="#30a46c" font-size="11">A stall delays only its quarter; loops use up to 4 cores.</text>
+    </svg>
+    </div>
+    <figcaption>Boxes are timer callbacks in the order one thread runs them. Green: on time. Amber: a slow callback. Red: delayed by it.</figcaption>
+  </figure>
+
+  <h2>Why one loop costs N²</h2>
+  <p>An event loop sleeps in <code>poll()</code> until its next timer or a watched file descriptor fires. Two things grow with the number of sources N on one loop:</p>
+  <div class="math">
+    <p><b>Wake-ups per second grow with N.</b> Each source's pacing nodes set their own timers.</p>
+    <p><b>Work per wake-up grows with N.</b> Each wake-up rebuilds the <code>pollfd</code> array for every watched fd, and each new timer walks the sorted timer list to find its slot.</p>
+    <p><b>So one loop's cost grows with N².</b> Four loops each carry N/4 sources: (N/4)² = N²/16 per loop, which is 16× less on the busiest core. Summed over the 4 loops it is 4 · N²/16 = N²/4, which is 4× less CPU in total.</p>
+  </div>
+  <p>Measured on the T4 test host with 100 sources on one loop: <b>43 % of one core</b> and <b>924 wake-ups per second</b>.</p>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 360 292" role="img" aria-labelledby="cost-t cost-d">
+      <title id="cost-t">Modelled relative cost of the N² term</title>
+      <desc id="cost-d">Relative cost, where 100 sources on one loop equals 1.00. N=50: one loop 0.25, busiest of four 0.02, four-loop total 0.06. N=100: 1.00, 0.06, 0.25. N=110: 1.21, 0.08, 0.30. N=150: 2.25, 0.14, 0.56.</desc>
+      <text x="0" y="14" fill="#edf4ff" font-size="13" font-weight="600">Model · N² term · 100 sources, 1 loop = 1.00</text>
+      <g font-size="11">
+        <rect x="0" y="26" width="10" height="10" rx="2" fill="#e5484d"/><text x="14" y="35" fill="#b5c4d8">1 loop</text>
+        <rect x="68" y="26" width="10" height="10" rx="2" fill="#30a46c"/><text x="82" y="35" fill="#b5c4d8">4 loops, busiest loop</text>
+        <rect x="212" y="26" width="10" height="10" rx="2" fill="#f5a524"/><text x="226" y="35" fill="#b5c4d8">4 loops, total</text>
+      </g>
+      <!-- scale: 1.00 = 110 px, bars start at x=64 -->
+      <line x1="64" y1="48" x2="64" y2="280" stroke="#26354a"/>
+      <g font-size="11">
+        <text x="0" y="80" fill="#edf4ff">N = 50</text>
+        <rect x="64" y="56"  width="27.5" height="12" fill="#e5484d"/><text x="95"  y="66"  fill="#b5c4d8">0.25</text>
+        <rect x="64" y="71"  width="1.9"  height="12" fill="#30a46c"/><text x="70"  y="81"  fill="#b5c4d8">0.02</text>
+        <rect x="64" y="86"  width="6.9"  height="12" fill="#f5a524"/><text x="75"  y="96"  fill="#b5c4d8">0.06</text>
+
+        <text x="0" y="138" fill="#edf4ff">N = 100</text>
+        <rect x="64" y="114" width="110"  height="12" fill="#e5484d"/><text x="178" y="124" fill="#b5c4d8">1.00 · measured 43 % of a core</text>
+        <rect x="64" y="129" width="6.9"  height="12" fill="#30a46c"/><text x="75"  y="139" fill="#b5c4d8">0.06</text>
+        <rect x="64" y="144" width="27.5" height="12" fill="#f5a524"/><text x="95"  y="154" fill="#b5c4d8">0.25</text>
+
+        <text x="0" y="196" fill="#edf4ff">N = 110</text>
+        <rect x="64" y="172" width="133.1" height="12" fill="#e5484d"/><text x="201" y="182" fill="#b5c4d8">1.21</text>
+        <rect x="64" y="187" width="8.6"   height="12" fill="#30a46c"/><text x="77"  y="197" fill="#b5c4d8">0.08</text>
+        <rect x="64" y="202" width="33.3"  height="12" fill="#f5a524"/><text x="101" y="212" fill="#b5c4d8">0.30</text>
+
+        <text x="0" y="254" fill="#edf4ff">N = 150</text>
+        <rect x="64" y="230" width="247.5" height="12" fill="#e5484d"/><text x="315" y="240" fill="#b5c4d8">2.25</text>
+        <rect x="64" y="245" width="15.9"  height="12" fill="#30a46c"/><text x="84"  y="255" fill="#b5c4d8">0.14</text>
+        <rect x="64" y="260" width="61.9"  height="12" fill="#f5a524"/><text x="130" y="270" fill="#b5c4d8">0.56</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>Model, not a measurement. Cost grows with (sources on a loop)². The busiest loop holds N/4 sources, rounded up. Only the 100-source, one-loop point is measured; the model ignores work that does not scale as N².</figcaption>
+  </figure>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>Source i's pacing nodes (<code>realtime</code> and <code>force_fps</code>; <code>smooth_timestamps</code> for browser sources) join event loop <code>pacing_{i % 4}</code> through the existing <code>event_loop</code> node parameter. Output, aux and wipe pacing stay on <code>default</code>.</li>
+    <li><b>Why</b>One loop for 100 sources used 43 % of a core at 924 wake-ups/s, its cost grows as N², and one slow timer delays every source behind it.</li>
+    <li><b>Latency</b>0 frames added to program and to command-to-screen latency: no new queue, buffer or node. What changes is timer lateness: one busy loop delayed <code>realtime</code>'s timestamps and held decoders; four loops cut that delay. The improvement is not measured yet.</li>
+    <li><b>Side effects</b>Sources on different loops now run their pacing callbacks in parallel, not one after another. Output, aux and wipe pacing get the <code>default</code> loop to themselves, so source timers no longer queue in front of them.</li>
+    <li><b>Cost</b>0 nodes, 0 queues, 0 VRAM, 0 framework lines. 4 new event-loop threads (<code>pacing_0</code>…<code>pacing_3</code>): source pacing moves from 1 thread to 4. Code: one constant, a two-line helper and an <code>event_loop</code> argument passed through the input builders.</li>
+    <li><b>Risk</b>Low. Sources were never phase-locked to each other, so moving them to separate threads changes no ordering a source relies on.</li>
+    <li><b>Switch it off</b>Set <code>PACING_LOOPS = 1</code>. All sources then share <code>pacing_0</code>. That is not the old layout exactly: output, aux and wipe pacing still keep <code>default</code> to themselves.</li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/EventLoop.hpp#L47-L60"><code>src/EventLoop.hpp:47-60</code></a>: each wake-up rebuilds the <code>pollfd</code> array for every watched fd.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/EventLoop.hpp#L192-L203"><code>src/EventLoop.hpp:192-203</code></a>: <code>schedule()</code> walks the sorted timer list to insert each timer.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/graph_mgmt.cpp#L944-L946"><code>src/graph_mgmt.cpp:944-946</code></a>: the existing <code>event_loop</code> node parameter picks a named loop.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L370-L379"><code>demos/mixer/mixer.py:375</code></a>: <code>PACING_LOOPS = 4</code> and <code>_pacing_loop()</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L93-L108"><code>pyplumber/mixer/inputs.py:93-108</code></a>: <code>_pace()</code> passes <code>event_loop</code> to <code>realtime</code> and <code>force_fps</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/dmabuf_inputs.py#L81-L85"><code>pyplumber/mixer/dmabuf_inputs.py:81-85</code></a>: browser sources pass it to <code>smooth_timestamps</code>.</li>
+  </ul>
+  <p>Markdown reference: <a href="https://github.com/amagimedia/avplumber/blob/develop/README.md#non-blocking-nodes">README · Non-blocking nodes</a> documents the <code>event_loop</code> field. No mixer doc section covers this change yet.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>
