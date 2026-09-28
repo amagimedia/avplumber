@@ -1,7 +1,7 @@
 import pytest
 
-from cut_spam import (is_expected_rejection, latest_id, measured, parse_mix, percentile, pick_scenes,
-                      playout_delta, sample as probe_sample, setup_check, summarize, thresholds,
+from cut_spam import (eligible_cuts, is_expected_rejection, latest_id, measured, parse_mix, percentile,
+                      pick_scenes, playout_delta, sample as probe_sample, setup_check, summarize, thresholds,
                       transition_payloads, verdict)
 
 
@@ -56,6 +56,17 @@ def test_a_burst_sample_is_its_last_cut_once_measured():
     assert probe_sample(PROBE, 7, "s") is None   # superseded, never measured
     assert probe_sample(PROBE, 5, "other") is None
     assert probe_sample(None, 1, "s") is None
+
+
+def test_only_cuts_the_next_take_left_time_for_are_eligible():
+    takes = [(0.0, "cut", "sent"),     # probe 11: the fade 100 ms later cancels it
+             (0.1, "fade", "sent"),
+             (0.5, "cut", "sent"),     # probe 12: 300 ms to the next take
+             (0.8, "wipe", None),      # rejected, still cancels a pending cut
+             (0.85, "cut", "sent"),    # probe 13: 150 ms, short of the gap
+             (1.0, "cut", "sent")]     # probe 14: the pause before recovery follows
+    assert eligible_cuts(takes, 10, 0.2) == {12, 14}
+    assert eligible_cuts([], 10, 0.2) == set()
 
 
 def test_playout_counters_sum_both_slots_and_must_advance():
@@ -123,6 +134,9 @@ def test_verdict_fails_slow_measurement_and_any_program_stall():
                                                   [], (True, ""), (True, "")))
     assert not criteria["spam measured"] and criteria["burst measured"]
     assert not criteria["program missed deadlines"] and criteria["program repeats"]
+    none_eligible = {**ok, "eligible": 0, "measured_ratio": None}
+    spam = {n: (c, d) for n, c, d in verdict(limits, none_eligible, ok, ok, stalled, [], (True, ""), (True, ""))}
+    assert spam["spam measured"][0] is False and "lower --rate" in spam["spam measured"][1]
 
 
 def test_only_known_rejections_are_expected():

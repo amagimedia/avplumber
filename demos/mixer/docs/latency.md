@@ -133,17 +133,21 @@ on what hammering adds to its spaced cuts. *F* is one frame at the show rate
 | No errors | every request and command succeeds; “transition already in progress” rejections are listed separately | — |
 | Setup running | `/api/setup` stays `running` at the same revision, when the web UI manages the mixer | — |
 | Spam and burst p95 / max | B50 + 2 F + 10 ms / B50 + 4 F + 10 ms | `--spam-p95-ms`, `--spam-max-ms` |
-| Spam and burst measured | at least 90% of the cuts sent (bursts: of their last cuts) | `--measured-ratio-min` |
+| Spam and burst measured | at least 90% of the eligible cuts (bursts: of their last cuts) | `--measured-ratio-min` |
 | Recovery median | B50 + 1 F | `--recovery-p50-ms` |
 | Recovery max | Bmax + 1 F | `--recovery-max-ms` |
 | Program missed deadlines | 0 from the bursts to the end, summed over both slot compositors | — |
 | Program repeats | 0 over the same window | `--playout-repeats-max` |
 | Program on last target | after the spam and at the end, the last accepted take's scene is on program with no transition running, within max(take length, 1 s) + the spam max limit | — |
 
-Every take cancels a cut measurement that is still pending. Spam therefore
-measures only cuts that reach the encoder before the next command (125–375 ms
-at 4 per second): a measured ratio under 90% means cuts are slower than the
-command gap. A take the web UI coalesced is counted apart, not as sent.
+Every take cancels a cut measurement that is still pending, so a spam cut
+followed by a take sooner than its own latency is never measured, however
+healthy the mixer (at 4 per second the gaps are 125–375 ms). The ratio counts
+only eligible cuts: those whose next take came at least the spam max limit
+later. An eligible cut left unmeasured took longer than that limit or lost its
+probe. A setup so slow that no cut is eligible fails and asks for a lower
+`--rate`. The latency percentiles use every measured cut. A take the web UI
+coalesced is counted apart, not as sent.
 
 The program counters come from `mixer.status` `playout`: each slot compositor
 publishes its playout `missed_deadlines` and per-input `repeats` every 60 output

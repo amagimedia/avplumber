@@ -81,6 +81,21 @@ def sample(cut_latency, probe_id, scene):
     return entry["ms"] if entry and entry.get("scene") == scene else None
 
 
+def eligible_cuts(takes, after_id, gap_s):
+    """Probe ids of the spam cuts whose next take came at least `gap_s` later: a take cancels a
+    pending measurement, so only these can be measured whatever the take rate. `takes` is
+    [(sent_at_s, kind, outcome)] in sending order; each cut the mixer accepted took the next
+    probe id after `after_id`. The last take has the pause before recovery after it."""
+    eligible, probe_id = set(), after_id
+    for i, (sent_at, kind, outcome) in enumerate(takes):
+        if kind != "cut" or outcome != "sent":
+            continue
+        probe_id += 1
+        if i + 1 == len(takes) or takes[i + 1][0] - sent_at >= gap_s:
+            eligible.add(probe_id)
+    return eligible
+
+
 def playout_delta(before, after):
     """Change of both slot compositors' counters (mixer.status `playout`), summed: the slots take
     turns on program. None when they are not reported or did not advance."""
@@ -134,8 +149,10 @@ def verdict(limits, spam, burst, recovery, playout, errors, setup, scene):
         return name, value is not None and limit is not None and value <= limit, f"{fmt(value)} ms, limit {fmt(limit)}"
 
     def ratio(name, stats):
-        value, low = stats.get("measured_ratio"), limits["measured_ratio_min"]
-        return name, value is not None and value >= low, f"{pct(value)} of cuts measured, minimum {pct(low)}"
+        value, low, pool = stats.get("measured_ratio"), limits["measured_ratio_min"], stats.get("eligible")
+        if pool == 0:
+            return name, False, "no cut had the spam max limit before the next take; lower --rate"
+        return name, value is not None and value >= low, f"{pct(value)} of {pool} cuts measured, minimum {pct(low)}"
 
     def counter(name, key, limit):
         if playout is None:
@@ -278,9 +295,10 @@ def bursts(run, scenes, count, rng, target):
     return samples, superseded, target
 
 
-def spam(run, args, scenes, payloads, mix, rng, target, settle_slack_s):
+def spam(run, args, scenes, payloads, mix, rng, target, max_s):
     """Send takes on an absolute schedule, one at a time so they arrive in the order sent;
-    a 10 Hz poller collects every cut measured meanwhile, including ones that land late."""
+    a 10 Hz poller collects every cut measured meanwhile, including ones that land late.
+    `max_s` is the spam max limit: the gap that makes a cut eligible and the settle slack."""
     after, samples, stop = latest_id(run.status().get("cut_latency")), {}, threading.Event()
 
     def poll():
@@ -288,24 +306,29 @@ def spam(run, args, scenes, payloads, mix, rng, target, settle_slack_s):
             samples.update(measured(run.status().get("cut_latency"), after))
     poller = threading.Thread(target=poll, daemon=True)
     poller.start()
-    sent, last_kind = dict.fromkeys(mix, 0), "cut"
+    sent, takes, last_kind = dict.fromkeys(mix, 0), [], "cut"
     next_at = time.monotonic()
     end = next_at + args.duration
     while next_at < end:
         time.sleep(max(0.0, next_at - time.monotonic()))
         kind = rng.choices(list(mix), list(mix.values()))[0]
         scene = next_target(scenes, target, rng)
-        if run.command(kind, scene, **payloads[kind]) == "sent":
+        takes.append((time.monotonic(), kind, run.command(kind, scene, **payloads[kind])))
+        if takes[-1][2] == "sent":
             sent[kind] += 1
             target, last_kind = scene, kind
         next_at += rng.uniform(0.5, 1.5) / args.rate
     # pgm_scene flips when a fade or wipe ends, and a take may start as late as a slow cut.
     length = payloads[last_kind].get("duration_sec", UNPROBED_WIPE_S if last_kind == "wipe" else 0)
-    settled = run.settle(target, max(length, 1.0) + settle_slack_s)
+    settled = run.settle(target, max(length, 1.0) + max_s)
     time.sleep(2)   # the pause before recovery; the poller still collects the last cut
     stop.set()
     poller.join()
-    return [samples[i]["ms"] for i in sorted(samples)], sent, target, settled
+    eligible = eligible_cuts(takes, after, max_s)
+    stats = {**summarize([samples[i]["ms"] for i in sorted(samples)]), "sent": sent,
+             "eligible": len(eligible), "measured_eligible": len(eligible & samples.keys())}
+    stats["measured_ratio"] = stats["measured_eligible"] / len(eligible) if eligible else None
+    return stats, target, settled
 
 
 def gate(args):
@@ -336,16 +359,14 @@ def gate(args):
     limits = thresholds(fps, base, {k: getattr(args, k) for k in THRESHOLDS})
     counters_before = run.status().get("playout")
     burst_ms, superseded, target = bursts(run, scenes, args.bursts, rng, target)
-    spam_ms, sent, target, after_spam = spam(run, args, scenes, payloads, mix, rng, target,
-                                             limits["spam_max_ms"] / 1000)
+    spam_stats, target, after_spam = spam(run, args, scenes, payloads, mix, rng, target,
+                                          limits["spam_max_ms"] / 1000)
     recovery, target = spaced_cuts(run, scenes, args.recovery_cuts, rng, target)
     at_end = run.settle(target, 1.0 + limits["recovery_max_ms"] / 1000)
     playout = playout_delta(counters_before, run.status().get("playout"))
     scene = (after_spam[0] and at_end[0], f"after spam: {after_spam[1]}; at end: {at_end[1]}")
-    spam_stats = {**summarize(spam_ms), "sent": sent,
-                  "measured_ratio": len(spam_ms) / sent["cut"] if sent.get("cut") else None}
     burst_stats = {**summarize(burst_ms), "bursts": args.bursts, "superseded": superseded,
-                   "measured_ratio": len(burst_ms) / args.bursts if args.bursts else None}
+                   "eligible": args.bursts, "measured_ratio": len(burst_ms) / args.bursts if args.bursts else None}
     criteria = verdict(limits, spam_stats, burst_stats, summarize(recovery), playout, run.errors,
                        setup_check(setup_before, run.setup()), scene)
     return {"pass": all(ok for _, ok, _ in criteria), "seed": seed, "fps": fps, "scenes": scenes,
@@ -364,8 +385,8 @@ def print_summary(r):
           f"baseline  n={b['n']} p50={fmt(b['p50'])} max={fmt(b['max'])} ms\n"
           f"burst     {u['bursts']} x {BURST_TAKES} cuts, {u['superseded']} coalesced; last measured "
           f"{u['n']} ({pct(u['measured_ratio'])}); p50={fmt(u['p50'])} p95={fmt(u['p95'])} max={fmt(u['max'])} ms\n"
-          f"spam      sent {s['sent']}; measured {s['n']}/{s['sent'].get('cut', 0)} cuts "
-          f"({pct(s['measured_ratio'])}); p50={fmt(s['p50'])} p95={fmt(s['p95'])} max={fmt(s['max'])} ms\n"
+          f"spam      sent {s['sent']}; measured {s['n']} cuts, {s['measured_eligible']}/{s['eligible']} "
+          f"eligible ({pct(s['measured_ratio'])}); p50={fmt(s['p50'])} p95={fmt(s['p95'])} max={fmt(s['max'])} ms\n"
           f"recovery  n={rec['n']} p50={fmt(rec['p50'])} max={fmt(rec['max'])} ms\n"
           f"playout   {r['playout'] or 'not reported'}\n"
           f"fade/wipe start latency {r['transition_start']}\n"
