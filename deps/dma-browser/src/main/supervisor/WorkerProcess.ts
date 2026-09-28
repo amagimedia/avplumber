@@ -291,6 +291,8 @@ export class ElectronWorkerProcess implements BrowserWorker {
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
       this.enqueue(async () => {
+        // stop() may have run while this restart waited in the queue; start() would undo it.
+        if (this.stopping) return;
         await this.start();
         await this.restoreDesiredWindows();
       }).catch((err: unknown) => {
