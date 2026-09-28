@@ -123,6 +123,14 @@ services:
     image: avplumber-dmabuf-demo-consumer:${DMABUF_CONSUMER_IMAGE_TAG:-latest}
     network_mode: host
     restart: unless-stopped
+    # The periodic queue dump alone is ~0.9 GB/day on a 40-source mixer; 5 x 100 MB
+    # keeps roughly the last 12 h, and rotated files are gzipped.
+    logging:
+      driver: json-file
+      options:
+        max-size: ${AVPLUMBER_LOG_MAX_SIZE:-100m}
+        max-file: "${AVPLUMBER_LOG_MAX_FILES:-5}"
+        compress: "true"
     gpus: all
     runtime: nvidia
     privileged: true
