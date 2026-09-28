@@ -225,6 +225,30 @@ void missed_deadlines_do_not_catch_up_in_bursts() {
     CHECK(!mix.prepare(85000000));
 }
 
+void idle_and_warm_up_gaps_are_not_missed_deadlines() {
+    // A slot compositor stops clocking an idle playout and holds its output while a
+    // reloaded scene warms up; neither gap is a deadline the output missed.
+    using namespace avp::mixer;
+    const TickGrid rate(av::Rational(30, 1));
+    Playout<int> mix(1, rate, {}, TimestampMode::Presentation);
+    for (int tick = 0; tick < 10; ++tick) {
+        mix.push(0, tick, rate.time(tick));
+        CHECK(mix.prepare(rate.time(tick) + mix.latencyNs()));
+        mix.commit();
+    }
+    mix.setActive(0, false);   // idle: ticks 10..19 are never prepared
+    mix.setActive(0, true);
+    mix.push(0, 20, rate.time(20));
+    CHECK(!mix.prepare(rate.time(19) + mix.latencyNs(), true));
+    CHECK(mix.prepare(rate.time(20) + mix.latencyNs(), true));
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 0);
+    mix.push(0, 22, rate.time(22));   // a tick the running output really skips
+    CHECK(mix.prepare(rate.time(22) + mix.latencyNs()));
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 1);
+}
+
 void latency_and_backpressure() {
     avp::mixer::Playout<int> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)), 50.0);
     mix.push(0, 42, 0);
@@ -696,6 +720,7 @@ int main(int argc, char **argv) {
         {"sixteen_independent_phases", sixteen_independent_phases},
         {"bounded_queue_counts_overflow", bounded_queue_counts_overflow},
         {"missed_deadlines_do_not_catch_up_in_bursts", missed_deadlines_do_not_catch_up_in_bursts},
+        {"idle_and_warm_up_gaps_are_not_missed_deadlines", idle_and_warm_up_gaps_are_not_missed_deadlines},
     };
     try {
         for (const auto &test : cases) {

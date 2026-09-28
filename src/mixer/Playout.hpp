@@ -56,6 +56,9 @@ private:
     std::vector<size_t> consume_;
     bool started_ = false;
     uint64_t missed_deadlines_ = 0;
+    // The ticks before the first commit after a reset were held for warm-up or not
+    // clocked at all (a node idles an inactive playout); they are not missed deadlines.
+    bool reset_since_commit_ = false;
 
 public:
     Playout(size_t inputs, TickGrid rate, std::optional<double> latency_ms = {},
@@ -180,7 +183,8 @@ public:
                 ++input.stats.repeats;
             }
         }
-        if (started_) missed_deadlines_ += pending_->index - *index_;
+        if (started_ && !reset_since_commit_) missed_deadlines_ += pending_->index - *index_;
+        reset_since_commit_ = false;
         index_ = pending_->index + 1;
         pending_.reset();
         waiting_deadline_.reset();
@@ -200,6 +204,7 @@ public:
     void resetInput(size_t input, std::optional<int64_t> valid_from_ns = {}, bool preserve_warm = false) {
         if (pending_) throw std::logic_error("commit mixer decision before resetting");
         auto &state = inputs_.at(input);
+        reset_since_commit_ = true;
         if (preserve_warm && state.prewarm && valid_from_ns) {
             // Scene geometry may change while source identity stays fixed.
             // Retain only frames in the current playout window. A source running

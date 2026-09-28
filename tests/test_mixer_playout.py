@@ -55,6 +55,7 @@ def playout_binary(tmp_path_factory):
     "sixteen_independent_phases",
     "bounded_queue_counts_overflow",
     "missed_deadlines_do_not_catch_up_in_bursts",
+    "idle_and_warm_up_gaps_are_not_missed_deadlines",
 ])
 def test_mixer_playout(playout_binary, case):
     result = subprocess.run([str(playout_binary), case], capture_output=True, text=True, timeout=10)
