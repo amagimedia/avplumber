@@ -873,15 +873,12 @@ const playable = (codec) => codec !== "h265" || h265Playable;
 // ?codec= picks the program's default codec; HDR otherwise, where the browser can play it.
 const defaultCodec = (codecs) => [query.get("codec"), "h265", "h264"].find((c) => codecs.includes(c) && playable(c)) || codecs[0];
 // The dirty program plays from the player's own mountpoints in the preview codecs; every other output
-// is an H.264 mountpoint of its own.
+// is an H.264 mountpoint of its own, which the player plays as H.264 whatever codec the URL names.
 function playerUrl(output, codec) {
   const url = new URL(playerBase);
   const codecs = settings().preview_codecs;
-  if (output) {
-    url.searchParams.set("mountpoint", output.mountpoint);
-    url.searchParams.set("codec", "h264");
-    url.searchParams.set("outputs", "h264");
-  } else {
+  if (output) url.searchParams.set("mountpoint", output.mountpoint);
+  else {
     if (codecs?.length) url.searchParams.set("outputs", codecs.join(","));
     url.searchParams.set("codec", codec);
   }
