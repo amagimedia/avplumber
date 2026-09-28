@@ -14,7 +14,12 @@ estimates rounded down, with a separate raw NV12 budget of 700 frames/second.
 | 50 | 50 | 20 | 16 | 14 | Linear estimate, not a measured capacity result |
 | 60 | 41 | 16 | 14 | 11 | Linear estimate, rounded to keep upload headroom |
 
-The browser service defaults to four workers with eight windows each (32 total).
+At 25 fps the setup also allows an experimental 110-input ceiling, keys included:
+**40 NVDEC + 40 browser + 30 raw NV12**, with pinned raw uploads (`canvas.raw_upload:
+"pinned"`, the setup default) and a fifth browser worker. It is not yet a validated limit.
+
+The browser service defaults to five workers with eight windows each (40 total); the setup
+allows all 40 at 25 fps and 32 at other rates.
 The setup allows 192 scenes; scenes describe layouts and do not each allocate a
 running compositor. Active layers and AUX outputs have separate limits.
 
@@ -89,9 +94,10 @@ a single-stream copy benchmark with the mixer stopped measured roughly
 frame size. These are measured transfer rates, not usable mixer budgets:
 decode, encoding, browser interop and driver submission need headroom too.
 
-The setup enforces 28 raw NV12 uploads at most, reducing that to 23/14/11 at
-30/50/60 fps. Excess allocation is redistributed among enabled source types;
-a raw-only request above its limit is rejected. This cap concerns the raw NV12
+The setup enforces 30 raw NV12 uploads at 25 fps (28 were measured with FFmpeg
+hwupload; the other two rely on pinned uploads) and 23/14/11 at 30/50/60 fps.
+Excess allocation is redistributed among enabled source types; a raw-only
+request above its limit is rejected. This cap concerns the raw NV12
 CPU-to-GPU path. P010 uploads share the same budget at two units per source,
 based on double the bytes per frame; this is not a measured HDR capacity. Combined
 SDR/HDR NVDEC inputs are capped at 40 for 25/30 fps and 20 for 50/60 fps.

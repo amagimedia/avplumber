@@ -124,7 +124,7 @@ const types = [
  {id:'hlg420',name:'HDR · 4:2:0 · NVDEC',detail:'HEVC 10-bit HLG patterns · NVDEC',color:'#5a87b5'},
  {id:'hlg422',name:'HDR · 4:2:2 · HW upload',detail:'10-bit HLG v210 · CPU → GPU + unpack',color:'#ac8bce',max:4},
  {id:'sdr422',name:'SDR · 4:2:2 · HW upload',detail:'10-bit v210 bars · CPU → GPU + unpack',color:'#d5a35f'},
- {id:'browser',name:'Browser',detail:'Bundled transparent test page · maximum 32',color:'#d47f95',max:32},
+ {id:'browser',name:'Browser',detail:'Bundled transparent test page · maximum 40 at 25 fps, 32 otherwise',color:'#d47f95'},
  {id:'sdr420_raw',name:'SDR · 4:2:0 · HW upload',detail:'8-bit NV12 · CPU → GPU · 1 upload unit',color:'#78aa62'},
  {id:'hlg420_raw',name:'HDR · 4:2:0 · HW upload',detail:'10-bit HLG P010 · CPU → GPU · 2 upload units',color:'#818bcf'}
 ];
@@ -132,10 +132,12 @@ const types = [
 const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]]];
 const presets = {balanced:[8,4,2,0,2,0,0],equal:[1,1,1,1,1,1,1],light:[2,1,0,0,0,0,0]};
 const dskPages=()=>[...document.querySelectorAll('#dsk-pages input:checked')].map(i=>i.value);
+// Same per-rate budgets as setup_runtime.py: 25 fps carries the experimental 110-input ceiling.
+const browserLimit=fps=>fps===25?40:32, rawUploadUnits=fps=>fps===25?30:Math.floor(700/fps);
 const sourceBudgets=()=>[
- [[2],[1],4,'HDR 4:2:2'],[[4],[1],32-dskPages().length,'Browser'],
+ [[2],[1],4,'HDR 4:2:2'],[[4],[1],browserLimit(Number($('fps').value))-dskPages().length,'Browser'],
  [[0,1],[1,1],Number($('fps').value)<=30?40:20,'Combined NVDEC'],
- [[5,6],[1,2],Math.min(28,Math.floor(700/Number($('fps').value))),'Raw 4:2:0 upload units']
+ [[5,6],[1,2],rawUploadUnits(Number($('fps').value)),'Raw 4:2:0 upload units']
 ];
 const overBudget=counts=>sourceBudgets().some(([indices,costs,limit])=>indices.reduce((n,i,k)=>n+counts[i]*costs[k],0)>limit);
 function sourceMaximum(index){
@@ -225,7 +227,7 @@ function update(){
    dsk:dskPages(),clean_feed:$('clean-feed').checked&&dskPages().length>0};
  types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(document.activeElement!==input&&(Number(input.value)!==counts[i]||input.value===''))input.value=counts[i];input.max=sourceMaximum(i);});
  $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
- $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${fps<=30?40:20} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]}/${Math.min(28,Math.floor(700/fps))} units (NV12 = 1, P010 = 2). Capacity depends on codec and content.`;
+ $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${fps<=30?40:20} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]}/${rawUploadUnits(fps)} units (NV12 = 1, P010 = 2). Capacity depends on codec and content.`;
  $('canvas-label').textContent=`${width} × ${height} · ${fps} fps · ${portrait?'portrait':'landscape'}`;
  const eight=currentSettings.bit_depth===8;
  $('canvas-format').textContent=eight?'BT.709, 8-bit 4:2:0 canvas · SDR output':`HLG, 10-bit ${currentSettings.chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`;

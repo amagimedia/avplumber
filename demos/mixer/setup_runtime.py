@@ -27,6 +27,14 @@ DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="42
                         bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60),
                         dsk=[], clean_feed=False)
 BROWSER_LIMIT = 32
+# The experimental 110-input ceiling at 25 fps adds a fifth browser worker (8 windows) and two
+# pinned raw uploads; other rates keep the measured baseline.
+def browser_limit(fps):
+    return 40 if fps == 25 else BROWSER_LIMIT
+
+
+def raw_upload_units(fps):
+    return 30 if fps == 25 else 700 // fps
 
 
 def _browser_ids(*shows):
@@ -38,9 +46,9 @@ def source_counts(total, weights, fps=25, reserved_browsers=0):
     counts = allocate(total, weights)
     # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
     for indices, costs, limit, name in (
-            ((2,), (1,), 4, "HDR 4:2:2"), ((4,), (1,), BROWSER_LIMIT - reserved_browsers, "Browser"),
+            ((2,), (1,), 4, "HDR 4:2:2"), ((4,), (1,), browser_limit(fps) - reserved_browsers, "Browser"),
             ((0, 1), (1, 1), 40 if fps <= 30 else 20, "Combined NVDEC"),
-            ((5, 6), (1, 2), min(28, 700 // fps), "Raw 4:2:0 upload units")):
+            ((5, 6), (1, 2), raw_upload_units(fps), "Raw 4:2:0 upload units")):
         group = [(i, cost) for i, cost in zip(indices, costs) if i < len(weights)]
         if sum(counts[i] * cost for i, cost in group) > limit:
             size = min(limit, sum(counts[i] for i, _ in group))

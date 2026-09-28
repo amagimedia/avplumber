@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 import prepare_demo
-from setup_runtime import DEFAULT_SETTINGS, SetupRuntime, recipe_for, source_counts
+from setup_runtime import DEFAULT_SETTINGS, SetupRuntime, browser_limit, raw_upload_units, recipe_for, source_counts
 from webui import serve
 
 
@@ -20,7 +20,7 @@ def test_generic_setups_expand(tmp_path, count, fps):
         with pytest.raises(ValueError, match=f"source_count must be an integer from 1 to {maximum}"):
             recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
         return
-    if count > (40 if fps <= 30 else 20) + 32 + 4:
+    if count > (40 if fps <= 30 else 20) + browser_limit(fps) + 4:
         with pytest.raises(ValueError, match="enable another source type"):
             recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
         return
@@ -208,7 +208,7 @@ def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
                 "chroma": "420" if bit_depth == 8 else "422",
                 "source_count": maximum, "scene_count": 192,
                 "weights": [1, 0, 0, 0 if bit_depth == 8 else 1, 1, 1, 0]}
-    feasible = min(maximum, (40 if fps <= 30 else 20) + 32 + min(28, 700 // fps))
+    feasible = min(maximum, (40 if fps <= 30 else 20) + browser_limit(fps) + raw_upload_units(fps))
     assert recipe_for({**settings, "source_count": feasible})["source_count"] == feasible
     with pytest.raises(ValueError, match="source_count"):
         recipe_for({**settings, "source_count": maximum + 1})
@@ -258,14 +258,14 @@ def test_hdr_raw_420_uses_p010_without_nvdec(tmp_path, chroma):
         recipe_for({**settings, "bit_depth": 8, "chroma": "420"})
 
 
-@pytest.mark.parametrize("fps,limit", [(25, 14), (30, 11), (50, 7), (60, 5)])
+@pytest.mark.parametrize("fps,limit", [(25, 15), (30, 11), (50, 7), (60, 5)])
 def test_hdr_raw_upload_counts_twice_toward_byte_budget(fps, limit):
     weights = [0, 0, 0, 0, 0, 0, 1]
     assert source_counts(limit, weights, fps)[6] == limit
     with pytest.raises(ValueError, match="upload units"):
         source_counts(limit + 1, weights, fps)
     mixed = source_counts(32, [1, 1, 0, 0, 1, 1, 1], fps)
-    assert mixed[5] + 2 * mixed[6] <= min(28, 700 // fps)
+    assert mixed[5] + 2 * mixed[6] <= raw_upload_units(fps)
 
 
 @pytest.mark.parametrize("fps,limit", [(25, 40), (30, 40), (50, 20), (60, 20)])
@@ -312,9 +312,9 @@ def test_four_hdr_422_inputs_can_be_used_alone():
 
 
 @pytest.mark.parametrize('weights, expected', [
-    ([1, 0, 0, 0, 100], [32, 0, 0, 0, 32]),
-    ([1, 0, 100, 0, 100], [28, 0, 4, 0, 32]),
-    ([1, 0, 1, 0, 100], [28, 0, 4, 0, 32]),
+    ([1, 0, 0, 0, 100], [24, 0, 0, 0, 40]),
+    ([1, 0, 100, 0, 100], [20, 0, 4, 0, 40]),
+    ([1, 0, 1, 0, 100], [20, 0, 4, 0, 40]),
 ])
 def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expected):
     assert source_counts(64, weights) == expected
@@ -328,7 +328,7 @@ def test_browser_only_limit():
     with pytest.raises(ValueError, match='Browser is limited to 32'):
         recipe_for({**settings, 'source_count': 33})
     with pytest.raises(ValueError, match='enable another source type'):
-        source_counts(37, [0, 0, 1, 0, 1])
+        source_counts(37, [0, 0, 1, 0, 1], 30)
 
 
 def test_failed_first_start_does_not_leave_show_for_resume(runtime, monkeypatch):
@@ -472,7 +472,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
     assert len(calls) == len(expected)
 
 
-@pytest.mark.parametrize("fps, maximum", [(25, 28), (30, 23), (50, 14), (60, 11)])
+@pytest.mark.parametrize("fps, maximum", [(25, 30), (30, 23), (50, 14), (60, 11)])
 def test_raw_upload_budget(fps, maximum):
     settings = {**DEFAULT_SETTINGS, "fps": fps, "source_count": maximum,
                 "weights": [0, 0, 0, 0, 0, 1]}
@@ -484,9 +484,9 @@ def test_raw_upload_budget(fps, maximum):
 
 
 def test_combined_source_caps():
-    assert source_counts(100, [1, 0, 100, 0, 100, 100]) == [36, 0, 4, 0, 32, 28]
+    assert source_counts(100, [1, 0, 100, 0, 100, 100]) == [26, 0, 4, 0, 40, 30]
     with pytest.raises(ValueError, match="enable another source type"):
-        source_counts(65, [0, 0, 1, 0, 1, 1])
+        source_counts(75, [0, 0, 1, 0, 1, 1])
 
 
 def test_192_scenes_expand(tmp_path):
@@ -633,7 +633,7 @@ def test_dsk_pages_take_their_share_of_the_source_budget():
     recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 3, "dsk": ["lower_third", "bug_left", "bug_right"]})
     with pytest.raises(ValueError, match="source_count"):
         recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 2, "dsk": ["lower_third", "bug_left", "bug_right"]})
-    assert source_counts(40, [1, 0, 0, 0, 10], 25, reserved_browsers=3)[4] == 29   # 32 browsers minus 3 keys
+    assert source_counts(45, [1, 0, 0, 0, 10], 25, reserved_browsers=3)[4] == 37   # 40 browsers at 25 fps minus 3 keys
 
 
 @pytest.mark.parametrize("changes", [{"dsk": ["nope"]}, {"dsk": ["ticker", "ticker"]}, {"dsk": "ticker"},

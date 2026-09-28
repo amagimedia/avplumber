@@ -4,7 +4,8 @@
   "seed": 7,
   "canvas": {
     "width": 1920, "height": 1080, "fps": 30,
-    "working_format": "p210le", "color": "hlg"
+    "working_format": "p210le", "color": "hlg",
+    "raw_upload": "pinned"
   },
   "generation": {"seconds": 2, "sdr_encoder": "h264_nvenc", "hdr_encoder": "hevc_nvenc"},
   "inputs": [

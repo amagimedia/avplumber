@@ -22,7 +22,7 @@ services:
     extends: {file: ../dmabuf-browser/compose.yaml, service: dma-browser}
     environment:
       DMA_BROWSER_AUTO_OPEN_URL: ""
-      DMA_BROWSER_MAX_WINDOWS: ${MIXER_BROWSER_CAPACITY:-32}
+      DMA_BROWSER_MAX_WINDOWS: ${MIXER_BROWSER_CAPACITY:-40}
       DMA_BROWSER_WINDOWS_PER_PROCESS: 8
       # Sources, then the downstream-key windows (prepare_demo.DSK_WINDOWS): keys
       # export DMA-BUFs at the graphic's own size, not a transparent full frame.
