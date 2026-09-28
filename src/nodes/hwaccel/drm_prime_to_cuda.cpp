@@ -9,6 +9,7 @@
 #include "cuda_rect_sampler.h"
 #include "cuda_rect_texture.h"
 #include "DeferredRelease.hpp"
+#include "EglDmabufDisplay.hpp"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -42,13 +43,8 @@ protected:
     bool zero_copy_ = false;
     bool zero_copy_warned_ = false;
 
-    // EGL state
-    EGLDisplay egl_dpy_ = EGL_NO_DISPLAY;
-
-    bool have_dma_buf_import_ = false;
-    bool have_mods_ = false;
-    PFNEGLCREATEIMAGEKHRPROC p_eglCreateImageKHR_ = nullptr;
-    PFNEGLDESTROYIMAGEKHRPROC p_eglDestroyImageKHR_ = nullptr;
+    // EGL state; egl_.dpy is EGL_NO_DISPLAY until initialized
+    EglDmabufDisplay egl_;
 
     // CUDA state
     AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
@@ -113,55 +109,11 @@ protected:
     std::atomic<uint64_t> cache_hits_{0}, fresh_imports_{0}, expired_imports_{0}, evicted_imports_{0};
     std::atomic<const char*> phase_{"idle"};
 
-    static inline const char* safe_str(const char* s) { return s ? s : ""; }
-
-    // Importing a DMA-BUF (eglCreateImage with EGL_NO_CONTEXT) and registering the image
-    // with CUDA need only an initialized display, so no GL context or pbuffer is created:
-    // each one would cost device memory per node (same setup as drm_prime_to_egl_image).
     bool ensureEGL() {
-        if (egl_dpy_ != EGL_NO_DISPLAY) return true;
-
-        EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-        if (dpy == EGL_NO_DISPLAY) {
-            logstream << "drm2cuda: eglGetDisplay failed";
-            return false;
-        }
-        EGLint major=0, minor=0;
-        if (!eglInitialize(dpy, &major, &minor)) {
-            logstream << "drm2cuda: eglInitialize failed";
-            return false;
-        }
-        logstream << "drm2cuda: EGL vendor: " << safe_str(eglQueryString(dpy, EGL_VENDOR));
-
-        const char* exts = eglQueryString(dpy, EGL_EXTENSIONS);
-        have_dma_buf_import_ = exts && strstr(exts, "EGL_EXT_image_dma_buf_import");
-        have_mods_ = exts && strstr(exts, "EGL_EXT_image_dma_buf_import_modifiers");
-        if (!have_dma_buf_import_) {
-            logstream << "drm2cuda: EGL_EXT_image_dma_buf_import missing";
-            return false;
-        }
-        // Resolve extension function pointers at runtime to avoid link-time deps
-        if (!p_eglCreateImageKHR_) {
-            p_eglCreateImageKHR_ = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
-            if (!p_eglCreateImageKHR_) {
-                // Try core symbol name as a fallback on some implementations
-                p_eglCreateImageKHR_ = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImage");
-            }
-        }
-        if (!p_eglDestroyImageKHR_) {
-            p_eglDestroyImageKHR_ = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
-            if (!p_eglDestroyImageKHR_) {
-                p_eglDestroyImageKHR_ = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImage");
-            }
-        }
-        if (!p_eglCreateImageKHR_ || !p_eglDestroyImageKHR_) {
-            logstream << "drm2cuda: failed to load eglCreateImageKHR/eglDestroyImageKHR";
-            return false;
-        }
-
-        // Commit — only store the display after full successful init
-        egl_dpy_ = dpy;
-        return true;
+        if (egl_.dpy != EGL_NO_DISPLAY) return true;
+        const auto display = EglDmabufDisplay::open("drm2cuda");
+        if (display) egl_ = *display;
+        return display.has_value();
     }
 
     static AVPixelFormat swfmt_from_fourcc(uint32_t fourcc, bool drop_alpha) {
@@ -261,8 +213,8 @@ protected:
         e.key = key;
         e.last_used_ms = now_ms;
         e.cuda_ctx = cuda_dev_ctx_->cuda_ctx;
-        e.egl_dpy = egl_dpy_;
-        e.destroy_image = p_eglDestroyImageKHR_;
+        e.egl_dpy = egl_.dpy;
+        e.destroy_image = egl_.destroy;
         e.dup_fd = dup(obj.fd);
         if (e.dup_fd < 0) {
             logstream << "drm2cuda: dup(fd) failed: " << std::strerror(errno);
@@ -276,13 +228,13 @@ protected:
         attrs[a++] = EGL_DMA_BUF_PLANE0_FD_EXT; attrs[a++] = e.dup_fd;
         attrs[a++] = EGL_DMA_BUF_PLANE0_PITCH_EXT; attrs[a++] = (EGLint)pl.pitch;
         attrs[a++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT; attrs[a++] = (EGLint)pl.offset;
-        if (have_mods_ && obj.format_modifier) {
+        if (egl_.have_modifiers && obj.format_modifier) {
             attrs[a++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT; attrs[a++] = (EGLint)(obj.format_modifier & 0xFFFFFFFFu);
             attrs[a++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT; attrs[a++] = (EGLint)(obj.format_modifier >> 32);
         }
         attrs[a++] = EGL_NONE;
         phase_ = "egl_import";
-        e.image = eglCreateImage(egl_dpy_, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, (EGLClientBuffer)NULL, attrs);
+        e.image = eglCreateImage(egl_.dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, (EGLClientBuffer)NULL, attrs);
         if (e.image == EGL_NO_IMAGE_KHR) {
             logstream << "drm2cuda: eglCreateImage failed width=" << width << " height=" << height
                       << " EGL error=" << eglGetError();
