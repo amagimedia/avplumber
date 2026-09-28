@@ -774,7 +774,7 @@ class MixerGraphBuilder:
             "dst": self._e("wipe_overlay_out"),
             "hwaccel": self.hwaccel,
             "width": W, "height": H, "sw_format": self.working_format,
-            "max_layers": self.max_compositor_layers,
+            "max_layers": 2,   # program and clip; per-frame metadata can move layers, never add them
             "color": self.color.transfer, "fps": fps_str,
             "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H},
                        {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H, "z": 1, "blend": True}],

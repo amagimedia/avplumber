@@ -170,6 +170,8 @@ class AuxBus:
     id: str
     scenes: Tuple[Optional[str], ...]
     renditions: Tuple[Rendition, ...]
+    layout: str = "pgm_pvw_grid"   # or "source_pages": every source, one page of tiles at a time
+    rotate_s: float = 5.0          # source_pages: seconds per page while rotating
 
 
 @dataclass(frozen=True)

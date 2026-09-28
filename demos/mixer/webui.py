@@ -125,7 +125,7 @@ class MixerBridge:
 
     def take(self, request: dict) -> None:
         command = request.get("command")
-        if command in ("aux", "dsk"):
+        if command in ("aux", "aux_page", "dsk"):
             payload = {k: v for k, v in request.items() if k != "command"}
             result = json.loads(self.command(f"mixer.{command} " + json.dumps(payload)) or "{}")
             if isinstance(result, dict) and result.get("error"):

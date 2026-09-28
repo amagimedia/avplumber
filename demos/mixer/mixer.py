@@ -698,8 +698,8 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
-    from pyplumber.mixer.aux import AuxMultiview, register_aux_commands
-    aux = tuple(AuxMultiview(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses)
+    from pyplumber.mixer.aux import make_aux, register_aux_commands
+    aux = tuple(make_aux(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses)
     keyer = DownstreamKeyer(avp, api, mixer, cfg, group=OUTPUT_GROUP) if cfg.dsk_keys else None
     renditions = cfg.renditions or _flag_renditions(options, *canvas)
     program = mixer.build()
@@ -707,14 +707,16 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     if keyer:
         feeds = {**feeds, **keyer.build(program, clean=any(r.feed == "clean" for r in renditions))}
         register_dsk_commands(avp, keyer)
-    if aux:
+    pgm_taps = [b.pgm_edge for b in aux if b.pgm_edge]
+    if pgm_taps:
         # The multiview PGM tile shows what goes to air: the keyed program.
         tapped = "program_after_aux_tap"
         avp.addNode(api.OneToMany({
-            "name": "program_aux_tap", "src": feeds["dirty"], "dst": [tapped, *(b.pgm_edge for b in aux)],
-            "outputs": 1, "subscribed_outputs": {b.pgm_edge: b.pgm_edge for b in aux}, "group": OUTPUT_GROUP,
+            "name": "program_aux_tap", "src": feeds["dirty"], "dst": [tapped, *pgm_taps],
+            "outputs": 1, "subscribed_outputs": {edge: edge for edge in pgm_taps}, "group": OUTPUT_GROUP,
         }))
         feeds["dirty"] = tapped
+    if aux:
         for bus in aux:
             bus.build(options)
         register_aux_commands(avp, aux)
@@ -731,9 +733,11 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                                     "port": r.port, "mountpoint": r.port, "fps": r.fps})
     if aux:
         settings_data["aux_buses"] = [b.bus.id for b in aux]
+        labels = {"pgm_pvw_grid": "Program preview", "source_pages": "Multiviewer"}
         preview_outputs += [
-            {"bus": b.bus.id, "label": "Multiview · SDR", "rendition": r.id, "codec": "h264", "color": "sdr",
-             "port": r.port, "mountpoint": r.port, "fps": r.fps} for b in aux for r in b.bus.renditions]
+            {"bus": b.bus.id, "label": labels[b.bus.layout], "layout": b.bus.layout, "rendition": r.id,
+             "codec": "h264", "color": "sdr", "port": r.port, "mountpoint": r.port, "fps": r.fps}
+            for b in aux for r in b.bus.renditions]
     if preview_outputs:
         settings_data["preview_outputs"] = preview_outputs
     settings = json.dumps(settings_data, separators=(",", ":")) + "\n"

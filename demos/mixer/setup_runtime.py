@@ -219,10 +219,14 @@ class SetupRuntime:
             return
         live = {}
         if self.process and self.process.poll() is None:
-            live = {b["id"]: b["scenes"] for b in json.loads(self.bridge.command("mixer.aux_status"))}
+            live = {b["id"]: b["scenes"] for b in json.loads(self.bridge.command("mixer.aux_status")) if "scenes" in b}
         cfg = parse(show)
         scene_ids = {s.id for s in cfg.scenes}
         for bus in buses:
+            for rendition in bus["renditions"]:
+                rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=aux_fps(cfg.fps))
+            if bus.get("layout", {}).get("preset") == "source_pages":
+                continue   # pages follow the new source list by themselves
             assignments = [None] * 8
             for i, scene in enumerate(live.get(bus["id"], bus.get("scenes", [None] * 8))):
                 if scene not in scene_ids:
@@ -234,8 +238,6 @@ class SetupRuntime:
                     # A retained scene may have grown beyond the tile draw budget.
                     assignments[i] = None
             bus["scenes"] = assignments
-            for rendition in bus["renditions"]:
-                rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=aux_fps(cfg.fps))
         recipe["aux_buses"] = buses
 
     def _stop(self):

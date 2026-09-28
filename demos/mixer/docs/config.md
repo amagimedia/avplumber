@@ -388,6 +388,33 @@ still fading. A cut (`0`) also asks the preview encoder for a keyframe, as an
 M/E cut does; a fade does not. Like the M/E's, that keyframe goes to the first
 Janus rendition only, even when that rendition is a clean feed.
 
+## aux_buses
+
+Extra monitor outputs, each its own compositor and H.264 encoder (SDR, canvas
+size, program rate halved above 30 fps) sent to Janus. They subscribe to the
+sources the main mixer already decodes: a source reaches a bus only while one
+of its tiles shows it, and a bus never delays the program.
+
+```json
+"aux_buses": [
+  {"id": "mv", "scenes": ["grid_4_000", null, null, null, null, null, null, null],
+   "renditions": [{"id": "monitor", "port": 5008}]},
+  {"id": "mv2", "layout": {"preset": "source_pages"}, "rotate_s": 5,
+   "renditions": [{"id": "monitor", "port": 5012}]}
+]
+```
+
+| layout | shows | control |
+| --- | --- | --- |
+| `pgm_pvw_grid` (default) | PVW and PGM on top, eight scene slots below | `mixer.aux {"bus", "expected_revision", "scenes"}` assigns slots; PVW follows the mixer |
+| `source_pages` | every source in equal tiles, 12 per page (2 × 6 portrait, 4 × 3 landscape) | pages rotate every `rotate_s` (1–60, default 5); `mixer.aux_page {"bus", "page"}` or `{"bus", "step": ±1}` holds a page, `{"bus", "auto": true}` resumes |
+
+`mixer.aux_status` reports every bus with its tile geometry in canvas pixels
+(`cells` or `tiles`), so a control page can label the tiles over the video.
+Each bus needs its own Janus RTP/RTCP port pair. Setup changes keep the buses:
+scene slots that no longer exist are cleared, and source pages follow the new
+source list.
+
 ## Known limitations
 
 - **128 sources per show, or 127 with aux.** Every source is a pad on the compositor;

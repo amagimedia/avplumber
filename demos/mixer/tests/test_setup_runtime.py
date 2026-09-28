@@ -407,7 +407,9 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
     old, _, _ = prepare_demo.plan(recipe_for(DEFAULT_SETTINGS), runtime.media_dir)
     old["aux_buses"] = [{"id": "mv", "scenes": [old["scenes"][0]["id"], "removed", *([None] * 6)],
                          "renditions": [{"id": "monitor", "port": 5008, "width": 1080,
-                                         "height": 1920, "fps": 30, "bitrate_kbps": 4500}]}]
+                                         "height": 1920, "fps": 30, "bitrate_kbps": 4500}]},
+                        {"id": "mv2", "layout": {"preset": "source_pages"}, "rotate_s": 8,
+                         "renditions": [{"id": "monitor", "port": 5012, "width": 1080, "height": 1920, "fps": 30}]}]
     (runtime.media_dir / "mixer.demo.json").write_text(json.dumps(old))
     runtime.process = None
     recipe = recipe_for({**DEFAULT_SETTINGS, "resolution": "1280x720", "orientation": "landscape",
@@ -418,6 +420,9 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
     assert cfg.aux_buses[0].scenes == (old["scenes"][0]["id"], *([None] * 7))
     r = cfg.aux_buses[0].renditions[0]
     assert (r.width, r.height, r.fps, r.bitrate_kbps) == (1280, 720, 25, 4500)
+    pages = cfg.aux_buses[1]
+    assert (pages.layout, pages.rotate_s, pages.scenes) == ("source_pages", 8.0, ())
+    assert (pages.renditions[0].width, pages.renditions[0].height, pages.renditions[0].fps) == (1280, 720, 25)
 
 
 @pytest.mark.parametrize("limit,tiles", [(256, 2), (512, 6)])

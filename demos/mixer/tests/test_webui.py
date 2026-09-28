@@ -163,6 +163,13 @@ def test_key_fades_reach_the_mixer_unchanged(client):
     assert bridge.sent == ['mixer.dsk {"key": "bug", "on": true, "fade_seconds": 0.5, "curve": "ease-out"}']
 
 
+def test_aux_page_requests_reach_the_mixer(client):
+    bridge = FakeBridge({"mixer.aux_page": '{"page": 3}'})
+    url, _ = client(bridge)
+    assert post(url, {"command": "aux_page", "bus": "mv2", "step": 1})[0] == 200
+    assert bridge.sent == ['mixer.aux_page {"bus": "mv2", "step": 1}']
+
+
 @pytest.mark.parametrize("payload, expected", [
     ({"command": "reboot", "scene": "a"}, "command must be one of"),
     ({"command": "cut"}, "needs a scene"),

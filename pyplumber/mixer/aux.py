@@ -1,9 +1,10 @@
-"""Scene multiviews sharing the main mixer's ingest and native preview state."""
+"""AUX outputs sharing the main mixer's ingest: scene multiviews and paged source views."""
 from __future__ import annotations
 
 import json
 import re
 import threading
+import time
 import uuid
 
 from .config import AuxBus, ConfigError, _parse_rendition, scene_layers
@@ -12,6 +13,10 @@ from .control import source_mask_param
 
 def aux_fps(fps):
     return fps // 2 if fps in (50, 60) else fps
+
+
+def _even(value):
+    return int(value) // 2 * 2
 
 
 def validate_assignments(cfg, scenes):
@@ -29,8 +34,6 @@ def validate_assignments(cfg, scenes):
 def parse_aux_buses(values, cfg):
     if not isinstance(values, list) or len(values) > 30:
         raise ConfigError("aux_buses must be a list of at most 30 buses")
-    if values and len(cfg.sources) + 1 > 128:
-        raise ConfigError("multiview needs one pad per unique source plus PGM; limit is 128")
     if values and cfg.fps not in (25, 30, 50, 60):
         raise ConfigError("multiview supports program rates 25, 30, 50 and 60")
     result, ids = [], set()
@@ -41,11 +44,23 @@ def parse_aux_buses(values, cfg):
             raise ConfigError("aux bus IDs must be unique identifiers")
         ids.add(bid)
         layout = obj.get("layout", {})
-        if (layout.get("preset", "pgm_pvw_grid") != "pgm_pvw_grid" or
-                layout.get("rows", 2) != 2 or layout.get("cols", 4) != 4):
-            raise ConfigError("v1 multiview layout is pgm_pvw_grid, 2 rows by 4 columns")
-        scenes = obj.get("scenes", [None] * 8)
-        validate_assignments(cfg, scenes)
+        preset = layout.get("preset", "pgm_pvw_grid")
+        rotate_s = obj.get("rotate_s", 5)
+        if preset == "source_pages":
+            if set(layout) != {"preset"} or "scenes" in obj:
+                raise ConfigError("source_pages takes no grid size or scenes: it pages through every source")
+            if len(cfg.sources) > 128:
+                raise ConfigError("source pages need one pad per unique source; limit is 128")
+            if isinstance(rotate_s, bool) or not isinstance(rotate_s, (int, float)) or not 1 <= rotate_s <= 60:
+                raise ConfigError("rotate_s must be 1 to 60 seconds")
+            scenes = ()
+        else:
+            if preset != "pgm_pvw_grid" or layout.get("rows", 2) != 2 or layout.get("cols", 4) != 4:
+                raise ConfigError("aux layout is pgm_pvw_grid (2 rows by 4 columns) or source_pages")
+            if len(cfg.sources) + 1 > 128:
+                raise ConfigError("multiview needs one pad per unique source plus PGM; limit is 128")
+            scenes = obj.get("scenes", [None] * 8)
+            validate_assignments(cfg, scenes)
         renditions = obj.get("renditions", [])
         if len(renditions) != 1:
             raise ConfigError("v1 aux requires one SDR/H.264 Janus rendition")
@@ -57,38 +72,73 @@ def parse_aux_buses(values, cfg):
         if not r.port or r.port in ports or r.port + 1 in ports or r.port - 1 in ports:
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
         ports.add(r.port)
-        result.append(AuxBus(bid, tuple(scenes), (r,)))
+        result.append(AuxBus(bid, tuple(scenes), (r,), preset, float(rotate_s)))
     return tuple(result)
+
+
+def multiview_cells(cfg):
+    """PVW, PGM and the eight scene slots of the pgm_pvw_grid layout, in canvas pixels."""
+    w, h = cfg.canvas_w, cfg.canvas_h
+    xs = [_even(w * i // 4) for i in range(5)]
+    ys = [_even(h * i // 4) for i in range(5)]
+    cells = [{"role": "pvw", "x": 0, "y": 0, "w": xs[2], "h": ys[2]},
+             {"role": "pgm", "x": xs[2], "y": 0, "w": w - xs[2], "h": ys[2]}]
+    for i in range(8):
+        col, row = i % 4, 2 + i // 4
+        cells.append({"role": "slot", "slot": i, "x": xs[col], "y": ys[row],
+                      "w": xs[col + 1] - xs[col], "h": ys[row + 1] - ys[row]})
+    return cells
 
 
 def composition(cfg, scenes, preview):
     validate_assignments(cfg, scenes)
     definitions = {s.id: s for s in cfg.scenes}
     indices = {s.id: i for i, s in enumerate(cfg.sources)}
-    w, h = cfg.canvas_w, cfg.canvas_h
-    xs = [(w * i // 4) // 2 * 2 for i in range(5)]
-    ys = [(h * i // 4) // 2 * 2 for i in range(5)]
-    places = [(preview, (0, 0, xs[2], ys[2]))]
-    for i, scene in enumerate(scenes):
-        col, row = i % 4, 2 + i // 4
-        places.append((scene, (xs[col], ys[row], xs[col + 1] - xs[col], ys[row + 1] - ys[row])))
+    pvw, pgm, *slots = multiview_cells(cfg)
     layers = []
-    for scene, (x, y, tw, th) in places:
+    for scene, cell in [(preview, pvw), *zip(scenes, slots)]:
         if not scene:
             continue
         if scene not in definitions:
             raise ConfigError(f"native preview references an unknown scene: {scene}")
         for name, layer in scene_layers(cfg, definitions[scene]).items():
             layers.append({**layer, "input": indices[name.split("#", 1)[0]], "z": len(layers),
-                           "tile": {"x": x, "y": y, "w": tw, "h": th},
-                           "scene_canvas": {"w": w, "h": h}})
-    layers.append({"input": len(indices), "dst_x": xs[2], "dst_y": 0,
-                   "dst_w": w - xs[2], "dst_h": ys[2], "fit": "contain", "z": len(layers)})
+                           "tile": {k: cell[k] for k in ("x", "y", "w", "h")},
+                           "scene_canvas": {"w": cfg.canvas_w, "h": cfg.canvas_h}})
+    layers.append({"input": len(indices), "dst_x": pgm["x"], "dst_y": pgm["y"],
+                   "dst_w": pgm["w"], "dst_h": pgm["h"], "fit": "contain", "z": len(layers)})
     mask = sum(1 << i for i in {layer["input"] for layer in layers})
     return {"layers": layers, "active_inputs": source_mask_param(mask)}
 
 
-class AuxMultiview:
+def page_grid(cfg):
+    """Tiles of one source page: 2 by 6 on a portrait canvas, 4 by 3 on a landscape one."""
+    w, h = cfg.canvas_w, cfg.canvas_h
+    cols, rows = (2, 6) if h > w else (4, 3)
+    cw, ch = w // cols, h // rows
+    tw = _even(cw - 4)
+    th = _even(tw * 9 / 16)
+    if th > ch - 4:
+        th = _even(ch - 4)
+        tw = _even(th * 16 / 9)
+    return [{"x": _even(c * cw + (cw - tw) / 2), "y": _even(r * ch + (ch - th) / 2), "w": tw, "h": th}
+            for r in range(rows) for c in range(cols)]
+
+
+def page_composition(cfg, page):
+    grid = page_grid(cfg)
+    first = page * len(grid)
+    layers = [{"input": first + i, "dst_x": r["x"], "dst_y": r["y"], "dst_w": r["w"], "dst_h": r["h"],
+               "fit": "contain", "z": i} for i, r in enumerate(grid[:len(cfg.sources) - first])]
+    return {"layers": layers, "active_inputs": source_mask_param(sum(1 << l["input"] for l in layers))}
+
+
+class _AuxOutput:
+    """One AUX output: a compositor over subscribed sources, then SDR H.264 to Janus.
+
+    Subclasses define the composition and the background thread that keeps it current."""
+    pgm_edge = None   # the edge the program tap feeds, for layouts that show PGM
+
     def __init__(self, avp, api, mixer, cfg, bus):
         self.avp, self.api, self.mixer, self.cfg, self.bus = avp, api, mixer, cfg, bus
         self.prefix = f"aux_{bus.id}"
@@ -96,22 +146,32 @@ class AuxMultiview:
         self.node_name = f"{self.prefix}_comp"
         self.hwaccel = f"{self.prefix}_gpu"
         self.edges = [f"{self.prefix}_source_{i}" for i in range(len(cfg.sources))]
-        self.pgm_edge, self.output_edge = f"{self.prefix}_pgm", f"{self.prefix}_out"
-        self.scenes, self.revision, self.preview = list(bus.scenes), uuid.uuid4().hex, ""
+        self.output_edge = f"{self.prefix}_out"
         self.lock, self.stopped = threading.Lock(), threading.Event()
         self.thread, self.listener, self.error = None, None, ""
         for source, edge in zip(cfg.sources, self.edges):
             mixer.add_aux_destination(source.id, edge)
 
+    def inputs(self):
+        return self.edges
+
+    def layer_budget(self):
+        return self.cfg.max_compositor_layers
+
+    def latency_ms(self):
+        # The main mixer's latency, but at least two aux ticks (Playout's default): at
+        # 50/60 fps the aux runs at half rate, where the main default is only one tick.
+        main_latency = self.mixer.latency_ms
+        main = main_latency if main_latency is not None else 2000 / self.cfg.fps
+        return max(main, 2000 / aux_fps(self.cfg.fps))
+
     def build(self, options):
         from .janus import JanusVideoConfig, build_janus_output
         fps = aux_fps(self.cfg.fps)
-        main_latency = self.mixer.latency_ms
-        # Allow one aux frame for the rendered PGM tile to arrive.
-        latency = (main_latency if main_latency is not None else 2000 / self.cfg.fps) + 1000 / fps
+        latency = self.latency_ms()
         if latency > 6000 / fps:
             raise ConfigError("main plus aux latency exceeds the six-frame aux history budget")
-        inputs = [*self.edges, self.pgm_edge]
+        inputs = self.inputs()
         for edge in [*inputs, self.output_edge, *(f"{self.prefix}_{suffix}" for suffix in
                       ("sdr", "fps", "keyframed", "video", "encoded", "repeat_headers", "video_rtp_mux"))]:
             self.avp.edges.planCapacity(edge, 1)
@@ -122,9 +182,9 @@ class AuxMultiview:
             "fps": str(fps), "latency_ms": latency, "warmup_timeout_ms": 250,
             "hwaccel": self.mixer.hwaccel, "output_hwaccel": self.hwaccel,
             "aux_mode": True, "subscriptions": inputs, "mixer": self.mixer.name,
-            "max_layers": self.cfg.max_compositor_layers,
+            "max_layers": self.layer_budget(),
             "group": self.group, "auto_restart": "off", "on_error": "off",
-            **composition(self.cfg, self.scenes, self.preview),
+            **self.current_composition(),
         }, api=self.api), early_create=True)
         r = self.bus.renditions[0]
         converted = f"{self.prefix}_sdr"
@@ -150,8 +210,51 @@ class AuxMultiview:
                 status = self.avp.node(self.node_name).getObject("status")
             except Exception:
                 status = {"suspended": True}
-            return {"id": self.bus.id, "scenes": list(self.scenes), "revision": self.revision,
-                    "pvw_scene": self.preview, "error": self.error, **status}
+            return {"id": self.bus.id, "layout": self.bus.layout, "error": self.error,
+                    "canvas": {"w": self.cfg.canvas_w, "h": self.cfg.canvas_h}, **self.details(), **status}
+
+    def _publish(self, snapshot, status=None):
+        """Apply *snapshot*. An automatic update passes the compositor's *status* and keeps
+        an encoder-backpressure suspension; an operator's change resumes the bus."""
+        if status is not None:
+            snapshot = {**snapshot, "enabled": not status.get("suspended", False)}
+        self.avp.executeCommandsFromString(f"node.object.set {self.node_name} composition {json.dumps(snapshot)}")
+
+    def start(self):
+        self.avp.group(self.group).startNodes()
+        self.listener.start()
+        self.thread = threading.Thread(target=self.run, name=self.prefix, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread:
+            self.thread.join(timeout=1)
+        self.listener.stop()
+        self.avp.group(self.group).stopNodes()
+
+
+class AuxMultiview(_AuxOutput):
+    """PVW, PGM and eight assignable scene tiles; the PVW tile follows the main mixer's preview."""
+
+    def __init__(self, avp, api, mixer, cfg, bus):
+        super().__init__(avp, api, mixer, cfg, bus)
+        self.pgm_edge = f"{self.prefix}_pgm"
+        self.scenes, self.revision, self.preview = list(bus.scenes), uuid.uuid4().hex, ""
+
+    def inputs(self):
+        return [*self.edges, self.pgm_edge]
+
+    def latency_ms(self):
+        # Allow one aux frame for the rendered PGM tile to arrive.
+        return super().latency_ms() + 1000 / aux_fps(self.cfg.fps)
+
+    def current_composition(self):
+        return composition(self.cfg, self.scenes, self.preview)
+
+    def details(self):
+        return {"scenes": list(self.scenes), "revision": self.revision, "pvw_scene": self.preview,
+                "cells": multiview_cells(self.cfg)}
 
     def assign(self, request):
         with self.lock:
@@ -164,42 +267,105 @@ class AuxMultiview:
             self.scenes, self.revision, self.error = list(scenes), uuid.uuid4().hex, ""
             return {"scenes": list(self.scenes), "revision": self.revision}
 
-    def _publish(self, snapshot):
-        self.avp.executeCommandsFromString(f"node.object.set {self.node_name} composition {json.dumps(snapshot)}")
+    def run(self):
+        while not self.stopped.wait(0.05):
+            try:
+                with self.lock:
+                    status = self.avp.node(self.node_name).getObject("status")
+                    preview = status.get("pvw_scene", "")
+                    if preview != self.preview:
+                        self._publish(composition(self.cfg, self.scenes, preview), status)
+                        self.preview = preview
+            except Exception as exc:
+                self.error = str(exc)
 
-    def start(self):
-        self.avp.group(self.group).startNodes()
-        self.listener.start()
-        def follow_preview():
-            while not self.stopped.wait(0.05):
+
+class AuxSourcePages(_AuxOutput):
+    """Every source in equal tiles, one page at a time. Pages rotate every rotate_s seconds
+    until the operator picks one, which holds it; only the shown page's sources are delivered."""
+
+    def __init__(self, avp, api, mixer, cfg, bus):
+        super().__init__(avp, api, mixer, cfg, bus)
+        self.per_page = len(page_grid(cfg))
+        self.pages = -(-len(cfg.sources) // self.per_page)
+        self.page, self.auto, self.flipped_at = 0, True, time.monotonic()
+
+    def current_composition(self):
+        return page_composition(self.cfg, self.page)
+
+    def layer_budget(self):
+        return self.per_page   # a page never draws more tiles
+
+    def details(self):
+        first = self.page * self.per_page
+        shown = self.cfg.sources[first:first + self.per_page]
+        return {"page": self.page, "pages": self.pages, "auto": self.auto, "rotate_s": self.bus.rotate_s,
+                "first": first + 1, "total": len(self.cfg.sources),
+                "tiles": [{"id": s.id, "kind": s.kind, **rect} for s, rect in zip(shown, page_grid(self.cfg))]}
+
+    def _show(self, page, status=None):
+        self.flipped_at = time.monotonic()
+        self._publish(page_composition(self.cfg, page), status)
+        self.page, self.error = page, ""
+
+    def turn(self, request):
+        """Hold a page (``page`` or relative ``step``) or switch rotation (``auto``)."""
+        def integer(value):
+            return isinstance(value, int) and not isinstance(value, bool)
+        with self.lock:
+            if "auto" in request:
+                if not isinstance(request["auto"], bool):
+                    raise ConfigError("auto must be a boolean")
+                self.auto, self.flipped_at = request["auto"], time.monotonic()
+            elif integer(request.get("page")) and 0 <= request["page"] < self.pages:
+                self.auto = False
+                self._show(request["page"])
+            elif integer(request.get("step")):
+                self.auto = False
+                self._show((self.page + request["step"]) % self.pages)
+            else:
+                raise ConfigError(f"aux_page needs auto, a page from 0 to {self.pages - 1}, or a step")
+            return self.details()
+
+    def _tick(self):
+        """Show the next page when one is due; return the seconds until the next check."""
+        with self.lock:
+            due = self.flipped_at + self.bus.rotate_s - time.monotonic()
+            if self.auto and self.pages > 1 and due <= 0:
                 try:
-                    with self.lock:
-                        status = self.avp.node(self.node_name).getObject("status")
-                        preview = status.get("pvw_scene", "")
-                        if preview != self.preview:
-                            snapshot = composition(self.cfg, self.scenes, preview)
-                            snapshot["enabled"] = not status.get("suspended", False)
-                            self._publish(snapshot)
-                            self.preview = preview
+                    self._show((self.page + 1) % self.pages, self.avp.node(self.node_name).getObject("status"))
                 except Exception as exc:
                     self.error = str(exc)
-        self.thread = threading.Thread(target=follow_preview, name=self.prefix, daemon=True)
-        self.thread.start()
+                due = self.bus.rotate_s
+        return min(max(due, 0.05), 0.5)
 
-    def stop(self):
-        self.stopped.set()
-        if self.thread:
-            self.thread.join(timeout=1)
-        self.listener.stop()
-        self.avp.group(self.group).stopNodes()
+    def run(self):
+        while not self.stopped.wait(self._tick()):
+            pass
+
+
+def make_aux(avp, api, mixer, cfg, bus):
+    kind = AuxSourcePages if bus.layout == "source_pages" else AuxMultiview
+    return kind(avp, api, mixer, cfg, bus)
 
 
 def register_aux_commands(avp, buses):
     by_id = {b.bus.id: b for b in buses}
+
+    def target(request, kind):
+        bus = by_id.get(request.get("bus"))
+        if not isinstance(bus, kind):
+            raise ConfigError(f"Unknown {'scene multiview' if kind is AuxMultiview else 'source pages'} bus")
+        return bus
+
     def assign(arg):
-        req = json.loads(arg)
-        if req.get("bus") not in by_id:
-            raise ConfigError("Unknown aux bus")
-        return json.dumps(by_id[req["bus"]].assign(req)) + "\n"
+        request = json.loads(arg)
+        return json.dumps(target(request, AuxMultiview).assign(request)) + "\n"
+
+    def turn(arg):
+        request = json.loads(arg)
+        return json.dumps(target(request, AuxSourcePages).turn(request)) + "\n"
+
     avp.registerControlCommand("mixer.aux", assign, True)
+    avp.registerControlCommand("mixer.aux_page", turn, True)
     avp.registerControlCommand("mixer.aux_status", lambda _arg: json.dumps([b.state() for b in buses]) + "\n", True)
