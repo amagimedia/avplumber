@@ -46,6 +46,17 @@ The same page changes an existing instance: it prepares missing assets, restarts
 the mixer, then refreshes the control page and player. Output pauses during the
 restart. If startup fails, the service attempts to restore the previous show.
 
+**Restarts.** A stop asks every input group at once, so even a large show stops in
+seconds. The web UI process stops its mixer cleanly on `docker compose stop` or
+`restart` (90 s grace), which releases browser frames instead of forcing a
+browser-worker restart. If the mixer exits on its own (a crash, or a node panic
+that shuts the graph down), the setup page shows the exit and restarts the same
+show after 2, 5, 15, then 60 s; a run of 5 minutes resets that sequence, and
+**Apply setup** restarts at once. Multiview tile assignments are saved as they
+change, so a restart shows the same tiles. The container log times every phase
+(`Stopping mixer`, `Assets ready`, `Browser workers recovered`, `Graph built`,
+`Inputs ready`, `Mixer ready: … in N s`).
+
 Open **<http://127.0.0.1:7681>** for controls and HDR playback. Choose **SDR**
 in the player if your browser cannot decode HEVC. The standalone player remains
 at <http://127.0.0.1:8080>.
