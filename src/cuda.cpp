@@ -24,9 +24,7 @@ __attribute__((constructor)) void init_global_cuda() {
 
     // No context is created here: nodes run in the context of their hwaccel device, and an
     // unused process-wide context would still hold device memory.
-    cuda_error |= CHECK_CU(cuDeviceGet(&global_cuda.device, 0));
-
-    if (cuda_error) {
+    if (cuda_error || device_count < 1) {
         logstream << "failed to find a CUDA device";
         global_cuda.has_errors = true;
         return;
