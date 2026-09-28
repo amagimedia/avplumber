@@ -131,6 +131,7 @@ class AuxMultiview:
         self.avp.addNode(self.api.FilterVideo({
             "name": converted, "src": self.output_edge, "dst": converted,
             "hwaccel": self.hwaccel, "group": self.group, "defer_preliminary_init": True,
+            "threads": self.mixer.backend.graph_threads,
             "graph": self.mixer.backend.conversion("sdr", "nv12", source=self.cfg.out_color,
                                       source_format=self.cfg.working_format, tonemap=r.tonemap or "clip"),
         }))

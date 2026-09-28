@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 from typing import List, Tuple
 
+from .backends.cuda import CudaMixerBackend
 from .config import default_browser_ring_size
 
 SCHEME = "dmabuf://"
@@ -86,6 +87,7 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
                       + (",setparams=alpha_mode=premultiplied" if preserve_alpha else "")),
             "hwaccel": cuda_hwaccel, "src": smooth_edge, "dst": cuda_edge, "dst_width": width,
             "dst_height": height, "dst_pixel_format": "cuda", "dst_frame_rate": f"{fps}/1",
+            "threads": CudaMixerBackend.graph_threads,
             "group": processing_group, "name": f"{prefix}_timestamp", "auto_restart": "panic"}),
     ]
     if hold:

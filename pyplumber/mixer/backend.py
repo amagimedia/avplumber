@@ -11,6 +11,7 @@ class MixerBackend(Protocol):
     """
     name: str
     hardware_format: str
+    graph_threads: int  # filter_video "threads" for the graphs below
 
     def compositor(self, params, *, api=None): ...
     def transition(self, params): ...

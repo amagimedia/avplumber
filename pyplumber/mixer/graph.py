@@ -189,6 +189,8 @@ class MixerGraphBuilder:
             Avplumber group that owns this source's OTM and crop-scale nodes.
         default_graph:
             Initial crop/scale filter graph for this source's slot filters.
+            It must hold GPU filters only: slot filters run with the
+            backend's ``graph_threads`` (one thread for CUDA).
             An empty string bypasses slot filters; scenes then use compositor
             dst_w/dst_h and crop directly. Scene switches can still replace
             nonempty filters, but preheated geometry
@@ -528,7 +530,7 @@ class MixerGraphBuilder:
         output = self._e(f"{label}_color")
         self.avp.addNode(FilterVideo({
             "name": self._n(f"color_{label}"), "src": edge, "dst": output,
-            "graph": graph,
+            "graph": graph, "threads": self.backend.graph_threads,
             "hwaccel": self.hwaccel, "group": source.input_group,
             "defer_preliminary_init": True,
         }))
@@ -581,6 +583,7 @@ class MixerGraphBuilder:
                     "src": edge,
                     "dst": self._e(f"{src.name}_scaled_{slot}"),
                     "graph": default_graph,
+                    "threads": self.backend.graph_threads,
                     "hwaccel": self.hwaccel,
                     "group": src.input_group,
                     "auto_restart": "on",

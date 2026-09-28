@@ -425,6 +425,7 @@ def _build_input(
         "dst_height": CANONICAL_SOURCE_HEIGHT,
         "dst_pixel_format": "cuda",
         "dst_frame_rate": f"{fps}/{FPS_DEN}",
+        "threads": mixer_backend().graph_threads,
         "hwaccel": HWACCEL,
         "auto_restart": "group",
         "group": group,
@@ -562,6 +563,7 @@ def _build_renditions(avp, api, options: GraphOptions, renditions, feeds, *,
         scaled = f"program_scaled_{r.id}"
         avp.addNode(api.FilterVideo({
             "name": f"scale_{r.id}", "src": edge, "dst": scaled, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
+            "threads": backend.graph_threads,
             "graph": scale + backend.conversion(target, enc_format, source=color, source_format=working_format,
                                               tonemap=r.tonemap or "clip", hdr_peak=r.tonemap_peak * 100,
                                               desat=r.tonemap_desat, param=r.tonemap_param),

@@ -21,7 +21,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
                 speed_team: Optional[str] = None, speed: float = 1.0,
                 pause_team: Optional[str] = None, sync_team: Optional[str] = None,
                 realtime_params: Optional[dict] = None, decoder_params: Optional[dict] = None,
-                decoded_filter: str = "",
+                decoded_filter: str = "", decoded_filter_threads: Optional[int] = None,
                 pause_params: Optional[dict] = None,
                 auto_restart: Optional[str] = "group") -> str:
     """Add the chain for one source and return its output edge (``input_<tag>_fps``).
@@ -35,7 +35,8 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     realtime team, so ``pause/resume <pause_team>`` holds the picture and
     ``seek <sync_team> now <ts>`` re-cues the input (the replay demo's wiring).
     ``hwaccel=None`` keeps decoded frames on the CPU; ``decoded_filter`` runs
-    before speed, pause and realtime pacing.
+    before speed, pause and realtime pacing, with ``decoded_filter_threads``
+    slice threads when given (FFmpeg's default otherwise).
     """
     edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
     restart = {} if auto_restart is None else {"auto_restart": auto_restart}
@@ -62,6 +63,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
             "name": f"filter_{tag}", "src": realtime_src, "dst": edge("filtered"),
             "graph": decoded_filter, "group": group,
             **({"hwaccel": hwaccel} if hwaccel else {}),
+            **({} if decoded_filter_threads is None else {"threads": decoded_filter_threads}),
         }))
         realtime_src = edge("filtered")
     if speed_team is not None:
@@ -111,6 +113,9 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     """
     if pixel_format not in ("nv12", "p010le"):
         raise ValueError("raw 4:2:0 upload requires nv12 or p010le")
+    from .backends.cuda import CudaMixerBackend   # backends load only when used
+    # Neither setpts nor hwupload does CPU slice work: one filter thread each.
+    threads = CudaMixerBackend.graph_threads
     edge = build_input(avp, api, tag, path, group=group, fps=fps, fps_den=fps_den,
                        hwaccel=None, loop=loop, auto_restart=None if loop else "group",
                        input_params={"format": "rawvideo", "options": {
@@ -119,10 +124,10 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
                        decoder_params={"codec": "rawvideo", "pixel_format": pixel_format},
                        # InputRec seeks back to PTS zero at each loop. Count frames
                        # before pacing; setpts changes metadata only, not pixels.
-                       decoded_filter=f"setpts=N*{fps_den}/({fps}*TB)")
+                       decoded_filter=f"setpts=N*{fps_den}/({fps}*TB)", decoded_filter_threads=threads)
     output = f"input_{tag}_uploaded"
     avp.addNode(api.FilterVideo({"name": f"upload_{tag}", "src": edge, "dst": output,
-                                "graph": "hwupload", "hwaccel": hwaccel, "group": group}))
+                                "graph": "hwupload", "hwaccel": hwaccel, "threads": threads, "group": group}))
     return output
 
 

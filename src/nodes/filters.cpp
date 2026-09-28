@@ -303,6 +303,7 @@ protected:
     std::string node_label_ = "<unnamed>";
     bool do_shift_ = true;
     bool defer_preliminary_init_ = false;
+    int threads_ = 0; // AVFilterGraph::nb_threads; 0 lets FFmpeg pick one slice thread per CPU
     std::shared_ptr<HWAccelDevice> hwaccel_;
     std::vector<bool> input_eof_;
 
@@ -416,6 +417,9 @@ protected:
         };
 
         filter_graph_ = avfilter_graph_alloc();
+        if (!filter_graph_) throw Error("avfilter_graph_alloc failed");
+        // Before parsing: FFmpeg starts the slice thread pool when the first filter is allocated.
+        filter_graph_->nb_threads = threads_;
         
         AVFilterInOut* inputs = nullptr;
         AVFilterInOut* outputs = nullptr;
@@ -776,6 +780,7 @@ public:
         if (params.count("defer_preliminary_init")==1) {
             result->defer_preliminary_init_ = params["defer_preliminary_init"].get<bool>();
         }
+        result->threads_ = params.value("threads", 0);
         if (params.count("hwaccel")) {
             result->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
         }

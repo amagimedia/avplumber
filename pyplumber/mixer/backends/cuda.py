@@ -6,6 +6,9 @@ from ..color import Color, SEMIPLANAR_FORMATS, validate_conversion
 class CudaMixerBackend:
     name = "cuda"
     hardware_format = "cuda"
+    # filter_video "threads" for graphs of CUDA filters and setparams: they do no CPU
+    # slice work, and FFmpeg's default starts one idle slice thread per CPU per graph.
+    graph_threads = 1
 
     def compositor(self, params, *, api=None):
         if api is None:
@@ -14,7 +17,7 @@ class CudaMixerBackend:
 
     def transition(self, params):
         from pyplumber.node import FilterVideo
-        return FilterVideo({"graph": "transition_cuda=alpha='0':eval=frame", **params})
+        return FilterVideo({"graph": "transition_cuda=alpha='0':eval=frame", "threads": self.graph_threads, **params})
 
     def scale(self, *, width=None, height=None, pixel_format=None, interpolation=None):
         values = {"w": width, "h": height, "interp_algo": interpolation, "format": pixel_format}

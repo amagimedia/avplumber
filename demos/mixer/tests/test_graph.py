@@ -594,6 +594,8 @@ def test_raw_420_source_uses_cpu_frames_and_one_paced_upload(tmp_path, kind, fmt
     assert nodes["realtime_0"]["src"] == "input_0_filtered"
     assert nodes["upload_0"]["src"] == "input_0_fps"
     assert nodes["upload_0"]["graph"] == "hwupload"
+    # Neither graph does CPU slice work.
+    assert nodes["filter_0"]["threads"] == nodes["upload_0"]["threads"] == 1
     source = dict(FakeMixer.instances[-1].sources)["raw"]
     assert source["pre_otm_edge"] == "input_0_uploaded" and source["pixel_format"] == fmt
 
