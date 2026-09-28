@@ -62,6 +62,8 @@ In a custom recipe, add an input such as:
 
 It uses the same SDR pattern pool and asset cache as encoded sources, with separate
 `.nv12` files. The generated show declares these sources as `kind: "nv12"`.
+`canvas.raw_upload: "pinned"` in the recipe (copied to the show) uploads raw
+sources through `raw_to_cuda` instead; see [config](config.md#canvas).
 
 Both 10-bit canvas modes also offer **HDR · 4:2:0 · raw upload**. This generates
 cached HLG P010 patterns and uploads them directly, without NVDEC or a runtime

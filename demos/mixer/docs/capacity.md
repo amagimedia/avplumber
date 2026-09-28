@@ -97,6 +97,10 @@ based on double the bytes per frame; this is not a measured HDR capacity. Combin
 SDR/HDR NVDEC inputs are capped at 40 for 25/30 fps and 20 for 50/60 fps.
 The separate v210 upload/unpack path is not calibrated by this
 measurement. Higher browser capacity does not increase the upload allowance.
+These limits were measured with FFmpeg `hwupload` from pageable memory, still the
+default. `canvas.raw_upload: "pinned"` uploads through `raw_to_cuda` instead
+(pinned staging, a private stream per source); the limits and the
+browser-refresh ceiling below need re-measuring on that path before they are raised.
 
 ### Upload headroom and browser allocation bursts
 

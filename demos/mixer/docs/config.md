@@ -118,6 +118,7 @@ library and a scene with each fit mode. Paths and URLs are placeholders.
 | `width`, `height` | — | the program raster the compositor draws into |
 | `fps` | `30` | **how often the compositor renders**, and the clock the whole mixer runs on: inputs are re-timed to it and browser pages are asked to paint at it |
 | `working_format` | `nv12` | compositor and transition pixel storage: `nv12` (8-bit 4:2:0), `p010le` (10-bit 4:2:0) or `p210le` (10-bit 4:2:2). 8-bit sources are promoted onto a 10-bit canvas; `p210le` keeps 4:2:2 through conversion and compositing. Renditions are 4:2:0 for NVENC, subsampled once |
+| `raw_upload` | `hwupload` | how `nv12`/`p010` sources reach the GPU: `hwupload` (rawvideo frames paced on the CPU, then FFmpeg `hwupload`) or `pinned` (`raw_to_cuda`: pinned staging on a private CUDA stream, one uploaded frame held ahead of pacing). `pinned` is opt-in until measured against the default |
 | `color` | `sdr` | canvas color contract: `sdr` (BT.709), `hlg` or `pq` (BT.2020). HLG/PQ need a 10-bit `working_format`. Every source is converted to it on the GPU; renditions convert from it |
 | `latency_ms` | two frames | playout buffer between a source frame's arrival and its tick (33 ms at 60 fps). A frame later than that is skipped and the previous one repeated, so set it just above the worst source jitter; must stay below six frames. `--mixer-latency-ms` on the command line overrides it |
 

@@ -164,6 +164,7 @@ def fake_api():
         "one_to_many",
         "output",
         "preheat_video_router",
+        "raw_to_cuda",
         "realtime",
         "repeat_last_frame",
         "smooth_timestamps",
@@ -194,6 +195,7 @@ def fake_api():
             "one_to_many": "OneToMany",
             "output": "Output",
             "preheat_video_router": "PreheatVideoRouter",
+            "raw_to_cuda": "RawToCuda",
             "realtime": "Realtime",
             "repeat_last_frame": "RepeatLastFrame",
             "smooth_timestamps": "SmoothTimestamps",
@@ -577,28 +579,63 @@ def fake_browser_rest(base, method, path, body=None):
     return body if path == "/window/open" else {"windows": []}
 
 
-@pytest.mark.parametrize("kind,fmt,color", [("nv12", "nv12", "sdr"), ("p010", "p010le", "hlg")])
-def test_raw_420_source_uses_cpu_frames_and_one_paced_upload(tmp_path, kind, fmt, color):
-    doc = {"canvas": CONFIG["canvas"], "sources": [{"id": "raw", "kind": kind,
+def _raw_420_nodes(tmp_path, kind, color, **canvas):
+    doc = {"canvas": {**CONFIG["canvas"], **canvas}, "sources": [{"id": "raw", "kind": kind,
            "path": str(tmp_path / "pattern.raw"), "width": 320, "height": 180, "color": color}],
            "scenes": [{"id": "full", "items": [{"source": "raw", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
     path = tmp_path / "show.json"
     path.write_text(json.dumps(doc))
     app = build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
     nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+    chain = [name for name in nodes if name.endswith("_0") and nodes[name].get("group") == nodes["input_0"]["group"]]
+    return app, nodes, chain
+
+
+@pytest.mark.parametrize("kind,fmt,color", [("nv12", "nv12", "sdr"), ("p010", "p010le", "hlg")])
+def test_raw_420_source_uses_cpu_frames_and_one_paced_upload_by_default(tmp_path, kind, fmt, color):
+    app, nodes, chain = _raw_420_nodes(tmp_path, kind, color)
+    assert chain == ["input_0", "demux_0", "decode_0", "filter_0", "realtime_0", "fps_0", "upload_0"]
     assert nodes["input_0"]["format"] == "rawvideo"
     assert nodes["input_0"]["options"] == {"pixel_format": fmt, "video_size": "320x180", "framerate": "60/1"}
+    assert nodes["input_0"]["loop_continuous_ts"] is False   # setpts counts frames across loops instead
     assert nodes["decode_0"]["codec"] == "rawvideo"
     assert "hwaccel" not in nodes["decode_0"]
     assert nodes["filter_0"]["src"] == "input_0_decoded"
     assert nodes["filter_0"]["graph"] == "setpts=N*1/(60*TB)"
     assert nodes["realtime_0"]["src"] == "input_0_filtered"
     assert nodes["upload_0"]["src"] == "input_0_fps"
-    assert nodes["upload_0"]["graph"] == "hwupload"
+    assert (nodes["upload_0"]["type"], nodes["upload_0"]["graph"]) == ("filter_video", "hwupload")
     # Neither graph does CPU slice work.
     assert nodes["filter_0"]["threads"] == nodes["upload_0"]["threads"] == 1
+    assert not {"input_0_decoded", "input_0_cuda"} & dict(app.avp.edges.plans).keys()
     source = dict(FakeMixer.instances[-1].sources)["raw"]
     assert source["pre_otm_edge"] == "input_0_uploaded" and source["pixel_format"] == fmt
+
+
+def test_raw_upload_rejects_unknown_modes():
+    with pytest.raises(mixer_config.ConfigError, match="raw_upload must be one of hwupload, pinned"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "raw_upload": "pageable"}})
+    assert mixer_config.parse(CONFIG).raw_upload == "hwupload"
+
+
+@pytest.mark.parametrize("kind,fmt,color", [("nv12", "nv12", "sdr"), ("p010", "p010le", "hlg")])
+def test_pinned_raw_420_source_uploads_packets_through_one_node_before_pacing(tmp_path, kind, fmt, color):
+    app, nodes, chain = _raw_420_nodes(tmp_path, kind, color, raw_upload="pinned")
+    # No decoder, setpts filter or FFmpeg hwupload: one node turns packets into CUDA frames.
+    assert chain == ["input_0", "demux_0", "upload_0", "realtime_0", "fps_0"]
+    assert nodes["input_0"]["format"] == "rawvideo"
+    assert nodes["input_0"]["options"] == {"pixel_format": fmt, "video_size": "320x180", "framerate": "60/1"}
+    assert nodes["demux_0"]["routing"] == {"v:0": "input_0_packed"}
+    upload = nodes["upload_0"]
+    assert upload["type"] == "raw_to_cuda"
+    assert (upload["src"], upload["dst"], upload["pixel_format"]) == ("input_0_packed", "input_0_cuda", fmt)
+    assert (upload["width"], upload["height"], upload["hwaccel"]) == (320, 180, "mixer_gpu")
+    # The mixer applies the source's colour contract; the upload leaves frames untagged as before.
+    assert not {"color_trc", "color_primaries", "colorspace", "color_range"} & upload.keys()
+    assert nodes["realtime_0"]["src"] == "input_0_cuda"
+    assert dict(app.avp.edges.plans)["input_0_cuda"] == 1
+    source = dict(FakeMixer.instances[-1].sources)["raw"]
+    assert source["pre_otm_edge"] == "input_0_fps" and source["pixel_format"] == fmt
 
 
 @pytest.mark.parametrize("changes", [{"width": 319}, {"height": 0}, {"color": "hlg"}, {"color": ""}])

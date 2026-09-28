@@ -833,6 +833,21 @@ Parameters:
 -   `stride` (int) - row pitch in bytes, default the 128-byte aligned v210 pitch
 -   `sw_format` (string) - CUDA storage, `p210le` (default) or `yuv422p10le`
 -   `color_trc`, `color_primaries`, `colorspace`, `color_range`, `chroma_location` (string) - tags stamped on every output frame (libavutil names, e.g. `arib-std-b67`, `bt2020`, `bt2020nc`, `tv`)
+-   `fps` (string, required), `timebase` (string, default `1/fps`), `sample_aspect_ratio` (string, default `1/1`) - reported to downstream nodes and stamped on the frames
+
+Each packet is copied into a pinned host buffer and uploaded on the node's own non-blocking CUDA stream, which is synchronized before the frame is sent, so consumers receive complete frames.
+
+### `raw_to_cuda`
+
+Uploads headerless raw pictures (e.g. `nv12`, `p010le`), one packet per picture, into CUDA frames of the same pixel format. An alternative to `dec_video(rawvideo)` + `filter_video(hwupload)` for raw files (the mixer's `canvas.raw_upload: "pinned"`): the upload path and parameters are those of `v210_to_cuda` without the unpack kernel. Unlike FFmpeg `hwupload`, which copies from pageable memory on the device context's legacy stream, the copy goes through pinned staging on a private stream, which first waits for the work already queued on the device context's stream (FFmpeg filters release frames without synchronizing). A packet shorter than one picture (the partial picture `rawvideo` passes on at the end of a file) is dropped; `v210_to_cuda` fails on it.
+
+1 input: `av::Packet` (planes back to back without row padding, the `rawvideo` layout), 1 output: `av::VideoFrame` (hardware "pixel format" `cuda`)
+
+Parameters:
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `pixel_format` (string, required) - layout of the packets and the CUDA frames' `sw_format`; must be one FFmpeg's CUDA frames can store
+-   `width`, `height` (int, required) - multiples of the format's chroma subsampling
+-   `fps`, `timebase`, `sample_aspect_ratio`, and the color tags - as for `v210_to_cuda`; color tags default to unspecified
 
 ### `cuda_infer_yolo`
 

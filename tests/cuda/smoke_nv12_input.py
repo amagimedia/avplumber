@@ -12,7 +12,7 @@ from pyplumber import node as api
 from pyplumber.mixer.inputs import build_raw420_input
 
 
-def check(fmt):
+def check(fmt, pinned):
     width, height, fps = 96, 64, 30
     dtype, shift = (np.uint8, 0) if fmt == "nv12" else (np.uint16, 6)
     sample_bytes = np.dtype(dtype).itemsize
@@ -28,7 +28,7 @@ def check(fmt):
         nodes = []
         try:
             edge = build_raw420_input(avp, api, "raw", str(path), width=width, height=height, pixel_format=fmt,
-                                    fps=fps, group="probe", hwaccel="raw_gpu", loop=True)
+                                    fps=fps, group="probe", hwaccel="raw_gpu", loop=True, pinned=pinned)
             verify = api.FilterVideo({"name": "verify", "src": edge, "dst": "result",
                                       "group": "probe", "hwaccel": "raw_gpu",
                                       "graph": f"hwdownload,format={fmt}"})
@@ -49,11 +49,12 @@ def check(fmt):
             assert len(seen) == 24 and len(set(seen)) >= 3, seen
             assert any(b < a for a, b in zip(seen, seen[1:])), "raw clip did not loop"
             assert np.allclose(np.diff(timestamps), 1 / fps, atol=0.001), timestamps
-            print(f"PASS: 24 paced {fmt} frames, looping, byte-exact CPU → CUDA upload", flush=True)
+            print(f"PASS: 24 paced {fmt} frames, looping, byte-exact CPU → CUDA upload ({'pinned' if pinned else 'hwupload'})", flush=True)
         finally:
             finish(avp, nodes)
 
 
 if __name__ == "__main__":
     for fmt in ("nv12", "p010le"):
-        check(fmt)
+        for pinned in (False, True):
+            check(fmt, pinned)

@@ -25,6 +25,9 @@ TRANSITIONS = ("cut", "fade", "wipe")
 # purpose: the compositor cannot promote 8-bit sources or draw the RGBA wipe
 # onto them, so they only fail later.
 WORKING_FORMATS = ("nv12", "p010le", "p210le")
+# How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (default), or
+# raw_to_cuda's pinned staging on a private stream (opt-in until measured).
+RAW_UPLOADS = ("hwupload", "pinned")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 128         # cuda_rect_overlay active_inputs is a 128-bit pad mask (SourceMask)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 256
@@ -192,6 +195,7 @@ class MixerConfig:
     transition: str = DEFAULT_TRANSITION   # what a pick takes with in direct mode
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
+    raw_upload: str = "hwupload"   # canvas.raw_upload: one of RAW_UPLOADS
     latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default two output frames
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
@@ -381,6 +385,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     working_format = str(canvas.get("working_format", "nv12"))
     if working_format not in WORKING_FORMATS:
         raise ConfigError(f"canvas.working_format must be one of {WORKING_FORMATS}")
+    raw_upload = canvas.get("raw_upload", "hwupload")
+    if raw_upload not in RAW_UPLOADS:
+        raise ConfigError(f"canvas.raw_upload must be one of {', '.join(RAW_UPLOADS)}")
     latency_ms = canvas.get("latency_ms")
     if latency_ms is not None:
         try:
@@ -469,7 +476,7 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     cfg = MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
                        browser_ring_size=browser_ring_size,
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
-                       initial_scene=initial, working_format=working_format, latency_ms=latency_ms, out_color=out_color,
+                       initial_scene=initial, working_format=working_format, raw_upload=raw_upload, latency_ms=latency_ms, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     from .aux import parse_aux_buses
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),

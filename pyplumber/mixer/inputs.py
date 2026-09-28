@@ -106,33 +106,81 @@ def v210_row_stride(width: int) -> int:
     return ((width + 47) // 48) * 128
 
 
+def _raw_file_restart(loop: bool) -> dict:
+    """A looped raw file never ends, so only a one-shot file restarts its group."""
+    return {} if loop else {"auto_restart": "group"}
+
+
+def _raw_file_packets(avp, api, tag: str, path: str, *, pixel_format: str, video_size: str,
+                      group: str, fps: int, fps_den: int, loop: bool) -> str:
+    """``input_rec(rawvideo) -> demux`` head of a headerless raw file source: one
+    picture per packet, timestamps rising across loop passes. Returns the packet edge."""
+    restart = _raw_file_restart(loop)
+    avp.addNode(api.InputRec({
+        "name": f"input_{tag}", "url": path, "dst": f"input_{tag}_packets", "loop": loop,
+        "loop_continuous_ts": loop, "format": "rawvideo", "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
+        "options": {"pixel_format": pixel_format, "video_size": video_size, "framerate": f"{fps}/{fps_den}"},
+    }))
+    avp.addNode(api.Demux({
+        "name": f"demux_{tag}", "src": f"input_{tag}_packets", "routing": {"v:0": f"input_{tag}_packed"},
+        "wait_for_keyframe": False, "group": group, **restart,
+    }))
+    return f"input_{tag}_packed"
+
+
+# Capacity of a raw source's CUDA edge (input_<tag>_cuda): realtime keeps the head
+# frame there until it is due, so the upload runs one frame ahead of pacing and
+# each source holds one uploaded frame in VRAM before realtime (as NVDEC does).
+RAW_UPLOADED_CAPACITY = 1
+
+
 def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                        pixel_format: str, fps: int, fps_den: int = 1,
-                       hwaccel: str = "@gpu", loop: bool = False, event_loop: Optional[str] = None) -> str:
-    """CPU/GPU interop source: raw NV12/P010 -> paced CPU frames -> CUDA upload.
+                       hwaccel: str = "@gpu", loop: bool = False, event_loop: Optional[str] = None,
+                       pinned: bool = False) -> str:
+    """CPU/GPU interop source: raw NV12/P010 file -> CUDA frames -> paced output edge.
 
-    Pacing before upload bounds transfer work to the requested frame rate. No NVDEC
-    or pixel conversion is needed; rawvideo only wraps the existing bytes.
+    Default: ``input_rec -> demux -> dec_video(rawvideo) -> filter(setpts) ->
+    realtime(set_pts) -> force_fps -> filter(hwupload)``. Pacing before upload bounds
+    transfer work to the requested frame rate; rawvideo only wraps the existing bytes.
+
+    ``pinned``: ``input_rec -> demux -> raw_to_cuda -> realtime(set_pts) -> force_fps``.
+    raw_to_cuda uploads each packet through pinned staging on its own stream, so
+    no decoder, setpts or FFmpeg hwupload is involved; it uploads one frame ahead
+    of pacing (RAW_UPLOADED_CAPACITY). Opt-in until measured against the default.
     """
     if pixel_format not in ("nv12", "p010le"):
         raise ValueError("raw 4:2:0 upload requires nv12 or p010le")
-    from .backends.cuda import CudaMixerBackend   # backends load only when used
-    # Neither setpts nor hwupload does CPU slice work: one filter thread each.
-    threads = CudaMixerBackend.graph_threads
-    edge = build_input(avp, api, tag, path, group=group, fps=fps, fps_den=fps_den,
-                       hwaccel=None, loop=loop, auto_restart=None if loop else "group",
-                       input_params={"format": "rawvideo", "options": {
-                           "pixel_format": pixel_format, "video_size": f"{width}x{height}",
-                           "framerate": f"{fps}/{fps_den}"}},
-                       decoder_params={"codec": "rawvideo", "pixel_format": pixel_format},
-                       # InputRec seeks back to PTS zero at each loop. Count frames
-                       # before pacing; setpts changes metadata only, not pixels.
-                       decoded_filter=f"setpts=N*{fps_den}/({fps}*TB)", decoded_filter_threads=threads,
-                       event_loop=event_loop)
-    output = f"input_{tag}_uploaded"
-    avp.addNode(api.FilterVideo({"name": f"upload_{tag}", "src": edge, "dst": output,
-                                "graph": "hwupload", "hwaccel": hwaccel, "threads": threads, "group": group}))
-    return output
+    if not pinned:
+        from .backends.cuda import CudaMixerBackend   # backends load only when used
+        # Neither setpts nor hwupload does CPU slice work: one filter thread each.
+        threads = CudaMixerBackend.graph_threads
+        edge = build_input(avp, api, tag, path, group=group, fps=fps, fps_den=fps_den,
+                           hwaccel=None, loop=loop, auto_restart=None if loop else "group",
+                           input_params={"format": "rawvideo", "options": {
+                               "pixel_format": pixel_format, "video_size": f"{width}x{height}",
+                               "framerate": f"{fps}/{fps_den}"}},
+                           decoder_params={"codec": "rawvideo", "pixel_format": pixel_format},
+                           # InputRec seeks back to PTS zero at each loop. Count frames
+                           # before pacing; setpts changes metadata only, not pixels.
+                           decoded_filter=f"setpts=N*{fps_den}/({fps}*TB)", decoded_filter_threads=threads,
+                           event_loop=event_loop)
+        output = f"input_{tag}_uploaded"
+        avp.addNode(api.FilterVideo({"name": f"upload_{tag}", "src": edge, "dst": output,
+                                    "graph": "hwupload", "hwaccel": hwaccel, "threads": threads, "group": group}))
+        return output
+    packets = _raw_file_packets(avp, api, tag, path, pixel_format=pixel_format, video_size=f"{width}x{height}",
+                                group=group, fps=fps, fps_den=fps_den, loop=loop)
+    uploaded = f"input_{tag}_cuda"
+    # addNode creates the edge, so the plan must come first.
+    avp.edges.planCapacity(uploaded, RAW_UPLOADED_CAPACITY)
+    avp.addNode(api.RawToCuda({
+        "name": f"upload_{tag}", "src": packets, "dst": uploaded,
+        "hwaccel": hwaccel, "width": width, "height": height, "pixel_format": pixel_format,
+        "fps": f"{fps}/{fps_den}", "timebase": "1/90000",
+        "group": group, **_raw_file_restart(loop),
+    }))
+    return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)
 
 
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
@@ -144,23 +192,13 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
     The packed bytes carry no metadata, so the color contract (HLG/BT.2020 for
     the HDR sources) is supplied here and stamped on the CUDA frames.
     """
-    edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
-    restart = {} if loop else {"auto_restart": "group"}
     stride = v210_row_stride(width)
-    avp.addNode(api.InputRec({
-        "name": f"input_{tag}", "url": path, "dst": edge("packets"), "loop": loop,
-        "loop_continuous_ts": loop, "format": "rawvideo", "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
-        "options": {"pixel_format": "gray", "video_size": f"{stride}x{height}",
-                    "framerate": f"{fps}/{fps_den}"},
-    }))
-    avp.addNode(api.Demux({
-        "name": f"demux_{tag}", "src": edge("packets"), "routing": {"v:0": edge("packed")},
-        "wait_for_keyframe": False, "group": group, **restart,
-    }))
+    packets = _raw_file_packets(avp, api, tag, path, pixel_format="gray", video_size=f"{stride}x{height}",
+                                group=group, fps=fps, fps_den=fps_den, loop=loop)
     avp.addNode(api.V210ToCuda({
-        "name": f"unpack_{tag}", "src": edge("packed"), "dst": edge("cuda"),
+        "name": f"unpack_{tag}", "src": packets, "dst": f"input_{tag}_cuda",
         "hwaccel": hwaccel, "width": width, "height": height, "stride": stride,
         "fps": f"{fps}/{fps_den}", "timebase": "1/90000", "sw_format": "p210le",
-        "group": group, **restart, **(color or {}),
+        "group": group, **_raw_file_restart(loop), **(color or {}),
     }))
-    return _pace(avp, api, tag, edge("cuda"), fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)
+    return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)
