@@ -105,9 +105,10 @@ route changes or scene control commands. Several scene definitions share the
 same input queues: this does not continuously render every scene. An idle slot
 advances its playout queues without allocating output surfaces or launching
 composition kernels. Cuts, fades and wipes reuse only frames within the current
-playout window. A source running late keeps its held picture, so the new scene
-flips at the next deadline and repeats it; a held picture older than the
-eight-frame queue budget, from a stalled source, cannot prove readiness.
+playout window, except from a source running late: it keeps its held picture and
+the frames after it, so the new scene flips at the next deadline and that source
+stays on its cadence. A held picture older than the eight-frame queue budget,
+from a stalled source, cannot prove readiness.
 There is no GPU download/upload or additional source decoding. The existing
 frame rate, playout delay, visible routing and ready-frame gate are retained.
 Preview preparation still uses the ordinary reset path.

@@ -207,20 +207,24 @@ public:
         reset_since_commit_ = true;
         if (preserve_warm && state.prewarm && valid_from_ns) {
             // Scene geometry may change while source identity stays fixed.
-            // Retain only frames in the current playout window. A source running
-            // late keeps its held picture and repeats it, so require_all does not
-            // hold the new scene back for it; a picture older than the queue
-            // budget is from a source that stopped while the slot was idle.
-            while (!state.queue.empty() && rate_.time(state.queue.front().index) < *valid_from_ns) {
-                state.queue.pop_front();
-                ++state.stats.discarded;
-            }
-            if (state.held_index &&
-                    rate_.time(*state.held_index + int64_t(kQueueCapacity)) < *valid_from_ns) {
+            // A held picture older than the queue budget is from a source that
+            // stopped while the slot was idle; without one, retain only frames in
+            // the current playout window. A source running late keeps its held
+            // picture, so require_all does not hold the new scene back for it, and
+            // every frame after it, even before the window, so it keeps its cadence
+            // instead of repeating until it reaches the window. Frames arrive in
+            // order: anything stamped after the held tick is newer.
+            auto from = *valid_from_ns;
+            if (state.held_index && rate_.time(*state.held_index + int64_t(kQueueCapacity)) < from) {
                 state.held.reset();
                 state.held_index.reset();
             }
-            state.valid_from_ns = valid_from_ns;
+            if (state.held_index) from = std::min(from, rate_.time(*state.held_index) + 1);
+            while (!state.queue.empty() && rate_.time(state.queue.front().index) < from) {
+                state.queue.pop_front();
+                ++state.stats.discarded;
+            }
+            state.valid_from_ns = from;
             waiting_deadline_.reset();
             return;
         }

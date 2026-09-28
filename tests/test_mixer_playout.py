@@ -30,7 +30,7 @@ def playout_binary(tmp_path_factory):
     "input_offset_selects_a_late_source_one_tick_later",
     "staged_input_readiness_preserves_old_output",
     "inactive_prewarm_retains_live_frames_without_rendering",
-    "warm_reset_repeats_a_late_source_instead_of_waiting",
+    "warm_reset_keeps_a_late_source_on_cadence",
     "complete_jitter_plateau_is_not_rate_drift",
     "stale_burst_is_not_retimestamped_as_fresh",
     "rational_source_drift_does_not_amplify",

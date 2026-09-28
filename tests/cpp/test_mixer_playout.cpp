@@ -565,10 +565,11 @@ void inactive_prewarm_retains_live_frames_without_rendering() {
     CHECK(!mix.prepare(rate.time(110), true));
 }
 
-void warm_reset_repeats_a_late_source_instead_of_waiting() {
+void warm_reset_keeps_a_late_source_on_cadence() {
     // A saturated source runs four ticks behind its timestamps. A warm scene
-    // load flips at the next deadline and repeats that source's held picture;
-    // it does not wait for the source's first frame inside the new window.
+    // load flips at the next deadline without waiting for the source's first
+    // frame inside the new window, and keeps that source's frames after its
+    // held picture: it neither repeats nor skips across the reset.
     using namespace avp::mixer;
     const TickGrid rate(av::Rational(30, 1));
     Playout<int> mix(2, rate, {}, TimestampMode::Presentation);
@@ -582,18 +583,22 @@ void warm_reset_repeats_a_late_source_instead_of_waiting() {
         CHECK(mix.prepare(rate.time(tick) + mix.latencyNs(), true));
         mix.commit();
     }
+    const auto late = mix.stats(1);
     // The compositor's warm_reset: valid from one period before the playout window.
     const auto now = rate.time(30) + mix.latencyNs();
     for (size_t input : {0, 1}) {
         mix.setActive(input, true);
         mix.resetInput(input, now - mix.latencyNs() - rate.time(1), true);
     }
-    mix.push(0, 30, rate.time(30));
-    mix.push(1, 126, rate.time(26));   // still behind the new window: discarded
-    const auto *frame = mix.prepare(now, true);
-    CHECK(frame && frame->index == 30);
-    CHECK(*frame->frames[0] == 30 && *frame->frames[1] == 125);
-    mix.commit();
+    for (int tick = 30; tick < 32; ++tick) {
+        mix.push(0, tick, rate.time(tick));
+        mix.push(1, 100 + tick - 4, rate.time(tick - 4));   // behind the new window, after the held picture
+        const auto *frame = mix.prepare(rate.time(tick) + mix.latencyNs(), true);
+        CHECK(frame && frame->index == tick);
+        CHECK(*frame->frames[0] == tick && *frame->frames[1] == 100 + tick - 4);
+        mix.commit();
+    }
+    CHECK(mix.stats(1).repeats == late.repeats && mix.stats(1).discarded == late.discarded);
     CHECK(mix.missedDeadlines() == 0);
 }
 
@@ -695,7 +700,7 @@ int main(int argc, char **argv) {
         {"input_offset_selects_a_late_source_one_tick_later", input_offset_selects_a_late_source_one_tick_later},
         {"staged_input_readiness_preserves_old_output", staged_input_readiness_preserves_old_output},
         {"inactive_prewarm_retains_live_frames_without_rendering", inactive_prewarm_retains_live_frames_without_rendering},
-        {"warm_reset_repeats_a_late_source_instead_of_waiting", warm_reset_repeats_a_late_source_instead_of_waiting},
+        {"warm_reset_keeps_a_late_source_on_cadence", warm_reset_keeps_a_late_source_on_cadence},
         {"complete_jitter_plateau_is_not_rate_drift", complete_jitter_plateau_is_not_rate_drift},
         {"stale_burst_is_not_retimestamped_as_fresh", stale_burst_is_not_retimestamped_as_fresh},
         {"rational_source_drift_does_not_amplify", rational_source_drift_does_not_amplify},
