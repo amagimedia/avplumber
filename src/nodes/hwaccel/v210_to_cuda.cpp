@@ -38,8 +38,7 @@ public:
 };
 
 // A private stream and bounded staging allocation isolate this node's work
-// (module, kernel and packed are v210_to_cuda's unpacking resources, readers_done
-// raw_to_cuda's).
+// (module, kernel and packed are v210_to_cuda's unpacking resources).
 // Destruction also covers partial initialization and failed kernel launches.
 struct UploadResources {
     CUcontext context = nullptr;
@@ -90,6 +89,10 @@ int colorOption(const Parameters& params, const char* node, const char* name, in
 // stages itself, contending on the context shared by every mixer thread.
 // The stream is synchronized before the frame is published: consumers see an
 // ordinary, complete CUDA frame.
+// FFmpeg filters read these frames on the device context's stream and release
+// them without synchronizing, so the pool can hand back a picture a queued
+// kernel still reads. Each upload waits for the work queued on that stream so
+// far; nothing ever waits for an upload.
 class PacketToCuda : public NodeSISO<av::Packet, av::VideoFrame>, public ReportsFinishByFlag,
                      public IVideoFormatSource, public IFrameRateSource, public ITimeBaseSource {
     av::Rational fps_, timebase_, aspect_;
@@ -100,6 +103,7 @@ class PacketToCuda : public NodeSISO<av::Packet, av::VideoFrame>, public Reports
     AVChromaLocation chroma_;
     // Keep the FFmpeg device alive until all CUDA resources have been released.
     std::shared_ptr<HWAccelDevice> device_;
+    CUstream device_stream_ = nullptr;   // the FFmpeg device context's stream
 
     void initialize() {
         if (global_cuda.has_errors || !device_ || device_->hardwarePixelFormat() != AV_PIX_FMT_CUDA)
@@ -125,6 +129,7 @@ class PacketToCuda : public NodeSISO<av::Packet, av::VideoFrame>, public Reports
         constexpr unsigned kNonBlockingStream = 0x1;
         check(cuStreamCreate(&gpu_.stream, kNonBlockingStream), "create stream");
         check(cuMemHostAlloc(&gpu_.staging, packet_size_, 0), "allocate upload staging");
+        check(cuEventCreate(&gpu_.readers_done, CU_EVENT_DISABLE_TIMING), "create event");
         initializeDevice();
     }
 
@@ -136,7 +141,6 @@ protected:
     AVPixelFormat format_ = AV_PIX_FMT_NONE;
     // Drop a picture shorter than packet_size_ instead of failing (raw_to_cuda).
     bool drop_truncated_ = false;
-    CUstream device_stream_ = nullptr;   // the FFmpeg device context's stream
     UploadResources gpu_;
 
     void check(CUresult result, const char* operation) const { checkCuda(result, node_, operation); }
@@ -200,6 +204,9 @@ public:
             // Staging allows arbitrary AVPacket/MXL host buffers without registering their pages.
             std::memcpy(gpu_.staging, packet.data(), packet_size_);
             try {
+                // After av_hwframe_get_buffer: the reads of a recycled frame were queued before its release.
+                check(cuEventRecord(gpu_.readers_done, device_stream_), "record device stream");
+                check(cuStreamWaitEvent(gpu_.stream, gpu_.readers_done, 0), "wait for device stream");
                 enqueue(output.raw());
                 check(cuStreamSynchronize(gpu_.stream), "complete frame");
             } catch (...) {
@@ -278,22 +285,12 @@ public:
 
 // The packet holds the planes back to back without row padding (rawvideo's
 // layout); each plane is copied as is into the frame's pitched plane.
-// FFmpeg filters read these frames on the device context's stream and release
-// them without synchronizing, so the pool can hand back a picture a queued
-// kernel still reads. Each copy waits for the work queued on that stream so
-// far; nothing ever waits for an upload.
 class RawToCuda : public PacketToCuda {
     size_t offsets_[4] = {};
     int linesizes_[4] = {};
     size_t heights_[4] = {};
 
-    void initializeDevice() override {
-        check(cuEventCreate(&gpu_.readers_done, CU_EVENT_DISABLE_TIMING), "create event");
-    }
-
     void enqueue(AVFrame* frame) override {
-        check(cuEventRecord(gpu_.readers_done, device_stream_), "record device stream");
-        check(cuStreamWaitEvent(gpu_.stream, gpu_.readers_done, 0), "wait for device stream");
         for (int i = 0; i < 4 && linesizes_[i]; ++i) {
             CUDA_MEMCPY2D copy = {};
             copy.srcMemoryType = CU_MEMORYTYPE_HOST;
