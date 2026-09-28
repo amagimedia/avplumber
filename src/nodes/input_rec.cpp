@@ -66,6 +66,13 @@ protected:
     int64_t live_delay_ = 1'000;
     ETimestampSource timestamp_source_ = ETimestampSource::ts_None;
     bool loop_ = false;
+    // With loop_continuous_ts_, every forward loop shifts later passes by the
+    // span of the previous one, so downstream sees one monotonic timeline
+    // instead of a jump back to the start of the file on each pass.
+    bool loop_continuous_ts_ = false;
+    av::Timestamp loop_offset_ = NOTS;
+    av::Timestamp pass_start_ = NOTS; // earliest timestamp of the current pass, before loop_offset_
+    av::Timestamp pass_end_ = NOTS;   // latest timestamp + duration of the current pass, before loop_offset_
     std::atomic_bool notify_eof_ = false;
     std::atomic_bool eof_sent_ = false;
     bool send_eof_ = true;
@@ -533,6 +540,43 @@ public:
         auto_resume_after_seek_ = false;
         need_seek_ = true;
     }
+    void loopForward() {
+        if (loop_continuous_ts_ && pass_end_.isValid()) {
+            av::Timestamp span = addTS(pass_end_, negateTS(pass_start_));
+            loop_offset_ = loop_offset_.isValid() ? addTS(loop_offset_, span) : span;
+            pass_start_ = pass_end_ = NOTS;
+        }
+        seek(start_ts_);
+    }
+    void continueLoopTimeline(av::Packet &pkt) {
+        av::Timestamp ts = pkt.pts().isNoPts() ? pkt.dts() : pkt.pts();
+        if (ts.isNoPts()) {
+            return;
+        }
+        av::Timestamp duration = {pkt.duration(), ts.timebase()};
+        if (duration.timestamp() <= 0) {
+            av::Rational rate = ictx_.stream(pkt.streamIndex()).averageFrameRate();
+            duration = rate.getNumerator() > 0 ? av::Timestamp(1, av_inv_q(rate.getValue())) : av::Timestamp(0, ts.timebase());
+        }
+        av::Timestamp end = addTS(ts, duration);
+        // The pass span follows the video stream: other streams are shifted by the same
+        // offset to stay in sync, even if the file's audio runs a frame longer or shorter.
+        bool measured = (video_stream_ < 0) || (pkt.streamIndex() == video_stream_);
+        if (measured && (!pass_start_.isValid() || ts < pass_start_)) {
+            pass_start_ = ts;
+        }
+        if (measured && (!pass_end_.isValid() || end > pass_end_)) {
+            pass_end_ = end;
+        }
+        if (loop_offset_.isValid()) {
+            if (!pkt.pts().isNoPts()) {
+                pkt.setPts(addTS(pkt.pts(), loop_offset_));
+            }
+            if (!pkt.dts().isNoPts()) {
+                pkt.setDts(addTS(pkt.dts(), loop_offset_));
+            }
+        }
+    }
     virtual void seek(StreamTarget target) {
         auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
         seek_target_ = target;
@@ -738,7 +782,7 @@ public:
         }
 
         if (pkt.isNull() && loop_ && (play_direction_ == EPlaybackDirection::pd_Forward)) {
-            seek(start_ts_);
+            loopForward();
             return;
         }
         if (pkt.isNull()) {
@@ -831,6 +875,10 @@ public:
                 }
             }
         }
+        const av::Timestamp file_pts = pkt.pts();
+        if (loop_continuous_ts_) {
+            continueLoopTimeline(pkt);
+        }
         this->sink_->put(pkt);
 
         if (pkt_pts.isValid()) {
@@ -839,7 +887,7 @@ public:
                 if (stop_ts_.ts.isValid() && (pkt_pts >= stop_ts_.ts)) {
                     if (loop_) {
                         logstream << "input_rec reached stop timestamp, loop to start";
-                        seek(start_ts_);
+                        loopForward();
                     } else {
                         logstream << "input_rec reached stop timestamp, EOF";
                         notify_eof_ = true;
@@ -862,7 +910,7 @@ public:
         auto lock = std::lock_guard<decltype(seek_at_mutex_)>(seek_at_mutex_);
         if (!seek_at_table_.empty()) {
             auto e = seek_at_table_.front();
-            if (pkt.pts() >= e.first) {
+            if (file_pts >= e.first) {
                 seek_at_table_.pop_front();
                 seek(e.second);
             }
@@ -1111,6 +1159,9 @@ public:
         }
         if (params.count("loop") > 0) {
             loop_ = params["loop"];
+        }
+        if (params.count("loop_continuous_ts") > 0) {
+            loop_continuous_ts_ = params["loop_continuous_ts"];
         }
         if (params.count("send_eof") > 0) {
             send_eof_ = params["send_eof"];

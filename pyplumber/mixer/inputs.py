@@ -16,7 +16,7 @@ INPUT_TIMEOUT_S = 3_942_000_000
 
 
 def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: int = 1,
-                hwaccel: Optional[str] = "@gpu", loop: bool = False,
+                hwaccel: Optional[str] = "@gpu", loop: bool = False, continuous_loop: bool = False,
                 input_params: Optional[dict] = None,
                 speed_team: Optional[str] = None, speed: float = 1.0,
                 pause_team: Optional[str] = None, sync_team: Optional[str] = None,
@@ -27,7 +27,10 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     """Add the chain for one source and return its output edge (``input_<tag>_fps``).
 
     ``auto_restart="group"`` restarts the chain when a live source drops; pass
-    ``None`` for file playback that is looped or seeked instead.  ``pause_team``
+    ``None`` for file playback that is looped or seeked instead.  ``continuous_loop``
+    keeps timestamps rising across loop passes, so the decoder and ``realtime`` see
+    no jump back at each wrap; only for free-running loops, since seeks then land on
+    the shifted timeline.  ``pause_team``
     adds a ``pause`` node before ``realtime`` and ``sync_team`` names the
     realtime team, so ``pause/resume <pause_team>`` holds the picture and
     ``seek <sync_team> now <ts>`` re-cues the input (the replay demo's wiring).
@@ -39,7 +42,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     sync = {} if sync_team is None else {"sync_team": sync_team}
     avp.addNode(api.InputRec({
         "name": f"input_{tag}", "url": url, "dst": edge("packets"), "loop": loop,
-        "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
+        "loop_continuous_ts": loop and continuous_loop, "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
         **(input_params or {}),
     }))
     avp.addNode(api.Demux({
@@ -137,7 +140,7 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
     stride = v210_row_stride(width)
     avp.addNode(api.InputRec({
         "name": f"input_{tag}", "url": path, "dst": edge("packets"), "loop": loop,
-        "format": "rawvideo", "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
+        "loop_continuous_ts": loop, "format": "rawvideo", "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
         "options": {"pixel_format": "gray", "video_size": f"{stride}x{height}",
                     "framerate": f"{fps}/{fps_den}"},
     }))

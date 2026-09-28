@@ -405,7 +405,7 @@ def _build_input(
             avp.addNode(node)
     else:
         fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
-                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop)
+                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop, continuous_loop=True)
     if not normalize:
         return fps_edge
     normalized_edge = f"input_{index}_normalized"
@@ -658,7 +658,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
-                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)
+                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True)
         if source.filter_graph:
             filtered_edge = f"input_{index}_filtered"
             avp.addNode(api.FilterVideo({
