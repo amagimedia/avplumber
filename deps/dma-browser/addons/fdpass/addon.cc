@@ -132,7 +132,10 @@ class Server {
     int ls = bindListener();
     if (ls < 0) return false;
     const bool ok = ::dup3(ls, listen_fd_, O_CLOEXEC) >= 0;
-    if (!ok) logf(path_, "[fdpass] dup3 failed errno=%d (%s)", errno, strerror(errno));
+    if (!ok) {
+      logf(path_, "[fdpass] dup3 failed errno=%d (%s)", errno, strerror(errno));
+      ::unlink(path_.c_str());   // nothing listens behind it: let the next check retry
+    }
     ::close(ls);
     wake();  // poll() still waits on the replaced socket
     logf(path_, "[fdpass] socket file re-bound path=%s ok=%d", path_.c_str(), ok);
