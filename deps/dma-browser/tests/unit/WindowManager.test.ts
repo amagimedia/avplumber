@@ -12,6 +12,7 @@ function fakeWindow(config: WindowConfig, overrides: Partial<IManagedWindow> = {
     height: config.height,
     fps: config.fps,
     audio: config.audio,
+    holdLastFrame: config.holdLastFrame ?? true,
     visible: false,
     stats: {
       paintCount: 0,

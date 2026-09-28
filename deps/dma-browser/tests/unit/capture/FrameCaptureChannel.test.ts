@@ -138,6 +138,28 @@ describe('FrameCaptureChannel retained frame lifetime', () => {
     await channel.stop();
   });
 
+  it('drops and releases paints while held, then sends again', async () => {
+    const channel = new FrameCaptureChannel({socketPath: '/tmp/dma-page/held.sock',
+      allowedDims: AllowedDims.fromList(['1080x1920']), log: logSink()});
+    const contents = new EventEmitter() as WebContents & EventEmitter;
+    channel.attach(contents);
+    await channel.start();
+    channel.hold(true);
+    const held = makeTexture(30);
+    contents.emit('paint', held, {}, image());
+    expect(fdpass.broadcastFd).not.toHaveBeenCalled();
+    expect(held.texture.release).toHaveBeenCalledTimes(1);
+    expect(channel.getStats().droppedReasons).toEqual({held: 1});
+    channel.hold(false);
+    const resumed = makeTexture(31);
+    contents.emit('paint', resumed, {}, image());
+    await Promise.resolve();
+    expect(fdpass.broadcastFd).toHaveBeenCalledTimes(1);
+    expect(resumed.texture.release).not.toHaveBeenCalled();
+    expect(channel.getStats().txFrameCount).toBe(1);
+    await channel.stop();
+  });
+
   it.each(['disconnect', 'stop'] as const)('quarantines outstanding textures on %s', async (reason) => {
     const options = {socketPath: `/tmp/dma-page/quarantine-${reason}.sock`,
       allowedDims: AllowedDims.fromList(['1080x1920']), log: logSink()};

@@ -8,6 +8,7 @@ import type { StatusReport } from '../../../src/main/WindowControl';
 function snapshot(config: WindowConfig): WindowSnapshot {
   return {
     ...config,
+    holdLastFrame: config.holdLastFrame ?? true,
     visible: false,
     stats: {
       paintCount: 0,

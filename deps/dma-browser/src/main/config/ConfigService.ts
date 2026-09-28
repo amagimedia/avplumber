@@ -77,7 +77,8 @@ export class ConfigService {
     const fps = requireFiniteInt(input, 'fps', MIN_FPS, MAX_FPS);
     const audio = requireBoolean(input, 'audio', false);
     const ring = input.ringSize === undefined ? {} : { ringSize: requireFiniteInt(input, 'ringSize', 1, 64) };
-    return { id, url, width, height, fps, audio, ...ring };
+    const holdLastFrame = requireBoolean(input, 'holdLastFrame', true);
+    return { id, url, width, height, fps, audio, ...ring, holdLastFrame };
   }
 
   public validateId(input: unknown): { id: string } {

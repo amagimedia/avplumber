@@ -43,8 +43,11 @@ export class PageReloader {
     return delayMs;
   }
 
-  public loaded(): void {
-    if (!this.failedSinceReload) this.attempts = 0;
+  /** A clean load (not an error page) restarts the backoff and returns true. */
+  public loaded(): boolean {
+    if (this.failedSinceReload) return false;
+    this.attempts = 0;
+    return true;
   }
 
   /** Cancels a pending reload and restarts the backoff, e.g. on an explicit navigation. */

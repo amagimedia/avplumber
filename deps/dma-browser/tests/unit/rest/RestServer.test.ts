@@ -19,6 +19,7 @@ function snapshotFor(cfg: WindowConfig): WindowSnapshot {
     height: cfg.height,
     fps: cfg.fps,
     audio: cfg.audio,
+    holdLastFrame: cfg.holdLastFrame ?? true,
     visible: false,
     stats: {
       paintCount: 0,

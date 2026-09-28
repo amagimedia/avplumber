@@ -78,7 +78,7 @@ must cover `DMA_BROWSER_MAX_WINDOWS`. The public API always enforces
 
 | Method | Path                | Body                                                       |
 | ------ | ------------------- | ---------------------------------------------------------- |
-| POST   | `/window/open`      | `{ id, url, width, height, fps, audio }`                   |
+| POST   | `/window/open`      | `{ id, url, width, height, fps, audio, holdLastFrame }`    |
 | POST   | `/window/close`     | `{ id }`                                                   |
 | GET    | `/window/close/all` |                                                            |
 | POST   | `/window/refresh`   | `{ id }`                                                   |
@@ -92,6 +92,8 @@ Audio (when `audio: true`) goes to `/tmp/dma-page/{id}-audio.sock` (raw interlea
 A main-frame load failure, a load exceeding `DMA_BROWSER_LOAD_WATCHDOG_MS` (30 s by default), or a
 renderer crash reloads the page after 1 s, doubling up to 30 s while reloads keep failing. The
 sockets stay open, so consumers keep their connection and held frames.
+With `holdLastFrame` (default `true`), the window sends no frames until a reload loads cleanly, so
+consumers repeat the last one they received; `false` sends Chromium's error page instead.
 
 ### Frame lifetime and transport counters
 

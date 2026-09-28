@@ -20,9 +20,16 @@ describe('ConfigService.validateWindowConfig', () => {
       expect(() => svc.validateWindowConfig({ ...validBody, ringSize })).toThrow(ValidationError);
     }
   });
+  it('holds the last frame unless holdLastFrame is false', () => {
+    expect(svc.validateWindowConfig(validBody).holdLastFrame).toBe(true);
+    expect(svc.validateWindowConfig({ ...validBody, holdLastFrame: false }).holdLastFrame).toBe(false);
+    for (const holdLastFrame of [0, 'false', null]) {
+      expect(() => svc.validateWindowConfig({ ...validBody, holdLastFrame })).toThrow(ValidationError);
+    }
+  });
   it('accepts a valid body', () => {
     const cfg = svc.validateWindowConfig(validBody);
-    expect(cfg).toEqual(validBody);
+    expect(cfg).toEqual({ ...validBody, holdLastFrame: true });
   });
 
   it('defaults audio to false when omitted', () => {

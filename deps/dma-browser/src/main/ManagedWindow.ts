@@ -169,6 +169,8 @@ export class ManagedWindow implements IManagedWindow {
     });
     const recover = (reason: string): void => {
       if (this.destroyed) return;
+      // Until a clean load, the error page and a half-loaded reload are not sent.
+      if (this.config.holdLastFrame ?? true) this.frameChannel?.hold(true);
       const delayMs = this.reloader?.failed() ?? null;
       const action =
         delayMs === null ? 'reload already pending' : `reloading page in ${delayMs} ms`;
@@ -183,7 +185,7 @@ export class ManagedWindow implements IManagedWindow {
 
     wc.on('did-finish-load', () => {
       this.watchdog?.clear();
-      this.reloader?.loaded();
+      if (this.reloader?.loaded()) this.frameChannel?.hold(false);
     });
 
     wc.on('did-fail-load', (_e, errorCode, errorDesc, url, isMainFrame) => {
@@ -307,6 +309,7 @@ export class ManagedWindow implements IManagedWindow {
       fps: this.config.fps,
       audio: this.config.audio,
       ringSize: this.opts.retainedFramePoolSize,
+      holdLastFrame: this.config.holdLastFrame ?? true,
       visible: this.visible,
       stats,
     };

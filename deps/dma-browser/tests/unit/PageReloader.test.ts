@@ -55,6 +55,20 @@ describe('PageReloader', () => {
     expect(reloader.failed()).toBe(1000);
   });
 
+  it('reports a clean load only once the reload after a failure loads', () => {
+    expect(reloader.loaded()).toBe(true);
+    reloader.failed();
+    expect(reloader.loaded()).toBe(false);
+    vi.advanceTimersByTime(1000);
+    expect(reloader.loaded()).toBe(true);
+  });
+
+  it('reports the first load after reset() as clean', () => {
+    reloader.failed();
+    reloader.reset();
+    expect(reloader.loaded()).toBe(true);
+  });
+
   it('reset() cancels a pending reload', () => {
     reloader.failed();
     reloader.failed();

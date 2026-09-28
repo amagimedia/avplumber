@@ -76,6 +76,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
   private boundContents: WebContents | null = null;
   private readonly retainedFrames = new Map<bigint, RetainedFrame>();
   private readonly retainedFramePoolSize: number;
+  private held = false;
   private nextFrameNumber = 0n;
   private readonly boundHandler = (event: unknown, _dirty: unknown, img: unknown) =>
     this.handlePaint(event as PaintEventLike, img as PaintImageLike);
@@ -114,6 +115,11 @@ export class FrameCaptureChannel implements ICaptureChannel {
       }
     }, SOCKET_MONITOR_INTERVAL_MS);
     return Promise.resolve();
+  }
+
+  /** Drops paints while on, so the consumer repeats the last frame it received. */
+  public hold(on: boolean): void {
+    this.held = on;
   }
 
   public attach(webContents: WebContents): void {
@@ -169,6 +175,11 @@ export class FrameCaptureChannel implements ICaptureChannel {
       tex = event.texture;
       if (!tex) {
         this.dropFrame('no_texture');
+        return;
+      }
+      if (this.held) {
+        this.dropFrame('held');
+        this.releaseTexture(tex);
         return;
       }
       if (quarantinedTextures.has(this.opts.socketPath)) {
