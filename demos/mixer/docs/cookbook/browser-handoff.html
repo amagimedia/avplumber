@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="How the AVPlumber mixer's browser sender hands frames over: the fd-passing thread waits in poll() instead of waking every millisecond, a vanished socket is re-bound, and failed pages reload without dropping the mixer's connection.">
+  <title>Browser frame hand-off · Mixer optimization cookbook</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+    .measured { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 14px 0 0; max-width: 640px; }
+    .measured table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .measured th, .measured td { padding: 8px 14px; border-bottom: 1px solid var(--line); text-align: right; color: var(--body); white-space: nowrap; }
+    .measured tr:last-child td { border-bottom: 0; }
+    .measured th:first-child, .measured td:first-child { text-align: left; }
+    .measured th { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; }
+    .measured td:last-child { color: #edf4ff; }
+    .changes { padding-left: 20px; }
+    .changes li { margin: 10px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Browser frame hand-off</h1>
+  <p class="lede">Each browser window passes its painted frames to the mixer as DMA-BUF descriptors over a Unix socket, and the mixer acks every frame back. The sender's socket thread now sleeps in <code>poll()</code> instead of waking every millisecond, a vanished socket file is re-bound, and a failed page reloads without dropping the mixer's connection.</p>
+  <span class="pill live">Status: Implemented, deployed on the test host</span>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 760 262" role="img" aria-labelledby="poll-t poll-d">
+        <title id="poll-t">One window's socket thread over 20 ms, before and after</title>
+        <desc id="poll-d">Before: the thread wakes every millisecond, 20 times in 20 ms; four of those wake-ups find an ack, which waited up to 1 ms for them. After: the thread stays blocked in poll() and wakes 6 times, at the moment of each of four acks, one connection and one wake() call.</desc>
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="#a4b4ca"/>
+          </marker>
+        </defs>
+        <g font-family="system-ui, sans-serif" font-size="12">
+          <!-- Before: x = 160 + 30 * ms -->
+          <text x="8" y="20" fill="#edf4ff" font-size="14" font-weight="600">Before · check, sleep 1 ms, repeat</text>
+          <text x="8" y="50" fill="#a4b4ca">acks arrive</text>
+          <g fill="#30a46c">
+            <circle cx="232" cy="46" r="5"/><circle cx="391" cy="46" r="5"/>
+            <circle cx="529" cy="46" r="5"/><circle cx="688" cy="46" r="5"/>
+          </g>
+          <g stroke="#a4b4ca" stroke-width="1.2" stroke-dasharray="3 3" fill="none" marker-end="url(#ah)">
+            <path d="M236 50 L248 62"/><path d="M395 50 L398 62"/>
+            <path d="M533 50 L547 62"/><path d="M692 50 L698 62"/>
+          </g>
+          <text x="8" y="81" fill="#a4b4ca">socket thread</text>
+          <rect x="150" y="64" width="600" height="24" rx="4" fill="#182236" stroke="#26354a"/>
+          <g fill="#f5a524">
+            <rect x="157" y="64" width="6" height="24"/><rect x="187" y="64" width="6" height="24"/>
+            <rect x="217" y="64" width="6" height="24"/>
+            <rect x="277" y="64" width="6" height="24"/><rect x="307" y="64" width="6" height="24"/>
+            <rect x="337" y="64" width="6" height="24"/><rect x="367" y="64" width="6" height="24"/>
+            <rect x="427" y="64" width="6" height="24"/><rect x="457" y="64" width="6" height="24"/>
+            <rect x="487" y="64" width="6" height="24"/><rect x="517" y="64" width="6" height="24"/>
+            <rect x="577" y="64" width="6" height="24"/><rect x="607" y="64" width="6" height="24"/>
+            <rect x="637" y="64" width="6" height="24"/><rect x="667" y="64" width="6" height="24"/>
+            <rect x="727" y="64" width="6" height="24"/>
+          </g>
+          <g fill="#30a46c">
+            <rect x="247" y="64" width="6" height="24"/><rect x="397" y="64" width="6" height="24"/>
+            <rect x="547" y="64" width="6" height="24"/><rect x="697" y="64" width="6" height="24"/>
+          </g>
+          <text x="160" y="104" fill="#a4b4ca" font-size="11">0 ms</text>
+          <text x="733" y="104" fill="#a4b4ca" font-size="11" text-anchor="end">20 ms</text>
+          <text x="8" y="122" fill="#e5484d">20 wake-ups in 20 ms, traffic or not. Each ack waits for the next tick, up to 1 ms.</text>
+
+          <line x1="8" y1="138" x2="752" y2="138" stroke="#26354a"/>
+
+          <!-- After -->
+          <text x="8" y="162" fill="#edf4ff" font-size="14" font-weight="600">After · one poll() on the eventfd, the listener and every client</text>
+          <text x="232" y="180" fill="#30a46c" text-anchor="middle">ack</text>
+          <text x="310" y="180" fill="#6e8bf5" text-anchor="middle">connect</text>
+          <text x="610" y="180" fill="#57dbc2" text-anchor="middle">wake()</text>
+          <text x="8" y="194" fill="#a4b4ca">events</text>
+          <g fill="#30a46c">
+            <circle cx="232" cy="190" r="5"/><circle cx="391" cy="190" r="5"/>
+            <circle cx="529" cy="190" r="5"/><circle cx="688" cy="190" r="5"/>
+          </g>
+          <rect x="305" y="185" width="10" height="10" rx="2" fill="#6e8bf5"/>
+          <rect x="605" y="185" width="10" height="10" rx="2" fill="#57dbc2"/>
+          <g stroke="#a4b4ca" stroke-width="1.2" stroke-dasharray="3 3" fill="none" marker-end="url(#ah)">
+            <path d="M232 196 L232 206"/><path d="M310 196 L310 206"/><path d="M391 196 L391 206"/>
+            <path d="M529 196 L529 206"/><path d="M610 196 L610 206"/><path d="M688 196 L688 206"/>
+          </g>
+          <text x="8" y="225" fill="#a4b4ca">socket thread</text>
+          <rect x="150" y="208" width="600" height="24" rx="4" fill="#182236" stroke="#26354a"/>
+          <text x="460" y="224" fill="#a4b4ca" text-anchor="middle">blocked in poll()</text>
+          <g>
+            <rect x="229" y="208" width="6" height="24" fill="#30a46c"/><rect x="307" y="208" width="6" height="24" fill="#6e8bf5"/>
+            <rect x="388" y="208" width="6" height="24" fill="#30a46c"/><rect x="526" y="208" width="6" height="24" fill="#30a46c"/>
+            <rect x="607" y="208" width="6" height="24" fill="#57dbc2"/><rect x="685" y="208" width="6" height="24" fill="#30a46c"/>
+          </g>
+          <text x="8" y="254" fill="#30a46c">6 wake-ups, each with work to do. An ack is read the moment it arrives.</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Illustration, not a measurement: one window's socket thread over 20 ms. Amber: a check that found nothing. Green: an ack read. Blue: a consumer connecting. Teal: <code>wake()</code> for stop, re-bind or client removal. Before, every window's thread woke about 1000 times a second whatever the traffic.</figcaption>
+  </figure>
+
+  <h2>Measured: old vs. new browser image</h2>
+  <p>Same 110-source 1080p25 show (40 NVDEC, 36 browser pages, 30 raw NV12 files and 4 DSK key pages) on the 16 GB T4 test host, with the same avplumber build. Only the browser image changed.</p>
+  <div class="measured">
+    <table>
+      <thead><tr><th>Metric</th><th>Old image</th><th>New image</th></tr></thead>
+      <tbody>
+        <tr><td>Browser CPU</td><td>4.71 cores</td><td>3.47 cores</td></tr>
+        <tr><td>Browser wake-ups/s</td><td>53,297</td><td>18,428</td></tr>
+        <tr><td>Host CPU idle</td><td>33.9 %</td><td>43.8 %</td></tr>
+        <tr><td>avplumber CPU</td><td>4.06 cores</td><td>3.85 cores</td></tr>
+        <tr><td>GPU SM</td><td>58.8 %</td><td>57.5 %</td></tr>
+        <tr><td>VRAM total</td><td>10,064 MiB</td><td>10,085 MiB</td></tr>
+        <tr><td>VRAM of browser processes</td><td>1,272 MiB</td><td>1,265 MiB</td></tr>
+        <tr><td>Repeated source frames</td><td>0</td><td>0</td></tr>
+        <tr><td>Median cut latency</td><td>70 ms</td><td>75 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Browser wake-ups fell by about 35,000 a second, consistent with 1000 a second for each of the 40 windows. Even so, the table measures everything that changed between the two images, not the <code>poll()</code> rewrite alone. The 5 ms cut-latency difference is within run-to-run noise.</p>
+
+  <h2>What changed</h2>
+  <ol class="changes">
+    <li><b>The socket thread waits in <code>poll()</code>.</b> Before, each window's accept thread tried <code>accept()</code>, read acks from every client, then slept 1 ms: about 1000 wake-ups a second per window. Now it blocks in <code>poll()</code> on an eventfd (stop, re-bind, client removal), the listening socket and every client, and reads each ack as it arrives. Acks are read before new connections are accepted, so a reused descriptor number is never taken for the old client. A descriptor already removed is ignored. A persistent error pauses 1 ms, so <code>poll()</code> cannot spin.</li>
+    <li><b>A vanished socket file is re-bound.</b> The 1 s socket monitor notices the missing file and calls <code>createServer</code>, which binds a new socket and moves it under the old descriptor with <code>dup3</code>, so connected consumers keep their frames. If that fails, the file is unlinked, since nothing listens behind it, and the next check retries. Before, <code>createServer</code> returned early and the file stayed gone.</li>
+    <li><b>Failed pages reload; the capture channel stays.</b> A main-frame load failure, a load past the watchdog (30 s by default) or a renderer crash reloads the page after 1 s, doubling up to 30 s while reloads keep failing, and logs each attempt to stderr. Sub-frame failures and <code>ERR_ABORTED</code> (a cancelled or superseded navigation) are ignored. The consumer keeps its connection and the frames it holds. Before, any <code>did-fail-load</code> tore the window down: the socket closed, the mixer quarantined its frames, and a failed re-create left the source frozen for good with no alarm. A renderer crash had no handler at all.</li>
+    <li><b>Type-aware lint.</b> <code>@typescript-eslint/no-floating-promises</code> now runs with <code>ignoreVoid: false</code>: <code>void promise</code> no longer passes, so every fire-and-forget call ends in <code>.catch()</code>. Also added: <code>return-await</code> (only inside <code>try</code>), <code>switch-exhaustiveness-check</code> and <code>no-unnecessary-condition</code>; the lint script reports stale disable comments. Following its findings turned up two bugs. Media elements bound before the first audio collector was ready each built their own, so an element could stay silent and uncaptured; they now share one setup. And a crash restart queued before <code>stop()</code> respawned the stopped worker, which kept holding its port.</li>
+    <li><b>Per-window ring size.</b> The setup's <code>browser_ring_size</code> (6 at 25 fps), sent as each window's <code>ringSize</code>, now sizes that window's frame pool. Without it, the process-wide <code>DMA_BROWSER_DMABUF_POOL_SIZE</code> applies (default 11).</li>
+  </ol>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>Browser sender changes only, in <code>deps/dma-browser</code>: the fd-passing thread waits in <code>poll()</code>, a vanished capture socket is re-bound, failed loads and renderer crashes reload the page, stricter lint and the bugs it found, and a per-window ring size. avplumber is unchanged.</li>
+    <li><b>Why</b>With 40 windows, the 1 ms loop alone meant about 40,000 wake-ups a second, most of them finding nothing. A page that failed to load, or whose renderer crashed, froze its source with no alarm.</li>
+    <li><b>Latency</b>0 frames added to program and to command-to-screen: no queue, buffer or node changes. Acks are read as they arrive instead of at the next 1 ms tick, so each frame returns to the browser's pool up to 1 ms sooner. Median cut latency measured 70 ms old and 75 ms new, within run-to-run noise.</li>
+    <li class="flag"><b>Side effects</b>While a page is down, Chromium paints its own empty error page, so the source shows transparent or black instead of holding its last frame. The source recovers on the next successful reload. Sub-frame failures and <code>ERR_ABORTED</code> are now only logged.</li>
+    <li><b>Cost</b>0 nodes, 0 queues, 0 VRAM: browser processes held 1,272 MiB before and 1,265 MiB after. One eventfd per window; each wake-up rebuilds the <code>pollfd</code> list of the eventfd, the listener and the window's clients. Code: +51/−28 lines in the fd-passing addon, and a 57-line page reloader with tests.</li>
+    <li><b>Risk</b>Low. The <code>poll()</code> loop's hazards are covered: acks are read before <code>accept()</code>, removed descriptors are skipped, <code>removeClient()</code> calls <code>wake()</code> because <code>close()</code> does not end a <code>poll()</code>, and a persistent error pauses 1 ms. A URL that never loads retries every 30 s indefinitely, logged each time.</li>
+    <li><b>Switch it off</b>No runtime switch. Revert the commits and rebuild the browser image; avplumber needs no change.</li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/addons/fdpass/addon.cc#L426-L465">deps/dma-browser/addons/fdpass/addon.cc#L426-L465</a>: <code>wake()</code> and <code>acceptLoop()</code>, one <code>poll()</code> with acks read before accepting; <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/addons/fdpass/addon.cc#L467-L473">L467-L473</a> the 1 ms pause on a persistent error.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/addons/fdpass/addon.cc#L389-L391">addon.cc#L389-L391</a>: a descriptor no longer in the client list is ignored; <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/addons/fdpass/addon.cc#L475-L486">L475-L486</a> <code>removeClient()</code> retires the client's frames, closes it and calls <code>wake()</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/addons/fdpass/addon.cc#L129-L143">addon.cc#L129-L143</a>: <code>rebind()</code>, <code>dup3</code> under the same descriptor, unlink on failure; <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/addons/fdpass/addon.cc#L513-L518">L513-L518</a> <code>createServer</code> re-binds a server whose file vanished.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/main/capture/FrameCaptureChannel.ts#L105-L115">deps/dma-browser/src/main/capture/FrameCaptureChannel.ts#L105-L115</a>: the 1 s socket monitor that calls <code>createServer</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/main/PageReloader.ts#L1-L57">deps/dma-browser/src/main/PageReloader.ts#L1-L57</a>: which load failures count, and the doubling backoff.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/main/ManagedWindow.ts#L160-L201">deps/dma-browser/src/main/ManagedWindow.ts#L160-L201</a>: load failures, the watchdog and renderer crashes all reload the page; <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/main/ManagedWindow.ts#L26-L27">L26-L27</a> the 1 s and 30 s delays.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/.eslintrc.cjs#L28-L35">deps/dma-browser/.eslintrc.cjs#L28-L35</a>: the promise and condition rules.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/preload/AudioCapturePipeline.ts#L125-L135">deps/dma-browser/src/preload/AudioCapturePipeline.ts#L125-L135</a>: one shared audio collector setup, retried after a failure.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/main/supervisor/WorkerProcess.ts#L289-L307">deps/dma-browser/src/main/supervisor/WorkerProcess.ts#L289-L307</a>: a queued restart does nothing once <code>stop()</code> has run.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/main/Application.ts#L74">deps/dma-browser/src/main/Application.ts#L74</a>: the window's <code>ringSize</code>, else the process-wide pool size.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/README.md#frame-lifetime-and-transport-counters">dma-browser README · Frame lifetime and transport counters</a> (the ack protocol); the paragraph above it describes page recovery.</li>
+  </ul>
+  <p class="note">Line numbers match the change under review and resolve on develop once it merges.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>
