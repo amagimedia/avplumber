@@ -1,7 +1,8 @@
 import pytest
 
 from cut_spam import (is_expected_rejection, latest_id, measured, parse_mix, percentile, pick_scenes,
-                      setup_check, summarize, thresholds, transition_payloads, verdict)
+                      playout_delta, sample as probe_sample, setup_check, summarize, thresholds,
+                      transition_payloads, verdict)
 
 
 def sample(id, state="measured", ms=100.0):
@@ -24,18 +25,23 @@ def test_summary_of_nothing_has_no_latency():
     assert summarize([]) == {"n": 0, "p50": None, "p95": None, "max": None}
 
 
-def test_frame_term_rules_at_25_fps_and_ms_floor_at_60():
-    at25, at60 = thresholds(25, 100), thresholds(60, 100)
-    assert (at25["spam_p95_ms"], at25["spam_max_ms"], at25["recovery_max_ms"]) == (320, 600, 240)
-    assert (at60["spam_p95_ms"], at60["spam_max_ms"], at60["recovery_max_ms"]) == (150, 300, 120)
-    assert at25["recovery_p50_ms"] == pytest.approx(165)
-    assert at60["recovery_p50_ms"] == 141.7   # 125 + 16.67, rounded to 0.1 ms
+BASE = {"p50": 100, "max": 130}
 
 
-def test_overrides_win_and_missing_baseline_leaves_no_recovery_limit():
-    limits = thresholds(60, None, {"spam_p95_ms": 200, "spam_max_ms": None})
-    assert limits["spam_p95_ms"] == 200 and limits["spam_max_ms"] == 300
-    assert limits["recovery_p50_ms"] is None
+def test_limits_add_frames_to_the_runs_own_baseline():
+    at25, at60 = thresholds(25, BASE), thresholds(60, BASE)
+    assert (at25["spam_p95_ms"], at25["spam_max_ms"]) == (190, 270)   # p50 + 2 F + 10, p50 + 4 F + 10
+    assert (at25["recovery_p50_ms"], at25["recovery_max_ms"]) == (140, 170)   # p50 + F, max + F
+    assert (at60["spam_p95_ms"], at60["spam_max_ms"]) == (143.3, 176.7)
+    assert (at60["recovery_p50_ms"], at60["recovery_max_ms"]) == (116.7, 146.7)
+    assert (at60["measured_ratio_min"], at60["playout_repeats_max"]) == (0.9, 0)
+
+
+def test_overrides_win_and_missing_baseline_leaves_no_latency_limit():
+    limits = thresholds(60, {"p50": None, "max": None},
+                        {"spam_p95_ms": 200, "spam_max_ms": None, "measured_ratio_min": 0.95})
+    assert limits["spam_p95_ms"] == 200 and limits["spam_max_ms"] is None
+    assert limits["recovery_p50_ms"] is None and limits["measured_ratio_min"] == 0.95
 
 
 def test_measured_collects_both_categories_and_recent_history_after_an_id():
@@ -43,6 +49,22 @@ def test_measured_collects_both_categories_and_recent_history_after_an_id():
     assert sorted(measured(PROBE, 0)) == [2, 3, 4, 5, 6]
     assert {i: s["ms"] for i, s in measured(PROBE, 4).items()} == {5: 110, 6: 120}
     assert measured(None, 0) == {} and latest_id(None) == 0
+
+
+def test_a_burst_sample_is_its_last_cut_once_measured():
+    assert probe_sample(PROBE, 5, "s") == 110
+    assert probe_sample(PROBE, 7, "s") is None   # superseded, never measured
+    assert probe_sample(PROBE, 5, "other") is None
+    assert probe_sample(None, 1, "s") is None
+
+
+def test_playout_counters_sum_both_slots_and_must_advance():
+    before = {"A": {"frames": 60, "repeats": 1, "missed_deadlines": 0}, "B": {"frames": 0}}
+    after = {"A": {"frames": 180, "repeats": 1, "missed_deadlines": 2},
+             "B": {"frames": 120, "repeats": 3, "missed_deadlines": 0}}
+    assert playout_delta(before, after) == {"frames": 240, "repeats": 3, "missed_deadlines": 2}
+    assert playout_delta(after, after) is None   # nothing published during the run
+    assert playout_delta(None, after) is None and playout_delta({}, {}) is None
 
 
 def test_mix_and_scene_selection():
@@ -78,15 +100,29 @@ def test_setup_must_keep_running_the_same_revision():
 
 
 def test_verdict_fails_a_criterion_without_samples():
-    limits = thresholds(60, 100)
-    ok = {"p50": 100, "p95": 140, "max": 200}
-    criteria = dict((n, c) for n, c, _ in verdict(limits, ok, {"p50": 100, "max": 110}, [],
+    limits = thresholds(60, BASE)
+    ok = {"p50": 110, "p95": 140, "max": 170, "measured_ratio": 0.95}
+    clean = {"frames": 3600, "repeats": 0, "missed_deadlines": 0}
+    criteria = dict((n, c) for n, c, _ in verdict(limits, ok, ok, {"p50": 110, "max": 140}, clean, [],
                                                   (True, ""), (True, "")))
     assert all(criteria.values())
-    empty = summarize([])
-    criteria = dict((n, c) for n, c, _ in verdict(limits, empty, empty, ["boom"], (True, ""), (False, "")))
-    assert not any(criteria[n] for n in ("no errors", "spam p95", "spam max", "recovery p50",
+    empty = {**summarize([]), "measured_ratio": None}
+    criteria = dict((n, c) for n, c, _ in verdict(limits, empty, empty, empty, None, ["boom"],
+                                                  (True, ""), (False, "")))
+    assert not any(criteria[n] for n in ("no errors", "spam p95", "spam max", "spam measured", "burst p95",
+                                         "burst max", "burst measured", "recovery p50", "recovery max",
+                                         "program missed deadlines", "program repeats",
                                          "program on last target"))
+
+
+def test_verdict_fails_slow_measurement_and_any_program_stall():
+    limits = thresholds(60, BASE, {"playout_repeats_max": 2})
+    ok = {"p50": 110, "p95": 140, "max": 170, "measured_ratio": 0.95}
+    stalled = {"frames": 3600, "repeats": 2, "missed_deadlines": 1}
+    criteria = dict((n, c) for n, c, _ in verdict(limits, {**ok, "measured_ratio": 0.8}, ok, ok, stalled,
+                                                  [], (True, ""), (True, "")))
+    assert not criteria["spam measured"] and criteria["burst measured"]
+    assert not criteria["program missed deadlines"] and criteria["program repeats"]
 
 
 def test_only_known_rejections_are_expected():
