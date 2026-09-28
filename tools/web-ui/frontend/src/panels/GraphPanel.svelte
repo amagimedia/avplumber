@@ -1,6 +1,6 @@
 <script>
   import GraphPreview from '../GraphPreview.svelte';
-  import { groupGraph, focusGroup } from '../graphGroups.mjs';
+  import { groupGraph, focusGroup, expandedGroupKeys } from '../graphGroups.mjs';
 
   export let ctx; // store
   export let dock;
@@ -13,7 +13,11 @@
   let grouped = true;
   let family = '';
   let focused = '';
-  $: overview = groupGraph(c?.nodes || [], c?.queues || []);
+  // A link such as `?expand=aux_mv2,output` shows those groups' nodes in the overview (README).
+  const expandParam = new URLSearchParams(window.location.search).get('expand');
+  $: expanded = expandedGroupKeys(expandParam, c?.nodes || []);
+  $: expandedNodeNames = (c?.nodes || []).filter(n => expanded.has(`group:${n.params?.group}`)).map(n => n.name);
+  $: overview = groupGraph(c?.nodes || [], c?.queues || [], expanded);
   $: familyMembers = family
     ? [...new Set((overview.membership.get(family)?.nodes || []).map(n => n.params.group))].sort((a,b) => a.localeCompare(b, undefined, {numeric:true}))
     : [];
@@ -87,6 +91,7 @@
     <GraphPreview
       groupedLayout={grouped}
       focusedLayout={grouped && !!focused}
+      fitNodeNames={grouped && !focused ? expandedNodeNames : []}
       nodes={grouped ? projection.nodes : c.nodes}
       queues={grouped ? projection.queues : c.queues}
       selectedNodeName={c.selectedNodeName}

@@ -28,6 +28,13 @@ Selecting an instance updates the URL with `?instance=<id>`; share that URL to
 open the same graph. An unavailable instance displays a waiting state instead
 of another graph. Use the WebUI server's reachable address when sharing.
 
+Add `expand=<group>[,<group>…]` (e.g. `?instance=<id>&expand=aux_mv2,output`)
+to show those groups' nodes individually in the grouped overview, framed in
+view. A numbered group also opens its family, so its siblings (`aux_mv0`,
+`aux_mv1`, …) appear as separate groups; `expand=aux_mv*` opens every group of
+the family. The expansion stays for the page's lifetime; remove the parameter to
+get the plain overview back.
+
 ## DiSCLAiMER
 
 I'm not a frontend developer.

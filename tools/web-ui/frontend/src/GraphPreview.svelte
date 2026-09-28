@@ -19,6 +19,8 @@
   export let groupedLayout = false;
   export let focusedLayout = false;
   export let minZoom = 0;
+  // Native node names to frame after layout and on resize; the whole graph when none is shown.
+  export let fitNodeNames = [];
   let rebuilding = false;
   let rebuildRequested = false;
   let cancelLayout;
@@ -217,7 +219,8 @@
 
   async function fitGraph() {
     if (!area || !editor || !editor.getNodes().length) return;
-    await AreaExtensions.zoomAt(area, editor.getNodes());
+    const framed = editor.getNodes().filter(node => fitNodeNames.includes(node.id));
+    await AreaExtensions.zoomAt(area, framed.length ? framed : editor.getNodes());
     if (!area) return;
     if (minZoom && area.area.transform.k < minZoom) {
       await area.area.zoom(minZoom, 0, 0);
