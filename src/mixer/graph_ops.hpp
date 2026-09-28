@@ -15,6 +15,9 @@ namespace avp::mixer::graph {
 /// Poll period of every readiness wait in the orchestrator.
 constexpr int64_t kPollMs = 5;
 constexpr int64_t kWipeReadyTimeoutMs = 5000;
+/// How long a cut or fade waits for its target slot's first fresh frame before it gives
+/// up and keeps the program, so a dead source never parks the mixer in a transition.
+constexpr int64_t kTakeReadyTimeoutMs = 2000;
 
 void resetInputIf(const std::shared_ptr<NodeManager>& nodes, const std::string& name);
 

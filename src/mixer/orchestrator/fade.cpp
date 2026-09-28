@@ -72,7 +72,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     postTransitionTask("mixer.fade.ready", 0,
         [orch = *this, scene_name, duration_sec, curve, start, generation, initial]() mutable {
             orch.startFadeWhenReady(scene_name, duration_sec, curve, start, generation, initial,
-                                    wallclock.pts() + 2000);
+                                    wallclock.pts() + kTakeReadyTimeoutMs);
         });
     guard.release();
 }
@@ -93,7 +93,8 @@ void MixerOrchestrator::startFadeWhenReady(const std::string& scene_name, double
     }
     if (output_held || !ready.isValid() || (initial_ts.isValid() && ready <= initial_ts)) {
         if (wallclock.pts() >= deadline_ms) {
-            throw Error("mixer.fade: target scene did not produce a fresh frame within 2 seconds");
+            throw Error("mixer.fade: target scene did not produce a fresh frame within " +
+                        std::to_string(kTakeReadyTimeoutMs) + " ms");
         }
         postTransitionTask("mixer.fade.ready", 2,
             [orch = *this, scene_name, duration_sec, curve, requested_pts, generation, initial_ts,
