@@ -454,7 +454,15 @@ std::shared_ptr< NodeWrapper > NodeManager::createNode(Parameters& params, const
                     if (!n) return;
                     logstream << "Node " << n->name() << " finished, restarting";
                     start_thread(std::string("R:") + n->name(), [n]() {
-                        n->start();
+                        // An exception leaving a thread calls std::terminate: one failed restart
+                        // would end the whole instance. Log it; the node stays stopped.
+                        try {
+                            n->start();
+                        } catch (std::exception &e) {
+                            logstream << "Node " << n->name() << " restart failed: " << e.what();
+                        } catch (...) {
+                            logstream << "Node " << n->name() << " restart failed: unknown non-std exception";
+                        }
                     }).detach();
                 };
             } else if (mode == "group" || mode == "restart_group") {
