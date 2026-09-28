@@ -66,7 +66,7 @@ from pyplumber.node import (
 
 
 from .color import Color
-from .config import DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, fade_curve
+from .config import DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, fade_color, fade_curve
 from .backend import mixer_backend
 from .control import source_mask_param
 from . import clipcache
@@ -376,13 +376,18 @@ class MixerGraphBuilder:
         duration_sec: float = 1.0,
         start_pts_ms: int = -1,
         curve: str = DEFAULT_FADE_CURVE,
+        color: Optional[str] = None,
     ) -> None:
-        """Crossfade to *scene* over *duration_sec* seconds, eased by *curve* (config.FADE_CURVES)."""
+        """Crossfade to *scene* over *duration_sec* seconds, eased by *curve* (config.FADE_CURVES);
+        a *color* ("#RRGGBB") dips through that colour instead, fully shown at the midpoint."""
         cmd = {"mixer": self.name, "scene": scene, "duration_sec": duration_sec}
         if start_pts_ms >= 0:
             cmd["start_pts_ms"] = start_pts_ms
         if fade_curve(curve, "fade curve") != DEFAULT_FADE_CURVE:
             cmd["curve"] = curve
+        color = fade_color(color, "fade color")
+        if color is not None:
+            cmd["color"] = color
         self.avp.executeCommandsFromString(f"mixer.fade {json.dumps(cmd)}")
         self._current_pgm = scene
 
@@ -805,6 +810,7 @@ class MixerGraphBuilder:
             "hwaccel": self.hwaccel,
             "fps_num": self.fps_num,
             "fps_den": self.fps_den,
+            "color": self.color.transfer,   # the canvas a dip colour is converted for
             "switch_margin_ms": self.switch_margin_ms,
             "source_switcher": self._n("out_sel"),
             **({"keyframe_node": self.keyframe_node} if self.keyframe_node else {}),
