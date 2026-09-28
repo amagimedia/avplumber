@@ -566,7 +566,7 @@ function assignSlot(slot, scene) {
 }
 
 // Tile order and filter chips follow the demo's scene families; anything else is "Other".
-const GROUPS = [["random", "Random"], ["grid", "Grid"], ["fullscreen", "Fullscreen"], ["pip", "PiP"], ["other", "Other"], ["alpha_overlay", "Alpha"]];
+const GROUPS = [["random", "Random"], ["grid", "Grid"], ["fullscreen", "Fullscreen"], ["pip", "PiP"], ["other", "Other"], ["alpha_overlay", "Browser"]];
 const groupOf = (id) => id.match(/^(random|grid|fullscreen|pip|alpha_overlay)_/)?.[1] || "other";
 const groupRank = (id) => GROUPS.findIndex(([g]) => g === groupOf(id));
 function renderChips() {
@@ -576,6 +576,7 @@ function renderChips() {
   rebuild($("chips"), (counts.length > 1 ? [["all", "All", scenes.length], ...counts] : []).map(([g, name, n]) => {
     const chip = el("button", "chip", name);
     chip.dataset.focus = g;
+    if (g === "alpha_overlay") chip.title = "HTML overlay pages keyed over video";
     chip.setAttribute("aria-pressed", String(filter === g));
     chip.append(el("span", "", String(n)));
     chip.onclick = () => { filter = g; store.set("filter", g); renderChips(); renderScenes(); };
