@@ -126,7 +126,6 @@ def recipe_for(settings):
     else:
         recipe["canvas"]["working_format"] = "p010le" if settings["chroma"] == "420" else "p210le"
     recipe["generation"].update(width=width, height=height)
-    recipe["inputs"] = [source for source in recipe["inputs"] if source["kind"] != "download"]
     recipe["inputs"].append({"id": "sdr420_raw", "kind": "generated", "color": "sdr",
                              "chroma": "420", "storage": "nv12"})
     recipe["inputs"].append({"id": "hlg420_raw", "kind": "generated", "color": "hlg",
