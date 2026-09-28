@@ -34,10 +34,11 @@
   #counts { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   #counts b { color: var(--text); font-weight: 600; }
   #conn { margin-left: auto; color: var(--pgm); font-size: 12px; }
-  #stats { flex: 0 1 auto; min-width: 0; display: flex; justify-content: flex-end; margin-left: auto; }
+  #stats { flex: 0 1 auto; min-width: 0; display: flex; justify-content: flex-end; margin-left: auto; gap: 12px; }
   #stats, .vstats { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   #conn:not([hidden]) + #stats { margin-left: 0; }
   .group { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+  #gpu { border-left: 1px solid var(--edge); padding-left: 12px; }   /* apart from the pipeline's latency */
   #meters { display: contents; }
   .meter { display: flex; align-items: center; gap: 6px; }
   .meter i { position: relative; width: 38px; height: 5px; border-radius: 3px; background: var(--edge); overflow: hidden; }
@@ -46,6 +47,8 @@
   .meter b[data-level="good"] { color: var(--ok); }
   .meter b[data-level="warn"] { color: var(--warn); }
   .meter b[data-level="bad"] { color: var(--pgm); }
+  .meter b.ms { min-width: 6ch; }   /* "—", "186 ms" and "1.2 s" take the same room, so new numbers never move the row */
+  .meter .u { margin-left: .25em; }
 
   /* ---------- shared controls ---------- */
   .seg { display: inline-flex; border: 1px solid var(--edge); border-radius: 7px; overflow: hidden; background: var(--panel); }
@@ -251,8 +254,6 @@
   .vstats { display: flex; align-items: center; justify-content: space-between; gap: 10px; height: var(--vstats-h); box-sizing: border-box;
             padding-inline: 10px; border-top: 1px solid var(--edge); white-space: nowrap; overflow: hidden; }
   .vstats b { text-align: left; }   /* the spare room falls after the value, into the gap */
-  .vstats b.ms { min-width: 6ch; }   /* "—", "186 ms" and "1.2 s" take the same room, so new numbers never move the row */
-  .vstats .u { margin-left: .25em; }
   /* At the minimum viewer width the row packs, the unit spacing last. */
   @container (max-width: 300px) {
     .vstats { gap: 6px; padding-inline: 6px; }
@@ -304,6 +305,7 @@
     </span></span>
   <span id="conn" role="status" hidden></span>
   <span id="stats">
+    <span class="meter" id="lat">LAT <b class="ms">—</b></span>
     <span class="group" id="gpu" role="group" aria-label="GPU" title="GPU load from nvidia-smi, refreshed every second" hidden>
       <span id="meters"></span>
     </span>
@@ -1181,15 +1183,17 @@ for (const b of $("viewer-count").children) b.onclick = () => {
 
 /* ---------- stream stats ---------- */
 // The screen clips the player's stats footer, so each player posts its numbers to this page about once
-// per second, and its viewer shows them under the screen.
+// per second, and its viewer shows them under the screen. The cut latency is the program encoder's, the
+// same whichever player measured it, so the top bar shows it once for the pipeline.
 const STREAM_STALE_MS = 3000;
+const LAT_MEANING = "Latency: median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. " +
+                    "Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.";
 const STREAM_MEANING = {
-  lat: "Latency: median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. " +
-       "Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.",
   rtt: "RTT: WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.",
   fps: "FPS: frames this browser decoded per second during the latest sample (receiver side, not the mixer's output rate).",
   buf: "Buffer: average receiver jitter-buffer residence during the latest sample; not end-to-end latency.",
 };
+let cutLatency = null;           // the last stats that carried a measured cut latency
 addEventListener("message", (e) => {
   const v = e.origin === playerBase.origin && viewers.find((x) => x.frame.contentWindow === e.source);
   if (!v || e.data?.type !== "avp-preview-stats") return;
@@ -1197,27 +1201,32 @@ addEventListener("message", (e) => {
   // before it navigated would otherwise be filed under the new output.
   if (!v.src || e.data.search !== new URL(v.src).search) return;
   v.stats = {data: e.data, at: performance.now()};
+  // Only a measured latency replaces the top bar's, so a player without one does not blank it.
+  if (Number.isFinite(e.data.latency?.ms)) cutLatency = v.stats;
   renderStream(v);
 });
-function renderStream(v) {
-  const data = v.stats && performance.now() - v.stats.at <= STREAM_STALE_MS ? v.stats.data : null;
-  const text = (x) => (typeof x === "string" ? x : "");
-  const status = data ? text(data.status) : "No stats from its player in the last 3 s";
+const fresh = (stats) => (stats && performance.now() - stats.at <= STREAM_STALE_MS ? stats.data : null);
+function showStat(m, value, unit, coloured, title) {
+  const n = Number.isFinite(value) ? Math.round(value) : null, b = m.lastElementChild;
+  // From 1000 ms on, seconds ("1.2 s", "12 s") keep the value inside its reserved width.
+  const [num, u] = n === null ? ["—", ""] : unit === "ms" && n >= 1000 ? [String(n < 9950 ? (n / 1000).toFixed(1) : Math.round(n / 1000)), "s"]
+                                                                        : [String(n), unit];
+  if (b.textContent !== num + u) b.replaceChildren(num, ...(u ? [el("span", "u", u)] : []));
   // Same thresholds as the player's latency and RTT colours.
-  const level = (ms) => (ms === null ? "" : ms <= 200 ? "good" : ms <= 400 ? "warn" : "bad");
-  const stat = (key, value, unit, coloured, detail = "") => {
-    const n = Number.isFinite(value) ? Math.round(value) : null, m = v.meters[key], b = m.lastElementChild;
-    // From 1000 ms on, seconds ("1.2 s", "12 s") keep the value inside its reserved width.
-    const [num, u] = n === null ? ["—", ""] : unit === "ms" && n >= 1000 ? [String(n < 9950 ? (n / 1000).toFixed(1) : Math.round(n / 1000)), "s"]
-                                                                          : [String(n), unit];
-    if (b.textContent !== num + u) b.replaceChildren(num, ...(u ? [el("span", "u", u)] : []));
-    if (coloured) b.dataset.level = level(n);
-    m.title = [STREAM_MEANING[key], detail, status].filter(Boolean).join("\n");
-  };
-  stat("lat", data?.latency?.ms, "ms", true, text(data?.latency?.title));
-  stat("rtt", data?.rtt_ms, "ms", true);
-  stat("fps", data?.fps, "", false);
-  stat("buf", data?.buffer_ms, "ms", false);
+  if (coloured) b.dataset.level = n === null ? "" : n <= 200 ? "good" : n <= 400 ? "warn" : "bad";
+  m.title = title;
+}
+function renderStream(v) {
+  const data = fresh(v.stats);
+  const status = !data ? "No stats from its player in the last 3 s" : typeof data.status === "string" ? data.status : "";
+  const title = (key) => [STREAM_MEANING[key], status].filter(Boolean).join("\n");
+  showStat(v.meters.rtt, data?.rtt_ms, "ms", true, title("rtt"));
+  showStat(v.meters.fps, data?.fps, "", false, title("fps"));
+  showStat(v.meters.buf, data?.buffer_ms, "ms", false, title("buf"));
+}
+function renderLatency() {
+  const lat = fresh(cutLatency)?.latency;
+  showStat($("lat"), lat?.ms, "ms", true, [LAT_MEANING, typeof lat?.title === "string" && lat.title].filter(Boolean).join("\n"));
 }
 
 /* ---------- polling ---------- */
@@ -1306,8 +1315,9 @@ addEventListener("keydown", (e) => {
 (validSaved ? savedViewers : ["program"]).forEach(addViewer);
 setTab(tab === "graph" ? "graph" : "scenes");
 viewers.forEach(renderStream);
+renderLatency();
 refresh();
 setInterval(refresh, 1000);
-setInterval(() => viewers.forEach(renderStream), 1000);   // a player that stopped posting shows "—" after STREAM_STALE_MS
+setInterval(() => { viewers.forEach(renderStream); renderLatency(); }, 1000);   // a player that stopped posting shows "—" after STREAM_STALE_MS
 addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>
