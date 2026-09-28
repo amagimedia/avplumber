@@ -781,6 +781,8 @@ public:
             result->defer_preliminary_init_ = params["defer_preliminary_init"].get<bool>();
         }
         result->threads_ = params.value("threads", 0);
+        // Assigning nb_threads directly skips the range check of FFmpeg's "threads" option.
+        if (result->threads_ < 0) throw Error("filter node: threads must be 0 (FFmpeg's default) or positive");
         if (params.count("hwaccel")) {
             result->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
         }

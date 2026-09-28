@@ -233,7 +233,7 @@ Supports parameters working the same as in `extract_timestamps` node:
 -   `hwaccel` (string, name of instance-shared object) - optional
     (mandatory for some filters), name of hwaccel previously created
     with `hwaccel.init`
--   `threads` (int, default 0) - slice threads of the FFmpeg filter graph
+-   `threads` (int >= 0, default 0) - slice threads of the FFmpeg filter graph
     (`nb_threads`); 0 starts one per CPU for every graph. Set 1 for graphs
     of GPU filters, `setparams`, `settb` and the like, which do no CPU slice work.
 
