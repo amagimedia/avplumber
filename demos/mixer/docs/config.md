@@ -277,7 +277,8 @@ The media-wipe library. By default startup decodes each clip once into a GPU
 cache (`--wipe-cache-mb 640`; the demo's two 2 s 540x960 clips take about
 0.5 GB), so a take neither decodes nor uploads: decoding QTRLE/ProRes alpha on
 the CPU per take missed program deadlines at 64+ sources at 60 fps. `0`
-decodes on each take, keeping GPU memory bounded by the playback queues.
+decodes on each take, keeping GPU memory bounded by the playback queues. The
+web UI's WIPES meter shows how full the cache is and lists its clips on hover.
 
 ```json
 "wipes": [{"id": "ribbons", "path": "/media/media_wipes/ribbons.mov",

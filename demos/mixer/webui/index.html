@@ -308,6 +308,7 @@
   <span id="stats">
     <span class="meter" id="lat">LAT <b class="ms">—</b></span>
     <span class="group" id="gpu" role="group" aria-label="GPU" title="GPU load from nvidia-smi, refreshed every second" hidden></span>
+    <span class="meter" id="wipe-cache" hidden>WIPES <i></i><b></b></span>
   </span>
 </header>
 
@@ -743,6 +744,12 @@ function renderCounts() {
   $("counts").title = parts.map(([n, text]) => `${n}${text}`).join(" · ");
   $("counts").replaceChildren(...parts.flatMap(([n, text], i) => [...(i ? [" · "] : []), ...(n === "" ? [] : [el("b", "", String(n))]), text]));
 }
+// Top-bar meters: the bar turns amber past 70% and red past 85%; memory reads "used / total GB".
+function fillBar(bar, pct) {
+  bar.style.setProperty("--v", `${Number.isFinite(pct) ? pct : 0}%`);
+  bar.style.setProperty("--c", pct > 85 ? "var(--pgm)" : pct > 70 ? "var(--warn)" : "var(--ok)");
+}
+const gbText = (usedGib, totalGib) => `${usedGib.toFixed(1)} / ${totalGib.toFixed(1)} GB`;
 function renderMeters() {
   const gpus = state.gpus || [];
   $("gpu").hidden = !gpus.length;
@@ -750,9 +757,8 @@ function renderMeters() {
   // One meter per metric whatever the GPU count, so the bar keeps its width: it shows the busiest GPU
   // (for VRAM the fullest) and its title lists every GPU. The meters are updated in place; rebuilt, they
   // would close the tooltip under the cursor every second.
-  const gib = (mib) => (mib / 1024).toFixed(1);
   const vram = (g) => Number.isFinite(g.memory_used_mib) && g.memory_total_mib > 0 ?
-    {pct: Math.round(g.memory_used_mib / g.memory_total_mib * 100), text: `${gib(g.memory_used_mib)} / ${gib(g.memory_total_mib)} GB`} : null;
+    {pct: Math.round(g.memory_used_mib / g.memory_total_mib * 100), text: gbText(g.memory_used_mib / 1024, g.memory_total_mib / 1024)} : null;
   const pctText = (pct) => Number.isFinite(pct) ? `${pct}%` : "—";
   const many = gpus.length > 1;
   const metrics = [...[["GPU", "gpu"], ["ENC", "encoder"], ["DEC", "decoder"]].map(([name, key]) => [name, (g) => g[key], (g) => pctText(g[key])]),
@@ -762,12 +768,23 @@ function renderMeters() {
     const m = $("gpu").children[i], [bar, b] = m.children;
     const top = gpus.reduce((a, g) => ((value(g) ?? -1) > (value(a) ?? -1) ? g : a)), pct = value(top);
     m.firstChild.data = `${many ? `${name} ×${gpus.length}` : name} `;
-    bar.style.setProperty("--v", `${Number.isFinite(pct) ? pct : 0}%`);
-    bar.style.setProperty("--c", pct > 85 ? "var(--pgm)" : pct > 70 ? "var(--warn)" : "var(--ok)");
+    fillBar(bar, pct);
     b.textContent = text(top);
     if (many) m.title = [`${name}: busiest of ${gpus.length} GPUs`, ...gpus.map((g) => `GPU ${g.index}: ${text(g)}`)].join("\n");
     else m.removeAttribute("title");   // a single GPU's meters show the group's title
   });
+}
+// mixer.status carries wipe_cache only while the mixer keeps decoded wipe clips in GPU memory.
+function renderWipeCache() {
+  const cache = state.status?.wipe_cache, m = $("wipe-cache");
+  m.hidden = !cache;
+  if (!cache) return;
+  const [bar, b] = m.children;
+  fillBar(bar, cache.budget_bytes > 0 ? Math.round(cache.bytes / cache.budget_bytes * 100) : NaN);
+  b.textContent = gbText(cache.bytes / 2 ** 30, cache.budget_bytes / 2 ** 30);
+  const clips = (cache.clips || []).map((c) =>
+    `${c.path.split("/").pop()} · ${c.frames} frames · ${Math.round(c.bytes / 2 ** 20)} MB${c.complete ? "" : " · loading"}`);
+  m.title = ["Wipe clips decoded in GPU memory", ...(clips.length ? clips : ["none yet"])].join("\n");
 }
 
 /* ---------- styled dropdown ---------- */
@@ -1273,7 +1290,7 @@ function render() {
   applySettings(s);
   trackPages();
   layoutWall();   // first: the slots widget and the page keys follow what the viewers show
-  renderCounts(); renderMeters(); renderBuses(); renderKeys(); renderSlots(); renderChips(); renderScenes();
+  renderCounts(); renderMeters(); renderWipeCache(); renderBuses(); renderKeys(); renderSlots(); renderChips(); renderScenes();
   $("hint-pages").hidden = !pagesBus();
   $("hint").title = ["1–9 scene · C cut · F fade · W wipe · D direct", pagesBus() && "[ ] page · R rotate",
                      gridAux() && "⇧1–8 slot"].filter(Boolean).join(" · ");
