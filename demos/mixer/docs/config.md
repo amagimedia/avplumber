@@ -120,7 +120,7 @@ library and a scene with each fit mode. Paths and URLs are placeholders.
 | `working_format` | `nv12` | compositor and transition pixel storage: `nv12` (8-bit 4:2:0), `p010le` (10-bit 4:2:0) or `p210le` (10-bit 4:2:2). 8-bit sources are promoted onto a 10-bit canvas; `p210le` keeps 4:2:2 through conversion and compositing. Renditions are 4:2:0 for NVENC, subsampled once |
 | `raw_upload` | `hwupload` | how `nv12`/`p010` sources reach the GPU: `hwupload` (rawvideo frames paced on the CPU, then FFmpeg `hwupload`) or `pinned` (`raw_to_cuda`: pinned staging on a private CUDA stream, one uploaded frame held ahead of pacing). `pinned` is opt-in until measured against the default |
 | `color` | `sdr` | canvas color contract: `sdr` (BT.709), `hlg` or `pq` (BT.2020). HLG/PQ need a 10-bit `working_format`. Every source is converted to it on the GPU; renditions convert from it |
-| `latency_ms` | two frames | playout buffer between a source frame's arrival and its tick (33 ms at 60 fps). A frame later than that is skipped and the previous one repeated, so set it just above the worst source jitter; must stay below six frames. `--mixer-latency-ms` on the command line overrides it |
+| `latency_ms` | 2 frames up to 30 fps, 3 at 50/60 | playout buffer between a source frame's arrival and its tick (80 ms at 25 fps, 50 ms at 60). A frame later than that is skipped and the previous one repeated, so set it just above the worst source jitter; must stay below six frames. `--mixer-latency-ms` on the command line overrides it |
 
 The canvas rate is the single biggest load knob. Halving it from 60 to 30 on
 the sixteen-source demo took the T4 from ~33% to ~17% GPU.
@@ -273,10 +273,11 @@ for downloaded and file inputs, which several sources may read.
 
 ## wipes
 
-The media-wipe library. Clips decode on each take by default, keeping GPU
-memory bounded by the playback queues. Startup warms the wipe path but does
-not retain whole decoded clips. Opt in with `--wipe-cache-mb 256` to retain
-clips in a GPU cache with a 256 MiB budget; `0` disables caching.
+The media-wipe library. By default startup decodes each clip once into a GPU
+cache (`--wipe-cache-mb 640`; the demo's two 2 s 540x960 clips take about
+0.5 GB), so a take neither decodes nor uploads: decoding QTRLE/ProRes alpha on
+the CPU per take missed program deadlines at 64+ sources at 60 fps. `0`
+decodes on each take, keeping GPU memory bounded by the playback queues.
 
 ```json
 "wipes": [{"id": "ribbons", "path": "/media/media_wipes/ribbons.mov",

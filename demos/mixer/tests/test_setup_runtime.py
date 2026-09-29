@@ -16,7 +16,7 @@ from webui import serve
 @pytest.mark.parametrize('count', [1, 8, 16, 32, 41, 42, 48, 50, 64, 83, 96, 100, 110])
 @pytest.mark.parametrize('fps', [25, 30, 50, 60])
 def test_generic_setups_expand(tmp_path, count, fps):
-    maximum = {25: 110, 30: 110, 50: 50, 60: 41}[fps]
+    maximum = {25: 110, 30: 110, 50: 68, 60: 68}[fps]
     if count > maximum:
         with pytest.raises(ValueError, match=f"source_count must be an integer from 1 to {maximum}"):
             recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
@@ -229,7 +229,7 @@ def test_bitrate_outside_the_range_is_rejected(value):
 
 
 @pytest.mark.parametrize("bit_depth", [8, 10])
-@pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 110), (50, 50), (60, 41)])
+@pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 110), (50, 68), (60, 68)])
 def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
     settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "fps": fps,
                 "chroma": "420" if bit_depth == 8 else "422",
@@ -285,7 +285,7 @@ def test_hdr_raw_420_uses_p010_without_nvdec(tmp_path, chroma):
         recipe_for({**settings, "bit_depth": 8, "chroma": "420"})
 
 
-@pytest.mark.parametrize("fps,limit", [(25, 15), (30, 17), (50, 7), (60, 5)])
+@pytest.mark.parametrize("fps,limit", [(25, 15), (30, 17), (50, 8), (60, 8)])
 def test_hdr_raw_upload_counts_twice_toward_byte_budget(fps, limit):
     weights = [0, 0, 0, 0, 0, 0, 1]
     assert source_counts(limit, weights, fps)[6] == limit
@@ -350,12 +350,12 @@ def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expecte
 
 
 def test_browser_only_limit():
-    settings = {**DEFAULT_SETTINGS, 'fps': 50, 'source_count': 32, 'weights': [0, 0, 0, 0, 1]}
-    assert next(s for s in recipe_for(settings)['inputs'] if s['kind'] == 'browser')['weight'] == 32
-    with pytest.raises(ValueError, match='Browser is limited to 32'):
-        recipe_for({**settings, 'source_count': 33})
+    settings = {**DEFAULT_SETTINGS, 'fps': 50, 'source_count': 40, 'weights': [0, 0, 0, 0, 1]}
+    assert next(s for s in recipe_for(settings)['inputs'] if s['kind'] == 'browser')['weight'] == 40
+    with pytest.raises(ValueError, match='Browser is limited to 40'):
+        recipe_for({**settings, 'source_count': 41})
     with pytest.raises(ValueError, match='enable another source type'):
-        source_counts(37, [0, 0, 1, 0, 1], 50)
+        source_counts(45, [0, 0, 1, 0, 1], 50)
 
 
 def test_failed_first_start_does_not_leave_show_for_resume(runtime, monkeypatch):
@@ -499,7 +499,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
     assert len(calls) == len(expected)
 
 
-@pytest.mark.parametrize("fps, maximum", [(25, 30), (30, 34), (50, 14), (60, 11)])
+@pytest.mark.parametrize("fps, maximum", [(25, 30), (30, 34), (50, 17), (60, 17)])
 def test_raw_upload_budget(fps, maximum):
     settings = {**DEFAULT_SETTINGS, "fps": fps, "source_count": maximum,
                 "weights": [0, 0, 0, 0, 0, 1]}
@@ -887,10 +887,11 @@ def test_dsk_pages_are_browser_sources_with_clean_copies_of_each_output(tmp_path
 
 
 def test_dsk_pages_take_their_share_of_the_source_budget():
-    limit = 2500 // 60
-    recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 3, "dsk": ["lower_third", "bug_left", "bug_right"]})
+    limit = 68   # 60 fps; SDR 4:2:2 v210 (no budget of its own) fills what the capped types leave
+    keys = {"dsk": ["lower_third", "bug_left", "bug_right"], "weights": [8, 4, 2, 8, 2, 0, 0]}
+    recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 3, **keys})
     with pytest.raises(ValueError, match="source_count"):
-        recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 2, "dsk": ["lower_third", "bug_left", "bug_right"]})
+        recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 2, **keys})
     assert source_counts(45, [1, 0, 0, 0, 10], 25, reserved_browsers=3)[4] == 37   # 40 browsers at 25 fps minus 3 keys
 
 

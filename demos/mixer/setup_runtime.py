@@ -43,12 +43,10 @@ DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="42
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
                         bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60),
                         dsk=[], clean_feed=False)
-BROWSER_LIMIT = 32
-# The experimental 110-input ceilings at 25 and 30 fps add a fifth browser worker (8 windows) and
-# pinned raw uploads (30 at 25 fps; 34 at 30 fps, where NVDEC is meant to carry 36 instead of 40).
-# Other rates keep the measured baseline.
+# Measured on the T4: 110 inputs at 25/30 fps; 68 at 50/60 fps (the largest 60 fps show that
+# passes the cut-spam gate, with its 3-frame deadline and the wipe cache). Keys count as inputs.
 def browser_limit(fps):
-    return 40 if fps <= 30 else BROWSER_LIMIT
+    return 40   # five browser workers of eight windows (compose.yaml)
 
 
 def nvdec_limit(fps):
@@ -58,7 +56,11 @@ def nvdec_limit(fps):
 
 
 def raw_upload_units(fps):
-    return {25: 30, 30: 34}.get(fps, 700 // fps)
+    return {25: 30, 30: 34}.get(fps, 17)
+
+
+def source_limit(fps):
+    return 110 if fps <= 30 else 68
 
 
 def _write_atomic(path, text):
@@ -118,10 +120,9 @@ def recipe_for(settings):
         raise ValueError(f"dsk must list distinct pages from {', '.join(DSK_PAGES)}")
     if not isinstance(settings["clean_feed"], bool) or settings["clean_feed"] and not dsk:
         raise ValueError("clean_feed must be a boolean and needs at least one dsk page")
-    # Higher rates use the 100-at-25-fps baseline; 25 and 30 fps have the experimental 110-input ceiling.
     # Key pages are sources too: they take their share of the same budget.
-    source_limit = (110 if settings["fps"] <= 30 else 2500 // settings["fps"]) - len(dsk)
-    for key, maximum in (("source_count", source_limit), ("scene_count", 192), ("browser_ring_size", 64)):
+    limit = source_limit(settings["fps"]) - len(dsk)
+    for key, maximum in (("source_count", limit), ("scene_count", 192), ("browser_ring_size", 64)):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError(f"{key} must be an integer from 1 to {maximum}")

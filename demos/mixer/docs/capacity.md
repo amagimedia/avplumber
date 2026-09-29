@@ -11,8 +11,14 @@ estimates rounded down, with a separate raw NV12 budget of 700 frames/second.
 | --- | ---: | ---: | ---: | ---: | --- |
 | 25 | 100 | 40 | 32 | 28 | Two healthy starts; several minutes of transitions |
 | 30 | 83 | 33 | 27 | 23 | Healthy starts and transitions; long soak still needed |
-| 50 | 50 | 20 | 16 | 14 | Linear estimate, not a measured capacity result |
-| 60 | 41 | 16 | 14 | 11 | Linear estimate, rounded to keep upload headroom |
+| 50 | 68 | 22 | 40 | 17 | 60 fps limits applied; not measured separately (lighter than 60) |
+| 60 | 68 | 18 | 29 + 4 keys | 17 | Cut-spam gate passes: 3-frame deadline, wipe cache |
+
+At 60 fps the 68-input show (keys included) measured GPU SM about 88%, NVDEC 88% and
+19% host CPU idle. Two defaults make it hold under cut, fade and wipe spam: a 3-frame
+playout deadline at 50/60 fps (50 ms at 60; two frames left 17 ms of slack), and the wipe
+clip cache (`--wipe-cache-mb 640`), without which each wipe take decoded QTRLE on the CPU
+and missed deadlines. At 70 inputs the GPU itself saturates (SM 92-94%, NVDEC 95%).
 
 At 25 fps the setup also allows an experimental 110-input ceiling, keys included:
 **40 NVDEC + 40 browser + 30 raw NV12**, with pinned raw uploads (`canvas.raw_upload:

@@ -124,7 +124,7 @@ const types = [
  {id:'hlg420',name:'HDR · 4:2:0 · NVDEC',detail:'HEVC 10-bit HLG patterns · NVDEC',color:'#5a87b5'},
  {id:'hlg422',name:'HDR · 4:2:2 · HW upload',detail:'10-bit HLG v210 · CPU → GPU + unpack',color:'#ac8bce',max:4},
  {id:'sdr422',name:'SDR · 4:2:2 · HW upload',detail:'10-bit v210 bars · CPU → GPU + unpack',color:'#d5a35f'},
- {id:'browser',name:'Browser',detail:'Bundled transparent test page · maximum 40 at 25/30 fps, 32 otherwise',color:'#d47f95'},
+ {id:'browser',name:'Browser',detail:'Bundled transparent test page · maximum 40',color:'#d47f95'},
  {id:'sdr420_raw',name:'SDR · 4:2:0 · HW upload',detail:'8-bit NV12 · CPU → GPU · 1 upload unit',color:'#78aa62'},
  {id:'hlg420_raw',name:'HDR · 4:2:0 · HW upload',detail:'10-bit HLG P010 · CPU → GPU · 2 upload units',color:'#818bcf'}
 ];
@@ -132,8 +132,8 @@ const types = [
 const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]]];
 const presets = {balanced:[8,4,2,0,2,0,0],equal:[1,1,1,1,1,1,1],light:[2,1,0,0,0,0,0]};
 const dskPages=()=>[...document.querySelectorAll('#dsk-pages input:checked')].map(i=>i.value);
-// Same per-rate budgets as setup_runtime.py: 25 and 30 fps carry the experimental 110-input ceiling.
-const browserLimit=fps=>fps<=30?40:32, nvdecLimit=fps=>Math.min(40,Math.floor(1100/fps)), rawUploadUnits=fps=>({25:30,30:34})[fps]??Math.floor(700/fps);
+// Same per-rate budgets as setup_runtime.py: 110 inputs at 25/30 fps, 68 at 50/60.
+const browserLimit=()=>40, nvdecLimit=fps=>Math.min(40,Math.floor(1100/fps)), rawUploadUnits=fps=>({25:30,30:34})[fps]??17;
 const sourceBudgets=()=>[
  [[2],[1],4,'HDR 4:2:2'],[[4],[1],browserLimit(Number($('fps').value))-dskPages().length,'Browser'],
  [[0,1],[1,1],nvdecLimit(Number($('fps').value)),'Combined NVDEC'],
@@ -151,7 +151,7 @@ function sourceMaximum(index){
 }
 let sourceValues=sourceCounts(Number($('sources').value),presets.balanced), currentSettings=null, busy=false, online=false, loaded=false, previousDepth=10;
 let resizeValues=null, submitting=false, submission=0;
-const sourceLimit = () => (Number($('fps').value)<=30?110:Math.floor(2500/Number($('fps').value)))-dskPages().length;
+const sourceLimit = () => (Number($('fps').value)<=30?110:68)-dskPages().length;
 function outputMode(){
  const [depth,chroma]=$('mode').value.split(':');return {bit_depth:Number(depth),chroma};
 }
