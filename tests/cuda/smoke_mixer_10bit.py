@@ -173,7 +173,7 @@ def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacit
                      "hwaccel": "mix_gpu", "dst_frame_rate": "60/1",
                      "defer_preliminary_init": True,
                      "graph": f"transition_cuda=alpha='{coef}':mode={mode}:eval=init"
-                              + (":color='%g:%g:%g'" % DIP_COLOR if mode == "dip" else "")}),
+                              + (":color='%g\\:%g\\:%g'" % DIP_COLOR if mode == "dip" else "")}),
         FilterVideo({"name": "verify", "src": "mixed", "dst": "result", "hwaccel": "mix_gpu",
                      "graph": f"hwdownload,format={fmt}"}),
     ]

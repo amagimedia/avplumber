@@ -34,7 +34,7 @@ def test_limits_add_frames_to_the_runs_own_baseline():
     assert (at25["recovery_p50_ms"], at25["recovery_max_ms"]) == (140, 170)   # p50 + F, max + F
     assert (at60["spam_p95_ms"], at60["spam_max_ms"]) == (143.3, 176.7)
     assert (at60["recovery_p50_ms"], at60["recovery_max_ms"]) == (116.7, 146.7)
-    assert (at60["measured_ratio_min"], at60["playout_repeats_max"]) == (0.9, 0)
+    assert (at60["measured_ratio_min"], at60["playout_repeats_max"]) == (0.9, None)
 
 
 def test_overrides_win_and_missing_baseline_leaves_no_latency_limit():

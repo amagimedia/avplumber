@@ -52,7 +52,7 @@ def thresholds(fps, baseline, overrides=None):
         return None if base is None else round(base + frames * frame + ms, 1)
     limits = {"spam_p95_ms": above(baseline["p50"], 2, 10), "spam_max_ms": above(baseline["p50"], 4, 10),
               "recovery_p50_ms": above(baseline["p50"], 1), "recovery_max_ms": above(baseline["max"], 1),
-              "measured_ratio_min": 0.9, "playout_repeats_max": 0}
+              "measured_ratio_min": 0.9, "playout_repeats_max": None}
     limits.update({k: v for k, v in (overrides or {}).items() if v is not None})
     return limits
 
@@ -159,6 +159,8 @@ def verdict(limits, spam, burst, recovery, playout, errors, setup, scene):
     def counter(name, key, limit):
         if playout is None:
             return name, False, "mixer.status reports no advancing playout counters"
+        if limit is None:   # repeats count every input showing its previous frame, e.g. a page that paints slower
+            return name, True, f"{playout[key]} over {playout['frames']} frames, informational"
         return name, playout[key] <= limit, f"{playout[key]} over {playout['frames']} frames, limit {limit:g}"
     return [("no errors", not errors, f"{len(errors)} unexpected"), ("setup running", *setup),
             at_most("spam p95", spam["p95"], limits["spam_p95_ms"]),
