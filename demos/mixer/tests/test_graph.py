@@ -1014,13 +1014,17 @@ def test_wipe_dir_scans_a_library_and_explicit_entries_win(tmp_path):
         mc.parse({**CONFIG, "wipe_dir": str(tmp_path / "nope")})
 
 
-def test_wipe_cache_is_optional_and_splits_the_chain(tmp_path):
+def test_wipe_cache_is_on_by_default_and_splits_the_chain(tmp_path):
     from pyplumber.mixer import clipcache
 
     FakeMixer.instances.clear()
     default = build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
-    assert default.wipe_cache_mb == 0
-    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] is None
+    assert default.wipe_cache_mb == 640
+    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] == 640
+
+    FakeMixer.instances.clear()
+    build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_cache_mb=0), api=fake_api())
+    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] is None   # 0 decodes on each take
 
     FakeMixer.instances.clear()
     cached = build_application(
@@ -1028,7 +1032,7 @@ def test_wipe_cache_is_optional_and_splits_the_chain(tmp_path):
     assert cached.wipe_cache_mb == 256
     assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] == 256
 
-    assert parse_args(["--input", "a.mp4", "--janus-output"]).wipe_cache_mb == 0
+    assert parse_args(["--input", "a.mp4", "--janus-output"]).wipe_cache_mb == 640
     assert parse_args(["--input", "a.mp4", "--janus-output", "--wipe-cache-mb", "256"]).wipe_cache_mb == 256
     assert clipcache.loader_group("mixer") == "mixer_wipe_load"
 

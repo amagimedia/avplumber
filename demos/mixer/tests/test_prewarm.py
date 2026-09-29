@@ -185,7 +185,7 @@ def test_prewarm_does_not_rebuild_graph_or_change_requested_program(native_bound
 
 
 def test_media_wipe_path_is_registered_without_starting_an_empty_clip(native_boundary):
-    app = application(native_boundary)
+    app = application(native_boundary, wipe_cache_mb=0)   # the decode-per-take chain
     app.start()
     engine = app.avp
     init = next(event for event in engine.events if event.startswith("mixer.init "))

@@ -93,7 +93,7 @@ class GraphOptions:
     webui_url: str = ""                  # AVPlumber web UI to register the graph with
     cut_latency_encoder: str = ""        # opt-in cut-to-output observer on this encoder
     prewarm_cut_scenes: tuple[str, ...] = ()  # '*' selects all scene definitions
-    wipe_cache_mb: float = 0.0          # opt-in GPU clip cache; otherwise decode per take
+    wipe_cache_mb: float = 640.0        # GPU clip cache (the demo's two 2 s 540x960 wipes take ~0.5 GB); 0 decodes per take
     # Browser pages from the DMA-BUF demo as sources: --input dmabuf://<window-id>
     dmabuf_socket_dir: str = "/tmp/dma-page"
     dmabuf_size: tuple[int, int] = (1920, 1080)
@@ -175,7 +175,7 @@ class MixerApplication:
     browser_windows: tuple[str, ...] = ()   # reloaded after the chains start: static pages paint only on load
     dmabuf_rest: str = ""
     aux_buses: tuple = ()
-    wipe_cache_mb: float = 0.0              # hold decoded wipes in GPU memory
+    wipe_cache_mb: float = 640.0            # hold decoded wipes in GPU memory
     cut_latency_encoder: str = ""
     prewarm_cut_scenes: tuple[str, ...] = ()
 
@@ -851,7 +851,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
                             "(the TUI still selects the clip for each wipe)")
     add("--wipe-cache-mb", type=float, default=GraphOptions.wipe_cache_mb,
-        help="Opt-in GPU wipe cache budget in MiB (default: 0, decode on each take)")
+        help="GPU wipe cache budget in MiB (default: 640; 0 decodes on each take)")
     add("--webui-url", default="", help="Register the graph with an AVPlumber web UI, e.g. http://127.0.0.1:22222")
     add("--cut-latency-encoder", default="", metavar="NODE",
         help="Measure CUT receipt to matching encoded frame at NODE (e.g. janus_encoder)")

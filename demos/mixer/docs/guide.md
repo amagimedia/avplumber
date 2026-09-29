@@ -145,8 +145,8 @@ that covers the picture at its midpoint to hide the scene cut.
 MOV is a container: the video codec must preserve alpha, for example QTRLE/ARGB
 or ProRes 4444. The wipe branch decodes these assets on the CPU and uploads
 alpha frames at their native size; scaling and compositing happen together
-on the GPU. Wipe caching is off by default; `--wipe-cache-mb 256` opts into a
-256 MiB GPU cache. The recipe generates its own moving alpha wipes; custom
+on the GPU. The demo caches decoded wipes in GPU memory (`--wipe-cache-mb 640`);
+`0` decodes on each take instead. The recipe generates its own moving alpha wipes; custom
 clips are supplied separately.
 
 The TUI polls Program, Preview, and transition state twice per second. If the
