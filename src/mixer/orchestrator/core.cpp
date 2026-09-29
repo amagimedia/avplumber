@@ -194,14 +194,11 @@ void MixerOrchestrator::interruptTransition() {
     state_->pvw_scene_name.clear();
     state_->transition_mode = MixerState::TransitionMode::Idle;
     {
+        const auto release_pts = releaseAfterSelectorOutput();
         std::lock_guard<std::mutex> lock(snapshot->mutex);
-        if (freeze) {
-            snapshot->frames.arm(wallclock.pts() * 1000000);
-        } else {
-            // Drop any substitution an earlier interruption left in the slot.
-            snapshot->frames.finish();
-            snapshot->frames.arm(wallclock.pts() * 1000000, false);
-        }
+        // Without a freeze, drop any substitution an earlier interruption left in the slot.
+        if (!freeze) snapshot->frames.finish();
+        snapshot->frames.arm(release_pts, freeze);
     }
     guard.release();
     logstream << "mixer: interrupted transition; " << (freeze ? "retained the blended picture"
@@ -263,10 +260,21 @@ std::shared_ptr<OutputSnapshot> MixerOrchestrator::outputSnapshot() const {
 }
 
 void MixerOrchestrator::finishSnapshot() {
+    const auto release_pts = releaseAfterSelectorOutput();
     auto snapshot = outputSnapshot();
     std::lock_guard<std::mutex> lock(snapshot->mutex);
     snapshot->frames.finish();
-    snapshot->frames.arm(wallclock.pts() * 1000000, false);
+    snapshot->frames.arm(release_pts, false);
+}
+
+int64_t MixerOrchestrator::releaseAfterSelectorOutput() const {
+    // Callers read this after they switched the selector: everything it has emitted so
+    // far, from the old program or the dropped transition, is older than the release and
+    // cannot end the hold even when still in flight to the output, and the first frame
+    // of the new selection does end it. The wallclock, the fallback without a selector
+    // edge, releases on a frame stamped after now, two frames away behind the playout delay.
+    const auto emitted = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->source_switcher_name));
+    return emitted.isValid() ? emitted.timestamp({1, 1000000000}) + 1 : wallclock.pts() * 1000000;
 }
 
 int64_t MixerOrchestrator::resolveTransitionStartPts(int64_t requested_start_pts_ms) const {

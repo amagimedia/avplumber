@@ -67,7 +67,11 @@ class MixerOrchestrator {
     void ensureIdle() const;
     void interruptTransition();
     std::shared_ptr<OutputSnapshot> outputSnapshot() const;
+    /// Stops the slot substitution and releases a held output at the next selected frame.
     void finishSnapshot();
+    /// Release timestamp (ns) for the output hold: the first frame newer than everything
+    /// the selector has emitted, read after the selector was switched.
+    int64_t releaseAfterSelectorOutput() const;
     // Caller holds state_->mutex; restores live program after failed preparation.
     // Requests a keyframe unless the dropped transition was a cut that had not flipped
     // and no frozen picture is on air: the caller then finishes the snapshot, which
