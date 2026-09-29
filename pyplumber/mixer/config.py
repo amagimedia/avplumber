@@ -69,6 +69,13 @@ def key_fade_seconds(value: Any, where: str) -> float:
     return float(value)
 
 
+def default_latency_ms(fps):
+    """Playout deadline: 2 output frames up to 30 fps (80 ms at 25, 67 at 29.97/30), 3 at 50/60
+    (60/50 ms). Two 60 fps frames left 17 ms of slack for a late source or pass, and the
+    measured shows missed deadlines at loads 25/30 fps handled cleanly."""
+    return (2 if fps < 40 else 3) * 1000 / fps
+
+
 def default_browser_ring_size(fps):
     return 6 if fps in (25, 30) else 9
 
@@ -207,7 +214,7 @@ class MixerConfig:
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
     raw_upload: str = "hwupload"   # canvas.raw_upload: one of RAW_UPLOADS
-    latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default two output frames
+    latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default default_latency_ms(fps)
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBus, ...] = ()

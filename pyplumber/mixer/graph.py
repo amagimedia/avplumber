@@ -66,7 +66,7 @@ from pyplumber.node import (
 
 
 from .color import Color
-from .config import DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, fade_color, fade_curve
+from .config import DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, default_latency_ms, fade_color, fade_curve
 from .backend import mixer_backend
 from .control import source_mask_param
 from . import clipcache
@@ -127,7 +127,7 @@ class MixerGraphBuilder:
         # and a take replays them instead of opening and decoding the file again.
         self.cache_wipes_mb = cache_wipes_mb
         self.defer_initial_routes = defer_initial_routes
-        self.latency_ms = latency_ms
+        self.latency_ms = latency_ms if latency_ms is not None else default_latency_ms(self.fps_num / self.fps_den)
         self.max_compositor_layers = max_compositor_layers
         self.working_format = working_format
         self.color = Color.parse(color)
