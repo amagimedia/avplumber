@@ -243,9 +243,13 @@ int64_t MixerOrchestrator::prepareWipe(
         timeline->clearKey(state->wipe_otm_name, "outputs");
         orch.setNodeObject(state->wipe_otm_name, "outputs", Parameters(3u));       // 0b11 both direct + wipe_in
         timeline->set(state->wipe_otm_name, "outputs", prep_ms, Parameters(3u));
+        // Direct branch while prerolling: the node value alone, no timeline row. Frames
+        // reach the selector a playout deadline after their timestamp, so a row at
+        // prep_ms would still select the direct branch for the frames stamped between
+        // prep_ms and the visible switch below, hiding the wipe's first frames right
+        // after they were shown once.
         timeline->clearKey(state->wipe_selector_name, "active");
-        orch.setNodeObject(state->wipe_selector_name, "active", Parameters(0));    // direct branch while prerolling
-        timeline->set(state->wipe_selector_name, "active", prep_ms, Parameters(0));
+        orch.setNodeObject(state->wipe_selector_name, "active", Parameters(0));
 
         int64_t total_ms = (int64_t)(duration_sec * 1000);
         int64_t midpoint_ms = total_ms / 2;
