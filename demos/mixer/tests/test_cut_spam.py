@@ -1,8 +1,8 @@
 import pytest
 
-from cut_spam import (eligible_cuts, is_expected_rejection, latest_id, measured, parse_mix, percentile,
-                      pick_scenes, playout_delta, sample as probe_sample, setup_check, summarize, thresholds,
-                      transition_payloads, verdict)
+from cut_spam import (eligible_cuts, is_expected_rejection, last_states, latest_id, measured, parse_mix,
+                      percentile, pick_scenes, playout_delta, sample as probe_sample, setup_check, summarize,
+                      thresholds, transition_payloads, unmeasured_by_state, verdict)
 
 
 def sample(id, state="measured", ms=100.0):
@@ -56,6 +56,14 @@ def test_a_burst_sample_is_its_last_cut_once_measured():
     assert probe_sample(PROBE, 7, "s") is None   # superseded, never measured
     assert probe_sample(PROBE, 5, "other") is None
     assert probe_sample(None, 1, "s") is None
+
+
+def test_unmeasured_cuts_are_counted_by_the_last_state_the_poller_saw():
+    assert last_states(PROBE, 4) == {7: "superseded", 5: "measured", 6: "measured"}
+    assert last_states(None, 0) == {}
+    states = {11: "interrupted", 12: "measured", 13: "pending", 14: "interrupted"}
+    assert unmeasured_by_state({11, 13, 14, 15}, states) == {"interrupted": 2, "pending": 1, "unseen": 1}
+    assert unmeasured_by_state(set(), states) == {}
 
 
 def test_only_cuts_the_next_take_left_time_for_are_eligible():

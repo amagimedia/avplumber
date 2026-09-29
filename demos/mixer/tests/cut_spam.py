@@ -81,6 +81,23 @@ def sample(cut_latency, probe_id, scene):
     return entry["ms"] if entry and entry.get("scene") == scene else None
 
 
+def last_states(cut_latency, after_id):
+    """{id: state} of every sample after `after_id` as this poll shows it; a poller that
+    updates a dict with it keeps the last state it saw for each cut."""
+    return {e["id"]: e.get("state") for e in probe_entries(cut_latency) if e.get("id", 0) > after_id}
+
+
+def unmeasured_by_state(probe_ids, states):
+    """Counts of the last state the poller saw for each of `probe_ids`, the eligible cuts never
+    measured: {"interrupted": 105, "unseen": 2}. "interrupted": the next take cancelled a sample
+    the encoder had not completed; "unseen": it came and went between two polls."""
+    counts = {}
+    for probe_id in probe_ids:
+        state = states.get(probe_id) or "unseen"
+        counts[state] = counts.get(state, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def eligible_cuts(takes, after_id, gap_s):
     """Probe ids of the spam cuts whose next take came at least `gap_s` later: a take cancels a
     pending measurement, so only these can be measured whatever the take rate. `takes` is
@@ -303,11 +320,13 @@ def spam(run, args, scenes, payloads, mix, rng, target, max_s):
     """Send takes on an absolute schedule, one at a time so they arrive in the order sent;
     a 10 Hz poller collects every cut measured meanwhile, including ones that land late.
     `max_s` is the spam max limit: the gap that makes a cut eligible and the settle slack."""
-    after, samples, stop = latest_id(run.status().get("cut_latency")), {}, threading.Event()
+    after, samples, states, stop = latest_id(run.status().get("cut_latency")), {}, {}, threading.Event()
 
     def poll():
         while not stop.wait(0.1):
-            samples.update(measured(run.status().get("cut_latency"), after))
+            cut_latency = run.status().get("cut_latency")
+            samples.update(measured(cut_latency, after))
+            states.update(last_states(cut_latency, after))
     poller = threading.Thread(target=poll, daemon=True)
     poller.start()
     sent, takes, last_kind = dict.fromkeys(mix, 0), [], "cut"
@@ -330,7 +349,8 @@ def spam(run, args, scenes, payloads, mix, rng, target, max_s):
     poller.join()
     eligible = eligible_cuts(takes, after, max_s)
     stats = {**summarize([samples[i]["ms"] for i in sorted(samples)]), "sent": sent,
-             "eligible": len(eligible), "measured_eligible": len(eligible & samples.keys())}
+             "eligible": len(eligible), "measured_eligible": len(eligible & samples.keys()),
+             "unmeasured": unmeasured_by_state(eligible - samples.keys(), states)}
     stats["measured_ratio"] = stats["measured_eligible"] / len(eligible) if eligible else None
     return stats, target, settled
 
@@ -391,6 +411,8 @@ def print_summary(r):
           f"{u['n']} ({pct(u['measured_ratio'])}); p50={fmt(u['p50'])} p95={fmt(u['p95'])} max={fmt(u['max'])} ms\n"
           f"spam      sent {s['sent']}; measured {s['n']} cuts, {s['measured_eligible']}/{s['eligible']} "
           f"eligible ({pct(s['measured_ratio'])}); p50={fmt(s['p50'])} p95={fmt(s['p95'])} max={fmt(s['max'])} ms\n"
+          f"          unmeasured eligible by last probe state: "
+          f"{' '.join(f'{state}={n}' for state, n in s['unmeasured'].items()) or 'none'}\n"
           f"recovery  n={rec['n']} p50={fmt(rec['p50'])} max={fmt(rec['max'])} ms\n"
           f"playout   {r['playout'] or 'not reported'}\n"
           f"fade/wipe start latency {r['transition_start']}\n"

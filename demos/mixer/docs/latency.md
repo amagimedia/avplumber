@@ -145,8 +145,11 @@ followed by a take sooner than its own latency is never measured, however
 healthy the mixer (at 4 per second the gaps are 125–375 ms). The ratio counts
 only eligible cuts: those whose next take came at least the spam max limit
 later. An eligible cut left unmeasured took longer than that limit or lost its
-probe. A setup so slow that no cut is eligible fails and asks for a lower
-`--rate`. The latency percentiles use every measured cut. A take the web UI
+probe; the summary counts those cuts by the last probe state the poller saw
+(`interrupted`: the next take cancelled a sample the encoder had not completed,
+`unseen`: it came and went between two polls), so a run of `interrupted` cuts
+points at the output path rather than at the take rate. A setup so slow that
+no cut is eligible fails and asks for a lower `--rate`. The latency percentiles use every measured cut. A take the web UI
 coalesced is counted apart, not as sent.
 
 The program counters come from `mixer.status` `playout`: each slot compositor
