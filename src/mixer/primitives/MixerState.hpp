@@ -107,6 +107,9 @@ struct MixerState : public InstanceShared<MixerState> {
     // Pre-created wipe subgraph: group is started at wipe begin, stopped at wipe end
     std::string wipe_group_name;       // "mixer_wipe"
     std::string wipe_input_node_name;  // "wipe_input" (input_rec whose url is set per wipe)
+    /// ClipCache store holding decoded wipe clips ("clips"), reported by mixer.status.
+    /// Empty when wipes decode per take.
+    std::string wipe_cache_store;
     /// Edge feeding the overlay's wipe input (e.g. "wipe_rt_fps_out"). Polled at
     /// wipe end to ensure the tail of the wipe has been consumed by the overlay
     /// before `wipe_selector` flips back to the direct path; otherwise the last

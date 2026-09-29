@@ -11,6 +11,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
+# The shared store the cache node fills. The mixer reads it by this name for
+# mixer.status, so the status report and the node see the same clips.
+STORE = "clips"
+
 
 def loader_group(mixer_name: str) -> str:
     """Group holding the decode chain; started only to fill the cache."""
@@ -18,7 +22,7 @@ def loader_group(mixer_name: str) -> str:
 
 
 def cache_node(*, name: str, src: str, dst: str, group: str, fps: str,
-               store: str = "clips", budget_mb: float | None = None,
+               store: str = STORE, budget_mb: float | None = None,
                url: str = "") -> Dict[str, Any]:
     """Parameters for the clip_cache node.
 

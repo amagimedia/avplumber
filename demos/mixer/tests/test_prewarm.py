@@ -200,6 +200,15 @@ def test_media_wipe_path_is_registered_without_starting_an_empty_clip(native_bou
     assert upload["graph"].split(",")[-1] == "hwupload"
 
 
+@pytest.mark.parametrize("cache_mb, store", [(0, None), (256, "clips")])
+def test_mixer_init_names_the_wipe_cache_store_only_when_caching(native_boundary, cache_mb, store):
+    # mixer.status reports the store it is given; without one it has no wipe_cache.
+    app = application(native_boundary, wipe_cache_mb=cache_mb)
+    app.start()
+    init = next(event for event in app.avp.events if event.startswith("mixer.init "))
+    assert json.loads(init.split(" ", 2)[2]).get("wipe_cache_store") == store
+
+
 def test_mixer_init_names_the_canvas_a_dip_colour_is_converted_for(native_boundary):
     app = application(native_boundary)
     app.start()

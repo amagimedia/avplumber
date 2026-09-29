@@ -843,6 +843,7 @@ class MixerGraphBuilder:
                                             else "wipe_input"),
                 "wipe_tail_edge": self._e("wipe_rt_fps_out"),
                 "wipe_flush_edges": wipe_flush_edges,
+                **({"wipe_cache_store": clipcache.STORE} if self.cache_wipes_mb is not None else {}),
             })
 
         lines = [f"mixer.init {self.name} {json.dumps(init_cfg)}"]

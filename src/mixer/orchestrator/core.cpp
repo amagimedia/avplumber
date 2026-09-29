@@ -2,6 +2,7 @@
 // interruption and abort, and status. Scene loading, cut, fade, wipe and
 // overlay live in the sibling scene/cut/fade/wipe/overlay.cpp files.
 #include "internal.hpp"
+#include "../../nodes/clip_cache/ClipCache.hpp"
 
 namespace avp::mixer {
 
@@ -324,7 +325,13 @@ Parameters MixerOrchestrator::status() const {
     // publishes them every 60 frames; one that is restarting is skipped, not waited for.
     const std::pair<const char*, std::string> slots[] = {
         {"A", state_->slot_a.compositor_name}, {"B", state_->slot_b.compositor_name}};
+    const std::string wipe_cache_store = state_->wipe_cache_store;
     lock.unlock();
+    // Read from the shared store, not the clip_cache node: that node exists only
+    // while a wipe group runs, the store for the life of the instance.
+    if (!wipe_cache_store.empty())
+        s["wipe_cache"] = InstanceSharedObjects<avp::clipcache::ClipCache>::get(
+            nodes_->instanceData(), wipe_cache_store)->status();
     Parameters playout = Parameters::object();
     for (const auto& [slot, name] : slots) {
         Parameters node_status;
