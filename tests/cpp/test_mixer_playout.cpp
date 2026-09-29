@@ -695,8 +695,51 @@ void input_offset_selects_a_late_source_one_tick_later() {
     }
 }
 
+void prewarm_activation_keeps_the_reset_threshold() {
+    // The resident wipe compositor is parked between clips (inactive, no prewarm)
+    // and armed as prewarm -> reset(now) -> active, each possibly applied in its
+    // own loop iteration. Whatever the previous clip left in its edges is stamped
+    // before the arm and must stay rejected through the activation; the program
+    // frame in flight at the arm is rejected the same way, never a stale picture.
+    using namespace avp::mixer;
+    const TickGrid rate(av::Rational(60, 1));
+    Playout<int> mix(2, rate, {}, TimestampMode::Presentation);
+    mix.push(0, 1, rate.time(10));
+    mix.push(1, 2, rate.time(10));
+    CHECK(mix.prepare(rate.time(10) + mix.latencyNs(), true));
+    mix.commit();
+    mix.setActive(0, false);   // park: an inactive input without prewarm is reset
+    mix.setActive(1, false);
+    mix.setPrewarm(0, true);   // arm at tick 20, prewarm first
+    mix.setPrewarm(1, true);
+    mix.push(1, 3, rate.time(11));   // the previous clip's frame, still in the edge
+    mix.resetInput(0, rate.time(20));
+    mix.resetInput(1, rate.time(20));
+    mix.setActive(0, true);          // must not drop the threshold
+    mix.setActive(1, true);
+    mix.push(1, 4, rate.time(12));   // stale, delivered after the activation
+    mix.push(0, 5, rate.time(19));   // the program frame in flight at the arm
+    CHECK(!mix.prepare(rate.time(21) + mix.latencyNs(), true));   // nothing fresh yet: no stale composite
+    mix.push(0, 6, rate.time(20));
+    mix.push(1, 7, rate.time(21));
+    auto decision = mix.prepare(rate.time(21) + mix.latencyNs(), true);
+    CHECK(decision && decision->index == 21 && *decision->frames[0] == 6 && *decision->frames[1] == 7);
+    mix.commit();
+    CHECK(mix.stats(0).discarded == 1 && mix.stats(1).discarded == 2);
+    CHECK(mix.missedDeadlines() == 0);   // the parked ticks were not deadlines
+    // Park again: clearing prewarm on an inactive input resets it, and a parked
+    // input takes nothing, so the edges hold whatever arrives until the next arm.
+    mix.setActive(0, false);
+    mix.setActive(1, false);
+    mix.setPrewarm(0, false);
+    mix.setPrewarm(1, false);
+    mix.push(1, 8, rate.time(22));
+    CHECK(mix.queued(0) == 0 && mix.queued(1) == 0);
+}
+
 int main(int argc, char **argv) {
     const std::pair<const char *, void (*)()> cases[] = {
+        {"prewarm_activation_keeps_the_reset_threshold", prewarm_activation_keeps_the_reset_threshold},
         {"input_offset_selects_a_late_source_one_tick_later", input_offset_selects_a_late_source_one_tick_later},
         {"staged_input_readiness_preserves_old_output", staged_input_readiness_preserves_old_output},
         {"inactive_prewarm_retains_live_frames_without_rendering", inactive_prewarm_retains_live_frames_without_rendering},
