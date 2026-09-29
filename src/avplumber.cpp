@@ -1159,6 +1159,7 @@ public:
             if (cfg.contains("wipe_group")) state->wipe_group_name = cfg["wipe_group"].get<std::string>();
             if (cfg.contains("wipe_input_node")) state->wipe_input_node_name = cfg["wipe_input_node"].get<std::string>();
             if (cfg.contains("wipe_cache_store")) state->wipe_cache_store = cfg["wipe_cache_store"].get<std::string>();
+            if (cfg.contains("wipe_overlay")) state->wipe_overlay_name = cfg["wipe_overlay"].get<std::string>();
             if (cfg.contains("wipe_tail_edge")) state->wipe_tail_edge = cfg["wipe_tail_edge"].get<std::string>();
             if (cfg.contains("wipe_flush_edges")) {
                 state->wipe_flush_edges.clear();

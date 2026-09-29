@@ -182,21 +182,20 @@ class MixerApplication:
     def _preload_wipes(self) -> None:
         """Decode every wipe once into GPU memory (see pyplumber.mixer.clipcache).
 
-        The loader group is started only here; a take starts the player group
-        alone and replays what this left behind.
+        The loader group is started only here. The player group runs already
+        (mixer.start_groups); a take arms it to replay what this left behind.
         """
         loader = clipcache.loader_group(MIXER_NAME)
-        player = f"{MIXER_NAME}_wipe"
         cache_node = f"{MIXER_NAME}_wipe_cache"
+        self._wait_for_node(cache_node)   # its group starts asynchronously with the mixer's
         for clip in dict.fromkeys(c for c in (self.wipe_file, *self.wipe_files) if c):
             started = time.monotonic()
-            # Both nodes need the clip before their group starts: the reader to
-            # open the file, the cache to know which clip it is filling.
-            value = json.dumps(clip)   # node.param.set parses the value as JSON
+            # The reader needs the clip before its group starts, to open the file; the
+            # running cache is told which clip the chain is about to deliver.
+            value = json.dumps(clip)   # both commands parse the value as JSON
             self.avp.executeCommandsFromString(
                 f"node.param.set {MIXER_NAME}_wipe_input url {value}\n"
-                f"node.param.set {cache_node} url {value}")
-            self.avp.group(player).startNodes()
+                f"node.object.set {cache_node} load {value}")
             self.avp.group(loader).startNodes()
             deadline = started + self.preheat_timeout_sec
             held = None
@@ -212,7 +211,6 @@ class MixerApplication:
                     break
                 time.sleep(PREHEAT_POLL_INTERVAL_SEC)
             self.avp.group(loader).stopNodes()
-            self.avp.group(player).stopNodes()
             print(f"wipe cached: {clip} {held['frames'] if held else 0} frames, "
                   f"{(held['bytes'] if held else 0) / 1048576:.1f} MiB, "
                   f"{(time.monotonic() - started) * 1000:.0f} ms", flush=True)

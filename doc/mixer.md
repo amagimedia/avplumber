@@ -97,9 +97,15 @@ mixer.wipe {"mixer":"mixer","scene":"grid_4_page_0","wipe_file":"<path>/wipe.mov
 ```
 
 Cut, Fade and transparent media-file Wipe are supported. Fade uses the permanent
-CUDA transition filter. The media wipe graph is predeclared; the orchestrator
-loads the selected clip. A new take can interrupt an ongoing transition using
-the current output picture.
+CUDA transition filter. The media wipe graph is predeclared. Decoding per take,
+the orchestrator starts it on the selected clip and stops it after the wipe.
+With the clip cache (`mixer.init` `wipe_cache_store` and `wipe_overlay`) the
+player group runs for the life of the graph: the clip player and the wipe
+compositor idle between wipes, and a take arms them in place (`play` on the
+`clip_cache` node, a reset and `active_inputs` on the compositor), so a wipe
+creates, starts or stops nothing. A new take can interrupt an ongoing
+transition using the current output picture; interrupting a wipe parks the
+chain the same way.
 
 A fade with `"color"` (opaque RGB such as `"#000000"`, in libavutil colour
 syntax) is a dip: program fades to that colour over the first half and the

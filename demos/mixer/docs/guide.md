@@ -302,8 +302,11 @@ name. Displayed node and queue totals always describe the native graph.
 Both `cuda_rect_overlay` compositors and the permanent `transition_cuda` filter
 are warmed before the control server reports ready. Cut and Fade therefore
 change runtime parameters without rebuilding their FFmpeg filter graphs. Media
-Wipe uses a separate, predeclared graph that the native orchestrator starts for
-the selected clip and stops after its tail has drained.
+Wipe uses a separate, predeclared graph. With the clip cache (the default) its
+player and compositor run from startup and idle between wipes; a take arms them
+in place and an interruption parks them, so wipe spam creates, starts and stops
+nothing under the program. With `--wipe-cache-mb 0` the orchestrator starts the
+decode graph for the selected clip and stops it after its tail has drained.
 
 ## Demo recording
 

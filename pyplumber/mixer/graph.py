@@ -421,7 +421,8 @@ class MixerGraphBuilder:
     def warmup_wipe(self, wipe_file: str, timeout_ms: int = 30000) -> None:
         """Initialise the wipe chain on *wipe_file* once, invisibly, so the
         first real wipe does not pay for file open, decoder and GPU filter
-        setup (PTX compilation included)."""
+        setup (PTX compilation included). Decode-per-take chains only: with
+        cache_wipes_mb the chain stays running and clips are preloaded instead."""
         if not self.enable_wipe:
             raise RuntimeError("Wipe subgraph not enabled (pass enable_wipe=True)")
         cmd = {"mixer": self.name, "wipe_file": wipe_file, "timeout_ms": timeout_ms}
@@ -438,7 +439,11 @@ class MixerGraphBuilder:
             raise RuntimeError(
                 "initial mixer routes must be initialized before starting groups"
             )
-        for g in [f"{self.name}_a", f"{self.name}_b", self.name]:
+        groups = [f"{self.name}_a", f"{self.name}_b", self.name]
+        if self.enable_wipe and self.cache_wipes_mb is not None:
+            # The resident clip player and wipe compositor, parked until a take arms them.
+            groups.append(f"{self.name}_wipe")
+        for g in groups:
             self.avp.group(g).startNodes()
 
     def initialize_routes(self) -> None:
@@ -717,13 +722,19 @@ class MixerGraphBuilder:
                                 self._e("final_picture"), self._e("final_out"), self.name)
 
     def _build_wipe_subgraph(self) -> None:
-        """Create the pre-declared wipe subgraph (not started; orchestrator manages it)."""
+        """Create the pre-declared wipe subgraph.
+
+        Decoding per take, the orchestrator starts and stops it around each wipe. With
+        the clip cache, the player group runs from start_groups() on, parked, and a take
+        only arms it: nothing is created or started under the program.
+        """
         W, H = self.canvas_w, self.canvas_h
         fps_str = self._fps_str()
         wipe_group = f"{self.name}_wipe"
+        cached = self.cache_wipes_mb is not None
         # With the cache on, everything up to and including the decode lives in a
         # group a take never starts; the take only replays cached frames.
-        load_group = clipcache.loader_group(self.name) if self.cache_wipes_mb is not None else wipe_group
+        load_group = clipcache.loader_group(self.name) if cached else wipe_group
 
         self.avp.addNode(InputRec({
             "name": self._n("wipe_input"),
@@ -765,24 +776,30 @@ class MixerGraphBuilder:
             "set_pts": True,
             "group": load_group,
         }))
-        if self.cache_wipes_mb is not None:
+        if cached:
+            # The resident player feeds the compositor directly: it stamps the clip on
+            # the output tick grid from the take that armed it, and a force_fps here
+            # would fill the gap between two takes with the previous clip's last frame.
             self.avp.addNode(ClipCache(clipcache.cache_node(
                 name=self._n("wipe_cache"), src=self._e("wipe_rt_out"),
                 dst=self._e("wipe_cached"), group=wipe_group, fps=fps_str,
                 budget_mb=self.cache_wipes_mb)))
-        self.avp.addNode(ForceFPS({
-            "name": self._n("wipe_rt_fps"),
-            "fps": fps_str,
-            "src": self._e("wipe_cached") if self.cache_wipes_mb is not None else self._e("wipe_rt_out"),
-            "dst": self._e("wipe_rt_fps_out"),
-            "group": wipe_group,
-        }))
+            clip_edge = self._e("wipe_cached")
+        else:
+            self.avp.addNode(ForceFPS({
+                "name": self._n("wipe_rt_fps"),
+                "fps": fps_str,
+                "src": self._e("wipe_rt_out"),
+                "dst": self._e("wipe_rt_fps_out"),
+                "group": wipe_group,
+            }))
+            clip_edge = self._e("wipe_rt_fps_out")
         # The wipe is one alpha-blended layer over the program, drawn by the same
         # compositor kernel the scenes use: no format round trip through
         # yuv420p, no second blend pass and no CPU resize.
         self.avp.addNode(self.backend.compositor({
             "name": self._n("wipe_overlay"),
-            "src": [self._e("final_wipe_in"), self._e("wipe_rt_fps_out")],
+            "src": [self._e("final_wipe_in"), clip_edge],
             "dst": self._e("wipe_overlay_out"),
             "hwaccel": self.hwaccel,
             "width": W, "height": H, "sw_format": self.working_format,
@@ -790,7 +807,9 @@ class MixerGraphBuilder:
             "color": self.color.transfer, "fps": fps_str,
             "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H},
                        {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H, "z": 1, "blend": True}],
-            "active_inputs": 3,
+            # Resident: parked with no active input, so it composes nothing until a take
+            # arms it. Per take: created active, with the group.
+            "active_inputs": 0 if cached else 3,
             **({} if self.latency_ms is None else {"latency_ms": self.latency_ms}),
             "group": wipe_group,
         }))
@@ -837,13 +856,16 @@ class MixerGraphBuilder:
         }
 
         if self.enable_wipe:
+            cached = self.cache_wipes_mb is not None
             init_cfg.update({
                 "wipe_group": wipe_group,
-                "wipe_input_node": self._n("wipe_cache" if self.cache_wipes_mb is not None
-                                            else "wipe_input"),
-                "wipe_tail_edge": self._e("wipe_rt_fps_out"),
-                "wipe_flush_edges": wipe_flush_edges,
-                **({"wipe_cache_store": clipcache.STORE} if self.cache_wipes_mb is not None else {}),
+                "wipe_input_node": self._n("wipe_cache" if cached else "wipe_input"),
+                # The edge feeding the compositor's clip input, drained before the wipe ends.
+                "wipe_tail_edge": self._e("wipe_cached" if cached else "wipe_rt_fps_out"),
+                # The resident chain is armed and parked in place; only a stopped chain's
+                # edges are flushed.
+                **({"wipe_cache_store": clipcache.STORE, "wipe_overlay": self._n("wipe_overlay")}
+                   if cached else {"wipe_flush_edges": wipe_flush_edges}),
             })
 
         lines = [f"mixer.init {self.name} {json.dumps(init_cfg)}"]
