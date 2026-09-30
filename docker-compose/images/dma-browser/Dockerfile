@@ -1,4 +1,4 @@
-FROM fedora:42 AS builder
+FROM fedora:44 AS builder
 
 RUN dnf -y install --setopt=install_weak_deps=False \
         "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
@@ -25,7 +25,7 @@ RUN npm run build \
     && npm run rebuild:addons \
     && npm run rebuild:shim
 
-FROM fedora:42
+FROM fedora:44
 
 RUN dnf -y install --setopt=install_weak_deps=False \
         "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
