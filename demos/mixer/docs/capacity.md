@@ -34,6 +34,29 @@ The cached wipe chain also stays running between wipes: stopping and re-creating
 compositor on every take freed and reallocated GPU memory under the program and missed
 deadlines under wipe spam.
 
+**Current stack, measured 2026-09-30.** The shows below ran on the Fedora 44 mixer image
+(`Dockerfile.fedora44`, CUDA 13.4), NVIDIA driver R615 and Electron 44 browsers. Each figure
+is from two or three 10 s samples after the show settled. Every show started in about 14 s and
+missed 0 playout deadlines while measured.
+
+| Show | Host CPU idle | avplumber | Electron | CPU PSI "some" | GPU | NVDEC | NVENC | VRAM |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1080p60, 68 = 18 NVDEC + 29 browser + 17 raw + 4 keys | 52% | 4.38 cores | 2.91 cores | 6.9% | 50% | 81% | 61% | 7.7 GB |
+| 1080p30, 110 = 36 NVDEC + 36 browser + 34 raw + 4 keys | 55% | 4.42 cores | 2.20 cores | 4.6% | 55% | 86% | 39% | 8.6 GB |
+| 1080p25, 110 = 40 NVDEC + 36 browser + 30 raw + 4 keys | 64% | 3.54 cores | 1.78 cores | 10% | 45% | 79% | 32% | 8.7 GB |
+
+On this stack the cut-spam gate (`--mix 6:2:2`) passes at 68@60. Cut latency was p95 46 ms and
+max 52 ms during spam, and p50 37 ms in recovery. The program missed 0 of 7320 deadlines.
+
+The same 68@60 show on the Ubuntu 22.04 image (CUDA 11.7) with driver R595 measured:
+- avplumber 4.58 cores and host CPU idle 50%;
+- CPU PSI 16%;
+- GPU 62-64%.
+
+The mixer's anonymous memory was 2.29 GB on both stacks. At 1080p30 the limit is NVDEC, near
+the setup's ~90% budget. The busiest single thread, the program compositor, used about 30% of
+one core.
+
 At 30 fps the 110-input ceiling is the declared baseline for this host, keys included:
 **36 NVDEC + 36 browser + 34 raw NV12 + 4 key pages**, with pinned raw uploads
 (`canvas.raw_upload: "pinned"`, the setup default) and a fifth browser worker; it has not
