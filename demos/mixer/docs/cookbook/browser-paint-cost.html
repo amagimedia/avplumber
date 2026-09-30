@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Why each browser window costs the AVPlumber mixer about 3.5 ms of Chromium CPU per delivered frame whatever the page shows, and how a test page that rests two thirds of the time and Electron 44 took Electron from 5.90 to 2.83 cores at 68 inputs and 60 fps.">
+  <title>Browser CPU is per painted frame · Mixer optimization cookbook</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+    .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 22px 0 0; padding: 0; list-style: none; }
+    .figures li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+    .figures b { display: block; font-size: 23px; font-weight: 650; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; color: #edf4ff; }
+    .figures span { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; line-height: 1.45; }
+    .measured { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 14px 0 0; max-width: 640px; }
+    .measured table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .measured th, .measured td { padding: 8px 14px; border-bottom: 1px solid var(--line); text-align: right; color: var(--body); white-space: nowrap; }
+    .measured tr:last-child td { border-bottom: 0; }
+    .measured th:first-child, .measured td:first-child { text-align: left; }
+    .measured th { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; }
+    .measured td:last-child { color: #edf4ff; }
+    .measured.wide { max-width: none; }
+    .measured .was { color: var(--muted); }
+    .changes { padding-left: 20px; }
+    .changes li { margin: 10px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Browser CPU is per painted frame</h1>
+  <p class="lede">Chromium's cost for a browser window follows the frames the window delivers, not what the page shows: about 3.5 ms of CPU for every painted frame, spread over the renderer, the GPU process and the browser's main process, about 0.2 core per window at 60 paints a second. The demo's browser test page slid its marker without pause, so all 29 windows painted at 60 fps. It now rests 4 s and slides 2 s, as a real graphic does, each window from its own point of the cycle; and the browser image moved from Electron 41 to 44.5.1. Electron went from 5.90 to 2.83 cores and host idle from 28 to 50&nbsp;% on the 68-input 60 fps show.</p>
+  <span class="pill live">Status: Implemented, deployed on the test host</span>
+
+  <ul class="figures" aria-label="Measured facts">
+    <li><b>~3.5 ms</b><span>Chromium CPU per delivered frame per window, whatever the page: about 0.2 core at 60 paints/s</span></li>
+    <li><b>5.90 → 2.83</b><span>Electron cores, after the rested test page and then Electron 44 (two sequential runs)</span></li>
+    <li><b>28 → 50 %</b><span>host CPU idle on the 68-input 60 fps show</span></li>
+    <li><b>1,748 → 594</b><span>browser paints per second once the page rests two thirds of the time</span></li>
+  </ul>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 760 456" role="img" aria-labelledby="pc-t pc-d">
+        <title id="pc-t">Where one browser window's CPU goes, and the test page's rest-and-slide cycle</title>
+        <desc id="pc-d">Top: for each frame a window delivers, the renderer takes about 3 percent of a core, the GPU process about 12 percent (VizCompositor and GL through ANGLE) and the browser's main process about 6 percent (paint event, fd pass, release ack): about 3.5 ms of CPU per frame. Chromium paints only on damage: a static key page at 3 paints a second costs about 7 percent of a core, an animated page at 60 paints a second 21 to 25 percent. With 29 windows sliding without pause: 1,748 paints a second and Electron at 5.90 cores, more than avplumber's 5.08. Bottom: eight of the 29 windows over one 6 s cycle; each rests 4 s and slides 2 s, starting at a golden-ratio step of its id's number, so at any moment about a third are sliding: 3 of the 8 shown, 9 to 11 of 29 measured. Result: 594 paints a second, Electron 3.25 cores, host idle 28 to 49 percent.</desc>
+        <defs>
+          <marker id="pc-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="#a4b4ca"/>
+          </marker>
+        </defs>
+        <g font-family="system-ui, sans-serif" font-size="12">
+          <text x="8" y="20" fill="#edf4ff" font-size="14" font-weight="600">One window, one delivered frame · ~3.5 ms of CPU across three Chromium processes</text>
+          <rect x="8" y="34" width="186" height="58" rx="6" fill="#182236" stroke="#2b3a52"/>
+          <text x="101" y="54" fill="#edf4ff" text-anchor="middle" font-weight="600">Renderer · ~3 %</text>
+          <text x="101" y="72" fill="#a4b4ca" text-anchor="middle" font-size="11">paints on damage</text>
+          <rect x="216" y="34" width="222" height="58" rx="6" fill="#182236" stroke="#2b3a52"/>
+          <text x="327" y="54" fill="#edf4ff" text-anchor="middle" font-weight="600">GPU process · ~12 %</text>
+          <text x="327" y="72" fill="#a4b4ca" text-anchor="middle" font-size="11">VizCompositor, GL through ANGLE</text>
+          <rect x="460" y="34" width="214" height="58" rx="6" fill="#182236" stroke="#2b3a52"/>
+          <text x="567" y="54" fill="#edf4ff" text-anchor="middle" font-weight="600">Browser main · ~6 %</text>
+          <text x="567" y="72" fill="#a4b4ca" text-anchor="middle" font-size="11">paint event, fd pass, release ack</text>
+          <g stroke="#a4b4ca" stroke-width="1.5" fill="none" marker-end="url(#pc-ah)">
+            <path d="M194 63 L214 63"/><path d="M438 63 L458 63"/><path d="M674 63 L696 63"/>
+          </g>
+          <text x="700" y="67" fill="#a4b4ca">mixer</text>
+
+          <text x="8" y="118" fill="#edf4ff" font-weight="600">Chromium paints only on damage</text>
+          <text x="8" y="140" fill="#a4b4ca">static key page · 3 paints/s</text>
+          <rect x="200" y="128" width="140" height="16" rx="3" fill="#30a46c"/>
+          <text x="348" y="140" fill="#edf4ff">~7 % of a core</text>
+          <text x="8" y="164" fill="#a4b4ca">animated page · 60 paints/s</text>
+          <rect x="200" y="152" width="420" height="16" rx="3" fill="#e5484d"/>
+          <rect x="620" y="152" width="80" height="16" rx="3" fill="#e5484d" opacity="0.4"/>
+          <text x="708" y="164" fill="#edf4ff">21–25 %</text>
+          <text x="8" y="190" fill="#e5484d">29 windows sliding without pause: 1,748 paints/s, Electron 5.90 cores, more than avplumber's 5.08.</text>
+
+          <line x1="8" y1="206" x2="752" y2="206" stroke="#26354a"/>
+
+          <!-- Timeline: x = 160 + 90 * seconds; slide of window i starts at frac(i * 0.618) * 6 s and lasts 2 s -->
+          <text x="8" y="230" fill="#edf4ff" font-size="14" font-weight="600">Test page · each window rests 4 s and slides 2 s, from its own point of the cycle</text>
+          <g fill="#a4b4ca" font-size="11" text-anchor="middle">
+            <text x="160" y="250">0 s</text><text x="340" y="250">2 s</text><text x="520" y="250">4 s</text><text x="700" y="250">6 s</text>
+          </g>
+          <text x="430" y="250" fill="#57dbc2" font-size="11" text-anchor="middle">now</text>
+          <g fill="#182236" stroke="#26354a">
+            <rect x="160" y="258" width="540" height="14" rx="3"/><rect x="160" y="278" width="540" height="14" rx="3"/>
+            <rect x="160" y="298" width="540" height="14" rx="3"/><rect x="160" y="318" width="540" height="14" rx="3"/>
+            <rect x="160" y="338" width="540" height="14" rx="3"/><rect x="160" y="358" width="540" height="14" rx="3"/>
+            <rect x="160" y="378" width="540" height="14" rx="3"/><rect x="160" y="398" width="540" height="14" rx="3"/>
+          </g>
+          <g fill="#6e8bf5">
+            <rect x="493.7" y="258" width="180" height="14" rx="3"/>
+            <rect x="287.5" y="278" width="180" height="14" rx="3"/>
+            <rect x="621.2" y="298" width="78.8" height="14" rx="3"/><rect x="160" y="298" width="101.2" height="14" rx="3"/>
+            <rect x="415" y="318" width="180" height="14" rx="3"/>
+            <rect x="208.7" y="338" width="180" height="14" rx="3"/>
+            <rect x="542.4" y="358" width="157.6" height="14" rx="3"/><rect x="160" y="358" width="22.4" height="14" rx="3"/>
+            <rect x="336.2" y="378" width="180" height="14" rx="3"/>
+            <rect x="669.9" y="398" width="30.1" height="14" rx="3"/><rect x="160" y="398" width="149.9" height="14" rx="3"/>
+          </g>
+          <g fill="#a4b4ca">
+            <text x="8" y="269">browser_001</text><text x="8" y="289">browser_002</text>
+            <text x="8" y="309">browser_003</text><text x="8" y="329">browser_004</text>
+            <text x="8" y="349">browser_005</text><text x="8" y="369">browser_006</text>
+            <text x="8" y="389">browser_007</text><text x="8" y="409">browser_008</text>
+          </g>
+          <line x1="430" y1="254" x2="430" y2="416" stroke="#57dbc2" stroke-width="1.2" stroke-dasharray="3 3"/>
+          <text x="8" y="430" fill="#a4b4ca">grey: resting, no paints · blue: sliding, 60 paints/s · at “now” 3 of these 8 slide; 9–11 of 29 measured</text>
+          <text x="8" y="448" fill="#30a46c">594 paints/s instead of 1,748: Electron 3.25 cores, host idle 28 → 49 %, GPU ~83 → 62 %, 0 missed deadlines.</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>The per-process shares and the two paint-rate costs are measured per window on the 68-input show. The timeline is an illustration: eight windows out of 29, drawn with the real offsets of ids 1–8 (a golden-ratio step of the id's number), so that the share sliding at “now” is the rule's, not a measurement.</figcaption>
+  </figure>
+
+  <h2>Where a window's CPU goes</h2>
+  <p>For every frame a window delivers, three Chromium processes do work: the renderer paints the damaged page (about 3&nbsp;% of a core per window at 60 paints/s), the GPU process composites it in VizCompositor and draws through ANGLE's GL (about 12&nbsp;%), and the browser's main process handles the paint event, passes the DMA-BUF descriptor over the socket and takes the mixer's release ack (about 6&nbsp;%; see <a href="browser-handoff.html">Browser frame hand-off</a>). Together about 3.5 ms of CPU per delivered frame, which at 60 paints/s is about 0.2 core per window (3 + 12 + 6&nbsp;% = 21&nbsp;%, computed). The cost tracks delivered frames, not page complexity.</p>
+  <p>Chromium paints only on damage, so a page that does not change delivers no frame and costs next to nothing. On the same show a static key page painting 3 times a second took about 7&nbsp;% of a core, and the always-sliding test page at 60 paints/s 21–25&nbsp;%. The number of Electron workers does not enter: the work is per window per frame, so grouping windows into fewer, bigger workers would not reduce it and would concentrate VizCompositor load in fewer GPU processes (<a href="rejected.html">rejected idea 9</a>). That leaves two levers, and this page pulls both: fewer delivered frames when nothing on the page moves, and a cheaper Chromium.</p>
+  <p>This is not the shortcut the cookbook rules out. Every window is still an independent 60 fps input: while its marker moves it paints 60 frames a second and the mixer imports, stamps and composites every one; the sender, the chain and the ring are unchanged. What changed is the content: a graphic that holds still two thirds of the time, which is what real lower thirds, bugs and tickers do. Running browser sources at 30 fps in a 60 fps show, which halves the delivered rate of a page that is moving, stays rejected (<a href="rejected.html">idea 10</a>).</p>
+
+  <h2>Measured at 68 inputs, 60 fps</h2>
+  <p>Same 68-input 60 fps show (18 NVDEC, 29 browser sources, 17 raw NV12 files and 4 browser key pages) on the T4 test host (16 vCPU), same avplumber build. Three states, measured as two sequential pairs: the columns are not additive.</p>
+  <div class="measured wide">
+    <table>
+      <thead><tr><th>Metric</th><th>Always sliding, Electron 41</th><th>Rests 2/3, Electron 41</th><th>Rests 2/3, Electron 44</th></tr></thead>
+      <tbody>
+        <tr><td>Electron CPU</td><td>5.90 cores</td><td>3.25 cores</td><td>2.83 cores</td></tr>
+        <tr><td>Host CPU idle</td><td>28 %</td><td>49 %</td><td>50.3 %</td></tr>
+        <tr><td>avplumber CPU</td><td>5.08 cores</td><td>4.61 cores</td><td>4.58 cores</td></tr>
+        <tr><td>Browser paints/s</td><td>1,748</td><td>594</td><td>–</td></tr>
+        <tr><td>GPU utilisation</td><td>~83 %</td><td>62 %</td><td>–</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The first pair, columns 1 and 2, is the test-page change; the rested page ran with 0 missed program deadlines. The second pair is Electron 41 against 44 on the rested page, measured as its own two runs, so its Electron 41 baseline is not column 2: it read 3.30 cores, 47.7&nbsp;% idle, avplumber 4.62 cores and CPU pressure (PSI some) 17.6&nbsp;%, against 2.83 cores, 50.3&nbsp;%, 4.58 cores and 16.4&nbsp;% on Electron 44: Electron CPU −14&nbsp;%, no regression. The gap between that baseline and column 2, 0.05 core and 1.3 points of idle, is within run-to-run noise. PSI was sampled only in the second pair (<a href="cpu-pressure.html">Measuring CPU pressure at 60 Hz</a>).</p>
+
+  <h2>What changed</h2>
+  <ol class="changes">
+    <li><b>The test page rests two thirds of the time.</b> Before, the marker of <code>browser_alpha.html</code> ran a CSS keyframe animation, 4 s each way, without pause, so every window painted every frame. Now the marker's <code>transform</code> has a 2 s transition, and a timer toggles its target every 6 s: slide 2 s, rest 4 s. It moves on <code>transform</code>, not <code>left</code>, which snaps to whole pixels and lays out on the main thread each frame. Each window starts its cycle at (index × 0.618 mod 1) × 6 s, where index is the number in the source's id (<code>browser_007</code> is 7), which <code>prepare_demo</code> embeds in the page as a data attribute; golden-ratio steps spread any count of windows evenly over the cycle, so 9–11 of the 29 slide at any moment instead of all of them. Paints fell from 1,748 to 594 a second, Electron from 5.90 to 3.25 cores, avplumber from 5.08 to 4.61, GPU utilisation from about 83 to 62&nbsp;%, host idle rose from 28 to 49&nbsp;%, with 0 missed program deadlines.</li>
+    <li><b>Electron 44.5.1 (Chromium 152) on Fedora 44.</b> Electron 41 (Chromium 146) and Fedora 42 were both end of life. On the rested page, Electron CPU fell from 3.30 to 2.83 cores (−14&nbsp;%), host idle rose from 47.7 to 50.3&nbsp;%, avplumber went from 4.62 to 4.58 cores and CPU pressure (PSI some) from 17.6 to 16.4&nbsp;%, with no regression. Electron 42 and later no longer download the Electron binary in the package's npm postinstall, so the image build runs <code>node node_modules/electron/install.js</code> after <code>npm ci</code>. The image needs only Electron's runtime libraries; the NVIDIA userspace comes from the host through the container runtime. The GPU-process crash on recreating all windows is the same on Electron 41 and 44; its fix is on <a href="gpu-process-crash.html">Keeping Vulkan out of the GPU process</a>.</li>
+  </ol>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b><p>Two changes outside the mixer. The demo's browser test page, <code>demos/mixer/browser_alpha.html</code>, rests 4 s and slides 2 s, each window from its own point of the cycle. The browser image builds Electron 44.5.1 on Fedora 44. No avplumber, mixer Python or browser-sender change.</p></li>
+    <li><b>Why</b><p>With the always-sliding page, 29 windows painting 60 times a second made Electron the largest CPU consumer of the 60 fps show: 5.90 cores against avplumber's 5.08, the host 28&nbsp;% idle and the GPU at about 83&nbsp;%. Chromium's work is per delivered frame, so the page had to deliver fewer frames when nothing moves, and Chromium had to get cheaper for the frames it does deliver.</p></li>
+    <li><b>Latency</b><p>0 frames added: nothing in the frame path changed, the same sender, chain, ring and paint numbering (<a href="browser-paint-grid.html">Browser paints numbered on the canvas grid</a>). A resting page delivers no paint; the compositor repeats its last frame for that tick, as it does for any still key page. The marker moves on a compositor transform, so its motion is not delayed by main-thread layout. Cut and program latency were not re-measured in these runs.</p></li>
+    <li class="flag"><b>Side effects</b>
+      <p>The demo's browser tiles hold still two thirds of the time, so the demo shows less motion than before, and a browser-heavy scene loads the browser path less than the always-sliding page did: on average about 20 paints/s per window (594 over 29, computed) instead of 60. Every window is still a 60 fps input while it moves.</p>
+      <p>Electron 44 is six Chromium majors up from 41 (146 → 152). Behaviour changes ride along; the one met so far, the GPU-process crash when all windows are recreated, exists on both versions and has its own page.</p></li>
+    <li><b>Cost</b><ul>
+      <li>0 nodes, 0 queues, 0 new threads; VRAM not re-measured.</li>
+      <li>Code: +15/−5 lines in the test page; 1 line in <code>package.json</code> and its lockfile; +2/−1 and 2 changed lines in the Dockerfile.</li>
+      <li>One browser image rebuild; the Electron binary is fetched by the explicit <code>install.js</code> step.</li>
+    </ul></li>
+    <li><b>Risk</b><p>Low. The per-process split (3, 12 and 6&nbsp;%) and the paint-rate costs are from one host and one show. The −14&nbsp;% from Electron 44 is one pair of runs, with about 0.05 core of run-to-run noise on the baseline. An image build that drops the <code>install.js</code> step has no Electron binary, since Electron 42 and later no longer fetch it in postinstall. Nothing on this page changes what the mixer does with a frame.</p></li>
+    <li><b>Switch it off</b><p>No runtime switch; the two are independent. Restore the marker's <code>animation: slide 4s linear infinite alternate</code> and its keyframes in <code>browser_alpha.html</code>: every window then paints at 60 fps again. Pin <code>"electron"</code> in <code>deps/dma-browser/package.json</code> back to <code>41.3.0</code> and rebuild the browser image.</p></li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/browser_alpha.html#L13-L18">demos/mixer/browser_alpha.html#L13-L18</a>: why the marker rests, why it moves on <code>transform</code>, and the 2 s transition; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/browser_alpha.html#L39-L48">L39-L48</a> the 6 s cycle and the golden-ratio offset from the id's number.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/prepare_demo.py#L44-L50">demos/mixer/prepare_demo.py#L44-L50</a>: <code>page_url</code> embeds the page with its data attributes; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/prepare_demo.py#L279">L279</a> the alpha pattern loads <code>browser_alpha.html</code> with the source's id.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/docker-compose/images/dma-browser/Dockerfile#L20-L21">docker-compose/images/dma-browser/Dockerfile#L20-L21</a>: <code>npm ci</code>, then <code>node node_modules/electron/install.js</code>; <a href="https://github.com/amagimedia/avplumber/blob/develop/docker-compose/images/dma-browser/Dockerfile#L1">L1</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/docker-compose/images/dma-browser/Dockerfile#L28">L28</a> <code>fedora:44</code> for the build and runtime stages.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/package.json#L33">deps/dma-browser/package.json#L33</a>: <code>"electron": "44.5.1"</code>.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/README.md?plain=1#L9-L10">dma-browser README</a> names the Electron and Chromium versions.</li>
+  </ul>
+  <p class="note">Line numbers match the change under review and resolve on develop once it merges.</p>
+
+  <p class="note">Measured on the T4 test host (16 vCPU) with the 68-input 60 fps show: 18 NVDEC, 29 browser sources, 17 raw NV12 files and 4 browser key pages. The per-window shares are Chromium CPU per window on that show; Electron and avplumber figures are whole-process totals.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>

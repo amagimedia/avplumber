@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Seven mixer optimizations we costed or measured and dropped: subcomposition reuse, shared media chains, 720p inputs, decode-side resize, GPU-held loops, narrower prewarm and pausing unwatched outputs.">
+  <meta name="description" content="Twelve mixer ideas we costed, measured or ruled out, from subcomposition reuse to FFmpeg hwupload at 60 fps.">
   <title>Ideas we measured and dropped · Mixer optimization cookbook</title>
   <style>
     :root {
@@ -74,7 +74,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Ideas we measured and dropped</h1>
-  <p class="lede">Every source is a unique, independent 1080p25 input processed every frame; seven shortcuts broke that rule, saved almost nothing, or made cuts or pictures slower, so we dropped them.</p>
+  <p class="lede">Every source is a unique, independent 1080p25 input processed every frame; twelve ideas broke that rule, saved nothing, or made cuts, pictures or the pipeline slower, so we dropped them.</p>
   <span class="pill rejected">Status: Rejected</span>
 
   <h2>The rule, and where each shortcut would cut it</h2>
@@ -147,7 +147,7 @@
         </g>
       </svg>
     </div>
-    <figcaption>Red: the shortcut makes the demo lighter than a real show, so capacity numbers would lie. Amber: a real trade, but it costs cut latency. Green: what the demo keeps. Idea 1 is not on this chain; it is the next diagram.</figcaption>
+    <figcaption>Red: the shortcut makes the demo lighter than a real show, so capacity numbers would lie. Amber: a real trade, but it costs cut latency. Green: what the demo keeps. Idea 1 is not on this chain; it is the next diagram. Ideas 8–12 are not on this chain.</figcaption>
   </figure>
 
   <h2>Why reusing compositor B's picture costs more</h2>
@@ -181,7 +181,7 @@
     <figcaption>Schematic, not to scale. A portrait tile of letterboxed 16:9 boxes. Only the green area costs work when the compositor draws the scene itself.</figcaption>
   </figure>
 
-  <h2>The seven ideas</h2>
+  <h2>The twelve ideas</h2>
   <h3>The cost model said no</h3>
   <ol class="ideas">
     <li><span class="name"><span class="num">1</span>Subcomposition reuse</span>
@@ -204,6 +204,19 @@
     <li><span class="name"><span class="num">7</span>Pause outputs nobody watches</span>
       <p><span class="k">Idea</span>A Janus viewer poller stops the monitor and clean-feed encoders while no one views them.</p>
       <p><span class="k">Dropped</span>It saved encoder work only while unwatched, and hid real load. A viewer saw ~1&nbsp;s of black or frozen picture on resume. A clean-feed consumer that is not a Janus viewer, such as a recorder, would lose picture. More moving parts. Removed from the code.</p></li>
+    <li><span class="name"><span class="num">10</span>Browser sources at 30 fps in a 60 fps show</span>
+      <p><span class="k">Dropped</span>Every demo source is a real 60 fps input. A production knob, not a capacity result.</p></li>
+  </ol>
+  <h3>Ruled out on the 60 fps show</h3>
+  <ol class="ideas">
+    <li><span class="name"><span class="num">8</span><code>__GL_YIELD=USLEEP</code></span>
+      <p><span class="k">Dropped</span>Chromium's GPU processes made 0 <code>sched_yield</code> calls in 5 s: no spinning. Their CPU is ~12k futex/s thread hand-offs and ~1.1k ioctl/s.</p></li>
+    <li><span class="name"><span class="num">9</span>Fewer, bigger browser workers</span>
+      <p><span class="k">Dropped</span>Cost is per window per delivered frame, not per process; fewer workers concentrate VizCompositor load (<a href="browser-paint-cost.html">Browser CPU is per painted frame</a>).</p></li>
+    <li><span class="name"><span class="num">11</span>cpuset split between containers</span>
+      <p><span class="k">Dropped</span>Cores pinned to one side idle while the other is short: it idles capacity.</p></li>
+    <li><span class="name"><span class="num">12</span>FFmpeg <code>hwupload</code> for raw sources at 60 fps</span>
+      <p><span class="k">Dropped</span>69&nbsp;% of program frames missed their deadline at 68 inputs; NVDEC fell from ~85 to ~26&nbsp;% because the pipeline stalled (<a href="raw-uploads.html">Raw uploads</a>).</p></li>
   </ol>
   <h3>The trade was cut latency</h3>
   <ol class="ideas">
@@ -214,7 +227,7 @@
   <h2>At a glance</h2>
   <ul class="cards">
     <li><b>What</b>
-      <p>One rule for capacity numbers: every source is a unique, independent 1080p25 input, processed every frame. Ideas 2–5 and 7 break it. Idea 1 saves nothing. Idea 6 costs cut latency.</p></li>
+      <p>One rule for capacity numbers: every source is a unique, independent 1080p25 input, processed every frame. Ideas 2–5 and 7 break it. Idea 1 saves nothing. Idea 6 costs cut latency. Ideas 8, 9 and 11 gained nothing; 10 breaks the rule; 12 stalled the pipeline.</p></li>
     <li><b>Why</b>
       <p>Capacity numbers must describe real shows. A shortcut that works only because test inputs repeat, loop, shrink or go unwatched makes the numbers wrong.</p></li>
     <li class="flag"><b>Latency</b>
@@ -236,7 +249,7 @@
       <p>Headline capacity is lower than a demo with shortcuts would show. That is the point.</p></li>
     <li><b>Switch it off</b>
       <ul>
-        <li>Nothing to switch off: ideas 1, 4, 5 and 7 are not in the code.</li>
+        <li>Nothing to switch off: ideas 1, 4, 5 and 7–11 are not in the code; 12 is the library default, off in setup-built shows.</li>
         <li>Repeated files: a repeat is rejected at load; mark both declarations <code>"independent": true</code> for separate chains.</li>
         <li>Cut prewarm: the demo runs with <code>--prewarm-cut-scene '*'</code> (every scene). The mixer's own default is off; naming fewer scenes narrows it.</li>
       </ul></li>
