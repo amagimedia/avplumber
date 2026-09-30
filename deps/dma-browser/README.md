@@ -35,6 +35,17 @@ DMA_BROWSER_FORCE_NVIDIA=1 npm start
 
 The shim is native to the host CPU architecture. `bin/run.sh` applies the
 Wayland, EGL/GBM, and DRM settings; hardware video decoding stays disabled.
+
+Two switches keep the GPU process stable, both on by default:
+
+- `DMA_BROWSER_WEBGPU_OPENGLES=0` turns off `--use-webgpu-adapter=opengles`.
+  With `--ignore-gpu-blocklist`, Chromium runs WebGPU on Vulkan through GL
+  interop and creates a Vulkan context in the GPU process. Recreating windows
+  then crashes it in `AddCleanupTaskForSkiaFlush` (electron/electron#54553).
+  On OpenGL ES that Vulkan context is never created (Chromium 152+).
+- `DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT=0` turns off
+  `--disable-gpu-process-crash-limit`. Without it, a fourth GPU-process crash
+  within five minutes makes Chromium quit the worker.
 The [Docker demo](../../demos/dmabuf-browser/README.md#run) builds and enables
 the shim automatically. Alternatively, use the patched Electron build linked
 above without the shim.

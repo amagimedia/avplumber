@@ -51,6 +51,18 @@ describe('HwAccelConfigurator.apply', () => {
     expect(findSwitch(calls, 'use-gl')?.value).toBe('angle');
     expect(findSwitch(calls, 'use-angle')?.value).toBe('gl-egl');
     expect(findSwitch(calls, 'autoplay-policy')?.value).toBe('no-user-gesture-required');
+    expect(findSwitch(calls, 'use-webgpu-adapter')?.value).toBe('opengles');
+    expect(findSwitch(calls, 'disable-gpu-process-crash-limit')).toBeDefined();
+  });
+
+  it('keeps WebGPU on Vulkan and the GPU crash limit when their flags are off', () => {
+    const { cl, calls } = recorder();
+    new HwAccelConfigurator(
+      { DMA_BROWSER_WEBGPU_OPENGLES: '0', DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT: 'false' },
+      cl,
+    ).apply();
+    expect(findSwitch(calls, 'use-webgpu-adapter')).toBeUndefined();
+    expect(findSwitch(calls, 'disable-gpu-process-crash-limit')).toBeUndefined();
   });
 
   it('uses DMA_BROWSER_GL_BACKEND and skips use-angle for non-angle backends', () => {

@@ -55,6 +55,19 @@ export class HwAccelConfigurator {
     this.appendSwitch('disable-hardware-overlays');
     this.appendSwitch('disable-accelerated-video-decode');
     this.appendSwitch('ignore-gpu-blocklist');
+    // With the blocklist ignored, Chromium 144+ runs WebGPU on Vulkan through GL interop and
+    // creates a Vulkan context in the GPU process even with Vulkan compositing off (Chromium has
+    // no disable-vulkan switch). Recreating windows then leaves a Vulkan cleanup task that trips
+    // AddCleanupTaskForSkiaFlush's CHECK on the shared-texture copy (electron/electron#54553).
+    // The pages need no WebGPU; on OpenGL ES the interop and its Vulkan context are off (152+).
+    if (envFlag(this.env, 'DMA_BROWSER_WEBGPU_OPENGLES', true)) {
+      this.appendSwitch('use-webgpu-adapter', 'opengles');
+    }
+    // Past three GPU-process crashes in five minutes Chromium quits the worker ("GPU process
+    // isn't usable"); keep relaunching the GPU process instead.
+    if (envFlag(this.env, 'DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT', true)) {
+      this.appendSwitch('disable-gpu-process-crash-limit');
+    }
 
     const enabled = HwAccelConfigurator.dedupe(
       envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES'),
