@@ -203,6 +203,7 @@ void MixerOrchestrator::interruptTransition() {
     }
     // The program slot's routing was restored above: the other slot is cold now.
     state_->pvw_slot_scene.clear();
+    state_->take_received_ns = 0;
     state_->publishPreview("", 0);
     state_->transition_mode = MixerState::TransitionMode::Idle;
     {
@@ -263,6 +264,7 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
     // The output gate still waits for a fresh program frame before releasing.
     cleanup([&] { finishSnapshot(); });
     state_->pvw_slot_scene.clear();
+    state_->take_received_ns = 0;
     state_->publishPreview("", 0);
     state_->transition_mode = MixerState::TransitionMode::Idle;
 }
@@ -334,6 +336,8 @@ Parameters MixerOrchestrator::status() const {
     s["switch_margin_ms"] = state_->switch_margin_ms;
     s["now_pts_ms"] = wallclock.pts();
     s["cut_latency"] = state_->cut_latency ? state_->cut_latency->status() : Parameters(nullptr);
+    // Every AUX multiview's PVW change latency next to the program's (mixer_pvw_follow).
+    s["pvw_latency"] = Parameters(state_->preview_follow_samples);
     s["prewarm_cut_scenes"] = state_->prewarm_cut_scenes;
     s["prewarm_source_mask"] = toParameters(state_->prewarm_source_mask);
     if (!state_->overlay_selector_name.empty()) {

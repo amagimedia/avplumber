@@ -3,6 +3,7 @@
 #include "../../util.hpp"
 #include <condition_variable>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -89,32 +90,46 @@ struct MixerState : public InstanceShared<MixerState> {
     /// Preview change feed for the followers, written under `mutex`, waited on with
     /// `preview_changed`: the revision, the pts (ns, on the monotonic clock the compositors stamp
     /// with) of the first program frame that shows the new program (0: the change is immediate),
-    /// and when it was published (monotonic ns), for the followers' latency metric.
+    /// when it was published (monotonic ns), for the followers' latency metric, and when the
+    /// take that ended in it was received (monotonic ns; 0: not a take), for their latency
+    /// from the operator's command.
     uint64_t pvw_revision = 0;
     int64_t pvw_effective_ns = 0;
     int64_t pvw_published_ns = 0;
+    int64_t pvw_received_ns = 0;
     std::condition_variable preview_changed;
     std::atomic<int> preview_followers{0};
+    /// Receipt (monotonic ns) of the take command being prepared or running, 0 without one;
+    /// completeTransition hands it to the followers.
+    int64_t take_received_ns = 0;
+    /// The last timed preview change every follower (mixer_pvw_follow, keyed by its node name)
+    /// applied: pvw_latency_ms, pgm_latency_ms, pvw_minus_pgm_ms and the rest of the follower's
+    /// status, for `mixer.status` `pvw_latency`. Written by the follower under `mutex`.
+    std::map<std::string, Parameters> preview_follow_samples;
 
     /// Caller holds `mutex`. Shows `scene` ("" clears) as the preview from the program frame at
-    /// `effective_ns` (0: now) and wakes every follower.
-    void publishPreview(const std::string& scene, int64_t effective_ns) {
+    /// `effective_ns` (0: now), received as a take at `received_ns` (0: not one), and wakes
+    /// every follower.
+    void publishPreview(const std::string& scene, int64_t effective_ns, int64_t received_ns = 0) {
         pvw_scene_name = scene;
         pvw_effective_ns = effective_ns;
         pvw_published_ns = monotonicNs();
+        pvw_received_ns = received_ns;
         ++pvw_revision;
         preview_changed.notify_all();
     }
 
     /// Caller holds `mutex`. Program moves to `new_pgm` on slot A or B from the frame at
     /// `effective_ns`; the other slot is cold, and the preview is the scene that left program
-    /// (swap_preview, when it differs) or nothing. Ends the transition.
+    /// (swap_preview, when it differs) or nothing. Ends the transition, whose command receipt
+    /// (`take_received_ns`) goes to the followers with the change.
     void completeTransition(bool new_pgm_is_slot_a, std::string new_pgm, int64_t effective_ns) {
         const std::string old_pgm = std::move(pgm_scene_name);
         pgm_is_slot_a = new_pgm_is_slot_a;
         pgm_scene_name = std::move(new_pgm);
         pvw_slot_scene.clear();
-        publishPreview(swap_preview && old_pgm != pgm_scene_name ? old_pgm : "", effective_ns);
+        publishPreview(swap_preview && old_pgm != pgm_scene_name ? old_pgm : "", effective_ns, take_received_ns);
+        take_received_ns = 0;
         transition_mode = TransitionMode::Idle;
     }
 

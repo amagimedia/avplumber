@@ -398,9 +398,9 @@ Janus rendition only, even when that rendition is a clean feed.
 ## aux_buses
 
 Extra monitor outputs, each its own compositor and H.264 encoder (SDR, canvas
-size, program rate halved above 30 fps) sent to Janus. They subscribe to the
-sources the main mixer already decodes: a source reaches a bus only while one
-of its tiles shows it, and a bus never delays the program.
+size, program rate halved above 30 fps unless `full_rate`) sent to Janus. They
+subscribe to the sources the main mixer already decodes: a source reaches a bus
+only while one of its tiles shows it, and a bus never delays the program.
 
 ```json
 "aux_buses": [
@@ -410,6 +410,13 @@ of its tiles shows it, and a bus never delays the program.
    "renditions": [{"id": "monitor", "port": 5012}]}
 ]
 ```
+
+| field | default | meaning |
+| --- | --- | --- |
+| `latency_ms` | the mixer's `latency_ms` | the bus compositor's playout buffer. The sources reach a bus when they reach the program compositors, so the program's buffer leaves it the same slack (1.5 aux frames at 60 fps: 50 ms); a bus at the program's buffer can change its PVW tile when the program changes. Bus latency plus `pgm_delay_frames` must stay below six aux frames |
+| `pgm_delay_frames` | `1` | `pgm_pvw_grid`: aux frames the PGM pad is matched back. The finished program leaves the main compositor `latency_ms` after its timestamp, when the bus would already be drawing that frame's tick, so `pgm_delay_frames × aux frame + latency_ms` must exceed the mixer's `latency_ms` (checked at build): `0` needs a bus `latency_ms` at least one aux frame above the mixer's, and then delays every tile by that frame instead of the PGM tile alone |
+| `pvw_align` | `"program"` | `pgm_pvw_grid`: when the PVW tile changes on a take. `program`: on the multiview frame leaving the bus when the program frame of the take leaves the mixer, so the operator sees both at once; the PGM tile of the same multiview follows `pgm_delay_frames` later. `pgm_tile`: together with that PGM tile, `pgm_delay_frames` after the program |
+| `full_rate` | `false` | run the bus at the canvas rate at 50/60 fps instead of half. Costs about twice the bus's compositor and encoder work on the GPU (a second bus's worth at 1080p60), and the rendition's `bitrate_kbps` then covers twice the frames, so raise it to keep the quality per frame; no change at 25/30 |
 
 | layout | shows | control |
 | --- | --- | --- |
@@ -422,33 +429,72 @@ Each bus needs its own Janus RTP/RTCP port pair. Setup changes keep the buses:
 scene slots that no longer exist are cleared, and source pages follow the new
 source list.
 
-The PGM tile of a `pgm_pvw_grid` bus runs one aux frame behind the other tiles:
-the finished program reaches the bus a frame after the sources it is made of,
-so that pad alone is shown a tick later instead of delaying every pad.
+The PGM tile of a `pgm_pvw_grid` bus runs `pgm_delay_frames` (one) aux frame
+behind the other tiles: the finished program reaches the bus a frame after the
+sources it is made of, so that pad alone is shown a tick later instead of
+delaying every pad. At half rate the bus receives every other program frame
+(the first of each aux tick), so a take whose first program frame falls
+between aux ticks shows in the PGM tile from the next frame.
 
 The PVW tile of a `pgm_pvw_grid` bus is drawn by a `mixer_pvw_follow` node
 (`aux_<id>_pvw`), one per bus. The mixer hands it every preview change together
-with the program frame the take lands on, and it changes the compositor's
-layout on the multiview frame whose PGM tile shows that frame: nominally the
-same frame, not the poll-plus-tick lag of a status poller. The residual error
-is one aux frame either way when the follower or the compositor's render
+with the first program frame of the take, and it changes the compositor's
+layout on one multiview frame by `pvw_align`: not the poll-plus-tick lag of a
+status poller. With `program` (the default) that is the first multiview frame
+whose deadline is at or after the program frame's, so the PVW tile and the
+program change at the same instant when the program frame sits on an aux
+tick (every frame at 25/30 fps or with `full_rate`, every other at 50/60) and
+half an aux frame later otherwise (16.7 ms at 60 → 30, 20 at 50 → 25); the
+PGM tile of the same multiview shows the take one aux frame after the PVW
+tile. With `pgm_tile` the PVW tile waits for that PGM tile. The residual
+error is one aux frame either way when the follower or the compositor's render
 thread is more than half an aux frame late (16 ms at 30 aux fps, 20 ms at 25),
 half an aux frame at 50/60 fps (one at 25/30) when the program missed a frame
 deadline right before the cut, and one or more frames when the PVW scene's
 sources were not reaching the bus (a stalled source, or takes faster than
 about one aux frame); a change the compositor still cannot draw after its
 staging deadline (250 ms or twice the latency) is dropped until the next
-preview change. Wipes and explicit `mixer.preview` changes draw on the
-next frame. With `swap_preview` the program scene's sources are kept flowing
-to the bus so the swapped preview is warm: one subscription push per source
-per aux frame per bus, no compositing. `mixer.aux_status` reports the
-follower under `follower` (`last_change_to_apply_ms`,
-`last_target_error_ticks`, its base `revision`, `error`). Python publishes
-the layouts once (at build and on a slot assignment); while the node is
-unreachable the bus thread falls back to polling the preview every 50 ms.
+preview change. In `program` mode the change is published after the selector
+switch, between the emission of the last old and the first new program frame,
+so when the multiview frame's deadline equals the program frame's the follower
+has what is left of one main frame (0 to 16.7 ms at 60 fps) minus the main
+compositor's render time and the routing the mixer finishes before it wakes
+the followers; a change that misses it lands one aux frame late
+(`last_target_error_ticks` 1, `pvw_minus_pgm_ms` 33.3 at 30 aux fps).
+Wipes and explicit `mixer.preview` changes draw on the next frame. With
+`swap_preview` the program scene's sources are kept flowing to the bus so the
+swapped preview is warm: one subscription push per source per aux frame per
+bus, no compositing.
 
-A bus's playout buffer is the main `latency_ms`, but at least two aux frames:
-80 ms at 25 and 50 fps, 66.7 ms at 30 and 60 fps by default.
+Every timed change is measured from the take command's receipt:
+`pvw_latency_ms` to the deadline of the multiview frame the change is first
+drawn on, `pgm_latency_ms` to the program frame's deadline at the main
+compositor, and `pvw_minus_pgm_ms` their difference (0 aligned; one aux frame
+when the change missed its tick, `last_target_error_ticks` 1). Both end at
+compositor deadlines, before the encoders; the cut probe's `mixer.status`
+`cut_latency` ends at the program encoder's output, so it exceeds
+`pgm_latency_ms` by the encoder's share. `mixer.aux_status` reports them under
+`follower` with `align`, `last_change_to_apply_ms`, `last_target_error_ticks`,
+its base `revision` and `error`, next to the bus's `fps`, `latency_ms`,
+`pvw_align` and `pgm_delay_frames`; `mixer.status` `pvw_latency` carries every
+follower's last timed change keyed by its node name, for a script polling the
+status alone (`tests/cut_spam.py` reports them). Python publishes the layouts
+once (at build and on a slot assignment); while the node is unreachable the
+bus thread falls back to polling the preview every 50 ms.
+
+The latency budget of a take, from the first new program frame's timestamp K,
+with the defaults: the program frame leaves the mixer at K + `latency_ms`
+(50 ms at 60 fps, 66.7 at 30); the multiview frame with the new PVW tile
+leaves the bus at the same instant, or 16.7 ms later at 60 → 30 for the half
+of the takes whose K sits between aux ticks (always at the same instant at
+25/30 fps or with `full_rate`), or one aux frame late when the change missed
+its tick as above; the PGM tile shows the take at K + 83.3 ms (K even) or
+K + 100 ms (K odd, shown from frame K + 1) at 60 → 30, K + 100 ms at 30 fps,
+K + 66.7 ms with `full_rate` at 60. A bus `latency_ms` above the mixer's moves
+the whole multiview later by the difference; the PVW tile then still targets
+the first frame leaving at or after the program frame. Before this alignment
+a bus ran at two aux frames of latency and the PVW tile was timed with the
+PGM tile, so it changed 50 ms after the program at 60 fps.
 
 ## Known limitations
 

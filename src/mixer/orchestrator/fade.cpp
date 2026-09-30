@@ -4,6 +4,7 @@
 // interruption and cleanup; only the transition filter's commands differ.
 #include "internal.hpp"
 #include "../primitives/compositor_color.hpp"
+#include "../../CommandTiming.hpp"
 
 namespace avp::mixer {
 
@@ -70,6 +71,9 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     state_->transition_mode = MixerState::TransitionMode::Crossfade;
     const auto generation = ++state_->transition_generation;
     state_->transition_scene_name = scene_name;
+    // The command's receipt when the dispatcher runs this, now otherwise: the followers time
+    // the preview swap at the end of the fade from it.
+    state_->take_received_ns = monotonicNs(CommandTiming::received());
     TransitionGuard guard([&] { abortTransition(generation); });
     cutInternal(scene_name, start);
     const auto initial = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->pvwSlot().post_otm_name));

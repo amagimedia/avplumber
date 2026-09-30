@@ -436,7 +436,9 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
                          "renditions": [{"id": "monitor", "port": 5008, "width": 1080,
                                          "height": 1920, "fps": 30, "bitrate_kbps": 4500}]},
                         {"id": "mv2", "layout": {"preset": "source_pages"}, "rotate_s": 8,
-                         "renditions": [{"id": "monitor", "port": 5012, "width": 1080, "height": 1920, "fps": 30}]}]
+                         "renditions": [{"id": "monitor", "port": 5012, "width": 1080, "height": 1920, "fps": 30}]},
+                        {"id": "mv3", "full_rate": True, "pvw_align": "pgm_tile",
+                         "renditions": [{"id": "monitor", "port": 5016, "width": 1080, "height": 1920, "fps": 60}]}]
     (runtime.media_dir / "mixer.demo.json").write_text(json.dumps(old))
     runtime.process = None
     recipe = recipe_for({**DEFAULT_SETTINGS, "orientation": "landscape",
@@ -450,6 +452,8 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
     pages = cfg.aux_buses[1]
     assert (pages.layout, pages.rotate_s, pages.scenes) == ("source_pages", 8.0, ())
     assert (pages.renditions[0].width, pages.renditions[0].height, pages.renditions[0].fps) == (1920, 1080, 25)
+    full = cfg.aux_buses[2]   # a full-rate bus follows the new canvas rate, not half of it
+    assert (full.full_rate, full.pvw_align, full.renditions[0].fps) == (True, "pgm_tile", 50)
 
 
 @pytest.mark.parametrize("limit,tiles", [(256, 2), (512, 6)])

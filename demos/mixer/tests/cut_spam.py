@@ -123,6 +123,37 @@ def playout_delta(before, after):
     return delta if delta["frames"] > 0 else None
 
 
+class PvwSamples:
+    """The AUX multiviews' PVW change latencies, informational: `mixer.status` `pvw_latency` holds
+    each follower's (`aux_<bus>_pvw`) last timed change, so every status poll feeds `observe` and
+    a change counts once, by its revision. `pvw_minus_pgm_ms` is how much later than the program
+    frame the multiview frame with the new PVW tile leaves its compositor (0 when aligned, one aux
+    tick when the change missed its tick); the latencies run from the take's receipt to the two
+    compositor deadlines, so the cut probe's encoder-output `ms` exceeds `pgm_latency_ms` by the
+    program encoder's share."""
+
+    def __init__(self):
+        self.samples = {}
+
+    def observe(self, status):
+        for follower, entry in ((status or {}).get("pvw_latency") or {}).items():
+            if isinstance(entry, dict) and entry.get("pvw_minus_pgm_ms") is not None:
+                self.samples.setdefault((follower, entry.get("applied_revision")), entry)
+
+    def summary(self):
+        """None without a sample; else counts and summaries of the difference and the latencies."""
+        if not self.samples:
+            return None
+        entries = list(self.samples.values())
+        def of(key):
+            return summarize([e[key] for e in entries if isinstance(e.get(key), (int, float))])
+        return {"followers": sorted({follower for follower, _ in self.samples}),
+                "align": sorted({str(e.get("align")) for e in entries}),
+                "pvw_minus_pgm": of("pvw_minus_pgm_ms"), "pvw_latency": of("pvw_latency_ms"),
+                "pgm_latency": of("pgm_latency_ms"),
+                "late": sum((e.get("last_target_error_ticks") or 0) > 0 for e in entries)}
+
+
 def pick_scenes(names, explicit=None, prefix=""):
     chosen = explicit or [n for n in names if not n.startswith("aux") and n.startswith(prefix)]
     unknown = sorted(set(chosen) - set(names))
@@ -220,6 +251,7 @@ def request(url, body=None, timeout=5.0):
 class Run:
     def __init__(self, url):
         self.url, self.errors, self.rejections = url.rstrip("/"), [], []
+        self.pvw = PvwSamples()
 
     def state(self):
         code, body = request(self.url + "/api/state")
@@ -232,6 +264,8 @@ class Run:
         code, body = request(self.url + "/api/status")
         if code != 200:
             self.errors.append(f"GET /api/status: HTTP {code} {body.get('error')}")
+        if code == 200:
+            self.pvw.observe(body)
         return body if code == 200 else {}
 
     def setup(self):
@@ -396,9 +430,18 @@ def gate(args):
     return {"pass": all(ok for _, ok, _ in criteria), "seed": seed, "fps": fps, "scenes": scenes,
             "mix": mix, "rate": args.rate, "duration_s": args.duration, "thresholds": limits,
             "baseline": base, "burst": burst_stats, "spam": spam_stats, "recovery": summarize(recovery),
-            "playout": playout, "transition_start": TRANSITION_START,
+            "playout": playout, "pvw": run.pvw.summary(), "transition_start": TRANSITION_START,
             "errors": run.errors, "rejections": run.rejections,
             "criteria": [{"name": n, "ok": ok, "detail": d} for n, ok, d in criteria]}
+
+
+def pvw_line(pvw):
+    if not pvw:
+        return "pvw       no AUX multiview reported a timed PVW change (mixer.status pvw_latency)"
+    d, lat = pvw["pvw_minus_pgm"], pvw["pvw_latency"]
+    return (f"pvw       {', '.join(pvw['followers'])} ({', '.join(pvw['align'])}): n={d['n']} PVW-PGM "
+            f"p50={fmt(d['p50'])} p95={fmt(d['p95'])} max={fmt(d['max'])} ms, {pvw['late']} missed their tick; "
+            f"PVW latency p50={fmt(lat['p50'])} max={fmt(lat['max'])} ms (receipt to compositor deadlines, informational)")
 
 
 def print_summary(r):
@@ -415,6 +458,7 @@ def print_summary(r):
           f"{' '.join(f'{state}={n}' for state, n in s['unmeasured'].items()) or 'none'}\n"
           f"recovery  n={rec['n']} p50={fmt(rec['p50'])} max={fmt(rec['max'])} ms\n"
           f"playout   {r['playout'] or 'not reported'}\n"
+          f"{pvw_line(r.get('pvw'))}\n"
           f"fade/wipe start latency {r['transition_start']}\n"
           f"errors    {len(r['errors'])} unexpected, {len(r['rejections'])} expected rejections")
     for line in r["errors"][:10] + r["rejections"][:5]:

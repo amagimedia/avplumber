@@ -130,8 +130,14 @@ any other scene, a swapped preview or `mixer.init`'s `initial_pvw_scene`
 (shown only) included, is loaded first, warm when it is in `mixer.prewarm`.
 Every preview change bumps `pvw_revision` and wakes the
 `preview_followers` (`mixer_pvw_follow` nodes) with the pts of the first
-program frame of the new program, so a multiview's PVW tile changes on the
-frame its PGM tile shows the take.
+program frame of the new program and the take command's receipt, so a
+multiview's PVW tile changes on the multiview frame that leaves its bus when
+that program frame leaves the mixer (or, per bus, on the frame whose PGM tile
+shows the take). Each follower writes its last timed change back into
+`mixer.status` `pvw_latency` (keyed by node name): `pvw_latency_ms` and
+`pgm_latency_ms` from the command's receipt to the multiview's and the
+program's compositor deadlines, and `pvw_minus_pgm_ms`; `cut_latency` ends at
+the encoder's output instead (`demos/mixer/docs/config.md`, `aux_buses`).
 
 `mixer.status <name>` returns the current PGM/PVW scene and transition state,
 and under `playout` each slot compositor's (`A`, `B`) running `frames`, `repeats`

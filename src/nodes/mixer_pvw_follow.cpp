@@ -10,8 +10,13 @@
 
 // One per pgm_pvw_grid AUX bus. The mixer publishes its preview changes
 // (MixerState::publishPreview); this node draws them in the bus compositor's PVW cell through
-// the compositor's `composition` object, on the multiview frame whose PGM tile shows the take
-// (PreviewFollow.hpp). The control side publishes the layouts once: `pvw`, the PVW-cell layers
+// the compositor's `composition` object, on the multiview frame that leaves the bus when the
+// program frame of the take leaves the mixer (`align` "program", the default) or whose PGM
+// tile shows that frame ("pgm_tile"), see PreviewFollow.hpp. Every timed change is measured
+// from the take command's receipt to the aux deadline it is drawn at (`pvw_latency_ms`), next
+// to the program frame's own deadline (`pgm_latency_ms`; the cut probe's `cut_latency` ends at
+// the encoder's output instead), and their difference `pvw_minus_pgm_ms`, in this node's status
+// and in `mixer.status` `pvw_latency`. The control side publishes the layouts once: `pvw`, the PVW-cell layers
 // of every scene, and `base`, the rest of the composition (the operator's tiles and the PGM
 // tile); every composition this node sets is pvw[shown] followed by base, and it is the only
 // writer of the compositor's composition while it runs.
@@ -33,12 +38,13 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     };
     struct Change {
         std::string shown, pgm;
-        int64_t effective_ns = 0, published_ns = 0;
+        int64_t effective_ns = 0, published_ns = 0, received_ns = 0;
         bool swap = false;
         uint64_t revision = 0;
-        int64_t target = 0;   // aux tick the PGM tile shows it on; 0: at once
+        int64_t target = 0;   // aux tick it changes the PVW tile on; 0: at once
     };
     std::shared_ptr<avp::mixer::MixerState> state_;
+    const std::string name_;
     const std::string compositor_name_;
     const std::weak_ptr<NodeWrapper> compositor_;
     const avp::mixer::PreviewFollowTiming timing_;
@@ -117,12 +123,37 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
         error_ = error;
     }
 
+    /// The status of `change`, applied at `applied_at`: what it drew and when, and for a timed
+    /// change (a cut or fade) its latency from the take's receipt against the program's. Both
+    /// end at compositor deadlines: the aux tick the change is first drawn on (the tick its
+    /// apply time falls in, so a late apply shows as a later tick) and the program frame's.
+    Parameters sample(const Change& change, int64_t applied_at) const {
+        Parameters status = {{"pvw_scene", change.shown}, {"pgm_scene", change.pgm},
+                             {"applied_revision", change.revision}, {"target_tick", change.target},
+                             {"align", timing_.align == avp::mixer::PreviewAlign::Program ? "program" : "pgm_tile"},
+                             {"last_change_to_apply_ms", (applied_at - change.published_ns) / 1e6},
+                             {"last_target_error_ticks", 0}, {"pvw_latency_ms", nullptr},
+                             {"pgm_latency_ms", nullptr}, {"pvw_minus_pgm_ms", nullptr}};
+        if (!change.target) return status;
+        const int64_t drawn = timing_.tickDrawnAfter(applied_at);
+        const int64_t pvw = timing_.deadline(drawn), pgm = timing_.programDeparture(change.effective_ns);
+        status["last_target_error_ticks"] = drawn - change.target;
+        status["pvw_minus_pgm_ms"] = (pvw - pgm) / 1e6;
+        if (change.received_ns) {
+            status["pvw_latency_ms"] = (pvw - change.received_ns) / 1e6;
+            status["pgm_latency_ms"] = (pgm - change.received_ns) / 1e6;
+        }
+        return status;
+    }
+
 public:
-    MixerPvwFollow(std::shared_ptr<avp::mixer::MixerState> state, std::string compositor_name,
+    MixerPvwFollow(std::shared_ptr<avp::mixer::MixerState> state, std::string name, std::string compositor_name,
                    std::shared_ptr<NodeWrapper> compositor, avp::mixer::PreviewFollowTiming timing)
-        : state_(std::move(state)), compositor_name_(std::move(compositor_name)), compositor_(compositor), timing_(timing) {
+        : state_(std::move(state)), name_(std::move(name)), compositor_name_(std::move(compositor_name)),
+          compositor_(compositor), timing_(timing) {
         ++state_->preview_followers;
     }
+    // The last sample stays in the mixer's status: a bus is not removed while the mixer runs.
     ~MixerPvwFollow() override { --state_->preview_followers; }
 
     // One wake per call: a preview change, a layout change, a stop, the pending change's apply
@@ -146,7 +177,8 @@ public:
             if (!seen_ || state_->pvw_revision != *seen_) {
                 // The first read takes the state as it is; the change it came from is history.
                 fresh = Change{state_->pvw_scene_name, state_->pgm_scene_name, seen_ ? state_->pvw_effective_ns : 0,
-                               state_->pvw_published_ns, state_->swap_preview, state_->pvw_revision};
+                               state_->pvw_published_ns, state_->pvw_received_ns, state_->swap_preview,
+                               state_->pvw_revision};
                 seen_ = state_->pvw_revision;
             }
         }
@@ -164,11 +196,13 @@ public:
                 pending_.reset();
                 settle_at_ = applied_.swap ? std::optional<int64_t>(applied_.target ? timing_.deadline(applied_.target) : applied_at)
                                            : std::nullopt;
+                Parameters status = sample(applied_, applied_at);
+                if (applied_.target) {
+                    std::lock_guard<std::mutex> lock(state_->mutex);
+                    state_->preview_follow_samples[name_] = status;
+                }
                 std::lock_guard<std::mutex> lock(layouts_mutex_);
-                status_ = {{"pvw_scene", applied_.shown}, {"pgm_scene", applied_.pgm},
-                           {"applied_revision", applied_.revision}, {"target_tick", applied_.target},
-                           {"last_change_to_apply_ms", (applied_at - applied_.published_ns) / 1e6},
-                           {"last_target_error_ticks", applied_.target ? timing_.tickDrawnAfter(applied_at) - applied_.target : 0}};
+                status_ = std::move(status);
             } else if (dirty) {
                 // A new base (a tile reassignment; the PVW layouts are only set at creation) keeps
                 // the warm inputs; a settle still due stays due.
@@ -228,13 +262,23 @@ public:
             main_rate = av::Rational(state->fps_num, state->fps_den);
         }
         const auto aux_rate = parseRatio(params.at("fps").get<std::string>());
-        const int64_t latency_ns = static_cast<int64_t>(params.at("latency_ms").get<double>() * 1000000);
+        const auto ns = [](double ms) { return static_cast<int64_t>(ms * 1000000); };
+        const int64_t latency_ns = ns(params.at("latency_ms").get<double>());
+        // The main mixer's playout latency: when a program frame leaves its compositor. Without
+        // it the bus is assumed to run with the program's.
+        const int64_t main_latency_ns = ns(params.value("main_latency_ms", params.at("latency_ms").get<double>()));
         const int64_t delay = params.value("pgm_delay_frames", int64_t(0));
-        if (latency_ns < 0 || delay < 0) throw Error("mixer_pvw_follow: latency_ms and pgm_delay_frames must be nonnegative");
+        if (latency_ns < 0 || main_latency_ns < 0 || delay < 0)
+            throw Error("mixer_pvw_follow: latency_ms, main_latency_ms and pgm_delay_frames must be nonnegative");
+        const auto align_name = params.value("align", std::string("program"));
+        if (align_name != "program" && align_name != "pgm_tile")
+            throw Error("mixer_pvw_follow: align must be program or pgm_tile");
+        const auto align = align_name == "program" ? avp::mixer::PreviewAlign::Program : avp::mixer::PreviewAlign::PgmTile;
         const auto compositor_name = params.at("compositor").get<std::string>();
         auto node = std::make_shared<MixerPvwFollow>(
-            std::move(state), compositor_name, nci.nodes.node(compositor_name),
-            avp::mixer::PreviewFollowTiming{avp::mixer::TickGrid(main_rate), avp::mixer::TickGrid(aux_rate), latency_ns, delay});
+            std::move(state), params.value("name", compositor_name + "_pvw"), compositor_name, nci.nodes.node(compositor_name),
+            avp::mixer::PreviewFollowTiming{avp::mixer::TickGrid(main_rate), avp::mixer::TickGrid(aux_rate), latency_ns, delay,
+                                            main_latency_ns, align});
         for (const char* key : {"pvw", "base"})
             if (params.contains(key)) node->setObject(key, params.at(key));
         return node;

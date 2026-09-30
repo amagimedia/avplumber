@@ -194,6 +194,12 @@ class AuxBus:
     renditions: Tuple[Rendition, ...]
     layout: str = "pgm_pvw_grid"   # or "source_pages": every source, one page of tiles at a time
     rotate_s: float = 5.0          # source_pages: seconds per page while rotating
+    # pgm_pvw_grid: when the PVW tile changes on a take: "program", with the program output, or
+    # "pgm_tile", with the PGM tile of the same multiview (one pgm_delay_frames later).
+    pvw_align: str = "program"
+    latency_ms: Optional[float] = None   # the bus compositor's playout buffer; None: the main mixer's
+    pgm_delay_frames: int = 1            # pgm_pvw_grid: aux ticks the PGM pad is matched back
+    full_rate: bool = False              # run at the canvas rate at 50/60 fps instead of half
 
 
 @dataclass(frozen=True)

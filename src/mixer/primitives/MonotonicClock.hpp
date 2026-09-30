@@ -8,10 +8,12 @@
 
 namespace avp::mixer {
 
-inline int64_t monotonicNs() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+/// A steady_clock instant on the monotonic ns scale monotonicNs() reads.
+inline int64_t monotonicNs(std::chrono::steady_clock::time_point at) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(at.time_since_epoch()).count();
 }
+
+inline int64_t monotonicNs() { return monotonicNs(std::chrono::steady_clock::now()); }
 
 inline int waitMilliseconds(std::optional<int64_t> deadline, int64_t now) {
     if (!deadline) return 10;

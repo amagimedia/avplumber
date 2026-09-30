@@ -8,6 +8,7 @@ import pytest
 from pyplumber.mixer.aux import (AuxMultiview, AuxSourcePages, aux_fps, base_composition, composition,
                                  multiview_cells, page_composition, page_grid, parse_aux_buses, pvw_layouts,
                                  register_aux_commands, validate_assignments)
+from pyplumber.mixer.config import default_latency_ms
 from pyplumber.mixer.config import AuxBus, ConfigError, Item, MixerConfig, Rect, Rendition, Scene, Source
 
 
@@ -35,6 +36,7 @@ def bus_json(**kwargs):
 @pytest.mark.parametrize("program,aux", [(25, 25), (30, 30), (50, 25), (60, 30)])
 def test_aux_cadence(program, aux):
     assert aux_fps(program) == aux
+    assert aux_fps(program, full_rate=True) == program   # opt-in: the canvas rate, twice the work at 50/60
 
 
 def test_repeated_scenes_and_occurrences_share_pads(cfg):
@@ -223,7 +225,7 @@ def test_commands_route_by_bus_kind_and_status_reports_geometry(cfg):
     handlers = {}
     avp = SimpleNamespace(registerControlCommand=lambda name, fn, _payload: handlers.__setitem__(name, fn),
                           executeCommandsFromString=lambda command: None)
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None)
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=None)
     views = (AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0]),
              AuxSourcePages(avp, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0]))
     register_aux_commands(avp, views)
@@ -237,6 +239,9 @@ def test_commands_route_by_bus_kind_and_status_reports_geometry(cfg):
     assert [c["role"] for c in grid["cells"]] == ["pvw", "pgm"] + ["slot"] * 8
     assert pages["tiles"][0] == {"id": "s12", "kind": "video", "x": 2, "y": 10, "w": 536, "h": 300}
     assert pages["canvas"] == {"w": 1080, "h": 1920} and pages["suspended"] is True
+    # The timing a script needs to read the follower's numbers: the bus rate and buffer.
+    assert (grid["fps"], grid["latency_ms"], grid["pvw_align"], grid["pgm_delay_frames"]) == (30, 50, "program", 1)
+    assert (pages["fps"], pages["latency_ms"]) == (30, 50) and "pvw_align" not in pages
 
 
 class StatusAvp:
@@ -296,17 +301,56 @@ def test_multiview_shows_pgm_one_tick_late_at_the_main_latency(cfg):
     mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=None)
     view = AuxMultiview(None, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
     pages = AuxSourcePages(None, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0])
-    # 60 fps program, 30 fps aux: two aux ticks, not the main default of two 60 fps ticks.
-    assert view.latency_ms() == pages.latency_ms() == 2000 / 30
+    # 60 fps program, 30 fps aux: the main mixer's buffer (three 60 fps ticks, 1.5 aux ticks), so
+    # the PVW tile can leave with the program; the sources reach both at the same time.
+    assert view.latency_ms() == pages.latency_ms() == view.main_latency_ms() == default_latency_ms(60) == 50
     cfg25 = replace(cfg, fps=25)
-    for latency, expected in ((None, 80), (120, 120), (20, 80)):
+    for latency, expected in ((None, 80), (120, 120), (20, 20)):
         mixer.latency_ms = latency
         assert AuxMultiview(None, None, mixer, cfg25, parse_aux_buses([bus_json()], cfg25)[0]).latency_ms() == expected
+    # A bus's own latency_ms wins over the main mixer's.
+    mixer.latency_ms = 50
+    assert AuxMultiview(None, None, mixer, cfg, parse_aux_buses([bus_json(latency_ms=70)], cfg)[0]).latency_ms() == 70
     assert view.inputs()[-1] == view.pgm_edge   # the delay applies to the last input
+
+
+def test_bus_timing_options_parse_and_validate(cfg):
+    bus = parse_aux_buses([bus_json()], cfg)[0]
+    assert (bus.pvw_align, bus.latency_ms, bus.pgm_delay_frames, bus.full_rate) == ("program", None, 1, False)
+    chosen = parse_aux_buses([bus_json(pvw_align="pgm_tile", latency_ms=66.7, pgm_delay_frames=0, full_rate=True)], cfg)[0]
+    assert (chosen.pvw_align, chosen.latency_ms, chosen.pgm_delay_frames, chosen.full_rate) == ("pgm_tile", 66.7, 0, True)
+    assert chosen.renditions[0].fps == 60   # full rate: the rendition runs at the canvas rate
+    assert parse_aux_buses([bus_json(renditions=[{"id": "monitor", "port": 5010, "fps": 60}], full_rate=True)], cfg)
+    pages = parse_aux_buses([pages_json(full_rate=True, latency_ms=40)], cfg)[0]
+    assert (pages.full_rate, pages.latency_ms, pages.renditions[0].fps) == (True, 40, 60)
+    for invalid in (bus_json(pvw_align="nearest"), bus_json(latency_ms=0), bus_json(latency_ms="50"),
+                    bus_json(latency_ms=True), bus_json(pgm_delay_frames=7), bus_json(pgm_delay_frames=1.0),
+                    bus_json(pgm_delay_frames=True), bus_json(full_rate=1),
+                    bus_json(renditions=[{"id": "monitor", "port": 5010, "fps": 60}]),   # full rate not asked for
+                    pages_json(pvw_align="program"), pages_json(pgm_delay_frames=0)):
+        with pytest.raises(ConfigError):
+            parse_aux_buses([invalid], cfg)
 
 
 class _Built(Exception):
     pass
+
+
+def test_program_frame_must_reach_the_bus_before_its_deadline(cfg):
+    """At the main latency the program frame leaves its compositor when a pgm_delay_frames 0 bus
+    would draw it; the PGM pad needs a tick of delay or a longer bus buffer. The checks precede
+    the first graph call, which ends the build here."""
+    avp = SimpleNamespace(edges=SimpleNamespace(planCapacity=lambda *_: (_ for _ in ()).throw(_Built())))
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=50, name="mixer")
+    def build(**options):
+        AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json(**options)], cfg)[0]).build(None)
+    for options in ({"pgm_delay_frames": 0}, {"full_rate": True, "pgm_delay_frames": 0}):
+        with pytest.raises(ConfigError, match="pgm_delay_frames"):
+            build(**options)
+    for options in ({}, {"pgm_delay_frames": 0, "latency_ms": 83.4},   # one aux tick more than the program
+                    {"full_rate": True}):                            # 16.7 + 50 > 50: the delay covers it
+        with pytest.raises(_Built):
+            build(**options)
 
 
 @pytest.mark.parametrize("kind,limit", [(AuxMultiview, 200), (AuxSourcePages, 240)])
@@ -362,10 +406,17 @@ def test_multiview_builds_a_follower_holding_the_layouts(cfg, monkeypatch):
     p = follower.parameters
     assert (p["type"], p["name"]) == ("mixer_pvw_follow", "aux_multiview_pvw")
     assert (p["mixer"], p["compositor"], p["group"]) == ("mixer", "aux_multiview_comp", "aux_multiview")
-    assert (p["fps"], p["latency_ms"], p["pgm_delay_frames"]) == ("30", 2000 / 30, 1)
+    assert (p["fps"], p["latency_ms"], p["main_latency_ms"], p["pgm_delay_frames"], p["align"]) == ("30", 50, 50, 1, "program")
     assert (p["auto_restart"], p["on_error"]) == ("off", "off")
     assert p["base"] == {"revision": view.revision, **base_composition(cfg, ["full"] * 8)}
     assert p["pvw"] == pvw_layouts(cfg)
+    # A bus with its own timing hands it to the follower and the compositor alike.
+    nodes.clear()
+    mixer.latency_ms = 60
+    bus = parse_aux_buses([bus_json(pvw_align="pgm_tile", latency_ms=80, pgm_delay_frames=2, full_rate=True)], cfg)[0]
+    AuxMultiview(avp, None, mixer, cfg, bus).build(None)
+    p = nodes[0].parameters
+    assert (p["fps"], p["latency_ms"], p["main_latency_ms"], p["pgm_delay_frames"], p["align"]) == ("60", 80, 60, 2, "pgm_tile")
 
 
 def test_assignment_hands_the_follower_the_base_or_falls_back(cfg):

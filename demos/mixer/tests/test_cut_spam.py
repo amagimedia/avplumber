@@ -1,8 +1,8 @@
 import pytest
 
-from cut_spam import (eligible_cuts, is_expected_rejection, last_states, latest_id, measured, parse_mix,
-                      percentile, pick_scenes, playout_delta, sample as probe_sample, setup_check, summarize,
-                      thresholds, transition_payloads, unmeasured_by_state, verdict)
+from cut_spam import (PvwSamples, eligible_cuts, is_expected_rejection, last_states, latest_id, measured,
+                      parse_mix, percentile, pick_scenes, playout_delta, pvw_line, sample as probe_sample,
+                      setup_check, summarize, thresholds, transition_payloads, unmeasured_by_state, verdict)
 
 
 def sample(id, state="measured", ms=100.0):
@@ -152,3 +152,25 @@ def test_only_known_rejections_are_expected():
     assert is_expected_rejection("400 mixer: transition already in progress")
     assert not is_expected_rejection("mixer: unknown scene: x")
     assert not is_expected_rejection(None)
+
+
+def test_pvw_samples_count_each_follower_change_once():
+    pvw = PvwSamples()
+    assert pvw.summary() is None and pvw_line(None).startswith("pvw       no AUX")
+    change = lambda rev, diff, late=0, **extra: {"applied_revision": rev, "align": "program", "pvw_minus_pgm_ms": diff,
+                                                 "pvw_latency_ms": 60 + diff, "pgm_latency_ms": 60.0,
+                                                 "last_target_error_ticks": late, **extra}
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": change(1, 0.0)}})
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": change(1, 0.0)}})            # the same change, polled twice
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": change(2, 16.7)}})
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": change(3, 33.3, late=1), "aux_mv2_pvw": change(3, 0.0)}})
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": {**change(4, 0.0), "pvw_minus_pgm_ms": None}}})   # untimed: a wipe
+    pvw.observe({"cut_latency": {}})                                        # a mixer without followers
+    pvw.observe(None)
+    summary = pvw.summary()
+    assert summary["followers"] == ["aux_mv2_pvw", "aux_mv_pvw"] and summary["align"] == ["program"]
+    assert summary["pvw_minus_pgm"] == {"n": 4, "p50": 8.35, "p95": 33.3, "max": 33.3}
+    assert summary["pvw_latency"]["max"] == 93.3 and summary["pgm_latency"]["p50"] == 60.0
+    assert summary["late"] == 1
+    line = pvw_line(summary)
+    assert "n=4" in line and "1 missed their tick" in line and "aux_mv2_pvw, aux_mv_pvw (program)" in line

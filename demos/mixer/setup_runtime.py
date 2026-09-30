@@ -281,7 +281,7 @@ class SetupRuntime:
         scene_ids = {s.id for s in cfg.scenes}
         for bus in buses:
             for rendition in bus["renditions"]:
-                rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=aux_fps(cfg.fps))
+                rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=aux_fps(cfg.fps, bus.get("full_rate", False)))
             if bus.get("layout", {}).get("preset") == "source_pages":
                 continue   # pages follow the new source list by themselves
             assignments = [None] * 8

@@ -120,6 +120,7 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms,
     TransitionGuard prep_guard([&] { abortTransition(transition_generation); });
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
     bool was_preloaded = state_->pvw_slot_scene == scene_name;
+    state_->take_received_ns = monotonicNs(received);
     if (state_->cut_latency)
         state_->cut_latency->timing.begin(scene_name, was_preloaded, pvw_is_slot_a ? 0 : 1, received);
 

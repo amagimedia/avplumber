@@ -7,8 +7,10 @@ import threading
 import time
 import uuid
 
+import math
+
 from ..node import InternalNode
-from .config import AuxBus, ConfigError, _parse_rendition, scene_layers
+from .config import AuxBus, ConfigError, _parse_rendition, default_latency_ms, scene_layers
 from .control import source_mask_param
 
 
@@ -16,8 +18,36 @@ class _PvwFollowNode(InternalNode):
     TYPE = "mixer_pvw_follow"
 
 
-def aux_fps(fps):
-    return fps // 2 if fps in (50, 60) else fps
+def aux_fps(fps, full_rate=False):
+    """A bus runs at half the canvas rate at 50/60 fps unless it opts into the full rate."""
+    return fps // 2 if fps in (50, 60) and not full_rate else fps
+
+
+PVW_ALIGNMENTS = ("program", "pgm_tile")
+
+
+def _parse_bus_timing(obj, multiview):
+    """pvw_align, latency_ms, pgm_delay_frames and full_rate of one bus; the first and third
+    belong to the pgm_pvw_grid layout only. Their consistency with the main latency is checked
+    at build (_AuxOutput.build), where the main mixer's latency is known."""
+    if not isinstance(obj.get("full_rate", False), bool):
+        raise ConfigError("aux full_rate must be a boolean")
+    latency = obj.get("latency_ms")
+    if latency is not None and (isinstance(latency, bool) or not isinstance(latency, (int, float)) or
+                                not math.isfinite(latency) or latency <= 0):
+        raise ConfigError("aux latency_ms must be a positive number of milliseconds or null")
+    if not multiview:
+        if "pvw_align" in obj or "pgm_delay_frames" in obj:
+            raise ConfigError("pvw_align and pgm_delay_frames apply to the pgm_pvw_grid layout only")
+        return {"latency_ms": latency, "full_rate": obj.get("full_rate", False)}
+    align = obj.get("pvw_align", "program")
+    if align not in PVW_ALIGNMENTS:
+        raise ConfigError(f"aux pvw_align must be one of {', '.join(PVW_ALIGNMENTS)}")
+    delay = obj.get("pgm_delay_frames", 1)
+    if isinstance(delay, bool) or not isinstance(delay, int) or not 0 <= delay <= 6:
+        raise ConfigError("aux pgm_delay_frames must be an integer from 0 to 6")
+    return {"pvw_align": align, "latency_ms": latency, "pgm_delay_frames": delay,
+            "full_rate": obj.get("full_rate", False)}
 
 
 def _even(value):
@@ -66,19 +96,21 @@ def parse_aux_buses(values, cfg):
                 raise ConfigError("multiview needs one pad per unique source plus PGM; limit is 128")
             scenes = obj.get("scenes", [None] * 8)
             validate_assignments(cfg, scenes)
+        timing = _parse_bus_timing(obj, preset == "pgm_pvw_grid")
+        fps = aux_fps(cfg.fps, timing["full_rate"])
         renditions = obj.get("renditions", [])
         if len(renditions) != 1:
             raise ConfigError("v1 aux requires one SDR/H.264 Janus rendition")
         # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
         r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
-                             f"aux {bid}", cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps))
+                             f"aux {bid}", cfg.canvas_w, cfg.canvas_h, fps)
         if (r.target != "janus" or r.codec != "h264_nvenc" or r.color != "sdr" or
-                (r.width, r.height, r.fps) != (cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps))):
+                (r.width, r.height, r.fps) != (cfg.canvas_w, cfg.canvas_h, fps)):
             raise ConfigError("aux rendition must be SDR/H.264 at canvas size and the aux frame rate")
         if not r.port or r.port in ports or r.port + 1 in ports or r.port - 1 in ports:
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
         ports.add(r.port)
-        result.append(AuxBus(bid, tuple(scenes), (r,), preset, float(rotate_s)))
+        result.append(AuxBus(bid, tuple(scenes), (r,), preset, float(rotate_s), **timing))
     return tuple(result)
 
 
@@ -175,6 +207,7 @@ class _AuxOutput:
 
     def __init__(self, avp, api, mixer, cfg, bus):
         self.avp, self.api, self.mixer, self.cfg, self.bus = avp, api, mixer, cfg, bus
+        self.fps = aux_fps(cfg.fps, bus.full_rate)
         self.prefix = f"aux_{bus.id}"
         self.group = self.prefix
         self.node_name = f"{self.prefix}_comp"
@@ -192,20 +225,30 @@ class _AuxOutput:
     def layer_budget(self):
         return self.cfg.max_compositor_layers
 
-    def latency_ms(self):
-        # The main mixer's latency, but at least two aux ticks (Playout's default): at
-        # 50/60 fps the aux runs at half rate, where the main default is only one tick.
+    def main_latency_ms(self):
+        """The main mixer's playout buffer: when a program frame leaves its compositor."""
         main_latency = self.mixer.latency_ms
-        main = main_latency if main_latency is not None else 2000 / self.cfg.fps
-        return max(main, 2000 / aux_fps(self.cfg.fps))
+        return main_latency if main_latency is not None else default_latency_ms(self.cfg.fps)
+
+    def latency_ms(self):
+        # The bus's own playout buffer, or the main mixer's (50 ms at 60 fps, 1.5 aux ticks at
+        # half rate): the sources reach a bus when they reach the program compositors, so the
+        # same buffer leaves it the same slack, and its PVW tile can leave with the program.
+        return self.bus.latency_ms if self.bus.latency_ms is not None else self.main_latency_ms()
 
     def build(self, options):
         from .janus import JanusVideoConfig, build_janus_output
-        fps = aux_fps(self.cfg.fps)
+        fps = self.fps
         latency = self.latency_ms()
         # Playout::setInputOffset's budget: the PGM delay is history the compositor keeps as well.
         if latency + self.pgm_delay_frames * 1000 / fps > 6000 / fps:
             raise ConfigError("main plus aux latency exceeds the six-frame aux history budget")
+        # The program frame leaves the main compositor at its deadline, main latency after its
+        # pts, and is drawn here pgm_delay_frames aux ticks plus the bus latency after it: with
+        # no margin it misses its aux deadline and the PGM tile repeats or runs a tick late.
+        if self.pgm_edge and self.pgm_delay_frames * 1000 / fps + latency <= self.main_latency_ms():
+            raise ConfigError(f"aux {self.bus.id}: pgm_delay_frames * aux frame + latency_ms must exceed the main "
+                              f"latency_ms ({self.main_latency_ms():g}) for the program frame to reach the bus in time")
         inputs = self.inputs()
         for edge in [*inputs, self.output_edge, *(f"{self.prefix}_{suffix}" for suffix in
                       ("sdr", "fps", "keyframed", "video", "encoded", "repeat_headers", "video_rtp_mux"))]:
@@ -247,7 +290,8 @@ class _AuxOutput:
             except Exception:
                 status = {"suspended": True}
             return {"id": self.bus.id, "layout": self.bus.layout, "error": self.error,
-                    "canvas": {"w": self.cfg.canvas_w, "h": self.cfg.canvas_h}, **self.details(), **status}
+                    "canvas": {"w": self.cfg.canvas_w, "h": self.cfg.canvas_h},
+                    "fps": self.fps, "latency_ms": self.latency_ms(), **self.details(), **status}
 
     def _set(self, node, key, value):
         self.avp.executeCommandsFromString(f"node.object.set {node} {key} {json.dumps(value)}")
@@ -288,16 +332,15 @@ class AuxMultiview(_AuxOutput):
         super().__init__(avp, api, mixer, cfg, bus)
         self.pgm_edge = f"{self.prefix}_pgm"
         self.follower = f"{self.prefix}_pvw"
+        # The PGM tile is the finished program (the last input), which reaches this bus a
+        # frame after the sources it is made of. Matching it one frame back (the default) keeps
+        # every other input at the normal latency instead of holding all of them a frame longer.
+        self.pgm_delay_frames = bus.pgm_delay_frames
         self.scenes, self.revision, self.preview = list(bus.scenes), uuid.uuid4().hex, ""
         self.follower_status = {}
 
     def inputs(self):
         return [*self.edges, self.pgm_edge]
-
-    # The PGM tile is the finished program (the last input), which reaches this bus a
-    # frame after the sources it is made of. Matching it one frame back keeps every
-    # other input at the normal latency instead of holding all of them a frame longer.
-    pgm_delay_frames = 1
 
     def current_composition(self):
         return composition(self.cfg, self.scenes, self.preview)
@@ -310,13 +353,15 @@ class AuxMultiview(_AuxOutput):
         super().build(options)
         self.avp.addNode(_PvwFollowNode({
             "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,
-            "fps": str(aux_fps(self.cfg.fps)), "latency_ms": self.latency_ms(),
-            "pgm_delay_frames": self.pgm_delay_frames, "base": self.base(), "pvw": pvw_layouts(self.cfg),
+            "fps": str(self.fps), "latency_ms": self.latency_ms(), "main_latency_ms": self.main_latency_ms(),
+            "pgm_delay_frames": self.pgm_delay_frames, "align": self.bus.pvw_align,
+            "base": self.base(), "pvw": pvw_layouts(self.cfg),
             "group": self.group, "auto_restart": "off", "on_error": "off",
         }))
 
     def details(self):
         return {"scenes": list(self.scenes), "revision": self.revision, "cells": multiview_cells(self.cfg),
+                "pvw_align": self.bus.pvw_align, "pgm_delay_frames": self.pgm_delay_frames,
                 "follower": self.follower_status}
 
     def _follower_status(self):

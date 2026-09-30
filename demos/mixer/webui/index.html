@@ -950,6 +950,12 @@ const playable = (codec) => codec !== "h265" || h265Playable;
 const defaultCodec = (codecs) => [query.get("codec"), "h265", "h264"].find((c) => codecs.includes(c) && playable(c)) || codecs[0];
 // The dirty program plays from the player's own mountpoints in the preview codecs; every other output
 // is an H.264 mountpoint of its own, which the player plays as H.264 whatever codec the URL names.
+// Every viewer, the program and the multiviews alike, plays with the same receiver playout delay:
+// the player's ?lowlat=1 pins the WebRTC jitter buffer to its minimum (jitterBufferTarget and
+// playoutDelayHint 0), so a cut shows in the program and in the multiview's PVW tile at the same
+// instant instead of each stream settling on its own adaptive delay. ?lowlat=0 on this page keeps
+// the browser's adaptive buffer for every viewer (a decoder that drops late frames, a bad link).
+const lowLatency = query.get("lowlat") !== "0";
 function playerUrl(output, codec) {
   const url = new URL(playerBase);
   const codecs = settings().preview_codecs;
@@ -958,6 +964,7 @@ function playerUrl(output, codec) {
     if (codecs?.length) url.searchParams.set("outputs", codecs.join(","));
     url.searchParams.set("codec", codec);
   }
+  if (lowLatency) url.searchParams.set("lowlat", "1");
   return url.href;
 }
 // Program entries are "program", or "program:<codec>" when the mixer encodes the program twice.

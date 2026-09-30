@@ -13,6 +13,7 @@ int main() {
     state.pvw_slot_scene = "b";   // armed
     state.pvw_scene_name = "b";
     state.transition_mode = MixerState::TransitionMode::Cut;
+    state.take_received_ns = 1000;   // the cut command's receipt, for the followers' latency
     const auto revision = state.pvw_revision;
 
     // A follower waits on the revision; the completed take wakes it.
@@ -35,12 +36,13 @@ int main() {
     assert(state.pvw_revision == revision + 1);
     assert(state.pvw_effective_ns == 123456789);
     assert(state.pvw_published_ns > 0);
+    assert(state.pvw_received_ns == 1000 && state.take_received_ns == 0);   // handed over once
     assert(state.transition_mode == MixerState::TransitionMode::Idle);
 
     // Taking the program scene again swaps nothing: there is no other scene to preview.
     state.completeTransition(true, "b", 0);
     assert(state.pvw_scene_name.empty() && state.pgm_is_slot_a && state.pvw_effective_ns == 0);
-    assert(state.pvw_revision == revision + 2);
+    assert(state.pvw_revision == revision + 2 && state.pvw_received_ns == 0);
 
     // Swap off: a take clears the preview, as it always did.
     state.swap_preview = false;
@@ -52,5 +54,8 @@ int main() {
     // An explicit preview publishes at once (effective 0) and leaves the program alone.
     state.publishPreview("a", 0);
     assert(state.pvw_scene_name == "a" && state.pgm_scene_name == "c" && state.pvw_effective_ns == 0);
-    assert(state.pvw_revision == revision + 4);
+    assert(state.pvw_revision == revision + 4 && state.pvw_received_ns == 0);
+    // A follower's sample is the mixer's to report (mixer.status pvw_latency).
+    state.preview_follow_samples["aux_mv_pvw"] = {{"pvw_minus_pgm_ms", 16.7}};
+    assert(Parameters(state.preview_follow_samples).at("aux_mv_pvw").at("pvw_minus_pgm_ms") == 16.7);
 }
