@@ -68,10 +68,19 @@ class MixerOrchestrator {
     void interruptTransition();
     std::shared_ptr<OutputSnapshot> outputSnapshot() const;
     /// Stops the slot substitution and releases a held output at the next selected frame.
-    void finishSnapshot();
+    /// Returns that frame's pts (ns): one main tick after the selector's newest output, read
+    /// after the selector was switched, so it is the first frame of the new program; 0 before
+    /// the selector emitted anything.
+    int64_t finishSnapshot();
+    /// pts (ns) of the newest frame the selector has emitted, 0 before its first.
+    int64_t selectorOutputNs() const;
     /// Release timestamp (ns) for the output hold: the first frame newer than everything
     /// the selector has emitted, read after the selector was switched.
     int64_t releaseAfterSelectorOutput() const;
+    /// Caller holds state_->mutex. Ends a transition: program on `new_pgm_scene`, the preview
+    /// swapped or cleared (MixerState::completeTransition) from the program frame at
+    /// `effective_ns` (0: now).
+    void finishTransition(bool new_pgm_is_slot_a, std::string new_pgm_scene, int64_t effective_ns);
     // Caller holds state_->mutex; restores live program after failed preparation.
     // Requests a keyframe unless the dropped transition was a cut that had not flipped
     // and no frozen picture is on air: the caller then finishes the snapshot, which

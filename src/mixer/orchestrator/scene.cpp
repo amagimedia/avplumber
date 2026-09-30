@@ -94,7 +94,7 @@ void MixerOrchestrator::prewarmCuts(const std::vector<std::string>& scenes) {
     for (const auto& [name, source] : state_->sources) {
         if (source.routed) continue;
         uint32_t outputs = state_->scenes.at(state_->pgm_scene_name).sources.count(name) ? state_->pgmOutputBit() : 0u;
-        if (!state_->pvw_scene_name.empty() && state_->scenes.at(state_->pvw_scene_name).sources.count(name))
+        if (!state_->pvw_slot_scene.empty() && state_->scenes.at(state_->pvw_slot_scene).sources.count(name))
             outputs |= state_->pvwOutputBit();
         publishCameraOtmOutputs(source.otm_node_name, state_->sourceOutputMask(source, outputs));
     }
@@ -292,7 +292,7 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     const uint32_t slot_bit = is_slot_a ? 1u : 2u;
     rewriteCameraOutputsForSlot(slot_bit, scene);
     applyRoutedSceneRoutesForSlot(is_slot_a, scene, wallclock.pts(), true);
-
+    state_->pvw_slot_scene = scene_name;
 }
 
 void MixerOrchestrator::scheduleSceneControls(const SceneDefinition& scene, int64_t at_pts_ms) {
@@ -312,7 +312,7 @@ void MixerOrchestrator::preview(const std::string& scene_name) {
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
     const auto& slot = state_->pvwSlot();
 
-    if (state_->pvw_scene_name == scene_name) {
+    if (state_->pvw_slot_scene == scene_name) {
         logstream << "mixer preview: scene already loaded in PVW: " << scene_name;
     } else {
         loadSceneIntoSlot(pvw_is_slot_a, scene_name);
@@ -324,8 +324,8 @@ void MixerOrchestrator::preview(const std::string& scene_name) {
     setNodeObject(slot.post_otm_name, "outputs", Parameters(1u));
     timeline_->set(slot.post_otm_name, "outputs", prep_ms, Parameters(1u));
     // Direct transitions also load this slot; only an explicit preview should
-    // publish its scene to the control UI and AUX preview follower.
-    state_->pvw_scene_name = scene_name;
+    // publish its scene to the control UI and the AUX preview followers.
+    state_->publishPreview(scene_name, 0);
     logstream << "mixer preview armed: scene=" << scene_name
               << " slot=" << (pvw_is_slot_a ? 'A' : 'B')
               << " post_otm " << slot.post_otm_name << "->1";

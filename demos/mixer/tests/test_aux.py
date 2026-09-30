@@ -5,10 +5,16 @@ import threading
 
 import pytest
 
-from pyplumber.mixer.aux import (AuxMultiview, AuxSourcePages, aux_fps, composition, multiview_cells,
-                                 page_composition, page_grid, parse_aux_buses, register_aux_commands,
-                                 validate_assignments)
+from pyplumber.mixer.aux import (AuxMultiview, AuxSourcePages, aux_fps, base_composition, composition,
+                                 multiview_cells, page_composition, page_grid, parse_aux_buses, pvw_layouts,
+                                 register_aux_commands, validate_assignments)
 from pyplumber.mixer.config import AuxBus, ConfigError, Item, MixerConfig, Rect, Rendition, Scene, Source
+
+
+def object_set(command):
+    """(node, key, value) of a ``node.object.set`` line."""
+    node, key, value = command.split(" ", 3)[1:]
+    return node, key, json.loads(value)
 
 
 @pytest.fixture
@@ -81,9 +87,9 @@ def test_bus_validation_and_distinct_outputs(cfg):
 def test_assignment_conflict_does_not_publish_or_overwrite(cfg):
     published = []
     def execute(command):
-        prefix, value = command.split(" composition ", 1)
-        assert prefix == "node.object.set aux_multiview_comp"
-        published.append(json.loads(value))
+        node, key, value = object_set(command)
+        assert (node, key) == ("aux_multiview_pvw", "base")
+        published.append(value)
     avp = SimpleNamespace(executeCommandsFromString=execute)
     mixer = SimpleNamespace(add_aux_destination=lambda *args: None)
     bus = AuxMultiview(avp, None, mixer, cfg, AuxBus("multiview", (None,) * 8, (Rendition("monitor"),)))
@@ -233,29 +239,41 @@ def test_commands_route_by_bus_kind_and_status_reports_geometry(cfg):
 
 
 class StatusAvp:
-    """Records compositions; the test sets what the compositor's status reports."""
+    """Records compositions and follower bases; the test sets what the compositor's status
+    reports and the follower's status (``follower``, None while that node is unreachable)."""
 
     def __init__(self):
-        self.published, self.status = [], {"suspended": False, "pvw_scene": ""}
+        self.published, self.bases = [], []
+        self.status, self.follower = {"suspended": False, "pvw_scene": ""}, None
+
+    def _reach(self, name):
+        if name.endswith("_pvw") and self.follower is None:
+            raise Exception(f"Node {name} doesn't exist.")
 
     def executeCommandsFromString(self, command):
-        self.published.append(json.loads(command.split(" composition ", 1)[1]))
+        node, key, value = object_set(command)
+        self._reach(node)
+        assert key == ("base" if node.endswith("_pvw") else "composition")
+        (self.bases if key == "base" else self.published).append(value)
 
-    def node(self, _name):
-        return SimpleNamespace(getObject=lambda _key: dict(self.status))
+    def node(self, name):
+        self._reach(name)
+        status = self.follower if name.endswith("_pvw") else self.status
+        return SimpleNamespace(getObject=lambda _key: dict(status))
 
 
 def test_encoder_backpressure_suspension_survives_automatic_updates_only(cfg, monkeypatch):
-    """Following PVW and rotating pages keep a suspended bus suspended; an operator's
-    slot assignment or page turn applies a composition without ``enabled``, which resumes it."""
+    """Following PVW (here without the follower node, so this thread does it) and rotating pages
+    keep a suspended bus suspended; an operator's slot assignment or page turn applies a
+    composition without ``enabled``, which resumes it."""
     mixer = SimpleNamespace(add_aux_destination=lambda *args: None)
     avp = StatusAvp()
     grid = AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
     avp.status = {"suspended": True, "pvw_scene": "repeat"}
-    waits = iter([False, True])                 # one pass of the PVW follower
+    waits = iter([True])                        # one pass of the PVW poll
     grid.stopped = SimpleNamespace(wait=lambda _s: next(waits))
     grid.run()
-    assert avp.published[-1] == {**composition(cfg, ["full"] * 8, "repeat"), "enabled": False}
+    assert avp.published == [{**composition(cfg, ["full"] * 8, "repeat"), "enabled": False}]
     grid.assign({"expected_revision": grid.revision, "scenes": [None] * 8})
     assert "enabled" not in avp.published[-1]
 
@@ -304,3 +322,69 @@ def test_aux_monitors_default_to_one_reference_frame(cfg):
     assert parse_aux_buses([bus_json()], cfg)[0].renditions[0].dpb_size == 1
     custom = bus_json(renditions=[{"id": "monitor", "port": 5010, "dpb_size": 0}])
     assert parse_aux_buses([custom], cfg)[0].renditions[0].dpb_size == 0
+
+
+def test_pvw_layouts_and_base_split_the_composition(cfg):
+    """The follower node sets pvw[shown] followed by base; composition() is exactly that."""
+    layouts = pvw_layouts(cfg)
+    reserved = max(len(s.items) for s in cfg.scenes)
+    assert set(layouts) == {"full", "repeat", "grid64"}
+    assert [l["z"] for l in layouts["repeat"]["layers"]] == [0, 1]
+    assert all(l["z"] < reserved for layout in layouts.values() for l in layout["layers"])
+    assert layouts["grid64"]["layers"][-1]["z"] == reserved - 1
+    pvw_cell = multiview_cells(cfg)[0]
+    assert layouts["full"]["layers"][0]["tile"] == {k: pvw_cell[k] for k in ("x", "y", "w", "h")}
+    assert layouts["full"]["active_inputs"] == 1
+    assignments = ["repeat"] * 8
+    base = base_composition(cfg, assignments)
+    assert min(l["z"] for l in base["layers"]) == reserved
+    assert base["layers"][-1]["input"] == 64 and base["layers"][-1]["z"] == reserved + 16
+    merged = composition(cfg, assignments, "full")
+    assert merged["layers"] == layouts["full"]["layers"] + base["layers"]
+    assert merged["active_inputs"] == "1" + "0" * 63 + "1"
+    assert composition(cfg, assignments, "") == base
+    with pytest.raises(ConfigError, match="unknown scene"):
+        composition(cfg, assignments, "missing")
+
+
+def test_multiview_builds_a_follower_holding_the_layouts(cfg, monkeypatch):
+    import pyplumber.mixer.aux as aux_module
+    monkeypatch.setattr(aux_module._AuxOutput, "build", lambda self, options: None)
+    nodes = []
+    avp = SimpleNamespace(addNode=nodes.append)
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=None, name="mixer")
+    view = AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
+    view.build(None)
+    follower, = nodes
+    p = follower.parameters
+    assert (p["type"], p["name"]) == ("mixer_pvw_follow", "aux_multiview_pvw")
+    assert (p["mixer"], p["compositor"], p["group"]) == ("mixer", "aux_multiview_comp", "aux_multiview")
+    assert (p["fps"], p["latency_ms"], p["pgm_delay_frames"]) == ("30", 2000 / 30, 1)
+    assert (p["auto_restart"], p["on_error"]) == ("off", "off")
+    assert p["base"] == {"revision": view.revision, **base_composition(cfg, ["full"] * 8)}
+    assert p["pvw"] == pvw_layouts(cfg)
+
+
+def test_assignment_hands_the_follower_the_base_or_falls_back(cfg):
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None)
+    avp = StatusAvp()
+    avp.follower = {"base_revision": "stale"}
+    grid = AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
+    scenes = ["repeat"] + [None] * 7
+    grid.assign({"expected_revision": grid.revision, "scenes": scenes})
+    assert avp.bases == [{"revision": grid.revision, **base_composition(cfg, scenes)}]
+    assert avp.published == []
+    # Once a second: a follower reporting another base revision (it restarted) gets the current one.
+    assert grid._follow() == 1.0
+    assert len(avp.bases) == 2 and avp.bases[-1]["revision"] == grid.revision
+    avp.follower = {"base_revision": grid.revision, "pvw_scene": "repeat"}
+    assert grid._follow() == 1.0 and len(avp.bases) == 2
+    assert grid.details()["follower"] == avp.follower
+    # Unreachable: this thread follows the preview at 50 ms and sets the composition itself.
+    avp.follower = None
+    avp.status = {"suspended": False, "pvw_scene": "full"}
+    assert grid._follow() == 0.05
+    assert avp.published == [{**composition(cfg, scenes, "full"), "enabled": True}]
+    assert grid.details()["follower"]["error"]
+    grid.assign({"expected_revision": grid.revision, "scenes": [None] * 8})
+    assert avp.published[-1] == composition(cfg, [None] * 8, "full") and len(avp.bases) == 2

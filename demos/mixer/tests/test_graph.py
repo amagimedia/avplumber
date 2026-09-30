@@ -890,7 +890,8 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         "preview_codecs": [],
         "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
         "source_counts": {"video": 1, "browser": 1, "v210": 0, "nv12": 0, "p010": 0},
-        "direct": False, "fade_seconds": 0.8, "fade_curve": "linear", "fade_color": None, "transition": "cut",
+        "direct": False, "swap_preview": True,
+        "fade_seconds": 0.8, "fade_curve": "linear", "fade_color": None, "transition": "cut",
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
         "wipes": [{"id": "swoosh", "name": "swoosh", "path": "/media/swoosh.mov",
@@ -1352,14 +1353,19 @@ def test_control_section_carries_the_defaults_the_surfaces_start_from():
     assert cfg.settings()["transition"] == "cut"
     assert cfg.fade_curve == cfg.settings()["fade_curve"] == "linear"
     assert cfg.fade_color is cfg.settings()["fade_color"] is None   # a fade mixes unless the show picks a dip
+    assert cfg.swap_preview is cfg.settings()["swap_preview"] is True   # a take previews what left program
     chosen = mc.parse({**doc, "control": {"transition": "wipe", "fade_seconds": 1.5, "direct": False,
-                                          "fade_curve": "ease-in-out", "fade_color": "#FFFFFF"}})
+                                          "fade_curve": "ease-in-out", "fade_color": "#FFFFFF",
+                                          "swap_preview": False}})
     assert (chosen.transition, chosen.fade_seconds, chosen.direct) == ("wipe", 1.5, False)
     assert chosen.settings()["fade_curve"] == "ease-in-out"
     assert chosen.settings()["fade_color"] == "#ffffff"
+    assert chosen.swap_preview is chosen.settings()["swap_preview"] is False
     for bad in ("smooth", "", None, 1):
         with pytest.raises(mc.ConfigError, match="control.fade_curve must be one of linear, ease-in"):
             mc.parse({**doc, "control": {"fade_curve": bad}})
+    with pytest.raises(mc.ConfigError, match="control.swap_preview must be a boolean"):
+        mc.parse({**doc, "control": {"swap_preview": "no"}})
     for bad in ("black", "#fff", "#00000080", "000000", 0):
         with pytest.raises(mc.ConfigError, match="control.fade_color must be a #RRGGBB colour or null"):
             mc.parse({**doc, "control": {"fade_color": bad}})
@@ -1369,6 +1375,16 @@ def test_control_section_carries_the_defaults_the_surfaces_start_from():
         mc.parse({**{k: v for k, v in doc.items() if k != "wipes"}, "control": {"transition": "wipe"}})
     with pytest.raises(mc.ConfigError, match="fade_seconds must be positive"):
         mc.parse({**doc, "control": {"fade_seconds": 0}})
+
+
+def test_preview_swap_reaches_the_builder(tmp_path):
+    FakeMixer.instances.clear()
+    doc = {"canvas": CONFIG["canvas"], "sources": [CONFIG["sources"][0]], "scenes": [CONFIG["scenes"][0]],
+           "control": {"swap_preview": False}}
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps(doc))
+    build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
+    assert FakeMixer.instances[-1].parameters["swap_preview"] is False
 
 
 def test_generated_grids_show_every_distinct_source_before_any_repeat():

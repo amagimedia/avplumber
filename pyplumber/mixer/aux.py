@@ -7,8 +7,13 @@ import threading
 import time
 import uuid
 
+from ..node import InternalNode
 from .config import AuxBus, ConfigError, _parse_rendition, scene_layers
 from .control import source_mask_param
+
+
+class _PvwFollowNode(InternalNode):
+    TYPE = "mixer_pvw_follow"
 
 
 def aux_fps(fps):
@@ -91,25 +96,52 @@ def multiview_cells(cfg):
     return cells
 
 
-def composition(cfg, scenes, preview):
+def _layout(layers):
+    return {"layers": layers, "active_inputs": source_mask_param(sum(1 << i for i in {l["input"] for l in layers}))}
+
+
+def _cell_layers(cfg, scene, cell, first_z):
+    """One layer per scene item, drawn into *cell*, z from *first_z* in item order."""
+    indices = {s.id: i for i, s in enumerate(cfg.sources)}
+    return [{**layer, "input": indices[name.split("#", 1)[0]], "z": first_z + z,
+             "tile": {k: cell[k] for k in ("x", "y", "w", "h")},
+             "scene_canvas": {"w": cfg.canvas_w, "h": cfg.canvas_h}}
+            for z, (name, layer) in enumerate(scene_layers(cfg, scene).items())]
+
+
+def pvw_layouts(cfg):
+    """The PVW cell's layers of every scene, keyed by scene id: what mixer_pvw_follow draws for a
+    preview. Their z is below the reserved count (the largest scene); base_composition starts there."""
+    pvw = multiview_cells(cfg)[0]
+    return {scene.id: _layout(_cell_layers(cfg, scene, pvw, 0)) for scene in cfg.scenes}
+
+
+def base_composition(cfg, scenes):
+    """The eight assigned scene tiles and the PGM tile: the part of the composition the
+    preview does not change, z from the reserved count up."""
     validate_assignments(cfg, scenes)
     definitions = {s.id: s for s in cfg.scenes}
-    indices = {s.id: i for i, s in enumerate(cfg.sources)}
-    pvw, pgm, *slots = multiview_cells(cfg)
+    _, pgm, *slots = multiview_cells(cfg)
     layers = []
-    for scene, cell in [(preview, pvw), *zip(scenes, slots)]:
-        if not scene:
-            continue
-        if scene not in definitions:
-            raise ConfigError(f"native preview references an unknown scene: {scene}")
-        for name, layer in scene_layers(cfg, definitions[scene]).items():
-            layers.append({**layer, "input": indices[name.split("#", 1)[0]], "z": len(layers),
-                           "tile": {k: cell[k] for k in ("x", "y", "w", "h")},
-                           "scene_canvas": {"w": cfg.canvas_w, "h": cfg.canvas_h}})
-    layers.append({"input": len(indices), "dst_x": pgm["x"], "dst_y": pgm["y"],
-                   "dst_w": pgm["w"], "dst_h": pgm["h"], "fit": "contain", "z": len(layers)})
-    mask = sum(1 << i for i in {layer["input"] for layer in layers})
-    return {"layers": layers, "active_inputs": source_mask_param(mask)}
+    reserved = max(len(s.items) for s in cfg.scenes)
+    for scene, cell in zip(scenes, slots):
+        if scene:
+            layers.extend(_cell_layers(cfg, definitions[scene], cell, reserved + len(layers)))
+    layers.append({"input": len(cfg.sources), "dst_x": pgm["x"], "dst_y": pgm["y"],
+                   "dst_w": pgm["w"], "dst_h": pgm["h"], "fit": "contain", "z": reserved + len(layers)})
+    return _layout(layers)
+
+
+def composition(cfg, scenes, preview):
+    """The whole multiview: pvw_layouts()[preview] followed by base_composition(), exactly what
+    the follower node sets for that preview."""
+    base = base_composition(cfg, scenes)
+    if not preview:
+        return base
+    layouts = pvw_layouts(cfg)
+    if preview not in layouts:
+        raise ConfigError(f"native preview references an unknown scene: {preview}")
+    return _layout(layouts[preview]["layers"] + base["layers"])
 
 
 def page_grid(cfg):
@@ -217,12 +249,15 @@ class _AuxOutput:
             return {"id": self.bus.id, "layout": self.bus.layout, "error": self.error,
                     "canvas": {"w": self.cfg.canvas_w, "h": self.cfg.canvas_h}, **self.details(), **status}
 
+    def _set(self, node, key, value):
+        self.avp.executeCommandsFromString(f"node.object.set {node} {key} {json.dumps(value)}")
+
     def _publish(self, snapshot, status=None):
         """Apply *snapshot*. An automatic update passes the compositor's *status* and keeps
         an encoder-backpressure suspension; an operator's change resumes the bus."""
         if status is not None:
             snapshot = {**snapshot, "enabled": not status.get("suspended", False)}
-        self.avp.executeCommandsFromString(f"node.object.set {self.node_name} composition {json.dumps(snapshot)}")
+        self._set(self.node_name, "composition", snapshot)
 
     def start(self):
         self.avp.group(self.group).startNodes()
@@ -240,12 +275,21 @@ class _AuxOutput:
 
 
 class AuxMultiview(_AuxOutput):
-    """PVW, PGM and eight assignable scene tiles; the PVW tile follows the main mixer's preview."""
+    """PVW, PGM and eight assignable scene tiles; the PVW tile follows the main mixer's preview.
+
+    A ``mixer_pvw_follow`` node (``<prefix>_pvw``) draws the preview: the mixer hands it every
+    change with the program frame it takes effect on, and it sets the compositor's composition
+    on the multiview frame whose PGM tile shows the take. It holds the PVW-cell layers of every
+    scene and the base layout (tiles and PGM) published here at build and on every reassignment;
+    this thread only checks that it holds the current base, and while the node is unreachable
+    it polls the mixer's preview and sets the composition itself, as before the node existed."""
 
     def __init__(self, avp, api, mixer, cfg, bus):
         super().__init__(avp, api, mixer, cfg, bus)
         self.pgm_edge = f"{self.prefix}_pgm"
+        self.follower = f"{self.prefix}_pvw"
         self.scenes, self.revision, self.preview = list(bus.scenes), uuid.uuid4().hex, ""
+        self.follower_status = {}
 
     def inputs(self):
         return [*self.edges, self.pgm_edge]
@@ -258,9 +302,22 @@ class AuxMultiview(_AuxOutput):
     def current_composition(self):
         return composition(self.cfg, self.scenes, self.preview)
 
+    def base(self, scenes=None, revision=None):
+        return {"revision": revision or self.revision,
+                **base_composition(self.cfg, self.scenes if scenes is None else scenes)}
+
+    def build(self, options):
+        super().build(options)
+        self.avp.addNode(_PvwFollowNode({
+            "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,
+            "fps": str(aux_fps(self.cfg.fps)), "latency_ms": self.latency_ms(),
+            "pgm_delay_frames": self.pgm_delay_frames, "base": self.base(), "pvw": pvw_layouts(self.cfg),
+            "group": self.group, "auto_restart": "off", "on_error": "off",
+        }))
+
     def details(self):
-        return {"scenes": list(self.scenes), "revision": self.revision, "pvw_scene": self.preview,
-                "cells": multiview_cells(self.cfg)}
+        return {"scenes": list(self.scenes), "revision": self.revision, "cells": multiview_cells(self.cfg),
+                "follower": self.follower_status}
 
     def assign(self, request):
         with self.lock:
@@ -268,22 +325,40 @@ class AuxMultiview(_AuxOutput):
                 return {"error": "Assignments changed; refresh before editing", "conflict": True,
                         "scenes": list(self.scenes), "revision": self.revision}
             scenes = request.get("scenes")
-            snapshot = composition(self.cfg, scenes, self.preview)
-            self._publish(snapshot)
-            self.scenes, self.revision, self.error = list(scenes), uuid.uuid4().hex, ""
+            base = self.base(scenes, uuid.uuid4().hex)
+            try:
+                self._set(self.follower, "base", base)
+            except Exception:
+                self._publish(composition(self.cfg, scenes, self.preview))
+            self.scenes, self.revision, self.error = list(scenes), base["revision"], ""
             return {"scenes": list(self.scenes), "revision": self.revision}
 
-    def run(self):
-        while not self.stopped.wait(0.05):
+    def _follow(self):
+        """One pass; returns the seconds until the next. A follower that restarted holds the base
+        it was built with, so resend the current one when its revision differs. Only one of the
+        two, the node or this thread, sets the composition at any time."""
+        with self.lock:
             try:
-                with self.lock:
-                    status = self.avp.node(self.node_name).getObject("status")
-                    preview = status.get("pvw_scene", "")
-                    if preview != self.preview:
-                        self._publish(composition(self.cfg, self.scenes, preview), status)
-                        self.preview = preview
+                status = self.avp.node(self.follower).getObject("status")
+                if status.get("base_revision") != self.revision:
+                    self._set(self.follower, "base", self.base())
+                self.follower_status = status
+                return 1.0
+            except Exception as exc:
+                self.follower_status = {"error": str(exc)}
+            try:
+                status = self.avp.node(self.node_name).getObject("status")
+                preview = status.get("pvw_scene", "")
+                if preview != self.preview:
+                    self._publish(composition(self.cfg, self.scenes, preview), status)
+                    self.preview = preview
             except Exception as exc:
                 self.error = str(exc)
+            return 0.05
+
+    def run(self):
+        while not self.stopped.wait(self._follow()):
+            pass
 
 
 class AuxSourcePages(_AuxOutput):

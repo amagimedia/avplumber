@@ -303,6 +303,7 @@ always outranks these; they are the state a fresh browser tab picks up.
 | field | default | meaning |
 | --- | --- | --- |
 | `direct` | `true` | a scene pick goes straight to program rather than loading preview |
+| `swap_preview` | `true` | a completed take previews the scene that left program (OBS's "Swap Preview/Program Scenes After Transitioning"); a cut swaps at once, a fade at its end. `false` clears the preview after a take. The swapped preview is shown, not loaded: the old program slot is idle, and taking it again reloads it like any other scene, so keep it in `prewarm` for an instant cut. Reaches the orchestrator as `mixer.init` `swap_preview`; until the native side reads that key, `false` has no effect |
 | `transition` | `"cut"` | what a direct-mode pick takes with: `cut`, `fade` or `wipe` |
 | `fade_seconds` | `0.5` | length of a fade |
 | `fade_curve` | `"linear"` | easing of a fade: `linear`, `ease-in` (t²), `ease-out` (1−(1−t)²) or `ease-in-out` (3t²−2t³); a take may pick its own (`mixer.fade {..., "curve": "ease-in"}`); a `mixer.fade` without `curve` is linear |
@@ -424,6 +425,25 @@ source list.
 The PGM tile of a `pgm_pvw_grid` bus runs one aux frame behind the other tiles:
 the finished program reaches the bus a frame after the sources it is made of,
 so that pad alone is shown a tick later instead of delaying every pad.
+
+The PVW tile of a `pgm_pvw_grid` bus is drawn by a `mixer_pvw_follow` node
+(`aux_<id>_pvw`), one per bus. The mixer hands it every preview change together
+with the program frame the take lands on, and it changes the compositor's
+layout on the multiview frame whose PGM tile shows that frame: nominally the
+same frame, not the poll-plus-tick lag of a status poller. The residual error
+is one aux frame either way when the follower or the compositor's render
+thread is more than half an aux frame late (16 ms at 30 aux fps, 20 ms at 25),
+half an aux frame at 50/60 fps (one at 25/30) when the program missed a frame
+deadline right before the cut, and one or more frames when the PVW scene's
+sources were not reaching the bus (a stalled source, or takes faster than
+about one aux frame). Wipes and explicit `mixer.preview` changes draw on the
+next frame. With `swap_preview` the program scene's sources are kept flowing
+to the bus so the swapped preview is warm: one subscription push per source
+per aux frame per bus, no compositing. `mixer.aux_status` reports the
+follower under `follower` (`last_change_to_apply_ms`,
+`last_target_error_ticks`, its base `revision`, `error`). Python publishes
+the layouts once (at build and on a slot assignment); while the node is
+unreachable the bus thread falls back to polling the preview every 50 ms.
 
 A bus's playout buffer is the main `latency_ms`, but at least two aux frames:
 80 ms at 25 and 50 fps, 66.7 ms at 30 and 60 fps by default.

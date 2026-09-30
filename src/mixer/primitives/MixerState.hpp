@@ -1,6 +1,7 @@
 #pragma once
 #include "../../instance_shared.hpp"
 #include "../../util.hpp"
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
@@ -9,6 +10,7 @@
 #include <vector>
 #include <atomic>
 #include "CutLatencyProbe.hpp"
+#include "MonotonicClock.hpp"
 #include "source_mask.hpp"
 #include "../transition_control.hpp"
 
@@ -72,7 +74,49 @@ struct MixerState : public InstanceShared<MixerState> {
 
     bool pgm_is_slot_a = true;
     std::string pgm_scene_name;
+    /// The preview as shown to the operator: what `mixer.preview` armed, or with `swap_preview` the
+    /// scene that just left program. Followers (mixer_pvw_follow) draw it; it says nothing about
+    /// the PVW slot's contents, see pvw_slot_scene.
     std::string pvw_scene_name;
+    /// The scene loaded in the PVW slot, "" while the slot is cold (after every completed or
+    /// dropped transition: the old program slot's sources are routed away). A take reuses the
+    /// slot only for this scene; anything else reloads it, so a swapped preview costs no GPU
+    /// time until it is taken.
+    std::string pvw_slot_scene;
+    /// OBS's "Swap Preview/Program Scenes After Transitioning": a completed take previews the
+    /// scene that left program. Off, a take clears the preview.
+    bool swap_preview = true;
+    /// Preview change feed for the followers, written under `mutex`, waited on with
+    /// `preview_changed`: the revision, the pts (ns, on the monotonic clock the compositors stamp
+    /// with) of the first program frame that shows the new program (0: the change is immediate),
+    /// and when it was published (monotonic ns), for the followers' latency metric.
+    uint64_t pvw_revision = 0;
+    int64_t pvw_effective_ns = 0;
+    int64_t pvw_published_ns = 0;
+    std::condition_variable preview_changed;
+    std::atomic<int> preview_followers{0};
+
+    /// Caller holds `mutex`. Shows `scene` ("" clears) as the preview from the program frame at
+    /// `effective_ns` (0: now) and wakes every follower.
+    void publishPreview(const std::string& scene, int64_t effective_ns) {
+        pvw_scene_name = scene;
+        pvw_effective_ns = effective_ns;
+        pvw_published_ns = monotonicNs();
+        ++pvw_revision;
+        preview_changed.notify_all();
+    }
+
+    /// Caller holds `mutex`. Program moves to `new_pgm` on slot A or B from the frame at
+    /// `effective_ns`; the other slot is cold, and the preview is the scene that left program
+    /// (swap_preview, when it differs) or nothing. Ends the transition.
+    void completeTransition(bool new_pgm_is_slot_a, std::string new_pgm, int64_t effective_ns) {
+        const std::string old_pgm = std::move(pgm_scene_name);
+        pgm_is_slot_a = new_pgm_is_slot_a;
+        pgm_scene_name = std::move(new_pgm);
+        pvw_slot_scene.clear();
+        publishPreview(swap_preview && old_pgm != pgm_scene_name ? old_pgm : "", effective_ns);
+        transition_mode = TransitionMode::Idle;
+    }
 
     int fps_num = 30, fps_den = 1;
     int64_t switch_margin_ms = 100;

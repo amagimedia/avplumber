@@ -42,17 +42,15 @@ void MixerOrchestrator::deferredCleanup(
     std::lock_guard<std::mutex> lock(state->mutex);
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Crossfade))
         return;
+    MixerOrchestrator orch(nodes, state, timeline, scheduler);
     try {
-        MixerOrchestrator orch(nodes, state, timeline, scheduler);
         orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
         orch.finishSnapshot();
     } catch (const std::exception& e) {
         logstream << "mixer: deferred cleanup error restoring routing: " << e.what();
     }
-    state->pgm_is_slot_a = new_pgm_is_slot_a;
-    state->pgm_scene_name = std::move(new_pgm_scene);
-    state->pvw_scene_name = "";
-    state->transition_mode = MixerState::TransitionMode::Idle;
+    // `presented` is the first program frame past the end of the fade: the new scene alone.
+    orch.finishTransition(new_pgm_is_slot_a, std::move(new_pgm_scene), presented.timestamp({1, 1000000000}));
 }
 
 // ---------------------------------------------------------------------------

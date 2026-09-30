@@ -181,10 +181,8 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
         }
 
         orch.finishSnapshot();
-        state->pgm_is_slot_a = new_pgm_is_slot_a;
-        state->pgm_scene_name = scene_name;
-        state->pvw_scene_name = "";
-        state->transition_mode = MixerState::TransitionMode::Idle;
+        // The switch happened under the wipe, well before this teardown: not timed.
+        orch.finishTransition(new_pgm_is_slot_a, scene_name, 0);
     } catch (const std::exception& e) {
         logstream << "mixer: wipe teardown error: " << e.what();
         if (transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
