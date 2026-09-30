@@ -44,14 +44,17 @@ void MixerOrchestrator::deferredCleanup(
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Crossfade))
         return;
     MixerOrchestrator orch(nodes, state, timeline, scheduler);
+    // `presented` is the first program frame past the end of the fade: the new scene alone. It
+    // has left the mixer already, so the followers get the swap before the routing, like a cut's.
+    const int64_t effective_ns = presented.timestamp({1, 1000000000});
     try {
-        orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
+        orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene, true,
+            [&](int64_t) { state->publishTakePreview(new_pgm_scene, effective_ns); });
         orch.finishSnapshot();
     } catch (const std::exception& e) {
         logstream << "mixer: deferred cleanup error restoring routing: " << e.what();
     }
-    // `presented` is the first program frame past the end of the fade: the new scene alone.
-    orch.finishTransition(new_pgm_is_slot_a, std::move(new_pgm_scene), presented.timestamp({1, 1000000000}));
+    orch.finishTransition(new_pgm_is_slot_a, std::move(new_pgm_scene), effective_ns);
 }
 
 // ---------------------------------------------------------------------------

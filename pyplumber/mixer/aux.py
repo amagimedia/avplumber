@@ -26,7 +26,15 @@ def aux_fps(fps, full_rate=False):
 PVW_ALIGNMENTS = ("program", "pgm_tile")
 
 
-def _parse_bus_timing(obj, multiview):
+def default_pgm_delay_frames(aux_fps):
+    """Aux frames the PGM pad is matched back unless the bus says: one, or two at a 50/60 fps
+    bus (full_rate). Either way about 33 ms (40 at 25/50) for the finished program to travel
+    from the main compositor, which releases it at its deadline, to the bus's deadline for it;
+    one 60 fps frame would leave 16.7 ms."""
+    return 2 if aux_fps > 30 else 1
+
+
+def _parse_bus_timing(obj, multiview, canvas_fps):
     """pvw_align, latency_ms, pgm_delay_frames and full_rate of one bus; the first and third
     belong to the pgm_pvw_grid layout only. Their consistency with the main latency is checked
     at build (_AuxOutput.build), where the main mixer's latency is known."""
@@ -43,7 +51,7 @@ def _parse_bus_timing(obj, multiview):
     align = obj.get("pvw_align", "program")
     if align not in PVW_ALIGNMENTS:
         raise ConfigError(f"aux pvw_align must be one of {', '.join(PVW_ALIGNMENTS)}")
-    delay = obj.get("pgm_delay_frames", 1)
+    delay = obj.get("pgm_delay_frames", default_pgm_delay_frames(aux_fps(canvas_fps, obj.get("full_rate", False))))
     if isinstance(delay, bool) or not isinstance(delay, int) or not 0 <= delay <= 6:
         raise ConfigError("aux pgm_delay_frames must be an integer from 0 to 6")
     return {"pvw_align": align, "latency_ms": latency, "pgm_delay_frames": delay,
@@ -96,7 +104,7 @@ def parse_aux_buses(values, cfg):
                 raise ConfigError("multiview needs one pad per unique source plus PGM; limit is 128")
             scenes = obj.get("scenes", [None] * 8)
             validate_assignments(cfg, scenes)
-        timing = _parse_bus_timing(obj, preset == "pgm_pvw_grid")
+        timing = _parse_bus_timing(obj, preset == "pgm_pvw_grid", cfg.fps)
         fps = aux_fps(cfg.fps, timing["full_rate"])
         renditions = obj.get("renditions", [])
         if len(renditions) != 1:
@@ -244,11 +252,14 @@ class _AuxOutput:
         if latency + self.pgm_delay_frames * 1000 / fps > 6000 / fps:
             raise ConfigError("main plus aux latency exceeds the six-frame aux history budget")
         # The program frame leaves the main compositor at its deadline, main latency after its
-        # pts, and is drawn here pgm_delay_frames aux ticks plus the bus latency after it: with
-        # no margin it misses its aux deadline and the PGM tile repeats or runs a tick late.
-        if self.pgm_edge and self.pgm_delay_frames * 1000 / fps + latency <= self.main_latency_ms():
+        # pts, and is drawn here pgm_delay_frames aux ticks plus the bus latency after it. That
+        # margin carries it through the output chain (snapshot, selectors, keyer, tap) to the bus:
+        # below one program frame the PGM tile repeats or runs a tick late on every take.
+        floor = 1000 / self.cfg.fps
+        if self.pgm_edge and self.pgm_delay_frames * 1000 / fps + latency - self.main_latency_ms() < floor - 1e-6:
             raise ConfigError(f"aux {self.bus.id}: pgm_delay_frames * aux frame + latency_ms must exceed the main "
-                              f"latency_ms ({self.main_latency_ms():g}) for the program frame to reach the bus in time")
+                              f"latency_ms ({self.main_latency_ms():g}) by a program frame ({floor:.1f} ms) at least, "
+                              f"for the program frame to reach the bus in time")
         inputs = self.inputs()
         for edge in [*inputs, self.output_edge, *(f"{self.prefix}_{suffix}" for suffix in
                       ("sdr", "fps", "keyframed", "video", "encoded", "repeat_headers", "video_rtp_mux"))]:
@@ -333,8 +344,8 @@ class AuxMultiview(_AuxOutput):
         self.pgm_edge = f"{self.prefix}_pgm"
         self.follower = f"{self.prefix}_pvw"
         # The PGM tile is the finished program (the last input), which reaches this bus a
-        # frame after the sources it is made of. Matching it one frame back (the default) keeps
-        # every other input at the normal latency instead of holding all of them a frame longer.
+        # frame after the sources it is made of. Matching it back (default_pgm_delay_frames)
+        # keeps every other input at the normal latency instead of holding all of them longer.
         self.pgm_delay_frames = bus.pgm_delay_frames
         self.scenes, self.revision, self.preview = list(bus.scenes), uuid.uuid4().hex, ""
         self.follower_status = {}

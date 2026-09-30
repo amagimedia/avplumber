@@ -6,8 +6,8 @@ import threading
 import pytest
 
 from pyplumber.mixer.aux import (AuxMultiview, AuxSourcePages, aux_fps, base_composition, composition,
-                                 multiview_cells, page_composition, page_grid, parse_aux_buses, pvw_layouts,
-                                 register_aux_commands, validate_assignments)
+                                 default_pgm_delay_frames, multiview_cells, page_composition, page_grid,
+                                 parse_aux_buses, pvw_layouts, register_aux_commands, validate_assignments)
 from pyplumber.mixer.config import default_latency_ms
 from pyplumber.mixer.config import AuxBus, ConfigError, Item, MixerConfig, Rect, Rendition, Scene, Source
 
@@ -321,6 +321,9 @@ def test_bus_timing_options_parse_and_validate(cfg):
     assert (chosen.pvw_align, chosen.latency_ms, chosen.pgm_delay_frames, chosen.full_rate) == ("pgm_tile", 66.7, 0, True)
     assert chosen.renditions[0].fps == 60   # full rate: the rendition runs at the canvas rate
     assert parse_aux_buses([bus_json(renditions=[{"id": "monitor", "port": 5010, "fps": 60}], full_rate=True)], cfg)
+    # A 50/60 fps bus matches the PGM pad two frames back: about 33 ms of margin, as at half rate.
+    assert parse_aux_buses([bus_json(full_rate=True)], cfg)[0].pgm_delay_frames == 2
+    assert [default_pgm_delay_frames(aux_fps(fps, full)) for fps, full in ((60, False), (60, True), (50, True), (30, True), (25, False))] == [1, 2, 2, 1, 1]
     pages = parse_aux_buses([pages_json(full_rate=True, latency_ms=40)], cfg)[0]
     assert (pages.full_rate, pages.latency_ms, pages.renditions[0].fps) == (True, 40, 60)
     for invalid in (bus_json(pvw_align="nearest"), bus_json(latency_ms=0), bus_json(latency_ms="50"),
@@ -338,17 +341,21 @@ class _Built(Exception):
 
 def test_program_frame_must_reach_the_bus_before_its_deadline(cfg):
     """At the main latency the program frame leaves its compositor when a pgm_delay_frames 0 bus
-    would draw it; the PGM pad needs a tick of delay or a longer bus buffer. The checks precede
-    the first graph call, which ends the build here."""
+    would draw it; the PGM pad needs a tick of delay or a longer bus buffer, at least one program
+    frame of margin. The checks precede the first graph call, which ends the build here."""
     avp = SimpleNamespace(edges=SimpleNamespace(planCapacity=lambda *_: (_ for _ in ()).throw(_Built())))
     mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=50, name="mixer")
     def build(**options):
         AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json(**options)], cfg)[0]).build(None)
-    for options in ({"pgm_delay_frames": 0}, {"full_rate": True, "pgm_delay_frames": 0}):
-        with pytest.raises(ConfigError, match="pgm_delay_frames"):
+    for options in ({"pgm_delay_frames": 0}, {"full_rate": True, "pgm_delay_frames": 0},
+                    {"pgm_delay_frames": 0, "latency_ms": 51},          # 1 ms is no margin for the output chain
+                    {"pgm_delay_frames": 0, "latency_ms": 66}):         # just under a 60 fps frame
+        with pytest.raises(ConfigError, match=r"pgm_delay_frames .* by a program frame \(16.7 ms\)"):
             build(**options)
     for options in ({}, {"pgm_delay_frames": 0, "latency_ms": 83.4},   # one aux tick more than the program
-                    {"full_rate": True}):                            # 16.7 + 50 > 50: the delay covers it
+                    {"pgm_delay_frames": 0, "latency_ms": 66.7},       # exactly one program frame: the floor
+                    {"full_rate": True},                               # 33.3 + 50 - 50: the default two frames
+                    {"full_rate": True, "pgm_delay_frames": 1}):       # 16.7 + 50 - 50: one frame, an opt-in
         with pytest.raises(_Built):
             build(**options)
 

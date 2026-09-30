@@ -28,10 +28,13 @@
 // deadline before the cut, or a frame emitted between the selector switch and the read that
 // follows it at once): half an aux tick at 50/60 fps, a whole one at 25/30. In Program mode a
 // change lands on a tick whose deadline equals the program frame's: the mixer publishes it
-// after switching the selector and finishing the take's routing, between the emission of
-// frame K-1 and of frame K, so the follower has what is left of one main tick (0 to 16.7 ms
-// at 60 fps) minus the main compositor's render time and that routing; a publish or apply
-// past the deadline lands on the next tick (+1). The
+// right after switching the selector, before the take's routing (MixerState::preview_mutex
+// lets the follower wake meanwhile), at a random phase between the emission of frame K-1 and
+// of frame K, so the follower has what is left of one main tick (0 to 16.7 ms at 60 fps)
+// minus the main compositor's render time, its own wake and the compositor's status read and
+// composition set; a set past the deadline lands on the next tick (+1). A fade's change is
+// published from a frame already presented, so such a tick has passed by construction
+// (`target_unreachable` in the follower's status) and the change lands on the next. The
 // timed composition only drops inputs (the previewed scene's are active; with swap_preview the
 // program scene's stay warm), so the compositor applies it at once; when it does add one the bus
 // was not receiving (a source that stalled, or takes faster than the warm-up settle, about one
@@ -66,7 +69,7 @@ struct PreviewFollowTiming {
     /// a few ns short of it, and both compositors take longer than this to render.
     static constexpr int64_t kSameInstantNs = 1000000;
     /// The aux tick the PVW tile changes on for the first frame of a new program stamped
-    /// `effective_ns` (see MixerState::pvw_effective_ns), by the alignment above.
+    /// `effective_ns` (see MixerState::PreviewChange), by the alignment above.
     int64_t targetTick(int64_t effective_ns) const {
         const int64_t pts = programPts(effective_ns);
         if (align == PreviewAlign::PgmTile) return aux.nearestIndex(pts) + pgm_delay_ticks;

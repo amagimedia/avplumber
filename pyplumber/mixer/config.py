@@ -198,7 +198,9 @@ class AuxBus:
     # "pgm_tile", with the PGM tile of the same multiview (one pgm_delay_frames later).
     pvw_align: str = "program"
     latency_ms: Optional[float] = None   # the bus compositor's playout buffer; None: the main mixer's
-    pgm_delay_frames: int = 1            # pgm_pvw_grid: aux ticks the PGM pad is matched back
+    # pgm_pvw_grid: aux ticks the PGM pad is matched back; parse_aux_buses defaults it to
+    # aux.default_pgm_delay_frames (1, or 2 at a 50/60 fps bus).
+    pgm_delay_frames: int = 1
     full_rate: bool = False              # run at the canvas rate at 50/60 fps instead of half
 
 

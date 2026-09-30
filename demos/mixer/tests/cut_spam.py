@@ -126,11 +126,13 @@ def playout_delta(before, after):
 class PvwSamples:
     """The AUX multiviews' PVW change latencies, informational: `mixer.status` `pvw_latency` holds
     each follower's (`aux_<bus>_pvw`) last timed change, so every status poll feeds `observe` and
-    a change counts once, by its revision. `pvw_minus_pgm_ms` is how much later than the program
-    frame the multiview frame with the new PVW tile leaves its compositor (0 when aligned, one aux
-    tick when the change missed its tick); the latencies run from the take's receipt to the two
-    compositor deadlines, so the cut probe's encoder-output `ms` exceeds `pgm_latency_ms` by the
-    program encoder's share."""
+    a change counts once, by its revision, under its take's `kind`. `pvw_minus_pgm_ms` is how
+    much later than the program frame the multiview frame with the new PVW tile leaves its
+    compositor (0 when aligned, one aux tick when the change missed its tick: `late`, or when
+    its tick had passed before the mixer published it: `unreachable`, every fade); the latencies
+    run from the take's receipt to the two compositor deadlines, so the cut probe's
+    encoder-output `ms` exceeds a cut's `pgm_latency_ms` by the program encoder's share, and a
+    fade's include the fade."""
 
     def __init__(self):
         self.samples = {}
@@ -140,18 +142,25 @@ class PvwSamples:
             if isinstance(entry, dict) and entry.get("pvw_minus_pgm_ms") is not None:
                 self.samples.setdefault((follower, entry.get("applied_revision")), entry)
 
+    @staticmethod
+    def block(entries):
+        """Counts and summaries of the difference and the latencies over *entries*."""
+        def of(key):
+            return summarize([e[key] for e in entries if isinstance(e.get(key), (int, float))])
+        unreachable = [bool(e.get("target_unreachable")) for e in entries]
+        return {"n": len(entries), "pvw_minus_pgm": of("pvw_minus_pgm_ms"), "pvw_latency": of("pvw_latency_ms"),
+                "pgm_latency": of("pgm_latency_ms"), "unreachable": sum(unreachable),
+                "late": sum((e.get("last_target_error_ticks") or 0) > 0 and not u for e, u in zip(entries, unreachable))}
+
     def summary(self):
-        """None without a sample; else counts and summaries of the difference and the latencies."""
+        """None without a sample; else the followers, their alignments and one block per take kind."""
         if not self.samples:
             return None
         entries = list(self.samples.values())
-        def of(key):
-            return summarize([e[key] for e in entries if isinstance(e.get(key), (int, float))])
+        kinds = sorted({e.get("kind") or "cut" for e in entries})
         return {"followers": sorted({follower for follower, _ in self.samples}),
                 "align": sorted({str(e.get("align")) for e in entries}),
-                "pvw_minus_pgm": of("pvw_minus_pgm_ms"), "pvw_latency": of("pvw_latency_ms"),
-                "pgm_latency": of("pgm_latency_ms"),
-                "late": sum((e.get("last_target_error_ticks") or 0) > 0 for e in entries)}
+                "kinds": {kind: self.block([e for e in entries if (e.get("kind") or "cut") == kind]) for kind in kinds}}
 
 
 def pick_scenes(names, explicit=None, prefix=""):
@@ -436,12 +445,17 @@ def gate(args):
 
 
 def pvw_line(pvw):
+    """The cuts' block, the goal of the alignment; the other kinds by count. A fade's swap lands
+    a tick after the program frame by construction, so its numbers say nothing about lateness."""
     if not pvw:
         return "pvw       no AUX multiview reported a timed PVW change (mixer.status pvw_latency)"
-    d, lat = pvw["pvw_minus_pgm"], pvw["pvw_latency"]
-    return (f"pvw       {', '.join(pvw['followers'])} ({', '.join(pvw['align'])}): n={d['n']} PVW-PGM "
-            f"p50={fmt(d['p50'])} p95={fmt(d['p95'])} max={fmt(d['max'])} ms, {pvw['late']} missed their tick; "
-            f"PVW latency p50={fmt(lat['p50'])} max={fmt(lat['max'])} ms (receipt to compositor deadlines, informational)")
+    kind = "cut" if "cut" in pvw["kinds"] else next(iter(pvw["kinds"]))
+    block, d, lat = pvw["kinds"][kind], pvw["kinds"][kind]["pvw_minus_pgm"], pvw["kinds"][kind]["pvw_latency"]
+    unreachable = f", {block['unreachable']} unreachable" if block["unreachable"] else ""
+    others = "".join(f"; {k} n={b['n']}" for k, b in pvw["kinds"].items() if k != kind)
+    return (f"pvw       {', '.join(pvw['followers'])} ({', '.join(pvw['align'])}): {kind} n={block['n']} PVW-PGM "
+            f"p50={fmt(d['p50'])} p95={fmt(d['p95'])} max={fmt(d['max'])} ms, {block['late']} missed their tick{unreachable}; "
+            f"PVW latency p50={fmt(lat['p50'])} max={fmt(lat['max'])} ms (receipt to compositor deadlines, informational){others}")
 
 
 def print_summary(r):

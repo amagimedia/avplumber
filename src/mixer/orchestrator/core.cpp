@@ -203,8 +203,7 @@ void MixerOrchestrator::interruptTransition() {
     }
     // The program slot's routing was restored above: the other slot is cold now.
     state_->pvw_slot_scene.clear();
-    state_->take_received_ns = 0;
-    state_->publishPreview("", 0);
+    state_->clearTakePreview();
     state_->transition_mode = MixerState::TransitionMode::Idle;
     {
         const auto release_pts = releaseAfterSelectorOutput();
@@ -264,8 +263,7 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
     // The output gate still waits for a fresh program frame before releasing.
     cleanup([&] { finishSnapshot(); });
     state_->pvw_slot_scene.clear();
-    state_->take_received_ns = 0;
-    state_->publishPreview("", 0);
+    state_->clearTakePreview();
     state_->transition_mode = MixerState::TransitionMode::Idle;
 }
 
@@ -286,6 +284,10 @@ int64_t MixerOrchestrator::finishSnapshot(int64_t emitted) {
     std::lock_guard<std::mutex> lock(snapshot->mutex);
     snapshot->frames.finish();
     snapshot->frames.arm(releaseAfter(emitted), false);
+    return firstNewProgramFrameNs(emitted);
+}
+
+int64_t MixerOrchestrator::firstNewProgramFrameNs(int64_t emitted) const {
     return emitted ? emitted + TickGrid(av::Rational(state_->fps_num, state_->fps_den)).time(1) : 0;
 }
 
@@ -329,15 +331,18 @@ Parameters MixerOrchestrator::status() const {
     s["pgm_scene"] = state_->pgm_scene_name;
     s["pvw_scene"] = state_->pvw_scene_name;
     s["pvw_slot_scene"] = state_->pvw_slot_scene;
-    s["pvw_revision"] = state_->pvw_revision;
     s["swap_preview"] = state_->swap_preview;
     s["preview_followers"] = state_->preview_followers.load();
     s["pgm_slot"] = state_->pgm_is_slot_a ? "A" : "B";
     s["switch_margin_ms"] = state_->switch_margin_ms;
     s["now_pts_ms"] = wallclock.pts();
     s["cut_latency"] = state_->cut_latency ? state_->cut_latency->status() : Parameters(nullptr);
-    // Every AUX multiview's PVW change latency next to the program's (mixer_pvw_follow).
-    s["pvw_latency"] = Parameters(state_->preview_follow_samples);
+    {
+        // Every AUX multiview's PVW change latency next to the program's (mixer_pvw_follow).
+        std::lock_guard<std::mutex> feed(state_->preview_mutex);
+        s["pvw_revision"] = state_->preview.revision;
+        s["pvw_latency"] = Parameters(state_->preview_follow_samples);
+    }
     s["prewarm_cut_scenes"] = state_->prewarm_cut_scenes;
     s["prewarm_source_mask"] = toParameters(state_->prewarm_source_mask);
     if (!state_->overlay_selector_name.empty()) {

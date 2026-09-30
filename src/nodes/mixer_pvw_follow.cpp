@@ -15,11 +15,12 @@
 // tile shows that frame ("pgm_tile"), see PreviewFollow.hpp. Every timed change is measured
 // from the take command's receipt to the aux deadline it is drawn at (`pvw_latency_ms`), next
 // to the program frame's own deadline (`pgm_latency_ms`; the cut probe's `cut_latency` ends at
-// the encoder's output instead), and their difference `pvw_minus_pgm_ms`, in this node's status
-// and in `mixer.status` `pvw_latency`. The control side publishes the layouts once: `pvw`, the PVW-cell layers
-// of every scene, and `base`, the rest of the composition (the operator's tiles and the PGM
-// tile); every composition this node sets is pvw[shown] followed by base, and it is the only
-// writer of the compositor's composition while it runs.
+// the encoder's output instead), and their difference `pvw_minus_pgm_ms`, with the take's
+// `kind`, in this node's status and in `mixer.status` `pvw_latency`. The control side
+// publishes the layouts once: `pvw`, the PVW-cell layers of every scene, and `base`, the rest
+// of the composition (the operator's tiles and the PGM tile); every composition this node sets
+// is pvw[shown] followed by base, and it is the only writer of the compositor's composition
+// while it runs.
 //
 // With swap_preview the scene that leaves program becomes the preview, so a settle pass after
 // every take adds the program scene's sources to the active inputs (no layer draws them: one
@@ -30,17 +31,16 @@
 // in applied_inputs_ without being active, so the next timed apply adds it and is staged too.
 //
 // The compositor is resolved once, at creation: a lookup by name takes NodeManager's lock, which
-// shutdown holds while it joins this thread.
+// shutdown holds while it joins this thread. Once running, this thread takes only the feed's
+// lock (MixerState::preview_mutex), never the mixer's `mutex`: the orchestrator holds that
+// while it takes NodeManager's lock, and while it routes a take, which is when a timed change
+// has to reach the compositor.
 class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, public IReturnsObjects {
     struct Layout {
         Parameters layers = Parameters::array();
         avp::mixer::SourceMask inputs;
     };
-    struct Change {
-        std::string shown, pgm;
-        int64_t effective_ns = 0, published_ns = 0, received_ns = 0;
-        bool swap = false;
-        uint64_t revision = 0;
+    struct Change : avp::mixer::MixerState::PreviewChange {
         int64_t target = 0;   // aux tick it changes the PVW tile on; 0: at once
     };
     std::shared_ptr<avp::mixer::MixerState> state_;
@@ -55,7 +55,7 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     std::unordered_map<std::string, Layout> pvw_;
     Parameters status_ = Parameters::object();
     std::string error_;
-    // Wake reasons besides the mixer's revision. The base is flagged under state_->mutex; the
+    // Wake reasons besides the mixer's revision. The base is flagged under the feed's lock; the
     // stop is not, since the framework requests it under locks the orchestrator takes after
     // state_->mutex: a wake lost that way lasts one aux tick.
     bool base_dirty_ = true;
@@ -97,8 +97,8 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
         avp::mixer::SourceMask inputs;
         {
             std::lock_guard<std::mutex> lock(layouts_mutex_);
-            const Layout* pvw = change.shown.empty() ? nullptr : layout(change.shown);
-            warning_ = !change.shown.empty() && !pvw ? "no PVW layout for scene " + change.shown : "";
+            const Layout* pvw = change.pvw.empty() ? nullptr : layout(change.pvw);
+            warning_ = !change.pvw.empty() && !pvw ? "no PVW layout for scene " + change.pvw : "";
             Parameters layers = pvw ? pvw->layers : Parameters::array();
             layers.insert(layers.end(), base_.layers.begin(), base_.layers.end());
             inputs = base_.inputs | (pvw ? pvw->inputs : avp::mixer::SourceMask{});
@@ -127,17 +127,21 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     /// change (a cut or fade) its latency from the take's receipt against the program's. Both
     /// end at compositor deadlines: the aux tick the change is first drawn on (the tick its
     /// apply time falls in, so a late apply shows as a later tick) and the program frame's.
+    /// `target_unreachable`: the target tick was being drawn, or gone, when the change was
+    /// published (a fade's first frame past its end is read after it was presented), so the
+    /// tick after it is where the change lands, not a miss of this node's.
     Parameters sample(const Change& change, int64_t applied_at) const {
-        Parameters status = {{"pvw_scene", change.shown}, {"pgm_scene", change.pgm},
+        Parameters status = {{"pvw_scene", change.pvw}, {"pgm_scene", change.pgm}, {"kind", change.kind},
                              {"applied_revision", change.revision}, {"target_tick", change.target},
                              {"align", timing_.align == avp::mixer::PreviewAlign::Program ? "program" : "pgm_tile"},
                              {"last_change_to_apply_ms", (applied_at - change.published_ns) / 1e6},
-                             {"last_target_error_ticks", 0}, {"pvw_latency_ms", nullptr},
-                             {"pgm_latency_ms", nullptr}, {"pvw_minus_pgm_ms", nullptr}};
+                             {"last_target_error_ticks", 0}, {"target_unreachable", false},
+                             {"pvw_latency_ms", nullptr}, {"pgm_latency_ms", nullptr}, {"pvw_minus_pgm_ms", nullptr}};
         if (!change.target) return status;
         const int64_t drawn = timing_.tickDrawnAfter(applied_at);
         const int64_t pvw = timing_.deadline(drawn), pgm = timing_.programDeparture(change.effective_ns);
         status["last_target_error_ticks"] = drawn - change.target;
+        status["target_unreachable"] = timing_.deadline(change.target) <= change.published_ns;
         status["pvw_minus_pgm_ms"] = (pvw - pgm) / 1e6;
         if (change.received_ns) {
             status["pvw_latency_ms"] = (pvw - change.received_ns) / 1e6;
@@ -168,18 +172,17 @@ public:
         bool dirty;
         std::optional<Change> fresh;
         {
-            std::unique_lock<std::mutex> lock(state_->mutex);
+            std::unique_lock<std::mutex> lock(state_->preview_mutex);
             state_->preview_changed.wait_until(lock, std::chrono::steady_clock::time_point(std::chrono::nanoseconds(wake_by)),
-                [&] { return stopping_ || base_dirty_ || !seen_ || state_->pvw_revision != *seen_; });
+                [&] { return stopping_ || base_dirty_ || !seen_ || state_->preview.revision != *seen_; });
             if (stopping_) return;
             dirty = base_dirty_ || dirty_retry_;
             base_dirty_ = dirty_retry_ = false;
-            if (!seen_ || state_->pvw_revision != *seen_) {
+            if (!seen_ || state_->preview.revision != *seen_) {
+                fresh = Change{state_->preview};
                 // The first read takes the state as it is; the change it came from is history.
-                fresh = Change{state_->pvw_scene_name, state_->pgm_scene_name, seen_ ? state_->pvw_effective_ns : 0,
-                               state_->pvw_published_ns, state_->pvw_received_ns, state_->swap_preview,
-                               state_->pvw_revision};
-                seen_ = state_->pvw_revision;
+                if (!seen_) fresh->effective_ns = 0;
+                seen_ = state_->preview.revision;
             }
         }
         try {
@@ -198,7 +201,7 @@ public:
                                            : std::nullopt;
                 Parameters status = sample(applied_, applied_at);
                 if (applied_.target) {
-                    std::lock_guard<std::mutex> lock(state_->mutex);
+                    std::lock_guard<std::mutex> lock(state_->preview_mutex);
                     state_->preview_follow_samples[name_] = status;
                 }
                 std::lock_guard<std::mutex> lock(layouts_mutex_);
@@ -239,7 +242,7 @@ public:
         } else {
             throw Error("mixer_pvw_follow: unknown object " + key);
         }
-        std::lock_guard<std::mutex> lock(state_->mutex);
+        std::lock_guard<std::mutex> lock(state_->preview_mutex);
         base_dirty_ = true;
         state_->preview_changed.notify_all();
     }

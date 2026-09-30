@@ -164,7 +164,8 @@ void MixerOrchestrator::initializeRoutedRoutes() {
 
 int64_t MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
                                                       const std::string& new_pgm_scene,
-                                                      bool picture_changed) {
+                                                      bool picture_changed,
+                                                      const std::function<void(int64_t)>& switched) {
     const auto scene_it = state_->scenes.find(new_pgm_scene);
     if (scene_it == state_->scenes.end())
         return 0;
@@ -183,8 +184,10 @@ int64_t MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
     setNodeObject(state_->source_switcher_name, "active",
                   Parameters(new_pgm_is_slot_a ? 0 : 1));
     // Read at once: the selector drains its inactive inputs, so the new program's first frame
-    // arrives at the next main deadline, and the routing below could take until then.
+    // arrives at the next main deadline, and the routing below could take until then. The
+    // followers of a take get their change now, for the same reason.
     const int64_t emitted = selectorOutputNs();
+    if (switched) switched(emitted);
 
     // The encoder must not make the receiver wait for the next periodic keyframe:
     // a cut changes the whole picture, and a P-frame carrying it can exceed what

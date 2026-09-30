@@ -60,10 +60,14 @@ class MixerOrchestrator {
     /// Caller must hold state_->mutex. Wipe end has different semantics
     /// (timeline-driven, doesn't immediately mutate node objects) and uses
     /// its own logic. `picture_changed` false (the on-air picture stays the same) skips
-    /// the encoder keyframe request. Returns selectorOutputNs() read right after the
-    /// selector was switched, for finishSnapshot(); 0 for an unknown scene.
+    /// the encoder keyframe request. `switched`, when given, runs right after the selector
+    /// switch with selectorOutputNs() read then, before the routing: a finishing take
+    /// publishes its preview there (MixerState::publishTakePreview), so the AUX followers
+    /// start while the routing runs. Returns that same reading, for finishSnapshot(); 0 for
+    /// an unknown scene.
     int64_t applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene,
-                                       bool picture_changed = true);
+                                       bool picture_changed = true,
+                                       const std::function<void(int64_t emitted)>& switched = {});
 
     void ensureIdle() const;
     void interruptTransition();
@@ -75,6 +79,9 @@ class MixerOrchestrator {
     /// anything.
     int64_t finishSnapshot(int64_t emitted);
     int64_t finishSnapshot() { return finishSnapshot(selectorOutputNs()); }
+    /// pts (ns) of the first frame of the new program: one main tick after `emitted`, the
+    /// selector's newest output read after it was switched; 0 before it emitted anything.
+    int64_t firstNewProgramFrameNs(int64_t emitted) const;
     /// pts (ns) of the newest frame the selector has emitted, 0 before its first.
     int64_t selectorOutputNs() const;
     /// Release timestamp (ns) for the output hold: the first frame newer than everything

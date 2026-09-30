@@ -158,15 +158,17 @@ the right. Drag the divider to resize the panes; the split persists in your
 browser. The player uses port 8080 on the same host and defaults to H.265/HDR;
 open the control page with `?codec=h264` for SDR. If you change
 `JANUS_PREVIEW_PORT`, pass that port as `?preview_port=8084` on the control page.
-The standalone preview includes the latency and RTT readouts. The control page
-opens every viewer, program and multiviews, with the player's `?lowlat=1`: the
-WebRTC jitter buffer pinned to its minimum (`jitterBufferTarget` and
-`playoutDelayHint` 0), the same for both so a cut shows in the program and in
-the multiview's PVW tile at the same instant (measured gain 4–5 ms on a clean
-link, more against an adaptive buffer that grew). `?lowlat=0` on the control
-page keeps the browser's adaptive buffer for every viewer, for a link that
-loses packets or a software HEVC decoder that drops late frames. The standalone
-player keeps its own default (adaptive) unless opened with `?lowlat=1`.
+The standalone preview includes the latency and RTT readouts. Every viewer the
+control page opens, program and multiviews, plays with the same receiver
+playout delay: the browser's adaptive jitter buffer by default, or, with
+`?lowlat=1` on the control page, the player's `?lowlat=1` for all of them, the
+buffer pinned to its minimum (`jitterBufferTarget` and `playoutDelayHint` 0)
+so a cut shows in the program and in the multiview's PVW tile at the same
+instant instead of each stream settling on its own delay. The pin stays opt-in,
+as on the player: it gains 4–5 ms on a clean link and removes the cushion on a
+link that loses packets, and a software HEVC decoder drops late frames while
+the program viewport defaults to H.265 wherever the browser plays it; try it
+with `?codec=h264` first.
 
 Two surfaces speak the same protocol and can run at once. Cut is the default
 transition; explicit show settings and operator choices can select Fade or Wipe.
