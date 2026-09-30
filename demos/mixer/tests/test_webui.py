@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -12,7 +13,7 @@ import urllib.request
 import pytest
 
 from pyplumber.mixer.control import mixer_command
-from webui import GpuStats, MixerBridge, serve
+from webui import GpuStats, HostStats, MixerBridge, serve
 
 
 class FakeBridge(MixerBridge):
@@ -46,9 +47,9 @@ def client(monkeypatch):
     monkeypatch.setattr(GpuStats, 'snapshot', lambda _: [])
     bridges = []
 
-    def start(bridge):
+    def start(bridge, host=None):
         bridges.append(bridge)
-        server = serve(bridge, "127.0.0.1", 0)
+        server = serve(bridge, "127.0.0.1", 0, host=host)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return f"http://127.0.0.1:{server.server_address[1]}", server
 
@@ -93,6 +94,59 @@ def test_gpu_query_failure_clears_old_sample_and_is_cached(monkeypatch, error):
     assert stats.snapshot() == [] and len(calls) == 1
 
 
+def fake_proc(root, load1, cpu, threads=None, pid=4242):
+    """A /proc with one host of two vCPUs and, given {tid: (comm, utime, stime)}, the mixer's threads."""
+    (root / "loadavg").write_text(f"{load1} 20.1 18.7 3/1234 56789\n")
+    (root / "stat").write_text(f"cpu {' '.join(map(str, cpu))} 0 0\ncpu0 1 0 0 1 0 0 0 0 0 0\ncpu1 1 0 0 1 0 0 0 0 0 0\n"
+                               "intr 5 1 2\nctxt 9\n")
+    for tid, (comm, utime, stime) in (threads or {}).items():
+        task = root / str(pid) / "task" / str(tid)
+        task.mkdir(parents=True, exist_ok=True)
+        task.joinpath("stat").write_text(f"{tid} ({comm}) S 1 1 1 0 -1 4194560 0 0 0 0 {utime} {stime} 0 0 20 0 1 0 5 0 0\n")
+
+
+def test_host_stats_sample_load_cpu_and_the_busiest_mixer_thread(tmp_path, monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr("webui.time.monotonic", lambda: now[0])
+    hz = os.sysconf("SC_CLK_TCK")
+    pid = [4242]
+    stats = HostStats(lambda: pid[0], proc=tmp_path)
+    #                       user nice system idle iowait irq softirq steal
+    fake_proc(tmp_path, 3.5, [100, 0, 50, 800, 20, 0, 10, 0], {1: ("mixer.py", 500, 100), 2: ("mixer_comp_a", 10, 0)})
+    stats.sample()
+    assert stats.values is None   # the first sample has nothing to diff against
+    now[0] += 2.0   # user+nice+system+irq+softirq+steal grew 52 of 100 ticks; thread 2 ran 76 ticks over two seconds
+    fake_proc(tmp_path, 21.4, [140, 2, 58, 840, 28, 1, 10, 1], {1: ("mixer.py", 505, 105), 2: ("mixer_comp_a", 84, 2),
+                                                                3: ("mixer (new)", 30, 1)})
+    stats.sample()
+    assert stats.values == dict(load1=21.4, vcpus=2, cpu_pct=52, thread_pct=round(76 * 100 / hz / 2), thread_name="mixer_comp_a")
+    # Without a mixer, or before its first diff after a restart, the thread fields stay unknown.
+    pid[0] = None
+    now[0] += 1.0
+    stats.sample()
+    assert stats.values["thread_pct"] is None and stats.values["thread_name"] is None
+    pid[0] = 4243
+    now[0] += 1.0
+    fake_proc(tmp_path, 1.0, [150, 2, 58, 940, 28, 1, 10, 1], {1: ("mixer.py", 900, 100)}, pid=4243)
+    stats.sample()
+    assert stats.values["cpu_pct"] == 9 and stats.values["thread_pct"] is None
+    now[0] += 1.0
+    fake_proc(tmp_path, 1.0, [150, 2, 58, 1040, 28, 1, 10, 1], {1: ("mixer.py", 920, 100)}, pid=4243)
+    stats.sample()
+    assert stats.values["cpu_pct"] == 0 and stats.values["thread_pct"] == round(20 * 100 / hz) and stats.values["thread_name"] == "mixer.py"
+
+
+def test_host_stats_survive_a_missing_proc_and_a_vanished_mixer(tmp_path):
+    stats = HostStats(lambda: 4242, proc=tmp_path)
+    with pytest.raises(OSError):   # the sampling thread then publishes no values
+        stats.sample()
+    fake_proc(tmp_path, 1.0, [1, 0, 1, 1, 0, 0, 0, 0])   # a pid without a /proc entry: the mixer just exited
+    stats.sample()
+    fake_proc(tmp_path, 1.0, [2, 0, 2, 2, 0, 0, 0, 0])
+    stats.sample()
+    assert stats.values["cpu_pct"] == 67 and stats.values["thread_pct"] is None
+
+
 def get(url, path):
     with urllib.request.urlopen(url + path, timeout=5) as response:
         return response.status, json.loads(response.read() or b"{}")
@@ -122,7 +176,16 @@ def test_state_is_one_round_trip_of_status_scenes_and_settings(client):
     assert body["status"]["pgm_scene"] == "a"
     assert body["scenes"] == ["a", "b"]
     assert body["settings"]["direct"] is True
+    assert body["host"] is None   # no host sampler: the page hides its meters
     assert bridge.sent == ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
+
+
+def test_state_carries_the_host_sample(client):
+    bridge = FakeBridge(STATE_REPLIES)
+    host = HostStats()
+    host.values = dict(load1=21.4, vcpus=16, cpu_pct=52, thread_pct=38, thread_name="mixer_comp_a")
+    url, _ = client(bridge, host=host)
+    assert get(url, "/api/state")[1]["host"] == host.values
 
 
 STATE_REPLIES = {"mixer.status": '{"pgm_scene":"a"}', "mixer.scenes": '["a","b"]', "mixer.settings": "{}"}

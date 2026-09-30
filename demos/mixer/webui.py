@@ -28,6 +28,7 @@ import collections
 import csv
 import json
 import logging
+import os
 import subprocess
 import threading
 import signal
@@ -75,6 +76,69 @@ class GpuStats:
         finally:
             self.lock.release()
         return self.values
+
+
+class HostStats:
+    """Host load, CPU use and the mixer's busiest thread, sampled once a second on one thread and
+    shared by every viewer. Inside the container /proc/loadavg and /proc/stat still describe the
+    whole host, not the container's share. `values` is None where /proc is missing and until the
+    second sample; its thread fields are None while no mixer process runs."""
+
+    def __init__(self, mixer_pid=lambda: None, proc=Path("/proc")):
+        self.mixer_pid = mixer_pid   # the mixer's pid, or None while none runs
+        self.proc = proc
+        self.values = None
+        self._last = None   # (monotonic time, cpu counters, pid, {tid: (comm, ticks)}) of the previous sample
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True, name="host-stats").start()
+
+    def _run(self):
+        while True:
+            try:
+                self.sample()
+            except (OSError, ValueError):   # no /proc (macOS), or a torn read of it
+                self.values = None
+            time.sleep(1)
+
+    def sample(self):
+        load1 = float((self.proc / "loadavg").read_text().split()[0])
+        lines = (self.proc / "stat").read_text().splitlines()
+        # user nice system idle iowait irq softirq steal; guest time is already inside user and nice.
+        cpu = [int(v) for v in lines[0].split()[1:9]]
+        pid, at = self.mixer_pid(), time.monotonic()
+        threads = self._thread_ticks(pid) if pid else {}
+        last, self._last = self._last, (at, cpu, pid, threads)
+        if last is None:
+            return
+        last_at, last_cpu, last_pid, last_threads = last
+        total, idle = sum(cpu) - sum(last_cpu), cpu[3] + cpu[4] - last_cpu[3] - last_cpu[4]
+        values = dict(load1=load1, vcpus=sum(line[3:4].isdigit() for line in lines if line.startswith("cpu")),
+                      cpu_pct=round((total - idle) / total * 100) if total > 0 else None, thread_pct=None, thread_name=None)
+        if pid and pid == last_pid:   # a restarted mixer's thread ids say nothing about the previous ones
+            name, ticks = max(((name, ticks - last_threads.get(tid, ("", 0))[1]) for tid, (name, ticks) in threads.items()),
+                              key=lambda item: item[1], default=(None, 0))
+            if name is not None:
+                values.update(thread_pct=round(ticks * 100 / os.sysconf("SC_CLK_TCK") / (at - last_at)), thread_name=name)
+        self.values = values   # a fresh dict: HTTP threads read the previous one meanwhile
+
+    def _thread_ticks(self, pid):
+        """{tid: (comm, utime + stime)} for every thread of *pid*: one listing and one read per thread."""
+        tasks = self.proc / str(pid) / "task"
+        try:
+            tids = os.listdir(tasks)
+        except OSError:
+            return {}   # the mixer exited since its pid was read
+        ticks = {}
+        for tid in tids:
+            try:
+                stat = (tasks / tid / "stat").read_text()
+            except OSError:
+                continue   # the thread exited between the listing and the read
+            head, _, rest = stat.rpartition(")")   # comm may hold spaces and parentheses
+            fields = rest.split()
+            ticks[tid] = (head.partition("(")[2], int(fields[11]) + int(fields[12]))   # stat fields 14 and 15
+        return ticks
 
 
 class MixerBridge:
@@ -213,10 +277,11 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "avplumber-mixer-webui"
 
-    def __init__(self, bridge: MixerBridge, *args, setup=None, gpu=None, **kwargs):
+    def __init__(self, bridge: MixerBridge, *args, setup=None, gpu=None, host=None, **kwargs):
         self.bridge = bridge
         self.setup_manager = setup
         self.gpu = gpu
+        self.host = host
         super().__init__(*args, **kwargs)
 
     def log_message(self, *_args) -> None:
@@ -253,6 +318,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 state = self.bridge.state()
                 state["gpus"] = self.gpu.snapshot()
+                state["host"] = self.host.values if self.host else None
                 if self.setup_manager:
                     state["setup_revision"] = self.setup_manager.status()["revision"]
                 self._send_json(200, state)
@@ -303,8 +369,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "superseded": True} if result is False else {"ok": True})
 
 
-def serve(bridge: MixerBridge, bind: str, port: int, setup=None) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=GpuStats()))
+def serve(bridge: MixerBridge, bind: str, port: int, setup=None, host: HostStats | None = None) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=GpuStats(), host=host))
     server.daemon_threads = True
     return server
 
@@ -335,7 +401,9 @@ def main(argv: list[str] | None = None) -> None:
                 setup.resume()
             except Exception as exc:
                 setup._status("error", str(exc))
-    server = serve(bridge, args.bind, args.http_port, setup=setup)
+    host = HostStats(lambda: setup.process.pid if setup and setup.process else None)
+    host.start()
+    server = serve(bridge, args.bind, args.http_port, setup=setup, host=host)
     print(f"mixer web UI on http://{args.bind}:{args.http_port} "
           f"controlling {args.mixer} at {args.host}:{args.port}", flush=True)
     def stop(_signum, _frame):
