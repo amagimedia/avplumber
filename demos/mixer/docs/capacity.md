@@ -1,8 +1,10 @@
 # Mixer demo capacity
 
-These numbers describe 1920×1080 SDR 8-bit inputs on a 16 GiB NVIDIA T4 host (16 vCPU),
-with PGM and one AUX output. They are not decoder-only limits or guarantees
-for HDR, larger frames, arbitrary browser pages, or additional outputs.
+These numbers come from a 16 GiB NVIDIA T4 host (16 vCPU) with 1920×1080 inputs. The
+30 and 60 fps baselines below stand on the source mixes listed beside them; the older
+25 and 30 fps measurements that follow used SDR 8-bit inputs with PGM and one AUX
+output. None of them are decoder-only limits or guarantees for HDR, larger frames,
+arbitrary browser pages, or additional outputs.
 
 The setup (`setup_runtime.py`, mirrored in `setup.html`) allows 110 inputs at 25 and
 30 fps and 68 at 50 and 60 fps, downstream-key pages included. Within that total it caps
@@ -13,7 +15,7 @@ raw NV12 uploads at 30, 34 or 17 units at 25, 30 or 50/60 fps (a P010 upload cos
 | --- | ---: | ---: | ---: | ---: | --- |
 | 25 | 110 | 40 | 40 | 30 | 100 (40 / 32 / 28) validated: two healthy starts, several minutes of transitions; 110 not measured at this rate |
 | 30 | 110 | 36 | 40 | 34 | The declared baseline: 36 NVDEC + 36 browser + 34 raw NV12 + 4 keys, pinned uploads; not pushed further |
-| 50 | 68 | 22 | 40 | 17 | 60 fps limits applied; not measured separately (lighter than 60) |
+| 50 | 68 | 22 | 40 | 17 | Shares the 60 fps total and upload limits; NVDEC 22 from the 1100 frames/s rule; not measured separately (lighter than 60) |
 | 60 | 68 | 18 | 40 | 17 | 18 NVDEC + 29 browser + 17 raw NV12 + 4 keys: cut-spam gate passes, 19.5 h soak |
 
 At 60 fps the 68-input show (18 NVDEC + 29 browser + 17 raw NV12 + 4 downstream-key
@@ -24,7 +26,7 @@ frame of the new scene, is about 43 ms at the median. History: before the mostly
 browser test page (commit 5068a50) and Electron 44, the same show measured GPU SM about
 88%, NVDEC 88% and 19% host CPU idle, and 70 inputs saturated the GPU (SM 92-94%,
 NVDEC 95%). Two defaults make it hold under cut, fade and wipe spam
-(`tests/cut_spam.py`): a 3-frame playout deadline at 50/60 fps (50 ms at 60; two frames
+(`demos/mixer/tests/cut_spam.py`): a 3-frame playout deadline at 50/60 fps (50 ms at 60; two frames
 left 17 ms of slack), and the wipe clip cache (`--wipe-cache-mb 640`, which holds the
 demo's two wipes, about 0.5 GB, in VRAM), without which each wipe take decoded QTRLE on
 the CPU and missed deadlines.
@@ -49,10 +51,11 @@ browser ring. It tests additional browser capacity rather than raising upload
 traffic. The first run maintained 25 fps between two multi-second stalls,
 with a 2.9-second cut, VRAM peaking near 14.1 GiB and up to 145 browser imports
 pending cleanup. It recovered without intervention. Remote validation overlapped
-the stalls, so this is not an isolated capacity measurement; 110 is not yet a
-validated reliable limit. The instance was returned to the 100-source baseline,
-and the browser limit was restored to 32 across four workers.
-Do not extrapolate this experiment to 110 inputs at 30 fps.
+the stalls, so this is not an isolated capacity measurement; it does not validate
+110 at 25 fps. The instance was returned to the 100-source baseline, and the
+browser limit was restored to 32 across four workers (since raised to 40 across
+five). The 30 fps baseline above was measured separately (36 NVDEC + 36 browser +
+34 raw NV12 + 4 keys, pinned uploads); this 25 fps experiment says nothing about it.
 
 Both stalls began during the same early phase of two remote validation runs.
 Fresh browser delivery fell to zero for several seconds while raw uploads
@@ -71,6 +74,10 @@ browser sources. Import statistics were sampled every ten seconds; they establis
 the backlog during the stall, but cannot prove that expiry caused its onset.
 
 ### Same workload at 25 and 30 fps
+
+These runs used FFmpeg `hwupload` from pageable memory and 40 NVDEC streams, before
+pinned uploads and the 36-stream cap at 30 fps; the 30 fps baseline above supersedes
+them.
 
 A repeat with nonblocking import admission and corrected PVW publication kept
 1080p SDR inputs, ring six, 192 scenes, one random PGM scene and eight 64-input
@@ -142,8 +149,9 @@ After refresh, 26 and 24 uploads each left one browser no longer painting
 (different windows in the two phases). At 22 and 18 uploads, every browser
 returned to 25 fps. Thus 22 is a candidate upload ceiling for this particular
 42-browser workload, with 18 providing more headroom; neither is a certified
-long-running capacity limit. The generic setup's 28-upload maximum must not be
-interpreted as safe independently of browser load and allocation churn.
+long-running capacity limit. The generic setup's 25 fps upload maximum (28 then,
+30 now with pinned uploads) must not be interpreted as safe independently of
+browser load and allocation churn.
 
 CUDA uprobes attached during the 14-upload phase and the return to 28 exposed
 submission waits, but also affected performance. With 14 uploads, the compositor
