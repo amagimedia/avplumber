@@ -39,7 +39,7 @@
   #stats, .vstats { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   #conn:not([hidden]) + #stats { margin-left: 0; }
   .group { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
-  #gpu, #host { border-left: 1px solid var(--edge); padding-left: 12px; }   /* apart from the pipeline's latency */
+  #gpu, #host { border-left: 1px solid var(--edge); padding-left: 12px; }   /* sections: pipeline latency | GPU and wipes | host CPU */
   /* A load up to "99.9/128" and a thread name (comm, at most 15 chars) keep their room, so a new busiest thread never moves the row */
   #load b { min-width: 8ch; }
   #thread .u { min-width: 15ch; }
@@ -312,12 +312,12 @@
   <span id="stats">
     <span class="meter" id="lat">LAT <b class="ms">—</b></span>
     <span class="group" id="gpu" role="group" aria-label="GPU" title="GPU load from nvidia-smi, refreshed every second" hidden></span>
+    <span class="meter" id="wipe-cache" hidden>WIPES <i></i><b></b></span>
     <span class="group" id="host" role="group" aria-label="Host CPU" title="Host CPU from /proc (the whole host, not this container), refreshed every second" hidden>
       <span class="meter" id="load">LOAD <i></i><b></b></span>
       <span class="meter" id="cpu">CPU <i></i><b></b></span>
       <span class="meter" id="thread" title="The mixer's busiest thread: its share of one core, the single-thread bottleneck">THREAD <i></i><b></b><span class="u"></span></span>
     </span>
-    <span class="meter" id="wipe-cache" hidden>WIPES <i></i><b></b></span>
   </span>
 </header>
 
