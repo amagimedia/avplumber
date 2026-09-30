@@ -156,8 +156,7 @@ def test_pacing_loops_and_single_threaded_gpu_graphs(native_boundary, tmp_path, 
 
     filters = {name: p for name, p in graph.items() if p["type"] == "filter_video"}
     single = {name for name, p in filters.items() if p.get("threads") == 1}
-    assert {"mixer_color_video0", "scale_program", "aux_mv_sdr", "mixer_out_sel_transition",
-            f"input_{PACING_LOOPS}_timestamp"} <= single
+    assert {"mixer_color_video0", "scale_program", "aux_mv_sdr", "mixer_out_sel_transition"} <= single
     # CPU work (the wipe decode conversion) keeps FFmpeg's threads.
     assert "mixer_wipe_fmt" in filters and "mixer_wipe_fmt" not in single
     # A raw source's setpts and hwupload graphs do no CPU slice work either.

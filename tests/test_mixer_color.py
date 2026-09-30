@@ -162,6 +162,16 @@ def test_rgb_keeps_alpha_and_uses_hdr_compositor(builder):
     assert nodes["mixer_comp_a"]["layers"][0]["blend"]
 
 
+def test_premultiplied_rgb_alpha_is_tagged_by_the_colour_node(builder):
+    builder.add_source("page", "rgba", "input", default_graph="", packed_rgb=True, color="sdr",
+                       premultiplied_alpha=True)
+    builder.add_scene("full", {"page": {"blend": True}})
+    builder.set_initial_scene("full")
+    builder.build()
+    nodes = {n["name"]: n for n in builder.avp.nodes}
+    assert nodes["mixer_color_page"]["graph"] == Color().setparams + ":alpha_mode=premultiplied"
+
+
 @pytest.mark.parametrize("transfer", ("hlg", "pq"))
 def test_422_hdr_canvas_retains_native_source_chroma(builder, transfer):
     builder.working_format = "p210le"

@@ -405,12 +405,10 @@ def test_dmabuf_input_builds_browser_chain_next_to_files(tmp_path):
     assert receive["fps"] == "60/1" and receive["group"] == "input_1"
     assert nodes["input_1_to_cuda"]["type"] == "drm_prime_to_cuda"
     smooth = nodes["input_1_smooth"]
-    assert (smooth["type"], smooth["src"], smooth["dst"]) == ("smooth_timestamps", "input_1_cuda_raw", "input_1_cuda_smooth")
+    assert (smooth["type"], smooth["src"], smooth["dst"]) == ("smooth_timestamps", "input_1_cuda_raw", "input_1_cuda")
     assert smooth["fps"] == "60/1" and smooth["discontinuity_threshold"] == 0.1
-    stamp = nodes["input_1_timestamp"]
-    assert (stamp["dst_width"], stamp["dst_height"], stamp["dst_frame_rate"]) == (480, 270, "60/1")
-    assert (stamp["src"], stamp["dst"]) == ("input_1_cuda_smooth", "input_1_cuda")
-    assert "round(PTS" not in stamp["graph"]   # arrival times are numbered, not rounded
+    # Frames carry their own geometry and smooth_timestamps stamps in 1/fps: no format or time-base nodes.
+    assert nodes["input_1_to_cuda"]["src"] == "input_1_drm" and "input_1_timestamp" not in nodes
     hold = nodes["input_1_hold"]
     assert (hold["type"], hold["src"], hold["dst"], hold["fps"]) == ("repeat_last_frame", "input_1_cuda", "input_1_held", "60/1")
     assert "decode_1" not in nodes and "decode_0" in nodes
@@ -817,6 +815,7 @@ def test_browser_alpha_preservation_follows_scene_blending(tmp_path, monkeypatch
                             api=fake_api())
     nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
     assert nodes["input_1_to_cuda"]["drop_alpha"] is not blend
+    assert dict(FakeMixer.instances[-1].sources)["page"]["premultiplied_alpha"] is blend
     layer = FakeMixer.instances[-1].scenes["overlay"]["sources"]["page"]
     assert layer.get("blend", False) is blend
 

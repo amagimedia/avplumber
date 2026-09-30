@@ -433,11 +433,10 @@ def _build_input(
     if is_dmabuf_url(url):
         # A dma-browser window: DRM PRIME frames over its socket, already on the
         # shared monotonic clock; the same chain the DMA-BUF demo composes from.
-        width, height = options.dmabuf_size
         nodes, fps_edge = dmabuf_cuda_input_nodes(
             api, prefix=f"input_{index}",
             socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
-            width=width, height=height, fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
+            fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
             source_group=group, processing_group=group, hold=True, browser_ring_size=options.browser_ring_size,
             event_loop=_pacing_loop(index))
         for node in nodes:
@@ -706,7 +705,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         if source.kind == "browser":
             nodes, edge = dmabuf_cuda_input_nodes(
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
-                width=source.width, height=source.height, fps=cfg.fps, drm_hwaccel=None,
+                fps=cfg.fps, drm_hwaccel=None,
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True,
                 preserve_alpha=source.id in blended_sources, browser_ring_size=cfg.browser_ring_size,
                 event_loop=_pacing_loop(index))
@@ -745,6 +744,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                              input_group=group, default_graph="",
                              color=None if source.filter_graph else source.color,
                              packed_rgb=source.kind == "browser",
+                             premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
                              pixel_format=source.filter_output_format or
                              {"v210": "p210le", "nv12": "nv12", "p010": "p010le"}.get(source.kind))
     for scene in cfg.scenes:

@@ -20,7 +20,7 @@ def consume(args):
     avp, errors = make_avp("probe", capacity=2)
     nodes, edge = dmabuf_cuda_input_nodes(
         api, prefix="probe", socket=f"{args.socket_dir}/{args.consumer}.sock",
-        width=1280, height=720, fps=30, drm_hwaccel=None, cuda_hwaccel="probe",
+        fps=30, drm_hwaccel=None, cuda_hwaccel="probe",
         source_group="probe", processing_group="probe", preserve_alpha=True)
     nodes.append(api.CudaRectOverlay({
         "name": "compose", "src": [edge], "dst": "out", "hwaccel": "probe",

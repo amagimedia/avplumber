@@ -19,7 +19,6 @@ import urllib.error
 import urllib.request
 from typing import List, Tuple
 
-from .backends.cuda import CudaMixerBackend
 from .config import default_browser_ring_size
 
 SCHEME = "dmabuf://"
@@ -36,7 +35,7 @@ def window_id(url: str) -> str:
     return name
 
 
-def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height: int, fps: int,
+def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, fps: int,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
                             processing_group: str, hold: bool = False,
                             preserve_alpha: bool = False, browser_ring_size: int | None = None,
@@ -45,27 +44,26 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
 
     With *hold*, a ``repeat_last_frame`` node re-emits the last frame at *fps*
     while the page is not painting, so static pages keep feeding the mixer.
-    *preserve_alpha* retains alpha-bearing DRM formats for blended scene items.
+    *preserve_alpha* retains alpha-bearing DRM formats for blended scene items. Chromium's
+    alpha is premultiplied; the consumer tags it (the mixer does in its colour node).
+    Geometry and format come from each frame, and ``smooth_timestamps`` already stamps
+    in 1/*fps*, so the chain has no format or time-base nodes of its own.
     *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted)."""
     if browser_ring_size is None:
         browser_ring_size = default_browser_ring_size(fps)
-    drm_edge, assumed_edge, raw_edge, smooth_edge, cuda_edge = (
-        f"{prefix}_{s}" for s in ("drm", "assumed", "cuda_raw", "cuda_smooth", "cuda"))
+    drm_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
               "auto_restart": "group", "fps": f"{fps}/1"}
     if drm_hwaccel:
         source["hwaccel"] = drm_hwaccel
     nodes = [
         api.IpcDmabufSource(source),
-        api.AssumeVideoFormat({"width": width, "height": height, "pixel_format": "drm_prime",
-                               "real_pixel_format": "rgba" if preserve_alpha else "rgb0", "src": drm_edge, "dst": assumed_edge,
-                               "group": processing_group, "auto_restart": "panic"}),
         # zero_copy: the compositor samples the mapped DMA-BUF directly; no 8 MB copy per frame.
         # Keep the recycling allocation pool registered, including live frames.
         # The ring bounds outstanding frames, not retired Chromium allocations:
         # expire idle imports after several ring cycles instead of pinning them
         # indefinitely. Lookups refresh returning allocations before expiry.
-        api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": assumed_edge,
+        api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group", "zero_copy": True,
                             "max_imports": max(32, browser_ring_size),
@@ -82,18 +80,9 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
         # not the nearest, so a paint always precedes the tick it is shown at.
         api.SmoothTimestamps({
             "fps": f"{fps}/1", "discontinuity_threshold": 0.1, "round_up": True,
-            "src": raw_edge, "dst": smooth_edge, "group": processing_group,
+            "src": raw_edge, "dst": cuda_edge, "group": processing_group,
             "name": f"{prefix}_smooth", "auto_restart": "panic",
             **({} if event_loop is None else {"event_loop": event_loop})}),
-        api.FilterVideo({
-            # Chromium exports premultiplied colour. Keep its alpha association
-            # through the GPU graph so the compositor applies opacity only once.
-            "graph": (f"settb=expr=1/{fps}"
-                      + (",setparams=alpha_mode=premultiplied" if preserve_alpha else "")),
-            "hwaccel": cuda_hwaccel, "src": smooth_edge, "dst": cuda_edge, "dst_width": width,
-            "dst_height": height, "dst_pixel_format": "cuda", "dst_frame_rate": f"{fps}/1",
-            "threads": CudaMixerBackend.graph_threads,
-            "group": processing_group, "name": f"{prefix}_timestamp", "auto_restart": "panic"}),
     ]
     if hold:
         held_edge = f"{prefix}_held"

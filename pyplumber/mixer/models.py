@@ -18,6 +18,7 @@ class MixerSource:
     color: Any = None
     pixel_format: Optional[str] = None
     packed_rgb: bool = False
+    premultiplied_alpha: bool = False
 
 
 @dataclass

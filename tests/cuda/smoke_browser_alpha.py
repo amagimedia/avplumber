@@ -42,10 +42,9 @@ def main():
         socket = f"{args.socket_dir}/{name}.sock"
         wait_for_sockets([socket], 20)
         nodes, edge = dmabuf_cuda_input_nodes(
-            api, prefix="probe", socket=socket, width=width, height=height, fps=30,
+            api, prefix="probe", socket=socket, fps=30,
             drm_hwaccel=None, cuda_hwaccel="alpha_gpu", source_group="probe", processing_group="probe",
             preserve_alpha=True)
-        nodes[1].parameters["real_pixel_format"] = args.format
         if args.unclocked:
             class Layout(api.PythonNode):
                 count = 0
@@ -64,6 +63,10 @@ def main():
             nodes.append(Layout({"name": "layout", "src": edge, "dst": "marked"}))
             edge = "marked"
         if args.composite:
+            # Chromium's alpha is premultiplied; the mixer tags it in its colour node.
+            nodes.append(api.FilterVideo({"name": "premultiplied", "src": edge, "dst": "tagged", "hwaccel": "alpha_gpu",
+                                          "graph": "setparams=alpha_mode=premultiplied"}))
+            edge = "tagged"
             nodes.append(api.CudaRectOverlay({
                 "name": "blend", "src": [edge], "dst": "blended", "hwaccel": "alpha_gpu",
                 "width": width, "height": height, "sw_format": "p210le", "color": "sdr",

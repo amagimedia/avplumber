@@ -164,7 +164,7 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         default_graph: Optional[str] = None,
-        *, color=None, pixel_format=None, packed_rgb=False,
+        *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -173,6 +173,8 @@ class MixerGraphBuilder:
         the builder converts once, then fans out to their scene-slot routers.
         pixel_format is required for CUDA layouts other than NV12/P010.
         packed_rgb keeps alpha for fused compositing and requires explicit SDR.
+        premultiplied_alpha tags packed RGB alpha as premultiplied (Chromium's
+        export), so the compositor applies opacity only once.
 
         The source's one_to_many and per-slot crop-scale nodes will be
         created in *input_group* during build() so that they restart
@@ -207,7 +209,8 @@ class MixerGraphBuilder:
             raise ValueError(f"Source '{name}': packed RGB requires an explicit SDR color setting")
         idx = len(self._sources)
         self._sources.append(MixerSource(name, pre_otm_edge, input_group, default_graph,
-                                               color=color, pixel_format=pixel_format, packed_rgb=packed_rgb))
+                                               color=color, pixel_format=pixel_format, packed_rgb=packed_rgb,
+                                               premultiplied_alpha=premultiplied_alpha))
         self._source_index[name] = idx
         return self
 
@@ -507,7 +510,7 @@ class MixerGraphBuilder:
                     result[(source.name, slot)] = self._color_edge(source, edge, f"{source.name}_{slot}")
         for edge, sources in shared.items():
             first = sources[0]
-            contract = lambda s: (s.input_group, s.color, s.pixel_format, s.packed_rgb)
+            contract = lambda s: (s.input_group, s.color, s.pixel_format, s.packed_rgb, s.premultiplied_alpha)
             if any(contract(s) != contract(first) for s in sources):
                 raise ValueError(f"Conflicting color contracts for shared input edge {edge!r}")
             prepared = self._color_edge(first, edge, first.name)
@@ -525,7 +528,7 @@ class MixerGraphBuilder:
         if source.packed_rgb:
             if self.working_format not in ("nv12", "p010le", "p210le"):
                 raise ValueError("Packed RGB compositing requires a semiplanar canvas (NV12/P010/P210)")
-            graph = source.color.setparams
+            graph = source.color.setparams + (":alpha_mode=premultiplied" if source.premultiplied_alpha else "")
         else:
             pixel_format = self.working_format
             if (pixel_format == "p210le" and self.color.transfer != "sdr" and
