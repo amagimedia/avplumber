@@ -17,7 +17,8 @@ WORKDIR /opt/dma-browser
 
 COPY deps/dma-browser/package.json deps/dma-browser/package-lock.json deps/dma-browser/.npmrc ./
 COPY deps/dma-browser/addons ./addons
-RUN npm ci
+# Electron 42+ no longer downloads its binary on install; fetch it explicitly.
+RUN npm ci && node node_modules/electron/install.js
 
 COPY deps/dma-browser ./
 RUN npm run build \
