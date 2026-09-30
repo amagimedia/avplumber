@@ -18,7 +18,10 @@ At 60 fps the 68-input show (keys included) measured GPU SM about 88%, NVDEC 88%
 19% host CPU idle. Two defaults make it hold under cut, fade and wipe spam: a 3-frame
 playout deadline at 50/60 fps (50 ms at 60; two frames left 17 ms of slack), and the wipe
 clip cache (`--wipe-cache-mb 640`), without which each wipe take decoded QTRLE on the CPU
-and missed deadlines. At 70 inputs the GPU itself saturates (SM 92-94%, NVDEC 95%).
+and missed deadlines. The cached wipe chain also stays running between wipes: stopping
+and re-creating its CUDA compositor on every take freed and reallocated GPU memory under
+the program and missed deadlines under wipe spam. At 70 inputs the GPU itself saturates
+(SM 92-94%, NVDEC 95%).
 
 At 25 fps the setup also allows an experimental 110-input ceiling, keys included:
 **40 NVDEC + 40 browser + 30 raw NV12**, with pinned raw uploads (`canvas.raw_upload:

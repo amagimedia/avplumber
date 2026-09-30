@@ -27,6 +27,7 @@ def playout_binary(tmp_path_factory):
 
 
 @pytest.mark.parametrize("case", [
+    "prewarm_activation_keeps_the_reset_threshold",
     "input_offset_selects_a_late_source_one_tick_later",
     "staged_input_readiness_preserves_old_output",
     "inactive_prewarm_retains_live_frames_without_rendering",

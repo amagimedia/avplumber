@@ -111,6 +111,34 @@ void MixerOrchestrator::flushWipeEdges() {
     }
 }
 
+int64_t MixerOrchestrator::armWipeChain(const std::string& wipe_file) {
+    // The compositor applies these on its render thread, possibly one loop iteration
+    // each, and activating an input without prewarm resets it, threshold included. So:
+    // prewarm first, which keeps the activation from touching the reset; then the reset,
+    // after which the compositor rejects everything stamped before now, which is all the
+    // previous take could have left in its edges; then the clip, whose first frame is
+    // stamped on the next tick, so nothing of this take is rejected. Program frames of
+    // the current deadline are rejected too: the wipe starts one tick later than the
+    // in-flight picture, never on a stale one.
+    setNodeObject(state_->wipe_overlay_name, "prewarm_inputs", Parameters(3u));
+    resetInputIf(nodes_, state_->wipe_overlay_name);
+    setNodeObject(state_->wipe_overlay_name, "active_inputs", Parameters(3u));
+    setNodeObject(state_->wipe_input_node_name, "play", Parameters(wipe_file));
+    return nodes_->node(state_->wipe_input_node_name)->getObject("status").at("start_tick").get<int64_t>();
+}
+
+void MixerOrchestrator::retireWipeChain() {
+    if (!state_->wipeChainStaysRunning()) {
+        stopGroup(state_->wipe_group_name);
+        return;
+    }
+    // The clip first: no frame is pushed after its stop returns. Then the compositor:
+    // no active input ends the composites, and no prewarm input parks its thread.
+    setNodeObject(state_->wipe_input_node_name, "stop", Parameters(nullptr));
+    setNodeObject(state_->wipe_overlay_name, "active_inputs", Parameters(0u));
+    setNodeObject(state_->wipe_overlay_name, "prewarm_inputs", Parameters(0u));
+}
+
 void MixerOrchestrator::flushSlotEdges(bool is_slot_a) {
     const auto& slot = is_slot_a ? state_->slot_a : state_->slot_b;
 
@@ -188,9 +216,10 @@ void MixerOrchestrator::interruptTransition() {
     TransitionGuard guard([&] { abortTransition(generation); });
     restoreProgramRouting(previous_mode);
     if (previous_mode == MixerState::TransitionMode::Wipe && !state_->wipe_group_name.empty()) {
-        // Group management retires the old decoder independently. Waiting here
-        // would add teardown time to every correction, including a hard cut.
-        stopGroup(state_->wipe_group_name);
+        // A resident chain parks at once. Group management retires a per-take decoder
+        // independently: waiting here would add teardown time to every correction,
+        // including a hard cut.
+        retireWipeChain();
     }
     state_->pvw_scene_name.clear();
     state_->transition_mode = MixerState::TransitionMode::Idle;
@@ -247,7 +276,7 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
     };
     cleanup([&] { restoreProgramRouting(mode); });
     if (mode == MixerState::TransitionMode::Wipe && !state_->wipe_group_name.empty())
-        cleanup([&] { stopGroup(state_->wipe_group_name); });
+        cleanup([&] { retireWipeChain(); });
     // Remove slot substitution even when the target never produced a frame.
     // The output gate still waits for a fresh program frame before releasing.
     cleanup([&] { finishSnapshot(); });
@@ -327,8 +356,8 @@ Parameters MixerOrchestrator::status() const {
         {"A", state_->slot_a.compositor_name}, {"B", state_->slot_b.compositor_name}};
     const std::string wipe_cache_store = state_->wipe_cache_store;
     lock.unlock();
-    // Read from the shared store, not the clip_cache node: that node exists only
-    // while a wipe group runs, the store for the life of the instance.
+    // Read from the shared store, not the clip_cache node: the store lives for the
+    // life of the instance whether or not the player group has been started.
     if (!wipe_cache_store.empty())
         s["wipe_cache"] = InstanceSharedObjects<avp::clipcache::ClipCache>::get(
             nodes_->instanceData(), wipe_cache_store)->status();

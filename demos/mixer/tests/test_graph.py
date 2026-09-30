@@ -602,11 +602,12 @@ def test_wipe_file_preloads_into_the_clip_cache_at_start(monkeypatch):
     monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
     monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
     application.start()
-    # Caching opted in: the clip is armed on the loader and decoded once, so
-    # mixer.wipe.warmup (which only compiles the filter) is not used.
+    # Caching opted in: the clip is armed on the loader and decoded once into the
+    # running cache, so mixer.wipe.warmup (which only compiles the filter) is not used.
     armed = "\n".join(application.avp.commands)
     assert 'node.param.set mixer_wipe_input url "/media/wipe.mov"' in armed
-    assert 'node.param.set mixer_wipe_cache url "/media/wipe.mov"' in armed
+    assert 'node.object.set mixer_wipe_cache load "/media/wipe.mov"' in armed
+    assert 'mixer_wipe_cache url' not in armed
     assert not hasattr(FakeMixer.instances[-1], "warmed_wipe")
     assert application.avp.ready
 

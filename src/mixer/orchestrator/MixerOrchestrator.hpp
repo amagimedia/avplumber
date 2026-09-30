@@ -41,6 +41,13 @@ class MixerOrchestrator {
     // Skips edges whose configured consumer is still working; readerwriterqueue
     // clear() is a consumer-side operation and must not race that node.
     void flushWipeEdges();
+    /// Cached wipes: wake the resident wipe compositor and start the clip replay.
+    /// Returns the output tick of the clip's first frame: the compositor's output is
+    /// this take's from that tick on. Caller holds state_->mutex.
+    int64_t armWipeChain(const std::string& wipe_file);
+    /// Take the wipe chain off duty: park the resident chain (cached wipes), or stop
+    /// the per-take decode group. Caller holds state_->mutex.
+    void retireWipeChain();
     void flushSlotEdges(bool is_slot_a);
 
     void loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name, bool warm_cut = false);

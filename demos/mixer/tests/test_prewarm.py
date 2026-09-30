@@ -35,6 +35,7 @@ class NativeEngine:
         self.drained = set()
         self.ready = False
         self.shutdown_complete = False
+        self.loaded_clips = []   # what the running clip cache was told to load
         self.edges = SimpleNamespace(planCapacity=lambda *_: None)
         self.manager = SimpleNamespace(shouldWork=True)
 
@@ -42,7 +43,11 @@ class NativeEngine:
         self.nodes[node.parameters["name"]] = node.parameters
 
     def executeCommandsFromString(self, commands):
-        self.events.extend(commands.splitlines())
+        for line in commands.splitlines():
+            self.events.append(line)
+            parts = line.split(" ", 3)
+            if parts[:1] == ["node.object.set"] and parts[2:3] == ["load"]:
+                self.loaded_clips.append(json.loads(parts[3]))
 
     def group(self, name):
         def start():
@@ -51,7 +56,11 @@ class NativeEngine:
         return SimpleNamespace(startNodes=start, stopNodes=lambda: self.events.append("stop " + name))
 
     def node(self, name):
-        return SimpleNamespace(isWorking=self.nodes[name]["group"] in self.started)
+        # A node reports its clip cache as holding every clip it was told to load.
+        return SimpleNamespace(
+            isWorking=self.nodes[name]["group"] in self.started,
+            getObject=lambda key: {"clips": [{"path": path, "frames": 120, "bytes": 1 << 20, "complete": True}
+                                             for path in self.loaded_clips]})
 
     def getEdge(self, name):
         # Readiness is supplied by the engine boundary, never by the builder.
@@ -192,12 +201,50 @@ def test_media_wipe_path_is_registered_without_starting_an_empty_clip(native_bou
     config = json.loads(init.split(" ", 2)[2])
     assert config["wipe_group"] == "mixer_wipe"
     assert config["wipe_input_node"] == "mixer_wipe_input"
+    assert config["wipe_tail_edge"] == "mixer_wipe_rt_fps_out"
+    assert "wipe_overlay" not in config and "wipe_cache_store" not in config
     assert "mixer_wipe_cache" not in engine.nodes
     assert engine.nodes["mixer_wipe_input"]["group"] == "mixer_wipe"
+    # The whole chain, clip conforming included, is started with the group, per take.
+    assert engine.nodes["mixer_wipe_rt_fps"]["group"] == "mixer_wipe"
+    assert engine.nodes["mixer_wipe_overlay"]["src"] == ["mixer_final_wipe_in", "mixer_wipe_rt_fps_out"]
+    assert engine.nodes["mixer_wipe_overlay"]["active_inputs"] == 3
     assert "mixer_wipe" not in engine.started and "mixer_wipe_load" not in engine.started
     upload = engine.nodes["mixer_wipe_fmt"]
     assert upload["hwaccel"] == config["hwaccel"]
     assert upload["graph"].split(",")[-1] == "hwupload"
+
+
+def test_cached_wipe_chain_runs_from_startup_parked_and_is_never_stopped(native_boundary):
+    # A take arms the resident player and compositor instead of creating, starting and
+    # stopping nodes: nothing churns CUDA allocations or threads under the program.
+    app = application(native_boundary, wipe_cache_mb=256, wipe_file="/media/wipe.mov")
+    app.start()
+    engine = app.avp
+    events = engine.events
+    init = next(event for event in events if event.startswith("mixer.init "))
+    config = json.loads(init.split(" ", 2)[2])
+    assert config["wipe_input_node"] == "mixer_wipe_cache"
+    assert config["wipe_overlay"] == "mixer_wipe_overlay"
+    assert config["wipe_cache_store"] == "clips"
+    assert config["wipe_tail_edge"] == "mixer_wipe_cached"
+    assert "wipe_flush_edges" not in config
+    # The player feeds the compositor directly, stamped on the output grid; the
+    # compositor starts parked.
+    assert "mixer_wipe_rt_fps" not in engine.nodes
+    assert engine.nodes["mixer_wipe_cache"]["group"] == "mixer_wipe"
+    assert engine.nodes["mixer_wipe_overlay"]["src"] == ["mixer_final_wipe_in", "mixer_wipe_cached"]
+    assert engine.nodes["mixer_wipe_overlay"]["active_inputs"] == 0
+    # Started with the mixer's own groups; the preload only starts the decode chain and
+    # tells the running player which clip it delivers.
+    player = events.index("start mixer_wipe")
+    assert events.index("start mixer") < player < events.index("start output")
+    load = events.index('node.object.set mixer_wipe_cache load "/media/wipe.mov"')
+    assert player < load < events.index("start mixer_wipe_load") < events.index("stop mixer_wipe_load")
+    assert events.index("stop mixer_wipe_load") < events.index("READY")
+    assert "stop mixer_wipe" not in events
+    assert not any(event.startswith("mixer.wipe.warmup") for event in events)
+    assert engine.loaded_clips == ["/media/wipe.mov"]
 
 
 @pytest.mark.parametrize("cache_mb, store", [(0, None), (256, "clips")])

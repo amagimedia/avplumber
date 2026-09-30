@@ -104,12 +104,21 @@ struct MixerState : public InstanceShared<MixerState> {
     std::string wipe_base_fps_name;    // "wipe_base_fps"
     std::string wipe_selector_name;    // "wipe_sel"
 
-    // Pre-created wipe subgraph: group is started at wipe begin, stopped at wipe end
+    // Pre-created wipe subgraph. Decoding per take: the group is started at wipe begin and
+    // stopped at wipe end. With the clip cache it runs for the life of the graph and a take
+    // only arms it (see wipeChainStaysRunning()).
     std::string wipe_group_name;       // "mixer_wipe"
     std::string wipe_input_node_name;  // "wipe_input" (input_rec whose url is set per wipe)
+                                       // or the clip_cache player armed with "play"
     /// ClipCache store holding decoded wipe clips ("clips"), reported by mixer.status.
     /// Empty when wipes decode per take.
     std::string wipe_cache_store;
+    /// The wipe compositor (cuda_rect_overlay), parked with active_inputs=0 between cached
+    /// wipes and armed per take. Required when wipe_cache_store is set.
+    std::string wipe_overlay_name;
+    /// Cached wipes keep the player group running: no node is created, started or stopped
+    /// for a take, so its CUDA allocations and threads never churn under the program.
+    bool wipeChainStaysRunning() const { return !wipe_cache_store.empty(); }
     /// Edge feeding the overlay's wipe input (e.g. "wipe_rt_fps_out"). Polled at
     /// wipe end to ensure the tail of the wipe has been consumed by the overlay
     /// before `wipe_selector` flips back to the direct path; otherwise the last
