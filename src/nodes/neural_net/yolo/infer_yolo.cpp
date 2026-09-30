@@ -57,6 +57,8 @@ protected:
     bool debug_log_metadata_ = false;
     int debug_log_every_n_ = 30;
     int infer_every_n_ = 1;
+    int skip_every_ = 0;
+    std::string last_detection_metadata_;
     float conf_thresh_ = 0.25f;
     int max_det_ = 300;
     int mask_gpu_every_n_ = 1;
@@ -79,6 +81,8 @@ public:
         , sink_seg_(std::move(sink_seg)) {}
 
     ~CudaInferYolo() {
+        logstream << "cuda_infer_yolo: cadence input_frames=" << frame_counter_
+                  << " inference_frames=" << infer_counter_ << " skip_every=" << skip_every_;
         if (detection_count_histogram_.empty()) return;
         uint64_t total = 0;
         uint64_t with_dets = 0;
@@ -122,6 +126,16 @@ public:
         bool process_preinit = wasPreinitializedFromHWAccel();
 
         ++frame_counter_;
+        if (skip_every_ > 0 && frame_counter_ % (uint64_t)skip_every_ == 0) {
+            // Retain the latest boxes for foreground masking, but explicitly
+            // distinguish a scheduled prediction tick from a new observation.
+            Parameters md = Parameters::parse(last_detection_metadata_.empty()
+                ? buildDetectionMetadata({}) : last_detection_metadata_);
+            md["inference_skipped"] = true;
+            av_dict_set(&frm.raw()->metadata, metadata_key_detection_.c_str(), md.dump().c_str(), 0);
+            sink_->put(frm);
+            return;
+        }
         if (infer_every_n_ > 1 && (frame_counter_ % (uint64_t)infer_every_n_) != 0) {
             sink_->put(frm);
             return;
@@ -415,6 +429,7 @@ public:
 
         // Build and attach detection metadata
         std::string md = buildDetectionMetadata(all_dets);
+        if (skip_every_ > 0) last_detection_metadata_ = md;
         av_dict_set(&frm.raw()->metadata, metadata_key_detection_.c_str(), md.c_str(), 0);
 
         if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
@@ -504,6 +519,10 @@ public:
         if (params.count("conf_thresh")) r->conf_thresh_ = params["conf_thresh"];
         if (params.count("max_det")) r->max_det_ = params["max_det"];
         if (params.count("infer_every_n")) r->infer_every_n_ = params["infer_every_n"];
+        r->skip_every_ = params.value("skip_every", 0);
+        if (r->skip_every_ < 0 || r->skip_every_ == 1 ||
+            (r->skip_every_ > 0 && r->infer_every_n_ != 1))
+            throw Error("cuda_infer_yolo: skip_every must be zero or >=2, and cannot combine with infer_every_n");
         if (params.count("use_cuda_graph")) r->use_cuda_graph_ = params["use_cuda_graph"];
         if (params.count("metadata_key_detection")) r->metadata_key_detection_ = params["metadata_key_detection"].get<std::string>();
         if (params.count("metadata_key_segmentation")) r->metadata_key_segmentation_ = params["metadata_key_segmentation"].get<std::string>();
