@@ -40,6 +40,7 @@ from pathlib import Path
 
 from pyplumber.mixer.control import AvpConnection, mixer_command
 
+log = logging.getLogger("webui")
 PAGE = Path(__file__).with_name("webui") / "index.html"
 TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")
 PROGRAM_TAKES = ("cut", "fade", "wipe")
@@ -94,11 +95,15 @@ class HostStats:
         threading.Thread(target=self._run, daemon=True, name="host-stats").start()
 
     def _run(self):
+        failing = False   # the first failure of an outage is logged; a working sample ends it
         while True:
             try:
                 self.sample()
-            except (OSError, ValueError):   # no /proc (macOS), or a torn read of it
-                self.values = None
+                failing = False
+            except Exception as exc:   # no /proc (macOS), a torn read, the mixer stopping mid-sample: the page hides the meters
+                if not failing:
+                    log.warning("Host stats unavailable: %s: %s", type(exc).__name__, exc)
+                failing, self.values = True, None
             time.sleep(1)
 
     def sample(self):
@@ -277,11 +282,11 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "avplumber-mixer-webui"
 
-    def __init__(self, bridge: MixerBridge, *args, setup=None, gpu=None, host=None, **kwargs):
+    def __init__(self, bridge: MixerBridge, *args, setup=None, gpu=None, host_stats=None, **kwargs):
         self.bridge = bridge
         self.setup_manager = setup
         self.gpu = gpu
-        self.host = host
+        self.host_stats = host_stats
         super().__init__(*args, **kwargs)
 
     def log_message(self, *_args) -> None:
@@ -318,7 +323,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 state = self.bridge.state()
                 state["gpus"] = self.gpu.snapshot()
-                state["host"] = self.host.values if self.host else None
+                state["host"] = self.host_stats.values if self.host_stats else None
                 if self.setup_manager:
                     state["setup_revision"] = self.setup_manager.status()["revision"]
                 self._send_json(200, state)
@@ -369,8 +374,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "superseded": True} if result is False else {"ok": True})
 
 
-def serve(bridge: MixerBridge, bind: str, port: int, setup=None, host: HostStats | None = None) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=GpuStats(), host=host))
+def serve(bridge: MixerBridge, bind: str, port: int, setup=None, host_stats: HostStats | None = None) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=GpuStats(), host_stats=host_stats))
     server.daemon_threads = True
     return server
 
@@ -401,9 +406,12 @@ def main(argv: list[str] | None = None) -> None:
                 setup.resume()
             except Exception as exc:
                 setup._status("error", str(exc))
-    host = HostStats(lambda: setup.process.pid if setup and setup.process else None)
-    host.start()
-    server = serve(bridge, args.bind, args.http_port, setup=setup, host=host)
+    def mixer_pid():
+        process = setup.process if setup else None   # read once: the setup worker thread clears it when the mixer stops
+        return process.pid if process else None
+    host_stats = HostStats(mixer_pid)
+    host_stats.start()
+    server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats)
     print(f"mixer web UI on http://{args.bind}:{args.http_port} "
           f"controlling {args.mixer} at {args.host}:{args.port}", flush=True)
     def stop(_signum, _frame):

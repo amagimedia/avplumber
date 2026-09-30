@@ -40,8 +40,8 @@
   #conn:not([hidden]) + #stats { margin-left: 0; }
   .group { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
   #gpu, #host { border-left: 1px solid var(--edge); padding-left: 12px; }   /* apart from the pipeline's latency */
-  /* "21.4/16" and a thread name (comm, at most 15 chars) keep their room, so a new busiest thread never moves the row */
-  #load b { min-width: 7ch; }
+  /* A load up to "99.9/128" and a thread name (comm, at most 15 chars) keep their room, so a new busiest thread never moves the row */
+  #load b { min-width: 8ch; }
   #thread .u { min-width: 15ch; }
   .meter { display: flex; align-items: center; gap: 6px; }
   .meter i { position: relative; width: 38px; height: 5px; border-radius: 3px; background: var(--edge); overflow: hidden; }

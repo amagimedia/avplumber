@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
+from itertools import count
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,9 +50,9 @@ def client(monkeypatch):
     monkeypatch.setattr(GpuStats, 'snapshot', lambda _: [])
     bridges = []
 
-    def start(bridge, host=None):
+    def start(bridge, host_stats=None):
         bridges.append(bridge)
-        server = serve(bridge, "127.0.0.1", 0, host=host)
+        server = serve(bridge, "127.0.0.1", 0, host_stats=host_stats)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return f"http://127.0.0.1:{server.server_address[1]}", server
 
@@ -136,6 +139,28 @@ def test_host_stats_sample_load_cpu_and_the_busiest_mixer_thread(tmp_path, monke
     assert stats.values["cpu_pct"] == 0 and stats.values["thread_pct"] == round(20 * 100 / hz) and stats.values["thread_name"] == "mixer.py"
 
 
+def test_host_stats_thread_hides_the_meters_during_an_error_and_logs_it_once(tmp_path, monkeypatch, caplog):
+    fake_proc(tmp_path, 1.0, [1, 0, 1, 1, 0, 0, 0, 0], {1: ("mixer.py", 1, 0)})
+    # A setup change clears setup.process on another thread: two samples in a row see None where a process was.
+    processes = iter([SimpleNamespace(pid=4242), None, None, SimpleNamespace(pid=4242)])
+    stats = HostStats(lambda: next(processes).pid, proc=tmp_path)
+    clock, published = count(10.0), []
+
+    class Stop(Exception):
+        pass
+
+    def sleep(_seconds):   # the loop only ends with the process: stop it after the fourth sample
+        published.append(stats.values)
+        if len(published) == 4:
+            raise Stop
+    monkeypatch.setattr("webui.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("webui.time.sleep", sleep)
+    with caplog.at_level(logging.WARNING, logger="webui"), pytest.raises(Stop):
+        stats._run()
+    assert published[:3] == [None, None, None] and published[3]["thread_name"] == "mixer.py"   # the meters return with the next good sample
+    assert [r.getMessage() for r in caplog.records] == ["Host stats unavailable: AttributeError: 'NoneType' object has no attribute 'pid'"]
+
+
 def test_host_stats_survive_a_missing_proc_and_a_vanished_mixer(tmp_path):
     stats = HostStats(lambda: 4242, proc=tmp_path)
     with pytest.raises(OSError):   # the sampling thread then publishes no values
@@ -184,7 +209,7 @@ def test_state_carries_the_host_sample(client):
     bridge = FakeBridge(STATE_REPLIES)
     host = HostStats()
     host.values = dict(load1=21.4, vcpus=16, cpu_pct=52, thread_pct=38, thread_name="mixer_comp_a")
-    url, _ = client(bridge, host=host)
+    url, _ = client(bridge, host_stats=host)
     assert get(url, "/api/state")[1]["host"] == host.values
 
 
