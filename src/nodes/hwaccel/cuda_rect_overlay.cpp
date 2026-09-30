@@ -524,10 +524,14 @@ public:
             if (!hwSwFormatMatch(*p))
                 throw Error("cuda_rect_overlay: input hw sw_format mismatch node sw_format");
             av::VideoFrame consumed = *p;
+            const bool carries_metadata = p == meta_src;
             this->source_edges_[i]->pop();
             held_[i] = std::move(consumed);
             held_valid_[i] = true;
             src_for_layer[i] = &held_[i];
+            // pop destroys the queue entry; retain the metadata source along
+            // with the frame reference used for drawing this tick.
+            if (carries_metadata) meta_src = &held_[i];
         }
 
         // During slot warmup, do not emit a partial black composite just because
