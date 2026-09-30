@@ -6,8 +6,8 @@ Generic offscreen HTML page renderer for Linux + Electron, with GPU dmabuf captu
 Electron limit. The launcher groups at most `DMA_BROWSER_WINDOWS_PER_PROCESS`
 windows in one Electron process (default 8) and automatically starts enough
 workers for the requested maximum. All workers remain behind the same REST API
-on `127.0.0.1:9009`. The project configuration uses Electron 41 / Chromium
-146.
+on `127.0.0.1:9009`. The project configuration uses Electron 44 / Chromium
+152.
 
 To build the runtime-gated Electron native-handle change yourself, use the
 patch and script documented in
