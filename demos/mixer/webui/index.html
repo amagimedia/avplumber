@@ -31,7 +31,9 @@
   #top h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
   .link { color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
   .link:hover { color: var(--accent); }
-  #counts { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #counts { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums;
+            flex: 1 1 0; min-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the counts line gives way first (its full text is its title), so the meters keep one row */
   #counts b { color: var(--text); font-weight: 600; }
   #conn { margin-left: auto; color: var(--pgm); font-size: 12px; }
   /* Meter groups wrap whole onto another row where they no longer fit beside each other; they never squeeze their text. */
