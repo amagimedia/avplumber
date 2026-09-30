@@ -75,7 +75,7 @@ the backlog during the stall, but cannot prove that expiry caused its onset.
 
 ### Same workload at 25 and 30 fps
 
-These runs used FFmpeg `hwupload` from pageable memory and 40 NVDEC streams, before
+These runs used FFmpeg `hwupload` from pageable memory and up to 40 NVDEC streams, before
 pinned uploads and the 36-stream cap at 30 fps; the 30 fps baseline above supersedes
 them.
 
