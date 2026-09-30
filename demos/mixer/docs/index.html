@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="AVPlumber live mixer: sixteen sources — live browser pages and clips — on one GPU canvas, cut, faded and wiped from a browser control surface, described by one JSON document.">
+  <meta name="description" content="AVPlumber live mixer: up to 110 independent inputs — live Chromium pages, NVDEC clips and raw uploads — on one GPU canvas of a 16 GiB NVIDIA T4, cut, faded, dipped, wiped and keyed from a browser control surface, described by one JSON document.">
   <title>Live mixer demo · AVPlumber</title>
   <style>
     :root {
@@ -57,21 +57,25 @@
       browser pages, clip grids and the sixteen-box.</figcaption>
   </figure>
 
-  <p class="lede">Sixteen sources — live browser pages and video files together — composited on one GPU canvas into a 1080×1920 portrait program, cut, faded and wiped from one page, with the whole show described by one JSON document.</p>
+  <p class="lede">Up to 110 independent inputs at 25/30 fps, or 68 at 50/60 — live Chromium pages, NVDEC clips and raw uploads together — composited on one GPU canvas of a 16 GiB NVIDIA T4 into a 1080p program in either orientation, SDR or 10-bit HLG, cut, faded, dipped and wiped from one page, keyed with up to four downstream graphics, with the whole show described by one JSON document.</p>
 
   <ul class="figures">
-    <li><b>16</b><span>unique sources: live pages and clips, one decode or capture each</span></li>
-    <li><b>17–18%</b><span>GPU on a Tesla T4, canvas at 30 fps</span></li>
-    <li><b>2.86 Mbit/s</b><span>on the wire from a 2 700 kbit/s WebRTC rendition</span></li>
-    <li><b>5</b><span>media wipes held decoded in GPU memory, ~482 MiB</span></li>
+    <li><b>110</b><span>inputs at 1080p30 on one T4: 36 NVDEC + 36 browser + 34 raw NV12 + 4 keys</span></li>
+    <li><b>68</b><span>inputs at 1080p60: 18 NVDEC + 29 browser + 17 raw + 4 keys, GPU 62–64%, NVDEC 84%, host half idle</span></li>
+    <li><b>~43 ms</b><span>median cut latency at 68@60, from the command to the first encoded frame of the new scene</span></li>
+    <li><b>24</b><span>missed playout deadlines in a 19.5 h run at 68@60 (0.0006%); none in steady state</span></li>
+    <li><b>40</b><span>real Chromium windows (Electron 44 / Chromium 152), their DMA-BUFs imported zero-copy into CUDA</span></li>
+    <li><b>192</b><span>scenes per show; cut, fade, dip to colour and GPU-cached media wipes between them</span></li>
   </ul>
 
-  <p class="closing">Browser pages arrive as DMA-BUFs from the <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/dmabuf-browser">dma-browser demo</a> and are imported straight into CUDA; the compositor converts packed RGB to the NV12 canvas in its own draw pass, so pages and NVDEC video mix with no separate conversion. Wipe clips decode on each take by default and are drawn as one alpha-blended layer by the compositor kernel the scenes use, including GPU scaling. GPU clip caching is optional; the recorded example above used it. Fresh setups generate their own moving alpha wipes. The program is composited once and each <code>rendition</code> re-times and rescales it, so a second output costs an encode, not another composite.</p>
+  <p class="closing">Every browser source is a real Chromium window from the <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/dmabuf-browser">dma-browser demo</a>: its DMA-BUFs are imported straight into CUDA, and the compositor converts packed RGB to the NV12, P010 or P210 canvas in its own draw pass, so pages, NVDEC video and raw uploads mix with no separate conversion. Takes are cut, fade, dip through a colour picked on the control page (a CUDA transition), or a media wipe drawn as one alpha-blended layer by the compositor kernel the scenes use; decoded wipe clips stay cached in GPU memory. Up to four downstream keys — browser pages — go over the finished program, with keyed and clean program feeds, and an aux multiviewer shows PGM, PVW and eight scene tiles, or pages through every source. The canvas is 8-bit SDR 4:2:0, or 10-bit HLG with 4:2:2 or 4:2:0 chroma, encoded as H.264 SDR and H.265 HDR renditions and previewed over WebRTC through Janus; the program is composited once and each <code>rendition</code> re-times and rescales it, so a second output costs an encode, not another composite. The instance's <code>/setup</code> page builds the whole show from source counts, with no JSON editing.</p>
 
   <footer>
-    <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md">Configuration reference</a> — sources, scenes, wipes, renditions, control defaults<br>
-    <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/README.md">Demo README</a> — run it, controls, measured load<br>
-    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer">Processing graph ↗</a> — 122 nodes, 140 queues<br>
+    <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md">Configuration reference</a> — sources, scenes, wipes, keys, aux outputs, renditions, control defaults<br>
+    <a href="https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/">Cookbook</a> — how the pieces work: browser hand-off, CUDA streams, frame queues, key fades, raw uploads, the multiviewer<br>
+    <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md">Capacity measurements</a> — tested mixes and limits on the T4, with their history<br>
+    <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/README.md">Demo README</a> — run it, controls, limits<br>
+    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer">Processing graph ↗</a><br>
     <a href="https://github.com/amagimedia/avplumber">AVPlumber on GitHub</a>
   </footer>
 </main>
