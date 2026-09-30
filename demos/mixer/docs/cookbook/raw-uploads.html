@@ -62,6 +62,13 @@
     .figures li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
     .figures b { display: block; font-size: 23px; font-weight: 650; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; color: #edf4ff; }
     .figures span { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; line-height: 1.45; }
+    .measured { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 14px 0 0; max-width: 640px; }
+    .measured table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .measured th, .measured td { padding: 8px 14px; border-bottom: 1px solid var(--line); text-align: right; color: var(--body); white-space: nowrap; }
+    .measured tr:last-child td { border-bottom: 0; }
+    .measured th:first-child, .measured td:first-child { text-align: left; }
+    .measured th { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; }
+    .measured td:last-child { color: #edf4ff; }
   </style>
 </head>
 <body>
@@ -70,7 +77,7 @@
 
   <h1>Raw uploads and the CUDA driver lock</h1>
   <p class="lede">With FFmpeg <code>hwupload</code>, each raw NV12 source uploads its frames with a slow, synchronous copy that holds a lock the whole mixer shares; copying through a reusable pinned buffer on the source's own stream should shrink that hold to a short enqueue.</p>
-  <span class="pill optin">Status: Setup default, A/B pending</span>
+  <span class="pill optin">Status: Setup default, passes the 60 fps A/B</span>
 
   <ul class="figures" aria-label="Measured facts">
     <li><b>28 of 100</b><span>sources in the 100-source demo are raw NV12 1920×1080 files, 3.1 MB per frame</span></li>
@@ -113,7 +120,7 @@
 
         <rect x="8" y="126" width="744" height="1" fill="#26354a"/>
 
-        <text x="8" y="152" fill="#edf4ff" font-size="14" font-weight="600">pinned · raw_to_cuda (expected, no A/B yet)</text>
+        <text x="8" y="152" fill="#edf4ff" font-size="14" font-weight="600">pinned · raw_to_cuda (holds 60 fps; lock hold still inferred)</text>
         <text x="8" y="184" fill="#a4b4ca" font-size="12">raw source thread</text>
         <rect x="170" y="168" width="90" height="26" rx="4" fill="#6e8bf5"/>
         <text x="215" y="185" fill="#080d17" font-size="12" text-anchor="middle">read 3.1 MB</text>
@@ -199,7 +206,7 @@
   <ul class="cards">
     <li><b>What</b><p>Swap the FFmpeg <code>hwupload</code> filter for <code>raw_to_cuda</code>, a generalization of the existing <code>v210_to_cuda</code> node. Per frame: one copy into a reusable pinned buffer, <code>cuMemcpy2DAsync</code> on the source's own non-blocking stream, then a stream sync before the frame moves on. Consumers are unchanged.</p></li>
     <li><b>Why</b><p>The <code>hwupload</code> copy is synchronous, from pageable memory, on the default stream. The driver bounces it through its own pinned buffer (a second CPU copy) and holds the context lock for the whole transfer. Every other CUDA call in the process (compositors, DMA-BUF imports, other uploads, encoders) needs that lock.</p><p>With <code>hwupload</code> at 100 live sources the GPU engines were fine (SM 56 %, NVDEC 81 %, NVENC 32 %, VRAM 9.6 of 15.4 GB). The CPU threads were not: 28 upload threads at 81 % CPU, 68 input threads at 94 %.</p></li>
-    <li><b>Latency</b><p>Expected neutral or better; no A/B against <code>hwupload</code> yet. Program: no frame added. The frame is already on the GPU when pacing releases it, so the upload leaves the release path.</p><p>The one uploaded frame queued ahead of pacing is prefetch, not an extra frame of delay. Command-to-screen: unchanged (an input-side change).</p></li>
+    <li><b>Latency</b><p>Expected neutral or better; the 60 fps A/B against <code>hwupload</code> measured deadlines, not latency. Program: no frame added. The frame is already on the GPU when pacing releases it, so the upload leaves the release path.</p><p>The one uploaded frame queued ahead of pacing is prefetch, not an extra frame of delay. Command-to-screen: unchanged (an input-side change).</p></li>
     <li><b>Side effects</b><ul>
       <li>About 100–175 MB more VRAM at 28 sources.</li>
       <li>The raw chain shrinks from 7 to 5 nodes.</li>
@@ -210,16 +217,30 @@
       <li>Host RAM: one pinned 3.1 MB buffer per source, about 87 MB for 28 (computed, not measured).</li>
       <li>CPU: one copy per frame instead of two. PCIe: same bytes.</li>
     </ul></li>
-    <li><b>Risk</b><p>Unproven: the traces show contention, not that pinned staging and a private stream remove it. The source thread still blocks on its own stream sync each frame. Before its first write into the frame, the private stream waits on the GPU for work already queued on the shared device stream (<code>PacketToCuda::waitForReaders()</code>), so it is not fully decoupled. <code>raw_to_cuda</code> waits before its copy; <code>v210_to_cuda</code> waits only between the staging copy and the unpack kernel, so the copy overlaps. Pinned memory is locked RAM the OS cannot page out.</p></li>
-    <li><b>Switch it off</b><p>The library default is <code>canvas.raw_upload: "hwupload"</code> (vanilla FFmpeg), so a config that does not set it is unchanged. The setup's base recipe, <code>demo.example.json</code>, sets <code>"pinned"</code>, so every show the setup builds uploads through <code>raw_to_cuda</code>; set it back to <code>"hwupload"</code> there. Pinned stays only if the A/B shows it removes the stall with no latency cost; otherwise the node is deleted.</p></li>
+    <li><b>Risk</b><p>Shown to matter at 60 fps; the mechanism is still inferred from traces. The traces show contention and the 60 fps run shows the outcome, not which part of the change (pinned staging, the private stream, or the two dropped nodes) removes the stall. The source thread still blocks on its own stream sync each frame. Before its first write into the frame, the private stream waits on the GPU for work already queued on the shared device stream (<code>PacketToCuda::waitForReaders()</code>), so it is not fully decoupled. <code>raw_to_cuda</code> waits before its copy; <code>v210_to_cuda</code> waits only between the staging copy and the unpack kernel, so the copy overlaps. Pinned memory is locked RAM the OS cannot page out.</p></li>
+    <li><b>Switch it off</b><p>The library default is <code>canvas.raw_upload: "hwupload"</code> (vanilla FFmpeg), so a config that does not set it is unchanged. The setup's base recipe, <code>demo.example.json</code>, sets <code>"pinned"</code>, so every show the setup builds uploads through <code>raw_to_cuda</code>; set it back to <code>"hwupload"</code> there.</p></li>
   </ul>
 
   <h2>Why it matters at 110 sources</h2>
   <p>The setup's 110-input shows carry 40 NVDEC + 40 browser windows + 30 raw sources at 25 fps, and 36 + 40 + 34 at 30 fps; the browser windows include 4 key pages (<a href="capacity-budgets.html">Rate-aware capacity budgets</a>). Raw uploads grow from 28 sources at 2.2 GB/s to about 2.3 GB/s at 25 fps and about 3.2 GB/s at 30 fps (computed: raw upload units × 3.1 MB × frame rate, where a P010 source counts as 2 units). The PCIe link has headroom; the lock is the limit. The evidence from lighter load: a pinned compositor table upload took 0.081 ms with 14 raw uploads and 5.31 ms with 28, 98–99.7 % of it in futex waits, while the compositor and import cleanup waited on the same futex.</p>
   <p>With pinned uploads at 30 fps and 110 inputs, the upload threads still waited on a lock for 2.2 s per 10 s. There is no <code>hwupload</code> run at the same load, so that figure does not yet say how much pinned helps.</p>
 
+  <h2>Measured at 68 inputs, 60 fps</h2>
+  <p>The 68-input 60 fps show (18 NVDEC + 29 browser + 17 raw NV12 + 4 browser key pages) on the T4 test host (16 vCPU), with <code>canvas.raw_upload</code> set to <code>hwupload</code> and then to <code>pinned</code>.</p>
+  <div class="measured">
+    <table>
+      <thead><tr><th>Metric</th><th>hwupload</th><th>pinned</th></tr></thead>
+      <tbody>
+        <tr><td>NVDEC + browser + raw + keys</td><td>18 + 29 + 17 + 4</td><td>18 + 29 + 17 + 4</td></tr>
+        <tr><td>Program frames that missed their deadline</td><td>69 %</td><td>0</td></tr>
+        <tr><td>NVDEC</td><td>about 26 %</td><td>about 85 %</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Host CPU was lower with <code>hwupload</code> only because the pipeline stalled (the NVDEC drop is the same stall seen from the GPU side), so it is not a saving. This run is idea 12 on <a href="rejected.html">Ideas we measured and dropped</a>.</p>
+
   <h2>How it gets measured</h2>
-  <p>A/B at 110 sources, <code>hwupload</code> vs. <code>pinned</code>, same build.</p>
+  <p>The 60 fps run above shows the outcome, not the mechanism. Still pending: an A/B at 110 sources, <code>hwupload</code> vs. <code>pinned</code>, same build.</p>
   <ul>
     <li>Futex wait time of compositor, import and upload threads.</li>
     <li>Scheduler run delay from <code>/proc/&lt;pid&gt;/task/*/schedstat</code>.</li>
@@ -237,13 +258,13 @@
     <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L298-L312">src/nodes/hwaccel/v210_to_cuda.cpp L298–312</a>: <code>RawToCuda</code>: <code>waitForReaders()</code> first, then <code>cuMemcpy2DAsync</code> per plane</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/v210_to_cuda.cpp#L257-L267">src/nodes/hwaccel/v210_to_cuda.cpp L257–267</a>: <code>V210ToCuda</code>: staging copy, <code>waitForReaders()</code>, then the unpack kernel</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L139-L185">pyplumber/mixer/inputs.py L139–185</a>: <code>build_raw420_input</code>, both chains and the one-frame prefetch</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L28-L30">pyplumber/mixer/config.py L28–30</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L392-L394">L392–394</a>: the <code>raw_upload</code> switch and its library default, <code>"hwupload"</code>; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/demo.example.json#L8">demos/mixer/demo.example.json L8</a> sets <code>"pinned"</code> for every setup-built show</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L699-L703">demos/mixer/mixer.py L699–703</a>: the demo passes the switch to each raw source</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L28-L30">pyplumber/mixer/config.py L28–30</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L411-L413">L411–413</a>: the <code>raw_upload</code> switch and its library default, <code>"hwupload"</code>; <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/demo.example.json#L8">demos/mixer/demo.example.json L8</a> sets <code>"pinned"</code> for every setup-built show</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L723-L727">demos/mixer/mixer.py L723–727</a>: the demo passes the switch to each raw source</li>
   </ul>
-  <p>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md#why-uploads-limit-this-mix">capacity.md · Why uploads limit this mix</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md#upload-headroom-and-browser-allocation-bursts">Upload headroom</a> (the measurements); <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#canvas">config.md · canvas</a> (<code>raw_upload</code>); <a href="https://github.com/amagimedia/avplumber/blob/develop/doc/NODES.md#raw_to_cuda">NODES.md · raw_to_cuda</a> (node reference).</p>
+  <p>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md#why-uploads-limit-this-mix">capacity.md · Why uploads limit this mix</a> and <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md#upload-headroom-and-browser-allocation-bursts">Upload headroom</a> (the measurements); <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#canvas">config.md · canvas</a> (<code>raw_upload</code>); <a href="https://github.com/amagimedia/avplumber/blob/develop/doc/NODES.md#raw_to_cuda">NODES.md · raw_to_cuda</a> (node reference); <a href="cpu-pressure.html">Measuring CPU pressure at 60 Hz</a> (the ~0.15 core a raw NV12 file costs at 60 fps: the file read plus the pinned staging copy).</p>
   <p class="note">Line numbers match the change under review and resolve on develop once it merges.</p>
 
-  <p class="note">Measured on the T4 test host with the live 100-source demo: 40 NVDEC, 32 browser pages (including 4 DSK keys) and 28 raw NV12 files, all 1080p25. The stop-the-uploads run is from a 100-source, 30 fps session in capacity.md. The lock-wait figure is from the 110-input 30 fps show: 36 NVDEC, 36 browser sources, 4 key pages and 34 pinned raw sources.</p>
+  <p class="note">Measured on the T4 test host with the live 100-source demo: 40 NVDEC, 32 browser pages (including 4 DSK keys) and 28 raw NV12 files, all 1080p25. The stop-the-uploads run is from a 100-source, 30 fps session in capacity.md. The lock-wait figure is from the 110-input 30 fps show: 36 NVDEC, 36 browser sources, 4 key pages and 34 pinned raw sources. The 60 fps A/B is from the 68-input show on the T4 test host (16 vCPU): 18 NVDEC, 29 browser sources, 4 key pages and 17 raw NV12 files.</p>
 
   <footer><a href="index.html">← All cookbook pages</a></footer>
 </main>

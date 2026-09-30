@@ -44,8 +44,8 @@ Two switches keep the GPU process stable, both on by default:
   then crashes it in `AddCleanupTaskForSkiaFlush` (electron/electron#54553).
   On OpenGL ES that Vulkan context is never created (Chromium 152+).
 - `DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT=0` turns off
-  `--disable-gpu-process-crash-limit`. Without it, a fourth GPU-process crash
-  within five minutes makes Chromium quit the worker.
+  `--disable-gpu-process-crash-limit`. Without it, a third GPU-process crash
+  within five minutes of the last makes Chromium quit the worker.
 The [Docker demo](../../demos/dmabuf-browser/README.md#run) builds and enables
 the shim automatically. Alternatively, use the patched Electron build linked
 above without the shim.
