@@ -1,4 +1,5 @@
-# Fedora 44 / CUDA 13.2 build of the mixer image. Candidate for ./Dockerfile
+# syntax=docker/dockerfile:1.7
+# Fedora 44 / CUDA 13.4 build of the mixer image. Candidate for ./Dockerfile
 # (Ubuntu 22.04 / CUDA 11.7), which stays the compose default until the host
 # A/B described in docs/guide.md passes. Same /build layout, entrypoint, ports
 # and environment as the current image, so compose.yaml only needs its
@@ -6,27 +7,29 @@
 #
 # Build from the repository root:
 #   docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44 .
-#   docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44-trt \
-#       --build-arg WITH_TENSORRT=1 \
-#       --build-arg TENSORRT_ARCHIVE_URL=<url of your tensorrt-minimal tgz> .
+#   TENSORRT_URL=<url of your tensorrt-minimal tgz> docker build \
+#       -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44-trt \
+#       --build-arg WITH_TENSORRT=1 --secret id=tensorrt_url,env=TENSORRT_URL .
 #
-# CUDA 13.2 exactly: FFmpeg ships its CUDA filters as PTX that the driver
-# JIT-compiles, and the R595 host driver (CUDA 13.2) rejects PTX from nvcc 13.3
-# or newer with CUDA_ERROR_UNSUPPORTED_PTX_VERSION. NVIDIA's fedora44 repository
-# starts at 13.3, so the 13.2 rpms come from the fedora43 repository; they
-# depend on nothing but glibc.
+# The host driver must be R615 or newer (CUDA 13.4): FFmpeg ships its CUDA
+# filters as PTX that the driver JIT-compiles, and an older driver rejects
+# nvcc 13.4 PTX with CUDA_ERROR_UNSUPPORTED_PTX_VERSION at the first CUDA filter.
+# NVIDIA_REQUIRE_CUDA below makes the container runtime refuse such a host at
+# start instead. For an R595 host build CUDA_VERSION=13.2 from the fedora43
+# repository (CUDA_REPO_URL), with NVCC_PREPEND_FLAGS='-ccbin g++-15' and
+# gcc15-c++ installed, since nvcc 13.2 supports GCC up to 15.
 
 ARG WITH_TENSORRT=0
 
 FROM fedora:44 AS base
 
-ARG CUDA_VERSION=13.2
-ARG CUDA_REPO_URL=https://developer.download.nvidia.com/compute/cuda/repos/fedora43/x86_64/cuda-fedora43.repo
+ARG CUDA_VERSION=13.4
+ARG CUDA_REPO_URL=https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/cuda-fedora44.repo
 
-# The partial rpm set installs no /usr/local/cuda, which the Makefile defaults
-# to, hence the symlink. Fedora's loader path omits /usr/local/lib, where
-# FFmpeg installs below, hence the ld.so.conf entry.
-RUN dnf -y install --setopt=install_weak_deps=False dnf5-plugins \
+# The Makefile defaults to /usr/local/cuda; the symlink makes sure it names this
+# CUDA_VERSION. Fedora's loader path omits /usr/local/lib, where FFmpeg installs
+# below, hence the ld.so.conf entry.
+RUN dnf -y install --setopt=install_weak_deps=False ca-certificates dnf5-plugins \
     && dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
     && cuda_pkg="$(echo "${CUDA_VERSION}" | tr . -)" \
     && dnf -y install --setopt=install_weak_deps=False \
@@ -36,7 +39,6 @@ RUN dnf -y install --setopt=install_weak_deps=False dnf5-plugins \
         findutils \
         gcc \
         gcc-c++ \
-        gcc15-c++ \
         git \
         libcurl-devel \
         libdrm-devel \
@@ -45,7 +47,6 @@ RUN dnf -y install --setopt=install_weak_deps=False dnf5-plugins \
         nasm \
         nv-codec-headers \
         openssl-devel \
-        perl \
         pkgconf-pkg-config \
         python3-devel \
         which \
@@ -64,9 +65,15 @@ RUN dnf -y install --setopt=install_weak_deps=False dnf5-plugins \
     && ln -sfnT "/usr/local/cuda-${CUDA_VERSION}" /usr/local/cuda \
     && echo /usr/local/lib > /etc/ld.so.conf.d/avplumber.conf
 
-# nvcc 13.2 accepts host GCC up to 15 and Fedora 44 ships GCC 16. Only device
-# code (-ptx, -fatbin) goes through nvcc; every C/C++ object comes from GCC 16.
-ENV NVCC_CCBIN=g++-15
+# Extra nvcc flags without editing this file, e.g. '-allow-unsupported-compiler'
+# should a CUDA release lag behind Fedora's GCC. nvcc 13.4 supports GCC 16.
+ARG NVCC_PREPEND_FLAGS=
+ENV NVCC_PREPEND_FLAGS=${NVCC_PREPEND_FLAGS}
+
+# Ubuntu's GCC hardens by default and Fedora's only through rpm %optflags, which
+# these builds never see: set it explicitly so the A/B against the Ubuntu image
+# compares toolchains, not hardening.
+ENV HARDENING_FLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fcf-protection"
 
 FROM base AS ffmpeg
 
@@ -105,7 +112,7 @@ RUN cd /tmp/ffmpeg \
         --disable-manpages \
         --disable-podpages \
         --disable-txtpages \
-        --extra-cflags=-I/usr/local/cuda/targets/x86_64-linux/include \
+        --extra-cflags="-I/usr/local/cuda/targets/x86_64-linux/include ${HARDENING_FLAGS}" \
         --extra-ldflags=-L/usr/local/cuda/targets/x86_64-linux/lib \
         --extra-ldexeflags=-Wl,--disable-new-dtags,-rpath,/usr/local/lib \
         --nvcc=/usr/local/cuda/bin/nvcc \
@@ -116,9 +123,15 @@ RUN cd /tmp/ffmpeg \
     && ldconfig \
     && rm -rf /tmp/ffmpeg
 
-RUN /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' scale_cuda ' \
-    && /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda ' \
-    && /usr/local/bin/ffmpeg -hide_banner -h filter=transition_cuda \
+# The mixer's GPU paths: CUDA filters (incl. the patched pad_cuda and
+# transition_cuda dip), NVENC H.264/HEVC, NVDEC, and DRM for DMA-BUF.
+RUN ffmpeg="/usr/local/bin/ffmpeg -hide_banner" \
+    && for f in scale_cuda pad_cuda overlay_many_cuda; do $ffmpeg -filters | grep -q " $f " || exit 1; done \
+    && for e in h264_nvenc hevc_nvenc; do $ffmpeg -encoders | grep -q " $e " || exit 1; done \
+    && $ffmpeg -decoders | grep -q ' h264_cuvid ' \
+    && $ffmpeg -hwaccels | grep -qx cuda \
+    && $ffmpeg -buildconf | grep -q -- '--enable-libdrm' \
+    && $ffmpeg -h filter=transition_cuda \
        | awk '$1 == "mode" && $3 ~ /T/ { m = 1 } $1 == "dip" { d = 1 } $1 == "color" && $3 ~ /T/ { c = 1 } \
               END { exit !(m && d && c) }'
 
@@ -130,19 +143,19 @@ RUN mkdir -p /opt/tensorrt/lib
 
 FROM ffmpeg AS tensorrt-1
 
-ARG TENSORRT_ARCHIVE_URL
-
 # The stripped bundle: trtexec, headers, the libnvinfer family. It must be a
 # TensorRT build for CUDA 13; .plan engines are TensorRT-version and GPU
 # specific and are mounted at run time, never baked in. cudart, the one CUDA
 # library TensorRT needs at run time, rides along in /opt/tensorrt/lib so the
 # runtime stage needs no CUDA rpms either way. eigen3 serves the tracking nodes.
-RUN test -n "${TENSORRT_ARCHIVE_URL}" \
-    || { echo 'WITH_TENSORRT=1 needs --build-arg TENSORRT_ARCHIVE_URL=<url of your tensorrt-minimal tgz>' >&2; exit 1; } \
+# The URL comes in as a build secret, so it never lands in the image history.
+RUN --mount=type=secret,id=tensorrt_url \
+    test -s /run/secrets/tensorrt_url \
+    || { echo 'WITH_TENSORRT=1 needs --secret id=tensorrt_url (the url of your tensorrt-minimal tgz)' >&2; exit 1; } \
     && dnf -y install --setopt=install_weak_deps=False curl eigen3-devel tar \
     && dnf clean all \
     && mkdir -p /opt/tensorrt/bin /opt/tensorrt/include /opt/tensorrt/lib \
-    && curl -fL --retry 3 "${TENSORRT_ARCHIVE_URL}" -o /tmp/tensorrt.tgz \
+    && curl -fL --retry 3 "$(cat /run/secrets/tensorrt_url)" -o /tmp/tensorrt.tgz \
     && tar -xzf /tmp/tensorrt.tgz -C /opt/tensorrt/bin --strip-components=2 --wildcards 'TensorRT-*/bin/trtexec' \
     && tar -xzf /tmp/tensorrt.tgz -C /opt/tensorrt/include --strip-components=2 --wildcards 'TensorRT-*/include/*' \
     && tar -xzf /tmp/tensorrt.tgz -C /opt/tensorrt/lib --strip-components=2 --wildcards \
@@ -188,6 +201,7 @@ RUN make -j"${BUILD_JOBS}" python_module \
         NEURAL_NET="${WITH_TENSORRT}" \
         TENSORRT_ROOT=/opt/tensorrt \
         PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+        CXXFLAGS+=" ${HARDENING_FLAGS}" \
         LFLAGS+=' -Wl,--disable-new-dtags'
 
 RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
@@ -197,7 +211,7 @@ RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
                    egl_image_cuda_overlay v210_to_cuda; do \
            grep -q "\"${node}\"" /build/graph_factory.generated.cpp || exit 1; \
        done \
-    && PYTHONPATH=/build python3 -c 'import pyplumber'
+    && PYTHONPATH=/build python3 -c 'import _avplumber'
 
 FROM fedora:44 AS runtime
 
@@ -236,14 +250,18 @@ COPY tests/cuda/v210_fixture.py /build/tests/cuda/v210_fixture.py
 # CUDA is loaded through the driver at run time (deps/cuda_loader, ffnvcodec),
 # so nothing here may link a CUDA toolkit library: "not found" means a build
 # flag drifted (HAVE_NVJPEG, libnpp).
+# import _avplumber loads the native module (import pyplumber is lazy), so
+# unresolved symbols fail here rather than at the first mixer start.
 RUN ldconfig \
     && pip3 install --no-cache-dir -r /build/demos/mixer/requirements.txt \
+    && ls /build/_avplumber*.so >/dev/null \
     && ! ldd /build/_avplumber*.so /usr/local/bin/ffmpeg | grep 'not found' \
-    && PYTHONPATH=/build python3 -c 'import pyplumber' \
+    && PYTHONPATH=/build python3 -c 'import _avplumber' \
     && /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda '
 
 ENV AVPLUMBER_REVISION=${AVPLUMBER_REVISION}
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+ENV NVIDIA_REQUIRE_CUDA="cuda>=13.4"
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV PYTHONPATH=/build
 ENV PYTHONUNBUFFERED=1
