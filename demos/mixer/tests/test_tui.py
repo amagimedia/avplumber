@@ -34,6 +34,7 @@ class FakeConnection:
                 {
                     "pgm_scene": self.program,
                     "pvw_scene": self.preview,
+                    "pvw_slot_scene": self.preview,
                     "transition": "idle",
                 }
             )

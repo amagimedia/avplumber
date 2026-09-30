@@ -3,6 +3,7 @@
 #include "../mixer/primitives/MonotonicClock.hpp"
 #include "../mixer/primitives/PreviewFollow.hpp"
 #include "../mixer/primitives/source_mask.hpp"
+#include <atomic>
 #include <chrono>
 #include <optional>
 #include <unordered_map>
@@ -15,10 +16,16 @@
 // tile); every composition this node sets is pvw[shown] followed by base, and it is the only
 // writer of the compositor's composition while it runs.
 //
-// With swap_preview the scene that leaves program becomes the preview, so after every apply the
-// program scene's sources are added to the active inputs (no layer draws them: one subscription
-// push per source per aux tick, no compositing). The timed composition of the next take then
-// only drops inputs, which the compositor applies at once instead of staging.
+// With swap_preview the scene that leaves program becomes the preview, so a settle pass after
+// every take adds the program scene's sources to the active inputs (no layer draws them: one
+// subscription push per source per aux tick, no compositing), and every other apply keeps the
+// program's inputs that are active already. The timed composition of the next take then only
+// drops inputs, which the compositor applies at once instead of staging. Residual: a settle the
+// compositor stages and rejects after its deadline (a stalled program source) leaves that input
+// in applied_inputs_ without being active, so the next timed apply adds it and is staged too.
+//
+// The compositor is resolved once, at creation: a lookup by name takes NodeManager's lock, which
+// shutdown holds while it joins this thread.
 class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, public IReturnsObjects {
     struct Layout {
         Parameters layers = Parameters::array();
@@ -32,8 +39,8 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
         int64_t target = 0;   // aux tick the PGM tile shows it on; 0: at once
     };
     std::shared_ptr<avp::mixer::MixerState> state_;
-    NodeManager& nodes_;
-    const std::string compositor_;
+    const std::string compositor_name_;
+    const std::weak_ptr<NodeWrapper> compositor_;
     const avp::mixer::PreviewFollowTiming timing_;
     // Layouts and status, under layouts_mutex_, which is never held while taking another lock.
     std::mutex layouts_mutex_;
@@ -42,17 +49,26 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     std::unordered_map<std::string, Layout> pvw_;
     Parameters status_ = Parameters::object();
     std::string error_;
-    // Wake reasons besides the mixer's revision, under state_->mutex.
+    // Wake reasons besides the mixer's revision. The base is flagged under state_->mutex; the
+    // stop is not, since the framework requests it under locks the orchestrator takes after
+    // state_->mutex: a wake lost that way lasts one aux tick.
     bool base_dirty_ = true;
-    bool stopping_ = false;
+    std::atomic<bool> stopping_{false};
     // Follower thread only.
     std::optional<uint64_t> seen_;
     std::optional<Change> pending_;
     Change applied_;
+    avp::mixer::SourceMask applied_inputs_;   // the active inputs the compositor last accepted
     bool suspended_ = false;
     std::optional<int64_t> settle_at_;   // when to add the program scene's inputs (swap on)
     bool dirty_retry_ = false;           // a base apply failed: again at the next wake
     std::string warning_;                // from the last apply, shown as the status error
+
+    std::shared_ptr<NodeWrapper> compositor() const {
+        auto node = compositor_.lock();
+        if (!node) throw Error("mixer_pvw_follow: compositor " + compositor_name_ + " is gone");
+        return node;
+    }
 
     static Layout parseLayout(const Parameters& value) {
         if (!value.at("layers").is_array()) throw Error("mixer_pvw_follow: layers must be an array");
@@ -65,28 +81,34 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
         return it == pvw_.end() ? nullptr : &it->second;
     }
 
-    /// pvw[shown] ++ base; `warm` adds the program scene's inputs. `enabled` unset resumes a
-    /// suspended bus, as an operator's change does; a preview change keeps it suspended. A scene
-    /// without a PVW layout draws an empty cell and is reported (`warning_`), not retried.
-    void apply(const Change& change, bool warm, std::optional<bool> enabled) {
+    /// pvw[shown] ++ base; with swap_preview the program scene's inputs stay warm: `settle` adds
+    /// them all, otherwise those active already are kept, so the composition adds nothing.
+    /// `enabled` unset resumes a suspended bus, as an operator's change does; a preview change
+    /// keeps it suspended. A scene without a PVW layout draws an empty cell and is reported
+    /// (`warning_`), not retried.
+    void apply(const Change& change, bool settle, std::optional<bool> enabled) {
         Parameters composition;
+        avp::mixer::SourceMask inputs;
         {
             std::lock_guard<std::mutex> lock(layouts_mutex_);
             const Layout* pvw = change.shown.empty() ? nullptr : layout(change.shown);
             warning_ = !change.shown.empty() && !pvw ? "no PVW layout for scene " + change.shown : "";
             Parameters layers = pvw ? pvw->layers : Parameters::array();
             layers.insert(layers.end(), base_.layers.begin(), base_.layers.end());
-            auto inputs = base_.inputs | (pvw ? pvw->inputs : avp::mixer::SourceMask{});
-            if (const Layout* pgm = warm && !change.pgm.empty() ? layout(change.pgm) : nullptr) inputs |= pgm->inputs;
+            inputs = base_.inputs | (pvw ? pvw->inputs : avp::mixer::SourceMask{});
+            if (const Layout* pgm = change.swap && !change.pgm.empty() ? layout(change.pgm) : nullptr)
+                inputs |= settle ? pgm->inputs : pgm->inputs & applied_inputs_;
             composition = {{"layers", std::move(layers)}, {"active_inputs", avp::mixer::toParameters(inputs)}};
         }
         if (enabled) composition["enabled"] = *enabled;
-        nodes_.node(compositor_)->setObject("composition", composition);
+        compositor()->setObject("composition", composition);
+        applied_inputs_ = inputs;
     }
 
+    /// Blocks on the compositor's start/stop lock (bounded) and throws while it is not created:
+    /// a failed read must not pass for "not suspended", which would resume the bus.
     bool compositorSuspended() {
-        Parameters status;
-        return nodes_.node(compositor_)->getObjectTry("status", status) && status.value("suspended", false);
+        return compositor()->getObject("status").value("suspended", false);
     }
 
     void report(const std::string& error) {
@@ -96,9 +118,9 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     }
 
 public:
-    MixerPvwFollow(std::shared_ptr<avp::mixer::MixerState> state, NodeManager& nodes, std::string compositor,
-                   avp::mixer::PreviewFollowTiming timing)
-        : state_(std::move(state)), nodes_(nodes), compositor_(std::move(compositor)), timing_(timing) {
+    MixerPvwFollow(std::shared_ptr<avp::mixer::MixerState> state, std::string compositor_name,
+                   std::shared_ptr<NodeWrapper> compositor, avp::mixer::PreviewFollowTiming timing)
+        : state_(std::move(state)), compositor_name_(std::move(compositor_name)), compositor_(compositor), timing_(timing) {
         ++state_->preview_followers;
     }
     ~MixerPvwFollow() override { --state_->preview_followers; }
@@ -148,8 +170,9 @@ public:
                            {"last_change_to_apply_ms", (applied_at - applied_.published_ns) / 1e6},
                            {"last_target_error_ticks", applied_.target ? timing_.tickDrawnAfter(applied_at) - applied_.target : 0}};
             } else if (dirty) {
+                // A new base (a tile reassignment; the PVW layouts are only set at creation) keeps
+                // the warm inputs; a settle still due stays due.
                 apply(applied_, false, std::nullopt);
-                settle_at_ = applied_.swap ? std::optional<int64_t>(now) : std::nullopt;
             } else if (settle_at_ && now >= *settle_at_) {
                 apply(applied_, true, !suspended_);
                 settle_at_.reset();
@@ -164,7 +187,6 @@ public:
     }
 
     void stop() override {
-        std::lock_guard<std::mutex> lock(state_->mutex);
         stopping_ = true;
         state_->preview_changed.notify_all();
     }
@@ -209,8 +231,9 @@ public:
         const int64_t latency_ns = static_cast<int64_t>(params.at("latency_ms").get<double>() * 1000000);
         const int64_t delay = params.value("pgm_delay_frames", int64_t(0));
         if (latency_ns < 0 || delay < 0) throw Error("mixer_pvw_follow: latency_ms and pgm_delay_frames must be nonnegative");
+        const auto compositor_name = params.at("compositor").get<std::string>();
         auto node = std::make_shared<MixerPvwFollow>(
-            std::move(state), nci.nodes, params.at("compositor").get<std::string>(),
+            std::move(state), compositor_name, nci.nodes.node(compositor_name),
             avp::mixer::PreviewFollowTiming{avp::mixer::TickGrid(main_rate), avp::mixer::TickGrid(aux_rate), latency_ns, delay});
         for (const char* key : {"pvw", "base"})
             if (params.contains(key)) node->setObject(key, params.at(key));

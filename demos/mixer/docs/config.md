@@ -436,7 +436,9 @@ thread is more than half an aux frame late (16 ms at 30 aux fps, 20 ms at 25),
 half an aux frame at 50/60 fps (one at 25/30) when the program missed a frame
 deadline right before the cut, and one or more frames when the PVW scene's
 sources were not reaching the bus (a stalled source, or takes faster than
-about one aux frame). Wipes and explicit `mixer.preview` changes draw on the
+about one aux frame); a change the compositor still cannot draw after its
+staging deadline (250 ms or twice the latency) is dropped until the next
+preview change. Wipes and explicit `mixer.preview` changes draw on the
 next frame. With `swap_preview` the program scene's sources are kept flowing
 to the bus so the swapped preview is warm: one subscription push per source
 per aux frame per bus, no compositing. `mixer.aux_status` reports the

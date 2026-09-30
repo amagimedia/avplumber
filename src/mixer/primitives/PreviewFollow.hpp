@@ -14,10 +14,14 @@
 // thread is that late to tick N; -1 when the render thread draws tick N-1 more than half a tick
 // late (the set lands in that iteration). +-1 main tick of the change's own pts when the first
 // new program frame is not one main tick after the selector's last output (a missed main
-// deadline before the cut): half an aux tick at 50/60 fps, a whole one at 25/30. +1 or more when
-// the timed composition adds an input the bus was not receiving (a PVW-scene source stalled, or
-// takes faster than the warm-up settle, about one aux tick): the compositor stages it until that
-// input has a frame for the tick. A PGM frame that misses the aux deadline moves the PGM tile,
+// deadline before the cut, or a frame emitted between the selector switch and the read that
+// follows it at once): half an aux tick at 50/60 fps, a whole one at 25/30. The timed
+// composition only drops inputs (the previewed scene's are active; with swap_preview the program
+// scene's stay warm), so the compositor applies it at once; when it does add one the bus was not
+// receiving (a source that stalled, or takes faster than the warm-up settle, about one aux tick)
+// the compositor stages it until that input has a frame for the tick, and past its staging
+// deadline (max(250 ms, 2x latency)) keeps the previous layout: the change is dropped, not late,
+// until the next preview change. A PGM frame that misses the aux deadline moves the PGM tile,
 // not the PVW tile. Wipes and explicit previews are not timed: they draw on the next tick.
 #include "TickGrid.hpp"
 #include <cstdint>

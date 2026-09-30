@@ -60,18 +60,21 @@ class MixerOrchestrator {
     /// Caller must hold state_->mutex. Wipe end has different semantics
     /// (timeline-driven, doesn't immediately mutate node objects) and uses
     /// its own logic. `picture_changed` false (the on-air picture stays the same) skips
-    /// the encoder keyframe request.
-    void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene,
-                                    bool picture_changed = true);
+    /// the encoder keyframe request. Returns selectorOutputNs() read right after the
+    /// selector was switched, for finishSnapshot(); 0 for an unknown scene.
+    int64_t applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene,
+                                       bool picture_changed = true);
 
     void ensureIdle() const;
     void interruptTransition();
     std::shared_ptr<OutputSnapshot> outputSnapshot() const;
     /// Stops the slot substitution and releases a held output at the next selected frame.
-    /// Returns that frame's pts (ns): one main tick after the selector's newest output, read
-    /// after the selector was switched, so it is the first frame of the new program; 0 before
-    /// the selector emitted anything.
-    int64_t finishSnapshot();
+    /// Returns that frame's pts (ns): one main tick after `emitted`, the selector's newest
+    /// output read after the selector was switched (applyPostTransitionRouting's return, or
+    /// read now), so it is the first frame of the new program; 0 before the selector emitted
+    /// anything.
+    int64_t finishSnapshot(int64_t emitted);
+    int64_t finishSnapshot() { return finishSnapshot(selectorOutputNs()); }
     /// pts (ns) of the newest frame the selector has emitted, 0 before its first.
     int64_t selectorOutputNs() const;
     /// Release timestamp (ns) for the output hold: the first frame newer than everything

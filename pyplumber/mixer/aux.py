@@ -319,6 +319,15 @@ class AuxMultiview(_AuxOutput):
         return {"scenes": list(self.scenes), "revision": self.revision, "cells": multiview_cells(self.cfg),
                 "follower": self.follower_status}
 
+    def _follower_status(self):
+        """The follower's status, None while the node is unreachable (not created, stopped). A
+        command sent to it then is logged and dropped, never an error here, so this is the test."""
+        try:
+            return self.avp.node(self.follower).getObject("status")
+        except Exception as exc:
+            self.follower_status = {"error": str(exc)}
+            return None
+
     def assign(self, request):
         with self.lock:
             if request.get("expected_revision") != self.revision:
@@ -326,9 +335,9 @@ class AuxMultiview(_AuxOutput):
                         "scenes": list(self.scenes), "revision": self.revision}
             scenes = request.get("scenes")
             base = self.base(scenes, uuid.uuid4().hex)
-            try:
+            if self._follower_status() is not None:
                 self._set(self.follower, "base", base)
-            except Exception:
+            else:
                 self._publish(composition(self.cfg, scenes, self.preview))
             self.scenes, self.revision, self.error = list(scenes), base["revision"], ""
             return {"scenes": list(self.scenes), "revision": self.revision}
@@ -336,16 +345,15 @@ class AuxMultiview(_AuxOutput):
     def _follow(self):
         """One pass; returns the seconds until the next. A follower that restarted holds the base
         it was built with, so resend the current one when its revision differs. Only one of the
-        two, the node or this thread, sets the composition at any time."""
+        two, the node or this thread, sets the composition at any time; both use the same shown
+        preview."""
         with self.lock:
-            try:
-                status = self.avp.node(self.follower).getObject("status")
+            status = self._follower_status()
+            if status is not None:
                 if status.get("base_revision") != self.revision:
                     self._set(self.follower, "base", self.base())
-                self.follower_status = status
+                self.follower_status, self.preview = status, status.get("pvw_scene", "")
                 return 1.0
-            except Exception as exc:
-                self.follower_status = {"error": str(exc)}
             try:
                 status = self.avp.node(self.node_name).getObject("status")
                 preview = status.get("pvw_scene", "")

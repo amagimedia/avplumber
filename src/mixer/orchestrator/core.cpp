@@ -279,8 +279,7 @@ std::shared_ptr<OutputSnapshot> MixerOrchestrator::outputSnapshot() const {
         nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
 }
 
-int64_t MixerOrchestrator::finishSnapshot() {
-    const auto emitted = selectorOutputNs();
+int64_t MixerOrchestrator::finishSnapshot(int64_t emitted) {
     auto snapshot = outputSnapshot();
     std::lock_guard<std::mutex> lock(snapshot->mutex);
     snapshot->frames.finish();

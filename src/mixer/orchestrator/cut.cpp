@@ -95,8 +95,7 @@ void MixerOrchestrator::readyCutTask(
     int64_t effective_ns = 0;
     try {
         if (state->cut_latency) state->cut_latency->timing.arm();
-        orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
-        effective_ns = orch.finishSnapshot();
+        effective_ns = orch.finishSnapshot(orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene));
     } catch (const std::exception& e) {
         if (state->cut_latency) state->cut_latency->timing.cancel("failed");
         logstream << "mixer: ready cut error restoring routing: " << e.what();

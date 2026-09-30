@@ -105,7 +105,8 @@ class AvpConnection:
 @dataclass(frozen=True)
 class MixerStatus:
     pgm_scene: str = ""
-    pvw_scene: str = ""
+    pvw_scene: str = ""        # shown to the operator; after a take, the scene that left program
+    pvw_slot_scene: str = ""   # loaded in the PVW slot, so a take of it is instant; "" while cold
     transition: str = "idle"
 
 
@@ -121,6 +122,7 @@ def parse_mixer_status(content: str) -> MixerStatus:
     return MixerStatus(
         pgm_scene=str(data.get("pgm_scene", "")),
         pvw_scene=str(data.get("pvw_scene", "")),
+        pvw_slot_scene=str(data.get("pvw_slot_scene", "")),
         transition=str(data.get("transition", "idle")),
     )
 

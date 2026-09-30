@@ -162,12 +162,12 @@ void MixerOrchestrator::initializeRoutedRoutes() {
         true);
 }
 
-void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
-                                                   const std::string& new_pgm_scene,
-                                                   bool picture_changed) {
+int64_t MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
+                                                      const std::string& new_pgm_scene,
+                                                      bool picture_changed) {
     const auto scene_it = state_->scenes.find(new_pgm_scene);
     if (scene_it == state_->scenes.end())
-        return;
+        return 0;
 
     const SceneDefinition& scene = scene_it->second;
     const uint32_t pgm_bit = new_pgm_is_slot_a ? 1u : 2u;
@@ -182,6 +182,9 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
     timeline_->clearKey(state_->source_switcher_name, "active");
     setNodeObject(state_->source_switcher_name, "active",
                   Parameters(new_pgm_is_slot_a ? 0 : 1));
+    // Read at once: the selector drains its inactive inputs, so the new program's first frame
+    // arrives at the next main deadline, and the routing below could take until then.
+    const int64_t emitted = selectorOutputNs();
 
     // The encoder must not make the receiver wait for the next periodic keyframe:
     // a cut changes the whole picture, and a P-frame carrying it can exceed what
@@ -213,6 +216,7 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
     nodes_->node(old_slot.post_otm_name)->setObject("outputs", Parameters(0u));
     nodes_->node(new_slot.compositor_name)->setObject("active_inputs", toParameters(active));
     nodes_->node(old_slot.compositor_name)->setObject("active_inputs", Parameters(0u));
+    return emitted;
 }
 
 void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene) {
@@ -234,6 +238,9 @@ void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const Sce
 void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name, bool warm_cut) {
     auto& scene = state_->scenes.at(scene_name);
     const auto& slot = is_slot_a ? state_->slot_a : state_->slot_b;
+    // Cold from here: a load that throws below leaves the flushed, reset slot marked so, and
+    // the next take reloads it instead of trusting the previous scene.
+    state_->pvw_slot_scene.clear();
 
     // The slot being loaded is the broadcast-inactive PVW slot.  Its compositor
     // was previously idled with active_inputs=0, so it may still hold frames on

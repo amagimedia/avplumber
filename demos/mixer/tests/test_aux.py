@@ -90,7 +90,8 @@ def test_assignment_conflict_does_not_publish_or_overwrite(cfg):
         node, key, value = object_set(command)
         assert (node, key) == ("aux_multiview_pvw", "base")
         published.append(value)
-    avp = SimpleNamespace(executeCommandsFromString=execute)
+    avp = SimpleNamespace(executeCommandsFromString=execute,
+                          node=lambda _name: SimpleNamespace(getObject=lambda _key: {}))   # follower reachable
     mixer = SimpleNamespace(add_aux_destination=lambda *args: None)
     bus = AuxMultiview(avp, None, mixer, cfg, AuxBus("multiview", (None,) * 8, (Rendition("monitor"),)))
     revision = bus.revision
@@ -240,24 +241,26 @@ def test_commands_route_by_bus_kind_and_status_reports_geometry(cfg):
 
 class StatusAvp:
     """Records compositions and follower bases; the test sets what the compositor's status
-    reports and the follower's status (``follower``, None while that node is unreachable)."""
+    reports and the follower's status (``follower``, None while that node is unreachable).
+    Like the binding, a command to an unreachable node is logged and dropped, never raised;
+    only ``node()`` raises."""
 
     def __init__(self):
         self.published, self.bases = [], []
         self.status, self.follower = {"suspended": False, "pvw_scene": ""}, None
 
-    def _reach(self, name):
-        if name.endswith("_pvw") and self.follower is None:
-            raise Exception(f"Node {name} doesn't exist.")
-
     def executeCommandsFromString(self, command):
         node, key, value = object_set(command)
-        self._reach(node)
         assert key == ("base" if node.endswith("_pvw") else "composition")
-        (self.bases if key == "base" else self.published).append(value)
+        if node.endswith("_pvw"):
+            if self.follower is not None:
+                self.bases.append(value)
+        else:
+            self.published.append(value)
 
     def node(self, name):
-        self._reach(name)
+        if name.endswith("_pvw") and self.follower is None:
+            raise Exception(f"Node {name} doesn't exist.")
         status = self.follower if name.endswith("_pvw") else self.status
         return SimpleNamespace(getObject=lambda _key: dict(status))
 
@@ -380,11 +383,13 @@ def test_assignment_hands_the_follower_the_base_or_falls_back(cfg):
     avp.follower = {"base_revision": grid.revision, "pvw_scene": "repeat"}
     assert grid._follow() == 1.0 and len(avp.bases) == 2
     assert grid.details()["follower"] == avp.follower
+    assert grid.preview == "repeat"   # what the node shows, for a composition set here later
     # Unreachable: this thread follows the preview at 50 ms and sets the composition itself.
     avp.follower = None
     avp.status = {"suspended": False, "pvw_scene": "full"}
     assert grid._follow() == 0.05
     assert avp.published == [{**composition(cfg, scenes, "full"), "enabled": True}]
     assert grid.details()["follower"]["error"]
+    # A reassignment then goes to the compositor: the node would drop the base without a word.
     grid.assign({"expected_revision": grid.revision, "scenes": [None] * 8})
     assert avp.published[-1] == composition(cfg, [None] * 8, "full") and len(avp.bases) == 2
