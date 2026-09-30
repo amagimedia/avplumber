@@ -65,17 +65,17 @@ The player also shows host GPU/NVDEC usage and used/total VRAM from `nvidia-smi`
 sampled once per second. Usage turns orange at 95% and red at 99%; VRAM turns
 orange at 14 GiB and red at 14.75 GiB. These totals include other GPU applications.
 
-The setup limits unique sources to **110 at 25 fps, 83 at 30 fps, 50 at 50 fps,
-and 41 at 60 fps**. The 25 fps ceiling is experimental above
-the 100-source baseline. Higher rates retain a budget of
-2,500 input frames per second, rounded down. It allows at most **32 browser sources**
-and **192 scenes**. The browser service defaults to four workers with eight windows
-each. Source mix, orientation and bit depth also affect capacity; a mixed-source
-budget does not mean the GPU can decode that many simultaneous videos. Combined
-SDR/HDR NVDEC inputs are capped at **40** for 25/30 fps and **20** for 50/60 fps.
-Raw uploads share **28/23/14/11** units at 25/30/50/60 fps: an SDR NV12 source
-uses one unit and an HDR P010 source uses two. The **HDR · 4:2:0 · raw upload**
-count is available in both 10-bit modes and uses no NVDEC. See the
+The setup limits unique sources to **110 at 25 and 30 fps, and 68 at 50 and 60 fps**,
+measured on a 16 GiB NVIDIA T4 host. Downstream-key pages count as sources: each key
+takes one place in that budget. It allows at most **40 browser windows** (sources and
+key pages together; the browser service runs five workers with eight windows each)
+and **192 scenes**. Source mix, orientation and bit depth also affect capacity; a
+mixed-source budget does not mean the GPU can decode that many simultaneous videos.
+Combined SDR/HDR NVDEC inputs are capped at about 1 100 decoded frames per second:
+**40 at 25 fps, 36 at 30, 22 at 50 and 18 at 60**. Raw uploads share
+**30/34/17/17** units at 25/30/50/60 fps: an SDR NV12 source uses one unit and an
+HDR P010 source uses two. The **HDR · 4:2:0 · raw upload** count is available in
+both 10-bit modes and uses no NVDEC. See the
 [capacity measurements](docs/capacity.md) for tested mixes and limitations.
 
 Settings persist in `media/demo.json`; later starts restore them and reuse
@@ -139,8 +139,8 @@ off by default; repeat `--prewarm-cut-scene SCENE` to select only some scenes.
 The cost is extra queue handling and potentially more retained GPU surfaces.
 
 The demo uses three-slot graph queues; requesting four would round up to seven.
-These queues are separate from the mixer's two-frame jitter tolerance and the
-decoder's reference buffers. Scene definitions share source frames, so adding
+These queues are separate from the mixer's playout deadline (two frames at 25/30 fps,
+three at 50/60) and the decoder's reference buffers. Scene definitions share source frames, so adding
 scenes does not create more decoders. For large source counts, use media encoded
 at the intended input resolution and frame rate: pacing a 60 fps file to 30 fps
 after decoding still decodes all 60 frames per second.
@@ -176,29 +176,31 @@ python3 -m venv .venv-tui && .venv-tui/bin/python -m pip install -r demos/mixer/
 | --- | --- |
 | A scene tile | Loads Preview; in Direct mode, takes it to Program |
 | Cut / `c` | Immediate take |
-| Fade / `f` | Blend over the chosen duration |
+| Fade / `f` | Mix over the chosen duration, or dip through a colour picked beside the fade curve |
 | A wipe button / `w` | Play that transparent clip over the change |
 | Direct / `d` (`t` in the TUI) | Picks go straight to Program |
 | `1`–`9` | Pick one of the first nine scenes |
 
-A new take interrupts a running transition from the current picture. Wipes
-decode on each take by default; decoded clips are not retained in GPU memory.
-Use `--wipe-cache-mb 256` to opt into a GPU cache with a 256 MiB budget.
-The recipe generates a diagonal sweep and sliding panels with moving colour
+A new take interrupts a running transition from the current picture. Decoded wipe
+clips are held in GPU memory: the cache budget is 640 MiB by default (the generic
+setup's two wipes take about 0.5 GB) and the web UI's WIPES meter shows its fill.
+`--wipe-cache-mb 0` decodes each take instead. The recipe generates a diagonal sweep and sliding panels with moving colour
 bands at the selected FPS. No external wipe files are needed. Custom clips
 must preserve alpha (for example QTRLE/ARGB or ProRes 4444) and cover the
 canvas at their midpoint to hide the scene switch.
 
 ## Browser pages as sources
 
-Recipe entries with `kind: "browser"` open their own DMA-BUF windows. Pages and
+Recipe entries with `kind: "browser"` open their own Chromium windows (Electron 44 /
+Chromium 152) whose DMA-BUFs are imported zero-copy into CUDA. Pages and
 files share every layout and transition; a page that stops painting holds its
-last frame. The included alpha page needs no external website.
+last frame. The included alpha page needs no external website; like a real
+graphic it rests most of the time and animates a third of it.
 
-The stack allows 32 browser windows across four processes, eight per process.
+The stack allows 40 browser windows across five processes, eight per process.
 Set `MIXER_BROWSER_CAPACITY` when starting Compose to change the service capacity.
-The generic setup page caps browser inputs at 32. This is browser capacity, not
-the recipe's total source count. Lower-level browser-only setup remains in the
+The generic setup page caps browser inputs at 40, downstream-key pages included.
+This is browser capacity, not the recipe's total source count. Lower-level browser-only setup remains in the
 [DMA-BUF demo](../dmabuf-browser/README.md).
 
 ## Describe a show in one file
@@ -254,7 +256,7 @@ CPU. Browser frames are converted from RGB to the NV12, P010 or P210 canvas insi
 draw pass. The program is composited once and each rendition re-times and rescales
 it, so a second output costs an encode, not another composite.
 
-Limits: 64 sources per show, no runtime source changes. Recipe grids support up
+Limits: 128 sources per show (127 with an aux output), no runtime source changes. Recipe grids support up
 to 64 boxes; the legacy `--input` layouts support up to 16;
 see [docs/config.md](docs/config.md#known-limitations).
 
