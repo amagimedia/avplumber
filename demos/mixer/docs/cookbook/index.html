@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="How the AVPlumber live mixer is made cheaper without cheating: each optimization explained with a diagram, what it does, why, what it costs, its risk and how to switch it off.">
+  <title>Mixer optimization cookbook · AVPlumber</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+    .intro { max-width: 78ch; }
+    .group { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin: 30px 0 10px; }
+    .entries { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .entries li { margin: 0; }
+    .entries a { display: flex; flex-direction: column; height: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+                 padding: 14px 16px; color: inherit; text-decoration: none; }
+    .entries a:hover, .entries a:focus-visible { border-color: var(--accent); }
+    .entries .pill { align-self: flex-start; margin: 0 0 10px; }
+    .entries b { color: #edf4ff; font-size: 16px; line-height: 1.35; }
+    .entries span.sum { color: var(--body); line-height: 1.55; margin-top: 6px; font-size: 15px; }
+    .docs { padding-left: 20px; }
+    .docs li { margin: 6px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Mixer optimization cookbook</h1>
+  <p class="lede intro">Every source is a unique, independent input of at least 1080p25, processed every frame, so no optimization may take a shortcut that <a href="real-inputs.html">real inputs</a> would not allow. Each change is explained with what it does, why, what it costs, its risk and how to switch it off before it ships.</p>
+
+  <h2 class="group">Live</h2>
+  <ul class="entries">
+    <li><a href="cuda-streams.html"><span class="pill live">Live</span><b>One main CUDA stream, one per monitor</b><span class="sum">The program runs on one CUDA stream; each aux monitor gets its own non-blocking stream, so a slow monitor cannot stall the program.</span></a></li>
+    <li><a href="multiviewer.html"><span class="pill live">Live</span><b>Multiviewer: 100 sources, 12 at a time</b><span class="sum">Pages of 12 equal tiles. Only the 12 on screen send frames, so off-page sources cost no GPU work and no VRAM.</span></a></li>
+    <li><a href="browser-handoff.html"><span class="pill live">Implemented, deployed on the test host</span><b>Browser frame hand-off</b><span class="sum">The browser's frame socket thread waits in poll() instead of waking every millisecond, and failed pages reload without dropping the mixer's connection, holding their last frame while they do. The new browser image used 1.2 fewer cores at 110 sources; the hold is not measured yet.</span></a></li>
+    <li><a href="browser-paint-grid.html"><span class="pill impl">Implemented, measured on the live demo</span><b>Browser paints numbered on the canvas grid</b><span class="sum">Each browser paint takes the previous tick plus one instead of its arrival rounded to the nearest tick. On a 64-source 30 fps show, browser repeats and discards fell from 1,234 and 1,237 to 7 and 25. DSK keys are drawn by timestamp.</span></a></li>
+    <li><a href="browser-paint-cost.html"><span class="pill live">Implemented, deployed on the test host</span><b>Browser CPU is per painted frame</b><span class="sum">Chromium costs ~3.5 ms CPU per delivered frame per window, whatever the page. A test page that rests two thirds of the time and Electron 44: Electron 5.90 → 2.83 cores, host idle 28 → 50 % at 68 inputs, 60 fps.</span></a></li>
+    <li><a href="gpu-process-crash.html"><span class="pill live">Implemented, deployed on the test host</span><b>Keeping Vulkan out of the GPU process</b><span class="sum">Recreating all browser windows crashed Chromium's GPU process and killed workers. WebGPU on OpenGL ES and no crash limit: 5 restarts, 0 crashes.</span></a></li>
+    <li><a href="cpu-pressure.html"><span class="pill">Measurement method</span><b>Measuring CPU pressure at 60 Hz</b><span class="sum">Load average 25 on 16 vCPU at 69 % busy: ready-thread sampling, PSI and schedstat show one ~8 ms burst per 16.7 ms frame from ~6 threads per source.</span></a></li>
+  </ul>
+
+  <h2 class="group">Being measured</h2>
+  <ul class="entries">
+    <li><a href="capacity-budgets.html"><span class="pill optin">Experimental, measured at 25 and 30 fps</span><b>Rate-aware capacity budgets</b><span class="sum">NVDEC gets 1100 decoded frames/s instead of a fixed stream count (40/36/22/18 at 25/30/50/60 fps); a fifth browser worker and pinned raw uploads fill 110 inputs at 25 and 30 fps. NVDEC measured 81–82 % at 25 fps and 88.5 % at 30.</span></a></li>
+    <li><a href="force-fps-center-phase.html"><span class="pill impl">Implemented, measuring</span><b>Centred force_fps phase</b><span class="sum">Source pacers shift a source's timestamps so its first frame lands on an output tick, so timing jitter no longer turns into a repeated frame plus a dropped one. Before it, one raw source at 30 fps repeated and dropped about 10 frames/s each.</span></a></li>
+    <li><a href="raw-uploads.html"><span class="pill optin">Setup default, passes the 60 fps A/B</span><b>Raw uploads and the CUDA driver lock</b><span class="sum">Raw NV12 and P010 frames go through a pinned buffer on the source’s own stream instead of a synchronous copy that holds a lock the whole mixer shares. The setup’s 110-input shows use it for 30 raw sources at 25 fps and 34 at 30. At 68 inputs and 60 fps, hwupload missed 69 % of program deadlines; pinned missed 0.</span></a></li>
+  </ul>
+
+  <h2 class="group">Implemented</h2>
+  <ul class="entries">
+    <li><a href="loop-continuous-timestamps.html"><span class="pill impl">Implemented</span><b>Looped clips keep counting across the wrap</b><span class="sum">A looped file's next pass is shifted by the length of the one before, so timestamps keep rising and a wrap no longer costs the source a frame: about 0.9 drops/s per source with 2 s clips before.</span></a></li>
+  </ul>
+
+  <h2 class="group">Implemented, not deployed</h2>
+  <ul class="entries">
+    <li><a href="real-inputs.html"><span class="pill impl">Implemented, not deployed</span><b>Real 1080p inputs, no shortcuts</b><span class="sum">The ground rule: every capacity-demo source is its own input of at least 1080p25, with its own media, processed on every frame.</span></a></li>
+    <li><a href="pgm-delay.html"><span class="pill impl">Implemented, not deployed</span><b>PGM delay instead of a longer aux deadline</b><span class="sum">The Program preview matches only its PGM pad one frame back, so its 100 source pads keep the normal 80 ms deadline.</span></a></li>
+    <li><a href="dsk-fades.html"><span class="pill impl">Implemented, not deployed</span><b>DSK fades in one pass</b><span class="sum">A key fades by weighting its alpha in the existing keyer pass: no second compositor, and frames without a fade run the old kernels.</span></a></li>
+    <li><a href="key-prewarm.html"><span class="pill impl">Implemented, not deployed</span><b>Prewarmed DSK keys</b><span class="sum">Keys stay subscribed while off, so a key cut or fade-in starts on the next program frame instead of 1–2 frames later.</span></a></li>
+    <li><a href="filter-threads.html"><span class="pill impl">Implemented, not deployed</span><b>One thread per GPU filter graph</b><span class="sum">GPU and metadata-only filter graphs run on one thread instead of an idle 16-thread FFmpeg slice pool each.</span></a></li>
+    <li><a href="nvenc-dpb.html"><span class="pill impl">Implemented, not deployed</span><b>One reference frame for monitor encoders</b><span class="sum">The two monitor encoders keep one NVENC reference frame, because without B-frames each frame is predicted from the previous one.</span></a></li>
+    <li><a href="event-loops.html"><span class="pill impl">Implemented, not deployed</span><b>Event-loop sharding</b><span class="sum">Source pacing timers spread over four event-loop threads, so wake-up cost stops growing with the square of the source count.</span></a></li>
+    <li><a href="contexts.html"><span class="pill impl">Implemented, not deployed</span><b>Unused GPU contexts</b><span class="sum">Removes an OpenGL context in every browser importer and a process-wide CUDA context. Both held memory and drew nothing.</span></a></li>
+  </ul>
+
+  <h2 class="group">Proposed, not in code</h2>
+  <ul class="entries">
+    <li><a href="frame-queues.html"><span class="pill proposed">Proposed, not in code</span><b>One decoded frame in flight per NVDEC source</b><span class="sum">At 30 fps and below, each NVDEC source could park one decoded frame instead of three: about 255 MB of VRAM across 40 sources, no added latency.</span></a></li>
+  </ul>
+
+  <h2 class="group">Rejected</h2>
+  <ul class="entries">
+    <li><a href="rejected.html"><span class="pill rejected">Rejected</span><b>Ideas we measured and dropped</b><span class="sum">Twelve ideas that broke the every-source-real rule, saved almost nothing, or made cuts, pictures or the pipeline slower.</span></a></li>
+  </ul>
+
+  <h2>Markdown references</h2>
+  <ul class="docs">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md">config.md</a>: configuration reference for sources, scenes, aux buses, DSK and outputs.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/capacity.md">capacity.md</a>: measured capacity and where the limits are.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/recipe.md">recipe.md</a>: the workload recipe that generates the demo sources and scenes.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/doc/NODES.md">doc/NODES.md</a>: node reference.</li>
+  </ul>
+
+  <footer><a href="../index.html">← Live mixer demo</a></footer>
+</main>
+</body>
+</html>

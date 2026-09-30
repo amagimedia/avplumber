@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Twelve mixer ideas we costed, measured or ruled out, from subcomposition reuse to FFmpeg hwupload at 60 fps.">
+  <title>Ideas we measured and dropped · Mixer optimization cookbook</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+    h3 { font-size: 15px; margin: 22px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
+    .ideas { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+    .ideas li { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--red); border-radius: 10px; padding: 12px 16px; }
+    .ideas li.trade { border-left-color: var(--amber); }
+    .ideas .name { color: #edf4ff; font-weight: 600; font-size: 16px; }
+    .ideas .num { display: inline-block; min-width: 22px; color: var(--red); font-weight: 700; }
+    .ideas li.trade .num { color: var(--amber); }
+    .ideas p { margin: 6px 0 0; line-height: 1.55; }
+    .ideas .k { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; margin-right: 6px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Ideas we measured and dropped</h1>
+  <p class="lede">Every source is a unique, independent 1080p25 input processed every frame; twelve ideas broke that rule, saved almost nothing, or made cuts, pictures or the pipeline slower, so we dropped them.</p>
+  <span class="pill rejected">Status: Rejected</span>
+
+  <h2>The rule, and where each shortcut would cut it</h2>
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 760 330" role="img" aria-labelledby="rule-title">
+        <title id="rule-title">One real source chain: unique 1080p25 input, decode or capture every frame, convert, compositor, encode and send. Red callouts mark the five shortcuts that would break the rule; an amber callout marks idling off-screen sources.</title>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 Z" fill="#a4b4ca"/>
+          </marker>
+        </defs>
+        <g font-family="system-ui, sans-serif" font-size="14" text-anchor="middle">
+          <!-- kept note -->
+          <rect x="16" y="14" width="348" height="54" rx="8" fill="#0f2a1e" stroke="#30a46c" stroke-width="1.5"/>
+          <text x="190" y="36" fill="#30a46c" font-weight="600" font-size="13">Kept: every source has its own chain</text>
+          <text x="190" y="55" fill="#edf4ff" font-size="12">and its own media, decoded by itself</text>
+          <!-- amber trade-off -->
+          <rect x="396" y="14" width="348" height="54" rx="8" fill="#2a1f0a" stroke="#f5a524" stroke-width="1.5"/>
+          <text x="570" y="36" fill="#f5a524" font-weight="600" font-size="13">6 · Idle off-screen sources</text>
+          <text x="570" y="55" fill="#edf4ff" font-size="12">direct cuts 80–120 ms slower</text>
+          <line x1="231" y1="68" x2="231" y2="96" stroke="#30a46c" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+          <line x1="531" y1="68" x2="531" y2="96" stroke="#f5a524" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+          <!-- pipeline: five stages -->
+          <rect x="16" y="100" width="128" height="74" rx="8" fill="#141f38" stroke="#6e8bf5" stroke-width="1.5"/>
+          <text x="80" y="130" fill="#edf4ff" font-weight="600">Unique input</text>
+          <text x="80" y="152" fill="#a4b4ca" font-size="12">1080p25 file/page</text>
+          <rect x="166" y="100" width="128" height="74" rx="8" fill="#141f38" stroke="#6e8bf5" stroke-width="1.5"/>
+          <text x="230" y="130" fill="#edf4ff" font-weight="600">Decode</text>
+          <text x="230" y="152" fill="#a4b4ca" font-size="12">one chain each</text>
+          <rect x="316" y="100" width="128" height="74" rx="8" fill="#141f38" stroke="#6e8bf5" stroke-width="1.5"/>
+          <text x="380" y="130" fill="#edf4ff" font-weight="600">Convert</text>
+          <text x="380" y="152" fill="#a4b4ca" font-size="12">full-size frame</text>
+          <rect x="466" y="100" width="128" height="74" rx="8" fill="#182236" stroke="#57dbc2" stroke-width="1.5"/>
+          <text x="530" y="130" fill="#edf4ff" font-weight="600">Compositor</text>
+          <text x="530" y="152" fill="#a4b4ca" font-size="12">new frame each tick</text>
+          <rect x="616" y="100" width="128" height="74" rx="8" fill="#141f38" stroke="#6e8bf5" stroke-width="1.5"/>
+          <text x="680" y="130" fill="#edf4ff" font-weight="600">Encode, send</text>
+          <text x="680" y="152" fill="#a4b4ca" font-size="12">every output</text>
+          <line x1="144" y1="137" x2="162" y2="137" stroke="#a4b4ca" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <line x1="294" y1="137" x2="312" y2="137" stroke="#a4b4ca" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <line x1="444" y1="137" x2="462" y2="137" stroke="#a4b4ca" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <line x1="594" y1="137" x2="612" y2="137" stroke="#a4b4ca" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <!-- red callouts -->
+          <line x1="80" y1="174" x2="80" y2="222" stroke="#e5484d" stroke-width="1.5" stroke-dasharray="4 3"/>
+          <line x1="230" y1="174" x2="230" y2="222" stroke="#e5484d" stroke-width="1.5" stroke-dasharray="4 3"/>
+          <line x1="380" y1="174" x2="380" y2="222" stroke="#e5484d" stroke-width="1.5" stroke-dasharray="4 3"/>
+          <line x1="530" y1="174" x2="530" y2="222" stroke="#e5484d" stroke-width="1.5" stroke-dasharray="4 3"/>
+          <line x1="680" y1="174" x2="680" y2="222" stroke="#e5484d" stroke-width="1.5" stroke-dasharray="4 3"/>
+          <rect x="16" y="222" width="128" height="92" rx="8" fill="#2d1215" stroke="#e5484d" stroke-width="1.5"/>
+          <text x="80" y="248" fill="#e5484d" font-weight="600" font-size="13">3 · 720p pages</text>
+          <text x="80" y="266" fill="#e5484d" font-weight="600" font-size="13">or test clips</text>
+          <text x="80" y="290" fill="#edf4ff" font-size="12">fewer real pixels</text>
+          <rect x="166" y="222" width="128" height="92" rx="8" fill="#2d1215" stroke="#e5484d" stroke-width="1.5"/>
+          <text x="230" y="248" fill="#e5484d" font-weight="600" font-size="13">2 · One chain</text>
+          <text x="230" y="266" fill="#e5484d" font-weight="600" font-size="13">per file</text>
+          <text x="230" y="290" fill="#edf4ff" font-size="12">NVDEC 40 → 7</text>
+          <rect x="316" y="222" width="128" height="92" rx="8" fill="#2d1215" stroke="#e5484d" stroke-width="1.5"/>
+          <text x="380" y="248" fill="#e5484d" font-weight="600" font-size="13">4 · Resize in</text>
+          <text x="380" y="266" fill="#e5484d" font-weight="600" font-size="13">the decoder</text>
+          <text x="380" y="290" fill="#edf4ff" font-size="12">1080×608 kept</text>
+          <rect x="466" y="222" width="128" height="92" rx="8" fill="#2d1215" stroke="#e5484d" stroke-width="1.5"/>
+          <text x="530" y="248" fill="#e5484d" font-weight="600" font-size="13">5 · Loop kept</text>
+          <text x="530" y="266" fill="#e5484d" font-weight="600" font-size="13">on the GPU</text>
+          <text x="530" y="290" fill="#edf4ff" font-size="12">no new frames</text>
+          <rect x="616" y="222" width="128" height="92" rx="8" fill="#2d1215" stroke="#e5484d" stroke-width="1.5"/>
+          <text x="680" y="248" fill="#e5484d" font-weight="600" font-size="13">7 · Pause</text>
+          <text x="680" y="266" fill="#e5484d" font-weight="600" font-size="13">unwatched</text>
+          <text x="680" y="290" fill="#edf4ff" font-size="12">~1 s black to resume</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Red: the shortcut makes the demo lighter than a real show, so capacity numbers would lie. Amber: a real trade, but it costs cut latency. Green: what the demo keeps. Idea 1 is not on this chain; it is the next diagram. Ideas 8–12 are not on this chain.</figcaption>
+  </figure>
+
+  <h2>Why reusing compositor B's picture costs more</h2>
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 760 300" role="img" aria-labelledby="sub-title">
+        <title id="sub-title">The Program preview's PVW tile drawn two ways: copying compositor B's picture fills 100 % of the tile; re-compositing the scene fills only about 49 %, because contain letterboxing leaves bars.</title>
+        <g font-family="system-ui, sans-serif" font-size="14" text-anchor="middle">
+          <!-- left: copy B -->
+          <text x="190" y="28" fill="#edf4ff" font-weight="600">Idea: copy B's picture</text>
+          <rect x="130" y="44" width="120" height="214" rx="4" fill="#2a1f0a" stroke="#f5a524" stroke-width="1.5"/>
+          <rect x="140" y="110" width="100" height="56" rx="3" fill="#0f2a1e" stroke="#30a46c" stroke-width="1"/>
+          <rect x="140" y="176" width="100" height="56" rx="3" fill="#0f2a1e" stroke="#30a46c" stroke-width="1"/>
+          <text x="190" y="84" fill="#f5a524" font-size="12">bars drawn too</text>
+          <text x="190" y="284" fill="#f5a524" font-size="13" font-weight="600">100 % of tile pixels</text>
+          <!-- right: re-composite -->
+          <text x="570" y="28" fill="#edf4ff" font-weight="600">Live: re-composite the scene</text>
+          <rect x="510" y="44" width="120" height="214" rx="4" fill="#0b111d" stroke="#26354a" stroke-width="1.5"/>
+          <rect x="520" y="110" width="100" height="56" rx="3" fill="#0f2a1e" stroke="#30a46c" stroke-width="1.5"/>
+          <rect x="520" y="176" width="100" height="56" rx="3" fill="#0f2a1e" stroke="#30a46c" stroke-width="1.5"/>
+          <text x="570" y="84" fill="#a4b4ca" font-size="12">bars skipped</text>
+          <text x="570" y="284" fill="#30a46c" font-size="13" font-weight="600">~49 % of tile pixels (average)</text>
+          <!-- middle rule -->
+          <rect x="280" y="112" width="200" height="86" rx="8" fill="#182236" stroke="#57dbc2" stroke-width="1.5"/>
+          <text x="380" y="138" fill="#57dbc2" font-weight="600" font-size="13">Cost follows drawn pixels</text>
+          <text x="380" y="158" fill="#edf4ff" font-size="12">× 4 bilinear taps</text>
+          <text x="380" y="178" fill="#a4b4ca" font-size="12">not layer count</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Schematic, not to scale. A portrait tile of letterboxed 16:9 boxes. Only the green area costs work when the compositor draws the scene itself.</figcaption>
+  </figure>
+
+  <h2>The twelve ideas</h2>
+  <h3>The cost model said no</h3>
+  <ol class="ideas">
+    <li><span class="name"><span class="num">1</span>Subcomposition reuse</span>
+      <p><span class="k">Idea</span>Draw the Program preview's PVW quadrant from compositor B's picture. Share scaled renditions between compositors.</p>
+      <p><span class="k">Dropped</span>Compositor cost follows drawn output pixels, not layer count. Scenes cover only ~49&nbsp;% of the portrait canvas on average, so copying B's full quadrant draws more pixels than re-compositing. Best case, reuse saves ~0.01&nbsp;GFLOP/s of the T4's 8.1&nbsp;TFLOPS. A whole full-canvas compositor costs ~0.56&nbsp;GFLOP/s.</p>
+      <p><span class="k">Kept</span>The PGM tile reuses the finished program. Compositor B idles when no preview is armed.</p></li>
+  </ol>
+  <h3>They would break the rule</h3>
+  <ol class="ideas">
+    <li><span class="name"><span class="num">2</span>Share identical media between sources</span>
+      <p><span class="k">Idea</span>One decode chain per file, fanned out to every source that plays it.</p>
+      <p><span class="k">Dropped</span>It would cut NVDEC sessions from 40 to 7 and save 1.5–4&nbsp;GB. Real inputs are all different, so the saving is fake.</p></li>
+    <li><span class="name"><span class="num">3</span>720p browser pages or 720p test clips</span>
+      <p><span class="k">Dropped</span>Real pixels stay 1080p. Smaller inputs make every stage look cheaper than a real show.</p></li>
+    <li><span class="name"><span class="num">4</span>Decode-side resize to 1080×608</span>
+      <p><span class="k">Idea</span>Let NVDEC write a 1920×1080 clip at the size a full-canvas box shows it on a 1080×1920 canvas.</p>
+      <p><span class="k">Dropped</span>It keeps fewer pixels than the source. Dropped for the capacity demo; it is not in the code.</p></li>
+    <li><span class="name"><span class="num">5</span>Keep looped test clips on the GPU</span>
+      <p><span class="k">Dropped</span>Real inputs deliver a new frame every tick. Replaying held frames skips decode work a real show must pay.</p></li>
+    <li><span class="name"><span class="num">7</span>Pause outputs nobody watches</span>
+      <p><span class="k">Idea</span>A Janus viewer poller stops the monitor and clean-feed encoders while no one views them.</p>
+      <p><span class="k">Dropped</span>It saved encoder work only while unwatched, and hid real load. A viewer saw ~1&nbsp;s of black or frozen picture on resume. A clean-feed consumer that is not a Janus viewer, such as a recorder, would lose picture. More moving parts. Removed from the code.</p></li>
+    <li><span class="name"><span class="num">10</span>Browser sources at 30 fps in a 60 fps show</span>
+      <p><span class="k">Dropped</span>Every demo source is a real 60 fps input. A production knob, not a capacity result.</p></li>
+  </ol>
+  <h3>Ruled out for the 60 fps show</h3>
+  <ol class="ideas">
+    <li><span class="name"><span class="num">8</span><code>__GL_YIELD=USLEEP</code></span>
+      <p><span class="k">Dropped</span>Chromium's GPU processes made 0 <code>sched_yield</code> calls in 5 s: no spinning. Their CPU is ~12k futex/s thread hand-offs and ~1.1k ioctl/s.</p></li>
+    <li><span class="name"><span class="num">9</span>Fewer, bigger browser workers</span>
+      <p><span class="k">Dropped</span>Cost is per window per delivered frame, not per process; fewer workers concentrate VizCompositor load (<a href="browser-paint-cost.html">Browser CPU is per painted frame</a>).</p></li>
+    <li><span class="name"><span class="num">11</span>cpuset split between containers</span>
+      <p><span class="k">Dropped</span>Cores pinned to one side idle while the other is short: it idles capacity.</p></li>
+    <li><span class="name"><span class="num">12</span>FFmpeg <code>hwupload</code> for raw sources at 60 fps</span>
+      <p><span class="k">Dropped</span>69&nbsp;% of program frames missed their deadline at 68 inputs; NVDEC fell from ~85 to ~26&nbsp;% because the pipeline stalled (<a href="raw-uploads.html">Raw uploads</a>).</p></li>
+  </ol>
+  <h3>The trade was cut latency</h3>
+  <ol class="ideas">
+    <li class="trade"><span class="name"><span class="num">6</span>Narrow prewarm, idle off-screen sources</span>
+      <p><span class="k">Dropped</span>Direct cuts get 80–120&nbsp;ms slower. Without prewarm, a cut resets the incoming source's playout queue and waits for fresh frames.</p></li>
+  </ol>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>
+      <p>One rule for capacity numbers: every source is a unique, independent 1080p25 input, processed every frame. Ideas 2–5 and 7 break it. Idea 1 saves nothing. Idea 6 costs cut latency. Ideas 8, 9 and 11 gained nothing; 10 breaks the rule; 12 stalled the pipeline.</p></li>
+    <li><b>Why</b>
+      <p>Capacity numbers must describe real shows. A shortcut that works only because test inputs repeat, loop, shrink or go unwatched makes the numbers wrong.</p></li>
+    <li class="flag"><b>Latency</b>
+      <ul>
+        <li>Program latency: unchanged; nothing here shipped.</li>
+        <li>Idea 6 would add 80–120&nbsp;ms to direct cuts.</li>
+        <li>Idea 7 would add ~1&nbsp;s of black or frozen picture when a viewer opens a paused output.</li>
+        <li>Kept reuse: the PGM tile runs one aux frame behind the other tiles; the program is not delayed.</li>
+      </ul></li>
+    <li><b>Side effects</b>
+      <p>None on the program path. The honest load stays visible: all sources decode and convert all the time, and every output encodes every frame, watched or not.</p></li>
+    <li><b>Cost</b>
+      <ul>
+        <li>0 new nodes, queues or threads; the pause poller's code is gone.</li>
+        <li>GPU: budget for the whole source catalogue, not the scene on air.</li>
+        <li>Forgone savings: NVDEC 40&nbsp;→&nbsp;7 and 1.5–4&nbsp;GB (idea 2); encoder work on unwatched outputs (idea 7).</li>
+      </ul></li>
+    <li><b>Risk</b>
+      <p>Headline capacity is lower than a demo with shortcuts would show. That is the point.</p></li>
+    <li><b>Switch it off</b>
+      <ul>
+        <li>Nothing to switch off: ideas 1, 4, 5, 7–9 and 11 are not in the code; 10 is a browser source's <code>fps</code> field (<a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#sources">config.md · sources</a>), which the demo leaves at the canvas rate; 12 is the library default, off in setup-built shows.</li>
+        <li>Repeated files: a repeat is rejected at load; mark both declarations <code>"independent": true</code> for separate chains.</li>
+        <li>Cut prewarm: the demo runs with <code>--prewarm-cut-scene '*'</code> (every scene). The mixer's own default is off; naming fewer scenes narrows it.</li>
+      </ul></li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li>PGM tile is the finished program: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L109-L110">aux.py:109–110</a> (last input, <code>contain</code>), matched one frame back at <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L1098-L1103">cuda_rect_overlay.cpp:1098–1103</a></li>
+    <li>Idle compositor slot, no surface and no kernel: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L509-L511">cuda_rect_overlay.cpp:509–511</a>; empty mask means an idle PVW slot: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L692-L695">cuda_rect_overlay.cpp:692–695</a></li>
+    <li>Bilinear, 4 taps per sample: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_scale.cu#L81-L86">cuda_rect_scale.cu:81–86</a></li>
+    <li>One chain per source: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/inputs.py#L18">inputs.py:18</a> (<code>build_input</code>); repeated locations and <code>independent</code>: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/config.py#L435-L441">config.py:435–441</a></li>
+    <li>Own media per generated source, id burned in: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/prepare_demo.py#L254-L260">prepare_demo.py:254–260</a></li>
+    <li>Cut prewarm: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/mixer/orchestrator/scene.cpp#L75-L93">scene.cpp:75–93</a> (<code>prewarmCuts</code>), <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/mixer/Playout.hpp#L247-L252">Playout.hpp:247–252</a> (<code>setPrewarm</code>; a cold input resets its queue), <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/mixer.py#L858">mixer.py:858</a> (CLI flag)</li>
+    <li>Outputs that encode every frame: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/janus.py#L112">janus.py:112</a> (<code>build_janus_output</code>), clean feed split at <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/dsk.py#L43-L45">dsk.py:43–45</a></li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#known-limitations">config.md · Known limitations</a> (all sources run all the time), <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#sources">config.md · sources</a> (<code>independent</code>), <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#aux_buses">config.md · aux_buses</a> (PGM tile one frame behind), <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/recipe.md#generated-media">recipe.md · Generated media</a>, <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/doc/mixer_cut_latency.md#optional-direct-cut-source-prewarm">mixer_cut_latency.md · Optional direct-cut source prewarm</a></li>
+  </ul>
+  <p class="note">The GFLOP/s figures and the NVDEC and memory savings are model estimates for the T4 test host, not measurements. The ~49&nbsp;% coverage is an average over scene layouts; single scenes vary.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>

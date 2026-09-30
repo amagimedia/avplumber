@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Every downstream key stays subscribed and the keyer always has its frames queued, so a key cut or fade-in starts on the very next program frame instead of 1–2 frames later.">
+  <title>Prewarmed DSK keys · Mixer optimization cookbook</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Prewarmed DSK keys</h1>
+  <p class="lede">Every downstream key stays subscribed while it is off, so a key cut or fade-in starts on the very next program frame instead of waiting 1–2 frames for the browser page’s next paint.</p>
+  <span class="pill impl">Status: Implemented, not deployed</span>
+
+  <h2>The idea</h2>
+  <p>Low latency is the product’s selling point. Scene sources are already prewarmed: their frames flow before a cut needs them. Keys were not. The keyer subscribed to a key’s browser feed only while the key was on. Now it treats keys like scene sources: frames always flow, and the key’s level decides what is drawn.</p>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 700 250" role="img" aria-labelledby="t1">
+        <title id="t1">Program frames over time. A key-on command arrives between frames 1 and 2. Before: the key appears 1 to 2 frames late, after the page's next paint. Now: the key appears on frame 2, the very next program frame.</title>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 L10 5 L0 10 Z" fill="#a4b4ca"/>
+          </marker>
+        </defs>
+        <g font-family="system-ui, sans-serif" font-size="12" fill="#edf4ff">
+          <!-- program frames: x = 110 + 72 * i -->
+          <text x="14" y="42" fill="#a4b4ca">program</text>
+          <rect x="110" y="26" width="64" height="26" rx="4" fill="#3a1618" stroke="#e5484d"/>
+          <rect x="182" y="26" width="64" height="26" rx="4" fill="#3a1618" stroke="#e5484d"/>
+          <rect x="254" y="26" width="64" height="26" rx="4" fill="#3a1618" stroke="#e5484d"/>
+          <rect x="326" y="26" width="64" height="26" rx="4" fill="#3a1618" stroke="#e5484d"/>
+          <rect x="398" y="26" width="64" height="26" rx="4" fill="#3a1618" stroke="#e5484d"/>
+          <rect x="470" y="26" width="64" height="26" rx="4" fill="#3a1618" stroke="#e5484d"/>
+          <rect x="542" y="26" width="64" height="26" rx="4" fill="#3a1618" stroke="#e5484d"/>
+          <g text-anchor="middle">
+            <text x="142" y="44">f0</text><text x="214" y="44">f1</text><text x="286" y="44">f2</text>
+            <text x="358" y="44">f3</text><text x="430" y="44">f4</text><text x="502" y="44">f5</text><text x="574" y="44">f6</text>
+          </g>
+
+          <!-- command -->
+          <line x1="250" y1="14" x2="250" y2="214" stroke="#f5a524" stroke-width="2" stroke-dasharray="5 4"/>
+          <text x="250" y="232" text-anchor="middle" fill="#f5a524">key on (cut or fade-in)</text>
+
+          <!-- before -->
+          <text x="14" y="106" fill="#edf4ff" font-weight="600">Before</text>
+          <text x="14" y="122" fill="#a4b4ca">subscribe</text>
+          <text x="14" y="136" fill="#a4b4ca">on demand</text>
+          <rect x="110" y="94" width="136" height="30" rx="4" fill="#141e30" stroke="#26354a"/>
+          <text x="178" y="113" text-anchor="middle" fill="#a4b4ca">off, feed closed</text>
+          <rect x="254" y="94" width="64" height="30" rx="4" fill="#3a2a0c" stroke="#f5a524"/>
+          <text x="286" y="113" text-anchor="middle" fill="#f5a524">waiting</text>
+          <rect x="326" y="94" width="64" height="30" rx="4" fill="#3a2a0c" stroke="#f5a524" stroke-dasharray="4 3"/>
+          <text x="358" y="113" text-anchor="middle" fill="#f5a524">waiting?</text>
+          <rect x="398" y="94" width="208" height="30" rx="4" fill="#12281f" stroke="#30a46c"/>
+          <text x="502" y="113" text-anchor="middle" fill="#30a46c">key drawn</text>
+          <path d="M256 140 L256 146 L388 146 L388 140" stroke="#f5a524" stroke-width="1.5" fill="none"/>
+          <text x="322" y="160" text-anchor="middle" fill="#f5a524">+1–2 frames</text>
+
+          <!-- now -->
+          <text x="14" y="190" fill="#edf4ff" font-weight="600">Now</text>
+          <text x="14" y="206" fill="#a4b4ca">always fed</text>
+          <rect x="110" y="178" width="136" height="30" rx="4" fill="#1b2748" stroke="#6e8bf5"/>
+          <text x="178" y="197" text-anchor="middle" fill="#aebdfb">off, frame held</text>
+          <rect x="254" y="178" width="352" height="30" rx="4" fill="#12281f" stroke="#30a46c"/>
+          <text x="430" y="197" text-anchor="middle" fill="#30a46c">key drawn from the very next frame · +0 frames</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Before, the command opened the key’s feed, then the keyer waited for the page’s next paint: 1 or 2 program frames of nothing. Now the keyer already holds a frame, so the next program frame can draw it.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 700 200" role="img" aria-labelledby="t2">
+        <title id="t2">The browser page paints continuously. Its frames always reach the keyer, which queues up to 6 frames per key, picks the one stamped for the program tick, and draws a key only when its level is above 0. With no key visible the program passes through.</title>
+        <defs>
+          <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 L10 5 L0 10 Z" fill="#a4b4ca"/>
+          </marker>
+        </defs>
+        <g font-family="system-ui, sans-serif" font-size="12" fill="#edf4ff">
+          <rect x="14" y="20" width="150" height="56" rx="8" fill="#1b2748" stroke="#6e8bf5"/>
+          <text x="89" y="44" text-anchor="middle" font-weight="600">Browser page</text>
+          <text x="89" y="62" text-anchor="middle" fill="#a4b4ca">paints all the time</text>
+
+          <rect x="206" y="20" width="150" height="56" rx="8" fill="#12281f" stroke="#30a46c"/>
+          <text x="281" y="44" text-anchor="middle" font-weight="600">Subscription</text>
+          <text x="281" y="62" text-anchor="middle" fill="#30a46c">always enabled</text>
+
+          <rect x="398" y="20" width="150" height="56" rx="8" fill="#101827" stroke="#57dbc2"/>
+          <text x="473" y="44" text-anchor="middle" font-weight="600">Keyer</text>
+          <text x="473" y="62" text-anchor="middle" fill="#a4b4ca">queues up to 6 frames</text>
+
+          <rect x="398" y="118" width="150" height="56" rx="28" fill="#3a2a0c" stroke="#f5a524"/>
+          <text x="473" y="142" text-anchor="middle" fill="#f5a524" font-weight="600">level &gt; 0 ?</text>
+          <text x="473" y="160" text-anchor="middle" fill="#a4b4ca">only then drawn</text>
+
+          <rect x="14" y="118" width="150" height="56" rx="8" fill="#3a1618" stroke="#e5484d"/>
+          <text x="89" y="142" text-anchor="middle" font-weight="600">Program in</text>
+          <text x="89" y="160" text-anchor="middle" fill="#a4b4ca">clocks the keyer</text>
+
+          <rect x="590" y="118" width="96" height="56" rx="8" fill="#3a1618" stroke="#e5484d"/>
+          <text x="638" y="142" text-anchor="middle" font-weight="600">Program</text>
+          <text x="638" y="160" text-anchor="middle" fill="#a4b4ca">keyed</text>
+
+          <g stroke="#a4b4ca" stroke-width="1.5" fill="none" marker-end="url(#arrow2)">
+            <path d="M164 48 L204 48"/>
+            <path d="M356 48 L396 48"/>
+            <path d="M473 76 L473 116"/>
+            <path d="M164 146 L396 146"/>
+            <path d="M548 146 L588 146"/>
+          </g>
+          <text x="280" y="138" text-anchor="middle" fill="#a4b4ca">no key visible: passes through</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Same pattern as scene sources: frames flow whether or not the key is on air. Only the level decides what is drawn.</figcaption>
+  </figure>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>The keyer enables every key subscription once, the first time it runs, and keeps it. It takes each key’s frames whether the key is on or off and queues up to 6 of them; at each program frame it draws the key’s frame stamped for that tick. It draws only keys whose level is above 0.</li>
+    <li><b>Why</b>Before, a key subscribed only while on. Turning a key on then waited for the page’s next paint. Every scene source is already prewarmed; keys were the exception.</li>
+    <li><b>Latency</b>Key on, by cut or fade-in: 1–2 program frames → 0 extra frames. It starts on the very next program frame after the command. Program latency: unchanged; the keyer still never waits for a key.</li>
+    <li><b>Side effects</b>None on the program path. With no key visible the program frame still passes through without GPU work, as before.</li>
+    <li><b>Cost</b>0 nodes, 0 queues, 0 threads. The browser already renders these pages all the time; this only delivers frames that were being dropped. Off keys add a queue step per key frame and no GPU work. Memory: an off key now keeps the same frames an on key does, a held frame plus up to 6 queued frames waiting for their program tick. Key frames are small; the largest demo key is 1016×172.</li>
+    <li><b>Risk</b>Low. A key switched on shows the page’s paint stamped for that program tick. If the page has not painted since, that frame is older, exactly as for a key already on air.</li>
+    <li><b>Switch it off</b>No runtime switch. Going back means restoring the per-command enable, which brings the 1–2 frame wait back.</li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L583-L588">src/nodes/hwaccel/cuda_rect_overlay.cpp#L583-L588</a>: <code>processKeyed</code> and the comment that states the rule.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L602-L606">L602-L606</a>: every key subscription enabled once (<code>keys_subscribed_</code>, <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L129">L129</a>).</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L607-L622">L607-L622</a>: every key’s frames are queued, on or off; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L636-L649">L636-L649</a> the frame stamped for the program tick is taken; the queue bound <code>kKeyQueue</code> is at <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L127">L127</a>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L650">L650</a>: a key is drawn only when it has a frame and its level is above 0; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L654-L659">L654-L659</a> the pass-through with no key visible.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#dsk">config.md · dsk</a> (“Off keys keep receiving frames …”).</li>
+  </ul>
+  <p class="note">This change is not deployed yet; line numbers refer to the branch that carries it.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>

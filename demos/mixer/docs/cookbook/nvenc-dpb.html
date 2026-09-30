@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="The two monitor encoders keep one NVENC reference frame (dpb_size 1) instead of letting NVENC reserve several, because without B-frames each frame is predicted from the previous one.">
+  <title>One reference frame · Mixer optimization cookbook</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>One reference frame for monitor encoders</h1>
+  <p class="lede">The two monitor encoders keep one reference frame instead of the several NVENC reserves by default, because without B-frames each frame is predicted from the previous one.</p>
+  <span class="pill impl">Status: Implemented, not deployed</span>
+
+  <h2>The idea</h2>
+  <p>An H.264 frame is coded as the difference from earlier frames. The encoder keeps those earlier frames, reconstructed, in its decoded picture buffer (DPB). With <code>dpb_size</code> 0 (automatic), NVENC reserves room for several of them. The mixer's streams use no B-frames and no lookahead (ultra-low-latency tune), so each frame references the previous one. The other slots sit in VRAM.</p>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 700 250" role="img" aria-labelledby="t1">
+        <title id="t1">With dpb_size 0 NVENC keeps several reference slots but frame N uses only frame N−1; with dpb_size 1 only that slot remains and the rest of the memory is freed.</title>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 L10 5 L0 10 Z" fill="#57dbc2"/>
+          </marker>
+          <pattern id="idle" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect width="8" height="8" fill="#141e30"/>
+            <rect width="3" height="8" fill="#26354a"/>
+          </pattern>
+        </defs>
+        <g font-family="system-ui, sans-serif" font-size="12" fill="#a4b4ca">
+          <!-- Before -->
+          <text x="10" y="30" fill="#edf4ff" font-weight="600" font-size="14">dpb_size 0</text>
+          <text x="10" y="48">NVENC decides</text>
+          <rect x="150" y="20" width="96" height="40" rx="6" fill="url(#idle)" stroke="#26354a"/>
+          <text x="198" y="44" text-anchor="middle">N−4</text>
+          <rect x="256" y="20" width="96" height="40" rx="6" fill="url(#idle)" stroke="#26354a"/>
+          <text x="304" y="44" text-anchor="middle">N−3</text>
+          <rect x="362" y="20" width="96" height="40" rx="6" fill="url(#idle)" stroke="#26354a"/>
+          <text x="410" y="44" text-anchor="middle">N−2</text>
+          <rect x="468" y="20" width="96" height="40" rx="6" fill="#1b2748" stroke="#6e8bf5"/>
+          <text x="516" y="44" text-anchor="middle" fill="#edf4ff">N−1</text>
+          <rect x="598" y="20" width="92" height="40" rx="6" fill="#0f2a26" stroke="#57dbc2"/>
+          <text x="644" y="44" text-anchor="middle" fill="#edf4ff">encode N</text>
+          <path d="M564 40 L596 40" stroke="#57dbc2" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+          <text x="150" y="80">Reserved slots, in VRAM. Almost never used as a reference.</text>
+
+          <line x1="8" y1="112" x2="692" y2="112" stroke="#26354a"/>
+
+          <!-- After -->
+          <text x="10" y="150" fill="#edf4ff" font-weight="600" font-size="14">dpb_size 1</text>
+          <text x="10" y="168">monitors only</text>
+          <rect x="150" y="140" width="308" height="40" rx="6" fill="#101827" stroke="#30a46c" stroke-dasharray="5 4"/>
+          <text x="304" y="164" text-anchor="middle" fill="#7fd6a8">freed: up to ~40 MB VRAM (estimate)</text>
+          <rect x="468" y="140" width="96" height="40" rx="6" fill="#1b2748" stroke="#6e8bf5"/>
+          <text x="516" y="164" text-anchor="middle" fill="#edf4ff">N−1</text>
+          <rect x="598" y="140" width="92" height="40" rx="6" fill="#0f2a26" stroke="#57dbc2"/>
+          <text x="644" y="164" text-anchor="middle" fill="#edf4ff">encode N</text>
+          <path d="M564 160 L596 160" stroke="#57dbc2" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+          <text x="150" y="200">Same reference, same encode order, same timing.</text>
+          <text x="150" y="222">Frames still leave the encoder one at a time, as they are made.</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Blue is the reference frame N actually uses. Hatched slots are reserved but idle. The slot count under <code>dpb_size</code> 0 is illustrative: NVENC picks it. The ~40 MB saving is an estimate, not yet measured.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 700 200" role="img" aria-labelledby="t2">
+        <title id="t2">Program and clean encoders keep dpb_size 0; the Program preview and Multiviewer monitor encoders get dpb_size 1.</title>
+        <g font-family="system-ui, sans-serif" font-size="12" fill="#edf4ff">
+          <text x="16" y="24" fill="#a4b4ca" font-weight="600">What viewers see · untouched</text>
+          <rect x="16" y="36" width="320" height="52" rx="8" fill="#3a1618" stroke="#e5484d"/>
+          <text x="32" y="58" font-weight="600">Program encoder</text>
+          <text x="32" y="76" fill="#a4b4ca">3 Mb/s · dpb_size 0 (NVENC decides)</text>
+          <rect x="16" y="100" width="320" height="52" rx="8" fill="#1b2748" stroke="#6e8bf5"/>
+          <text x="32" y="122" font-weight="600">Clean feed encoder</text>
+          <text x="32" y="140" fill="#a4b4ca">3 Mb/s · dpb_size 0 (NVENC decides)</text>
+
+          <text x="364" y="24" fill="#a4b4ca" font-weight="600">Monitors · changed</text>
+          <rect x="364" y="36" width="320" height="52" rx="8" fill="#12281f" stroke="#30a46c"/>
+          <text x="380" y="58" font-weight="600">Program preview aux</text>
+          <text x="380" y="76" fill="#f5a524">dpb_size 1</text>
+          <rect x="364" y="100" width="320" height="52" rx="8" fill="#3a2a0c" stroke="#f5a524"/>
+          <text x="380" y="122" font-weight="600">Multiviewer aux</text>
+          <text x="380" y="140" fill="#f5a524">dpb_size 1</text>
+
+          <text x="16" y="182" fill="#a4b4ca">Aux buses default to 1; any rendition can override it with <tspan fill="#edf4ff">"dpb_size"</tspan>.</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Only the operator monitors change. The encoders viewers receive keep NVENC's own choice.</figcaption>
+  </figure>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>The FFmpeg nvenc option <code>dpb_size: 1</code> on the two monitor encoders: Program preview and Multiviewer. It comes from the rendition field <code>dpb_size</code>, which aux buses default to 1. Program and clean encoders are untouched.</li>
+    <li><b>Why</b>With no B-frames and no lookahead, each frame references the previous one. The extra DPB slots NVENC reserves under <code>dpb_size</code> 0 hold VRAM for references the monitors do not need.</li>
+    <li class="flag"><b>Latency</b><p>Program output: none (0 frames, 0 ms). Its encoder is not changed.</p><p>Monitors and command-to-screen: none. The DPB size changes no encode order and adds no buffering.</p></li>
+    <li><b>Side effects</b>The encoder has less choice when content returns after an occlusion, such as a background reappearing after something passes in front of it. At the same bitrate a monitor picture can be marginally softer in such moments. Viewers' streams are not affected.</li>
+    <li><b>Cost</b>0 nodes, 0 queues, 0 threads, no extra GPU or CPU work. About 20 lines (counted in the code): one encoder option, one rendition field with a 0–16 range check, the aux default. VRAM: saves up to ~40 MB (estimate, to be measured).</li>
+    <li><b>Risk</b>Low. It touches only the monitors, whose pictures operators watch but viewers never receive. The worst case is a slightly softer monitor frame after an occlusion.</li>
+    <li><b>Switch it off</b>Set <code>"dpb_size": 0</code> on the monitor's rendition in <code>aux_buses</code>. NVENC then chooses again.</li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/janus.py#L96-L102">pyplumber/mixer/janus.py#L96-L102</a>: <code>dpb_options</code> turns the field into the nvenc option, or nothing for 0; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/janus.py#L160">L160</a> adds it to the Janus encoder options.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L67-L68">pyplumber/mixer/aux.py#L67-L68</a>: aux renditions default to <code>dpb_size</code> 1; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L206">L206</a> passes it to the monitor encoder.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/config.py#L143">pyplumber/mixer/config.py#L143</a>: the rendition field (default 0); <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/config.py#L358-L359">L358-L359</a> check the 0–16 range (<a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/config.py#L43">L43</a>).</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/mixer.py#L624">demos/mixer/mixer.py#L624</a>: program Janus outputs pass the field through (0 unless set); <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/mixer.py#L557">L557</a> does the same for file outputs.</li>
+    <li>Tests: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_backend.py#L94-L96">demos/mixer/tests/test_backend.py#L94-L96</a> (monitor 1, program unset), <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L303-L306">demos/mixer/tests/test_aux.py#L303-L306</a>, <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_graph.py#L1639-L1655">demos/mixer/tests/test_graph.py#L1639-L1655</a>.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#renditions">config.md · renditions</a> (the <code>dpb_size</code> row).</li>
+  </ul>
+  <p class="note">This change is not deployed yet; it is approved for the fade build. Line numbers refer to the branch that carries it.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>

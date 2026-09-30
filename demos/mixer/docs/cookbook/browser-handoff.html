@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="How the AVPlumber mixer's browser sender hands frames over: the fd-passing thread waits in poll() instead of waking every millisecond, a vanished socket is re-bound, failed pages reload without dropping the mixer's connection, and the mixer keeps showing a failed page's last frame while it reloads.">
+  <title>Browser frame hand-off · Mixer optimization cookbook</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+      --red: #e5484d;
+      --green: #30a46c;
+      --amber: #f5a524;
+      --blue: #6e8bf5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d17; }
+    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
+    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
+    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
+    .site a { font-weight: 600; text-decoration: none; }
+    .site a:hover { text-decoration: underline; }
+    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
+    h2 { font-size: 19px; margin: 34px 0 12px; }
+    p, li { color: var(--body); line-height: 1.6; }
+    p { max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
+            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
+    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
+    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
+    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
+    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
+    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
+    figure { margin: 22px 0 0; }
+    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
+    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
+    .cards > li.flag { border-left: 3px solid var(--amber); }
+    .cards p { margin: 0; }
+    .cards p + p { margin-top: 8px; }
+    .cards ul { margin: 4px 0 0; padding-left: 18px; }
+    .cards ul li { margin: 2px 0; }
+    .where { padding-left: 20px; }
+    .where li { margin: 6px 0; }
+    .note { font-size: 14px; color: var(--muted); }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+    .measured { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 14px 0 0; max-width: 640px; }
+    .measured table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .measured th, .measured td { padding: 8px 14px; border-bottom: 1px solid var(--line); text-align: right; color: var(--body); white-space: nowrap; }
+    .measured tr:last-child td { border-bottom: 0; }
+    .measured th:first-child, .measured td:first-child { text-align: left; }
+    .measured th { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; }
+    .measured td:last-child { color: #edf4ff; }
+    .changes { padding-left: 20px; }
+    .changes li { margin: 10px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Browser frame hand-off</h1>
+  <p class="lede">Each browser window passes its painted frames to the mixer as DMA-BUF descriptors over a Unix socket, and the mixer acks every frame back. The sender's socket thread now sleeps in <code>poll()</code> instead of waking every millisecond, a vanished socket file is re-bound, and a failed page reloads without dropping the mixer's connection. While a failed or crashed page reloads, the sender by default holds: it sends nothing more, so the mixer keeps showing the page's last frame instead of Chromium's error page.</p>
+  <span class="pill live">Implemented, deployed on the test host</span> <span class="note">Deployed and measured: everything on this page except the hold of the last frame, which was added after the measurement below and has not been measured. The dropped no-op nodes (item 7) were measured on a later 68-input, 60 fps show, not in the table.</span>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 760 262" role="img" aria-labelledby="poll-t poll-d">
+        <title id="poll-t">One window's socket thread over 20 ms, before and after</title>
+        <desc id="poll-d">Before: the thread wakes every millisecond, 20 times in 20 ms; four of those wake-ups find an ack, which waited up to 1 ms for them. After: the thread stays blocked in poll() and wakes 6 times, at the moment of each of four acks, one connection and one wake() call.</desc>
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="#a4b4ca"/>
+          </marker>
+        </defs>
+        <g font-family="system-ui, sans-serif" font-size="12">
+          <!-- Before: x = 160 + 30 * ms -->
+          <text x="8" y="20" fill="#edf4ff" font-size="14" font-weight="600">Before · check, sleep 1 ms, repeat</text>
+          <text x="8" y="50" fill="#a4b4ca">acks arrive</text>
+          <g fill="#30a46c">
+            <circle cx="232" cy="46" r="5"/><circle cx="391" cy="46" r="5"/>
+            <circle cx="529" cy="46" r="5"/><circle cx="688" cy="46" r="5"/>
+          </g>
+          <g stroke="#a4b4ca" stroke-width="1.2" stroke-dasharray="3 3" fill="none" marker-end="url(#ah)">
+            <path d="M236 50 L248 62"/><path d="M395 50 L398 62"/>
+            <path d="M533 50 L547 62"/><path d="M692 50 L698 62"/>
+          </g>
+          <text x="8" y="81" fill="#a4b4ca">socket thread</text>
+          <rect x="150" y="64" width="600" height="24" rx="4" fill="#182236" stroke="#26354a"/>
+          <g fill="#f5a524">
+            <rect x="157" y="64" width="6" height="24"/><rect x="187" y="64" width="6" height="24"/>
+            <rect x="217" y="64" width="6" height="24"/>
+            <rect x="277" y="64" width="6" height="24"/><rect x="307" y="64" width="6" height="24"/>
+            <rect x="337" y="64" width="6" height="24"/><rect x="367" y="64" width="6" height="24"/>
+            <rect x="427" y="64" width="6" height="24"/><rect x="457" y="64" width="6" height="24"/>
+            <rect x="487" y="64" width="6" height="24"/><rect x="517" y="64" width="6" height="24"/>
+            <rect x="577" y="64" width="6" height="24"/><rect x="607" y="64" width="6" height="24"/>
+            <rect x="637" y="64" width="6" height="24"/><rect x="667" y="64" width="6" height="24"/>
+            <rect x="727" y="64" width="6" height="24"/>
+          </g>
+          <g fill="#30a46c">
+            <rect x="247" y="64" width="6" height="24"/><rect x="397" y="64" width="6" height="24"/>
+            <rect x="547" y="64" width="6" height="24"/><rect x="697" y="64" width="6" height="24"/>
+          </g>
+          <text x="160" y="104" fill="#a4b4ca" font-size="11">0 ms</text>
+          <text x="733" y="104" fill="#a4b4ca" font-size="11" text-anchor="end">20 ms</text>
+          <text x="8" y="122" fill="#e5484d">20 wake-ups in 20 ms, traffic or not. Each ack waits for the next tick, up to 1 ms.</text>
+
+          <line x1="8" y1="138" x2="752" y2="138" stroke="#26354a"/>
+
+          <!-- After -->
+          <text x="8" y="162" fill="#edf4ff" font-size="14" font-weight="600">After · one poll() on the eventfd, the listener and every client</text>
+          <text x="232" y="180" fill="#30a46c" text-anchor="middle">ack</text>
+          <text x="310" y="180" fill="#6e8bf5" text-anchor="middle">connect</text>
+          <text x="610" y="180" fill="#57dbc2" text-anchor="middle">wake()</text>
+          <text x="8" y="194" fill="#a4b4ca">events</text>
+          <g fill="#30a46c">
+            <circle cx="232" cy="190" r="5"/><circle cx="391" cy="190" r="5"/>
+            <circle cx="529" cy="190" r="5"/><circle cx="688" cy="190" r="5"/>
+          </g>
+          <rect x="305" y="185" width="10" height="10" rx="2" fill="#6e8bf5"/>
+          <rect x="605" y="185" width="10" height="10" rx="2" fill="#57dbc2"/>
+          <g stroke="#a4b4ca" stroke-width="1.2" stroke-dasharray="3 3" fill="none" marker-end="url(#ah)">
+            <path d="M232 196 L232 206"/><path d="M310 196 L310 206"/><path d="M391 196 L391 206"/>
+            <path d="M529 196 L529 206"/><path d="M610 196 L610 206"/><path d="M688 196 L688 206"/>
+          </g>
+          <text x="8" y="225" fill="#a4b4ca">socket thread</text>
+          <rect x="150" y="208" width="600" height="24" rx="4" fill="#182236" stroke="#26354a"/>
+          <text x="460" y="224" fill="#a4b4ca" text-anchor="middle">blocked in poll()</text>
+          <g>
+            <rect x="229" y="208" width="6" height="24" fill="#30a46c"/><rect x="307" y="208" width="6" height="24" fill="#6e8bf5"/>
+            <rect x="388" y="208" width="6" height="24" fill="#30a46c"/><rect x="526" y="208" width="6" height="24" fill="#30a46c"/>
+            <rect x="607" y="208" width="6" height="24" fill="#57dbc2"/><rect x="685" y="208" width="6" height="24" fill="#30a46c"/>
+          </g>
+          <text x="8" y="254" fill="#30a46c">6 wake-ups, each with work to do. An ack is read the moment it arrives.</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Illustration, not a measurement: one window's socket thread over 20 ms. Amber: a check that found nothing. Green: an ack read. Blue: a consumer connecting. Teal: <code>wake()</code> for stop, re-bind or client removal. Before, every window's thread woke about 1000 times a second whatever the traffic.</figcaption>
+  </figure>
+
+  <h2>Measured: old vs. new browser image</h2>
+  <p>Same 110-source 1080p25 show (40 NVDEC, 36 browser pages, 30 raw NV12 files and 4 DSK key pages) on the 16 GB T4 test host, with the same avplumber build. Only the browser image changed.</p>
+  <div class="measured">
+    <table>
+      <thead><tr><th>Metric</th><th>Old image</th><th>New image</th></tr></thead>
+      <tbody>
+        <tr><td>Browser CPU</td><td>4.71 cores</td><td>3.47 cores</td></tr>
+        <tr><td>Browser wake-ups/s</td><td>53,297</td><td>18,428</td></tr>
+        <tr><td>Host CPU idle</td><td>33.9 %</td><td>43.8 %</td></tr>
+        <tr><td>avplumber CPU</td><td>4.06 cores</td><td>3.85 cores</td></tr>
+        <tr><td>GPU SM</td><td>58.8 %</td><td>57.5 %</td></tr>
+        <tr><td>VRAM total</td><td>10,064 MiB</td><td>10,085 MiB</td></tr>
+        <tr><td>VRAM of browser processes</td><td>1,272 MiB</td><td>1,265 MiB</td></tr>
+        <tr><td>Repeated source frames</td><td>0</td><td>0</td></tr>
+        <tr><td>Median cut latency</td><td>70 ms</td><td>75 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Browser wake-ups fell by about 35,000 a second, consistent with 1000 a second for each of the 40 windows. Even so, the table measures everything that changed between the two images, not the <code>poll()</code> rewrite alone. The 5 ms cut-latency difference is within run-to-run noise.</p>
+
+  <h2>What changed</h2>
+  <ol class="changes">
+    <li><b>The socket thread waits in <code>poll()</code>.</b> Before, each window's accept thread tried <code>accept()</code>, read acks from every client, then slept 1 ms: about 1000 wake-ups a second per window. Now it blocks in <code>poll()</code> on an eventfd (stop, re-bind, client removal), the listening socket and every client, and reads each ack as it arrives. Acks are read before new connections are accepted, so a reused descriptor number is never taken for the old client. A descriptor already removed is ignored. A persistent error pauses 1 ms, so <code>poll()</code> cannot spin.</li>
+    <li><b>A vanished socket file is re-bound.</b> The 1 s socket monitor notices the missing file and calls <code>createServer</code>, which binds a new socket and moves it under the old descriptor with <code>dup3</code>, so connected consumers keep their frames. If that fails, the file is unlinked, since nothing listens behind it, and the next check retries. Before, <code>createServer</code> returned early and the file stayed gone.</li>
+    <li><b>Failed pages reload; the capture channel stays.</b> A main-frame load failure, a load past the watchdog (30 s by default) or a renderer crash reloads the page after 1 s, doubling up to 30 s while reloads keep failing, and logs each failure and the delay to the next reload to stderr. Sub-frame failures and <code>ERR_ABORTED</code> (a cancelled or superseded navigation) are ignored. The consumer keeps its connection and the frames it holds. Before, any <code>did-fail-load</code> tore the window down: the socket closed, the mixer quarantined its frames, and a failed re-create left the source frozen for good with no alarm. A renderer crash had no handler at all.</li>
+    <li><b>Hold the last frame.</b> A main-frame load failure or a renderer crash also puts the window's capture channel on hold: each paint is dropped as <code>held</code> and its texture goes straight back to Chromium, so the mixer's <code>repeat_last_frame</code> keeps showing the source's last frame instead of Chromium's empty error page or a half-loaded reload. A load watchdog timeout reloads without holding, because a slow page is still painting its own content. The hold needs a frame to hold: until the window has delivered at least one frame to a connected consumer, its paints go through even while held. The hold ends at the first <code>did-finish-load</code> with no failure since the last reload; Chromium also fires <code>did-finish-load</code> for its own error page, and that one does not count. A refresh or URL update starts a clean attempt, so its clean load also ends the hold. <code>/status</code> counts held paints under <code>droppedReasons.held</code>. The window option is <code>holdLastFrame</code> (default <code>true</code>); the mixer sets it from each browser source's <code>hold_last_frame</code>, and <code>--dmabuf-open</code> windows always hold. The mixer checks that the browser service echoes <code>holdLastFrame</code> back, as it already did for <code>ringSize</code>: a browser service too old for the option stops the mixer at start with “Browser service did not apply holdLastFrame; update dma-browser before starting the mixer”. Without the check, such a service would ignore the option, run without the hold, and have every window closed and reopened on each mixer start, because its windows never match the requested settings. Before, the error page was sent, so the source went transparent or black until a reload loaded cleanly.</li>
+    <li><b>Type-aware lint.</b> <code>@typescript-eslint/no-floating-promises</code> now runs with <code>ignoreVoid: false</code>: <code>void promise</code> no longer passes, so every fire-and-forget call ends in <code>.catch()</code>. Also added: <code>return-await</code> (only inside <code>try</code>), <code>switch-exhaustiveness-check</code> and <code>no-unnecessary-condition</code>; the lint script reports stale disable comments. Following its findings turned up two bugs. Media elements bound before the first audio collector was ready each built their own, so an element could stay silent and uncaptured, or several collectors sent audio to the same socket; they now share one setup. And a crash restart queued before <code>stop()</code> respawned the stopped worker, which kept holding its port. Two smaller changes came with it. REST handlers end in <code>.catch(next)</code> through one <code>route()</code> helper, instead of a <code>try</code> inside a <code>void</code>-ed async function, which was safe only while every line stayed inside the <code>try</code>. Three guards that <code>no-unnecessary-condition</code> flags stay, each suppression with its reason: a child's exit status read after an <code>await</code> (TypeScript keeps the narrowing from before it), and <code>document.head</code> or <code>document.documentElement</code>, which lib.dom types as non-null although a preload can run before the parser creates them.</li>
+    <li><b>Per-window ring size.</b> The setup's <code>browser_ring_size</code> (6 at 25 fps), sent as each window's <code>ringSize</code>, now sizes that window's frame pool. Without it, the process-wide <code>DMA_BROWSER_DMABUF_POOL_SIZE</code> applies (default 11).</li>
+    <li><b>Two no-op nodes dropped.</b> Each browser window's mixer chain ran an <code>assume_video_format</code> node and a <code>settb</code> <code>filter_video</code>, each on its own thread. Neither did anything: <code>drm_prime_to_cuda</code> reads geometry and format from every frame, and <code>smooth_timestamps</code> already stamps in 1/fps. Both are gone. The filter's one real job, tagging Chromium's premultiplied alpha, moved into the mixer's colour node (<code>add_source</code> takes <code>premultiplied_alpha</code>), which every browser frame already passes on its way to blended scene items and downstream keys. Measured on a later show than the table above (68 inputs: 18 NVDEC, 29 browser pages, 17 raw NV12 files and 4 browser key pages, 60 fps, T4 test host with 16 vCPU): avplumber threads 555 → 491, avplumber CPU 4.72 → 4.63 cores, within run-to-run noise. A cleanup, not a CPU win.</li>
+  </ol>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>Mostly browser sender changes, in <code>deps/dma-browser</code>:
+      <ul>
+        <li>the fd-passing thread waits in <code>poll()</code>;</li>
+        <li>a vanished capture socket is re-bound;</li>
+        <li>failed loads and renderer crashes reload the page;</li>
+        <li>the window holds its last frame while a failed or crashed page reloads;</li>
+        <li>stricter lint and the bugs it found;</li>
+        <li>a per-window ring size.</li>
+      </ul>
+      <p>On the mixer side only Python changed: each browser source's <code>hold_last_frame</code> reaches its window, a browser service that ignores the option stops the mixer at start, each window's <code>assume_video_format</code> and <code>settb</code> <code>filter_video</code> nodes are gone, and the colour node tags Chromium's premultiplied alpha on blended browser sources and keys. The avplumber binary is unchanged.</p></li>
+    <li><b>Why</b>With 40 windows, the 1 ms loop alone meant about 40,000 wake-ups a second, most of them finding nothing. A page that failed to load, or whose renderer crashed, froze its source with no alarm. With reloads in place, a failed page's source showed Chromium's empty error page, transparent or black, until a reload loaded cleanly.</li>
+    <li><b>Latency</b>0 frames added to program and to command-to-screen: no queue, buffer or node added; item 7 only removes two per window. Acks are read as they arrive instead of at the next 1 ms tick, so each frame returns to the browser's pool up to 1 ms sooner. Median cut latency measured 70 ms old and 75 ms new, within run-to-run noise. Holding adds no queue either: the mixer repeats the last frame at the canvas rate, as it already does for a page that stops painting.</li>
+    <li class="flag"><b>Side effects</b>
+      <p>While a page is down, Chromium paints its own empty error page. After a main-frame load failure or a renderer crash, a window that has already delivered a frame no longer sends it: the sender drops paints until a reload loads cleanly, and the mixer's <code>repeat_last_frame</code> keeps showing the last frame.</p>
+      <p>A page that fails its first load has no frame to hold, so its error page is sent until one frame reaches a consumer, and then held. The source shows transparent or black until a clean load, but the mixer's chain gets a frame and can start.</p>
+      <p>A load watchdog timeout alone does not hold: a slow page is reloaded but keeps sending its live paints. A browser source with <code>hold_last_frame: false</code> passes the error page through, transparent or black until the next clean load. Sub-frame failures and <code>ERR_ABORTED</code> are only logged.</p></li>
+    <li><b>Cost</b>0 nodes, 0 queues, 0 VRAM for the sender changes: browser processes held 1,272 MiB before and 1,265 MiB after. Item 7 removes two nodes and their queues from every browser window's chain: avplumber threads 555 → 491 on the 68-input show. One eventfd per window; each wake-up rebuilds the <code>pollfd</code> list of the eventfd, the listener and the window's clients. The hold is one flag check per paint, and a held paint's texture is released at once. Code: in the fd-passing addon, +51/−28 lines for the <code>poll()</code> loop and +39/−16 for the re-bind; a 60-line page reloader with tests. The hold: +32/−8 lines in the browser sender and +13/−5 in the mixer's Python, without tests and docs.</li>
+    <li><b>Risk</b>
+      <p>Low. The <code>poll()</code> loop's hazards are covered: acks are read before <code>accept()</code>, removed descriptors are skipped, <code>removeClient()</code> calls <code>wake()</code> because <code>close()</code> does not end a <code>poll()</code>, and a persistent error pauses 1 ms. A URL that never loads retries every 30 s indefinitely, logged each time.</p>
+      <p>From the code, not observed: the “frame to hold” test counts frames over the window's lifetime, not per consumer. The mixer reuses a matching window, and its start-up refresh ends a hold only if the page then loads cleanly. So a mixer restarted while a reused window is held gets no frame from it until the page loads cleanly, and start-up fails after <code>--preheat-timeout</code> (60 s by default). Closing that window first, so the mixer opens a new one, or setting <code>hold_last_frame: false</code> on the source avoids it.</p></li>
+    <li><b>Switch it off</b>No runtime switch for the reload. <code>hold_last_frame: false</code> on a browser source turns off only the hold, for that window. To remove the changes, revert the browser and mixer commits together and rebuild the browser image: a mixer that sends <code>holdLastFrame</code> to a browser service without it stops at start. The avplumber binary needs no change.</li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/addons/fdpass/addon.cc#L426-L465">deps/dma-browser/addons/fdpass/addon.cc#L426-L465</a>: <code>wake()</code> and <code>acceptLoop()</code>, one <code>poll()</code> with acks read before accepting; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/addons/fdpass/addon.cc#L467-L473">L467-L473</a> the 1 ms pause on a persistent error.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/addons/fdpass/addon.cc#L389-L391">addon.cc#L389-L391</a>: a descriptor no longer in the client list is ignored; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/addons/fdpass/addon.cc#L475-L486">L475-L486</a> <code>removeClient()</code> retires the client's frames, closes it and calls <code>wake()</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/addons/fdpass/addon.cc#L129-L143">addon.cc#L129-L143</a>: <code>rebind()</code>, <code>dup3</code> under the same descriptor, unlink on failure; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/addons/fdpass/addon.cc#L513-L518">L513-L518</a> <code>createServer</code> re-binds a server whose file vanished.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/capture/FrameCaptureChannel.ts#L106-L116">deps/dma-browser/src/main/capture/FrameCaptureChannel.ts#L106-L116</a>: the 1 s socket monitor that calls <code>createServer</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/PageReloader.ts#L1-L60">deps/dma-browser/src/main/PageReloader.ts#L1-L60</a>: which load failures count, and the doubling backoff.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/ManagedWindow.ts#L160-L204">deps/dma-browser/src/main/ManagedWindow.ts#L160-L204</a>: load failures, the watchdog and renderer crashes all reload the page; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/ManagedWindow.ts#L26-L27">L26-L27</a> the 1 s and 30 s delays.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/ManagedWindow.ts#L170-L185">ManagedWindow.ts#L170-L185</a>: <code>recover()</code> holds for a load failure or a crash; the watchdog passes <code>hold = false</code>. <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/ManagedWindow.ts#L187-L190">L187-L190</a> a clean <code>did-finish-load</code> ends the hold; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/ManagedWindow.ts#L313">L313</a> the window reports <code>holdLastFrame</code>, which the mixer checks.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/capture/FrameCaptureChannel.ts#L120-L123">FrameCaptureChannel.ts#L120-L123</a>: <code>hold()</code>; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/capture/FrameCaptureChannel.ts#L180-L185">L180-L185</a> a paint is dropped as <code>held</code> only once a frame went out; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/capture/FrameCaptureChannel.ts#L275">L275</a> a frame counts as sent only when a consumer received it.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/PageReloader.ts#L47-L48">PageReloader.ts#L47-L48</a>: <code>loaded()</code> is false after a failure since the last reload, so the error page's own <code>did-finish-load</code> does not end the hold.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/config/ConfigService.ts#L80-L81">deps/dma-browser/src/main/config/ConfigService.ts#L80-L81</a>: <code>holdLastFrame</code> defaults to <code>true</code>; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/config/WindowConfig.ts#L9-L11">WindowConfig.ts#L9-L11</a> the window option.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/config.py#L100">pyplumber/mixer/config.py#L100</a>: a source's <code>hold_last_frame</code>, default <code>true</code>; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/config.py#L308-L310">L308-L310</a> a config error unless it is a boolean on a browser source.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/mixer.py#L689">demos/mixer/mixer.py#L689</a>: the source's <code>hold_last_frame</code> becomes its window's <code>holdLastFrame</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/dmabuf_inputs.py#L118">pyplumber/mixer/dmabuf_inputs.py#L118</a>: <code>--dmabuf-open</code> windows always hold; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/dmabuf_inputs.py#L143-L147">L143-L147</a> the mixer stops when the browser service does not apply <code>ringSize</code> or <code>holdLastFrame</code>; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/dmabuf_inputs.py#L87-L91">L87-L91</a> the <code>repeat_last_frame</code> node that repeats the last frame at the canvas rate.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/dmabuf_inputs.py#L47-L50">dmabuf_inputs.py#L47-L50</a>: why the chain has no format or time-base node of its own: geometry and format come from each frame, and <code>smooth_timestamps</code> stamps in 1/fps; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/dmabuf_inputs.py#L81-L85">L81-L85</a> <code>smooth_timestamps</code> writes the chain's output edge directly, with no filter after it.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/graph.py#L531">pyplumber/mixer/graph.py#L531</a>: the colour node appends <code>alpha_mode=premultiplied</code> for a source registered with <code>premultiplied_alpha</code>; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/mixer.py#L747">demos/mixer/mixer.py#L747</a> sets it for the browser sources that scenes blend or downstream keys use.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/.eslintrc.cjs#L28-L35">deps/dma-browser/.eslintrc.cjs#L28-L35</a>: the promise and condition rules.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/preload/AudioCapturePipeline.ts#L125-L135">deps/dma-browser/src/preload/AudioCapturePipeline.ts#L125-L135</a>: one shared audio collector setup, retried after a failure.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/rest/RestServer.ts#L12-L19">deps/dma-browser/src/main/rest/RestServer.ts#L12-L19</a>: <code>route()</code> passes a handler's rejection to the error middleware. The kept guards: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/supervisor/WorkerProcess.ts#L146-L148">WorkerProcess.ts#L146-L148</a>, <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/preload/AudioCapturePipeline.ts#L83-L85">AudioCapturePipeline.ts#L83-L85</a>, <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/preload/WebGLSyncInstaller.ts#L68-L70">WebGLSyncInstaller.ts#L68-L70</a>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/supervisor/WorkerProcess.ts#L294-L312">deps/dma-browser/src/main/supervisor/WorkerProcess.ts#L294-L312</a>: a queued restart does nothing once <code>stop()</code> has run.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/Application.ts#L74">deps/dma-browser/src/main/Application.ts#L74</a>: the window's <code>ringSize</code>, else the process-wide pool size.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/README.md#frame-lifetime-and-transport-counters">dma-browser README · Frame lifetime and transport counters</a> (the ack protocol); the paragraph above it describes page recovery and <code>holdLastFrame</code>, but not yet its two exceptions: a page that fails its first load still sends its error page, and a watchdog reload keeps sending live paints. <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#sources">Mixer config · sources</a> lists <code>hold_last_frame</code>. <a href="browser-paint-cost.html">Browser CPU is per painted frame</a> puts the hand-off in Chromium's per-frame cost: the browser's main process (paint event, fd pass, release ack) is about 6&nbsp;% of a core per window at 60 paints/s.</li>
+  </ul>
+  <p class="note">Line numbers match the change under review and resolve on develop once it merges.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>
