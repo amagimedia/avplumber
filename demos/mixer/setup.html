@@ -208,7 +208,7 @@ function update(){
  const fps=Number($('fps').value),limit=sourceLimit();
  $('sources').max=limit;
  if(Number($('sources').value)>limit)$('sources').value=limit;
- $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps.${fps<=30?` Above ${fps===25?100:83} is experimental.`:''}`;
+ $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps.${fps===25?' Above 100 is experimental.':''}`;
  if(Number($('scenes').value)>192)$('scenes').value=192;
  const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,192),bitrate=integer('bitrate',500,40000);
  if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
