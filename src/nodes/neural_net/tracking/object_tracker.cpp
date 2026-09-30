@@ -167,9 +167,10 @@ class ObjectTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public II
         Parameters det;
         det["track_id"] = track.track_id;
         det["tracklet_len"] = track.tracklet_len;
-        det["track_state"] = "lost";
+        det["track_state"] = track.state == bytetrack::TrackState::Tracked ? "tracked" : "lost";
         det["predicted"] = true;
         det["conf"] = (double)track.score;
+        if (target_labels_.size() == 1) det["label"] = target_labels_.front();
 
         Parameters xyxy = Parameters::array();
         xyxy.push_back(track.tlbr[0]);
@@ -312,6 +313,9 @@ public:
             return;
         }
 
+        const bool inference_skipped = has_metadata && md.value("inference_skipped", false);
+        if (inference_skipped) target_dets.clear();
+
         // Convert target detections to ByteTrack Objects
         std::vector<bytetrack::Object> objects;
         for (size_t i = 0; i < target_dets.size(); i++) {
@@ -334,7 +338,7 @@ public:
         }
 
         // Run tracker (always, to keep frame_id in sync)
-        auto output_tracks = tracker_->update(objects);
+        auto output_tracks = inference_skipped ? tracker_->predict_only() : tracker_->update(objects);
 
         // Build output detections
         Parameters out_dets = passthrough_dets;
@@ -342,7 +346,14 @@ public:
         stat_total_frames_++;
         stat_total_target_dets_ += target_dets.size();
 
-        if (!target_dets.empty()) {
+        if (inference_skipped) {
+            if (predict_on_empty_) {
+                for (const auto& track : output_tracks) {
+                    out_dets.push_back(buildPredictedDetection(track));
+                    stat_predicted_++;
+                }
+            }
+        } else if (!target_dets.empty()) {
             // Map output tracks back to source detections via detection_index
             std::vector<bool> matched(target_dets.size(), false);
 
@@ -434,6 +445,7 @@ public:
             out_md["model_width"] = md.value("model_width", (double)frm.width());
             out_md["model_height"] = md.value("model_height", (double)frm.height());
             if (md.contains("models")) out_md["models"] = md["models"];
+            if (inference_skipped) out_md["inference_skipped"] = true;
         }
         out_md["detections"] = out_dets;
 
