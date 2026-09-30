@@ -63,8 +63,8 @@ export class HwAccelConfigurator {
     if (envFlag(this.env, 'DMA_BROWSER_WEBGPU_OPENGLES', true)) {
       this.appendSwitch('use-webgpu-adapter', 'opengles');
     }
-    // Past three GPU-process crashes in five minutes Chromium quits the worker ("GPU process
-    // isn't usable"); keep relaunching the GPU process instead.
+    // After three GPU-process crashes, each within five minutes of the last, Chromium quits the
+    // worker ("GPU process isn't usable"); keep relaunching the GPU process instead.
     if (envFlag(this.env, 'DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT', true)) {
       this.appendSwitch('disable-gpu-process-crash-limit');
     }

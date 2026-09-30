@@ -74,7 +74,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Ideas we measured and dropped</h1>
-  <p class="lede">Every source is a unique, independent 1080p25 input processed every frame; twelve ideas broke that rule, saved nothing, or made cuts, pictures or the pipeline slower, so we dropped them.</p>
+  <p class="lede">Every source is a unique, independent 1080p25 input processed every frame; twelve ideas broke that rule, saved almost nothing, or made cuts, pictures or the pipeline slower, so we dropped them.</p>
   <span class="pill rejected">Status: Rejected</span>
 
   <h2>The rule, and where each shortcut would cut it</h2>
@@ -207,7 +207,7 @@
     <li><span class="name"><span class="num">10</span>Browser sources at 30 fps in a 60 fps show</span>
       <p><span class="k">Dropped</span>Every demo source is a real 60 fps input. A production knob, not a capacity result.</p></li>
   </ol>
-  <h3>Ruled out on the 60 fps show</h3>
+  <h3>Ruled out for the 60 fps show</h3>
   <ol class="ideas">
     <li><span class="name"><span class="num">8</span><code>__GL_YIELD=USLEEP</code></span>
       <p><span class="k">Dropped</span>Chromium's GPU processes made 0 <code>sched_yield</code> calls in 5 s: no spinning. Their CPU is ~12k futex/s thread hand-offs and ~1.1k ioctl/s.</p></li>
@@ -249,7 +249,7 @@
       <p>Headline capacity is lower than a demo with shortcuts would show. That is the point.</p></li>
     <li><b>Switch it off</b>
       <ul>
-        <li>Nothing to switch off: ideas 1, 4, 5 and 7–11 are not in the code; 12 is the library default, off in setup-built shows.</li>
+        <li>Nothing to switch off: ideas 1, 4, 5, 7–9 and 11 are not in the code; 10 is a browser source's <code>fps</code> field (<a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#sources">config.md · sources</a>), which the demo leaves at the canvas rate; 12 is the library default, off in setup-built shows.</li>
         <li>Repeated files: a repeat is rejected at load; mark both declarations <code>"independent": true</code> for separate chains.</li>
         <li>Cut prewarm: the demo runs with <code>--prewarm-cut-scene '*'</code> (every scene). The mixer's own default is off; naming fewer scenes narrows it.</li>
       </ul></li>
@@ -257,12 +257,12 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li>PGM tile is the finished program: <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L109-L110">aux.py:109–110</a> (last input, <code>contain</code>), matched one frame back at <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L1099-L1104">cuda_rect_overlay.cpp:1099–1104</a></li>
+    <li>PGM tile is the finished program: <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/aux.py#L109-L110">aux.py:109–110</a> (last input, <code>contain</code>), matched one frame back at <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L1098-L1103">cuda_rect_overlay.cpp:1098–1103</a></li>
     <li>Idle compositor slot, no surface and no kernel: <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L509-L511">cuda_rect_overlay.cpp:509–511</a>; empty mask means an idle PVW slot: <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_overlay.cpp#L692-L695">cuda_rect_overlay.cpp:692–695</a></li>
-    <li>Bilinear, 4 taps per sample: <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_scale.cu#L156-L157">cuda_rect_scale.cu:156–157</a></li>
-    <li>One chain per source: <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L18">inputs.py:18</a> (<code>build_input</code>); repeated locations and <code>independent</code>: <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L415-L421">config.py:415–421</a></li>
+    <li>Bilinear, 4 taps per sample: <a href="https://github.com/amagimedia/avplumber/blob/develop/src/nodes/hwaccel/cuda_rect_scale.cu#L81-L86">cuda_rect_scale.cu:81–86</a></li>
+    <li>One chain per source: <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/inputs.py#L18">inputs.py:18</a> (<code>build_input</code>); repeated locations and <code>independent</code>: <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/config.py#L435-L441">config.py:435–441</a></li>
     <li>Own media per generated source, id burned in: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/prepare_demo.py#L254-L260">prepare_demo.py:254–260</a></li>
-    <li>Cut prewarm: <a href="https://github.com/amagimedia/avplumber/blob/develop/src/mixer/orchestrator/scene.cpp#L75-L93">scene.cpp:75–93</a> (<code>prewarmCuts</code>), <a href="https://github.com/amagimedia/avplumber/blob/develop/src/mixer/Playout.hpp#L235-L240">Playout.hpp:235–240</a> (<code>setPrewarm</code>; a cold input resets its queue), <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L833-L834">mixer.py:833–834</a> (CLI flag)</li>
+    <li>Cut prewarm: <a href="https://github.com/amagimedia/avplumber/blob/develop/src/mixer/orchestrator/scene.cpp#L75-L93">scene.cpp:75–93</a> (<code>prewarmCuts</code>), <a href="https://github.com/amagimedia/avplumber/blob/develop/src/mixer/Playout.hpp#L247-L252">Playout.hpp:247–252</a> (<code>setPrewarm</code>; a cold input resets its queue), <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/mixer.py#L858">mixer.py:858</a> (CLI flag)</li>
     <li>Outputs that encode every frame: <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/janus.py#L112">janus.py:112</a> (<code>build_janus_output</code>), clean feed split at <a href="https://github.com/amagimedia/avplumber/blob/develop/pyplumber/mixer/dsk.py#L43-L45">dsk.py:43–45</a></li>
     <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#known-limitations">config.md · Known limitations</a> (all sources run all the time), <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#sources">config.md · sources</a> (<code>independent</code>), <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#aux_buses">config.md · aux_buses</a> (PGM tile one frame behind), <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/recipe.md#generated-media">recipe.md · Generated media</a>, <a href="https://github.com/amagimedia/avplumber/blob/develop/doc/mixer_cut_latency.md#optional-direct-cut-source-prewarm">mixer_cut_latency.md · Optional direct-cut source prewarm</a></li>
   </ul>

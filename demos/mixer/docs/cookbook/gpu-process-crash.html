@@ -80,7 +80,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Keeping Vulkan out of the GPU process</h1>
-  <p class="lede">A restart that changes the browser page closes and reopens all 29 browser windows. On Electron 41 that crashed Chromium's GPU process: closing windows left a Vulkan cleanup task pending, and a surviving window's shared-texture copy flush tripped a <code>CHECK</code> on it. Vulkan was in that GL-only process at all because, with the GPU blocklist ignored, Chromium runs WebGPU on Vulkan through GL interop. Two Chromium switches, both on by default in the browser sender, fix it: WebGPU on the OpenGL ES adapter, so no Vulkan context exists, and no GPU-process crash limit, so a crash never quits the worker.</p>
+  <p class="lede">A restart that changes the browser page closes and reopens all 29 browser windows. On Electron 41 that crashed Chromium's GPU process: closing windows left a Vulkan cleanup task pending, and a surviving window's shared-texture copy flush tripped a <code>CHECK</code> on it. Vulkan was in that GL-only process at all because, with the GPU blocklist ignored, Chromium runs WebGPU on Vulkan through GL interop. Two Chromium switches, both on by default in the browser sender, address it: WebGPU on the OpenGL ES adapter, so no Vulkan context exists, and no GPU-process crash limit, so a crash never quits the worker; five window-recreating restarts on Electron 44 then ran with 0 crashes.</p>
   <span class="pill live">Status: Implemented, deployed on the test host</span>
 
   <ul class="figures" aria-label="Measured facts">
@@ -94,7 +94,7 @@
     <div class="diagram">
       <svg viewBox="0 0 760 252" role="img" aria-labelledby="vk-t vk-d">
         <title id="vk-t">The crash path when all browser windows are recreated, before and after the two switches</title>
-        <desc id="vk-d">Before: a restart that changes the page closes 29 windows; a Vulkan cleanup task is left pending; a surviving window flushes its shared-texture copy; the CHECK in AddCleanupTaskForSkiaFlush trips and the GPU process crashes; the fourth crash within five minutes makes the worker quit. Five restarts gave 6 crashes and 2 quit workers, and the show did not start. After: no Vulkan context exists, so closing windows leaves no cleanup task; the flush completes and the GPU process runs on; with the crash limit off, a crash would relaunch the GPU process instead of quitting the worker. Five restarts gave 0 crashes at 10.5 to 11 seconds each, with 0 missed deadlines.</desc>
+        <desc id="vk-d">Before: a restart that changes the page closes 29 windows; a Vulkan cleanup task is left pending; a surviving window flushes its shared-texture copy; the CHECK in AddCleanupTaskForSkiaFlush trips and the GPU process crashes; a third crash within five minutes of the last makes the worker quit. Five restarts gave 6 crashes and 2 quit workers, and the show did not start. After: no Vulkan context exists, so closing windows leaves no cleanup task; the flush completes and the GPU process runs on; with the crash limit off, a crash would relaunch the GPU process instead of quitting the worker. Five restarts gave 0 crashes at 10.5 to 11 seconds each, with 0 missed deadlines.</desc>
         <defs>
           <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
             <path d="M0 0 L10 5 L0 10 z" fill="#a4b4ca"/>
@@ -113,7 +113,7 @@
             <rect x="464" y="34" width="140" height="48" rx="6" fill="#3a1618" stroke="#e5484d"/>
             <text x="534" y="54" fill="#edf4ff">CHECK_EQ trips</text><text x="534" y="70" fill="#e5484d">GPU process crashes</text>
             <rect x="616" y="34" width="140" height="48" rx="6" fill="#3a1618" stroke="#e5484d"/>
-            <text x="686" y="54" fill="#edf4ff">4th crash in 5 min</text><text x="686" y="70" fill="#e5484d">worker quits</text>
+            <text x="686" y="54" fill="#edf4ff">3rd crash in 5 min</text><text x="686" y="70" fill="#e5484d">worker quits</text>
           </g>
           <g stroke="#a4b4ca" stroke-width="1.5" marker-end="url(#ah)">
             <line x1="149" y1="58" x2="159" y2="58"/><line x1="301" y1="58" x2="311" y2="58"/>
@@ -166,27 +166,27 @@
       </tbody>
     </table>
   </div>
-  <p>Two runs in sequence, not a matrix: Electron 41 (Chromium 146) without the switches, then Electron 44.5.1 (Chromium 152) with both. “—”: not recorded; that sequence ended with two workers quit and the show failing to start. Neither switch was measured alone, and Electron 44 was not measured without them. The OpenGL ES adapter leaves the Vulkan context off only from Chromium 152, so the switches on Electron 41 were not a candidate; and Electron 42–44 do not change the code that crashes (<a href="https://github.com/electron/electron/issues/54553">electron/electron#54553</a> reports the same crash), so the version step alone is not the fix. With 0 crashes, the crash-limit switch had nothing to do.</p>
+  <p>Two runs in sequence, not a matrix: Electron 41 (Chromium 146) without the switches, then Electron 44.5.1 (Chromium 152) with both. “—”: not recorded; that sequence ended with two workers quit and the show failing to start. Neither switch was measured alone, and Electron 44 was not measured without them. The OpenGL ES adapter is verified to leave the Vulkan context off on Chromium 152 (Electron 44.5.1); it was not tried on Electron 41. Electron 42–44 do not change the code that crashes (<a href="https://github.com/electron/electron/issues/54553">electron/electron#54553</a> reports the same crash), so the version step alone is not the fix. With 0 crashes, the crash-limit switch had nothing to do.</p>
 
   <h2>What changed</h2>
   <ol class="changes">
     <li><b>WebGPU runs on the OpenGL ES adapter.</b> <code>--use-webgpu-adapter=opengles</code>. On Chromium 152 that turns the WebGPU-on-Vulkan interop and its Vulkan context off, and the NVIDIA Vulkan ICD is no longer mapped into the GPU processes. Closing windows then leaves no Vulkan cleanup task for a later flush to meet. The mixer's pages use no WebGPU.</li>
-    <li><b>No GPU-process crash limit.</b> <code>--disable-gpu-process-crash-limit</code>. Past three GPU-process crashes in five minutes, Chromium quits the worker with “GPU process isn't usable. Goodbye.”; on Electron 41 that took two workers and the show could not start. Now the GPU process is relaunched every time, so a crash never cascades into quitting the worker.</li>
+    <li><b>No GPU-process crash limit.</b> <code>--disable-gpu-process-crash-limit</code>. After three GPU-process crashes, each within five minutes of the last, Chromium quits the worker with “GPU process isn't usable. Goodbye.”; on Electron 41 that took two workers and the show could not start. Now the GPU process is relaunched every time, so a crash never cascades into quitting the worker.</li>
     <li><b>Each switch behind an env flag, on by default.</b> <code>DMA_BROWSER_WEBGPU_OPENGLES</code> and <code>DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT</code>; <code>0</code> or <code>false</code> leaves that switch out. Unit tests assert both defaults and both off. +13 lines in the configurator, +12 in its test, +11 in the README.</li>
   </ol>
 
   <h2>At a glance</h2>
   <ul class="cards">
     <li><b>What</b><p>Two Chromium command-line switches added by the browser sender's <code>HwAccelConfigurator</code>, each behind an env flag that defaults to on: <code>--use-webgpu-adapter=opengles</code> and <code>--disable-gpu-process-crash-limit</code>. Nothing changed in the mixer's Python or in the avplumber binary.</p></li>
-    <li><b>Why</b><p>A restart that changes the browser page recreates all 29 browser windows. On Electron 41 five such restarts produced 6 GPU-process crashes; the fourth crash within five minutes made Chromium quit the worker, two workers went, and the show failed to start. The upgrade to Electron 44 would not have fixed it on its own: Electron 42–44 do not change the code that crashes.</p></li>
-    <li><b>Latency</b><p>0 frames added to program and to command-to-screen: the switches change what the GPU process loads at start, not the frame path; no queue, buffer or node changed. Cut latency was not re-measured. A window-recreating restart ran in 10.5–11 s with the switches; without them, on Electron 41, the show did not start.</p></li>
-    <li class="flag"><b>Side effects</b><p>A page that asked for WebGPU would get the OpenGL ES adapter instead of Vulkan; the mixer's pages ask for none.</p><p>With the crash limit off, a GPU process that keeps crashing is relaunched without limit instead of taking its worker down after the fourth crash in five minutes: a persistent GPU fault shows as repeated relaunches, not a dead worker.</p></li>
+    <li><b>Why</b><p>A restart that changes the browser page recreates all 29 browser windows. On Electron 41 five such restarts produced 6 GPU-process crashes; the third crash within five minutes of the last made Chromium quit the worker, two workers went, and the show failed to start. The upgrade to Electron 44 would not have fixed it on its own: Electron 42–44 do not change the code that crashes.</p></li>
+    <li><b>Latency</b><p>0 frames added to program and to command-to-screen: the switches change what the GPU process loads at start, not the frame path; no queue, buffer or node changed. Cut latency was not re-measured. A window-recreating restart ran in 10.5–11 s with the switches; without them, on Electron 41, the five restarts ended with two workers quit and the show unable to start.</p></li>
+    <li class="flag"><b>Side effects</b><p>A page that asked for WebGPU would get the OpenGL ES adapter instead of Vulkan; the mixer's pages ask for none.</p><p>With the crash limit off, a GPU process that keeps crashing is relaunched without limit instead of taking its worker down at a third crash within five minutes of the last: a persistent GPU fault shows as repeated relaunches, not a dead worker.</p></li>
     <li><b>Cost</b><ul>
       <li>0 nodes, 0 queues, 0 threads.</li>
       <li>Memory: the NVIDIA Vulkan ICD is no longer mapped into each GPU process; the saving was not measured.</li>
       <li>Code: +13 lines in <code>HwAccelConfigurator.ts</code>, +12 in its test, +11 in the README.</li>
     </ul></li>
-    <li><b>Risk</b><p>Low. Both are Chromium's own switches. The OpenGL ES adapter leaves the Vulkan context off only from Chromium 152: verified on Electron 44.5.1, not on older Chromium. Neither switch was measured alone; the measured fix is the pair on Electron 44. The crash-limit switch was never exercised in that run (0 crashes), so what a relaunch does to the windows in that worker is not measured.</p></li>
+    <li><b>Risk</b><p>Low. Both are Chromium's own switches. The OpenGL ES adapter is verified to leave the Vulkan context off on Chromium 152 (Electron 44.5.1); it was not tried on older Chromium. Neither switch was measured alone; the measured fix is the pair on Electron 44. The crash-limit switch was never exercised in that run (0 crashes), so what a relaunch does to the windows in that worker is not measured.</p></li>
     <li><b>Switch it off</b><p><code>DMA_BROWSER_WEBGPU_OPENGLES=0</code> drops <code>--use-webgpu-adapter=opengles</code>; <code>DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT=0</code> drops <code>--disable-gpu-process-crash-limit</code>. Set either in the browser service's environment and restart it; the two are independent. No mixer or avplumber change.</p></li>
   </ul>
 
@@ -194,7 +194,7 @@
   <ul class="where">
     <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/main/HwAccelConfigurator.ts#L57-L70">deps/dma-browser/src/main/HwAccelConfigurator.ts#L57-L70</a>: <code>--ignore-gpu-blocklist</code>, the comment stating the mechanism, and both switches behind their env flags; <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/src/main/HwAccelConfigurator.ts#L54">L54</a> the <code>--disable-vulkan</code> that is not a Chromium switch.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts#L54-L55">deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts#L54-L55</a>: both switches present by default; <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts#L61">L61</a> both flags off, and neither switch appears.</li>
-    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/README.md#L39-L48">dma-browser README · NVIDIA GPUs</a>: the two switches and how to turn them off.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/develop/deps/dma-browser/README.md?plain=1#L39-L48">dma-browser README · NVIDIA GPUs</a>: the two switches and how to turn them off.</li>
   </ul>
   <p class="note">Line numbers match the change under review and resolve on develop once it merges.</p>
 

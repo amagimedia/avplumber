@@ -202,7 +202,7 @@
       <p>Electron 44 is six Chromium majors up from 41 (146 → 152). Behaviour changes ride along; the one met so far, the GPU-process crash when all windows are recreated, exists on both versions and has its own page.</p></li>
     <li><b>Cost</b><ul>
       <li>0 nodes, 0 queues, 0 new threads; VRAM not re-measured.</li>
-      <li>Code: +15/−5 lines in the test page; 1 line in <code>package.json</code> and its lockfile; +2/−1 and 2 changed lines in the Dockerfile.</li>
+      <li>Code: +15/−5 lines in the test page; 1 line in <code>package.json</code> (and the lockfile it regenerates, ~380 lines); +2/−1 and 2 changed lines in the Dockerfile.</li>
       <li>One browser image rebuild; the Electron binary is fetched by the explicit <code>install.js</code> step.</li>
     </ul></li>
     <li><b>Risk</b><p>Low. The per-process split (3, 12 and 6&nbsp;%) and the paint-rate costs are from one host and one show. The −14&nbsp;% from Electron 44 is one pair of runs, with about 0.05 core of run-to-run noise on the baseline. An image build that drops the <code>install.js</code> step has no Electron binary, since Electron 42 and later no longer fetch it in postinstall. Nothing on this page changes what the mixer does with a frame.</p></li>

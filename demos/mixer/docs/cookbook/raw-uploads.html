@@ -77,7 +77,7 @@
 
   <h1>Raw uploads and the CUDA driver lock</h1>
   <p class="lede">With FFmpeg <code>hwupload</code>, each raw NV12 source uploads its frames with a slow, synchronous copy that holds a lock the whole mixer shares; copying through a reusable pinned buffer on the source's own stream should shrink that hold to a short enqueue.</p>
-  <span class="pill optin">Status: Setup default, hwupload fails the 60 fps A/B</span>
+  <span class="pill optin">Status: Setup default, passes the 60 fps A/B</span>
 
   <ul class="figures" aria-label="Measured facts">
     <li><b>28 of 100</b><span>sources in the 100-source demo are raw NV12 1920×1080 files, 3.1 MB per frame</span></li>
