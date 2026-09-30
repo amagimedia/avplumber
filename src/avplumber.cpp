@@ -6,8 +6,9 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
-#include <boost/asio/io_service.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/streambuf.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/write.hpp>
@@ -1186,13 +1187,13 @@ class TcpControlServer: public ControlServerBase {
         ControlImpl &control;
         TcpControlServer &server;
         std::list<std::shared_ptr<Client>>::iterator iter;
-        boost::asio::io_service &io_service;
+        boost::asio::io_context &io_service;
         tcp::socket socket;
         boost::asio::streambuf buff;
         ClientPipe pipe;
         std::thread thread;
         bool closing = false;
-        Client(ControlImpl &_control, TcpControlServer &_server, boost::asio::io_service &_io_service):
+        Client(ControlImpl &_control, TcpControlServer &_server, boost::asio::io_context &_io_service):
             control(_control), server(_server), io_service(_io_service), socket(_io_service),
             pipe([this]() {
                 postToClient();
@@ -1206,7 +1207,8 @@ class TcpControlServer: public ControlServerBase {
         }
         void postToClient() {
             auto self = shared_from_this();
-            io_service.post([self]() {
+            // Boost 1.87 removed io_context::post() (and the io_service alias).
+            boost::asio::post(io_service, [self]() {
                 self->sendToClient();
             });
         }
@@ -1265,7 +1267,7 @@ class TcpControlServer: public ControlServerBase {
     };
 
     ControlImpl &control_;
-    boost::asio::io_service io_service_;
+    boost::asio::io_context io_service_;
     tcp::acceptor acceptor_;
     // clients_ is mutated only from the io_service thread (net_thread_):
     // accept() inserts, Client::closeAndRemove() erases via the saved iterator.

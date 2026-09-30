@@ -85,7 +85,8 @@ CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 CPPSRC += mixer/transition_control.cpp mixer/backends/cuda/transition_control.cpp
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
-LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz
+# Boost.System is header-only since Boost 1.69; Fedora 44 (Boost 1.90) ships no libboost_system stub to link.
+LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz
 
 ifeq ($(HAVE_JACK),1)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/jack -maxdepth 1 -name '*.cpp')

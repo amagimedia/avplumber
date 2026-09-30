@@ -226,6 +226,33 @@ no media locations or endpoints.
 
 Start `demos/mixer/tui.py` separately and connect it to port 7777.
 
+### Fedora 44 image (candidate)
+
+`demos/mixer/Dockerfile.fedora44` builds the same image on Fedora 44 with CUDA
+13.2, GCC 16, Python 3.14 and Boost 1.90, in a builder stage plus a slim runtime
+stage that installs no CUDA packages (FFmpeg and avplumber load the driver
+directly). The Ubuntu 22.04 / CUDA 11.7 `Dockerfile` stays the compose default
+until a host A/B of the two images, same recipe and scene sequence, shows the
+mixer container's steady-state CPU (`docker stats`) within 5% of the current
+image; then only the `dockerfile:` line in `compose.yaml` changes. Until then
+the candidate runs in the unchanged stack by taking over the compose image tag:
+
+```sh
+docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44 .
+docker tag avplumber-mixer:fedora44 avplumber-mixer:local
+docker compose -f demos/mixer/compose.yaml up --no-build
+```
+
+Build arguments:
+
+| Argument | Default | Purpose |
+| --- | --- | --- |
+| `WITH_TENSORRT` | `0` | `1` builds the neural nodes (`NEURAL_NET=1 HAVE_TENSORRT=1`) and ships TensorRT in the runtime stage. |
+| `TENSORRT_ARCHIVE_URL` | none | `<url of your tensorrt-minimal tgz>`: a TensorRT 10 build for CUDA 13 with `bin/trtexec`, `include/` and the `libnvinfer*` and `libnvonnxparser` libraries. Required with `WITH_TENSORRT=1`; `.plan` engines are mounted at run time. |
+| `CUDA_VERSION` | `13.2` | Must not exceed the host driver's PTX support: FFmpeg's CUDA filters are PTX that the driver JIT-compiles, and R595 (CUDA 13.2) rejects PTX from newer toolkits. |
+| `CUDA_REPO_URL` | NVIDIA's fedora43 repository | NVIDIA's fedora44 repository starts at CUDA 13.3. |
+| `FFMPEG_TAG`, `BUILD_JOBS`, `AVPLUMBER_REVISION` | `n8.1`, `4`, `workspace` | As in `Dockerfile`. |
+
 ## Tests
 
 [Click-to-picture latency](../docs/latency.md) explains the browser measurement,
