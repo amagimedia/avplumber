@@ -210,7 +210,8 @@ def test_media_wipe_blends_onto_an_hdr_canvas(monkeypatch, wipe_color):
     assert nodes["mixer_wipe_fmt"]["graph"] == (Color().setparams + "," if wipe_color else "") + "format=rgba,hwupload"
     overlay = nodes["mixer_wipe_overlay"]
     assert overlay["sw_format"] == "p210le" and overlay["color"] == "hlg"
-    assert overlay["layers"][1]["blend"] is True and overlay["active_inputs"] == 3
+    # Cached wipes keep a resident chain, parked with no active input until a take arms it.
+    assert overlay["layers"][1]["blend"] is True and overlay["active_inputs"] == 0
     assert nodes["mixer_wipe_cache"]["src"] == "mixer_wipe_rt_out"
     with pytest.raises(ValueError, match="require SDR"):
         graph.MixerGraphBuilder(Avp(), canvas=(1920, 1080), fps=(60, 1), working_format="p210le",
