@@ -12,7 +12,6 @@ namespace yolo_base {
 
 namespace {
 std::mutex g_cuda_graph_capture_mutex;
-constexpr unsigned int kCudaStreamDefault = 0x0;
 constexpr unsigned int kCudaStreamNonBlocking = 0x1;
 }
 
@@ -109,6 +108,10 @@ void CudaInferTrtBase::cleanupModel(ModelRunner& model) {
         model.aux_streams.clear();
         CUDA_CHECK_CU(cuStreamDestroy(model.stream));
         model.stream = nullptr;
+    }
+    if (model.input_ready) {
+        CUDA_CHECK_CU(cuEventDestroy(model.input_ready));
+        model.input_ready = nullptr;
     }
     // Clean up decoder GPU resources
     if (model.seg_decoder) {
@@ -410,11 +413,13 @@ bool CudaInferTrtBase::configureRunnerPreprocess(ModelRunner& model) {
 }
 
 bool CudaInferTrtBase::configureRunnerStream(ModelRunner& model) {
-    unsigned int stream_flags = use_cuda_graph_ ? kCudaStreamNonBlocking : kCudaStreamDefault;
-    if (CUDA_CHECK_CU(cuStreamCreate(&model.stream, stream_flags))) {
+    // Graph capture is unrelated to stream isolation. A blocking inference
+    // stream implicitly fences FFmpeg's default-stream scale/draw operations.
+    if (CUDA_CHECK_CU(cuStreamCreate(&model.stream, kCudaStreamNonBlocking))) {
         logstream << "cuda_infer_yolo: failed to create CUDA stream for " << model.engine_path;
         return false;
     }
+    if (CUDA_CHECK_CU(cuEventCreate(&model.input_ready, CU_EVENT_DISABLE_TIMING))) return false;
     if (use_cuda_graph_) {
         int nb_aux_streams = model.trt_engine->getNbAuxStreams();
         model.aux_streams.reserve((size_t)std::max(nb_aux_streams, 0));
@@ -545,7 +550,18 @@ AVPixelFormat CudaInferTrtBase::hwSwFormat(const av::VideoFrame& frm) const {
     return ctx->sw_format;
 }
 
+bool CudaInferTrtBase::waitForFrameReady(const av::VideoFrame& frm, ModelRunner& model) {
+    // Upstream CUDA filters may publish after enqueueing on the frame device
+    // stream. Fence only those producer operations, without a CPU/global wait.
+    CUcontext frame_ctx = nullptr;
+    AVCUDADeviceContext* device = nullptr;
+    if (!frameCudaContext(frm, frame_ctx, &device) || frame_ctx != cu_ctx_) return false;
+    return CUDA_CHECK_CU(cuEventRecord(model.input_ready, device->stream)) == 0
+        && CUDA_CHECK_CU(cuStreamWaitEvent(model.stream, model.input_ready, 0)) == 0;
+}
+
 bool CudaInferTrtBase::runPreprocessNV12(const av::VideoFrame& frm, ModelRunner& model) {
+    if (!waitForFrameReady(frm, model)) return false;
     const CUdeviceptr dY = (CUdeviceptr)(uintptr_t)frm.raw()->data[0];
     const CUdeviceptr dUV = (CUdeviceptr)(uintptr_t)frm.raw()->data[1];
     const size_t pitchY = (size_t)frm.raw()->linesize[0];
