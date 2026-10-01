@@ -46,7 +46,6 @@
   #gpu, #host { border-left: 1px solid var(--edge); padding-left: 12px; }   /* sections: pipeline latency | GPU and wipes | host CPU */
   /* A load up to "99.9/128" and a thread name (comm, at most 15 chars) keep their room, so a new busiest thread never moves the row */
   #load b { min-width: 8ch; }
-  #thread .u { min-width: 15ch; }
   .meter { display: flex; align-items: center; gap: 6px; }
   .meter i { position: relative; width: 38px; height: 5px; border-radius: 3px; background: var(--edge); overflow: hidden; }
   .meter i::after { content: ""; position: absolute; inset: 0 auto 0 0; width: var(--v); background: var(--c, var(--ok)); border-radius: 3px; }
@@ -320,7 +319,7 @@
     <span class="group" id="host" role="group" aria-label="Host CPU" title="Host CPU from /proc (the whole host, not this container), refreshed every second" hidden>
       <span class="meter" id="load">LOAD <i></i><b></b></span>
       <span class="meter" id="cpu">CPU <i></i><b></b></span>
-      <span class="meter" id="thread" title="The mixer's busiest thread: its share of one core, the single-thread bottleneck">THREAD <i></i><b></b><span class="u"></span></span>
+      <span class="meter" id="thread">THREAD <i></i><b></b></span>
     </span>
   </span>
 </header>
@@ -809,7 +808,10 @@ function renderHost() {
   show($("load"), h.load1 / h.vcpus * 100, `${h.load1.toFixed(1)}/${h.vcpus}`);
   show($("cpu"), h.cpu_pct, Number.isFinite(h.cpu_pct) ? `${h.cpu_pct}%` : "—");
   $("thread").hidden = h.thread_pct == null;
-  if (h.thread_pct != null) { show($("thread"), h.thread_pct, `${h.thread_pct}%`); $("thread").lastElementChild.textContent = h.thread_name; }
+  if (h.thread_pct != null) {
+    show($("thread"), h.thread_pct, `${h.thread_pct}%`);
+    $("thread").title = `The mixer's busiest thread (${h.thread_name}): its share of one core, the single-thread bottleneck`;
+  }
 }
 
 /* ---------- styled dropdown ---------- */
