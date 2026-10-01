@@ -9,18 +9,17 @@ import pytest
 
 import prepare_demo
 from setup_runtime import (DEFAULT_SETTINGS, HEALTHY_RUN_SEC, RECOVER_TIMEOUT_SEC, RETRY_DELAYS_SEC, STOP_TIMEOUT_SEC,
-                           SetupRuntime, browser_limit, nvdec_limit, raw_upload_units, recipe_for, source_counts)
+                           SetupRuntime, browser_limit, nvdec_limit, raw_upload_units, recipe_for, source_counts,
+                           source_limit)
 from webui import serve
 
 
 @pytest.mark.parametrize('count', [1, 8, 16, 32, 41, 42, 48, 50, 64, 83, 96, 100, 110])
 @pytest.mark.parametrize('fps', [25, 30, 50, 60])
 def test_generic_setups_expand(tmp_path, count, fps):
-    maximum = {25: 110, 30: 110, 50: 68, 60: 68}[fps]
-    if count > maximum:
-        with pytest.raises(ValueError, match=f"source_count must be an integer from 1 to {maximum}"):
-            recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
-        return
+    # DEFAULT_SETTINGS is a 10-bit 4:2:2 canvas: above its capacity the setup scales the show down.
+    maximum = source_limit(fps, DEFAULT_SETTINGS["bit_depth"], DEFAULT_SETTINGS["chroma"])
+    count = min(count, maximum)
     if count > nvdec_limit(fps) + browser_limit(fps) + 4:
         with pytest.raises(ValueError, match="enable another source type"):
             recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
@@ -32,7 +31,7 @@ def test_generic_setups_expand(tmp_path, count, fps):
     assert show['canvas']['fps'] == fps
 
 
-@pytest.mark.parametrize('changes', [{'source_count': 97}, {'scene_count': 0}, {'scene_count': 193}, {'fps': 24},
+@pytest.mark.parametrize('changes', [{'source_count': 0}, {'scene_count': 0}, {'scene_count': 193}, {'fps': 24},
     {'weights': [0] * 5}, {'weights': [True] * 5}, {'resolution': '../../file'}, {'command': 'id'}])
 def test_reject_unbounded_settings(changes):
     with pytest.raises(ValueError):
@@ -231,14 +230,15 @@ def test_bitrate_outside_the_range_is_rejected(value):
 @pytest.mark.parametrize("bit_depth", [8, 10])
 @pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 110), (50, 68), (60, 68)])
 def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
-    settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "fps": fps,
-                "chroma": "420" if bit_depth == 8 else "422",
+    chroma = "420" if bit_depth == 8 else "422"
+    maximum = source_limit(fps, bit_depth, chroma)   # the SDR rate limit, scaled for a 10-bit canvas
+    settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "fps": fps, "chroma": chroma,
                 "source_count": maximum, "scene_count": 192,
                 "weights": [1, 0, 0, 0 if bit_depth == 8 else 1, 1, 1, 0]}
     feasible = min(maximum, nvdec_limit(fps) + browser_limit(fps) + raw_upload_units(fps))
     assert recipe_for({**settings, "source_count": feasible})["source_count"] == feasible
-    with pytest.raises(ValueError, match="source_count"):
-        recipe_for({**settings, "source_count": maximum + 1})
+    if feasible == maximum:   # above the limit the show is scaled down to it, not refused
+        assert recipe_for({**settings, "source_count": maximum + 1})["source_count"] == maximum
     with pytest.raises(ValueError, match="scene_count"):
         recipe_for({**settings, "scene_count": 193})
 
@@ -321,7 +321,7 @@ def test_reject_incompatible_chroma(changes, message):
         recipe_for({**DEFAULT_SETTINGS, **changes})
 
 
-@pytest.mark.parametrize("total", [8, 16, 24, 32, 42, 64])
+@pytest.mark.parametrize("total", [8, 16, 24, 32, 42, 60])
 @pytest.mark.parametrize("weights", [[8, 4, 2, 0, 2], [1, 1, 100, 0, 1]])
 def test_hdr_422_cap_preserves_total_and_disabled_types(tmp_path, total, weights):
     recipe = recipe_for({**DEFAULT_SETTINGS, "fps": 25, "source_count": total, "weights": weights})
@@ -345,12 +345,14 @@ def test_four_hdr_422_inputs_can_be_used_alone():
 ])
 def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expected):
     assert source_counts(64, weights) == expected
+    # A 10-bit 4:2:2 canvas at 25 fps carries fewer than 64: the show is scaled down first.
     recipe = recipe_for({**DEFAULT_SETTINGS, 'source_count': 64, 'fps': 25, 'weights': weights})
-    assert [source['weight'] for source in recipe['inputs']] == expected + [0, 0]
+    capacity = source_limit(25, DEFAULT_SETTINGS['bit_depth'], DEFAULT_SETTINGS['chroma'])
+    assert [source['weight'] for source in recipe['inputs']] == source_counts(capacity, weights) + [0, 0]
 
 
 def test_browser_only_limit():
-    settings = {**DEFAULT_SETTINGS, 'fps': 50, 'source_count': 40, 'weights': [0, 0, 0, 0, 1]}
+    settings = {**DEFAULT_SETTINGS, 'fps': 50, 'bit_depth': 8, 'chroma': '420', 'source_count': 40, 'weights': [0, 0, 0, 0, 1]}
     assert next(s for s in recipe_for(settings)['inputs'] if s['kind'] == 'browser')['weight'] == 40
     with pytest.raises(ValueError, match='Browser is limited to 40'):
         recipe_for({**settings, 'source_count': 41})
@@ -458,7 +460,7 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
 
 @pytest.mark.parametrize("limit,tiles", [(256, 2), (512, 6)])
 def test_setup_clears_aux_tiles_that_exceed_new_draw_budget(runtime, limit, tiles):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": 30, "source_count": 64,
+    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": 30, "source_count": 64, "bit_depth": 8, "chroma": "420",
                          "weights": [1, 0, 0, 0, 1], "layout": "grids"})
     show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
     grid = next(s["id"] for s in show["scenes"] if s["id"].startswith("grid_64_"))
@@ -891,11 +893,11 @@ def test_dsk_pages_are_browser_sources_with_clean_copies_of_each_output(tmp_path
 
 
 def test_dsk_pages_take_their_share_of_the_source_budget():
-    limit = 68   # 60 fps; SDR 4:2:2 v210 (no budget of its own) fills what the capped types leave
+    # 60 fps, 10-bit 4:2:2; SDR 4:2:2 v210 (no budget of its own) fills what the capped types leave
+    limit = source_limit(60, DEFAULT_SETTINGS["bit_depth"], DEFAULT_SETTINGS["chroma"])
     keys = {"dsk": ["lower_third", "bug_left", "bug_right"], "weights": [8, 4, 2, 8, 2, 0, 0]}
-    recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 3, **keys})
-    with pytest.raises(ValueError, match="source_count"):
-        recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 2, **keys})
+    assert recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 3, **keys})["source_count"] == limit - 3
+    assert recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 2, **keys})["source_count"] == limit - 3
     assert source_counts(45, [1, 0, 0, 0, 10], 25, reserved_browsers=3)[4] == 37   # 40 browsers at 25 fps minus 3 keys
 
 
@@ -904,3 +906,17 @@ def test_dsk_pages_take_their_share_of_the_source_budget():
 def test_dsk_settings_are_bounded(changes):
     with pytest.raises(ValueError):
         recipe_for({**DEFAULT_SETTINGS, **changes})
+
+
+@pytest.mark.parametrize('fps, mode, expected', [
+    (30, (8, "420"), 110), (30, (10, "420"), 82), (30, (10, "422"), 60),
+    (60, (8, "420"), 68), (60, (10, "420"), 51), (60, (10, "422"), 37)])
+def test_a_show_above_the_modes_capacity_is_scaled_down(tmp_path, fps, mode, expected):
+    """Switching 110 SDR inputs at 30 fps to a 10-bit canvas keeps the show within that canvas's capacity."""
+    bit_depth, chroma = mode
+    weights = [36, 0, 0, 0, 36, 34, 0] if bit_depth == 8 else [18, 18, 0, 0, 36, 17, 17]
+    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": fps, "bit_depth": bit_depth, "chroma": chroma,
+                         "source_count": 110, "weights": weights})
+    assert source_limit(fps, bit_depth, chroma) == expected
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    assert len(show["sources"]) == expected

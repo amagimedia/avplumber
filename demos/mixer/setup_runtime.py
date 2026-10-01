@@ -59,8 +59,16 @@ def raw_upload_units(fps):
     return {25: 30, 30: 34}.get(fps, 17)
 
 
-def source_limit(fps):
-    return 110 if fps <= 30 else 68
+# Share of the per-rate total a 10-bit canvas carries. A P010 canvas moves 2x and a P210 canvas
+# 2.7x the bytes of NV12 per composited pixel and every SDR source is converted to HLG, so GPU
+# memory traffic and VRAM bind, not PCIe (P010 sources already cost two upload units).
+# Provisional estimates until measured on the T4; the setup page carries the same table.
+MODE_CAPACITY = {(8, "420"): 1.0, (10, "420"): 0.75, (10, "422"): 0.55}
+
+
+def source_limit(fps, bit_depth=8, chroma="420"):
+    # An unsupported pair (8-bit 4:2:2) is refused by the mode checks in recipe_for.
+    return int((110 if fps <= 30 else 68) * MODE_CAPACITY.get((bit_depth, chroma), 1.0))
 
 
 def _write_atomic(path, text):
@@ -120,8 +128,12 @@ def recipe_for(settings):
         raise ValueError(f"dsk must list distinct pages from {', '.join(DSK_PAGES)}")
     if not isinstance(settings["clean_feed"], bool) or settings["clean_feed"] and not dsk:
         raise ValueError("clean_feed must be a boolean and needs at least one dsk page")
-    # Key pages are sources too: they take their share of the same budget.
-    limit = source_limit(settings["fps"]) - len(dsk)
+    # Key pages are sources too: they take their share of the same budget. A show above the
+    # limit of its rate and canvas is scaled down to it, not refused: switching 110 SDR inputs
+    # at 30 fps to a 10-bit canvas keeps the mix at the capacity of the new mode.
+    limit = source_limit(settings["fps"], settings["bit_depth"], settings["chroma"]) - len(dsk)
+    if type(settings["source_count"]) is int and settings["source_count"] > limit >= 1:
+        settings = {**settings, "source_count": limit}
     for key, maximum in (("source_count", limit), ("scene_count", 192), ("browser_ring_size", 64)):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:

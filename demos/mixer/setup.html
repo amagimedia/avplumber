@@ -151,7 +151,10 @@ function sourceMaximum(index){
 }
 let sourceValues=sourceCounts(Number($('sources').value),presets.balanced), currentSettings=null, busy=false, online=false, loaded=false, previousDepth=10;
 let resizeValues=null, submitting=false, submission=0;
-const sourceLimit = () => (Number($('fps').value)<=30?110:68)-dskPages().length;
+// Share of the per-rate total each canvas carries (setup_runtime.py MODE_CAPACITY; provisional).
+const MODE_CAPACITY={'8:420':1,'10:420':0.75,'10:422':0.55};
+const sourceLimit = () => Math.floor((Number($('fps').value)<=30?110:68)*MODE_CAPACITY[$('mode').value])-dskPages().length;
+let scaledFrom=0;   // the total before the last automatic scale-down, shown until the next edit
 function outputMode(){
  const [depth,chroma]=$('mode').value.split(':');return {bit_depth:Number(depth),chroma};
 }
@@ -207,8 +210,10 @@ function update(){
  try{
  const fps=Number($('fps').value),limit=sourceLimit();
  $('sources').max=limit;
- if(Number($('sources').value)>limit)$('sources').value=limit;
- $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps.${fps===25?' Above 100 is experimental.':''}`;
+ if(Number($('sources').value)>limit){scaledFrom=Number($('sources').value);$('sources').value=limit;}
+ const tenBit=outputMode().bit_depth===10;
+ $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps${tenBit?` on a 10-bit ${outputMode().chroma==='422'?'4:2:2':'4:2:0'} canvas (estimated)`:''}.`+
+   (scaledFrom?` Scaled down from ${scaledFrom} to fit this mode.`:'');
  if(Number($('scenes').value)>192)$('scenes').value=192;
  const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,192),bitrate=integer('bitrate',500,40000);
  if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
@@ -293,7 +298,9 @@ function syncCounts(){
  }else if(outputMode().chroma==='420'){
   sourceValues[0]+=sourceValues[3];sourceValues[1]+=sourceValues[2];sourceValues[2]=sourceValues[3]=0;
  }
- const total=sourceValues.some(n=>n>0)?Math.min(sourceLimit(),Math.max(1,Number($('sources').value)||1)):0;
+ const wanted=Math.max(1,Number($('sources').value)||1);
+ const total=sourceValues.some(n=>n>0)?Math.min(sourceLimit(),wanted):0;
+ scaledFrom=total&&total<wanted?wanted:0;
  $('sources').value=total;
  resizeValues=null;
 }
@@ -357,6 +364,7 @@ $('mode').addEventListener('input',()=>{
 });
 document.querySelectorAll('.fields input,.fields select,#clean-feed').forEach(input=>{
  if(input.id!=='mode')input.addEventListener('input',update);
+ if(input.id==='sources')input.addEventListener('input',()=>{scaledFrom=0;},{capture:true});
 });
 $('fps').addEventListener('input',()=>{
  $('browser-ring-size').value=Number($('fps').value)<=30?6:9;update();
