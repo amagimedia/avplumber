@@ -116,7 +116,7 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms,
     if (!state_->scenes.count(scene_name))
         throw Error("mixer: unknown scene: " + scene_name);
     int64_t cut_ms = resolveTransitionStartPts(start_pts_ms);
-    interruptTransition();
+    interruptTransition(Interruption::Replaced);
     state_->transition_mode = MixerState::TransitionMode::Cut;
     uint64_t transition_generation = ++state_->transition_generation;
     state_->transition_scene_name = scene_name;

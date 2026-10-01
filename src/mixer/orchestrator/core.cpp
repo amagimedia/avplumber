@@ -203,7 +203,7 @@ void MixerOrchestrator::ensureIdle() const {
         throw Error("mixer: transition already in progress");
 }
 
-void MixerOrchestrator::interruptTransition() {
+void MixerOrchestrator::interruptTransition(Interruption why) {
     if (state_->cut_latency) state_->cut_latency->timing.cancel();
     if (state_->transition_mode == MixerState::TransitionMode::Idle) return;
     const auto previous_mode = state_->transition_mode.load();
@@ -232,7 +232,7 @@ void MixerOrchestrator::interruptTransition() {
     }
     // The program slot's routing was restored above: the other slot is cold now.
     state_->pvw_slot_scene.clear();
-    state_->clearTakePreview();
+    if (why == Interruption::Replaced) state_->forgetTake(); else state_->clearTakePreview();
     state_->transition_mode = MixerState::TransitionMode::Idle;
     {
         const auto release_pts = releaseAfterSelectorOutput();

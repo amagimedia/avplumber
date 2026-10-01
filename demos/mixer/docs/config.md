@@ -461,7 +461,8 @@ their own, not the mixer's), at a random phase between the emission of the
 last old and the first new program frame, so when the multiview frame's
 deadline equals the program frame's the follower has what is left of one main
 frame (0 to 16.7 ms at 60 fps) minus the main compositor's render time, its
-own wake and the compositor's status read and layout set; a change that misses
+own wake and the layout set (it reads the compositor's status, which waits on
+the mixer's lock, only between takes); a change that misses
 it lands one aux frame late (`last_target_error_ticks` 1, `pvw_minus_pgm_ms`
 33.3 at 30 aux fps). The host's `cut_spam.py` `late` count is the measure of
 that; no fraction is claimed here. A fade's swap is published from a frame

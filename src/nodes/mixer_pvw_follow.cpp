@@ -31,10 +31,15 @@
 // in applied_inputs_ without being active, so the next timed apply adds it and is staged too.
 //
 // The compositor is resolved once, at creation: a lookup by name takes NodeManager's lock, which
-// shutdown holds while it joins this thread. Once running, this thread takes only the feed's
-// lock (MixerState::preview_mutex), never the mixer's `mutex`: the orchestrator holds that
-// while it takes NodeManager's lock, and while it routes a take, which is when a timed change
-// has to reach the compositor.
+// shutdown holds while it joins this thread. A change travels from the feed's lock
+// (MixerState::preview_mutex) to the compositor's `composition` without waiting on the mixer's
+// `mutex`: the orchestrator holds that while it routes a take, which is when a timed change
+// has to reach the compositor, and the compositor's `status` is read under it (the compositor
+// reports the mixer's `pvw_scene`). So the status (`suspended`, see `suspended_`) is read only
+// on a wake with nothing to apply while no take is in flight (`transition_mode`, lock-free).
+// Such a read can still meet a take that started after the check and wait for its routing,
+// which takes NodeManager's lock under `mutex`: during shutdown that is a lock-order risk this
+// node narrows to that window and cannot remove while the aux compositor holds the mixer.
 class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, public IReturnsObjects {
     struct Layout {
         Parameters layers = Parameters::array();
@@ -65,6 +70,12 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     std::optional<Change> pending_;
     Change applied_;
     avp::mixer::SourceMask applied_inputs_;   // the active inputs the compositor last accepted
+    // The compositor's `suspended` as this node last set or read it. Every composition sets it
+    // (`enabled`, unset resumes), so after an apply it is what was sent; only the compositor's
+    // own suspension (encoder backpressure) diverges it, until the next read between takes.
+    // A bus that suspended since then gets one resuming composition (as the 50 ms status
+    // poller before this node could send) and suspends again after three blocked ticks; so
+    // does one suspended before this node started, as the first composition sent resumes it.
     bool suspended_ = false;
     std::optional<int64_t> settle_at_;   // when to add the program scene's inputs, for the swap
     bool dirty_retry_ = false;           // a base apply failed: again at the next wake
@@ -109,10 +120,13 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
         if (enabled) composition["enabled"] = *enabled;
         compositor()->setObject("composition", composition);
         applied_inputs_ = inputs;
+        suspended_ = enabled ? !*enabled : false;
     }
 
-    /// Blocks on the compositor's start/stop lock (bounded) and throws while it is not created:
-    /// a failed read must not pass for "not suspended", which would resume the bus.
+    /// Waits on the compositor's start/stop lock (bounded) and on the mixer's `mutex` (the
+    /// compositor reports `pvw_scene` from it), so it is called between takes only, and throws
+    /// while the compositor is not created: a failed read must not pass for "not suspended",
+    /// which would resume the bus.
     bool compositorSuspended() {
         return compositor()->getObject("status").value("suspended", false);
     }
@@ -164,6 +178,9 @@ public:
     // time or one aux tick, whichever comes first. The processing lock is held throughout, so
     // every wait is bounded. A change whose apply time has passed is only still pending after a
     // failed apply; it is retried at the tick, never at once, so a dead compositor cannot spin.
+    // A wake that applies nothing and has no change waiting refreshes `suspended_` instead,
+    // unless a take is in flight: a timed change is published while its take holds the mixer's
+    // `mutex` for the routing, and reading the status then would wait for it (see the header).
     void process() override {
         int64_t now = avp::mixer::monotonicNs();
         int64_t wake_by = now + timing_.aux.time(1);
@@ -189,7 +206,6 @@ public:
             if (fresh) {
                 fresh->target = fresh->effective_ns ? timing_.targetTick(fresh->effective_ns) : 0;
                 pending_ = fresh;   // the latest change wins over one still waiting for its tick
-                suspended_ = compositorSuspended();   // once per change, never at the deadline
             }
             now = avp::mixer::monotonicNs();
             if (pending_ && (!pending_->target || now >= timing_.applyAt(pending_->target))) {
@@ -212,6 +228,8 @@ public:
             } else if (settle_at_ && now >= *settle_at_) {
                 apply(applied_, true, !suspended_);
                 settle_at_.reset();
+            } else if (!pending_ && state_->transition_mode == avp::mixer::MixerState::TransitionMode::Idle) {
+                suspended_ = compositorSuspended();
             }
             report(warning_);
         } catch (const std::exception& e) {

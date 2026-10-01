@@ -40,7 +40,10 @@ Commits on `pvw-latency`: `452f22c`, `4cb2392`, `e9f4491` and `e1d9d9b`.
   - A cut or fade publishes right after the selector switch, before the per-source routing
     (`applyPostTransitionRouting`'s switched hook, `publishTakePreview`).
   - A wipe publishes in `completeTransition`.
-  - Interrupt and abort clear it (`clearTakePreview`).
+  - `mixer.interrupt` and abort clear it (`clearTakePreview`). A take that replaces a pending one
+    only forgets that take (`forgetTake`, on `pvw-merge`): the preview shown stays until the new
+    take's switch, so the PVW tile does not blank between takes under cut spam. `pvw-latency`
+    cleared it there too, which blanked the tile for one ready-wait on every replaced take.
   - One helper replaces the three copies of the state flip in cut, fade and wipe.
 - **Absorber.** The new mixer-owned node `src/nodes/mixer_pvw_follow.cpp` runs one per `pgm_pvw_grid`
   bus.
@@ -48,8 +51,14 @@ Commits on `pvw-latency`: `452f22c`, `4cb2392`, `e9f4491` and `e1d9d9b`.
     because node `process()` must return regularly.
   - It holds the per-scene PVW-tile layouts that Python publishes once and again on tile reassignment.
   - It applies them through the aux compositor's existing `setObject("composition")`.
-  - `src/mixer/primitives/PreviewFollow.hpp` holds the tick math. The follower never takes the mixer's
-    `mutex`.
+  - `src/mixer/primitives/PreviewFollow.hpp` holds the tick math. The follower carries a change to
+    the compositor without waiting on the mixer's `mutex`. It reads the compositor's status
+    (`suspended`; the aux compositor reports the mixer's `pvw_scene`, so `cuda_rect_overlay`
+    takes the mixer's `mutex` for it) only on a wake with nothing to apply and no take in flight.
+    On `pvw-latency` it read the status on every change, which waited for the take's routing
+    (held under `mutex`), so a cut whose routing outlasted what was left of the margin (16.7 ms
+    for an even K at 60 -> 30, 33.3 for an odd one) landed its PVW tile one aux tick late; fixed
+    on `pvw-merge`.
 - **OBS-style swap.** After a take, the preview becomes the scene that left program, matching OBS
   Studio's default "Swap Preview/Program Scenes After Transitioning". `pvw_slot_scene` (the slot is
   warm) is separate from `pvw_scene_name` (what the operator sees), so a cut back to a cold preview
@@ -123,7 +132,11 @@ swaps unconditionally and `PreviewChange` carries no `swap` flag, so nothing is 
    driver R615 or newer). Run `tests/test_mixer_preview_follow.py` and
    `tests/test_mixer_preview_swap.py` in the builder, then deploy by recreating the mixer container.
    Announce the restart.
-4. **Measure** on the 68-input 60 fps show with a `pgm_pvw_grid` bus.
+4. **Measure** on the 68-input 60 fps show with a `pgm_pvw_grid` bus, from `pvw-merge` at or after
+   the follower fix above (on `pvw-latency` a cut's PVW tile lands one aux tick late whenever the
+   routing outlasts the margin, so its `pvw` line and A/B would measure a broken alignment). The
+   gate on the new bus defaults (`latency_ms`,
+   `pvw_align`, `pgm_delay_frames`) is this run; nothing below has been done yet.
    - Run `cut_spam.py`: check the `pvw` line (PVW - PGM p50, p95 and max, and `late` for cuts only)
      and the bus's `playout.repeats` and `missed_deadlines` in `mixer.aux_status`.
    - Repeat with the bus at `"latency_ms": 66.7`, and once with `"full_rate": true`.

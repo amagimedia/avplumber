@@ -381,7 +381,7 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
 
     if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid wipe duration");
     int64_t start_ms = resolveTransitionStartPts(start_pts_ms);
-    interruptTransition();
+    interruptTransition(Interruption::Replaced);
     state_->transition_mode = MixerState::TransitionMode::Wipe;
     uint64_t transition_generation = ++state_->transition_generation;
     state_->transition_scene_name = scene_name;

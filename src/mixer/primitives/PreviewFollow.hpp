@@ -31,8 +31,9 @@
 // right after switching the selector, before the take's routing (MixerState::preview_mutex
 // lets the follower wake meanwhile), at a random phase between the emission of frame K-1 and
 // of frame K, so the follower has what is left of one main tick (0 to 16.7 ms at 60 fps)
-// minus the main compositor's render time, its own wake and the compositor's status read and
-// composition set; a set past the deadline lands on the next tick (+1). A fade's change is
+// minus the main compositor's render time, its own wake and the composition set (never a read
+// of the compositor's status, which waits on the mixer's mutex that the take still holds); a
+// set past the deadline lands on the next tick (+1). A fade's change is
 // published from a frame already presented, so such a tick has passed by construction
 // (`target_unreachable` in the follower's status) and the change lands on the next. The
 // timed composition only drops inputs (the previewed scene's are active; the program scene's

@@ -125,10 +125,12 @@ are the crossfade's; an interrupted dip keeps the picture it had reached,
 which at the midpoint is the solid colour.
 
 After a completed take the preview is the scene that left program (OBS's
-"Swap Preview/Program Scenes After Transitioning", always on; an interrupted
-or failed take clears the preview instead). The swapped preview is only
-shown: the slot it came from has its
-sources routed away, so `mixer.status` distinguishes `pvw_scene`, what the
+"Swap Preview/Program Scenes After Transitioning", always on; a failed take,
+or one dropped by `mixer.interrupt`, clears the preview instead, while a take
+that replaces a pending one leaves the preview as it is until its own switch,
+so a multiview's PVW tile does not blank between takes). The swapped preview
+is only shown: the slot it came from has its sources routed away, so
+`mixer.status` distinguishes `pvw_scene`, what the
 operator and the AUX multiview see, from `pvw_slot_scene`, what is loaded in
 the PVW slot (`""` while cold). A cut reuses the slot only for `pvw_slot_scene`;
 any other scene, a swapped preview or `mixer.init`'s `initial_pvw_scene`
@@ -136,8 +138,10 @@ any other scene, a swapped preview or `mixer.init`'s `initial_pvw_scene`
 Every preview change is one `MixerState::PreviewChange` (revision, the pts of
 the first program frame of the new program, the take command's receipt and
 kind), under the feed's own `preview_mutex`, which wakes the
-`preview_followers` (`mixer_pvw_follow` nodes; they never take the mixer's
-`mutex`). A cut or fade publishes it right after the selector switch, before
+`preview_followers` (`mixer_pvw_follow` nodes; a change reaches the bus
+compositor without waiting on the mixer's `mutex`: the follower reads the
+compositor's status, which that mutex guards, only between takes). A cut or
+fade publishes it right after the selector switch, before
 its routing, so a multiview's PVW tile changes on the multiview frame that
 leaves its bus when that program frame leaves the mixer (or, per bus, on the
 frame whose PGM tile shows the take); `mixer.status` still reports the swap

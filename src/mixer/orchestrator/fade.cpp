@@ -70,7 +70,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     const auto start = resolveTransitionStartPts(start_pts_ms);
     DipCodes dip;
     if (dip_rgb) dip = canvasCodes(*dip_rgb, state_->canvas_transfer);
-    interruptTransition();
+    interruptTransition(Interruption::Replaced);
     state_->transition_mode = MixerState::TransitionMode::Crossfade;
     const auto generation = ++state_->transition_generation;
     state_->transition_scene_name = scene_name;

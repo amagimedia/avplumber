@@ -76,6 +76,15 @@ int main() {
     assert(state.pvw_scene_name.empty() && state.preview.revision == revision + 5 && state.preview.kind.empty());
     assert(state.take_received_ns == 0 && !state.take_preview_published);
 
+    // A take replaced by another forgets the same but keeps the preview shown, publishing
+    // nothing: the replacing take's switch publishes the next change.
+    state.publishPreview("a", 0);
+    state.take_received_ns = 9;
+    state.take_preview_published = true;
+    state.forgetTake();
+    assert(state.pvw_scene_name == "a" && state.preview.revision == revision + 6 && state.preview.pvw == "a");
+    assert(state.take_received_ns == 0 && !state.take_preview_published);
+
     // A follower's sample is the mixer's to report (mixer.status pvw_latency), under the feed's lock.
     {
         std::lock_guard<std::mutex> lock(state.preview_mutex);

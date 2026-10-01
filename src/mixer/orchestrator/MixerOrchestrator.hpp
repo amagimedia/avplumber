@@ -77,7 +77,13 @@ class MixerOrchestrator {
                                        const std::function<void(int64_t emitted)>& switched = {});
 
     void ensureIdle() const;
-    void interruptTransition();
+    /// Why a transition being prepared or running is dropped. `Replaced`: by the take that
+    /// drops it, whose own switch publishes the next preview change, so the preview shown stays
+    /// as it is meanwhile (a multiview's PVW tile does not blank between takes under cut spam).
+    /// `Dropped`: with nothing to follow (`mixer.interrupt`), which clears the preview, as a
+    /// failed take does (abortTransition).
+    enum class Interruption { Dropped, Replaced };
+    void interruptTransition(Interruption why);
     std::shared_ptr<OutputSnapshot> outputSnapshot() const;
     /// Stops the slot substitution and releases a held output at the next selected frame.
     /// Returns that frame's pts (ns): one main tick after `emitted`, the selector's newest
@@ -168,7 +174,7 @@ class MixerOrchestrator {
 
 public:
     /// Drop an armed or running transition and keep the current program picture (`mixer.interrupt`).
-    void interrupt() { interruptTransition(); }
+    void interrupt() { interruptTransition(Interruption::Dropped); }
     MixerOrchestrator(std::shared_ptr<NodeManager> nodes,
                       std::shared_ptr<MixerState> state,
                       std::shared_ptr<SharedTimeline> timeline,

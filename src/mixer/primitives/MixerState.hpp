@@ -152,10 +152,18 @@ struct MixerState : public InstanceShared<MixerState> {
         transition_mode = TransitionMode::Idle;
     }
 
-    /// Caller holds `mutex`. A dropped or failed take: its preview is cleared, at once.
-    void clearTakePreview() {
+    /// Caller holds `mutex`. The take being prepared or running is dropped: its receipt and
+    /// its publish are forgotten, the preview shown stays. For a take replaced by another,
+    /// whose switch publishes the next change (a PVW tile does not blank between takes).
+    void forgetTake() {
         take_received_ns = 0;
         take_preview_published = false;
+    }
+
+    /// Caller holds `mutex`. A failed take, or one dropped with nothing to follow it: its
+    /// preview is cleared, at once.
+    void clearTakePreview() {
+        forgetTake();
         publishPreview("", 0);
     }
 
