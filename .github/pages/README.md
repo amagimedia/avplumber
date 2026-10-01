@@ -12,3 +12,5 @@ To replace a recording, upload the media to a new release, update the URLs in
 the demo README and HTML page, and update its SHA-256 manifest. Copy the HTML
 page and manifest to the same location on `gh-pages`, preserving the other demo
 files, then push both branches. Never add the media files to either branch.
+The mixer cookbook pages link a shared stylesheet: copy
+`demos/mixer/docs/cookbook/cookbook.css` together with them.

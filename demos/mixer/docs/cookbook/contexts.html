@@ -5,60 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Why the mixer drops the OpenGL context each browser importer never drew with, and the process-wide CUDA context nothing used.">
   <title>Unused GPU contexts · Mixer optimization cookbook</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      font-family: system-ui, sans-serif;
-      color: #edf4ff;
-      background: #080d17;
-      --panel: #101827;
-      --line: #26354a;
-      --muted: #a4b4ca;
-      --body: #b5c4d8;
-      --accent: #57dbc2;
-      --red: #e5484d;
-      --green: #30a46c;
-      --amber: #f5a524;
-      --blue: #6e8bf5;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #080d17; }
-    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
-    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
-    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
-    .site a { font-weight: 600; text-decoration: none; }
-    .site a:hover { text-decoration: underline; }
-    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
-    h2 { font-size: 19px; margin: 34px 0 12px; }
-    p, li { color: var(--body); line-height: 1.6; }
-    p { max-width: 78ch; }
-    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
-    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
-    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
-            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
-    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
-    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
-    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
-    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
-    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
-    figure { margin: 22px 0 0; }
-    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
-    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
-    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
-    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
-    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
-    .cards > li.flag { border-left: 3px solid var(--amber); }
-    .cards p { margin: 0; }
-    .cards p + p { margin-top: 8px; }
-    .cards ul { margin: 4px 0 0; padding-left: 18px; }
-    .cards ul li { margin: 2px 0; }
-    .where { padding-left: 20px; }
-    .where li { margin: 6px 0; }
-    .note { font-size: 14px; color: var(--muted); }
-    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
-    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
-  </style>
+  <link rel="stylesheet" href="cookbook.css">
 </head>
 <body>
 <main>
@@ -69,7 +16,7 @@
   <span class="pill live">Status: Live</span>
 
   <h2>1. The GL context in each browser importer</h2>
-  <p>Each browser page has its own <code>drm_prime_to_cuda</code> node. The setup allows up to 40 browser pages at 25 and 30 fps (five browser workers of eight windows) and 32 at 50 and 60 fps; the memory figures on this page were estimated for 32. Importing a page frame needs only an EGL display: <code>eglCreateImage</code> already takes <code>EGL_NO_CONTEXT</code>, and CUDA registers the EGL image directly. The node still created an OpenGL context and a 2×2 pbuffer, and made it current before every import. Nothing drew with it. Both importers, <code>drm_prime_to_cuda</code> and <code>drm_prime_to_egl_image</code>, now share one display-only setup, <code>EglDmabufDisplay</code>.</p>
+  <p>Each browser page has its own <code>drm_prime_to_cuda</code> node. The setup allows up to 40 browser pages at every frame rate (five browser workers of eight windows); the memory figures on this page were estimated for 32. Importing a page frame needs only an EGL display: <code>eglCreateImage</code> already takes <code>EGL_NO_CONTEXT</code>, and CUDA registers the EGL image directly. The node still created an OpenGL context and a 2×2 pbuffer, and made it current before every import. Nothing drew with it. Both importers, <code>drm_prime_to_cuda</code> and <code>drm_prime_to_egl_image</code>, now share one display-only setup, <code>EglDmabufDisplay</code>.</p>
 
   <figure>
     <div class="diagram">
@@ -220,8 +167,8 @@
     <li><b>Latency</b>0 frames on program and on command-to-screen: neither context sat on the frame path. Each new DMA-BUF import (a cache miss, not every frame) skips one <code>eglMakeCurrent</code> call on the CPU; not measured.</li>
     <li><b>Side effects</b>Less VRAM held per process, so more headroom for browser pages and compositors. No thread has a CUDA context current at start any more: code that called CUDA without binding its hwaccel context would now fail instead of running on the hidden global one. The start-up error log reads "failed to find a CUDA device".</li>
     <li><b>Cost</b>0 nodes, 0 queues, 0 threads. Net −84 lines (13 added, 97 removed). Frees an estimated ~150 MB (100–250 MB, unmeasured) across 32 importers, about 190 MB for 40 if it scales in proportion (also an estimate), plus 60–100 MB (estimate) for the global context. One fewer <code>eglMakeCurrent</code> per import on the CPU; GPU work unchanged.</li>
-    <li class="flag"><b>Risk</b>Both files are shared avplumber code that other apps use. The change stays only if a compatibility audit shows no behaviour change: the other apps' tests pass and every browser page still imports. Two checks belong in that audit: nothing relied on the global context being current on the loading thread, and no GL call remains in the importer (none does today, including the <code>zero_copy</code> path).</li>
-    <li><b>Switch it off</b>There is no runtime flag; the code is deleted. Reverting means restoring the removed lines and rebuilding. If the audit finds a behaviour change, the removals get gated behind an option or dropped.</li>
+    <li class="flag"><b>Risk</b>Both files are shared avplumber code that other apps use. The code audit of those apps (below) found nothing that relied on the global context being current on the loading thread, and no GL call remains in the importer, including the <code>zero_copy</code> path. A smoke run of those apps after they bump avplumber is still pending.</li>
+    <li><b>Switch it off</b>There is no runtime flag; the code is deleted. Reverting means restoring the removed lines and rebuilding. If that smoke run finds a behaviour change, the removals get gated behind an option or dropped.</li>
   </ul>
 
   <h2>Where in the code</h2>
@@ -233,7 +180,7 @@
     <li>The other importer: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/drm_prime_to_egl_image.cpp#L100-L114">src/nodes/hwaccel/drm_prime_to_egl_image.cpp#L100-L114</a> and <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/drm_prime_to_egl_image.cpp#L158">L158</a>, the same display-only import.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/cuda.cpp#L20-L31">src/cuda.cpp#L20-L31</a>: no context and no device handle at start, only <code>cuDeviceGetCount</code> and <code>has_errors</code>; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/cuda.hpp#L3-L6">src/cuda.hpp#L3-L6</a>: <code>CUDAState</code> holds only <code>has_errors</code>.</li>
     <li>Flag readers: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/v210_to_cuda.cpp#L109">v210_to_cuda.cpp#L109</a>, <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_to_egl_image.cpp#L373">cuda_to_egl_image.cpp#L373</a>, <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/neural_net/nvof/nvof_fruc.cpp#L584">nvof_fruc.cpp#L584</a>.</li>
-    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/doc/NODES.md#drm_prime_to_cuda">NODES.md · drm_prime_to_cuda</a>; the browser window counts are in <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/capacity.md#mixer-demo-capacity">capacity.md · Mixer demo capacity</a>; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/compose.yaml#L25-L26">demos/mixer/compose.yaml#L25-L26</a> sets 40 windows, eight per worker (<a href="capacity-budgets.html">Rate-aware capacity budgets</a>).</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/doc/NODES.md#drm_prime_to_cuda">NODES.md · drm_prime_to_cuda</a>; the browser window counts are in <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/capacity.md#mixer-demo-capacity">capacity.md · Mixer demo capacity</a>; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/compose.yaml#L25-L26">demos/mixer/compose.yaml#L25-L26</a> sets 40 windows, eight per worker (<a href="source-limits.html">Source limits by mode and frame rate</a>).</li>
   </ul>
   <p class="note">Live on the test host from mixer-improv; not merged to develop yet. Compatibility audit (2026-10-01): eka-recorder-ai and sports-live-reframer pin avplumber as a submodule, their CUDA nodes make their own hwaccel context current before any CUDA call, none reads the removed <code>global_cuda</code> fields, and their runtime Python runs no CUDA of its own. A smoke run of both after they bump avplumber remains the final check. Line numbers may have moved since.</p>
 

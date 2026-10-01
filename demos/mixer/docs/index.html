@@ -57,13 +57,13 @@
       browser pages, clip grids and the sixteen-box.</figcaption>
   </figure>
 
-  <p class="lede">Up to 110 independent inputs at 25/30 fps, or 68 at 50/60 — live Chromium pages, NVDEC clips and raw uploads together — composited on one GPU canvas of a 16 GiB NVIDIA T4 into a 1080p program in either orientation, SDR or 10-bit HLG, cut, faded, dipped and wiped from one page, keyed with up to four downstream graphics, with the whole show described by one JSON document.</p>
+  <p class="lede">Up to 110 independent inputs at 25/30 fps, 82 at 50 or 75 at 60 — live Chromium pages, NVDEC clips and raw uploads together — composited on one GPU canvas of a 16 GiB NVIDIA T4 into a 1080p program in either orientation, SDR or 10-bit HLG, cut, faded, dipped and wiped from one page, keyed with up to four downstream graphics, with the whole show described by one JSON document.</p>
 
   <ul class="figures">
     <li><b>110</b><span>inputs at 1080p30 on one T4: 36 NVDEC + 36 browser + 34 raw NV12 + 4 keys</span></li>
-    <li><b>68</b><span>inputs at 1080p60: 18 NVDEC + 29 browser + 17 raw + 4 keys, GPU 62–64%, NVDEC 84%, host half idle</span></li>
-    <li><b>~43 ms</b><span>median cut latency at 68@60, from the command to the first encoded frame of the new scene</span></li>
-    <li><b>24</b><span>missed playout deadlines in a 19.5 h run at 68@60 (0.0006%); none in steady state</span></li>
+    <li><b>75</b><span>inputs at 1080p60: 18 NVDEC + 36 browser + 17 raw + 4 keys, GPU 72%, NVDEC 86%, host CPU 45% idle</span></li>
+    <li><b>~43 ms</b><span>median cut latency in the 68@60 soak show, from the command to the first encoded frame of the new scene</span></li>
+    <li><b>24</b><span>missed playout deadlines in the 19.5 h 68@60 soak (0.0006%); none in steady state</span></li>
     <li><b>40</b><span>real Chromium windows (Electron 44 / Chromium 152), their DMA-BUFs imported zero-copy into CUDA</span></li>
     <li><b>192</b><span>scenes per show; cut, fade, dip to colour and GPU-cached media wipes between them</span></li>
   </ul>

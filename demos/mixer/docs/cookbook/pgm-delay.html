@@ -5,60 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Why the Program preview aux matches only its PGM pad one frame back instead of holding all 101 inputs a frame longer.">
   <title>PGM delay · Mixer optimization cookbook</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      font-family: system-ui, sans-serif;
-      color: #edf4ff;
-      background: #080d17;
-      --panel: #101827;
-      --line: #26354a;
-      --muted: #a4b4ca;
-      --body: #b5c4d8;
-      --accent: #57dbc2;
-      --red: #e5484d;
-      --green: #30a46c;
-      --amber: #f5a524;
-      --blue: #6e8bf5;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #080d17; }
-    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
-    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
-    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
-    .site a { font-weight: 600; text-decoration: none; }
-    .site a:hover { text-decoration: underline; }
-    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
-    h2 { font-size: 19px; margin: 34px 0 12px; }
-    p, li { color: var(--body); line-height: 1.6; }
-    p { max-width: 78ch; }
-    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
-    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
-    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
-            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
-    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
-    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
-    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
-    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
-    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
-    figure { margin: 22px 0 0; }
-    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
-    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
-    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
-    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
-    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
-    .cards > li.flag { border-left: 3px solid var(--amber); }
-    .cards p { margin: 0; }
-    .cards p + p { margin-top: 8px; }
-    .cards ul { margin: 4px 0 0; padding-left: 18px; }
-    .cards ul li { margin: 2px 0; }
-    .where { padding-left: 20px; }
-    .where li { margin: 6px 0; }
-    .note { font-size: 14px; color: var(--muted); }
-    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
-    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
-  </style>
+  <link rel="stylesheet" href="cookbook.css">
 </head>
 <body>
 <main>
@@ -179,20 +126,20 @@
 
   <h2>At a glance</h2>
   <ul class="cards">
-    <li><b>What</b>One integer parameter, <code>pgm_delay_frames: 1</code>, on the Program preview compositor <code>aux_mv_comp</code>. It applies to the last input only, the program feed <code>aux_mv_pgm</code>: output tick T takes PGM T−1. The other 100 inputs keep the normal 2 frames.</li>
+    <li><b>What</b>One integer bus field, <code>pgm_delay_frames</code> (default 1, 2 at a 50/60 fps bus), passed to the Program preview compositor <code>aux_mv_comp</code>. It applies to the last input only, the program feed <code>aux_mv_pgm</code>: output tick T takes PGM T−1. The other 100 inputs keep the normal 2 frames.</li>
     <li><b>Why</b>The old fix raised the whole aux to 120 ms (3 frames). Measured live: <code>aux_mv_comp</code> latency_ms = 120, <code>aux_mv2_comp</code> = 80, M/E at the default 2 frames. All 101 inputs waited a frame to help one.</li>
     <li class="flag"><b>Latency</b><p>Program output: unchanged. This is a monitor.</p><p>Program preview aux: source and PVW tiles 120 → 80 ms (−1 frame, −40 ms). PGM tile: 120 ms, unchanged.</p><p>Command-to-screen on this monitor: a cut reaches the PGM tile as before; changes on the other tiles show one frame (40 ms) sooner, because tick T is drawn at T + 80 instead of T + 120 (derived from the deadline, not measured).</p></li>
     <li><b>Side effects</b>The PGM tile shows one tick older than the tiles beside it, so PVW and PGM are no longer the same instant. The aux now has the same deadline as every other compositor. The Source pages layout does not use the parameter.</li>
     <li><b>Cost</b>0 nodes, 0 queues, 0 threads, about 20 lines. The offset moves a queue slot index; no extra draw work. VRAM: frees the extra frame that all 101 inputs held, ~105 MB (up to 216 MB).</li>
     <li><b>Risk</b>The program keeps the old margin: PGM T must arrive by T + 120 ms, as before. If it is late, the PGM tile repeats its last frame; nothing stalls. Latency plus offset must fit the six-frame history budget (240 ms at 25 fps), so the aux accepts 40 ms less main latency. The parameter is rejected on a compositor driven by <code>clock_input</code>.</li>
-    <li><b>Switch it off</b>Drop the parameter (<code>AuxMultiview.pgm_delay_frames = 0</code>) and add back +1 frame of latency on that aux (<code>latency_ms</code> 120 at 25 fps).</li>
+    <li><b>Switch it off</b>Set the bus's <code>pgm_delay_frames</code> to 0 and its <code>latency_ms</code> one frame higher (120 at 25 fps).</li>
   </ul>
 
   <h2>Where in the code</h2>
   <ul class="where">
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L1098-L1110">src/nodes/hwaccel/cuda_rect_overlay.cpp#L1098-L1110</a>: reads <code>pgm_delay_frames</code> and applies it to the last input; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L1077-L1078">L1077-L1078</a> reject it with <code>clock_input</code>.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/mixer/Playout.hpp#L81-L92">src/mixer/Playout.hpp#L81-L92</a>: <code>Playout::setInputOffset</code> and its six-frame budget check; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/mixer/Playout.hpp#L105">L105</a> shifts the input's slot.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L253-L256">pyplumber/mixer/aux.py#L253-L256</a>: <code>AuxMultiview.pgm_delay_frames = 1</code>; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L174-L176">L174-L176</a> check the budget in Python; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L190">L190</a> passes it to the node when it is not 0.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L253-L256">pyplumber/mixer/aux.py#L253-L256</a>: the bus field <code>pgm_delay_frames</code>, default 1 (2 at a 50/60 fps bus, <code>default_pgm_delay_frames</code>); <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L174-L176">L174-L176</a> check the budget in Python; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L190">L190</a> passes it to the node when it is not 0.</li>
     <li>Tests: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L274-L300">demos/mixer/tests/test_aux.py#L274-L300</a>, <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_backend.py#L99-L103">demos/mixer/tests/test_backend.py#L99-L103</a>.</li>
     <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#aux_buses">config.md · aux_buses</a> (the paragraph on the PGM tile running one aux frame behind).</li>
   </ul>

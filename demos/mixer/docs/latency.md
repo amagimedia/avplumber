@@ -118,14 +118,13 @@ program frame the multiview frame with the new PVW tile left its compositor
 `late` count, or when its tick had passed before the mixer published it,
 `unreachable`: every fade, whose swap follows a frame already presented) and
 the PVW change latency from command receipt to that compositor deadline; both
-stop before the encoders, unlike the cut probe ([config.md](config.md),
-`aux_buses`). The line shows the cuts, the goal of the alignment.
+stop before the encoders, unlike the cut probe
+([Multiview PVW follower](../../../doc/mixer.md#multiview-pvw-follower)). The line shows the cuts, the goal of the alignment.
 
 Run it on the mixer host against the web UI. The mixer must run with
 `--cut-latency-encoder <encoder>`. The script changes the live program and needs
 only the Python standard library. It exits 0 on PASS; `--json` prints one object.
-`--url` defaults to a forwarded web UI on 127.0.0.1:17681; on the host, pass its
-own port.
+`--url` defaults to the web UI on 127.0.0.1:7681.
 
 ```sh
 python3 demos/mixer/tests/cut_spam.py --url http://127.0.0.1:7681
@@ -146,7 +145,7 @@ on what hammering adds to its spaced cuts. *F* is one frame at the show rate
 | Recovery median | B50 + 1 F | `--recovery-p50-ms` |
 | Recovery max | Bmax + 1 F | `--recovery-max-ms` |
 | Program missed deadlines | 0 from the bursts to the end, summed over both slot compositors | — |
-| Program repeats | 0 over the same window | `--playout-repeats-max` |
+| Program repeats | informational; with the override, at most that many over the same window | `--playout-repeats-max` |
 | Program on last target | after the spam and at the end, the last accepted take's scene is on program with no transition running, within max(take length, 1 s) + the spam max limit | — |
 
 Every take cancels a cut measurement that is still pending, so a spam cut
@@ -165,8 +164,9 @@ The program counters come from `mixer.status` `playout`: each slot compositor
 publishes its playout `missed_deadlines` and per-input `repeats` every 60 output
 frames. A missed deadline is an output tick the compositor did not produce; an
 idle or warming slot does not count one. A repeat is a tick on which a source
-had no new frame; 0 fits sources at the show rate, so pass the expected count
-for slower sources or a deliberately saturated setup.
+had no new frame. Repeats are reported, not judged, since pages that rest or
+paint slower than the show rate repeat by design; `--playout-repeats-max` turns
+them into a limit for a setup whose sources all run at the show rate.
 
 Fade and wipe start latency (command to the first blended frame) is not
 measurable yet and is reported as such: the probe samples cuts only. It needs a

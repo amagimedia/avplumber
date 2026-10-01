@@ -1,38 +1,26 @@
 # Mixer demo capacity
 
 These numbers come from a 16 GiB NVIDIA T4 host (16 vCPU) with 1920×1080 inputs. The
-30 and 60 fps baselines below stand on the source mixes listed beside them; the older
+per-rate baselines below stand on the source mixes listed beside them; the older
 25 and 30 fps measurements that follow used SDR 8-bit inputs with PGM and one AUX
 output. None of them are decoder-only limits or guarantees for HDR, larger frames,
 arbitrary browser pages, or additional outputs.
 
-The setup (`setup_runtime.py`, mirrored in `setup.html`) allows 110 inputs at 25 and
-30 fps, 82 at 50 and 75 at 60 fps, downstream-key pages included. Within that total it caps
-NVDEC streams at min(40, 1100 ÷ fps), browser windows at 40 (five workers of eight) and
-raw NV12 uploads at 30, 34, 20 or 17 units at 25, 30, 50 or 60 fps (a P010 upload costs two).
-50 fps takes the 60 fps total and upload budget scaled by frame rate; the total never exceeds
-what the three caps carry together, 82 at 50 fps, since the 40 browser windows do not scale.
-[Source limits by mode and frame rate](cookbook/source-limits.html) has every mode in one table.
-On a 10-bit canvas the total is scaled by `MODE_CAPACITY`: 0.82 for HLG 4:2:0 (90 at 25/30 fps,
-73 at 50, 61 at 60) and 0.74 for HLG 4:2:2 (81, 66, 55); see [10-bit canvases](#10-bit-canvases).
-A request above the limit is scaled down to it.
+The setup (`setup_runtime.py`, mirrored in `setup.html`) applies the limits in
+[Source limits by mode and frame rate](cookbook/source-limits.html); this page has the
+measurements behind them.
 
-| Input fps | Setup limit | NVDEC | Browser | Raw NV12 upload maximum | Validation |
-| --- | ---: | ---: | ---: | ---: | --- |
-| 25 | 110 | 40 | 40 | 30 | 100 (40 / 32 / 28) validated: two healthy starts, several minutes of transitions; 110 not measured at this rate |
-| 30 | 110 | 36 | 40 | 34 | The declared baseline: 36 NVDEC + 36 browser + 34 raw NV12 + 4 keys, pinned uploads; not pushed further |
-| 50 | 82 | 22 | 40 | 20 | The 60 fps upload budget scaled by frame rate, NVDEC from the 1100 frames/s rule; the total is the three caps (the scaled 90 exceeds them); not measured |
-| 60 | 75 | 18 | 40 | 17 | 18 NVDEC + 36 browser + 17 raw NV12 + 4 keys: every cap filled, cut-spam gate passes (see [60 fps on the current stack](#60-fps-on-the-current-stack)); 68 had a 19.5 h soak |
+| Input fps | Measured show, keys included | Result |
+| --- | --- | --- |
+| 25 | 110 = 40 NVDEC + 36 browser + 30 raw NV12 + 4 keys | 0 missed playout deadlines in steady state on the current stack (below) |
+| 30 | 110 = 36 NVDEC + 36 browser + 34 raw NV12 + 4 keys, pinned uploads | The declared baseline; not pushed further |
+| 50 | 82 = 22 NVDEC + 36 browser + 20 raw NV12 + 4 keys | Cut-spam gate passes, 0 missed (see [50 fps](#50-fps)) |
+| 60 | 75 = 18 NVDEC + 36 browser + 17 raw NV12 + 4 keys | Cut-spam gate passes, 0 missed (see [60 fps on the current stack](#60-fps-on-the-current-stack)); 68 inputs ran a 19.5 h soak with 24 missed deadlines (0.0006%); that show's median cut latency is about 43 ms |
 
-At 60 fps the 68-input show (18 NVDEC + 29 browser + 17 raw NV12 + 4 downstream-key
-pages) currently measures about 50% host CPU idle, 62–64% GPU utilisation, 84% NVDEC,
-61% NVENC and 8 GB of the 15.4 GB VRAM, with 0 missed playout deadlines in steady state;
-a 19.5 h run missed 24 (0.0006%). Cut latency, from the command to the first encoded
-frame of the new scene, is about 43 ms at the median. History: before the mostly-still
-browser test page (commit 5068a50) and Electron 44, the same show measured GPU SM about
-88%, NVDEC 88% and 19% host CPU idle, and 70 inputs saturated the GPU (SM 92-94%,
-NVDEC 95%). Two defaults make it hold under cut, fade and wipe spam
-(`demos/mixer/tests/cut_spam.py`): a 3-frame playout deadline at 50/60 fps (50 ms at 60; two frames
+Before the mostly-still browser test page (commit 5068a50) and Electron 44, the 68-input
+60 fps show measured GPU SM about 88%, NVDEC 88% and 19% host CPU idle, and 70 inputs
+saturated the GPU (SM 92-94%, NVDEC 95%). Two defaults make 60 fps shows hold under cut,
+fade and wipe spam (`demos/mixer/tests/cut_spam.py`): a 3-frame playout deadline at 50/60 fps (50 ms at 60; two frames
 left 17 ms of slack), and the wipe clip cache (`--wipe-cache-mb 640`, which holds the
 demo's two wipes, about 0.5 GB, in VRAM), without which each wipe take decoded QTRLE on
 the CPU and missed deadlines.
@@ -98,8 +86,7 @@ assume pages that rest like real graphics; constantly animated pages need fewer 
 At 30 fps the 110-input ceiling is the declared baseline for this host, keys included:
 **36 NVDEC + 36 browser + 34 raw NV12 + 4 key pages**, with pinned raw uploads
 (`canvas.raw_upload: "pinned"`, the setup default) and a fifth browser worker; it has not
-been pushed further. At 25 fps the setup allows the same 110 as **40 NVDEC + 40 browser +
-30 raw NV12**, which has not been measured as a whole. NVDEC is capped at about 1100 decoded
+been pushed further. NVDEC is capped at about 1100 decoded
 frames/s (near 90%; 40 streams at 25 fps measured 81%): 40 at 25 fps, 36 at 30, 22 at 50 and
 18 at 60.
 
@@ -165,7 +152,7 @@ The setup takes 55, the margin 61 has at 4:2:0, as the 4:2:2 share: 55 / 75 = 0.
 
 ### 50 fps
 
-50 fps takes the 60 fps limits scaled by frame rate (see the top of this page). Measured 2026-10-01
+50 fps takes the 60 fps limits scaled by frame rate ([how the limit is computed](cookbook/source-limits.html)). Measured 2026-10-01
 with the Balanced mixes, clean feed on, NVENC p3:
 
 | 50 fps | Mix with 4 keys | Gate | Cut p95 | Input repeats | GPU p50 / p95 | NVDEC p50 / p95 | NVENC | Peak VRAM | Host CPU idle |
@@ -181,60 +168,6 @@ The browser service defaults to five workers with eight windows each (40 total);
 allows all 40 at every rate, downstream-key pages included.
 The setup allows 192 scenes; scenes describe layouts and do not each allocate a
 running compositor. Active layers and AUX outputs have separate limits.
-
-A temporary six-worker, 42-browser experiment at 110 sources kept the 25-fps
-upload and NVDEC counts unchanged:
-**40 NVDEC + 42 browser + 28 raw NV12**, six browser workers and a six-frame
-browser ring. It tests additional browser capacity rather than raising upload
-traffic. The first run maintained 25 fps between two multi-second stalls,
-with a 2.9-second cut, VRAM peaking near 14.1 GiB and up to 145 browser imports
-pending cleanup. It recovered without intervention. Remote validation overlapped
-the stalls, so this is not an isolated capacity measurement; it does not validate
-110 at 25 fps. The instance was returned to the 100-source baseline, and the
-browser limit was restored to 32 across four workers (since raised to 40 across
-five). The 30 fps baseline above was measured separately (36 NVDEC + 36 browser +
-34 raw NV12 + 4 keys, pinned uploads); this 25 fps experiment says nothing about it.
-
-Both stalls began during the same early phase of two remote validation runs.
-Fresh browser delivery fell to zero for several seconds while raw uploads
-continued near 25 fps. GPU utilization stayed around 61–67%; decoder utilization
-fell during the stall rather than remaining saturated. No CUDA out-of-memory
-error was recorded. Repeating validation with the mixer stopped showed no
-additional CUDA compute process and constant GPU memory, so the tests did not
-directly allocate the extra VRAM. Their contribution to scheduling or driver
-contention still needs an isolated trace.
-
-The import path can amplify a delay: idle cache entries expire after one second
-at ring size six / 25 fps, and all browser nodes share a cleanup worker. A cache
-miss waits until that shared cleanup backlog is empty before creating an import.
-A burst of expiry can therefore stop new imports across otherwise independent
-browser sources. Import statistics were sampled every ten seconds; they establish
-the backlog during the stall, but cannot prove that expiry caused its onset.
-
-### Same workload at 25 and 30 fps
-
-These runs used FFmpeg `hwupload` from pageable memory and up to 40 NVDEC streams, before
-pinned uploads and the 36-stream cap at 30 fps; the 30 fps baseline above supersedes
-them.
-
-A repeat with nonblocking import admission and corrected PVW publication kept
-1080p SDR inputs, ring six, 192 scenes, one random PGM scene and eight 64-input
-AUX tiles. No profiler or build ran during sampling.
-
-| Sources / fps | NVDEC / browser / upload | Fresh browser mean fps | PGM / AUX fps | GPU busy | Mean VRAM |
-| --- | --- | ---: | --- | ---: | ---: |
-| 100 / 25 | 40 / 32 / 28 | 25.0 | 25.0 / 25.0 | 55% | 9.4 GiB |
-| 100 / 30 | 40 / 32 / 28 | 18.7 | 3.7 / suspended | 65% | 9.4 GiB |
-| 82 / 30 | 33 / 26 / 23 | 30.0 | 30.0 / 30.0 | 56% | 7.5 GiB |
-
-The failed 30-fps run lasted 91 seconds; its row excludes the first 15 seconds.
-It rejected 26,585 import admissions during the remaining window, and AUX
-suspended after encoder backpressure. The 82-source run sustained two minutes
-without new import-admission drops or pending cleanup; 12 cuts measured
-54–82 ms to encoded output (median 66 ms). This is a short validation, not a
-guaranteed maximum. The healthy loads request about 2,500 input frames/second,
-versus 3,000 for the failed run. Source count alone cannot explain this boundary;
-the comparison does not separate pixel-transfer cost from per-frame driver work.
 
 ## Why uploads limit this mix
 
@@ -324,141 +257,3 @@ peak sampled VRAM was 14.29 GiB and pending import cleanup reached 219. The
 corresponding peaks at 100/105 were 12.02/13.42 GiB and 24/50 cleanup jobs.
 This locates a recovery boundary for this test, not an exact universal maximum
 between 105 and 110 sources.
-
-### Paced cleanup experiment
-
-`drm_prime_to_cuda.cleanup_interval_us` optionally spaces retired-import releases
-on the shared cleanup worker. The interval is a minimum pause after a release
-finishes, so a slow release never triggers catch-up bursts. Closing an importer
-bypasses pacing for its retired jobs. Live and retired imports retain the same
-per-source budget; cache hits do not wait for cleanup. The default remains `0`
-(unpaced), because a 1000 µs interval did not make 110 sources reliable.
-
-The experiment retained 40 NVDEC + 42 browser + 28 raw NV12 inputs at 25 fps,
-six browser workers, ring six, 192 scenes, the 640-layer budget, a PGM 64-input
-grid and eight AUX 64-input tiles. Each 75-second observation refreshed all
-browser pages at second 30, without tracing or concurrent builds/tests.
-
-An initial variant allowed replacement imports to consume byte credits as
-individual cleanup jobs completed. It left browser delivery averaging only
-3.2 fps in the final 20 seconds with AUX active. That admission change was
-removed; new registrations still wait for the shared cleanup backlog to drain.
-
-With pacing alone, AUX suspended during startup. After the first refresh,
-six browser windows remained frozen. AUX was explicitly resumed and another
-75-second refresh observation ended with three browsers frozen, despite fresh
-PGM and AUX output both averaging 25 fps. Sampled VRAM peaked at 14.27 GiB,
-and Chromium logged GPU-buffer allocation failures. The resumed observation
-started with six frozen browsers, so it is not a clean before/after capacity
-comparison with the earlier 110-source run. Both observations failed recovery.
-
-Pacing cannot interrupt a CUDA call already blocked in the driver, nor bound
-Chromium's own allocation bursts. Delaying destruction also retains retired
-buffers longer. Keep this option experimental; the instance was restored to
-100 sources with four browser workers and pacing disabled.
-
-### Locating the global browser stall
-
-A replay with pacing disabled added importer-phase, admission-wait, cleanup-time
-and receiver ACK counters. It used the same 110-source recipe and browser refresh
-with PGM and AUX active. At 31.4 seconds, 21 importers were in CUDA registration.
-At 32.7 seconds, 38 of 42 importers were waiting in `cleanup_admission`. They were
-still waiting at 38.7 seconds, with individual uninterrupted waits over 5 seconds.
-The shared backlog reached 321 retired imports. Between the 32.7- and 38.7-second
-samples, 329 imports were destroyed, taking 5.9 seconds of cleanup-worker time
-(about 18 ms each). These timings include driver waits and scheduling, not just
-GPU execution.
-
-During the sustained stall, the 38 affected sources each held six frames. Their
-queues immediately before the importer held 114 frames (three per source), while
-the queues after import were empty. A representative source accounted for all
-six: three queued before import, one being imported, one queued further upstream,
-and one last displayed frame. The receiver had received 937 frames and released
-931. Pending ACK messages were zero: already released frames were acknowledged.
-`repeat_last_frame` continued emitting references to the last image at 25 fps,
-which explains output frame rates recovering before browser images moved.
-
-This identified the sustained global stall with blocking admission: every cache-missing importer
-waited for **all** pending cleanup in the instance to drain, regardless of its own
-remaining budget. Expiry after the refresh increases that shared backlog. The
-gate holds incoming frames, fills bounded upstream queues, and exhausts browser
-capture slots. It is not an ACK transport blockage or unbounded graph buffering.
-The initial registration burst and Chromium allocation failures also occurred;
-the counters do not identify which NVIDIA operation inside destruction dominates.
-
-Admission is now nonblocking: an incoming frame needing a new import is dropped
-when cleanup is pending or its import budget is full. The input reference is
-released so the sender can reuse its capture slot. Cached imports continue normally;
-new registrations retain the same conservative memory admission rule. The check
-runs before EGL import work. `admission_dropped` counts rejected frames; monitor
-the CUDA output edge as well as browser transmission, since a transmitted frame
-may now be dropped before import. This does not remove waits inside an admitted
-EGL/CUDA registration call.
-
-Two subsequent runs used nonblocking admission with 110 sources and **ring nine**,
-restarting both the mixer and browser workers between runs. Other source counts,
-layouts and the refresh at 30 seconds were unchanged. Ring nine also increases
-the derived import-cache expiry from 1000 to 1440 ms, so these are combined
-configuration/code experiments rather than isolated admission comparisons.
-
-| Final 20-second observation | Run 1 | Run 2 |
-| --- | ---: | ---: |
-| Browser frames transmitted, mean per source | 22.5 fps | 21.9 fps |
-| Browser frames imported into CUDA, mean per source | 22.5 fps | 7.1 fps |
-| Fresh PGM output | 24.9 fps | 2.4 fps |
-| Fresh AUX output | 24.9 fps | 23.4 fps |
-| Browser windows no longer painting | 4 | 5 |
-| Peak sampled VRAM over the run | 13.89 GiB | 14.12 GiB |
-| Admission drops after refresh | 3,416 | 26,760 |
-
-The nonblocking path released frames while cleanup was busy. In run 1 at 34.9
-seconds, 210 imports were pending cleanup, all importers were back waiting for
-input, the queues immediately before them were empty, and pending ACKs were zero.
-This removed frame retention at the admission gate. It did not establish reliable
-110-source operation: run 2 remained in import/expiry churn, with browser
-transmission substantially exceeding successful imports. EGL/CUDA registration
-can still block after admission, and allocation failures persisted. PGM/AUX
-encoded frame rates and browser transmission rates alone conceal these failures.
-
-
-## AUX layout changes
-
-The measurements in the table below preceded staged AUX layout changes.
-
-On the 100-input / 25-fps baseline, a draw budget of 640 admitted eight 64-input
-tiles plus a 64-input PVW and the composited PGM (577 layers). The full layout
-held 25 fps with about 9.5–9.8 GiB total VRAM and 55–58% GPU utilization in the
-short observation windows. No validation jobs ran alongside these measurements.
-
-| Operation | Fresh AUX output | Encoded AUX / PGM | Observation |
-| --- | ---: | ---: | --- |
-| Hold all eight grids | 25 fps | 25 / 25 fps | No browser drops in steady windows |
-| Permute the same grids, four edits/second | 25 fps | 25 / 25 fps | 32 edits, zero browser drops |
-| Replace grids with different source sets, four edits/second | About 18 fps | 25 / 25 fps | Brief hitches; recovered after edits stopped |
-| Alternate sparse and dense layouts, four edits/second | About 20 fps | 25 / 25 fps | Brief hitches; recovered after edits stopped |
-
-These are short edit stress tests, not a long-term capacity certification.
-The worst sampled one-second AUX interval during source-set changes was about
-10 fps; VRAM briefly reached about 11.5 GiB. PGM stayed near 25 fps. The AUX
-encoder repeated frames to maintain its nominal rate, so encoded fps alone did
-not reveal the reduced fresh-output rate.
-
-Previously, a source-set change cleared new-input history and restarted a 250 ms
-warm-up window for the entire AUX. At 25 fps its usual 120 ms latency budget
-could therefore delay every tile while a newly subscribed frame became eligible.
-
-AUX now keeps rendering the current layout while subscribing only to the latest
-requested layout's additional sources. It switches the complete composition once
-all required inputs have a frame eligible for the next output tick. Superseded
-requests release their extra subscriptions. Preparation is bounded to the larger
-of 250 ms and twice the AUX latency budget; on timeout the previous layout stays
-live and pending subscriptions are released. Frame history and queue sizes are
-unchanged. Native AUX status exposes `composition_pending` and `composition_error`.
-
-Repeating the same 32 dense-layout edits and 16 sparse/dense edits at four edits
-per second after this change measured approximately 25 fps for fresh AUX output
-and PGM, with zero browser drops and no sampled import-cleanup backlog. Total
-VRAM remained about 9.4 GiB and GPU utilization 55–59% over the 100-second run.
-Settled subscription sets matched the requested layouts, rather than every input.
-Remote tests also covered an unavailable source, timeout, cancellation, resumed
-input, encoder backpressure, and independent compositor restart.
