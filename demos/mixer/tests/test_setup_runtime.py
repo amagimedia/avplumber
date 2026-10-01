@@ -228,7 +228,7 @@ def test_bitrate_outside_the_range_is_rejected(value):
 
 
 @pytest.mark.parametrize("bit_depth", [8, 10])
-@pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 110), (50, 75), (60, 75)])
+@pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 110), (50, 90), (60, 75)])
 def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
     chroma = "420" if bit_depth == 8 else "422"
     maximum = source_limit(fps, bit_depth, chroma)   # the SDR rate limit, scaled for a 10-bit canvas
@@ -285,7 +285,7 @@ def test_hdr_raw_420_uses_p010_without_nvdec(tmp_path, chroma):
         recipe_for({**settings, "bit_depth": 8, "chroma": "420"})
 
 
-@pytest.mark.parametrize("fps,limit", [(25, 15), (30, 17), (50, 8), (60, 8)])
+@pytest.mark.parametrize("fps,limit", [(25, 15), (30, 17), (50, 10), (60, 8)])
 def test_hdr_raw_upload_counts_twice_toward_byte_budget(fps, limit):
     weights = [0, 0, 0, 0, 0, 0, 1]
     assert source_counts(limit, weights, fps)[6] == limit
@@ -505,7 +505,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
     assert len(calls) == len(expected)
 
 
-@pytest.mark.parametrize("fps, maximum", [(25, 30), (30, 34), (50, 17), (60, 17)])
+@pytest.mark.parametrize("fps, maximum", [(25, 30), (30, 34), (50, 20), (60, 17)])
 def test_raw_upload_budget(fps, maximum):
     settings = {**DEFAULT_SETTINGS, "fps": fps, "source_count": maximum,
                 "weights": [0, 0, 0, 0, 0, 1]}

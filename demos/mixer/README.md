@@ -77,17 +77,17 @@ The player also shows host GPU/NVDEC usage and used/total VRAM from `nvidia-smi`
 sampled once per second. Usage turns orange at 95% and red at 99%; VRAM turns
 orange at 14 GiB and red at 14.75 GiB. These totals include other GPU applications.
 
-The setup limits unique sources to **110 at 25 and 30 fps, and 75 at 50 and 60
-fps**, set on a 16 GiB NVIDIA T4 host, where 110 at 30 fps and 75 at 60 fps are
-the measured baselines; 25 and 50 fps inherit those totals (25 fps validated to
-100). Downstream-key pages count as sources: each key takes one place in that
+The setup limits unique sources to **110 at 25 and 30 fps, 90 at 50 and 75 at
+60 fps**, set on a 16 GiB NVIDIA T4 host, where 110 at 30 fps and 75 at 60 fps are
+the measured baselines; 25 fps inherits the 30 fps total (validated to 100) and
+50 fps scales the 60 fps one by frame rate. Downstream-key pages count as sources: each key takes one place in that
 budget. It allows at most **40 browser windows** (sources and key pages together;
 the browser service runs five workers with eight windows each) and **192
 scenes**. Source mix, orientation and bit depth also affect capacity; a
 mixed-source budget does not mean the GPU can decode that many simultaneous
 videos. Combined SDR/HDR NVDEC inputs are capped at about 1 100 decoded frames
 per second: **40 at 25 fps, 36 at 30, 22 at 50 and 18 at 60**. Raw uploads share
-**30/34/17/17** units at 25/30/50/60 fps: an SDR NV12 source uses one unit and
+**30/34/20/17** units at 25/30/50/60 fps: an SDR NV12 source uses one unit and
 an HDR P010 source uses two. The **HDR · 4:2:0 · raw upload** count is available
 in both 10-bit modes and uses no NVDEC. See the
 [capacity measurements](docs/capacity.md) for tested mixes and limitations.

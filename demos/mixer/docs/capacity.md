@@ -7,18 +7,19 @@ output. None of them are decoder-only limits or guarantees for HDR, larger frame
 arbitrary browser pages, or additional outputs.
 
 The setup (`setup_runtime.py`, mirrored in `setup.html`) allows 110 inputs at 25 and
-30 fps and 75 at 50 and 60 fps, downstream-key pages included. Within that total it caps
+30 fps, 90 at 50 and 75 at 60 fps, downstream-key pages included. Within that total it caps
 NVDEC streams at min(40, 1100 ÷ fps), browser windows at 40 (five workers of eight) and
-raw NV12 uploads at 30, 34 or 17 units at 25, 30 or 50/60 fps (a P010 upload costs two).
+raw NV12 uploads at 30, 34, 20 or 17 units at 25, 30, 50 or 60 fps (a P010 upload costs two).
+50 fps takes the 60 fps total and upload budget scaled by frame rate.
 On a 10-bit canvas the total is scaled by `MODE_CAPACITY`, 0.82 for HLG 4:2:0 and 4:2:2:
-90 at 25/30 fps and 61 at 50/60 (see [10-bit canvases](#10-bit-canvases)). A request
+90 at 25/30 fps, 73 at 50 and 61 at 60 (see [10-bit canvases](#10-bit-canvases)). A request
 above the limit is scaled down to it.
 
 | Input fps | Setup limit | NVDEC | Browser | Raw NV12 upload maximum | Validation |
 | --- | ---: | ---: | ---: | ---: | --- |
 | 25 | 110 | 40 | 40 | 30 | 100 (40 / 32 / 28) validated: two healthy starts, several minutes of transitions; 110 not measured at this rate |
 | 30 | 110 | 36 | 40 | 34 | The declared baseline: 36 NVDEC + 36 browser + 34 raw NV12 + 4 keys, pinned uploads; not pushed further |
-| 50 | 75 | 22 | 40 | 17 | Shares the 60 fps total and upload limits; NVDEC 22 from the 1100 frames/s rule; not measured separately (lighter than 60) |
+| 50 | 90 | 22 | 40 | 20 | The 60 fps total and upload budget scaled by frame rate, NVDEC from the 1100 frames/s rule; not measured. 40 browser windows cap an SDR mix at 82 |
 | 60 | 75 | 18 | 40 | 17 | 18 NVDEC + 36 browser + 17 raw NV12 + 4 keys: every cap filled, cut-spam gate passes (see [60 fps on the current stack](#60-fps-on-the-current-stack)); 68 had a 19.5 h soak |
 
 At 60 fps the 68-input show (18 NVDEC + 29 browser + 17 raw NV12 + 4 downstream-key
@@ -73,7 +74,7 @@ and a 15 s GPU sample):
 | 75 | 18 + 36 + 17 + 4 | pass, 0 missed | 113 | 45% | 12.5% | 3.39 cores | 4.85 cores | 72% | 86% (max 90) | 8.8 GB |
 
 75 fills every per-rate cap (NVDEC 18, browser windows 40, raw upload units 17), so the setup
-allows 75 at 50 and 60 fps. Cut latency at 75 was p95 51 ms; PVW followed PGM within one frame.
+allows 75 at 60 fps, and 90 at 50 by frame rate. Cut latency at 75 was p95 51 ms; PVW followed PGM within one frame.
 The GPU keeps headroom; host CPU is the margin. At 75 about 8.5 of the 16 vCPUs were busy:
 
 | Inputs | CPU per input | Total | Where |
@@ -122,7 +123,7 @@ the program still meets its deadlines, but decoded sources fall behind and frame
 in VRAM, which at 4:2:2 and 110 ran the 15 GB T4 out of memory. HLG inputs skip that
 conversion: the Balanced HDR mix at 90 leaves GPU and NVDEC headroom. The limit holds for any
 mix the page allows, so the setup caps both 10-bit canvases at 90 / 110 = 0.82 of the SDR
-total, and applies the same share at 50 and 60 fps (61).
+total, and applies the same share at 50 fps (73) and 60 fps (61).
 
 At 60 fps the 61-input Balanced HDR 4:2:0 mix (9 SDR + 9 HLG NVDEC, 28 browser, 6 NV12 + 5 P010,
 4 keys, clean feed on) first failed on NVENC, not on its inputs. An HDR show encodes the program
@@ -225,7 +226,7 @@ decode, encoding, browser interop and driver submission need headroom too.
 
 The setup enforces 30 raw NV12 uploads at 25 fps and 34 at 30 fps (28 and 23 were
 measured with FFmpeg hwupload; 34 at 30 fps is part of the measured baseline with pinned
-uploads, 30 at 25 fps relies on them), and 17 at 50 and 60 fps.
+uploads, 30 at 25 fps relies on them), 20 at 50 and 17 at 60 fps.
 Excess allocation is redistributed among enabled source types; a raw-only
 request above its limit is rejected. This cap concerns the raw NV12
 CPU-to-GPU path. P010 uploads share the same budget at two units per source,

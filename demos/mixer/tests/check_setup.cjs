@@ -108,8 +108,8 @@ const { chromium } = require('playwright');
     await page.locator('#mode').selectOption('10:420');
     assert.deepEqual((await apply()).weights, [10, 5, 0, 0, 5, 5, 5], '4:2:2 uploads become 4:2:0 uploads of the same colour');
 
-    // The default canvas is 10-bit 4:2:2: 0.82 of 110 at 25/30 fps and of 75 at 50/60.
-    for (const [fps, maximum] of [[25, 90], [30, 90], [50, 61], [60, 61]]) {
+    // The default canvas is 10-bit 4:2:2: 0.82 of 110 at 25/30 fps, of 90 at 50 and of 75 at 60.
+    for (const [fps, maximum] of [[25, 90], [30, 90], [50, 73], [60, 61]]) {
       await reset();
       await page.locator('#fps').selectOption(String(fps));
       await page.locator('[data-preset=equal]').click();
@@ -134,7 +134,7 @@ const { chromium } = require('playwright');
     assert(mixed.weights[2] <= 4 && mixed.weights[4] <= 40);
     await page.locator('#scenes').fill('193');
     assert.equal((await apply()).scene_count, 192);
-    for (const [fps, units] of [[25, 30], [30, 34], [50, 17], [60, 17]]) {
+    for (const [fps, units] of [[25, 30], [30, 34], [50, 20], [60, 17]]) {
       await reset();
       await page.locator('#fps').selectOption(String(fps));
       await page.locator('#count-sdr420_raw').fill('40');
