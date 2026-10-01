@@ -138,7 +138,9 @@ little quality per bit for encoder time:
 | p5, no clean feed | pass, 0 missed (twice) | 53 ms | 73% | 82 / 89% | 77 / 83% | 10.1 GB |
 | p3, clean feed | pass, 0 missed | 51 ms | 70 / 76% | 83 / 91% | 78 / 84% | 9.5 GB |
 
-This is the tightest mode on the T4: GPU p95 near 90% at 61.
+Above 61 the GPU's CUDA compute runs out (p3, clean feed): 64 passed once and then missed 1
+deadline with a 123 ms cut (GPU p50 87-89%, p95 94%); 66 missed 2 (GPU p50 88%, p95 95%). The
+limit stays at 61, the tightest mode on the T4.
 
 The browser service defaults to five workers with eight windows each (40 total); the setup
 allows all 40 at every rate, downstream-key pages included.
