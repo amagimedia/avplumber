@@ -10,12 +10,13 @@
 #include "../../util.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
 namespace avp::mixer {
 
-enum class FadeCurve { Linear, EaseIn, EaseOut, EaseInOut };
+enum class FadeCurve : std::uint8_t { Linear, EaseIn, EaseOut, EaseInOut };
 
 inline FadeCurve parseFadeCurve(const std::string& name) {
     if (name == "linear") return FadeCurve::Linear;

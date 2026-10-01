@@ -26,7 +26,7 @@
 
 namespace avp::mixer {
 
-enum class PreviewAlign { Program, PgmTile };
+enum class PreviewAlign : std::uint8_t { Program, PgmTile };
 
 struct PreviewFollowTiming {
     TickGrid main;

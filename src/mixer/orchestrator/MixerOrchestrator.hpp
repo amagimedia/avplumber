@@ -86,7 +86,7 @@ class MixerOrchestrator {
     /// as it is meanwhile (a multiview's PVW tile does not blank between takes under cut spam).
     /// `Dropped`: with nothing to follow (`mixer.interrupt`), which clears the preview, as a
     /// failed take does (abortTransition).
-    enum class Interruption { Dropped, Replaced };
+    enum class Interruption : std::uint8_t { Dropped, Replaced };
     void interruptTransition(Interruption why);
     std::shared_ptr<OutputSnapshot> outputSnapshot() const;
     /// Stops the slot substitution and releases a held output at the first selected frame
