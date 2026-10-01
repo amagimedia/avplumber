@@ -345,9 +345,9 @@ def test_four_hdr_422_inputs_can_be_used_alone():
 ])
 def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expected):
     assert source_counts(64, weights) == expected
-    # A 10-bit 4:2:2 canvas at 25 fps carries fewer than 64: the show is scaled down first.
+    # Above the capacity of a 10-bit 4:2:2 canvas at 25 fps the show is scaled down first.
     recipe = recipe_for({**DEFAULT_SETTINGS, 'source_count': 64, 'fps': 25, 'weights': weights})
-    capacity = source_limit(25, DEFAULT_SETTINGS['bit_depth'], DEFAULT_SETTINGS['chroma'])
+    capacity = min(64, source_limit(25, DEFAULT_SETTINGS['bit_depth'], DEFAULT_SETTINGS['chroma']))
     assert [source['weight'] for source in recipe['inputs']] == source_counts(capacity, weights) + [0, 0]
 
 
@@ -909,8 +909,8 @@ def test_dsk_settings_are_bounded(changes):
 
 
 @pytest.mark.parametrize('fps, mode, expected', [
-    (30, (8, "420"), 110), (30, (10, "420"), 82), (30, (10, "422"), 60),
-    (60, (8, "420"), 68), (60, (10, "420"), 51), (60, (10, "422"), 37)])
+    (30, (8, "420"), 110), (30, (10, "420"), 90), (30, (10, "422"), 90),
+    (60, (8, "420"), 68), (60, (10, "420"), 55), (60, (10, "422"), 55)])
 def test_a_show_above_the_modes_capacity_is_scaled_down(tmp_path, fps, mode, expected):
     """Switching 110 SDR inputs at 30 fps to a 10-bit canvas keeps the show within that canvas's capacity."""
     bit_depth, chroma = mode

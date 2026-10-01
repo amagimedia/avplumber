@@ -59,11 +59,11 @@ def raw_upload_units(fps):
     return {25: 30, 30: 34}.get(fps, 17)
 
 
-# Share of the per-rate total a 10-bit canvas carries. A P010 canvas moves 2x and a P210 canvas
-# 2.7x the bytes of NV12 per composited pixel and every SDR source is converted to HLG, so GPU
-# memory traffic and VRAM bind, not PCIe (P010 sources already cost two upload units).
-# Provisional estimates until measured on the T4; the setup page carries the same table.
-MODE_CAPACITY = {(8, "420"): 1.0, (10, "420"): 0.75, (10, "422"): 0.55}
+# Share of the per-rate total a 10-bit canvas carries, measured on the T4 at 30 fps (see
+# docs/capacity.md): P010 and P210 canvases both pass the cut-spam gate at 90 sources; at 95 the
+# GPU-side SDR-to-HLG work slows NVDEC to saturation and sources fall behind. The same share is
+# assumed at 50/60 fps. The setup page carries the same table.
+MODE_CAPACITY = {(8, "420"): 1.0, (10, "420"): 0.82, (10, "422"): 0.82}
 
 
 def source_limit(fps, bit_depth=8, chroma="420"):

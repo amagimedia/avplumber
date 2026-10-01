@@ -10,6 +10,9 @@ The setup (`setup_runtime.py`, mirrored in `setup.html`) allows 110 inputs at 25
 30 fps and 68 at 50 and 60 fps, downstream-key pages included. Within that total it caps
 NVDEC streams at min(40, 1100 ÷ fps), browser windows at 40 (five workers of eight) and
 raw NV12 uploads at 30, 34 or 17 units at 25, 30 or 50/60 fps (a P010 upload costs two).
+On a 10-bit canvas the total is scaled by `MODE_CAPACITY`, 0.82 for HLG 4:2:0 and 4:2:2:
+90 at 25/30 fps and 55 at 50/60 (see [10-bit canvases](#10-bit-canvases)). A request
+above the limit is scaled down to it.
 
 | Input fps | Setup limit | NVDEC | Browser | Raw NV12 upload maximum | Validation |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -64,6 +67,32 @@ been pushed further. At 25 fps the setup allows the same 110 as **40 NVDEC + 40 
 30 raw NV12**, which has not been measured as a whole. NVDEC is capped at about 1100 decoded
 frames/s (near 90%; 40 streams at 25 fps measured 81%): 40 at 25 fps, 36 at 30, 22 at 50 and
 18 at 60.
+
+### 10-bit canvases
+
+Measured 2026-10-01 at 1080p30 on the current stack: portrait canvas, the 110 show's mix
+(36 : 36 : 34 SDR NVDEC : browser : raw NV12) scaled to each total, 4 key pages included,
+PGM rendered in SDR and HLG. Each point ran the cut-spam gate (`--mix 6:2:2`, 60 s at 4/s)
+and then a 15 s GPU sample. "Input repeats" counts inputs showing their previous frame on a
+program tick over the gate; the SDR 110 show has about 360.
+
+| Canvas | Total | Gate | Input repeats | GPU avg / max | NVDEC avg / max | NVENC | VRAM | Host CPU idle |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| P010 (HLG 4:2:0) | 82 | pass | 319 | 79% | 81% | 63% | 8.3 GB | 66% |
+| P010 | 90 | pass | 267 | 83 / 87% | 90 / 96% | 66% | 9.5 GB | 62% |
+| P010 | 95 | pass, sources fall behind | 28 316 | 87 / 91% | 99 / 100% | 69% | 11.4 GB | 56% |
+| P010 | 100 | pass, sources fall behind | 76 995 | 92 / 96% | 100% | 73% | 12.3 GB | 54% |
+| P210 (HLG 4:2:2) | 60 | pass | 343 | 58% | 48% | 55% | 6.4 GB | 74% |
+| P210 | 80 | pass | 227 | 76 / 80% | 74 / 75% | 62% | 8.3 GB | 66% |
+| P210 | 90 | pass | 235 | 83 / 86% | 89 / 94% | 66% | 9.3 GB | 63% |
+| P210 | 110 | fail: CUDA out of memory under spam, 59 missed deadlines | 23 052 | — | 90% | — | 12.8 GB after the failure | — |
+
+Per source, both 10-bit canvases cost about the same GPU time, roughly 1.8x an SDR source
+(every SDR input is converted to HLG). Above 90 the GPU-side work slows NVDEC to saturation:
+the program still meets its deadlines, but decoded sources fall behind and frames back up
+in VRAM, which at 4:2:2 and 110 ran the 15 GB T4 out of memory. The setup therefore caps
+both 10-bit canvases at 90 / 110 = 0.82 of the SDR total and applies the same share at 50
+and 60 fps (55), which has not been measured.
 
 The browser service defaults to five workers with eight windows each (40 total); the setup
 allows all 40 at every rate, downstream-key pages included.

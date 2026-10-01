@@ -151,8 +151,8 @@ function sourceMaximum(index){
 }
 let sourceValues=sourceCounts(Number($('sources').value),presets.balanced), currentSettings=null, busy=false, online=false, loaded=false, previousDepth=10;
 let resizeValues=null, submitting=false, submission=0;
-// Share of the per-rate total each canvas carries (setup_runtime.py MODE_CAPACITY; provisional).
-const MODE_CAPACITY={'8:420':1,'10:420':0.75,'10:422':0.55};
+// Share of the per-rate total each canvas carries (setup_runtime.py MODE_CAPACITY).
+const MODE_CAPACITY={'8:420':1,'10:420':0.82,'10:422':0.82};
 const sourceLimit = () => Math.floor((Number($('fps').value)<=30?110:68)*MODE_CAPACITY[$('mode').value])-dskPages().length;
 let scaledFrom=0;   // the total before the last automatic scale-down, shown until the next edit
 function outputMode(){
