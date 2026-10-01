@@ -3,10 +3,9 @@
 // drawn both ways must give identical canvases (NV12 and P210, scale/blit, NV12->P210 promotion,
 // opaque RGB and blended RGBA, overlapping z-order, partial off-canvas rects),
 // and checks key fades (composite_planes_opacity) against the full-opacity canvas.
-// Then times both paths on a 1080x1920 sixteen-box grid.
+// Then times the batched path on a 1080x1920 sixteen-box grid.
 //   nvcc -std=c++17 -O2 tests/cuda/test_rect_composite.cu -lcuda -o /tmp/test_rect_composite
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -436,7 +435,7 @@ int main() {
         }, 0, dev_table);
     }
 
-    // Timing: grid16 on 1080x1920 NV12, both paths, median of runs.
+    // Timing: grid16 on 1080x1920 NV12, batched path, median of runs.
     {
         std::vector<Layer> grid;
         for (int i = 0; i < 16; ++i)
@@ -460,13 +459,11 @@ int main() {
             std::sort(ms.begin(), ms.end());
             printf("%-28s median %.3f ms  p90 %.3f ms per frame\n", label, ms[ms.size() / 2], ms[ms.size() * 9 / 10]);
         };
-        timeIt([&] { drawLayered(NV12, canvas, grid, 2); }, "per-layer (2 memset + 32)");
         timeIt([&] { drawBatched(NV12, canvas, table, dev_table, 2); }, "batched yuv (1 launch)");
         std::vector<Layer> mixed = grid;
         mixed.push_back({AVP_RECT_KIND_RGBA, nullptr, &g2, nullptr, 0, 0, 128, 64, 0, 0, 256, 128});
         std::vector<AvpRectLayer> mixed_table;
         fillTable(NV12, mixed, mixed_table);
-        timeIt([&] { drawLayered(NV12, canvas, mixed, 2); }, "per-layer +1 rgba");
         timeIt([&] { drawBatched(NV12, canvas, mixed_table, dev_table, 2); }, "batched full +1 rgba");
     }
     cudaFree(dev_table);
