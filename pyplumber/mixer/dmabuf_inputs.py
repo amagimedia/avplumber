@@ -2,10 +2,9 @@
 
 One ``dma-browser`` window is one Unix socket delivering DRM PRIME frames.
 ``dmabuf_cuda_input_nodes`` turns it into a CUDA edge on the shared monotonic
-clock, snapped to the 1/fps grid, exactly as
-``demos/dmabuf-browser/graph/dmabuf_browser_common.py`` does for that demo
-(kept there unchanged because the demo's runtime image has no ``pyplumber.mixer``).
-The REST helpers open the windows and wait for their sockets.
+clock, snapped to the 1/fps grid. ``demos/dmabuf-browser/graph/dmabuf_browser_common.py``
+keeps an older variant of this chain for that demo, because the demo's runtime image
+has no ``pyplumber.mixer``. The REST helpers open the windows and wait for their sockets.
 """
 
 from __future__ import annotations
@@ -35,7 +34,9 @@ def window_id(url: str) -> str:
     return name
 
 
-def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, fps: int,
+def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
+                            # Unused (geometry comes from each frame); kept for downstream callers.
+                            width: int | None = None, height: int | None = None, fps: int,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
                             processing_group: str, hold: bool = False,
                             preserve_alpha: bool = False, browser_ring_size: int | None = None,

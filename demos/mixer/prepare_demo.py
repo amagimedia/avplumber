@@ -256,9 +256,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 pattern = spec.get("pattern", pool[index % len(pool)])
                 if pattern not in patterns:
                     raise ValueError(f"{name}: pattern must be one of {patterns}")
-                encoder = generation.get("sdr_encoder", "h264_nvenc") if color == "sdr" else generation.get("hdr_encoder", "hevc_nvenc")
-                if not raw and chroma == "420" and encoder != ("h264_nvenc" if color == "sdr" else "hevc_nvenc"):
-                    raise ValueError(f"{name}: generated media is encoded on NVENC: h264_nvenc for SDR, hevc_nvenc for HDR")
+                encoder = "h264_nvenc" if color == "sdr" else "hevc_nvenc"
                 storage = raw or ("v210" if chroma == "422" else encoder)
                 # Version cache names when changing generation semantics. Every
                 # source has its own file, with its id burned in (id_overlay), so

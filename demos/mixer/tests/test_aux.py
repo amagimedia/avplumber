@@ -225,7 +225,7 @@ def test_commands_route_by_bus_kind_and_status_reports_geometry(cfg):
     handlers = {}
     avp = SimpleNamespace(registerControlCommand=lambda name, fn, _payload: handlers.__setitem__(name, fn),
                           executeCommandsFromString=lambda command: None)
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=None)
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps))
     views = (AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0]),
              AuxSourcePages(avp, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0]))
     register_aux_commands(avp, views)
@@ -298,14 +298,14 @@ def test_encoder_backpressure_suspension_survives_automatic_updates_only(cfg, mo
 
 
 def test_multiview_shows_pgm_one_tick_late_at_the_main_latency(cfg):
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=None)
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps))
     view = AuxMultiview(None, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
     pages = AuxSourcePages(None, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0])
     # 60 fps program, 30 fps aux: the main mixer's buffer (three 60 fps ticks, 1.5 aux ticks), so
     # the PVW tile can leave with the program; the sources reach both at the same time.
     assert view.latency_ms() == pages.latency_ms() == view.main_latency_ms() == default_latency_ms(60) == 50
     cfg25 = replace(cfg, fps=25)
-    for latency, expected in ((None, 80), (120, 120), (20, 20)):
+    for latency, expected in ((default_latency_ms(25), 80), (120, 120), (20, 20)):
         mixer.latency_ms = latency
         assert AuxMultiview(None, None, mixer, cfg25, parse_aux_buses([bus_json()], cfg25)[0]).latency_ms() == expected
     # A bus's own latency_ms wins over the main mixer's.
@@ -406,7 +406,7 @@ def test_multiview_builds_a_follower_holding_the_layouts(cfg, monkeypatch):
     monkeypatch.setattr(aux_module._AuxOutput, "build", lambda self, options: None)
     nodes = []
     avp = SimpleNamespace(addNode=nodes.append)
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=None, name="mixer")
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps), name="mixer")
     view = AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
     view.build(None)
     follower, = nodes

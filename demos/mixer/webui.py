@@ -524,11 +524,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.manage_setup:
         from setup_runtime import SetupRuntime
         setup = SetupRuntime(args.media_dir, args.recipe, bridge, args.mixer_args, args.dmabuf_rest)
-        if args.recipe.exists() or (args.media_dir / "mixer.demo.json").exists():
-            try:
-                setup.resume()
-            except Exception as exc:
-                setup._status("error", str(exc))
+        setup.resume()
     def mixer_pid():
         process = setup.process if setup else None   # read once: the setup worker thread clears it when the mixer stops
         return process.pid if process else None

@@ -149,7 +149,8 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     ``pinned``: ``input_rec -> demux -> raw_to_cuda -> realtime(set_pts) -> force_fps``.
     raw_to_cuda uploads each packet through pinned staging on its own stream, so
     no decoder, setpts or FFmpeg hwupload is involved; it uploads one frame ahead
-    of pacing (RAW_UPLOADED_CAPACITY). Opt-in until measured against the default.
+    of pacing (RAW_UPLOADED_CAPACITY). Opt-in; the setup recipe selects it (60 fps A/B in
+    demos/mixer/docs/cookbook/raw-uploads.html; the 110-input A/B is pending).
     """
     if pixel_format not in ("nv12", "p010le"):
         raise ValueError("raw 4:2:0 upload requires nv12 or p010le")

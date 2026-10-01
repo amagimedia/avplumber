@@ -622,7 +622,6 @@ class MixerGraphBuilder:
         # source repeats its held picture (Playout::resetInput). The orchestrator bounds
         # a take that waits on a dead source.
         active_pgm = self._active_inputs_mask(self._initial_scene_def())
-        timing = {} if self.latency_ms is None else {"latency_ms": self.latency_ms}
         for slot in ("a", "b"):
             is_program = slot.upper() == self._initial_pgm_slot
             self.avp.addNode(self.backend.compositor({
@@ -636,7 +635,7 @@ class MixerGraphBuilder:
                 "max_layers": self.max_compositor_layers,
                 "color": self.color.transfer,
                 "fps": self._fps_str(),
-                **timing,
+                "latency_ms": self.latency_ms,
                 "layers": [
                     {k: v for k, v in self._initial_scene_def().sources.get(source.name, {}).items() if k != "graph"}
                     if is_program else {} for source in self._sources
@@ -660,11 +659,10 @@ class MixerGraphBuilder:
             }))
 
     def _add_snapshot_node(self, name, source, destination, group, slot=-1):
-        timing = {} if self.latency_ms is None else {"latency_ms": self.latency_ms}
         self.avp.addNode(_SnapshotNode({
             "name": name, "src": source, "dst": destination, "group": group,
             "snapshot": self._n("out_sel_snapshot"), "slot": slot,
-            "fps": self._fps_str(), **timing,
+            "fps": self._fps_str(), "latency_ms": self.latency_ms,
         }))
 
     def _build_output_path(self) -> None:
@@ -813,7 +811,7 @@ class MixerGraphBuilder:
             # Resident: parked with no active input, so it composes nothing until a take
             # arms it. Per take: created active, with the group.
             "active_inputs": 0 if cached else 3,
-            **({} if self.latency_ms is None else {"latency_ms": self.latency_ms}),
+            "latency_ms": self.latency_ms,
             "group": wipe_group,
         }))
 

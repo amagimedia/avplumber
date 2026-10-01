@@ -10,7 +10,7 @@ import uuid
 import math
 
 from ..node import InternalNode
-from .config import AuxBus, ConfigError, _parse_rendition, default_latency_ms, scene_layers
+from .config import AuxBus, ConfigError, _parse_rendition, scene_layers
 from .control import source_mask_param
 
 
@@ -235,8 +235,7 @@ class _AuxOutput:
 
     def main_latency_ms(self):
         """The main mixer's playout buffer: when a program frame leaves its compositor."""
-        main_latency = self.mixer.latency_ms
-        return main_latency if main_latency is not None else default_latency_ms(self.cfg.fps)
+        return self.mixer.latency_ms
 
     def latency_ms(self):
         # The bus's own playout buffer, or the main mixer's (50 ms at 60 fps, 1.5 aux ticks at

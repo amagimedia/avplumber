@@ -25,8 +25,9 @@ TRANSITIONS = ("cut", "fade", "wipe")
 # purpose: the compositor cannot promote 8-bit sources or draw the RGBA wipe
 # onto them, so they only fail later.
 WORKING_FORMATS = ("nv12", "p010le", "p210le")
-# How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (default), or
-# raw_to_cuda's pinned staging on a private stream (opt-in until measured).
+# How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (the library default), or
+# raw_to_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it. 60 fps
+# A/B in demos/mixer/docs/cookbook/raw-uploads.html; the 110-input A/B is pending).
 RAW_UPLOADS = ("hwupload", "pinned")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 128         # cuda_rect_overlay active_inputs is a 128-bit pad mask (SourceMask)
@@ -71,8 +72,8 @@ def key_fade_seconds(value: Any, where: str) -> float:
 
 def default_latency_ms(fps):
     """Playout deadline: 2 output frames up to 30 fps (80 ms at 25, 67 at 29.97/30), 3 at 50/60
-    (60/50 ms). Two 60 fps frames left 17 ms of slack for a late source or pass, and the
-    measured shows missed deadlines at loads 25/30 fps handled cleanly."""
+    (60/50 ms). Two 60 fps frames left 17 ms of slack for a late source or pass and missed
+    deadlines under load; two frames at 25/30 fps held the measured shows cleanly."""
     return (2 if fps < 40 else 3) * 1000 / fps
 
 

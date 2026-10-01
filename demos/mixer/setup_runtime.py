@@ -119,10 +119,6 @@ def source_counts(total, weights, fps=25, reserved_browsers=0):
 
 def recipe_for(settings):
     """Accept only the bounded generic setup controls, never paths or commands."""
-    if isinstance(settings, dict):
-        settings = {"bit_depth": 10, "chroma": "420" if settings.get("bit_depth") == 8 else "422",
-                    "bitrate_kbps": DEFAULT_BITRATE_KBPS, "browser_ring_size": default_browser_ring_size(settings.get("fps")),
-                    "dsk": [], "clean_feed": False, **settings}
     if not isinstance(settings, dict) or set(settings) != set(DEFAULT_SETTINGS):
         raise ValueError("Expected orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
     for key, choices in (("orientation", ("portrait", "landscape")),
@@ -151,10 +147,8 @@ def recipe_for(settings):
     if type(bitrate) is not int or not MIN_BITRATE_KBPS <= bitrate <= MAX_BITRATE_KBPS:
         raise ValueError(f"bitrate_kbps must be an integer from {MIN_BITRATE_KBPS} to {MAX_BITRATE_KBPS}")
     weights = settings["weights"]
-    if not isinstance(weights, list) or len(weights) not in (5, 6, 7) or any(type(w) is not int or not 0 <= w <= 110 for w in weights):
+    if not isinstance(weights, list) or len(weights) != 7 or any(type(w) is not int or not 0 <= w <= 110 for w in weights):
         raise ValueError("Provide seven integer source weights from 0 to 110")
-    weights = weights + [0] * (7 - len(weights))
-    settings = {**settings, "weights": weights}
     if settings["bit_depth"] == 8 and (any(weights[1:4]) or weights[6]):
         raise ValueError("8-bit mode supports SDR 4:2:0 and browser sources only")
     if settings["bit_depth"] == 8 and settings["chroma"] != "420":
@@ -246,8 +240,14 @@ class SetupRuntime:
             self.phase, self.message = phase, message
 
     def resume(self):
+        """Start the stored setup, else an existing show; a failure is reported in the status."""
         if self.recipe_path.exists():
-            self.apply()
+            try:
+                self.apply()
+            except Exception as exc:
+                self._status("error", str(exc))
+            return
+        if not (self.media_dir / "mixer.demo.json").exists():
             return
         # Adopt an existing explicit show when adding setup controls to a demo.
         def start():

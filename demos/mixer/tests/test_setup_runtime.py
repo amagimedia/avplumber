@@ -150,7 +150,7 @@ def test_api_rejects_cross_origin_and_oversized_requests(runtime):
 @pytest.mark.parametrize("bit_depth", [8, 10])
 def test_bit_depth_controls_canvas_sources_and_encoders(tmp_path, bit_depth):
     settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "chroma": "420" if bit_depth == 8 else "422",
-                "weights": [4, 0, 0, 0, 1]}
+                "weights": [4, 0, 0, 0, 1, 0, 0]}
     show, jobs, _ = prepare_demo.plan(recipe_for(settings), tmp_path)
     from pyplumber.mixer.config import parse
     cfg = parse(show)
@@ -170,13 +170,6 @@ def test_8bit_rejects_ten_bit_sources():
         recipe_for({**DEFAULT_SETTINGS, "bit_depth": 8})
 
 
-def test_old_setup_defaults_to_ten_bit():
-    old = {k: v for k, v in DEFAULT_SETTINGS.items() if k not in ("bit_depth", "chroma")}
-    assert recipe_for(old)["canvas"]["working_format"] == "p210le"
-    old.update(bit_depth=8, weights=[4, 0, 0, 0, 1])
-    assert recipe_for(old)["setup"]["chroma"] == "420"
-
-
 def test_bitrate_is_configurable_and_scales_every_rendition():
     """One control sets the SDR bitrate; other renditions keep their ratio to it."""
     base = recipe_for(DEFAULT_SETTINGS)["renditions"]
@@ -185,17 +178,10 @@ def test_bitrate_is_configurable_and_scales_every_rendition():
     halved = recipe_for({**DEFAULT_SETTINGS, "bitrate_kbps": 3000})["renditions"]
     assert [r["bitrate_kbps"] for r in halved] == [3000, 4000]
 
-    # The setting is optional: an older stored setup still expands, at the recipe's own numbers.
-    legacy = {k: v for k, v in DEFAULT_SETTINGS.items() if k != "bitrate_kbps"}
-    assert recipe_for(legacy)["renditions"][0]["bitrate_kbps"] == 6000
-    assert recipe_for(legacy)["setup"]["bitrate_kbps"] == 6000
-
 
 @pytest.mark.parametrize("fps, size", [(25, 6), (30, 6), (50, 9), (60, 9)])
 def test_browser_ring_default_tracks_fps(tmp_path, fps, size):
-    settings = {k: v for k, v in DEFAULT_SETTINGS.items() if k != "browser_ring_size"}
-    recipe = recipe_for({**settings, "fps": fps})
-    assert recipe["browser_ring_size"] == size
+    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": fps, "browser_ring_size": size})
     del recipe["browser_ring_size"]
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     from pyplumber.mixer.config import parse
@@ -244,7 +230,7 @@ def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
 
 
 def test_hdr_420_canvas_and_assets(tmp_path):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "chroma": "420", "weights": [8, 6, 0, 0, 2]})
+    recipe = recipe_for({**DEFAULT_SETTINGS, "chroma": "420", "weights": [8, 6, 0, 0, 2, 0, 0]})
     show, jobs, _ = prepare_demo.plan(recipe, tmp_path)
     assert show["canvas"]["working_format"] == "p010le"
     assert show["canvas"]["color"] == "hlg"
@@ -255,7 +241,7 @@ def test_hdr_420_canvas_and_assets(tmp_path):
 
 @pytest.mark.parametrize("bit_depth,chroma", [(8, "420"), (10, "420"), (10, "422")])
 def test_raw_sdr_420_mix_in_every_canvas_mode(tmp_path, bit_depth, chroma):
-    settings = {**DEFAULT_SETTINGS, "source_count": 6, "weights": [2, 0, 0, 0, 1, 3],
+    settings = {**DEFAULT_SETTINGS, "source_count": 6, "weights": [2, 0, 0, 0, 1, 3, 0],
                 "bit_depth": bit_depth, "chroma": chroma}
     show, jobs, _ = prepare_demo.plan(recipe_for(settings), tmp_path)
     from collections import Counter
@@ -263,11 +249,6 @@ def test_raw_sdr_420_mix_in_every_canvas_mode(tmp_path, bit_depth, chroma):
     assert len({s["id"] for s in show["sources"]}) == 6
     assert all(s["color"] == "sdr" for s in show["sources"] if s["kind"] == "nv12")
     assert sum(p.suffix == ".nv12" for p in jobs) == 3
-
-
-def test_legacy_source_weights_get_zero_raw_uploads():
-    settings = recipe_for({**DEFAULT_SETTINGS, "weights": [8, 4, 2, 0, 2]})["setup"]
-    assert settings["weights"] == [8, 4, 2, 0, 2, 0, 0]
 
 
 @pytest.mark.parametrize("chroma", ["420", "422"])
@@ -303,7 +284,7 @@ def test_sdr_and_hdr_share_nvdec_budget(fps, limit):
 
 
 def test_raw_only_mix_keeps_a_steady_alpha_background(tmp_path):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "source_count": 2, "weights": [0, 0, 0, 0, 1, 1]})
+    recipe = recipe_for({**DEFAULT_SETTINGS, "source_count": 2, "weights": [0, 0, 0, 0, 1, 1, 0]})
     show, jobs, _ = prepare_demo.plan(recipe, tmp_path)
     assert recipe["alpha_background"] == "sdr420_raw_000"
     assert any(path.name == "sdr420_raw_000_sdr_420_bars_nv12.nv12" for path in jobs)
@@ -313,8 +294,8 @@ def test_raw_only_mix_keeps_a_steady_alpha_background(tmp_path):
 @pytest.mark.parametrize("changes, message", [
     ({"chroma": "444"}, "Unsupported chroma"),
     ({"chroma": "420"}, "4:2:0 mode"),
-    ({"bit_depth": 8, "weights": [1, 0, 0, 0, 0]}, "4:2:0 canvas"),
-    ({"weights": [0, 0, 1, 0, 0]}, "enable another source type"),
+    ({"bit_depth": 8, "weights": [1, 0, 0, 0, 0, 0, 0]}, "4:2:0 canvas"),
+    ({"weights": [0, 0, 1, 0, 0, 0, 0]}, "enable another source type"),
 ])
 def test_reject_incompatible_chroma(changes, message):
     with pytest.raises(ValueError, match=message):
@@ -324,7 +305,7 @@ def test_reject_incompatible_chroma(changes, message):
 @pytest.mark.parametrize("total", [8, 16, 24, 32, 42, 60])
 @pytest.mark.parametrize("weights", [[8, 4, 2, 0, 2], [1, 1, 100, 0, 1]])
 def test_hdr_422_cap_preserves_total_and_disabled_types(tmp_path, total, weights):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": 25, "source_count": total, "weights": weights})
+    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": 25, "source_count": total, "weights": weights + [0, 0]})
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     counts = source_counts(total, weights)
     assert len(show["sources"]) == sum(counts) == total
@@ -346,13 +327,13 @@ def test_four_hdr_422_inputs_can_be_used_alone():
 def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expected):
     assert source_counts(64, weights) == expected
     # Above the capacity of a 10-bit 4:2:2 canvas at 25 fps the show is scaled down first.
-    recipe = recipe_for({**DEFAULT_SETTINGS, 'source_count': 64, 'fps': 25, 'weights': weights})
+    recipe = recipe_for({**DEFAULT_SETTINGS, 'source_count': 64, 'fps': 25, 'weights': weights + [0, 0]})
     capacity = min(64, source_limit(25, DEFAULT_SETTINGS['bit_depth'], DEFAULT_SETTINGS['chroma']))
     assert [source['weight'] for source in recipe['inputs']] == source_counts(capacity, weights) + [0, 0]
 
 
 def test_browser_only_limit():
-    settings = {**DEFAULT_SETTINGS, 'fps': 50, 'bit_depth': 8, 'chroma': '420', 'source_count': 40, 'weights': [0, 0, 0, 0, 1]}
+    settings = {**DEFAULT_SETTINGS, 'fps': 50, 'bit_depth': 8, 'chroma': '420', 'source_count': 40, 'weights': [0, 0, 0, 0, 1, 0, 0]}
     assert next(s for s in recipe_for(settings)['inputs'] if s['kind'] == 'browser')['weight'] == 40
     with pytest.raises(ValueError, match='Browser is limited to 40'):
         recipe_for({**settings, 'source_count': 41})
@@ -402,7 +383,7 @@ def test_restart_changes_revision(tmp_path, monkeypatch):
 def test_setup_preserves_live_aux_through_color_change_and_resume(runtime, monkeypatch, before, after):
     def settings(depth):
         return {**DEFAULT_SETTINGS, "bit_depth": depth, "chroma": "420",
-                "weights": [4, 0, 0, 0, 1]}
+                "weights": [4, 0, 0, 0, 1, 0, 0]}
     config = runtime.media_dir / "mixer.demo.json"
     show, _, _ = prepare_demo.plan(recipe_for(settings(before)), runtime.media_dir)
     scene_ids = [s["id"] for s in show["scenes"]]
@@ -461,7 +442,7 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
 @pytest.mark.parametrize("limit,tiles", [(256, 2), (512, 6)])
 def test_setup_clears_aux_tiles_that_exceed_new_draw_budget(runtime, limit, tiles):
     recipe = recipe_for({**DEFAULT_SETTINGS, "fps": 30, "source_count": 64, "bit_depth": 8, "chroma": "420",
-                         "weights": [1, 0, 0, 0, 1], "layout": "grids"})
+                         "weights": [1, 0, 0, 0, 1, 0, 0], "layout": "grids"})
     show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
     grid = next(s["id"] for s in show["scenes"] if s["id"].startswith("grid_64_"))
     show["aux_buses"] = [{"id": "mv", "scenes": [grid] * 8,
@@ -508,7 +489,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
 @pytest.mark.parametrize("fps, maximum", [(25, 30), (30, 34), (50, 20), (60, 17)])
 def test_raw_upload_budget(fps, maximum):
     settings = {**DEFAULT_SETTINGS, "fps": fps, "source_count": maximum,
-                "weights": [0, 0, 0, 0, 0, 1]}
+                "weights": [0, 0, 0, 0, 0, 1, 0]}
     assert recipe_for(settings)["inputs"][5]["weight"] == maximum
     with pytest.raises(ValueError, match=f"Raw 4:2:0 upload units is limited to {maximum}"):
         recipe_for({**settings, "source_count": maximum + 1})
@@ -742,7 +723,7 @@ def test_a_torn_write_never_reaches_the_show(tmp_path, monkeypatch):
 
 
 def test_live_aux_assignments_survive_resume(runtime, monkeypatch):
-    settings = {**DEFAULT_SETTINGS, "bit_depth": 8, "chroma": "420", "weights": [4, 0, 0, 0, 1]}
+    settings = {**DEFAULT_SETTINGS, "bit_depth": 8, "chroma": "420", "weights": [4, 0, 0, 0, 1, 0, 0]}
     config = runtime.media_dir / "mixer.demo.json"
     recipe = recipe_for(settings)
     show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
@@ -867,7 +848,7 @@ def test_healthy_browsers_are_not_restarted(tmp_path, monkeypatch):
 @pytest.mark.parametrize("bit_depth", [8, 10])
 def test_dsk_pages_are_browser_sources_with_clean_copies_of_each_output(tmp_path, bit_depth):
     settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "chroma": "420" if bit_depth == 8 else "422",
-                "weights": [4, 0, 0, 0, 1], "dsk": ["lower_third", "bug_left", "bug_right"], "clean_feed": True}
+                "weights": [4, 0, 0, 0, 1, 0, 0], "dsk": ["lower_third", "bug_left", "bug_right"], "clean_feed": True}
     show, _, _ = prepare_demo.plan(recipe_for(settings), tmp_path)
     from pyplumber.mixer.config import parse
     cfg = parse(show)
