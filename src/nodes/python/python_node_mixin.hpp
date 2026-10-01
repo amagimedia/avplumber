@@ -27,8 +27,39 @@ protected:
         return python_node_;
     }
 
+    // process() runs on the node's own thread for that thread's whole life.
+    // Without an extra reference, pybind11 creates a Python thread state on
+    // every call and destroys it on return, all under the GIL. Hold one
+    // reference per thread and drop it when the thread exits.
+    struct ThreadStateKeeper {
+        bool held = false;
+        ~ThreadStateKeeper() {
+#if PY_VERSION_HEX >= 0x030D0000
+            const bool finalizing = Py_IsFinalizing() != 0;
+#else
+            const bool finalizing = _Py_IsFinalizing() != 0;
+#endif
+            // A finalizing interpreter no longer lets other threads take the
+            // GIL; the thread state is then reclaimed with the interpreter.
+            if (!held || Py_IsInitialized() == 0 || finalizing) {
+                return;
+            }
+            py::gil_scoped_acquire gil;
+            gil.dec_ref();
+        }
+    };
+
+    static void keepThreadState(py::gil_scoped_acquire &gil) {
+        static thread_local ThreadStateKeeper keeper;
+        if (!keeper.held) {
+            gil.inc_ref();
+            keeper.held = true;
+        }
+    }
+
     void callProcess() {
         py::gil_scoped_acquire gil;
+        keepThreadState(gil);
         requirePythonNode().attr("process")();
     }
 

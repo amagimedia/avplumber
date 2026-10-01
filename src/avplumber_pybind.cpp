@@ -444,6 +444,12 @@ namespace {
             .def_property_readonly("enqueued_total", [](Edge<T> &e) { return e.enqueuedTotal(); })
             .def_property_readonly("free", [](Edge<T> &e) { return e.free(); })
             .def("enqueue", [](Edge<T> &e, const T &elem) {
+                // A queue with room needs no wait. Keep the GIL then: every
+                // release makes this thread queue for it again behind the
+                // other Python node threads.
+                if (e.try_enqueue(elem)) {
+                    return true;
+                }
                 py::gil_scoped_release release;
                 return e.enqueue(elem);
             })
@@ -486,15 +492,17 @@ namespace {
             }, py::arg("timeout_ms") = -1)
             .def("tryGet", [](Edge<T> &e, int timeout_ms) -> py::object {
                 T elem{};
-                bool ok = false;
-                {
+                // An item that is already queued needs no wait: take it
+                // without releasing the GIL (see enqueue).
+                bool ok = e.wait_dequeue_timed_ms(elem, 0);
+                if (!ok && timeout_ms > 0) {
                     py::gil_scoped_release release;
-                    ok = e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(std::max(0, timeout_ms)));
+                    ok = e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(timeout_ms));
                 }
                 if (!ok) {
                     return py::none();
                 }
-                return py::cast(elem);
+                return py::cast(std::move(elem));
             }, py::arg("timeout_ms") = 0)
             .def("peek", &Edge<T>::peek, py::return_value_policy::reference)
             .def("wait_peek", [](Edge<T> &e, int timeout_ms) {
