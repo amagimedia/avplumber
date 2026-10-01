@@ -10,7 +10,7 @@ std::vector<TransitionCommand> fadeCommand(const FadeRequest& request) {
         commands.push_back({"filter_command", {
             {"target", "transition_cuda"}, {"command", command}, {"argument", argument}}});
     };
-    const std::string clip = "clip((t-" + std::to_string(request.start_ms / 1000.0) +
+    const std::string clip = "clip((t-" + std::to_string(static_cast<double>(request.start_ms) / 1000.0) +
         ")/" + std::to_string(request.duration_sec) + ",0,1)";
     std::string progress;
     if (request.dip) {

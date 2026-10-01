@@ -306,7 +306,8 @@ protected:
         d->tex = e->tex;
         d->width = width;
         d->height = height;
-        f->data[0] = reinterpret_cast<uint8_t *>(static_cast<uintptr_t>(e->tex));   // handle, not memory
+        // A texture handle, never dereferenced as memory.
+        f->data[0] = reinterpret_cast<uint8_t *>(static_cast<uintptr_t>(e->tex));   // NOLINT(performance-no-int-to-ptr)
         f->linesize[0] = width * 4;
         return true;
     }

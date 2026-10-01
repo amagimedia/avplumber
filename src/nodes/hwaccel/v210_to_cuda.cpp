@@ -257,9 +257,9 @@ class V210ToCuda : public PacketToCuda {
     void enqueue(AVFrame* frame) override {
         int semiplanar = format_ == AV_PIX_FMT_P210LE;
         void* args[] = {&gpu_.packed, &stride_, &width_, &height_,
-                        &frame->data[0], &frame->linesize[0],
-                        &frame->data[1], &frame->linesize[1],
-                        &frame->data[2], &frame->linesize[2], &semiplanar};
+                        static_cast<void*>(&frame->data[0]), &frame->linesize[0],
+                        static_cast<void*>(&frame->data[1]), &frame->linesize[1],
+                        static_cast<void*>(&frame->data[2]), &frame->linesize[2], &semiplanar};
         check(cuMemcpyHtoDAsync(gpu_.packed, gpu_.staging, packet_size_, gpu_.stream), "upload");
         waitForReaders();   // the copy fills gpu_.packed; only the unpack writes the frame
         check(cuLaunchKernel(gpu_.kernel, (width_ / 2 + 31) / 32, (height_ + 7) / 8, 1,
@@ -298,7 +298,7 @@ class RawToCuda : public PacketToCuda {
     void enqueue(AVFrame* frame) override {
         waitForReaders();
         for (int i = 0; i < 4 && linesizes_[i]; ++i) {
-            CUDA_MEMCPY2D copy = {};
+            CUDA_MEMCPY2D copy = {};   // NOLINT(bugprone-invalid-enum-default-initialization): both memory types follow
             copy.srcMemoryType = CU_MEMORYTYPE_HOST;
             copy.srcHost = static_cast<uint8_t*>(gpu_.staging) + offsets_[i];
             copy.srcPitch = size_t(linesizes_[i]);

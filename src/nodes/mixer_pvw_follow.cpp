@@ -130,10 +130,11 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     /// published (a fade's first frame past its end is read after it was presented), so the
     /// tick after it is where the change lands, not a miss of this node's.
     Parameters sample(const Change& change, int64_t applied_at) const {
+        const auto ms = [](int64_t ns) { return static_cast<double>(ns) / 1e6; };
         Parameters status = {{"pvw_scene", change.pvw}, {"pgm_scene", change.pgm}, {"kind", change.kind},
                              {"applied_revision", change.revision}, {"target_tick", change.target},
                              {"align", timing_.align == avp::mixer::PreviewAlign::Program ? "program" : "pgm_tile"},
-                             {"last_change_to_apply_ms", (applied_at - change.published_ns) / 1e6},
+                             {"last_change_to_apply_ms", ms(applied_at - change.published_ns)},
                              {"last_target_error_ticks", 0}, {"target_unreachable", false},
                              {"pvw_latency_ms", nullptr}, {"pgm_latency_ms", nullptr}, {"pvw_minus_pgm_ms", nullptr}};
         if (!change.target) return status;
@@ -141,17 +142,17 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
         const int64_t pvw = timing_.deadline(drawn), pgm = timing_.programDeparture(change.effective_ns);
         status["last_target_error_ticks"] = drawn - change.target;
         status["target_unreachable"] = timing_.deadline(change.target) <= change.published_ns;
-        status["pvw_minus_pgm_ms"] = (pvw - pgm) / 1e6;
+        status["pvw_minus_pgm_ms"] = ms(pvw - pgm);
         if (change.received_ns) {
-            status["pvw_latency_ms"] = (pvw - change.received_ns) / 1e6;
-            status["pgm_latency_ms"] = (pgm - change.received_ns) / 1e6;
+            status["pvw_latency_ms"] = ms(pvw - change.received_ns);
+            status["pgm_latency_ms"] = ms(pgm - change.received_ns);
         }
         return status;
     }
 
 public:
     MixerPvwFollow(std::shared_ptr<avp::mixer::MixerState> state, std::string name, std::string compositor_name,
-                   std::shared_ptr<NodeWrapper> compositor, avp::mixer::PreviewFollowTiming timing)
+                   const std::shared_ptr<NodeWrapper>& compositor, avp::mixer::PreviewFollowTiming timing)
         : state_(std::move(state)), name_(std::move(name)), compositor_name_(std::move(compositor_name)),
           compositor_(compositor), timing_(timing) {
         ++state_->preview_followers;
@@ -193,9 +194,10 @@ public:
             }
             now = avp::mixer::monotonicNs();
             if (pending_ && (!pending_->target || now >= timing_.applyAt(pending_->target))) {
-                apply(*pending_, false, !suspended_);
+                const Change change = *pending_;   // stays pending if apply() throws: retried next wake
+                apply(change, false, !suspended_);
                 const int64_t applied_at = avp::mixer::monotonicNs();
-                applied_ = *pending_;
+                applied_ = change;
                 pending_.reset();
                 settle_at_ = applied_.target ? timing_.deadline(applied_.target) : applied_at;
                 Parameters status = sample(applied_, applied_at);

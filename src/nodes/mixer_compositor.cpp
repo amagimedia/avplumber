@@ -110,7 +110,7 @@ public:
     explicit MixerCompositor(const Config &config) : CudaRectCompositor("mixer_compositor", config) {}
 
     ~MixerCompositor() override {
-        flush();
+        MixerCompositor::flush();
         if (aux_) {
             draw_.ensureDevice();
             AVP_CHECK_CU(cuStreamSynchronize(draw_.stream()));
@@ -343,7 +343,7 @@ public:
             const auto mask = avp::mixer::parseSourceMask(value.at("active_inputs"));
             for (const auto &layer : layers)
                 if (layer.input < 0 || size_t(layer.input) >= source_edges_.size()) throw Error("aux: invalid input index");
-            for (int i = source_edges_.size(); i < avp::mixer::kSourceMaskBits; ++i)
+            for (int i = static_cast<int>(source_edges_.size()); i < avp::mixer::kSourceMaskBits; ++i)
                 if (mask.test(i)) throw Error("aux: active input out of range");
             {
                 std::lock_guard<std::mutex> lock(layers_mutex_);
@@ -398,7 +398,7 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
     node->playout_ = std::make_unique<avp::mixer::Playout<av::VideoFrame>>(
         config.inputs, avp::mixer::TickGrid(node->frame_rate_), latency_ms, avp::mixer::TimestampMode::Presentation);
     node->input_generation_.store(1);
-    logstream << "mixer_compositor: latency_ms=" << node->playout_->latencyNs() / 1000000.0;
+    logstream << "mixer_compositor: latency_ms=" << static_cast<double>(node->playout_->latencyNs()) / 1e6;
     // A Program preview's last input is the finished program, which arrives one frame after
     // the sources it is made of: match it that many frames back instead of raising the
     // latency of every input.
