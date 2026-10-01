@@ -103,10 +103,10 @@
     <table>
       <thead><tr><th>Frame rate</th><th>NVDEC decodes<small>SDR + HLG</small></th><th>Browser windows<small>keys included</small></th><th>Raw upload units<small>NV12 = 1, P010 = 2</small></th><th>HLG v210 4:2:2</th><th>SDR v210 4:2:2</th></tr></thead>
       <tbody>
-        <tr><td>25 fps</td><td>40</td><td>40</td><td>30</td><td>4</td><td>total only</td></tr>
-        <tr><td>30 fps</td><td>36</td><td>40</td><td>34</td><td>4</td><td>total only</td></tr>
-        <tr><td>50 fps</td><td>22</td><td>40</td><td>20</td><td>4</td><td>total only</td></tr>
-        <tr><td>60 fps</td><td>18</td><td>40</td><td>17</td><td>4</td><td>total only</td></tr>
+        <tr><td>25 fps</td><td>40</td><td>40</td><td>30</td><td>4</td><td>no own cap</td></tr>
+        <tr><td>30 fps</td><td>36</td><td>40</td><td>34</td><td>4</td><td>no own cap</td></tr>
+        <tr><td>50 fps</td><td>22</td><td>40</td><td>20</td><td>4</td><td>no own cap</td></tr>
+        <tr><td>60 fps</td><td>18</td><td>40</td><td>17</td><td>4</td><td>no own cap</td></tr>
       </tbody>
     </table>
   </div>
@@ -114,6 +114,7 @@
     <li><b>NVDEC</b>: about 1100 decoded frames per second, at most 40 streams. That keeps the T4's decoder near 90%.</li>
     <li><b>Browser windows</b>: five workers of eight windows. The count does not scale with the frame rate; only a sixth worker would raise it.</li>
     <li><b>Raw upload units</b>: 30 and 34 at 25 and 30 fps with pinned uploads, 1020 frames per second above 30 fps. A P010 frame is twice the bytes of NV12, so it costs two units.</li>
+    <li><b>SDR v210 4:2:2</b>: no cap of its own, only the total. The page fills at most 4 automatically; a typed count can go higher.</li>
     <li><b>Modes</b>: an SDR canvas takes SDR 4:2:0 decodes, browsers and NV12 uploads; HDR 4:2:0 adds HLG decodes and P010 uploads; only HDR 4:2:2 takes v210 inputs.</li>
   </ul>
 
