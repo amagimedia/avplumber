@@ -81,6 +81,7 @@
 
   <h2 class="group">Live</h2>
   <ul class="entries">
+    <li><a href="source-limits.html"><span class="pill live">Live: setup default</span><b>Source limits by mode and frame rate</b><span class="sum">One table for SDR, HLG 4:2:0 and HLG 4:2:2 at 25, 30, 50 and 60 fps: 110/90/81 at 30 fps, 75/61/55 at 60, with per-type caps, the Balanced mix at each limit and what runs out first.</span></a></li>
     <li><a href="cuda-streams.html"><span class="pill live">Live</span><b>One main CUDA stream, one per monitor</b><span class="sum">The program runs on one CUDA stream; each aux monitor gets its own non-blocking stream, so a slow monitor cannot stall the program.</span></a></li>
     <li><a href="multiviewer.html"><span class="pill live">Live</span><b>Multiviewer: 100 sources, 12 at a time</b><span class="sum">Pages of 12 equal tiles. Only the 12 on screen send frames, so off-page sources cost no GPU work and no VRAM.</span></a></li>
     <li><a href="browser-handoff.html"><span class="pill live">Implemented, deployed on the test host</span><b>Browser frame hand-off</b><span class="sum">The browser's frame socket thread waits in poll() instead of waking every millisecond, and failed pages reload without dropping the mixer's connection, holding their last frame while they do. The new browser image used 1.2 fewer cores at 110 sources; the hold is not measured yet.</span></a></li>
