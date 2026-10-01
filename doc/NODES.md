@@ -1032,9 +1032,11 @@ Parameters:
     every active input's first frame before drawing without the missing ones
 -   `debug_log_every_n` (int, default `0`) - log every n-th output frame
 
-`fps`, `aux_mode` and `clock_input` fail: they select `mixer_compositor` and
-`mixer_keyer`. `node.object.set <node> active_inputs <mask>` and
-`node.object.set <node> layers [...]` change the mask and the layers.
+`node.object.set <node> active_inputs <mask>` and
+`node.object.set <node> layers [...]` change the mask and the layers. The
+parameters `fps`, `aux_mode`, `clock_input`, `subscriptions` and
+`pgm_delay_frames` fail, as do the objects `prewarm_inputs`, `warm_reset`,
+`composition` and `fade_inputs`: they belong to `mixer_compositor` and `mixer_keyer`.
 
 ### `mixer_compositor`
 
@@ -1061,6 +1063,8 @@ Parameters, in addition:
     frame subscription per input, in `src` order; sources never wait for the bus
 -   `mixer` (string, optional with `aux_mode`) - the mixer whose preview the
     status reports; its scene definitions are frozen from then on
+
+`clock_input` fails: it is `mixer_keyer`'s.
 
 Objects (`node.object.set`):
 -   `active_inputs`, `layers` - as for `cuda_rect_overlay`
@@ -1094,6 +1098,8 @@ Parameters, in addition:
 -   `subscriptions` (array of strings, optional) - one shared frame
     subscription per input, in `src` order; an empty name (the program)
     subscribes nothing
+
+`aux_mode`, `latency_ms` and `pgm_delay_frames` fail: the keyer has no playout.
 
 Objects (`node.object.set`):
 -   `active_inputs` (mask) - the keys on air, switched with a cut

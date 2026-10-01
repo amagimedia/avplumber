@@ -390,8 +390,8 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
     node->connect(nci);
     node->aux_ = aux;
     node->frame_layers_ = !aux;
-    if (!params.contains("fps"))
-        throw Error("mixer_compositor: fps is required");
+    if (!params.contains("fps") || params.contains("clock_input"))
+        throw Error("mixer_compositor: fps is required; clock_input needs mixer_keyer");
     node->frame_rate_ = parseRatio(params.at("fps"));
     std::optional<double> latency_ms;
     if (params.contains("latency_ms")) latency_ms = params.at("latency_ms").get<double>();

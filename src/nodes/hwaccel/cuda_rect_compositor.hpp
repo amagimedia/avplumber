@@ -292,6 +292,9 @@ public:
             if (new_layers.size() > size_t(draw_.maxLayers())) throw Error(std::string(type_) + ": too many layers");
             std::lock_guard<std::mutex> lock(layers_mutex_);
             default_layers_ = std::move(new_layers);
+        } else if (key == "composition" || key == "prewarm_inputs" || key == "warm_reset" || key == "fade_inputs") {
+            // Another compositor node's control: fail rather than ignore it like an unknown key.
+            throw Error(std::string(type_) + ": " + key + " is not supported by this node");
         }
     }
 

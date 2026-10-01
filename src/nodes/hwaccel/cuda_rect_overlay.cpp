@@ -282,10 +282,12 @@ public:
 };
 std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) {
     const Parameters &params = nci.params;
-    // These selected the clocked paths that are now the mixer's nodes; ignoring them would
-    // silently drop the caller's clock.
-    if (params.contains("fps") || params.contains("clock_input") || params.value("aux_mode", false))
-        throw Error("cuda_rect_overlay: unclocked; fps and aux_mode need mixer_compositor, clock_input mixer_keyer");
+    // The parameters of the mixer's clocked nodes: ignoring them would silently drop a caller's
+    // clock or subscriptions.
+    if (params.contains("fps") || params.contains("clock_input") || params.value("aux_mode", false) ||
+        params.contains("subscriptions") || params.contains("pgm_delay_frames"))
+        throw Error("cuda_rect_overlay: unclocked; fps, aux_mode, clock_input, subscriptions and "
+                    "pgm_delay_frames are mixer_compositor's and mixer_keyer's");
     auto node = std::make_shared<CudaRectOverlay>(parseConfig(nci, "cuda_rect_overlay"));
     node->connect(nci);
     return node;

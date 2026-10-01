@@ -188,8 +188,9 @@ std::shared_ptr<MixerKeyer> MixerKeyer::create(NodeCreationInfo &nci) {
     auto node = std::make_shared<MixerKeyer>(parseConfig(nci, "mixer_keyer"));
     node->connect(nci);
     // fps is the clock input's rate: it paces key subscriptions, not a playout.
-    if (!params.contains("clock_input") || !params.contains("fps"))
-        throw Error("mixer_keyer: clock_input and fps are required");
+    if (!params.contains("clock_input") || !params.contains("fps") || params.value("aux_mode", false) ||
+        params.contains("latency_ms") || params.contains("pgm_delay_frames"))
+        throw Error("mixer_keyer: clock_input and fps are required; aux_mode, latency_ms and pgm_delay_frames are not keyer parameters");
     const int clock = params.at("clock_input").get<int>();
     if (clock < 0 || size_t(clock) >= node->source_edges_.size())
         throw Error("mixer_keyer: clock_input out of range");
