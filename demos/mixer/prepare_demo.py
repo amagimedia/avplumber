@@ -145,10 +145,20 @@ def id_overlay(source_id, width, height, seconds):
             plate.tobytes())
 
 
-def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, source_id):
-    # Offline conversion of a native HLG signal, not SDR samples tagged as HDR.
-    raw = path.with_name(path.name + ".src.v210")
-    write_hlg(raw, width, height, fps * seconds, source=variant)
+# Under assets/: the native HLG patterns of one preparation run (prepare removes it).
+HLG_PATTERNS = ".hlg-patterns"
+
+
+def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, source_id, pattern_dir):
+    # Offline conversion of a native HLG signal, not SDR samples tagged as HDR. The pattern
+    # depends only on its variant and geometry, and building it in Python is most of the cost,
+    # so it is built once per run and every source of the variant encodes it with its own id.
+    raw = pattern_dir / f"{variant}_{width}x{height}_{fps}fps_{seconds}s.v210"
+    if not raw.is_file():
+        pattern_dir.mkdir(parents=True, exist_ok=True)
+        staged = raw.with_name(raw.name + ".partial")
+        write_hlg(staged, width, height, fps * seconds, source=variant)
+        staged.replace(raw)
     inputs, graph, data = id_overlay(source_id, width, height, seconds)
     pixel_format = {"libx265": "yuv420p10le", "v210": "yuv422p10le"}.get(encoder, "p010le")
     options = (["-f", "rawvideo"] if encoder in ("rawvideo", "v210") else
@@ -160,7 +170,6 @@ def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, sour
                     "-pix_fmt", pixel_format, *options,
                     "-color_range", "tv", "-color_trc", "arib-std-b67", "-color_primaries", "bt2020",
                     "-colorspace", "bt2020nc", str(path)], input=data, check=True)
-    raw.unlink()
 
 
 def render_sdr422(path, width, height, fps, seconds, variant, ffmpeg, source_id):
@@ -261,7 +270,8 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 encoder = "v210" if chroma == "422" else "rawvideo" if raw else encoder
                 if color == "hlg":
                     writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"]: render_hlg(
-                        out, asset_width, asset_height, fps, seconds, int(pattern), encoder, ffmpeg, sid)
+                        out, asset_width, asset_height, fps, seconds, int(pattern), encoder, ffmpeg, sid,
+                        media_dir / "assets" / HLG_PATTERNS)
                 elif chroma == "422":
                     writer = lambda out, pattern=pattern, sid=source["id"]: render_sdr422(
                         out, asset_width, asset_height, fps, seconds, int(pattern), ffmpeg, sid)
@@ -358,8 +368,11 @@ def prepare(recipe, media_dir: Path, *, runtime_media_dir=None, ffmpeg="ffmpeg")
     if not shutil.which(ffmpeg):
         raise ValueError(f"FFmpeg not found: {ffmpeg}")
     print("Independent sources: " + ", ".join(f"{name}={n}" for name, n in allocation.items()), flush=True)
-    for path, writer in jobs.items():
-        ensure_asset(path, writer)
+    try:
+        for path, writer in jobs.items():
+            ensure_asset(path, writer)
+    finally:
+        shutil.rmtree(media_dir / "assets" / HLG_PATTERNS, ignore_errors=True)
     config_path = media_dir / "mixer.demo.json"
     with tempfile.TemporaryDirectory(prefix=".prepare-", dir=media_dir) as temporary:
         staged = Path(temporary) / config_path.name

@@ -348,3 +348,34 @@ def test_prepare_demo_produces_playable_media_and_mapped_config(recipe, tmp_path
     prepare(recipe, root, runtime_media_dir="/media")
     assert all(p.stat().st_mtime_ns == mtime for p, mtime in before.items())
     assert len(load(str(path)).scenes) == 7
+
+
+def test_hlg_pattern_is_built_once_per_variant_and_removed_after_the_run(tmp_path, monkeypatch):
+    import prepare_demo
+    built, encoded = [], []
+
+    def write_hlg(path, width, height, frames, source=0):
+        built.append(source)
+        Path(path).write_bytes(b"pattern")
+
+    def run(command, input=None, check=False):
+        encoded.append(Path(command[command.index("-i") + 1]))
+        Path(command[-1]).write_bytes(b"clip")
+
+    monkeypatch.setattr(prepare_demo, "write_hlg", write_hlg)
+    monkeypatch.setattr(prepare_demo.subprocess, "run", run)
+    patterns = tmp_path / "assets" / prepare_demo.HLG_PATTERNS
+    for variant, sid in ((0, "a"), (1, "b"), (0, "c")):
+        prepare_demo.render_hlg(tmp_path / f"{sid}.mp4", 96, 64, 4, 1, variant, "hevc_nvenc", "ffmpeg", sid, patterns)
+    assert built == [0, 1]   # the third source reuses variant 0
+    assert encoded == [patterns / "0_96x64_4fps_1s.v210", patterns / "1_96x64_4fps_1s.v210", patterns / "0_96x64_4fps_1s.v210"]
+
+    def failing_job(out):
+        prepare_demo.render_hlg(out, 96, 64, 4, 1, 0, "hevc_nvenc", "ffmpeg", "d", patterns)
+        raise ValueError("encoder failed")
+
+    monkeypatch.setattr(prepare_demo, "plan", lambda *args: ({}, {tmp_path / "assets" / "d.mp4": failing_job}, {}))
+    monkeypatch.setattr(prepare_demo.shutil, "which", lambda name: name)
+    with pytest.raises(ValueError, match="encoder failed"):
+        prepare_demo.prepare({}, tmp_path)
+    assert not patterns.exists()
