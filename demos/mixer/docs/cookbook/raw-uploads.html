@@ -171,7 +171,7 @@
   </ul>
 
   <h2>Why it matters at 110 sources</h2>
-  <p>The setup's 110-input shows carry 40 NVDEC + 40 browser windows + 30 raw sources at 25 fps, and 36 + 40 + 34 at 30 fps; the browser windows include 4 key pages (<a href="capacity-budgets.html">Rate-aware capacity budgets</a>). Raw uploads grow from 28 sources at 2.2 GB/s to about 2.3 GB/s at 25 fps and about 3.2 GB/s at 30 fps (computed: raw upload units × 3.1 MB × frame rate, where a P010 source counts as 2 units). The PCIe link has headroom; the lock is the limit. The evidence from lighter load: a pinned compositor table upload took 0.081 ms with 14 raw uploads and 5.31 ms with 28, 98–99.7 % of it in futex waits, while the compositor and import cleanup waited on the same futex.</p>
+  <p>The setup's 110-input shows carry 40 NVDEC + 40 browser windows + 30 raw sources at 25 fps, and 36 + 40 + 34 at 30 fps; the browser windows include 4 key pages (<a href="source-limits.html">Source limits by mode and frame rate</a>). Raw uploads grow from 28 sources at 2.2 GB/s to about 2.3 GB/s at 25 fps and about 3.2 GB/s at 30 fps (computed: raw upload units × 3.1 MB × frame rate, where a P010 source counts as 2 units). The PCIe link has headroom; the lock is the limit. The evidence from lighter load: a pinned compositor table upload took 0.081 ms with 14 raw uploads and 5.31 ms with 28, 98–99.7 % of it in futex waits, while the compositor and import cleanup waited on the same futex.</p>
   <p>With pinned uploads at 30 fps and 110 inputs, the upload threads still waited on a lock for 2.2 s per 10 s. There is no <code>hwupload</code> run at the same load, so that figure does not yet say how much pinned helps.</p>
 
   <h2>Measured at 68 inputs, 60 fps</h2>

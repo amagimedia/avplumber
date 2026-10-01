@@ -48,7 +48,9 @@ AUX scene changes briefly subscribe to the union of the current and latest reque
 layout. The old layout stays live until new inputs are ready for the output clock,
 then all tiles switch together. Preparation times out after the larger of 250 ms
 and twice the AUX latency budget, keeping the previous layout. Superseded requests
-and unused subscriptions are released; this does not prewarm every source.
+and unused subscriptions are released; this does not prewarm every source. The bus
+compositor's status reports `composition_pending` while a layout waits and
+`composition_error` when one timed out.
 
 `browser_ring_size` is a top-level integer (1–64, default 6 at 25/30 fps and 9
 otherwise) limiting outstanding DMA-BUF frames per browser. The CUDA import cache

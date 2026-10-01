@@ -153,7 +153,7 @@
     </table>
   </div>
   <p>With nearest alignment, a browser could also sit up to half a tick (8.3 ms at 60 fps) behind its tick. The research notes put the worst-case margin of a one-frame buffer below zero and of the two-frame default at about 14 ms. With <code>round_up</code>, the 25 ms buffer keeps the same worst-case margin as the 33 ms default. That margin covers the alignment only: a page slower than the canvas drifts later with either rounding until the averaged difference passes 20 ms, which leaves about 5 ms for jitter at 25 ms and 13 ms at 33 ms (estimate from the thresholds, not measured; the measured browsers ran fast, at 60.02 fps, so the trial did not exercise it). At the start, about 60 repeats still show in the first 90 s while browsers reconnect and prewarm fills.</p>
-  <p>In the <a href="capacity-budgets.html">110-input capacity run</a> at 25 fps (36 browser sources and 4 key pages among its inputs), repeated source frames were 0 in steady state.</p>
+  <p>In the <a href="source-limits.html">110-input show</a> at 25 fps (36 browser sources and 4 key pages among its inputs), repeated source frames were 0 in steady state.</p>
 
   <h2>At a glance</h2>
   <ul class="cards">

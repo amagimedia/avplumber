@@ -38,14 +38,10 @@ requested total; ties follow recipe order. A positive weight can round to zero
 when the total is small. For exact counts, make weights sum to the desired total.
 Preparation prints the allocated input counts before generating media.
 
-These are graph limits. The setup page allows 110 sources at 25 and 30 fps
-(experimental above 100 at 25 fps), 82 at 50 and 75 at 60 fps, downstream-key pages
-included. It also limits browsers to 40, HDR 4:2:2 inputs to four and scenes to
-192. SDR and HDR NVDEC inputs share a limit of 40/36/22/18 at 25/30/50/60 fps.
-Raw 4:2:0 uploads share 30/34/20/17 units at 25/30/50/60 fps; NV12 costs one unit
-and P010 costs two, proportional to their bytes per frame.
-See [capacity measurements](capacity.md) for the assumptions. Source mix still
-matters: custom recipes must fit the host's GPU, decoder, upload and browser capacity.
+These are graph limits. The setup page also applies the host's
+[source limits by mode and frame rate](cookbook/source-limits.html) (110 sources at
+25 and 30 fps, 82 at 50 and 75 at 60 on an SDR canvas, keys included) and at most
+192 scenes; custom recipes must fit the host's GPU, decoder, upload and browser capacity.
 
 The setup page also offers **SDR · 4:2:0 · raw upload**, separately from the
 H.264/NVDEC count. It works in all three canvas modes. These cached NV12 patterns
