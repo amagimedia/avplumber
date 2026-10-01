@@ -16,6 +16,7 @@ import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos" / "mixer"))
+from _harness import wait_for
 from mixer import GraphOptions, build_application
 
 
@@ -56,17 +57,10 @@ def run(args):
     packet_reader = threading.Thread(target=read_encoded, daemon=True)
     packet_reader.start()
 
-    def wait_for(predicate, label, timeout=10):
-        deadline = time.monotonic() + timeout
-        while not predicate():
-            assert not errors, errors
-            assert time.monotonic() < deadline, label
-            time.sleep(.005)
-
     try:
         app.start()
         app.avp.registerWithWebUI(args.webui, "keyframe-limit-smoke", "")
-        wait_for(lambda: len(frames) >= 60, "encoder startup")
+        wait_for(lambda: len(frames) >= 60, "encoder startup", errors=errors)
         state = app.avp.node("janus_force_keyframe").getObject("status")
         assert state["min_interval_ms"] == args.minimum_ms, state
         begin = time.monotonic()

@@ -1,5 +1,5 @@
 """Shared scaffolding for the CUDA smokes: AVPlumber setup, the packed-v210
-ingest chain, plane extraction and the frame drain loop."""
+ingest chain, plane extraction, the frame drain loop and condition polling."""
 
 import time
 
@@ -58,6 +58,15 @@ def start(avp, nodes, group, edge):
     out = avp.getEdge(edge, "VideoFrame")
     avp.group(group).startNodes()
     return out
+
+
+def wait_for(predicate, label="condition", timeout=10, errors=()):
+    """Poll *predicate* until it holds; fail on the first recorded error or after *timeout* seconds."""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert not errors, errors
+        assert time.monotonic() < deadline, f"{label} timed out"
+        time.sleep(.005)
 
 
 def drain(edge, errors, timeout, limit=None, state=None):

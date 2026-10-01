@@ -5,4 +5,4 @@ import subprocess
 def test_mixer_source_mask(cpp_binary):
     binary = cpp_binary("test_mixer_source_mask", libs=("libavutil",),
                         sources=("src/util.cpp", "deps/avcpp/src/rational.cpp", "deps/avcpp/src/timestamp.cpp"), pthread=True)
-    subprocess.run([str(binary)], check=True)
+    subprocess.run([str(binary)], check=True, timeout=10)

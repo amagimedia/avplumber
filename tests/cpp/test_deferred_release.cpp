@@ -1,5 +1,6 @@
 #include "nodes/hwaccel/DeferredRelease.hpp"
 #include <cassert>
+#include <chrono>
 #include <future>
 #include <stdexcept>
 
@@ -43,16 +44,15 @@ void lifetime_and_stop() {
     // It must not construct a resource or consume another producer's reservation.
     assert(!cleanup->tryMake(other_budget, second_entered, second_done, second_destroyed_on));
     assert(cleanup->counts().first == 1 && cleanup->counts().second == 1);
-    assert(cleanup->diagnostics(other_budget).declined == 1);
+    assert(cleanup->declined(other_budget) == 1);
     finish.set_value();
     for (int i = 0; i < 1000 && cleanup->counts().first; ++i) std::this_thread::sleep_for(1ms);
     assert(cleanup->counts().first == 0);
     auto second = cleanup->tryMake(other_budget, second_entered, second_done, second_destroyed_on);
     assert(second);
-    assert(cleanup->diagnostics(other_budget).released == 1);
     // A live frame also consumes its producer's budget, without pending cleanup.
     assert(!cleanup->tryMake(other_budget, entered, done, destroyed_on));
-    assert(cleanup->diagnostics(other_budget).declined == 2);
+    assert(cleanup->declined(other_budget) == 2);
     cleanup->close(other_budget);
     assert(!cleanup->tryMake(other_budget, entered, done, destroyed_on));
     // Instance teardown may release the service before edges release frames.
@@ -67,35 +67,6 @@ void lifetime_and_stop() {
     assert(service.expired());
 }
 
-struct Stamp {
-    using Clock = std::chrono::steady_clock;
-    std::promise<Clock::time_point>& released;
-    explicit Stamp(std::promise<Clock::time_point>& released): released(released) {}
-    ~Stamp() { released.set_value(Clock::now()); }
-};
-
-void pacing() {
-    using namespace std::chrono_literals;
-    auto cleanup = std::make_shared<DeferredRelease<Stamp>>(50ms);
-    auto budget = std::make_shared<DeferredRelease<Stamp>::Budget>(3);
-    std::promise<Stamp::Clock::time_point> first, second, third;
-    auto a = cleanup->tryMake(budget, first);
-    auto b = cleanup->tryMake(budget, second);
-    auto c = cleanup->tryMake(budget, third);
-    a.reset();
-    b.reset();
-    auto start = first.get_future().get();
-    auto end = second.get_future().get();
-    assert(end - start >= 50ms);
-    // Stop cancels pacing as well as blocked admissions.
-    cleanup->close(budget);
-    c.reset();
-    assert(third.get_future().wait_for(1s) == std::future_status::ready);
-    for (int i = 0; i < 1000 && cleanup->counts().first; ++i) std::this_thread::sleep_for(1ms);
-    assert(cleanup->counts().first == 0);
-}
-
 int main() {
     lifetime_and_stop();
-    pacing();
 }

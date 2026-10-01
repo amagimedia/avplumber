@@ -107,7 +107,6 @@ protected:
     int64_t import_ttl_ms_ = 3000;
     int64_t last_purge_ms_ = 0;
     std::atomic<uint64_t> cache_hits_{0}, fresh_imports_{0}, expired_imports_{0}, evicted_imports_{0};
-    std::atomic<const char*> phase_{"idle"};
 
     bool ensureEGL() {
         if (egl_.dpy != EGL_NO_DISPLAY) return true;
@@ -204,10 +203,8 @@ protected:
             imports_.erase(oldest);
             ++evicted_imports_;
         }
-        phase_ = "cleanup_admission";
         auto entry = cleanup_->tryMake(import_budget_, hwaccel_);
         if (!entry) return nullptr; // process() releases the input and its browser slot.
-        phase_ = "egl_display";
         if (!ensureEGL()) return nullptr;
         ImportEntry &e = *entry;
         e.key = key;
@@ -233,7 +230,6 @@ protected:
             attrs[a++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT; attrs[a++] = (EGLint)(obj.format_modifier >> 32);
         }
         attrs[a++] = EGL_NONE;
-        phase_ = "egl_import";
         e.image = eglCreateImage(egl_.dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, (EGLClientBuffer)NULL, attrs);
         if (e.image == EGL_NO_IMAGE_KHR) {
             logstream << "drm2cuda: eglCreateImage failed width=" << width << " height=" << height
@@ -241,7 +237,6 @@ protected:
             return nullptr;
         }
 
-        phase_ = "cuda_register";
         bool ok = !CHECK_CU(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx));
         if (ok) {
             ok = !CHECK_CU(cuGraphicsEGLRegisterImage(&e.resource, e.image, CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY)) &&
@@ -257,7 +252,6 @@ protected:
             ok = false;
         }
         if (ok && zero_copy_ && e.frame.frameType == CU_EGL_FRAME_TYPE_ARRAY) {
-            phase_ = "cuda_texture";
             // Sampling handle for the compositor: exact texels, unnormalized coordinates.
             CUDA_RESOURCE_DESC res{};
             CUDA_TEXTURE_DESC td{};
@@ -319,9 +313,7 @@ protected:
 
     bool import_to_cuda(const AVDRMFrameDescriptor* desc, int width, int height, AVPixelFormat swfmt,
                         const av::VideoFrame &in, av::VideoFrame &dst) {
-        phase_ = "frames_context";
         if (!ensureCudaFramesCtx(width, height, swfmt)) return false;
-        phase_ = "cache_lookup";
         std::shared_ptr<ImportEntry> e = findOrImport(desc, width, height, wallclock.pts());
         if (!e) return false;
         if (zero_copy_ && wrapMapped(e, in, width, height, dst))
@@ -370,29 +362,20 @@ public:
     Parameters getObject(const std::string key) override {
         if (key != "import_stats") throw Error("drm_prime_to_cuda: unknown object " + key);
         const auto counts = cleanup_->counts();
-        const auto timing = cleanup_->diagnostics(import_budget_);
         return {{"hits", cache_hits_.load()}, {"imports", fresh_imports_.load()},
                 {"expired", expired_imports_.load()}, {"evicted", evicted_imports_.load()},
                 {"instance_imports_alive", counts.first}, {"instance_cleanup_pending", counts.second},
-                {"phase", phase_.load()}, {"admission_dropped", timing.declined},
-                {"instance_released", timing.released}, {"instance_releasing_ms", timing.releasing_ms},
-                {"instance_release_total_ms", timing.release_ms}, {"instance_release_max_ms", timing.max_release_ms}};
+                {"admission_dropped", cleanup_->declined(import_budget_)}};
     }
     void stop() override {
         cleanup_->close(import_budget_);
         NodeSingleInput<av::VideoFrame>::stop();
     }
     virtual void process() {
-        struct ResetPhase {
-            std::atomic<const char*>& phase;
-            ~ResetPhase() { phase = "idle"; }
-        } reset{phase_};
-        phase_ = "input";
         av::VideoFrame in = this->source_->get();
         if (!in) return;
         if (in.raw()->format != AV_PIX_FMT_DRM_PRIME) {
             // pass through if not DRM PRIME
-            phase_ = "output";
             this->sink_->put(in);
             return;
         }
@@ -428,7 +411,6 @@ public:
             out.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);
         }
         out.setComplete(true);
-        phase_ = "output";
         this->sink_->put(out);
     }
     DRMPrimeToCUDA(std::unique_ptr<typename NodeSISO<av::VideoFrame,av::VideoFrame>::SourceType> &&source,
@@ -455,15 +437,9 @@ public:
         if (max_imports <= 0 || r->import_ttl_ms_ < 0)
             throw Error("drm_prime_to_cuda: max_imports must be positive and import_ttl_ms nonnegative (0 retains imports)");
         r->max_imports_ = size_t(max_imports);
-        const int cleanup_interval_us = params.value("cleanup_interval_us", 0);
-        if (cleanup_interval_us < 0)
-            throw Error("drm_prime_to_cuda: cleanup_interval_us must be nonnegative");
-        const auto interval = std::chrono::microseconds(cleanup_interval_us);
         using CleanupObjects = InstanceSharedObjects<DeferredRelease<ImportEntry>>;
-        CleanupObjects::emplace(nci.instance, "drm_import_cleanup", CleanupObjects::PolicyIfExists::Ignore, interval);
+        CleanupObjects::emplace(nci.instance, "drm_import_cleanup", CleanupObjects::PolicyIfExists::Ignore);
         r->cleanup_ = CleanupObjects::get(nci.instance, "drm_import_cleanup");
-        if (r->cleanup_->interval() != interval)
-            throw Error("drm_prime_to_cuda: cleanup_interval_us must match across the instance");
         // Include retired imports awaiting destruction, not just cache entries.
         r->import_budget_ = std::make_shared<DeferredRelease<ImportEntry>::Budget>(2 * r->max_imports_);
         if (!params.count("hwaccel")) {

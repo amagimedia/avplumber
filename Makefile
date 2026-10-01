@@ -81,9 +81,8 @@ override CXXFLAGS += -DSYNCMETER=1
 endif
 
 nodes_list_file = graph_factory.generated.cpp
-CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp mixer/TransitionScheduler.cpp mixer/graph_ops.cpp mixer/orchestrator/core.cpp mixer/orchestrator/scene.cpp mixer/orchestrator/cut.cpp mixer/orchestrator/fade.cpp mixer/orchestrator/wipe.cpp mixer/orchestrator/overlay.cpp
+CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp mixer/TransitionScheduler.cpp mixer/graph_ops.cpp mixer/orchestrator/core.cpp mixer/orchestrator/scene.cpp mixer/orchestrator/cut.cpp mixer/orchestrator/fade.cpp mixer/orchestrator/wipe.cpp mixer/orchestrator/overlay.cpp mixer/transition_control.cpp mixer/backends/cuda/transition_control.cpp
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
-CPPSRC += mixer/transition_control.cpp mixer/backends/cuda/transition_control.cpp
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
 # Boost.System is header-only since Boost 1.69; Fedora 44 (Boost 1.90) ships no libboost_system stub to link.
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz
@@ -168,7 +167,7 @@ NODES_SRC += $(SRCDIR)/nodes/hwaccel/v210_to_cuda.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/v210_unpack.cu,avpl_v210_unpack_ptx,objs/src/nodes/hwaccel/v210_to_cuda.o))
 override CXXFLAGS += -DHAVE_CUDA_RECT_SCALE=1
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.cu,avpl_rect_scale_ptx,objs/src/nodes/hwaccel/cuda_rect_draw.o))
-objs/$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.ptx: $(SRCDIR)/nodes/hwaccel/graphic_color.h
+objs/$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.ptx: $(SRCDIR)/nodes/hwaccel/cuda_rect_table.h $(SRCDIR)/nodes/hwaccel/graphic_color.h
 NODES_SRC += $(SRCDIR)/nodes/scene_cut/luma_diff.cpp
 NODES_SRC += $(SRCDIR)/nodes/scene_cut/hog_diff.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/scene_cut/luma_diff.cu,avpl_luma_diff_ptx,objs/src/nodes/scene_cut/luma_diff.o))
