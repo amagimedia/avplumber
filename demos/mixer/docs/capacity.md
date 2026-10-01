@@ -89,6 +89,12 @@ The GPU keeps headroom; host CPU is the margin. At 75 about 8.5 of the 16 vCPUs 
 The 1-minute load average reached 19 with 45% of the CPU idle: about 200 threads wake on every
 60 Hz tick, so runnable threads queue in bursts (CPU PSI) rather than the CPU running out.
 
+With every browser page moving all the time (the test page's marker never resting) the same 75@60
+show still passed the cut-spam gate with 0 missed deadlines, but without margin: Electron rose from
+3.4 to 6.5 cores (host CPU 24% idle, CPU PSI 19%), and Chromium rasterising and compositing 40
+repainting windows on the same T4 took GPU to p50 96% / p95 99% and NVDEC to 91-97%. The limits
+assume pages that rest like real graphics; constantly animated pages need fewer browser sources.
+
 At 30 fps the 110-input ceiling is the declared baseline for this host, keys included:
 **36 NVDEC + 36 browser + 34 raw NV12 + 4 key pages**, with pinned raw uploads
 (`canvas.raw_upload: "pinned"`, the setup default) and a fifth browser worker; it has not
