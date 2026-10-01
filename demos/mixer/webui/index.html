@@ -411,7 +411,7 @@ function tail(className, text) {
 /* ---------- mixer state ---------- */
 let state = null;                // last good /api/state
 let stale = false;               // the last /api/state poll failed
-let scenes = [];                 // [{id, name}], sorted like the tiles
+let scenes = [];                 // [{id}], sorted like the tiles
 let visible = [];                // scene ids behind the tiles, in the order 1–9 picks them
 let selected = "";               // scene the take buttons act on
 let direct = false;              // a pick goes straight to program
@@ -428,8 +428,7 @@ let filter = store.get("filter", "all"), tab = store.get("tab", "scenes");
 
 const settings = () => state?.settings || {};
 const auxBuses = () => state?.aux_buses || [];
-const layoutOf = (aux) => aux.layout || "pgm_pvw_grid";   // older mixers only have the scene multiview
-const isPages = (aux) => layoutOf(aux) === "source_pages";
+const isPages = (aux) => aux.layout === "source_pages";
 const auxError = (aux) => aux.error || aux.composition_error;
 const auxById = (id) => auxBuses().find((aux) => aux.id === id);
 // Slot edits go to the scene multiview a viewer shows, else to the first one the mixer has.
@@ -437,9 +436,7 @@ const gridAux = () => auxById(viewers.find((v) => !v.el.hidden && v.grid)?.grid)
                       auxBuses().find((aux) => !isPages(aux)) || null;
 const codecName = (codec) => ({h264: "H.264", h265: "H.265"})[codec] || String(codec || "").toUpperCase();
 const canvasText = (c) => `${c.width}×${c.height}p${c.fps}`;
-// Mixers from before the working_format option always composed in nv12.
-const workingFormat = (c) => c?.working_format || "nv12";
-const formatText = (c) => c ? `${canvasText(c)} ${({nv12: "SDR", p210le: "HDR 4:2:2"})[workingFormat(c)] || "HDR"}` : "";
+const formatText = (c) => c ? `${canvasText(c)} ${({nv12: "SDR", p210le: "HDR 4:2:2"})[c.working_format] || "HDR"}` : "";
 
 async function api(path, body) {
   const response = await fetch(path, body === undefined ? undefined :
@@ -610,7 +607,7 @@ function renderScenes() {
     $("scenes").replaceChildren(...shown.map((scene, i) => {
       const tile = el("button", "tile");
       tile.dataset.scene = scene.id;
-      tile.append(el("span", "n", i < 9 ? String(i + 1) : ""), el("span", "label", scene.name || scene.id));
+      tile.append(el("span", "n", i < 9 ? String(i + 1) : ""), el("span", "label", scene.id));
       tile.onclick = () => pick(scene.id);
       return tile;
     }));
@@ -1016,7 +1013,7 @@ function programOptions(s, keys) {
              unplayable: !playable(preferred),
              meta: [keys && "with keys", s.preview_codecs?.length && codecName(preferred), formatText(s.canvas)].filter(Boolean).join(" · ")}];
   }
-  const hdr = workingFormat(s.canvas) !== "nv12";
+  const hdr = s.canvas.working_format !== "nv12";
   return codecs.filter(playable).map((codec) => ({
     ...base, value: `program:${codec}`, label: `${name} · ${(hdr && RANGE_OF_CODEC[codec]) || codecName(codec)}`,
     preferred: codec === preferred, url: playerUrl(null, codec),
@@ -1026,8 +1023,7 @@ function programOptions(s, keys) {
 function outputOptions() {
   const s = settings(), keys = Boolean(state?.dsk?.length);
   return [...programOptions(s, keys), ...(s.preview_outputs || []).map((o) => {
-    // Older mixers publish aux outputs without a layout, so the bus decides what an output is.
-    const aux = auxById(o.bus), layout = aux ? layoutOf(aux) : null, pages = aux && isPages(aux);
+    const aux = auxById(o.bus), layout = aux ? aux.layout : null, pages = aux && isPages(aux);
     const meta = !aux ? ["no keys", `${codecName(o.codec)} ${String(o.color || "").toUpperCase()}`.trim(), o.fps && `p${o.fps}`]
       : pages ? [`${aux.total} sources`, `${aux.pages} pages`, o.fps && `p${o.fps}`]
       : ["PGM · PVW", `${aux.scenes.length} scene slots`, o.fps && `p${o.fps}`];
@@ -1324,7 +1320,7 @@ function renderLatency() {
 /* ---------- polling ---------- */
 function render() {
   const s = settings(), status = state.status || {};
-  scenes = s.scenes ? s.scenes.map((x) => ({id: x.id, name: x.name})) : (state.scenes || []).map((id) => ({id}));
+  scenes = (state.scenes || []).map((id) => ({id}));
   scenes.sort((a, b) => groupRank(a.id) - groupRank(b.id) || a.id.localeCompare(b.id, undefined, {numeric: true}));
   if (!selected || !scenes.some((scene) => scene.id === selected)) selected = status.pvw_scene || status.pgm_scene || "";
   applySettings(s);
