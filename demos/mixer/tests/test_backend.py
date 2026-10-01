@@ -43,7 +43,7 @@ def test_program_wipe_aux_and_renditions_use_same_backend(native_boundary, tmp_p
     backend = RecordingBackend()
     api = fake_api()
     api.AVPlumber = Engine
-    api.CudaRectOverlay = nodes.CudaRectOverlay
+    api.MixerCompositor = nodes.MixerCompositor
     api.MixerGraphBuilder = lambda *a, **kw: builder(*a, backend=backend, **kw)
     path = tmp_path / "show.json"
     path.write_text(json.dumps({
@@ -57,6 +57,9 @@ def test_program_wipe_aux_and_renditions_use_same_backend(native_boundary, tmp_p
     assert app.mixer.backend is backend
     assert [name for kind, name in calls if kind == "compositor"] == [
         "mixer_comp_a", "mixer_comp_b", "mixer_wipe_overlay", "aux_mv_comp"]
+    # All of them clocked: the scene slots, the wipe and the bus.
+    types = {n.parameters["name"]: n.parameters["type"] for n in app.avp.nodes if "name" in n.parameters}
+    assert {types[name] for kind, name in calls if kind == "compositor"} == {"mixer_compositor"}
     assert ("transition", "mixer_out_sel_transition") in calls
     assert len([c for c in calls if c[0] == "conversion"]) == 3  # source, aux and PGM rendition
 
@@ -69,7 +72,7 @@ def test_source_pages_bus_skips_the_program_tap_and_labels_outputs(native_bounda
             super().addNode(node)
     api = fake_api()
     api.AVPlumber = Engine
-    api.CudaRectOverlay = nodes.CudaRectOverlay
+    api.MixerCompositor = nodes.MixerCompositor
     api.MixerGraphBuilder = builder
     buses = [{"id": "mv2", "layout": {"preset": "source_pages"}, "renditions": [{"id": "monitor", "port": 5012}]}]
     if scene_view:
@@ -120,7 +123,7 @@ def test_pacing_loops_and_single_threaded_gpu_graphs(native_boundary, tmp_path, 
             super().addNode(node)
     api = fake_api()
     api.AVPlumber = Engine
-    api.CudaRectOverlay = nodes.CudaRectOverlay
+    api.MixerCompositor = nodes.MixerCompositor
     api.MixerGraphBuilder = builder
     (tmp_path / "page.sock").touch()
     monkeypatch.setattr(dmabuf_inputs, "rest_request",

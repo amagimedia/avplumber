@@ -336,7 +336,7 @@ show the current location; **← Back** moves one level up. Disable **Grouped
 overview** to inspect the complete native graph. Pan and zoom preserve the layout; hover a queue label for its full
 name. Displayed node and queue totals always describe the native graph.
 
-Both `cuda_rect_overlay` compositors and the permanent `transition_cuda` filter
+Both `mixer_compositor` slots and the permanent `transition_cuda` filter
 are warmed before the control server reports ready. Cut and Fade therefore
 change runtime parameters without rebuilding their FFmpeg filter graphs. Media
 Wipe uses a separate, predeclared graph. With the clip cache (the default) its

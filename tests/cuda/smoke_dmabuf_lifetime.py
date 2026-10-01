@@ -22,7 +22,7 @@ def consume(args):
         api, prefix="probe", socket=f"{args.socket_dir}/{args.consumer}.sock",
         fps=30, drm_hwaccel=None, cuda_hwaccel="probe",
         source_group="probe", processing_group="probe", preserve_alpha=True)
-    nodes.append(api.CudaRectOverlay({
+    nodes.append(api.MixerCompositor({
         "name": "compose", "src": [edge], "dst": "out", "hwaccel": "probe",
         "width": 1280, "height": 720, "fps": "30/1", "sw_format": args.format,
         "color": "sdr", "active_inputs": 1,

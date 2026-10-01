@@ -343,7 +343,7 @@ def test_program_excludes_frames_from_before_prewarm_finished(native_boundary, m
 
 def test_pad_masks_above_64_travel_as_bit_strings(native_boundary, tmp_path):
     """A show wider than 64 pads cannot put active_inputs in a JSON number, so the builder sends
-    the least-significant-bit-first bit string cuda_rect_overlay also parses."""
+    the least-significant-bit-first bit string mixer_compositor also parses."""
     count = 70
     lit = [0, 63, 64, 69]
     doc = {

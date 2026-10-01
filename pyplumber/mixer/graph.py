@@ -148,12 +148,12 @@ class MixerGraphBuilder:
         self._built = False
         self._aux_routes: Dict[str, List[str]] = {}
 
-    def canvas_compositor(self, params: Dict[str, Any], *, api=None):
-        """A compositor node on this mixer's GPU, canvas size, storage and colour; *params*
-        carries the rest and may override those."""
+    def canvas_compositor(self, params: Dict[str, Any], *, keyer: bool = False, api=None):
+        """A compositor node (with *keyer*, the DSK's keyer) on this mixer's GPU, canvas size,
+        storage and colour; *params* carries the rest and may override those."""
         return self.backend.compositor({"hwaccel": self.hwaccel, "width": self.canvas_w, "height": self.canvas_h,
                                         "sw_format": self.working_format, "color": self.color.transfer,
-                                        **params}, api=api)
+                                        **params}, keyer=keyer, api=api)
 
     def add_aux_destination(self, source: str, edge: str) -> None:
         """Add an independently subscribed destination before materializing the graph."""
@@ -502,7 +502,7 @@ class MixerGraphBuilder:
         return self._scenes[self._initial_pgm_scene]
 
     def _active_inputs_mask(self, scene: MixerScene) -> int:
-        """Compute the cuda_rect_overlay active_inputs bitmask for a scene."""
+        """Compute the mixer_compositor active_inputs bitmask for a scene."""
         mask = 0
         for src_name in scene.sources:
             idx = self._source_index[src_name]

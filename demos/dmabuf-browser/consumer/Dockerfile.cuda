@@ -123,7 +123,7 @@ RUN sofile="/build/_avplumber$(python3-config --extension-suffix)" \
     && test -s "${sofile}" \
     && ldd "${sofile}" | grep -q '/usr/local/lib/libavfilter' \
     && for node in ipc_dmabuf_source drm_prime_to_cuda drm_prime_to_egl_image \
-                   cuda_rect_overlay egl_image_cuda_overlay; do \
+                   cuda_rect_overlay mixer_compositor egl_image_cuda_overlay; do \
          strings "${sofile}" | grep -q "${node}" || exit 1; \
        done \
     && LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64 \

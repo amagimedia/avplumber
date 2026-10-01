@@ -31,7 +31,7 @@ WORKING_FORMATS = ("nv12", "p010le", "p210le")
 # A/B in demos/mixer/docs/cookbook/raw-uploads.html; the 110-input A/B is pending).
 RAW_UPLOADS = ("hwupload", "pinned")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
-MAX_SOURCES = 128         # cuda_rect_overlay active_inputs is a 128-bit pad mask (SourceMask)
+MAX_SOURCES = 128         # mixer_compositor active_inputs is a 128-bit pad mask (SourceMask)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 256
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
@@ -41,7 +41,7 @@ MAX_DSK_KEYS = 4          # the downstream keyer stays one small pass: program +
 # did before curves existed.
 FADE_CURVES = ("linear", "ease-in", "ease-out", "ease-in-out")
 DEFAULT_FADE_CURVE = "linear"
-MAX_KEY_FADE_SECONDS = 10.0   # cuda_rect_overlay rejects fade_inputs duration_ms above 10000
+MAX_KEY_FADE_SECONDS = 10.0   # mixer_keyer rejects fade_inputs duration_ms above 10000
 MAX_DPB_SIZE = 16             # H.264/HEVC allow at most 16 reference frames
 
 

@@ -991,6 +991,123 @@ NVIDIA GPU, including opaque compatibility, alpha lane layouts, transparent
 uncovered pixels, bilinear alpha sampling, and pitched output. It does not
 replace an end-to-end DMA-BUF/browser interop test.
 
+### `cuda_rect_overlay`
+
+Compose CUDA frames into one canvas: each layer scales one input's frame, or a
+crop of it, into a rectangle; the background and every layer are drawn in one
+kernel launch. The node has no clock: each output frame draws the active
+inputs' frames of one timestamp, matched across inputs, and an input without a
+frame at that timestamp repeats its previous one. Upstream owns pacing. The
+mixer's clocked compositor is [`mixer_compositor`](#mixer_compositor), its
+downstream keyer [`mixer_keyer`](#mixer_keyer).
+
+N inputs: CUDA `av::VideoFrame` (`src`, at most 128), 1 output: CUDA `av::VideoFrame` with software format `sw_format`
+
+Parameters:
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `width`, `height` (int, required) - canvas size
+-   `sw_format` (string, default `nv12`) - canvas storage: semiplanar YUV
+    (`nv12`, `p010le`, `p210le`) or packed 8-bit RGB (`rgb0`, `bgr0`, `rgba`, `bgra`)
+-   `layers` (array of objects, required) - at most `max_layers`; each draws
+    `input` (an index in `src`; omitted, the layer's position) at `dst_x`,
+    `dst_y`, `dst_w`, `dst_h` (size omitted: the source's), optionally from
+    `crop` (`{"x", "y", "w", "h"}`), with `fit` `stretch` (default) or
+    `contain` (`source_canvas` `{"w", "h"}` letterboxes into a virtual source
+    canvas), in `z` order (lower first), `blend` honouring the source's alpha.
+    The format is parsed in `src/mixer/primitives/compositor_layers.hpp`.
+-   `max_layers` (int, default `256`) - layers per frame; sizes the GPU rect table
+-   `active_inputs` (mask, default all) - inputs drawn: a JSON number, or a
+    least-significant-bit-first bit string (`"1011"`) beyond 64 inputs
+-   `timeline` (string, optional) - shared timeline whose `active_inputs`
+    entries override the mask at frame timestamps
+-   `metadata_key` (string, default `rect_overlay_v1`) - frame metadata key
+    with per-frame layer changes, `{"layers": [...]}` in `src` order or
+    `{"<index>": {...}}`, read from the frame the output copies its properties from
+-   `color` (`sdr`, `hlg` or `pq`, optional) - canvas colour contract: inputs'
+    colour tags are checked against it and the output carries it; HDR needs
+    10-bit storage. Unset, the output takes its tags from that metadata frame.
+-   `sdr_white`, `hdr_peak` (float nits, default `203`, `1000`) - graphics
+    white and peak with `color`
+-   `warmup_timeout_ms` (int, default `0`: no bound) - how long to wait for
+    every active input's first frame before drawing without the missing ones
+-   `debug_log_every_n` (int, default `0`) - log every n-th output frame
+
+`node.object.set <node> active_inputs <mask>` and
+`node.object.set <node> layers [...]` change the mask and the layers. The
+parameters `fps`, `aux_mode`, `clock_input`, `subscriptions` and
+`pgm_delay_frames` fail, as do the objects `prewarm_inputs`, `warm_reset`,
+`composition` and `fade_inputs`: they belong to `mixer_compositor` and `mixer_keyer`.
+
+### `mixer_compositor`
+
+The mixer's clocked compositor: its scene slots, the wipe overlay and the AUX
+buses. Parameters as for [`cuda_rect_overlay`](#cuda_rect_overlay), but the node
+owns its output clock: inputs are live with monotonic timestamps, and for every
+tick of `fps` a shared playout (`src/mixer/Playout.hpp`) picks each input's
+frame stamped nearest that tick, drawn `latency_ms` after it. A late input
+repeats its previous frame rather than delaying the output. See
+[mixer.md](mixer.md).
+
+Parameters, in addition:
+-   `fps` (ratio string, required) - output rate
+-   `latency_ms` (float, default two frames, at most six) - how long after a
+    tick its frame is drawn: the inputs' arrival budget
+-   `pgm_delay_frames` (int, optional) - match the last input that many ticks
+    back (a Program preview's finished program arrives one frame after its sources)
+-   `aux_mode` (bool, default `false`) - an AUX bus: a private CUDA stream,
+    subscribed inputs, layers from `composition` only (no per-frame metadata
+    layers), and frames dropped rather than waited for when the output edge is full
+-   `output_hwaccel` (string, required with `aux_mode`) - name the bus's device
+    with that stream is published under, for its conversion and encoder
+-   `subscriptions` (array of strings, required with `aux_mode`) - one shared
+    frame subscription per input, in `src` order; sources never wait for the bus
+-   `mixer` (string, optional with `aux_mode`) - the mixer whose preview the
+    status reports; its scene definitions are frozen from then on
+
+`clock_input` fails: it is `mixer_keyer`'s.
+
+Objects (`node.object.set`):
+-   `active_inputs`, `layers` - as for `cuda_rect_overlay`
+-   `prewarm_inputs` (mask) - inputs whose frames advance through the playout
+    without being drawn, so a switch to them is immediate
+-   `warm_reset` - reject frames stamped over a tick before the one being
+    drawn; prewarmed inputs keep their held pictures
+-   `composition` (`aux_mode` only) - `{"layers": [...], "active_inputs": <mask>,
+    "enabled": true}`: applied on the tick its new inputs are ready; if they
+    are not ready within max(250 ms, twice `latency_ms`), the previous layout
+    stays and `composition_error` says so. `enabled` false suspends the bus.
+
+`node.object.get <node> status`: `suspended`, `output_drops`, `playout`
+(`frames`, `repeats`, `discarded`, `overflow`, `missed_deadlines`,
+`per_input`), with `aux_mode` `composition_pending` and `composition_error`,
+with `mixer` `pvw_scene`.
+
+### `mixer_keyer`
+
+The mixer's downstream keyer (DSK): blended key layers over the program.
+Parameters as for [`cuda_rect_overlay`](#cuda_rect_overlay); the program input
+drives the output. Each program frame is drawn at once over every key above
+fade level 0, with each key's newest frame stamped at or before that program
+tick. Keys are never waited for; with no key visible the program frame passes
+through untouched.
+
+Parameters, in addition:
+-   `clock_input` (int, required) - the program's index in `src`
+-   `fps` (ratio string, required) - the program's rate; paces the key
+    subscriptions and the fades
+-   `subscriptions` (array of strings, optional) - one shared frame
+    subscription per input, in `src` order; an empty name (the program)
+    subscribes nothing
+
+`aux_mode`, `latency_ms` and `pgm_delay_frames` fail: the keyer has no playout.
+
+Objects (`node.object.set`):
+-   `active_inputs` (mask) - the keys on air, switched with a cut
+-   `fade_inputs` (`{"active_inputs": <mask>, "duration_ms": 0..10000, "curve":
+    "linear"}`) - the keys the mask switches fade over `duration_ms`; `curve`
+    is `linear`, `ease-in`, `ease-out` or `ease-in-out`
+-   `layers` - as for `cuda_rect_overlay`
+
 ### `jittergen`
 
 Enabled only if avplumber is compiled with `BUILD_TYPE=Debug`. Delay packets

@@ -12,9 +12,9 @@ sys.path.insert(0, os.environ.get("PYPLUMBER_PATH", "/opt/avplumber"))
 import pyplumber
 from pyplumber.node import (
     AssumeVideoFormat,
-    CudaRectOverlay,
     EglImageCudaOverlay,
     FilterVideo,
+    MixerCompositor,
     OneToMany,
     SmoothTimestamps,
 )
@@ -225,7 +225,7 @@ if compositor_backend not in {"egl_cuda", "cuda"}:
     sys.exit("COMPOSITOR_BACKEND must be 'egl_cuda' or 'cuda'")
 if compositor_backend == "cuda" and source_count > MAX_COMPOSITOR_INPUTS:
     sys.exit(
-        f"SOURCE_COUNT exceeds cuda_rect_overlay's {MAX_COMPOSITOR_INPUTS}-input mask"
+        f"SOURCE_COUNT exceeds mixer_compositor's {MAX_COMPOSITOR_INPUTS}-input mask"
     )
 
 source_url = os.environ.get("SOURCE_URL", DEFAULT_SOURCE_URL)
@@ -383,7 +383,7 @@ if compositor_backend == "egl_cuda":
 else:
     mixed_program_edge = "scale_grid_program"
     avp.addNode(
-        CudaRectOverlay(
+        MixerCompositor(
             {
                 "name": "scale_grid_mixer",
                 **mixer_timing_params,

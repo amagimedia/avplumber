@@ -23,7 +23,7 @@ namespace avp::mixer {
 
 struct SourceLayout {
     std::string crop_scale_graph; // e.g., "crop=1920:1080:0:0,scale_cuda=640:360"
-    /// Layer fields for cuda_rect_overlay (dst_x, dst_y, …) — not including `graph`.
+    /// Layer fields for mixer_compositor (dst_x, dst_y, …) — not including `graph`.
     Parameters layer;
 };
 
@@ -212,7 +212,7 @@ struct MixerState : public InstanceShared<MixerState> {
     /// ClipCache store holding decoded wipe clips ("clips"), reported by mixer.status.
     /// Empty when wipes decode per take.
     std::string wipe_cache_store;
-    /// The wipe compositor (cuda_rect_overlay), parked with active_inputs=0 between cached
+    /// The wipe compositor (mixer_compositor), parked with active_inputs=0 between cached
     /// wipes and armed per take. Required when wipe_cache_store is set.
     std::string wipe_overlay_name;
     /// Cached wipes keep the player group running: no node is created, started or stopped

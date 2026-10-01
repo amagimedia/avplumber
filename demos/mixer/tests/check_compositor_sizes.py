@@ -7,7 +7,7 @@ import argparse
 import json
 import time
 from pyplumber import AVPlumber
-from pyplumber.node import InputRec, Demux, DecVideo, Realtime, SourceSwitcher, CudaRectOverlay, FilterVideo
+from pyplumber.node import InputRec, Demux, DecVideo, Realtime, SourceSwitcher, MixerCompositor, FilterVideo
 
 
 def run(paths):
@@ -28,7 +28,7 @@ def run(paths):
     avp.addNode(SourceSwitcher({'name':'switch', 'group':'test', 'src':['r0','r1','r2'],
                                'dst':'selected', 'active':0, 'fallback_when_active_missing':False}))
     layer = {'dst_x':0,'dst_y':0,'dst_w':540,'dst_h':960,'fit':'contain'}
-    avp.addNode(CudaRectOverlay({'name':'compositor','group':'test','src':['selected'],'dst':'gpu_out',
+    avp.addNode(MixerCompositor({'name':'compositor','group':'test','src':['selected'],'dst':'gpu_out',
                                 'width':540,'height':960,'hwaccel':'test_gpu','sw_format':'nv12',
                                 'fps':'60/1','scale':True,'layers':[layer],'active_inputs':1}))
     avp.addNode(FilterVideo({'name':'pixel_readback','group':'test','src':'gpu_out','dst':'cpu_out',
