@@ -66,16 +66,9 @@ inline double dipHoldEnd(double hold) {
     return 0.5 + 0.5 * std::min(0.5, std::max(0.0, hold));
 }
 
-inline double dipCurveAt(FadeCurve curve, double x, double hold) {
-    x = std::min(1.0, std::max(0.0, x));
-    const double hi = dipHoldEnd(hold), lo = 1 - hi;
-    if (x < lo) return 0.5 * fadeCurveAt(curve, x / lo);
-    return x < hi ? 0.5 : 0.5 + 0.5 * fadeCurveAt(curve, (x - hi) / lo);
-}
-
-/// dipCurveAt as an FFmpeg expression of `progress` (clamped as for
+/// The dip's y(x) above as an FFmpeg expression of `progress` (clamped as for
 /// fadeCurveExpression), term for term: %.17g round-trips, so the bounds are
-/// dipCurveAt's doubles. Progress lives in variable 1 because the curve uses
+/// dipHoldEnd's doubles. Progress lives in variable 1 because the curve uses
 /// variable 0; the result is parenthesised for "1-" + result.
 inline std::string dipCurveExpression(FadeCurve curve, const std::string& progress, double hold) {
     const double end = dipHoldEnd(hold);

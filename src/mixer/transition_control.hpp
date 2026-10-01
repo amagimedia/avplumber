@@ -6,18 +6,21 @@
 #include <optional>
 #include <vector>
 
-namespace avp::mixer {
+extern "C" {
+#include <libavutil/pixfmt.h>
+}
 
-/// A dip colour as canvas codes: Y, Cb, Cr at 8-bit limited-range scale (canvasCodes).
-using DipCodes = std::optional<std::array<float, 3>>;
+namespace avp::mixer {
 
 struct FadeRequest {
     int64_t start_ms;
     double duration_sec;
     bool destination_is_a;
     FadeCurve curve = FadeCurve::Linear;  // shapes progress along the transition, either direction
-    DipCodes dip = std::nullopt;  // set: dip through this colour instead of mixing; the curve shapes each half
+    // set: dip through this opaque SDR RGB colour instead of mixing; the curve shapes each half
+    std::optional<std::array<uint8_t, 3>> dip = std::nullopt;
     double dip_hold = 0;  // the dip colour's hold alone, as a share of the duration (dipHoldEnd)
+    AVColorTransferCharacteristic transfer = AVCOL_TRC_BT709;  // the canvas the dip colour is drawn on
 };
 
 struct TransitionCommand {

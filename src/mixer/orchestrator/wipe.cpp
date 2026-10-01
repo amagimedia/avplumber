@@ -259,10 +259,7 @@ int64_t MixerOrchestrator::prepareWipe(
             const int64_t start_tick = orch.armWipeChain(wipe_file);
             overlay_initial_ts = av::Timestamp(start_tick - 1, av::Rational(state->fps_den, state->fps_num));
         } else {
-            nodes->node(state->wipe_input_node_name)->stop(true);
-            orch.setNodeParam(state->wipe_input_node_name, "url", wipe_file);
-            orch.flushWipeEdges();
-            orch.startGroup(state->wipe_group_name);
+            orch.startWipeDecode(wipe_file);
         }
 
         const int64_t prep_ms = wallclock.pts();
@@ -341,11 +338,8 @@ void MixerOrchestrator::warmupWipe(const std::string& wipe_file, int64_t timeout
         overlay_edge_name = edgeNameAt(nodes_, state_->wipe_selector_name, "src", 1);
         overlay_initial_ts = edgeLastTsIfExists(nodes_, overlay_edge_name);
         nodes_->group(state_->wipe_group_name)->stopNodesAndWait();
-        nodes_->node(state_->wipe_input_node_name)->stop(true);
-        setNodeParam(state_->wipe_input_node_name, "url", wipe_file);
-        flushWipeEdges();
         resetInputIf(nodes_, state_->wipe_base_fps_name);
-        startGroup(state_->wipe_group_name);
+        startWipeDecode(wipe_file);
         // Feed the overlay's program input as a real wipe would; the selector
         // stays on the direct branch so nothing of this reaches the output.
         timeline_->clearKey(state_->wipe_otm_name, "outputs");

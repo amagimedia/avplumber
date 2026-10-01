@@ -33,6 +33,7 @@
 #include "SharedTimeline.hpp"
 #include "mixer/primitives/MixerState.hpp"
 #include "mixer/primitives/compositor_color.hpp"
+#include "nodes/hwaccel/graphic_color.h"
 #include "mixer/orchestrator/MixerOrchestrator.hpp"
 using avp::mixer::MixerOrchestrator;
 using avp::mixer::MixerState;
@@ -505,7 +506,9 @@ public:
             std::map<std::string, bool> subscriptions;
             for (const auto &entry : manager_->allNodes()) {
                 if (!entry.second) continue;
-                if (auto source = std::dynamic_pointer_cast<IOutputSubscriptions>(entry.second->node())) {
+                std::shared_ptr<Node> n;
+                if (!entry.second->doLockedTry([&]() { n = entry.second->node(); })) continue;
+                if (auto source = std::dynamic_pointer_cast<IOutputSubscriptions>(n)) {
                     const auto states = source->outputSubscriptions();
                     subscriptions.insert(states.begin(), states.end());
                 }
@@ -1010,7 +1013,7 @@ public:
             if (req.contains("color") && !req.at("color").is_null())
                 dip = avp::mixer::parseDipColor(req.at("color").get<std::string>());
             auto orch = mixerOrchestrator(mixer_name);
-            orch.fade(scene_name, duration_sec, start_pts_ms, curve, dip);
+            orch.fade(scene_name, duration_sec, start_pts_ms, curve, dip, CommandTiming::received());
         };
 
         // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0,"start_pts_ms":123456789}
@@ -1105,13 +1108,9 @@ public:
             config_str = strutils::trim(config_str);
             json cfg = json::parse(config_str);
 
-            auto transition_control = avp::mixer::transitionControl(cfg.value("backend", std::string("cuda")));
-
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             std::lock_guard<std::mutex> lock(state->mutex);
-            state->transition_control = transition_control;
-            state->transition_node_name = cfg.value("transition_node", std::string(""));
-
+            if (cfg.contains("backend")) state->transition_control = avp::mixer::transitionControl(cfg["backend"].get<std::string>());
             if (cfg.contains("timeline")) state->timeline_name = cfg["timeline"].get<std::string>();
             if (cfg.contains("hwaccel")) state->hwaccel_name = cfg["hwaccel"].get<std::string>();
             if (cfg.contains("fps_num")) state->fps_num = cfg["fps_num"].get<int>();
@@ -1131,7 +1130,7 @@ public:
             if (cfg.contains("source_switcher")) state->source_switcher_name = cfg["source_switcher"].get<std::string>();
             if (cfg.contains("keyframe_node")) state->keyframe_node_name = cfg["keyframe_node"].get<std::string>();
             if (cfg.contains("initial_pgm_scene")) state->pgm_scene_name = cfg["initial_pgm_scene"].get<std::string>();
-            if (cfg.contains("initial_pvw_scene")) state->pvw_scene_name = cfg["initial_pvw_scene"].get<std::string>();
+            if (cfg.contains("initial_pvw_scene")) state->publishPreview(cfg["initial_pvw_scene"].get<std::string>(), 0);
             if (cfg.contains("initial_pgm_slot")) {
                 std::string slot = cfg["initial_pgm_slot"].get<std::string>();
                 if (slot == "A")
