@@ -1,8 +1,9 @@
-FROM fedora:42
+FROM fedora:44
 
 # Headless wlroots/sway compositor + GL userspace loaders (glvnd) + mesa GBM
 # frontend. No NVIDIA driver is baked in: the NVIDIA EGL/GL *core* (matching the
 # host kernel driver) is provided by the NVIDIA container runtime at run time.
+# libglvnd-gles obsoletes mesa-libGLES: Mesa's GLES goes through glvnd's libGLESv2.
 RUN dnf -y install --setopt=install_weak_deps=False \
         bash \
         libglvnd-egl \
@@ -12,7 +13,6 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         mesa-dri-drivers \
         mesa-libEGL \
         mesa-libGL \
-        mesa-libGLES \
         mesa-libgbm \
         shadow-utils \
         socat \
