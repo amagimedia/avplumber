@@ -45,7 +45,8 @@ DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="42
                         dsk=[], clean_feed=False)
 # Measured on the T4: 110 inputs at 25/30 fps; 75 at 60 fps, the NVDEC, browser and upload
 # caps below filled (cut-spam gate passes with its 3-frame deadline and the wipe cache; host CPU,
-# not the GPU, is the margin). 50 fps scales the 60 fps totals by frame rate. Keys count as inputs.
+# not the GPU, is the margin). 50 fps scales the 60 fps budgets by frame rate (source_limit).
+# Keys count as inputs.
 def browser_limit(fps):
     return 40   # five browser workers of eight windows (compose.yaml)
 
@@ -61,18 +62,22 @@ def raw_upload_units(fps):
     return {25: 30, 30: 34}.get(fps, 1020 // fps)
 
 
-# Share of the per-rate total a 10-bit canvas carries, measured on the T4 at 30 fps (see
-# docs/capacity.md): P010 and P210 canvases both pass the cut-spam gate at 90 sources; at 95 the
-# GPU-side SDR-to-HLG work slows NVDEC to saturation and sources fall behind. The same share is
-# assumed at 50 fps (73); at 60 fps 61 passes and 64 runs out of GPU compute. The setup page
-# carries the same table.
-MODE_CAPACITY = {(8, "420"): 1.0, (10, "420"): 0.82, (10, "422"): 0.82}
+# Share of the per-rate total a 10-bit canvas carries, measured on the T4 (see docs/capacity.md).
+# HLG 4:2:0 (P010): 90 of 110 at 30 fps, where above it the GPU-side SDR-to-HLG work drives NVDEC
+# to saturation, and 61 of 75 at 60 fps, where 64 runs out of GPU compute. HLG 4:2:2 (P210 canvas,
+# v210 unpack) costs more GPU per source: at 60 fps 55 keeps the margin of 61 at 4:2:0 (61 and 57
+# ran at GPU p95 92-96%). Each share applies at every rate (4:2:2: 81 at 25/30 fps, not measured;
+# 90 passed). The setup page carries the same table.
+MODE_CAPACITY = {(8, "420"): 1.0, (10, "420"): 0.82, (10, "422"): 0.74}
 
 
 def source_limit(fps, bit_depth=8, chroma="420"):
-    # Above 30 fps the measured 60 fps total (75) scaled by frame rate: 90 at 50, not measured.
-    # An unsupported pair (8-bit 4:2:2) is refused by the mode checks in recipe_for.
-    return int((110 if fps <= 30 else 75 * 60 // fps) * MODE_CAPACITY.get((bit_depth, chroma), 1.0))
+    # Above 30 fps the measured 60 fps total (75) scaled by frame rate, never above what the NVDEC,
+    # browser and upload caps carry together: 82 at 50 fps, where the 40 browser windows do not
+    # scale (the scaled 90 is not measured). An unsupported pair (8-bit 4:2:2) is refused by the
+    # mode checks in recipe_for.
+    total = int((110 if fps <= 30 else 75 * 60 // fps) * MODE_CAPACITY.get((bit_depth, chroma), 1.0))
+    return min(total, nvdec_limit(fps) + browser_limit(fps) + raw_upload_units(fps))
 
 
 def _write_atomic(path, text):

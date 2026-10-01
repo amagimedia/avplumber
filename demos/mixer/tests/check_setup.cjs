@@ -89,7 +89,7 @@ const { chromium } = require('playwright');
     await page.locator('#mode').selectOption('10:420');
     assert.deepEqual((await apply()).weights, [16, 16, 0, 0, 31, 12, 11], 'HDR 4:2:0 scales the baseline to its capacity, half HLG');
     await page.locator('#mode').selectOption('10:422');
-    assert.deepEqual((await apply()).weights, [15, 15, 4, 0, 30, 11, 11], 'HDR 4:2:2 adds the HLG v210 sources');
+    assert.deepEqual((await apply()).weights, [14, 14, 3, 0, 27, 10, 9], 'HDR 4:2:2 scales to its capacity and adds HLG v210 sources');
     await page.locator('#mode').selectOption('8:420');
     const back = await apply();
     assert.deepEqual(back.weights, [36, 0, 0, 0, 36, 34, 0], 'back on SDR the baseline returns');
@@ -108,8 +108,8 @@ const { chromium } = require('playwright');
     await page.locator('#mode').selectOption('10:420');
     assert.deepEqual((await apply()).weights, [10, 5, 0, 0, 5, 5, 5], '4:2:2 uploads become 4:2:0 uploads of the same colour');
 
-    // The default canvas is 10-bit 4:2:2: 0.82 of 110 at 25/30 fps, of 90 at 50 and of 75 at 60.
-    for (const [fps, maximum] of [[25, 90], [30, 90], [50, 73], [60, 61]]) {
+    // The default canvas is 10-bit 4:2:2: 0.74 of 110 at 25/30 fps, of 90 at 50 (scaled) and of 75 at 60.
+    for (const [fps, maximum] of [[25, 81], [30, 81], [50, 66], [60, 55]]) {
       await reset();
       await page.locator('#fps').selectOption(String(fps));
       await page.locator('[data-preset=equal]').click();
@@ -122,15 +122,15 @@ const { chromium } = require('playwright');
       await page.locator('#sources').fill(String(maximum + 1));
       assert.equal((await apply()).source_count, maximum, `${fps} fps stops at ${maximum}`);
       await page.locator('#fps').selectOption('60');
-      assert.equal((await apply()).source_count, 61);
+      assert.equal((await apply()).source_count, 55);
     }
 
     await reset();
     await page.locator('#fps').selectOption('30');
     await page.locator('[data-preset=equal]').click();
-    await page.locator('#sources').fill('83');
+    await page.locator('#sources').fill('81');   // the 4:2:2 maximum at 30 fps
     const mixed = await apply();
-    assert.equal(mixed.weights.reduce((sum, n) => sum + n, 0), 83);
+    assert.equal(mixed.weights.reduce((sum, n) => sum + n, 0), 81);
     assert(mixed.weights[2] <= 4 && mixed.weights[4] <= 40);
     await page.locator('#scenes').fill('193');
     assert.equal((await apply()).scene_count, 192);

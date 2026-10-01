@@ -7,19 +7,21 @@ output. None of them are decoder-only limits or guarantees for HDR, larger frame
 arbitrary browser pages, or additional outputs.
 
 The setup (`setup_runtime.py`, mirrored in `setup.html`) allows 110 inputs at 25 and
-30 fps, 90 at 50 and 75 at 60 fps, downstream-key pages included. Within that total it caps
+30 fps, 82 at 50 and 75 at 60 fps, downstream-key pages included. Within that total it caps
 NVDEC streams at min(40, 1100 ÷ fps), browser windows at 40 (five workers of eight) and
 raw NV12 uploads at 30, 34, 20 or 17 units at 25, 30, 50 or 60 fps (a P010 upload costs two).
-50 fps takes the 60 fps total and upload budget scaled by frame rate.
-On a 10-bit canvas the total is scaled by `MODE_CAPACITY`, 0.82 for HLG 4:2:0 and 4:2:2:
-90 at 25/30 fps, 73 at 50 and 61 at 60 (see [10-bit canvases](#10-bit-canvases)). A request
-above the limit is scaled down to it.
+50 fps takes the 60 fps total and upload budget scaled by frame rate; the total never exceeds
+what the three caps carry together, 82 at 50 fps, since the 40 browser windows do not scale.
+[Source limits by mode and frame rate](cookbook/source-limits.html) has every mode in one table.
+On a 10-bit canvas the total is scaled by `MODE_CAPACITY`: 0.82 for HLG 4:2:0 (90 at 25/30 fps,
+73 at 50, 61 at 60) and 0.74 for HLG 4:2:2 (81, 66, 55); see [10-bit canvases](#10-bit-canvases).
+A request above the limit is scaled down to it.
 
 | Input fps | Setup limit | NVDEC | Browser | Raw NV12 upload maximum | Validation |
 | --- | ---: | ---: | ---: | ---: | --- |
 | 25 | 110 | 40 | 40 | 30 | 100 (40 / 32 / 28) validated: two healthy starts, several minutes of transitions; 110 not measured at this rate |
 | 30 | 110 | 36 | 40 | 34 | The declared baseline: 36 NVDEC + 36 browser + 34 raw NV12 + 4 keys, pinned uploads; not pushed further |
-| 50 | 90 | 22 | 40 | 20 | The 60 fps total and upload budget scaled by frame rate, NVDEC from the 1100 frames/s rule; not measured. 40 browser windows cap an SDR mix at 82 |
+| 50 | 82 | 22 | 40 | 20 | The 60 fps upload budget scaled by frame rate, NVDEC from the 1100 frames/s rule; the total is the three caps (the scaled 90 exceeds them); not measured |
 | 60 | 75 | 18 | 40 | 17 | 18 NVDEC + 36 browser + 17 raw NV12 + 4 keys: every cap filled, cut-spam gate passes (see [60 fps on the current stack](#60-fps-on-the-current-stack)); 68 had a 19.5 h soak |
 
 At 60 fps the 68-input show (18 NVDEC + 29 browser + 17 raw NV12 + 4 downstream-key
@@ -74,7 +76,7 @@ and a 15 s GPU sample):
 | 75 | 18 + 36 + 17 + 4 | pass, 0 missed | 113 | 45% | 12.5% | 3.39 cores | 4.85 cores | 72% | 86% (max 90) | 8.8 GB |
 
 75 fills every per-rate cap (NVDEC 18, browser windows 40, raw upload units 17), so the setup
-allows 75 at 60 fps, and 90 at 50 by frame rate. Cut latency at 75 was p95 51 ms; PVW followed PGM within one frame.
+allows 75 at 60 fps, and 82 at 50 (the caps scaled by frame rate). Cut latency at 75 was p95 51 ms; PVW followed PGM within one frame.
 The GPU keeps headroom; host CPU is the margin. At 75 about 8.5 of the 16 vCPUs were busy:
 
 | Inputs | CPU per input | Total | Where |
@@ -122,8 +124,8 @@ Per source, both 10-bit canvases cost about the same GPU time, roughly 1.8x an S
 the program still meets its deadlines, but decoded sources fall behind and frames back up
 in VRAM, which at 4:2:2 and 110 ran the 15 GB T4 out of memory. HLG inputs skip that
 conversion: the Balanced HDR mix at 90 leaves GPU and NVDEC headroom. The limit holds for any
-mix the page allows, so the setup caps both 10-bit canvases at 90 / 110 = 0.82 of the SDR
-total, and applies the same share at 50 fps (73) and 60 fps (61).
+mix the page allows, so the setup caps HLG 4:2:0 at 90 / 110 = 0.82 of the SDR total, and
+applies the same share at 50 fps (73) and 60 fps (61).
 
 At 60 fps the 61-input Balanced HDR 4:2:0 mix (9 SDR + 9 HLG NVDEC, 28 browser, 6 NV12 + 5 P010,
 4 keys, clean feed on) first failed on NVENC, not on its inputs. An HDR show encodes the program
@@ -141,7 +143,19 @@ little quality per bit for encoder time:
 
 Above 61 the GPU's CUDA compute runs out (p3, clean feed): 64 passed once and then missed 1
 deadline with a 123 ms cut (GPU p50 87-89%, p95 94%); 66 missed 2 (GPU p50 88%, p95 95%). The
-limit stays at 61, the tightest mode on the T4.
+limit stays at 61.
+
+HLG 4:2:2 at 60 fps (P210 canvas, four HLG v210 inputs unpacked on the GPU, p3, clean feed) costs
+more GPU per source than 4:2:0, which at 30 fps did not show because the GPU had room:
+
+| 60 fps, HDR 4:2:2 | Gate | Input repeats | GPU p50 / p95 | NVDEC p50 / p95 | NVENC | Peak VRAM |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 61 | fail, 4 missed | 4 500 | 87 / 96% | 77 / 83% | 73% | 10.2 GB |
+| 57 | pass, 0 missed (twice) | 177; 5 750 | 87-88 / 92-93% | 78-80 / 83-84% | 71-72% | 9.9 GB |
+| 55 | pass, 0 missed | 98 | 80 / 86% | 77 / 81% | 71% | 9.2 GB |
+
+The setup takes 55, the margin 61 has at 4:2:0, as the 4:2:2 share: 55 / 75 = 0.74 at every rate
+(81 at 25/30 fps; 90 passed at 30 fps but is no longer allowed).
 
 The browser service defaults to five workers with eight windows each (40 total); the setup
 allows all 40 at every rate, downstream-key pages included.

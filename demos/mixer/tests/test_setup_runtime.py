@@ -909,8 +909,9 @@ def test_dsk_settings_are_bounded(changes):
 
 
 @pytest.mark.parametrize('fps, mode, expected', [
-    (30, (8, "420"), 110), (30, (10, "420"), 90), (30, (10, "422"), 90),
-    (60, (8, "420"), 75), (60, (10, "420"), 61), (60, (10, "422"), 61)])
+    (30, (8, "420"), 110), (30, (10, "420"), 90), (30, (10, "422"), 81),
+    (50, (8, "420"), 82), (50, (10, "420"), 73), (50, (10, "422"), 66),
+    (60, (8, "420"), 75), (60, (10, "420"), 61), (60, (10, "422"), 55)])
 def test_a_show_above_the_modes_capacity_is_scaled_down(tmp_path, fps, mode, expected):
     """Switching 110 SDR inputs at 30 fps to a 10-bit canvas keeps the show within that canvas's capacity."""
     bit_depth, chroma = mode

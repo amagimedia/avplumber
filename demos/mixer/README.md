@@ -77,11 +77,13 @@ The player also shows host GPU/NVDEC usage and used/total VRAM from `nvidia-smi`
 sampled once per second. Usage turns orange at 95% and red at 99%; VRAM turns
 orange at 14 GiB and red at 14.75 GiB. These totals include other GPU applications.
 
-The setup limits unique sources to **110 at 25 and 30 fps, 90 at 50 and 75 at
+The setup limits unique sources to **110 at 25 and 30 fps, 82 at 50 and 75 at
 60 fps**, set on a 16 GiB NVIDIA T4 host, where 110 at 30 fps and 75 at 60 fps are
 the measured baselines; 25 fps inherits the 30 fps total (validated to 100) and
-50 fps scales the 60 fps one by frame rate. Downstream-key pages count as sources: each key takes one place in that
-budget. It allows at most **40 browser windows** (sources and key pages together;
+50 fps scales the 60 fps one by frame rate, up to what the per-type caps below
+carry (82). Downstream-key pages count as sources: each key takes one place in that
+budget. [Source limits by mode and frame rate](docs/cookbook/source-limits.html)
+has every mode in one table. It allows at most **40 browser windows** (sources and key pages together;
 the browser service runs five workers with eight windows each) and **192
 scenes**. Source mix, orientation and bit depth also affect capacity; a
 mixed-source budget does not mean the GPU can decode that many simultaneous
