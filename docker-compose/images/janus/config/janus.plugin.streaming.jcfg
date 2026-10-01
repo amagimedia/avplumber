@@ -16,6 +16,20 @@ avplumber-multiview: {
 	videofmtp = "profile-level-id=640028;packetization-mode=1"
 }
 
+avplumber-clean: {
+	type = "rtp"
+	id = 5010
+	description = "avplumber SDR clean program"
+	audio = false
+	video = true
+	videoport = 5010
+	videortcpport = 5011
+	videoiface = "127.0.0.1"
+	videopt = 96
+	videocodec = "h264"
+	videofmtp = "profile-level-id=42e028;packetization-mode=1"
+}
+
 avplumber-hdr: {
 	type = "rtp"
 	id = 2

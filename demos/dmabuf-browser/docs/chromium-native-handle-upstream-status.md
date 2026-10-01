@@ -152,7 +152,6 @@ rendering backend. For this headless Wayland demo the tested family is:
 --ozone-platform=wayland
 --use-gl=angle
 --use-angle=gl-egl
---disable-vulkan
 ```
 
 The demo also uses deployment-oriented switches such as

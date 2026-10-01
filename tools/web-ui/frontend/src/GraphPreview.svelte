@@ -470,8 +470,8 @@
     left: 0.25rem;
     right: 0.25rem;
     padding: 0.25rem 0.4rem;
-    background: var(--pgm-dim);
-    color: var(--pgm);
+    background: var(--error-dim);
+    color: var(--error);
     font-size: 0.75rem;
     border-radius: 0.25rem;
   }

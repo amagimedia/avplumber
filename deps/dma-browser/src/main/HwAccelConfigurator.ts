@@ -51,7 +51,6 @@ export class HwAccelConfigurator {
       this.appendSwitch('use-angle', envString(this.env, 'DMA_BROWSER_ANGLE_BACKEND', 'gl-egl'));
     }
 
-    this.appendSwitch('disable-vulkan');
     this.appendSwitch('disable-hardware-overlays');
     this.appendSwitch('disable-accelerated-video-decode');
     this.appendSwitch('ignore-gpu-blocklist');

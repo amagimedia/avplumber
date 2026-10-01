@@ -177,23 +177,20 @@ export class FrameCaptureChannel implements ICaptureChannel {
         this.dropFrame('no_texture');
         return;
       }
-      // Holding needs a frame to hold: until one was sent, the page's paints go through.
-      if (this.held && this.stats.txFrameCount > 0) {
-        this.dropFrame('held');
-        this.releaseTexture(tex);
-        return;
-      }
-      if (quarantinedTextures.has(this.opts.socketPath)) {
-        this.dropFrame('transport_quarantined');
-        this.releaseTexture(tex);
-        return;
-      }
-      if (this.retainedFrames.size >= this.retainedFramePoolSize) {
-        this.dropFrame('retained_pool_full');
-        this.releaseTexture(tex);
-        return;
-      }
       try {
+        // Holding needs a frame to hold: until one was sent, the page's paints go through.
+        if (this.held && this.stats.txFrameCount > 0) {
+          this.dropFrame('held');
+          return;
+        }
+        if (quarantinedTextures.has(this.opts.socketPath)) {
+          this.dropFrame('transport_quarantined');
+          return;
+        }
+        if (this.retainedFrames.size >= this.retainedFramePoolSize) {
+          this.dropFrame('retained_pool_full');
+          return;
+        }
         // Electron 31+ exposes textureInfo directly on OffscreenSharedTexture.
         // Older builds returned it via toJSON(); keep that as a fallback.
         let info: Record<string, unknown> | undefined = tex.textureInfo;
@@ -416,7 +413,6 @@ export class FrameCaptureChannel implements ICaptureChannel {
     if (!textures) {
       textures = new Set();
       quarantinedTextures.set(this.opts.socketPath, textures);
-      textures.add(frame.texture);
       try {
         this.boundContents?.stopPainting();
       } catch (err) {

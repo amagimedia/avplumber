@@ -115,7 +115,7 @@ apply_nvidia_runtime() {
     electron_args+=(--ozone-platform=x11)
   fi
 
-  electron_args+=(--disable-vulkan "--use-gl=$gl_backend")
+  electron_args+=("--use-gl=$gl_backend")
   if [[ "$gl_backend" == "angle" || "$gl_backend" == "egl-angle" ]]; then
     electron_args+=("--use-angle=$angle_backend")
   fi

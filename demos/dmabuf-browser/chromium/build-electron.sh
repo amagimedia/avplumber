@@ -14,8 +14,9 @@ Build Electron with the avplumber NVIDIA DMA-BUF native-handle opt-in.
 Usage:
   build-electron.sh [ELECTRON_VERSION]
 
-The default is Electron 41.3.0 (Chromium 146), matching deps/dma-browser.
-Electron 43.x builds Chromium 150; for example:
+The patches are written for Electron 41.3.0 (Chromium 146), the default, and
+Electron 43.x (Chromium 150). deps/dma-browser installs stock Electron 44
+(Chromium 152) and uses the GBM shim instead. For example:
 
   build-electron.sh 43.4.0
 

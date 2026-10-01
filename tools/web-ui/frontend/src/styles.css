@@ -2,7 +2,7 @@
   color-scheme: dark;
   --bg: #0b0d10; --panel: #14181d; --edge: #232b34; --edge-soft: #1b222a;
   --text: #e8edf2; --muted: #8b98a5; --accent: #f5a524;
-  --pgm: #e5484d; --pgm-dim: #3a1416; --pvw: #30a46c; --pvw-dim: #0f2a1d;
+  --error: #e5484d; --error-dim: #3a1416; --ok: #30a46c; --ok-dim: #0f2a1d;
 }
 
 * { box-sizing: border-box; }
@@ -22,9 +22,6 @@
   text-transform: uppercase;
 }
 
-a { color: var(--muted); font-size: 12px; }
-a:hover { color: var(--accent); }
-
 .badge {
   border-radius: 6px;
   padding: 4px 8px;
@@ -32,13 +29,13 @@ a:hover { color: var(--accent); }
 }
 
 .badge-connected {
-  background: var(--pvw-dim);
-  color: var(--pvw);
+  background: var(--ok-dim);
+  color: var(--ok);
 }
 
 .badge-disconnected {
-  background: var(--pgm-dim);
-  color: var(--pgm);
+  background: var(--error-dim);
+  color: var(--error);
 }
 
 .status {
@@ -286,8 +283,8 @@ pre {
 }
 
 .node-badge-on {
-  background: var(--pvw-dim);
-  color: var(--pvw);
+  background: var(--ok-dim);
+  color: var(--ok);
 }
 
 .node-badge-off {
