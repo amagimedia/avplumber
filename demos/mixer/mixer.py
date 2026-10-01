@@ -410,10 +410,9 @@ def _init_avp(avp_options, api, on_error: ExitStack):
     return avp
 
 
-def _make_builder(avp, api, options, *, canvas, fps, working_format, color="sdr", wipe_color=None,
-                  swap_preview=True):
+def _make_builder(avp, api, options, *, canvas, fps, working_format, color="sdr", wipe_color=None):
     """The mixer builder, configured identically for both build paths (canvas,
-    rate, working_format and the show's control options are the only per-path differences)."""
+    rate and working_format are the only per-path differences)."""
     return api.MixerGraphBuilder(
         avp, name=MIXER_NAME, canvas=canvas, fps=(fps, FPS_DEN),
         latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
@@ -421,7 +420,7 @@ def _make_builder(avp, api, options, *, canvas, fps, working_format, color="sdr"
         defer_initial_routes=True, defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
         cache_wipes_mb=options.wipe_cache_mb or None, working_format=working_format, color=color,
-        wipe_color=options.wipe_color or wipe_color, swap_preview=swap_preview)
+        wipe_color=options.wipe_color or wipe_color)
 
 
 def _build_input(
@@ -694,7 +693,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     avp = _init_avp(options, api, on_error)
     canvas = (cfg.canvas_w, cfg.canvas_h)
     mixer = _make_builder(avp, api, options, canvas=canvas, fps=cfg.fps, working_format=cfg.working_format,
-                          color=cfg.out_color, wipe_color=cfg.wipe_color or None, swap_preview=cfg.swap_preview)
+                          color=cfg.out_color, wipe_color=cfg.wipe_color or None)
     aliases = cfg.alias_counts
     blended_sources = {item.source for scene in cfg.scenes for item in scene.items if item.blend}
     blended_sources |= {key.source for key in cfg.dsk_keys}

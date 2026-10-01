@@ -3,6 +3,9 @@
 Status on 2026-09-30: implemented and reviewed on branch `pvw-latency`. It has not been built, run on a
 GPU, or merged into `mixer-improv`.
 
+2026-10-01: merged onto `mixer-improv` as branch `pvw-merge` (a clean merge; the Python suite passes)
+and the swap decision below is taken. Still not built or run on a GPU.
+
 ## Goal
 
 Under cut spam, the multiview PVW tile and the program must change at the same visual instant, with
@@ -80,16 +83,21 @@ K is the pts of the first new program frame.
 | 30 fps, defaults | K + 66.7 | K + 66.7; +33.3 on a missed tick |
 | Before this branch, 60 fps | K + 50 | K + 100 |
 
-## Open decision
+## Decision: the swap is always on
 
-`control.swap_preview` is parsed and documented in Python, but C++ never reads it, so swap is always
-on. `mixer.init` is parsed in `src/avplumber.cpp`, which the constraints exclude. Ask the owner which
-option to take:
+As left on `pvw-latency`, `control.swap_preview` was parsed and documented in Python, but C++ never
+read it, so swap was always on. `mixer.init` is parsed in `src/avplumber.cpp`, which the constraints
+exclude. The options were:
 
 - (a) one line in the `mixer.init` parser;
 - (b) the flag as a `mixer_pvw_follow` parameter, which makes it configurable only when a multiview
   exists;
 - (c) remove the switch and keep swap always on.
+
+The owner chose (c) on 2026-10-01: the swap after a take is always on, as in OBS Studio's default,
+and not configurable. `control.swap_preview` is gone from the config parser, `MixerConfig`,
+`settings()`, the builder's keyword arguments and `mixer.init`; `MixerState::publishTakePreview`
+swaps unconditionally and `PreviewChange` carries no `swap` flag, so nothing is inert.
 
 ## Not verified
 
@@ -110,7 +118,7 @@ option to take:
    - the resident wipe chain merge (`pyplumber/mixer/graph.py`, `demos/mixer/mixer.py`);
    - the Fedora 44 image and the Boost `io_context` change;
    - the docs refresh.
-2. **Decide `swap_preview`** with the owner.
+2. **`swap_preview`**: decided, (c), see above.
 3. **Build.** Build the mixer image with `demos/mixer/Dockerfile.fedora44` (CUDA 13.4, which needs host
    driver R615 or newer). Run `tests/test_mixer_preview_follow.py` and
    `tests/test_mixer_preview_swap.py` in the builder, then deploy by recreating the mixer container.

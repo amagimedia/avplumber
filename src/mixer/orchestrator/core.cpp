@@ -360,7 +360,6 @@ Parameters MixerOrchestrator::status() const {
     s["pgm_scene"] = state_->pgm_scene_name;
     s["pvw_scene"] = state_->pvw_scene_name;
     s["pvw_slot_scene"] = state_->pvw_slot_scene;
-    s["swap_preview"] = state_->swap_preview;
     s["preview_followers"] = state_->preview_followers.load();
     s["pgm_slot"] = state_->pgm_is_slot_a ? "A" : "B";
     s["switch_margin_ms"] = state_->switch_margin_ms;

@@ -125,10 +125,9 @@ are the crossfade's; an interrupted dip keeps the picture it had reached,
 which at the midpoint is the solid colour.
 
 After a completed take the preview is the scene that left program (OBS's
-"Swap Preview/Program Scenes After Transitioning"; `mixer.init`
-`"swap_preview": false` is meant to clear it instead, as an interrupted or
-failed take always does, but `mixer.init` does not read that key yet, so the
-swap is always on). The swapped preview is only shown: the slot it came from has its
+"Swap Preview/Program Scenes After Transitioning", always on; an interrupted
+or failed take clears the preview instead). The swapped preview is only
+shown: the slot it came from has its
 sources routed away, so `mixer.status` distinguishes `pvw_scene`, what the
 operator and the AUX multiview see, from `pvw_slot_scene`, what is loaded in
 the PVW slot (`""` while cold). A cut reuses the slot only for `pvw_slot_scene`;

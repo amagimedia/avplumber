@@ -305,7 +305,6 @@ always outranks these; they are the state a fresh browser tab picks up.
 | field | default | meaning |
 | --- | --- | --- |
 | `direct` | `true` | a scene pick goes straight to program rather than loading preview |
-| `swap_preview` | `true` | a completed take previews the scene that left program (OBS's "Swap Preview/Program Scenes After Transitioning"); a cut swaps at once, a fade at its end. `false` clears the preview after a take. The swapped preview is shown, not loaded: the old program slot is idle, and taking it again reloads it like any other scene, so keep it in `prewarm` for an instant cut. Reaches the orchestrator as `mixer.init` `swap_preview`; until the native side reads that key, `false` has no effect |
 | `transition` | `"cut"` | what a direct-mode pick takes with: `cut`, `fade` or `wipe` |
 | `fade_seconds` | `0.5` | length of a fade |
 | `fade_curve` | `"linear"` | easing of a fade: `linear`, `ease-in` (t²), `ease-out` (1−(1−t)²) or `ease-in-out` (3t²−2t³); a take may pick its own (`mixer.fade {..., "curve": "ease-in"}`); a `mixer.fade` without `curve` is linear |
@@ -469,10 +468,10 @@ that; no fraction is claimed here. A fade's swap is published from a frame
 already presented (the first past the fade's end), so a target frame at the
 program's instant has passed by construction (`target_unreachable`) and the
 swap lands on the next: a tick after the program, not a miss. Wipes and
-explicit `mixer.preview` changes draw on the next frame. With
-`swap_preview` the program scene's sources are kept flowing to the bus so the
-swapped preview is warm: one subscription push per source per aux frame per
-bus, no compositing.
+explicit `mixer.preview` changes draw on the next frame. After a take the
+program scene's sources are kept flowing to the bus so the swapped preview
+(the scene that left program) is warm: one subscription push per source per
+aux frame per bus, no compositing.
 
 Every timed change is measured from the take command's receipt:
 `pvw_latency_ms` to the deadline of the multiview frame the change is first

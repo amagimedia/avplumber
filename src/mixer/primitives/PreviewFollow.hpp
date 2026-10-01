@@ -35,8 +35,8 @@
 // composition set; a set past the deadline lands on the next tick (+1). A fade's change is
 // published from a frame already presented, so such a tick has passed by construction
 // (`target_unreachable` in the follower's status) and the change lands on the next. The
-// timed composition only drops inputs (the previewed scene's are active; with swap_preview the
-// program scene's stay warm), so the compositor applies it at once; when it does add one the bus
+// timed composition only drops inputs (the previewed scene's are active; the program scene's
+// stay warm for the swap), so the compositor applies it at once; when it does add one the bus
 // was not receiving (a source that stalled, or takes faster than the warm-up settle, about one
 // aux tick) the compositor stages it until that input has a frame for the tick, and past its
 // staging deadline (max(250 ms, 2x latency)) keeps the previous layout: the change is dropped,

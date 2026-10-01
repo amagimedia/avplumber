@@ -215,7 +215,6 @@ class MixerConfig:
     renditions: Tuple[Rendition, ...] = ()
     initial_scene: str = ""
     direct: bool = True            # control surfaces: scene picks go straight to program
-    swap_preview: bool = True      # a completed take previews the scene that left program (OBS's swap)
     fade_seconds: float = DEFAULT_FADE_SECONDS
     fade_curve: str = DEFAULT_FADE_CURVE   # what an M/E fade eases with unless a take picks its own
     fade_color: Optional[str] = None       # "#rrggbb": what an M/E fade dips through unless a take picks; None mixes
@@ -258,7 +257,7 @@ class MixerConfig:
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources)
                                   for kind in ("video", "browser", "v210", "nv12", "p010")},
-                "direct": self.direct, "swap_preview": self.swap_preview,
+                "direct": self.direct,
                 "fade_seconds": self.fade_seconds, "fade_curve": self.fade_curve,
                 "fade_color": self.fade_color,
                 "transition": self.transition,
@@ -391,9 +390,7 @@ def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:
     fade_seconds = float(control.get("fade_seconds", DEFAULT_FADE_SECONDS))
     if fade_seconds <= 0:
         raise ConfigError("control.fade_seconds must be positive")
-    if not isinstance(control.get("swap_preview", True), bool):
-        raise ConfigError("control.swap_preview must be a boolean")
-    return {"direct": bool(control.get("direct", True)), "swap_preview": control.get("swap_preview", True),
+    return {"direct": bool(control.get("direct", True)),
             "fade_seconds": fade_seconds,
             "fade_curve": fade_curve(control.get("fade_curve", DEFAULT_FADE_CURVE), "control.fade_curve"),
             "fade_color": fade_color(control.get("fade_color"), "control.fade_color"),

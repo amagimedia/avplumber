@@ -1,6 +1,7 @@
-// The preview after a take: swapped with the scene that left program (OBS's default), or
-// cleared; the PVW slot is cold either way, and every change wakes the followers on the feed's
-// own lock, published before the take's routing and once per take.
+// The preview after a take: swapped with the scene that left program (OBS's default, always
+// on), or cleared when the take keeps the program scene; the PVW slot is cold either way, and
+// every change wakes the followers on the feed's own lock, published before the take's routing
+// and once per take.
 #include "SharedTimeline.hpp"
 #include "mixer/primitives/MixerState.hpp"
 #include <atomic>
@@ -37,7 +38,7 @@ int main() {
         state.completeTransition(false, "b", 123456789);   // publishes nothing more
     }
     assert(seen.revision == revision + 1 && seen.pvw == "a" && seen.pgm == "b" && seen.kind == "cut");
-    assert(seen.effective_ns == 123456789 && seen.published_ns > 0 && seen.received_ns == 1000 && seen.swap);
+    assert(seen.effective_ns == 123456789 && seen.published_ns > 0 && seen.received_ns == 1000);
     assert(state.preview.revision == revision + 1);   // one revision per take
     assert(state.take_received_ns == 0 && !state.take_preview_published);   // handed over once
     assert(state.pgm_scene_name == "b" && !state.pgm_is_slot_a);
@@ -54,13 +55,13 @@ int main() {
     assert(state.preview.pvw.empty() && state.preview.pgm == "b" && state.preview.kind == "wipe");
     assert(state.preview.received_ns == 0 && state.transition_mode == MixerState::TransitionMode::Idle);
 
-    // Swap off: a take clears the preview, as it always did.
-    state.swap_preview = false;
+    // A fade that did not publish swaps at completion too: the scene it left is previewed.
     state.pvw_slot_scene = "c";
     state.transition_mode = MixerState::TransitionMode::Crossfade;
     state.completeTransition(false, "c", 5);
-    assert(state.pgm_scene_name == "c" && state.pvw_scene_name.empty() && state.pvw_slot_scene.empty());
-    assert(state.preview.revision == revision + 3 && !state.preview.swap && state.preview.kind == "fade");
+    assert(state.pgm_scene_name == "c" && state.pvw_scene_name == "b" && state.pvw_slot_scene.empty());
+    assert(state.preview.revision == revision + 3 && state.preview.pvw == "b" && state.preview.pgm == "c");
+    assert(state.preview.effective_ns == 5 && state.preview.kind == "fade");
 
     // An explicit preview publishes at once (effective 0), untimed, beside the current program.
     state.publishPreview("a", 0);

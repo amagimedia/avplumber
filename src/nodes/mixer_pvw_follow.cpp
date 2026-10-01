@@ -22,8 +22,8 @@
 // is pvw[shown] followed by base, and it is the only writer of the compositor's composition
 // while it runs.
 //
-// With swap_preview the scene that leaves program becomes the preview, so a settle pass after
-// every take adds the program scene's sources to the active inputs (no layer draws them: one
+// The scene that leaves program becomes the preview (the swap), so a settle pass after every
+// take adds the program scene's sources to the active inputs (no layer draws them: one
 // subscription push per source per aux tick, no compositing), and every other apply keeps the
 // program's inputs that are active already. The timed composition of the next take then only
 // drops inputs, which the compositor applies at once instead of staging. Residual: a settle the
@@ -66,7 +66,7 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     Change applied_;
     avp::mixer::SourceMask applied_inputs_;   // the active inputs the compositor last accepted
     bool suspended_ = false;
-    std::optional<int64_t> settle_at_;   // when to add the program scene's inputs (swap on)
+    std::optional<int64_t> settle_at_;   // when to add the program scene's inputs, for the swap
     bool dirty_retry_ = false;           // a base apply failed: again at the next wake
     std::string warning_;                // from the last apply, shown as the status error
 
@@ -87,7 +87,7 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
         return it == pvw_.end() ? nullptr : &it->second;
     }
 
-    /// pvw[shown] ++ base; with swap_preview the program scene's inputs stay warm: `settle` adds
+    /// pvw[shown] ++ base; the program scene's inputs stay warm for the swap: `settle` adds
     /// them all, otherwise those active already are kept, so the composition adds nothing.
     /// `enabled` unset resumes a suspended bus, as an operator's change does; a preview change
     /// keeps it suspended. A scene without a PVW layout draws an empty cell and is reported
@@ -102,7 +102,7 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
             Parameters layers = pvw ? pvw->layers : Parameters::array();
             layers.insert(layers.end(), base_.layers.begin(), base_.layers.end());
             inputs = base_.inputs | (pvw ? pvw->inputs : avp::mixer::SourceMask{});
-            if (const Layout* pgm = change.swap && !change.pgm.empty() ? layout(change.pgm) : nullptr)
+            if (const Layout* pgm = change.pgm.empty() ? nullptr : layout(change.pgm))
                 inputs |= settle ? pgm->inputs : pgm->inputs & applied_inputs_;
             composition = {{"layers", std::move(layers)}, {"active_inputs", avp::mixer::toParameters(inputs)}};
         }
@@ -197,8 +197,7 @@ public:
                 const int64_t applied_at = avp::mixer::monotonicNs();
                 applied_ = *pending_;
                 pending_.reset();
-                settle_at_ = applied_.swap ? std::optional<int64_t>(applied_.target ? timing_.deadline(applied_.target) : applied_at)
-                                           : std::nullopt;
+                settle_at_ = applied_.target ? timing_.deadline(applied_.target) : applied_at;
                 Parameters status = sample(applied_, applied_at);
                 if (applied_.target) {
                     std::lock_guard<std::mutex> lock(state_->preview_mutex);

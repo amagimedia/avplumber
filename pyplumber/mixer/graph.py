@@ -108,13 +108,11 @@ class MixerGraphBuilder:
         wipe_color=None,
         backend=None,
         max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS,
-        swap_preview: bool = True,   # a completed take previews the scene that left program
     ):
         if switch_margin_ms < 0:
             raise ValueError("switch_margin_ms must be >= 0")
         self.avp = avp
         self.name = name
-        self.swap_preview = swap_preview
         self.canvas_w, self.canvas_h = canvas
         self.fps_num, self.fps_den = fps
         self.hwaccel = hwaccel
@@ -843,7 +841,6 @@ class MixerGraphBuilder:
             "fps_den": self.fps_den,
             "color": self.color.transfer,   # the canvas a dip colour is converted for
             "switch_margin_ms": self.switch_margin_ms,
-            "swap_preview": self.swap_preview,
             "source_switcher": self._n("out_sel"),
             **({"keyframe_node": self.keyframe_node} if self.keyframe_node else {}),
             "initial_pgm_slot": self._initial_pgm_slot,

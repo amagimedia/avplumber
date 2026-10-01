@@ -75,18 +75,15 @@ struct MixerState : public InstanceShared<MixerState> {
 
     bool pgm_is_slot_a = true;
     std::string pgm_scene_name;
-    /// The preview as shown to the operator: what `mixer.preview` armed, or with `swap_preview` the
-    /// scene that just left program. Followers (mixer_pvw_follow) draw it; it says nothing about
-    /// the PVW slot's contents, see pvw_slot_scene.
+    /// The preview as shown to the operator: what `mixer.preview` armed, or after a take the
+    /// scene that just left program (the swap). Followers (mixer_pvw_follow) draw it; it says
+    /// nothing about the PVW slot's contents, see pvw_slot_scene.
     std::string pvw_scene_name;
     /// The scene loaded in the PVW slot, "" while the slot is cold (after every completed or
     /// dropped transition: the old program slot's sources are routed away). A take reuses the
     /// slot only for this scene; anything else reloads it, so a swapped preview costs no GPU
     /// time until it is taken.
     std::string pvw_slot_scene;
-    /// OBS's "Swap Preview/Program Scenes After Transitioning": a completed take previews the
-    /// scene that left program. Off, a take clears the preview.
-    bool swap_preview = true;
     /// The preview change feed for the followers (mixer_pvw_follow): the newest change, under
     /// `preview_mutex`, a lock of its own that is never held while any other is taken, so a take
     /// publishes right after switching the selector and a follower wakes on `preview_changed`
@@ -101,7 +98,6 @@ struct MixerState : public InstanceShared<MixerState> {
         int64_t published_ns = 0;  // when it was published (monotonic ns)
         int64_t received_ns = 0;   // when the take that ended in it was received (monotonic ns;
                                    // 0: not a take), for the followers' latency from the command
-        bool swap = false;         // swap_preview when it was published
         std::string kind;          // the take: "cut", "fade", "wipe"; "" for a preview or a clear
     };
     std::mutex preview_mutex;
@@ -127,17 +123,18 @@ struct MixerState : public InstanceShared<MixerState> {
         pvw_scene_name = scene;
         std::lock_guard<std::mutex> lock(preview_mutex);
         preview = {preview.revision + 1, scene, pgm.empty() ? pgm_scene_name : pgm, effective_ns,
-                   monotonicNs(), received_ns, swap_preview, kind};
+                   monotonicNs(), received_ns, kind};
         preview_changed.notify_all();
     }
 
     /// Caller holds `mutex`. The running take has switched the program to `new_pgm` from the
-    /// frame at `effective_ns` (0: not timed): previews the scene that leaves program
-    /// (swap_preview, when it differs) or nothing, timed for the followers with the take's
-    /// receipt and kind. Once per take, right after the selector switch and before its routing,
+    /// frame at `effective_ns` (0: not timed): previews the scene that leaves program (OBS's
+    /// "Swap Preview/Program Scenes After Transitioning", always on) or nothing when the take
+    /// keeps the program scene, timed for the followers with the take's receipt and kind. Once
+    /// per take, right after the selector switch and before its routing,
     /// so the followers start meanwhile; completeTransition publishes for a take that did not.
     void publishTakePreview(const std::string& new_pgm, int64_t effective_ns) {
-        publishPreview(swap_preview && pgm_scene_name != new_pgm ? pgm_scene_name : "", effective_ns,
+        publishPreview(pgm_scene_name != new_pgm ? pgm_scene_name : "", effective_ns,
                        take_received_ns, new_pgm, takeKind());
         take_received_ns = 0;
         take_preview_published = true;
