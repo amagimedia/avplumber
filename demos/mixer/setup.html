@@ -130,7 +130,9 @@ const types = [
 ];
 // Presentation order is independent of the saved recipe's weight indices.
 const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]]];
-const presets = {balanced:[8,4,2,0,2,0,0],equal:[1,1,1,1,1,1,1],light:[2,1,0,0,0,0,0]};
+// Balanced is the measured mix (docs/capacity.md): NVDEC, browser and raw uploads in about equal
+// shares, half of each 4:2:0 path HLG on a 10-bit canvas (an SDR canvas folds HLG into SDR).
+const presets = {balanced:[18,18,4,0,36,17,17],equal:[1,1,1,1,1,1,1],light:[2,1,0,0,0,0,0]};
 const dskPages=()=>[...document.querySelectorAll('#dsk-pages input:checked')].map(i=>i.value);
 // Same per-rate budgets as setup_runtime.py: 110 inputs at 25/30 fps, 68 at 50/60.
 const browserLimit=()=>40, nvdecLimit=fps=>Math.min(40,Math.floor(1100/fps)), rawUploadUnits=fps=>({25:30,30:34})[fps]??17;
@@ -298,7 +300,8 @@ function syncCounts(){
  }else if(outputMode().chroma==='420'){
   sourceValues[0]+=sourceValues[3];sourceValues[1]+=sourceValues[2];sourceValues[2]=sourceValues[3]=0;
  }
- const wanted=Math.max(1,Number($('sources').value)||1);
+ // A total scaled down for an earlier mode comes back when this one has room for it.
+ const wanted=Math.max(1,scaledFrom||Number($('sources').value)||1);
  const total=sourceValues.some(n=>n>0)?Math.min(sourceLimit(),wanted):0;
  scaledFrom=total&&total<wanted?wanted:0;
  $('sources').value=total;
@@ -355,8 +358,9 @@ $('mode').addEventListener('input',()=>{
  const {bit_depth,chroma}=outputMode();
  adaptToMode();
  if(bit_depth===10&&previousDepth===8){
-  const hdr=Math.ceil(sourceValues[0]/2);
-  sourceValues[0]-=hdr;sourceValues[1]+=hdr;
+  // Half of each SDR 4:2:0 path turns HLG: H.264 decodes to HEVC HLG, NV12 uploads to P010.
+  // A P010 upload costs two units; update() fits the upload budget.
+  for(const [sdr,hlg] of [[0,1],[5,6]]){const n=Math.ceil(sourceValues[sdr]/2);sourceValues[sdr]-=n;sourceValues[hlg]+=n;}
  }
  if(chroma==='422'&&!sourceValues[2])sourceValues[2]=Math.min(4,Math.max(1,Math.round(Number($('sources').value)/8)));
  previousDepth=bit_depth;
