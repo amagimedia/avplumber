@@ -70,9 +70,11 @@ frames/s (near 90%; 40 streams at 25 fps measured 81%): 40 at 25 fps, 36 at 30, 
 
 ### 10-bit canvases
 
-Measured 2026-10-01 at 1080p30 on the current stack: portrait canvas, the 110 show's mix
-(36 : 36 : 34 SDR NVDEC : browser : raw NV12) scaled to each total, 4 key pages included,
-PGM rendered in SDR and HLG. Each point ran the cut-spam gate (`--mix 6:2:2`, 60 s at 4/s)
+Measured 2026-10-01 at 1080p30 on the current stack: portrait canvas, 4 key pages included,
+PGM rendered in SDR and HLG. The table first takes the SDR 110 show's mix (36 : 36 : 34 SDR
+NVDEC : browser : raw NV12) to each total, every input converted to HLG, the costliest mix a
+10-bit canvas can carry; the last row is the setup page's Balanced HDR mix, which turns half
+of the decodes and uploads HLG. Each point ran the cut-spam gate (`--mix 6:2:2`, 60 s at 4/s)
 and then a 15 s GPU sample. "Input repeats" counts inputs showing their previous frame on a
 program tick over the gate; the SDR 110 show has about 360.
 
@@ -86,13 +88,15 @@ program tick over the gate; the SDR 110 show has about 360.
 | P210 | 80 | pass | 227 | 76 / 80% | 74 / 75% | 62% | 8.3 GB | 66% |
 | P210 | 90 | pass | 235 | 83 / 86% | 89 / 94% | 66% | 9.3 GB | 63% |
 | P210 | 110 | fail: CUDA out of memory under spam, 59 missed deadlines | 23 052 | — | 90% | — | 12.8 GB after the failure | — |
+| P010, Balanced: 16 + 16 HLG NVDEC, 31 browser, 12 NV12 + 11 P010 | 90 | pass | 186 | 75 / 78% | 65 / 68% | 55% | 10.2 GB peak in spam | 59% |
 
 Per source, both 10-bit canvases cost about the same GPU time, roughly 1.8x an SDR source
 (every SDR input is converted to HLG). Above 90 the GPU-side work slows NVDEC to saturation:
 the program still meets its deadlines, but decoded sources fall behind and frames back up
-in VRAM, which at 4:2:2 and 110 ran the 15 GB T4 out of memory. The setup therefore caps
-both 10-bit canvases at 90 / 110 = 0.82 of the SDR total and applies the same share at 50
-and 60 fps (55), which has not been measured.
+in VRAM, which at 4:2:2 and 110 ran the 15 GB T4 out of memory. HLG inputs skip that
+conversion: the Balanced HDR mix at 90 leaves GPU and NVDEC headroom. The limit holds for any
+mix the page allows, so the setup caps both 10-bit canvases at 90 / 110 = 0.82 of the SDR
+total, and applies the same share at 50 and 60 fps (55), which has not been measured.
 
 The browser service defaults to five workers with eight windows each (40 total); the setup
 allows all 40 at every rate, downstream-key pages included.
