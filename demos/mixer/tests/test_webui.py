@@ -197,8 +197,8 @@ def record_setpriority(monkeypatch, fail=None):
 # thread, an NVDEC input and the aux compositor are not deadline-critical.
 MIXER_THREADS = {1: "mixer.py", 2: "mixer_comp_a", 3: "mixer_comp_b", 4: "mixer_snapshot_a", 5: "mixer_snapshot_output",
                  6: "EventLoop", 7: "cuda-EvtHandlr", 8: "janus_encoder", 9: "janus_hdr_encoder", 10: "aux_mv2_encoder",
-                 11: "input_12_decode", 12: "aux_mv2_comp", 13: "mixer_otm_scene_a", 14: "stats sender"}
-CRITICAL_TIDS = {2, 3, 4, 5, 6, 7, 8, 9, 10}
+                 11: "input_12_decode", 12: "aux_mv2_comp", 13: "mixer_otm_scene_a", 14: "stats sender", 15: "dsk_comp"}
+CRITICAL_TIDS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 15}
 
 
 def test_critical_threads_get_the_nice_level_each_period_and_are_logged_once(tmp_path, monkeypatch, caplog):
@@ -211,13 +211,14 @@ def test_critical_threads_get_the_nice_level_each_period_and_are_logged_once(tmp
         assert sorted(calls) == [(tid, -10) for tid in sorted(CRITICAL_TIDS)]
         nicer.apply()   # thread ids are reused: every match is set again, nothing new is logged
         assert len(calls) == 2 * len(CRITICAL_TIDS)
-        fake_threads(tmp_path, 4242, {15: "udp-tx"})   # the output started later
+        fake_threads(tmp_path, 4242, {16: "udp-tx"})   # the output started later
         nicer.apply()
-        assert sorted(calls[2 * len(CRITICAL_TIDS):]) == [(tid, -10) for tid in sorted(CRITICAL_TIDS | {15})]
+        assert sorted(calls[2 * len(CRITICAL_TIDS):]) == [(tid, -10) for tid in sorted(CRITICAL_TIDS | {16})]
     assert [r.getMessage() for r in caplog.records] == [
-        "Mixer 4242: nice -10 on 9 threads: EventLoop (6), aux_mv2_encoder (10), cuda-EvtHandlr (7), janus_encoder (8), "
-        "janus_hdr_encod (9), mixer_comp_a (2), mixer_comp_b (3), mixer_snapshot_ (4), mixer_snapshot_ (5)",
-        "Mixer 4242: nice -10 on 1 thread: udp-tx (15)"]
+        "Mixer 4242: nice -10 on 10 threads: EventLoop (6), aux_mv2_encoder (10), cuda-EvtHandlr (7), dsk_comp (15), "
+        "janus_encoder (8), janus_hdr_encod (9), mixer_comp_a (2), mixer_comp_b (3), mixer_snapshot_ (4), "
+        "mixer_snapshot_ (5)",
+        "Mixer 4242: nice -10 on 1 thread: udp-tx (16)"]
     # A restarted mixer is logged in full again; while no mixer runs nothing is touched.
     caplog.clear()
     pid[0] = None
@@ -257,16 +258,18 @@ def test_critical_nice_stops_after_eperm_and_tolerates_vanished_threads(tmp_path
 def test_critical_nice_is_off_by_default_and_bounded(monkeypatch):
     monkeypatch.delenv("MIXER_CRITICAL_NICE", raising=False)
     assert parse_args([]).critical_nice == 0
-    assert parse_args(["--critical-nice", "10"]).critical_nice == 10
+    assert parse_args(["--manage-setup", "--critical-nice", "10"]).critical_nice == 10
     monkeypatch.setenv("MIXER_CRITICAL_NICE", "7")
-    assert parse_args([]).critical_nice == 7
+    assert parse_args(["--manage-setup"]).critical_nice == 7
     assert parse_args(["--critical-nice", "0", "--mixer-args", "--janus-output"]).mixer_args == ["--janus-output"]
-    for bad in (["--critical-nice", "21"], ["--critical-nice", "-1"], ["--critical-nice", "high"]):
+    # The mixer pid comes from the managed process, so without --manage-setup the option would be inert.
+    for bad in (["--critical-nice", "10"], [], ["--manage-setup", "--critical-nice", "21"],
+                ["--manage-setup", "--critical-nice", "-1"], ["--manage-setup", "--critical-nice", "high"]):
         with pytest.raises(SystemExit):
             parse_args(bad)
     monkeypatch.setenv("MIXER_CRITICAL_NICE", "lots")
     with pytest.raises(SystemExit):
-        parse_args([])
+        parse_args(["--manage-setup"])
 
 
 def get(url, path):

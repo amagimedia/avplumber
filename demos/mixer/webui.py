@@ -156,14 +156,20 @@ def _thread_files(proc, pid, name):
 
 # Threads whose lateness shows on air, matched by comm: the kernel's thread name, cut to 15
 # characters. avplumber names a node's thread after the node (src/util.cpp set_thread_name), so
-# these are the scene compositors mixer_comp_a/b; the snapshot nodes mixer_snapshot_a/b/output,
-# all "mixer_snapshot_" once cut; "EventLoop", the tick thread (src/EventLoop.hpp); the CUDA
-# driver's own event thread "cuda-EvtHandlr"; "udp-tx", FFmpeg's paced UDP sender, which exists
-# because the Janus RTP URL sets bitrate and fifo_size; and every NVENC node: janus_encoder,
-# janus_<rendition>_encoder (janus_hdr_encoder arrives as "janus_hdr_encod", hence "_encod",
-# not "encoder") and aux_<bus>_encoder, which the cut hides when the bus id is longer than four
-# characters.
-CRITICAL_THREADS = re.compile(r"^(mixer_comp_|mixer_snapshot|EventLoop|cuda-EvtHandlr|udp-tx)|_encod")
+# these are the scene compositors mixer_comp_a/b; "dsk_comp", the downstream keyer's compositor
+# (pyplumber/mixer/dsk.py, no mixer_ prefix), which every program frame passes through after
+# mixer_snapshot_output; the snapshot nodes mixer_snapshot_a/b/output, all "mixer_snapshot_"
+# once cut; "EventLoop", the tick thread (src/EventLoop.hpp); the CUDA driver's own event thread
+# "cuda-EvtHandlr"; "udp-tx", FFmpeg's paced UDP sender, which exists because the Janus RTP URL
+# sets bitrate and fifo_size; and every NVENC node: janus_encoder, janus_<rendition>_encoder
+# (janus_hdr_encoder arrives as "janus_hdr_encod", hence "_encod", not "encoder") and
+# aux_<bus>_encoder, which the cut hides when the bus id is longer than five characters.
+# The pass-through nodes between these stages (OneToMany mixer_otm_*, SourceSwitcher
+# mixer_out_sel/mixer_wipe_sel, Split split_clean, janus_force_keyframe, janus_format,
+# janus_repeat_headers, janus_mux, janus_rtp_output) are left at nice 0: each runs for
+# microseconds per frame and sleeps otherwise, which CFS already wakes promptly. Widen the set
+# only after measuring that it moves the missed-deadline counter.
+CRITICAL_THREADS = re.compile(r"^(mixer_comp_|dsk_comp|mixer_snapshot|EventLoop|cuda-EvtHandlr|udp-tx)|_encod")
 CRITICAL_NICE_PERIOD_S = 10
 
 
@@ -468,12 +474,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # A string default goes through type=int like a command-line value, so a bad env value is a usage error.
     parser.add_argument("--critical-nice", type=int, metavar="N", default=os.environ.get("MIXER_CRITICAL_NICE", "0"),
                         help="Keep the deadline-critical mixer threads at nice -N, 1 to 20, rechecked every "
-                             f"{CRITICAL_NICE_PERIOD_S} s; needs CAP_SYS_NICE. 0, the default, leaves them alone. "
-                             "Env: MIXER_CRITICAL_NICE")
+                             f"{CRITICAL_NICE_PERIOD_S} s; needs CAP_SYS_NICE and --manage-setup. 0, the default, "
+                             "leaves them alone. Env: MIXER_CRITICAL_NICE")
     parser.add_argument("--mixer-args", nargs=argparse.REMAINDER, default=[])
     args = parser.parse_args(argv)
     if not 0 <= args.critical_nice <= 20:
         parser.error("--critical-nice must be 0 (off) or 1 to 20")
+    if args.critical_nice and not args.manage_setup:
+        parser.error("--critical-nice needs --manage-setup: the mixer pid comes from the managed process")
     return args
 
 
