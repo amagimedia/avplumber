@@ -1,4 +1,4 @@
-FROM fedora:42
+FROM fedora:44
 
 RUN dnf -y install --setopt=install_weak_deps=False \
         python3 \

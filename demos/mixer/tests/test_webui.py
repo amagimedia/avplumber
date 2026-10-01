@@ -16,7 +16,8 @@ from types import SimpleNamespace
 import pytest
 
 from pyplumber.mixer.control import mixer_command
-from webui import CONFIG_SCRIPT, GpuStats, HostStats, MixerBridge, normalize_preview_base, page, serve
+from webui import (CONFIG_SCRIPT, CriticalNice, GpuStats, HostStats, MixerBridge, normalize_preview_base, page,
+                   parse_args, serve)
 
 
 class FakeBridge(MixerBridge):
@@ -170,6 +171,106 @@ def test_host_stats_survive_a_missing_proc_and_a_vanished_mixer(tmp_path):
     fake_proc(tmp_path, 1.0, [2, 0, 2, 2, 0, 0, 0, 0])
     stats.sample()
     assert stats.values["cpu_pct"] == 67 and stats.values["thread_pct"] is None
+
+
+def fake_threads(root, pid, comms):
+    """/proc/<pid>/task/<tid>/comm for {tid: thread name}; the kernel keeps 15 characters of a name."""
+    for tid, comm in comms.items():
+        task = root / str(pid) / "task" / str(tid)
+        task.mkdir(parents=True, exist_ok=True)
+        task.joinpath("comm").write_text(comm[:15] + "\n")
+
+
+def record_setpriority(monkeypatch, fail=None):
+    """Record (tid, nice) of every os.setpriority call; `fail` maps a tid to the error raised for it."""
+    calls = []
+
+    def setpriority(which, who, nice):
+        assert which == os.PRIO_PROCESS
+        if (fail or {}).get(who):
+            raise fail[who]
+        calls.append((who, nice))
+    monkeypatch.setattr("webui.os.setpriority", setpriority)
+    return calls
+
+
+# The names avplumber, the CUDA driver and FFmpeg give their threads; the mixer's Python main
+# thread, an NVDEC input and the aux compositor are not deadline-critical.
+MIXER_THREADS = {1: "mixer.py", 2: "mixer_comp_a", 3: "mixer_comp_b", 4: "mixer_snapshot_a", 5: "mixer_snapshot_output",
+                 6: "EventLoop", 7: "cuda-EvtHandlr", 8: "janus_encoder", 9: "janus_hdr_encoder", 10: "aux_mv2_encoder",
+                 11: "input_12_decode", 12: "aux_mv2_comp", 13: "mixer_otm_scene_a", 14: "stats sender", 15: "dsk_comp"}
+CRITICAL_TIDS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 15}
+
+
+def test_critical_threads_get_the_nice_level_each_period_and_are_logged_once(tmp_path, monkeypatch, caplog):
+    calls = record_setpriority(monkeypatch)
+    pid = [4242]
+    nicer = CriticalNice(lambda: pid[0], 10, proc=tmp_path)
+    fake_threads(tmp_path, 4242, MIXER_THREADS)
+    with caplog.at_level(logging.INFO, logger="webui"):
+        nicer.apply()
+        assert sorted(calls) == [(tid, -10) for tid in sorted(CRITICAL_TIDS)]
+        nicer.apply()   # thread ids are reused: every match is set again, nothing new is logged
+        assert len(calls) == 2 * len(CRITICAL_TIDS)
+        fake_threads(tmp_path, 4242, {16: "udp-tx"})   # the output started later
+        nicer.apply()
+        assert sorted(calls[2 * len(CRITICAL_TIDS):]) == [(tid, -10) for tid in sorted(CRITICAL_TIDS | {16})]
+    assert [r.getMessage() for r in caplog.records] == [
+        "Mixer 4242: nice -10 on 10 threads: EventLoop (6), aux_mv2_encoder (10), cuda-EvtHandlr (7), dsk_comp (15), "
+        "janus_encoder (8), janus_hdr_encod (9), mixer_comp_a (2), mixer_comp_b (3), mixer_snapshot_ (4), "
+        "mixer_snapshot_ (5)",
+        "Mixer 4242: nice -10 on 1 thread: udp-tx (16)"]
+    # A restarted mixer is logged in full again; while no mixer runs nothing is touched.
+    caplog.clear()
+    pid[0] = None
+    nicer.apply()
+    assert len(calls) == 3 * len(CRITICAL_TIDS) + 1 and not caplog.records
+    pid[0] = 4243
+    fake_threads(tmp_path, 4243, {2: "mixer_comp_a", 6: "EventLoop"})
+    with caplog.at_level(logging.INFO, logger="webui"):
+        nicer.apply()
+    assert sorted(calls[-2:]) == [(2, -10), (6, -10)]
+    assert [r.getMessage() for r in caplog.records] == ["Mixer 4243: nice -10 on 2 threads: EventLoop (6), mixer_comp_a (2)"]
+
+
+def test_critical_nice_stops_after_eperm_and_tolerates_vanished_threads(tmp_path, monkeypatch, caplog):
+    fake_threads(tmp_path, 4242, {2: "mixer_comp_a", 3: "mixer_comp_b", 6: "EventLoop"})
+    calls = record_setpriority(monkeypatch, fail={3: ProcessLookupError()})
+    nicer = CriticalNice(lambda: 4242, 5, proc=tmp_path)
+    with caplog.at_level(logging.INFO, logger="webui"):
+        nicer.apply()
+    assert sorted(calls) == [(2, -5), (6, -5)]   # thread 3 exited after the listing
+    assert [r.getMessage() for r in caplog.records] == ["Mixer 4242: nice -5 on 2 threads: EventLoop (6), mixer_comp_a (2)"]
+    calls = record_setpriority(monkeypatch, fail={2: PermissionError(1, "Operation not permitted")})
+    fake_threads(tmp_path / "unprivileged", 4242, {2: "mixer_comp_a"})
+    nicer = CriticalNice(lambda: 4242, 5, proc=tmp_path / "unprivileged")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="webui"):
+        nicer.apply()
+        nicer.apply()   # no retry: the container will not gain CAP_SYS_NICE while it runs
+    assert not nicer.enabled and calls == []
+    assert [r.getMessage() for r in caplog.records] == [
+        "Cannot set nice -5 on mixer thread mixer_comp_a (2): the container needs CAP_SYS_NICE; critical-thread priority is off"]
+    nicer = CriticalNice(lambda: 9999, 5, proc=tmp_path)   # a pid without a /proc entry: the mixer just exited
+    nicer.apply()
+    assert calls == [] and nicer.enabled
+
+
+def test_critical_nice_is_off_by_default_and_bounded(monkeypatch):
+    monkeypatch.delenv("MIXER_CRITICAL_NICE", raising=False)
+    assert parse_args([]).critical_nice == 0
+    assert parse_args(["--manage-setup", "--critical-nice", "10"]).critical_nice == 10
+    monkeypatch.setenv("MIXER_CRITICAL_NICE", "7")
+    assert parse_args(["--manage-setup"]).critical_nice == 7
+    assert parse_args(["--critical-nice", "0", "--mixer-args", "--janus-output"]).mixer_args == ["--janus-output"]
+    # The mixer pid comes from the managed process, so without --manage-setup the option would be inert.
+    for bad in (["--critical-nice", "10"], [], ["--manage-setup", "--critical-nice", "21"],
+                ["--manage-setup", "--critical-nice", "-1"], ["--manage-setup", "--critical-nice", "high"]):
+        with pytest.raises(SystemExit):
+            parse_args(bad)
+    monkeypatch.setenv("MIXER_CRITICAL_NICE", "lots")
+    with pytest.raises(SystemExit):
+        parse_args(["--manage-setup"])
 
 
 def get(url, path):

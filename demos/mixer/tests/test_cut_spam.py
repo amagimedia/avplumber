@@ -1,7 +1,7 @@
 import pytest
 
 from cut_spam import (PvwSamples, eligible_cuts, is_expected_rejection, last_states, latest_id, measured,
-                      parse_mix, percentile, pick_scenes, playout_delta, pvw_line, sample as probe_sample,
+                      parse_mix, percentile, pick_scenes, playout_delta, print_summary, pvw_line, sample as probe_sample,
                       setup_check, summarize, thresholds, transition_payloads, unmeasured_by_state, verdict)
 
 
@@ -146,6 +146,27 @@ def test_verdict_fails_slow_measurement_and_any_program_stall():
     none_eligible = {**ok, "eligible": 0, "measured_ratio": None}
     spam = {n: (c, d) for n, c, d in verdict(limits, none_eligible, ok, ok, stalled, [], (True, ""), (True, ""))}
     assert spam["spam measured"][0] is False and "lower --rate" in spam["spam measured"][1]
+
+
+def test_no_bursts_skips_the_burst_criteria(capsys):
+    limits = thresholds(60, BASE)
+    ok = {"p50": 110, "p95": 140, "max": 170, "measured_ratio": 0.95}
+    clean = {"frames": 3600, "repeats": 0, "missed_deadlines": 0}
+    recovery = {"p50": 110, "max": 140}
+    none = {**summarize([]), "bursts": 0, "superseded": 0, "eligible": 0, "measured_ratio": None}
+    criteria = dict((n, c) for n, c, _ in verdict(limits, ok, none, recovery, clean, [], (True, ""), (True, "")))
+    assert not any(n.startswith("burst") for n in criteria) and all(criteria.values())
+    # Bursts that were run but never measured still fail.
+    unmeasured = {**none, "bursts": 10, "eligible": 10}
+    criteria = dict((n, c) for n, c, _ in verdict(limits, ok, unmeasured, recovery, clean, [], (True, ""), (True, "")))
+    assert not any(criteria[n] for n in ("burst p95", "burst max", "burst measured"))
+    spam = {**summarize([100.0]), "sent": {"cut": 1}, "eligible": 1, "measured_eligible": 1, "measured_ratio": 1.0,
+            "unmeasured": {}}
+    print_summary({"pass": True, "seed": 1, "fps": 60, "scenes": ["a", "b"], "mix": {"cut": 1}, "rate": 1,
+                   "duration_s": 1, "baseline": summarize([100.0]), "burst": none, "spam": spam,
+                   "recovery": summarize([100.0]), "playout": None, "transition_start": "-", "errors": [],
+                   "rejections": [], "criteria": []})
+    assert "burst     skipped (--bursts 0)\n" in capsys.readouterr().out
 
 
 def test_only_known_rejections_are_expected():

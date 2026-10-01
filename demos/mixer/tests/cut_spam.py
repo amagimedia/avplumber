@@ -203,7 +203,8 @@ def setup_check(before, after):
 
 def verdict(limits, spam, burst, recovery, playout, errors, setup, scene):
     """[(criterion, ok, detail)]; `setup` and `scene` are (ok, detail), `playout` is a
-    playout_delta. A criterion without samples fails."""
+    playout_delta. A criterion without samples fails; the burst criteria are left out when no
+    burst was run (`--bursts 0`, burst["bursts"] == 0)."""
     def at_most(name, value, limit):
         return name, value is not None and limit is not None and value <= limit, f"{fmt(value)} ms, limit {fmt(limit)}"
 
@@ -219,13 +220,15 @@ def verdict(limits, spam, burst, recovery, playout, errors, setup, scene):
         if limit is None:   # repeats count every input showing its previous frame, e.g. a page that paints slower
             return name, True, f"{playout[key]} over {playout['frames']} frames, informational"
         return name, playout[key] <= limit, f"{playout[key]} over {playout['frames']} frames, limit {limit:g}"
+    bursts = [] if burst.get("bursts") == 0 else [
+        at_most("burst p95", burst["p95"], limits["spam_p95_ms"]),
+        at_most("burst max", burst["max"], limits["spam_max_ms"]),
+        ratio("burst measured", burst)]
     return [("no errors", not errors, f"{len(errors)} unexpected"), ("setup running", *setup),
             at_most("spam p95", spam["p95"], limits["spam_p95_ms"]),
             at_most("spam max", spam["max"], limits["spam_max_ms"]),
             ratio("spam measured", spam),
-            at_most("burst p95", burst["p95"], limits["spam_p95_ms"]),
-            at_most("burst max", burst["max"], limits["spam_max_ms"]),
-            ratio("burst measured", burst),
+            *bursts,
             at_most("recovery p50", recovery["p50"], limits["recovery_p50_ms"]),
             at_most("recovery max", recovery["max"], limits["recovery_max_ms"]),
             counter("program missed deadlines", "missed_deadlines", 0),
@@ -461,11 +464,13 @@ def pvw_line(pvw):
 def print_summary(r):
     s, b, u, rec = r["spam"], r["baseline"], r["burst"], r["recovery"]
     mix = " ".join(f"{kind}:{weight:g}" for kind, weight in r["mix"].items())
+    burst = ("skipped (--bursts 0)" if u["bursts"] == 0 else
+             f"{u['bursts']} x {BURST_TAKES} cuts, {u['superseded']} coalesced; last measured "
+             f"{u['n']} ({pct(u['measured_ratio'])}); p50={fmt(u['p50'])} p95={fmt(u['p95'])} max={fmt(u['max'])} ms")
     print(f"{len(r['scenes'])} scenes at {r['fps']:g} fps, mix {mix}, "
           f"{r['duration_s']:g} s at {r['rate']:g}/s, seed {r['seed']}\n"
           f"baseline  n={b['n']} p50={fmt(b['p50'])} max={fmt(b['max'])} ms\n"
-          f"burst     {u['bursts']} x {BURST_TAKES} cuts, {u['superseded']} coalesced; last measured "
-          f"{u['n']} ({pct(u['measured_ratio'])}); p50={fmt(u['p50'])} p95={fmt(u['p95'])} max={fmt(u['max'])} ms\n"
+          f"burst     {burst}\n"
           f"spam      sent {s['sent']}; measured {s['n']} cuts, {s['measured_eligible']}/{s['eligible']} "
           f"eligible ({pct(s['measured_ratio'])}); p50={fmt(s['p50'])} p95={fmt(s['p95'])} max={fmt(s['max'])} ms\n"
           f"          unmeasured eligible by last probe state: "
@@ -492,7 +497,8 @@ def main(argv=None):
     p.add_argument("--scene-prefix", default="", help="only default scenes starting with this")
     p.add_argument("--baseline-cuts", type=int, default=15)
     p.add_argument("--recovery-cuts", type=int, default=15)
-    p.add_argument("--bursts", type=int, default=10, help=f"bursts of {BURST_TAKES} auto-repeated cuts")
+    p.add_argument("--bursts", type=int, default=10,
+                   help=f"bursts of {BURST_TAKES} auto-repeated cuts; 0 runs none and skips the burst criteria")
     p.add_argument("--seed", type=int)
     p.add_argument("--fps", type=float, help="show fps, when /api/state reports no canvas")
     p.add_argument("--json", action="store_true", help="print one JSON object")

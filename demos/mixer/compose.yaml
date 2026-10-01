@@ -3,7 +3,9 @@ name: avplumber-mixer-demo
 x-mixer-image: &mixer-image
   build:
     context: ../..
-    dockerfile: demos/mixer/Dockerfile
+    # Fedora 44 / CUDA 13.4, which needs host driver R615 or newer. On an older driver
+    # MIXER_DOCKERFILE=Dockerfile selects the Ubuntu 22.04 / CUDA 11.7 image (docs/guide.md).
+    dockerfile: demos/mixer/${MIXER_DOCKERFILE:-Dockerfile.fedora44}
   image: avplumber-mixer:local
 
 services:
@@ -39,6 +41,9 @@ services:
     # CUDA, DMA-BUF and graph queues need more than 1024 descriptors at 64 sources.
     ulimits:
       nofile: {soft: 65536, hard: 65536}
+    environment:
+      # Opt-in: webui.py keeps the deadline-critical mixer threads at nice -N (0 = off).
+      MIXER_CRITICAL_NICE: ${MIXER_CRITICAL_NICE:-0}
     entrypoint: [python3, demos/mixer/webui.py]
     volumes:
       - ../../media:/media:rw,z

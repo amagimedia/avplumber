@@ -209,7 +209,7 @@ patched CUDA overlay and transition filters, and builds the CUDA-enabled
 AVPlumber Python module against that FFmpeg installation:
 
 ```sh
-docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
+docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:local .
 
 docker run --rm --gpus all --network host \
   -v <path-to-media>:/media:ro,z \
@@ -226,29 +226,33 @@ no media locations or endpoints.
 
 Start `demos/mixer/tui.py` separately and connect it to port 7777.
 
-### Fedora 44 image (candidate)
+### The two images
 
-`demos/mixer/Dockerfile.fedora44` builds the same image on Fedora 44 with CUDA
-13.4, GCC 16, Python 3.14 and Boost 1.90, in a builder stage plus a slim runtime
-stage that installs no CUDA packages (FFmpeg and avplumber load the driver
-directly). It needs a host driver of R615 or newer: FFmpeg's CUDA filters are
-PTX that the driver JIT-compiles, and older drivers reject CUDA 13.4 PTX. The
-image sets `NVIDIA_REQUIRE_CUDA=cuda>=13.4`, so the container runtime refuses an
-older host at start. Like the Ubuntu toolchain, the build hardens explicitly
-(`-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fcf-protection`), so the A/B
-compares toolchains, not hardening. The Ubuntu 22.04 / CUDA 11.7 `Dockerfile` stays the compose default
-until a host A/B of the two images, same recipe and scene sequence, shows the
-mixer container's steady-state CPU (`docker stats`) within 5% of the current
-image; then only the `dockerfile:` line in `compose.yaml` changes. Until then
-the candidate runs in the unchanged stack by taking over the compose image tag:
+`demos/mixer/Dockerfile.fedora44`, the Compose default, builds the image on
+Fedora 44 with CUDA 13.4, GCC 16, Python 3.14 and Boost 1.90, in a builder stage
+plus a slim runtime stage that installs no CUDA packages (FFmpeg and avplumber
+load the driver directly). It needs a host driver of R615 or newer: FFmpeg's
+CUDA filters are PTX that the driver JIT-compiles, and older drivers reject CUDA
+13.4 PTX. The image sets `NVIDIA_REQUIRE_CUDA=cuda>=13.4`, so the container
+runtime refuses an older host at start (`requirement error: unsatisfied
+condition: cuda>=13.4`). Like the Ubuntu toolchain, the build hardens explicitly
+(`-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fcf-protection`), so the two
+images differ in toolchain, not hardening; [capacity.md](capacity.md) compares
+them on the same 68-input 60 fps show.
+
+`demos/mixer/Dockerfile` (Ubuntu 22.04 / CUDA 11.7) builds the same `/build`
+layout, entrypoint, ports and environment for a host whose driver is older than
+R615. `compose.yaml` selects it with one variable, which every later `up --build`
+needs as well (or put the line in `demos/mixer/.env`):
 
 ```sh
-docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44 .
-docker tag avplumber-mixer:fedora44 avplumber-mixer:local
-docker compose -f demos/mixer/compose.yaml up --no-build
+MIXER_DOCKERFILE=Dockerfile docker compose -f demos/mixer/compose.yaml up --build
 ```
 
-Build arguments:
+Both build the tag `avplumber-mixer:local`, so switching rebuilds and replaces
+the image in place.
+
+Build arguments of `Dockerfile.fedora44`:
 
 | Argument | Default | Purpose |
 | --- | --- | --- |

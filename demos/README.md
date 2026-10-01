@@ -41,8 +41,13 @@ The [mixer image](mixer/README.md#run) builds avplumber, its Python module,
 and patched FFmpeg together. Playlist and Replay can reuse this image:
 
 ```sh
-docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
+docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:local .
 ```
+
+This is the image the mixer's Compose file builds under the same tag: Fedora 44
+with CUDA 13.4, which needs host driver R615 or newer. For an older driver build
+`demos/mixer/Dockerfile` (Ubuntu 22.04 / CUDA 11.7) instead; the
+[mixer guide](mixer/docs/guide.md#the-two-images) compares the two.
 
 Then follow [Mixer](mixer/README.md#run),
 [Playlist](playlist/README.md#run-in-docker), or

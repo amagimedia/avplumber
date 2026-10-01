@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1.7
-# Fedora 44 / CUDA 13.4 build of the mixer image. Candidate for ./Dockerfile
-# (Ubuntu 22.04 / CUDA 11.7), which stays the compose default until the host
-# A/B described in docs/guide.md passes. Same /build layout, entrypoint, ports
-# and environment as the current image, so compose.yaml only needs its
-# `dockerfile:` line changed to switch.
+# Fedora 44 / CUDA 13.4 build of the mixer image, the compose default.
+# ./Dockerfile (Ubuntu 22.04 / CUDA 11.7) builds the same /build layout,
+# entrypoint, ports and environment for a host whose driver is older than
+# R615; compose.yaml selects it with MIXER_DOCKERFILE=Dockerfile (docs/guide.md).
 #
 # Build from the repository root:
 #   docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44 .
@@ -235,6 +234,16 @@ RUN dnf -y install --setopt=install_weak_deps=False \
     && mkdir -p /usr/share/glvnd/egl_vendor.d \
     && echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \
         > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+
+# glvnd opens every vendor it finds in that directory, and Fedora's libglvnd-egl
+# and libglvnd-gles require mesa-libEGL, whose 50_mesa.json lands next to the
+# NVIDIA ICD: through it the mixer mapped libEGL_mesa, libgallium and libLLVM
+# (~24 MB) it never used. Naming the NVIDIA ICD alone replaces the directory
+# scan, so Mesa stays installed (dnf would restore a deleted vendor file with
+# the next transaction) but is never opened. eglGetDisplay(EGL_DEFAULT_DISPLAY)
+# already resolved through NVIDIA, which sorted first; the wayland image sets
+# the same variable.
+ENV __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
 
 WORKDIR /build
 
