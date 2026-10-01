@@ -45,7 +45,7 @@ def main() -> None:
     parser.add_argument("--size", default="1920x1080")
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--seconds", type=int, default=20)
-    parser.add_argument("--encoder", default="h264_nvenc", help="h264_nvenc, or libx264 without a GPU")
+    parser.add_argument("--encoder", default="h264_nvenc", help="h264_nvenc, or rawvideo for raw NV12")
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--only", nargs="*", choices=sorted(GENERATORS), help="subset of generators")
     args = parser.parse_args()

@@ -1,4 +1,4 @@
-"""Configured fixture dimensions and cadence must survive H.264 encoding."""
+"""Configured fixture dimensions and cadence must survive H.264 (NVENC) encoding."""
 import json
 import shutil
 import subprocess
@@ -10,12 +10,7 @@ from frame_codes import generate, read_code
 
 
 @pytest.mark.parametrize("width,height,fps", [(1920, 1080, 60), (1920, 1080, 25), (1080, 1920, 30)])
-def test_generated_source_has_requested_size_rate_and_frame_ids(tmp_path, width, height, fps):
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        pytest.skip("requires FFmpeg and ffprobe")
-    encoders = subprocess.check_output(["ffmpeg", "-hide_banner", "-encoders"], stderr=subprocess.DEVNULL)
-    if b"libx264" not in encoders:
-        pytest.skip("requires FFmpeg with libx264")
+def test_generated_source_has_requested_size_rate_and_frame_ids(tmp_path, width, height, fps, nvenc):
     path = tmp_path / "source.mp4"
     generate(path, 3, fps, 1, width, height)
     stream = json.loads(subprocess.check_output([

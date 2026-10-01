@@ -78,8 +78,8 @@ def generate(path: pathlib.Path, source: int, fps: int, seconds: int,
         "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", "512x40",
         "-framerate", str(fps), "-i", "pipe:0", "-filter_complex_threads", "1",
         "-filter_complex", graph, "-map", "[video]", "-frames:v", str(fps * seconds),
-        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-g", str(fps * 2), "-bf", "2", "-pix_fmt", "yuv420p", "-threads", "2", str(path),
+        "-an", "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "constqp", "-qp", "20",
+        "-g", str(fps * 2), "-bf", "2", "-pix_fmt", "yuv420p", str(path),
     ], stdin=subprocess.PIPE)
     try:
         for frame in range(fps * seconds):
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     parser.add_argument("--sources", type=int, default=16)
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
-    parser.add_argument("--ffmpeg", default="ffmpeg", help="FFmpeg executable with libx264")
+    parser.add_argument("--ffmpeg", default="ffmpeg", help="FFmpeg executable with h264_nvenc (an NVIDIA GPU)")
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--seconds", type=int, default=30)
     args = parser.parse_args()

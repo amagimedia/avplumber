@@ -160,7 +160,7 @@ def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, sour
         write_hlg(staged, width, height, fps * seconds, source=variant)
         staged.replace(raw)
     inputs, graph, data = id_overlay(source_id, width, height, seconds)
-    pixel_format = {"libx265": "yuv420p10le", "v210": "yuv422p10le"}.get(encoder, "p010le")
+    pixel_format = "yuv422p10le" if encoder == "v210" else "p010le"
     options = (["-f", "rawvideo"] if encoder in ("rawvideo", "v210") else
                ["-profile:v", "main10", "-b:v", "12M", "-g", str(fps)])
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-f", "v210", "-video_size", f"{width}x{height}",
@@ -257,8 +257,8 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if pattern not in patterns:
                     raise ValueError(f"{name}: pattern must be one of {patterns}")
                 encoder = generation.get("sdr_encoder", "h264_nvenc") if color == "sdr" else generation.get("hdr_encoder", "hevc_nvenc")
-                if not raw and chroma == "420" and encoder not in (("h264_nvenc", "libx264") if color == "sdr" else ("hevc_nvenc", "libx265")):
-                    raise ValueError(f"{name}: use h264_nvenc/libx264 for SDR or hevc_nvenc/libx265 for HDR")
+                if not raw and chroma == "420" and encoder != ("h264_nvenc" if color == "sdr" else "hevc_nvenc"):
+                    raise ValueError(f"{name}: generated media is encoded on NVENC: h264_nvenc for SDR, hevc_nvenc for HDR")
                 storage = raw or ("v210" if chroma == "422" else encoder)
                 # Version cache names when changing generation semantics. Every
                 # source has its own file, with its id burned in (id_overlay), so

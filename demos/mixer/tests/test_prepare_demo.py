@@ -20,7 +20,7 @@ from v210_fixture import frame_stride
 def recipe():
     doc = json.loads((Path(__file__).resolve().parents[1] / "demo.example.json").read_text())
     doc["canvas"].update(width=96, height=64, fps=4)
-    doc["generation"].update(seconds=1, sdr_encoder="libx264", hdr_encoder="libx265")
+    doc["generation"].update(seconds=1)
     return doc
 
 
@@ -148,7 +148,8 @@ def test_sdr_pattern_pool_keeps_cellauto_opt_in(recipe, tmp_path):
     recipe["source_count"] = 3
     spec["patterns"] = ["bars", "gradients"]
     sources = plan(recipe, tmp_path)[0]["sources"]
-    assert [s["path"].split("_")[-2] for s in sources] == ["bars", "gradients", "bars"]
+    # <id>_<color>_<chroma>_<pattern>_<encoder>.mp4, and the encoder is h264_nvenc
+    assert [s["path"].removesuffix("_h264_nvenc.mp4").rsplit("_", 1)[-1] for s in sources] == ["bars", "gradients", "bars"]
     assert len({s["id"] for s in sources}) == len({s["path"] for s in sources}) == 3
     assert all(s["independent"] for s in sources)
     del spec["patterns"]
@@ -299,12 +300,10 @@ def test_download_rejects_truncated_response(tmp_path, monkeypatch):
     assert not path.exists()
 
 
-def test_prepare_demo_produces_playable_media_and_mapped_config(recipe, tmp_path):
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        pytest.skip("requires FFmpeg and ffprobe")
-    encoders = subprocess.check_output(["ffmpeg", "-hide_banner", "-encoders"], stderr=subprocess.DEVNULL)
-    if any(encoder not in encoders for encoder in (b"libx264", b"libx265", b"qtrle")):
-        pytest.skip("requires libx264, libx265 and qtrle")
+def test_prepare_demo_produces_playable_media_and_mapped_config(recipe, tmp_path, nvenc):
+    if b"qtrle" not in subprocess.check_output(["ffmpeg", "-hide_banner", "-encoders"], stderr=subprocess.DEVNULL):
+        pytest.skip("requires qtrle")
+    recipe["canvas"].update(width=192, height=128)   # NVENC's smallest frame is above 96x64
     root = tmp_path.resolve()
     path = prepare(recipe, root, runtime_media_dir="/media")
     cfg = load(str(path))
@@ -321,10 +320,10 @@ def test_prepare_demo_produces_playable_media_and_mapped_config(recipe, tmp_path
     for source in cfg.sources:
         media = local(source.location)
         if source.kind == "v210":
-            assert media.stat().st_size == frame_stride(96) * 64 * 4
+            assert media.stat().st_size == frame_stride(192) * 128 * 4
         else:
             stream = probe(media)
-            assert (stream["width"], stream["height"], stream["r_frame_rate"]) == (96, 64, "4/1")
+            assert (stream["width"], stream["height"], stream["r_frame_rate"]) == (192, 128, "4/1")
             if source.color.transfer == "hlg":
                 assert (stream["codec_name"], stream["pix_fmt"]) == ("hevc", "yuv420p10le")
                 assert stream["color_transfer"] == "arib-std-b67"
@@ -340,7 +339,7 @@ def test_prepare_demo_produces_playable_media_and_mapped_config(recipe, tmp_path
     alpha = subprocess.check_output([
         "ffmpeg", "-v", "error", "-i", str(wipe), "-vf", "alphaextract", "-pix_fmt", "gray",
         "-f", "rawvideo", "pipe:1"])
-    frame_size = 96 * 64
+    frame_size = 192 * 128
     assert max(alpha[:frame_size]) == 0
     assert min(alpha[4 * frame_size:5 * frame_size]) == 255
     before = {p: p.stat().st_mtime_ns for p in root.rglob("*") if p.is_file() and p != path}
