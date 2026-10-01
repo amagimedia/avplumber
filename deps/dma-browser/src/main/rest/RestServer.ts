@@ -68,6 +68,17 @@ export class RestServer {
       }),
     );
 
+    this.app.post('/workers/plan', (req, res) => {
+      const windows = (req.body as { windows?: unknown }).windows;
+      if (!Number.isInteger(windows) || (windows as number) < 0) {
+        res.status(400).json({ error: 'windows must be a non-negative integer' });
+        return;
+      }
+      // Advisory: a single-process service has no workers to plan.
+      this.manager.plan?.(windows as number);
+      res.json({ ok: true });
+    });
+
     this.app.post(
       '/window/open',
       route(async (req, res) => {

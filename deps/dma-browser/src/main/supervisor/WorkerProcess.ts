@@ -40,6 +40,8 @@ export interface BrowserWorker {
   readonly hasCapacity: boolean;
   start(): Promise<void>;
   stop(): Promise<void>;
+  /** Stops the Electron process when no window is assigned; the next open() starts it again. */
+  stopIfIdle(): Promise<void>;
   restart(): Promise<void>;
   open(config: WindowConfig): Promise<WindowSnapshot>;
   close(id: string): Promise<void>;
@@ -149,6 +151,13 @@ export class ElectronWorkerProcess implements BrowserWorker {
       child.kill('SIGKILL');
       await exited;
     }
+  }
+
+  public async stopIfIdle(): Promise<void> {
+    // Queued behind open(), so a window assigned while this waited keeps the process.
+    return this.enqueue(async () => {
+      if (this.desired.size === 0) await this.stop();
+    });
   }
 
   public async open(config: WindowConfig): Promise<WindowSnapshot> {

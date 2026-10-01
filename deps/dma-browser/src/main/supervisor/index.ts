@@ -23,18 +23,19 @@ async function main(): Promise<void> {
         parentEnv: process.env,
       }),
   );
-  const manager = new ProcessManager(workers, config.maxWindows);
+  const manager = new ProcessManager(workers, config.maxWindows, config.idleWorkerStopMs);
   const rest = new RestServer(manager, {
     host: config.publicHost,
     port: config.publicPort,
   });
 
-  await manager.start();
   await rest.listen();
   console.error(
     `dma-browser supervisor listening on http://${config.publicHost}:${String(
       config.publicPort,
-    )}; workers=${String(config.workerCount)} windowsPerWorker=${String(config.windowsPerWorker)}`,
+    )}; up to ${String(config.workerCount)} workers of ${String(
+      config.windowsPerWorker,
+    )} windows, started on demand`,
   );
   if (config.autoOpen) await manager.open(config.autoOpen);
 

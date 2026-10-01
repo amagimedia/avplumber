@@ -136,6 +136,13 @@ def open_windows(base_url: str, windows: List[dict]) -> None:
         if not current or any(current.get(key) != value for key, value in wanted.items()):
             changed.append((wanted, current is not None))
 
+    if changed:
+        # The show's page count lets the service spread pages evenly over the fewest workers.
+        try:
+            rest_request(base_url, "POST", "/workers/plan", {"windows": len(windows)})
+        except RuntimeError:   # an older service without the endpoint fills workers in order
+            pass
+
     def reopen(wanted, exists):
         if exists:
             rest_request(base_url, "POST", "/window/close", {"id": wanted["id"]})

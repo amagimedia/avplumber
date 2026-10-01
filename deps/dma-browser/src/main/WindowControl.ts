@@ -17,4 +17,6 @@ export interface WindowControl {
   // The caller must reap its consumer first and supply all of its window ids.
   // Implementations must refuse to restart workers shared with other consumers.
   recover?(ids: readonly string[]): Promise<void>;
+  /** The number of windows the caller is about to keep open; spreads them over the fewest workers. */
+  plan?(windows: number): void;
 }

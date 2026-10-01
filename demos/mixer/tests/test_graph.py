@@ -459,10 +459,11 @@ def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
     monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_rest)
     dmabuf_inputs.open_browser_windows("http://b", ["page_00", "page_01"], "http://p", 480, 270, 60)
 
-    assert [c[:2] for c in calls] == [
-        ("GET", "/status"), ("POST", "/window/close"), ("POST", "/window/open"), ("POST", "/window/open")]
-    assert calls[1][2] == {"id": "page_00"}
-    assert calls[3][2] == {"id": "page_01", "url": "http://p", "width": 480, "height": 270, "fps": 60,
+    assert [c[:2] for c in calls] == [("GET", "/status"), ("POST", "/workers/plan"), ("POST", "/window/close"),
+                                      ("POST", "/window/open"), ("POST", "/window/open")]
+    assert calls[1][2] == {"windows": 2}   # the show's page count, before any page opens
+    assert calls[2][2] == {"id": "page_00"}
+    assert calls[4][2] == {"id": "page_01", "url": "http://p", "width": 480, "height": 270, "fps": 60,
                            "audio": False, "ringSize": 9, "holdLastFrame": True}
 
 
@@ -483,6 +484,7 @@ def test_unchanged_browser_windows_survive_reconfiguration(monkeypatch):
     dmabuf_inputs.open_browser_windows("http://b", ["page_00", "page_01", "page_02"], "http://p", 480, 270, 60)
     assert calls == [
         ("GET", "/status", None),
+        ("POST", "/workers/plan", {"windows": 3}),
         ("POST", "/window/close", {"id": "page_01"}),
         ("POST", "/window/open", {**unchanged, "id": "page_01"}),
         ("POST", "/window/open", {**unchanged, "id": "page_02"}),
@@ -499,6 +501,8 @@ def test_changed_browser_windows_open_concurrently_one_per_worker(monkeypatch):
     def fake_rest(base_url, method, path, body=None):
         if path == "/status":
             return {"windows": [{"id": "page_00"}], "workers": [{"index": 0}, {"index": 1}]}
+        if path == "/workers/plan":
+            return {"ok": True}
         with lock:
             order.append((path, body["id"]))
             in_flight[0] += 1
