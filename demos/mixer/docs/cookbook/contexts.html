@@ -16,7 +16,7 @@
   <span class="pill live">Status: Live</span>
 
   <h2>1. The GL context in each browser importer</h2>
-  <p>Each browser page has its own <code>drm_prime_to_cuda</code> node. The setup allows up to 40 browser pages at 25 and 30 fps (five browser workers of eight windows) and 32 at 50 and 60 fps; the memory figures on this page were estimated for 32. Importing a page frame needs only an EGL display: <code>eglCreateImage</code> already takes <code>EGL_NO_CONTEXT</code>, and CUDA registers the EGL image directly. The node still created an OpenGL context and a 2×2 pbuffer, and made it current before every import. Nothing drew with it. Both importers, <code>drm_prime_to_cuda</code> and <code>drm_prime_to_egl_image</code>, now share one display-only setup, <code>EglDmabufDisplay</code>.</p>
+  <p>Each browser page has its own <code>drm_prime_to_cuda</code> node. The setup allows up to 40 browser pages at every frame rate (five browser workers of eight windows); the memory figures on this page were estimated for 32. Importing a page frame needs only an EGL display: <code>eglCreateImage</code> already takes <code>EGL_NO_CONTEXT</code>, and CUDA registers the EGL image directly. The node still created an OpenGL context and a 2×2 pbuffer, and made it current before every import. Nothing drew with it. Both importers, <code>drm_prime_to_cuda</code> and <code>drm_prime_to_egl_image</code>, now share one display-only setup, <code>EglDmabufDisplay</code>.</p>
 
   <figure>
     <div class="diagram">
@@ -167,8 +167,8 @@
     <li><b>Latency</b>0 frames on program and on command-to-screen: neither context sat on the frame path. Each new DMA-BUF import (a cache miss, not every frame) skips one <code>eglMakeCurrent</code> call on the CPU; not measured.</li>
     <li><b>Side effects</b>Less VRAM held per process, so more headroom for browser pages and compositors. No thread has a CUDA context current at start any more: code that called CUDA without binding its hwaccel context would now fail instead of running on the hidden global one. The start-up error log reads "failed to find a CUDA device".</li>
     <li><b>Cost</b>0 nodes, 0 queues, 0 threads. Net −84 lines (13 added, 97 removed). Frees an estimated ~150 MB (100–250 MB, unmeasured) across 32 importers, about 190 MB for 40 if it scales in proportion (also an estimate), plus 60–100 MB (estimate) for the global context. One fewer <code>eglMakeCurrent</code> per import on the CPU; GPU work unchanged.</li>
-    <li class="flag"><b>Risk</b>Both files are shared avplumber code that other apps use. The change stays only if a compatibility audit shows no behaviour change: the other apps' tests pass and every browser page still imports. Two checks belong in that audit: nothing relied on the global context being current on the loading thread, and no GL call remains in the importer (none does today, including the <code>zero_copy</code> path).</li>
-    <li><b>Switch it off</b>There is no runtime flag; the code is deleted. Reverting means restoring the removed lines and rebuilding. If the audit finds a behaviour change, the removals get gated behind an option or dropped.</li>
+    <li class="flag"><b>Risk</b>Both files are shared avplumber code that other apps use. The code audit of those apps (below) found nothing that relied on the global context being current on the loading thread, and no GL call remains in the importer, including the <code>zero_copy</code> path. A smoke run of those apps after they bump avplumber is still pending.</li>
+    <li><b>Switch it off</b>There is no runtime flag; the code is deleted. Reverting means restoring the removed lines and rebuilding. If that smoke run finds a behaviour change, the removals get gated behind an option or dropped.</li>
   </ul>
 
   <h2>Where in the code</h2>

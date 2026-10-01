@@ -4,7 +4,7 @@
 
 ## Features
 
-This demo manually mixes up to 64 video inputs into one
+This demo manually mixes up to 128 video inputs into one
 1080x1920 portrait program. It provides a separate terminal interface for
 choosing what is on air, preparing the next view, and changing between views.
 
