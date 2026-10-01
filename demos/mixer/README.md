@@ -158,10 +158,12 @@ for the WebUI connection and deployment-local `metrics.json` configuration.
 
 The web page puts scene controls on the left and the portrait WebRTC player on
 the right. Drag the divider to resize the panes; the split persists in your
-browser. The player uses port 8080 on the same host and defaults to H.265/HDR;
-open the control page with `?codec=h264` for SDR. If you change
-`JANUS_PREVIEW_PORT`, pass that port as `?preview_port=8084` on the control page.
-The standalone preview includes the latency and RTT readouts.
+browser. The player loads from port 8080 on the same host and defaults to
+H.265/HDR; open the control page with `?codec=h264` for SDR. If you change
+`JANUS_PREVIEW_PORT`, pass that port as `?preview_port=8084` on the control page;
+behind a reverse proxy, point the page at a path of its own origin with
+`--preview-base` ([below](#behind-a-reverse-proxy)). The standalone preview
+includes the latency and RTT readouts.
 
 Two surfaces speak the same protocol and can run at once. Cut is the default
 transition; explicit show settings and operator choices can select Fade or Wipe.
@@ -192,6 +194,33 @@ sweep and sliding panels with moving colour bands at the selected FPS. No
 external wipe files are needed. Custom clips must preserve alpha (for example
 QTRLE/ARGB or ProRes 4444) and cover the canvas at their midpoint to hide the
 scene switch.
+
+## Behind a reverse proxy
+
+The control page on port 7681 and the player on port 8080 are two origins, so a
+proxy that protects both with HTTP basic auth asks for the password twice. Serve
+them from one origin instead: the page at `/` and the preview server under
+`/preview/` with the prefix stripped, and tell the page where the player is:
+
+```nginx
+auth_basic "mixer";
+auth_basic_user_file <htpasswd-file>;
+location /         { proxy_pass http://127.0.0.1:7681; }
+location /preview/ { proxy_pass http://127.0.0.1:8080/; }   # the trailing slash strips the prefix
+```
+
+```sh
+python3 demos/mixer/webui.py --preview-base /preview/      # Compose: MIXER_PREVIEW_BASE=/preview/
+```
+
+Every player the page opens (the program in each codec, the clean output and
+the multiviewers, and the "open in the player" links) then loads from
+`/preview/`, and the player reaches Janus and posts its receiver stats under
+that path (`/preview/janus`, `/preview/receiver-stats`), so one realm covers
+everything. Rewriting the page in the proxy (`sub_filter`) is not needed, and
+forwarding `/janus` or `/receiver-stats` at the root is no longer required. The
+base must end with a slash, which `--preview-base` adds; a URL on another host
+is accepted too, and `?preview_port=` still replaces the port.
 
 ## Browser pages as sources
 

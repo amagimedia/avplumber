@@ -3,6 +3,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AVPlumber mixer</title>
+<!-- webui.py fills in its options for the page, such as where the player is; the file holds the defaults. -->
+<script id="config" type="application/json">{}</script>
 <style>
   /* The mixer UI is deliberately dark-only. */
   :root {
@@ -958,9 +960,13 @@ const fadeColor = (() => {
 
 /* ---------- viewer outputs ---------- */
 const query = new URLSearchParams(location.search);
-const playerBase = new URL(location.href);
-playerBase.port = query.get("preview_port") || "8080";
-playerBase.pathname = "/";
+// Where the player is, for every output's URL: the backend's --preview-base (a path on this origin,
+// such as /preview/ behind a reverse proxy, or a URL), else port 8080 of this host. ?preview_port=
+// replaces the port either way.
+const config = JSON.parse($("config").textContent);
+const playerBase = new URL(config.preview_base || "/", location.href);
+const previewPort = query.get("preview_port") || (!config.preview_base && "8080");
+if (previewPort) playerBase.port = previewPort;
 playerBase.search = playerBase.hash = "";
 // The player's own H.265 message sits in the footer the viewers clip, so the page never asks for a
 // codec the browser cannot receive.

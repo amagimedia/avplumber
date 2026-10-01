@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from pyplumber.mixer.control import mixer_command
-from webui import GpuStats, HostStats, MixerBridge, serve
+from webui import CONFIG_SCRIPT, GpuStats, HostStats, MixerBridge, normalize_preview_base, page, serve
 
 
 class FakeBridge(MixerBridge):
@@ -50,9 +50,9 @@ def client(monkeypatch):
     monkeypatch.setattr(GpuStats, 'snapshot', lambda _: [])
     bridges = []
 
-    def start(bridge, host_stats=None):
+    def start(bridge, host_stats=None, preview_base=None):
         bridges.append(bridge)
-        server = serve(bridge, "127.0.0.1", 0, host_stats=host_stats)
+        server = serve(bridge, "127.0.0.1", 0, host_stats=host_stats, preview_base=preview_base)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return f"http://127.0.0.1:{server.server_address[1]}", server
 
@@ -370,14 +370,44 @@ def test_a_failing_mixer_is_reported_not_swallowed(client):
     assert status == 502 and "mixer said no" in body["error"]
 
 
+def get_page(url):
+    with urllib.request.urlopen(url + "/", timeout=5) as response:
+        assert response.headers["Content-Type"].startswith("text/html")
+        return response.read().decode()
+
+
 def test_the_page_and_only_the_page_is_served(client):
     url, _ = client(FakeBridge({"mixer.status": "{}", "mixer.scenes": "[]"}))
-    with urllib.request.urlopen(url + "/", timeout=5) as response:
-        page = response.read().decode()
-    assert response.headers["Content-Type"].startswith("text/html")
-    assert "AVPlumber mixer" in page and "/api/state" in page
+    html = get_page(url)
+    assert "AVPlumber mixer" in html and "/api/state" in html
     try:
         urllib.request.urlopen(url + "/nope", timeout=5)
         raise AssertionError("expected 404")
     except urllib.error.HTTPError as exc:
         assert exc.code == 404
+
+
+def test_the_page_carries_where_the_player_is(client):
+    # Without --preview-base the page keeps its own defaults: the player on port 8080 of its host.
+    url, _ = client(FakeBridge())
+    assert CONFIG_SCRIPT % "{}" in get_page(url)
+    # Behind a reverse proxy every player loads from a path of the page's own origin.
+    url, _ = client(FakeBridge(), preview_base="/preview/")
+    assert CONFIG_SCRIPT % '{"preview_base": "/preview/"}' in get_page(url)
+
+
+def test_no_player_address_can_end_the_config_script():
+    base = "/</script><script>alert(1)</script>/"
+    html = page({"preview_base": base}).decode()
+    assert html.count("</script>") == page({}).decode().count("</script>")
+    opening = CONFIG_SCRIPT.partition("%s")[0]
+    start = html.index(opening) + len(opening)
+    script = html[start:html.index("</script>", start)]
+    assert "<" not in script and json.loads(script) == {"preview_base": base}
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("/preview", "/preview/"), ("/preview/", "/preview/"), ("https://other/player", "https://other/player/"), ("", ""),
+])
+def test_the_preview_base_ends_with_a_slash_so_the_player_finds_its_files(value, expected):
+    assert normalize_preview_base(value) == expected
