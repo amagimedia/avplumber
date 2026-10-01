@@ -505,7 +505,9 @@ public:
             std::map<std::string, bool> subscriptions;
             for (const auto &entry : manager_->allNodes()) {
                 if (!entry.second) continue;
-                if (auto source = std::dynamic_pointer_cast<IOutputSubscriptions>(entry.second->node())) {
+                std::shared_ptr<Node> n;
+                if (!entry.second->doLockedTry([&]() { n = entry.second->node(); })) continue;
+                if (auto source = std::dynamic_pointer_cast<IOutputSubscriptions>(n)) {
                     const auto states = source->outputSubscriptions();
                     subscriptions.insert(states.begin(), states.end());
                 }
