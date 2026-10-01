@@ -640,7 +640,11 @@ PYBIND11_MODULE(_avplumber, m) {
             }
             return result;
         })
-        .def("deleteNode", &NodeManager::deleteNode)
+        // deleteNode joins the node's thread. A Python node's thread needs the
+        // GIL to finish process() and to drop its thread state on exit, so the
+        // caller must not hold it across the join.
+        .def("deleteNode", &NodeManager::deleteNode,
+             py::call_guard<py::gil_scoped_release>())
         .def("node", &NodeManager::node, py::arg("name"))
         .def("node_if_exists", &NodeManager::node_if_exists, py::arg("name"))
         .def("nodes", &NodeManager::nodes, py::arg("type"))
