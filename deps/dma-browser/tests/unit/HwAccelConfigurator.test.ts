@@ -35,7 +35,6 @@ describe('HwAccelConfigurator.apply', () => {
         'run-all-compositor-stages-before-draw',
         'use-gl',
         'use-angle',
-        'disable-vulkan',
         'disable-hardware-overlays',
         'disable-accelerated-video-decode',
         'ignore-gpu-blocklist',

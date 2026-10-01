@@ -87,15 +87,16 @@ must cover `DMA_BROWSER_MAX_WINDOWS`. The public API always enforces
 
 ## REST API
 
-| Method | Path                | Body                                                       |
-| ------ | ------------------- | ---------------------------------------------------------- |
-| POST   | `/window/open`      | `{ id, url, width, height, fps, audio, holdLastFrame }`    |
-| POST   | `/window/close`     | `{ id }`                                                   |
-| GET    | `/window/close/all` |                                                            |
-| POST   | `/window/refresh`   | `{ id }`                                                   |
-| POST   | `/window/update`    | `{ id, url }`                                              |
-| POST   | `/window/show`      | `{ id, show }`                                             |
-| GET    | `/status`           |                                                            |
+| Method | Path                | Body                                                              |
+| ------ | ------------------- | ----------------------------------------------------------------- |
+| POST   | `/window/open`      | `{ id, url, width, height, fps, audio, ringSize, holdLastFrame }` |
+| POST   | `/window/close`     | `{ id }`                                                          |
+| GET    | `/window/close/all` |                                                                   |
+| POST   | `/window/refresh`   | `{ id }`                                                          |
+| POST   | `/window/update`    | `{ id, url }`                                                     |
+| POST   | `/window/show`      | `{ id, show }`                                                    |
+| GET    | `/status`           |                                                                   |
+| POST   | `/workers/recover`  | `{ ids }`                                                         |
 
 Frames go to `/tmp/dma-page/{id}.sock` (dmabuf FD + 48-byte TexInfo header).
 Audio (when `audio: true`) goes to `/tmp/dma-page/{id}-audio.sock` (raw interleaved float32 PCM).
@@ -118,9 +119,10 @@ then sends kind `2`. Shut down consumers before closing browser windows.
 An unexpected disconnect cannot prove GPU reads have finished. The browser pins
 unacknowledged textures, pauses the affected source, and reports
 `quarantinedFrameCount` in `/status`. After stopping the affected consumer,
-restart its browser worker to recover; reopening the window alone is refused.
-Other windows in that worker also restart. This protocol controls buffer reuse;
-it does not supply a producer-ready GPU fence.
+restart its browser worker with `POST /workers/recover`; reopening the window
+alone is refused. Other windows in that worker also restart, so `ids` must list
+all of them. This protocol controls buffer reuse; it does not supply a
+producer-ready GPU fence.
 
 `txFrameCount` counts paints delivered to at least one consumer. `droppedFrames`
 counts paints with no consumer or any failed delivery, so a partial broadcast
@@ -129,10 +131,11 @@ increments both counters. `fdpass_backpressure`, `fdpass_disconnected`, and
 
 The DMA-BUF socket is bidirectional. The browser retains every transmitted
 shared texture until the consumer acknowledges its frame number. The maximum
-sent-but-unacknowledged count is `DMA_BROWSER_DMABUF_POOL_SIZE` (default 11,
-range 1–64). If that limit is reached, the newest paint is dropped and released;
-an older in-flight texture is never released early. `/status` reports
-`releasedFrameCount` and `retainedFrameCount` for each window.
+sent-but-unacknowledged count is the window's `ringSize`, else
+`DMA_BROWSER_DMABUF_POOL_SIZE` (default 11; both range 1–64). If that limit is
+reached, the newest paint is dropped and released; an older in-flight texture is
+never released early. `/status` reports `releasedFrameCount` and
+`retainedFrameCount` for each window.
 
 ## Layout
 
