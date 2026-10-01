@@ -391,9 +391,11 @@ def test_the_page_carries_where_the_player_is(client):
     # Without --preview-base the page keeps its own defaults: the player on port 8080 of its host.
     url, _ = client(FakeBridge())
     assert CONFIG_SCRIPT % "{}" in get_page(url)
-    # Behind a reverse proxy every player loads from a path of the page's own origin.
-    url, _ = client(FakeBridge(), preview_base="/preview/")
-    assert CONFIG_SCRIPT % '{"preview_base": "/preview/"}' in get_page(url)
+    # Behind a reverse proxy every player loads from a path of the page's own origin; the page carries it
+    # with the slash the player resolves its files against, whichever way the server was given it.
+    for preview_base in ("/preview/", "/preview"):
+        url, _ = client(FakeBridge(), preview_base=preview_base)
+        assert CONFIG_SCRIPT % '{"preview_base": "/preview/"}' in get_page(url)
 
 
 def test_no_player_address_can_end_the_config_script():

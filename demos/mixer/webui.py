@@ -397,7 +397,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(bridge: MixerBridge, bind: str, port: int, setup=None, host_stats: HostStats | None = None,
           preview_base: str | None = None) -> ThreadingHTTPServer:
-    """`preview_base`: where the page's players load from, when not port 8080 of the page's host."""
+    """`preview_base`: where the page's players load from, when not port 8080 of the page's host.
+    Normalized here, so every caller's page carries a base the player resolves its files against."""
+    preview_base = normalize_preview_base(preview_base or "")
     config = {"preview_base": preview_base} if preview_base else {}
     server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=GpuStats(), host_stats=host_stats,
                                                         config=config))
@@ -413,7 +415,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--bind", default="0.0.0.0", help="address to serve the page on")
     parser.add_argument("--http-port", type=int, default=7681)
     # nargs="?": compose.yaml always passes the flag, with an empty value when MIXER_PREVIEW_BASE is unset.
-    parser.add_argument("--preview-base", nargs="?", const="", type=normalize_preview_base, default="",
+    parser.add_argument("--preview-base", nargs="?", const="", default="",
                         help="Where the page's players load from: a path on the page's own origin, such as /preview/ "
                              "behind a reverse proxy, or a URL (default: port 8080 of the page's host)")
     parser.add_argument("--transition", choices=("cut", "fade", "wipe"),
@@ -440,7 +442,7 @@ def main(argv: list[str] | None = None) -> None:
         return process.pid if process else None
     host_stats = HostStats(mixer_pid)
     host_stats.start()
-    server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats, preview_base=args.preview_base or None)
+    server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats, preview_base=args.preview_base)
     print(f"mixer web UI on http://{args.bind}:{args.http_port} "
           f"controlling {args.mixer} at {args.host}:{args.port}", flush=True)
     def stop(_signum, _frame):
