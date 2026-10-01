@@ -19,9 +19,9 @@
 //
 // The scene leaving program becomes the preview (the swap), so a settle pass after every take
 // keeps the program scene's sources active (no layer draws them) and the next take's timed
-// composition only drops inputs, which the compositor applies at once instead of staging. A
-// settle the compositor rejects (a stalled program source) stays in applied_inputs_, so the next
-// timed apply adds that input and is staged too.
+// composition only drops inputs, which the compositor applies at once instead of staging. An
+// input of a settle the compositor rejects (a stalled program source) stays in applied_inputs_
+// without being active, so the next timed apply adds it and is staged too.
 //
 // The compositor is resolved once, at creation: a lookup by name takes NodeManager's lock, which
 // shutdown holds while it joins this thread. A change goes from the feed's lock

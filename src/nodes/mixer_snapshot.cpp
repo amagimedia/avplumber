@@ -67,10 +67,11 @@ public:
 
         av::VideoFrame output;
         if (replace) {
-            // The output instance stamps its still one tick behind the clock: a still of the
-            // current tick would beat that tick's live frame, which then crosses the pipeline,
-            // and drop it below as a duplicate, so the hold never ended. Slot instances stay on
-            // the current tick: their still must reach the output ahead of the output's own.
+            // The output instance stamps its still one tick behind the clock: a tick's live frame
+            // crosses the pipeline after a still of that tick would be stamped, so it lost that race,
+            // was dropped below as a duplicate and left the hold's end to scheduling luck. Slot
+            // instances stay on the current tick: their still must reach the output ahead of the
+            // output's own.
             const auto index = rate_.atOrBefore(avp::mixer::monotonicNs() - latency_ns_) - (slot_ == -1 ? 1 : 0);
             auto pts = av::Timestamp(index, timeBase());
             // Draining is consumer-owned; no controller ever clears live edges.

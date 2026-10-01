@@ -4,7 +4,7 @@
 //
 // It was a uint64_t, which capped a show at 64 sources. The control protocol
 // already had a wider form: parseBitmask accepts a least-significant-bit-first
-// string of '0'/'1', which is what this type writes into JSON once a mask no
+// string of '0'/'1', which is what toParameters writes into JSON once a mask no
 // longer fits in a 64-bit number.
 #include "../../util.hpp"
 
