@@ -10,10 +10,10 @@ class CudaMixerBackend:
     # slice work, and FFmpeg's default starts one idle slice thread per CPU per graph.
     graph_threads = 1
 
-    def compositor(self, params, *, api=None):
+    def compositor(self, params, *, keyer=False, api=None):
         if api is None:
             from pyplumber import node as api
-        return api.CudaRectOverlay(params)
+        return (api.MixerKeyer if keyer else api.MixerCompositor)(params)
 
     def transition(self, params):
         from pyplumber.node import FilterVideo

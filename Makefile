@@ -183,6 +183,9 @@ override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs -I$(CUDA_ROOT)/include -I$(CUDA_ROOT)/targets/x86_64-linux/include
 override LFLAGS += -L$(CUDA_ROOT)/targets/x86_64-linux/lib -Wl,-rpath,$(CUDA_ROOT)/targets/x86_64-linux/lib
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
+else
+# The mixer's compositor nodes draw with cuda_rect_draw.
+NODES_SRC := $(filter-out $(SRCDIR)/nodes/mixer_compositor.cpp $(SRCDIR)/nodes/mixer_keyer.cpp,$(NODES_SRC))
 endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVJPEG),11)

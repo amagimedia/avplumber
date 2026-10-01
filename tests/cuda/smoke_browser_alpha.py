@@ -67,7 +67,7 @@ def main():
             nodes.append(api.FilterVideo({"name": "premultiplied", "src": edge, "dst": "tagged", "hwaccel": "alpha_gpu",
                                           "graph": "setparams=alpha_mode=premultiplied"}))
             edge = "tagged"
-            nodes.append(api.CudaRectOverlay({
+            nodes.append((api.CudaRectOverlay if args.unclocked else api.MixerCompositor)({
                 "name": "blend", "src": [edge], "dst": "blended", "hwaccel": "alpha_gpu",
                 "width": width, "height": height, "sw_format": "p210le", "color": "sdr",
                 **({"metadata_key": "probe_layout", "scale": True} if args.unclocked else {"fps": "30/1"}),

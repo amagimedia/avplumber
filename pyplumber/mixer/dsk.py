@@ -59,7 +59,7 @@ class DownstreamKeyer:
             # a distinct key keeps it from rearranging the keyer's layers.
             "metadata_key": "dsk_layers_v1",
             "group": self.group,
-        }, api=self.api))
+        }, keyer=True, api=self.api))
         return feeds
 
     def set(self, request) -> dict:

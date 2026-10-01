@@ -41,11 +41,6 @@ public:
 
     const Canvas &canvas() const { return canvas_; }
     int maxLayers() const { return max_layers_; }
-    void setColor(AVColorTransferCharacteristic transfer, float sdr_white, float hdr_peak) {
-        canvas_.transfer = transfer;
-        canvas_.sdr_white = sdr_white;
-        canvas_.hdr_peak = hdr_peak;
-    }
 
     /// Canvas formats the composite kernel writes: semiplanar YUV (NV12, P010, P210) and
     /// packed 8-bit RGB without a separate alpha plane (rgb0, bgr0, rgba, bgra).

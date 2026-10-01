@@ -159,7 +159,6 @@ def fake_api():
         "assume_video_format",
         "bsf",
         "clip_cache",
-        "cuda_rect_overlay",
         "dec_video",
         "demux",
         "drm_prime_to_cuda",
@@ -169,6 +168,8 @@ def fake_api():
         "force_key_frame",
         "input_rec",
         "ipc_dmabuf_source",
+        "mixer_compositor",
+        "mixer_keyer",
         "mux",
         "one_to_many",
         "output",
@@ -190,7 +191,6 @@ def fake_api():
             "assume_video_format": "AssumeVideoFormat",
             "bsf": "Bsf",
             "clip_cache": "ClipCache",
-            "cuda_rect_overlay": "CudaRectOverlay",
             "dec_video": "DecVideo",
             "demux": "Demux",
             "drm_prime_to_cuda": "DrmPrimeToCuda",
@@ -200,6 +200,8 @@ def fake_api():
             "force_key_frame": "ForceKeyFrame",
             "input_rec": "InputRec",
             "ipc_dmabuf_source": "IpcDmabufSource",
+            "mixer_compositor": "MixerCompositor",
+            "mixer_keyer": "MixerKeyer",
             "mux": "Mux",
             "one_to_many": "OneToMany",
             "output": "Output",
@@ -1435,6 +1437,7 @@ def _dsk_app(tmp_path, monkeypatch, renditions, canvas=CONFIG["canvas"], dsk=DSK
 def test_dsk_keys_the_program_after_the_mixer_with_one_small_program_clocked_pass(tmp_path, monkeypatch):
     app, nodes = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     keyer = nodes["dsk_comp"]
+    assert keyer["type"] == "mixer_keyer"
     assert keyer["src"] == ["mixer_final_out", "dsk_key_bug", "dsk_key_strap"]
     assert keyer["subscriptions"] == ["", "dsk_key_bug", "dsk_key_strap"]
     assert keyer["clock_input"] == 0 and "latency_ms" not in keyer
@@ -1534,7 +1537,7 @@ def test_dsk_command_the_keyer_rejects_switches_nothing(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
 
     def reject(commands):
-        raise RuntimeError("cuda_rect_overlay: fade_inputs requires clock_input")
+        raise RuntimeError("mixer_keyer: fade_inputs duration_ms must be 0 to 10000")
     monkeypatch.setattr(app.avp, "executeCommandsFromString", reject)
     with pytest.raises(RuntimeError):
         app.avp.commands_registered["mixer.dsk"](json.dumps({"key": "strap", "on": True, "fade_seconds": 1}))
