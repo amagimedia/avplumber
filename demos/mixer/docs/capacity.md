@@ -15,7 +15,7 @@ measurements behind them.
 | 25 | 110 = 40 NVDEC + 36 browser + 30 raw NV12 + 4 keys | 0 missed playout deadlines in steady state on the current stack (below) |
 | 30 | 110 = 36 NVDEC + 36 browser + 34 raw NV12 + 4 keys, pinned uploads | The declared baseline; not pushed further |
 | 50 | 82 = 22 NVDEC + 36 browser + 20 raw NV12 + 4 keys | Cut-spam gate passes, 0 missed (see [50 fps](#50-fps)) |
-| 60 | 75 = 18 NVDEC + 36 browser + 17 raw NV12 + 4 keys | Cut-spam gate passes, 0 missed (see [60 fps on the current stack](#60-fps-on-the-current-stack)); 68 inputs ran a 19.5 h soak with 24 missed deadlines (0.0006%) and a median cut latency of about 43 ms |
+| 60 | 75 = 18 NVDEC + 36 browser + 17 raw NV12 + 4 keys | Cut-spam gate passes, 0 missed (see [60 fps on the current stack](#60-fps-on-the-current-stack)); 68 inputs ran a 19.5 h soak with 24 missed deadlines (0.0006%); that show's median cut latency is about 43 ms |
 
 Before the mostly-still browser test page (commit 5068a50) and Electron 44, the 68-input
 60 fps show measured GPU SM about 88%, NVDEC 88% and 19% host CPU idle, and 70 inputs
@@ -152,7 +152,7 @@ The setup takes 55, the margin 61 has at 4:2:0, as the 4:2:2 share: 55 / 75 = 0.
 
 ### 50 fps
 
-50 fps takes the 60 fps limits scaled by frame rate (see the top of this page). Measured 2026-10-01
+50 fps takes the 60 fps limits scaled by frame rate ([how the limit is computed](cookbook/source-limits.html)). Measured 2026-10-01
 with the Balanced mixes, clean feed on, NVENC p3:
 
 | 50 fps | Mix with 4 keys | Gate | Cut p95 | Input repeats | GPU p50 / p95 | NVDEC p50 / p95 | NVENC | Peak VRAM | Host CPU idle |
