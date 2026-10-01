@@ -14,7 +14,7 @@ std::vector<TransitionCommand> fadeCommand(const FadeRequest& request) {
         ")/" + std::to_string(request.duration_sec) + ",0,1)";
     std::string progress;
     if (request.dip) {
-        const auto& c = *request.dip;
+        const auto c = canvasCodes(*request.dip, request.transfer);
         send("color", std::to_string(c[0]) + ":" + std::to_string(c[1]) + ":" + std::to_string(c[2]));
         send("mode", "dip");
         progress = dipCurveExpression(request.curve, clip, request.dip_hold);

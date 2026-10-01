@@ -3,8 +3,6 @@
 // A dip is a crossfade to the orchestrator: same readiness gate, timeline,
 // interruption and cleanup; only the transition filter's commands differ.
 #include "internal.hpp"
-#include "../primitives/compositor_color.hpp"
-#include "../../CommandTiming.hpp"
 
 namespace avp::mixer {
 
@@ -48,8 +46,9 @@ void MixerOrchestrator::deferredCleanup(
     // has left the mixer already, so the followers get the swap before the routing, like a cut's.
     const int64_t effective_ns = presented.timestamp({1, 1000000000});
     try {
-        orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene, true,
-            [&](int64_t) { state->publishTakePreview(new_pgm_scene, effective_ns); });
+        orch.switchProgramSelector(new_pgm_is_slot_a);
+        state->publishTakePreview(new_pgm_scene, effective_ns);
+        orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
         orch.finishSnapshot();
     } catch (const std::exception& e) {
         logstream << "mixer: deferred cleanup error restoring routing: " << e.what();
@@ -63,20 +62,18 @@ void MixerOrchestrator::deferredCleanup(
 // ---------------------------------------------------------------------------
 void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
                              int64_t start_pts_ms, FadeCurve curve,
-                             std::optional<std::array<uint8_t, 3>> dip_rgb) {
+                             std::optional<std::array<uint8_t, 3>> dip,
+                             avp::mixer::CutLatency::Clock::time_point received) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
     if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid fade duration");
     const auto start = resolveTransitionStartPts(start_pts_ms);
-    DipCodes dip;
-    if (dip_rgb) dip = canvasCodes(*dip_rgb, state_->canvas_transfer);
     interruptTransition(Interruption::Replaced);
     state_->transition_mode = MixerState::TransitionMode::Crossfade;
     const auto generation = ++state_->transition_generation;
     state_->transition_scene_name = scene_name;
-    // The command's receipt when the dispatcher runs this, now otherwise: the followers time
-    // the preview swap at the end of the fade from it.
-    state_->take_received_ns = monotonicNs(CommandTiming::received());
+    // The followers time the preview swap at the end of the fade from the command's receipt.
+    state_->take_received_ns = monotonicNs(received);
     TransitionGuard guard([&] { abortTransition(generation); });
     cutInternal(scene_name, start);
     const auto initial = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->pvwSlot().post_otm_name));
@@ -89,8 +86,8 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
 }
 
 void MixerOrchestrator::startFadeWhenReady(const std::string& scene_name, double duration_sec,
-        FadeCurve curve, const DipCodes& dip, int64_t requested_pts, uint64_t generation,
-        av::Timestamp initial_ts, int64_t deadline_ms) {
+        FadeCurve curve, const std::optional<std::array<uint8_t, 3>>& dip, int64_t requested_pts,
+        uint64_t generation, av::Timestamp initial_ts, int64_t deadline_ms) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!transitionIsCurrent(state_, generation, MixerState::TransitionMode::Crossfade)) return;
     TransitionGuard guard([&] { abortTransition(generation); });
@@ -120,7 +117,8 @@ void MixerOrchestrator::startFadeWhenReady(const std::string& scene_name, double
 }
 
 void MixerOrchestrator::startFade(const std::string& scene_name, double duration_sec, FadeCurve curve,
-                                 const DipCodes& dip, int64_t start_ms, uint64_t transition_generation) {
+                                 const std::optional<std::array<uint8_t, 3>>& dip, int64_t start_ms,
+                                 uint64_t transition_generation) {
     // Capture all needed values from pre-flip state
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
     uint32_t pvw_bit = state_->pvwOutputBit();
@@ -134,7 +132,8 @@ void MixerOrchestrator::startFade(const std::string& scene_name, double duration
     // 2. Update the preheated transition while its input branches are idle.
     // A dip holds its colour alone for one frame period, so some frame shows it.
     const double dip_hold = av_q2d({state_->fps_den, state_->fps_num}) / duration_sec;
-    for (const auto& command : state_->transition_control({start_ms, duration_sec, pvw_is_slot_a, curve, dip, dip_hold}))
+    for (const auto& command : state_->transition_control(
+            {start_ms, duration_sec, pvw_is_slot_a, curve, dip, dip_hold, state_->canvas_transfer}))
         setNodeObject(state_->source_switcher_name + "_transition", command.key, command.value);
 
     // 3. Camera routing: applied in loadSceneIntoSlot via rewriteCameraOutputsForSlot

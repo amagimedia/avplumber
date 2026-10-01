@@ -105,7 +105,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     // 128 bits do not fit a lock-free atomic, and both masks are read once per frame:
     // one mutex guards them, like default_layers_ above.
     mutable std::mutex masks_mutex_;
-    avp::mixer::SourceMask active_inputs_ = avp::mixer::SourceMask::all();
+    avp::mixer::SourceMask active_inputs_ = avp::mixer::SourceMask().set();
     avp::mixer::SourceMask prewarm_inputs_;
     avp::mixer::SourceMask activeInputs() const {
         std::lock_guard<std::mutex> lock(masks_mutex_);
@@ -338,8 +338,8 @@ public:
             result["composition_error"] = composition_error_;
         }
         if (mixer_state_) {
-            std::lock_guard<std::mutex> lock(mixer_state_->mutex);
-            result["pvw_scene"] = mixer_state_->pvw_scene_name;
+            std::lock_guard<std::mutex> lock(mixer_state_->preview_mutex);
+            result["pvw_scene"] = mixer_state_->preview.pvw;
         }
         return result;
     }
@@ -920,7 +920,7 @@ public:
             const auto mask = avp::mixer::parseSourceMask(value.at("active_inputs"));
             for (const auto &layer : layers)
                 if (layer.input < 0 || size_t(layer.input) >= source_edges_.size()) throw Error("aux: invalid input index");
-            for (int i = source_edges_.size(); i < avp::mixer::SourceMask::kBits; ++i)
+            for (int i = source_edges_.size(); i < avp::mixer::kSourceMaskBits; ++i)
                 if (mask.test(i)) throw Error("aux: active input out of range");
             {
                 std::lock_guard<std::mutex> lock(layers_mutex_);
@@ -1008,7 +1008,7 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     auto src_names = jsonToStringList(params["src"]);
     if (src_names.empty())
         throw Error("cuda_rect_overlay: at least one input required in src");
-    if (src_names.size() > avp::mixer::SourceMask::kBits)
+    if (src_names.size() > avp::mixer::kSourceMaskBits)
         throw Error("cuda_rect_overlay: at most 128 inputs supported");
     std::vector<LayerSpec> layers = avp::mixer::parseLayersParam(params);
     const int max_layers = params.value("max_layers", 256);

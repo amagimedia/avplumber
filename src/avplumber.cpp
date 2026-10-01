@@ -33,6 +33,7 @@
 #include "SharedTimeline.hpp"
 #include "mixer/primitives/MixerState.hpp"
 #include "mixer/primitives/compositor_color.hpp"
+#include "nodes/hwaccel/graphic_color.h"
 #include "mixer/orchestrator/MixerOrchestrator.hpp"
 using avp::mixer::MixerOrchestrator;
 using avp::mixer::MixerState;
@@ -1012,7 +1013,7 @@ public:
             if (req.contains("color") && !req.at("color").is_null())
                 dip = avp::mixer::parseDipColor(req.at("color").get<std::string>());
             auto orch = mixerOrchestrator(mixer_name);
-            orch.fade(scene_name, duration_sec, start_pts_ms, curve, dip);
+            orch.fade(scene_name, duration_sec, start_pts_ms, curve, dip, CommandTiming::received());
         };
 
         // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0,"start_pts_ms":123456789}
@@ -1129,7 +1130,7 @@ public:
             if (cfg.contains("source_switcher")) state->source_switcher_name = cfg["source_switcher"].get<std::string>();
             if (cfg.contains("keyframe_node")) state->keyframe_node_name = cfg["keyframe_node"].get<std::string>();
             if (cfg.contains("initial_pgm_scene")) state->pgm_scene_name = cfg["initial_pgm_scene"].get<std::string>();
-            if (cfg.contains("initial_pvw_scene")) state->pvw_scene_name = cfg["initial_pvw_scene"].get<std::string>();
+            if (cfg.contains("initial_pvw_scene")) state->publishPreview(cfg["initial_pvw_scene"].get<std::string>(), 0);
             if (cfg.contains("initial_pgm_slot")) {
                 std::string slot = cfg["initial_pgm_slot"].get<std::string>();
                 if (slot == "A")

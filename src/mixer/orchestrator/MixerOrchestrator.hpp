@@ -45,6 +45,9 @@ class MixerOrchestrator {
     /// Returns the output tick of the clip's first frame: the compositor's output is
     /// this take's from that tick on. Caller holds state_->mutex.
     int64_t armWipeChain(const std::string& wipe_file);
+    /// Decoding per take: point the stopped wipe reader at `wipe_file`, flush what the previous
+    /// clip left in the chain's edges and start the wipe group. Caller holds state_->mutex.
+    void startWipeDecode(const std::string& wipe_file);
     /// Take the wipe chain off duty: park the resident chain (cached wipes), or stop
     /// the per-take decode group. Caller holds state_->mutex.
     void retireWipeChain();
@@ -61,20 +64,21 @@ class MixerOrchestrator {
     void publishRoutedRoutesForProgramOnly(bool pgm_is_slot_a, const SceneDefinition& scene,
                                            int64_t at_pts_ms, bool immediate);
 
-    /// Restore steady-state routing after a cut or crossfade has concluded.
-    /// Centralizes the per-source OTM masks, post-otm/compositor flips, and
-    /// source_switcher reset that cut+fade cleanup paths used to duplicate.
-    /// Caller must hold state_->mutex. Wipe end has different semantics
+    /// Caller holds state_->mutex. Points the source_switcher at slot A or B, the only setting
+    /// visible at the output, before applyPostTransitionRouting flips the rest: the window
+    /// between the two would show only if the new direct path were not producing frames yet,
+    /// and at every caller it is. Returns selectorOutputNs() read right after the switch, for
+    /// finishSnapshot(); a finishing take publishes its preview between the two calls
+    /// (MixerState::publishTakePreview), so the AUX followers start while the routing runs.
+    int64_t switchProgramSelector(bool new_pgm_is_slot_a);
+    /// Restore steady-state routing after a cut or crossfade has concluded, once
+    /// switchProgramSelector has switched the selector: the per-source OTM masks and the
+    /// post-otm/compositor flips. Caller must hold state_->mutex. Wipe end has different semantics
     /// (timeline-driven, doesn't immediately mutate node objects) and uses
     /// its own logic. `picture_changed` false (the on-air picture stays the same) skips
-    /// the encoder keyframe request. `switched`, when given, runs right after the selector
-    /// switch with selectorOutputNs() read then, before the routing: a finishing take
-    /// publishes its preview there (MixerState::publishTakePreview), so the AUX followers
-    /// start while the routing runs. Returns that same reading, for finishSnapshot(); 0 for
-    /// an unknown scene.
-    int64_t applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene,
-                                       bool picture_changed = true,
-                                       const std::function<void(int64_t emitted)>& switched = {});
+    /// the encoder keyframe request. Does nothing for an unknown scene.
+    void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene,
+                                    bool picture_changed = true);
 
     void ensureIdle() const;
     /// Why a transition being prepared or running is dropped. `Replaced`: by the take that
@@ -85,21 +89,16 @@ class MixerOrchestrator {
     enum class Interruption { Dropped, Replaced };
     void interruptTransition(Interruption why);
     std::shared_ptr<OutputSnapshot> outputSnapshot() const;
-    /// Stops the slot substitution and releases a held output at the next selected frame.
-    /// Returns that frame's pts (ns): one main tick after `emitted`, the selector's newest
-    /// output read after the selector was switched (applyPostTransitionRouting's return, or
-    /// read now), so it is the first frame of the new program; 0 before the selector emitted
-    /// anything.
-    int64_t finishSnapshot(int64_t emitted);
-    int64_t finishSnapshot() { return finishSnapshot(selectorOutputNs()); }
+    /// Stops the slot substitution and releases a held output at the first selected frame
+    /// newer than `emitted`, the selector's newest output read after the selector was switched
+    /// (switchProgramSelector's return, or read now).
+    void finishSnapshot(int64_t emitted);
+    void finishSnapshot() { finishSnapshot(selectorOutputNs()); }
     /// pts (ns) of the first frame of the new program: one main tick after `emitted`, the
     /// selector's newest output read after it was switched; 0 before it emitted anything.
     int64_t firstNewProgramFrameNs(int64_t emitted) const;
     /// pts (ns) of the newest frame the selector has emitted, 0 before its first.
     int64_t selectorOutputNs() const;
-    /// Release timestamp (ns) for the output hold: the first frame newer than everything
-    /// the selector has emitted, read after the selector was switched.
-    int64_t releaseAfterSelectorOutput() const;
     /// Caller holds state_->mutex. Ends a transition: program on `new_pgm_scene`, the preview
     /// swapped or cleared (MixerState::completeTransition) from the program frame at
     /// `effective_ns` (0: now).
@@ -111,10 +110,10 @@ class MixerOrchestrator {
     void restoreProgramRouting(MixerState::TransitionMode dropped);
     void abortTransition(uint64_t generation) noexcept;
     void startFadeWhenReady(const std::string& scene_name, double duration_sec, FadeCurve curve,
-                           const DipCodes& dip, int64_t requested_pts, uint64_t generation,
-                           av::Timestamp initial_ts, int64_t deadline_ms);
-    void startFade(const std::string& scene_name, double duration_sec, FadeCurve curve, const DipCodes& dip,
-                   int64_t start_ms, uint64_t transition_generation);
+                           const std::optional<std::array<uint8_t, 3>>& dip, int64_t requested_pts,
+                           uint64_t generation, av::Timestamp initial_ts, int64_t deadline_ms);
+    void startFade(const std::string& scene_name, double duration_sec, FadeCurve curve,
+                   const std::optional<std::array<uint8_t, 3>>& dip, int64_t start_ms, uint64_t transition_generation);
     int64_t resolveTransitionStartPts(int64_t requested_start_pts_ms) const;
 
     // Core hard-cut logic: ensure PVW is configured, enable cameras, write timeline entries.
@@ -194,7 +193,8 @@ public:
     void prewarmCuts(const std::vector<std::string>& scenes);
     /// A set `dip` (opaque SDR RGB) fades through that colour instead of mixing.
     void fade(const std::string& scene_name, double duration_sec, int64_t start_pts_ms = -1,
-              FadeCurve curve = FadeCurve::Linear, std::optional<std::array<uint8_t, 3>> dip = std::nullopt);
+              FadeCurve curve = FadeCurve::Linear, std::optional<std::array<uint8_t, 3>> dip = std::nullopt,
+              avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now());
     void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,
               int64_t start_pts_ms = -1);
     /// Run the wipe subgraph once on *wipe_file* with the output kept on the

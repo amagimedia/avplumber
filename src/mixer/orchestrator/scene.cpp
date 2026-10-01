@@ -4,11 +4,17 @@
 
 namespace avp::mixer {
 
+namespace {
+void checkInputIndex(int input_index) {
+    if (input_index < 0 || input_index >= kSourceMaskBits)
+        throw Error("mixer source input_index must be in 0.." + std::to_string(kSourceMaskBits - 1));
+}
+}
+
 void MixerOrchestrator::defineSource(const std::string& name, const std::string& otm_node, int input_index,
                                       const std::string& cs_node_a, const std::string& cs_node_b) {
     std::lock_guard<std::mutex> lock(state_->mutex);
-    if (input_index < 0 || input_index >= SourceMask::kBits)
-        throw Error("mixer source input_index must be in 0.." + std::to_string(SourceMask::kBits - 1));
+    checkInputIndex(input_index);
     MixerState::SourceInfo info;
     info.otm_node_name = otm_node;
     info.input_index = input_index;
@@ -27,8 +33,7 @@ void MixerOrchestrator::defineRoutedSource(const std::string& name, const std::s
     const int route_output_b = routerOutputIndexFromLabel(nodes_, router_node, route_output_label_b);
 
     std::lock_guard<std::mutex> lock(state_->mutex);
-    if (input_index < 0 || input_index >= SourceMask::kBits)
-        throw Error("mixer source input_index must be in 0.." + std::to_string(SourceMask::kBits - 1));
+    checkInputIndex(input_index);
     MixerState::SourceInfo info;
     info.input_index = input_index;
     info.cs_node_a = cs_node_a;
@@ -162,32 +167,28 @@ void MixerOrchestrator::initializeRoutedRoutes() {
         true);
 }
 
-int64_t MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
-                                                      const std::string& new_pgm_scene,
-                                                      bool picture_changed,
-                                                      const std::function<void(int64_t)>& switched) {
+int64_t MixerOrchestrator::switchProgramSelector(bool new_pgm_is_slot_a) {
+    timeline_->clearKey(state_->source_switcher_name, "active");
+    setNodeObject(state_->source_switcher_name, "active",
+                  Parameters(new_pgm_is_slot_a ? 0 : 1));
+    // Read at once: the selector drains its inactive inputs, so the new program's first frame
+    // arrives at the next main deadline, and the routing could take until then. The followers
+    // of a take get their change now, for the same reason.
+    return selectorOutputNs();
+}
+
+void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
+                                                   const std::string& new_pgm_scene,
+                                                   bool picture_changed) {
     const auto scene_it = state_->scenes.find(new_pgm_scene);
     if (scene_it == state_->scenes.end())
-        return 0;
+        return;
 
     const SceneDefinition& scene = scene_it->second;
     const uint32_t pgm_bit = new_pgm_is_slot_a ? 1u : 2u;
     const SourceMask active = state_->computeActiveInputsMask(scene);
     const auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
     const auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
-
-    // Source_switcher first: this is the only setting visible at the SDI output.
-    // Any short window between this and the OTM/compositor flips below would only
-    // surface if the new direct path were not already producing frames; in both
-    // callers (ready cut and deferred fade cleanup) it is.
-    timeline_->clearKey(state_->source_switcher_name, "active");
-    setNodeObject(state_->source_switcher_name, "active",
-                  Parameters(new_pgm_is_slot_a ? 0 : 1));
-    // Read at once: the selector drains its inactive inputs, so the new program's first frame
-    // arrives at the next main deadline, and the routing below could take until then. The
-    // followers of a take get their change now, for the same reason.
-    const int64_t emitted = selectorOutputNs();
-    if (switched) switched(emitted);
 
     // The encoder must not make the receiver wait for the next periodic keyframe:
     // a cut changes the whole picture, and a P-frame carrying it can exceed what
@@ -219,7 +220,6 @@ int64_t MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
     nodes_->node(old_slot.post_otm_name)->setObject("outputs", Parameters(0u));
     nodes_->node(new_slot.compositor_name)->setObject("active_inputs", toParameters(active));
     nodes_->node(old_slot.compositor_name)->setObject("active_inputs", Parameters(0u));
-    return emitted;
 }
 
 void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene) {

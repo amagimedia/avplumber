@@ -136,6 +136,13 @@ int64_t MixerOrchestrator::armWipeChain(const std::string& wipe_file) {
     return nodes_->node(state_->wipe_input_node_name)->getObject("status").at("start_tick").get<int64_t>();
 }
 
+void MixerOrchestrator::startWipeDecode(const std::string& wipe_file) {
+    nodes_->node(state_->wipe_input_node_name)->stop(true);
+    setNodeParam(state_->wipe_input_node_name, "url", wipe_file);
+    flushWipeEdges();
+    startGroup(state_->wipe_group_name);
+}
+
 void MixerOrchestrator::retireWipeChain() {
     if (!state_->wipeChainStaysRunning()) {
         stopGroup(state_->wipe_group_name);
@@ -235,7 +242,10 @@ void MixerOrchestrator::interruptTransition(Interruption why) {
     if (why == Interruption::Replaced) state_->forgetTake(); else state_->clearTakePreview();
     state_->transition_mode = MixerState::TransitionMode::Idle;
     {
-        const auto release_pts = releaseAfterSelectorOutput();
+        // Read after the selector was switched: everything it has emitted so far, from the old
+        // program or the dropped transition, is older than the release and cannot end the hold
+        // even when still in flight to the output, and the first frame of the new selection does.
+        const auto release_pts = releaseAfter(selectorOutputNs());
         std::lock_guard<std::mutex> lock(snapshot->mutex);
         // Without a freeze, drop any substitution an earlier interruption left in the slot.
         if (!freeze) snapshot->frames.finish();
@@ -262,6 +272,7 @@ void MixerOrchestrator::restoreProgramRouting(MixerState::TransitionMode dropped
         for (const auto& control : scene->second.controls)
             timeline_->clearKey(control.node_name, control.key);
     }
+    switchProgramSelector(state_->pgm_is_slot_a);
     applyPostTransitionRouting(state_->pgm_is_slot_a, state_->pgm_scene_name, picture_changed);
     scheduleSceneControls(state_->scenes.at(state_->pgm_scene_name), wallclock.pts());
     for (const auto& [name, key, value] : std::vector<std::tuple<std::string, std::string, int>>{
@@ -299,7 +310,7 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
 void MixerOrchestrator::finishTransition(bool new_pgm_is_slot_a, std::string new_pgm_scene, int64_t effective_ns) {
     state_->completeTransition(new_pgm_is_slot_a, std::move(new_pgm_scene), effective_ns);
     logstream << "mixer: program " << state_->pgm_scene_name << " on slot " << (new_pgm_is_slot_a ? 'A' : 'B')
-              << ", preview " << (state_->pvw_scene_name.empty() ? "cleared" : state_->pvw_scene_name)
+              << ", preview " << (state_->preview.pvw.empty() ? "cleared" : state_->preview.pvw)
               << " from pts_ns=" << effective_ns;
 }
 
@@ -308,12 +319,11 @@ std::shared_ptr<OutputSnapshot> MixerOrchestrator::outputSnapshot() const {
         nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
 }
 
-int64_t MixerOrchestrator::finishSnapshot(int64_t emitted) {
+void MixerOrchestrator::finishSnapshot(int64_t emitted) {
     auto snapshot = outputSnapshot();
     std::lock_guard<std::mutex> lock(snapshot->mutex);
     snapshot->frames.finish();
     snapshot->frames.arm(releaseAfter(emitted), false);
-    return firstNewProgramFrameNs(emitted);
 }
 
 int64_t MixerOrchestrator::firstNewProgramFrameNs(int64_t emitted) const {
@@ -323,14 +333,6 @@ int64_t MixerOrchestrator::firstNewProgramFrameNs(int64_t emitted) const {
 int64_t MixerOrchestrator::selectorOutputNs() const {
     const auto emitted = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->source_switcher_name));
     return emitted.isValid() ? emitted.timestamp({1, 1000000000}) : 0;
-}
-
-int64_t MixerOrchestrator::releaseAfterSelectorOutput() const {
-    // Callers read this after they switched the selector: everything it has emitted so
-    // far, from the old program or the dropped transition, is older than the release and
-    // cannot end the hold even when still in flight to the output, and the first frame
-    // of the new selection does end it.
-    return releaseAfter(selectorOutputNs());
 }
 
 int64_t MixerOrchestrator::resolveTransitionStartPts(int64_t requested_start_pts_ms) const {
@@ -358,7 +360,6 @@ Parameters MixerOrchestrator::status() const {
     std::unique_lock<std::mutex> lock(state_->mutex);
     Parameters s;
     s["pgm_scene"] = state_->pgm_scene_name;
-    s["pvw_scene"] = state_->pvw_scene_name;
     s["pvw_slot_scene"] = state_->pvw_slot_scene;
     s["preview_followers"] = state_->preview_followers.load();
     s["pgm_slot"] = state_->pgm_is_slot_a ? "A" : "B";
@@ -366,8 +367,10 @@ Parameters MixerOrchestrator::status() const {
     s["now_pts_ms"] = wallclock.pts();
     s["cut_latency"] = state_->cut_latency ? state_->cut_latency->status() : Parameters(nullptr);
     {
-        // Every AUX multiview's PVW change latency next to the program's (mixer_pvw_follow).
+        // The preview shown, and every AUX multiview's PVW change latency next to the program's
+        // (mixer_pvw_follow).
         std::lock_guard<std::mutex> feed(state_->preview_mutex);
+        s["pvw_scene"] = state_->preview.pvw;
         s["pvw_revision"] = state_->preview.revision;
         s["pvw_latency"] = Parameters(state_->preview_follow_samples);
     }

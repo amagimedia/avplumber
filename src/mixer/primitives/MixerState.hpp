@@ -51,7 +51,7 @@ struct MixerState : public InstanceShared<MixerState> {
 
     struct SourceInfo {
         std::string otm_node_name;          // "otm_cam1"
-        int input_index;                    // index within compositor src array (0..SourceMask::kBits-1)
+        int input_index;                    // index within compositor src array (0..kSourceMaskBits-1)
         std::string cs_node_a, cs_node_b;   // "cs_cam1_a", "cs_cam1_b"
         bool routed = false;
         std::string router_node_name;
@@ -74,10 +74,6 @@ struct MixerState : public InstanceShared<MixerState> {
 
     bool pgm_is_slot_a = true;
     std::string pgm_scene_name;
-    /// The preview as shown to the operator: what `mixer.preview` armed, or after a take the
-    /// scene that just left program (the swap). Followers (mixer_pvw_follow) draw it; it says
-    /// nothing about the PVW slot's contents, see pvw_slot_scene.
-    std::string pvw_scene_name;
     /// The scene loaded in the PVW slot, "" while the slot is cold (after every completed or
     /// dropped transition: the old program slot's sources are routed away). A take reuses the
     /// slot only for this scene; anything else reloads it, so a swapped preview costs no GPU
@@ -87,10 +83,13 @@ struct MixerState : public InstanceShared<MixerState> {
     /// `preview_mutex`, a lock of its own that is never held while any other is taken, so a take
     /// publishes right after switching the selector and a follower wakes on `preview_changed`
     /// while the take's routing still holds `mutex`. Writers hold `mutex` too (`mutex`, then
-    /// `preview_mutex`); a follower takes `preview_mutex` alone.
+    /// `preview_mutex`), so either lock is enough to read it; a follower takes `preview_mutex`
+    /// alone. `pvw` is the preview as shown to the operator (`mixer.status` `pvw_scene`): what
+    /// `mixer.preview` armed, or after a take the scene that just left program (the swap); it
+    /// says nothing about the PVW slot's contents, see pvw_slot_scene.
     struct PreviewChange {
         uint64_t revision = 0;
-        std::string pvw;           // the preview shown, "" for none: pvw_scene_name's copy
+        std::string pvw;           // the preview shown, "" for none
         std::string pgm;           // the program shown beside it (a take: the program it moves to)
         int64_t effective_ns = 0;  // pts (ns, the compositors' monotonic clock) of the first program
                                    // frame that shows the new program; 0: the change is immediate
@@ -119,7 +118,6 @@ struct MixerState : public InstanceShared<MixerState> {
     /// as a take of `kind` at `received_ns` (0: not one), and wakes every follower.
     void publishPreview(const std::string& scene, int64_t effective_ns, int64_t received_ns = 0,
                         const std::string& pgm = "", const std::string& kind = "") {
-        pvw_scene_name = scene;
         std::lock_guard<std::mutex> lock(preview_mutex);
         preview = {preview.revision + 1, scene, pgm.empty() ? pgm_scene_name : pgm, effective_ns,
                    monotonicNs(), received_ns, kind};

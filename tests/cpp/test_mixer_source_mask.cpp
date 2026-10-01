@@ -17,13 +17,13 @@ int main() {
     assert(state.computeActiveInputsMask(scene) == expected);
 
     // Prewarm forces both slot bits on, for pads above 64 as well.
-    state.prewarm_source_mask = SourceMask::bit(127);
+    state.prewarm_source_mask = SourceMask().set(127);
     assert(state.sourceOutputMask(state.sources.at("127"), 0) == 3);
     assert(state.sourceOutputMask(state.sources.at("63"), 0) == 0);
     assert(state.sourceOutputMask(state.sources.at("32"), 1) == 1);
 
     // Wire form: a number while it fits in 64 bits, a bit string above that.
-    const SourceMask low = SourceMask::bit(0) | SourceMask::bit(63);
+    const SourceMask low = SourceMask().set(0).set(63);
     assert(toParameters(low).is_number());
     assert(parseSourceMask(toParameters(low)) == low);
     assert(toParameters(expected).is_string());
@@ -31,7 +31,7 @@ int main() {
     assert(parseSourceMask(Parameters(std::string(96, '1'))).test(95));
     assert(!parseSourceMask(Parameters(std::string(96, '1'))).test(96));
     // A 64-bit number still means pads 0..63, as older mixers sent it.
-    const SourceMask all_low{{std::numeric_limits<uint64_t>::max(), 0}};
+    const SourceMask all_low(std::numeric_limits<uint64_t>::max());
     assert(parseSourceMask(Parameters(std::numeric_limits<uint64_t>::max())) == all_low);
     assert(all_low.test(63) && !all_low.test(64));
     bool rejected = false;
@@ -39,8 +39,10 @@ int main() {
     catch (const Error&) { rejected = true; }
     assert(rejected);
 
-    // The narrow parser other nodes use (one_to_many outputs) is unchanged.
-    assert(parseBitmask<uint64_t>(Parameters(std::string(64, '1'))) ==
-           std::numeric_limits<uint64_t>::max());
+    // The narrow parser other nodes use (one_to_many outputs) rejects what it cannot hold.
     assert(parseBitmask(Parameters(std::string(32, '1'))) == std::numeric_limits<uint32_t>::max());
+    rejected = false;
+    try { parseBitmask(Parameters(std::string(33, '1'))); }
+    catch (const Error&) { rejected = true; }
+    assert(rejected);
 }

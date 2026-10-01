@@ -146,19 +146,17 @@ public:
 };
 
 
-template<typename Mask = uint32_t>
-inline Mask parseBitmask(const Parameters& value) {
-    static_assert(std::numeric_limits<Mask>::is_integer && !std::numeric_limits<Mask>::is_signed);
+inline uint32_t parseBitmask(const Parameters& value) {
     if (value.is_string()) {
-        Mask mask = 0;
+        uint32_t mask = 0;
         auto s = value.get<std::string>();
-        if (s.size() > std::numeric_limits<Mask>::digits)
+        if (s.size() > std::numeric_limits<uint32_t>::digits)
             throw Error("bitmask string exceeds mask width");
         for (size_t i = 0; i < s.size(); i++)
-            if (s[i] == '1') mask |= (Mask{1} << i);
+            if (s[i] == '1') mask |= (1u << i);
         return mask;
     }
-    return value.get<Mask>();
+    return value.get<uint32_t>();
 }
 
 class TimelineReader {
