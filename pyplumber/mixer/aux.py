@@ -37,6 +37,12 @@ def _layout(layers):
     return {"layers": layers, "active_inputs": source_mask_param(sum(1 << i for i in {l["input"] for l in layers}))}
 
 
+def _tile(index, rect, z):
+    """Input *index* contained in *rect*, a cell or page tile."""
+    return {"input": index, "dst_x": rect["x"], "dst_y": rect["y"], "dst_w": rect["w"], "dst_h": rect["h"],
+            "fit": "contain", "z": z}
+
+
 def _cell_layers(cfg, scene, cell, first_z):
     """One layer per scene item, drawn into *cell*, z from *first_z* in item order."""
     indices = {s.id: i for i, s in enumerate(cfg.sources)}
@@ -64,8 +70,7 @@ def base_composition(cfg, scenes):
     for scene, cell in zip(scenes, slots):
         if scene:
             layers.extend(_cell_layers(cfg, definitions[scene], cell, reserved + len(layers)))
-    layers.append({"input": len(cfg.sources), "dst_x": pgm["x"], "dst_y": pgm["y"],
-                   "dst_w": pgm["w"], "dst_h": pgm["h"], "fit": "contain", "z": reserved + len(layers)})
+    layers.append(_tile(len(cfg.sources), pgm, reserved + len(layers)))
     return _layout(layers)
 
 
@@ -98,15 +103,14 @@ def page_grid(cfg):
 def page_composition(cfg, page):
     grid = page_grid(cfg)
     first = page * len(grid)
-    layers = [{"input": first + i, "dst_x": r["x"], "dst_y": r["y"], "dst_w": r["w"], "dst_h": r["h"],
-               "fit": "contain", "z": i} for i, r in enumerate(grid[:len(cfg.sources) - first])]
-    return {"layers": layers, "active_inputs": source_mask_param(sum(1 << l["input"] for l in layers))}
+    return _layout([_tile(first + i, r, i) for i, r in enumerate(grid[:len(cfg.sources) - first])])
 
 
 class _AuxOutput:
     """One AUX output: a compositor over subscribed sources, then SDR H.264 to Janus.
 
-    Subclasses define the composition and the background thread that keeps it current."""
+    Subclasses define the composition and _step(), one pass of the background thread
+    (run) that keeps it current."""
     pgm_edge = None   # the edge the program tap feeds, for layouts that show PGM
     pgm_delay_frames = 0   # ticks the PGM input (the last one) is matched back; see AuxMultiview
 
@@ -157,15 +161,13 @@ class _AuxOutput:
                               f"latency_ms ({self.main_latency_ms():g}) by a program frame ({floor:.1f} ms) at least, "
                               f"for the program frame to reach the bus in time")
         inputs = self.inputs()
-        for edge in [*inputs, self.output_edge, *(f"{self.prefix}_{suffix}" for suffix in
-                      ("sdr", "fps", "keyframed", "video", "encoded", "repeat_headers", "video_rtp_mux"))]:
+        converted = f"{self.prefix}_sdr"
+        for edge in [*inputs, self.output_edge, converted]:
             self.avp.edges.planCapacity(edge, 1)
-        self.avp.addNode(self.mixer.backend.compositor({
+        self.avp.addNode(self.mixer.canvas_compositor({
             "name": self.node_name, "src": inputs, "dst": self.output_edge,
-            "width": self.cfg.canvas_w, "height": self.cfg.canvas_h,
-            "sw_format": self.cfg.working_format, "color": self.cfg.out_color.transfer,
             "fps": str(fps), "latency_ms": latency, "warmup_timeout_ms": 250,
-            "hwaccel": self.mixer.hwaccel, "output_hwaccel": self.hwaccel,
+            "output_hwaccel": self.hwaccel,
             "aux_mode": True, "subscriptions": inputs, "mixer": self.mixer.name,
             "max_layers": self.layer_budget(),
             "group": self.group, "auto_restart": "off", "on_error": "off",
@@ -173,7 +175,6 @@ class _AuxOutput:
             **self.current_composition(),
         }, api=self.api), early_create=True)
         r = self.bus.renditions[0]
-        converted = f"{self.prefix}_sdr"
         self.avp.addNode(self.api.FilterVideo({
             "name": converted, "src": self.output_edge, "dst": converted,
             "hwaccel": self.hwaccel, "group": self.group, "defer_preliminary_init": True,
@@ -188,7 +189,7 @@ class _AuxOutput:
                              rtcp_bind=options.janus_rtcp_bind, rtcp_port=0),
             fps=fps, width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
             codec="h264_nvenc", preset=r.preset, profile=r.profile or "high", enc_format="nv12",
-            prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size)
+            prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1)
 
     def state(self):
         with self.lock:
@@ -215,6 +216,11 @@ class _AuxOutput:
         self.listener.start()
         self.thread = threading.Thread(target=self.run, name=self.prefix, daemon=True)
         self.thread.start()
+
+    def run(self):
+        """Until stop(): _step() makes one pass and returns the seconds until the next."""
+        while not self.stopped.wait(self._step()):
+            pass
 
     def stop(self):
         """Stop the page thread and RTCP listener. The application stops the group together
@@ -294,7 +300,7 @@ class AuxMultiview(_AuxOutput):
             self.scenes, self.revision, self.error = list(scenes), base["revision"], ""
             return {"scenes": list(self.scenes), "revision": self.revision}
 
-    def _follow(self):
+    def _step(self):
         """One pass; returns the seconds until the next. A follower that restarted holds the base
         it was built with, so resend the current one when its revision differs. Only one of the
         two, the node or this thread, sets the composition at any time; both use the same shown
@@ -315,10 +321,6 @@ class AuxMultiview(_AuxOutput):
             except Exception as exc:
                 self.error = str(exc)
             return 0.05
-
-    def run(self):
-        while not self.stopped.wait(self._follow()):
-            pass
 
 
 class AuxSourcePages(_AuxOutput):
@@ -368,7 +370,7 @@ class AuxSourcePages(_AuxOutput):
                 raise ConfigError(f"aux_page needs auto, a page from 0 to {self.pages - 1}, or a step")
             return self.details()
 
-    def _tick(self):
+    def _step(self):
         """Show the next page when one is due; return the seconds until the next check."""
         with self.lock:
             due = self.flipped_at + self.bus.rotate_s - time.monotonic()
@@ -380,10 +382,6 @@ class AuxSourcePages(_AuxOutput):
                 due = self.bus.rotate_s
             # A held page or a single page has nothing due: check back at the slow rate.
             return min(max(due, 0.05), 0.5) if self.auto and self.pages > 1 else 0.5
-
-    def run(self):
-        while not self.stopped.wait(self._tick()):
-            pass
 
 
 def make_aux(avp, api, mixer, cfg, bus):

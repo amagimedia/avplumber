@@ -204,20 +204,20 @@ def test_rotation_advances_pages_until_held(cfg, monkeypatch):
     monkeypatch.setattr("pyplumber.mixer.aux.time.monotonic", lambda: clock[0])
     published = []
     bus = _pages(cfg, published)
-    assert bus._tick() == 0.5 and bus.page == 0
+    assert bus._step() == 0.5 and bus.page == 0
     clock[0] += 5
-    bus._tick()
+    bus._step()
     assert bus.page == 1 and len(published) == 1
     bus.turn({"page": 4})
     clock[0] += 50
-    assert bus._tick() == 0.5   # a held page is never due: no 50 ms polling
+    assert bus._step() == 0.5   # a held page is never due: no 50 ms polling
     assert bus.page == 4
     bus.turn({"auto": True})
     clock[0] += 2.5
-    bus._tick()
+    bus._step()
     assert bus.page == 4
     clock[0] += 2.5
-    bus._tick()
+    bus._step()
     assert bus.page == 5
 
 
@@ -291,7 +291,7 @@ def test_encoder_backpressure_suspension_survives_automatic_updates_only(cfg, mo
     pages = AuxSourcePages(avp, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0])
     avp.status = {"suspended": True}
     clock[0] += 5
-    pages._tick()
+    pages._step()
     assert avp.published[-1] == {**page_composition(cfg, 1), "enabled": False}
     pages.turn({"page": 3})
     assert avp.published[-1] == page_composition(cfg, 3)
@@ -436,16 +436,16 @@ def test_assignment_hands_the_follower_the_base_or_falls_back(cfg):
     assert avp.bases == [{"revision": grid.revision, **base_composition(cfg, scenes)}]
     assert avp.published == []
     # Once a second: a follower reporting another base revision (it restarted) gets the current one.
-    assert grid._follow() == 1.0
+    assert grid._step() == 1.0
     assert len(avp.bases) == 2 and avp.bases[-1]["revision"] == grid.revision
     avp.follower = {"base_revision": grid.revision, "pvw_scene": "repeat"}
-    assert grid._follow() == 1.0 and len(avp.bases) == 2
+    assert grid._step() == 1.0 and len(avp.bases) == 2
     assert grid.details()["follower"] == avp.follower
     assert grid.preview == "repeat"   # what the node shows, for a composition set here later
     # Unreachable: this thread follows the preview at 50 ms and sets the composition itself.
     avp.follower = None
     avp.status = {"suspended": False, "pvw_scene": "full"}
-    assert grid._follow() == 0.05
+    assert grid._step() == 0.05
     assert avp.published == [{**composition(cfg, scenes, "full"), "enabled": True}]
     assert grid.details()["follower"]["error"]
     # A reassignment then goes to the compositor: the node would drop the base without a word.

@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
-from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS, hdr_metadata, rendition_color
+from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS, default_codec, hdr_metadata, rendition_color
 from pyplumber.mixer.backend import mixer_backend
 from pyplumber.mixer import clipcache
 from pyplumber.mixer import config as mixer_config
@@ -561,7 +561,7 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
 
 def _rendition_target(r, working_format, color):
     """Encoder and color contract of a rendition, from the canvas when it declares neither."""
-    codec = r.codec or ("hevc_nvenc" if working_format in TEN_BIT_FORMATS else "h264_nvenc")
+    codec = r.codec or default_codec(working_format)
     return codec, rendition_color(color, codec, r.color or None, r.tonemap)
 
 
@@ -770,27 +770,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         for bus in aux:
             bus.build(options)
         register_aux_commands(avp, aux)
-    settings_data = cfg.settings()
-    preview_outputs = []
-    if keyer:
-        for r in renditions:
-            if r.feed != "clean" or r.target != "janus":
-                continue
-            codec, target = _rendition_target(r, cfg.working_format, cfg.out_color)
-            preview_outputs.append({"bus": f"clean_{r.id}", "label": f"Program clean · {'SDR' if target.transfer == 'sdr' else 'HDR'}",
-                                    "rendition": r.id, "codec": "h265" if "hevc" in codec else "h264",
-                                    "color": "sdr" if target.transfer == "sdr" else "hdr",
-                                    "port": r.port, "mountpoint": r.port, "fps": r.fps})
-    if aux:
-        settings_data["aux_buses"] = [b.bus.id for b in aux]
-        labels = {"pgm_pvw_grid": "Program preview", "source_pages": "Multiviewer"}
-        preview_outputs += [
-            {"bus": b.bus.id, "label": labels[b.bus.layout], "layout": b.bus.layout, "rendition": r.id,
-             "codec": "h264", "color": "sdr", "port": r.port, "mountpoint": r.port, "fps": r.fps}
-            for b in aux for r in b.bus.renditions]
-    if preview_outputs:
-        settings_data["preview_outputs"] = preview_outputs
-    settings = json.dumps(settings_data, separators=(",", ":")) + "\n"
+    settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend)

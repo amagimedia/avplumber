@@ -17,7 +17,7 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .color import Color, declared_color, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
+from .color import Color, declared_color, default_codec, rendition_color, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
 
 FITS = ("stretch", "contain", "cover")
 TRANSITIONS = ("cut", "fade", "wipe")
@@ -239,32 +239,50 @@ class MixerConfig:
             raise ConfigError("max_compositor_layers must be a positive 32-bit integer")
         if self.browser_ring_size is None:
             object.__setattr__(self, "browser_ring_size", default_browser_ring_size(self.fps))
+        if type(self.browser_ring_size) is not int or not 1 <= self.browser_ring_size <= 64:
+            raise ConfigError("browser_ring_size must be an integer from 1 to 64")
 
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
 
     def settings(self) -> Dict[str, Any]:
-        """Canvas format, source counts and operator settings for control surfaces."""
+        """Canvas format, source counts, operator settings and preview outputs for control surfaces."""
         wipes = [{"id": w.id, "name": w.label, "path": w.path,
                   "duration_seconds": w.duration_seconds} for w in self.wipes]
         default = next((w for w in self.wipes if w.id == self.default_wipe), None)
+
+        def codec(r):
+            return r.codec or default_codec(self.working_format)
         preview_codecs = list(dict.fromkeys(
-            "h265" if "hevc" in (r.codec or ("h264_nvenc" if self.working_format == "nv12" else "hevc_nvenc")) else "h264"
+            "h265" if "hevc" in codec(r) else "h264"
             for r in self.renditions if r.target == "janus" and r.feed == "dirty"))
         keys = {"dsk_keys": [{"id": k.id, "source": k.source} for k in self.dsk_keys],
                 "dsk_fade_seconds": self.dsk_fade_seconds, "dsk_fade_curve": self.dsk_fade_curve} if self.dsk_keys else {}
+        # The keyer splits off the clean feed, so it exists only with keys.
+        previews = []
+        for r in self.renditions if self.dsk_keys else ():
+            if r.feed == "clean" and r.target == "janus":
+                color = "sdr" if rendition_color(self.out_color, codec(r), r.color or None, r.tonemap).transfer == "sdr" else "hdr"
+                previews.append({"bus": f"clean_{r.id}", "label": f"Program clean · {color.upper()}", "rendition": r.id,
+                                 "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
+                                 "port": r.port, "mountpoint": r.port, "fps": r.fps})
+        labels = {"pgm_pvw_grid": "Program preview", "source_pages": "Multiviewer"}
+        previews += [{"bus": b.id, "label": labels[b.layout], "layout": b.layout, "rendition": r.id,
+                      "codec": "h264", "color": "sdr", "port": r.port, "mountpoint": r.port, "fps": r.fps}
+                     for b in self.aux_buses for r in b.renditions]
         return {"source_count": len(self.sources), "browser_ring_size": self.browser_ring_size,
                 "preview_codecs": preview_codecs,
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
                            "working_format": self.working_format},
-                "source_counts": {kind: sum(s.kind == kind for s in self.sources)
-                                  for kind in ("video", "browser", "v210", "nv12", "p010")},
+                "source_counts": {kind: sum(s.kind == kind for s in self.sources) for kind in _SOURCE_KEYS},
                 "direct": self.direct,
                 "fade_seconds": self.fade_seconds, "fade_curve": self.fade_curve,
                 "fade_color": self.fade_color,
                 "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
-                "wipes": wipes, **keys}
+                "wipes": wipes, **keys,
+                **({"aux_buses": [b.id for b in self.aux_buses]} if self.aux_buses else {}),
+                **({"preview_outputs": previews} if previews else {})}
 
     @property
     def alias_counts(self) -> Dict[str, int]:
@@ -376,6 +394,20 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
         raise ConfigError(f"{where}: {rendition.width}x{rendition.height} is "
                           f"{rendition.aspect}, not {wanted}")
     return rendition
+
+
+def check_janus_ports(renditions, default_port: int = 5004) -> None:
+    """Janus renditions need distinct RTP ports whose RTCP port (RTP + 1) is free too; port 0 is
+    the mixer's --janus-video-port, 5004 by default. parse_aux_buses checks the main renditions
+    together with the aux ones."""
+    used = set()
+    for r in renditions:
+        if r.target != "janus":
+            continue
+        port = r.port or default_port
+        if not 1 <= port < 65535 or used.intersection((port, port + 1)):
+            raise ConfigError("Janus renditions need distinct RTP/RTCP port pairs in 1..65535")
+        used.update((port, port + 1))
 
 
 def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:
@@ -505,11 +537,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     wipe_color = str(doc.get("wipe_color", ""))
     if wipe_color and wipe_color not in TRANSFER_TAGS:
         raise ConfigError("wipe_color must be sdr, hlg or pq")
-    browser_ring_size = doc.get("browser_ring_size", default_browser_ring_size(fps))
-    if type(browser_ring_size) is not int or not 1 <= browser_ring_size <= 64:
-        raise ConfigError("browser_ring_size must be an integer from 1 to 64")
     cfg = MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
-                       browser_ring_size=browser_ring_size,
+                       browser_ring_size=doc.get("browser_ring_size"),
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
                        initial_scene=initial, working_format=working_format, raw_upload=raw_upload, latency_ms=latency_ms, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
@@ -602,7 +631,6 @@ def parse_aux_buses(values, cfg):
     if values and cfg.fps not in (25, 30, 50, 60):
         raise ConfigError("multiview supports program rates 25, 30, 50 and 60")
     result, ids = [], set()
-    ports = {r.port for r in cfg.renditions if r.port}
     for obj in values:
         bid = obj.get("id", "")
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", bid) or bid in ids:
@@ -637,10 +665,10 @@ def parse_aux_buses(values, cfg):
         if (r.target != "janus" or r.codec != "h264_nvenc" or r.color != "sdr" or
                 (r.width, r.height, r.fps) != (cfg.canvas_w, cfg.canvas_h, fps)):
             raise ConfigError("aux rendition must be SDR/H.264 at canvas size and the aux frame rate")
-        if not r.port or r.port in ports or r.port + 1 in ports or r.port - 1 in ports:
+        if not r.port:
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
-        ports.add(r.port)
         result.append(AuxBus(bid, tuple(scenes), (r,), preset, float(rotate_s), **timing))
+    check_janus_ports([*cfg.renditions, *(b.renditions[0] for b in result)])
     return tuple(result)
 
 

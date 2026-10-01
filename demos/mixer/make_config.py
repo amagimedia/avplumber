@@ -95,11 +95,6 @@ def generate(argv=None) -> dict:
     hdr = args.color in ("hlg", "pq")
     if args.sdr_port and not hdr:
         raise SystemExit("--sdr-port needs an HDR canvas (--color hlg or pq)")
-    if args.sdr_port and abs(args.sdr_port - (args.program_port or 5004)) < 2:
-        raise SystemExit("HDR and SDR need distinct RTP ports and adjacent RTCP ports; pass --program-port, e.g. 5006")
-    for port in (args.program_port, args.sdr_port):
-        if port is not None and port != 0 and not 1 <= port < 65535:
-            raise SystemExit("RTP ports must be between 1 and 65534 (RTCP uses the next port)")
     ten_bit = args.working_format in TEN_BIT_FORMATS
     width, height = (int(v) for v in args.canvas.lower().split("x"))
     # One source per unique clip or page: repeated locations become references
@@ -144,6 +139,10 @@ def generate(argv=None) -> dict:
         "scenes": scenes,
         "initial_scene": scenes[0]["id"],
     }
+    try:
+        mixer_config.parse(doc)   # e.g. --sdr-port needs a port pair apart from the program's
+    except mixer_config.ConfigError as error:
+        raise SystemExit(str(error)) from None
     return doc
 
 

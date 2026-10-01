@@ -336,16 +336,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
         doc["dsk"] = {"keys": keys}
     if "max_compositor_layers" in recipe:
         doc["max_compositor_layers"] = recipe["max_compositor_layers"]
-    cfg = parse(doc)
-    # Include RTCP's adjacent port in conflict checks.
-    used_ports = set()
-    for rendition in (*cfg.renditions, *(r for b in cfg.aux_buses for r in b.renditions)):
-        if rendition.target != "janus":
-            continue
-        port = rendition.port or 5004
-        if not 1 <= port < 65535 or used_ports.intersection((port, port + 1)):
-            raise ValueError("Janus renditions need distinct RTP/RTCP port pairs in 1..65535")
-        used_ports.update((port, port + 1))
+    parse(doc)   # the whole show, distinct Janus RTP/RTCP port pairs included
     return doc, jobs, allocation
 
 

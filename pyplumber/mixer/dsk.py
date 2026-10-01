@@ -50,12 +50,10 @@ class DownstreamKeyer:
         layers = [{"dst_x": 0, "dst_y": 0, "dst_w": w, "dst_h": h}]
         layers += [{"input": i + 1, "dst_x": k.dst.x, "dst_y": k.dst.y, "dst_w": k.dst.w, "dst_h": k.dst.h,
                     "z": i + 1, "blend": True} for i, k in enumerate(self.keys)]
-        self.avp.addNode(self.mixer.backend.compositor({
+        self.avp.addNode(self.mixer.canvas_compositor({
             "name": self.node_name, "src": [keyed, *self.edges], "dst": feeds["dirty"],
             "subscriptions": ["", *self.edges], "clock_input": 0,
             "fps": f"{self.mixer.fps_num}/{self.mixer.fps_den}",
-            "hwaccel": self.mixer.hwaccel, "width": w, "height": h,
-            "sw_format": self.cfg.working_format, "color": self.cfg.out_color.transfer,
             "max_layers": len(layers), "layers": layers, "active_inputs": self._mask(self.on),
             # Program frames carry the scene compositor's per-frame layer metadata;
             # a distinct key keeps it from rearranging the keyer's layers.

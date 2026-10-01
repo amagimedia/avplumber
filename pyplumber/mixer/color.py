@@ -108,6 +108,11 @@ def conversion_graph(target, pixel_format, *, source=None, source_format=None,
                            tonemap=tonemap, sdr_white=sdr_white, hdr_peak=hdr_peak, desat=desat, param=param)
 
 
+def default_codec(pixel_format):
+    """The NVENC codec of an output that names none: HEVC for 10-bit storage, else H.264."""
+    return "hevc_nvenc" if pixel_format in TEN_BIT_FORMATS else "h264_nvenc"
+
+
 def rendition_color(canvas, codec, requested=None, tonemap=""):
     canvas = Color.parse(canvas)
     if codec not in ("h264_nvenc", "hevc_nvenc"):

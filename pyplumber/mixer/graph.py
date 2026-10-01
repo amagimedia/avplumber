@@ -148,6 +148,13 @@ class MixerGraphBuilder:
         self._built = False
         self._aux_routes: Dict[str, List[str]] = {}
 
+    def canvas_compositor(self, params: Dict[str, Any], *, api=None):
+        """A compositor node on this mixer's GPU, canvas size, storage and colour; *params*
+        carries the rest and may override those."""
+        return self.backend.compositor({"hwaccel": self.hwaccel, "width": self.canvas_w, "height": self.canvas_h,
+                                        "sw_format": self.working_format, "color": self.color.transfer,
+                                        **params}, api=api)
+
     def add_aux_destination(self, source: str, edge: str) -> None:
         """Add an independently subscribed destination before materializing the graph."""
         if self._built or source not in self._source_index:
@@ -624,16 +631,11 @@ class MixerGraphBuilder:
         active_pgm = self._active_inputs_mask(self._initial_scene_def())
         for slot in ("a", "b"):
             is_program = slot.upper() == self._initial_pgm_slot
-            self.avp.addNode(self.backend.compositor({
+            self.avp.addNode(self.canvas_compositor({
                 "name": self._n(f"comp_{slot}"),
                 "src": [self._source_slot_edge(source, slot) for source in self._sources],
                 "dst": self._e(f"scene_{slot}_composite"),
-                "hwaccel": self.hwaccel,
-                "width": self.canvas_w,
-                "height": self.canvas_h,
-                "sw_format": self.working_format,
                 "max_layers": self.max_compositor_layers,
-                "color": self.color.transfer,
                 "fps": self._fps_str(),
                 "latency_ms": self.latency_ms,
                 "layers": [
@@ -798,14 +800,12 @@ class MixerGraphBuilder:
         # The wipe is one alpha-blended layer over the program, drawn by the same
         # compositor kernel the scenes use: no format round trip through
         # yuv420p, no second blend pass and no CPU resize.
-        self.avp.addNode(self.backend.compositor({
+        self.avp.addNode(self.canvas_compositor({
             "name": self._n("wipe_overlay"),
             "src": [self._e("final_wipe_in"), clip_edge],
             "dst": self._e("wipe_overlay_out"),
-            "hwaccel": self.hwaccel,
-            "width": W, "height": H, "sw_format": self.working_format,
             "max_layers": 2,   # program and clip; per-frame metadata can move layers, never add them
-            "color": self.color.transfer, "fps": fps_str,
+            "fps": fps_str,
             "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H},
                        {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H, "z": 1, "blend": True}],
             # Resident: parked with no active input, so it composes nothing until a take
