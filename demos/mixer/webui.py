@@ -29,6 +29,7 @@ import csv
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import signal
@@ -129,21 +130,92 @@ class HostStats:
 
     def _thread_ticks(self, pid):
         """{tid: (comm, utime + stime)} for every thread of *pid*: one listing and one read per thread."""
-        tasks = self.proc / str(pid) / "task"
-        try:
-            tids = os.listdir(tasks)
-        except OSError:
-            return {}   # the mixer exited since its pid was read
         ticks = {}
-        for tid in tids:
-            try:
-                stat = (tasks / tid / "stat").read_text()
-            except OSError:
-                continue   # the thread exited between the listing and the read
+        for tid, stat in _thread_files(self.proc, pid, "stat"):
             head, _, rest = stat.rpartition(")")   # comm may hold spaces and parentheses
             fields = rest.split()
             ticks[tid] = (head.partition("(")[2], int(fields[11]) + int(fields[12]))   # stat fields 14 and 15
         return ticks
+
+
+def _thread_files(proc, pid, name):
+    """(tid, text of /proc/pid/task/tid/name) for every thread of *pid*: one listing and one read
+    per thread. Nothing when the mixer exited since its pid was read; a thread that exits between
+    the listing and its read is left out."""
+    tasks = proc / str(pid) / "task"
+    try:
+        tids = os.listdir(tasks)
+    except OSError:
+        return
+    for tid in tids:
+        try:
+            yield tid, (tasks / tid / name).read_text()
+        except OSError:
+            continue
+
+
+# Threads whose lateness shows on air, matched by comm: the kernel's thread name, cut to 15
+# characters. avplumber names a node's thread after the node (src/util.cpp set_thread_name), so
+# these are the scene compositors mixer_comp_a/b; the snapshot nodes mixer_snapshot_a/b/output,
+# all "mixer_snapshot_" once cut; "EventLoop", the tick thread (src/EventLoop.hpp); the CUDA
+# driver's own event thread "cuda-EvtHandlr"; "udp-tx", FFmpeg's paced UDP sender, which exists
+# because the Janus RTP URL sets bitrate and fifo_size; and every NVENC node: janus_encoder,
+# janus_<rendition>_encoder (janus_hdr_encoder arrives as "janus_hdr_encod", hence "_encod",
+# not "encoder") and aux_<bus>_encoder, which the cut hides when the bus id is longer than four
+# characters.
+CRITICAL_THREADS = re.compile(r"^(mixer_comp_|mixer_snapshot|EventLoop|cuda-EvtHandlr|udp-tx)|_encod")
+CRITICAL_NICE_PERIOD_S = 10
+
+
+class CriticalNice:
+    """Keep the mixer's deadline-critical threads (CRITICAL_THREADS) at nice -`level`, checked every
+    CRITICAL_NICE_PERIOD_S with one task listing and one comm read per thread. Nice only, never a
+    real-time class: a spinning thread must stay preemptible. Linux applies PRIO_PROCESS with a thread
+    id to that thread alone. Thread ids are reused, so every match is set each period (idempotent);
+    the log names each thread once per mixer process. Opt-in: needs CAP_SYS_NICE in the container."""
+
+    def __init__(self, mixer_pid, level, proc=Path("/proc")):
+        self.mixer_pid = mixer_pid   # the mixer's pid, or None while none runs
+        self.level = level
+        self.proc = proc
+        self.enabled = True   # cleared on EPERM: without CAP_SYS_NICE every period would fail the same way
+        self._logged = (None, set())   # (pid, {(tid, comm)}) already named in the log
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True, name="critical-nice").start()
+
+    def _run(self):
+        while self.enabled:
+            self.apply()
+            time.sleep(CRITICAL_NICE_PERIOD_S)
+
+    def apply(self):
+        pid = self.mixer_pid()
+        if not pid or not self.enabled:
+            return
+        applied = set()
+        for tid, comm in _thread_files(self.proc, pid, "comm"):
+            comm = comm.strip()
+            if not CRITICAL_THREADS.search(comm):
+                continue
+            try:
+                os.setpriority(os.PRIO_PROCESS, int(tid), -self.level)
+            except ProcessLookupError:
+                continue   # the thread exited after the listing
+            except PermissionError:
+                log.warning("Cannot set nice -%d on mixer thread %s (%s): the container needs CAP_SYS_NICE; "
+                            "critical-thread priority is off", self.level, comm, tid)
+                self.enabled = False
+                return
+            applied.add((tid, comm))
+        logged_pid, logged = self._logged
+        if logged_pid != pid:   # a restarted mixer: its thread ids say nothing about the previous ones
+            logged = set()
+        new = applied - logged
+        if new:
+            log.info("Mixer %s: nice -%d on %d %s: %s", pid, self.level, len(new), "thread" if len(new) == 1 else "threads",
+                     ", ".join(f"{comm} ({tid})" for tid, comm in sorted(new, key=lambda item: (item[1], int(item[0])))))
+        self._logged = (pid, logged | new)
 
 
 class MixerBridge:
@@ -380,7 +452,7 @@ def serve(bridge: MixerBridge, bind: str, port: int, setup=None, host_stats: Hos
     return server
 
 
-def main(argv: list[str] | None = None) -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1", help="mixer control host")
     parser.add_argument("--port", type=int, default=7777, help="mixer control port")
@@ -393,8 +465,20 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--media-dir", type=Path, default=Path("/media"))
     parser.add_argument("--recipe", type=Path, default=Path("/media/demo.json"))
     parser.add_argument("--dmabuf-rest", default="http://127.0.0.1:9009")
+    # A string default goes through type=int like a command-line value, so a bad env value is a usage error.
+    parser.add_argument("--critical-nice", type=int, metavar="N", default=os.environ.get("MIXER_CRITICAL_NICE", "0"),
+                        help="Keep the deadline-critical mixer threads at nice -N, 1 to 20, rechecked every "
+                             f"{CRITICAL_NICE_PERIOD_S} s; needs CAP_SYS_NICE. 0, the default, leaves them alone. "
+                             "Env: MIXER_CRITICAL_NICE")
     parser.add_argument("--mixer-args", nargs=argparse.REMAINDER, default=[])
     args = parser.parse_args(argv)
+    if not 0 <= args.critical_nice <= 20:
+        parser.error("--critical-nice must be 0 (off) or 1 to 20")
+    return args
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     bridge = MixerBridge(args.host, args.port, args.mixer, transition=args.transition)
     setup = None
@@ -411,6 +495,8 @@ def main(argv: list[str] | None = None) -> None:
         return process.pid if process else None
     host_stats = HostStats(mixer_pid)
     host_stats.start()
+    if args.critical_nice:
+        CriticalNice(mixer_pid, args.critical_nice).start()
     server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats)
     print(f"mixer web UI on http://{args.bind}:{args.http_port} "
           f"controlling {args.mixer} at {args.host}:{args.port}", flush=True)
