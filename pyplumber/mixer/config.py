@@ -194,6 +194,14 @@ class AuxBus:
     renditions: Tuple[Rendition, ...]
     layout: str = "pgm_pvw_grid"   # or "source_pages": every source, one page of tiles at a time
     rotate_s: float = 5.0          # source_pages: seconds per page while rotating
+    # pgm_pvw_grid: when the PVW tile changes on a take: "program", with the program output, or
+    # "pgm_tile", with the PGM tile of the same multiview (one pgm_delay_frames later).
+    pvw_align: str = "program"
+    latency_ms: Optional[float] = None   # the bus compositor's playout buffer; None: the main mixer's
+    # pgm_pvw_grid: aux ticks the PGM pad is matched back; parse_aux_buses defaults it to
+    # aux.default_pgm_delay_frames (1, or 2 at a 50/60 fps bus).
+    pgm_delay_frames: int = 1
+    full_rate: bool = False              # run at the canvas rate at 50/60 fps instead of half
 
 
 @dataclass(frozen=True)
@@ -207,6 +215,7 @@ class MixerConfig:
     renditions: Tuple[Rendition, ...] = ()
     initial_scene: str = ""
     direct: bool = True            # control surfaces: scene picks go straight to program
+    swap_preview: bool = True      # a completed take previews the scene that left program (OBS's swap)
     fade_seconds: float = DEFAULT_FADE_SECONDS
     fade_curve: str = DEFAULT_FADE_CURVE   # what an M/E fade eases with unless a take picks its own
     fade_color: Optional[str] = None       # "#rrggbb": what an M/E fade dips through unless a take picks; None mixes
@@ -249,7 +258,8 @@ class MixerConfig:
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources)
                                   for kind in ("video", "browser", "v210", "nv12", "p010")},
-                "direct": self.direct, "fade_seconds": self.fade_seconds, "fade_curve": self.fade_curve,
+                "direct": self.direct, "swap_preview": self.swap_preview,
+                "fade_seconds": self.fade_seconds, "fade_curve": self.fade_curve,
                 "fade_color": self.fade_color,
                 "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
@@ -381,7 +391,10 @@ def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:
     fade_seconds = float(control.get("fade_seconds", DEFAULT_FADE_SECONDS))
     if fade_seconds <= 0:
         raise ConfigError("control.fade_seconds must be positive")
-    return {"direct": bool(control.get("direct", True)), "fade_seconds": fade_seconds,
+    if not isinstance(control.get("swap_preview", True), bool):
+        raise ConfigError("control.swap_preview must be a boolean")
+    return {"direct": bool(control.get("direct", True)), "swap_preview": control.get("swap_preview", True),
+            "fade_seconds": fade_seconds,
             "fade_curve": fade_curve(control.get("fade_curve", DEFAULT_FADE_CURVE), "control.fade_curve"),
             "fade_color": fade_color(control.get("fade_color"), "control.fade_color"),
             "transition": transition, "default_wipe": default_wipe}

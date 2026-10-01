@@ -110,7 +110,16 @@ output, not the click-to-display latency measured above.
 4. **Recovery:** a 2 s pause, then 15 spaced cuts.
 
 The script polls `GET /api/status` (`mixer.status` alone) at up to 10 Hz, never
-the five-command `/api/state`.
+the five-command `/api/state`. When the show has a `pgm_pvw_grid` aux bus, the
+same polls collect its follower's `pvw_latency` samples: the `pvw` line and
+JSON key report, informationally and per take kind, how much later than the
+program frame the multiview frame with the new PVW tile left its compositor
+(`PVW-PGM`, 0 when aligned, one aux frame when a change missed its tick, the
+`late` count, or when its tick had passed before the mixer published it,
+`unreachable`: every fade, whose swap follows a frame already presented) and
+the PVW change latency from command receipt to that compositor deadline; both
+stop before the encoders, unlike the cut probe ([config.md](config.md),
+`aux_buses`). The line shows the cuts, the goal of the alignment.
 
 Run it on the mixer host against the web UI. The mixer must run with
 `--cut-latency-encoder <encoder>`. The script changes the live program and needs

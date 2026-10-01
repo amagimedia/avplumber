@@ -64,7 +64,7 @@ async def _preview(
     await _wait_for(
         connection,
         mixer,
-        lambda status: status.pvw_scene == scene and status.transition == "idle",
+        lambda status: status.pvw_slot_scene == scene and status.transition == "idle",
         timeout=timeout,
     )
     return (time.monotonic() - started) * 1_000

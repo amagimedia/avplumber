@@ -2,9 +2,18 @@
 // interruption and abort, and status. Scene loading, cut, fade, wipe and
 // overlay live in the sibling scene/cut/fade/wipe/overlay.cpp files.
 #include "internal.hpp"
+#include "../primitives/TickGrid.hpp"
 #include "../../nodes/clip_cache/ClipCache.hpp"
 
 namespace avp::mixer {
+
+namespace {
+// The hold releases on the first frame newer than the selector's `emitted` (ns) output; without
+// one, on a frame stamped after now, two frames away behind the playout delay.
+int64_t releaseAfter(int64_t emitted_ns) {
+    return emitted_ns ? emitted_ns + 1 : wallclock.pts() * 1000000;
+}
+}
 
 MixerOrchestrator::MixerOrchestrator(
     std::shared_ptr<NodeManager> nodes,
@@ -221,7 +230,9 @@ void MixerOrchestrator::interruptTransition() {
         // including a hard cut.
         retireWipeChain();
     }
-    state_->pvw_scene_name.clear();
+    // The program slot's routing was restored above: the other slot is cold now.
+    state_->pvw_slot_scene.clear();
+    state_->clearTakePreview();
     state_->transition_mode = MixerState::TransitionMode::Idle;
     {
         const auto release_pts = releaseAfterSelectorOutput();
@@ -280,8 +291,16 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
     // Remove slot substitution even when the target never produced a frame.
     // The output gate still waits for a fresh program frame before releasing.
     cleanup([&] { finishSnapshot(); });
-    state_->pvw_scene_name.clear();
+    state_->pvw_slot_scene.clear();
+    state_->clearTakePreview();
     state_->transition_mode = MixerState::TransitionMode::Idle;
+}
+
+void MixerOrchestrator::finishTransition(bool new_pgm_is_slot_a, std::string new_pgm_scene, int64_t effective_ns) {
+    state_->completeTransition(new_pgm_is_slot_a, std::move(new_pgm_scene), effective_ns);
+    logstream << "mixer: program " << state_->pgm_scene_name << " on slot " << (new_pgm_is_slot_a ? 'A' : 'B')
+              << ", preview " << (state_->pvw_scene_name.empty() ? "cleared" : state_->pvw_scene_name)
+              << " from pts_ns=" << effective_ns;
 }
 
 std::shared_ptr<OutputSnapshot> MixerOrchestrator::outputSnapshot() const {
@@ -289,22 +308,29 @@ std::shared_ptr<OutputSnapshot> MixerOrchestrator::outputSnapshot() const {
         nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
 }
 
-void MixerOrchestrator::finishSnapshot() {
-    const auto release_pts = releaseAfterSelectorOutput();
+int64_t MixerOrchestrator::finishSnapshot(int64_t emitted) {
     auto snapshot = outputSnapshot();
     std::lock_guard<std::mutex> lock(snapshot->mutex);
     snapshot->frames.finish();
-    snapshot->frames.arm(release_pts, false);
+    snapshot->frames.arm(releaseAfter(emitted), false);
+    return firstNewProgramFrameNs(emitted);
+}
+
+int64_t MixerOrchestrator::firstNewProgramFrameNs(int64_t emitted) const {
+    return emitted ? emitted + TickGrid(av::Rational(state_->fps_num, state_->fps_den)).time(1) : 0;
+}
+
+int64_t MixerOrchestrator::selectorOutputNs() const {
+    const auto emitted = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->source_switcher_name));
+    return emitted.isValid() ? emitted.timestamp({1, 1000000000}) : 0;
 }
 
 int64_t MixerOrchestrator::releaseAfterSelectorOutput() const {
     // Callers read this after they switched the selector: everything it has emitted so
     // far, from the old program or the dropped transition, is older than the release and
     // cannot end the hold even when still in flight to the output, and the first frame
-    // of the new selection does end it. The wallclock, the fallback without a selector
-    // edge, releases on a frame stamped after now, two frames away behind the playout delay.
-    const auto emitted = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->source_switcher_name));
-    return emitted.isValid() ? emitted.timestamp({1, 1000000000}) + 1 : wallclock.pts() * 1000000;
+    // of the new selection does end it.
+    return releaseAfter(selectorOutputNs());
 }
 
 int64_t MixerOrchestrator::resolveTransitionStartPts(int64_t requested_start_pts_ms) const {
@@ -333,10 +359,19 @@ Parameters MixerOrchestrator::status() const {
     Parameters s;
     s["pgm_scene"] = state_->pgm_scene_name;
     s["pvw_scene"] = state_->pvw_scene_name;
+    s["pvw_slot_scene"] = state_->pvw_slot_scene;
+    s["swap_preview"] = state_->swap_preview;
+    s["preview_followers"] = state_->preview_followers.load();
     s["pgm_slot"] = state_->pgm_is_slot_a ? "A" : "B";
     s["switch_margin_ms"] = state_->switch_margin_ms;
     s["now_pts_ms"] = wallclock.pts();
     s["cut_latency"] = state_->cut_latency ? state_->cut_latency->status() : Parameters(nullptr);
+    {
+        // Every AUX multiview's PVW change latency next to the program's (mixer_pvw_follow).
+        std::lock_guard<std::mutex> feed(state_->preview_mutex);
+        s["pvw_revision"] = state_->preview.revision;
+        s["pvw_latency"] = Parameters(state_->preview_follow_samples);
+    }
     s["prewarm_cut_scenes"] = state_->prewarm_cut_scenes;
     s["prewarm_source_mask"] = toParameters(state_->prewarm_source_mask);
     if (!state_->overlay_selector_name.empty()) {

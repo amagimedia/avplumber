@@ -15,7 +15,7 @@ namespace avp::mixer {
 int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t start_pts_ms) {
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
 
-    if (state_->pvw_scene_name == scene_name) {
+    if (state_->pvw_slot_scene == scene_name) {
         logstream << "mixer cut: reusing preloaded PVW scene=" << scene_name;
     } else {
         loadSceneIntoSlot(pvw_is_slot_a, scene_name, true);
@@ -91,19 +91,19 @@ void MixerOrchestrator::readyCutTask(
     std::lock_guard<std::mutex> lock(state->mutex);
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Cut))
         return;
+    MixerOrchestrator orch(nodes, state, timeline, scheduler);
+    int64_t effective_ns = 0;
     try {
-        MixerOrchestrator orch(nodes, state, timeline, scheduler);
         if (state->cut_latency) state->cut_latency->timing.arm();
-        orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
-        orch.finishSnapshot();
+        // The preview swap goes to the AUX followers as soon as the first new program frame is
+        // known, so it can reach the multiview frame leaving with that frame.
+        effective_ns = orch.finishSnapshot(orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene, true,
+            [&](int64_t emitted) { state->publishTakePreview(new_pgm_scene, orch.firstNewProgramFrameNs(emitted)); }));
     } catch (const std::exception& e) {
         if (state->cut_latency) state->cut_latency->timing.cancel("failed");
         logstream << "mixer: ready cut error restoring routing: " << e.what();
     }
-    state->pgm_is_slot_a = new_pgm_is_slot_a;
-    state->pgm_scene_name = std::move(new_pgm_scene);
-    state->pvw_scene_name = "";
-    state->transition_mode = MixerState::TransitionMode::Idle;
+    orch.finishTransition(new_pgm_is_slot_a, std::move(new_pgm_scene), effective_ns);
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +122,8 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms,
     state_->transition_scene_name = scene_name;
     TransitionGuard prep_guard([&] { abortTransition(transition_generation); });
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
-    bool was_preloaded = state_->pvw_scene_name == scene_name;
+    bool was_preloaded = state_->pvw_slot_scene == scene_name;
+    state_->take_received_ns = monotonicNs(received);
     if (state_->cut_latency)
         state_->cut_latency->timing.begin(scene_name, was_preloaded, pvw_is_slot_a ? 0 : 1, received);
 

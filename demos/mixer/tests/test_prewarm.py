@@ -263,6 +263,14 @@ def test_mixer_init_names_the_canvas_a_dip_colour_is_converted_for(native_bounda
     assert json.loads(init.split(" ", 2)[2])["color"] == "sdr"
 
 
+def test_mixer_init_carries_the_preview_swap(native_boundary):
+    # The orchestrator previews the scene that left program unless the show turns that off.
+    app = application(native_boundary)
+    app.start()
+    init = next(event for event in app.avp.events if event.startswith("mixer.init "))
+    assert json.loads(init.split(" ", 2)[2])["swap_preview"] is True
+
+
 def test_compatibility_import_keeps_the_real_builder(native_boundary):
     _, builder = native_boundary
     assert importlib.import_module("pyplumber.mixer").MixerGraphBuilder is builder

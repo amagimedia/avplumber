@@ -14,8 +14,9 @@ graph builder is `pyplumber/mixer/graph.py`; the native control implementation i
 | `src/mixer/graph_ops.{hpp,cpp}` | node/edge lookups, deferred `setObject`, readiness polls |
 | `src/mixer/TransitionScheduler.{hpp,cpp}` | worker thread for scheduled transition steps |
 | `src/mixer/Playout.hpp` | clocked playout: per-input queues, deadlines, frame pick (unit-tested) |
-| `src/mixer/primitives/` | headers with no graph or CUDA dependency: `TickGrid`, `Cadence`, `MonotonicClock`, `CutLatency`, `CutLatencyProbe`, `Snapshot`, `OutputSnapshot`, `MixerState`, `TransitionGuard` (unit-tested where they carry logic), plus the compositor geometry headers below |
+| `src/mixer/primitives/` | headers with no graph or CUDA dependency: `TickGrid`, `Cadence`, `MonotonicClock`, `CutLatency`, `CutLatencyProbe`, `Snapshot`, `OutputSnapshot`, `MixerState`, `TransitionGuard`, `PreviewFollow` (unit-tested where they carry logic), plus the compositor geometry headers below |
 | `src/nodes/hwaccel/cuda_rect_overlay.cpp` | compositor node: scheduling, control, output plumbing |
+| `src/nodes/mixer_snapshot.cpp`, `mixer_pvw_follow.cpp` | mixer-owned nodes: the output hold and slot substitution; the AUX multiview's PVW tile, applied to the bus compositor on the frame its PGM tile shows the take (`demos/mixer/docs/config.md`, `aux_buses`) |
 | `src/nodes/hwaccel/cuda_rect_draw.{hpp,cpp}`, `cuda_rect_scale.cu` | kernel module, canvas clear, per-layer draw |
 | `src/mixer/primitives/compositor_layers.hpp`, `pixel_layout.hpp`, `compositor_geometry.hpp` | layer parsing and draw-op resolution, format geometry, placement (pure; geometry and layout unit-tested) |
 
@@ -122,6 +123,32 @@ than a crossfade: two launches per frame, no extra buffers or passes, and
 nothing while no transition runs. Readiness, timing, interruption and cleanup
 are the crossfade's; an interrupted dip keeps the picture it had reached,
 which at the midpoint is the solid colour.
+
+After a completed take the preview is the scene that left program (OBS's
+"Swap Preview/Program Scenes After Transitioning"; `mixer.init`
+`"swap_preview": false` is meant to clear it instead, as an interrupted or
+failed take always does, but `mixer.init` does not read that key yet, so the
+swap is always on). The swapped preview is only shown: the slot it came from has its
+sources routed away, so `mixer.status` distinguishes `pvw_scene`, what the
+operator and the AUX multiview see, from `pvw_slot_scene`, what is loaded in
+the PVW slot (`""` while cold). A cut reuses the slot only for `pvw_slot_scene`;
+any other scene, a swapped preview or `mixer.init`'s `initial_pvw_scene`
+(shown only) included, is loaded first, warm when it is in `mixer.prewarm`.
+Every preview change is one `MixerState::PreviewChange` (revision, the pts of
+the first program frame of the new program, the take command's receipt and
+kind), under the feed's own `preview_mutex`, which wakes the
+`preview_followers` (`mixer_pvw_follow` nodes; they never take the mixer's
+`mutex`). A cut or fade publishes it right after the selector switch, before
+its routing, so a multiview's PVW tile changes on the multiview frame that
+leaves its bus when that program frame leaves the mixer (or, per bus, on the
+frame whose PGM tile shows the take); `mixer.status` still reports the swap
+and the ended transition together, since the take holds `mutex` throughout.
+Each follower writes its
+last timed change back into `mixer.status` `pvw_latency` (keyed by node
+name): `pvw_latency_ms` and `pgm_latency_ms` from the command's receipt to the
+multiview's and the program's compositor deadlines, `pvw_minus_pgm_ms`,
+`kind` and `target_unreachable`; `cut_latency` ends at the encoder's output
+instead (`demos/mixer/docs/config.md`, `aux_buses`).
 
 `mixer.status <name>` returns the current PGM/PVW scene and transition state,
 and under `playout` each slot compositor's (`A`, `B`) running `frames`, `repeats`

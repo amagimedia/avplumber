@@ -1,8 +1,8 @@
 import pytest
 
-from cut_spam import (eligible_cuts, is_expected_rejection, last_states, latest_id, measured, parse_mix,
-                      percentile, pick_scenes, playout_delta, sample as probe_sample, setup_check, summarize,
-                      thresholds, transition_payloads, unmeasured_by_state, verdict)
+from cut_spam import (PvwSamples, eligible_cuts, is_expected_rejection, last_states, latest_id, measured,
+                      parse_mix, percentile, pick_scenes, playout_delta, pvw_line, sample as probe_sample,
+                      setup_check, summarize, thresholds, transition_payloads, unmeasured_by_state, verdict)
 
 
 def sample(id, state="measured", ms=100.0):
@@ -152,3 +152,36 @@ def test_only_known_rejections_are_expected():
     assert is_expected_rejection("400 mixer: transition already in progress")
     assert not is_expected_rejection("mixer: unknown scene: x")
     assert not is_expected_rejection(None)
+
+
+def test_pvw_samples_count_each_follower_change_once_by_kind():
+    pvw = PvwSamples()
+    assert pvw.summary() is None and pvw_line(None).startswith("pvw       no AUX")
+    change = lambda rev, diff, late=0, kind="cut", **extra: {"applied_revision": rev, "align": "program", "kind": kind,
+                                                             "pvw_minus_pgm_ms": diff, "pvw_latency_ms": 60 + diff,
+                                                             "pgm_latency_ms": 60.0, "last_target_error_ticks": late, **extra}
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": change(1, 0.0)}})
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": change(1, 0.0)}})            # the same change, polled twice
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": change(2, 16.7)}})
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": change(3, 33.3, late=1), "aux_mv2_pvw": change(3, 0.0)}})
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": {**change(4, 0.0), "pvw_minus_pgm_ms": None}}})   # untimed: a wipe
+    # A fade's target tick had passed when the mixer published the swap: a tick late, not a miss.
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": change(5, 33.3, late=1, kind="fade", target_unreachable=True,
+                                                      pvw_latency_ms=1093.3, pgm_latency_ms=1060.0)}})
+    pvw.observe({"pvw_latency": {"aux_mv_pvw": change(6, 33.3, late=1, kind="cut", target_unreachable=True)}})
+    pvw.observe({"cut_latency": {}})                                        # a mixer without followers
+    pvw.observe(None)
+    summary = pvw.summary()
+    assert summary["followers"] == ["aux_mv2_pvw", "aux_mv_pvw"] and summary["align"] == ["program"]
+    assert sorted(summary["kinds"]) == ["cut", "fade"]
+    cuts, fades = summary["kinds"]["cut"], summary["kinds"]["fade"]
+    assert cuts["n"] == 5 and cuts["pvw_minus_pgm"] == {"n": 5, "p50": 16.7, "p95": 33.3, "max": 33.3}
+    assert cuts["pvw_latency"]["max"] == 93.3 and cuts["pgm_latency"]["p50"] == 60.0   # no fade in the cuts' latencies
+    assert (cuts["late"], cuts["unreachable"]) == (1, 1)   # the unreachable cut (a +-1 tick race) is not late
+    assert (fades["n"], fades["late"], fades["unreachable"], fades["pgm_latency"]["max"]) == (1, 0, 1, 1060.0)
+    line = pvw_line(summary)
+    assert "cut n=5" in line and "1 missed their tick, 1 unreachable" in line and "; fade n=1" in line
+    assert "aux_mv2_pvw, aux_mv_pvw (program)" in line and "p50=16.7" in line
+    only_fades = PvwSamples()
+    only_fades.observe({"pvw_latency": {"aux_mv_pvw": change(1, 33.3, late=1, kind="fade", target_unreachable=True)}})
+    assert pvw_line(only_fades.summary()).startswith("pvw       aux_mv_pvw (program): fade n=1 ") and "unreachable" in pvw_line(only_fades.summary())

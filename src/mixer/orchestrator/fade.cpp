@@ -4,6 +4,7 @@
 // interruption and cleanup; only the transition filter's commands differ.
 #include "internal.hpp"
 #include "../primitives/compositor_color.hpp"
+#include "../../CommandTiming.hpp"
 
 namespace avp::mixer {
 
@@ -42,17 +43,18 @@ void MixerOrchestrator::deferredCleanup(
     std::lock_guard<std::mutex> lock(state->mutex);
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Crossfade))
         return;
+    MixerOrchestrator orch(nodes, state, timeline, scheduler);
+    // `presented` is the first program frame past the end of the fade: the new scene alone. It
+    // has left the mixer already, so the followers get the swap before the routing, like a cut's.
+    const int64_t effective_ns = presented.timestamp({1, 1000000000});
     try {
-        MixerOrchestrator orch(nodes, state, timeline, scheduler);
-        orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
+        orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene, true,
+            [&](int64_t) { state->publishTakePreview(new_pgm_scene, effective_ns); });
         orch.finishSnapshot();
     } catch (const std::exception& e) {
         logstream << "mixer: deferred cleanup error restoring routing: " << e.what();
     }
-    state->pgm_is_slot_a = new_pgm_is_slot_a;
-    state->pgm_scene_name = std::move(new_pgm_scene);
-    state->pvw_scene_name = "";
-    state->transition_mode = MixerState::TransitionMode::Idle;
+    orch.finishTransition(new_pgm_is_slot_a, std::move(new_pgm_scene), effective_ns);
 }
 
 // ---------------------------------------------------------------------------
@@ -72,6 +74,9 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     state_->transition_mode = MixerState::TransitionMode::Crossfade;
     const auto generation = ++state_->transition_generation;
     state_->transition_scene_name = scene_name;
+    // The command's receipt when the dispatcher runs this, now otherwise: the followers time
+    // the preview swap at the end of the fade from it.
+    state_->take_received_ns = monotonicNs(CommandTiming::received());
     TransitionGuard guard([&] { abortTransition(generation); });
     cutInternal(scene_name, start);
     const auto initial = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->pvwSlot().post_otm_name));

@@ -94,7 +94,7 @@ void MixerOrchestrator::prewarmCuts(const std::vector<std::string>& scenes) {
     for (const auto& [name, source] : state_->sources) {
         if (source.routed) continue;
         uint32_t outputs = state_->scenes.at(state_->pgm_scene_name).sources.count(name) ? state_->pgmOutputBit() : 0u;
-        if (!state_->pvw_scene_name.empty() && state_->scenes.at(state_->pvw_scene_name).sources.count(name))
+        if (!state_->pvw_slot_scene.empty() && state_->scenes.at(state_->pvw_slot_scene).sources.count(name))
             outputs |= state_->pvwOutputBit();
         publishCameraOtmOutputs(source.otm_node_name, state_->sourceOutputMask(source, outputs));
     }
@@ -162,12 +162,13 @@ void MixerOrchestrator::initializeRoutedRoutes() {
         true);
 }
 
-void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
-                                                   const std::string& new_pgm_scene,
-                                                   bool picture_changed) {
+int64_t MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
+                                                      const std::string& new_pgm_scene,
+                                                      bool picture_changed,
+                                                      const std::function<void(int64_t)>& switched) {
     const auto scene_it = state_->scenes.find(new_pgm_scene);
     if (scene_it == state_->scenes.end())
-        return;
+        return 0;
 
     const SceneDefinition& scene = scene_it->second;
     const uint32_t pgm_bit = new_pgm_is_slot_a ? 1u : 2u;
@@ -182,6 +183,11 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
     timeline_->clearKey(state_->source_switcher_name, "active");
     setNodeObject(state_->source_switcher_name, "active",
                   Parameters(new_pgm_is_slot_a ? 0 : 1));
+    // Read at once: the selector drains its inactive inputs, so the new program's first frame
+    // arrives at the next main deadline, and the routing below could take until then. The
+    // followers of a take get their change now, for the same reason.
+    const int64_t emitted = selectorOutputNs();
+    if (switched) switched(emitted);
 
     // The encoder must not make the receiver wait for the next periodic keyframe:
     // a cut changes the whole picture, and a P-frame carrying it can exceed what
@@ -213,6 +219,7 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
     nodes_->node(old_slot.post_otm_name)->setObject("outputs", Parameters(0u));
     nodes_->node(new_slot.compositor_name)->setObject("active_inputs", toParameters(active));
     nodes_->node(old_slot.compositor_name)->setObject("active_inputs", Parameters(0u));
+    return emitted;
 }
 
 void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene) {
@@ -234,6 +241,9 @@ void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const Sce
 void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name, bool warm_cut) {
     auto& scene = state_->scenes.at(scene_name);
     const auto& slot = is_slot_a ? state_->slot_a : state_->slot_b;
+    // Cold from here: a load that throws below leaves the flushed, reset slot marked so, and
+    // the next take reloads it instead of trusting the previous scene.
+    state_->pvw_slot_scene.clear();
 
     // The slot being loaded is the broadcast-inactive PVW slot.  Its compositor
     // was previously idled with active_inputs=0, so it may still hold frames on
@@ -292,7 +302,7 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     const uint32_t slot_bit = is_slot_a ? 1u : 2u;
     rewriteCameraOutputsForSlot(slot_bit, scene);
     applyRoutedSceneRoutesForSlot(is_slot_a, scene, wallclock.pts(), true);
-
+    state_->pvw_slot_scene = scene_name;
 }
 
 void MixerOrchestrator::scheduleSceneControls(const SceneDefinition& scene, int64_t at_pts_ms) {
@@ -312,7 +322,7 @@ void MixerOrchestrator::preview(const std::string& scene_name) {
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
     const auto& slot = state_->pvwSlot();
 
-    if (state_->pvw_scene_name == scene_name) {
+    if (state_->pvw_slot_scene == scene_name) {
         logstream << "mixer preview: scene already loaded in PVW: " << scene_name;
     } else {
         loadSceneIntoSlot(pvw_is_slot_a, scene_name);
@@ -324,8 +334,8 @@ void MixerOrchestrator::preview(const std::string& scene_name) {
     setNodeObject(slot.post_otm_name, "outputs", Parameters(1u));
     timeline_->set(slot.post_otm_name, "outputs", prep_ms, Parameters(1u));
     // Direct transitions also load this slot; only an explicit preview should
-    // publish its scene to the control UI and AUX preview follower.
-    state_->pvw_scene_name = scene_name;
+    // publish its scene to the control UI and the AUX preview followers.
+    state_->publishPreview(scene_name, 0);
     logstream << "mixer preview armed: scene=" << scene_name
               << " slot=" << (pvw_is_slot_a ? 'A' : 'B')
               << " post_otm " << slot.post_otm_name << "->1";

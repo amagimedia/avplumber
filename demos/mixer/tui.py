@@ -181,6 +181,7 @@ class MixerTui(App):
         self.selected_scene = ""
         self.pgm_scene = ""
         self.pvw_scene = ""
+        self.pvw_slot_scene = ""
         self.transition = "idle"
         self.direct_mode = direct
         self._poll_timer = None
@@ -277,6 +278,7 @@ class MixerTui(App):
             return
         self.pgm_scene = status.pgm_scene
         self.pvw_scene = status.pvw_scene
+        self.pvw_slot_scene = status.pvw_slot_scene
         self.transition = status.transition
         self.query_one("#program_scene", Static).update(self.pgm_scene or "(none)")
         self.query_one("#preview_scene", Static).update(self.pvw_scene or "(none)")
@@ -322,15 +324,18 @@ class MixerTui(App):
         self._reconnect()
 
     async def _preview_and_wait(self, scene: str) -> None:
+        """Load *scene* into the PVW slot unless it is there. The shown preview is not enough:
+        after a take it is the scene that left program, whose slot is cold (a mixer without
+        pvw_slot_scene reports "", which loads every time)."""
         if self.transition != "idle":
             raise RuntimeError(f"transition is busy: {self.transition}")
-        if self.pvw_scene != scene:
+        if self.pvw_slot_scene != scene:
             await self.connection.command(
                 mixer_command("preview", self.mixer_name, scene=scene)
             )
         for _ in range(80):
             await self._read_status()
-            if self.pvw_scene == scene and self.transition == "idle":
+            if self.pvw_slot_scene == scene and self.transition == "idle":
                 return
             await asyncio.sleep(0.05)
         raise TimeoutError(f"preview did not become ready: {scene}")

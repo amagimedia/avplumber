@@ -67,7 +67,10 @@ def test_status_and_scene_parsing():
     )
     assert status.pgm_scene == "fullscreen_0"
     assert status.pvw_scene == "grid_2_page_0"
+    assert status.pvw_slot_scene == ""   # a mixer that does not report the slot: nothing is loaded
     assert status.transition == "idle"
+    loaded = parse_mixer_status('{"pgm_scene":"a","pvw_scene":"b","pvw_slot_scene":"b","transition":"idle"}')
+    assert (loaded.pvw_scene, loaded.pvw_slot_scene) == ("b", "b")
     assert parse_scene_list('["fullscreen_0", "grid_2_page_0"]') == [
         "fullscreen_0",
         "grid_2_page_0",
