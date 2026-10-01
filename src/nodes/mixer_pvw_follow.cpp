@@ -8,38 +8,25 @@
 #include <optional>
 #include <unordered_map>
 
-// One per pgm_pvw_grid AUX bus. The mixer publishes its preview changes
-// (MixerState::publishPreview); this node draws them in the bus compositor's PVW cell through
-// the compositor's `composition` object, on the multiview frame that leaves the bus when the
-// program frame of the take leaves the mixer (`align` "program", the default) or whose PGM
-// tile shows that frame ("pgm_tile"), see PreviewFollow.hpp. Every timed change is measured
-// from the take command's receipt to the aux deadline it is drawn at (`pvw_latency_ms`), next
-// to the program frame's own deadline (`pgm_latency_ms`; the cut probe's `cut_latency` ends at
-// the encoder's output instead), and their difference `pvw_minus_pgm_ms`, with the take's
-// `kind`, in this node's status and in `mixer.status` `pvw_latency`. The control side
-// publishes the layouts once: `pvw`, the PVW-cell layers of every scene, and `base`, the rest
-// of the composition (the operator's tiles and the PGM tile); every composition this node sets
-// is pvw[shown] followed by base, and it is the only writer of the compositor's composition
-// while it runs.
+// One per pgm_pvw_grid AUX bus: draws the mixer's preview changes (MixerState::publishPreview)
+// in the bus compositor's PVW cell through its `composition` object, on the multiview frame that
+// leaves the bus with the take's first program frame (`align` "program", the default) or whose
+// PGM tile shows that frame ("pgm_tile"), see PreviewFollow.hpp. Each timed change's latency
+// from the take command's receipt (`pvw_latency_ms`, next to the program's `pgm_latency_ms`,
+// `pvw_minus_pgm_ms`, `kind`) is in this node's status and in `mixer.status` `pvw_latency`.
+// The control side sets the layouts once: `pvw`, every scene's PVW-cell layers, and `base`, the
+// rest; each composition is pvw[shown] followed by base, and this node is its only writer.
 //
-// The scene that leaves program becomes the preview (the swap), so a settle pass after every
-// take adds the program scene's sources to the active inputs (no layer draws them: one
-// subscription push per source per aux tick, no compositing), and every other apply keeps the
-// program's inputs that are active already. The timed composition of the next take then only
-// drops inputs, which the compositor applies at once instead of staging. Residual: a settle the
-// compositor stages and rejects after its deadline (a stalled program source) leaves that input
-// in applied_inputs_ without being active, so the next timed apply adds it and is staged too.
+// The scene leaving program becomes the preview (the swap), so a settle pass after every take
+// keeps the program scene's sources active (no layer draws them) and the next take's timed
+// composition only drops inputs, which the compositor applies at once instead of staging. A
+// settle the compositor rejects (a stalled program source) stays in applied_inputs_, so the next
+// timed apply adds that input and is staged too.
 //
 // The compositor is resolved once, at creation: a lookup by name takes NodeManager's lock, which
-// shutdown holds while it joins this thread. A change travels from the feed's lock
-// (MixerState::preview_mutex) to the compositor's `composition` without waiting on the mixer's
-// `mutex`: the orchestrator holds that while it routes a take, which is when a timed change
-// has to reach the compositor, and the compositor's `status` is read under it (the compositor
-// reports the mixer's `pvw_scene`). So the status (`suspended`, see `suspended_`) is read only
-// on a wake with nothing to apply while no take is in flight (`transition_mode`, lock-free).
-// Such a read can still meet a take that started after the check and wait for its routing,
-// which takes NodeManager's lock under `mutex`: during shutdown that is a lock-order risk this
-// node narrows to that window and cannot remove while the aux compositor holds the mixer.
+// shutdown holds while it joins this thread. A change goes from the feed's lock
+// (MixerState::preview_mutex) to the compositor without taking the mixer's `mutex`, which the
+// orchestrator holds while it routes a take.
 class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, public IReturnsObjects {
     struct Layout {
         Parameters layers = Parameters::array();
@@ -123,10 +110,8 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
         suspended_ = enabled ? !*enabled : false;
     }
 
-    /// Waits on the compositor's start/stop lock (bounded) and on the mixer's `mutex` (the
-    /// compositor reports `pvw_scene` from it), so it is called between takes only, and throws
-    /// while the compositor is not created: a failed read must not pass for "not suspended",
-    /// which would resume the bus.
+    /// Waits on the compositor's start/stop lock (bounded), and throws while the compositor is
+    /// not created: a failed read must not pass for "not suspended", which would resume the bus.
     bool compositorSuspended() {
         return compositor()->getObject("status").value("suspended", false);
     }
@@ -178,9 +163,8 @@ public:
     // time or one aux tick, whichever comes first. The processing lock is held throughout, so
     // every wait is bounded. A change whose apply time has passed is only still pending after a
     // failed apply; it is retried at the tick, never at once, so a dead compositor cannot spin.
-    // A wake that applies nothing and has no change waiting refreshes `suspended_` instead,
-    // unless a take is in flight: a timed change is published while its take holds the mixer's
-    // `mutex` for the routing, and reading the status then would wait for it (see the header).
+    // A wake that applies nothing, with no change waiting and no take in flight, refreshes
+    // `suspended_` instead.
     void process() override {
         int64_t now = avp::mixer::monotonicNs();
         int64_t wake_by = now + timing_.aux.time(1);

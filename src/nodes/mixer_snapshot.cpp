@@ -67,16 +67,10 @@ public:
 
         av::VideoFrame output;
         if (replace) {
-            // The output instance stamps its still one tick behind the clock. The live frame
-            // of the current tick is produced at that tick's deadline, the instant a still of
-            // the same tick would be stamped, and then crosses the pipeline, so it lost that
-            // race every time and was discarded below as a duplicate: the hold could end only
-            // by scheduling luck, and a cut interrupting a fade kept the still on air for up
-            // to a second. One tick behind, the live frame arrives first and ends the hold at
-            // its own timestamp. A hold that outlives a tick delays one frame by that tick,
-            // PTS-continuous; a cut's hold usually ends before any still is due. Slot
-            // instances stay on the current tick: their substituted still must reach the
-            // output ahead of the output's own to end a hold that waits for it.
+            // The output instance stamps its still one tick behind the clock: a still of the
+            // current tick would beat that tick's live frame, which then crosses the pipeline,
+            // and drop it below as a duplicate, so the hold never ended. Slot instances stay on
+            // the current tick: their still must reach the output ahead of the output's own.
             const auto index = rate_.atOrBefore(avp::mixer::monotonicNs() - latency_ns_) - (slot_ == -1 ? 1 : 0);
             auto pts = av::Timestamp(index, timeBase());
             // Draining is consumer-owned; no controller ever clears live edges.

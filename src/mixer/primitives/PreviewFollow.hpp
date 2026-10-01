@@ -20,30 +20,7 @@
 //  PgmTile: the tick whose PGM tile shows frame K, so the PVW and PGM tiles change together,
 //    one pgm_delay_frames later than the program (33 ms at 30 aux fps with the default 1).
 //
-// Error bound, in aux frames, for a cut or fade: 0 nominally. +1 when the follower is woken
-// more than half an aux tick late (16 ms at 30 aux fps, 20 ms at 25) or the compositor's render
-// thread is that late to tick N; -1 when the render thread draws tick N-1 more than half a tick
-// late (the set lands in that iteration). +-1 main tick of the change's own pts when the first
-// new program frame is not one main tick after the selector's last output (a missed main
-// deadline before the cut, or a frame emitted between the selector switch and the read that
-// follows it at once): half an aux tick at 50/60 fps, a whole one at 25/30. In Program mode a
-// change lands on a tick whose deadline equals the program frame's: the mixer publishes it
-// right after switching the selector, before the take's routing (MixerState::preview_mutex
-// lets the follower wake meanwhile), at a random phase between the emission of frame K-1 and
-// of frame K, so the follower has what is left of one main tick (0 to 16.7 ms at 60 fps)
-// minus the main compositor's render time, its own wake and the composition set (never a read
-// of the compositor's status, which waits on the mixer's mutex that the take still holds); a
-// set past the deadline lands on the next tick (+1). A fade's change is
-// published from a frame already presented, so such a tick has passed by construction
-// (`target_unreachable` in the follower's status) and the change lands on the next. The
-// timed composition only drops inputs (the previewed scene's are active; the program scene's
-// stay warm for the swap), so the compositor applies it at once; when it does add one the bus
-// was not receiving (a source that stalled, or takes faster than the warm-up settle, about one
-// aux tick) the compositor stages it until that input has a frame for the tick, and past its
-// staging deadline (max(250 ms, 2x latency)) keeps the previous layout: the change is dropped,
-// not late, until the next preview change. A PGM frame that misses the aux deadline moves the
-// PGM tile, not the PVW tile. Wipes and explicit previews are not timed: they draw on the next
-// tick.
+// How far a change can land from its target tick is in doc/mixer.md.
 #include "TickGrid.hpp"
 #include <cstdint>
 
