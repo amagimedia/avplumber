@@ -200,7 +200,7 @@ def main():
     global FRAMES
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=60)
-    parser.add_argument("--families", nargs="+", default=["sdr8", "hlg", "420", "444"])
+    parser.add_argument("--families", nargs="+", default=["sdr8", "hlg", "420"])   # canvases are semiplanar: no 444
     parser.add_argument("--tail-margin", type=int, default=TAIL_MARGIN,
                         help="extra generated frames after the scored ones (default 0: drain to EOF)")
     parser.add_argument("--frames", type=int, default=FRAMES)

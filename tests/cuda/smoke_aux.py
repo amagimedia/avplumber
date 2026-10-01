@@ -119,12 +119,17 @@ def main():
                 wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
                 assert control_json("mixer.status mixer")["pgm_scene"] == "blue"
                 wait_for(lambda: bus.preview == "")
-            for scene in ("red", "blue") * 10:
+            # End on red: the program scene's sources stay warm on the bus (for the swap), so the
+            # subscription checks below need blue off program.
+            for scene in ("blue", "red") * 10:
                 app.mixer.cut(scene)
-                assert bus.state()["pvw_scene"] == ""
-                assert bus.preview == ""
+                assert bus.preview == ""   # fast takes never create an operator preview
                 time.sleep(.01)
             wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
+            # Swap Preview/Program: the bus shows what mixer.status shows, the scene that left
+            # program at the last switch ("blue"), or none when that take replaced a pending one.
+            pvw = bus.state()["pvw_scene"]
+            assert pvw == control_json("mixer.status mixer")["pvw_scene"] and pvw in ("", "blue"), pvw
             # An unavailable new input must leave the old AUX running, then
             # release the abandoned subscription. A newer request cancels it.
             app.mixer.preview("red")
@@ -148,10 +153,11 @@ def main():
             assert not bus.state()["composition_error"]
             assert not subscription_flags()[bus.edges[-1]]
             blue_fps.start()
+            time.sleep(.3)   # a staged input must deliver before its staging deadline, or the layout is kept
             assign(["blue"] * 8)
             wait_for(lambda: not bus.state()["composition_pending"])
             assert not bus.state()["composition_error"]
-            assert subscription_flags()[bus.edges[-1]]
+            assert subscription_flags()[bus.edges[-1]], (bus.state(), subscription_flags())
             assign(list(config["aux_buses"][0]["scenes"]))
             wait_for(lambda: not bus.state()["composition_pending"])
             app.mixer.preview("blue")
@@ -161,7 +167,7 @@ def main():
             assert bus.assign({"expected_revision": initial["revision"], "scenes": [None] * 8})["conflict"]
             app.mixer.cut("blue")
             app.mixer.preview("red")
-            expected[bus.edges[-1]] = False
+            # Blue is program now: its source stays subscribed, warm for the swap.
             wait_for(lambda: subscription_flags() == expected)
             time.sleep(1)
             # Stall the first consumer: the compositor must suspend, unsubscribe
