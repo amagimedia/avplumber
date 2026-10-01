@@ -176,7 +176,7 @@ disk space, not playback load. HLG patterns render on the CPU, a few seconds
 per source; other patterns take about a second. Only allocated input categories
 are prepared. File names hold the source ID and everything that shapes the
 content, so changing layout weights or scene count reuses media, while size,
-cadence, duration and encoder choices get new files under
+cadence, duration and storage choices get new files under
 `media/assets/synthetic_v3_<size>_<fps>fps_<seconds>s/`. Nothing is pruned:
 delete unused files, or older `synthetic_v1_*`/`synthetic_v2_*` directories,
 to reclaim space; delete an asset to regenerate it. An interrupted preparation does
