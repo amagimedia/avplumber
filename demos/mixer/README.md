@@ -30,6 +30,17 @@ including the recursive submodule checkout. Run from the repository root:
 docker compose -f demos/mixer/compose.yaml up --build
 ```
 
+The mixer image builds on Fedora 44 with CUDA 13.4 and needs host driver R615 or
+newer; the container runtime refuses an older host at start (`unsatisfied
+condition: cuda>=13.4`). On such a host select the Ubuntu 22.04 / CUDA 11.7 image
+instead, with the same variable on every later `up --build`:
+
+```sh
+MIXER_DOCKERFILE=Dockerfile docker compose -f demos/mixer/compose.yaml up --build
+```
+
+Both are described in the [guide's Docker section](docs/guide.md#docker).
+
 Open **<http://127.0.0.1:7681/setup/>**, choose orientation, FPS, unique sources,
 scenes, mode and source counts, then click **Apply setup**. The instance generates
 its assets and starts the mixer. No JSON editing or downloads are required.

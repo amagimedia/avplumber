@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1.7
-# Fedora 44 / CUDA 13.4 build of the mixer image. Candidate for ./Dockerfile
-# (Ubuntu 22.04 / CUDA 11.7), which stays the compose default until the host
-# A/B described in docs/guide.md passes. Same /build layout, entrypoint, ports
-# and environment as the current image, so compose.yaml only needs its
-# `dockerfile:` line changed to switch.
+# Fedora 44 / CUDA 13.4 build of the mixer image, the compose default.
+# ./Dockerfile (Ubuntu 22.04 / CUDA 11.7) builds the same /build layout,
+# entrypoint, ports and environment for a host whose driver is older than
+# R615; compose.yaml selects it with MIXER_DOCKERFILE=Dockerfile (docs/guide.md).
 #
 # Build from the repository root:
 #   docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44 .
