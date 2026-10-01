@@ -14,6 +14,7 @@ import time
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos/mixer"))
+from _harness import wait_for
 from mixer import GraphOptions, build_application, load_avp_api
 from pyplumber.node import PythonNode
 from pyplumber.mixer.control import AvpConnection
@@ -29,15 +30,6 @@ class ConsumerGate(PythonNode):
             frame = self._src.get()
             if frame:
                 self._dst.enqueue(frame)
-
-
-def wait_for(predicate, timeout=10):
-    until = time.monotonic() + timeout
-    while time.monotonic() < until:
-        if predicate():
-            return
-        time.sleep(0.05)
-    raise AssertionError("aux condition timed out")
 
 
 def control_json(command):
@@ -61,6 +53,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sources", type=int, choices=(2, 64, 96), default=2,
                         help="Use tiny independent decoders to exercise the wide aux mask")
+    parser.add_argument("--webui", default="http://127.0.0.1:22222", help="existing WebUI backend")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="avp-aux-") as directory:
         root = Path(directory)
@@ -96,7 +89,7 @@ def main():
         app.avp.addNode(gate)
         errors = []
         app.avp.on_exception = lambda *args: errors.append(args)
-        app.avp.registerWithWebUI("http://127.0.0.1:22222", "aux-smoke", "")
+        app.avp.registerWithWebUI(args.webui, "aux-smoke", "")
         try:
             app.start()
             bus = app.aux_buses[0]
