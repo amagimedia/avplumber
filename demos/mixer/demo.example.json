@@ -7,7 +7,7 @@
     "working_format": "p210le", "color": "hlg",
     "raw_upload": "pinned"
   },
-  "generation": {"seconds": 2, "sdr_encoder": "h264_nvenc", "hdr_encoder": "hevc_nvenc"},
+  "generation": {"seconds": 2},
   "inputs": [
     {"id": "sdr420", "kind": "generated", "color": "sdr", "chroma": "420", "weight": 8},
     {"id": "hlg420", "kind": "generated", "color": "hlg", "chroma": "420", "weight": 4},

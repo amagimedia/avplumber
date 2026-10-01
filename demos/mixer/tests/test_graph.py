@@ -7,6 +7,7 @@ import pytest
 
 from pyplumber.mixer import config as mixer_config
 from pyplumber.mixer.color import Color
+from pyplumber.mixer.graph import MixerGraphBuilder
 from mixer import DIRECT_INPUT_LIMIT, GraphOptions, build_application, infer_output_format, parse_args
 
 
@@ -84,6 +85,7 @@ class FakeAvp:
 
 class FakeMixer:
     instances = []
+    canvas_compositor = MixerGraphBuilder.canvas_compositor
 
     def __init__(self, avp, **parameters):
         self.avp = avp
@@ -98,6 +100,8 @@ class FakeMixer:
         self.aux_routes = []
         self.fps_num, self.fps_den = parameters.get("fps", (30, 1))
         self.hwaccel = parameters.get("hwaccel")
+        (self.canvas_w, self.canvas_h), self.working_format = parameters["canvas"], parameters["working_format"]
+        self.color = Color.parse(parameters["color"])
         self.keyframe_node = parameters.get("keyframe_node")
         self.instances.append(self)
 
@@ -1273,7 +1277,7 @@ def test_generated_hdr_show_has_hdr_and_sdr_renditions():
         make_config.source_spec("raw=/f/p.v210@1920x1080")
     with pytest.raises(SystemExit, match="--sdr-port needs"):
         make_config.main(["--sdr-port", "5004", "clip=/m/c.mp4"])
-    with pytest.raises(SystemExit, match="distinct RTP ports"):
+    with pytest.raises(SystemExit, match="distinct RTP/RTCP port pairs"):
         make_config.generate(["--color", "hlg", "--working-format", "p210le",
                               "--sdr-port", "5004", "clip=/m/c.mp4"])
 

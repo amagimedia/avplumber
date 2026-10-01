@@ -10,10 +10,8 @@ python3 demos/mixer/mixer.py --config media/mixer.demo.json --janus-output
 ```
 
 Run preparation on the NVIDIA host or inside the mixer Docker image. It needs
-Python, NumPy and FFmpeg, included in that image. For CPU-only preparation,
-set `generation.sdr_encoder` to `libx264` and `generation.hdr_encoder` to
-`libx265` in a copy of the recipe; FFmpeg must have those encoders. Playback
-still requires the NVIDIA mixer environment. `--runtime-media-dir /media`
+Python, NumPy and FFmpeg with NVENC, included in that image: generated clips
+are encoded with `h264_nvenc` (SDR) and `hevc_nvenc` (HDR). `--runtime-media-dir /media`
 lets host preparation write paths for a later `/media` container mount.
 
 ## Counts and proportions
@@ -29,7 +27,6 @@ lets host preparation write paths for a later `/media` container mount.
 | `canvas` | Normal mixer canvas settings: dimensions, fps, working format and color. Also sets synthetic clip dimensions and cadence. |
 | `generation.seconds` | Length of each synthetic input loop; default 2 seconds. |
 | `generation.width`, `generation.height` | Optional synthetic source dimensions, independent of the canvas. Defaults to the canvas dimensions. |
-| `generation.sdr_encoder`, `generation.hdr_encoder` | Preparation encoders; default `h264_nvenc`, `hevc_nvenc`. |
 | `renditions` | Normal mixer output definitions, copied to the generated show. Use separate RTP/RTCP port pairs. |
 | `browser_ring_size` | Maximum outstanding DMA-BUF frames per browser; 1–64, default 6 at 25/30 fps and 9 otherwise. The import-cache capacity is at least 32; obsolete idle imports expire. |
 
@@ -179,7 +176,7 @@ disk space, not playback load. HLG patterns render on the CPU, a few seconds
 per source; other patterns take about a second. Only allocated input categories
 are prepared. File names hold the source ID and everything that shapes the
 content, so changing layout weights or scene count reuses media, while size,
-cadence, duration and encoder choices get new files under
+cadence, duration and storage choices get new files under
 `media/assets/synthetic_v3_<size>_<fps>fps_<seconds>s/`. Nothing is pruned:
 delete unused files, or older `synthetic_v1_*`/`synthetic_v2_*` directories,
 to reclaim space; delete an asset to regenerate it. An interrupted preparation does
@@ -189,7 +186,8 @@ frame pacing visible even while the graphic covers the scene-switch midpoint.
 Both last two seconds, use the selected FPS and preserve the canvas aspect
 ratio, with the longer edge capped at 960 pixels to limit decode and upload
 cost. The compositor scales them to the canvas. No external wipe assets or
-downloads are required, and GPU wipe caching is off by default.
+downloads are required, and the mixer caches both decoded in GPU memory by
+default (`--wipe-cache-mb 640`).
 
 ## Scene compositions
 

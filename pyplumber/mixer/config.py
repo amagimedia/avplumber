@@ -9,6 +9,7 @@ the same scene gets alias names (``id#2``, ``id#3``...) that share its frames.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -16,7 +17,7 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .color import Color, declared_color, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
+from .color import Color, declared_color, default_codec, rendition_color, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
 
 FITS = ("stretch", "contain", "cover")
 TRANSITIONS = ("cut", "fade", "wipe")
@@ -25,8 +26,9 @@ TRANSITIONS = ("cut", "fade", "wipe")
 # purpose: the compositor cannot promote 8-bit sources or draw the RGBA wipe
 # onto them, so they only fail later.
 WORKING_FORMATS = ("nv12", "p010le", "p210le")
-# How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (default), or
-# raw_to_cuda's pinned staging on a private stream (opt-in until measured).
+# How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (the library default), or
+# raw_to_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it. 60 fps
+# A/B in demos/mixer/docs/cookbook/raw-uploads.html; the 110-input A/B is pending).
 RAW_UPLOADS = ("hwupload", "pinned")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 128         # cuda_rect_overlay active_inputs is a 128-bit pad mask (SourceMask)
@@ -71,8 +73,8 @@ def key_fade_seconds(value: Any, where: str) -> float:
 
 def default_latency_ms(fps):
     """Playout deadline: 2 output frames up to 30 fps (80 ms at 25, 67 at 29.97/30), 3 at 50/60
-    (60/50 ms). Two 60 fps frames left 17 ms of slack for a late source or pass, and the
-    measured shows missed deadlines at loads 25/30 fps handled cleanly."""
+    (60/50 ms). Two 60 fps frames left 17 ms of slack for a late source or pass and missed
+    deadlines under load; two frames at 25/30 fps held the measured shows cleanly."""
     return (2 if fps < 40 else 3) * 1000 / fps
 
 
@@ -199,7 +201,7 @@ class AuxBus:
     pvw_align: str = "program"
     latency_ms: Optional[float] = None   # the bus compositor's playout buffer; None: the main mixer's
     # pgm_pvw_grid: aux ticks the PGM pad is matched back; parse_aux_buses defaults it to
-    # aux.default_pgm_delay_frames (1, or 2 at a 50/60 fps bus).
+    # default_pgm_delay_frames (1, or 2 at a 50/60 fps bus).
     pgm_delay_frames: int = 1
     full_rate: bool = False              # run at the canvas rate at 50/60 fps instead of half
 
@@ -237,32 +239,50 @@ class MixerConfig:
             raise ConfigError("max_compositor_layers must be a positive 32-bit integer")
         if self.browser_ring_size is None:
             object.__setattr__(self, "browser_ring_size", default_browser_ring_size(self.fps))
+        if type(self.browser_ring_size) is not int or not 1 <= self.browser_ring_size <= 64:
+            raise ConfigError("browser_ring_size must be an integer from 1 to 64")
 
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
 
     def settings(self) -> Dict[str, Any]:
-        """Canvas format, source counts and operator settings for control surfaces."""
+        """Canvas format, source counts, operator settings and preview outputs for control surfaces."""
         wipes = [{"id": w.id, "name": w.label, "path": w.path,
                   "duration_seconds": w.duration_seconds} for w in self.wipes]
         default = next((w for w in self.wipes if w.id == self.default_wipe), None)
+
+        def codec(r):
+            return r.codec or default_codec(self.working_format)
         preview_codecs = list(dict.fromkeys(
-            "h265" if "hevc" in (r.codec or ("h264_nvenc" if self.working_format == "nv12" else "hevc_nvenc")) else "h264"
+            "h265" if "hevc" in codec(r) else "h264"
             for r in self.renditions if r.target == "janus" and r.feed == "dirty"))
         keys = {"dsk_keys": [{"id": k.id, "source": k.source} for k in self.dsk_keys],
                 "dsk_fade_seconds": self.dsk_fade_seconds, "dsk_fade_curve": self.dsk_fade_curve} if self.dsk_keys else {}
+        # The keyer splits off the clean feed, so it exists only with keys.
+        previews = []
+        for r in self.renditions if self.dsk_keys else ():
+            if r.feed == "clean" and r.target == "janus":
+                color = "sdr" if rendition_color(self.out_color, codec(r), r.color or None, r.tonemap).transfer == "sdr" else "hdr"
+                previews.append({"bus": f"clean_{r.id}", "label": f"Program clean · {color.upper()}", "rendition": r.id,
+                                 "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
+                                 "port": r.port, "mountpoint": r.port, "fps": r.fps})
+        labels = {"pgm_pvw_grid": "Program preview", "source_pages": "Multiviewer"}
+        previews += [{"bus": b.id, "label": labels[b.layout], "layout": b.layout, "rendition": r.id,
+                      "codec": "h264", "color": "sdr", "port": r.port, "mountpoint": r.port, "fps": r.fps}
+                     for b in self.aux_buses for r in b.renditions]
         return {"source_count": len(self.sources), "browser_ring_size": self.browser_ring_size,
                 "preview_codecs": preview_codecs,
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
                            "working_format": self.working_format},
-                "source_counts": {kind: sum(s.kind == kind for s in self.sources)
-                                  for kind in ("video", "browser", "v210", "nv12", "p010")},
+                "source_counts": {kind: sum(s.kind == kind for s in self.sources) for kind in _SOURCE_KEYS},
                 "direct": self.direct,
                 "fade_seconds": self.fade_seconds, "fade_curve": self.fade_curve,
                 "fade_color": self.fade_color,
                 "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
-                "wipes": wipes, **keys}
+                "wipes": wipes, **keys,
+                **({"aux_buses": [b.id for b in self.aux_buses]} if self.aux_buses else {}),
+                **({"preview_outputs": previews} if previews else {})}
 
     @property
     def alias_counts(self) -> Dict[str, int]:
@@ -374,6 +394,20 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
         raise ConfigError(f"{where}: {rendition.width}x{rendition.height} is "
                           f"{rendition.aspect}, not {wanted}")
     return rendition
+
+
+def check_janus_ports(renditions, default_port: int = 5004) -> None:
+    """Janus renditions need distinct RTP ports whose RTCP port (RTP + 1) is free too; port 0 is
+    the mixer's --janus-video-port, 5004 by default. parse_aux_buses checks the main renditions
+    together with the aux ones."""
+    used = set()
+    for r in renditions:
+        if r.target != "janus":
+            continue
+        port = r.port or default_port
+        if not 1 <= port < 65535 or used.intersection((port, port + 1)):
+            raise ConfigError("Janus renditions need distinct RTP/RTCP port pairs in 1..65535")
+        used.update((port, port + 1))
 
 
 def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:
@@ -503,15 +537,11 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     wipe_color = str(doc.get("wipe_color", ""))
     if wipe_color and wipe_color not in TRANSFER_TAGS:
         raise ConfigError("wipe_color must be sdr, hlg or pq")
-    browser_ring_size = doc.get("browser_ring_size", default_browser_ring_size(fps))
-    if type(browser_ring_size) is not int or not 1 <= browser_ring_size <= 64:
-        raise ConfigError("browser_ring_size must be an integer from 1 to 64")
     cfg = MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
-                       browser_ring_size=browser_ring_size,
+                       browser_ring_size=doc.get("browser_ring_size"),
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
                        initial_scene=initial, working_format=working_format, raw_upload=raw_upload, latency_ms=latency_ms, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
-    from .aux import parse_aux_buses
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))
 
@@ -541,6 +571,105 @@ def _parse_dsk(dsk: Any, sources: Dict[str, Source], canvas_w: int, canvas_h: in
     return {"dsk_keys": tuple(keys),
             "dsk_fade_seconds": key_fade_seconds(dsk.get("fade_seconds", DEFAULT_DSK_FADE_SECONDS), "dsk.fade_seconds"),
             "dsk_fade_curve": fade_curve(dsk.get("fade_curve", DEFAULT_FADE_CURVE), "dsk.fade_curve")}
+
+
+def aux_fps(fps, full_rate=False):
+    """A bus runs at half the canvas rate at 50/60 fps unless it opts into the full rate."""
+    return fps // 2 if fps in (50, 60) and not full_rate else fps
+
+
+PVW_ALIGNMENTS = ("program", "pgm_tile")
+
+
+def default_pgm_delay_frames(aux_fps):
+    """Aux frames the PGM pad is matched back unless the bus says: one, or two at a 50/60 fps
+    bus (full_rate). Either way about 33 ms (40 at 25/50) for the finished program to travel
+    from the main compositor, which releases it at its deadline, to the bus's deadline for it;
+    one 60 fps frame would leave 16.7 ms."""
+    return 2 if aux_fps > 30 else 1
+
+
+def _parse_bus_timing(obj, multiview, canvas_fps):
+    """pvw_align, latency_ms, pgm_delay_frames and full_rate of one bus; the first and third
+    belong to the pgm_pvw_grid layout only. Their consistency with the main latency is checked
+    at build (_AuxOutput.build), where the main mixer's latency is known."""
+    if not isinstance(obj.get("full_rate", False), bool):
+        raise ConfigError("aux full_rate must be a boolean")
+    latency = obj.get("latency_ms")
+    if latency is not None and (isinstance(latency, bool) or not isinstance(latency, (int, float)) or
+                                not math.isfinite(latency) or latency <= 0):
+        raise ConfigError("aux latency_ms must be a positive number of milliseconds or null")
+    if not multiview:
+        if "pvw_align" in obj or "pgm_delay_frames" in obj:
+            raise ConfigError("pvw_align and pgm_delay_frames apply to the pgm_pvw_grid layout only")
+        return {"latency_ms": latency, "full_rate": obj.get("full_rate", False)}
+    align = obj.get("pvw_align", "program")
+    if align not in PVW_ALIGNMENTS:
+        raise ConfigError(f"aux pvw_align must be one of {', '.join(PVW_ALIGNMENTS)}")
+    delay = obj.get("pgm_delay_frames", default_pgm_delay_frames(aux_fps(canvas_fps, obj.get("full_rate", False))))
+    if isinstance(delay, bool) or not isinstance(delay, int) or not 0 <= delay <= 6:
+        raise ConfigError("aux pgm_delay_frames must be an integer from 0 to 6")
+    return {"pvw_align": align, "latency_ms": latency, "pgm_delay_frames": delay,
+            "full_rate": obj.get("full_rate", False)}
+
+
+def validate_assignments(cfg, scenes):
+    definitions = {s.id: s for s in cfg.scenes}
+    if not isinstance(scenes, (list, tuple)) or len(scenes) != 8:
+        raise ConfigError("multiview needs exactly eight scene assignments (null clears a slot)")
+    if any(s is not None and (not isinstance(s, str) or s not in definitions) for s in scenes):
+        raise ConfigError("multiview references an unknown scene")
+    reserved = max(len(s.items) for s in cfg.scenes)
+    count = reserved + 1 + sum(len(definitions[s].items) for s in scenes if s is not None)
+    if count > cfg.max_compositor_layers:
+        raise ConfigError(f"multiview needs {count} layers including {reserved} reserved for PVW; limit is {cfg.max_compositor_layers}")
+
+
+def parse_aux_buses(values, cfg):
+    if not isinstance(values, list) or len(values) > 30:
+        raise ConfigError("aux_buses must be a list of at most 30 buses")
+    if values and cfg.fps not in (25, 30, 50, 60):
+        raise ConfigError("multiview supports program rates 25, 30, 50 and 60")
+    result, ids = [], set()
+    for obj in values:
+        bid = obj.get("id", "")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", bid) or bid in ids:
+            raise ConfigError("aux bus IDs must be unique identifiers")
+        ids.add(bid)
+        layout = obj.get("layout", {})
+        preset = layout.get("preset", "pgm_pvw_grid")
+        rotate_s = obj.get("rotate_s", 5)
+        if preset == "source_pages":
+            if set(layout) != {"preset"} or "scenes" in obj:
+                raise ConfigError("source_pages takes no grid size or scenes: it pages through every source")
+            if len(cfg.sources) > 128:
+                raise ConfigError("source pages need one pad per unique source; limit is 128")
+            if isinstance(rotate_s, bool) or not isinstance(rotate_s, (int, float)) or not 1 <= rotate_s <= 60:
+                raise ConfigError("rotate_s must be 1 to 60 seconds")
+            scenes = ()
+        else:
+            if preset != "pgm_pvw_grid" or layout.get("rows", 2) != 2 or layout.get("cols", 4) != 4 or "rotate_s" in obj:
+                raise ConfigError("aux layout is pgm_pvw_grid (2 rows by 4 columns, no rotate_s) or source_pages")
+            if len(cfg.sources) + 1 > 128:
+                raise ConfigError("multiview needs one pad per unique source plus PGM; limit is 128")
+            scenes = obj.get("scenes", [None] * 8)
+            validate_assignments(cfg, scenes)
+        timing = _parse_bus_timing(obj, preset == "pgm_pvw_grid", cfg.fps)
+        fps = aux_fps(cfg.fps, timing["full_rate"])
+        renditions = obj.get("renditions", [])
+        if len(renditions) != 1:
+            raise ConfigError("v1 aux requires one SDR/H.264 Janus rendition")
+        # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
+        r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
+                             f"aux {bid}", cfg.canvas_w, cfg.canvas_h, fps)
+        if (r.target != "janus" or r.codec != "h264_nvenc" or r.color != "sdr" or
+                (r.width, r.height, r.fps) != (cfg.canvas_w, cfg.canvas_h, fps)):
+            raise ConfigError("aux rendition must be SDR/H.264 at canvas size and the aux frame rate")
+        if not r.port:
+            raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
+        result.append(AuxBus(bid, tuple(scenes), (r,), preset, float(rotate_s), **timing))
+    check_janus_ports([*cfg.renditions, *(b.renditions[0] for b in result)])
+    return tuple(result)
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")

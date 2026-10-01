@@ -5,10 +5,10 @@ import threading
 
 import pytest
 
-from pyplumber.mixer.aux import (AuxMultiview, AuxSourcePages, aux_fps, base_composition, composition,
-                                 default_pgm_delay_frames, multiview_cells, page_composition, page_grid,
-                                 parse_aux_buses, pvw_layouts, register_aux_commands, validate_assignments)
-from pyplumber.mixer.config import default_latency_ms
+from pyplumber.mixer.aux import (AuxMultiview, AuxSourcePages, base_composition, composition, multiview_cells,
+                                 page_composition, page_grid, pvw_layouts, register_aux_commands)
+from pyplumber.mixer.config import (aux_fps, default_latency_ms, default_pgm_delay_frames, parse_aux_buses,
+                                    validate_assignments)
 from pyplumber.mixer.config import AuxBus, ConfigError, Item, MixerConfig, Rect, Rendition, Scene, Source
 
 
@@ -204,20 +204,20 @@ def test_rotation_advances_pages_until_held(cfg, monkeypatch):
     monkeypatch.setattr("pyplumber.mixer.aux.time.monotonic", lambda: clock[0])
     published = []
     bus = _pages(cfg, published)
-    assert bus._tick() == 0.5 and bus.page == 0
+    assert bus._step() == 0.5 and bus.page == 0
     clock[0] += 5
-    bus._tick()
+    bus._step()
     assert bus.page == 1 and len(published) == 1
     bus.turn({"page": 4})
     clock[0] += 50
-    assert bus._tick() == 0.5   # a held page is never due: no 50 ms polling
+    assert bus._step() == 0.5   # a held page is never due: no 50 ms polling
     assert bus.page == 4
     bus.turn({"auto": True})
     clock[0] += 2.5
-    bus._tick()
+    bus._step()
     assert bus.page == 4
     clock[0] += 2.5
-    bus._tick()
+    bus._step()
     assert bus.page == 5
 
 
@@ -225,7 +225,7 @@ def test_commands_route_by_bus_kind_and_status_reports_geometry(cfg):
     handlers = {}
     avp = SimpleNamespace(registerControlCommand=lambda name, fn, _payload: handlers.__setitem__(name, fn),
                           executeCommandsFromString=lambda command: None)
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=None)
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps))
     views = (AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0]),
              AuxSourcePages(avp, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0]))
     register_aux_commands(avp, views)
@@ -291,21 +291,21 @@ def test_encoder_backpressure_suspension_survives_automatic_updates_only(cfg, mo
     pages = AuxSourcePages(avp, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0])
     avp.status = {"suspended": True}
     clock[0] += 5
-    pages._tick()
+    pages._step()
     assert avp.published[-1] == {**page_composition(cfg, 1), "enabled": False}
     pages.turn({"page": 3})
     assert avp.published[-1] == page_composition(cfg, 3)
 
 
 def test_multiview_shows_pgm_one_tick_late_at_the_main_latency(cfg):
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=None)
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps))
     view = AuxMultiview(None, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
     pages = AuxSourcePages(None, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0])
     # 60 fps program, 30 fps aux: the main mixer's buffer (three 60 fps ticks, 1.5 aux ticks), so
     # the PVW tile can leave with the program; the sources reach both at the same time.
     assert view.latency_ms() == pages.latency_ms() == view.main_latency_ms() == default_latency_ms(60) == 50
     cfg25 = replace(cfg, fps=25)
-    for latency, expected in ((None, 80), (120, 120), (20, 20)):
+    for latency, expected in ((default_latency_ms(25), 80), (120, 120), (20, 20)):
         mixer.latency_ms = latency
         assert AuxMultiview(None, None, mixer, cfg25, parse_aux_buses([bus_json()], cfg25)[0]).latency_ms() == expected
     # A bus's own latency_ms wins over the main mixer's.
@@ -406,7 +406,7 @@ def test_multiview_builds_a_follower_holding_the_layouts(cfg, monkeypatch):
     monkeypatch.setattr(aux_module._AuxOutput, "build", lambda self, options: None)
     nodes = []
     avp = SimpleNamespace(addNode=nodes.append)
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=None, name="mixer")
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps), name="mixer")
     view = AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
     view.build(None)
     follower, = nodes
@@ -436,16 +436,16 @@ def test_assignment_hands_the_follower_the_base_or_falls_back(cfg):
     assert avp.bases == [{"revision": grid.revision, **base_composition(cfg, scenes)}]
     assert avp.published == []
     # Once a second: a follower reporting another base revision (it restarted) gets the current one.
-    assert grid._follow() == 1.0
+    assert grid._step() == 1.0
     assert len(avp.bases) == 2 and avp.bases[-1]["revision"] == grid.revision
     avp.follower = {"base_revision": grid.revision, "pvw_scene": "repeat"}
-    assert grid._follow() == 1.0 and len(avp.bases) == 2
+    assert grid._step() == 1.0 and len(avp.bases) == 2
     assert grid.details()["follower"] == avp.follower
     assert grid.preview == "repeat"   # what the node shows, for a composition set here later
     # Unreachable: this thread follows the preview at 50 ms and sets the composition itself.
     avp.follower = None
     avp.status = {"suspended": False, "pvw_scene": "full"}
-    assert grid._follow() == 0.05
+    assert grid._step() == 0.05
     assert avp.published == [{**composition(cfg, scenes, "full"), "enabled": True}]
     assert grid.details()["follower"]["error"]
     # A reassignment then goes to the compositor: the node would drop the base without a word.

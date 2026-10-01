@@ -2,15 +2,12 @@
 from __future__ import annotations
 
 import json
-import re
 import threading
 import time
 import uuid
 
-import math
-
 from ..node import InternalNode
-from .config import AuxBus, ConfigError, _parse_rendition, default_latency_ms, scene_layers
+from .config import ConfigError, aux_fps, scene_layers, validate_assignments
 from .control import source_mask_param
 
 
@@ -18,108 +15,8 @@ class _PvwFollowNode(InternalNode):
     TYPE = "mixer_pvw_follow"
 
 
-def aux_fps(fps, full_rate=False):
-    """A bus runs at half the canvas rate at 50/60 fps unless it opts into the full rate."""
-    return fps // 2 if fps in (50, 60) and not full_rate else fps
-
-
-PVW_ALIGNMENTS = ("program", "pgm_tile")
-
-
-def default_pgm_delay_frames(aux_fps):
-    """Aux frames the PGM pad is matched back unless the bus says: one, or two at a 50/60 fps
-    bus (full_rate). Either way about 33 ms (40 at 25/50) for the finished program to travel
-    from the main compositor, which releases it at its deadline, to the bus's deadline for it;
-    one 60 fps frame would leave 16.7 ms."""
-    return 2 if aux_fps > 30 else 1
-
-
-def _parse_bus_timing(obj, multiview, canvas_fps):
-    """pvw_align, latency_ms, pgm_delay_frames and full_rate of one bus; the first and third
-    belong to the pgm_pvw_grid layout only. Their consistency with the main latency is checked
-    at build (_AuxOutput.build), where the main mixer's latency is known."""
-    if not isinstance(obj.get("full_rate", False), bool):
-        raise ConfigError("aux full_rate must be a boolean")
-    latency = obj.get("latency_ms")
-    if latency is not None and (isinstance(latency, bool) or not isinstance(latency, (int, float)) or
-                                not math.isfinite(latency) or latency <= 0):
-        raise ConfigError("aux latency_ms must be a positive number of milliseconds or null")
-    if not multiview:
-        if "pvw_align" in obj or "pgm_delay_frames" in obj:
-            raise ConfigError("pvw_align and pgm_delay_frames apply to the pgm_pvw_grid layout only")
-        return {"latency_ms": latency, "full_rate": obj.get("full_rate", False)}
-    align = obj.get("pvw_align", "program")
-    if align not in PVW_ALIGNMENTS:
-        raise ConfigError(f"aux pvw_align must be one of {', '.join(PVW_ALIGNMENTS)}")
-    delay = obj.get("pgm_delay_frames", default_pgm_delay_frames(aux_fps(canvas_fps, obj.get("full_rate", False))))
-    if isinstance(delay, bool) or not isinstance(delay, int) or not 0 <= delay <= 6:
-        raise ConfigError("aux pgm_delay_frames must be an integer from 0 to 6")
-    return {"pvw_align": align, "latency_ms": latency, "pgm_delay_frames": delay,
-            "full_rate": obj.get("full_rate", False)}
-
-
 def _even(value):
     return int(value) // 2 * 2
-
-
-def validate_assignments(cfg, scenes):
-    definitions = {s.id: s for s in cfg.scenes}
-    if not isinstance(scenes, (list, tuple)) or len(scenes) != 8:
-        raise ConfigError("multiview needs exactly eight scene assignments (null clears a slot)")
-    if any(s is not None and (not isinstance(s, str) or s not in definitions) for s in scenes):
-        raise ConfigError("multiview references an unknown scene")
-    reserved = max(len(s.items) for s in cfg.scenes)
-    count = reserved + 1 + sum(len(definitions[s].items) for s in scenes if s is not None)
-    if count > cfg.max_compositor_layers:
-        raise ConfigError(f"multiview needs {count} layers including {reserved} reserved for PVW; limit is {cfg.max_compositor_layers}")
-
-
-def parse_aux_buses(values, cfg):
-    if not isinstance(values, list) or len(values) > 30:
-        raise ConfigError("aux_buses must be a list of at most 30 buses")
-    if values and cfg.fps not in (25, 30, 50, 60):
-        raise ConfigError("multiview supports program rates 25, 30, 50 and 60")
-    result, ids = [], set()
-    ports = {r.port for r in cfg.renditions if r.port}
-    for obj in values:
-        bid = obj.get("id", "")
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", bid) or bid in ids:
-            raise ConfigError("aux bus IDs must be unique identifiers")
-        ids.add(bid)
-        layout = obj.get("layout", {})
-        preset = layout.get("preset", "pgm_pvw_grid")
-        rotate_s = obj.get("rotate_s", 5)
-        if preset == "source_pages":
-            if set(layout) != {"preset"} or "scenes" in obj:
-                raise ConfigError("source_pages takes no grid size or scenes: it pages through every source")
-            if len(cfg.sources) > 128:
-                raise ConfigError("source pages need one pad per unique source; limit is 128")
-            if isinstance(rotate_s, bool) or not isinstance(rotate_s, (int, float)) or not 1 <= rotate_s <= 60:
-                raise ConfigError("rotate_s must be 1 to 60 seconds")
-            scenes = ()
-        else:
-            if preset != "pgm_pvw_grid" or layout.get("rows", 2) != 2 or layout.get("cols", 4) != 4 or "rotate_s" in obj:
-                raise ConfigError("aux layout is pgm_pvw_grid (2 rows by 4 columns, no rotate_s) or source_pages")
-            if len(cfg.sources) + 1 > 128:
-                raise ConfigError("multiview needs one pad per unique source plus PGM; limit is 128")
-            scenes = obj.get("scenes", [None] * 8)
-            validate_assignments(cfg, scenes)
-        timing = _parse_bus_timing(obj, preset == "pgm_pvw_grid", cfg.fps)
-        fps = aux_fps(cfg.fps, timing["full_rate"])
-        renditions = obj.get("renditions", [])
-        if len(renditions) != 1:
-            raise ConfigError("v1 aux requires one SDR/H.264 Janus rendition")
-        # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
-        r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
-                             f"aux {bid}", cfg.canvas_w, cfg.canvas_h, fps)
-        if (r.target != "janus" or r.codec != "h264_nvenc" or r.color != "sdr" or
-                (r.width, r.height, r.fps) != (cfg.canvas_w, cfg.canvas_h, fps)):
-            raise ConfigError("aux rendition must be SDR/H.264 at canvas size and the aux frame rate")
-        if not r.port or r.port in ports or r.port + 1 in ports or r.port - 1 in ports:
-            raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
-        ports.add(r.port)
-        result.append(AuxBus(bid, tuple(scenes), (r,), preset, float(rotate_s), **timing))
-    return tuple(result)
 
 
 def multiview_cells(cfg):
@@ -138,6 +35,12 @@ def multiview_cells(cfg):
 
 def _layout(layers):
     return {"layers": layers, "active_inputs": source_mask_param(sum(1 << i for i in {l["input"] for l in layers}))}
+
+
+def _tile(index, rect, z):
+    """Input *index* contained in *rect*, a cell or page tile."""
+    return {"input": index, "dst_x": rect["x"], "dst_y": rect["y"], "dst_w": rect["w"], "dst_h": rect["h"],
+            "fit": "contain", "z": z}
 
 
 def _cell_layers(cfg, scene, cell, first_z):
@@ -167,8 +70,7 @@ def base_composition(cfg, scenes):
     for scene, cell in zip(scenes, slots):
         if scene:
             layers.extend(_cell_layers(cfg, definitions[scene], cell, reserved + len(layers)))
-    layers.append({"input": len(cfg.sources), "dst_x": pgm["x"], "dst_y": pgm["y"],
-                   "dst_w": pgm["w"], "dst_h": pgm["h"], "fit": "contain", "z": reserved + len(layers)})
+    layers.append(_tile(len(cfg.sources), pgm, reserved + len(layers)))
     return _layout(layers)
 
 
@@ -201,15 +103,14 @@ def page_grid(cfg):
 def page_composition(cfg, page):
     grid = page_grid(cfg)
     first = page * len(grid)
-    layers = [{"input": first + i, "dst_x": r["x"], "dst_y": r["y"], "dst_w": r["w"], "dst_h": r["h"],
-               "fit": "contain", "z": i} for i, r in enumerate(grid[:len(cfg.sources) - first])]
-    return {"layers": layers, "active_inputs": source_mask_param(sum(1 << l["input"] for l in layers))}
+    return _layout([_tile(first + i, r, i) for i, r in enumerate(grid[:len(cfg.sources) - first])])
 
 
 class _AuxOutput:
     """One AUX output: a compositor over subscribed sources, then SDR H.264 to Janus.
 
-    Subclasses define the composition and the background thread that keeps it current."""
+    Subclasses define the composition and _step(), one pass of the background thread
+    (run) that keeps it current."""
     pgm_edge = None   # the edge the program tap feeds, for layouts that show PGM
     pgm_delay_frames = 0   # ticks the PGM input (the last one) is matched back; see AuxMultiview
 
@@ -235,8 +136,7 @@ class _AuxOutput:
 
     def main_latency_ms(self):
         """The main mixer's playout buffer: when a program frame leaves its compositor."""
-        main_latency = self.mixer.latency_ms
-        return main_latency if main_latency is not None else default_latency_ms(self.cfg.fps)
+        return self.mixer.latency_ms
 
     def latency_ms(self):
         # The bus's own playout buffer, or the main mixer's (50 ms at 60 fps, 1.5 aux ticks at
@@ -261,15 +161,13 @@ class _AuxOutput:
                               f"latency_ms ({self.main_latency_ms():g}) by a program frame ({floor:.1f} ms) at least, "
                               f"for the program frame to reach the bus in time")
         inputs = self.inputs()
-        for edge in [*inputs, self.output_edge, *(f"{self.prefix}_{suffix}" for suffix in
-                      ("sdr", "fps", "keyframed", "video", "encoded", "repeat_headers", "video_rtp_mux"))]:
+        converted = f"{self.prefix}_sdr"
+        for edge in [*inputs, self.output_edge, converted]:
             self.avp.edges.planCapacity(edge, 1)
-        self.avp.addNode(self.mixer.backend.compositor({
+        self.avp.addNode(self.mixer.canvas_compositor({
             "name": self.node_name, "src": inputs, "dst": self.output_edge,
-            "width": self.cfg.canvas_w, "height": self.cfg.canvas_h,
-            "sw_format": self.cfg.working_format, "color": self.cfg.out_color.transfer,
             "fps": str(fps), "latency_ms": latency, "warmup_timeout_ms": 250,
-            "hwaccel": self.mixer.hwaccel, "output_hwaccel": self.hwaccel,
+            "output_hwaccel": self.hwaccel,
             "aux_mode": True, "subscriptions": inputs, "mixer": self.mixer.name,
             "max_layers": self.layer_budget(),
             "group": self.group, "auto_restart": "off", "on_error": "off",
@@ -277,7 +175,6 @@ class _AuxOutput:
             **self.current_composition(),
         }, api=self.api), early_create=True)
         r = self.bus.renditions[0]
-        converted = f"{self.prefix}_sdr"
         self.avp.addNode(self.api.FilterVideo({
             "name": converted, "src": self.output_edge, "dst": converted,
             "hwaccel": self.hwaccel, "group": self.group, "defer_preliminary_init": True,
@@ -292,7 +189,7 @@ class _AuxOutput:
                              rtcp_bind=options.janus_rtcp_bind, rtcp_port=0),
             fps=fps, width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
             codec="h264_nvenc", preset=r.preset, profile=r.profile or "high", enc_format="nv12",
-            prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size)
+            prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1)
 
     def state(self):
         with self.lock:
@@ -319,6 +216,11 @@ class _AuxOutput:
         self.listener.start()
         self.thread = threading.Thread(target=self.run, name=self.prefix, daemon=True)
         self.thread.start()
+
+    def run(self):
+        """Until stop(): _step() makes one pass and returns the seconds until the next."""
+        while not self.stopped.wait(self._step()):
+            pass
 
     def stop(self):
         """Stop the page thread and RTCP listener. The application stops the group together
@@ -398,7 +300,7 @@ class AuxMultiview(_AuxOutput):
             self.scenes, self.revision, self.error = list(scenes), base["revision"], ""
             return {"scenes": list(self.scenes), "revision": self.revision}
 
-    def _follow(self):
+    def _step(self):
         """One pass; returns the seconds until the next. A follower that restarted holds the base
         it was built with, so resend the current one when its revision differs. Only one of the
         two, the node or this thread, sets the composition at any time; both use the same shown
@@ -419,10 +321,6 @@ class AuxMultiview(_AuxOutput):
             except Exception as exc:
                 self.error = str(exc)
             return 0.05
-
-    def run(self):
-        while not self.stopped.wait(self._follow()):
-            pass
 
 
 class AuxSourcePages(_AuxOutput):
@@ -472,7 +370,7 @@ class AuxSourcePages(_AuxOutput):
                 raise ConfigError(f"aux_page needs auto, a page from 0 to {self.pages - 1}, or a step")
             return self.details()
 
-    def _tick(self):
+    def _step(self):
         """Show the next page when one is due; return the seconds until the next check."""
         with self.lock:
             due = self.flipped_at + self.bus.rotate_s - time.monotonic()
@@ -484,10 +382,6 @@ class AuxSourcePages(_AuxOutput):
                 due = self.bus.rotate_s
             # A held page or a single page has nothing due: check back at the slow rate.
             return min(max(due, 0.05), 0.5) if self.auto and self.pages > 1 else 0.5
-
-    def run(self):
-        while not self.stopped.wait(self._tick()):
-            pass
 
 
 def make_aux(avp, api, mixer, cfg, bus):
