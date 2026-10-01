@@ -1,9 +1,3 @@
-export function sendFd(socketPath: string, fd: number): Promise<void>;
-export function sendFdWithInfo(
-  socketPath: string,
-  fd: number,
-  texInfoBuffer: Buffer,
-): Promise<void>;
 export function createServer(socketPath: string): boolean;
 export interface SendResult {
   clients: number;
@@ -20,4 +14,3 @@ export function setReleaseCallback(
   callback: (frameNumber: bigint, reusable: boolean) => void,
 ): void;
 export function monotonicTimeNs(): bigint;
-export function close(): void;

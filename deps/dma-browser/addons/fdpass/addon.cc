@@ -31,7 +31,6 @@
 #include "texinfo.h"
 
 namespace {
-static std::unordered_map<std::string, int> g_socks;
 static std::unordered_map<std::string, Napi::ThreadSafeFunction> g_loggers;
 static std::unordered_map<std::string, Napi::ThreadSafeFunction> g_release_callbacks;
 static std::mutex g_logger_mu;
@@ -88,16 +87,6 @@ static void logf(const std::string &path, const char *fmt, ...) {
   }
   // forward to JS logger
   emit_log(path, std::string(buf, (size_t)n));
-}
-
-Napi::Value Close(const Napi::CallbackInfo &info) {
-  for (auto it = g_socks.begin(); it != g_socks.end(); ++it) {
-    if (it->second >= 0) {
-      ::close(it->second);
-    }
-  }
-  g_socks.clear();
-  return info.Env().Undefined();
 }
 
 class Server {
@@ -633,12 +622,10 @@ Napi::Value MonotonicTimeNs(const Napi::CallbackInfo &info) {
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("createServer", Napi::Function::New(env, CreateServer));
   exports.Set("broadcastFd", Napi::Function::New(env, BroadcastFd));
-  exports.Set("broadcastFdWithInfo", Napi::Function::New(env, BroadcastFd));
   exports.Set("closeServer", Napi::Function::New(env, CloseServer));
   exports.Set("setServerLogger", Napi::Function::New(env, SetServerLogger));
   exports.Set("setReleaseCallback", Napi::Function::New(env, SetReleaseCallback));
   exports.Set("monotonicTimeNs", Napi::Function::New(env, MonotonicTimeNs));
-  exports.Set("close", Napi::Function::New(env, Close));
   return exports;
 }
 
