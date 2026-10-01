@@ -157,6 +157,20 @@ more GPU per source than 4:2:0, which at 30 fps did not show because the GPU had
 The setup takes 55, the margin 61 has at 4:2:0, as the 4:2:2 share: 55 / 75 = 0.74 at every rate
 (81 at 25/30 fps; 90 passed at 30 fps but is no longer allowed).
 
+### 50 fps
+
+50 fps takes the 60 fps limits scaled by frame rate (see the top of this page). Measured 2026-10-01
+with the Balanced mixes, clean feed on, NVENC p3:
+
+| 50 fps | Mix with 4 keys | Gate | Cut p95 | Input repeats | GPU p50 / p95 | NVDEC p50 / p95 | NVENC | Peak VRAM | Host CPU idle |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| HLG 4:2:2, 66 | 11 + 11 NVDEC, 3 HLG v210, 24 browser, 7 NV12 + 6 P010 | pass, 0 missed | 57 ms | 5 278 | 79 / 85% | 76 / 80% | 59% | 11.5 GB | 47% |
+| HLG 4:2:0, 73 | 10 + 12 NVDEC, 34 browser, 7 NV12 + 6 P010 | pass, 0 missed | 56 ms | 2 626 | 85 / 91% | 77 / 83% | 59% | 10.9 GB | 48% |
+| SDR, 82 | 22 NVDEC, 36 browser, 20 NV12 | pass, 0 missed | 51 ms | 3 262 | 69 / 92% | 86 / 90% | 35% | 12.0 GB | 47% |
+
+Input repeats are higher than at 30 or 60 fps (100-600 per gate there): browser pages paint on
+a 60 Hz rhythm that does not divide into a 50 fps grid. The program met every deadline.
+
 The browser service defaults to five workers with eight windows each (40 total); the setup
 allows all 40 at every rate, downstream-key pages included.
 The setup allows 192 scenes; scenes describe layouts and do not each allocate a

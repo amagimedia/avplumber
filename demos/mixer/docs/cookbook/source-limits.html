@@ -68,7 +68,6 @@
     .measured.wide { max-width: none; }
     .measured .was { color: var(--muted); }
     .measured td small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
-    .measured td.derived, .measured td.derived b { color: var(--muted); }
     .measured td b { font-weight: 700; }
     .measured td.m b { color: var(--accent); }
     .measured th small { display: block; font-size: 11px; font-weight: 400; letter-spacing: 0; text-transform: none; }
@@ -89,14 +88,14 @@
     <table>
       <thead><tr><th>Frame rate</th><th>SDR · 8-bit 4:2:0</th><th>HDR · HLG 10-bit 4:2:0</th><th>HDR · HLG 10-bit 4:2:2</th></tr></thead>
       <tbody>
-        <tr><td>25 fps</td><td class="derived"><b>110</b><small>from 30 fps; 100 validated</small></td><td class="derived"><b>90</b><small>from 30 fps</small></td><td class="derived"><b>81</b><small>from 30 fps</small></td></tr>
-        <tr><td>30 fps</td><td class="m"><b>110</b><small>measured baseline</small></td><td class="m"><b>90</b><small>measured</small></td><td class="derived"><b>81</b><small>0.74 share; 90 passed</small></td></tr>
-        <tr><td>50 fps</td><td class="derived"><b>82</b><small>60 fps scaled, engine caps</small></td><td class="derived"><b>73</b><small>60 fps scaled</small></td><td class="derived"><b>66</b><small>60 fps scaled</small></td></tr>
+        <tr><td>25 fps</td><td class="m"><b>110</b><small>covered by 30 fps</small></td><td class="m"><b>90</b><small>covered by 30 fps</small></td><td class="m"><b>81</b><small>covered by 30 fps</small></td></tr>
+        <tr><td>30 fps</td><td class="m"><b>110</b><small>measured baseline</small></td><td class="m"><b>90</b><small>measured</small></td><td class="m"><b>81</b><small>0.74 share; 90 passed</small></td></tr>
+        <tr><td>50 fps</td><td class="m"><b>82</b><small>measured; engine caps</small></td><td class="m"><b>73</b><small>measured</small></td><td class="m"><b>66</b><small>measured</small></td></tr>
         <tr><td>60 fps</td><td class="m"><b>75</b><small>measured</small></td><td class="m"><b>61</b><small>measured</small></td><td class="m"><b>55</b><small>measured</small></td></tr>
       </tbody>
     </table>
   </div>
-  <p class="legend">Green: measured on the test host (cut-spam gate, 0 missed program deadlines). Grey: derived, not measured as a whole show.</p>
+  <p class="legend">Every limit passed the cut-spam gate on the test host with 0 missed program deadlines, or is covered by a heavier show that did: 25 fps moves fewer frames per second than 30 fps on every engine, and HLG 4:2:2 at 30 fps passed at 90.</p>
 
   <h2>Per source type</h2>
   <div class="measured wide types">
