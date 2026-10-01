@@ -32,6 +32,17 @@ const context = createContext({
 runInContext(script, context);
 assert.equal(runInContext("MOUNTPOINT_ID", context), 2);
 assert.equal(elements.get("codec").value, "h265");
+// Janus is next to the page: at the root standalone, under the prefix behind a reverse proxy.
+assert.equal(runInContext("serverUrl", context), "http://127.0.0.1/janus");
+{
+  const proxied = createContext({
+    fixtureState: null, setTimeout() {},
+    URL, location: { origin: "http://127.0.0.1", href: "http://127.0.0.1/preview/?codec=h264" },
+    document: context.document, window: context.window,
+  });
+  runInContext(script, proxied);
+  assert.equal(runInContext("serverUrl", proxied), "http://127.0.0.1/preview/janus");
+}
 for (const [usage, level] of [[0, "good"], [92, "good"], [94, "good"], [95, "warn"], [98, "warn"], [99, "bad"], [100, "bad"], [null, "unknown"]]) {
   context.renderGpuStats([{index: 0, gpu: usage, decoder: usage, memory_used_mib: 4096, memory_total_mib: 15360}]);
   for (const label of ["GPU", "NVDEC"]) {

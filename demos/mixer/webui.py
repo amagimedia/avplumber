@@ -42,9 +42,29 @@ from pyplumber.mixer.control import AvpConnection, mixer_command
 
 log = logging.getLogger("webui")
 PAGE = Path(__file__).with_name("webui") / "index.html"
+# The page reads the backend's options from this script before its first request; the file holds `{}`, the defaults.
+CONFIG_SCRIPT = '<script id="config" type="application/json">%s</script>'
 TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")
 PROGRAM_TAKES = ("cut", "fade", "wipe")
 STATE_TTL_S = 0.2
+
+
+def page(config: dict) -> bytes:
+    """The page with `config`, what it needs before its first request (where the player is), in its
+    config script."""
+    html = PAGE.read_text("utf-8")
+    placeholder = CONFIG_SCRIPT % "{}"
+    if placeholder not in html:
+        raise RuntimeError(f"{PAGE} has no config script to fill")
+    # `<` is escaped so no option value can end the script element.
+    return html.replace(placeholder, CONFIG_SCRIPT % json.dumps(config).replace("<", "\\u003c"), 1).encode("utf-8")
+
+
+def normalize_preview_base(value: str) -> str:
+    """--preview-base: where the page finds the player, a path on the page's own origin (`/preview/`)
+    or a URL. The player resolves its own files and its Janus requests against it, so it ends with a
+    slash; empty keeps the default."""
+    return value + "/" if value and not value.endswith("/") else value
 
 
 class GpuStats:
@@ -282,11 +302,12 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "avplumber-mixer-webui"
 
-    def __init__(self, bridge: MixerBridge, *args, setup=None, gpu=None, host_stats=None, **kwargs):
+    def __init__(self, bridge: MixerBridge, *args, setup=None, gpu=None, host_stats=None, config=None, **kwargs):
         self.bridge = bridge
         self.setup_manager = setup
         self.gpu = gpu
         self.host_stats = host_stats
+        self.config = config or {}
         super().__init__(*args, **kwargs)
 
     def log_message(self, *_args) -> None:
@@ -306,7 +327,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
         path = self.path.partition("?")[0]
         if path in ("/", "/index.html"):
-            self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
+            self._send(200, page(self.config), "text/html; charset=utf-8")
         elif path in ("/setup", "/setup/"):
             self._send(200, Path(__file__).with_name("setup.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/setup" and self.setup_manager:
@@ -374,8 +395,14 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "superseded": True} if result is False else {"ok": True})
 
 
-def serve(bridge: MixerBridge, bind: str, port: int, setup=None, host_stats: HostStats | None = None) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=GpuStats(), host_stats=host_stats))
+def serve(bridge: MixerBridge, bind: str, port: int, setup=None, host_stats: HostStats | None = None,
+          preview_base: str | None = None) -> ThreadingHTTPServer:
+    """`preview_base`: where the page's players load from, when not port 8080 of the page's host.
+    Normalized here, so every caller's page carries a base the player resolves its files against."""
+    preview_base = normalize_preview_base(preview_base or "")
+    config = {"preview_base": preview_base} if preview_base else {}
+    server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=GpuStats(), host_stats=host_stats,
+                                                        config=config))
     server.daemon_threads = True
     return server
 
@@ -387,6 +414,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mixer", default="mixer")
     parser.add_argument("--bind", default="0.0.0.0", help="address to serve the page on")
     parser.add_argument("--http-port", type=int, default=7681)
+    # nargs="?": compose.yaml always passes the flag, with an empty value when MIXER_PREVIEW_BASE is unset.
+    parser.add_argument("--preview-base", nargs="?", const="", default="",
+                        help="Where the page's players load from: a path on the page's own origin, such as /preview/ "
+                             "behind a reverse proxy, or a URL (default: port 8080 of the page's host)")
     parser.add_argument("--transition", choices=("cut", "fade", "wipe"),
                         help="Override the page's initial transition without changing the running mixer")
     parser.add_argument("--manage-setup", action="store_true", help="Own and restart the demo mixer process")
@@ -411,7 +442,7 @@ def main(argv: list[str] | None = None) -> None:
         return process.pid if process else None
     host_stats = HostStats(mixer_pid)
     host_stats.start()
-    server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats)
+    server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats, preview_base=args.preview_base)
     print(f"mixer web UI on http://{args.bind}:{args.http_port} "
           f"controlling {args.mixer} at {args.host}:{args.port}", flush=True)
     def stop(_signum, _frame):

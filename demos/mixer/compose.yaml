@@ -52,6 +52,9 @@ services:
       - "${MIXER_HTTP_PORT:-7681}"
       - --dmabuf-rest
       - http://127.0.0.1:${DMA_BROWSER_REST_PORT:-9009}
+      # Behind a reverse proxy that serves the player under a path of the page's own origin: /preview/
+      - --preview-base
+      - ${MIXER_PREVIEW_BASE:-}
       - --mixer-args
       - --janus-output
       - --prewarm-cut-scene

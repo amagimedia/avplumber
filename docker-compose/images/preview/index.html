@@ -200,7 +200,9 @@
       url.searchParams.set("codec", codecSelect.value);
       location.assign(url);
     });
-    const serverUrl = `${location.origin}/janus`;
+    // Relative to the page, like its stats and metrics requests, so the player also works under a
+    // reverse proxy prefix such as /preview/ (whose trailing slash this relies on).
+    const serverUrl = new URL("janus", location.href).href;
     const statusEl = document.getElementById("status");
     const preview = document.getElementById("preview");
     const rttValue = document.getElementById("rtt-value");
