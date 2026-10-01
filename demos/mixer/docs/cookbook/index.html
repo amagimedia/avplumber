@@ -89,30 +89,17 @@
     <li><a href="browser-paint-cost.html"><span class="pill live">Implemented, deployed on the test host</span><b>Browser CPU is per painted frame</b><span class="sum">Chromium costs ~3.5 ms CPU per delivered frame per window, whatever the page. A test page that rests two thirds of the time and Electron 44: Electron 5.90 → 2.83 cores, host idle 28 → 50 % at 68 inputs, 60 fps.</span></a></li>
     <li><a href="gpu-process-crash.html"><span class="pill live">Implemented, deployed on the test host</span><b>Keeping Vulkan out of the GPU process</b><span class="sum">Recreating all browser windows crashed Chromium's GPU process and killed workers. WebGPU on OpenGL ES and no crash limit: 5 restarts, 0 crashes.</span></a></li>
     <li><a href="cpu-pressure.html"><span class="pill">Measurement method</span><b>Measuring CPU pressure at 60 Hz</b><span class="sum">Load average 25 on 16 vCPU at 69 % busy: ready-thread sampling, PSI and schedstat show one ~8 ms burst per 16.7 ms frame from ~6 threads per source.</span></a></li>
-  </ul>
-
-  <h2 class="group">Being measured</h2>
-  <ul class="entries">
-    <li><a href="capacity-budgets.html"><span class="pill optin">Experimental, measured at 25 and 30 fps</span><b>Rate-aware capacity budgets</b><span class="sum">NVDEC gets 1100 decoded frames/s instead of a fixed stream count (40/36/22/18 at 25/30/50/60 fps); a fifth browser worker and pinned raw uploads fill 110 inputs at 25 and 30 fps. NVDEC measured 81–82 % at 25 fps and 88.5 % at 30.</span></a></li>
-    <li><a href="force-fps-center-phase.html"><span class="pill impl">Implemented, measuring</span><b>Centred force_fps phase</b><span class="sum">Source pacers shift a source's timestamps so its first frame lands on an output tick, so timing jitter no longer turns into a repeated frame plus a dropped one. Before it, one raw source at 30 fps repeated and dropped about 10 frames/s each.</span></a></li>
-    <li><a href="raw-uploads.html"><span class="pill optin">Setup default, passes the 60 fps A/B</span><b>Raw uploads and the CUDA driver lock</b><span class="sum">Raw NV12 and P010 frames go through a pinned buffer on the source’s own stream instead of a synchronous copy that holds a lock the whole mixer shares. The setup’s 110-input shows use it for 30 raw sources at 25 fps and 34 at 30. At 68 inputs and 60 fps, hwupload missed 69 % of program deadlines; pinned missed 0.</span></a></li>
-  </ul>
-
-  <h2 class="group">Implemented</h2>
-  <ul class="entries">
-    <li><a href="loop-continuous-timestamps.html"><span class="pill impl">Implemented</span><b>Looped clips keep counting across the wrap</b><span class="sum">A looped file's next pass is shifted by the length of the one before, so timestamps keep rising and a wrap no longer costs the source a frame: about 0.9 drops/s per source with 2 s clips before.</span></a></li>
-  </ul>
-
-  <h2 class="group">Implemented, not deployed</h2>
-  <ul class="entries">
-    <li><a href="real-inputs.html"><span class="pill impl">Implemented, not deployed</span><b>Real 1080p inputs, no shortcuts</b><span class="sum">The ground rule: every capacity-demo source is its own input of at least 1080p25, with its own media, processed on every frame.</span></a></li>
-    <li><a href="pgm-delay.html"><span class="pill impl">Implemented, not deployed</span><b>PGM delay instead of a longer aux deadline</b><span class="sum">The Program preview matches only its PGM pad one frame back, so its 100 source pads keep the normal 80 ms deadline.</span></a></li>
-    <li><a href="dsk-fades.html"><span class="pill impl">Implemented, not deployed</span><b>DSK fades in one pass</b><span class="sum">A key fades by weighting its alpha in the existing keyer pass: no second compositor, and frames without a fade run the old kernels.</span></a></li>
-    <li><a href="key-prewarm.html"><span class="pill impl">Implemented, not deployed</span><b>Prewarmed DSK keys</b><span class="sum">Keys stay subscribed while off, so a key cut or fade-in starts on the next program frame instead of 1–2 frames later.</span></a></li>
-    <li><a href="filter-threads.html"><span class="pill impl">Implemented, not deployed</span><b>One thread per GPU filter graph</b><span class="sum">GPU and metadata-only filter graphs run on one thread instead of an idle 16-thread FFmpeg slice pool each.</span></a></li>
-    <li><a href="nvenc-dpb.html"><span class="pill impl">Implemented, not deployed</span><b>One reference frame for monitor encoders</b><span class="sum">The two monitor encoders keep one NVENC reference frame, because without B-frames each frame is predicted from the previous one.</span></a></li>
-    <li><a href="event-loops.html"><span class="pill impl">Implemented, not deployed</span><b>Event-loop sharding</b><span class="sum">Source pacing timers spread over four event-loop threads, so wake-up cost stops growing with the square of the source count.</span></a></li>
-    <li><a href="contexts.html"><span class="pill impl">Implemented, not deployed</span><b>Unused GPU contexts</b><span class="sum">Removes an OpenGL context in every browser importer and a process-wide CUDA context. Both held memory and drew nothing.</span></a></li>
+    <li><a href="real-inputs.html"><span class="pill live">Live</span><b>Real 1080p inputs, no shortcuts</b><span class="sum">The ground rule: every capacity-demo source is its own input of at least 1080p25, with its own media, processed on every frame.</span></a></li>
+    <li><a href="pgm-delay.html"><span class="pill live">Live</span><b>PGM delay instead of a longer aux deadline</b><span class="sum">The Program preview matches only its PGM pad one frame back, so its 100 source pads keep the normal 80 ms deadline.</span></a></li>
+    <li><a href="dsk-fades.html"><span class="pill live">Live</span><b>DSK fades in one pass</b><span class="sum">A key fades by weighting its alpha in the existing keyer pass: no second compositor, and frames without a fade run the old kernels.</span></a></li>
+    <li><a href="key-prewarm.html"><span class="pill live">Live</span><b>Prewarmed DSK keys</b><span class="sum">Keys stay subscribed while off, so a key cut or fade-in starts on the next program frame instead of 1–2 frames later.</span></a></li>
+    <li><a href="filter-threads.html"><span class="pill live">Live</span><b>One thread per GPU filter graph</b><span class="sum">GPU and metadata-only filter graphs run on one thread instead of an idle 16-thread FFmpeg slice pool each.</span></a></li>
+    <li><a href="nvenc-dpb.html"><span class="pill live">Live</span><b>One reference frame for monitor encoders</b><span class="sum">The two monitor encoders keep one NVENC reference frame, because without B-frames each frame is predicted from the previous one.</span></a></li>
+    <li><a href="event-loops.html"><span class="pill live">Live</span><b>Event-loop sharding</b><span class="sum">Source pacing timers spread over four event-loop threads, so wake-up cost stops growing with the square of the source count.</span></a></li>
+    <li><a href="contexts.html"><span class="pill live">Live</span><b>Unused GPU contexts</b><span class="sum">Removes an OpenGL context in every browser importer and a process-wide CUDA context. Both held memory and drew nothing.</span></a></li>
+    <li><a href="force-fps-center-phase.html"><span class="pill live">Live</span><b>Centred force_fps phase</b><span class="sum">Source pacers shift a source's timestamps so its first frame lands on an output tick, so timing jitter no longer turns into a repeated frame plus a dropped one. Before it, one raw source at 30 fps repeated and dropped about 10 frames/s each.</span></a></li>
+    <li><a href="raw-uploads.html"><span class="pill live">Live</span><b>Raw uploads and the CUDA driver lock</b><span class="sum">Raw NV12 and P010 frames go through a pinned buffer on the source’s own stream instead of a synchronous copy that holds a lock the whole mixer shares. The setup’s 110-input shows use it for 30 raw sources at 25 fps and 34 at 30. At 68 inputs and 60 fps, hwupload missed 69 % of program deadlines; pinned missed 0.</span></a></li>
+    <li><a href="loop-continuous-timestamps.html"><span class="pill live">Live</span><b>Looped clips keep counting across the wrap</b><span class="sum">A looped file's next pass is shifted by the length of the one before, so timestamps keep rising and a wrap no longer costs the source a frame: about 0.9 drops/s per source with 2 s clips before.</span></a></li>
   </ul>
 
   <h2 class="group">Proposed, not in code</h2>
@@ -123,6 +110,11 @@
   <h2 class="group">Rejected</h2>
   <ul class="entries">
     <li><a href="rejected.html"><span class="pill rejected">Rejected</span><b>Ideas we measured and dropped</b><span class="sum">Twelve ideas that broke the every-source-real rule, saved almost nothing, or made cuts, pictures or the pipeline slower.</span></a></li>
+  </ul>
+
+  <h2 class="group">History</h2>
+  <ul class="entries">
+    <li><a href="capacity-budgets.html"><span class="pill">History</span><b>Rate-aware capacity budgets</b><span class="sum">NVDEC gets 1100 decoded frames/s instead of a fixed stream count (40/36/22/18 at 25/30/50/60 fps); a fifth browser worker and pinned raw uploads fill 110 inputs at 25 and 30 fps. NVDEC measured 81–82 % at 25 fps and 88.5 % at 30.</span></a></li>
   </ul>
 
   <h2>Markdown references</h2>
