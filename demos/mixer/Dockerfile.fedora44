@@ -254,7 +254,6 @@ COPY --from=builder /opt/tensorrt /opt/tensorrt
 COPY --from=builder /build/_avplumber*.so /build/
 COPY --from=builder /build/pyplumber /build/pyplumber
 COPY demos/mixer /build/demos/mixer
-COPY tests/cuda/v210_fixture.py /build/tests/cuda/v210_fixture.py
 
 # CUDA is loaded through the driver at run time (deps/cuda_loader, ffnvcodec),
 # so nothing here may link a CUDA toolkit library: "not found" means a build

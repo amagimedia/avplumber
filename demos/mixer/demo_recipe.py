@@ -1,13 +1,34 @@
 """Expand weighted source and layout choices into reproducible demo scenes."""
 
 import math
+import os
 import random
+
+from pyplumber.mixer.config import MAX_DSK_KEYS
 
 
 LAYOUTS = ("fullscreen", "grid_2", "grid_4", "grid_8", "grid_16", "grid_32", "grid_64",
            "pip", "random", "alpha_overlay")
-# Downstream-key pages under dsk/, keyed over the finished program in this order.
-DSK_PAGES = ("lower_third", "ticker", "bug_left", "bug_right")
+# Browser window of each downstream-key page under dsk/, keyed over the finished program in
+# this order. The browser service exports only allowlisted sizes (DMA_BROWSER_ALLOWED_DIMS),
+# so these are fixed; keep that list in step.
+DSK_WINDOWS = {"lower_third": (1016, 172), "ticker": (1920, 80), "bug_left": (152, 152), "bug_right": (304, 152)}
+DSK_PAGES = tuple(DSK_WINDOWS)
+
+
+def validate_dsk(pages, clean_feed):
+    if (not isinstance(pages, list) or len(set(pages)) != len(pages) or len(pages) > MAX_DSK_KEYS
+            or any(page not in DSK_PAGES for page in pages)):
+        raise ValueError(f"dsk must list up to {MAX_DSK_KEYS} distinct pages from {', '.join(DSK_PAGES)}")
+    if not isinstance(clean_feed, bool) or clean_feed and not pages:
+        raise ValueError("clean_feed must be a boolean and needs at least one dsk page")
+
+
+def write_atomic(path, text):
+    """A crash mid-write must not leave resume or a restart a torn show or recipe."""
+    staged = path.with_name(f".{path.name}.tmp")
+    staged.write_text(text, encoding="utf-8")
+    os.replace(staged, path)
 
 
 def allocate(total, weights):

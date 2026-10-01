@@ -5,10 +5,10 @@ import threading
 
 import pytest
 
-from pyplumber.mixer.aux import (AuxMultiview, AuxSourcePages, aux_fps, base_composition, composition,
-                                 default_pgm_delay_frames, multiview_cells, page_composition, page_grid,
-                                 parse_aux_buses, pvw_layouts, register_aux_commands, validate_assignments)
-from pyplumber.mixer.config import default_latency_ms
+from pyplumber.mixer.aux import (AuxMultiview, AuxSourcePages, base_composition, composition, multiview_cells,
+                                 page_composition, page_grid, pvw_layouts, register_aux_commands)
+from pyplumber.mixer.config import (aux_fps, default_latency_ms, default_pgm_delay_frames, parse_aux_buses,
+                                    validate_assignments)
 from pyplumber.mixer.config import AuxBus, ConfigError, Item, MixerConfig, Rect, Rendition, Scene, Source
 
 

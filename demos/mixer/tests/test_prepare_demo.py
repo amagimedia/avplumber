@@ -13,7 +13,7 @@ pytest.importorskip("numpy")
 from prepare_demo import ensure_asset, plan, prepare, download, render_wipe, WIPE_NAMES
 from demo_recipe import allocate
 from pyplumber.mixer.config import load, parse, scene_layers
-from v210_fixture import frame_stride
+from v210 import frame_stride
 
 
 @pytest.fixture

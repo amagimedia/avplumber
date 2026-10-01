@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from v210_fixture import hlg_oetf, pack_v210
+from v210 import hlg_ycbcr422, pack_v210
 
 TAU = 2.0 * np.pi
 
@@ -51,13 +51,7 @@ def frame_planes(width, height, index, frames, source):
         cy = 0.5 + 0.33 * np.sin(theta + phi + k * np.pi)
         hi = np.exp(-((u - cx) ** 2 + (v - cy) ** 2) / (2 * 0.06 ** 2))
         r = r + hi; g = g + hi; b = b + hi
-    r = np.clip(r, 0.0, 1.0); g = np.clip(g, 0.0, 1.0); b = np.clip(b, 0.0, 1.0)
-    rp, gp, bp = hlg_oetf(r), hlg_oetf(g), hlg_oetf(b)
-    yp = 0.2627 * rp + 0.6780 * gp + 0.0593 * bp
-    y = np.rint(876 * yp + 64).astype("<u2")
-    cb = np.rint(896 * (bp - yp) / 1.8814 + 512).astype("<u2")[:, 0::2]
-    cr = np.rint(896 * (rp - yp) / 1.4746 + 512).astype("<u2")[:, 0::2]
-    return y, cb, cr
+    return hlg_ycbcr422(np.clip(r, 0.0, 1.0), np.clip(g, 0.0, 1.0), np.clip(b, 0.0, 1.0))
 
 
 def write_hlg(path, width, height, frames, source=0):

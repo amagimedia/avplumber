@@ -710,15 +710,15 @@ def test_api_answers_409_to_a_concurrent_apply_without_asking_the_mixer(runtime,
 
 def test_a_torn_write_never_reaches_the_show(tmp_path, monkeypatch):
     from pathlib import Path
-    from setup_runtime import _write_atomic
+    from demo_recipe import write_atomic
     path = tmp_path / 'mixer.demo.json'
     path.write_text('{"old": true}')
-    def torn(self, text):
+    def torn(self, text, **_):
         Path.write_bytes(self, text[:4].encode())
         raise OSError('disk full')
     monkeypatch.setattr(Path, 'write_text', torn)
     with pytest.raises(OSError, match='disk full'):
-        _write_atomic(path, '{"new": true}')
+        write_atomic(path, '{"new": true}')
     assert path.read_text() == '{"old": true}'
 
 

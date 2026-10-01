@@ -9,6 +9,7 @@ the same scene gets alias names (``id#2``, ``id#3``...) that share its frames.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -200,7 +201,7 @@ class AuxBus:
     pvw_align: str = "program"
     latency_ms: Optional[float] = None   # the bus compositor's playout buffer; None: the main mixer's
     # pgm_pvw_grid: aux ticks the PGM pad is matched back; parse_aux_buses defaults it to
-    # aux.default_pgm_delay_frames (1, or 2 at a 50/60 fps bus).
+    # default_pgm_delay_frames (1, or 2 at a 50/60 fps bus).
     pgm_delay_frames: int = 1
     full_rate: bool = False              # run at the canvas rate at 50/60 fps instead of half
 
@@ -512,7 +513,6 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
                        initial_scene=initial, working_format=working_format, raw_upload=raw_upload, latency_ms=latency_ms, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
-    from .aux import parse_aux_buses
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))
 
@@ -542,6 +542,106 @@ def _parse_dsk(dsk: Any, sources: Dict[str, Source], canvas_w: int, canvas_h: in
     return {"dsk_keys": tuple(keys),
             "dsk_fade_seconds": key_fade_seconds(dsk.get("fade_seconds", DEFAULT_DSK_FADE_SECONDS), "dsk.fade_seconds"),
             "dsk_fade_curve": fade_curve(dsk.get("fade_curve", DEFAULT_FADE_CURVE), "dsk.fade_curve")}
+
+
+def aux_fps(fps, full_rate=False):
+    """A bus runs at half the canvas rate at 50/60 fps unless it opts into the full rate."""
+    return fps // 2 if fps in (50, 60) and not full_rate else fps
+
+
+PVW_ALIGNMENTS = ("program", "pgm_tile")
+
+
+def default_pgm_delay_frames(aux_fps):
+    """Aux frames the PGM pad is matched back unless the bus says: one, or two at a 50/60 fps
+    bus (full_rate). Either way about 33 ms (40 at 25/50) for the finished program to travel
+    from the main compositor, which releases it at its deadline, to the bus's deadline for it;
+    one 60 fps frame would leave 16.7 ms."""
+    return 2 if aux_fps > 30 else 1
+
+
+def _parse_bus_timing(obj, multiview, canvas_fps):
+    """pvw_align, latency_ms, pgm_delay_frames and full_rate of one bus; the first and third
+    belong to the pgm_pvw_grid layout only. Their consistency with the main latency is checked
+    at build (_AuxOutput.build), where the main mixer's latency is known."""
+    if not isinstance(obj.get("full_rate", False), bool):
+        raise ConfigError("aux full_rate must be a boolean")
+    latency = obj.get("latency_ms")
+    if latency is not None and (isinstance(latency, bool) or not isinstance(latency, (int, float)) or
+                                not math.isfinite(latency) or latency <= 0):
+        raise ConfigError("aux latency_ms must be a positive number of milliseconds or null")
+    if not multiview:
+        if "pvw_align" in obj or "pgm_delay_frames" in obj:
+            raise ConfigError("pvw_align and pgm_delay_frames apply to the pgm_pvw_grid layout only")
+        return {"latency_ms": latency, "full_rate": obj.get("full_rate", False)}
+    align = obj.get("pvw_align", "program")
+    if align not in PVW_ALIGNMENTS:
+        raise ConfigError(f"aux pvw_align must be one of {', '.join(PVW_ALIGNMENTS)}")
+    delay = obj.get("pgm_delay_frames", default_pgm_delay_frames(aux_fps(canvas_fps, obj.get("full_rate", False))))
+    if isinstance(delay, bool) or not isinstance(delay, int) or not 0 <= delay <= 6:
+        raise ConfigError("aux pgm_delay_frames must be an integer from 0 to 6")
+    return {"pvw_align": align, "latency_ms": latency, "pgm_delay_frames": delay,
+            "full_rate": obj.get("full_rate", False)}
+
+
+def validate_assignments(cfg, scenes):
+    definitions = {s.id: s for s in cfg.scenes}
+    if not isinstance(scenes, (list, tuple)) or len(scenes) != 8:
+        raise ConfigError("multiview needs exactly eight scene assignments (null clears a slot)")
+    if any(s is not None and (not isinstance(s, str) or s not in definitions) for s in scenes):
+        raise ConfigError("multiview references an unknown scene")
+    reserved = max(len(s.items) for s in cfg.scenes)
+    count = reserved + 1 + sum(len(definitions[s].items) for s in scenes if s is not None)
+    if count > cfg.max_compositor_layers:
+        raise ConfigError(f"multiview needs {count} layers including {reserved} reserved for PVW; limit is {cfg.max_compositor_layers}")
+
+
+def parse_aux_buses(values, cfg):
+    if not isinstance(values, list) or len(values) > 30:
+        raise ConfigError("aux_buses must be a list of at most 30 buses")
+    if values and cfg.fps not in (25, 30, 50, 60):
+        raise ConfigError("multiview supports program rates 25, 30, 50 and 60")
+    result, ids = [], set()
+    ports = {r.port for r in cfg.renditions if r.port}
+    for obj in values:
+        bid = obj.get("id", "")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", bid) or bid in ids:
+            raise ConfigError("aux bus IDs must be unique identifiers")
+        ids.add(bid)
+        layout = obj.get("layout", {})
+        preset = layout.get("preset", "pgm_pvw_grid")
+        rotate_s = obj.get("rotate_s", 5)
+        if preset == "source_pages":
+            if set(layout) != {"preset"} or "scenes" in obj:
+                raise ConfigError("source_pages takes no grid size or scenes: it pages through every source")
+            if len(cfg.sources) > 128:
+                raise ConfigError("source pages need one pad per unique source; limit is 128")
+            if isinstance(rotate_s, bool) or not isinstance(rotate_s, (int, float)) or not 1 <= rotate_s <= 60:
+                raise ConfigError("rotate_s must be 1 to 60 seconds")
+            scenes = ()
+        else:
+            if preset != "pgm_pvw_grid" or layout.get("rows", 2) != 2 or layout.get("cols", 4) != 4 or "rotate_s" in obj:
+                raise ConfigError("aux layout is pgm_pvw_grid (2 rows by 4 columns, no rotate_s) or source_pages")
+            if len(cfg.sources) + 1 > 128:
+                raise ConfigError("multiview needs one pad per unique source plus PGM; limit is 128")
+            scenes = obj.get("scenes", [None] * 8)
+            validate_assignments(cfg, scenes)
+        timing = _parse_bus_timing(obj, preset == "pgm_pvw_grid", cfg.fps)
+        fps = aux_fps(cfg.fps, timing["full_rate"])
+        renditions = obj.get("renditions", [])
+        if len(renditions) != 1:
+            raise ConfigError("v1 aux requires one SDR/H.264 Janus rendition")
+        # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
+        r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
+                             f"aux {bid}", cfg.canvas_w, cfg.canvas_h, fps)
+        if (r.target != "janus" or r.codec != "h264_nvenc" or r.color != "sdr" or
+                (r.width, r.height, r.fps) != (cfg.canvas_w, cfg.canvas_h, fps)):
+            raise ConfigError("aux rendition must be SDR/H.264 at canvas size and the aux frame rate")
+        if not r.port or r.port in ports or r.port + 1 in ports or r.port - 1 in ports:
+            raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
+        ports.add(r.port)
+        result.append(AuxBus(bid, tuple(scenes), (r,), preset, float(rotate_s), **timing))
+    return tuple(result)
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")

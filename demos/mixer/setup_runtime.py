@@ -14,8 +14,8 @@ import sys
 import threading
 import time
 
-from demo_recipe import DSK_PAGES, allocate
-from pyplumber.mixer.config import default_browser_ring_size
+from demo_recipe import allocate, validate_dsk, write_atomic
+from pyplumber.mixer.config import ConfigError, aux_fps, default_browser_ring_size, parse, validate_assignments
 
 DEMO_DIR = Path(__file__).resolve().parent
 # Phase markers with durations: restart timings are read from the container log.
@@ -80,13 +80,6 @@ def source_limit(fps, bit_depth=8, chroma="420"):
     return min(total, nvdec_limit(fps) + browser_limit(fps) + raw_upload_units(fps))
 
 
-def _write_atomic(path, text):
-    """A crash mid-write must not leave resume or a restart a torn show or recipe."""
-    staged = path.with_name(f".{path.name}.tmp")
-    staged.write_text(text)
-    os.replace(staged, path)
-
-
 def _browser_ids(*shows):
     return {s["id"] for show in shows for s in show.get("sources", []) if s["kind"] == "browser"}
 
@@ -129,10 +122,7 @@ def recipe_for(settings):
         if settings[key] not in choices:
             raise ValueError(f"Unsupported {key}")
     dsk = settings["dsk"]
-    if (not isinstance(dsk, list) or len(set(dsk)) != len(dsk) or any(page not in DSK_PAGES for page in dsk)):
-        raise ValueError(f"dsk must list distinct pages from {', '.join(DSK_PAGES)}")
-    if not isinstance(settings["clean_feed"], bool) or settings["clean_feed"] and not dsk:
-        raise ValueError("clean_feed must be a boolean and needs at least one dsk page")
+    validate_dsk(dsk, settings["clean_feed"])
     # Key pages are sources too: they take their share of the same budget. A show above the
     # limit of its rate and canvas is scaled down to it, not refused: switching 110 SDR inputs
     # at 30 fps to a 10-bit canvas keeps the mix at the capacity of the new mode.
@@ -286,8 +276,6 @@ class SetupRuntime:
 
     def _preserve_aux(self, recipe, show):
         """Keep instance outputs while replacing the generic sources and scenes."""
-        from pyplumber.mixer.aux import aux_fps, validate_assignments
-        from pyplumber.mixer.config import ConfigError, parse
         config = self.media_dir / "mixer.demo.json"
         previous = json.loads(config.read_text()) if config.exists() else {}
         if "max_compositor_layers" in previous:
@@ -328,7 +316,7 @@ class SetupRuntime:
                 bus = next((b for b in doc.get("aux_buses", []) if b.get("id") == bus_id), None)
                 if bus is not None and bus.get("scenes") != scenes:
                     bus["scenes"] = scenes
-                    _write_atomic(path, json.dumps(doc, indent=2) + "\n")
+                    write_atomic(path, json.dumps(doc, indent=2) + "\n")
 
     def _stop(self):
         with self.stop_lock:
@@ -501,7 +489,7 @@ class SetupRuntime:
             recipe_show = json.loads(config.read_bytes())
             self._start_recovering(config, json.loads(previous or b"{}"))
             if settings is not None:
-                _write_atomic(self.recipe_path, json.dumps(recipe, indent=2) + "\n")
+                write_atomic(self.recipe_path, json.dumps(recipe, indent=2) + "\n")
             with self.lock:
                 self.settings = recipe.get("setup")
                 self.revision += 1
@@ -514,7 +502,7 @@ class SetupRuntime:
                 if stopped:
                     self._stop()
                 if previous is not None:
-                    _write_atomic(config, previous.decode())
+                    write_atomic(config, previous.decode())
                     if stopped and isinstance(exc, TimeoutError):
                         # The browser service may still be restarting workers; restoring now would
                         # recover them a second time. The next Apply starts from a settled service.
