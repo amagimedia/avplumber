@@ -75,7 +75,8 @@ at <http://127.0.0.1:8080>.
 
 The player also shows host GPU/NVDEC usage and used/total VRAM from `nvidia-smi`,
 sampled once per second. Usage turns orange at 95% and red at 99%; VRAM turns
-orange at 14 GiB and red at 14.75 GiB. These totals include other GPU applications.
+orange at 93.3% and red at 98.3% of the total (14 and 14.75 GiB on a 15 GiB T4). These totals include
+other GPU applications.
 
 The setup limits unique sources, downstream-key pages included, to what the 16 GiB
 NVIDIA T4 test host carries: **110 at 25 and 30 fps, 82 at 50 and 75 at 60 fps** on
@@ -283,7 +284,7 @@ python3 demos/mixer/tests/frame_codes.py media --sources 16 --width 1920 --heigh
 Eight colorful SDR patterns (bars, mandelbrot, life, ...) as NVENC clips:
 
 ```sh
-python3 demos/mixer/tests/sdr_patterns.py media/assets/patterns --fps 60 --seconds 20
+python3 demos/mixer/sdr_patterns.py media/assets/patterns --fps 60 --seconds 20
 ```
 
 ## Under the hood

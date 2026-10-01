@@ -122,8 +122,9 @@ cd demos/dmabuf-browser/chromium
 BUILD_JOBS=8 ./build-electron.sh
 ```
 
-The default is Electron 41.3.0 / Chromium 146.0.7680.188, matching
-`deps/dma-browser/package.json`. For Electron 43.4.0 / Chromium 150.0.7871.224:
+The default is Electron 41.3.0 / Chromium 146.0.7680.188, the version both patches are checked
+against; `deps/dma-browser/package.json` pins stock Electron 44.5.1 (Chromium 152) for the shim
+path. For Electron 43.4.0 / Chromium 150.0.7871.224:
 
 ```bash
 BUILD_JOBS=8 ./build-electron.sh 43.4.0
@@ -151,9 +152,9 @@ aligned with the custom binary.
 
 ## The settings that actually matter
 
-### 1. Sender = Electron 41.3.0 (Chromium 146)
+### 1. Sender = Electron 44.5.1 (Chromium 152)
 
-- `deps/dma-browser/package.json` pins `electron` to `41.3.0`.
+- `deps/dma-browser/package.json` pins `electron` to `44.5.1`.
 - Use either the patched Electron build or the stock-build shim described
   above; do not apply both allocation rewrites simultaneously.
 - The patched feature is enabled only on the NVIDIA path; without the runtime

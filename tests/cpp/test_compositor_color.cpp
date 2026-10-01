@@ -1,4 +1,5 @@
 #include "mixer/primitives/compositor_color.hpp"
+#include "mixer/backends/cuda/transition_control.hpp"
 #include <cassert>
 #include <cmath>
 #include <initializer_list>
@@ -18,7 +19,7 @@ bool rejected(const std::string &text) {
 }
 
 int main() {
-    using avp::mixer::canvasCodes;
+    using avp::mixer::cuda::canvasCodes;
     using Rgb = std::array<uint8_t, 3>;
     AVFrame frame{};
     for (auto transfer : {AVCOL_TRC_UNSPECIFIED, AVCOL_TRC_BT709}) {

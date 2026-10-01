@@ -42,13 +42,12 @@ inline void dmabufEncodeReleaseAck(uint8_t *data, uint64_t frame_count,
 	dmabufStoreLe64(data + 8, frame_count);
 }
 
-inline bool dmabufDecodeReleaseAck(const uint8_t *data, uint64_t &frame_count,
-                                   DmabufAckKind *kind = nullptr) {
+inline bool dmabufDecodeReleaseAck(const uint8_t *data, uint64_t &frame_count, DmabufAckKind &kind) {
 	const uint32_t flags = dmabufLoadLe32(data + 4);
 	if (dmabufLoadLe32(data) != DMABUF_RELEASE_ACK_MAGIC ||
-        flags > static_cast<uint32_t>(DmabufAckKind::Drained) || (!kind && flags != 0))
+        flags > static_cast<uint32_t>(DmabufAckKind::Drained))
 		return false;
-	if (kind) *kind = static_cast<DmabufAckKind>(flags);
+	kind = static_cast<DmabufAckKind>(flags);
 	frame_count = dmabufLoadLe64(data + 8);
 	return true;
 }

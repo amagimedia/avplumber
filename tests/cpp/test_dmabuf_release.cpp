@@ -7,7 +7,7 @@ static void expectAck(int fd, DmabufAckKind expected, uint64_t frame = 0) {
     assert(recv(fd, bytes.data(), bytes.size(), MSG_WAITALL) == (ssize_t)bytes.size());
     uint64_t got;
     DmabufAckKind kind;
-    assert(dmabufDecodeReleaseAck(bytes.data(), got, &kind));
+    assert(dmabufDecodeReleaseAck(bytes.data(), got, kind));
     assert(kind == expected && got == frame);
 }
 

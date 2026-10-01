@@ -832,7 +832,6 @@ class MixerGraphBuilder:
 
         init_cfg: Dict[str, Any] = {
             "backend": self.backend.name,
-            "transition_node": self._n("out_sel_transition"),
             "timeline": self.timeline,
             "hwaccel": self.hwaccel,
             "fps_num": self.fps_num,

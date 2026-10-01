@@ -156,7 +156,7 @@ is only shown: the slot it came from has its sources routed away, so
 operator and the AUX multiview see, from `pvw_slot_scene`, what is loaded in
 the PVW slot (`""` while cold). A cut reuses the slot only for `pvw_slot_scene`;
 any other scene, a swapped preview or `mixer.init`'s `initial_pvw_scene`
-(shown only) included, is loaded first, warm when it is in `mixer.prewarm`.
+(published to the followers, not loaded) included, is loaded first, warm when it is in `mixer.prewarm`.
 A multiview shows each preview change as described in
 [Multiview PVW follower](#multiview-pvw-follower).
 
@@ -182,9 +182,9 @@ kind), published under the feed's own `preview_mutex`, which wakes the
 `preview_followers`. A cut or fade publishes it right after the selector
 switch, before its routing; `mixer.status` still reports the swap and the ended
 transition together, since the take holds the mixer's `mutex` throughout. A
-change therefore reaches the bus compositor without waiting on that `mutex`:
-the follower reads the compositor's status, which the mutex guards, only
-between takes. Python publishes the bus layouts once (at build and on a slot
+change therefore reaches the bus compositor without waiting on that `mutex`,
+and the bus compositor reports `pvw_scene` from the feed's lock, never from
+that mutex. Python publishes the bus layouts once (at build and on a slot
 assignment); while the node is unreachable, the bus thread falls back to
 polling the preview every 50 ms.
 

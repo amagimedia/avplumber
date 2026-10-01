@@ -13,7 +13,7 @@ import numpy as np
 # Packing and HLG encoding live with the mixer demo, which ships them (demos/mixer/v210.py);
 # the smoke tests import them from here.
 sys.path.append(str(Path(__file__).resolve().parents[2] / "demos/mixer"))
-from v210 import frame_stride, hlg_oetf, pack_v210  # noqa: E402
+from v210 import frame_stride, hlg_ycbcr422, pack_v210  # noqa: E402
 
 
 def sample_planes(width, height, index=0):
@@ -42,12 +42,7 @@ def hlg_planes(width, height, index=0):
     b = ((x * 5 + row * 11 + index * 17) % width) / (width - 1)
     for i, e in enumerate((0.0, 1 / 12, 1.0)):
         r[:2, 12 * i:12 * (i + 1)] = g[:2, 12 * i:12 * (i + 1)] = b[:2, 12 * i:12 * (i + 1)] = e
-    rp, gp, bp = hlg_oetf(r), hlg_oetf(g), hlg_oetf(b)
-    yp = 0.2627 * rp + 0.6780 * gp + 0.0593 * bp
-    y = np.rint(876 * yp + 64).astype("<u2")
-    u = np.rint(896 * (bp - yp) / 1.8814 + 512).astype("<u2")[:, 0::2]
-    v = np.rint(896 * (rp - yp) / 1.4746 + 512).astype("<u2")[:, 0::2]
-    return y, u, v
+    return hlg_ycbcr422(r, g, b)
 
 
 def sdr8_planes(width, height, index=0):

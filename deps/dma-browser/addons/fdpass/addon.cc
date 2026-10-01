@@ -384,7 +384,7 @@ class Server {
         if (received > 0) {
           state.used += static_cast<size_t>(received);
           if (state.used == state.bytes.size()) {
-            have_ack = dmabufDecodeReleaseAck(state.bytes.data(), acknowledged, &kind);
+            have_ack = dmabufDecodeReleaseAck(state.bytes.data(), acknowledged, kind);
             malformed = !have_ack;
             state.used = 0;
             if (have_ack && kind == DmabufAckKind::Drain) draining_clients_.insert(fd);

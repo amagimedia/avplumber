@@ -1,7 +1,8 @@
 #pragma once
 // RGB graphics to canvas codes, shared by the compositor kernel (cuda_rect_scale.cu) and the
-// host (a mixer dip colour, compositor_color.hpp), so both land on the same codes. Luma and
-// chroma come out at 8-bit limited-range scale; callers multiply by 1 << (depth - 8).
+// host (a mixer dip colour, mixer/backends/cuda/transition_control.hpp), so both land on the
+// same codes. Luma and chroma come out at 8-bit limited-range scale; callers multiply by
+// 1 << (depth - 8).
 #include <math.h>
 
 #ifdef __CUDACC__
