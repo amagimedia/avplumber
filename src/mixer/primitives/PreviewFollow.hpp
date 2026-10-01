@@ -5,7 +5,7 @@
 // The PGM pad of a pgm_pvw_grid bus carries the program frames with the selector's pts, main
 // tick K stamped main.time(K). The aux playout (Playout, presentation mode) draws that frame on
 // aux tick aux.nearestIndex(pts) + pgm_delay_frames, at that tick's deadline aux.time(N) +
-// latency. cuda_rect_overlay swaps a pending composition at the top of every iteration, before
+// latency. mixer_compositor swaps a pending composition at the top of every iteration, before
 // it prepares a tick, so a composition set inside (deadline(N-1), deadline(N)] is first drawn on
 // tick N; applyAt(N) sits in the middle of that window.
 //

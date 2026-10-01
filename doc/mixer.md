@@ -15,7 +15,8 @@ graph builder is `pyplumber/mixer/graph.py`; the native control implementation i
 | `src/mixer/TransitionScheduler.{hpp,cpp}` | worker thread for scheduled transition steps |
 | `src/mixer/Playout.hpp` | clocked playout: per-input queues, deadlines, frame pick (unit-tested) |
 | `src/mixer/primitives/` | headers with no graph or CUDA dependency: `TickGrid`, `Cadence`, `MonotonicClock`, `CutLatency`, `CutLatencyProbe`, `Snapshot`, `OutputSnapshot`, `MixerState`, `TransitionGuard`, `PreviewFollow` (unit-tested where they carry logic), plus the compositor geometry headers below |
-| `src/nodes/hwaccel/cuda_rect_overlay.cpp` | compositor node: scheduling, control, output plumbing |
+| `src/nodes/mixer_compositor.cpp`, `mixer_keyer.cpp` | mixer-owned compositor nodes: the clocked playout of the scene slots, wipe and AUX buses (`mixer_compositor`); the DSK (`mixer_keyer`) |
+| `src/nodes/hwaccel/cuda_rect_compositor.hpp`, `cuda_rect_overlay.cpp` | the compositors' shared base (canvas, layers, control, drawing one frame); the generic unclocked `cuda_rect_overlay` |
 | `src/nodes/mixer_snapshot.cpp`, `mixer_pvw_follow.cpp` | mixer-owned nodes: the output hold and slot substitution; the AUX multiview's PVW tile, applied to the bus compositor on the multiview frame the bus's `pvw_align` picks ([Multiview PVW follower](#multiview-pvw-follower)) |
 | `src/nodes/hwaccel/cuda_rect_draw.{hpp,cpp}`, `cuda_rect_scale.cu` | kernel module, canvas clear, per-layer draw |
 | `src/mixer/primitives/compositor_layers.hpp`, `pixel_layout.hpp`, `compositor_geometry.hpp` | layer parsing and draw-op resolution, format geometry, placement (pure; geometry and layout unit-tested) |
@@ -48,7 +49,10 @@ Applications outside this repository use two mixer pieces directly rather than
 Keep the node name, its Python import and parameters, and the helper's
 signature and return structure stable. The compositor in particular keeps:
 
-- unclocked composition when no `fps` is supplied: upstream owns pacing;
+- unclocked composition: upstream owns pacing. The clocked modes are the
+  mixer's own nodes, `mixer_compositor` (`fps`, `aux_mode`) and `mixer_keyer`
+  (`clock_input`); `cuda_rect_overlay` rejects those parameters rather than
+  silently dropping a caller's clock;
 - per-frame `metadata_key` layers, including moving crops, contain and two-box
   layouts, with the existing source-index and z-order semantics;
 - program metadata propagation with the program placed last in the input list
@@ -71,7 +75,7 @@ for a catalogue that exceeds the compositor input limit.
 ```text
 CUDA source frames
   -> source fanout (or catalogue router)
-  -> cuda_rect_overlay A / cuda_rect_overlay B
+  -> mixer_compositor A / mixer_compositor B
   -> permanent transition_cuda
   -> source_switcher
   -> NVENC
@@ -269,7 +273,7 @@ muxing, and control messages are not video-frame memory paths.
 The demo uses these CUDA operations:
 
 - optional `scale_cuda` and `pad_cuda` for homogeneous catalogue inputs;
-- `cuda_rect_overlay` for per-layer scaling and scene composition;
+- `mixer_compositor` for per-layer scaling and scene composition;
 - `transition_cuda` for fades and dips;
 - NVDEC and NVENC at the graph boundaries.
 

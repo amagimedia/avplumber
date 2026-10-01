@@ -77,7 +77,7 @@ inline void setRoutedSlotInTables(MixerState& st,
     }
 }
 
-/// One cuda_rect_overlay layer per compositor src index (see mixer.source). Omitted sources use a dummy rect.
+/// One mixer_compositor layer per compositor src index (see mixer.source). Omitted sources use a dummy rect.
 inline Parameters compositorLayersFromScene(const MixerState& st, const SceneDefinition& scene) {
     static const Parameters kUnusedLayer = Parameters({{"dst_x", 0}, {"dst_y", 0}});
 

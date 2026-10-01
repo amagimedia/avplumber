@@ -291,7 +291,7 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     setNodeObject(slot.compositor_name, "layers", compositorLayersFromScene(*state_, scene));
 
     const SourceMask active_mask = state_->computeActiveInputsMask(scene);
-    // Same pattern as camera otms: cuda_rect_overlay reads "active_inputs" from timeline only.
+    // Same pattern as camera otms: mixer_compositor reads "active_inputs" from timeline only.
     // clearKey does not touch "layers" or other keys on this compositor channel.
     timeline_->clearKey(slot.compositor_name, "active_inputs");
     setNodeObject(slot.compositor_name, "active_inputs", toParameters(active_mask));

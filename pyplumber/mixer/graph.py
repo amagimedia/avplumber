@@ -502,7 +502,7 @@ class MixerGraphBuilder:
         return self._scenes[self._initial_pgm_scene]
 
     def _active_inputs_mask(self, scene: MixerScene) -> int:
-        """Compute the cuda_rect_overlay active_inputs bitmask for a scene."""
+        """Compute the mixer_compositor active_inputs bitmask for a scene."""
         mask = 0
         for src_name in scene.sources:
             idx = self._source_index[src_name]
