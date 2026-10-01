@@ -153,7 +153,6 @@ def main():
             assert not bus.state()["composition_error"]
             assert not subscription_flags()[bus.edges[-1]]
             blue_fps.start()
-            time.sleep(.3)   # a staged input must deliver before its staging deadline, or the layout is kept
             assign(["blue"] * 8)
             wait_for(lambda: not bus.state()["composition_pending"])
             assert not bus.state()["composition_error"]
