@@ -169,9 +169,6 @@ class MixerOrchestrator {
                                bool new_pgm_is_slot_a,
                                int64_t earliest_visible_pts_ms);
 
-    std::string transition_node_name_ = "mixer_transition";
-    std::string transition_edge_name_ = "trans_out";
-
 public:
     /// Drop an armed or running transition and keep the current program picture (`mixer.interrupt`).
     void interrupt() { interruptTransition(Interruption::Dropped); }

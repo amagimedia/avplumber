@@ -47,8 +47,7 @@ struct SceneDefinition {
 
 struct MixerState : public InstanceShared<MixerState> {
     std::mutex mutex;
-    TransitionControl transition_control = nullptr;
-    std::string transition_node_name;
+    TransitionControl transition_control = transitionControl("cuda");
 
     struct SourceInfo {
         std::string otm_node_name;          // "otm_cam1"

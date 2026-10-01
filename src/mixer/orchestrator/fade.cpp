@@ -132,16 +132,10 @@ void MixerOrchestrator::startFade(const std::string& scene_name, double duration
     scheduleSceneControls(target_scene, start_ms);
 
     // 2. Update the preheated transition while its input branches are idle.
-    // Legacy callers may construct MixerState without mixer.init.
-    const auto control = state_->transition_control ? state_->transition_control : transitionControl("cuda");
-    const std::string transition_node_name = !state_->transition_node_name.empty()
-        ? state_->transition_node_name
-        : (state_->source_switcher_name.empty() ? transition_node_name_
-                                               : state_->source_switcher_name + "_transition");
     // A dip holds its colour alone for one frame period, so some frame shows it.
     const double dip_hold = av_q2d({state_->fps_den, state_->fps_num}) / duration_sec;
-    for (const auto& command : control({start_ms, duration_sec, pvw_is_slot_a, curve, dip, dip_hold}))
-        setNodeObject(transition_node_name, command.key, command.value);
+    for (const auto& command : state_->transition_control({start_ms, duration_sec, pvw_is_slot_a, curve, dip, dip_hold}))
+        setNodeObject(state_->source_switcher_name + "_transition", command.key, command.value);
 
     // 3. Camera routing: applied in loadSceneIntoSlot via rewriteCameraOutputsForSlot
 

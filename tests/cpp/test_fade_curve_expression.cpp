@@ -1,7 +1,7 @@
 // The M/E fade hands the curve to FFmpeg as an expression; it must evaluate to
 // what fadeCurveAt computes for the keyer. A dip's expression must match
-// dipCurveAt the same way, and some frame of the 1/fps grid must get alpha 1/2
-// exactly, the colour alone, whatever the phase of the millisecond start.
+// dipCurveAt below the same way, and some frame of the 1/fps grid must get alpha
+// 1/2 exactly, the colour alone, whatever the phase of the millisecond start.
 #include "mixer/primitives/fade_curve.hpp"
 extern "C" {
 #include <libavutil/eval.h>
@@ -17,6 +17,14 @@ void print_stack_trace() {}
 
 namespace {
 const char* const kNames[] = {"t", nullptr};
+
+// The dip's y(x) as fade_curve.hpp defines it (dipHoldEnd), on the host.
+double dipCurveAt(FadeCurve curve, double x, double hold) {
+    x = std::min(1.0, std::max(0.0, x));
+    const double hi = dipHoldEnd(hold), lo = 1 - hi;
+    if (x < lo) return 0.5 * fadeCurveAt(curve, x / lo);
+    return x < hi ? 0.5 : 0.5 + 0.5 * fadeCurveAt(curve, (x - hi) / lo);
+}
 
 double evaluate(const std::string& expr, double t) {
     const double values[] = {t};

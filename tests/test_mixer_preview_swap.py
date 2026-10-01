@@ -4,5 +4,7 @@ import subprocess
 
 def test_mixer_preview_swap(cpp_binary):
     binary = cpp_binary("test_mixer_preview_swap", libs=("libavutil",),
-                        sources=("src/util.cpp", "deps/avcpp/src/rational.cpp", "deps/avcpp/src/timestamp.cpp"), pthread=True)
+                        sources=("src/util.cpp", "deps/avcpp/src/rational.cpp", "deps/avcpp/src/timestamp.cpp",
+                                 "src/mixer/transition_control.cpp", "src/mixer/backends/cuda/transition_control.cpp"),
+                        pthread=True)
     subprocess.run([str(binary)], check=True, timeout=10)
