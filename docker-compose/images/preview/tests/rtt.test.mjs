@@ -49,7 +49,7 @@ for (const [usage, level] of [[0, "good"], [92, "good"], [94, "good"], [95, "war
     assert(elements.get("gpu-stats").innerHTML.includes(`>${label}</span><span class="metric-value" data-level="${level}">`));
   }
 }
-for (const [used, level] of [[14335, "good"], [14336, "warn"], [15103, "warn"], [15104, "bad"], [null, "unknown"]]) {
+for (const [used, level] of [[14330, "good"], [14331, "warn"], [15098, "warn"], [15099, "bad"], [null, "unknown"]]) {
   context.renderGpuStats([{index: 0, gpu: 30, decoder: 90, memory_used_mib: used, memory_total_mib: 15360}]);
   assert(elements.get("gpu-stats").innerHTML.includes(`>VRAM</span><span class="metric-value" data-level="${level}">`));
 }

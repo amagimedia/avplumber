@@ -135,7 +135,7 @@
             <span>Buffer</span><span id="receiver-buffer" class="metric-value">—</span>
           </span>
         </span>
-        <span id="gpu-stats" class="metrics" title="Host GPU totals from nvidia-smi, sampled once per second. Usage: orange ≥95%, red ≥99%. VRAM: orange ≥14 GiB, red ≥14.75 GiB.">GPU —</span>
+        <span id="gpu-stats" class="metrics" title="Host GPU totals from nvidia-smi, sampled once per second. Usage: orange ≥95%, red ≥99%. VRAM: orange ≥93.3%, red ≥98.3% of the total.">GPU —</span>
       </span>
     </footer>
   </main>
@@ -154,7 +154,9 @@
         const used = Number.isFinite(gpu.memory_used_mib) ? gpu.memory_used_mib / 1024 : null;
         const memory = used !== null && Number.isFinite(gpu.memory_total_mib)
           ? `${used.toFixed(2)} / ${(gpu.memory_total_mib / 1024).toFixed(2)} GiB` : "—";
-        return percent("GPU", gpu.gpu) + percent("NVDEC", gpu.decoder) + percent("NVENC", gpu.encoder) + metric("VRAM" + suffix, memory, level(used, 14, 14.75));
+        // A missing or zero total leaves the fraction non-finite, so the level is unknown.
+        const full = used === null ? NaN : gpu.memory_used_mib / gpu.memory_total_mib;
+        return percent("GPU", gpu.gpu) + percent("NVDEC", gpu.decoder) + percent("NVENC", gpu.encoder) + metric("VRAM" + suffix, memory, level(full, 0.933, 0.983));
       }).join("") || "GPU —";
     }
     let monitorMixer = true;
