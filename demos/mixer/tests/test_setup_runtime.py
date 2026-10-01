@@ -228,7 +228,7 @@ def test_bitrate_outside_the_range_is_rejected(value):
 
 
 @pytest.mark.parametrize("bit_depth", [8, 10])
-@pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 110), (50, 68), (60, 68)])
+@pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 110), (50, 75), (60, 75)])
 def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
     chroma = "420" if bit_depth == 8 else "422"
     maximum = source_limit(fps, bit_depth, chroma)   # the SDR rate limit, scaled for a 10-bit canvas
@@ -910,7 +910,7 @@ def test_dsk_settings_are_bounded(changes):
 
 @pytest.mark.parametrize('fps, mode, expected', [
     (30, (8, "420"), 110), (30, (10, "420"), 90), (30, (10, "422"), 90),
-    (60, (8, "420"), 68), (60, (10, "420"), 55), (60, (10, "422"), 55)])
+    (60, (8, "420"), 75), (60, (10, "420"), 61), (60, (10, "422"), 61)])
 def test_a_show_above_the_modes_capacity_is_scaled_down(tmp_path, fps, mode, expected):
     """Switching 110 SDR inputs at 30 fps to a 10-bit canvas keeps the show within that canvas's capacity."""
     bit_depth, chroma = mode

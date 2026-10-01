@@ -7,19 +7,19 @@ output. None of them are decoder-only limits or guarantees for HDR, larger frame
 arbitrary browser pages, or additional outputs.
 
 The setup (`setup_runtime.py`, mirrored in `setup.html`) allows 110 inputs at 25 and
-30 fps and 68 at 50 and 60 fps, downstream-key pages included. Within that total it caps
+30 fps and 75 at 50 and 60 fps, downstream-key pages included. Within that total it caps
 NVDEC streams at min(40, 1100 ÷ fps), browser windows at 40 (five workers of eight) and
 raw NV12 uploads at 30, 34 or 17 units at 25, 30 or 50/60 fps (a P010 upload costs two).
 On a 10-bit canvas the total is scaled by `MODE_CAPACITY`, 0.82 for HLG 4:2:0 and 4:2:2:
-90 at 25/30 fps and 55 at 50/60 (see [10-bit canvases](#10-bit-canvases)). A request
+90 at 25/30 fps and 61 at 50/60 (see [10-bit canvases](#10-bit-canvases)). A request
 above the limit is scaled down to it.
 
 | Input fps | Setup limit | NVDEC | Browser | Raw NV12 upload maximum | Validation |
 | --- | ---: | ---: | ---: | ---: | --- |
 | 25 | 110 | 40 | 40 | 30 | 100 (40 / 32 / 28) validated: two healthy starts, several minutes of transitions; 110 not measured at this rate |
 | 30 | 110 | 36 | 40 | 34 | The declared baseline: 36 NVDEC + 36 browser + 34 raw NV12 + 4 keys, pinned uploads; not pushed further |
-| 50 | 68 | 22 | 40 | 17 | Shares the 60 fps total and upload limits; NVDEC 22 from the 1100 frames/s rule; not measured separately (lighter than 60) |
-| 60 | 68 | 18 | 40 | 17 | 18 NVDEC + 29 browser + 17 raw NV12 + 4 keys: cut-spam gate passes, 19.5 h soak |
+| 50 | 75 | 22 | 40 | 17 | Shares the 60 fps total and upload limits; NVDEC 22 from the 1100 frames/s rule; not measured separately (lighter than 60) |
+| 60 | 75 | 18 | 40 | 17 | 18 NVDEC + 36 browser + 17 raw NV12 + 4 keys: every cap filled, cut-spam gate passes (see [60 fps on the current stack](#60-fps-on-the-current-stack)); 68 had a 19.5 h soak |
 
 At 60 fps the 68-input show (18 NVDEC + 29 browser + 17 raw NV12 + 4 downstream-key
 pages) currently measures about 50% host CPU idle, 62–64% GPU utilisation, 84% NVDEC,
@@ -60,6 +60,32 @@ The mixer's anonymous memory was 2.29 GB on both stacks. At 1080p30 the limit is
 the setup's ~90% budget. The busiest single thread, the program compositor, used about 30% of
 one core.
 
+### 60 fps on the current stack
+
+The 68 limit dated from before the mostly-still browser page and Electron 44. Measured again on
+2026-10-01 (SDR, PVW follower on, cut-spam gate `--mix 6:2:2` at 4/s; then a 10 s CPU sample
+and a 15 s GPU sample):
+
+| Total | Mix | Gate | Input repeats | Host CPU idle | CPU PSI | Electron | avplumber | GPU | NVDEC | VRAM |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 68 | 18 NVDEC + 29 browser + 17 raw + 4 keys | pass, 0 missed | 156 | 52% | 8.0% | 2.81 cores | 4.50 cores | 64% | 85% | 8.2 GB |
+| 72 | 18 + 33 + 17 + 4 | pass, 0 missed | 6 125 (start-up) | 49% | 9.9% | 3.05 cores | 4.67 cores | 70% | 86% | 7.9 GB |
+| 75 | 18 + 36 + 17 + 4 | pass, 0 missed | 113 | 45% | 12.5% | 3.39 cores | 4.85 cores | 72% | 86% (max 90) | 8.8 GB |
+
+75 fills every per-rate cap (NVDEC 18, browser windows 40, raw upload units 17), so the setup
+allows 75 at 50 and 60 fps. Cut latency at 75 was p95 51 ms; PVW followed PGM within one frame.
+The GPU keeps headroom; host CPU is the margin. At 75 about 8.5 of the 16 vCPUs were busy:
+
+| Inputs | CPU per input | Total | Where |
+| --- | ---: | ---: | --- |
+| 40 browser windows (keys included) | about 0.10 core | 3.9 cores | Electron renderers, compositor and GPU process 3.45; avplumber receive and import 0.4 |
+| 17 raw NV12 | about 0.135 core | 2.3 cores | the file read (`input_N`, 3.1 MB a frame) 1.25; the upload (`upload_N`) 1.0 |
+| 18 NVDEC | about 0.025 core | 0.45 core | demux and decode threads; decoding itself runs on NVDEC |
+| shared mixer work | | 1.3 cores | EventLoop, the two scene compositors, colour, aux and encoders |
+
+The 1-minute load average reached 19 with 45% of the CPU idle: about 200 threads wake on every
+60 Hz tick, so runnable threads queue in bursts (CPU PSI) rather than the CPU running out.
+
 At 30 fps the 110-input ceiling is the declared baseline for this host, keys included:
 **36 NVDEC + 36 browser + 34 raw NV12 + 4 key pages**, with pinned raw uploads
 (`canvas.raw_upload: "pinned"`, the setup default) and a fifth browser worker; it has not
@@ -96,7 +122,7 @@ the program still meets its deadlines, but decoded sources fall behind and frame
 in VRAM, which at 4:2:2 and 110 ran the 15 GB T4 out of memory. HLG inputs skip that
 conversion: the Balanced HDR mix at 90 leaves GPU and NVDEC headroom. The limit holds for any
 mix the page allows, so the setup caps both 10-bit canvases at 90 / 110 = 0.82 of the SDR
-total, and applies the same share at 50 and 60 fps (55), which has not been measured.
+total, and applies the same share at 50 and 60 fps (61), which has not been measured.
 
 The browser service defaults to five workers with eight windows each (40 total); the setup
 allows all 40 at every rate, downstream-key pages included.

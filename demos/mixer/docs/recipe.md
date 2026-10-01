@@ -39,7 +39,7 @@ when the total is small. For exact counts, make weights sum to the desired total
 Preparation prints the allocated input counts before generating media.
 
 These are graph limits. The setup page allows 110 sources at 25 and 30 fps
-(experimental above 100 at 25 fps) and 68 at 50 and 60 fps, downstream-key pages
+(experimental above 100 at 25 fps) and 75 at 50 and 60 fps, downstream-key pages
 included. It also limits browsers to 40, HDR 4:2:2 inputs to four and scenes to
 192. SDR and HDR NVDEC inputs share a limit of 40/36/22/18 at 25/30/50/60 fps.
 Raw 4:2:0 uploads share 30/34/17/17 units at 25/30/50/60 fps; NV12 costs one unit

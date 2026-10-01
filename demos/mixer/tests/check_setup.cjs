@@ -108,8 +108,8 @@ const { chromium } = require('playwright');
     await page.locator('#mode').selectOption('10:420');
     assert.deepEqual((await apply()).weights, [10, 5, 0, 0, 5, 5, 5], '4:2:2 uploads become 4:2:0 uploads of the same colour');
 
-    // The default canvas is 10-bit 4:2:2: 0.82 of 110 at 25/30 fps and of 68 at 50/60.
-    for (const [fps, maximum] of [[25, 90], [30, 90], [50, 55], [60, 55]]) {
+    // The default canvas is 10-bit 4:2:2: 0.82 of 110 at 25/30 fps and of 75 at 50/60.
+    for (const [fps, maximum] of [[25, 90], [30, 90], [50, 61], [60, 61]]) {
       await reset();
       await page.locator('#fps').selectOption(String(fps));
       await page.locator('[data-preset=equal]').click();
@@ -122,7 +122,7 @@ const { chromium } = require('playwright');
       await page.locator('#sources').fill(String(maximum + 1));
       assert.equal((await apply()).source_count, maximum, `${fps} fps stops at ${maximum}`);
       await page.locator('#fps').selectOption('60');
-      assert.equal((await apply()).source_count, 55);
+      assert.equal((await apply()).source_count, 61);
     }
 
     await reset();

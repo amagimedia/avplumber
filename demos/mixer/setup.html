@@ -134,7 +134,7 @@ const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]]];
 // shares, half of each 4:2:0 path HLG on a 10-bit canvas (an SDR canvas folds HLG into SDR).
 const presets = {balanced:[18,18,4,0,36,17,17],equal:[1,1,1,1,1,1,1],light:[2,1,0,0,0,0,0]};
 const dskPages=()=>[...document.querySelectorAll('#dsk-pages input:checked')].map(i=>i.value);
-// Same per-rate budgets as setup_runtime.py: 110 inputs at 25/30 fps, 68 at 50/60.
+// Same per-rate budgets as setup_runtime.py: 110 inputs at 25/30 fps, 75 at 50/60.
 const browserLimit=()=>40, nvdecLimit=fps=>Math.min(40,Math.floor(1100/fps)), rawUploadUnits=fps=>({25:30,30:34})[fps]??17;
 const sourceBudgets=()=>[
  [[2],[1],4,'HDR 4:2:2'],[[4],[1],browserLimit(Number($('fps').value))-dskPages().length,'Browser'],
@@ -155,7 +155,7 @@ let sourceValues=sourceCounts(Number($('sources').value),presets.balanced), curr
 let resizeValues=null, submitting=false, submission=0;
 // Share of the per-rate total each canvas carries (setup_runtime.py MODE_CAPACITY).
 const MODE_CAPACITY={'8:420':1,'10:420':0.82,'10:422':0.82};
-const sourceLimit = () => Math.floor((Number($('fps').value)<=30?110:68)*MODE_CAPACITY[$('mode').value])-dskPages().length;
+const sourceLimit = () => Math.floor((Number($('fps').value)<=30?110:75)*MODE_CAPACITY[$('mode').value])-dskPages().length;
 let scaledFrom=0;   // the total before the last automatic scale-down, shown until the next edit
 function outputMode(){
  const [depth,chroma]=$('mode').value.split(':');return {bit_depth:Number(depth),chroma};

@@ -43,8 +43,9 @@ DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="42
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
                         bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60),
                         dsk=[], clean_feed=False)
-# Measured on the T4: 110 inputs at 25/30 fps; 68 at 50/60 fps (the largest 60 fps show that
-# passes the cut-spam gate, with its 3-frame deadline and the wipe cache). Keys count as inputs.
+# Measured on the T4: 110 inputs at 25/30 fps; 75 at 50/60 fps, the NVDEC, browser and upload
+# caps below filled at 60 fps (cut-spam gate passes with its 3-frame deadline and the wipe cache;
+# host CPU, not the GPU, is the margin). Keys count as inputs.
 def browser_limit(fps):
     return 40   # five browser workers of eight windows (compose.yaml)
 
@@ -62,13 +63,13 @@ def raw_upload_units(fps):
 # Share of the per-rate total a 10-bit canvas carries, measured on the T4 at 30 fps (see
 # docs/capacity.md): P010 and P210 canvases both pass the cut-spam gate at 90 sources; at 95 the
 # GPU-side SDR-to-HLG work slows NVDEC to saturation and sources fall behind. The same share is
-# assumed at 50/60 fps. The setup page carries the same table.
+# assumed at 50/60 fps (61). The setup page carries the same table.
 MODE_CAPACITY = {(8, "420"): 1.0, (10, "420"): 0.82, (10, "422"): 0.82}
 
 
 def source_limit(fps, bit_depth=8, chroma="420"):
     # An unsupported pair (8-bit 4:2:2) is refused by the mode checks in recipe_for.
-    return int((110 if fps <= 30 else 68) * MODE_CAPACITY.get((bit_depth, chroma), 1.0))
+    return int((110 if fps <= 30 else 75) * MODE_CAPACITY.get((bit_depth, chroma), 1.0))
 
 
 def _write_atomic(path, text):

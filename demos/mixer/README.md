@@ -77,8 +77,8 @@ The player also shows host GPU/NVDEC usage and used/total VRAM from `nvidia-smi`
 sampled once per second. Usage turns orange at 95% and red at 99%; VRAM turns
 orange at 14 GiB and red at 14.75 GiB. These totals include other GPU applications.
 
-The setup limits unique sources to **110 at 25 and 30 fps, and 68 at 50 and 60
-fps**, set on a 16 GiB NVIDIA T4 host, where 110 at 30 fps and 68 at 60 fps are
+The setup limits unique sources to **110 at 25 and 30 fps, and 75 at 50 and 60
+fps**, set on a 16 GiB NVIDIA T4 host, where 110 at 30 fps and 75 at 60 fps are
 the measured baselines; 25 and 50 fps inherit those totals (25 fps validated to
 100). Downstream-key pages count as sources: each key takes one place in that
 budget. It allows at most **40 browser windows** (sources and key pages together;
