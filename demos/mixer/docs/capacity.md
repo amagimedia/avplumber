@@ -122,7 +122,23 @@ the program still meets its deadlines, but decoded sources fall behind and frame
 in VRAM, which at 4:2:2 and 110 ran the 15 GB T4 out of memory. HLG inputs skip that
 conversion: the Balanced HDR mix at 90 leaves GPU and NVDEC headroom. The limit holds for any
 mix the page allows, so the setup caps both 10-bit canvases at 90 / 110 = 0.82 of the SDR
-total, and applies the same share at 50 and 60 fps (61), which has not been measured.
+total, and applies the same share at 50 and 60 fps (61).
+
+At 60 fps the 61-input Balanced HDR 4:2:0 mix (9 SDR + 9 HLG NVDEC, 28 browser, 6 NV12 + 5 P010,
+4 keys, clean feed on) first failed on NVENC, not on its inputs. An HDR show encodes the program
+in SDR (H.264) and HLG (HEVC Main10) plus the SDR clean feed, three 1080p60 encodes and two 30 fps
+multiviews on the T4's single NVENC. At preset p5 NVENC saturated: the program met every deadline
+but encoded output fell seconds behind (cut p95 1.6-2.9 s). The demo recipes now use p3, which
+keeps the same low-latency settings (`tune=ull`, CBR, no lookahead, no B-frames) and trades a
+little quality per bit for encoder time:
+
+| 60 fps, HDR 4:2:0, 61 | Gate | Cut p95 | NVENC p50 / p95 | GPU p50 / p95 | NVDEC p50 / p95 | Peak VRAM |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| p5, clean feed | fail | 1.6-2.9 s | 100% | 72 / 87% | 86 / 89% | 10.6 GB |
+| p5, no clean feed | pass, 0 missed (twice) | 53 ms | 73% | 82 / 89% | 77 / 83% | 10.1 GB |
+| p3, clean feed | pass, 0 missed | 51 ms | 70 / 76% | 83 / 91% | 78 / 84% | 9.5 GB |
+
+This is the tightest mode on the T4: GPU p95 near 90% at 61.
 
 The browser service defaults to five workers with eight windows each (40 total); the setup
 allows all 40 at every rate, downstream-key pages included.

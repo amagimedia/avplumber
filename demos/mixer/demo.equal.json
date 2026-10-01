@@ -29,8 +29,8 @@
   },
   "renditions": [
     {"id": "sdr", "target": "janus", "port": 5004, "codec": "h264_nvenc", "profile": "baseline",
-     "bitrate_kbps": 6000, "preset": "p5", "tonemap": "mobius", "tonemap_param": 0.9},
+     "bitrate_kbps": 6000, "preset": "p3", "tonemap": "mobius", "tonemap_param": 0.9},
     {"id": "hdr", "target": "janus", "port": 5006, "codec": "hevc_nvenc", "profile": "main10",
-     "bitrate_kbps": 8000, "preset": "p5"}
+     "bitrate_kbps": 8000, "preset": "p3"}
   ]
 }
