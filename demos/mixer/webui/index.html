@@ -765,8 +765,8 @@ $("graph").addEventListener("focusout", () => setTimeout(renderGraph));
 function renderCounts() {
   const s = settings(), c = s.source_counts || {};
   // DSK keys are browser sources; the header lists them apart from the browser sources in scenes.
-  const keys = new Set((s.dsk_keys || []).map((k) => k.source)).size;
-  const kinds = [[c.video, "NVDEC"], [c.browser - keys, "browser"], [c.nv12, "raw 4:2:0"], [c.p010, "raw 10-bit 4:2:0"],
+  const keys = new Set((s.dsk_keys || []).map((k) => k.source)).size, hdr = s.hdr_video || 0;
+  const kinds = [[c.video - hdr, hdr ? "NVDEC SDR" : "NVDEC"], [hdr, "NVDEC HDR"], [c.browser - keys, "browser"], [c.nv12, "raw 4:2:0"], [c.p010, "raw 10-bit 4:2:0"],
                  [c.v210, "raw 4:2:2"], [keys, "keys"]].filter(([n]) => n > 0).map(([n, what]) => `${n} ${what}`);
   const parts = [[s.source_count ?? "—", " sources"], [scenes.length, " scenes"], ...kinds.map((t) => ["", t])];
   if (s.canvas) parts.push(["", formatText(s.canvas)]);

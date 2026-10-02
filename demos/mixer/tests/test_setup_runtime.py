@@ -1005,6 +1005,23 @@ def test_l4_setup_takes_its_limit_above_128_sources(tmp_path, fps):
     assert draws_program(cfg, cfg.aux_buses[0].layouts)
 
 
+@pytest.mark.parametrize('fps, mode, expected', [
+    (30, (8, "420"), {"video": 83, "browser": 40, "nv12": 47}), (60, (8, "420"), {"video": 40, "browser": 40, "nv12": 19}),
+    (30, (10, "420"), {"video": 96, "browser": 40}), (60, (10, "420"), {"video": 48, "browser": 40}),
+    (30, (10, "422"), {"video": 88, "browser": 40, "v210": 4}), (60, (10, "422"), {"video": 44, "browser": 40, "v210": 4})])
+def test_l4_largest_show_is_the_measured_mix(tmp_path, fps, mode, expected):
+    """A canvas's own limits (mode_limits) bound the L4's HLG shows: NVDEC and the browser windows
+    full, no raw 4:2:0 upload beside them, the v210 inputs counted only on a 4:2:2 canvas."""
+    l4, (bit_depth, chroma) = INSTANCE_PROFILES[InstanceType.NVIDIA_L4], mode
+    weights = [36, 0, 0, 0, 36, 34, 0] if bit_depth == 8 else [18, 18, 4 * (chroma == "422"), 0, 36, 17, 17]
+    recipe = recipe_for(l4, {**DEFAULT_SETTINGS, "fps": fps, "bit_depth": bit_depth, "chroma": chroma,
+                             "source_count": 191, "weights": weights})
+    assert source_limit(l4, fps, bit_depth, chroma) == sum(expected.values())
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    kinds = [s["kind"] for s in show["sources"]]
+    assert {kind: kinds.count(kind) for kind in set(kinds)} == expected
+
+
 def own_aux(**rendition):
     """The live show's own buses: Program preview and Multiviewer."""
     return [{"id": "mv", "renditions": [{"id": "monitor", "port": 5008, **rendition}]},

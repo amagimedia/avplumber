@@ -278,6 +278,8 @@ class MixerConfig:
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources) for kind in _SOURCE_KEYS},
+                # Of the "video" inputs, those declared HDR; an undeclared one counts as SDR.
+                "hdr_video": sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"]) for s in self.sources),
                 "direct": self.direct,
                 "fade_seconds": self.fade_seconds, "fade_curve": self.fade_curve,
                 "fade_color": self.fade_color,

@@ -2,7 +2,8 @@
 
 Every value comes from measurements on that instance (docs/capacity.md), derived ones noted
 beside them; another machine needs its own measured entry, never a scaled T4 one. Per-rate
-tables cover every frame rate the setup offers. setup_runtime.py applies the selected profile
+tables cover every frame rate the setup offers; a profile's "mode_limits" replace, on one canvas
+("bit_depth:chroma"), the limits measured apart there. setup_runtime.py applies the selected profile
 and serves it to setup.html. Standard library only: tests/check_setup.cjs loads it with any
 python3.
 """
@@ -66,20 +67,42 @@ INSTANCE_PROFILES = {
             "defaults": _ENCODE_DEFAULTS,
         },
     },
-    # GCP g2-standard-16: one L4 (Ada: 2 NVENC, 4 NVDEC, 24 GB), 16 vCPU.
-    # PROVISIONAL, 2026-10-02: exploration ceilings for measuring this instance, from NVIDIA's engine
-    # counts and tables (about 2.2x the T4's NVENC and 2.3-2.7x its NVDEC), not limits. Every value
-    # is replaced by a measurement on the instance before the setup offers it to operators.
+    # GCP g2-standard-16: one L4 (Ada: 2 NVENC, 4 NVDEC, 24 GB), 16 vCPU; 1920x1080 inputs.
+    # Measured 2026-10-02 beside the full outputs (program at p5, clean feed, Program preview,
+    # Multiviewer and three extra aux at p3, four keys), with synthetic inputs of 3-10 Mbit/s (16
+    # peak) and grain. A limit keeps NVDEC and the GPU at 90% of the idle show and 10% of the CPU idle.
+    # NVDEC fills first, then the browser windows, raw uploads last: an upload raises the NVDEC load
+    # of the same decodes (48 at 60 fps: 91% beside none, 95% beside four v210, 98% beside eight).
+    # 25 fps keeps the 30 fps numbers; 50 fps scales the 60 fps decodes and uploads by frame rate
+    # (not measured).
     InstanceType.NVIDIA_L4: {
-        "sources": {25: 191, 30: 191, 50: 150, 60: 130},   # 191: the 192-pad mask less a PGM pad
+        # SDR canvas, keys included: 170 at 30 fps (83 NVDEC, 40 browser, 47 NV12), where the CPU is
+        # the limit (46% idle), and 100 at 60 (41, 40, 19; CPU 47% idle) less the decode below.
+        "sources": {25: 170, 30: 170, 50: 110, 60: 99},
+        # The 10-bit canvases have their own limits (mode_limits), not a share of the SDR total.
         "mode_share": {"8:420": 1.0, "10:420": 1.0, "10:422": 1.0},
-        # Measured 2026-10-02: 83 1080p30 H.264 decodes (synthetic inputs with grain, 3-10 Mbit/s,
-        # 16 peak) ran NVDEC at 88-89% (the 90% reference) beside the full outputs, gate passed.
-        # 50/60 fps scale those 2,490 decoded frames/s; 25 fps keeps the 30 fps count.
-        "nvdec_decodes": {25: 83, 30: 83, 50: 49, 60: 41},
+        # H.264: 83 decodes at 30 fps ran NVDEC at 88-89%; 41 at 60 fps ran it at 91% beside 15 and
+        # beside 19 uploads, so 40.
+        "nvdec_decodes": {25: 83, 30: 83, 50: 48, 60: 40},
         "browser_windows": 40,
-        "raw_upload_units": {25: 60, 30: 60, 50: 40, 60: 34},
-        "hlg_v210": 8,
+        "raw_upload_units": {25: 47, 30: 47, 50: 22, 60: 19},   # NV12 = 1, P010 = 2
+        # Beside 44 decodes and the browsers at 60 fps (88 inputs): NVDEC 84%, GPU 75%. Eight ran
+        # NVDEC at 86% and the GPU at 81%, 98% while cutting.
+        "hlg_v210": 4,
+        "mode_limits": {
+            # Half the decodes of an HLG canvas are HEVC Main10, which loads NVDEC less than H.264:
+            # 48 at 60 fps beside the browsers (88 inputs) ran it at 89-91%, 44 at 78%, 52 at 98%
+            # (gate failed). No raw upload fits beside them. The 25/30 fps counts scale the 60 fps
+            # ones by frame rate (not measured).
+            "10:420": {"nvdec_decodes": {25: 96, 30: 96, 50: 57, 60: 48},
+                       "raw_upload_units": {25: 0, 30: 0, 50: 0, 60: 0}},
+            # NVDEC decodes 4:2:0 only, so a 4:2:2 canvas takes its native 4:2:2 inputs as v210
+            # uploads (hlg_v210) and no 4:2:0 upload; four decodes make room for them.
+            "10:422": {"nvdec_decodes": {25: 88, 30: 88, 50: 52, 60: 44},
+                       "raw_upload_units": {25: 0, 30: 0, 50: 0, 60: 0}},
+        },
+        # Not measured per preset: the T4's costs over 2.2 (two NVENC engines). The full outputs'
+        # totals agree within 5 points: 22% on SDR at 30 fps, 30% at 60, 49% on HLG at 60.
         "nvenc": {
             "budget_pct": 80,
             "pct_per_fps": {

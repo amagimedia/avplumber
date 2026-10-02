@@ -18,14 +18,15 @@ const { chromium } = require('playwright');
     page.on('pageerror', error => errors.push(error.message));
     const html = fs.readFileSync(path.join(__dirname, '../setup.html'), 'utf8');
     // The status carries the instance's profile as webui.py serves it: the limits asserted below are tesla_t4's.
-    const profile = JSON.parse(execFileSync(process.env.PYTHON || 'python3', ['-c',
-      'import json; from instance_profiles import INSTANCE_PROFILES as p, InstanceType as t; print(json.dumps(p[t.TESLA_T4]))'],
+    const profiles = JSON.parse(execFileSync(process.env.PYTHON || 'python3', ['-c',
+      'import json; from instance_profiles import INSTANCE_PROFILES as p; print(json.dumps({t.value: v for t, v in p.items()}))'],
       {cwd: path.join(__dirname, '..')}));
+    let instanceType = 'tesla_t4';
     await page.route('http://mixer.test/**', route => {
       if (route.request().url().endsWith('/api/setup')) {
         if (route.request().method() === 'POST') submissions.push(route.request().postDataJSON());
         return route.fulfill({json: {phase: 'idle', message: 'Ready', settings: initialSettings,
-          instance_type: 'tesla_t4', profile, ...auxStatus}});
+          instance_type: instanceType, profile: profiles[instanceType], ...auxStatus}});
       }
       return route.fulfill({contentType: 'text/html', body: html});
     });
@@ -213,6 +214,19 @@ const { chromium } = require('playwright');
     assert.match(await text('nvenc-note'), / · extra aux need webui\.py --janus-api$/);
     assert.deepEqual((await rows()).map(row => row.split(' | ')[0]), ['Program', 'Program HLG', 'Clean feed'], 'no own buses, no extra row');
     assert.equal((await apply()).extra_aux, 0, 'without a Janus API there are none');
+    // The L4's 10-bit canvases have their own limits (mode_limits): the largest show is the measured
+    // mix, NVDEC and the browser windows full, v210 the only upload on 4:2:2 and none on 4:2:0.
+    instanceType = 'nvidia_l4';
+    await reset();
+    assert.match(await text('source-limit'), /^Maximum 88 .* measured on nvidia_l4\.$/);
+    assert.deepEqual((await apply()).weights, [22, 22, 4, 0, 40, 0, 0]);
+    await page.locator('#mode').selectOption('10:420');
+    assert.match(await text('source-limit'), /^Maximum 88 /);
+    assert.deepEqual((await apply()).weights, [22, 26, 0, 0, 40, 0, 0]);   // the v210 share folds into the HLG decodes
+    await page.locator('#fps').selectOption('30');
+    await page.locator('#mode').selectOption('8:420');
+    assert.match(await text('source-limit'), /^Maximum 170 /);
+    assert.deepEqual((await apply()).weights, [83, 0, 0, 0, 40, 47, 0]);
     assert.deepEqual(errors, []);
     console.log('PASS: Balanced source counts, the maximum total, per-output encodes, NVENC budget and extra aux outputs');
   } finally {

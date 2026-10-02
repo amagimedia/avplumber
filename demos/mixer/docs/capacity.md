@@ -300,3 +300,53 @@ peak sampled VRAM was 14.29 GiB and pending import cleanup reached 219. The
 corresponding peaks at 100/105 were 12.02/13.42 GiB and 24/50 cleanup jobs.
 This locates a recovery boundary for this test, not an exact universal maximum
 between 105 and 110 sources.
+
+## NVIDIA L4 (`nvidia_l4`)
+
+One L4 (two NVENC and four NVDEC engines, 24 GiB) on a GCP g2-standard-16 (16 vCPU), measured
+2026-10-02. Every show ran the full outputs: the program at p5 (H.264, plus HEVC Main10 on an HLG
+canvas), the clean feed, Program preview, Multiviewer and three extra aux at p3, and four keys. The
+inputs are synthetic 1920×1080 patterns with grain at 3–10 Mbit/s (16 peak). Each row passed the
+cut-spam gate (60 s, four cuts, fades or wipes per second).
+
+A limit keeps NVDEC and the GPU at 90% of the idle show and 10% of the CPU idle. NVDEC fills first,
+then the 40 browser windows (keys included), raw uploads last.
+
+| Canvas | fps | Inputs | NVDEC | Browser | Raw upload | NVDEC idle | NVDEC cutting (mean, p95) | GPU idle | GPU cutting (p95, max) | CPU idle | Cut p95 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SDR 4:2:0 | 30 | 150 | 83 | 40 | 27 NV12 | 88% | | 42% | | 59% | 74 ms |
+| SDR 4:2:0 | 30 | 170 | 83 | 40 | 47 NV12 | 88% | | 54% | | 46% | 75 ms |
+| SDR 4:2:0 | 60 | 85 | 41 | 40 | 4 NV12 | 84% | | 39% | | 64% | 42 ms |
+| SDR 4:2:0 | 60 | 96 | 41 | 40 | 15 NV12 | 91% | 85%, 90% | 58% | 61%, 67% | 50% | 43 ms |
+| SDR 4:2:0 | 60 | 100 | 41 | 40 | 19 NV12 | 91% | | 63% | | 47% | 44 ms |
+| HLG 4:2:0 | 60 | 85 | 44 | 40 | 1 NV12 | 78% | | 68% | | 64% | |
+| HLG 4:2:0 | 60 | 88 | 48 | 40 | none | 89% | 85%, 94% | 70% | 77%, 84% | 62% | 46 ms |
+| HLG 4:2:0 | 60 | 93 | 52 | 40 | 1 NV12 | 98% | | 74% | | 54% | 147 ms, gate failed |
+| HLG 4:2:2 | 60 | 88 | 48 | 40 | none | 91% | | 74% | | 62% | 46 ms |
+| HLG 4:2:2 | 60 | 88 | 44 | 40 | 4 v210 | 84% | 82%, 95% | 75% | 85%, 91% | 58% | 47 ms |
+| HLG 4:2:2 | 60 | 92 | 48 | 40 | 4 v210 | 95% | | 79% | | 56% | 49 ms |
+| HLG 4:2:2 | 60 | 92 | 44 | 40 | 8 v210 | 86% | 88%, 99% | 81% | 95%, 98% | 49% | 49 ms |
+
+What the profile takes from them:
+
+- **SDR**: 170 at 25/30 fps, where the CPU is the limit. 41 H.264 decodes at 60 fps read 91% beside
+  15 and beside 19 uploads, so the profile takes 40 and the 19 uploads: 99 inputs.
+- **HLG 4:2:0**: half the decodes are HEVC Main10, which loads NVDEC less than H.264, so 48 fit at
+  60 fps. No raw upload fits beside them: 88 inputs.
+- **HLG 4:2:2**: NVDEC decodes 4:2:0 only, so the native 4:2:2 inputs are v210 uploads and the
+  canvas takes no 4:2:0 upload. Every upload raises the NVDEC load of the same decodes (48 decodes:
+  91% beside none, 95% beside four v210), so four decodes make room for four v210: 88 inputs. Eight
+  v210 pass at rest and take the GPU to 98% while cutting.
+- **Scaled, not measured**: 50 fps takes the 60 fps decodes and uploads by frame rate, the HLG
+  canvases at 25/30 fps twice their 60 fps decodes.
+- **NVENC**: not measured per preset; the profile has the T4's costs over 2.2. The full outputs took
+  22% on SDR at 30 fps, 30% at 60 and 49% on HLG at 60, within 5 points of that model.
+
+| Canvas | 25/30 fps | 50 fps | 60 fps |
+| --- | --- | --- | --- |
+| SDR 4:2:0 | 170 = 83 NVDEC + 40 browser + 47 raw | 110 = 48 + 40 + 22 | 99 = 40 + 40 + 19 |
+| HLG 4:2:0 | 136 = 96 + 40 | 97 = 57 + 40 | 88 = 48 + 40 |
+| HLG 4:2:2 | 132 = 88 + 40 + 4 v210 | 96 = 52 + 40 + 4 v210 | 88 = 44 + 40 + 4 v210 |
+
+The limits a canvas measured apart are the profile's `mode_limits`; `setup_runtime.for_mode`
+applies them.

@@ -158,9 +158,11 @@ const encodeRows=new Map();
 // The extra aux count as typed or loaded; a lower maximum lowers it. A total of unique sources
 // typed below the maximum stays, within the maximum; null follows the maximum.
 let extraAux=0, typedSources=null, atDefaults=true;
-const browserLimit=()=>profile.browser_windows, nvdecLimit=fps=>profile.nvdec_decodes[fps], rawUploadUnits=fps=>profile.raw_upload_units[fps];
+// setup_runtime.for_mode: the profile with the limits measured apart on the chosen canvas.
+const limits=()=>({...profile,...profile.mode_limits?.[$('mode').value]});
+const browserLimit=()=>limits().browser_windows, nvdecLimit=fps=>limits().nvdec_decodes[fps], rawUploadUnits=fps=>limits().raw_upload_units[fps];
 const sourceBudgets=()=>[
- [[2],[1],profile.hlg_v210,'HDR 4:2:2'],[[4],[1],browserLimit()-dskPages().length,'Browser'],
+ [[2],[1],limits().hlg_v210,'HDR 4:2:2'],[[4],[1],browserLimit()-dskPages().length,'Browser'],
  [[0,1],[1,1],nvdecLimit(Number($('fps').value)),'Combined NVDEC'],
  [[5,6],[1,2],rawUploadUnits(Number($('fps').value)),'Raw 4:2:0 upload units']
 ];
@@ -168,7 +170,7 @@ let currentSettings=null, busy=false, online=false, loaded=false, submitting=fal
 // setup_runtime.source_limit, less the key pages.
 const sourceLimit = () => {
  const fps=Number($('fps').value);
- return Math.min(Math.floor(profile.sources[fps]*profile.mode_share[$('mode').value]),nvdecLimit(fps)+browserLimit()+rawUploadUnits(fps))-dskPages().length;
+ return Math.min(Math.floor(profile.sources[fps]*profile.mode_share[$('mode').value]),nvdecLimit(fps)+browserLimit()+rawUploadUnits(fps)+(outputMode().chroma==='422'?limits().hlg_v210:0))-dskPages().length;
 };
 // The encodes in setup_runtime.extra_aux_limit's order, which it sums alike: the H.264 program, the
 // HEVC HLG one on a 10-bit canvas, the H.264 clean feed (counted even while off), the instance's own

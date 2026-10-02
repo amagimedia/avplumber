@@ -52,12 +52,19 @@ DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="42
                         encodes={}, dsk=[], clean_feed=False, extra_aux=0)
 
 
+def for_mode(profile, bit_depth, chroma):
+    """*profile* with the limits its instance measured apart on this canvas ("mode_limits")."""
+    return {**profile, **profile.get("mode_limits", {}).get(f"{bit_depth}:{chroma}", {})}
+
+
 def source_limit(profile, fps, bit_depth=8, chroma="420"):
     """The instance's per-rate total scaled by the canvas's share, never above what the NVDEC,
-    browser and upload caps carry together. An unsupported pair (8-bit 4:2:2) is refused by the
-    mode checks in recipe_for."""
+    browser and upload caps carry together (v210 inputs only on a 4:2:2 canvas). An unsupported
+    pair (8-bit 4:2:2) is refused by the mode checks in recipe_for."""
+    profile = for_mode(profile, bit_depth, chroma)
     total = int(profile["sources"][fps] * profile["mode_share"].get(f"{bit_depth}:{chroma}", 1.0))
-    return min(total, profile["nvdec_decodes"][fps] + profile["browser_windows"] + profile["raw_upload_units"][fps])
+    return min(total, profile["nvdec_decodes"][fps] + profile["browser_windows"] + profile["raw_upload_units"][fps]
+               + (profile["hlg_v210"] if chroma == "422" else 0))
 
 
 def extra_aux_limit(profile, cfg, encodes):
@@ -131,7 +138,7 @@ def source_counts(profile, total, weights, fps=25, reserved_browsers=0):
         if sum(counts[i] * cost for i, cost in group) > limit:
             size = min(limit, sum(counts[i] for i, _ in group))
             while True:
-                capped = allocate(size, [weights[i] for i, _ in group])
+                capped = allocate(size, [weights[i] for i, _ in group]) if size else [0] * len(group)
                 if sum(n * cost for n, (_, cost) in zip(capped, group)) <= limit:
                     break
                 size -= 1
@@ -190,7 +197,8 @@ def recipe_for(profile, settings):
         raise ValueError("8-bit mode supports a 4:2:0 canvas only")
     if settings["chroma"] == "420" and any(weights[2:4]):
         raise ValueError("4:2:0 mode supports 4:2:0 and browser sources only")
-    counts = source_counts(profile, settings["source_count"], weights, settings["fps"], len(dsk))
+    counts = source_counts(for_mode(profile, settings["bit_depth"], settings["chroma"]), settings["source_count"],
+                           weights, settings["fps"], len(dsk))
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
