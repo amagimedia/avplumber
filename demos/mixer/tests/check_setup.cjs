@@ -81,6 +81,11 @@ const { chromium } = require('playwright');
     await page.locator('#mode').selectOption('10:420');
     assert.deepEqual((await apply()).weights, [0, 0, 0, 0, 8, 0, 0], 'browser-only setup must not gain decoders');
 
+    // Typing a new total redistributes as the Balanced mix, not the old proportions.
+    await reset({...sdr, bit_depth: 8, chroma: '420', source_count: 5, weights: [4, 0, 0, 0, 1, 0, 0]});
+    await page.locator('#sources').fill('106');
+    assert.deepEqual((await apply()).weights, [36, 0, 0, 0, 36, 34, 0], 'a new total takes the Balanced mix');
+
     // Balanced is the measured 30 fps baseline on SDR; HDR scales it to the 10-bit capacity.
     await reset({...sdr, bit_depth: 8, chroma: '420', dsk: ['lower_third', 'ticker', 'bug_left', 'bug_right']});
     await page.locator('[data-preset=balanced]').click();
