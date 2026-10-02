@@ -68,6 +68,9 @@ services:
       - ${MIXER_PREVIEW_BASE:-}
       - --mixer-args
       - --janus-output
+      # Measures each cut's latency (mixer.status cut_latency), which the cut-spam gate reads.
+      - --cut-latency-encoder
+      - janus_encoder
       - --prewarm-cut-scene
       - '*'
 
