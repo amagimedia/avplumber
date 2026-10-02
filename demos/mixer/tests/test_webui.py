@@ -444,7 +444,7 @@ def test_key_fades_reach_the_mixer_unchanged(client):
 
 def test_aux_requests_reach_the_mixer_and_setup_keeps_the_bus(monkeypatch):
     monkeypatch.setattr(GpuStats, 'snapshot', lambda _: [])
-    layout = {"preset": "source_pages", "page": 3, "rotate_s": 5.0}
+    layout = {"preset": "source_pages", "page": 3}
     bridge = FakeBridge({"mixer.aux_page": json.dumps({"layout": layout, "scenes": [], "page": 3}),
                          "mixer.aux_layout": json.dumps({"layout": layout, "scenes": []}),
                          "mixer.aux ": '{"error": "Assignments changed; refresh before editing", "conflict": true}'})

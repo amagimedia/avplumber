@@ -186,8 +186,8 @@ pvw[shown] followed by the base with that revision; the compositor reports the
 revision it draws (`composition_revision`), and the bus is
 `composition_pending` until it is the bus's own. A slot assignment, a layout
 switch and a page turn are each a new layout object; one Python thread for all
-buses turns pages and resends the layout to a follower that restarted with the
-one it was built with. The timing of the PVW cells is
+buses resends the layout to a follower that restarted with the one it was built
+with. The timing of the PVW cells is
 `src/mixer/primitives/PreviewFollow.hpp`.
 
 Every preview change is one `MixerState::PreviewChange` (revision, the pts of

@@ -175,10 +175,10 @@ def test_explicit_cells_are_validated(cfg, cell, match):
 
 
 def test_layout_specs_normalize_and_reject_unknown_shapes(cfg):
-    assert parse_layout(cfg, {"preset": "source_pages"}, 8) == {"preset": "source_pages", "page": None, "rotate_s": 8.0}
-    assert parse_layout(cfg, {"preset": "source_pages", "page": 5, "rotate_s": 2})["page"] == 5
+    assert parse_layout(cfg, {"preset": "source_pages"}) == {"preset": "source_pages", "page": 0}
+    assert parse_layout(cfg, {"preset": "source_pages", "page": 5})["page"] == 5
     for invalid in ({"preset": "mosaic"}, {"preset": "pgm_pvw_grid", "rows": 2}, {"preset": "source_pages", "page": 6},
-                    {"preset": "source_pages", "rotate_s": 0.5}, {"preset": "source_pages", "rotate_s": True},
+                    {"preset": "source_pages", "page": None}, {"preset": "source_pages", "rotate_s": 5},
                     {"cells": []}, {"cells": CELLS, "preset": "pgm_pvw_grid"}, "pgm_pvw_grid", None):
         with pytest.raises(ConfigError):
             parse_layout(cfg, invalid)
@@ -324,7 +324,7 @@ def test_follower_gets_preview_layers_and_base_of_the_current_layout(cfg):
     bus.assign({"expected_revision": bus.revision, "scenes": scenes})
     layout, = avp.layouts
     assert layout == {"revision": bus.revision, "pvw": pvw_layouts(cfg, grid_cells(cfg)),
-                      "base": base_composition(cfg, grid_cells(cfg), scenes), "resume": True}
+                      "base": base_composition(cfg, grid_cells(cfg), scenes)}
 
 
 def test_runtime_layout_switch_keeps_assignments_by_slot(cfg):
@@ -344,7 +344,7 @@ def test_runtime_layout_switch_keeps_assignments_by_slot(cfg):
     bus.assign({"expected_revision": bus.revision, "scenes": [None, "full", None] + [None] * 5})
     assert avp.layouts[-1]["base"]["layers"][0]["input"] == 63
     # Pages: no slots, the assignments wait for a layout that has them.
-    bus.set_layout({"layout": {"preset": "source_pages", "rotate_s": 3}})
+    bus.set_layout({"layout": {"preset": "source_pages"}})
     assert bus.state()["page"] == 0 and avp.layouts[-1]["base"] == base_composition(cfg, layout_cells(cfg, bus.layout), [])
     with pytest.raises(ConfigError, match="no scene slots"):
         bus.assign({"expected_revision": bus.revision, "scenes": [None] * 8})
@@ -409,57 +409,45 @@ def test_commands_route_any_number_of_buses_by_id(cfg):
     grid, _, pages = status
     assert (grid["layout"], [c["role"] for c in grid["cells"]][:2]) == ({"preset": "pgm_pvw_grid"}, ["pvw", "pgm"])
     assert [l.get("preset") for l in grid["layouts"]] == ["pgm_pvw_grid", "source_pages"]
-    assert (pages["page"], pages["pages"], pages["auto"], pages["first"], pages["total"]) == (3, 6, False, 37, 64)
+    assert (pages["page"], pages["pages"], pages["first"], pages["total"]) == (3, 6, 37, 64)
     assert pages["cells"][0] == {"role": "source", "source": 36, "id": "s36", "kind": "video", **page_grid(cfg)[0]}
     assert (grid["fps"], grid["latency_ms"], grid["pvw_align"], grid["pgm_delay_frames"], grid["max_layers"]) == (30, 50, "program", 1, 577)
 
 
-def test_page_commands_hold_step_and_resume_rotation(cfg):
+def test_page_commands_show_and_step_pages(cfg):
     avp = FakeAvp()
     bus = make_bus(cfg, pages_json(), avp)
     reachable(avp, bus)
     state = bus.turn({"page": 2})
-    assert (state["page"], state["auto"], state["first"], state["layout"]["page"]) == (2, False, 25, 2)
+    assert (state["page"], state["first"], state["layout"]["page"]) == (2, 25, 2)
     assert avp.layouts[-1]["base"]["layers"][0]["input"] == 24
     assert bus.turn({"step": -3})["page"] == 5
     assert bus.turn({"step": 1})["page"] == 0
     count = len(avp.layouts)
-    assert bus.turn({"auto": True})["auto"] is True and bus.layout["page"] is None
-    assert bus.turn({"auto": False})["layout"]["page"] == 0
-    assert len(avp.layouts) == count   # rotation on or off draws nothing new
-    for invalid in ({"page": 6}, {"page": True}, {"step": "1"}, {"auto": 1}, {}):
+    for invalid in ({"page": 6}, {"page": True}, {"step": "1"}, {"auto": True}, {}):
         with pytest.raises(ConfigError):
             bus.turn(invalid)
     assert len(avp.layouts) == count
 
 
-def test_one_scheduler_rotates_pages_and_resends_layouts_for_every_bus(cfg, monkeypatch):
+def test_one_scheduler_resends_layouts_for_every_bus(cfg, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr("pyplumber.mixer.aux.time.monotonic", lambda: clock[0])
     avp = FakeAvp()
-    specs = [pages_json(id="a"), pages_json(id="b", rotate_s=2, renditions=[{"id": "monitor", "port": 5014}]),
-             bus_json(renditions=[{"id": "monitor", "port": 5016}])]
+    specs = [pages_json(), bus_json(renditions=[{"id": "monitor", "port": 5016}])]
     mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50)
     buses = AuxBuses(avp, [AuxBus(avp, None, mixer, cfg, spec) for spec in parse_aux_buses(specs, cfg)])
-    a, b, grid = buses
+    pages, grid = buses
     for bus in buses:
         reachable(avp, bus)
     assert buses.tick() == 1.0   # nothing due before the follower check
-    clock[0] += 2
-    assert buses.tick() == pytest.approx(1.0)
-    assert (a.page, b.page) == (0, 1)
-    sent, = avp.layouts
-    assert sent["resume"] is False and sent["base"]["layers"][0]["input"] == 12   # a page turn keeps a suspension
-    avp.statuses[grid.follower]["layout_revision"] = "built"   # restarted: holds its build-time layout
-    clock[0] += 3
-    buses.tick()
-    assert (a.page, b.page) == (1, 2)
-    assert avp.layouts[-1] == grid.layout_object() and len(avp.layouts) == 4
-    # A held page is never due.
-    a.turn({"page": 4})
     clock[0] += 50
+    assert buses.tick() == pytest.approx(1.0)
+    assert pages.layout["page"] == 0 and avp.layouts == []   # pages turn only by hand
+    avp.statuses[grid.follower]["layout_revision"] = "built"   # restarted: holds its build-time layout
+    clock[0] += 1
     buses.tick()
-    assert a.page == 4
+    assert avp.layouts == [grid.layout_object()]
 
 
 def test_scheduler_survives_an_unreachable_follower(cfg, monkeypatch):
@@ -468,9 +456,10 @@ def test_scheduler_survives_an_unreachable_follower(cfg, monkeypatch):
     avp = FakeAvp()
     buses = AuxBuses(avp, [make_bus(cfg, pages_json(), avp)])
     bus, = buses
-    clock[0] += 5
+    bus.turn({"step": 1})
+    clock[0] += 1
     assert 0.05 <= buses.tick() <= 1.0
-    assert bus.page == 1 and avp.layouts == []   # dropped by the binding, resent once reachable
+    assert avp.layouts == []   # dropped by the binding, resent once reachable
     assert bus.state()["follower"]["error"]
     reachable(avp, bus)
     avp.statuses[bus.follower]["layout_revision"] = "built"

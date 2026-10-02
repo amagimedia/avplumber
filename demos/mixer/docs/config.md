@@ -411,7 +411,7 @@ program.
 "aux_buses": [
   {"id": "mv", "scenes": ["grid_4_000", null, null, null, null, null, null, null],
    "renditions": [{"id": "monitor", "port": 5008}]},
-  {"id": "mv2", "layout": {"preset": "source_pages"}, "rotate_s": 5,
+  {"id": "mv2", "layout": {"preset": "source_pages"},
    "renditions": [{"id": "monitor", "port": 5012}]}
 ]
 ```
@@ -428,7 +428,7 @@ A bus draws a layout: a list of cells in canvas pixels, each with a role.
 | layout | cells |
 | --- | --- |
 | `{"preset": "pgm_pvw_grid"}` (default) | PVW and PGM on top, slots 0–7 below in two rows of four |
-| `{"preset": "source_pages", "page": null, "rotate_s": 5}` | one page of source cells, 12 per page (2 × 6 portrait, 4 × 3 landscape); `page` null rotates every `rotate_s` (1–60 s, by default the bus's `rotate_s`, 5), a page number holds it |
+| `{"preset": "source_pages", "page": 0}` | one page of source cells, 12 per page (2 × 6 portrait, 4 × 3 landscape): page `page`, 0 by default |
 | `{"cells": [{"role": "slot", "slot": 0, "x": 0, "y": 0, "w": 540, "h": 960}, ...]}` | exactly these: even `x`, `y`, `w`, `h` inside the canvas, slots numbered 0 to n−1, each once; any number of `pvw` and `pgm` cells, including none |
 
 Every `pvw` cell draws the preview scene below the rest, each reserving the
@@ -441,7 +441,6 @@ list order and the `pgm` cells last, over any cell they overlap.
 | `layouts` | both presets | further layouts the operator can switch to (at most 16); the control page offers `layout` and these |
 | `scenes` | none | slot assignments by slot index, `null` for an empty slot; padded with `null` to the layout's slot count |
 | `max_layers` | the largest of its layouts, at most `max_compositor_layers` | the bus compositor's layer budget, fixed at build: a layout's PVW reserve, slots, sources and PGM. A layout or assignment over it is refused |
-| `rotate_s` | `5` | seconds per page of a `source_pages` layout that names none |
 | `latency_ms` | the mixer's `latency_ms` | the bus compositor's playout buffer. The sources reach a bus when they reach the program compositors, so the program's buffer leaves it the same slack (1.5 aux frames at 60 fps: 50 ms); a bus at the program's buffer can change its PVW cells when the program changes. Bus latency plus `pgm_delay_frames` must stay below six aux frames |
 | `pgm_delay_frames` | `1`, `2` at a 50/60 fps bus | aux frames the PGM pad is matched back. The finished program leaves the main compositor `latency_ms` after its timestamp, when the bus would already be drawing that frame's tick, and needs a margin to cross the output chain (snapshot, selectors, keyer, tap) to the bus: `pgm_delay_frames × aux frame + latency_ms` must exceed the mixer's `latency_ms` by at least one program frame (checked at build for a bus whose layouts draw the program). The default gives about 33 ms (40 at 25/50) at any rate, which is why a `full_rate` bus at 50/60 takes two of its frames; `1` there leaves one program frame (16.7 ms at 60), and `0` needs a bus `latency_ms` at least a program frame above the mixer's, which delays every cell instead of the PGM cells alone |
 | `pvw_align` | `"program"` | when the PVW cells change on a take. `program`: on the bus frame leaving the bus when the program frame of the take leaves the mixer, so the operator sees both at once; the PGM cells of the same frame follow `pgm_delay_frames` later. `pgm_tile`: together with those PGM cells, `pgm_delay_frames` after the program |
@@ -463,28 +462,26 @@ Control commands, each `{"bus": <id>, ...}`:
   complete `scenes` list as `mixer.aux_status` reports it (`null` clears a slot)
   and that status's `revision`; a stale revision returns the current
   assignments without applying the change.
-- `mixer.aux_page {"bus", "page"}` or `{"bus", "step": ±1}` holds a page of a
-  `source_pages` layout, `{"bus", "auto": true}` resumes rotation and `false`
-  stops it on the current page.
+- `mixer.aux_page {"bus", "page"}` or `{"bus", "step": ±1}` shows a page of a
+  `source_pages` layout; a step past the last page wraps around.
 - `mixer.aux_status` reports every bus: `id`, `layout`, `layouts`, `cells` (in
   canvas pixels, source cells with the source's `id` and `kind`), `scenes`,
   `revision`, `max_layers`, `composition_pending`, `composition_error`,
   `pvw_scene` and the follower's status under `follower`, and for a
-  `source_pages` layout `page`, `pages`, `auto`, `rotate_s`, `first` and
-  `total`. A change is `composition_pending` until the bus compositor draws its
-  revision: its new sources are staged until they have frames, and dropped
-  with `composition_error` when they do not arrive in time.
+  `source_pages` layout `page`, `pages`, `first` and `total`. A change is
+  `composition_pending` until the bus compositor draws its revision: its new
+  sources are staged until they have frames, and dropped with
+  `composition_error` when they do not arrive in time.
 
 The control page offers each bus as an output, with a menu of its layouts when
 it has several, and M1… slot buttons for the bus a viewer shows: arm a slot,
 then click a scene; × clears it, and Shift+1–9 assigns the selected scene.
 Recipes accept the same block. Setup changes keep each bus's live layout and
 assignments: slots whose scene no longer exists or no longer fits the bus's
-budget are cleared, and source pages follow the new source list, rotating.
+budget are cleared, and source pages follow the new source list from page 0.
 With a bus configured, scene definitions are fixed until the next setup,
 `mixer.scene` included. A bus suspends after sustained encoder backpressure;
-the next assignment, layout switch or page turn by the operator resumes it, an
-automatic page turn does not.
+the next assignment, layout switch or page turn resumes it.
 
 The PGM cells run `pgm_delay_frames` (one aux frame, two at a 50/60 fps bus)
 behind the other cells: the finished program reaches the bus after the sources

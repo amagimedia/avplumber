@@ -202,7 +202,7 @@ def main():
                 wait_for(lambda: subscription_flags() == {name: name in drawn for name in [*bus.edges, bus.pgm_edge]})
                 before = edge.enqueued_total
                 wait_for(lambda: edge.enqueued_total >= before + 15)
-            switch({"preset": "source_pages", "rotate_s": 60}, bus.edges[:12])
+            switch({"preset": "source_pages"}, bus.edges[:12])
             last = len(bus.edges) - 1
             switch({"cells": [{"role": "pgm", "x": 0, "y": 0, "w": 320, "h": 240},
                               {"role": "source", "source": last, "x": 0, "y": 240, "w": 320, "h": 240}]},

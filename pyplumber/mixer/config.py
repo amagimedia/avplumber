@@ -198,7 +198,6 @@ class AuxBusConfig:
     layout: Dict[str, Any]               # the initial layout
     layouts: Tuple[Dict[str, Any], ...]  # what the operator can switch to, the initial one first
     max_layers: int                      # the compositor's layer budget, fixed at build
-    rotate_s: float = 5.0                # seconds per page of a source_pages layout that names none
     # when a pvw cell changes on a take: "program", with the program output, or "pgm_tile", with
     # the pgm cell of the same frame (one pgm_delay_frames later).
     pvw_align: str = "program"
@@ -618,7 +617,7 @@ def parse_aux_buses(values, cfg):
     switch to (both presets by default), its slot assignments `scenes`, and the layer budget
     `max_layers`, by default what the largest of its layouts draws, up to max_compositor_layers."""
     from .aux_layout import (PRESETS, check_assignments, count, draws_program, layout_cells, max_layer_count,
-                             parse_layout, rotate_seconds, same_kind)
+                             parse_layout, same_kind)
     if not isinstance(values, list) or len(values) > 30:
         raise ConfigError("aux_buses must be a list of at most 30 buses")
     if values and cfg.fps not in (25, 30, 50, 60):
@@ -629,12 +628,11 @@ def parse_aux_buses(values, cfg):
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", bid) or bid in ids:
             raise ConfigError("aux bus IDs must be unique identifiers")
         ids.add(bid)
-        rotate_s = rotate_seconds(obj.get("rotate_s", 5))
-        layouts = [parse_layout(cfg, obj.get("layout", {"preset": "pgm_pvw_grid"}), rotate_s)]
+        layouts = [parse_layout(cfg, obj.get("layout", {"preset": "pgm_pvw_grid"}))]
         offered = obj.get("layouts", [{"preset": p} for p in PRESETS])
         if not isinstance(offered, list) or len(offered) > 16:
             raise ConfigError(f"aux {bid}: layouts must be a list of at most 16 layouts")
-        for spec in (parse_layout(cfg, spec, rotate_s) for spec in offered):
+        for spec in (parse_layout(cfg, spec) for spec in offered):
             if not any(same_kind(spec, known) for known in layouts):
                 layouts.append(spec)
         if len(cfg.sources) + draws_program(cfg, layouts) > 128:
@@ -643,7 +641,7 @@ def parse_aux_buses(values, cfg):
                                                max(max_layer_count(cfg, layout_cells(cfg, spec)) for spec in layouts)))
         if type(max_layers) is not int or not 1 <= max_layers <= 2_147_483_647:
             raise ConfigError(f"aux {bid}: max_layers must be a positive 32-bit integer")
-        cells = layout_cells(cfg, layouts[0], layouts[0].get("page") or 0)
+        cells = layout_cells(cfg, layouts[0], layouts[0].get("page", 0))
         scenes = obj.get("scenes", [])
         if not isinstance(scenes, list):
             raise ConfigError(f"aux {bid}: scenes must be a list of scene IDs by slot (null clears a slot)")
@@ -662,7 +660,7 @@ def parse_aux_buses(values, cfg):
             raise ConfigError("aux rendition must be SDR/H.264 at canvas size and the aux frame rate")
         if not r.port:
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
-        result.append(AuxBusConfig(bid, tuple(scenes), (r,), layouts[0], tuple(layouts), max_layers, rotate_s, **timing))
+        result.append(AuxBusConfig(bid, tuple(scenes), (r,), layouts[0], tuple(layouts), max_layers, **timing))
     check_janus_ports([*cfg.renditions, *(b.renditions[0] for b in result)])
     return tuple(result)
 

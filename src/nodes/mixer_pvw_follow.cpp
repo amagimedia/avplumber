@@ -48,9 +48,6 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     std::unordered_map<std::string, Layout> pvw_;
     Parameters status_ = Parameters::object();
     std::string error_;
-    // Whether applying a new layout resumes a suspended bus: an operator's change does, an automatic
-    // one (`resume` false, a page turn) keeps an encoder-backpressure suspension.
-    std::atomic<bool> resume_{true};
     // Wake reasons besides the mixer's revision. The layout is flagged under the feed's lock; the
     // stop is not, since the framework requests it under locks the orchestrator takes after
     // state_->mutex: a wake lost that way lasts one aux tick.
@@ -213,8 +210,8 @@ public:
                 std::lock_guard<std::mutex> lock(layouts_mutex_);
                 status_ = std::move(status);
             } else if (dirty) {
-                // A new layout keeps the warm inputs; a settle still due stays due.
-                apply(applied_, false, resume_ ? std::nullopt : std::optional<bool>(!compositorSuspended()));
+                // A new layout keeps the warm inputs and resumes a suspended bus; a settle still due stays due.
+                apply(applied_, false, std::nullopt);
             } else if (settle_at_ && now >= *settle_at_) {
                 apply(applied_, true, !suspended_);
                 settle_at_.reset();
@@ -235,7 +232,7 @@ public:
         state_->preview_changed.notify_all();
     }
 
-    /// `layout`: {"revision", "pvw": {scene: {"layers", "active_inputs"}}, "base": {...}, "resume"},
+    /// `layout`: {"revision", "pvw": {scene: {"layers", "active_inputs"}}, "base": {...}},
     /// replaced as a whole, so no composition mixes two layouts.
     void setObject(const std::string key, const Parameters& value) override {
         if (key != "layout") throw Error("mixer_pvw_follow: unknown object " + key);
@@ -250,7 +247,6 @@ public:
             pvw_ = std::move(pvw);
             revision_ = revision;
         }
-        resume_ = value.value("resume", true);
         std::lock_guard<std::mutex> lock(state_->preview_mutex);
         layout_dirty_ = true;
         state_->preview_changed.notify_all();

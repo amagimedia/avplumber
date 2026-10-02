@@ -51,12 +51,6 @@ def page_count(cfg):
     return -(-len(cfg.sources) // len(page_grid(cfg)))
 
 
-def rotate_seconds(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= 60:
-        raise ConfigError("rotate_s must be 1 to 60 seconds")
-    return float(value)
-
-
 def _cell(cfg, cell, where):
     if not isinstance(cell, dict) or cell.get("role") not in ROLES:
         raise ConfigError(f"{where}: role must be one of {', '.join(ROLES)}")
@@ -74,10 +68,9 @@ def _cell(cfg, cell, where):
     return {"role": cell["role"], **{k: cell[k] for k in keys}}
 
 
-def parse_layout(cfg, spec, rotate_s=5.0):
+def parse_layout(cfg, spec):
     """*spec* validated and normalized: {"preset": "pgm_pvw_grid"}, {"preset": "source_pages",
-    "page": a held page or None to rotate, "rotate_s"} (*rotate_s* when it names none) or
-    {"cells": [...]}, whose slot cells number 0 to n-1."""
+    "page"} (0 when it names none) or {"cells": [...]}, whose slot cells number 0 to n-1."""
     if isinstance(spec, dict) and set(spec) == {"cells"} and isinstance(spec["cells"], list) and spec["cells"]:
         cells = [_cell(cfg, c, f"aux cell {i}") for i, c in enumerate(spec["cells"])]
         slots = sorted(c["slot"] for c in cells if c["role"] == "slot")
@@ -87,12 +80,12 @@ def parse_layout(cfg, spec, rotate_s=5.0):
     preset = spec.get("preset") if isinstance(spec, dict) else None
     if preset == "pgm_pvw_grid" and set(spec) == {"preset"}:
         return {"preset": preset}
-    if preset == "source_pages" and set(spec) <= {"preset", "page", "rotate_s"}:
-        page = spec.get("page")
-        if page is not None and not (_integer(page) and 0 <= page < page_count(cfg)):
-            raise ConfigError(f"source_pages page must be null (rotate) or a page from 0 to {page_count(cfg) - 1}")
-        return {"preset": preset, "page": page, "rotate_s": rotate_seconds(spec.get("rotate_s", rotate_s))}
-    raise ConfigError('aux layout is {"preset": "pgm_pvw_grid"}, {"preset": "source_pages", "page", "rotate_s"} '
+    if preset == "source_pages" and set(spec) <= {"preset", "page"}:
+        page = spec.get("page", 0)
+        if not (_integer(page) and 0 <= page < page_count(cfg)):
+            raise ConfigError(f"source_pages page must be a page from 0 to {page_count(cfg) - 1}")
+        return {"preset": preset, "page": page}
+    raise ConfigError('aux layout is {"preset": "pgm_pvw_grid"}, {"preset": "source_pages", "page"} '
                       'or {"cells": [{"role", "x", "y", "w", "h"}, ...]}')
 
 

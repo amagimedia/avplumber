@@ -47,8 +47,7 @@ class AuxBus:
         self.lock = threading.Lock()
         self.listener, self.error, self.follower_status = None, "", {}
         self.layout, self.scenes = bus.layout, list(bus.scenes)
-        self.page = bus.layout.get("page") or 0
-        self.flipped_at = self.checked_at = time.monotonic()
+        self.checked_at = time.monotonic()
         self.revision = uuid.uuid4().hex
         for source, edge in zip(cfg.sources, self.edges):
             mixer.add_aux_destination(source.id, edge)
@@ -57,7 +56,7 @@ class AuxBus:
         return [*self.edges, self.pgm_edge] if self.pgm_edge else self.edges
 
     def cells(self):
-        return layout_cells(self.cfg, self.layout, self.page)
+        return layout_cells(self.cfg, self.layout, self.layout.get("page", 0))
 
     def main_latency_ms(self):
         """The main mixer's playout buffer: when a program frame leaves its compositor."""
@@ -69,12 +68,11 @@ class AuxBus:
         # same buffer leaves it the same slack, and its pvw cells can change with the program.
         return self.bus.latency_ms if self.bus.latency_ms is not None else self.main_latency_ms()
 
-    def layout_object(self, resume=True):
-        """The follower's ``layout``: every scene's preview layers and the base, with the revision.
-        *resume* false keeps an encoder-backpressure suspension (an automatic page turn)."""
+    def layout_object(self):
+        """The follower's ``layout``: every scene's preview layers and the base, with the revision."""
         cells = self.cells()
         return {"revision": self.revision, "pvw": pvw_layouts(self.cfg, cells),
-                "base": base_composition(self.cfg, cells, self.scenes), "resume": resume}
+                "base": base_composition(self.cfg, cells, self.scenes)}
 
     def build(self, options):
         """The bus's nodes, all in its own group: compositor, follower, conversion, encoder, Janus output."""
@@ -149,24 +147,23 @@ class AuxBus:
                 self.follower_status = {"error": str(exc)}
             return None
 
-    def _send(self, resume=True):
+    def _send(self):
         """The current layout under a new revision to the follower."""
         self.revision = uuid.uuid4().hex
-        self._resend(resume)
+        self._resend()
 
-    def _resend(self, resume=True):
+    def _resend(self):
         """The current layout to the follower. While the follower is unreachable the binding logs
         and drops the command; tick() resends it."""
         self.avp.executeCommandsFromString(
-            f"node.object.set {self.follower} layout {json.dumps(self.layout_object(resume))}")
+            f"node.object.set {self.follower} layout {json.dumps(self.layout_object())}")
 
     def _pages(self):
-        """A source_pages layout's page shown, page count, rotation and sources shown."""
+        """A source_pages layout's page shown, page count and sources shown."""
         if self.layout.get("preset") != "source_pages":
             return {}
-        per_page = len(page_grid(self.cfg))
-        return {"page": self.page, "pages": page_count(self.cfg), "auto": self.layout["page"] is None,
-                "rotate_s": self.layout["rotate_s"], "first": self.page * per_page + 1, "total": len(self.cfg.sources)}
+        per_page, page = len(page_grid(self.cfg)), self.layout["page"]
+        return {"page": page, "pages": page_count(self.cfg), "first": page * per_page + 1, "total": len(self.cfg.sources)}
 
     def _summary(self):
         return {"layout": self.layout, "scenes": list(self.scenes), "revision": self.revision, **self._pages()}
@@ -209,51 +206,38 @@ class AuxBus:
     def set_layout(self, request):
         """Switch to ``layout``, validated and within the layer budget; assignments keep their slots."""
         with self.lock:
-            layout = parse_layout(self.cfg, request.get("layout"), self.bus.rotate_s)
+            layout = parse_layout(self.cfg, request.get("layout"))
             if not self.pgm_edge and draws_program(self.cfg, [layout]):
                 raise ConfigError(f"aux {self.bus.id} has no program input: its layouts draw no pgm cell")
-            page = layout.get("page") or 0
-            cells = layout_cells(self.cfg, layout, page)
+            cells = layout_cells(self.cfg, layout, layout.get("page", 0))
             scenes = self.scenes + [None] * (count(cells, "slot") - len(self.scenes))
             check_assignments(self.cfg, cells, scenes, self.bus.max_layers)
-            self.layout, self.page, self.scenes, self.error = layout, page, scenes, ""
-            self.flipped_at = time.monotonic()
+            self.layout, self.scenes, self.error = layout, scenes, ""
             self._send()
             return self._summary()
 
     def turn(self, request):
-        """Hold a page (``page`` or relative ``step``) or switch rotation (``auto``) of a source_pages
-        layout: the layout's ``page``, null while rotating."""
+        """Show a page (``page`` or relative ``step``) of a source_pages layout: the layout's ``page``."""
         with self.lock:
             if self.layout.get("preset") != "source_pages":
                 raise ConfigError(f"aux {self.bus.id} shows no source pages")
             pages = page_count(self.cfg)
-            if "auto" in request:
-                if not isinstance(request["auto"], bool):
-                    raise ConfigError("auto must be a boolean")
-                page = None if request["auto"] else self.page
-            elif _integer(request.get("page")) and 0 <= request["page"] < pages:
+            if _integer(request.get("page")) and 0 <= request["page"] < pages:
                 page = request["page"]
             elif _integer(request.get("step")):
-                page = (self.page + request["step"]) % pages
+                page = (self.layout["page"] + request["step"]) % pages
             else:
-                raise ConfigError(f"aux_page needs auto, a page from 0 to {pages - 1}, or a step")
-            self.layout, self.flipped_at = {**self.layout, "page": page}, time.monotonic()
-            if "auto" not in request:
-                self.page, self.error = page, ""
-                self._send()
+                raise ConfigError(f"aux_page needs a page from 0 to {pages - 1} or a step")
+            self.layout, self.error = {**self.layout, "page": page}, ""
+            self._send()
             return self._summary()
 
     def tick(self, now):
-        """One pass of the shared scheduler: turn a due page, and once a second resend the layout to
-        a follower that restarted (it holds the one it was built with). Returns the seconds until
-        this bus is due again."""
+        """One pass of the shared scheduler: once a second, resend the layout to a follower that
+        restarted (it holds the one it was built with). Returns the seconds until this bus is due
+        again."""
         with self.lock:
-            rotating = self.layout.get("preset") == "source_pages" and self.layout["page"] is None and page_count(self.cfg) > 1
             try:
-                if rotating and now >= self.flipped_at + self.layout["rotate_s"]:
-                    self.page, self.flipped_at = (self.page + 1) % page_count(self.cfg), now
-                    self._send(resume=False)
                 if now >= self.checked_at + 1:
                     self.checked_at = now
                     follower = self._status(self.follower)
@@ -263,13 +247,12 @@ class AuxBus:
                             self._resend()
             except Exception as exc:
                 self.error = str(exc)
-            due = self.checked_at + 1
-            return (min(due, self.flipped_at + self.layout["rotate_s"]) if rotating else due) - now
+            return self.checked_at + 1 - now
 
 
 class AuxBuses:
-    """Every AUX bus by id, their control commands, and one thread for all of them that turns
-    pages and resends layouts (AuxBus.tick), however many buses there are."""
+    """Every AUX bus by id, their control commands, and one thread for all of them that resends
+    layouts (AuxBus.tick), however many buses there are."""
 
     def __init__(self, avp, buses):
         self.avp = avp

@@ -1129,9 +1129,9 @@ Parameters:
 Objects (`node.object.set`):
 -   `layout` - `{"revision": "<string>", "pvw": {"<scene>": {"layers": [...],
     "active_inputs": <mask>}, ...}, "base": {"layers": [...], "active_inputs":
-    <mask>}, "resume": true}`, replaced as a whole and applied at the next wake.
-    Every composition carries its `revision`. `resume` false keeps a bus the
-    compositor suspended for encoder backpressure suspended.
+    <mask>}}`, replaced as a whole and applied at the next wake. Every
+    composition carries its `revision`; a new layout resumes a bus the
+    compositor suspended for encoder backpressure.
 
 `node.object.get <node> status`: the last change's `pvw_scene`, `pgm_scene`,
 `kind`, `align`, `target_tick` and latencies (`pvw_latency_ms`,

@@ -69,7 +69,7 @@
   .mini { width: 26px; height: 26px; padding: 0; border: 1px solid var(--edge); border-radius: 6px; background: var(--panel);
           cursor: pointer; line-height: 1; font-size: 14px; display: inline-grid; place-items: center; }
   .btn:hover, .mini:hover, .dd-btn:hover, .tile:hover { border-color: var(--muted); }
-  .btn[aria-pressed="true"], .mini[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
   .mini svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
   /* Names that share a prefix and differ in their tail, like grid_32_078, lose their start instead. */
   .tail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; min-width: 0; }
@@ -251,8 +251,7 @@
   }
   .viewer > header.tight .lbl { font-size: 0; letter-spacing: 0; gap: 0; }
   .pager { display: inline-flex; align-items: center; gap: 4px; }
-  .pager .pg { position: relative; min-width: 3.1em; text-align: center; font-size: 12.5px; font-variant-numeric: tabular-nums; }
-  .pager .pg i { position: absolute; left: 0; bottom: -4px; height: 2px; width: 0; background: var(--accent); border-radius: 1px; }
+  .pager .pg { min-width: 3.1em; text-align: center; font-size: 12.5px; font-variant-numeric: tabular-nums; }
   .screen { position: relative; aspect-ratio: 9 / 16; width: 100%; background: #050607; overflow: hidden; user-select: none; }
   /* A transparent layer over the player: its <video controls> would pause on a click and take the
      keyboard focus into its cross-origin frame, which ends the shortcuts. */
@@ -372,7 +371,7 @@
       <label class="field" id="wipe-custom" hidden><input id="wipe-file" type="text" placeholder="wipe clip path on the mixer host" aria-label="Wipe clip path on the mixer host"></label>
       <span class="vsep"></span>
       <button class="btn" id="direct" type="button" aria-pressed="false" title="Picks take to program (D)" aria-keyshortcuts="D">Direct: off</button>
-      <span id="hint" aria-hidden="true"><kbd>1–9</kbd><span class="w"> scene</span> · <kbd>C</kbd><span class="w"> cut</span> · <kbd>F</kbd><span class="w"> fade</span> · <kbd>W</kbd><span class="w"> wipe</span> · <kbd>D</kbd><span class="w"> direct</span><span id="hint-pages" hidden> · <kbd>[ ]</kbd> <kbd>R</kbd><span class="w"> pages</span></span></span>
+      <span id="hint" aria-hidden="true"><kbd>1–9</kbd><span class="w"> scene</span> · <kbd>C</kbd><span class="w"> cut</span> · <kbd>F</kbd><span class="w"> fade</span> · <kbd>W</kbd><span class="w"> wipe</span> · <kbd>D</kbd><span class="w"> direct</span><span id="hint-pages" hidden> · <kbd>[ ]</kbd><span class="w"> pages</span></span></span>
       <div id="error" role="alert"></div>
     </footer>
   </section>
@@ -384,7 +383,6 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const store = {
   get(k, d) { try { const v = localStorage.getItem("avplumber.mixer." + k); return v === null ? d : JSON.parse(v); } catch (_) { return d; } },
   set(k, v) { try { localStorage.setItem("avplumber.mixer." + k, JSON.stringify(v)); } catch (_) {} },
@@ -682,10 +680,10 @@ function graphModel() {
   const aux = auxBuses().map((a) => {
     const out = outputs.find((o) => o.bus === a.id), slots = slotsOf(a);
     const sub = auxError(a) ? "error" : a.suspended ? "suspended"
-      : isPages(a) ? `page ${a.page + 1}/${a.pages}${a.auto ? " · auto" : ""}`
+      : isPages(a) ? `page ${a.page + 1}/${a.pages}`
       : `${slots.length ? `${slots.filter((i) => a.scenes[i]).length}/${slots.length} slots` : layoutName(a.layout)}${a.composition_pending ? " · pending" : ""}`;
     return {id: a.id, grid: cellsOf(a, "pgm").length > 0, title: out?.label || a.id, sub,
-            tip: auxError(a) || a.id, warn: Boolean(auxError(a) || a.suspended), hot: isPages(a) && Boolean(a.auto),
+            tip: auxError(a) || a.id, warn: Boolean(auxError(a) || a.suspended),
             encoder: out && {title: codecName(out.codec), sub: port(out)}};   // its row names the bus
   });
   return {
@@ -744,8 +742,8 @@ function renderGraph() {
   if (m.keys) node(KEY[0], chainY, KEY[1], H44, "Keyer", m.keys, "output");
   m.encoders.forEach((e, i) => node(ENC[0], encY(i), ENC[1], H44, e.title, e.sub, "output"));
   m.aux.forEach((a, i) => {
-    node(ME[0], auxY(i), ME[1], H44, a.title, a.sub, `aux_${a.id}`, {hot: a.hot, warn: a.warn, tip: a.tip});
-    if (a.encoder) node(ENC[0], auxY(i), ENC[1], H44, a.encoder.title, a.encoder.sub, `aux_${a.id}`, {hot: a.hot, warn: a.warn});   // each bus encodes in its own group
+    node(ME[0], auxY(i), ME[1], H44, a.title, a.sub, `aux_${a.id}`, {warn: a.warn, tip: a.tip});
+    if (a.encoder) node(ENC[0], auxY(i), ENC[1], H44, a.encoder.title, a.encoder.sub, `aux_${a.id}`, {warn: a.warn});   // each bus encodes in its own group
   });
   $("graph").replaceChildren(root);
   // A title that would run into its status dot is condensed to end before it.
@@ -1061,7 +1059,6 @@ function outputOptions() {
 // The deck keeps four slot columns and one row of filter chips; two viewers need a window about
 // 1140 px wide, three never fit.
 const MIN_VIEWER = 300, DECK_MIN = 480;
-const pageFlips = new Map();     // source_pages bus → {page, auto, at}: when this page was first seen
 let viewers = [];
 let viewersTouched = false;      // once the operator adds or closes one, the first state adds none
 const savedViewers = store.get("viewers", null);
@@ -1090,14 +1087,12 @@ function addViewer(out) {
   v.pager = el("span", "pager");
   v.pager.setAttribute("role", "group");
   v.pager.setAttribute("aria-label", "Multiviewer pages");
-  v.pager.innerHTML = '<button class="mini" type="button" aria-label="Previous page">‹</button><span class="pg" aria-live="polite"><span></span><i></i></span>' +
-                      '<button class="mini" type="button" aria-label="Next page">›</button>' +
-                      '<button class="mini" type="button"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M10 6a4 4 0 1 1-1.2-2.85"/><path d="M9.2 1v2.3H6.9"/></svg></button>';
-  const [prev, pg, next, auto] = v.pager.children;
+  v.pager.innerHTML = '<button class="mini" type="button" aria-label="Previous page">‹</button><span class="pg" aria-live="polite"></span>' +
+                      '<button class="mini" type="button" aria-label="Next page">›</button>';
+  const [prev, pg, next] = v.pager.children;
   prev.onclick = () => pageCommand(v.bus, {step: -1});
   next.onclick = () => pageCommand(v.bus, {step: 1});
-  auto.onclick = () => pageCommand(v.bus, {auto: !auxById(v.bus)?.auto});
-  Object.assign(v, {pg: pg.firstChild, dwell: pg.lastChild, auto});
+  v.pg = pg;
   v.close = el("button", "mini close", "×");
   v.close.onclick = () => { viewersTouched = true; viewers.splice(viewers.indexOf(v), 1); v.el.remove(); saveViewers(); redraw(); };
   // The screen clips the player's footer and blocks clicks into it; its numbers show in the row under
@@ -1175,29 +1170,7 @@ function renderLayouts(v, aux) {
 function renderPager(v, aux) {
   const page = `${aux.page + 1}/${aux.pages}`;
   if (v.pg.textContent !== page) v.pg.textContent = page;   // a live region: rewriting it would re-announce
-  v.pg.parentElement.title = `Sources ${aux.first}–${aux.first + cellsOf(aux, "source").length - 1} of ${aux.total}`;
-  v.auto.setAttribute("aria-pressed", String(aux.auto));
-  v.auto.title = `Rotate every ${aux.rotate_s} s (R)`;
-  v.auto.setAttribute("aria-label", `Rotate pages every ${aux.rotate_s} seconds`);
-  // The bar runs from when polling first saw this page, so it trails the mixer by up to one poll.
-  // With reduced motion it steps at the poll rate instead of animating.
-  const at = pageFlips.get(aux.id)?.at ?? null, key = `${aux.id}@${at}`;
-  if (v.dwellKey === key && !reduced) return;
-  v.dwellKey = key;
-  const done = at === null ? 0 : Math.min(1, (performance.now() - at) / 1000 / aux.rotate_s);
-  v.dwell.style.transition = "none";
-  v.dwell.style.width = `${done * 100}%`;
-  if (at === null || reduced || done >= 1) return;
-  v.dwell.getBoundingClientRect();   // commit the start width before animating to the end
-  v.dwell.style.transition = `width ${(1 - done) * aux.rotate_s}s linear`;
-  v.dwell.style.width = "100%";
-}
-function trackPages() {
-  for (const aux of auxBuses()) if (isPages(aux)) {
-    const seen = pageFlips.get(aux.id);
-    const flipped = seen && (seen.page !== aux.page || (!seen.auto && aux.auto));
-    pageFlips.set(aux.id, {page: aux.page, auto: aux.auto, at: !aux.auto ? null : flipped ? performance.now() : seen?.at ?? performance.now()});
-  }
+  v.pg.title = `Sources ${aux.first}–${aux.first + cellsOf(aux, "source").length - 1} of ${aux.total}`;
 }
 const KIND_TAGS = {video: "dec", browser: "web", nv12: "raw", p010: "raw", v210: "raw"};
 // Labels and tally boxes are HTML on top of the video, placed in the canvas pixels the mixer reports.
@@ -1233,7 +1206,7 @@ function renderOverlay(v, aux, [cw, ch], note) {
 function pageCommand(bus, change) {
   if (bus) command({command: "aux_page", bus, ...change});
 }
-// [ ] and R act on the Multiviewer a viewer shows, else on the first one the mixer has.
+// [ ] act on the Multiviewer a viewer shows, else on the first one the mixer has.
 function pagesBus() {
   return viewers.find((v) => !v.el.hidden && v.bus)?.bus ||
          auxBuses().find(isPages)?.id || null;
@@ -1392,11 +1365,10 @@ function render() {
   scenes.sort((a, b) => groupRank(a.id) - groupRank(b.id) || a.id.localeCompare(b.id, undefined, {numeric: true}));
   if (!selected || !scenes.some((scene) => scene.id === selected)) selected = status.pvw_scene || status.pgm_scene || "";
   applySettings(s);
-  trackPages();
   layoutWall();   // first: the slots widget and the page keys follow what the viewers show
   renderCounts(); renderMeters(); renderHost(); renderWipeCache(); renderBuses(); renderKeys(); renderSlots(); renderChips(); renderScenes();
   $("hint-pages").hidden = !pagesBus();
-  $("hint").title = ["1–9 scene · C cut · F fade · W wipe · D direct", pagesBus() && "[ ] page · R rotate",
+  $("hint").title = ["1–9 scene · C cut · F fade · W wipe · D direct", pagesBus() && "[ ] page",
                      gridAux() && `⇧1–${Math.min(slotsOf(gridAux()).length, 9)} slot`].filter(Boolean).join(" · ");
   trimTakebar();
   renderGraph();
@@ -1463,7 +1435,6 @@ addEventListener("keydown", (e) => {
   else if (k === "d") $("direct").click();
   else if (bus && e.key === "[") pageCommand(bus, {step: -1});
   else if (bus && e.key === "]") pageCommand(bus, {step: 1});
-  else if (bus && k === "r") pageCommand(bus, {auto: !auxById(bus).auto});
   else return;
   e.preventDefault();
 });

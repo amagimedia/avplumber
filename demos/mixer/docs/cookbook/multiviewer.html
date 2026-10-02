@@ -143,9 +143,9 @@
           <path d="M390 204 H416" marker-end="url(#head2)"/>
           <path d="M505 352 V370 H101 V356" marker-end="url(#head2)"/>
         </g>
-        <text x="201" y="196" text-anchor="middle" class="m">5 s</text>
-        <text x="403" y="196" text-anchor="middle" class="m">… 5 s</text>
-        <text x="303" y="388" text-anchor="middle" class="m">auto: next page every rotate_s (default 5 s) · ‹ n/N › holds one</text>
+        <text x="201" y="196" text-anchor="middle" class="m">›</text>
+        <text x="403" y="196" text-anchor="middle" class="m">… ›</text>
+        <text x="303" y="388" text-anchor="middle" class="m">the operator turns the page: ‹ n/N ›, past the last back to the first</text>
 
         <path d="M613 20 V380" stroke="#26354a" stroke-width="1"/>
 
@@ -164,39 +164,38 @@
 
   <h2>At a glance</h2>
   <ul class="cards">
-    <li><b>What</b>An aux bus with layout <code>source_pages</code>. It shows every source in equal 16:9 tiles, 12 per page: 2×6 on the portrait 1080×1920 canvas (tiles of about 536×300), 4×3 on landscape. Pages turn every <code>rotate_s</code> (default 5 s), set on the layout or, for every <code>source_pages</code> layout the bus switches to, on the bus. The operator holds a page with <code>mixer.aux_page {bus, page|step|auto}</code>.</li>
+    <li><b>What</b>An aux bus with layout <code>source_pages</code>. It shows every source in equal 16:9 tiles, 12 per page: 2×6 on the portrait 1080×1920 canvas (tiles of about 536×300), 4×3 on landscape. The operator turns the pages with <code>mixer.aux_page {bus, page|step}</code>.</li>
     <li><b>Why</b>100 sources on one canvas give tiles of about 150×84, too small to judge. Paging keeps tiles readable. Delivering only the page on screen keeps the other 88 sources off the GPU.</li>
     <li><b>Latency</b>Program: 0 frames. The bus reads sources the M/E already decodes and never delays the program. The aux draws with the main mixer's deadline (<code>latency_ms</code>, 2 frames by default). A page turn keeps the old page on screen until the 12 new sources are ready at the next tick; if they are not ready within 250 ms (or twice the aux latency, whichever is longer), the old page stays.</li>
     <li><b>Side effects</b>
       <ul>
         <li>A page turn closes 12 subscriptions and opens 12; a closed one's queue is cleared.</li>
-        <li>Picking a page stops rotation until ⟳ (or <code>{"auto": true}</code>).</li>
         <li>Source names exist only in the web UI. The stream itself carries no labels.</li>
       </ul>
     </li>
-    <li><b>Cost</b>One compositor pass of 12 tiles per aux frame. One H.264 encoder: +8 % ENC and 48 MB (measured). A PGM pad only when one of the bus's layouts draws the program (by default the bus can switch to <code>pgm_pvw_grid</code>; <code>"layouts": []</code> keeps it off); its subscription is closed while the pages show. One edge per source (capacity 1), but only the 12 shown carry frames. An off-page source costs a lock attempt and an atomic check per frame: no frame, no GPU work, no VRAM. One Python thread for all aux buses turns the pages: in rotation it wakes when the next page is due, otherwise once a second.</li>
-    <li class="flag"><b>Risk</b>In auto rotation each source is on screen one page in nine, so it returns every 45 s at the default 5 s (derived). A fault on an off-page source shows only when its page comes up. Hold its page, or put it in a scene multiview, to watch it continuously.</li>
-    <li><b>Switch it off</b>Remove the bus from <code>aux_buses</code>. <code>mixer.aux_page {"bus", "auto": false}</code> stops rotation; <code>{"bus", "auto": true}</code> resumes it.</li>
+    <li><b>Cost</b>One compositor pass of 12 tiles per aux frame. One H.264 encoder: +8 % ENC and 48 MB (measured). A PGM pad only when one of the bus's layouts draws the program (by default the bus can switch to <code>pgm_pvw_grid</code>; <code>"layouts": []</code> keeps it off); its subscription is closed while the pages show. One edge per source (capacity 1), but only the 12 shown carry frames. An off-page source costs a lock attempt and an atomic check per frame: no frame, no GPU work, no VRAM. One Python thread for all aux buses wakes once a second to resend the layout to a follower that restarted.</li>
+    <li class="flag"><b>Risk</b>Only the 12 sources of the page shown are watched. A fault on an off-page source shows only when the operator turns to its page. Keep its page up, or put it in a scene multiview, to watch it continuously.</li>
+    <li><b>Switch it off</b>Remove the bus from <code>aux_buses</code>.</li>
   </ul>
 
   <h2>In the web UI</h2>
-  <p>The viewer header carries the page control <code style="white-space:nowrap">‹ n/N › ⟳</code>: previous, page number, next, auto rotation. <kbd>[</kbd> <kbd>]</kbd> and <kbd>R</kbd> do the same. The source names are HTML over the video, placed from the tile geometry the mixer reports, so the encoder never draws text.</p>
+  <p>The viewer header carries the page control <code style="white-space:nowrap">‹ n/N ›</code>: previous, page number, next. <kbd>[</kbd> and <kbd>]</kbd> do the same. The source names are HTML over the video, placed from the tile geometry the mixer reports, so the encoder never draws text.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux_layout.py#L77-L96"><code>pyplumber/mixer/aux_layout.py:77–96</code></a>: <code>parse_layout</code>, the <code>source_pages</code> preset with its <code>page</code> and <code>rotate_s</code> (<a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux_layout.py#L54-L57">L54–57</a>: 1–60 s, default 5)</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux_layout.py#L36-L47"><code>pyplumber/mixer/aux_layout.py:36–47</code></a>: <code>page_grid</code>, the 2×6 / 4×3 tile geometry; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux_layout.py#L105-L113">L105–113</a> <code>layout_cells</code>, a page's source cells</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux_layout.py#L157-L169"><code>pyplumber/mixer/aux_layout.py:157–169</code></a>: <code>base_composition</code>, the cells' layers and their <code>active_inputs</code> mask</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L66-L70"><code>pyplumber/mixer/aux.py:66–70</code></a>: the aux takes the main mixer's latency; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L79-L132">L79–132</a> build one compositor and one H.264 encoder</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L224-L245"><code>pyplumber/mixer/aux.py:224–245</code></a>: <code>AuxBus.turn</code> (hold, step, auto); <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L247-L267">L247–267</a> <code>tick</code>, the rotation, called by the one thread of <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L270-L305">AuxBuses</a></li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L307-L319"><code>pyplumber/mixer/aux.py:307–319</code></a>: the <code>mixer.aux_page</code> control command</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux_layout.py#L71-L89"><code>pyplumber/mixer/aux_layout.py:71–89</code></a>: <code>parse_layout</code>, the <code>source_pages</code> preset with its <code>page</code> (default 0)</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux_layout.py#L36-L47"><code>pyplumber/mixer/aux_layout.py:36–47</code></a>: <code>page_grid</code>, the 2×6 / 4×3 tile geometry; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux_layout.py#L98-L106">L98–106</a> <code>layout_cells</code>, a page's source cells</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux_layout.py#L150-L162"><code>pyplumber/mixer/aux_layout.py:150–162</code></a>: <code>base_composition</code>, the cells' layers and their <code>active_inputs</code> mask</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L65-L69"><code>pyplumber/mixer/aux.py:65–69</code></a>: the aux takes the main mixer's latency; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L77-L130">L77–130</a> build one compositor and one H.264 encoder</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L219-L233"><code>pyplumber/mixer/aux.py:219–233</code></a>: <code>AuxBus.turn</code> (page, step); <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L235-L250">L235–250</a> <code>tick</code>, the resend to a restarted follower, called by the one thread of <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L253-L288">AuxBuses</a></li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L290-L302"><code>pyplumber/mixer/aux.py:290–302</code></a>: the <code>mixer.aux_page</code> control command</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/mixer_compositor.cpp#L84-L101"><code>src/nodes/mixer_compositor.cpp:84–101</code></a>: the compositor opens the shown sources' subscriptions and closes the rest; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/mixer_compositor.cpp#L179-L186">L179–186</a> and <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/mixer_compositor.cpp#L240-L258">L240–258</a> warm the next page before it goes on screen</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/mixer/primitives/frame_subscription.hpp#L37-L46"><code>src/mixer/primitives/frame_subscription.hpp:37–46</code></a>: <code>publish</code>, the lock attempt and atomic check where an off-page frame stops</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/one_to_many.cpp#L39-L41"><code>src/nodes/one_to_many.cpp:39–41</code></a>: the source fan-out calls <code>publish</code> once per frame and subscriber</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/webui/index.html#L1025-L1035"><code>demos/mixer/webui/index.html:1025–1035</code></a>: the pager in the viewer header; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/webui/index.html#L1127-L1131">L1127–1131</a>: source names over the video</li>
-    <li>Tests: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L188-L198"><code>demos/mixer/tests/test_aux.py:188–198</code></a> (even, separate tiles that fill the canvas),<a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L201">L201</a> (one page of source cells), <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L417">L417</a> (hold, step, rotation) and <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L436">L436</a> (one scheduler for every bus)</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/webui/index.html#L1087-L1095"><code>demos/mixer/webui/index.html:1087–1095</code></a>: the pager in the viewer header; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/webui/index.html#L1177-L1184">L1177–1184</a>: source names over the video</li>
+    <li>Tests: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L188-L198"><code>demos/mixer/tests/test_aux.py:188–198</code></a> (even, separate tiles that fill the canvas),<a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L201">L201</a> (one page of source cells), <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L417">L417</a> (page, step) and <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L433">L433</a> (one scheduler for every bus)</li>
   </ul>
-  <p>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#aux_buses"><code>config.md</code> → aux_buses</a> (layouts, <code>rotate_s</code>, <code>mixer.aux_page</code>).</p>
+  <p>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#aux_buses"><code>config.md</code> → aux_buses</a> (layouts, <code>mixer.aux_page</code>).</p>
 
   <p class="note">+8 % ENC and 48 MB are measured. Figures marked derived are arithmetic from 100 sources and 12 tiles per page. Line numbers follow the current mixer branch and may shift on develop.</p>
 
