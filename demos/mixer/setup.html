@@ -50,6 +50,15 @@ label.toggle input { display: inline-block; width: auto; margin: 0; }
 .source-group h2 { margin-bottom: 8px; color: var(--muted); }
 .dot { width: 8px; height: 8px; display: inline-block; border-radius: 50%; margin-right: 6px; }
 .allocation { display: flex; height: 5px; overflow: hidden; background: var(--edge); margin: 10px 0; }
+.encodes { width: 100%; border-collapse: collapse; margin-top: 6px; }
+.encodes th, .encodes td { padding: 8px 0 8px 10px; border-top: 1px solid var(--edge-soft); text-align: right; font-weight: 400; }
+.encodes :is(th, td):first-child { padding-left: 0; text-align: left; }
+.encodes thead th { padding-top: 0; border: 0; font-size: 12px; color: var(--muted); }
+.encodes tfoot :is(th, td) { border-top-color: var(--edge); }
+.encodes b { font-size: 13px; font-weight: 600; }
+.encodes small { display: block; font-size: 11px; color: var(--muted); }
+.encodes select, .encodes input { width: 70px; padding: 6px; }
+.encodes input { text-align: right; }
 .right { position: sticky; top: 14px; }
 .summary h2 { margin-bottom: 12px; }
 .stats { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; }
@@ -64,6 +73,7 @@ summary { cursor: pointer; }
 @media (max-width: 880px) { .workspace { grid-template-columns: 1fr; } .right { position: static; } }
 @media (max-width: 560px) {
   .fields { grid-template-columns: 1fr; }
+  .encodes select, .encodes input { width: 58px; }
 }
 </style>
 <header><h1>AVPlumber mixer setup</h1></header>
@@ -77,7 +87,6 @@ summary { cursor: pointer; }
 <label>Mode<select id="mode"><option value="10:422">HDR · 10-bit · 4:2:2</option><option value="10:420">HDR · 10-bit · 4:2:0</option><option value="8:420">SDR · 8-bit · 4:2:0</option></select></label>
 <label>Unique sources<input id="sources" type="number" min="1" step="1" value="16"></label>
 <label>Scenes<input id="scenes" type="number" min="1" max="192" step="1" value="32"></label>
-<label>Program bitrate<input id="bitrate" type="number" min="500" max="40000" step="500" value="6000"> <small>kbit/s</small></label>
 <label>Extra aux outputs<input id="extra-aux" type="number" min="0" max="0" step="1" value="0"></label>
 <label>Scene mix<select id="layout"><option value="balanced">Balanced · grids, fullscreen, PiP, random</option><option value="grids">Grids · up to your source count</option><option value="fullscreen">Fullscreen only</option></select></label>
 </div>
@@ -85,6 +94,12 @@ summary { cursor: pointer; }
 <p class="hint" id="source-limit"></p>
 <p class="hint" id="extra-aux-note"></p>
 <p class="hint">Unique sources are independent input chains. Scene count is the number of compositions you can switch between; scenes reuse those sources.</p>
+</section>
+<section class="card"><div class="card-title"><h2>Encodes</h2></div>
+<p class="hint">NVENC preset and CBR bitrate of every encoded output: p1 is the fastest, p5 the best quality. The NVENC share follows the preset and frame rate, not the bitrate.</p>
+<table class="encodes"><thead><tr><th scope="col">Output</th><th scope="col">Preset</th><th scope="col">Mbit/s</th><th scope="col">NVENC</th></tr></thead>
+<tbody id="encodes"></tbody>
+<tfoot><tr><th scope="row"><b>Total</b><small id="nvenc-budget"></small></th><td></td><td></td><td id="nvenc-total"></td></tr></tfoot></table>
 </section>
 <section class="card"><div class="card-title"><h2>Sources</h2></div>
 <p class="hint">Edit source counts directly. Changing the total redistributes the mix. Switching to HDR splits the NVDEC count between SDR and HDR.</p>
@@ -142,6 +157,12 @@ const dskPages=()=>[...document.querySelectorAll('#dsk-pages input:checked')].ma
 // The instance's measured limits (instance_profiles.py) arrive with the setup status; the page
 // applies them as setup_runtime.py does and computes nothing before they arrive.
 let profile=null, instanceType='', auxBuses=[], janusApi=false, extraLimit=0;
+// One {preset, bitrate_kbps} per encoded output, by output id: the last valid one of every output
+// shown or loaded. A new one starts at setup_runtime's defaults (DEFAULT_KBPS), an own aux bus at
+// the encode the status gives it.
+const DEFAULT_KBPS={sdr:6000,hdr:8000,sdr_clean:6000,extra:3000};
+let encodes={};
+const encodeRows=new Map();
 const browserLimit=()=>profile.browser_windows, nvdecLimit=fps=>profile.nvdec_decodes[fps], rawUploadUnits=fps=>profile.raw_upload_units[fps];
 const sourceBudgets=()=>[
  [[2],[1],profile.hlg_v210,'HDR 4:2:2'],[[4],[1],browserLimit()-dskPages().length,'Browser'],
@@ -166,15 +187,31 @@ const sourceLimit = () => {
  const fps=Number($('fps').value);
  return Math.min(Math.floor(profile.sources[fps]*profile.mode_share[$('mode').value]),nvdecLimit(fps)+browserLimit()+rawUploadUnits(fps))-dskPages().length;
 };
-// setup_runtime.extra_aux_limit for this page's encodes: the H.264 program, the HEVC HLG one on a
-// 10-bit canvas and the H.264 clean feed (counted even while off), then the instance's own aux buses (config.aux_fps); every
-// canvas here has 1080p's pixels.
+// The encodes in setup_runtime.extra_aux_limit's order, which it sums alike: the H.264 program, the
+// HEVC HLG one on a 10-bit canvas, the H.264 clean feed (counted even while off), the instance's own
+// aux buses (config.aux_fps), then one extra aux output. Every canvas here has 1080p's pixels.
 const auxFps=(fps,fullRate)=>fps>30&&!fullRate?fps/2:fps;
-function nvencShares(fps,tenBit){
- const {budget_pct,h264_pct_per_fps,hevc_cost}=profile.nvenc;
- const frames=fps*(2+(tenBit?hevc_cost:0))+auxBuses.reduce((n,b)=>n+auxFps(fps,b.full_rate),0);
- return {used:frames*h264_pct_per_fps,each:auxFps(fps,false)*h264_pct_per_fps,
-   limit:janusApi?Math.max(0,Math.floor((budget_pct/h264_pct_per_fps-frames)/auxFps(fps,false))):0};
+function encodeOutputs(fps,tenBit,clean){
+ const output=(id,name,codec,rate,encode={preset:profile.nvenc.default_preset,bitrate_kbps:DEFAULT_KBPS[id]},note='')=>({id,name,codec,fps:rate,encode,note});
+ return [output('sdr','Program · SDR','h264',fps),...tenBit?[output('hdr','Program · HLG','hevc',fps)]:[],
+  output('sdr_clean','Clean feed · SDR','h264',fps,undefined,clean?'':' · off, counted'),
+  ...auxBuses.map(b=>output(b.id,b.label,'h264',auxFps(fps,b.full_rate),b.encode)),
+  ...janusApi?[output('extra','Extra aux · each','h264',auxFps(fps,false))]:[]];
+}
+function encodeRow(o){
+ if(!encodeRows.has(o.id)){
+  encodes[o.id]??={...o.encode};
+  const row=document.createElement('tr'),[low,high]=profile.nvenc.bitrate_kbps;
+  row.innerHTML=`<th scope="row"><b></b><small></small></th><td><select></select></td><td><input type="number" min="${low/1000}" max="${high/1000}" step="0.5"></td><td></td>`;
+  const select=row.querySelector('select'),input=row.querySelector('input');
+  select.append(...Object.keys(profile.nvenc.pct_per_fps.h264).map(preset=>new Option(preset)));
+  select.value=encodes[o.id].preset;input.value=encodes[o.id].bitrate_kbps/1000;
+  select.setAttribute('aria-label',`${o.name} preset`);input.setAttribute('aria-label',`${o.name} bitrate, Mbit/s`);
+  select.addEventListener('input',()=>{encodes[o.id].preset=select.value;update();});
+  input.addEventListener('input',update);
+  encodeRows.set(o.id,row);
+ }
+ return encodeRows.get(o.id);
 }
 let scaledFrom=0;   // the total before the last automatic scale-down, shown until the next edit
 function outputMode(){
@@ -226,7 +263,7 @@ function sourceCounts(total,values){
  }
  return counts;
 }
-const FIELD_NAMES={sources:'Unique sources',scenes:'Scenes',bitrate:'Program bitrate','extra-aux':'Extra aux outputs'};
+const FIELD_NAMES={sources:'Unique sources',scenes:'Scenes','extra-aux':'Extra aux outputs'};
 function integer(id,min,max){const v=Number($(id).value);if(!Number.isInteger(v)||v<min||v>max)throw Error(`${FIELD_NAMES[id]??id} must be a whole number from ${min} to ${max}.`);return v;}
 function update(){
  if(!profile)return;   // #clean-feed stays enabled before the first setup status
@@ -238,14 +275,30 @@ function update(){
  $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps${tenBit?` on a 10-bit ${outputMode().chroma==='422'?'4:2:2':'4:2:0'} canvas (estimated)`:''}.`+
    (scaledFrom?` Scaled down from ${scaledFrom} to fit this mode.`:'')+` Limits measured on ${instanceType}.`;
  $('browser-max').textContent=` · maximum ${browserLimit()}`;
- const clean=$('clean-feed').checked&&dskPages().length>0,nvenc=nvencShares(fps,tenBit);
- extraLimit=nvenc.limit;$('extra-aux').max=extraLimit;
+ const clean=$('clean-feed').checked&&dskPages().length>0,outputs=encodeOutputs(fps,tenBit,clean),rows=outputs.map(encodeRow);
+ if(rows.length!==$('encodes').children.length||rows.some((row,i)=>$('encodes').children[i]!==row))$('encodes').replaceChildren(...rows);
+ const {budget_pct,pct_per_fps,bitrate_kbps:[low,high]}=profile.nvenc,share=o=>o.fps*pct_per_fps[o.codec][encodes[o.id].preset];
+ const extra=outputs.find(o=>o.id==='extra'),used=outputs.reduce((n,o)=>o===extra?n:n+share(o),0);
+ extraLimit=extra&&used<=budget_pct?Math.floor((budget_pct-used)/share(extra)):0;$('extra-aux').max=extraLimit;
  if(Number($('extra-aux').value)>extraLimit)$('extra-aux').value=extraLimit;
- const percent=n=>`${+n.toFixed(1)}%`;
- $('extra-aux-note').textContent=janusApi?`Extra aux outputs: at most ${extraLimit}, each with random layouts of 4–16 sources. The program, clean feed and ${auxBuses.length} aux output${auxBuses.length===1?'':'s'} use ${percent(nvenc.used)} of NVENC, each extra output ${percent(nvenc.each)} (budget ${profile.nvenc.budget_pct}%).`
+ const percent=n=>`${n.toFixed(1)}%`;
+ outputs.forEach((o,i)=>{
+  const [name,detail]=rows[i].querySelectorAll('b,small');
+  name.textContent=o.name;detail.textContent=`${o.codec==='hevc'?'HEVC':'H.264'} · ${o.fps} fps${o.note}`;rows[i].lastElementChild.textContent=percent(share(o));
+ });
+ $('nvenc-budget').textContent=`of ${budget_pct}%${janusApi?` · at most ${extraLimit} extra aux`:''}`;
+ $('nvenc-total').textContent=percent(used+(extra?share(extra)*Number($('extra-aux').value):0));
+ $('nvenc-total').classList.toggle('error',used>budget_pct);
+ $('extra-aux-note').textContent=janusApi?`Extra aux outputs: at most ${extraLimit}, each with random layouts of 4–16 sources, at the preset and bitrate under Encodes.`
    :'Extra aux outputs need webui.py --janus-api to create their Janus mountpoints.';
+ outputs.forEach((o,i)=>{
+  const mbps=Number(rows[i].querySelector('input').value);
+  if(!(mbps>=low/1000&&mbps<=high/1000))throw Error(`${o.name}: the bitrate must be from ${low/1000} to ${high/1000} Mbit/s.`);
+  encodes[o.id].bitrate_kbps=Math.round(mbps*1000);
+ });
+ if(used>budget_pct)throw Error(`The encodes need ${used.toFixed(1)}% of NVENC, above its ${budget_pct}% budget: choose faster presets.`);
  if(Number($('scenes').value)>192)$('scenes').value=192;
- const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,192),bitrate=integer('bitrate',500,40000);
+ const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,192);
  if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
  if(resizeValues||sourceValues.reduce((a,b)=>a+b,0)!==sourceCount||overBudget(sourceValues))sourceValues=sourceCounts(sourceCount,resizeValues||sourceValues);
  const counts=sourceValues,[sourceWidth,sourceHeight]=[1920,1080];
@@ -258,17 +311,14 @@ function update(){
  }
  currentSettings={orientation:$('orientation').value,fps,
    source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts],
-   bitrate_kbps:bitrate,
-   dsk:dskPages(),clean_feed:clean,extra_aux:integer('extra-aux',0,extraLimit)};
+   encodes,dsk:dskPages(),clean_feed:clean,extra_aux:integer('extra-aux',0,extraLimit)};
  types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(document.activeElement!==input&&(Number(input.value)!==counts[i]||input.value===''))input.value=counts[i];input.max=sourceMaximum(i);});
  $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
  $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${nvdecLimit(fps)} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]}/${rawUploadUnits(fps)} units (NV12 = 1, P010 = 2). Capacity depends on codec and content.`;
  $('canvas-label').textContent=`${width} × ${height} · ${fps} fps · ${portrait?'portrait':'landscape'}`;
  const eight=currentSettings.bit_depth===8;
  $('canvas-format').textContent=eight?'BT.709, 8-bit 4:2:0 canvas · SDR output':`HLG, 10-bit ${currentSettings.chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`;
- const hdrKbps=Math.max(1,Math.round(bitrate*8000/6000));
- $('output-description').textContent=eight?`H.264 / SDR at ${bitrate} kbit/s. HDR encoding is off.`
-   :`H.264 / SDR at ${bitrate} kbit/s and H.265 / HLG at ${hdrKbps} kbit/s.`;
+ $('output-description').textContent=eight?'H.264 / SDR, HDR encoding off.':'H.264 / SDR and H.265 / HLG.';
  const keys=currentSettings.dsk.length;
  $('output-description').textContent+=keys?` ${keys} downstream key${keys>1?'s':''} on the program${currentSettings.clean_feed?'; the SDR output also has a clean copy without keys':''}.`:'';
  $('input-size').textContent=`Generated inputs: ${sourceWidth} × ${sourceHeight} at ${fps} fps`;
@@ -287,7 +337,7 @@ function update(){
 }
 function setBusy(value){
  busy=value||submitting;
- document.querySelectorAll('.fields input,.fields select,.toggles input,[data-preset]').forEach(el=>el.disabled=busy);
+ document.querySelectorAll('.fields input,.fields select,.toggles input,[data-preset],#encodes select,#encodes input').forEach(el=>el.disabled=busy);
  types.forEach((t,i)=>{$(`count-${t.id}`).disabled=busy||!sourceEnabled(i)});
  $('extra-aux').disabled=busy||!extraLimit;
  $('apply').disabled=!currentSettings||busy||!online;
@@ -310,7 +360,8 @@ async function refresh(){
     const s=status.settings;
     previousDepth=s.bit_depth??10;
     $('mode').value=`${previousDepth}:${s.chroma??(previousDepth===8?'420':'422')}`;
-    for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps','extra-aux':'extra_aux'}))if(s[key]!==undefined)$(id).value=s[key];
+    for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout','extra-aux':'extra_aux'}))if(s[key]!==undefined)$(id).value=s[key];
+    encodes=structuredClone(s.encodes??{});
     document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;
     sourceValues=types.map((_,i)=>s.weights[i]??0);syncCounts();
    }

@@ -97,6 +97,18 @@ same sources, and its RTP port pair after the highest in use (5016, 5020, … be
 once a smaller setup is on air; without the flag the setup offers none. The mountpoints are not
 permanent: after a Janus restart, **Apply setup** creates them again.
 
+**Encodes** lists every encoded output: the SDR program, the HLG program on a 10-bit canvas, the
+clean feed (counted even while off), each of the instance's own aux buses, and one row shared by
+the extra aux outputs. Each has its NVENC preset, p1 (fastest), p3 (default) or p5 (best
+quality), and its CBR bitrate, 2–20 Mbit/s: by default the recipe's 6 Mbit/s SDR and 8 Mbit/s HLG
+programs, the SDR program's for the clean feed, an own bus's own bitrate and 3 Mbit/s for extra
+outputs. Each row shows its share of NVENC, which follows the preset and frame rate, not the
+bitrate ([measured costs](docs/capacity.md#nvenc-and-extra-aux-outputs)); the total row adds the
+extra outputs and says how many fit. Encodes above the budget on their own cannot be applied. The
+saved settings keep one `{"preset", "bitrate_kbps"}` per output id in `encodes` (`sdr`, `hdr`,
+`sdr_clean`, an own bus's id, `extra`); settings saved with the former single program bitrate
+give it to the SDR program and its clean copy and scale the HLG program's as before.
+
 Settings persist in `media/demo.json`; later starts restore them and reuse
 `media/assets/` and `media/media_wipes/`. The HTTP server stays running while its
 mixer child restarts, without access to the Docker socket. The generic setup

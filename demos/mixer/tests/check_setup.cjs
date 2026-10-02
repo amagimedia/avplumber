@@ -13,7 +13,9 @@ const { chromium } = require('playwright');
     const errors = [], submissions = [];
     let initialSettings = null;
     // The live show's own aux buses (Program preview and Multiviewer) and a Janus API for extra ones.
-    let auxStatus = {aux_buses: [{id: 'mv', full_rate: false}, {id: 'mv2', full_rate: false}], janus_api: true};
+    const ownAux = [{id: 'mv', label: 'Program preview', full_rate: false, encode: {preset: 'p3', bitrate_kbps: 3000}},
+      {id: 'mv2', label: 'Multiviewer', full_rate: false, encode: {preset: 'p3', bitrate_kbps: 3000}}];
+    let auxStatus = {aux_buses: ownAux, janus_api: true};
     page.on('pageerror', error => errors.push(error.message));
     const html = fs.readFileSync(path.join(__dirname, '../setup.html'), 'utf8');
     // The status carries the instance's profile as webui.py serves it: the limits asserted below are tesla_t4's.
@@ -44,8 +46,36 @@ const { chromium } = require('playwright');
     };
     await reset();
     assert.match(await page.locator('#source-limit').textContent(), /Maximum 55 .* measured on tesla_t4\.$/);
-    await page.locator('#bitrate').fill('8500');
-    assert.equal((await apply()).bitrate_kbps, 8500, 'bitrate edit alone must reach the backend');
+    // Every encoded output has its row, at the profile's preset and setup_runtime.DEFAULT_KBPS or,
+    // for an own aux bus, the status's encode; the clean feed counts even while off.
+    const rows = () => page.locator('#encodes tr').evaluateAll(rows => rows.map(row =>
+      [...row.querySelectorAll('b,small'), row.lastElementChild].map(cell => cell.textContent).join(' | ')));
+    assert.deepEqual(await rows(), ['Program · SDR | H.264 · 60 fps | 13.1%', 'Program · HLG | HEVC · 60 fps | 26.3%',
+      'Clean feed · SDR | H.264 · 60 fps · off, counted | 13.1%', 'Program preview | H.264 · 30 fps | 6.6%',
+      'Multiviewer | H.264 · 30 fps | 6.6%', 'Extra aux · each | H.264 · 30 fps | 6.6%']);
+    const preset = output => page.getByLabel(`${output} preset`, {exact: true});
+    const bitrate = output => page.getByLabel(`${output} bitrate, Mbit/s`, {exact: true});
+    assert.equal(await bitrate('Program · HLG').inputValue(), '8');
+    await preset('Program · SDR').selectOption('p1');
+    await bitrate('Program · SDR').fill('8.5');
+    const p3 = kbps => ({preset: 'p3', bitrate_kbps: kbps});
+    const defaults = {sdr: p3(6000), hdr: p3(8000), sdr_clean: p3(6000), mv: p3(3000), mv2: p3(3000), extra: p3(3000)};
+    const edited = await apply();
+    assert.deepEqual(edited.encodes, {...defaults, sdr: {preset: 'p1', bitrate_kbps: 8500}}, 'an encode edit alone must reach the backend');
+    assert.equal('bitrate_kbps' in edited, false);
+    for (const value of ['25', '1.5', '']) {
+      await bitrate('Multiviewer').fill(value);
+      assert.equal(await page.locator('#error').textContent(), 'Multiviewer: the bitrate must be from 2 to 20 Mbit/s.');
+      assert.equal(await page.locator('#apply').isDisabled(), true, `${value || 'no'} Mbit/s cannot be applied`);
+    }
+    await bitrate('Multiviewer').fill('20');
+    assert.equal((await apply()).encodes.mv2.bitrate_kbps, 20000);
+    await reset(edited);
+    assert.equal(await preset('Program · SDR').inputValue(), 'p1', 'saved encodes load');
+    assert.equal(await bitrate('Program · SDR').inputValue(), '8.5');
+    const {encodes: _encodes, ...withoutEncodes} = edited;
+    await reset(withoutEncodes);
+    assert.deepEqual((await apply()).encodes, defaults, 'settings saved before per-output encodes load the defaults');
 
     // Exercise actual keystrokes: re-rendering must not reinsert zero while editing.
     for (const id of ['sdr420', 'hlg420', 'hlg422', 'sdr422', 'browser', 'sdr420_raw', 'hlg420_raw']) {
@@ -190,9 +220,9 @@ const { chromium } = require('playwright');
     assert.equal('browser_ring_size' in await apply(), false);
 
     // Extra aux outputs fill NVENC to the profile's budget beside the program, its HLG copy on a
-    // 10-bit canvas, the clean feed and the two own buses (setup_runtime.extra_aux_limit).
+    // 10-bit canvas, the clean feed and the two own buses, at p3 (setup_runtime.extra_aux_limit).
     const extraAux = page.locator('#extra-aux');
-    for (const [mode, limits] of [['8:420', [9, 6, 7, 4]], ['10:420', [7, 4, 3, 0]]]) {
+    for (const [mode, limits] of [['8:420', [10, 8, 8, 6]], ['10:420', [8, 6, 4, 2]]]) {
       await reset();
       await page.locator('#mode').selectOption(mode);
       await page.locator('#dsk-pages input[value=lower_third]').check();
@@ -218,18 +248,37 @@ const { chromium } = require('playwright');
     await page.locator('#fps').selectOption('25');
     await extraAux.fill('9');
     await page.locator('#fps').selectOption('30');
-    assert.equal(await extraAux.inputValue(), '6');
+    assert.equal(await extraAux.inputValue(), '8');
     await page.locator('#mode').selectOption('10:420');
-    assert.equal(await extraAux.inputValue(), '4');
+    assert.equal(await extraAux.inputValue(), '6');
     // The clean feed counts even while off: the maximum does not move with it.
     await page.locator('#clean-feed').uncheck();
-    assert.equal(await extraAux.getAttribute('max'), '4');
-    assert.equal((await apply()).extra_aux, 4);
+    assert.equal(await extraAux.getAttribute('max'), '6');
+    assert.equal((await apply()).extra_aux, 6);
     assert.match(await page.locator('#extra-aux-note').textContent(),
-      /^Extra aux outputs: at most 4, .* 2 aux outputs use 43\.7% of NVENC, each extra output 7\.3% \(budget 80%\)\.$/);
+      /^Extra aux outputs: at most 6, each with random layouts of 4–16 sources, at the preset and bitrate under Encodes\.$/);
+    assert.equal(await page.locator('#encodes ~ tfoot').innerText().then(t => t.split(/\s+/).join(' ')),
+      'Total of 80% · at most 6 extra aux 78.8%', 'six extra outputs beside 39.4% of encodes');
+    // Each encode costs its preset: the HLG program at p5 leaves 3 at 30 fps and exceeds the budget
+    // at 60; the monitors at p1 leave 9 and 3.
+    await preset('Program · HLG').selectOption('p5');
+    assert.equal(await extraAux.getAttribute('max'), '3');
+    await page.locator('#fps').selectOption('60');
+    assert.equal(await page.locator('#error').textContent(),
+      'The encodes need 95.3% of NVENC, above its 80% budget: choose faster presets.');
+    assert.equal(await page.locator('#apply').isDisabled(), true, 'encodes above the budget cannot be applied');
+    assert.equal(await extraAux.isDisabled(), true);
+    await preset('Program · HLG').selectOption('p3');
+    for (const output of ['Program preview', 'Multiviewer', 'Extra aux · each']) await preset(output).selectOption('p1');
+    assert.equal(await extraAux.getAttribute('max'), '3');
+    await page.locator('#fps').selectOption('30');
+    assert.equal(await extraAux.getAttribute('max'), '9');
+    await extraAux.fill('9');
+    const monitors = await apply();
+    assert.deepEqual([monitors.extra_aux, monitors.encodes.mv.preset, monitors.encodes.extra.preset], [9, 'p1', 'p1']);
     const saved = submissions.at(-1);
     await reset(saved);
-    assert.equal(await extraAux.inputValue(), '4', 'the saved count loads');
+    assert.equal(await extraAux.inputValue(), '9', 'the saved count loads');
     const {extra_aux: _, ...older} = saved;
     await reset(older);
     assert.equal((await apply()).extra_aux, 0, 'settings saved before extra aux outputs load with none');
@@ -237,9 +286,10 @@ const { chromium } = require('playwright');
     await reset(saved);
     assert.equal(await extraAux.isDisabled(), true);
     assert.match(await page.locator('#extra-aux-note').textContent(), /--janus-api/);
+    assert.deepEqual((await rows()).map(row => row.split(' | ')[0]), ['Program · SDR', 'Program · HLG', 'Clean feed · SDR'], 'no own buses, no extra row');
     assert.equal((await apply()).extra_aux, 0, 'without a Janus API there are none');
     assert.deepEqual(errors, []);
-    console.log('PASS: normal source-count editing, setup bitrate, allocation, limits, raw SDR/HDR upload and extra aux outputs');
+    console.log('PASS: normal source-count editing, per-output encodes, allocation, limits, raw SDR/HDR upload and extra aux outputs');
   } finally {
     await browser.close();
   }

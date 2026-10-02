@@ -6,6 +6,7 @@ from contextlib import suppress
 from dataclasses import replace
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import shutil
@@ -20,15 +21,18 @@ from extra_aux import extra_buses
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import janus_mountpoints
 from pyplumber.mixer.color import default_codec
-from pyplumber.mixer.config import ConfigError, aux_fps, parse, parse_aux_buses
+from pyplumber.mixer.config import ConfigError, Rendition, aux_fps, aux_label, parse, parse_aux_buses
 
 DEMO_DIR = Path(__file__).resolve().parent
 # Phase markers with durations: restart timings are read from the container log.
 log = logging.getLogger("setup")
-# bitrate_kbps is the SDR (H.264) program bitrate. The recipe's other renditions keep their
-# ratio to it, so an HDR output stays proportionally richer without a second control.
-DEFAULT_BITRATE_KBPS = 6000
-MIN_BITRATE_KBPS, MAX_BITRATE_KBPS = 500, 40000
+# encodes: the NVENC preset and bitrate_kbps of each encoded output, by output id: the recipe's
+# renditions (sdr, and hdr on a 10-bit canvas), the clean copy of the SDR program (sdr_clean), each
+# of the show's own aux buses by bus id, and "extra", shared by every extra aux output. One the
+# settings omit takes the profile's default preset at its default bitrate: the recipe's
+# (demo.example.json), the SDR program's for its clean copy, an aux rendition's for the extra
+# outputs; an own bus keeps its own (_own_encode).
+DEFAULT_KBPS = {"sdr": 6000, "hdr": 8000, "sdr_clean": 6000, "extra": Rendition.bitrate_kbps}
 # A clean mixer stop releases browser DMA-BUF frames; a killed one leaves them quarantined
 # until /workers/recover restarts the browser workers. Groups stop concurrently (mixer.py
 # MixerApplication.stop), so this only bounds a hung stop. compose.yaml's stop_grace_period
@@ -46,7 +50,7 @@ HEALTHY_RUN_SEC = 300
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
-                        bitrate_kbps=DEFAULT_BITRATE_KBPS, dsk=[], clean_feed=False, extra_aux=0)
+                        encodes={}, dsk=[], clean_feed=False, extra_aux=0)
 
 
 def source_limit(profile, fps, bit_depth=8, chroma="420"):
@@ -57,19 +61,55 @@ def source_limit(profile, fps, bit_depth=8, chroma="420"):
     return min(total, profile["nvdec_decodes"][fps] + profile["browser_windows"] + profile["raw_upload_units"][fps])
 
 
-def extra_aux_limit(profile, cfg):
+def extra_aux_limit(profile, cfg, encodes):
     """Extra aux outputs the instance's NVENC budget leaves beside *cfg*'s encodes, its renditions
-    and aux buses: each costs its frames/s at 1920x1080, scaled by its pixels, an HEVC one hevc_cost
-    times. An extra bus is a canvas-size H.264 encode at aux_fps."""
+    and aux buses; encodes above the budget on their own are refused. Each takes its frames/s at
+    1920x1080, scaled by its pixels, times the profile's share of its codec at its preset; the clean
+    feed counts even while off, and an extra bus is a canvas-size H.264 encode at aux_fps, both at
+    their preset in *encodes*. setup.html sums in the same order, so both round alike."""
     nvenc = profile["nvenc"]
-    def frames(width, height, fps, codec="h264"):
-        return fps * width * height / (1920 * 1080) * (nvenc["hevc_cost"] if "hevc" in codec else 1)
-    load = sum(frames(r.width, r.height, r.fps, r.codec or default_codec(cfg.working_format))
-               for r in (*cfg.renditions, *(b.renditions[0] for b in cfg.aux_buses)))
+    def share(width, height, fps, codec, preset):
+        return fps * width * height / (1920 * 1080) * nvenc["pct_per_fps"]["hevc" if "hevc" in codec else "h264"][preset]
+    encoded = [(r.width, r.height, r.fps, r.codec or default_codec(cfg.working_format), r.preset) for r in cfg.renditions]
     if not any(r.feed == "clean" for r in cfg.renditions):
-        load += frames(cfg.canvas_w, cfg.canvas_h, cfg.fps)   # the clean feed counts even while off
-    budget = nvenc["budget_pct"] / nvenc["h264_pct_per_fps"]
-    return max(0, int((budget - load) // frames(cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps))))
+        encoded.append((cfg.canvas_w, cfg.canvas_h, cfg.fps, "h264", encodes["sdr_clean"]["preset"]))
+    encoded += [(r.width, r.height, r.fps, r.codec, r.preset) for b in cfg.aux_buses for r in b.renditions]
+    used, budget = sum(share(*e) for e in encoded), nvenc["budget_pct"]
+    if used > budget:
+        raise ValueError(f"The encodes need {used:.1f}% of NVENC, above its {budget}% budget: choose faster presets")
+    return math.floor((budget - used) / share(cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps), "h264",
+                                              encodes["extra"]["preset"]))
+
+
+def _in_range(profile, kbps):
+    low, high = profile["nvenc"]["bitrate_kbps"]
+    return min(max(kbps, low), high)
+
+
+def _own_encode(profile, bus):
+    """The encode of the own aux bus *bus* (a show's entry) the settings omit: the profile's
+    default preset at the bus's bitrate, within the profile's range."""
+    kbps = bus["renditions"][0].get("bitrate_kbps", Rendition.bitrate_kbps)
+    return {"preset": profile["nvenc"]["default_preset"], "bitrate_kbps": _in_range(profile, kbps)}
+
+
+def current_settings(profile, settings):
+    """Saved *settings* in the current shape, every program encode filled in. Saved before extra
+    aux outputs, they had none; the browser ring size the page no longer sets goes, and the show
+    takes the frame rate's default (config.default_browser_ring_size); one program bitrate_kbps
+    sets the SDR program and its clean copy, the HLG program in the recipe's ratio to it."""
+    if not isinstance(settings, dict):
+        return settings
+    encodes, legacy = settings.get("encodes", {}), settings.get("bitrate_kbps")
+    if not isinstance(encodes, dict) or len(encodes) > 64:
+        raise ValueError("encodes must map at most 64 output ids to their preset and bitrate_kbps")
+    def kbps(output):
+        if type(legacy) is not int or output == "extra":
+            return DEFAULT_KBPS[output]
+        return _in_range(profile, round(DEFAULT_KBPS[output] * legacy / DEFAULT_KBPS["sdr"]))
+    defaults = {o: {"preset": profile["nvenc"]["default_preset"], "bitrate_kbps": kbps(o)} for o in DEFAULT_KBPS}
+    return {"extra_aux": 0, **{k: v for k, v in settings.items() if k not in ("browser_ring_size", "bitrate_kbps")},
+            "encodes": {**defaults, **encodes}}
 
 
 def _split_aux(buses, recipe):
@@ -117,10 +157,7 @@ def source_counts(profile, total, weights, fps=25, reserved_browsers=0):
 def recipe_for(profile, settings):
     """Accept only the bounded generic setup controls, never paths or commands; *profile* is the
     instance's entry in INSTANCE_PROFILES."""
-    if isinstance(settings, dict):
-        # Saved before extra aux outputs, or with the browser ring size the page no longer sets:
-        # the show takes the frame rate's default (config.default_browser_ring_size).
-        settings = {"extra_aux": 0, **{k: v for k, v in settings.items() if k != "browser_ring_size"}}
+    settings = current_settings(profile, settings)
     if not isinstance(settings, dict) or set(settings) != set(DEFAULT_SETTINGS):
         raise ValueError("Expected orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
     for key, choices in (("orientation", ("portrait", "landscape")),
@@ -146,9 +183,12 @@ def recipe_for(profile, settings):
     # buses are known (SetupRuntime.apply).
     if type(settings["extra_aux"]) is not int or not 0 <= settings["extra_aux"] <= 30:
         raise ValueError("extra_aux must be an integer from 0 to 30")
-    bitrate = settings["bitrate_kbps"]
-    if type(bitrate) is not int or not MIN_BITRATE_KBPS <= bitrate <= MAX_BITRATE_KBPS:
-        raise ValueError(f"bitrate_kbps must be an integer from {MIN_BITRATE_KBPS} to {MAX_BITRATE_KBPS}")
+    presets, (low, high) = profile["nvenc"]["pct_per_fps"]["h264"], profile["nvenc"]["bitrate_kbps"]
+    for output, encode in settings["encodes"].items():
+        if not isinstance(encode, dict) or set(encode) != {"preset", "bitrate_kbps"} or encode["preset"] not in presets:
+            raise ValueError(f"encodes.{output} must have a preset of {', '.join(presets)} and a bitrate_kbps")
+        if type(encode["bitrate_kbps"]) is not int or not low <= encode["bitrate_kbps"] <= high:
+            raise ValueError(f"encodes.{output}: bitrate_kbps must be an integer from {low} to {high}")
     weights = settings["weights"]
     most = max(profile["sources"].values())   # the page sends source counts as weights
     if not isinstance(weights, list) or len(weights) != 7 or any(type(w) is not int or not 0 <= w <= most for w in weights):
@@ -163,11 +203,9 @@ def recipe_for(profile, settings):
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
-    # Scale every rendition by what the SDR one was asked to change by, so their relative
-    # quality is preserved and the recipe's own numbers stay the reference.
-    reference = recipe["renditions"][0]["bitrate_kbps"]
     for rendition in recipe["renditions"]:
-        rendition["bitrate_kbps"] = max(1, round(rendition["bitrate_kbps"] * bitrate / reference))
+        rendition.update(settings["encodes"][rendition["id"]])
+    recipe["clean_rendition"] = settings["encodes"]["sdr_clean"]
     canvas_width, canvas_height = (height, width) if settings["orientation"] == "portrait" else (width, height)
     recipe["canvas"].update(width=canvas_width, height=canvas_height, fps=settings["fps"])
     if settings["bit_depth"] == 8:
@@ -306,21 +344,23 @@ class SetupRuntime:
         previous = json.loads(config.read_text()) if config.exists() else {}
         stored = json.loads(self.recipe_path.read_text()) if self.recipe_path.exists() else {}
         own, extra = _split_aux(previous.get("aux_buses", []), stored)
-        self.aux_buses = [{"id": b["id"], "full_rate": b.get("full_rate", False)} for b in own]
+        self.aux_buses = [{"id": b["id"], "label": aux_label(b["id"], b.get("label", ""), b.get("layout")),
+                           "full_rate": b.get("full_rate", False), "encode": _own_encode(self.profile, b)} for b in own]
         self.extra_ports = _ports(extra)
         return previous, own, extra
 
     def _preserve_aux(self, recipe, show):
         """Keep instance outputs while replacing the generic sources and scenes: each bus keeps its
-        live layout, layouts and slot assignments, less the scenes that no longer exist or fit its budget.
-        The setup's extra buses follow the own ones: as many as asked for, within the NVENC budget."""
+        live layout, layouts and slot assignments, less the scenes that no longer exist or fit its budget,
+        at its encode settings. The setup's extra buses follow the own ones: as many as asked for, within
+        the NVENC budget, which the show's encodes must fit without them."""
         previous, own, extra = self._previous_show()
         if "max_compositor_layers" in previous:
             recipe["max_compositor_layers"] = show["max_compositor_layers"] = previous["max_compositor_layers"]
-        wanted = recipe["setup"]["extra_aux"]
+        wanted, encodes = recipe["setup"]["extra_aux"], recipe["setup"]["encodes"]
         extra = extra[:wanted]   # fewer drops the last ones
-        if not own and not wanted:
-            return
+        for bus in own:
+            bus["renditions"][0].update(encodes.get(bus["id"]) or _own_encode(self.profile, bus))
         live = {}
         if (own or extra) and self.process and self.process.poll() is None:
             live = {b["id"]: b for b in json.loads(self.bridge.command("mixer.aux_status"))}
@@ -345,18 +385,19 @@ class SetupRuntime:
                     # A retained scene may have grown beyond the bus's draw budget.
                     scenes[i] = None
             bus["scenes"] = scenes
+        mine = parse({**show, "aux_buses": own}) if own else cfg
+        limit = extra_aux_limit(self.profile, mine, encodes)
+        if wanted > (limit if self.janus_api else 0):
+            raise ValueError(f"At most {limit} extra aux outputs fit this setup's NVENC budget on "
+                             f"{self.instance_type.value}" if self.janus_api else
+                             "Extra aux outputs need a Janus API (webui.py --janus-api)")
         if wanted:
             from prepare_demo import CLEAN_PORT   # clean feed or not, extra buses never take its port
-            mine = parse({**show, "aux_buses": own})
-            limit = extra_aux_limit(self.profile, mine) if self.janus_api else 0
-            if wanted > limit:
-                raise ValueError(f"At most {limit} extra aux outputs fit this setup's NVENC budget on "
-                                 f"{self.instance_type.value}" if self.janus_api else
-                                 "Extra aux outputs need a Janus API (webui.py --janus-api)")
             # Cells show the generic sources, not the key pages after them.
             own = own + extra_buses(replace(mine, sources=mine.sources[:recipe["source_count"]]), extra, wanted, CLEAN_PORT,
-                                     self.profile["nvenc"]["preset"])
-        recipe["aux_buses"] = own
+                                     encodes["extra"])
+        if own:
+            recipe["aux_buses"] = own
 
     def remember_aux(self, bus_id, fields):
         """Persist an operator's change of a bus's ``layout`` or ``scenes`` (a mixer.aux,
@@ -565,7 +606,7 @@ class SetupRuntime:
                 write_atomic(self.recipe_path, json.dumps(recipe, indent=2) + "\n")
             self._mountpoints(recipe, prune=True)
             with self.lock:
-                self.settings = recipe.get("setup")
+                self.settings = current_settings(self.profile, recipe.get("setup"))
                 self.revision += 1
                 self.retries = 0
                 self.phase, self.message = "running", "Mixer ready."

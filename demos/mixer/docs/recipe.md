@@ -28,6 +28,7 @@ lets host preparation write paths for a later `/media` container mount.
 | `generation.seconds` | Length of each synthetic input loop; default 2 seconds. |
 | `generation.width`, `generation.height` | Optional synthetic source dimensions, independent of the canvas. Defaults to the canvas dimensions. |
 | `renditions` | Normal mixer output definitions, copied to the generated show. Use separate RTP/RTCP port pairs. |
+| `clean_rendition` | Fields in which the clean SDR copy, added by the setup's clean feed, differs from the first rendition, such as `preset` and `bitrate_kbps`. |
 | `browser_ring_size` | Maximum outstanding DMA-BUF frames per browser; 1–64, default 6 at 25/30 fps and 9 otherwise. The import-cache capacity is at least 32; obsolete idle imports expire. |
 
 Weights need not add to 100. Largest-remainder rounding makes counts add to the

@@ -36,11 +36,23 @@ INSTANCE_PROFILES = {
         "raw_upload_units": {25: 30, 30: 34, 50: 20, 60: 17},
         # HLG v210 4:2:2 inputs, unpacked on the GPU (the 60 fps 4:2:2 limit was measured with four).
         "hlg_v210": 4,
-        # Encodes, measured 2026-10-02 on the live show: three 1080p30 H.264 p3 encodes took 22% of
-        # NVENC, the 50 fps SDR show 35% and the 60 fps HDR show 70-76%. A 1920x1080 H.264 p3 encode
-        # costs about 0.243% per encoded frame/s (7.3% at 30 fps), HEVC Main10 twice that, and the
-        # cost follows the pixel count. Extra aux outputs fill encodes up to 80%, at that preset (the
-        # renditions' own default, p7, saturated NVENC with 7 encodes).
-        "nvenc": {"budget_pct": 80, "h264_pct_per_fps": 0.243, "hevc_cost": 2, "preset": "p3"},
+        # NVENC share of one 1920x1080 encode per encoded frame/s (the cost follows the pixel count),
+        # by codec and preset: the offered presets are the h264 keys. Extra aux outputs fill what the
+        # program, clean feed and aux encodes leave of budget_pct (setup_runtime.extra_aux_limit).
+        # Bitrate does not enter: CBR NVENC time is roughly independent of bitrate (to be verified).
+        "nvenc": {
+            "budget_pct": 80,
+            "pct_per_fps": {
+                # Measured 2026-10-02, 1080p30, tune ull, CBR, no B-frames: p3 0.219 (5 encodes took
+                # 32.8%, 9 took 58.2%), p5 0.466 (5 took 70.0%). p1: 0.70 of p3, NVIDIA's Turing
+                # table; to be replaced by the T4 measurement.
+                "h264": {"p1": 0.153, "p3": 0.219, "p5": 0.466},
+                # HEVC Main10 (the HLG program): twice H.264 at the same preset, an assumption; to
+                # be replaced by the T4 measurement.
+                "hevc": {"p1": 0.306, "p3": 0.438, "p5": 0.932},
+            },
+            "bitrate_kbps": [2000, 20000],   # the range the setup offers per output
+            "default_preset": "p3",          # every output's, until the setup sets another
+        },
     },
 }

@@ -269,8 +269,7 @@ class MixerConfig:
                 previews.append({"bus": f"clean_{r.id}", "label": f"Program clean · {color.upper()}", "rendition": r.id,
                                  "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
                                  "port": r.port, "mountpoint": r.port, "fps": r.fps})
-        labels = {"pgm_pvw_grid": "Program preview", "source_pages": "Multiviewer"}
-        previews += [{"bus": b.id, "label": b.label or labels.get(b.layout.get("preset"), f"Aux {b.id}"),
+        previews += [{"bus": b.id, "label": aux_label(b.id, b.label, b.layout),
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
                       "codec": "h264", "color": "sdr", "port": r.port, "mountpoint": r.port, "fps": r.fps}
                      for b in self.aux_buses for r in b.renditions]
@@ -577,6 +576,16 @@ def _parse_dsk(dsk: Any, sources: Dict[str, Source], canvas_w: int, canvas_h: in
             "dsk_fade_curve": fade_curve(dsk.get("fade_curve", DEFAULT_FADE_CURVE), "dsk.fade_curve")}
 
 
+DEFAULT_AUX_LAYOUT = {"preset": "pgm_pvw_grid"}
+
+
+def aux_label(bus_id, label="", layout=None):
+    """The control page's name for a bus: its *label*, else that of its initial *layout*
+    (DEFAULT_AUX_LAYOUT without one), else Aux <id>."""
+    return label or {"pgm_pvw_grid": "Program preview", "source_pages": "Multiviewer"}.get(
+        (layout or DEFAULT_AUX_LAYOUT).get("preset"), f"Aux {bus_id}")
+
+
 def aux_fps(fps, full_rate=False):
     """A bus runs at half the canvas rate at 50/60 fps unless it opts into the full rate."""
     return fps // 2 if fps in (50, 60) and not full_rate else fps
@@ -629,7 +638,7 @@ def parse_aux_buses(values, cfg):
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", bid) or bid in ids:
             raise ConfigError("aux bus IDs must be unique identifiers")
         ids.add(bid)
-        layouts = [parse_layout(cfg, obj.get("layout", {"preset": "pgm_pvw_grid"}))]
+        layouts = [parse_layout(cfg, obj.get("layout", DEFAULT_AUX_LAYOUT))]
         offered = obj.get("layouts", [{"preset": p} for p in PRESETS
                                       if draws_program(cfg, layouts) or not draws_program(cfg, [{"preset": p}])])
         if not isinstance(offered, list) or len(offered) > 16:

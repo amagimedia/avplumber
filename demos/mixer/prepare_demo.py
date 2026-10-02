@@ -324,7 +324,9 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     renditions = recipe["renditions"]
     if recipe.get("clean_feed"):
         sdr = renditions[0]   # the recipe's first rendition is the H.264/SDR program
-        renditions = [*renditions, {**sdr, "id": f"{sdr['id']}_clean", "feed": "clean", "port": CLEAN_PORT}]
+        # clean_rendition: the fields in which the clean copy differs, such as its preset and bitrate.
+        renditions = [*renditions, {**sdr, "id": f"{sdr['id']}_clean", "feed": "clean", "port": CLEAN_PORT,
+                                    **recipe.get("clean_rendition", {})}]
     doc = {"canvas": canvas, "sources": sources, "scenes": scene_list,
            "browser_ring_size": recipe.get("browser_ring_size", default_browser_ring_size(fps)),
            "initial_scene": scene_list[0]["id"], "renditions": renditions,

@@ -144,7 +144,7 @@ output costs an encode, not another composite.
 | `bitrate_kbps` | `3000` | CBR target, also the `maxrate` and `bufsize` |
 | `codec` | from canvas depth | `h264_nvenc` for 8-bit or `hevc_nvenc` for 10-bit by default; applies to Janus and file targets |
 | `profile` | from codec/depth | HEVC `main`/`main10`; H.264 `baseline` for Janus, `high` for files. No B-frames |
-| `preset` | `"p7"` | NVENC quality preset |
+| `preset` | `"p7"` | NVENC quality preset. The setup page sets p1, p3 or p5 on every output it generates ([NVENC costs](capacity.md#nvenc-and-extra-aux-outputs)) |
 | `port` | — | Janus target: overrides the RTP port from the command line |
 | `color` | automatic | `sdr`, `hlg`, or `pq`; H.264 always requires SDR, HEVC otherwise inherits the canvas |
 | `feed` | `"dirty"` | `"clean"` encodes the program without the [downstream keys](#dsk); without keys both are the program |
