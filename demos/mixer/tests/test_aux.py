@@ -5,17 +5,11 @@ import threading
 
 import pytest
 
-from pyplumber.mixer.aux import (AuxMultiview, AuxSourcePages, base_composition, composition, multiview_cells,
-                                 page_composition, page_grid, pvw_layouts, register_aux_commands)
-from pyplumber.mixer.config import (aux_fps, default_latency_ms, default_pgm_delay_frames, parse_aux_buses,
-                                    validate_assignments)
-from pyplumber.mixer.config import AuxBus, ConfigError, Item, MixerConfig, Rect, Rendition, Scene, Source
-
-
-def object_set(command):
-    """(node, key, value) of a ``node.object.set`` line."""
-    node, key, value = command.split(" ", 3)[1:]
-    return node, key, json.loads(value)
+from pyplumber.mixer.aux import AuxBus, AuxBuses
+from pyplumber.mixer.aux_layout import (base_composition, check_assignments, grid_cells, layout_cells, page_grid,
+                                        parse_layout, pvw_layouts)
+from pyplumber.mixer.config import (aux_fps, default_latency_ms, default_pgm_delay_frames, parse_aux_buses)
+from pyplumber.mixer.config import ConfigError, Item, MixerConfig, Rect, Scene, Source
 
 
 @pytest.fixture
@@ -25,12 +19,63 @@ def cfg():
     scenes = (Scene("full", (Item("s0", Rect(0, 0, 1080, 1920)),)),
               Scene("repeat", (Item("s0", Rect(0, 0, 540, 960)), Item("s0", Rect(540, 960, 540, 960), blend=True))),
               Scene("grid64", items))
-    return MixerConfig(1080, 1920, 60, sources, scenes)
+    return MixerConfig(1080, 1920, 60, sources, scenes, max_compositor_layers=640)
 
 
 def bus_json(**kwargs):
-    return {"id": "multiview", "scenes": ["full"] * 8,
-            "renditions": [{"id": "monitor", "port": 5010}], **kwargs}
+    return {"id": "multiview", "scenes": ["full"] * 8, "renditions": [{"id": "monitor", "port": 5010}], **kwargs}
+
+
+def pages_json(**kwargs):
+    return {"id": "sources", "layout": {"preset": "source_pages"}, "renditions": [{"id": "monitor", "port": 5012}], **kwargs}
+
+
+# PGM bottom left, PVW nowhere, three slots: nothing about the grid preset is assumed.
+CELLS = [{"role": "slot", "slot": 2, "x": 0, "y": 0, "w": 540, "h": 480},
+         {"role": "slot", "slot": 0, "x": 540, "y": 0, "w": 540, "h": 480},
+         {"role": "source", "source": 63, "x": 0, "y": 480, "w": 540, "h": 480},
+         {"role": "slot", "slot": 1, "x": 540, "y": 480, "w": 540, "h": 480},
+         {"role": "pgm", "x": 0, "y": 960, "w": 1080, "h": 960}]
+
+
+class FakeAvp:
+    """Records the follower's layouts; ``statuses`` holds what each node reports, a missing node
+    is unreachable. Like the binding, a command to an unreachable node is dropped, never raised;
+    like the follower, a reachable one reports the revision it holds at once."""
+
+    def __init__(self):
+        self.layouts, self.statuses, self.handlers = [], {}, {}
+
+    def executeCommandsFromString(self, command):
+        node, key, value = command.split(" ", 3)[1:]
+        assert key == "layout" and node.endswith("_pvw"), command
+        if node in self.statuses:
+            self.layouts.append(json.loads(value))
+            self.statuses[node]["layout_revision"] = self.layouts[-1]["revision"]
+
+    def node(self, name):
+        if name not in self.statuses:
+            raise Exception(f"Node {name} doesn't exist.")
+        return SimpleNamespace(getObject=lambda _key: dict(self.statuses[name]))
+
+    def registerControlCommand(self, name, handler, _payload):
+        self.handlers[name] = handler
+
+    def command(self, name, **request):
+        return json.loads(self.handlers[name](json.dumps(request)))
+
+
+def make_bus(cfg, spec, avp=None, latency_ms=None):
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, name="mixer",
+                            latency_ms=default_latency_ms(cfg.fps) if latency_ms is None else latency_ms)
+    return AuxBus(avp or FakeAvp(), None, mixer, cfg, parse_aux_buses([spec], cfg)[0])
+
+
+def reachable(avp, bus, **compositor):
+    """The bus's compositor and follower exist; the compositor draws *compositor*'s revision."""
+    avp.statuses[bus.follower] = {"layout_revision": bus.revision, "pvw_scene": ""}
+    avp.statuses[bus.node_name] = {"suspended": False, "composition_pending": False,
+                                   "composition_revision": bus.revision, **compositor}
 
 
 @pytest.mark.parametrize("program,aux", [(25, 25), (30, 30), (50, 25), (60, 30)])
@@ -39,109 +84,104 @@ def test_aux_cadence(program, aux):
     assert aux_fps(program, full_rate=True) == program   # opt-in: the canvas rate, twice the work at 50/60
 
 
+def composition(cfg, cells, scenes, preview):
+    """What the follower sets: pvw[preview] followed by the base."""
+    base = base_composition(cfg, cells, scenes)
+    return {**base, "layers": (pvw_layouts(cfg, cells)[preview]["layers"] if preview else []) + base["layers"]}
+
+
+def test_grid_preset_keeps_the_multiview_geometry_and_order(cfg):
+    """pgm_pvw_grid is today's multiview: PVW and PGM on top, eight slots below; the slots draw
+    in slot order and the program last, z from above the PVW reserve."""
+    cells = layout_cells(cfg, parse_layout(cfg, {"preset": "pgm_pvw_grid"}))
+    assert cells == grid_cells(cfg)
+    assert [c["role"] for c in cells] == ["pvw", "pgm"] + ["slot"] * 8
+    assert cells[:3] == [{"role": "pvw", "x": 0, "y": 0, "w": 540, "h": 960},
+                         {"role": "pgm", "x": 540, "y": 0, "w": 540, "h": 960},
+                         {"role": "slot", "slot": 0, "x": 0, "y": 960, "w": 270, "h": 480}]
+    result = composition(cfg, cells, ["full"] * 8, "full")
+    assert [layer["tile"] for layer in result["layers"][:-1]] == [
+        {k: c[k] for k in ("x", "y", "w", "h")} for c in (cells[0], *cells[2:])]
+    pgm = result["layers"][-1]
+    assert (pgm["input"], pgm["z"]) == (64, 64 + 8)
+    assert (pgm["dst_x"], pgm["dst_y"], pgm["dst_w"], pgm["dst_h"]) == (540, 0, 540, 960)
+
+
 def test_repeated_scenes_and_occurrences_share_pads(cfg):
-    result = composition(cfg, ["repeat"] * 8, "full")
+    result = composition(cfg, grid_cells(cfg), ["repeat"] * 8, "full")
     assert len(result["layers"]) == 18
     assert {l["input"] for l in result["layers"]} == {0, 64}
     assert result["active_inputs"] == "1" + "0" * 63 + "1"
     assert sum(l.get("blend", False) for l in result["layers"]) == 8
     assert len({l["z"] for l in result["layers"]}) == 18
-
-
-def test_empty_preview_and_tiles_keep_only_real_pgm(cfg):
-    result = composition(cfg, [None] * 8, "")
-    assert len(result["layers"]) == 1
-    assert result["layers"][0]["input"] == 64
+    assert base_composition(cfg, grid_cells(cfg), [None] * 8)["layers"][0]["input"] == 64   # PGM only
 
 
 @pytest.mark.parametrize("count", [63, 64, 96, 127])
 def test_aux_mask_addresses_high_source_and_program_pads(cfg, count):
-    cfg = replace(cfg, sources=tuple(Source(f"s{i}", "video", f"clip{i}.mp4", 1920, 1080)
-                                    for i in range(count)),
+    cfg = replace(cfg, sources=tuple(Source(f"s{i}", "video", f"clip{i}.mp4", 1920, 1080) for i in range(count)),
                   scenes=(Scene("last", (Item(f"s{count - 1}", Rect(0, 0, 1080, 1920)),)),))
-    wire = composition(cfg, ["last"] + [None] * 7, "")["active_inputs"]
+    wire = base_composition(cfg, grid_cells(cfg), ["last"] + [None] * 7)["active_inputs"]
     assert wire == ((1 << 63) | (1 << 62) if count == 63 else "0" * (count - 1) + "11")
 
 
-def test_capacity_reserves_any_preview(cfg):
-    cfg = replace(cfg, max_compositor_layers=512, scenes=(*cfg.scenes, Scene("grid63", cfg.scenes[-1].items[:-1])))
-    assignments = ["grid64"] * 6 + ["grid63", None]
-    assert len(composition(cfg, assignments, "grid64")["layers"]) == 512
-    with pytest.raises(ConfigError, match="513"):
-        validate_assignments(cfg, assignments[:-1] + ["full"])
+def test_pvw_layouts_and_base_split_the_composition(cfg):
+    cells = grid_cells(cfg)
+    layouts = pvw_layouts(cfg, cells)
+    assert set(layouts) == {"full", "repeat", "grid64"}
+    assert [l["z"] for l in layouts["repeat"]["layers"]] == [0, 1]
+    assert layouts["grid64"]["layers"][-1]["z"] == 63
+    assert layouts["full"]["layers"][0]["tile"] == {k: cells[0][k] for k in ("x", "y", "w", "h")}
+    assert layouts["full"]["active_inputs"] == 1
+    base = base_composition(cfg, cells, ["repeat"] * 8)
+    assert min(l["z"] for l in base["layers"]) == 64
+    assert base["layers"][-1]["input"] == 64 and base["layers"][-1]["z"] == 64 + 16
 
 
-def test_bus_validation_and_distinct_outputs(cfg):
-    buses = parse_aux_buses([bus_json(), bus_json(id="second", renditions=[{"id": "monitor", "port": 5012}])], cfg)
-    assert len(buses) == 2
-    assert buses[0].renditions[0].fps == 30
-    assert buses[0].renditions[0].codec == "h264_nvenc"
-    for invalid in (bus_json(id="bad name"), bus_json(scenes=["missing"] * 8),
-                    bus_json(renditions=[{"id": "monitor", "port": 5010, "color": "hlg"}])):
-        with pytest.raises((ConfigError, ValueError)):
-            parse_aux_buses([invalid], cfg)
-    with pytest.raises(ConfigError, match="port"):
-        parse_aux_buses([bus_json(), bus_json(id="second")], cfg)
-    with pytest.raises(ConfigError, match="128"):
-        parse_aux_buses([bus_json()], replace(cfg, sources=cfg.sources * 2))
+def test_explicit_cells_put_slots_pgm_and_sources_anywhere(cfg):
+    layout = parse_layout(cfg, {"cells": CELLS})
+    cells = layout_cells(cfg, layout)
+    assert cells == CELLS
+    # No PVW cell: every scene's preview layers are empty and the base starts at z 0.
+    assert all(l == {"layers": [], "active_inputs": 0} for l in pvw_layouts(cfg, cells).values())
+    base = base_composition(cfg, cells, ["full", None, "repeat"])
+    # Slot and source cells in list order (slot 2, slot 0, source 63, slot 1), the program last.
+    assert [(l["input"], l["z"]) for l in base["layers"]] == [(0, 0), (0, 1), (0, 2), (63, 3), (64, 4)]
+    assert base["layers"][0]["tile"] == {"x": 0, "y": 0, "w": 540, "h": 480}       # slot 2: "repeat"
+    assert base["layers"][2]["tile"] == {"x": 540, "y": 0, "w": 540, "h": 480}     # slot 0: "full"
+    assert (base["layers"][-1]["dst_y"], base["layers"][-1]["dst_h"]) == (960, 960)
+    # Two PVW cells: each reserves the largest scene's z values.
+    two = layout_cells(cfg, parse_layout(cfg, {"cells": [{"role": "pvw", "x": 0, "y": 0, "w": 540, "h": 960},
+                                                         {"role": "pvw", "x": 540, "y": 0, "w": 540, "h": 960}]}))
+    assert [l["z"] for l in pvw_layouts(cfg, two)["repeat"]["layers"]] == [0, 1, 64, 65]
 
 
-def test_assignment_conflict_does_not_publish_or_overwrite(cfg):
-    published = []
-    def execute(command):
-        node, key, value = object_set(command)
-        assert (node, key) == ("aux_multiview_pvw", "base")
-        published.append(value)
-    avp = SimpleNamespace(executeCommandsFromString=execute,
-                          node=lambda _name: SimpleNamespace(getObject=lambda _key: {}))   # follower reachable
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None)
-    bus = AuxMultiview(avp, None, mixer, cfg, AuxBus("multiview", (None,) * 8, (Rendition("monitor"),)))
-    revision = bus.revision
-    first = {"expected_revision": revision, "scenes": ["full"] + [None] * 7}
-    second = {"expected_revision": revision, "scenes": [None, "repeat"] + [None] * 6}
-    results = []
-    threads = [threading.Thread(target=lambda req=req: results.append(bus.assign(req))) for req in (first, second)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert len(published) == 1
-    assert sum(bool(r.get("conflict")) for r in results) == 1
-    assert bus.revision != revision
-    before = bus.revision, list(bus.scenes)
-    with pytest.raises(ConfigError):
-        bus.assign({"expected_revision": bus.revision, "scenes": ["grid64"] * 8})
-    assert (bus.revision, bus.scenes) == before
-    assert bus.assign({"scenes": [None] * 8})["conflict"]
+@pytest.mark.parametrize("cell,match", [
+    ({"role": "pip", "x": 0, "y": 0, "w": 2, "h": 2}, "role"),
+    ({"role": "pvw", "x": 1, "y": 0, "w": 2, "h": 2}, "even"),
+    ({"role": "pvw", "x": 0, "y": 0, "w": 0, "h": 2}, "positive"),
+    ({"role": "pvw", "x": 0, "y": 1900, "w": 2, "h": 22}, "inside"),
+    ({"role": "pvw", "x": 0, "y": 0, "w": 2, "h": 2, "slot": 0}, "has role"),
+    ({"role": "slot", "x": 0, "y": 0, "w": 2, "h": 2}, "has role"),
+    ({"role": "slot", "slot": 1, "x": 0, "y": 0, "w": 2, "h": 2}, "0 to n-1"),
+    ({"role": "slot", "slot": True, "x": 0, "y": 0, "w": 2, "h": 2}, "slot index"),
+    ({"role": "source", "source": 64, "x": 0, "y": 0, "w": 2, "h": 2}, "0 to 63"),
+])
+def test_explicit_cells_are_validated(cfg, cell, match):
+    with pytest.raises(ConfigError, match=match):
+        parse_layout(cfg, {"cells": [cell]})
+    with pytest.raises(ConfigError, match="0 to n-1"):
+        parse_layout(cfg, {"cells": [*CELLS, {**CELLS[0], "slot": 1}]})
 
 
-def test_new_instance_rejects_previous_revision(cfg):
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None)
-    spec = AuxBus("multiview", (None,) * 8, ())
-    old = AuxMultiview(None, None, mixer, cfg, spec)
-    new = AuxMultiview(None, None, mixer, cfg, spec)
-    assert new.assign({"expected_revision": old.revision, "scenes": [None] * 8})["conflict"]
-
-
-def pages_json(**kwargs):
-    return {"id": "sources", "layout": {"preset": "source_pages"},
-            "renditions": [{"id": "monitor", "port": 5012}], **kwargs}
-
-
-def test_source_pages_bus_validation(cfg):
-    bus, = parse_aux_buses([pages_json(rotate_s=8)], cfg)
-    assert (bus.layout, bus.scenes, bus.rotate_s) == ("source_pages", (), 8.0)
-    assert parse_aux_buses([pages_json()], cfg)[0].rotate_s == 5.0
-    for invalid in (pages_json(scenes=["full"] * 8), pages_json(layout={"preset": "source_pages", "cols": 3}),
-                    pages_json(rotate_s=0.5), pages_json(rotate_s=True), bus_json(layout={"preset": "mosaic"}),
-                    bus_json(rotate_s=5)):
+def test_layout_specs_normalize_and_reject_unknown_shapes(cfg):
+    assert parse_layout(cfg, {"preset": "source_pages"}, 8) == {"preset": "source_pages", "page": None, "rotate_s": 8.0}
+    assert parse_layout(cfg, {"preset": "source_pages", "page": 5, "rotate_s": 2})["page"] == 5
+    for invalid in ({"preset": "mosaic"}, {"preset": "pgm_pvw_grid", "rows": 2}, {"preset": "source_pages", "page": 6},
+                    {"preset": "source_pages", "rotate_s": 0.5}, {"preset": "source_pages", "rotate_s": True},
+                    {"cells": []}, {"cells": CELLS, "preset": "pgm_pvw_grid"}, "pgm_pvw_grid", None):
         with pytest.raises(ConfigError):
-            parse_aux_buses([invalid], cfg)
-    # Without a PGM pad a page view takes one source more than a multiview.
-    many = replace(cfg, sources=tuple(Source(f"s{i}", "video", f"c{i}.mp4", 1920, 1080) for i in range(128)))
-    assert parse_aux_buses([pages_json()], many)
-    with pytest.raises(ConfigError, match="128"):
-        parse_aux_buses([bus_json()], many)
+            parse_layout(cfg, invalid)
 
 
 @pytest.mark.parametrize("w,h,cols,rows", [(1080, 1920, 2, 6), (1920, 1080, 4, 3)])
@@ -158,160 +198,73 @@ def test_page_grid_fills_the_canvas_with_even_separate_tiles(cfg, w, h, cols, ro
     assert all(b - a > grid[0]["h"] for a, b in zip(ys, ys[1:]))
 
 
-def test_last_page_draws_only_the_remaining_sources(cfg):
+def test_source_pages_preset_draws_one_page_of_source_cells(cfg):
     assert page_grid(cfg)[0] == {"x": 2, "y": 10, "w": 536, "h": 300}
-    result = page_composition(cfg, 5)
-    assert [layer["input"] for layer in result["layers"]] == [60, 61, 62, 63]
+    cells = layout_cells(cfg, parse_layout(cfg, {"preset": "source_pages"}), 5)
+    assert cells[0] == {"role": "source", "source": 60, **page_grid(cfg)[0]}
+    result = base_composition(cfg, cells, [])
+    assert [(l["input"], l["z"]) for l in result["layers"]] == [(60, 0), (61, 1), (62, 2), (63, 3)]
     assert result["active_inputs"] == sum(1 << i for i in range(60, 64))
 
 
-def test_multiview_cells_match_the_composition(cfg):
-    cells = multiview_cells(cfg)
-    result = composition(cfg, ["full"] * 8, "full")
-    assert [layer["tile"] for layer in result["layers"][:-1]] == [
-        {k: c[k] for k in ("x", "y", "w", "h")} for c in (cells[0], *cells[2:])]
-    pgm = result["layers"][-1]
-    assert (pgm["dst_x"], pgm["dst_y"], pgm["dst_w"], pgm["dst_h"]) == tuple(cells[1][k] for k in ("x", "y", "w", "h"))
+def test_budget_counts_the_largest_preview_and_refuses_beyond_it(cfg):
+    cfg = replace(cfg, max_compositor_layers=512, scenes=(*cfg.scenes, Scene("grid63", cfg.scenes[-1].items[:-1])))
+    cells, assignments = grid_cells(cfg), ["grid64"] * 6 + ["grid63", None]
+    check_assignments(cfg, cells, assignments, 512)
+    assert len(composition(cfg, cells, assignments, "grid64")["layers"]) == 512
+    with pytest.raises(ConfigError, match="needs 513 layers including 64 reserved for PVW; the bus's max_layers is 512"):
+        check_assignments(cfg, cells, assignments[:-1] + ["full"], 512)
+    with pytest.raises(ConfigError, match="unknown scene"):
+        check_assignments(cfg, cells, ["missing"] + [None] * 7, 512)
 
 
-def _pages(cfg, published):
-    avp = SimpleNamespace(executeCommandsFromString=lambda c: published.append(json.loads(c.split(" composition ", 1)[1])),
-                          node=lambda _name: SimpleNamespace(getObject=lambda _key: {"suspended": False}))
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None)
-    return AuxSourcePages(avp, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0])
+def test_bus_budget_defaults_to_its_largest_layout(cfg):
+    # Every slot with the 64-item scene: 9 * 64 + 1 = 577 layers, capped by max_compositor_layers.
+    assert parse_aux_buses([bus_json()], cfg)[0].max_layers == 577
+    assert parse_aux_buses([bus_json()], replace(cfg, max_compositor_layers=256))[0].max_layers == 256
+    pages = parse_aux_buses([pages_json(layouts=[])], cfg)[0]
+    assert (pages.max_layers, pages.layouts) == (12, (pages.layout,))
+    assert parse_aux_buses([bus_json(max_layers=100, scenes=[])], cfg)[0].max_layers == 100
+    with pytest.raises(ConfigError, match="max_layers is 100"):
+        parse_aux_buses([bus_json(max_layers=100, scenes=["grid64", "grid64"])], cfg)
+    for invalid in (0, 1.5, True):
+        with pytest.raises(ConfigError, match="max_layers"):
+            parse_aux_buses([bus_json(max_layers=invalid)], cfg)
 
 
-def test_page_commands_hold_step_and_resume_rotation(cfg):
-    published = []
-    bus = _pages(cfg, published)
-    assert (bus.pages, bus.auto) == (6, True)
-    state = bus.turn({"page": 2})
-    assert (state["page"], state["auto"], state["first"], state["total"]) == (2, False, 25, 64)
-    assert [t["id"] for t in state["tiles"]] == [f"s{i}" for i in range(24, 36)]
-    assert published[-1]["layers"][0]["input"] == 24
-    assert bus.turn({"step": -3})["page"] == 5
-    assert bus.turn({"step": 1})["page"] == 0
-    assert bus.turn({"auto": True})["auto"] is True
-    count = len(published)
-    for invalid in ({"page": 6}, {"page": True}, {"step": "1"}, {"auto": 1}, {}):
-        with pytest.raises(ConfigError):
-            bus.turn(invalid)
-    assert len(published) == count
+def test_bus_validation_and_distinct_outputs(cfg):
+    buses = parse_aux_buses([bus_json(), bus_json(id="second", renditions=[{"id": "monitor", "port": 5012}]),
+                             pages_json(id="third", renditions=[{"id": "monitor", "port": 5014}])], cfg)
+    assert [b.id for b in buses] == ["multiview", "second", "third"]
+    assert buses[0].renditions[0].fps == 30 and buses[0].renditions[0].codec == "h264_nvenc"
+    # Both presets are offered by default, the initial layout first.
+    assert [l.get("preset") for l in buses[0].layouts] == ["pgm_pvw_grid", "source_pages"]
+    assert [l.get("preset") for l in buses[2].layouts] == ["source_pages", "pgm_pvw_grid"]
+    assert buses[2].scenes == (None,) * 0 and buses[0].scenes == ("full",) * 8
+    assert parse_aux_buses([bus_json(scenes=["full"])], cfg)[0].scenes == ("full",) + (None,) * 7
+    custom = parse_aux_buses([bus_json(layout={"cells": CELLS}, scenes=[None] * 3)], cfg)[0]
+    assert (custom.layout, len(custom.layouts)) == ({"cells": CELLS}, 3)
+    for invalid in (bus_json(id="bad name"), bus_json(scenes=["missing"] * 8), bus_json(scenes="full"),
+                    bus_json(layouts={"preset": "source_pages"}), bus_json(layouts=[{"preset": "mosaic"}]),
+                    bus_json(renditions=[{"id": "monitor", "port": 5010, "color": "hlg"}])):
+        with pytest.raises((ConfigError, ValueError)):
+            parse_aux_buses([invalid], cfg)
+    with pytest.raises(ConfigError, match="port"):
+        parse_aux_buses([bus_json(), bus_json(id="second")], cfg)
+    with pytest.raises(ConfigError, match="unique"):
+        parse_aux_buses([bus_json(), bus_json(renditions=[{"id": "monitor", "port": 5012}])], cfg)
 
 
-def test_rotation_advances_pages_until_held(cfg, monkeypatch):
-    clock = [100.0]
-    monkeypatch.setattr("pyplumber.mixer.aux.time.monotonic", lambda: clock[0])
-    published = []
-    bus = _pages(cfg, published)
-    assert bus._step() == 0.5 and bus.page == 0
-    clock[0] += 5
-    bus._step()
-    assert bus.page == 1 and len(published) == 1
-    bus.turn({"page": 4})
-    clock[0] += 50
-    assert bus._step() == 0.5   # a held page is never due: no 50 ms polling
-    assert bus.page == 4
-    bus.turn({"auto": True})
-    clock[0] += 2.5
-    bus._step()
-    assert bus.page == 4
-    clock[0] += 2.5
-    bus._step()
-    assert bus.page == 5
-
-
-def test_commands_route_by_bus_kind_and_status_reports_geometry(cfg):
-    handlers = {}
-    avp = SimpleNamespace(registerControlCommand=lambda name, fn, _payload: handlers.__setitem__(name, fn),
-                          executeCommandsFromString=lambda command: None)
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps))
-    views = (AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0]),
-             AuxSourcePages(avp, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0]))
-    register_aux_commands(avp, views)
-    assert json.loads(handlers["mixer.aux_page"](json.dumps({"bus": "sources", "page": 1})))["page"] == 1
-    with pytest.raises(ConfigError, match="source pages"):
-        handlers["mixer.aux_page"](json.dumps({"bus": "multiview", "page": 1}))
-    with pytest.raises(ConfigError, match="scene multiview"):
-        handlers["mixer.aux"](json.dumps({"bus": "sources", "scenes": [None] * 8}))
-    grid, pages = json.loads(handlers["mixer.aux_status"](""))
-    assert (grid["layout"], pages["layout"]) == ("pgm_pvw_grid", "source_pages")
-    assert [c["role"] for c in grid["cells"]] == ["pvw", "pgm"] + ["slot"] * 8
-    assert pages["tiles"][0] == {"id": "s12", "kind": "video", "x": 2, "y": 10, "w": 536, "h": 300}
-    assert pages["canvas"] == {"w": 1080, "h": 1920} and pages["suspended"] is True
-    # The timing a script needs to read the follower's numbers: the bus rate and buffer.
-    assert (grid["fps"], grid["latency_ms"], grid["pvw_align"], grid["pgm_delay_frames"]) == (30, 50, "program", 1)
-    assert (pages["fps"], pages["latency_ms"]) == (30, 50) and "pvw_align" not in pages
-
-
-class StatusAvp:
-    """Records compositions and follower bases; the test sets what the compositor's status
-    reports and the follower's status (``follower``, None while that node is unreachable).
-    Like the binding, a command to an unreachable node is logged and dropped, never raised;
-    only ``node()`` raises."""
-
-    def __init__(self):
-        self.published, self.bases = [], []
-        self.status, self.follower = {"suspended": False, "pvw_scene": ""}, None
-
-    def executeCommandsFromString(self, command):
-        node, key, value = object_set(command)
-        assert key == ("base" if node.endswith("_pvw") else "composition")
-        if node.endswith("_pvw"):
-            if self.follower is not None:
-                self.bases.append(value)
-        else:
-            self.published.append(value)
-
-    def node(self, name):
-        if name.endswith("_pvw") and self.follower is None:
-            raise Exception(f"Node {name} doesn't exist.")
-        status = self.follower if name.endswith("_pvw") else self.status
-        return SimpleNamespace(getObject=lambda _key: dict(status))
-
-
-def test_encoder_backpressure_suspension_survives_automatic_updates_only(cfg, monkeypatch):
-    """Following PVW (here without the follower node, so this thread does it) and rotating pages
-    keep a suspended bus suspended; an operator's slot assignment or page turn applies a
-    composition without ``enabled``, which resumes it."""
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None)
-    avp = StatusAvp()
-    grid = AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
-    avp.status = {"suspended": True, "pvw_scene": "repeat"}
-    waits = iter([True])                        # one pass of the PVW poll
-    grid.stopped = SimpleNamespace(wait=lambda _s: next(waits))
-    grid.run()
-    assert avp.published == [{**composition(cfg, ["full"] * 8, "repeat"), "enabled": False}]
-    grid.assign({"expected_revision": grid.revision, "scenes": [None] * 8})
-    assert "enabled" not in avp.published[-1]
-
-    clock = [100.0]
-    monkeypatch.setattr("pyplumber.mixer.aux.time.monotonic", lambda: clock[0])
-    avp = StatusAvp()
-    pages = AuxSourcePages(avp, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0])
-    avp.status = {"suspended": True}
-    clock[0] += 5
-    pages._step()
-    assert avp.published[-1] == {**page_composition(cfg, 1), "enabled": False}
-    pages.turn({"page": 3})
-    assert avp.published[-1] == page_composition(cfg, 3)
-
-
-def test_multiview_shows_pgm_one_tick_late_at_the_main_latency(cfg):
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps))
-    view = AuxMultiview(None, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
-    pages = AuxSourcePages(None, None, mixer, cfg, parse_aux_buses([pages_json()], cfg)[0])
-    # 60 fps program, 30 fps aux: the main mixer's buffer (three 60 fps ticks, 1.5 aux ticks), so
-    # the PVW tile can leave with the program; the sources reach both at the same time.
-    assert view.latency_ms() == pages.latency_ms() == view.main_latency_ms() == default_latency_ms(60) == 50
-    cfg25 = replace(cfg, fps=25)
-    for latency, expected in ((default_latency_ms(25), 80), (120, 120), (20, 20)):
-        mixer.latency_ms = latency
-        assert AuxMultiview(None, None, mixer, cfg25, parse_aux_buses([bus_json()], cfg25)[0]).latency_ms() == expected
-    # A bus's own latency_ms wins over the main mixer's.
-    mixer.latency_ms = 50
-    assert AuxMultiview(None, None, mixer, cfg, parse_aux_buses([bus_json(latency_ms=70)], cfg)[0]).latency_ms() == 70
-    assert view.inputs()[-1] == view.pgm_edge   # the delay applies to the last input
+def test_program_pad_only_for_buses_whose_layouts_draw_it(cfg):
+    many = replace(cfg, sources=tuple(Source(f"s{i}", "video", f"c{i}.mp4", 1920, 1080) for i in range(128)))
+    assert parse_aux_buses([pages_json(layouts=[])], many)
+    with pytest.raises(ConfigError, match="128"):
+        parse_aux_buses([pages_json()], many)   # pgm_pvw_grid is offered: it needs the PGM pad
+    pages, grid = make_bus(cfg, pages_json(layouts=[])), make_bus(cfg, bus_json())
+    assert (pages.pgm_edge, pages.inputs()[-1], pages.pgm_delay_frames) == (None, "aux_sources_source_63", 0)
+    assert (grid.inputs()[-1], grid.pgm_delay_frames) == ("aux_multiview_pgm", 1)
+    with pytest.raises(ConfigError, match="no program input"):
+        pages.set_layout({"layout": {"preset": "pgm_pvw_grid"}})
 
 
 def test_bus_timing_options_parse_and_validate(cfg):
@@ -320,56 +273,16 @@ def test_bus_timing_options_parse_and_validate(cfg):
     chosen = parse_aux_buses([bus_json(pvw_align="pgm_tile", latency_ms=66.7, pgm_delay_frames=0, full_rate=True)], cfg)[0]
     assert (chosen.pvw_align, chosen.latency_ms, chosen.pgm_delay_frames, chosen.full_rate) == ("pgm_tile", 66.7, 0, True)
     assert chosen.renditions[0].fps == 60   # full rate: the rendition runs at the canvas rate
-    assert parse_aux_buses([bus_json(renditions=[{"id": "monitor", "port": 5010, "fps": 60}], full_rate=True)], cfg)
-    # A 50/60 fps bus matches the PGM pad two frames back: about 33 ms of margin, as at half rate.
     assert parse_aux_buses([bus_json(full_rate=True)], cfg)[0].pgm_delay_frames == 2
     assert [default_pgm_delay_frames(aux_fps(fps, full)) for fps, full in ((60, False), (60, True), (50, True), (30, True), (25, False))] == [1, 2, 2, 1, 1]
-    pages = parse_aux_buses([pages_json(full_rate=True, latency_ms=40)], cfg)[0]
-    assert (pages.full_rate, pages.latency_ms, pages.renditions[0].fps) == (True, 40, 60)
+    pages = parse_aux_buses([pages_json(full_rate=True, latency_ms=40, pvw_align="pgm_tile")], cfg)[0]
+    assert (pages.full_rate, pages.latency_ms, pages.renditions[0].fps, pages.pvw_align) == (True, 40, 60, "pgm_tile")
     for invalid in (bus_json(pvw_align="nearest"), bus_json(latency_ms=0), bus_json(latency_ms="50"),
                     bus_json(latency_ms=True), bus_json(pgm_delay_frames=7), bus_json(pgm_delay_frames=1.0),
                     bus_json(pgm_delay_frames=True), bus_json(full_rate=1),
-                    bus_json(renditions=[{"id": "monitor", "port": 5010, "fps": 60}]),   # full rate not asked for
-                    pages_json(pvw_align="program"), pages_json(pgm_delay_frames=0)):
+                    bus_json(renditions=[{"id": "monitor", "port": 5010, "fps": 60}])):   # full rate not asked for
         with pytest.raises(ConfigError):
             parse_aux_buses([invalid], cfg)
-
-
-class _Built(Exception):
-    pass
-
-
-def test_program_frame_must_reach_the_bus_before_its_deadline(cfg):
-    """At the main latency the program frame leaves its compositor when a pgm_delay_frames 0 bus
-    would draw it; the PGM pad needs a tick of delay or a longer bus buffer, at least one program
-    frame of margin. The checks precede the first graph call, which ends the build here."""
-    avp = SimpleNamespace(edges=SimpleNamespace(planCapacity=lambda *_: (_ for _ in ()).throw(_Built())))
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=50, name="mixer")
-    def build(**options):
-        AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json(**options)], cfg)[0]).build(None)
-    for options in ({"pgm_delay_frames": 0}, {"full_rate": True, "pgm_delay_frames": 0},
-                    {"pgm_delay_frames": 0, "latency_ms": 51},          # 1 ms is no margin for the output chain
-                    {"pgm_delay_frames": 0, "latency_ms": 66}):         # just under a 60 fps frame
-        with pytest.raises(ConfigError, match=r"pgm_delay_frames .* by a program frame \(16.7 ms\)"):
-            build(**options)
-    for options in ({}, {"pgm_delay_frames": 0, "latency_ms": 83.4},   # one aux tick more than the program
-                    {"pgm_delay_frames": 0, "latency_ms": 66.7},       # exactly one program frame: the floor
-                    {"full_rate": True},                               # 33.3 + 50 - 50: the default two frames
-                    {"full_rate": True, "pgm_delay_frames": 1}):       # 16.7 + 50 - 50: one frame, an opt-in
-        with pytest.raises(_Built):
-            build(**options)
-
-
-@pytest.mark.parametrize("kind,limit", [(AuxMultiview, 200), (AuxSourcePages, 240)])
-def test_latency_budget_counts_the_pgm_delay(cfg, kind, limit):
-    """At 25 fps six ticks are 240 ms, and the multiview's PGM input is held one tick more."""
-    cfg25 = replace(cfg, fps=25)
-    spec = bus_json() if kind is AuxMultiview else pages_json()
-    avp = SimpleNamespace(edges=SimpleNamespace(planCapacity=lambda *_: (_ for _ in ()).throw(_Built())))
-    for latency, error in ((limit, _Built), (limit + 1, ConfigError)):
-        mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=latency)
-        with pytest.raises(error):
-            kind(avp, None, mixer, cfg25, parse_aux_buses([spec], cfg25)[0]).build(None)
 
 
 def test_aux_monitors_default_to_one_reference_frame(cfg):
@@ -378,80 +291,255 @@ def test_aux_monitors_default_to_one_reference_frame(cfg):
     assert parse_aux_buses([custom], cfg)[0].renditions[0].dpb_size == 0
 
 
-def test_pvw_layouts_and_base_split_the_composition(cfg):
-    """The follower node sets pvw[shown] followed by base; composition() is exactly that."""
-    layouts = pvw_layouts(cfg)
-    reserved = max(len(s.items) for s in cfg.scenes)
-    assert set(layouts) == {"full", "repeat", "grid64"}
-    assert [l["z"] for l in layouts["repeat"]["layers"]] == [0, 1]
-    assert all(l["z"] < reserved for layout in layouts.values() for l in layout["layers"])
-    assert layouts["grid64"]["layers"][-1]["z"] == reserved - 1
-    pvw_cell = multiview_cells(cfg)[0]
-    assert layouts["full"]["layers"][0]["tile"] == {k: pvw_cell[k] for k in ("x", "y", "w", "h")}
-    assert layouts["full"]["active_inputs"] == 1
-    assignments = ["repeat"] * 8
-    base = base_composition(cfg, assignments)
-    assert min(l["z"] for l in base["layers"]) == reserved
-    assert base["layers"][-1]["input"] == 64 and base["layers"][-1]["z"] == reserved + 16
-    merged = composition(cfg, assignments, "full")
-    assert merged["layers"] == layouts["full"]["layers"] + base["layers"]
-    assert merged["active_inputs"] == "1" + "0" * 63 + "1"
-    assert composition(cfg, assignments, "") == base
-    with pytest.raises(ConfigError, match="unknown scene"):
-        composition(cfg, assignments, "missing")
+def test_assignment_conflict_sends_one_layout(cfg):
+    avp = FakeAvp()
+    bus = make_bus(cfg, bus_json(scenes=[]), avp)
+    reachable(avp, bus)
+    revision = bus.revision
+    first = {"expected_revision": revision, "scenes": ["full"] + [None] * 7}
+    second = {"expected_revision": revision, "scenes": [None, "repeat"] + [None] * 6}
+    results = []
+    threads = [threading.Thread(target=lambda req=req: results.append(bus.assign(req))) for req in (first, second)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(avp.layouts) == 1 and avp.layouts[0]["revision"] == bus.revision != revision
+    assert sum(bool(r.get("conflict")) for r in results) == 1
+    before = bus.revision, list(bus.scenes)
+    for invalid in (["missing"] + [None] * 7, ["full"] * 7, "full"):
+        with pytest.raises(ConfigError):
+            bus.assign({"expected_revision": bus.revision, "scenes": invalid})
+    assert (bus.revision, bus.scenes) == before
+    assert bus.assign({"scenes": [None] * 8})["conflict"]
+    # A new instance never accepts the previous one's revision.
+    assert make_bus(cfg, bus_json()).assign({"expected_revision": bus.revision, "scenes": [None] * 8})["conflict"]
 
 
-def test_multiview_builds_a_follower_holding_the_layouts(cfg, monkeypatch):
-    import pyplumber.mixer.aux as aux_module
-    monkeypatch.setattr(aux_module._AuxOutput, "build", lambda self, options: None)
-    nodes = []
-    avp = SimpleNamespace(addNode=nodes.append)
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps), name="mixer")
-    view = AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
-    view.build(None)
-    follower, = nodes
-    p = follower.parameters
-    assert (p["type"], p["name"]) == ("mixer_pvw_follow", "aux_multiview_pvw")
-    assert (p["mixer"], p["compositor"], p["group"]) == ("mixer", "aux_multiview_comp", "aux_multiview")
-    assert (p["fps"], p["latency_ms"], p["main_latency_ms"], p["pgm_delay_frames"], p["align"]) == ("30", 50, 50, 1, "program")
-    assert (p["auto_restart"], p["on_error"]) == ("off", "off")
-    assert p["base"] == {"revision": view.revision, **base_composition(cfg, ["full"] * 8)}
-    assert p["pvw"] == pvw_layouts(cfg)
-    # A bus with its own timing hands it to the follower and the compositor alike.
-    nodes.clear()
-    mixer.latency_ms = 60
-    bus = parse_aux_buses([bus_json(pvw_align="pgm_tile", latency_ms=80, pgm_delay_frames=2, full_rate=True)], cfg)[0]
-    AuxMultiview(avp, None, mixer, cfg, bus).build(None)
-    p = nodes[0].parameters
-    assert (p["fps"], p["latency_ms"], p["main_latency_ms"], p["pgm_delay_frames"], p["align"]) == ("60", 80, 60, 2, "pgm_tile")
-
-
-def test_assignment_hands_the_follower_the_base_or_falls_back(cfg):
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps))
-    avp = StatusAvp()
-    avp.follower = {"base_revision": "stale"}
-    grid = AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
+def test_follower_gets_preview_layers_and_base_of_the_current_layout(cfg):
+    avp = FakeAvp()
+    bus = make_bus(cfg, bus_json(), avp)
+    reachable(avp, bus)
     scenes = ["repeat"] + [None] * 7
-    grid.assign({"expected_revision": grid.revision, "scenes": scenes})
-    assert avp.bases == [{"revision": grid.revision, **base_composition(cfg, scenes)}]
-    assert avp.published == []
-    # Once a second: a follower reporting another base revision (it restarted) gets the current one.
-    assert grid._step() == 1.0
-    assert len(avp.bases) == 2 and avp.bases[-1]["revision"] == grid.revision
-    avp.follower = {"base_revision": grid.revision, "pvw_scene": "repeat"}
-    assert grid._step() == 1.0 and len(avp.bases) == 2
-    assert grid.details()["follower"] == avp.follower
-    assert grid.preview == "repeat"   # what the node shows, for a composition set here later
-    # An assignment is pending until the follower has set a composition with its base.
-    assert grid.state()["composition_pending"]
-    avp.follower = {**avp.follower, "applied_base_revision": grid.revision}
-    assert not grid.state().get("composition_pending")   # the compositor's own flag decides
-    # Unreachable: this thread follows the preview at 50 ms and sets the composition itself.
-    avp.follower = None
-    avp.status = {"suspended": False, "pvw_scene": "full"}
-    assert grid._step() == 0.05
-    assert avp.published == [{**composition(cfg, scenes, "full"), "enabled": True}]
-    assert grid.details()["follower"]["error"]
-    # A reassignment then goes to the compositor: the node would drop the base without a word.
-    grid.assign({"expected_revision": grid.revision, "scenes": [None] * 8})
-    assert avp.published[-1] == composition(cfg, [None] * 8, "full") and len(avp.bases) == 2
+    bus.assign({"expected_revision": bus.revision, "scenes": scenes})
+    layout, = avp.layouts
+    assert layout == {"revision": bus.revision, "pvw": pvw_layouts(cfg, grid_cells(cfg)),
+                      "base": base_composition(cfg, grid_cells(cfg), scenes), "resume": True}
+
+
+def test_runtime_layout_switch_keeps_assignments_by_slot(cfg):
+    avp = FakeAvp()
+    bus = make_bus(cfg, bus_json(scenes=["full", "repeat", "full"] + [None] * 5, layouts=[{"cells": CELLS}]), avp)
+    reachable(avp, bus)
+    result = bus.set_layout({"layout": {"cells": CELLS}})
+    assert result["layout"] == {"cells": CELLS} and result["scenes"] == ["full", "repeat", "full"] + [None] * 5
+    sent = avp.layouts[-1]
+    assert sent["revision"] == bus.revision
+    assert sent["base"] == base_composition(cfg, CELLS, ["full", "repeat", "full"])
+    assert all(not l["layers"] for l in sent["pvw"].values())   # no pvw cell: the preview draws nothing
+    state = bus.state()
+    assert [c["role"] for c in state["cells"]] == ["slot", "slot", "source", "slot", "pgm"]
+    assert state["cells"][2] == {**CELLS[2], "id": "s63", "kind": "video"}
+    # Three slots now: an assignment still lists every slot kept, the hidden ones too.
+    bus.assign({"expected_revision": bus.revision, "scenes": [None, "full", None] + [None] * 5})
+    assert avp.layouts[-1]["base"]["layers"][0]["input"] == 63
+    # Pages: no slots, the assignments wait for a layout that has them.
+    bus.set_layout({"layout": {"preset": "source_pages", "rotate_s": 3}})
+    assert bus.state()["page"] == 0 and avp.layouts[-1]["base"] == base_composition(cfg, layout_cells(cfg, bus.layout), [])
+    with pytest.raises(ConfigError, match="no scene slots"):
+        bus.assign({"expected_revision": bus.revision, "scenes": [None] * 8})
+    bus.set_layout({"layout": {"preset": "pgm_pvw_grid"}})
+    assert bus.scenes == [None, "full"] + [None] * 6
+    for invalid in ({"layout": {"preset": "mosaic"}}, {}, {"layout": {"cells": [{**CELLS[0], "x": 1}]}}):
+        with pytest.raises(ConfigError):
+            bus.set_layout(invalid)
+
+
+def test_layout_over_the_budget_is_refused_and_changes_nothing(cfg):
+    avp = FakeAvp()
+    bus = make_bus(cfg, bus_json(scenes=["grid64"] * 3, max_layers=300), avp)
+    reachable(avp, bus)
+    pvw = [{"role": "pvw", "x": 0, "y": 0, "w": 540, "h": 960}, {"role": "pvw", "x": 540, "y": 0, "w": 540, "h": 960}]
+    # Two PVW cells reserve 128, slots 0 and 1 hold 64 each: 256 fit; slot 2 makes it 320.
+    bus.set_layout({"layout": {"cells": [*pvw, CELLS[1], CELLS[3]]}})
+    before = bus.layout, bus.revision, len(avp.layouts)
+    with pytest.raises(ConfigError, match="needs 320 layers including 128 reserved for PVW; the bus's max_layers is 300"):
+        bus.set_layout({"layout": {"cells": [*pvw, CELLS[1], CELLS[3], CELLS[0]]}})
+    assert (bus.layout, bus.revision, len(avp.layouts)) == before
+
+
+def test_status_is_pending_until_the_compositor_draws_the_revision(cfg):
+    avp = FakeAvp()
+    bus = make_bus(cfg, bus_json(), avp)
+    assert bus.state()["composition_pending"] and bus.state()["suspended"]   # nothing reachable yet
+    reachable(avp, bus)
+    assert not bus.state()["composition_pending"]
+    bus.assign({"expected_revision": bus.revision, "scenes": [None] * 8})
+    assert bus.state()["composition_pending"]   # the follower has not set it yet
+    avp.statuses[bus.node_name]["composition_revision"] = bus.revision
+    avp.statuses[bus.node_name]["composition_pending"] = True   # staged until its inputs have frames
+    assert bus.state()["composition_pending"]
+    avp.statuses[bus.node_name]["composition_pending"] = False
+    assert not bus.state()["composition_pending"]
+    # A staged composition the compositor dropped keeps the old revision: pending, with its error.
+    previous = bus.revision
+    bus.assign({"expected_revision": bus.revision, "scenes": ["full"] * 8})
+    avp.statuses[bus.node_name].update(composition_revision=previous, composition_error="Aux inputs not ready")
+    state = bus.state()
+    assert state["composition_pending"] and state["composition_error"] == "Aux inputs not ready"
+
+
+def test_commands_route_any_number_of_buses_by_id(cfg):
+    avp = FakeAvp()
+    specs = [bus_json(id=f"bus{i}", renditions=[{"id": "monitor", "port": 5010 + 2 * i}]) for i in range(3)]
+    buses = AuxBuses(avp, [AuxBus(avp, None, SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50),
+                                  cfg, spec) for spec in parse_aux_buses(specs, cfg)])
+    for bus in buses:
+        reachable(avp, bus)
+    buses.register_commands()
+    assert set(avp.handlers) == {"mixer.aux", "mixer.aux_layout", "mixer.aux_page", "mixer.aux_status"}
+    assert avp.command("mixer.aux_layout", bus="bus2", layout={"preset": "source_pages"})["page"] == 0
+    assert avp.command("mixer.aux_page", bus="bus2", page=3)["layout"]["page"] == 3
+    with pytest.raises(ConfigError, match="no source pages"):
+        avp.command("mixer.aux_page", bus="bus0", page=1)
+    with pytest.raises(ConfigError, match="Unknown aux bus"):
+        avp.command("mixer.aux", bus="bus3", scenes=[])
+    status = json.loads(avp.handlers["mixer.aux_status"](""))
+    assert [b["id"] for b in status] == ["bus0", "bus1", "bus2"]
+    grid, _, pages = status
+    assert (grid["layout"], [c["role"] for c in grid["cells"]][:2]) == ({"preset": "pgm_pvw_grid"}, ["pvw", "pgm"])
+    assert [l.get("preset") for l in grid["layouts"]] == ["pgm_pvw_grid", "source_pages"]
+    assert (pages["page"], pages["pages"], pages["auto"], pages["first"], pages["total"]) == (3, 6, False, 37, 64)
+    assert pages["cells"][0] == {"role": "source", "source": 36, "id": "s36", "kind": "video", **page_grid(cfg)[0]}
+    assert (grid["fps"], grid["latency_ms"], grid["pvw_align"], grid["pgm_delay_frames"], grid["max_layers"]) == (30, 50, "program", 1, 577)
+
+
+def test_page_commands_hold_step_and_resume_rotation(cfg):
+    avp = FakeAvp()
+    bus = make_bus(cfg, pages_json(), avp)
+    reachable(avp, bus)
+    state = bus.turn({"page": 2})
+    assert (state["page"], state["auto"], state["first"], state["layout"]["page"]) == (2, False, 25, 2)
+    assert avp.layouts[-1]["base"]["layers"][0]["input"] == 24
+    assert bus.turn({"step": -3})["page"] == 5
+    assert bus.turn({"step": 1})["page"] == 0
+    count = len(avp.layouts)
+    assert bus.turn({"auto": True})["auto"] is True and bus.layout["page"] is None
+    assert bus.turn({"auto": False})["layout"]["page"] == 0
+    assert len(avp.layouts) == count   # rotation on or off draws nothing new
+    for invalid in ({"page": 6}, {"page": True}, {"step": "1"}, {"auto": 1}, {}):
+        with pytest.raises(ConfigError):
+            bus.turn(invalid)
+    assert len(avp.layouts) == count
+
+
+def test_one_scheduler_rotates_pages_and_resends_layouts_for_every_bus(cfg, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("pyplumber.mixer.aux.time.monotonic", lambda: clock[0])
+    avp = FakeAvp()
+    specs = [pages_json(id="a"), pages_json(id="b", rotate_s=2, renditions=[{"id": "monitor", "port": 5014}]),
+             bus_json(renditions=[{"id": "monitor", "port": 5016}])]
+    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50)
+    buses = AuxBuses(avp, [AuxBus(avp, None, mixer, cfg, spec) for spec in parse_aux_buses(specs, cfg)])
+    a, b, grid = buses
+    for bus in buses:
+        reachable(avp, bus)
+    assert buses.tick() == 1.0   # nothing due before the follower check
+    clock[0] += 2
+    assert buses.tick() == pytest.approx(1.0)
+    assert (a.page, b.page) == (0, 1)
+    sent, = avp.layouts
+    assert sent["resume"] is False and sent["base"]["layers"][0]["input"] == 12   # a page turn keeps a suspension
+    avp.statuses[grid.follower]["layout_revision"] = "built"   # restarted: holds its build-time layout
+    clock[0] += 3
+    buses.tick()
+    assert (a.page, b.page) == (1, 2)
+    assert avp.layouts[-1] == grid.layout_object() and len(avp.layouts) == 4
+    # A held page is never due.
+    a.turn({"page": 4})
+    clock[0] += 50
+    buses.tick()
+    assert a.page == 4
+
+
+def test_scheduler_survives_an_unreachable_follower(cfg, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("pyplumber.mixer.aux.time.monotonic", lambda: clock[0])
+    avp = FakeAvp()
+    buses = AuxBuses(avp, [make_bus(cfg, pages_json(), avp)])
+    bus, = buses
+    clock[0] += 5
+    assert 0.05 <= buses.tick() <= 1.0
+    assert bus.page == 1 and avp.layouts == []   # dropped by the binding, resent once reachable
+    assert bus.state()["follower"]["error"]
+    reachable(avp, bus)
+    avp.statuses[bus.follower]["layout_revision"] = "built"
+    clock[0] += 1
+    buses.tick()
+    assert avp.layouts[-1]["revision"] == bus.revision
+
+
+def test_bus_builds_its_nodes_in_one_group(cfg, monkeypatch):
+    import pyplumber.mixer.janus as janus
+    nodes = []
+    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: "listener")
+    avp = SimpleNamespace(addNode=lambda node, **kw: nodes.append(node), edges=SimpleNamespace(planCapacity=lambda *a: None))
+    api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
+    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
+                            canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
+                            backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
+    options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="")
+    bus = AuxBus(avp, api, mixer, cfg, parse_aux_buses([bus_json(scenes=["repeat"])], cfg)[0])
+    bus.build(options)
+    compositor, converted, follower = (n.parameters for n in nodes)
+    assert {p["group"] for p in (compositor, converted, follower)} == {"aux_multiview"}
+    assert compositor["src"] == compositor["subscriptions"] == [*bus.edges, "aux_multiview_pgm"]
+    assert (compositor["max_layers"], compositor["pgm_delay_frames"]) == (577, 1)
+    assert compositor["layers"] == follower["layout"]["base"]["layers"]
+    assert (follower["type"], follower["name"], follower["compositor"]) == ("mixer_pvw_follow", "aux_multiview_pvw", "aux_multiview_comp")
+    assert (follower["fps"], follower["latency_ms"], follower["main_latency_ms"], follower["align"]) == ("30", 50, 50, "program")
+    assert follower["layout"] == bus.layout_object()
+
+
+class _Built(Exception):
+    pass
+
+
+def _build_until_the_graph(cfg, spec, latency_ms):
+    """The checks precede the first graph call, which ends the build here."""
+    avp = SimpleNamespace(edges=SimpleNamespace(planCapacity=lambda *_: (_ for _ in ()).throw(_Built())))
+    make_bus(cfg, spec, avp, latency_ms).build(None)
+
+
+def test_program_frame_must_reach_the_bus_before_its_deadline(cfg):
+    """At the main latency the program frame leaves its compositor when a pgm_delay_frames 0 bus
+    would draw it; the PGM pad needs a tick of delay or a longer bus buffer, at least one program
+    frame of margin. A bus that never draws the program is not held to it."""
+    for options in ({"pgm_delay_frames": 0}, {"full_rate": True, "pgm_delay_frames": 0},
+                    {"pgm_delay_frames": 0, "latency_ms": 51}, {"pgm_delay_frames": 0, "latency_ms": 66}):
+        with pytest.raises(ConfigError, match=r"pgm_delay_frames .* by a program frame \(16.7 ms\)"):
+            _build_until_the_graph(cfg, bus_json(**options), 50)
+    for spec in (bus_json(), bus_json(pgm_delay_frames=0, latency_ms=83.4), bus_json(pgm_delay_frames=0, latency_ms=66.7),
+                 bus_json(full_rate=True), bus_json(full_rate=True, pgm_delay_frames=1),
+                 pages_json(layouts=[], pgm_delay_frames=0, latency_ms=20)):
+        with pytest.raises(_Built):
+            _build_until_the_graph(cfg, spec, 50)
+
+
+@pytest.mark.parametrize("spec,limit", [(bus_json(), 200), (pages_json(layouts=[]), 240)])
+def test_latency_budget_counts_the_pgm_delay(cfg, spec, limit):
+    """At 25 fps six ticks are 240 ms, and a bus's PGM input is held one tick more."""
+    cfg25 = replace(cfg, fps=25)
+    for latency, error in ((limit, _Built), (limit + 1, ConfigError)):
+        with pytest.raises(error):
+            _build_until_the_graph(cfg25, {**spec, "latency_ms": latency}, 50)
+
+
+def test_bus_latency_defaults_to_the_main_mixer(cfg):
+    # 60 fps program, 30 fps aux: the main mixer's buffer (three 60 fps ticks, 1.5 aux ticks), so
+    # the pvw cell can leave with the program; the sources reach both at the same time.
+    assert make_bus(cfg, bus_json()).latency_ms() == default_latency_ms(60) == 50
+    cfg25 = replace(cfg, fps=25)
+    for latency, expected in ((default_latency_ms(25), 80), (120, 120), (20, 20)):
+        assert make_bus(cfg25, pages_json(), latency_ms=latency).latency_ms() == expected
+    assert make_bus(cfg, bus_json(latency_ms=70)).latency_ms() == 70   # the bus's own wins

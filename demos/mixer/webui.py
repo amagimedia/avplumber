@@ -47,6 +47,7 @@ PAGE = Path(__file__).with_name("webui") / "index.html"
 CONFIG_SCRIPT = '<script id="config" type="application/json">%s</script>'
 TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")
 PROGRAM_TAKES = ("cut", "fade", "wipe")
+AUX_COMMANDS = ("aux", "aux_layout", "aux_page")   # answered with the bus's layout and scenes, which setup keeps
 STATE_TTL_S = 0.2
 
 
@@ -325,10 +326,10 @@ class MixerBridge:
         return state
 
     def take(self, request: dict):
-        """Returns the mixer's answer to an aux, aux_page or dsk command; for a take, whether it was sent
+        """Returns the mixer's answer to an aux, aux_layout, aux_page or dsk command; for a take, whether it was sent
         (False when a newer program take superseded it unsent)."""
         command = request.get("command")
-        if command in ("aux", "aux_page", "dsk"):
+        if command in ("dsk", *AUX_COMMANDS):
             payload = {k: v for k, v in request.items() if k != "command"}
             try:
                 result = json.loads(self.command(f"mixer.{command} " + json.dumps(payload)) or "{}")
@@ -465,10 +466,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json(502, {"error": str(exc)})
             return
-        if self.setup_manager and request.get("command") == "aux":
+        if self.setup_manager and request.get("command") in AUX_COMMANDS:
             try:
-                self.setup_manager.remember_aux(request.get("bus"), result["scenes"])
-            except Exception as exc:   # the tiles are live; only their persistence failed
+                self.setup_manager.remember_aux(request.get("bus"), result)
+            except Exception as exc:   # the bus is live; only its persistence failed
                 print(f"Could not persist aux {request.get('bus')}: {exc}", flush=True)
         self._send_json(200, {"ok": True, "superseded": True} if result is False else {"ok": True})
 

@@ -391,7 +391,9 @@ def test_setup_preserves_live_aux_through_color_change_and_resume(runtime, monke
                           "renditions": [{"id": "monitor", "port": 5008}]}]
     config.write_text(json.dumps(show))
     live = [scene_ids[1], scene_ids[-1], *([None] * 6)]
-    runtime.bridge.command = lambda cmd: json.dumps([{"id": "mv", "scenes": live}])
+    # The live layout carries over; a held page does not, pages follow the new source list.
+    layout = {"preset": "source_pages", "page": 0, "rotate_s": 7.0}
+    runtime.bridge.command = lambda cmd: json.dumps([{"id": "mv", "layout": layout, "scenes": live}])
     def prepare(recipe, directory):
         generated, _, _ = prepare_demo.plan(recipe, directory)
         config.write_text(json.dumps(generated))
@@ -402,6 +404,7 @@ def test_setup_preserves_live_aux_through_color_change_and_resume(runtime, monke
     changed = json.loads(config.read_text())
     assert changed["canvas"]["color"] == ("sdr" if after == 8 else "hlg")
     assert changed["aux_buses"][0]["scenes"] == live
+    assert changed["aux_buses"][0]["layout"] == {"preset": "source_pages", "rotate_s": 7.0}
     from pyplumber.mixer.config import parse
     rendition = parse(changed).aux_buses[0].renditions[0]
     assert (rendition.codec, rendition.color, rendition.port) == ("h264_nvenc", "sdr", 5008)
@@ -433,7 +436,7 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
     r = cfg.aux_buses[0].renditions[0]
     assert (r.width, r.height, r.fps, r.bitrate_kbps) == (1920, 1080, 25, 4500)
     pages = cfg.aux_buses[1]
-    assert (pages.layout, pages.rotate_s, pages.scenes) == ("source_pages", 8.0, ())
+    assert (pages.layout, pages.scenes) == ({"preset": "source_pages", "page": None, "rotate_s": 8.0}, ())
     assert (pages.renditions[0].width, pages.renditions[0].height, pages.renditions[0].fps) == (1920, 1080, 25)
     full = cfg.aux_buses[2]   # a full-rate bus follows the new canvas rate, not half of it
     assert (full.full_rate, full.pvw_align, full.renditions[0].fps) == (True, "pgm_tile", 50)
@@ -733,9 +736,12 @@ def test_live_aux_assignments_survive_resume(runtime, monkeypatch):
     config.write_text(json.dumps(show))
     runtime.recipe_path.write_text(json.dumps(recipe))
     live = [scene_ids[1], None, scene_ids[-1], *([None] * 5)]
-    runtime.remember_aux("mv", live)
-    runtime.remember_aux("unknown", live)
-    assert json.loads(config.read_text())["aux_buses"][0]["scenes"] == live
+    layout = {"preset": "source_pages", "page": None, "rotate_s": 7.0}
+    runtime.remember_aux("mv", {"scenes": live, "revision": "r"})
+    runtime.remember_aux("mv", {"layout": layout, "page": 0})
+    runtime.remember_aux("unknown", {"scenes": live})
+    assert json.loads(config.read_text())["aux_buses"][0] == {
+        "id": "mv", "scenes": live, "layout": layout, "renditions": [{"id": "monitor", "port": 5008}]}
     def prepare(recipe, directory):
         generated, _, _ = prepare_demo.plan(recipe, directory)
         config.write_text(json.dumps(generated))
@@ -744,7 +750,9 @@ def test_live_aux_assignments_survive_resume(runtime, monkeypatch):
     runtime.apply()          # resume
     runtime.worker.join(3)
     assert runtime.status()["phase"] == "running", runtime.status()
-    assert json.loads(config.read_text())["aux_buses"][0]["scenes"] == live
+    from pyplumber.mixer.config import parse
+    bus = parse(json.loads(config.read_text())).aux_buses[0]
+    assert (bus.layout, list(bus.scenes)) == (layout, live)
 
 
 def test_stale_preparation_directories_are_removed_on_start(tmp_path):

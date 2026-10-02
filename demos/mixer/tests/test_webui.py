@@ -442,11 +442,26 @@ def test_key_fades_reach_the_mixer_unchanged(client):
     assert bridge.sent == ['mixer.dsk {"key": "bug", "on": true, "fade_seconds": 0.5, "curve": "ease-out"}']
 
 
-def test_aux_page_requests_reach_the_mixer(client):
-    bridge = FakeBridge({"mixer.aux_page": '{"page": 3}'})
-    url, _ = client(bridge)
+def test_aux_requests_reach_the_mixer_and_setup_keeps_the_bus(monkeypatch):
+    monkeypatch.setattr(GpuStats, 'snapshot', lambda _: [])
+    layout = {"preset": "source_pages", "page": 3, "rotate_s": 5.0}
+    bridge = FakeBridge({"mixer.aux_page": json.dumps({"layout": layout, "scenes": [], "page": 3}),
+                         "mixer.aux_layout": json.dumps({"layout": layout, "scenes": []}),
+                         "mixer.aux ": '{"error": "Assignments changed; refresh before editing", "conflict": true}'})
+    remembered = []
+    setup = SimpleNamespace(remember_aux=lambda bus, fields: remembered.append((bus, fields)),
+                            status=lambda: {"revision": 1})
+    server = serve(bridge, "127.0.0.1", 0, setup=setup)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
     assert post(url, {"command": "aux_page", "bus": "mv2", "step": 1})[0] == 200
-    assert bridge.sent == ['mixer.aux_page {"bus": "mv2", "step": 1}']
+    assert post(url, {"command": "aux_layout", "bus": "mv2", "layout": {"preset": "source_pages"}})[0] == 200
+    assert post(url, {"command": "aux", "bus": "mv2", "scenes": []})[0] == 400   # a conflict changes nothing
+    assert bridge.sent == ['mixer.aux_page {"bus": "mv2", "step": 1}',
+                           'mixer.aux_layout {"bus": "mv2", "layout": {"preset": "source_pages"}}',
+                           'mixer.aux {"bus": "mv2", "scenes": []}']
+    assert [bus for bus, _ in remembered] == ["mv2", "mv2"] and remembered[0][1]["layout"] == layout
+    server.shutdown()
 
 
 @pytest.mark.parametrize("payload, expected", [

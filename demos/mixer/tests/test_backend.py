@@ -65,7 +65,9 @@ def test_program_wipe_aux_and_renditions_use_same_backend(native_boundary, tmp_p
 
 
 @pytest.mark.parametrize("scene_view", [True, False])
-def test_source_pages_bus_skips_the_program_tap_and_labels_outputs(native_boundary, tmp_path, scene_view):
+def test_bus_without_a_pgm_layout_skips_the_program_tap_and_labels_outputs(native_boundary, tmp_path, scene_view):
+    """A bus whose layouts never draw the program gets no PGM pad; one that may (by default both
+    presets are offered) gets it last, matched back pgm_delay_frames."""
     nodes, builder = native_boundary
     class Engine(FakeAvp):
         def addNode(self, node, **kwargs):
@@ -74,7 +76,8 @@ def test_source_pages_bus_skips_the_program_tap_and_labels_outputs(native_bounda
     api.AVPlumber = Engine
     api.MixerCompositor = nodes.MixerCompositor
     api.MixerGraphBuilder = builder
-    buses = [{"id": "mv2", "layout": {"preset": "source_pages"}, "renditions": [{"id": "monitor", "port": 5012}]}]
+    buses = [{"id": "mv2", "layout": {"preset": "source_pages"}, "layouts": [],
+              "renditions": [{"id": "monitor", "port": 5012}]}]
     if scene_view:
         buses.insert(0, {"id": "mv", "scenes": ["full"] * 8, "renditions": [{"id": "monitor", "port": 5008}]})
     path = tmp_path / "show.json"
@@ -104,6 +107,8 @@ def test_source_pages_bus_skips_the_program_tap_and_labels_outputs(native_bounda
         assert graph["aux_mv_comp"]["pgm_delay_frames"] == 1
         assert graph["aux_mv_comp"]["src"][-1] == "aux_mv_pgm"   # the delayed input is the last one
         assert "pgm_delay_frames" not in pages
+        # The larger of its layouts: a page of twelve sources, over PVW, PGM and eight one-item slots.
+        assert graph["aux_mv_comp"]["max_layers"] == 12
         assert graph["aux_mv_encoder"]["options"]["dpb_size"] == 1
     else:
         assert "program_aux_tap" not in graph

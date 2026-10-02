@@ -190,18 +190,21 @@ class DskKey:
 
 
 @dataclass(frozen=True)
-class AuxBus:
+class AuxBusConfig:
+    """One AUX bus; layouts are normalized aux_layout specs."""
     id: str
-    scenes: Tuple[Optional[str], ...]
+    scenes: Tuple[Optional[str], ...]    # slot assignments by slot index, at least one per slot cell
     renditions: Tuple[Rendition, ...]
-    layout: str = "pgm_pvw_grid"   # or "source_pages": every source, one page of tiles at a time
-    rotate_s: float = 5.0          # source_pages: seconds per page while rotating
-    # pgm_pvw_grid: when the PVW tile changes on a take: "program", with the program output, or
-    # "pgm_tile", with the PGM tile of the same multiview (one pgm_delay_frames later).
+    layout: Dict[str, Any]               # the initial layout
+    layouts: Tuple[Dict[str, Any], ...]  # what the operator can switch to, the initial one first
+    max_layers: int                      # the compositor's layer budget, fixed at build
+    rotate_s: float = 5.0                # seconds per page of a source_pages layout that names none
+    # when a pvw cell changes on a take: "program", with the program output, or "pgm_tile", with
+    # the pgm cell of the same frame (one pgm_delay_frames later).
     pvw_align: str = "program"
     latency_ms: Optional[float] = None   # the bus compositor's playout buffer; None: the main mixer's
-    # pgm_pvw_grid: aux ticks the PGM pad is matched back; parse_aux_buses defaults it to
-    # default_pgm_delay_frames (1, or 2 at a 50/60 fps bus).
+    # aux ticks the PGM pad is matched back; parse_aux_buses defaults it to default_pgm_delay_frames
+    # (1, or 2 at a 50/60 fps bus).
     pgm_delay_frames: int = 1
     full_rate: bool = False              # run at the canvas rate at 50/60 fps instead of half
 
@@ -227,7 +230,7 @@ class MixerConfig:
     latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default default_latency_ms(fps)
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
-    aux_buses: Tuple[AuxBus, ...] = ()
+    aux_buses: Tuple[AuxBusConfig, ...] = ()
     dsk_keys: Tuple[DskKey, ...] = ()
     dsk_fade_seconds: float = DEFAULT_DSK_FADE_SECONDS   # what a key change fades over unless the command says; 0 cuts
     dsk_fade_curve: str = DEFAULT_FADE_CURVE
@@ -267,7 +270,8 @@ class MixerConfig:
                                  "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
                                  "port": r.port, "mountpoint": r.port, "fps": r.fps})
         labels = {"pgm_pvw_grid": "Program preview", "source_pages": "Multiviewer"}
-        previews += [{"bus": b.id, "label": labels[b.layout], "layout": b.layout, "rendition": r.id,
+        previews += [{"bus": b.id, "label": labels.get(b.layout.get("preset"), f"Aux {b.id}"),
+                      "layout": b.layout.get("preset", "cells"), "rendition": r.id,
                       "codec": "h264", "color": "sdr", "port": r.port, "mountpoint": r.port, "fps": r.fps}
                      for b in self.aux_buses for r in b.renditions]
         return {"source_count": len(self.sources), "browser_ring_size": self.browser_ring_size,
@@ -589,20 +593,16 @@ def default_pgm_delay_frames(aux_fps):
     return 2 if aux_fps > 30 else 1
 
 
-def _parse_bus_timing(obj, multiview, canvas_fps):
+def _parse_bus_timing(obj, canvas_fps):
     """pvw_align, latency_ms, pgm_delay_frames and full_rate of one bus; the first and third
-    belong to the pgm_pvw_grid layout only. Their consistency with the main latency is checked
-    at build (_AuxOutput.build), where the main mixer's latency is known."""
+    matter while its layout draws the preview or the program. Their consistency with the main
+    latency is checked at build (AuxBus.build), where the main mixer's latency is known."""
     if not isinstance(obj.get("full_rate", False), bool):
         raise ConfigError("aux full_rate must be a boolean")
     latency = obj.get("latency_ms")
     if latency is not None and (isinstance(latency, bool) or not isinstance(latency, (int, float)) or
                                 not math.isfinite(latency) or latency <= 0):
         raise ConfigError("aux latency_ms must be a positive number of milliseconds or null")
-    if not multiview:
-        if "pvw_align" in obj or "pgm_delay_frames" in obj:
-            raise ConfigError("pvw_align and pgm_delay_frames apply to the pgm_pvw_grid layout only")
-        return {"latency_ms": latency, "full_rate": obj.get("full_rate", False)}
     align = obj.get("pvw_align", "program")
     if align not in PVW_ALIGNMENTS:
         raise ConfigError(f"aux pvw_align must be one of {', '.join(PVW_ALIGNMENTS)}")
@@ -613,48 +613,43 @@ def _parse_bus_timing(obj, multiview, canvas_fps):
             "full_rate": obj.get("full_rate", False)}
 
 
-def validate_assignments(cfg, scenes):
-    definitions = {s.id: s for s in cfg.scenes}
-    if not isinstance(scenes, (list, tuple)) or len(scenes) != 8:
-        raise ConfigError("multiview needs exactly eight scene assignments (null clears a slot)")
-    if any(s is not None and (not isinstance(s, str) or s not in definitions) for s in scenes):
-        raise ConfigError("multiview references an unknown scene")
-    reserved = max(len(s.items) for s in cfg.scenes)
-    count = reserved + 1 + sum(len(definitions[s].items) for s in scenes if s is not None)
-    if count > cfg.max_compositor_layers:
-        raise ConfigError(f"multiview needs {count} layers including {reserved} reserved for PVW; limit is {cfg.max_compositor_layers}")
-
-
 def parse_aux_buses(values, cfg):
+    """Each bus: its initial `layout` (pgm_pvw_grid by default) and the `layouts` the operator can
+    switch to (both presets by default), its slot assignments `scenes`, and the layer budget
+    `max_layers`, by default what the largest of its layouts draws, up to max_compositor_layers."""
+    from .aux_layout import (PRESETS, check_assignments, count, draws_program, layout_cells, max_layer_count,
+                             parse_layout, rotate_seconds, same_kind)
     if not isinstance(values, list) or len(values) > 30:
         raise ConfigError("aux_buses must be a list of at most 30 buses")
     if values and cfg.fps not in (25, 30, 50, 60):
-        raise ConfigError("multiview supports program rates 25, 30, 50 and 60")
+        raise ConfigError("aux buses support program rates 25, 30, 50 and 60")
     result, ids = [], set()
     for obj in values:
         bid = obj.get("id", "")
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", bid) or bid in ids:
             raise ConfigError("aux bus IDs must be unique identifiers")
         ids.add(bid)
-        layout = obj.get("layout", {})
-        preset = layout.get("preset", "pgm_pvw_grid")
-        rotate_s = obj.get("rotate_s", 5)
-        if preset == "source_pages":
-            if set(layout) != {"preset"} or "scenes" in obj:
-                raise ConfigError("source_pages takes no grid size or scenes: it pages through every source")
-            if len(cfg.sources) > 128:
-                raise ConfigError("source pages need one pad per unique source; limit is 128")
-            if isinstance(rotate_s, bool) or not isinstance(rotate_s, (int, float)) or not 1 <= rotate_s <= 60:
-                raise ConfigError("rotate_s must be 1 to 60 seconds")
-            scenes = ()
-        else:
-            if preset != "pgm_pvw_grid" or layout.get("rows", 2) != 2 or layout.get("cols", 4) != 4 or "rotate_s" in obj:
-                raise ConfigError("aux layout is pgm_pvw_grid (2 rows by 4 columns, no rotate_s) or source_pages")
-            if len(cfg.sources) + 1 > 128:
-                raise ConfigError("multiview needs one pad per unique source plus PGM; limit is 128")
-            scenes = obj.get("scenes", [None] * 8)
-            validate_assignments(cfg, scenes)
-        timing = _parse_bus_timing(obj, preset == "pgm_pvw_grid", cfg.fps)
+        rotate_s = rotate_seconds(obj.get("rotate_s", 5))
+        layouts = [parse_layout(cfg, obj.get("layout", {"preset": "pgm_pvw_grid"}), rotate_s)]
+        offered = obj.get("layouts", [{"preset": p} for p in PRESETS])
+        if not isinstance(offered, list) or len(offered) > 16:
+            raise ConfigError(f"aux {bid}: layouts must be a list of at most 16 layouts")
+        for spec in (parse_layout(cfg, spec, rotate_s) for spec in offered):
+            if not any(same_kind(spec, known) for known in layouts):
+                layouts.append(spec)
+        if len(cfg.sources) + draws_program(cfg, layouts) > 128:
+            raise ConfigError("an aux bus needs one pad per unique source, plus PGM when a layout draws it; limit is 128")
+        max_layers = obj.get("max_layers", min(cfg.max_compositor_layers,
+                                               max(max_layer_count(cfg, layout_cells(cfg, spec)) for spec in layouts)))
+        if type(max_layers) is not int or not 1 <= max_layers <= 2_147_483_647:
+            raise ConfigError(f"aux {bid}: max_layers must be a positive 32-bit integer")
+        cells = layout_cells(cfg, layouts[0], layouts[0].get("page") or 0)
+        scenes = obj.get("scenes", [])
+        if not isinstance(scenes, list):
+            raise ConfigError(f"aux {bid}: scenes must be a list of scene IDs by slot (null clears a slot)")
+        scenes = scenes + [None] * (count(cells, "slot") - len(scenes))
+        check_assignments(cfg, cells, scenes, max_layers)
+        timing = _parse_bus_timing(obj, cfg.fps)
         fps = aux_fps(cfg.fps, timing["full_rate"])
         renditions = obj.get("renditions", [])
         if len(renditions) != 1:
@@ -667,7 +662,7 @@ def parse_aux_buses(values, cfg):
             raise ConfigError("aux rendition must be SDR/H.264 at canvas size and the aux frame rate")
         if not r.port:
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
-        result.append(AuxBus(bid, tuple(scenes), (r,), preset, float(rotate_s), **timing))
+        result.append(AuxBusConfig(bid, tuple(scenes), (r,), layouts[0], tuple(layouts), max_layers, rotate_s, **timing))
     check_janus_ports([*cfg.renditions, *(b.renditions[0] for b in result)])
     return tuple(result)
 

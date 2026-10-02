@@ -1,4 +1,5 @@
-"""AUX outputs sharing the main mixer's ingest: scene multiviews and paged source views."""
+"""AUX buses sharing the main mixer's ingest, each drawing a layout of cells (aux_layout) that the
+operator can switch at runtime, and the one thread that keeps every bus current."""
 from __future__ import annotations
 
 import json
@@ -7,112 +8,27 @@ import time
 import uuid
 
 from ..node import InternalNode
-from .config import ConfigError, aux_fps, scene_layers, validate_assignments
-from .control import source_mask_param
+from .aux_layout import (base_composition, check_assignments, count, draws_program, layout_cells, page_count,
+                         page_grid, parse_layout, pvw_layouts)
+from .config import ConfigError, aux_fps
 
 
 class _PvwFollowNode(InternalNode):
     TYPE = "mixer_pvw_follow"
 
 
-def _even(value):
-    return int(value) // 2 * 2
+def _integer(value):
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
-def multiview_cells(cfg):
-    """PVW, PGM and the eight scene slots of the pgm_pvw_grid layout, in canvas pixels."""
-    w, h = cfg.canvas_w, cfg.canvas_h
-    xs = [_even(w * i // 4) for i in range(5)]
-    ys = [_even(h * i // 4) for i in range(5)]
-    cells = [{"role": "pvw", "x": 0, "y": 0, "w": xs[2], "h": ys[2]},
-             {"role": "pgm", "x": xs[2], "y": 0, "w": w - xs[2], "h": ys[2]}]
-    for i in range(8):
-        col, row = i % 4, 2 + i // 4
-        cells.append({"role": "slot", "slot": i, "x": xs[col], "y": ys[row],
-                      "w": xs[col + 1] - xs[col], "h": ys[row + 1] - ys[row]})
-    return cells
+class AuxBus:
+    """One AUX bus: a compositor over subscribed sources (and the program, last, when one of its
+    layouts draws it), then SDR H.264 to Janus.
 
-
-def _layout(layers):
-    return {"layers": layers, "active_inputs": source_mask_param(sum(1 << i for i in {l["input"] for l in layers}))}
-
-
-def _tile(index, rect, z):
-    """Input *index* contained in *rect*, a cell or page tile."""
-    return {"input": index, "dst_x": rect["x"], "dst_y": rect["y"], "dst_w": rect["w"], "dst_h": rect["h"],
-            "fit": "contain", "z": z}
-
-
-def _cell_layers(cfg, scene, cell, first_z):
-    """One layer per scene item, drawn into *cell*, z from *first_z* in item order."""
-    indices = {s.id: i for i, s in enumerate(cfg.sources)}
-    return [{**layer, "input": indices[name.split("#", 1)[0]], "z": first_z + z,
-             "tile": {k: cell[k] for k in ("x", "y", "w", "h")},
-             "scene_canvas": {"w": cfg.canvas_w, "h": cfg.canvas_h}}
-            for z, (name, layer) in enumerate(scene_layers(cfg, scene).items())]
-
-
-def pvw_layouts(cfg):
-    """The PVW cell's layers of every scene, keyed by scene id: what mixer_pvw_follow draws for a
-    preview. Their z is below the reserved count (the largest scene); base_composition starts there."""
-    pvw = multiview_cells(cfg)[0]
-    return {scene.id: _layout(_cell_layers(cfg, scene, pvw, 0)) for scene in cfg.scenes}
-
-
-def base_composition(cfg, scenes):
-    """The eight assigned scene tiles and the PGM tile: the part of the composition the
-    preview does not change, z from the reserved count up."""
-    validate_assignments(cfg, scenes)
-    definitions = {s.id: s for s in cfg.scenes}
-    _, pgm, *slots = multiview_cells(cfg)
-    layers = []
-    reserved = max(len(s.items) for s in cfg.scenes)
-    for scene, cell in zip(scenes, slots):
-        if scene:
-            layers.extend(_cell_layers(cfg, definitions[scene], cell, reserved + len(layers)))
-    layers.append(_tile(len(cfg.sources), pgm, reserved + len(layers)))
-    return _layout(layers)
-
-
-def composition(cfg, scenes, preview):
-    """The whole multiview: pvw_layouts()[preview] followed by base_composition(), exactly what
-    the follower node sets for that preview."""
-    base = base_composition(cfg, scenes)
-    if not preview:
-        return base
-    layouts = pvw_layouts(cfg)
-    if preview not in layouts:
-        raise ConfigError(f"native preview references an unknown scene: {preview}")
-    return _layout(layouts[preview]["layers"] + base["layers"])
-
-
-def page_grid(cfg):
-    """Tiles of one source page: 2 by 6 on a portrait canvas, 4 by 3 on a landscape one."""
-    w, h = cfg.canvas_w, cfg.canvas_h
-    cols, rows = (2, 6) if h > w else (4, 3)
-    cw, ch = w // cols, h // rows
-    tw = _even(cw - 4)
-    th = _even(tw * 9 / 16)
-    if th > ch - 4:
-        th = _even(ch - 4)
-        tw = _even(th * 16 / 9)
-    return [{"x": _even(c * cw + (cw - tw) / 2), "y": _even(r * ch + (ch - th) / 2), "w": tw, "h": th}
-            for r in range(rows) for c in range(cols)]
-
-
-def page_composition(cfg, page):
-    grid = page_grid(cfg)
-    first = page * len(grid)
-    return _layout([_tile(first + i, r, i) for i, r in enumerate(grid[:len(cfg.sources) - first])])
-
-
-class _AuxOutput:
-    """One AUX output: a compositor over subscribed sources, then SDR H.264 to Janus.
-
-    Subclasses define the composition and _step(), one pass of the background thread
-    (run) that keeps it current."""
-    pgm_edge = None   # the edge the program tap feeds, for layouts that show PGM
-    pgm_delay_frames = 0   # ticks the PGM input (the last one) is matched back; see AuxMultiview
+    A ``mixer_pvw_follow`` node (``<prefix>_pvw``) is the only writer of the composition: this class
+    computes, for the current layout, every scene's preview layers and the base (everything else)
+    with a new revision, and hands them to the node, which draws the mixer's preview changes with
+    the program. A slot assignment, a layout switch and a page turn are each a new base."""
 
     def __init__(self, avp, api, mixer, cfg, bus):
         self.avp, self.api, self.mixer, self.cfg, self.bus = avp, api, mixer, cfg, bus
@@ -120,19 +36,28 @@ class _AuxOutput:
         self.prefix = f"aux_{bus.id}"
         self.group = self.prefix
         self.node_name = f"{self.prefix}_comp"
+        self.follower = f"{self.prefix}_pvw"
         self.hwaccel = f"{self.prefix}_gpu"
         self.edges = [f"{self.prefix}_source_{i}" for i in range(len(cfg.sources))]
+        # The finished program reaches the bus a frame after the sources it is made of. Matching it
+        # back (default_pgm_delay_frames) keeps every other input at the normal latency.
+        self.pgm_edge = f"{self.prefix}_pgm" if draws_program(cfg, bus.layouts) else None
+        self.pgm_delay_frames = bus.pgm_delay_frames if self.pgm_edge else 0
         self.output_edge = f"{self.prefix}_out"
-        self.lock, self.stopped = threading.Lock(), threading.Event()
-        self.thread, self.listener, self.error = None, None, ""
+        self.lock = threading.Lock()
+        self.listener, self.error, self.follower_status = None, "", {}
+        self.layout, self.scenes = bus.layout, list(bus.scenes)
+        self.page = bus.layout.get("page") or 0
+        self.flipped_at = self.checked_at = time.monotonic()
+        self.revision = uuid.uuid4().hex
         for source, edge in zip(cfg.sources, self.edges):
             mixer.add_aux_destination(source.id, edge)
 
     def inputs(self):
-        return self.edges
+        return [*self.edges, self.pgm_edge] if self.pgm_edge else self.edges
 
-    def layer_budget(self):
-        return self.cfg.max_compositor_layers
+    def cells(self):
+        return layout_cells(self.cfg, self.layout, self.page)
 
     def main_latency_ms(self):
         """The main mixer's playout buffer: when a program frame leaves its compositor."""
@@ -141,10 +66,18 @@ class _AuxOutput:
     def latency_ms(self):
         # The bus's own playout buffer, or the main mixer's (50 ms at 60 fps, 1.5 aux ticks at
         # half rate): the sources reach a bus when they reach the program compositors, so the
-        # same buffer leaves it the same slack, and its PVW tile can leave with the program.
+        # same buffer leaves it the same slack, and its pvw cells can change with the program.
         return self.bus.latency_ms if self.bus.latency_ms is not None else self.main_latency_ms()
 
+    def layout_object(self, resume=True):
+        """The follower's ``layout``: every scene's preview layers and the base, with the revision.
+        *resume* false keeps an encoder-backpressure suspension (an automatic page turn)."""
+        cells = self.cells()
+        return {"revision": self.revision, "pvw": pvw_layouts(self.cfg, cells),
+                "base": base_composition(self.cfg, cells, self.scenes), "resume": resume}
+
     def build(self, options):
+        """The bus's nodes, all in its own group: compositor, follower, conversion, encoder, Janus output."""
         from .janus import JanusVideoConfig, build_janus_output
         fps = self.fps
         latency = self.latency_ms()
@@ -154,7 +87,7 @@ class _AuxOutput:
         # The program frame leaves the main compositor at its deadline, main latency after its
         # pts, and is drawn here pgm_delay_frames aux ticks plus the bus latency after it. That
         # margin carries it through the output chain (snapshot, selectors, keyer, tap) to the bus:
-        # below one program frame the PGM tile repeats or runs a tick late on every take.
+        # below one program frame a pgm cell repeats or runs a tick late on every take.
         floor = 1000 / self.cfg.fps
         if self.pgm_edge and self.pgm_delay_frames * 1000 / fps + latency - self.main_latency_ms() < floor - 1e-6:
             raise ConfigError(f"aux {self.bus.id}: pgm_delay_frames * aux frame + latency_ms must exceed the main "
@@ -164,15 +97,16 @@ class _AuxOutput:
         converted = f"{self.prefix}_sdr"
         for edge in [*inputs, self.output_edge, converted]:
             self.avp.edges.planCapacity(edge, 1)
+        initial = self.layout_object()
         self.avp.addNode(self.mixer.canvas_compositor({
             "name": self.node_name, "src": inputs, "dst": self.output_edge,
             "fps": str(fps), "latency_ms": latency, "warmup_timeout_ms": 250,
             "output_hwaccel": self.hwaccel,
             "aux_mode": True, "subscriptions": inputs, "mixer": self.mixer.name,
-            "max_layers": self.layer_budget(),
+            "max_layers": self.bus.max_layers,
             "group": self.group, "auto_restart": "off", "on_error": "off",
             **({"pgm_delay_frames": self.pgm_delay_frames} if self.pgm_delay_frames else {}),
-            **self.current_composition(),
+            **initial["base"],
         }, api=self.api), early_create=True)
         r = self.bus.renditions[0]
         self.avp.addNode(self.api.FilterVideo({
@@ -190,232 +124,192 @@ class _AuxOutput:
             fps=fps, width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
             codec="h264_nvenc", preset=r.preset, profile=r.profile or "high", enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1)
-
-    def state(self):
-        with self.lock:
-            try:
-                status = self.avp.node(self.node_name).getObject("status")
-            except Exception:
-                status = {"suspended": True}
-            return {"id": self.bus.id, "layout": self.bus.layout, "error": self.error,
-                    "canvas": {"w": self.cfg.canvas_w, "h": self.cfg.canvas_h},
-                    "fps": self.fps, "latency_ms": self.latency_ms(), **self.details(), **status}
-
-    def _set(self, node, key, value):
-        self.avp.executeCommandsFromString(f"node.object.set {node} {key} {json.dumps(value)}")
-
-    def _publish(self, snapshot, status=None):
-        """Apply *snapshot*. An automatic update passes the compositor's *status* and keeps
-        an encoder-backpressure suspension; an operator's change resumes the bus."""
-        if status is not None:
-            snapshot = {**snapshot, "enabled": not status.get("suspended", False)}
-        self._set(self.node_name, "composition", snapshot)
+        self.avp.addNode(_PvwFollowNode({
+            "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,
+            "fps": str(fps), "latency_ms": latency, "main_latency_ms": self.main_latency_ms(),
+            "pgm_delay_frames": self.pgm_delay_frames, "align": self.bus.pvw_align,
+            "layout": initial, "group": self.group, "auto_restart": "off", "on_error": "off",
+        }))
 
     def start(self):
         self.avp.group(self.group).startNodes()
         self.listener.start()
-        self.thread = threading.Thread(target=self.run, name=self.prefix, daemon=True)
-        self.thread.start()
-
-    def run(self):
-        """Until stop(): _step() makes one pass and returns the seconds until the next."""
-        while not self.stopped.wait(self._step()):
-            pass
 
     def stop(self):
-        """Stop the page thread and RTCP listener. The application stops the group together
-        with all others (demos/mixer MixerApplication.stop), and not after a panic."""
-        self.stopped.set()
-        if self.thread:
-            self.thread.join(timeout=1)
+        """Stop the RTCP listener. The application stops the group together with all others
+        (demos/mixer MixerApplication.stop), and not after a panic."""
         self.listener.stop()
 
-
-class AuxMultiview(_AuxOutput):
-    """PVW, PGM and eight assignable scene tiles; the PVW tile follows the main mixer's preview.
-
-    A ``mixer_pvw_follow`` node (``<prefix>_pvw``) draws the preview: the mixer hands it every
-    change with the program frame it takes effect on, and it sets the compositor's composition
-    on the multiview frame whose PGM tile shows the take. It holds the PVW-cell layers of every
-    scene and the base layout (tiles and PGM) published here at build and on every reassignment;
-    this thread only checks that it holds the current base, and while the node is unreachable
-    it polls the mixer's preview and sets the composition itself, as before the node existed."""
-
-    def __init__(self, avp, api, mixer, cfg, bus):
-        super().__init__(avp, api, mixer, cfg, bus)
-        self.pgm_edge = f"{self.prefix}_pgm"
-        self.follower = f"{self.prefix}_pvw"
-        # The PGM tile is the finished program (the last input), which reaches this bus a
-        # frame after the sources it is made of. Matching it back (default_pgm_delay_frames)
-        # keeps every other input at the normal latency instead of holding all of them longer.
-        self.pgm_delay_frames = bus.pgm_delay_frames
-        self.scenes, self.revision, self.preview = list(bus.scenes), uuid.uuid4().hex, ""
-        self.follower_status = {}
-
-    def inputs(self):
-        return [*self.edges, self.pgm_edge]
-
-    def current_composition(self):
-        return composition(self.cfg, self.scenes, self.preview)
-
-    def base(self, scenes=None, revision=None):
-        return {"revision": revision or self.revision,
-                **base_composition(self.cfg, self.scenes if scenes is None else scenes)}
-
-    def build(self, options):
-        super().build(options)
-        self.avp.addNode(_PvwFollowNode({
-            "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,
-            "fps": str(self.fps), "latency_ms": self.latency_ms(), "main_latency_ms": self.main_latency_ms(),
-            "pgm_delay_frames": self.pgm_delay_frames, "align": self.bus.pvw_align,
-            "base": self.base(), "pvw": pvw_layouts(self.cfg),
-            "group": self.group, "auto_restart": "off", "on_error": "off",
-        }))
-
-    def state(self):
-        state = super().state()
-        # An assignment reaches the compositor through the follower: pending until the follower
-        # has set a composition with this revision's base. Unreachable, this thread sets it.
-        with self.lock:
-            follower = self._follower_status()
-            if follower is not None and follower.get("applied_base_revision") != self.revision:
-                state["composition_pending"] = True
-        return state
-
-    def details(self):
-        return {"scenes": list(self.scenes), "revision": self.revision, "cells": multiview_cells(self.cfg),
-                "pvw_align": self.bus.pvw_align, "pgm_delay_frames": self.pgm_delay_frames,
-                "follower": self.follower_status}
-
-    def _follower_status(self):
-        """The follower's status, None while the node is unreachable (not created, stopped). A
-        command sent to it then is logged and dropped, never an error here, so this is the test."""
+    def _status(self, node):
+        """*node*'s status, or None while it is unreachable (not created, stopped)."""
         try:
-            return self.avp.node(self.follower).getObject("status")
+            return self.avp.node(node).getObject("status")
         except Exception as exc:
-            self.follower_status = {"error": str(exc)}
+            if node == self.follower:
+                self.follower_status = {"error": str(exc)}
             return None
 
+    def _send(self, resume=True):
+        """The current layout under a new revision to the follower. While the follower is
+        unreachable the binding logs and drops the command; tick() resends it."""
+        self.revision = uuid.uuid4().hex
+        self.avp.executeCommandsFromString(
+            f"node.object.set {self.follower} layout {json.dumps(self.layout_object(resume))}")
+
+    def _pages(self):
+        """A source_pages layout's page shown, page count, rotation and sources shown."""
+        if self.layout.get("preset") != "source_pages":
+            return {}
+        per_page = len(page_grid(self.cfg))
+        return {"page": self.page, "pages": page_count(self.cfg), "auto": self.layout["page"] is None,
+                "rotate_s": self.layout["rotate_s"], "first": self.page * per_page + 1, "total": len(self.cfg.sources)}
+
+    def _summary(self):
+        return {"layout": self.layout, "scenes": list(self.scenes), "revision": self.revision, **self._pages()}
+
+    def state(self):
+        with self.lock:
+            status = self._status(self.node_name) or {"suspended": True}
+            follower = self._status(self.follower)
+            if follower is not None:
+                self.follower_status = follower
+            sources = self.cfg.sources
+            cells = [{**c, "id": sources[c["source"]].id, "kind": sources[c["source"]].kind}
+                     if c["role"] == "source" else c for c in self.cells()]
+            # Pending until the compositor draws this revision: the follower sets it a wake after
+            # the change, and the compositor stages it until its new inputs have frames.
+            pending = status.get("composition_pending", False) or status.get("composition_revision") != self.revision
+            return {"id": self.bus.id, "error": self.error, "layouts": list(self.bus.layouts), "cells": cells,
+                    "max_layers": self.bus.max_layers, "canvas": {"w": self.cfg.canvas_w, "h": self.cfg.canvas_h},
+                    "fps": self.fps, "latency_ms": self.latency_ms(), "pvw_align": self.bus.pvw_align,
+                    "pgm_delay_frames": self.pgm_delay_frames, "follower": self.follower_status,
+                    "pvw_scene": self.follower_status.get("pvw_scene", ""), **self._summary(), **status,
+                    "composition_pending": pending}
+
     def assign(self, request):
+        """Slot assignments: the complete ``scenes`` list as the status reports it, by slot index,
+        against ``expected_revision``."""
         with self.lock:
             if request.get("expected_revision") != self.revision:
-                return {"error": "Assignments changed; refresh before editing", "conflict": True,
-                        "scenes": list(self.scenes), "revision": self.revision}
-            scenes = request.get("scenes")
-            base = self.base(scenes, uuid.uuid4().hex)
-            if self._follower_status() is not None:
-                self._set(self.follower, "base", base)
-            else:
-                self._publish(composition(self.cfg, scenes, self.preview))
-            self.scenes, self.revision, self.error = list(scenes), base["revision"], ""
-            return {"scenes": list(self.scenes), "revision": self.revision}
+                return {"error": "Assignments changed; refresh before editing", "conflict": True, **self._summary()}
+            scenes, cells = request.get("scenes"), self.cells()
+            if not count(cells, "slot"):
+                raise ConfigError(f"aux {self.bus.id}: the layout has no scene slots")
+            if not isinstance(scenes, list) or len(scenes) != len(self.scenes):
+                raise ConfigError(f"aux {self.bus.id}: scenes must list all {len(self.scenes)} assignments (null clears one)")
+            check_assignments(self.cfg, cells, scenes, self.bus.max_layers)
+            self.scenes, self.error = list(scenes), ""
+            self._send()
+            return self._summary()
 
-    def _step(self):
-        """One pass; returns the seconds until the next. A follower that restarted holds the base
-        it was built with, so resend the current one when its revision differs. Only one of the
-        two, the node or this thread, sets the composition at any time; both use the same shown
-        preview."""
+    def set_layout(self, request):
+        """Switch to ``layout``, validated and within the layer budget; assignments keep their slots."""
         with self.lock:
-            status = self._follower_status()
-            if status is not None:
-                if status.get("base_revision") != self.revision:
-                    self._set(self.follower, "base", self.base())
-                self.follower_status, self.preview = status, status.get("pvw_scene", "")
-                return 1.0
-            try:
-                status = self.avp.node(self.node_name).getObject("status")
-                preview = status.get("pvw_scene", "")
-                if preview != self.preview:
-                    self._publish(composition(self.cfg, self.scenes, preview), status)
-                    self.preview = preview
-            except Exception as exc:
-                self.error = str(exc)
-            return 0.05
-
-
-class AuxSourcePages(_AuxOutput):
-    """Every source in equal tiles, one page at a time. Pages rotate every rotate_s seconds
-    until the operator picks one, which holds it; only the shown page's sources are delivered."""
-
-    def __init__(self, avp, api, mixer, cfg, bus):
-        super().__init__(avp, api, mixer, cfg, bus)
-        self.per_page = len(page_grid(cfg))
-        self.pages = -(-len(cfg.sources) // self.per_page)
-        self.page, self.auto, self.flipped_at = 0, True, time.monotonic()
-
-    def current_composition(self):
-        return page_composition(self.cfg, self.page)
-
-    def layer_budget(self):
-        return self.per_page   # a page never draws more tiles
-
-    def details(self):
-        first = self.page * self.per_page
-        shown = self.cfg.sources[first:first + self.per_page]
-        return {"page": self.page, "pages": self.pages, "auto": self.auto, "rotate_s": self.bus.rotate_s,
-                "first": first + 1, "total": len(self.cfg.sources),
-                "tiles": [{"id": s.id, "kind": s.kind, **rect} for s, rect in zip(shown, page_grid(self.cfg))]}
-
-    def _show(self, page, status=None):
-        self.flipped_at = time.monotonic()
-        self._publish(page_composition(self.cfg, page), status)
-        self.page, self.error = page, ""
+            layout = parse_layout(self.cfg, request.get("layout"), self.bus.rotate_s)
+            if not self.pgm_edge and draws_program(self.cfg, [layout]):
+                raise ConfigError(f"aux {self.bus.id} has no program input: its layouts draw no pgm cell")
+            page = layout.get("page") or 0
+            cells = layout_cells(self.cfg, layout, page)
+            scenes = self.scenes + [None] * (count(cells, "slot") - len(self.scenes))
+            check_assignments(self.cfg, cells, scenes, self.bus.max_layers)
+            self.layout, self.page, self.scenes, self.error = layout, page, scenes, ""
+            self.flipped_at = time.monotonic()
+            self._send()
+            return self._summary()
 
     def turn(self, request):
-        """Hold a page (``page`` or relative ``step``) or switch rotation (``auto``)."""
-        def integer(value):
-            return isinstance(value, int) and not isinstance(value, bool)
+        """Hold a page (``page`` or relative ``step``) or switch rotation (``auto``) of a source_pages
+        layout: the layout's ``page``, null while rotating."""
         with self.lock:
+            if self.layout.get("preset") != "source_pages":
+                raise ConfigError(f"aux {self.bus.id} shows no source pages")
+            pages = page_count(self.cfg)
             if "auto" in request:
                 if not isinstance(request["auto"], bool):
                     raise ConfigError("auto must be a boolean")
-                self.auto, self.flipped_at = request["auto"], time.monotonic()
-            elif integer(request.get("page")) and 0 <= request["page"] < self.pages:
-                self.auto = False
-                self._show(request["page"])
-            elif integer(request.get("step")):
-                self.auto = False
-                self._show((self.page + request["step"]) % self.pages)
+                page = None if request["auto"] else self.page
+            elif _integer(request.get("page")) and 0 <= request["page"] < pages:
+                page = request["page"]
+            elif _integer(request.get("step")):
+                page = (self.page + request["step"]) % pages
             else:
-                raise ConfigError(f"aux_page needs auto, a page from 0 to {self.pages - 1}, or a step")
-            return self.details()
+                raise ConfigError(f"aux_page needs auto, a page from 0 to {pages - 1}, or a step")
+            self.layout, self.flipped_at = {**self.layout, "page": page}, time.monotonic()
+            if "auto" not in request:
+                self.page, self.error = page, ""
+                self._send()
+            return self._summary()
 
-    def _step(self):
-        """Show the next page when one is due; return the seconds until the next check."""
+    def tick(self, now):
+        """One pass of the shared scheduler: turn a due page, and once a second resend the layout to
+        a follower that restarted (it holds the one it was built with). Returns the seconds until
+        this bus is due again."""
         with self.lock:
-            due = self.flipped_at + self.bus.rotate_s - time.monotonic()
-            if self.auto and self.pages > 1 and due <= 0:
-                try:
-                    self._show((self.page + 1) % self.pages, self.avp.node(self.node_name).getObject("status"))
-                except Exception as exc:
-                    self.error = str(exc)
-                due = self.bus.rotate_s
-            # A held page or a single page has nothing due: check back at the slow rate.
-            return min(max(due, 0.05), 0.5) if self.auto and self.pages > 1 else 0.5
+            rotating = self.layout.get("preset") == "source_pages" and self.layout["page"] is None and page_count(self.cfg) > 1
+            try:
+                if rotating and now >= self.flipped_at + self.layout["rotate_s"]:
+                    self.page, self.flipped_at = (self.page + 1) % page_count(self.cfg), now
+                    self._send(resume=False)
+                if now >= self.checked_at + 1:
+                    self.checked_at = now
+                    follower = self._status(self.follower)
+                    if follower is not None:
+                        self.follower_status = follower
+                        if follower.get("layout_revision") != self.revision:
+                            self._send()
+            except Exception as exc:
+                self.error = str(exc)
+            due = self.checked_at + 1
+            return (min(due, self.flipped_at + self.layout["rotate_s"]) if rotating else due) - now
 
 
-def make_aux(avp, api, mixer, cfg, bus):
-    kind = AuxSourcePages if bus.layout == "source_pages" else AuxMultiview
-    return kind(avp, api, mixer, cfg, bus)
+class AuxBuses:
+    """Every AUX bus by id, their control commands, and one thread for all of them that turns
+    pages and resends layouts (AuxBus.tick), however many buses there are."""
 
+    def __init__(self, avp, buses):
+        self.avp = avp
+        self.buses = {bus.bus.id: bus for bus in buses}
+        self.stopped, self.thread = threading.Event(), None
 
-def register_aux_commands(avp, buses):
-    by_id = {b.bus.id: b for b in buses}
+    def __iter__(self):
+        return iter(list(self.buses.values()))
 
-    def target(request, kind):
-        bus = by_id.get(request.get("bus"))
-        if not isinstance(bus, kind):
-            raise ConfigError(f"Unknown {'scene multiview' if kind is AuxMultiview else 'source pages'} bus")
-        return bus
+    def __len__(self):
+        return len(self.buses)
 
-    def assign(arg):
-        request = json.loads(arg)
-        return json.dumps(target(request, AuxMultiview).assign(request)) + "\n"
+    def start(self):
+        for bus in self:
+            bus.start()
+        self.thread = threading.Thread(target=self.run, name="aux", daemon=True)
+        self.thread.start()
 
-    def turn(arg):
-        request = json.loads(arg)
-        return json.dumps(target(request, AuxSourcePages).turn(request)) + "\n"
+    def tick(self):
+        """Every bus's pass; the seconds until the next, from 50 ms to one second."""
+        now = time.monotonic()
+        return min(max(min((bus.tick(now) for bus in self), default=1.0), 0.05), 1.0)
 
-    avp.registerControlCommand("mixer.aux", assign, True)
-    avp.registerControlCommand("mixer.aux_page", turn, True)
-    avp.registerControlCommand("mixer.aux_status", lambda _arg: json.dumps([b.state() for b in buses]) + "\n", True)
+    def run(self):
+        while not self.stopped.wait(self.tick()):
+            pass
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread:
+            self.thread.join(timeout=1)
+        for bus in self:
+            bus.stop()
+
+    def register_commands(self):
+        def command(method):
+            def handle(arg):
+                request = json.loads(arg)
+                bus = self.buses.get(request.get("bus"))
+                if bus is None:
+                    raise ConfigError(f"Unknown aux bus {request.get('bus')!r}")
+                return json.dumps(method(bus, request)) + "\n"
+            return handle
+        self.avp.registerControlCommand("mixer.aux", command(AuxBus.assign), True)
+        self.avp.registerControlCommand("mixer.aux_layout", command(AuxBus.set_layout), True)
+        self.avp.registerControlCommand("mixer.aux_page", command(AuxBus.turn), True)
+        self.avp.registerControlCommand("mixer.aux_status", lambda _arg: json.dumps([b.state() for b in self]) + "\n", True)

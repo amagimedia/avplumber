@@ -30,12 +30,12 @@ class MixerCompositor : public CudaRectCompositor,
     int64_t staged_deadline_ns_ = 0;
     std::atomic<bool> composition_preparing_{false};
     std::string composition_error_; // protected by layers_mutex_
+    std::string composition_revision_; // of the composition being drawn; protected by layers_mutex_
     bool aux_ = false;
     std::atomic<bool> suspended_{false};
     std::atomic<uint64_t> output_drops_{0};
     int blocked_ticks_ = 0;
     CUevent input_ready_ = nullptr;
-    std::shared_ptr<avp::mixer::MixerState> mixer_state_;
     // Playout counters snapshotted every 60 frames for the status object; the
     // control thread never touches playout_ itself.
     std::mutex playout_stats_mutex_;
@@ -104,6 +104,7 @@ class MixerCompositor : public CudaRectCompositor,
         auxInputs(mask);
         std::lock_guard<std::mutex> lock(layers_mutex_);
         default_layers_ = avp::mixer::parseLayersArray(value.at("layers"));
+        composition_revision_ = value.value("revision", std::string());
     }
 
 public:
@@ -151,10 +152,7 @@ public:
             std::lock_guard<std::mutex> lock(layers_mutex_);
             result["composition_pending"] = pending_composition_.has_value() || composition_preparing_.load();
             result["composition_error"] = composition_error_;
-        }
-        if (mixer_state_) {
-            std::lock_guard<std::mutex> lock(mixer_state_->preview_mutex);
-            result["pvw_scene"] = mixer_state_->preview.pvw;
+            result["composition_revision"] = composition_revision_;
         }
         return result;
     }
@@ -341,6 +339,7 @@ public:
             auto layers = avp::mixer::parseLayersArray(value.at("layers"));
             if (layers.size() > size_t(draw_.maxLayers())) throw Error("aux: too many layers");
             const auto mask = avp::mixer::parseSourceMask(value.at("active_inputs"));
+            if (value.contains("revision") && !value.at("revision").is_string()) throw Error("aux: revision must be a string");
             for (const auto &layer : layers)
                 if (layer.input < 0 || size_t(layer.input) >= source_edges_.size()) throw Error("aux: invalid input index");
             for (int i = static_cast<int>(source_edges_.size()); i < avp::mixer::kSourceMaskBits; ++i)
@@ -411,9 +410,9 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
     }
     if (aux) {
         if (params.contains("mixer")) {
-            node->mixer_state_ = InstanceSharedObjects<avp::mixer::MixerState>::get(nci.instance, params.at("mixer"));
-            std::lock_guard<std::mutex> lock(node->mixer_state_->mutex);
-            node->mixer_state_->scene_definitions_frozen = true;
+            const auto state = InstanceSharedObjects<avp::mixer::MixerState>::get(nci.instance, params.at("mixer"));
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->scene_definitions_frozen = true;
         }
         node->draw_.ensureDevice();
         if (AVP_CHECK_CU(cuEventCreate(&node->input_ready_, CU_EVENT_DISABLE_TIMING)))

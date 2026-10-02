@@ -15,7 +15,7 @@ import threading
 import time
 
 from demo_recipe import allocate, validate_dsk, write_atomic
-from pyplumber.mixer.config import ConfigError, aux_fps, default_browser_ring_size, parse, validate_assignments
+from pyplumber.mixer.config import ConfigError, aux_fps, default_browser_ring_size, parse, parse_aux_buses
 
 DEMO_DIR = Path(__file__).resolve().parent
 # Phase markers with durations: restart timings are read from the container log.
@@ -275,7 +275,8 @@ class SetupRuntime:
             self.worker.start()
 
     def _preserve_aux(self, recipe, show):
-        """Keep instance outputs while replacing the generic sources and scenes."""
+        """Keep instance outputs while replacing the generic sources and scenes: each bus keeps its
+        live layout and slot assignments, less the scenes that no longer exist or fit its budget."""
         config = self.media_dir / "mixer.demo.json"
         previous = json.loads(config.read_text()) if config.exists() else {}
         if "max_compositor_layers" in previous:
@@ -285,37 +286,39 @@ class SetupRuntime:
             return
         live = {}
         if self.process and self.process.poll() is None:
-            live = {b["id"]: b["scenes"] for b in json.loads(self.bridge.command("mixer.aux_status")) if "scenes" in b}
+            live = {b["id"]: b for b in json.loads(self.bridge.command("mixer.aux_status"))}
         cfg = parse(show)
         scene_ids = {s.id for s in cfg.scenes}
         for bus in buses:
             for rendition in bus["renditions"]:
                 rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=aux_fps(cfg.fps, bus.get("full_rate", False)))
-            if bus.get("layout", {}).get("preset") == "source_pages":
-                continue   # pages follow the new source list by themselves
-            assignments = [None] * 8
-            for i, scene in enumerate(live.get(bus["id"], bus.get("scenes", [None] * 8))):
-                if scene not in scene_ids:
+            state = live.get(bus["id"], bus)
+            if "layout" in state:
+                bus["layout"] = {k: v for k, v in state["layout"].items() if k != "page"}   # pages follow the new sources
+            scenes = [s if s in scene_ids else None for s in state.get("scenes", [])]
+            for i, scene in enumerate(scenes):
+                if not scene:
                     continue
-                assignments[i] = scene
                 try:
-                    validate_assignments(cfg, assignments)
+                    parse_aux_buses([{**bus, "scenes": scenes[:i + 1]}], cfg)
                 except ConfigError:
-                    # A retained scene may have grown beyond the tile draw budget.
-                    assignments[i] = None
-            bus["scenes"] = assignments
+                    # A retained scene may have grown beyond the bus's draw budget.
+                    scenes[i] = None
+            bus["scenes"] = scenes
         recipe["aux_buses"] = buses
 
-    def remember_aux(self, bus_id, scenes):
-        """Persist an operator's multiview assignment, so a resume or restart shows the same tiles."""
-        with self.lock:   # an Apply carries live assignments over itself (_preserve_aux)
+    def remember_aux(self, bus_id, fields):
+        """Persist an operator's change of a bus's ``layout`` or ``scenes`` (a mixer.aux,
+        mixer.aux_layout or mixer.aux_page answer), so a resume or restart shows the same bus."""
+        fields = {k: fields[k] for k in ("layout", "scenes") if k in fields}
+        with self.lock:   # an Apply carries the live bus over itself (_preserve_aux)
             if self.worker and self.worker.is_alive():
                 return
             for path in (self.media_dir / "mixer.demo.json", self.recipe_path):
                 doc = json.loads(path.read_text()) if path.exists() else {}
                 bus = next((b for b in doc.get("aux_buses", []) if b.get("id") == bus_id), None)
-                if bus is not None and bus.get("scenes") != scenes:
-                    bus["scenes"] = scenes
+                if bus is not None and any(bus.get(k) != v for k, v in fields.items()):
+                    bus.update(fields)
                     write_atomic(path, json.dumps(doc, indent=2) + "\n")
 
     def _stop(self):

@@ -8,14 +8,15 @@
 #include <optional>
 #include <unordered_map>
 
-// One per pgm_pvw_grid AUX bus: draws the mixer's preview changes (MixerState::publishPreview)
-// in the bus compositor's PVW cell through its `composition` object, on the multiview frame that
-// leaves the bus with the take's first program frame (`align` "program", the default) or whose
-// PGM tile shows that frame ("pgm_tile"), see PreviewFollow.hpp. Each timed change's latency
-// from the take command's receipt (`pvw_latency_ms`, next to the program's `pgm_latency_ms`,
-// `pvw_minus_pgm_ms`, `kind`) is in this node's status and in `mixer.status` `pvw_latency`.
-// The control side sets the layouts once: `pvw`, every scene's PVW-cell layers, and `base`, the
-// rest; each composition is pvw[shown] followed by base, and this node is its only writer.
+// One per AUX bus, the only writer of the bus compositor's `composition`: draws the mixer's preview
+// changes (MixerState::publishPreview) on the bus frame that leaves it with the take's first
+// program frame (`align` "program", the default) or whose last (program) input shows that frame
+// ("pgm_tile"), see PreviewFollow.hpp. Each timed change's latency from the take command's receipt
+// (`pvw_latency_ms`, next to the program's `pgm_latency_ms`, `pvw_minus_pgm_ms`, `kind`) is in this
+// node's status and in `mixer.status` `pvw_latency`.
+// The control side sets the `layout` object: `pvw`, every scene's preview layers (empty for a bus
+// that draws no preview), `base`, the rest, and their `revision`. Each composition is pvw[shown]
+// followed by base, carrying that revision; what the layers draw is the control side's business.
 //
 // The scene leaving program becomes the preview (the swap), so a settle pass after every take
 // keeps the program scene's sources active (no layer draws them) and the next take's timed
@@ -43,15 +44,17 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     // Layouts and status, under layouts_mutex_, which is never held while taking another lock.
     std::mutex layouts_mutex_;
     Layout base_;
-    std::string base_revision_;
-    std::string applied_base_revision_;   // the base of the last composition the compositor took
+    std::string revision_;
     std::unordered_map<std::string, Layout> pvw_;
     Parameters status_ = Parameters::object();
     std::string error_;
-    // Wake reasons besides the mixer's revision. The base is flagged under the feed's lock; the
+    // Whether applying a new layout resumes a suspended bus: an operator's change does, an automatic
+    // one (`resume` false, a page turn) keeps an encoder-backpressure suspension.
+    std::atomic<bool> resume_{true};
+    // Wake reasons besides the mixer's revision. The layout is flagged under the feed's lock; the
     // stop is not, since the framework requests it under locks the orchestrator takes after
     // state_->mutex: a wake lost that way lasts one aux tick.
-    bool base_dirty_ = true;
+    bool layout_dirty_ = true;
     std::atomic<bool> stopping_{false};
     // Follower thread only.
     std::optional<uint64_t> seen_;
@@ -66,7 +69,7 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     // does one suspended before this node started, as the first composition sent resumes it.
     bool suspended_ = false;
     std::optional<int64_t> settle_at_;   // when to add the program scene's inputs, for the swap
-    bool dirty_retry_ = false;           // a base apply failed: again at the next wake
+    bool dirty_retry_ = false;           // a layout apply failed: again at the next wake
     std::string warning_;                // from the last apply, shown as the status error
 
     std::shared_ptr<NodeWrapper> compositor() const {
@@ -94,7 +97,6 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     void apply(const Change& change, bool settle, std::optional<bool> enabled) {
         Parameters composition;
         avp::mixer::SourceMask inputs;
-        std::string revision;
         {
             std::lock_guard<std::mutex> lock(layouts_mutex_);
             const Layout* pvw = change.pvw.empty() ? nullptr : layout(change.pvw);
@@ -104,15 +106,11 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
             inputs = base_.inputs | (pvw ? pvw->inputs : avp::mixer::SourceMask{});
             if (const Layout* pgm = change.pgm.empty() ? nullptr : layout(change.pgm))
                 inputs |= settle ? pgm->inputs : pgm->inputs & applied_inputs_;
-            composition = {{"layers", std::move(layers)}, {"active_inputs", avp::mixer::toParameters(inputs)}};
-            revision = base_revision_;
+            composition = {{"layers", std::move(layers)}, {"active_inputs", avp::mixer::toParameters(inputs)},
+                           {"revision", revision_}};
         }
         if (enabled) composition["enabled"] = *enabled;
         compositor()->setObject("composition", composition);
-        {
-            std::lock_guard<std::mutex> lock(layouts_mutex_);
-            applied_base_revision_ = std::move(revision);
-        }
         applied_inputs_ = inputs;
         suspended_ = enabled ? !*enabled : false;
     }
@@ -183,10 +181,10 @@ public:
         {
             std::unique_lock<std::mutex> lock(state_->preview_mutex);
             state_->preview_changed.wait_until(lock, std::chrono::steady_clock::time_point(std::chrono::nanoseconds(wake_by)),
-                [&] { return stopping_ || base_dirty_ || !seen_ || state_->preview.revision != *seen_; });
+                [&] { return stopping_ || layout_dirty_ || !seen_ || state_->preview.revision != *seen_; });
             if (stopping_) return;
-            dirty = base_dirty_ || dirty_retry_;
-            base_dirty_ = dirty_retry_ = false;
+            dirty = layout_dirty_ || dirty_retry_;
+            layout_dirty_ = dirty_retry_ = false;
             if (!seen_ || state_->preview.revision != *seen_) {
                 fresh = Change{state_->preview};
                 // The first read takes the state as it is; the change it came from is history.
@@ -215,9 +213,8 @@ public:
                 std::lock_guard<std::mutex> lock(layouts_mutex_);
                 status_ = std::move(status);
             } else if (dirty) {
-                // A new base (a tile reassignment; the PVW layouts are only set at creation) keeps
-                // the warm inputs; a settle still due stays due.
-                apply(applied_, false, std::nullopt);
+                // A new layout keeps the warm inputs; a settle still due stays due.
+                apply(applied_, false, resume_ ? std::nullopt : std::optional<bool>(!compositorSuspended()));
             } else if (settle_at_ && now >= *settle_at_) {
                 apply(applied_, true, !suspended_);
                 settle_at_.reset();
@@ -238,22 +235,24 @@ public:
         state_->preview_changed.notify_all();
     }
 
+    /// `layout`: {"revision", "pvw": {scene: {"layers", "active_inputs"}}, "base": {...}, "resume"},
+    /// replaced as a whole, so no composition mixes two layouts.
     void setObject(const std::string key, const Parameters& value) override {
-        if (key == "base") {
-            Layout layout = parseLayout(value);
+        if (key != "layout") throw Error("mixer_pvw_follow: unknown object " + key);
+        Layout base = parseLayout(value.at("base"));
+        std::unordered_map<std::string, Layout> pvw;
+        const Parameters& scenes = value.at("pvw");
+        for (auto it = scenes.begin(); it != scenes.end(); ++it) pvw[it.key()] = parseLayout(it.value());
+        const auto revision = value.value("revision", std::string());
+        {
             std::lock_guard<std::mutex> lock(layouts_mutex_);
-            base_ = std::move(layout);
-            base_revision_ = value.value("revision", std::string());
-        } else if (key == "pvw") {
-            std::unordered_map<std::string, Layout> layouts;
-            for (auto it = value.begin(); it != value.end(); ++it) layouts[it.key()] = parseLayout(it.value());
-            std::lock_guard<std::mutex> lock(layouts_mutex_);
-            pvw_ = std::move(layouts);
-        } else {
-            throw Error("mixer_pvw_follow: unknown object " + key);
+            base_ = std::move(base);
+            pvw_ = std::move(pvw);
+            revision_ = revision;
         }
+        resume_ = value.value("resume", true);
         std::lock_guard<std::mutex> lock(state_->preview_mutex);
-        base_dirty_ = true;
+        layout_dirty_ = true;
         state_->preview_changed.notify_all();
     }
 
@@ -261,8 +260,7 @@ public:
         if (key != "status") throw Error("mixer_pvw_follow: unknown object " + key);
         std::lock_guard<std::mutex> lock(layouts_mutex_);
         Parameters result = status_;
-        result["base_revision"] = base_revision_;
-        result["applied_base_revision"] = applied_base_revision_;
+        result["layout_revision"] = revision_;
         result["error"] = error_;
         return result;
     }
@@ -293,8 +291,7 @@ public:
             std::move(state), params.value("name", compositor_name + "_pvw"), compositor_name, nci.nodes.node(compositor_name),
             avp::mixer::PreviewFollowTiming{avp::mixer::TickGrid(main_rate), avp::mixer::TickGrid(aux_rate), latency_ns, delay,
                                             main_latency_ns, align});
-        for (const char* key : {"pvw", "base"})
-            if (params.contains(key)) node->setObject(key, params.at(key));
+        if (params.contains("layout")) node->setObject("layout", params.at("layout"));
         return node;
     }
 };

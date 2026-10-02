@@ -174,7 +174,7 @@ class MixerApplication:
     wipe_files: tuple[str, ...] = ()
     browser_windows: tuple[str, ...] = ()   # reloaded after the chains start: static pages paint only on load
     dmabuf_rest: str = ""
-    aux_buses: tuple = ()
+    aux_buses: object = None                # pyplumber.mixer.aux.AuxBuses, with a config that has buses
     wipe_cache_mb: float = 640.0            # hold decoded wipes in GPU memory
     cut_latency_encoder: str = ""
     prewarm_cut_scenes: tuple[str, ...] = ()
@@ -283,16 +283,16 @@ class MixerApplication:
             scenes = self.mixer.scenes() if self.prewarm_cut_scenes == ("*",) else list(self.prewarm_cut_scenes)
             self.avp.executeCommandsFromString("mixer.prewarm " + json.dumps({"mixer": MIXER_NAME, "scenes": scenes}))
         self.avp.setReady()
-        for bus in self.aux_buses:
-            bus.start()
+        if self.aux_buses:
+            self.aux_buses.start()
         log.info("Generic mixer preheat complete: compositors and transition ready in %.1f s",
                  time.monotonic() - started)
 
     def stop(self) -> None:
         started = time.monotonic()
         log.info("Stopping the graph")
-        for bus in self.aux_buses:
-            bus.stop()
+        if self.aux_buses:
+            self.aux_buses.stop()
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.stop()
         # After a panic the graph is already shutting down under the manager lock and its groups
@@ -301,7 +301,7 @@ class MixerApplication:
             # shutdown() stops one group after another, so a large show took minutes; stopNodes()
             # only signals the group's own thread. Asking every input and aux group first leaves
             # shutdown() joining groups that stop concurrently (its group order was never defined).
-            for group in (*self.input_groups, *(bus.group for bus in self.aux_buses)):
+            for group in (*self.input_groups, *(bus.group for bus in self.aux_buses or ())):
                 self.avp.group(group).stopNodes()
         self.avp.shutdown()
         log.info("Graph stopped in %.1f s", time.monotonic() - started)
@@ -750,8 +750,8 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
-    from pyplumber.mixer.aux import make_aux, register_aux_commands
-    aux = tuple(make_aux(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses)
+    from pyplumber.mixer.aux import AuxBus, AuxBuses
+    aux = AuxBuses(avp, [AuxBus(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses]) if cfg.aux_buses else None
     keyer = DownstreamKeyer(avp, api, mixer, cfg, group=OUTPUT_GROUP) if cfg.dsk_keys else None
     renditions = cfg.renditions or _flag_renditions(options, *canvas)
     program = mixer.build()
@@ -759,9 +759,9 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     if keyer:
         feeds = {**feeds, **keyer.build(program, clean=any(r.feed == "clean" for r in renditions))}
         register_dsk_commands(avp, keyer)
-    pgm_taps = [b.pgm_edge for b in aux if b.pgm_edge]
+    pgm_taps = [b.pgm_edge for b in aux or () if b.pgm_edge]
     if pgm_taps:
-        # The multiview PGM tile shows what goes to air: the keyed program.
+        # An aux pgm cell shows what goes to air: the keyed program.
         tapped = "program_after_aux_tap"
         avp.addNode(api.OneToMany({
             "name": "program_aux_tap", "src": feeds["dirty"], "dst": [tapped, *pgm_taps],
@@ -771,7 +771,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     if aux:
         for bus in aux:
             bus.build(options)
-        register_aux_commands(avp, aux)
+        aux.register_commands()
     settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
