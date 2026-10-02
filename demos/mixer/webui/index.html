@@ -337,8 +337,8 @@
           <span class="fade-ctl key-fade" id="key-fade"><label class="field" title="Key fade · empty or 0 cuts"><input id="key-fade-s" type="number" min="0" max="10" step="0.1" placeholder="0" aria-label="Key fade in seconds, empty or 0 cuts"><span>s</span></label></span></header>
         <div id="keys"></div>
       </section>
-      <section class="card widget" id="slots-card" aria-label="Program preview scene slots" hidden>
-        <header><h2 class="title">Program preview slots</h2><span class="note" id="slot-note"></span></header>
+      <section class="card widget" id="slots-card" aria-labelledby="slots-title" hidden>
+        <header><h2 class="title" id="slots-title">Program preview slots</h2><span class="note" id="slot-note"></span></header>
         <div id="slots"></div>
       </section>
     </div>
@@ -428,12 +428,25 @@ let filter = store.get("filter", "all"), tab = store.get("tab", "scenes");
 
 const settings = () => state?.settings || {};
 const auxBuses = () => state?.aux_buses || [];
-const isPages = (aux) => aux.layout === "source_pages";
+const isPages = (aux) => aux.layout?.preset === "source_pages";
 const auxError = (aux) => aux.error || aux.composition_error;
 const auxById = (id) => auxBuses().find((aux) => aux.id === id);
-// Slot edits go to the scene multiview a viewer shows, else to the first one the mixer has.
+// A bus's cells of one role: "pvw", "pgm", "slot" (an assigned scene) or "source".
+const cellsOf = (aux, role) => (aux?.cells || []).filter((cell) => cell.role === role);
+const slotsOf = (aux) => cellsOf(aux, "slot").map((cell) => cell.slot).sort((a, b) => a - b);
+// Slot edits go to the bus with slots a viewer shows, else to the first one the mixer has.
 const gridAux = () => auxById(viewers.find((v) => !v.el.hidden && v.grid)?.grid) ||
-                      auxBuses().find((aux) => !isPages(aux)) || null;
+                      auxBuses().find((aux) => slotsOf(aux).length) || null;
+const LAYOUT_NAMES = {pgm_pvw_grid: "PVW · PGM grid", source_pages: "Source pages"};
+function layoutName(spec) {
+  if (spec.preset) return LAYOUT_NAMES[spec.preset] || spec.preset;
+  const n = (role) => spec.cells.filter((cell) => cell.role === role).length;
+  return ["Custom", n("pvw") && "PVW", n("pgm") && "PGM", n("slot") && `${n("slot")} slots`,
+          n("source") && `${n("source")} sources`].filter(Boolean).join(" · ");
+}
+// Layouts the operator picks between: a preset whatever its page, or the same cells.
+const sameLayout = (a, b) => JSON.stringify(a.preset ?? a.cells) === JSON.stringify(b.preset ?? b.cells);
+const outputLabel = (bus) => settings().preview_outputs?.find((o) => o.bus === bus)?.label || bus;
 const codecName = (codec) => ({h264: "H.264", h265: "H.265"})[codec] || String(codec || "").toUpperCase();
 const canvasText = (c) => `${c.width}×${c.height}p${c.fps}`;
 const formatText = (c) => c ? `${canvasText(c)} ${({nv12: "SDR", p210le: "HDR 4:2:2"})[c.working_format] || "HDR"}` : "";
@@ -544,20 +557,21 @@ function renderKeys() {
   }));
 }
 function renderSlots() {
-  const aux = gridAux(), keys = Boolean(state?.dsk?.length);
-  if (!aux) armedSlot = null;
+  const aux = gridAux(), keys = Boolean(state?.dsk?.length), slots = slotsOf(aux);
+  if (!aux || armedSlot >= slots.length) armedSlot = null;
   $("slots-card").hidden = !aux;
   $("row2").hidden = !aux && !keys;
   $("row2").classList.toggle("single", !aux || !keys);
   $("scenes").classList.toggle("armed", armedSlot !== null);
   if (!aux) return;
+  $("slots-title").textContent = `${outputLabel(aux.id)} slots`;
   const problem = auxError(aux) || (aux.suspended ? "suspended · assign a scene to resume" : "");
   $("slot-note").textContent = armedSlot !== null ? `pick a scene for M${armedSlot + 1}` : problem ||
-    (aux.composition_pending ? "preparing sources · the program preview stays live" : "click a slot, then a scene · ⇧1–8");
+    (aux.composition_pending ? "preparing sources · the bus stays live" : `click a slot, then a scene · ⇧1–${Math.min(slots.length, 9)}`);
   $("slot-note").classList.toggle("warn", armedSlot === null && Boolean(problem));
-  if (!changed($("slots"), [aux.scenes, armedSlot])) return;
-  rebuild($("slots"), aux.scenes.map((scene, i) => {
-    const cell = el("div", "slot");
+  if (!changed($("slots"), [aux.scenes, slots, armedSlot])) return;
+  rebuild($("slots"), slots.map((i) => {
+    const scene = aux.scenes[i], cell = el("div", "slot");
     const assign = el("button", "assign" + (scene ? "" : " empty"));
     assign.dataset.focus = `assign${i}`;
     assign.setAttribute("aria-pressed", String(armedSlot === i));
@@ -657,11 +671,11 @@ function graphModel() {
     ...outputs.filter((o) => !auxById(o.bus)).map((o) => ({title: `${codecName(o.codec)} clean`, sub: port(o), keyed: false})),
   ];
   const aux = auxBuses().map((a) => {
-    const out = outputs.find((o) => o.bus === a.id);
+    const out = outputs.find((o) => o.bus === a.id), slots = slotsOf(a);
     const sub = auxError(a) ? "error" : a.suspended ? "suspended"
       : isPages(a) ? `page ${a.page + 1}/${a.pages}${a.auto ? " · auto" : ""}`
-      : `${a.scenes.filter(Boolean).length}/${a.scenes.length} slots${a.composition_pending ? " · pending" : ""}`;
-    return {id: a.id, grid: !isPages(a), title: out?.label || a.id, sub,
+      : `${slots.length ? `${slots.filter((i) => a.scenes[i]).length}/${slots.length} slots` : layoutName(a.layout)}${a.composition_pending ? " · pending" : ""}`;
+    return {id: a.id, grid: cellsOf(a, "pgm").length > 0, title: out?.label || a.id, sub,
             tip: auxError(a) || a.id, warn: Boolean(auxError(a) || a.suspended), hot: isPages(a) && Boolean(a.auto),
             encoder: out && {title: codecName(out.codec), sub: port(out)}};   // its row names the bus
   });
@@ -708,7 +722,7 @@ function renderGraph() {
   if (m.keys) edge(`M${end(TR)} ${cy} H${KEY[0]}`);
   m.encoders.forEach((e, i) => edge(e.keyed || !m.keys ? `M${keyerX} ${cy} ${toEncoder(encY(i))}`
                                                        : `M${end(TR)} ${cy} H${gap(TR, KEY)} V${chainY + H44 + 26} ${toEncoder(encY(i))}`));
-  // A scene multiview takes the program from where the keyer (or without keys, the transition) is.
+  // A bus with a pgm cell takes the program from where the keyer (or without keys, the transition) is.
   const tap = m.keys ? KEY : TR;
   m.aux.forEach((a, i) => {
     edge(`M${end(SRC)} ${scy} H${gap(SRC, ME)} V${auxY(i) + 22} H${ME[0]}`, true);
@@ -1023,11 +1037,12 @@ function programOptions(s, keys) {
 function outputOptions() {
   const s = settings(), keys = Boolean(state?.dsk?.length);
   return [...programOptions(s, keys), ...(s.preview_outputs || []).map((o) => {
-    const aux = auxById(o.bus), layout = aux ? aux.layout : null, pages = aux && isPages(aux);
+    const aux = auxById(o.bus), pages = aux && isPages(aux), slots = slotsOf(aux).length;
     const meta = !aux ? ["no keys", `${codecName(o.codec)} ${String(o.color || "").toUpperCase()}`.trim(), o.fps && `p${o.fps}`]
       : pages ? [`${aux.total} sources`, `${aux.pages} pages`, o.fps && `p${o.fps}`]
-      : ["PGM · PVW", `${aux.scenes.length} scene slots`, o.fps && `p${o.fps}`];
-    return {value: o.bus, group: aux ? "Monitoring" : "Program", layout, label: o.label || o.bus, url: playerUrl(o), chrome: 49,
+      : [["PGM", "PVW"].filter((role) => cellsOf(aux, role.toLowerCase()).length).join(" · "),
+         slots && `${slots} scene slots`, o.fps && `p${o.fps}`];
+    return {value: o.bus, group: aux ? "Monitoring" : "Program", layout: o.layout, label: o.label || o.bus, url: playerUrl(o), chrome: 49,
             unplayable: !playable(o.codec),
             dot: !aux ? "var(--pgm)" : pages ? "var(--accent)" : "var(--pvw)", meta: meta.filter(Boolean).join(" · ")};
   })];
@@ -1052,12 +1067,17 @@ function canvasSize(aux) {
   const c = settings().canvas;
   return aux?.canvas ? [aux.canvas.w, aux.canvas.h] : c ? [c.width, c.height] : [9, 16];
 }
-// The slots widget and the pager follow what the viewers show.
+// The slots widget, the layout menu and the pager follow what the viewers show.
 const redraw = () => (state ? render() : layoutWall());
 
 function addViewer(out) {
   const v = {out, el: el("section", "card viewer"), head: el("header"), src: null};
   v.dd = dropdown((value) => { v.out = value; saveViewers(); redraw(); });
+  v.layouts = dropdown((value) => {
+    const aux = auxById(v.aux);
+    if (aux) command({command: "aux_layout", bus: aux.id, layout: aux.layouts[Number(value)]});
+  });
+  v.layouts.root.classList.add("layouts");
   v.pager = el("span", "pager");
   v.pager.setAttribute("role", "group");
   v.pager.setAttribute("aria-label", "Multiviewer pages");
@@ -1079,7 +1099,7 @@ function addViewer(out) {
   v.open.title = "Open in the player: status, errors, all stats";
   v.open.setAttribute("aria-label", "Open this output in the player");
   v.open.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 2h3v3M10 2 5.5 6.5"/></svg>';
-  v.head.append(el("span", "lbl", "Output"), v.dd.root, v.pager, v.close);
+  v.head.append(el("span", "lbl", "Output"), v.dd.root, v.layouts.root, v.pager, v.close);
   v.screen = el("div", "screen");
   v.frame = el("iframe");
   v.frame.setAttribute("allow", "autoplay; fullscreen; picture-in-picture");
@@ -1116,8 +1136,10 @@ function refreshViewer(v, options) {
   v.screen.setAttribute("aria-label", `${opt.label}: full screen`);
   v.screen.style.aspectRatio = `${size[0]} / ${size[1]}`;
   v.screen.style.setProperty("--ar", size[0] / size[1]);
-  v.grid = aux && !isPages(aux) ? aux.id : null;
+  v.aux = aux?.id || null;
+  v.grid = slotsOf(aux).length ? aux.id : null;
   v.bus = aux && isPages(aux) ? aux.id : null;
+  renderLayouts(v, aux);
   v.pager.hidden = !v.bus;
   v.el.classList.toggle("paged", Boolean(v.bus));
   if (v.bus) renderPager(v, aux);
@@ -1132,10 +1154,19 @@ function refreshViewer(v, options) {
   v.open.href = opt.url;
   v.open.hidden = !src;
 }
+// A bus that offers more than one layout gets a menu of them in its viewer's header.
+function renderLayouts(v, aux) {
+  const layouts = aux?.layouts || [];
+  v.layouts.root.hidden = layouts.length < 2;
+  if (v.layouts.root.hidden) return;
+  v.layouts.setOptions(layouts.map((spec, i) => ({value: String(i), label: layoutName(spec), group: "Layout",
+                                                  meta: spec.preset ? "preset" : "cells", dot: "var(--muted)"})));
+  v.layouts.set(String(layouts.findIndex((spec) => sameLayout(spec, aux.layout))));
+}
 function renderPager(v, aux) {
   const page = `${aux.page + 1}/${aux.pages}`;
   if (v.pg.textContent !== page) v.pg.textContent = page;   // a live region: rewriting it would re-announce
-  v.pg.parentElement.title = `Sources ${aux.first}–${aux.first + aux.tiles.length - 1} of ${aux.total}`;
+  v.pg.parentElement.title = `Sources ${aux.first}–${aux.first + cellsOf(aux, "source").length - 1} of ${aux.total}`;
   v.auto.setAttribute("aria-pressed", String(aux.auto));
   v.auto.title = `Rotate every ${aux.rotate_s} s (R)`;
   v.auto.setAttribute("aria-label", `Rotate pages every ${aux.rotate_s} seconds`);
@@ -1162,16 +1193,12 @@ function trackPages() {
 const KIND_TAGS = {video: "dec", browser: "web", nv12: "raw", p010: "raw", v210: "raw"};
 // Labels and tally boxes are HTML on top of the video, placed in the canvas pixels the mixer reports.
 function renderOverlay(v, aux, [cw, ch], note) {
-  const items = [];
-  if (aux && isPages(aux)) {
-    for (const t of aux.tiles || []) items.push({r: t, text: t.id, kind: t.id.startsWith("dsk_") ? "key" : KIND_TAGS[t.kind] || t.kind, bottom: true});
-  } else if (aux) {
-    const status = state.status || {};
-    for (const cell of aux.cells || []) {
-      if (cell.role === "slot") items.push({r: cell, lead: `M${cell.slot + 1} ·`, text: aux.scenes[cell.slot] || "—", bottom: true});
-      else items.push({r: cell, box: cell.role, lead: `${cell.role.toUpperCase()} ·`,
-                       text: (cell.role === "pgm" ? status.pgm_scene : aux.pvw_scene ?? status.pvw_scene) || "—"});
-    }
+  const items = [], status = state?.status || {};
+  for (const cell of aux?.cells || []) {
+    if (cell.role === "source") items.push({r: cell, text: cell.id, kind: cell.id.startsWith("dsk_") ? "key" : KIND_TAGS[cell.kind] || cell.kind, bottom: true});
+    else if (cell.role === "slot") items.push({r: cell, lead: `M${cell.slot + 1} ·`, text: aux.scenes[cell.slot] || "—", bottom: true});
+    else items.push({r: cell, box: cell.role, lead: `${cell.role.toUpperCase()} ·`,
+                     text: (cell.role === "pgm" ? status.pgm_scene : aux.pvw_scene) || "—"});
   }
   if (!changed(v.ovl, [items, cw, ch, note])) return;
   const pct = (n, of) => `${n / of * 100}%`;
@@ -1226,6 +1253,7 @@ function layoutWall() {
     v.close.hidden = viewers.length < 2;
     v.close.setAttribute("aria-label", `Close viewer ${i + 1}`);
     v.dd.setLabel(`Output of viewer ${i + 1}`);
+    v.layouts.setLabel(`Layout of viewer ${i + 1}`);
     refreshViewer(v, options);
   });
   const shown = viewers.filter((v) => !v.el.hidden);
@@ -1329,7 +1357,7 @@ function render() {
   renderCounts(); renderMeters(); renderHost(); renderWipeCache(); renderBuses(); renderKeys(); renderSlots(); renderChips(); renderScenes();
   $("hint-pages").hidden = !pagesBus();
   $("hint").title = ["1–9 scene · C cut · F fade · W wipe · D direct", pagesBus() && "[ ] page · R rotate",
-                     gridAux() && "⇧1–8 slot"].filter(Boolean).join(" · ");
+                     gridAux() && `⇧1–${Math.min(slotsOf(gridAux()).length, 9)} slot`].filter(Boolean).join(" · ");
   trimTakebar();
   renderGraph();
 }
@@ -1385,7 +1413,7 @@ $("tab-graph").onclick = () => setTab("graph");
 addEventListener("keydown", (e) => {
   if (e.target.closest?.("input, .dd-menu") || e.metaKey || e.ctrlKey || e.altKey) return;
   const shifted = Number(e.code.replace("Digit", ""));
-  if (e.shiftKey && gridAux() && shifted >= 1 && shifted <= 8) { e.preventDefault(); assignSlot(shifted - 1, selected || null); return; }
+  if (e.shiftKey && shifted >= 1 && shifted <= slotsOf(gridAux()).length) { e.preventDefault(); assignSlot(shifted - 1, selected || null); return; }
   const digit = Number(e.key);
   if (digit >= 1 && digit <= 9 && visible[digit - 1]) { e.preventDefault(); pick(visible[digit - 1]); return; }
   const k = e.key.toLowerCase(), bus = pagesBus();
