@@ -1226,7 +1226,8 @@ function deckWidth(main) {
 function layoutWall() {
   const main = document.querySelector("main"), narrow = matchMedia("(max-width: 900px)").matches;
   const deck = narrow ? null : deckWidth(main);
-  main.style.gridTemplateColumns = deck === null ? "" : `${deck}px 14px minmax(0, 1fr)`;
+  // The deck takes whatever the monitors cannot use, so the divider stays at their edge and a drag resizes the video.
+  main.style.gridTemplateColumns = deck === null ? "" : `minmax(${deck}px, 1fr) 14px auto`;
   const room = main.clientWidth - (deck ?? DECK_MIN) - 14, options = outputOptions();
   const aspectOf = (v) => { const [w, h] = canvasSize(auxById(optionOf(v, options).value)); return w / h; };
   // The video gets what is left between the header and the stats row, inside the card's borders.
@@ -1296,7 +1297,7 @@ new ResizeObserver(layoutWall).observe(document.querySelector("main"));
     if (!step) return;
     e.preventDefault();
     e.stopPropagation();   // the arrows move the divider, not a mixer shortcut
-    setDeck((deckWidth(main) ?? $("deck").offsetWidth) + step);
+    setDeck($("deck").offsetWidth + step);
   });
 }
 for (const b of $("viewer-count").children) b.onclick = () => {
