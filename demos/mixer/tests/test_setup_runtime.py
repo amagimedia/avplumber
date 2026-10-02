@@ -454,6 +454,25 @@ def test_setup_preserves_live_aux_through_color_change_and_resume(runtime, monke
     assert json.loads(config.read_text())["aux_buses"] == changed["aux_buses"]
 
 
+def test_setup_drops_saved_aux_layouts_the_new_sources_no_longer_have(runtime, monkeypatch):
+    """Fewer sources (e.g. 110 at 30 fps, 75 at 60) must not refuse an Apply over a cells layout."""
+    settings = {**DEFAULT_SETTINGS, "chroma": "420", "weights": [4, 0, 0, 0, 1, 0, 0]}
+    config = runtime.media_dir / "mixer.demo.json"
+    show, _, _ = prepare_demo.plan(recipe_for(T4, settings), runtime.media_dir)
+    show["aux_buses"] = [{"id": "mv", "renditions": [{"id": "monitor", "port": 5008}]}]
+    config.write_text(json.dumps(show))
+    cell = lambda source: {"role": "source", "source": source, "x": 0, "y": 0, "w": 960, "h": 540}
+    gone, kept = {"cells": [cell(99)]}, {"cells": [cell(0)]}
+    runtime.bridge.command = lambda cmd: json.dumps([{"id": "mv", "layout": gone, "layouts": [gone, kept], "scenes": []}])
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory: config.write_text(
+        json.dumps(prepare_demo.plan(recipe, directory)[0])))
+    runtime.apply(settings)
+    runtime.worker.join(3)
+    assert runtime.status()["phase"] == "running", runtime.status()
+    bus = json.loads(config.read_text())["aux_buses"][0]
+    assert bus["layouts"] == [kept] and bus["layout"] == kept
+
+
 def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
     from pyplumber.mixer.config import parse
     old, _, _ = prepare_demo.plan(recipe_for(T4, DEFAULT_SETTINGS), runtime.media_dir)

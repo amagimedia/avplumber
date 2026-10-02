@@ -21,6 +21,7 @@ from extra_aux import extra_buses
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import janus_mountpoints
 from pyplumber.mixer.color import default_codec
+from pyplumber.mixer.aux_layout import parse_layout
 from pyplumber.mixer.config import ConfigError, aux_fps, aux_label, parse, parse_aux_buses
 
 DEMO_DIR = Path(__file__).resolve().parent
@@ -233,6 +234,14 @@ def recipe_for(profile, settings):
     return recipe
 
 
+def _fits(cfg, spec):
+    try:
+        parse_layout(cfg, spec)
+        return True
+    except ConfigError:
+        return False
+
+
 class SetupRuntime:
     def __init__(self, media_dir, recipe_path, bridge, instance_type, mixer_args=(), browser_url="http://127.0.0.1:9009",
                  janus_api=None):
@@ -364,6 +373,12 @@ class SetupRuntime:
                 bus["layout"] = unpaged(state["layout"])
             if "layouts" in state:   # the live menu, and with it the PGM pad when a layout has a pgm cell
                 bus["layouts"] = [unpaged(spec) for spec in state["layouts"]]
+            # A layout whose cells the new canvas or source list no longer has is dropped, the live
+            # one falling back to the first that still fits: a saved layout never refuses an Apply.
+            if "layouts" in bus:
+                bus["layouts"] = [spec for spec in bus["layouts"] if _fits(cfg, spec)]
+            if "layout" in bus and not _fits(cfg, bus["layout"]):
+                bus["layout"] = next(iter(bus.get("layouts", [])), {"preset": "source_pages"})
             scenes = [s if s in scene_ids else None for s in state.get("scenes", [])]
             for i, scene in enumerate(scenes):
                 if not scene:
