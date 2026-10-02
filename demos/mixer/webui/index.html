@@ -456,6 +456,7 @@ const sameLayout = (a, b) => JSON.stringify(a.preset ?? a.cells) === JSON.string
 const outputLabel = (bus) => settings().preview_outputs?.find((o) => o.bus === bus)?.label || bus;
 const codecName = (codec) => ({h264: "H.264", h265: "H.265"})[codec] || String(codec || "").toUpperCase();
 const canvasText = (c) => `${c.width}×${c.height}p${c.fps}`;
+const rateText = (o) => o.fps && `${o.fps} fps`;   // an output's encoded rate
 const formatText = (c) => c ? `${canvasText(c)} ${({nv12: "SDR", p210le: "HDR 4:2:2"})[c.working_format] || "HDR"}` : "";
 
 async function api(path, body) {
@@ -671,7 +672,7 @@ function svg(tag, attrs, text) {
 function graphModel() {
   const s = settings(), status = state.status || {}, keys = state.dsk || [], mixer = state.mixer || "mixer";
   const outputs = s.preview_outputs || [], canvas = s.canvas ? canvasText(s.canvas) : "";
-  const port = (o) => [o.port && `port ${o.port}`, o.fps && `p${o.fps}`].filter(Boolean).join(" · ");
+  const port = (o) => [o.port && `port ${o.port}`, rateText(o)].filter(Boolean).join(" · ");
   const encoders = [
     ...(s.preview_codecs || []).map((codec) => ({title: `${codecName(codec)} ${keys.length ? "dirty" : "program"}`,
                                                   sub: canvas, keyed: true})),
@@ -1045,10 +1046,11 @@ function outputOptions() {
   const s = settings(), keys = Boolean(state?.dsk?.length);
   return [...programOptions(s, keys), ...(s.preview_outputs || []).map((o) => {
     const aux = auxById(o.bus), pages = aux && isPages(aux), slots = slotsOf(aux).length;
-    const meta = !aux ? ["no keys", `${codecName(o.codec)} ${String(o.color || "").toUpperCase()}`.trim(), o.fps && `p${o.fps}`]
-      : pages ? [`${aux.total} sources`, `${aux.pages} pages`, o.fps && `p${o.fps}`]
+    const sources = cellsOf(aux, "source").length;
+    const meta = !aux ? ["no keys", `${codecName(o.codec)} ${String(o.color || "").toUpperCase()}`.trim(), rateText(o)]
+      : pages ? [`${aux.total} sources`, `${aux.pages} pages`, rateText(o)]
       : [["PGM", "PVW"].filter((role) => cellsOf(aux, role.toLowerCase()).length).join(" · "),
-         slots && `${slots} scene slots`, o.fps && `p${o.fps}`];
+         slots && `${slots} scene slots`, sources && `${sources} sources`, rateText(o)];
     return {value: o.bus, group: aux ? "Monitoring" : "Program", layout: o.layout, label: o.label || o.bus, url: playerUrl(o), chrome: 49,
             unplayable: !playable(o.codec),
             dot: !aux ? "var(--pgm)" : pages ? "var(--accent)" : "var(--pvw)", meta: meta.filter(Boolean).join(" · ")};

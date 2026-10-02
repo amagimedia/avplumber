@@ -970,10 +970,10 @@ def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime
         return parse(json.loads(config.read_text()))
 
     cfg = apply(3)
-    ports = {"aux1": 5016, "aux2": 5020, "aux3": 5024}
+    ports = {"aux0": 5016, "aux1": 5020, "aux2": 5024}
     # Each is an output of the control page, its mountpoint created before the mixer starts.
     assert [(o["bus"], o["label"], o["mountpoint"]) for o in cfg.settings()["preview_outputs"]][-3:] == [
-        ("aux1", "Aux 1", 5016), ("aux2", "Aux 2", 5020), ("aux3", "Aux 3", 5024)]
+        ("aux0", "Aux 0", 5016), ("aux1", "Aux 1", 5020), ("aux2", "Aux 2", 5024)]
     assert syncs == [(ports, False), (ports, True)]
     assert runtime.status()["aux_buses"] == [{"id": "mv", "full_rate": False}, {"id": "mv2", "full_rate": False}]
     first = cfg.aux_buses
@@ -981,15 +981,15 @@ def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime
         assert len(bus.layouts) == 5 and bus.layout == bus.layouts[0] and not draws_program(cfg, bus.layouts)
         assert bus.renditions[0].bitrate_kbps == first[0].renditions[0].bitrate_kbps
         assert bus.renditions[0].preset == T4["nvenc"]["preset"]   # not the renditions' p7 default
-    # Fewer drops the last ones; the operator's pick on aux2 stays.
-    live["aux2"] = {"id": "aux2", "layout": first[3].layouts[2], "layouts": list(first[3].layouts), "scenes": []}
+    # Fewer drops the last ones; the operator's pick on aux1 stays.
+    live["aux1"] = {"id": "aux1", "layout": first[3].layouts[2], "layouts": list(first[3].layouts), "scenes": []}
     cfg = apply(2)
-    assert [b.id for b in cfg.aux_buses] == ["mv", "mv2", "aux1", "aux2"]
+    assert [b.id for b in cfg.aux_buses] == ["mv", "mv2", "aux0", "aux1"]
     assert cfg.aux_buses[3].layout == first[3].layouts[2]
-    assert syncs[-1] == ({"aux1": 5016, "aux2": 5020}, True)
+    assert syncs[-1] == ({"aux0": 5016, "aux1": 5020}, True)
     # More adds them back: the same ids, ports and layouts.
     cfg = apply(4)
-    assert [(b.id, b.label, b.renditions[0].port) for b in cfg.aux_buses[4:]] == [("aux3", "Aux 3", 5024), ("aux4", "Aux 4", 5028)]
+    assert [(b.id, b.label, b.renditions[0].port) for b in cfg.aux_buses[4:]] == [("aux2", "Aux 2", 5024), ("aux3", "Aux 3", 5028)]
     assert cfg.aux_buses[4].layouts == first[4].layouts
     # Another orientation draws them again, on the same outputs.
     cfg = apply(4, orientation="landscape")

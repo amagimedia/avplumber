@@ -13,7 +13,7 @@ def config(width, height, sources):
 @pytest.mark.parametrize("sources", [1, 3, 5, 16, 110])
 def test_random_layouts_tile_the_canvas_with_distinct_sources(width, height, sources):
     cfg = config(width, height, sources)
-    specs = layouts("aux1", cfg)
+    specs = layouts("aux0", cfg)
     sizes = [len(spec["cells"]) for spec in specs]
     # Different cell counts, fewest first: 4 to 16, never more cells than sources.
     assert sizes == sorted(set(sizes)) and len(sizes) == min(5, min(16, sources) - min(4, sources) + 1)
@@ -28,6 +28,6 @@ def test_random_layouts_tile_the_canvas_with_distinct_sources(width, height, sou
 
 def test_random_layouts_follow_the_bus_id_and_source_list():
     cfg = config(1080, 1920, 40)
-    assert layouts("aux1", cfg) == layouts("aux1", config(1080, 1920, 40))
-    assert layouts("aux2", cfg) != layouts("aux1", cfg)
-    assert layouts("aux1", config(1080, 1920, 41)) != layouts("aux1", cfg)
+    assert layouts("aux0", cfg) == layouts("aux0", config(1080, 1920, 40))
+    assert layouts("aux1", cfg) != layouts("aux0", cfg)
+    assert layouts("aux0", config(1080, 1920, 41)) != layouts("aux0", cfg)
