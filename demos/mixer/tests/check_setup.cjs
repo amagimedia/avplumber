@@ -185,16 +185,9 @@ const { chromium } = require('playwright');
       assert.equal(sdr.weights[5], hdr.weights[5] + 3 + hdr.weights[2] + hdr.weights[3], 'P010 and 4:2:2 uploads stay uploads, as NV12');
     }
     await reset();
-    for (const [fps, ring] of [[25, 6], [50, 9], [30, 6], [60, 9]]) {
-      await page.locator('#fps').selectOption(String(fps));
-      assert.equal((await apply()).browser_ring_size, ring);
-    }
-    for (const ring of [6, 9, 11]) {
-      await page.locator('#browser-ring-size').fill(String(ring));
-      assert.equal((await apply()).browser_ring_size, ring);
-    }
-    await page.locator('#browser-ring-size').fill('0');
-    assert.equal(await page.locator('#apply').isDisabled(), true);
+    // The browser ring size is not a setup control: the show takes the frame rate's default.
+    assert.equal(await page.locator('#browser-ring-size').count(), 0);
+    assert.equal('browser_ring_size' in await apply(), false);
 
     // Extra aux outputs fill NVENC to the profile's budget beside the program, its HLG copy on a
     // 10-bit canvas, the clean feed and the two own buses (setup_runtime.extra_aux_limit).
@@ -228,10 +221,12 @@ const { chromium } = require('playwright');
     assert.equal(await extraAux.inputValue(), '6');
     await page.locator('#mode').selectOption('10:420');
     assert.equal(await extraAux.inputValue(), '4');
+    // The clean feed counts even while off: the maximum does not move with it.
     await page.locator('#clean-feed').uncheck();
+    assert.equal(await extraAux.getAttribute('max'), '4');
     assert.equal((await apply()).extra_aux, 4);
     assert.match(await page.locator('#extra-aux-note').textContent(),
-      /^Maximum 5 at 30 fps: .* 2 aux outputs take 36\.4% of NVENC and each extra output 7\.3%, of the 80% budget on tesla_t4\.$/);
+      /^Extra aux outputs: at most 4, .* 2 aux outputs use 43\.7% of NVENC, each extra output 7\.3% \(budget 80%\)\.$/);
     const saved = submissions.at(-1);
     await reset(saved);
     assert.equal(await extraAux.inputValue(), '4', 'the saved count loads');
