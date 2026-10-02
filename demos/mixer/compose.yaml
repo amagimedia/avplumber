@@ -71,6 +71,10 @@ services:
       # Measures each cut's latency (mixer.status cut_latency), which the cut-spam gate reads.
       - --cut-latency-encoder
       - janus_encoder
+      # The AVPlumber web UI (tools/web-ui) the mixer registers with: the players' cut-latency meter
+      # reads mixer.status through its bridge (doc/mixer_cut_latency.md). Empty: no registration.
+      - --webui-url
+      - ${MIXER_WEBUI_URL:-}
       - --prewarm-cut-scene
       - '*'
 

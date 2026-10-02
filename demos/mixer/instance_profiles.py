@@ -73,7 +73,10 @@ INSTANCE_PROFILES = {
     InstanceType.NVIDIA_L4: {
         "sources": {25: 191, 30: 191, 50: 150, 60: 130},   # 191: the 192-pad mask less a PGM pad
         "mode_share": {"8:420": 1.0, "10:420": 1.0, "10:422": 1.0},
-        "nvdec_decodes": {25: 100, 30: 83, 50: 50, 60: 41},
+        # Measured 2026-10-02: 83 1080p30 H.264 decodes (synthetic inputs with grain, 3-10 Mbit/s,
+        # 16 peak) ran NVDEC at 88-89% (the 90% reference) beside the full outputs, gate passed.
+        # 50/60 fps scale those 2,490 decoded frames/s; 25 fps keeps the 30 fps count.
+        "nvdec_decodes": {25: 83, 30: 83, 50: 49, 60: 41},
         "browser_windows": 40,
         "raw_upload_units": {25: 60, 30: 60, 50: 40, 60: 34},
         "hlg_v210": 8,
