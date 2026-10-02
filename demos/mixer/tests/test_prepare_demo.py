@@ -149,7 +149,7 @@ def test_sdr_pattern_pool_keeps_cellauto_opt_in(recipe, tmp_path):
     spec["patterns"] = ["bars", "gradients"]
     sources = plan(recipe, tmp_path)[0]["sources"]
     # <id>_<color>_<chroma>_<pattern>_<encoder>.mp4, and the encoder is h264_nvenc
-    assert [s["path"].removesuffix("_h264_nvenc.mp4").rsplit("_", 1)[-1] for s in sources] == ["bars", "gradients", "bars"]
+    assert [s["path"].rsplit("_h264_nvenc", 1)[0].rsplit("_", 1)[-1] for s in sources] == ["bars", "gradients", "bars"]
     assert len({s["id"] for s in sources}) == len({s["path"] for s in sources}) == 3
     assert all(s["independent"] for s in sources)
     del spec["patterns"]
@@ -365,12 +365,12 @@ def test_hlg_pattern_is_built_once_per_variant_and_removed_after_the_run(tmp_pat
     monkeypatch.setattr(prepare_demo.subprocess, "run", run)
     patterns = tmp_path / "assets" / prepare_demo.HLG_PATTERNS
     for variant, sid in ((0, "a"), (1, "b"), (0, "c")):
-        prepare_demo.render_hlg(tmp_path / f"{sid}.mp4", 96, 64, 4, 1, variant, "hevc_nvenc", "ffmpeg", sid, patterns)
+        prepare_demo.render_hlg(tmp_path / f"{sid}.mp4", 96, 64, 4, 1, variant, "hevc_nvenc", "ffmpeg", sid, patterns, 3000)
     assert built == [0, 1]   # the third source reuses variant 0
     assert encoded == [patterns / "0_96x64_4fps_1s.v210", patterns / "1_96x64_4fps_1s.v210", patterns / "0_96x64_4fps_1s.v210"]
 
     def failing_job(out):
-        prepare_demo.render_hlg(out, 96, 64, 4, 1, 0, "hevc_nvenc", "ffmpeg", "d", patterns)
+        prepare_demo.render_hlg(out, 96, 64, 4, 1, 0, "hevc_nvenc", "ffmpeg", "d", patterns, 3000)
         raise ValueError("encoder failed")
 
     monkeypatch.setattr(prepare_demo, "plan", lambda *args: ({}, {tmp_path / "assets" / "d.mp4": failing_job}, {}))

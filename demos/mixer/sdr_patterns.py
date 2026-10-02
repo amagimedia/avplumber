@@ -5,10 +5,29 @@
 
 One clip per generator below; each is a distinct NVDEC-decodable source, far
 cheaper at run time than raw v210 (which streams ~330 MB/s per 1080p60 input).
+Every pattern carries moving grain and encodes at a contribution-like bitrate (3 to
+10 Mbit/s average, 16 Mbit/s peak), so a clip costs a decoder about what camera footage
+does: a plain pattern would encode to a few hundred kbit/s and flatter the source limits.
 """
 import argparse
 import pathlib
 import subprocess
+
+# Temporal luma noise, like camera grain: per-frame detail for the encoder and decoder.
+GRAIN = "noise=c0s=10:c0f=t"
+# Contribution-like input bitrates: each source averages one, 3 to 10 Mbit/s, peaking at 16.
+INPUT_KBPS = range(3000, 10001, 1000)
+PEAK_KBPS = 16000
+
+
+def input_kbps(index: int) -> int:
+    """The bitrate of source *index*, spread over INPUT_KBPS."""
+    return INPUT_KBPS[index * 3 % len(INPUT_KBPS)]
+
+
+def rate(kbps: int) -> list:
+    return ["-b:v", f"{kbps}k", "-maxrate", f"{PEAK_KBPS}k", "-bufsize", f"{2 * kbps}k"]
+
 
 GENERATORS = {
     "testsrc2": "testsrc2",
@@ -23,18 +42,18 @@ GENERATORS = {
 
 
 def render(directory: pathlib.Path, name: str, graph: str, size: str, fps: int, seconds: int,
-           encoder: str, ffmpeg: str, overlay=None) -> pathlib.Path:
+           encoder: str, ffmpeg: str, overlay=None, kbps: int = INPUT_KBPS[-1]) -> pathlib.Path:
     """*overlay* is (extra FFmpeg input arguments, filter_complex over [0:v] and [1:v],
     stdin bytes for that input), e.g. prepare_demo.id_overlay()."""
     raw = encoder == "rawvideo"
     out = directory / f"{name}.{'nv12' if raw else 'mp4'}"
-    source = f"{graph}{':' if '=' in graph else '='}size={size}:rate={fps}"
+    source = f"{graph}{':' if '=' in graph else '='}size={size}:rate={fps},{GRAIN}"
     inputs, graph_filter, data = overlay or ([], None, None)
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", source, *inputs,
                     *(["-filter_complex", graph_filter] if graph_filter else []), "-t", str(seconds),
                     "-c:v", encoder,
                     *(["-f", "rawvideo", "-pix_fmt", "nv12"] if raw else
-                      ["-b:v", "12M", "-maxrate", "16M", "-g", str(fps), "-pix_fmt", "yuv420p"]), str(out)],
+                      [*rate(kbps), "-g", str(fps), "-pix_fmt", "yuv420p"]), str(out)],
                    input=data, check=True)
     return out
 

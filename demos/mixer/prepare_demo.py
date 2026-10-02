@@ -28,7 +28,7 @@ import numpy as np
 DEMO_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(DEMO_DIR.parents[1]))
 
-from sdr_patterns import GENERATORS, render  # noqa: E402
+from sdr_patterns import GENERATORS, input_kbps, rate, render  # noqa: E402
 from demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic  # noqa: E402
 from hdr_patterns import write_hlg  # noqa: E402
 from pyplumber.mixer.config import MAX_SOURCES, default_browser_ring_size, parse  # noqa: E402
@@ -142,7 +142,7 @@ def id_overlay(source_id, width, height, seconds):
 HLG_PATTERNS = ".hlg-patterns"
 
 
-def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, source_id, pattern_dir):
+def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, source_id, pattern_dir, kbps):
     # Offline conversion of a native HLG signal, not SDR samples tagged as HDR. The pattern
     # depends only on its variant and geometry, and building it in Python is most of the cost,
     # so it is built once per run and every source of the variant encodes it with its own id.
@@ -155,7 +155,7 @@ def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, sour
     inputs, graph, data = id_overlay(source_id, width, height, seconds)
     pixel_format = "yuv422p10le" if encoder == "v210" else "p010le"
     options = (["-f", "rawvideo"] if encoder in ("rawvideo", "v210") else
-               ["-profile:v", "main10", "-b:v", "12M", "-g", str(fps)])
+               ["-profile:v", "main10", *rate(kbps), "-g", str(fps)])
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-f", "v210", "-video_size", f"{width}x{height}",
                     "-framerate", str(fps), "-i", str(raw), *inputs, "-an", "-filter_complex",
                     graph + ",setparams=range=limited:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
@@ -256,20 +256,20 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 # no two inputs share decode input or page cache; the name holds
                 # all that shapes the content, so re-applying reuses the file.
                 extension = raw or ("v210" if chroma == "422" else "mp4")
-                path = (media_dir / "assets" / f"synthetic_v3_{size}_{fps}fps_{seconds}s" /
-                        f"{source['id']}_{color}_{chroma}_{pattern}_{storage}.{extension}")
+                path = (media_dir / "assets" / f"synthetic_v4_{size}_{fps}fps_{seconds}s" /
+                        f"{source['id']}_{color}_{chroma}_{pattern}_{storage}{f'_{input_kbps(index)}k' if extension == 'mp4' else ''}.{extension}")
                 encoder = "v210" if chroma == "422" else "rawvideo" if raw else encoder
                 if color == "hlg":
-                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"]: render_hlg(
+                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"], kbps=input_kbps(index): render_hlg(
                         out, asset_width, asset_height, fps, seconds, int(pattern), encoder, ffmpeg, sid,
-                        media_dir / "assets" / HLG_PATTERNS)
+                        media_dir / "assets" / HLG_PATTERNS, kbps)
                 elif chroma == "422":
                     writer = lambda out, pattern=pattern, sid=source["id"]: render_sdr422(
                         out, asset_width, asset_height, fps, seconds, int(pattern), ffmpeg, sid)
                 else:
-                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"]: render(
+                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"], kbps=input_kbps(index): render(
                         out.parent, out.stem, GENERATORS[pattern], size, fps, seconds, encoder, ffmpeg,
-                        id_overlay(sid, asset_width, asset_height, seconds))
+                        id_overlay(sid, asset_width, asset_height, seconds), kbps)
                 jobs[path] = writer
                 source.update(kind=raw or ("v210" if chroma == "422" else "video"),
                               path=runtime_path(path), width=asset_width, height=asset_height)
