@@ -31,7 +31,7 @@ WORKING_FORMATS = ("nv12", "p010le", "p210le")
 # A/B in demos/mixer/docs/cookbook/raw-uploads.html; the 110-input A/B is pending).
 RAW_UPLOADS = ("hwupload", "pinned")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
-MAX_SOURCES = 128         # mixer_compositor active_inputs is a 128-bit pad mask (SourceMask)
+MAX_SOURCES = 256         # mixer_compositor active_inputs is a 256-bit pad mask (SourceMask, kSourceMaskBits)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 256
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
@@ -646,8 +646,9 @@ def parse_aux_buses(values, cfg):
         for spec in (parse_layout(cfg, spec) for spec in offered):
             if not any(same_kind(spec, known) for known in layouts):
                 layouts.append(spec)
-        if len(cfg.sources) + draws_program(cfg, layouts) > 128:
-            raise ConfigError("an aux bus needs one pad per unique source, plus PGM when a layout draws it; limit is 128")
+        if len(cfg.sources) + draws_program(cfg, layouts) > MAX_SOURCES:
+            raise ConfigError("an aux bus needs one pad per unique source, plus PGM when a layout draws it; "
+                              f"limit is {MAX_SOURCES}")
         max_layers = obj.get("max_layers", cfg.max_compositor_layers)
         if type(max_layers) is not int or not 1 <= max_layers <= 2_147_483_647:
             raise ConfigError(f"aux {bid}: max_layers must be a positive 32-bit integer")

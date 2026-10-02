@@ -15,7 +15,7 @@
 
 namespace avp::mixer {
 
-constexpr int kSourceMaskBits = 128;
+constexpr int kSourceMaskBits = 256;   // pyplumber/mixer/config.py MAX_SOURCES mirrors it
 using SourceMask = std::bitset<kSourceMaskBits>;
 
 /// A mask as the control protocol carries it: a number while it fits in 64 bits

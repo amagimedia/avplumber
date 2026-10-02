@@ -10,7 +10,7 @@ import pytest
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import prepare_demo
 from pyplumber.mixer.aux_layout import draws_program
-from pyplumber.mixer.config import parse
+from pyplumber.mixer.config import MAX_SOURCES, parse
 from setup_runtime import (DEFAULT_SETTINGS, HEALTHY_RUN_SEC, RECOVER_TIMEOUT_SEC, RETRY_DELAYS_SEC, STOP_TIMEOUT_SEC,
                            SetupRuntime, current_settings, extra_aux_limit, recipe_for, source_counts, source_limit)
 from webui import serve
@@ -979,6 +979,7 @@ def test_every_profile_covers_every_rate_and_canvas(tmp_path, instance_type):
     assert set(profile["mode_share"]) == {"8:420", "10:420", "10:422"}
     for fps in (25, 30, 50, 60):
         recipe_for(profile, {**DEFAULT_SETTINGS, "fps": fps})
+        assert source_limit(profile, fps) < MAX_SOURCES   # room for a bus's PGM pad in the pad mask
     # setup.html indexes the served tables by frame rate, which JSON turns into string keys.
     status = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), instance_type).status()
     assert status["instance_type"] == instance_type.value
@@ -987,6 +988,21 @@ def test_every_profile_covers_every_rate_and_canvas(tmp_path, instance_type):
     assert nvenc.keys() == {"budget_pct", "pct_per_fps", "bitrate_kbps", "defaults"}
     assert nvenc["defaults"].keys() == {"sdr", "hdr", "sdr_clean", "aux"}
     assert nvenc["pct_per_fps"]["hevc"].keys() == nvenc["pct_per_fps"]["h264"].keys() >= {e["preset"] for e in nvenc["defaults"].values()}
+
+
+@pytest.mark.parametrize("fps", [25, 30])
+def test_l4_setup_takes_its_limit_above_128_sources(tmp_path, fps):
+    """The L4's SDR limits pass the former 128-pad mask: every source and the program preview's
+    PGM pad fit, so its maximum builds a show."""
+    l4 = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    maximum = source_limit(l4, fps)
+    assert maximum > 128
+    recipe = recipe_for(l4, {**DEFAULT_SETTINGS, "fps": fps, "bit_depth": 8, "chroma": "420",
+                             "source_count": maximum, "weights": [1, 0, 0, 0, 1, 1, 0]})
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    assert len(show["sources"]) == maximum
+    cfg = parse({**show, "aux_buses": own_aux()})
+    assert draws_program(cfg, cfg.aux_buses[0].layouts)
 
 
 def own_aux(**rendition):

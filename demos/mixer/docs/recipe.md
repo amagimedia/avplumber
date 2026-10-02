@@ -18,7 +18,7 @@ lets host preparation write paths for a later `/media` container mount.
 
 | Recipe field | Meaning |
 | --- | --- |
-| `source_count` | Total independent input chains, 1–128 (up to 127 with aux), each with its own decoder or browser window. Every generated source also has its own media; see [generated media](#generated-media). This is separate from boxes visible in a scene. |
+| `source_count` | Total independent input chains, 1–256 (up to 255 with aux), each with its own decoder or browser window. Every generated source also has its own media; see [generated media](#generated-media). This is separate from boxes visible in a scene. |
 | `scene_count` | Total named scenes to generate, independent of source count. |
 | `inputs[].weight` | Relative share of the input total. Zero disables the entry, including download/preparation. |
 | `layouts` | Layout names mapped to relative shares of the scene total. |

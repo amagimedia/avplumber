@@ -9,7 +9,7 @@ from pyplumber.mixer.aux import AuxBus, AuxBuses
 from pyplumber.mixer.aux_layout import (base_composition, check_assignments, grid_cells, layout_cells, page_grid,
                                         parse_layout, pvw_layouts)
 from pyplumber.mixer.config import (aux_fps, default_latency_ms, default_pgm_delay_frames, parse_aux_buses)
-from pyplumber.mixer.config import ConfigError, Item, MixerConfig, Rect, Scene, Source
+from pyplumber.mixer.config import MAX_SOURCES, ConfigError, Item, MixerConfig, Rect, Scene, Source
 
 
 @pytest.fixture
@@ -116,7 +116,7 @@ def test_repeated_scenes_and_occurrences_share_pads(cfg):
     assert base_composition(cfg, grid_cells(cfg), [None] * 8)["layers"][0]["input"] == 64   # PGM only
 
 
-@pytest.mark.parametrize("count", [63, 64, 96, 127])
+@pytest.mark.parametrize("count", [63, 64, 96, 127, 200, 255])
 def test_aux_mask_addresses_high_source_and_program_pads(cfg, count):
     cfg = replace(cfg, sources=tuple(Source(f"s{i}", "video", f"clip{i}.mp4", 1920, 1080) for i in range(count)),
                   scenes=(Scene("last", (Item(f"s{count - 1}", Rect(0, 0, 1080, 1920)),)),))
@@ -255,9 +255,9 @@ def test_bus_validation_and_distinct_outputs(cfg):
 
 
 def test_program_pad_only_for_buses_whose_layouts_draw_it(cfg):
-    many = replace(cfg, sources=tuple(Source(f"s{i}", "video", f"c{i}.mp4", 1920, 1080) for i in range(128)))
+    many = replace(cfg, sources=tuple(Source(f"s{i}", "video", f"c{i}.mp4", 1920, 1080) for i in range(MAX_SOURCES)))
     assert parse_aux_buses([pages_json()], many)
-    with pytest.raises(ConfigError, match="128"):
+    with pytest.raises(ConfigError, match=f"limit is {MAX_SOURCES}"):
         parse_aux_buses([pages_json(layouts=[{"preset": "pgm_pvw_grid"}])], many)   # listed: it needs the PGM pad
     pages, grid = make_bus(cfg, pages_json()), make_bus(cfg, bus_json())
     assert (pages.pgm_edge, pages.inputs()[-1], pages.pgm_delay_frames) == (None, "aux_sources_source_63", 0)

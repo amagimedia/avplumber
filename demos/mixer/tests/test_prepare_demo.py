@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("numpy")
 from prepare_demo import ensure_asset, plan, prepare, download, render_wipe, WIPE_NAMES
 from demo_recipe import allocate
-from pyplumber.mixer.config import load, parse, scene_layers
+from pyplumber.mixer.config import MAX_SOURCES, load, parse, scene_layers
 from v210 import frame_stride
 
 
@@ -242,7 +242,7 @@ def test_equal_recipe_has_five_source_types_and_32_scenes(tmp_path):
     assert {s["items"][0]["source"] for s in doc["scenes"] if s["id"].startswith("alpha_overlay_")} == {"sdr420_001"}
 
 
-@pytest.mark.parametrize("field,value", [("source_count", 129), ("source_count", 0), ("scene_count", 0)])
+@pytest.mark.parametrize("field,value", [("source_count", MAX_SOURCES + 1), ("source_count", 0), ("scene_count", 0)])
 def test_invalid_counts_fail_before_creating_assets(recipe, tmp_path, field, value):
     recipe[field] = value
     with pytest.raises(ValueError):

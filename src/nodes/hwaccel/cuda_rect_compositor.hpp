@@ -72,7 +72,7 @@ protected:
     std::string last_ops_desc_;
     bool sent_eof_ = false;
 
-    // 128 bits do not fit a lock-free atomic, and the input masks are read once per frame: one
+    // The pad mask does not fit a lock-free atomic, and the input masks are read once per frame: one
     // mutex guards them, like default_layers_ above, and the nodes' other per-input control state.
     mutable std::mutex masks_mutex_;
     avp::mixer::SourceMask active_inputs_ = avp::mixer::SourceMask().set();
@@ -312,7 +312,7 @@ inline CudaRectCompositor::Config CudaRectCompositor::parseConfig(NodeCreationIn
     if (config.inputs == 0)
         throw Error(prefix + "at least one input required in src");
     if (config.inputs > avp::mixer::kSourceMaskBits)
-        throw Error(prefix + "at most 128 inputs supported");
+        throw Error(prefix + "at most " + std::to_string(avp::mixer::kSourceMaskBits) + " inputs supported");
     config.layers = avp::mixer::parseLayersParam(params);
     config.max_layers = params.value("max_layers", 256);
     if (config.max_layers <= 0) throw Error(prefix + "max_layers must be positive");

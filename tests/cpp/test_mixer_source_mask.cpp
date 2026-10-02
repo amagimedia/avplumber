@@ -8,7 +8,7 @@ int main() {
     MixerState state;
     SceneDefinition scene;
     SourceMask expected;
-    for (int index : {0, 31, 32, 44, 63, 64, 95, 127}) {
+    for (int index : {0, 31, 32, 44, 63, 64, 95, 127, 128, 200, 255}) {
         auto name = std::to_string(index);
         state.sources[name].input_index = index;
         scene.sources[name] = {};
@@ -16,9 +16,9 @@ int main() {
     }
     assert(state.computeActiveInputsMask(scene) == expected);
 
-    // Prewarm forces both slot bits on, for pads above 64 as well.
-    state.prewarm_source_mask = SourceMask().set(127);
-    assert(state.sourceOutputMask(state.sources.at("127"), 0) == 3);
+    // Prewarm forces both slot bits on, for the highest pad as well.
+    state.prewarm_source_mask = SourceMask().set(255);
+    assert(state.sourceOutputMask(state.sources.at("255"), 0) == 3);
     assert(state.sourceOutputMask(state.sources.at("63"), 0) == 0);
     assert(state.sourceOutputMask(state.sources.at("32"), 1) == 1);
 
@@ -28,14 +28,14 @@ int main() {
     assert(parseSourceMask(toParameters(low)) == low);
     assert(toParameters(expected).is_string());
     assert(parseSourceMask(toParameters(expected)) == expected);
-    assert(parseSourceMask(Parameters(std::string(96, '1'))).test(95));
-    assert(!parseSourceMask(Parameters(std::string(96, '1'))).test(96));
+    assert(parseSourceMask(Parameters(std::string(200, '1'))).test(199));
+    assert(!parseSourceMask(Parameters(std::string(200, '1'))).test(200));
     // A 64-bit number still means pads 0..63, as older mixers sent it.
     const SourceMask all_low(std::numeric_limits<uint64_t>::max());
     assert(parseSourceMask(Parameters(std::numeric_limits<uint64_t>::max())) == all_low);
     assert(all_low.test(63) && !all_low.test(64));
     bool rejected = false;
-    try { parseSourceMask(Parameters(std::string(129, '1'))); }
+    try { parseSourceMask(Parameters(std::string(kSourceMaskBits + 1, '1'))); }
     catch (const Error&) { rejected = true; }
     assert(rejected);
 

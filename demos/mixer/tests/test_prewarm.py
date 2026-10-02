@@ -341,11 +341,10 @@ def test_program_excludes_frames_from_before_prewarm_finished(native_boundary, m
     assert app.avp.events.index("inspect mixer_final_out") < app.avp.events.index("READY")
 
 
-def test_pad_masks_above_64_travel_as_bit_strings(native_boundary, tmp_path):
+@pytest.mark.parametrize("count, lit", [(70, [0, 63, 64, 69]), (200, [0, 63, 64, 127, 128, 199])])
+def test_pad_masks_above_64_travel_as_bit_strings(native_boundary, tmp_path, count, lit):
     """A show wider than 64 pads cannot put active_inputs in a JSON number, so the builder sends
     the least-significant-bit-first bit string mixer_compositor also parses."""
-    count = 70
-    lit = [0, 63, 64, 69]
     doc = {
         "canvas": {"width": 320, "height": 180, "fps": 60},
         "sources": [{"id": f"s{i}", "kind": "video", "path": f"/m/{i}.mp4", "width": 320, "height": 180}
@@ -373,6 +372,7 @@ def test_pad_masks_above_64_travel_as_bit_strings(native_boundary, tmp_path):
     mask = program[0]
     assert isinstance(mask, str), f"mask past bit 63 must not be a JSON number: {mask!r}"
     assert [i for i, bit in enumerate(mask) if bit == "1"] == lit
+    assert len(app.avp.nodes["mixer_comp_a"]["src"]) == count
 
 
 def test_geometry_is_resolved_by_two_compositors_without_filter_branches(native_boundary):
