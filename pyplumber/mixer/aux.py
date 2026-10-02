@@ -150,9 +150,13 @@ class AuxBus:
             return None
 
     def _send(self, resume=True):
-        """The current layout under a new revision to the follower. While the follower is
-        unreachable the binding logs and drops the command; tick() resends it."""
+        """The current layout under a new revision to the follower."""
         self.revision = uuid.uuid4().hex
+        self._resend(resume)
+
+    def _resend(self, resume=True):
+        """The current layout to the follower. While the follower is unreachable the binding logs
+        and drops the command; tick() resends it."""
         self.avp.executeCommandsFromString(
             f"node.object.set {self.follower} layout {json.dumps(self.layout_object(resume))}")
 
@@ -256,7 +260,7 @@ class AuxBus:
                     if follower is not None:
                         self.follower_status = follower
                         if follower.get("layout_revision") != self.revision:
-                            self._send()
+                            self._resend()
             except Exception as exc:
                 self.error = str(exc)
             due = self.checked_at + 1
