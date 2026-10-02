@@ -141,6 +141,12 @@ struct PoseDecoderDeleter {
 };
 
 // --- Output tensor info (supports multiple output tensors per model) ---
+struct CudaHostDeleter {
+    void operator()(void* memory) const noexcept {
+        if (memory) CUDA_CHECK_CU(cuMemFreeHost(memory));
+    }
+};
+
 struct OutputTensor {
     std::string name;
     nvinfer1::Dims dims{};
@@ -150,6 +156,8 @@ struct OutputTensor {
     std::vector<uint16_t> host_output_half;
     std::vector<int32_t> host_output_i32;
     std::vector<int64_t> host_output_i64;
+    std::unique_ptr<void, CudaHostDeleter> host_staging;
+    size_t host_staging_bytes = 0;
 };
 
 // --- ModelRunner ---
