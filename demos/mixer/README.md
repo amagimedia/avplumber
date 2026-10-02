@@ -303,9 +303,10 @@ CPU. Browser frames are converted from RGB to the NV12, P010 or P210 canvas insi
 draw pass. The program is composited once and each rendition re-times and rescales
 it, so a second output costs an encode, not another composite.
 
-Limits: 128 sources per show (127 with an aux output), no runtime source
-changes. Recipe grids support up to 64 boxes; the legacy `--input` layouts
-support up to 16; see [docs/config.md](docs/config.md#known-limitations).
+Limits: 128 sources per show (127 with an aux bus that shows the program), no
+runtime source changes. Recipe grids support up to 64 boxes; the legacy
+`--input` layouts support up to 16; see
+[docs/config.md](docs/config.md#known-limitations).
 
 Output files, Janus settings, layouts and tests: [docs/guide.md](docs/guide.md).
 Measured samples and conditions: [runtime-load-1080p.json](docs/runtime-load-1080p.json),

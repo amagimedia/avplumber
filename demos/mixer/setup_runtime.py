@@ -276,7 +276,7 @@ class SetupRuntime:
 
     def _preserve_aux(self, recipe, show):
         """Keep instance outputs while replacing the generic sources and scenes: each bus keeps its
-        live layout and slot assignments, less the scenes that no longer exist or fit its budget."""
+        live layout, layouts and slot assignments, less the scenes that no longer exist or fit its budget."""
         config = self.media_dir / "mixer.demo.json"
         previous = json.loads(config.read_text()) if config.exists() else {}
         if "max_compositor_layers" in previous:

@@ -47,7 +47,7 @@ PAGE = Path(__file__).with_name("webui") / "index.html"
 CONFIG_SCRIPT = '<script id="config" type="application/json">%s</script>'
 TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")
 PROGRAM_TAKES = ("cut", "fade", "wipe")
-AUX_COMMANDS = ("aux", "aux_layout", "aux_page")   # answered with the bus's layout and scenes, which setup keeps
+AUX_COMMANDS = ("aux", "aux_layout", "aux_page")   # answered with the bus's layout, layouts and scenes, which setup keeps
 STATE_TTL_S = 0.2
 
 
