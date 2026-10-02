@@ -29,7 +29,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Source limits by mode and frame rate</h1>
-  <p class="lede">How many unique 1080p sources the setup page allows on the 16 GiB T4 test host (16 vCPU), for every canvas mode and frame rate, and what each source type may use of it. Downstream-key pages count as sources. A request above a limit is scaled down to it, and switching back to a larger mode restores the total.</p>
+  <p class="lede">How many unique 1080p sources the setup page allows on the 16 GiB T4 test host (16 vCPU), for every canvas mode and frame rate, and what each source type may use of it. Downstream-key pages count as sources. A request above a limit is scaled down to it, and switching back to a larger mode restores the total. Every limit here comes from the <code>tesla_t4</code> instance profile; another machine needs its own measured profile.</p>
   <span class="pill live">Live: setup default</span>
 
   <h2>Total sources, keys included</h2>
@@ -98,15 +98,16 @@
   </ul>
 
   <h2>How the limit is computed</h2>
-  <p><code>limit = min(base × share, NVDEC + browser + raw caps)</code>. The base is 110 at 25 and 30 fps and 75 × 60 / fps above (75 at 60, 90 at 50). The share is 1 for SDR, 0.82 for HLG 4:2:0 and 0.74 for HLG 4:2:2. The caps' sum equals the measured totals at 25, 30 and 60 fps; at 50 fps it bounds the scaled 90 to 82.</p>
+  <p><code>limit = min(base × share, NVDEC + browser + raw caps)</code>, each term a value of the instance profile. The base is 110 at 25 and 30 fps and 75 at 60; 90 at 50 is the 60 fps total scaled by frame rate. The share is 1 for SDR, 0.82 for HLG 4:2:0 and 0.74 for HLG 4:2:2. The caps' sum equals the measured totals at 25, 30 and 60 fps; at 50 fps it bounds the scaled 90 to 82.</p>
 
   <h2>Conditions</h2>
   <p>NVIDIA T4 16 GiB, 16 vCPU, driver R615, Fedora 44 image with CUDA 13.4, Electron 44 browsers. Portrait 1080×1920 canvas from 1920×1080 sources, program with clean feed and two multiviews, NVENC preset p3. Each limit passed the cut-spam gate (cuts, fades and wipes at 4 per second) with 0 missed program deadlines.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><code>demos/mixer/setup_runtime.py</code>: <code>source_limit</code>, <code>MODE_CAPACITY</code>, <code>nvdec_limit</code>, <code>browser_limit</code>, <code>raw_upload_units</code>.</li>
-    <li><code>demos/mixer/setup.html</code>: the same rules on the setup page.</li>
+    <li><code>demos/mixer/instance_profiles.py</code>: <code>INSTANCE_PROFILES[InstanceType.TESLA_T4]</code>, every limit on this page. <code>webui.py --instance-type tesla_t4</code> selects it; Compose passes <code>MIXER_INSTANCE_TYPE</code>, default <code>tesla_t4</code>.</li>
+    <li><code>demos/mixer/setup_runtime.py</code>: <code>source_limit</code> and <code>source_counts</code> apply the profile.</li>
+    <li><code>demos/mixer/setup.html</code>: the same rules on the setup page, with the profile served in the setup status.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/capacity.md">capacity.md</a>: every measurement behind these numbers.</li>
   </ul>
 

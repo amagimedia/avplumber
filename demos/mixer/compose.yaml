@@ -49,6 +49,9 @@ services:
       - ../../media:/media:rw,z
     command:
       - --manage-setup
+      # The measured demo host. Another machine needs its own profile in instance_profiles.py first.
+      - --instance-type
+      - ${MIXER_INSTANCE_TYPE:-tesla_t4}
       - --recipe
       - ${MIXER_RECIPE:-/media/demo.json}
       - --port

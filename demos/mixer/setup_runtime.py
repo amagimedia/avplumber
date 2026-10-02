@@ -15,6 +15,7 @@ import threading
 import time
 
 from demo_recipe import allocate, validate_dsk, write_atomic
+from instance_profiles import INSTANCE_PROFILES, InstanceType
 from pyplumber.mixer.config import ConfigError, aux_fps, default_browser_ring_size, parse, parse_aux_buses
 
 DEMO_DIR = Path(__file__).resolve().parent
@@ -43,55 +44,27 @@ DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="42
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
                         bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60),
                         dsk=[], clean_feed=False)
-# Measured on the T4: 110 inputs at 25/30 fps; 75 at 60 fps, the NVDEC, browser and upload
-# caps below filled (cut-spam gate passes with its 3-frame deadline and the wipe cache; host CPU,
-# not the GPU, is the margin). 50 fps scales the 60 fps budgets by frame rate (source_limit).
-# Keys count as inputs.
-def browser_limit(fps):
-    return 40   # five browser workers of eight windows (compose.yaml)
-
-
-def nvdec_limit(fps):
-    # 40 streams at 25 fps (1000 decoded frames/s) measured 81% NVDEC on the T4; about
-    # 1100 frames/s stays near 90% at any rate, leaving room for content-dependent swings.
-    return min(40, 1100 // fps)
-
-
-def raw_upload_units(fps):
-    # Above 30 fps the 60 fps budget (17 units, 1020 frames/s) scaled by frame rate: 20 at 50.
-    return {25: 30, 30: 34}.get(fps, 1020 // fps)
-
-
-# Share of the per-rate total a 10-bit canvas carries, measured on the T4 (see docs/capacity.md).
-# HLG 4:2:0 (P010): 90 of 110 at 30 fps, where above it the GPU-side SDR-to-HLG work drives NVDEC
-# to saturation, and 61 of 75 at 60 fps, where 64 runs out of GPU compute. HLG 4:2:2 (P210 canvas,
-# v210 unpack) costs more GPU per source: at 60 fps 55 keeps the margin of 61 at 4:2:0 (61 and 57
-# ran at GPU p95 92-96%). Each share applies at every rate (4:2:2: 81 at 25/30 fps, not measured;
-# 90 passed). The setup page carries the same table.
-MODE_CAPACITY = {(8, "420"): 1.0, (10, "420"): 0.82, (10, "422"): 0.74}
-
-
-def source_limit(fps, bit_depth=8, chroma="420"):
-    # Above 30 fps the measured 60 fps total (75) scaled by frame rate, never above what the NVDEC,
-    # browser and upload caps carry together: 82 at 50 fps, where the 40 browser windows do not
-    # scale (the scaled 90 is not measured). An unsupported pair (8-bit 4:2:2) is refused by the
-    # mode checks in recipe_for.
-    total = int((110 if fps <= 30 else 75 * 60 // fps) * MODE_CAPACITY.get((bit_depth, chroma), 1.0))
-    return min(total, nvdec_limit(fps) + browser_limit(fps) + raw_upload_units(fps))
+def source_limit(profile, fps, bit_depth=8, chroma="420"):
+    """The instance's per-rate total scaled by the canvas's share, never above what the NVDEC,
+    browser and upload caps carry together. An unsupported pair (8-bit 4:2:2) is refused by the
+    mode checks in recipe_for."""
+    total = int(profile["sources"][fps] * profile["mode_share"].get(f"{bit_depth}:{chroma}", 1.0))
+    return min(total, profile["nvdec_decodes"][fps] + profile["browser_windows"] + profile["raw_upload_units"][fps])
 
 
 def _browser_ids(*shows):
     return {s["id"] for show in shows for s in show.get("sources", []) if s["kind"] == "browser"}
 
 
-def source_counts(total, weights, fps=25, reserved_browsers=0):
+def source_counts(profile, total, weights, fps=25, reserved_browsers=0):
     """*reserved_browsers* are downstream-key pages: browser inputs outside the weighted mix."""
     counts = allocate(total, weights)
     # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
     for indices, costs, limit, name in (
-            ((2,), (1,), 4, "HDR 4:2:2"), ((4,), (1,), browser_limit(fps) - reserved_browsers, "Browser"),
-            ((0, 1), (1, 1), nvdec_limit(fps), "Combined NVDEC"),
-            ((5, 6), (1, 2), raw_upload_units(fps), "Raw 4:2:0 upload units")):
+            ((2,), (1,), profile["hlg_v210"], "HDR 4:2:2"),
+            ((4,), (1,), profile["browser_windows"] - reserved_browsers, "Browser"),
+            ((0, 1), (1, 1), profile["nvdec_decodes"][fps], "Combined NVDEC"),
+            ((5, 6), (1, 2), profile["raw_upload_units"][fps], "Raw 4:2:0 upload units")):
         group = [(i, cost) for i, cost in zip(indices, costs) if i < len(weights)]
         if sum(counts[i] * cost for i, cost in group) > limit:
             size = min(limit, sum(counts[i] for i, _ in group))
@@ -103,15 +76,16 @@ def source_counts(total, weights, fps=25, reserved_browsers=0):
             remaining = [0 if i in indices else w for i, w in enumerate(weights)]
             if not any(remaining):
                 raise ValueError(f"{name} is limited to {limit}; enable another source type")
-            counts = source_counts(total - size, remaining, fps, reserved_browsers)
+            counts = source_counts(profile, total - size, remaining, fps, reserved_browsers)
             for (i, _), count in zip(group, capped):
                 counts[i] = count
             break
     return counts
 
 
-def recipe_for(settings):
-    """Accept only the bounded generic setup controls, never paths or commands."""
+def recipe_for(profile, settings):
+    """Accept only the bounded generic setup controls, never paths or commands; *profile* is the
+    instance's entry in INSTANCE_PROFILES."""
     if not isinstance(settings, dict) or set(settings) != set(DEFAULT_SETTINGS):
         raise ValueError("Expected orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
     for key, choices in (("orientation", ("portrait", "landscape")),
@@ -126,7 +100,7 @@ def recipe_for(settings):
     # Key pages are sources too: they take their share of the same budget. A show above the
     # limit of its rate and canvas is scaled down to it, not refused: switching 110 SDR inputs
     # at 30 fps to a 10-bit canvas keeps the mix at the capacity of the new mode.
-    limit = source_limit(settings["fps"], settings["bit_depth"], settings["chroma"]) - len(dsk)
+    limit = source_limit(profile, settings["fps"], settings["bit_depth"], settings["chroma"]) - len(dsk)
     if type(settings["source_count"]) is int and settings["source_count"] > limit >= 1:
         settings = {**settings, "source_count": limit}
     for key, maximum in (("source_count", limit), ("scene_count", 192), ("browser_ring_size", 64)):
@@ -137,15 +111,16 @@ def recipe_for(settings):
     if type(bitrate) is not int or not MIN_BITRATE_KBPS <= bitrate <= MAX_BITRATE_KBPS:
         raise ValueError(f"bitrate_kbps must be an integer from {MIN_BITRATE_KBPS} to {MAX_BITRATE_KBPS}")
     weights = settings["weights"]
-    if not isinstance(weights, list) or len(weights) != 7 or any(type(w) is not int or not 0 <= w <= 110 for w in weights):
-        raise ValueError("Provide seven integer source weights from 0 to 110")
+    most = max(profile["sources"].values())   # the page sends source counts as weights
+    if not isinstance(weights, list) or len(weights) != 7 or any(type(w) is not int or not 0 <= w <= most for w in weights):
+        raise ValueError(f"Provide seven integer source weights from 0 to {most}")
     if settings["bit_depth"] == 8 and (any(weights[1:4]) or weights[6]):
         raise ValueError("8-bit mode supports SDR 4:2:0 and browser sources only")
     if settings["bit_depth"] == 8 and settings["chroma"] != "420":
         raise ValueError("8-bit mode supports a 4:2:0 canvas only")
     if settings["chroma"] == "420" and any(weights[2:4]):
         raise ValueError("4:2:0 mode supports 4:2:0 and browser sources only")
-    counts = source_counts(settings["source_count"], weights, settings["fps"], len(dsk))
+    counts = source_counts(profile, settings["source_count"], weights, settings["fps"], len(dsk))
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
@@ -194,7 +169,7 @@ def recipe_for(settings):
 
 
 class SetupRuntime:
-    def __init__(self, media_dir, recipe_path, bridge, mixer_args=(), browser_url="http://127.0.0.1:9009"):
+    def __init__(self, media_dir, recipe_path, bridge, instance_type, mixer_args=(), browser_url="http://127.0.0.1:9009"):
         self.media_dir = Path(media_dir).resolve()
         self.media_dir.mkdir(parents=True, exist_ok=True)
         # prepare_demo stages every file in a .prepare-* directory; a killed preparation leaves it.
@@ -202,6 +177,8 @@ class SetupRuntime:
             shutil.rmtree(stale, ignore_errors=True)
         self.recipe_path = Path(recipe_path)
         self.bridge = bridge
+        self.instance_type = InstanceType(instance_type)
+        self.profile = INSTANCE_PROFILES[self.instance_type]
         self.mixer_args = list(mixer_args)
         self.browser_url = browser_url
         self.lock = threading.Lock()
@@ -223,7 +200,8 @@ class SetupRuntime:
         with self.lock:
             if self.phase == "running" and self.process and self.process.poll() is not None:
                 self.phase, self.message = "error", f"Mixer exited ({self.process.returncode}). Apply to retry."
-            return dict(phase=self.phase, message=self.message, settings=self.settings, revision=self.revision)
+            return dict(phase=self.phase, message=self.message, settings=self.settings, revision=self.revision,
+                        instance_type=self.instance_type.value, profile=self.profile)
 
     def _status(self, phase, message):
         with self.lock:
@@ -260,7 +238,7 @@ class SetupRuntime:
         # Before _preserve_aux asks the live mixer, which a running change may be stopping.
         with self.lock:
             self._check_idle()
-        recipe = recipe_for(settings) if settings is not None else json.loads(self.recipe_path.read_text())
+        recipe = recipe_for(self.profile, settings) if settings is not None else json.loads(self.recipe_path.read_text())
         # Plan validation happens before stopping the live mixer or writing files.
         from prepare_demo import plan
         show, _, _ = plan(recipe, self.media_dir)

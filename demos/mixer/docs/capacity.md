@@ -6,9 +6,11 @@ per-rate baselines below stand on the source mixes listed beside them; the older
 output. None of them are decoder-only limits or guarantees for HDR, larger frames,
 arbitrary browser pages, or additional outputs.
 
-The setup (`setup_runtime.py`, mirrored in `setup.html`) applies the limits in
-[Source limits by mode and frame rate](cookbook/source-limits.html); this page has the
-measurements behind them.
+The setup applies these limits as the `tesla_t4` profile in `instance_profiles.py`
+(`webui.py --instance-type tesla_t4`): `setup_runtime.py` enforces it and serves it to
+`setup.html`. [Source limits by mode and frame rate](cookbook/source-limits.html) lists
+them; this page has the measurements behind them. Another machine needs its own measured
+profile, not these numbers scaled.
 
 | Input fps | Measured show, keys included | Result |
 | --- | --- | --- |

@@ -84,6 +84,9 @@ an SDR canvas and fewer on a 10-bit one, within per-type caps for NVDEC decodes,
 browser windows and raw uploads, and at most **192 scenes**;
 [Source limits by mode and frame rate](docs/cookbook/source-limits.html) has every
 mode in one table, and the [capacity measurements](docs/capacity.md) the tested mixes.
+These numbers are the `tesla_t4` profile in `instance_profiles.py`, which Compose selects
+with `--instance-type` (`MIXER_INSTANCE_TYPE`, default `tesla_t4`); another machine needs
+its own measured profile there, not scaled T4 numbers.
 
 Settings persist in `media/demo.json`; later starts restore them and reuse
 `media/assets/` and `media/media_wipes/`. The HTTP server stays running while its
@@ -246,8 +249,8 @@ graphic it rests most of the time and animates a third of it.
 
 The stack allows 40 browser windows across five processes, eight per process.
 Set `MIXER_BROWSER_CAPACITY` when starting Compose to change the service capacity.
-The generic setup page caps browser inputs at 40, downstream-key pages included.
-This is browser capacity, not the recipe's total source count. Lower-level
+The generic setup page caps browser inputs at 40 (`tesla_t4` profile), downstream-key
+pages included. This is browser capacity, not the recipe's total source count. Lower-level
 browser-only setup remains in the [DMA-BUF demo](../dmabuf-browser/README.md).
 
 ## Describe a show in one file

@@ -256,21 +256,33 @@ def test_critical_nice_stops_after_eperm_and_tolerates_vanished_threads(tmp_path
     assert calls == [] and nicer.enabled
 
 
+MANAGE = ["--manage-setup", "--instance-type", "tesla_t4"]
+
+
 def test_critical_nice_is_off_by_default_and_bounded(monkeypatch):
     monkeypatch.delenv("MIXER_CRITICAL_NICE", raising=False)
     assert parse_args([]).critical_nice == 0
-    assert parse_args(["--manage-setup", "--critical-nice", "10"]).critical_nice == 10
+    assert parse_args([*MANAGE, "--critical-nice", "10"]).critical_nice == 10
     monkeypatch.setenv("MIXER_CRITICAL_NICE", "7")
-    assert parse_args(["--manage-setup"]).critical_nice == 7
+    assert parse_args(MANAGE).critical_nice == 7
     assert parse_args(["--critical-nice", "0", "--mixer-args", "--janus-output"]).mixer_args == ["--janus-output"]
     # The mixer pid comes from the managed process, so without --manage-setup the option would be inert.
-    for bad in (["--critical-nice", "10"], [], ["--manage-setup", "--critical-nice", "21"],
-                ["--manage-setup", "--critical-nice", "-1"], ["--manage-setup", "--critical-nice", "high"]):
+    for bad in (["--critical-nice", "10"], [], [*MANAGE, "--critical-nice", "21"],
+                [*MANAGE, "--critical-nice", "-1"], [*MANAGE, "--critical-nice", "high"]):
         with pytest.raises(SystemExit):
             parse_args(bad)
     monkeypatch.setenv("MIXER_CRITICAL_NICE", "lots")
     with pytest.raises(SystemExit):
+        parse_args(MANAGE)
+
+
+def test_a_managed_setup_names_its_instance_type(capsys):
+    assert parse_args(MANAGE).instance_type == "tesla_t4"
+    with pytest.raises(SystemExit):
         parse_args(["--manage-setup"])
+    assert "--manage-setup needs --instance-type" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        parse_args(["--manage-setup", "--instance-type", "tesla_l4"])   # no measured profile
 
 
 def get(url, path):

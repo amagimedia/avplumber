@@ -1,6 +1,7 @@
-// Run with Playwright installed (or NODE_PATH pointing to its node_modules).
+// Run with Playwright installed (or NODE_PATH pointing to its node_modules) and python3 (or PYTHON).
 // All HTTP requests are intercepted; this never applies settings to a live mixer.
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
@@ -13,10 +14,15 @@ const { chromium } = require('playwright');
     let initialSettings = null;
     page.on('pageerror', error => errors.push(error.message));
     const html = fs.readFileSync(path.join(__dirname, '../setup.html'), 'utf8');
+    // The status carries the instance's profile as webui.py serves it: the limits asserted below are tesla_t4's.
+    const profile = JSON.parse(execFileSync(process.env.PYTHON || 'python3', ['-c',
+      'import json; from instance_profiles import INSTANCE_PROFILES as p, InstanceType as t; print(json.dumps(p[t.TESLA_T4]))'],
+      {cwd: path.join(__dirname, '..')}));
     await page.route('http://mixer.test/**', route => {
       if (route.request().url().endsWith('/api/setup')) {
         if (route.request().method() === 'POST') submissions.push(route.request().postDataJSON());
-        return route.fulfill({json: {phase: 'idle', message: 'Ready', settings: initialSettings}});
+        return route.fulfill({json: {phase: 'idle', message: 'Ready', settings: initialSettings,
+          instance_type: 'tesla_t4', profile}});
       }
       return route.fulfill({contentType: 'text/html', body: html});
     });
@@ -35,6 +41,7 @@ const { chromium } = require('playwright');
       return submissions.at(-1);
     };
     await reset();
+    assert.match(await page.locator('#source-limit').textContent(), /Maximum 55 .* measured on tesla_t4\.$/);
     await page.locator('#bitrate').fill('8500');
     assert.equal((await apply()).bitrate_kbps, 8500, 'bitrate edit alone must reach the backend');
 
