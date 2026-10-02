@@ -297,12 +297,18 @@ async function refresh(){
   online=false;$('feedback').textContent=error.message;$('apply').disabled=true;
  }finally{setTimeout(refresh,1500);}
 }
-function syncCounts(){
+// Kinds this canvas cannot carry go to the kind it can: HLG and 4:2:2 to SDR 4:2:0 on an 8-bit
+// canvas, 4:2:2 to its 4:2:0 twin on a 4:2:0 one.
+function foldForMode(values){
  if(outputMode().bit_depth===8){
-  sourceValues[0]+=sourceValues[1]+sourceValues[2]+sourceValues[3];sourceValues[5]+=sourceValues[6];sourceValues[1]=sourceValues[2]=sourceValues[3]=sourceValues[6]=0;
+  values[0]+=values[1]+values[2]+values[3];values[5]+=values[6];values[1]=values[2]=values[3]=values[6]=0;
  }else if(outputMode().chroma==='420'){
-  sourceValues[0]+=sourceValues[3];sourceValues[1]+=sourceValues[2];sourceValues[2]=sourceValues[3]=0;
+  values[0]+=values[3];values[1]+=values[2];values[2]=values[3]=0;
  }
+ return values;
+}
+function syncCounts(){
+ foldForMode(sourceValues);
  // A total scaled down for an earlier mode comes back when this one has room for it.
  const wanted=Math.max(1,scaledFrom||Number($('sources').value)||1);
  const total=sourceValues.some(n=>n>0)?Math.min(sourceLimit(),wanted):0;
@@ -371,12 +377,12 @@ $('mode').addEventListener('input',()=>{
 });
 document.querySelectorAll('.fields input,.fields select,#clean-feed').forEach(input=>{
  if(input.id!=='mode')input.addEventListener('input',update);
- if(input.id==='sources')input.addEventListener('input',()=>{scaledFrom=0;},{capture:true});
+ // A new total takes the Balanced mix of this canvas, whatever the counts were before.
+ if(input.id==='sources')input.addEventListener('input',()=>{scaledFrom=0;resizeValues=foldForMode([...presets.balanced]);},{capture:true});
 });
 $('fps').addEventListener('input',()=>{
  $('browser-ring-size').value=Number($('fps').value)<=30?6:9;update();
 });
-$('sources').addEventListener('focus',()=>{resizeValues=[...sourceValues]});
 $('sources').addEventListener('blur',()=>{resizeValues=null});
 setBusy(true);update();refresh();
 </script>
