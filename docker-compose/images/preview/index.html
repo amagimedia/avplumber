@@ -385,6 +385,10 @@
         await peer.addIceCandidate(event.candidate);
       } else if (event.janus === "webrtcup") {
         setStatus("WebRTC connected");
+        // The long poll has done its work: the keepalive holds the session and the peer connection
+        // reports a failure. A browser opens six HTTP/1.1 connections per host, so on a page of many
+        // players (the wall) the polls of the first six would keep every later player from connecting.
+        pollAbort.abort();
       } else if (event.janus === "hangup") {
         throw new Error(event.reason || "WebRTC hung up");
       } else if (event.janus === "error") {
