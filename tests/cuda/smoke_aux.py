@@ -1,4 +1,4 @@
-"""Remote GPU smoke: independent aux output, assignments, prewarm and stalled consumer.
+"""Remote GPU smoke: independent aux output, assignments, layout switches, prewarm and stalled consumer.
 
 Run from the repository root with its CUDA Python module on PYTHONPATH.
 Generates two small clips; uses private UDP ports and never changes a live show.
@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos/mixer"))
 from _harness import wait_for
 from mixer import GraphOptions, build_application, load_avp_api
 from pyplumber.node import PythonNode
+from pyplumber.mixer.config import ConfigError
 from pyplumber.mixer.control import AvpConnection
 
 
@@ -92,7 +93,8 @@ def main():
         app.avp.registerWithWebUI(args.webui, "aux-smoke", "")
         try:
             app.start()
-            bus = app.aux_buses[0]
+            bus, = app.aux_buses
+            pvw_scene = lambda: bus.state()["pvw_scene"]   # what the bus's follower last drew
             edge = app.avp.getEdge(bus.output_edge)
             main_edge = app.avp.getEdge("mixer_final_out")
             wait_for(lambda: edge.enqueued_total >= 30)
@@ -103,37 +105,35 @@ def main():
             # Its hidden target must not appear as a user-selected preview.
             app.mixer.cut("red")
             wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
-            wait_for(lambda: bus.preview == "")
+            wait_for(lambda: pvw_scene() == "")
             for preview in ("", "red"):
                 if preview:
                     app.mixer.preview(preview)
-                    wait_for(lambda: bus.preview == preview)
+                    wait_for(lambda: pvw_scene() == preview)
                 app.mixer.cut("blue", start_pts_ms=int(time.monotonic() * 1000) + 500)
                 until = time.monotonic() + .25
                 while time.monotonic() < until:
                     status = control_json("mixer.status mixer")
                     assert status["pvw_scene"] == preview, status
-                    assert bus.state()["pvw_scene"] == preview
-                    assert bus.preview == preview
+                    assert pvw_scene() == preview
                     time.sleep(.01)
                 wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
                 assert control_json("mixer.status mixer")["pgm_scene"] == "blue"
-                wait_for(lambda: bus.preview == "")
+                wait_for(lambda: pvw_scene() == "")
             # End on red: the program scene's sources stay warm on the bus (for the swap), so the
             # subscription checks below need blue off program.
             for scene in ("blue", "red") * 10:
                 app.mixer.cut(scene)
-                assert bus.preview == ""   # fast takes never create an operator preview
                 time.sleep(.01)
             wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
             # Swap Preview/Program: the bus shows what mixer.status shows, the scene that left
             # program at the last switch ("blue"), or none when that take replaced a pending one.
-            pvw = bus.state()["pvw_scene"]
+            pvw = pvw_scene()
             assert pvw == control_json("mixer.status mixer")["pvw_scene"] and pvw in ("", "blue"), pvw
             # An unavailable new input must leave the old AUX running, then
             # release the abandoned subscription. A newer request cancels it.
             app.mixer.preview("red")
-            wait_for(lambda: bus.state()["pvw_scene"] == "red")
+            wait_for(lambda: pvw_scene() == "red")
             def assign(scenes):
                 bus.assign({"expected_revision": bus.state()["revision"], "scenes": scenes})
             assign(["red"] * 8)
@@ -160,7 +160,7 @@ def main():
             assign(list(config["aux_buses"][0]["scenes"]))
             wait_for(lambda: not bus.state()["composition_pending"])
             app.mixer.preview("blue")
-            wait_for(lambda: bus.state()["pvw_scene"] == "blue")
+            wait_for(lambda: pvw_scene() == "blue")
             initial = bus.state()
             bus.assign({"expected_revision": initial["revision"], "scenes": ["repeat"] * 8})
             assert bus.assign({"expected_revision": initial["revision"], "scenes": [None] * 8})["conflict"]
@@ -192,8 +192,34 @@ def main():
             current = bus.state()
             bus.assign({"expected_revision": current["revision"], "scenes": current["scenes"]})
             wait_for(lambda: edge.enqueued_total >= before + 30)
+            # Switch layouts at runtime: each draws once the compositor reports its revision, and
+            # the bus then subscribes to exactly what the layout draws.
+            def switch(layout, drawn):
+                bus.set_layout({"layout": layout})
+                wait_for(lambda: not bus.state()["composition_pending"])
+                state = bus.state()
+                assert state["composition_revision"] == state["revision"] and not state["composition_error"], state
+                wait_for(lambda: subscription_flags() == {name: name in drawn for name in [*bus.edges, bus.pgm_edge]})
+                before = edge.enqueued_total
+                wait_for(lambda: edge.enqueued_total >= before + 15)
+            switch({"preset": "source_pages", "rotate_s": 60}, bus.edges[:12])
+            last = len(bus.edges) - 1
+            switch({"cells": [{"role": "pgm", "x": 0, "y": 0, "w": 320, "h": 240},
+                              {"role": "source", "source": last, "x": 0, "y": 240, "w": 320, "h": 240}]},
+                   (bus.pgm_edge, bus.edges[last]))
+            # Ten PVW cells reserve ten times the largest scene: over the bus's layer budget.
+            try:
+                bus.set_layout({"layout": {"cells": [{"role": "pvw", "x": 0, "y": 0, "w": 32, "h": 48}] * 10}})
+                raise AssertionError("a layout over max_layers was accepted")
+            except ConfigError as exc:
+                assert "max_layers" in str(exc), exc
+            app.mixer.preview("red")
+            wait_for(lambda: pvw_scene() == "red")
+            switch({"preset": "pgm_pvw_grid"}, (bus.edges[0], bus.edges[-1], bus.pgm_edge))   # the slots came back
+            assert bus.state()["scenes"] == current["scenes"]
             assert not errors, errors
-            print("PASS: aux staging, timeout, cancellation, cadence, repeated pads, preview, revision conflict, stalled consumer and PGM continuity", flush=True)
+            print("PASS: aux staging, timeout, cancellation, cadence, repeated pads, preview, revision conflict, stalled consumer, "
+                  "PGM continuity and runtime layout switches", flush=True)
         finally:
             gate.blocked = False
             app.stop()
