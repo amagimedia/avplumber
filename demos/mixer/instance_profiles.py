@@ -1,9 +1,10 @@
 """Source capacity of each instance type the mixer setup supports.
 
-Every value was measured on that instance (docs/capacity.md); another machine needs its own
-measured entry, never a scaled T4 one. Per-rate tables cover every frame rate the setup offers.
-setup_runtime.py applies the selected profile and serves it to setup.html. Standard library only:
-tests/check_setup.cjs loads it with any python3.
+Every value comes from measurements on that instance (docs/capacity.md), derived ones noted
+beside them; another machine needs its own measured entry, never a scaled T4 one. Per-rate
+tables cover every frame rate the setup offers. setup_runtime.py applies the selected profile
+and serves it to setup.html. Standard library only: tests/check_setup.cjs loads it with any
+python3.
 """
 
 from enum import Enum

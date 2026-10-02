@@ -48,6 +48,8 @@ DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="42
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
                         bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60),
                         dsk=[], clean_feed=False, extra_aux=0)
+
+
 def source_limit(profile, fps, bit_depth=8, chroma="420"):
     """The instance's per-rate total scaled by the canvas's share, never above what the NVDEC,
     browser and upload caps carry together. An unsupported pair (8-bit 4:2:2) is refused by the
@@ -137,7 +139,8 @@ def recipe_for(profile, settings):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError(f"{key} must be an integer from 1 to {maximum}")
-    # The NVENC budget bounds it further once the show's own buses are known (SetupRuntime.apply).
+    # 30: parse_aux_buses's cap on all buses. The NVENC budget bounds it further once the show's own
+    # buses are known (SetupRuntime.apply).
     if type(settings["extra_aux"]) is not int or not 0 <= settings["extra_aux"] <= 30:
         raise ValueError("extra_aux must be an integer from 0 to 30")
     bitrate = settings["bitrate_kbps"]
