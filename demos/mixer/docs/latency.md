@@ -119,7 +119,7 @@ program frame the multiview frame with the new PVW tile left its compositor
 `unreachable`: every fade, whose swap follows a frame already presented) and
 the PVW change latency from command receipt to that compositor deadline; both
 stop before the encoders, unlike the cut probe
-([Multiview PVW follower](../../../doc/mixer.md#multiview-pvw-follower)). The line shows the cuts, the goal of the alignment.
+([AUX bus follower](../../../doc/mixer.md#aux-bus-follower)). The line shows the cuts, the goal of the alignment.
 
 Run it on the mixer host against the web UI. The mixer must run with
 `--cut-latency-encoder <encoder>`. The script changes the live program and needs

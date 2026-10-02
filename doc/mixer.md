@@ -17,7 +17,7 @@ graph builder is `pyplumber/mixer/graph.py`; the native control implementation i
 | `src/mixer/primitives/` | headers with no graph or CUDA dependency: `TickGrid`, `Cadence`, `MonotonicClock`, `CutLatency`, `CutLatencyProbe`, `Snapshot`, `OutputSnapshot`, `MixerState`, `TransitionGuard`, `PreviewFollow` (unit-tested where they carry logic), plus the compositor geometry headers below |
 | `src/nodes/mixer_compositor.cpp`, `mixer_keyer.cpp` | mixer-owned compositor nodes: the clocked playout of the scene slots, wipe and AUX buses (`mixer_compositor`); the DSK (`mixer_keyer`) |
 | `src/nodes/hwaccel/cuda_rect_compositor.hpp`, `cuda_rect_overlay.cpp` | the compositors' shared base (canvas, layers, control, drawing one frame); the generic unclocked `cuda_rect_overlay` |
-| `src/nodes/mixer_snapshot.cpp`, `mixer_pvw_follow.cpp` | mixer-owned nodes: the output hold and slot substitution; the AUX multiview's PVW tile, applied to the bus compositor on the multiview frame the bus's `pvw_align` picks ([Multiview PVW follower](#multiview-pvw-follower)) |
+| `src/nodes/mixer_snapshot.cpp`, `mixer_pvw_follow.cpp` | mixer-owned nodes: the output hold and slot substitution; an AUX bus's composition writer, which draws its PVW cells on the bus frame the bus's `pvw_align` picks ([AUX bus follower](#aux-bus-follower)) |
 | `src/nodes/hwaccel/cuda_rect_draw.{hpp,cpp}`, `cuda_rect_scale.cu` | kernel module, canvas clear, per-layer draw |
 | `src/mixer/primitives/compositor_layers.hpp`, `pixel_layout.hpp`, `compositor_geometry.hpp` | layer parsing and draw-op resolution, format geometry, placement (pure; geometry and layout unit-tested) |
 
@@ -154,15 +154,15 @@ After a completed take the preview is the scene that left program (OBS's
 "Swap Preview/Program Scenes After Transitioning", always on; a failed take,
 or one dropped by `mixer.interrupt`, clears the preview instead, while a take
 that replaces a pending one leaves the preview as it is until its own switch,
-so a multiview's PVW tile does not blank between takes). The swapped preview
+so an aux bus's PVW cells do not blank between takes). The swapped preview
 is only shown: the slot it came from has its sources routed away, so
 `mixer.status` distinguishes `pvw_scene`, what the
-operator and the AUX multiview see, from `pvw_slot_scene`, what is loaded in
+operator and the AUX buses see, from `pvw_slot_scene`, what is loaded in
 the PVW slot (`""` while cold). A cut reuses the slot only for `pvw_slot_scene`;
 any other scene, a swapped preview or `mixer.init`'s `initial_pvw_scene`
 (published to the followers, not loaded) included, is loaded first, warm when it is in `mixer.prewarm`.
-A multiview shows each preview change as described in
-[Multiview PVW follower](#multiview-pvw-follower).
+An AUX bus shows each preview change as described in
+[AUX bus follower](#aux-bus-follower).
 
 `mixer.status <name>` returns the current PGM/PVW scene and transition state,
 and under `playout` each slot compositor's (`A`, `B`) running `frames`, `repeats`
@@ -174,11 +174,21 @@ names a `wipe_cache_store`, `wipe_cache` holds that clip cache's `bytes`,
 The alpha media path decodes the wipe in software and uploads it to the mixer
 CUDA device. This is separate from the GPU-native program video path.
 
-## Multiview PVW follower
+## AUX bus follower
 
-The PVW tile of a `pgm_pvw_grid` AUX bus (`demos/mixer/docs/config.md`,
-`aux_buses`) is set by a `mixer_pvw_follow` node, `aux_<id>_pvw`, one per bus.
-Its timing is `src/mixer/primitives/PreviewFollow.hpp`.
+Every AUX bus (`demos/mixer/docs/config.md`, `aux_buses`) has a
+`mixer_pvw_follow` node, `aux_<id>_pvw`, the only writer of its compositor's
+`composition`. The control side (`pyplumber/mixer/aux.py`) turns the bus's
+layout, a list of cells by role (`pyplumber/mixer/aux_layout.py`), into the
+node's `layout` object: every scene's layers in the `pvw` cells (empty when
+there are none) and the base, everything else, with a revision. The node sets
+pvw[shown] followed by the base with that revision; the compositor reports the
+revision it draws (`composition_revision`), and the bus is
+`composition_pending` until it is the bus's own. A slot assignment, a layout
+switch and a page turn are each a new layout object; one Python thread for all
+buses turns pages and resends the layout to a follower that restarted with the
+one it was built with. The timing of the PVW cells is
+`src/mixer/primitives/PreviewFollow.hpp`.
 
 Every preview change is one `MixerState::PreviewChange` (revision, the pts of
 the first program frame of the new program, the take command's receipt and
@@ -186,11 +196,9 @@ kind), published under the feed's own `preview_mutex`, which wakes the
 `preview_followers`. A cut or fade publishes it right after the selector
 switch, before its routing; `mixer.status` still reports the swap and the ended
 transition together, since the take holds the mixer's `mutex` throughout. A
-change therefore reaches the bus compositor without waiting on that `mutex`,
-and the bus compositor reports `pvw_scene` from the feed's lock, never from
-that mutex. Python publishes the bus layouts once (at build and on a slot
-assignment); while the node is unreachable, the bus thread falls back to
-polling the preview every 50 ms.
+change therefore reaches the bus compositor without waiting on that `mutex`.
+While the node is unreachable (its group still starting) a layout object sent
+to it is dropped and the bus keeps its previous composition until the resend.
 
 The PGM pad carries the program frames with the selector's pts. The bus draws
 the frame stamped with main tick K on aux tick `aux.nearestIndex(pts)` +
@@ -203,13 +211,13 @@ is K, the bus's `pvw_align` picks N:
 
 - `program` (the default): the first aux tick whose deadline is at or after
   the program frame's own, main.time(K) + main latency, the instant that frame
-  leaves the main compositor. The PVW tile then changes with the program if
+  leaves the main compositor. The PVW cells then change with the program if
   that frame sits on an aux tick (every K at equal rates and latencies, an even
   K at 60 → 30), and half an aux tick later otherwise (16.7 ms at 60 → 30, 20
-  at 50 → 25). The PGM tile of the same multiview trails the program by
-  `pgm_delay_frames` aux ticks (plus the latency difference), so the PVW tile
-  leads it.
-- `pgm_tile`: the tick whose PGM tile shows frame K, so the PVW and PGM tiles
+  at 50 → 25). The PGM cells of the same bus frame trail the program by
+  `pgm_delay_frames` aux ticks (plus the latency difference), so the PVW cells
+  lead them.
+- `pgm_tile`: the tick whose PGM cells show frame K, so the PVW and PGM cells
   change together, `pgm_delay_frames` later than the program (33 ms at 30 aux
   fps with the default 1).
 
@@ -240,14 +248,14 @@ The error, in aux frames, for a cut or fade is 0 nominally, and:
   deadline (max(250 ms, 2× latency)) keeps the previous layout: the change is
   dropped, not late, until the next preview change.
 
-A PGM frame that misses the aux deadline moves the PGM tile, not the PVW tile.
+A PGM frame that misses the aux deadline moves the PGM cells, not the PVW cells.
 Wipes and explicit `mixer.preview` changes are not timed: they draw on the next
 tick. After a take the program scene's sources keep flowing to the bus, so the
 swapped preview is warm: one subscription push per source per aux frame per
 bus, no compositing.
 
 Every timed change is measured from the take command's receipt:
-`pvw_latency_ms` to the deadline of the multiview frame the change is first
+`pvw_latency_ms` to the deadline of the bus frame the change is first
 drawn on, `pgm_latency_ms` to the program frame's deadline at the main
 compositor, and `pvw_minus_pgm_ms` their difference (0 aligned; one aux frame
 when the change missed its tick, `last_target_error_ticks` 1, or when its tick
@@ -256,8 +264,8 @@ had passed at publish, `target_unreachable`), with the take's `kind` (`cut`,
 deadlines, before the encoders; the cut probe's `mixer.status` `cut_latency`
 ends at the program encoder's output, so it exceeds a cut's `pgm_latency_ms`
 by the encoder's share. `mixer.aux_status` reports them under `follower` with
-`align`, `last_change_to_apply_ms`, `last_target_error_ticks`, its base
-`revision` and `error`; `mixer.status` `pvw_latency` carries every follower's
+`align`, `last_change_to_apply_ms`, `last_target_error_ticks`, the
+`layout_revision` it holds and `error`; `mixer.status` `pvw_latency` carries every follower's
 last timed change keyed by its node name, for a script polling the status
 alone (`demos/mixer/tests/cut_spam.py` reports them per kind, `late` counting
 reachable misses only).

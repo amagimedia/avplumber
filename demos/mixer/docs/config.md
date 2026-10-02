@@ -35,9 +35,10 @@ supplied by that file; the runtime does not depend on the recorded demo's inputs
 
 `canvas`, `sources` and `scenes` are required; everything else has a default.
 
-`max_compositor_layers` is the per-compositor draw budget (default 256).
-Eight 64-input multiview tiles need 577 layers: 512 for the tiles, 64 reserved
-for PVW and one for the already-composited PGM. Set the budget to `640`, or
+`max_compositor_layers` is the per-compositor draw budget (default 256), and
+caps an aux bus's default `max_layers`. Eight 64-input slots of a
+`pgm_pvw_grid` aux bus need 577 layers: 512 for the slots, 64 reserved for PVW
+and one for the already-composited PGM. Set the budget to `640`, or
 override a show with `--max-compositor-layers 640`. Recipes accept the same field; setup changes
 preserve it. Native compositor nodes call this parameter `max_layers`.
 The CUDA layer table allocates 128 bytes per configured layer on both the GPU
@@ -400,10 +401,11 @@ Janus rendition only, even when that rendition is a clean feed.
 
 ## aux_buses
 
-Extra monitor outputs, each its own compositor and H.264 encoder (SDR, canvas
-size, program rate halved above 30 fps unless `full_rate`) sent to Janus. They
-subscribe to the sources the main mixer already decodes: a source reaches a bus
-only while one of its tiles shows it, and a bus never delays the program.
+Extra monitor outputs, any number of them, each its own compositor and H.264
+encoder (SDR, canvas size, program rate halved above 30 fps unless `full_rate`)
+sent to Janus. They subscribe to the sources the main mixer already decodes: a
+source reaches a bus only while its layout draws it, and a bus never delays the
+program.
 
 ```json
 "aux_buses": [
@@ -414,62 +416,104 @@ only while one of its tiles shows it, and a bus never delays the program.
 ]
 ```
 
+A bus draws a layout: a list of cells in canvas pixels, each with a role.
+
+| role | draws |
+| --- | --- |
+| `pvw` | the mixer's preview scene, changed with the program on a take (see `pvw_align`) |
+| `pgm` | the finished, keyed program, `pgm_delay_frames` behind the other cells |
+| `slot` (+ `"slot": n`) | the scene assigned to slot `n` |
+| `source` (+ `"source": i`) | source `i` (its index in `sources`) |
+
+| layout | cells |
+| --- | --- |
+| `{"preset": "pgm_pvw_grid"}` (default) | PVW and PGM on top, slots 0–7 below in two rows of four |
+| `{"preset": "source_pages", "page": null, "rotate_s": 5}` | one page of source cells, 12 per page (2 × 6 portrait, 4 × 3 landscape); `page` null rotates every `rotate_s` (1–60 s, by default the bus's `rotate_s`, 5), a page number holds it |
+| `{"cells": [{"role": "slot", "slot": 0, "x": 0, "y": 0, "w": 540, "h": 960}, ...]}` | exactly these: even `x`, `y`, `w`, `h` inside the canvas, slots numbered 0 to n−1, each once; any number of `pvw` and `pgm` cells, including none |
+
+Every `pvw` cell draws the preview scene below the rest, each reserving the
+largest scene's item count of layers; the `slot` and `source` cells follow in
+list order and the `pgm` cells last, over any cell they overlap.
+
 | field | default | meaning |
 | --- | --- | --- |
-| `latency_ms` | the mixer's `latency_ms` | the bus compositor's playout buffer. The sources reach a bus when they reach the program compositors, so the program's buffer leaves it the same slack (1.5 aux frames at 60 fps: 50 ms); a bus at the program's buffer can change its PVW tile when the program changes. Bus latency plus `pgm_delay_frames` must stay below six aux frames |
-| `pgm_delay_frames` | `1`, `2` at a 50/60 fps bus | `pgm_pvw_grid`: aux frames the PGM pad is matched back. The finished program leaves the main compositor `latency_ms` after its timestamp, when the bus would already be drawing that frame's tick, and needs a margin to cross the output chain (snapshot, selectors, keyer, tap) to the bus: `pgm_delay_frames × aux frame + latency_ms` must exceed the mixer's `latency_ms` by at least one program frame (checked at build). The default gives about 33 ms (40 at 25/50) at any rate, which is why a `full_rate` bus at 50/60 takes two of its frames; `1` there leaves one program frame (16.7 ms at 60), and `0` needs a bus `latency_ms` at least a program frame above the mixer's, which delays every tile instead of the PGM tile alone |
-| `pvw_align` | `"program"` | `pgm_pvw_grid`: when the PVW tile changes on a take. `program`: on the multiview frame leaving the bus when the program frame of the take leaves the mixer, so the operator sees both at once; the PGM tile of the same multiview follows `pgm_delay_frames` later. `pgm_tile`: together with that PGM tile, `pgm_delay_frames` after the program |
+| `layout` | `{"preset": "pgm_pvw_grid"}` | the layout the bus starts with |
+| `layouts` | both presets | further layouts the operator can switch to (at most 16); the control page offers `layout` and these |
+| `scenes` | none | slot assignments by slot index, `null` for an empty slot; padded with `null` to the layout's slot count |
+| `max_layers` | the largest of its layouts, at most `max_compositor_layers` | the bus compositor's layer budget, fixed at build: a layout's PVW reserve, slots, sources and PGM. A layout or assignment over it is refused |
+| `rotate_s` | `5` | seconds per page of a `source_pages` layout that names none |
+| `latency_ms` | the mixer's `latency_ms` | the bus compositor's playout buffer. The sources reach a bus when they reach the program compositors, so the program's buffer leaves it the same slack (1.5 aux frames at 60 fps: 50 ms); a bus at the program's buffer can change its PVW cells when the program changes. Bus latency plus `pgm_delay_frames` must stay below six aux frames |
+| `pgm_delay_frames` | `1`, `2` at a 50/60 fps bus | aux frames the PGM pad is matched back. The finished program leaves the main compositor `latency_ms` after its timestamp, when the bus would already be drawing that frame's tick, and needs a margin to cross the output chain (snapshot, selectors, keyer, tap) to the bus: `pgm_delay_frames × aux frame + latency_ms` must exceed the mixer's `latency_ms` by at least one program frame (checked at build for a bus whose layouts draw the program). The default gives about 33 ms (40 at 25/50) at any rate, which is why a `full_rate` bus at 50/60 takes two of its frames; `1` there leaves one program frame (16.7 ms at 60), and `0` needs a bus `latency_ms` at least a program frame above the mixer's, which delays every cell instead of the PGM cells alone |
+| `pvw_align` | `"program"` | when the PVW cells change on a take. `program`: on the bus frame leaving the bus when the program frame of the take leaves the mixer, so the operator sees both at once; the PGM cells of the same frame follow `pgm_delay_frames` later. `pgm_tile`: together with those PGM cells, `pgm_delay_frames` after the program |
 | `full_rate` | `false` | run the bus at the canvas rate at 50/60 fps instead of half. Costs about twice the bus's compositor and encoder work on the GPU (a second bus's worth at 1080p60), and the rendition's `bitrate_kbps` then covers twice the frames, so raise it to keep the quality per frame; no change at 25/30 |
 
-| layout | shows | control |
-| --- | --- | --- |
-| `pgm_pvw_grid` (default) | PVW and PGM on top, eight scene slots below | `mixer.aux {"bus", "expected_revision", "scenes"}` assigns slots; PVW follows the mixer |
-| `source_pages` | every source in equal tiles, 12 per page (2 × 6 portrait, 4 × 3 landscape) | pages rotate every `rotate_s` (1–60, default 5); `mixer.aux_page {"bus", "page"}` or `{"bus", "step": ±1}` holds a page, `{"bus", "auto": true}` resumes |
-
-`mixer.aux_status` reports every bus with its tile geometry in canvas pixels
-(`cells` or `tiles`), so a control page can label the tiles over the video.
+A bus gets a PGM pad (the program tap's subscribed output) only when one of
+its layouts has a `pgm` cell; a bus without one refuses a switch to a layout
+that draws the program. `"layouts": []` keeps a `source_pages` bus to its own
+layout: no PGM pad, no program latency check, 128 sources.
 Each bus needs its own Janus RTP/RTCP port pair and a Janus mountpoint whose ID
 equals its RTP port; the bundled Janus config has one for 5008 (RTCP 5009).
-Recipes accept the same block. Setup changes keep the buses: scene slots that no
-longer exist or no longer fit the draw budget are cleared, and source pages
-follow the new source list.
 
-`mixer.aux` takes the complete eight-slot `scenes` list (`null` clears a slot)
-and the bus's `expected_revision` from `mixer.aux_status`; a stale revision
-returns the current assignments without applying the change. The control page
-offers each bus as an output, with M1–M8 slot buttons: arm a slot, then click a
-scene; × clears it, and Shift+1–8 assigns the selected scene. With a bus
-configured, scene definitions are fixed until the next setup, `mixer.scene`
-included. A bus suspends after sustained encoder backpressure; the next slot
-assignment resumes it.
+Control commands, each `{"bus": <id>, ...}`:
 
-The PGM tile of a `pgm_pvw_grid` bus runs `pgm_delay_frames` (one aux frame,
-two at a 50/60 fps bus) behind the other tiles: the finished program reaches
-the bus after the sources it is made of, so that pad alone is shown later
-instead of delaying every pad. At half rate the bus receives every other
-program frame (the first of each aux tick), so a take whose first program
-frame falls between aux ticks shows in the PGM tile from the next frame.
+- `mixer.aux_layout {"bus", "layout"}` switches the bus to any valid layout
+  within its `max_layers`; slot assignments keep their slot numbers (a layout
+  with fewer slots hides the rest until one with more shows them again).
+- `mixer.aux {"bus", "expected_revision", "scenes"}` assigns slots: the
+  complete `scenes` list as `mixer.aux_status` reports it (`null` clears a slot)
+  and that status's `revision`; a stale revision returns the current
+  assignments without applying the change.
+- `mixer.aux_page {"bus", "page"}` or `{"bus", "step": ±1}` holds a page of a
+  `source_pages` layout, `{"bus", "auto": true}` resumes rotation and `false`
+  stops it on the current page.
+- `mixer.aux_status` reports every bus: `id`, `layout`, `layouts`, `cells` (in
+  canvas pixels, source cells with the source's `id` and `kind`), `scenes`,
+  `revision`, `max_layers`, `composition_pending`, `composition_error`,
+  `pvw_scene` and the follower's status under `follower`, and for a
+  `source_pages` layout `page`, `pages`, `auto`, `rotate_s`, `first` and
+  `total`. A change is `composition_pending` until the bus compositor draws its
+  revision: its new sources are staged until they have frames, and dropped
+  with `composition_error` when they do not arrive in time.
 
-The PVW tile is set by a `mixer_pvw_follow` node (`aux_<id>_pvw`) on the
-multiview frame `pvw_align` picks. With the defaults, a take whose first new
-program frame has timestamp K leaves the mixer at K + `latency_ms` (50 ms at
-60 fps, 66.7 at 30). The multiview frame with the new PVW tile leaves its bus at
-the same instant, or 16.7 ms later at 60 → 30 for the takes whose K falls
-between aux ticks (always the same instant at 25/30 fps or with `full_rate`),
-and one aux frame later when the change misses its tick. The PGM tile shows the
-take at K + 83.3 ms (K even) or K + 100 ms (K odd) at 60 → 30, and at K + 100 ms
-at 30 fps. A fade's PVW change lands one tick after the program by
-construction; wipes and explicit `mixer.preview` changes draw on the next
-frame. A bus `latency_ms` above the mixer's moves the whole multiview later by
-the difference. `mixer.aux_status` reports each bus's follower under `follower`,
-and `mixer.status` `pvw_latency` every follower's last timed change; the
-[mixer notes](../../../doc/mixer.md#multiview-pvw-follower) give the error
-bound, the lock order and what each latency field measures.
+The control page offers each bus as an output, with a menu of its layouts when
+it has several, and M1… slot buttons for the bus a viewer shows: arm a slot,
+then click a scene; × clears it, and Shift+1–9 assigns the selected scene.
+Recipes accept the same block. Setup changes keep each bus's live layout and
+assignments: slots whose scene no longer exists or no longer fits the bus's
+budget are cleared, and source pages follow the new source list, rotating.
+With a bus configured, scene definitions are fixed until the next setup,
+`mixer.scene` included. A bus suspends after sustained encoder backpressure;
+the next assignment, layout switch or page turn by the operator resumes it, an
+automatic page turn does not.
+
+The PGM cells run `pgm_delay_frames` (one aux frame, two at a 50/60 fps bus)
+behind the other cells: the finished program reaches the bus after the sources
+it is made of, so that pad alone is shown later instead of delaying every pad.
+At half rate the bus receives every other program frame (the first of each aux
+tick), so a take whose first program frame falls between aux ticks shows in the
+PGM cells from the next frame.
+
+Every bus's composition is set by its `mixer_pvw_follow` node
+(`aux_<id>_pvw`), which draws the PVW cells on the bus frame `pvw_align` picks.
+With the defaults, a take whose first new program frame has timestamp K leaves
+the mixer at K + `latency_ms` (50 ms at 60 fps, 66.7 at 30). The bus frame with
+the new PVW cells leaves its bus at the same instant, or 16.7 ms later at 60 →
+30 for the takes whose K falls between aux ticks (always the same instant at
+25/30 fps or with `full_rate`), and one aux frame later when the change misses
+its tick. The PGM cells show the take at K + 83.3 ms (K even) or K + 100 ms (K
+odd) at 60 → 30, and at K + 100 ms at 30 fps. A fade's PVW change lands one tick
+after the program by construction; wipes and explicit `mixer.preview` changes
+draw on the next frame. A bus `latency_ms` above the mixer's moves the whole
+bus later by the difference. `mixer.status` `pvw_latency` reports every
+follower's last timed change; the
+[mixer notes](../../../doc/mixer.md#aux-bus-follower) give the error bound,
+the lock order and what each latency field measures.
 
 ## Known limitations
 
-- **128 sources per show, or 127 with aux.** Every source is a pad on the compositor;
-  aux reserves one additional pad for PGM. 8-bit or 10-bit makes no difference;
+- **128 sources per show, or 127 with an aux bus that can draw the program.** Every
+  source is a pad on the compositor; a bus with a `pgm` cell in one of its layouts
+  (by default, every bus) reserves one additional pad for PGM. 8-bit or 10-bit makes no difference;
   scenes and aliases are free. Sources cannot be added while running: the
   pads are wired at build time. A document with more sources is rejected at load.
 - **16 boxes per scene** in the built-in `--input` layouts; a `--config` scene has no box limit.

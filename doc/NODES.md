@@ -1061,8 +1061,8 @@ Parameters, in addition:
     with that stream is published under, for its conversion and encoder
 -   `subscriptions` (array of strings, required with `aux_mode`) - one shared
     frame subscription per input, in `src` order; sources never wait for the bus
--   `mixer` (string, optional with `aux_mode`) - the mixer whose preview the
-    status reports; its scene definitions are frozen from then on
+-   `mixer` (string, optional with `aux_mode`) - the mixer whose scene
+    definitions are frozen from then on
 
 `clock_input` fails: it is `mixer_keyer`'s.
 
@@ -1073,14 +1073,18 @@ Objects (`node.object.set`):
 -   `warm_reset` - reject frames stamped over a tick before the one being
     drawn; prewarmed inputs keep their held pictures
 -   `composition` (`aux_mode` only) - `{"layers": [...], "active_inputs": <mask>,
-    "enabled": true}`: applied on the tick its new inputs are ready; if they
-    are not ready within max(250 ms, twice `latency_ms`), the previous layout
-    stays and `composition_error` says so. `enabled` false suspends the bus.
+    "enabled": true, "revision": "<string>"}`: applied on the tick its new
+    inputs are ready; if they are not ready within max(250 ms, twice
+    `latency_ms`), the previous layout stays and `composition_error` says so.
+    `enabled` false suspends the bus. `revision` (optional) names it in the
+    status once it is drawn.
 
 `node.object.get <node> status`: `suspended`, `output_drops`, `playout`
 (`frames`, `repeats`, `discarded`, `overflow`, `missed_deadlines`,
-`per_input`), with `aux_mode` `composition_pending` and `composition_error`,
-with `mixer` `pvw_scene`.
+`per_input`), with `aux_mode` `composition_pending`, `composition_error` and
+`composition_revision`, the revision of the composition being drawn (set when
+one is applied at once or a staged one becomes ready, unchanged when a staged
+one is dropped; empty for one without a revision).
 
 ### `mixer_keyer`
 
@@ -1100,6 +1104,40 @@ Parameters, in addition:
     subscribes nothing
 
 `aux_mode`, `latency_ms` and `pgm_delay_frames` fail: the keyer has no playout.
+
+### `mixer_pvw_follow`
+
+The only writer of an AUX bus compositor's `composition`: each one is the
+layers of the mixer's preview scene followed by a base, so the preview changes
+on the bus frame that leaves it with the take's first program frame (see
+[mixer.md](mixer.md#aux-bus-follower)). What the layers draw is the control
+side's: this node knows no cells. No edges.
+
+Parameters:
+-   `mixer` (string, required) - the mixer whose preview changes it follows
+-   `compositor` (string, required) - the bus's `mixer_compositor` (`aux_mode`),
+    resolved once at creation
+-   `fps` (ratio string, required), `latency_ms` (float, required) - the bus
+    compositor's rate and playout latency
+-   `main_latency_ms` (float, default `latency_ms`) - the main mixer's playout
+    latency: when a program frame leaves its compositor
+-   `pgm_delay_frames` (int, default 0) - the bus's program input delay
+-   `align` (string, default `program`) - `program`: change with the program
+    output; `pgm_tile`: with the bus's program input, `pgm_delay_frames` later
+-   `layout` (object, optional) - the initial `layout` object
+
+Objects (`node.object.set`):
+-   `layout` - `{"revision": "<string>", "pvw": {"<scene>": {"layers": [...],
+    "active_inputs": <mask>}, ...}, "base": {"layers": [...], "active_inputs":
+    <mask>}, "resume": true}`, replaced as a whole and applied at the next wake.
+    Every composition carries its `revision`. `resume` false keeps a bus the
+    compositor suspended for encoder backpressure suspended.
+
+`node.object.get <node> status`: the last change's `pvw_scene`, `pgm_scene`,
+`kind`, `align`, `target_tick` and latencies (`pvw_latency_ms`,
+`pgm_latency_ms`, `pvw_minus_pgm_ms`, `last_change_to_apply_ms`,
+`last_target_error_ticks`, `target_unreachable`), the `layout_revision` it
+holds and `error`.
 
 Objects (`node.object.set`):
 -   `active_inputs` (mask) - the keys on air, switched with a cut
