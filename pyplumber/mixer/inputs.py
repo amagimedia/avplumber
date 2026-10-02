@@ -54,7 +54,9 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     }))
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": edge("video_packets"), "dst": edge("decoded"),
-        **({"pixel_format": "?cuda", "hwaccel": hwaccel} if hwaccel else {}),
+        # The GPU decodes: a libavcodec frame thread only reserves one more decode surface, 16 of them
+        # (about 55 MB of VRAM per 1080p decoder) on a 16-vCPU host.
+        **({"pixel_format": "?cuda", "hwaccel": hwaccel, "options": {"threads": 1}} if hwaccel else {}),
         "group": group, **restart,
         **(decoder_params or {}),
     }))

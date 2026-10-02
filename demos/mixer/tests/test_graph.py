@@ -418,6 +418,7 @@ def test_dmabuf_input_builds_browser_chain_next_to_files(tmp_path):
     hold = nodes["input_1_hold"]
     assert (hold["type"], hold["src"], hold["dst"], hold["fps"]) == ("repeat_last_frame", "input_1_cuda", "input_1_held", "60/1")
     assert "decode_1" not in nodes and "decode_0" in nodes
+    assert nodes["decode_0"]["options"] == {"threads": 1}   # NVDEC decodes; a frame thread only reserves a surface
     sources = dict(FakeMixer.instances[-1].sources)
     assert sources["source_1"]["pre_otm_edge"] == "input_1_held"
     assert sources["source_0"]["pre_otm_edge"] == "input_0_fps"
@@ -673,7 +674,7 @@ def test_raw_420_source_uses_cpu_frames_and_one_paced_upload_by_default(tmp_path
     assert nodes["input_0"]["options"] == {"pixel_format": fmt, "video_size": "320x180", "framerate": "60/1"}
     assert nodes["input_0"]["loop_continuous_ts"] is False   # setpts counts frames across loops instead
     assert nodes["decode_0"]["codec"] == "rawvideo"
-    assert "hwaccel" not in nodes["decode_0"]
+    assert "hwaccel" not in nodes["decode_0"] and "options" not in nodes["decode_0"]
     assert nodes["filter_0"]["src"] == "input_0_decoded"
     assert nodes["filter_0"]["graph"] == "setpts=N*1/(60*TB)"
     assert nodes["realtime_0"]["src"] == "input_0_filtered"
@@ -1637,7 +1638,7 @@ def test_clips_decode_on_the_gpu_and_raw_sources_upload_after_pacing(tmp_path):
     nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
     decode = nodes["decode_0"]
     assert (decode["hwaccel"], decode["pixel_format"]) == ("mixer_gpu", "?cuda")
-    assert "codec_map" not in decode and "options" not in decode
+    assert "codec_map" not in decode and decode["options"] == {"threads": 1}
     assert nodes["upload_1"]["graph"] == "hwupload"   # raw uploads at its own size, after pacing
 
 
