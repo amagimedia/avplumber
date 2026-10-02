@@ -41,7 +41,8 @@ avp = Plumber()
 worker = Worker({"name": "worker", "dst": "unused", "data_type": "VideoFrame",
                  "auto_restart": "on"})
 worker_type = worker.parameters["type"]
-avp.addNode(worker, True, True)
+avp.addNode(worker)   # its edges exist before the node is created and started
+avp.executeCommandsFromString("node.start worker\n")
 assert running.wait(5), "worker did not start"
 
 finish_with_broken_factory()
