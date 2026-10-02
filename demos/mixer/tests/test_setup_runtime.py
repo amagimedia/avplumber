@@ -11,7 +11,7 @@ from instance_profiles import INSTANCE_PROFILES, InstanceType
 import prepare_demo
 from pyplumber.mixer.aux_layout import draws_program
 from pyplumber.mixer.config import parse
-from setup_runtime import (DEFAULT_KBPS, DEFAULT_SETTINGS, HEALTHY_RUN_SEC, RECOVER_TIMEOUT_SEC, RETRY_DELAYS_SEC, STOP_TIMEOUT_SEC,
+from setup_runtime import (DEFAULT_SETTINGS, HEALTHY_RUN_SEC, RECOVER_TIMEOUT_SEC, RETRY_DELAYS_SEC, STOP_TIMEOUT_SEC,
                            SetupRuntime, current_settings, extra_aux_limit, recipe_for, source_counts, source_limit)
 from webui import serve
 
@@ -180,13 +180,13 @@ def encode(preset="p3", kbps=3000):
 
 
 def test_every_program_encode_takes_its_own_preset_and_bitrate(tmp_path):
-    """By default the recipe's bitrates at the profile's preset, the clean copy at the SDR program's."""
+    """By default the profile's: the recipe's bitrates at p3, the clean copy at the SDR program's."""
     def encodes(settings):
         show, _, _ = prepare_demo.plan(recipe_for(T4, {**KEYED, "bit_depth": 10, **settings}), tmp_path)
         return [(r["id"], r["preset"], r["bitrate_kbps"]) for r in show["renditions"]]
     assert encodes({}) == [("sdr", "p3", 6000), ("hdr", "p3", 8000), ("sdr_clean", "p3", 6000)]
     recipe = json.loads((prepare_demo.DEMO_DIR / "demo.example.json").read_text())
-    assert [DEFAULT_KBPS[r["id"]] for r in recipe["renditions"]] == [r["bitrate_kbps"] for r in recipe["renditions"]]
+    assert [T4["nvenc"]["defaults"][r["id"]]["bitrate_kbps"] for r in recipe["renditions"]] == [r["bitrate_kbps"] for r in recipe["renditions"]]
     assert encodes({"encodes": {"sdr": encode("p1", 2000), "hdr": encode("p5", 20000), "sdr_clean": encode("p5", 4500)}}) == [
         ("sdr", "p1", 2000), ("hdr", "p5", 20000), ("sdr_clean", "p5", 4500)]
 
@@ -194,11 +194,11 @@ def test_every_program_encode_takes_its_own_preset_and_bitrate(tmp_path):
 @pytest.mark.parametrize("legacy, kbps", [(6000, [6000, 8000, 6000]), (3000, [3000, 4000, 3000]),
                                           (16000, [16000, 20000, 16000]), (500, [2000, 2000, 2000])])
 def test_settings_saved_with_one_program_bitrate_load_per_output(legacy, kbps):
-    """The SDR program and its clean copy take it, the HLG one the recipe's ratio, within the range."""
+    """The SDR program and its clean copy take it, the HLG one the defaults' ratio, within the range."""
     older = {**{k: v for k, v in DEFAULT_SETTINGS.items() if k != "encodes"}, "bitrate_kbps": legacy}
     encodes = recipe_for(T4, older)["setup"]["encodes"]
     assert [encodes[o] for o in ("sdr", "hdr", "sdr_clean")] == [encode("p3", n) for n in kbps]
-    assert encodes["extra"] == encode("p3", 3000)
+    assert encodes["extra"] == encode("p1", 4000)
 
 
 @pytest.mark.parametrize("fps, size", [(25, 6), (30, 6), (50, 9), (60, 9)])
@@ -234,7 +234,7 @@ def test_a_setup_saved_with_one_program_bitrate_resumes_with_per_output_encodes(
         runtime.apply()   # as a resume
         runtime.worker.join(3)
         encodes = runtime.status()["settings"]["encodes"]
-        assert [encodes[o] for o in ("sdr", "hdr", "sdr_clean", "extra")] == [*map(encode, ["p3"] * 3, kbps), encode()]
+        assert [encodes[o] for o in ("sdr", "hdr", "sdr_clean", "extra")] == [*map(encode, ["p3"] * 3, kbps), encode("p1", 4000)]
 
 
 @pytest.mark.parametrize("encodes, message", [
@@ -473,7 +473,8 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
     cfg = parse(prepare_demo.plan(recipe, runtime.media_dir)[0])
     assert cfg.aux_buses[0].scenes == (old["scenes"][0]["id"], *([None] * 7))
     r = cfg.aux_buses[0].renditions[0]
-    assert (r.width, r.height, r.fps, r.bitrate_kbps) == (1920, 1080, 25, 4500)
+    # The setup sets every bus's encode: one it omits takes the profile's aux default.
+    assert (r.width, r.height, r.fps, r.preset, r.bitrate_kbps) == (1920, 1080, 25, "p1", 4000)
     pages = cfg.aux_buses[1]
     assert (pages.layout, pages.scenes) == ({"preset": "source_pages", "page": 0}, ())
     assert (pages.renditions[0].width, pages.renditions[0].height, pages.renditions[0].fps) == (1920, 1080, 25)
@@ -964,8 +965,9 @@ def test_every_profile_covers_every_rate_and_canvas(tmp_path, instance_type):
     assert status["instance_type"] == instance_type.value
     assert json.loads(json.dumps(status))["profile"]["nvdec_decodes"].keys() == {"25", "30", "50", "60"}
     nvenc = profile["nvenc"]
-    assert nvenc.keys() == {"budget_pct", "pct_per_fps", "bitrate_kbps", "default_preset"}
-    assert nvenc["pct_per_fps"]["hevc"].keys() == nvenc["pct_per_fps"]["h264"].keys() >= {nvenc["default_preset"]}
+    assert nvenc.keys() == {"budget_pct", "pct_per_fps", "bitrate_kbps", "defaults"}
+    assert nvenc["defaults"].keys() == {"sdr", "hdr", "sdr_clean", "aux"}
+    assert nvenc["pct_per_fps"]["hevc"].keys() == nvenc["pct_per_fps"]["h264"].keys() >= {e["preset"] for e in nvenc["defaults"].values()}
 
 
 def own_aux(**rendition):
@@ -978,7 +980,7 @@ def own_aux(**rendition):
 KEYED = {**DEFAULT_SETTINGS, "dsk": ["lower_third"], "clean_feed": True, "chroma": "420", "weights": [4, 0, 0, 0, 1, 0, 0]}
 
 
-def nvenc_limits(tmp_path, bit_depth, own_preset="p3", **encodes):
+def nvenc_limits(tmp_path, bit_depth, own_preset="p1", **encodes):
     """extra_aux_limit at 25, 30, 50 and 60 fps beside two own buses at *own_preset*, the reason
     where the encodes exceed the budget; the same with the clean feed on and off."""
     def limit(settings):
@@ -993,36 +995,38 @@ def nvenc_limits(tmp_path, bit_depth, own_preset="p3", **encodes):
     return limits
 
 
-@pytest.mark.parametrize("bit_depth, limits", [(8, [10, 8, 8, 6]), (10, [8, 6, 4, 2])])
+@pytest.mark.parametrize("bit_depth, limits", [(8, [11, 8, 9, 6]), (10, [10, 7, 6, 3])])
 def test_extra_aux_fill_nvenc_beside_the_program_clean_feed_and_own_buses(tmp_path, bit_depth, limits):
-    """The live show's encodes at p3 (docs/capacity.md): the H.264 program and clean feed (counted
-    even while off), the HEVC HLG program on a 10-bit canvas and two own buses, at the program rate
-    at 25/30 fps, half at 50/60."""
+    """The live show's encodes at the defaults (docs/capacity.md): the H.264 program and clean feed
+    (counted even while off) and the HEVC HLG program on a 10-bit canvas at p3, two own buses and the
+    extra ones at p1, at the program rate at 25/30 fps, half at 50/60."""
     assert nvenc_limits(tmp_path, bit_depth) == limits
 
 
-OVER_BUDGET = "The encodes need 95.3% of NVENC, above its 80% budget: choose faster presets"
+OVER_BUDGET = "The encodes need 94.7% of NVENC, above its 80% budget: choose faster presets"
+# The programs and the clean feed at p5.
+P5 = {"sdr": encode("p5", 6000), "hdr": encode("p5", 8000), "sdr_clean": encode("p5", 6000)}
 
 
 @pytest.mark.parametrize("bit_depth, own_preset, encodes, limits", [
-    (10, "p3", {"hdr": encode("p5", 8000)}, [6, 3, 0, OVER_BUDGET]),   # the HLG program at p5, the rest at p3
-    (8, "p1", {"extra": encode("p1")}, [16, 12, 13, 9]),                # monitors at p1
-    (10, "p1", {"extra": encode("p1")}, [13, 9, 7, 3])])
+    (8, "p3", {"extra": encode("p3")}, [10, 8, 8, 6]),   # every encode at p3
+    (10, "p3", {"extra": encode("p3")}, [9, 6, 5, 3]),
+    (8, "p1", P5, [9, 6, 4, 1]),                          # the monitors at p1
+    (10, "p1", P5, [6, 4, 0, OVER_BUDGET])])
 def test_each_encode_costs_its_preset(tmp_path, bit_depth, own_preset, encodes, limits):
     assert nvenc_limits(tmp_path, bit_depth, own_preset, **encodes) == limits
 
 
 def test_encodes_above_the_nvenc_budget_are_refused_without_extra_aux(runtime, monkeypatch):
     """No Janus API and no extra aux outputs: the show's own encodes alone exceed the budget. At
-    60 fps the HLG program at p5 does not fit even with every other encode at p1."""
+    60 fps the programs and the clean feed at p5 do not fit beside two aux buses at p1, nor the SDR
+    program and the clean feed at p5 beside the HLG program at p3."""
     monkeypatch.setattr(prepare_demo, "prepare", lambda *_: pytest.fail("must validate first"))
     settings = {**KEYED, "fps": 60, "bit_depth": 10}
     show, _, _ = prepare_demo.plan(recipe_for(T4, settings), runtime.media_dir)
     (runtime.media_dir / "mixer.demo.json").write_text(json.dumps({**show, "aux_buses": own_aux()}))
     runtime.process = None
-    fastest = {output: encode("p1") for output in ("sdr", "sdr_clean", "mv", "mv2")}
-    for encodes, reason in (({"hdr": encode("p5", 8000)}, OVER_BUDGET),
-                            ({**fastest, "hdr": encode("p5", 8000)}, "The encodes need 83.5% of NVENC")):
+    for encodes, reason in ((P5, OVER_BUDGET), ({**P5, "hdr": encode("p3", 8000)}, "The encodes need 86.5% of NVENC")):
         with pytest.raises(ValueError, match=reason):
             runtime.apply({**settings, "encodes": encodes})
 
@@ -1056,22 +1060,21 @@ def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime
     raw = json.loads(config.read_text())
     encodes = [*raw["renditions"], *(r for bus in raw["aux_buses"] for r in bus["renditions"])]
     assert len(encodes) == 7 and all(r["preset"] in ("p1", "p3", "p5") and "bitrate_kbps" in r for r in encodes)
-    # The page names the own buses and starts them at the profile's preset and their own bitrate.
-    assert runtime.status()["aux_buses"] == [
-        {"id": "mv", "label": "Program preview", "full_rate": False, "encode": encode("p3", 3000)},
-        {"id": "mv2", "label": "Multiviewer", "full_rate": False, "encode": encode("p3", 3000)}]
+    # The page names the own buses; like the extra ones, they start at the profile's aux default.
+    assert runtime.status()["aux_buses"] == [{"id": "mv", "label": "Program preview", "full_rate": False},
+                                             {"id": "mv2", "label": "Multiviewer", "full_rate": False}]
     first = cfg.aux_buses
     for bus in first[2:]:
         assert len(bus.layouts) == 5 and bus.layout == bus.layouts[0] and not draws_program(cfg, bus.layouts)
-        assert (bus.renditions[0].preset, bus.renditions[0].bitrate_kbps) == ("p3", 3000)   # the extra default
+        assert (bus.renditions[0].preset, bus.renditions[0].bitrate_kbps) == ("p1", 4000)   # the aux default
     # Fewer drops the last ones; the operator's pick on aux1 stays. Every extra bus takes the extra
-    # encode, an own bus its own.
+    # encode, an own bus its own or the aux default.
     live["aux1"] = {"id": "aux1", "layout": first[3].layouts[2], "layouts": list(first[3].layouts), "scenes": []}
     cfg = apply(2, encodes={"extra": encode("p1", 2500), "mv": encode("p5", 4500)})
     assert [b.id for b in cfg.aux_buses] == ["mv", "mv2", "aux0", "aux1"]
     assert cfg.aux_buses[3].layout == first[3].layouts[2]
     assert [(b.renditions[0].preset, b.renditions[0].bitrate_kbps) for b in cfg.aux_buses] == [
-        ("p5", 4500), ("p3", 3000), ("p1", 2500), ("p1", 2500)]
+        ("p5", 4500), ("p1", 4000), ("p1", 2500), ("p1", 2500)]
     assert syncs[-1] == ({"aux0": 5016, "aux1": 5020}, True)
     # More adds them back: the same ids, ports and layouts.
     cfg = apply(4)

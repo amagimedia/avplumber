@@ -62,12 +62,12 @@
     <li><b>NVDEC</b>: about 1100 decoded frames per second, at most 40 streams. That keeps the T4's decoder near 90%.</li>
     <li><b>Browser windows</b>: five workers of eight windows. The count does not scale with the frame rate; only a sixth worker would raise it.</li>
     <li><b>Raw upload units</b>: 30 and 34 at 25 and 30 fps with pinned uploads, 1020 frames per second above 30 fps. A P010 frame is twice the bytes of NV12, so it costs two units.</li>
-    <li><b>SDR v210 4:2:2</b>: no cap of its own, only the total. The page fills at most 4 automatically; a typed count can go higher.</li>
+    <li><b>SDR v210 4:2:2</b>: no cap of its own, only the total. The page's Balanced mix has none.</li>
     <li><b>Modes</b>: an SDR canvas takes SDR 4:2:0 decodes, browsers and NV12 uploads; HDR 4:2:0 adds HLG decodes and P010 uploads; only HDR 4:2:2 takes v210 inputs.</li>
   </ul>
 
   <h2>The Balanced mix at each limit</h2>
-  <p>What the setup page's Balanced preset allocates with four key pages. On an HDR canvas half of each 4:2:0 path is HLG.</p>
+  <p>What the setup page allocates, always the Balanced mix, at the maximum with four key pages. On an HDR canvas half of each 4:2:0 path is HLG.</p>
   <div class="measured wide">
     <table>
       <thead><tr><th>Mode</th><th>Rate</th><th>SDR NVDEC</th><th>HLG NVDEC</th><th>HLG v210</th><th>Browser</th><th>NV12</th><th>P010</th><th>Total with 4 keys</th></tr></thead>

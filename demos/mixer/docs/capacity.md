@@ -174,38 +174,40 @@ running compositor. Active layers and AUX outputs have separate limits.
 ### NVENC and extra aux outputs
 
 Every encoded output has its own NVENC preset (p1, p3 or p5) and CBR bitrate (2–20 Mbit/s),
-set under **Encodes** on the setup page; the **Extra aux outputs** fill what they leave of the
-profile's NVENC budget (`nvenc` in the `tesla_t4` entry). An encode takes its encoded frames/s
+set under **Outputs** on the setup page; the **Extra aux** outputs fill what the others leave of
+the profile's NVENC budget (`nvenc` in the `tesla_t4` entry). An encode takes its encoded frames/s
 times its codec's share per frame/s at its preset, scaled by its pixels against 1920×1080:
 
 | 1920×1080 encode, % of the T4's NVENC per frame/s | p1 | p3 | p5 |
 | --- | ---: | ---: | ---: |
-| H.264 | 0.153 | 0.219 | 0.466 |
-| HEVC Main10 (HLG program) | 0.306 | 0.438 | 0.932 |
+| H.264 | 0.204 | 0.219 | 0.466 |
+| HEVC Main10 (HLG program) | 0.153 | 0.305 | 0.442 |
 
-H.264 p3 and p5 were measured on 2026-10-02 at 1080p30, `tune ull`, CBR, no B-frames: five p3
-encodes took 32.8% and nine 58.2% (7.3% each at 30 fps), five p5 encodes 70.0%. H.264 p1 is
-0.70 of p3, NVIDIA's Turing table, and HEVC twice H.264 at the same preset is an assumption;
-both are to be replaced by T4 measurements. p2, p4, p6 and p7 are not offered (the renditions'
-own default, p7, saturated NVENC with seven encodes). The bitrate does not enter: CBR NVENC time
-is roughly independent of the bitrate, which is still to be verified.
+Measured on 2026-10-02 at 1080p30, `tune ull`, CBR, no B-frames. On the live show five H.264
+encodes took 32.8% at p3 (nine 58.2%, about 6.5% each) and 70.0% at p5. Two real-time 1080p30 test
+encodes beside it took, per encode, 6.0%, 6.5% and 14.9% for H.264 p1, p3 and p5, and 4.5%,
+9.0% and 13.1% for HEVC Main10; the table anchors them to the show's 0.219 for H.264 p3. p2,
+p4, p6 and p7 are not offered (the renditions' own default, p7, saturated NVENC with seven
+encodes). The bitrate does not enter: CBR NVENC time is roughly independent of the bitrate,
+which is still to be verified.
 
 Every encode counts: the H.264 program, the HEVC HLG program on a 10-bit canvas, the H.264 clean
 feed, counted even while off, and each aux bus, which encodes at the program rate at 25/30 fps and
 at half of it at 50/60 (a `full_rate` bus at the program rate). Extra outputs, each at the
 **Extra aux** preset, take what is left of 80% (`setup_runtime.extra_aux_limit`); a setup whose
 encodes exceed 80% without them is refused, with the share they need. With the live show's two aux
-buses (Program preview and Multiviewer) and every encode at p3:
+buses (Program preview and Multiviewer) at the defaults, the programs and the clean feed at p3 and
+every aux bus at p1:
 
 | Canvas | 25 fps | 30 fps | 50 fps | 60 fps |
 | --- | ---: | ---: | ---: | ---: |
-| SDR, 8-bit | 10 | 8 | 8 | 6 |
-| HLG, 10-bit | 8 | 6 | 4 | 2 |
+| SDR, 8-bit | 11 | 8 | 9 | 6 |
+| HLG, 10-bit | 10 | 7 | 6 | 3 |
 
-The HLG program at p5 and the rest at p3 leaves 6, 3 and 0 extra outputs at 25, 30 and 50 fps;
-at 60 fps the encodes need 95.3%, and still 83.5% with every other encode at p1, so that setup
-is refused. The two buses and the extra outputs at p1 leave 16, 12, 13 and 9 on an SDR canvas
-and 13, 9, 7 and 3 on a 10-bit one.
+Every encode at p3 leaves 10, 8, 8 and 6 extra outputs on an SDR canvas and 9, 6, 5 and 3 on a
+10-bit one. The programs and the clean feed at p5, the aux buses at p1, leave 9, 6, 4 and 1 on an
+SDR canvas; on a 10-bit one 6, 4 and 0 at 25, 30 and 50 fps, and at 60 fps the encodes need
+94.7%, so that setup is refused (the SDR program at p3 fits).
 
 Each aux bus also composites on the GPU, which has not been measured per bus: the source
 limits do not change with the number of extra outputs.

@@ -41,18 +41,18 @@ MIXER_DOCKERFILE=Dockerfile docker compose -f demos/mixer/compose.yaml up --buil
 
 Both are described in the [guide's Docker section](docs/guide.md#docker).
 
-Open **<http://127.0.0.1:7681/setup/>**, choose orientation, FPS, unique sources,
-scenes, mode and source counts, then click **Apply setup**. The instance generates
-its assets and starts the mixer. No JSON editing or downloads are required.
+Open **<http://127.0.0.1:7681/setup/>**, choose orientation, FPS, mode, unique
+sources and scenes, then click **Apply setup**. The instance generates its assets and
+starts the mixer. No JSON editing or downloads are required.
 **8-bit** uses an SDR NV12 canvas and H.264 output only; the player hides its
 stream selector. **10-bit HDR** offers **4:2:2** (P210, default) or **4:2:0**
-(P010), with H.264 SDR and H.265 HDR outputs. Switching to HDR splits the
-existing NVDEC count between SDR and HDR; browser and raw-upload counts are
-preserved. Each source type has an editable count. Editing a type updates the
-total; changing the total redistributes the current mix. HDR 4:2:2 inputs are
-capped at **four**, redistributing the remainder among the other enabled types.
-4:2:0 mode excludes 4:2:2 inputs. Switching to SDR reallocates video weights to
-SDR 4:2:0; 8-bit 4:2:2 is not offered.
+(P010), with H.264 SDR and H.265 HDR outputs; 8-bit 4:2:2 is not offered. Unique
+sources start at the maximum of the mode and frame rate and follow it when either
+or the keys change, unless a lower total is typed: that one stays, within the
+maximum. The sources are always the Balanced mix of that total, shown read-only per
+type: NVDEC, browser and raw uploads in about equal shares, half of each 4:2:0 path
+HLG on a 10-bit canvas, and at most **four** HDR 4:2:2 inputs; a type at its cap
+leaves the rest to the others.
 
 The same page changes an existing instance: it prepares missing assets, restarts
 the mixer, then refreshes the control page and player. Output pauses during the
@@ -88,24 +88,26 @@ These numbers are the `tesla_t4` profile in `instance_profiles.py`, which Compos
 with `--instance-type` (`MIXER_INSTANCE_TYPE`, default `tesla_t4`); another machine needs
 its own measured profile there, not scaled T4 numbers.
 
-**Extra aux outputs** adds that many monitor outputs after the show's own aux buses, as many
-as the profile's [NVENC budget](docs/capacity.md#nvenc-and-extra-aux-outputs) leaves beside
-the program encodes. Each has up to five random layouts of 4 to 16 sources, the same for the
-same sources, and its RTP port pair after the highest in use (5016, 5020, … beside buses on
-5008 and 5012). Its Janus Streaming mountpoint, whose ID is that port, is created through
-`webui.py --janus-api` (Compose passes the bundled Janus) before the mixer starts, and removed
-once a smaller setup is on air; without the flag the setup offers none. The mountpoints are not
-permanent: after a Janus restart, **Apply setup** creates them again.
+The **Extra aux** count under **Outputs** adds that many monitor outputs after the show's own
+aux buses, as many as the profile's [NVENC budget](docs/capacity.md#nvenc-and-extra-aux-outputs)
+leaves beside the other encodes; a change that lowers that maximum lowers the count. Each has
+up to five random layouts of 4 to 16 sources, the same for the same sources, and its RTP port
+pair after the highest in use (5016, 5020, … beside buses on 5008 and 5012). Its Janus
+Streaming mountpoint, whose ID is that port, is created through `webui.py --janus-api` (Compose
+passes the bundled Janus) before the mixer starts, and removed once a smaller setup is on air;
+without the flag the setup offers none. The mountpoints are not permanent: after a Janus
+restart, **Apply setup** creates them again.
 
-**Encodes** lists every encoded output: the SDR program, the HLG program on a 10-bit canvas, the
-clean feed (counted even while off), each of the instance's own aux buses, and one row shared by
-the extra aux outputs. Each has its NVENC preset, p1 (fastest), p3 (default) or p5 (best
-quality), and its CBR bitrate, 2–20 Mbit/s: by default the recipe's 6 Mbit/s SDR and 8 Mbit/s HLG
-programs, the SDR program's for the clean feed, an own bus's own bitrate and 3 Mbit/s for extra
-outputs. Each row shows its share of NVENC, which follows the preset and frame rate, not the
-bitrate ([measured costs](docs/capacity.md#nvenc-and-extra-aux-outputs)); the total row adds the
-extra outputs and says how many fit. Encodes above the budget on their own cannot be applied. The
-saved settings keep one `{"preset", "bitrate_kbps"}` per output id in `encodes` (`sdr`, `hdr`,
+**Outputs** lists every encoded output: the H.264 program, the HEVC HLG program on a 10-bit
+canvas, the clean feed while it is on (counted even while off), each of the instance's own aux
+buses, and one row shared by the extra aux outputs. Each has its NVENC preset, p1 (fastest), p3
+or p5 (best quality), and its CBR bitrate, 2–20 Mbit/s. **Defaults** (`nvenc.defaults` in the
+profile) sets the programs and the clean feed to p3 at 6 Mbit/s, 8 for HLG, and every aux bus,
+own or extra, to p1 at 4 Mbit/s. Each row shows its share of NVENC, which follows the preset and
+frame rate, not the bitrate ([measured costs](docs/capacity.md#nvenc-and-extra-aux-outputs)); the
+bar below shows the total against the budget and how many more extra outputs fit. Encodes above
+the budget on their own cannot be applied; the page names the output to lower. The saved
+settings keep one `{"preset", "bitrate_kbps"}` per output id in `encodes` (`sdr`, `hdr`,
 `sdr_clean`, an own bus's id, `extra`); settings saved with the former single program bitrate
 give it to the SDR program and its clean copy and scale the HLG program's as before.
 

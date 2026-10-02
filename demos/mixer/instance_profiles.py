@@ -43,16 +43,22 @@ INSTANCE_PROFILES = {
         "nvenc": {
             "budget_pct": 80,
             "pct_per_fps": {
-                # Measured 2026-10-02, 1080p30, tune ull, CBR, no B-frames: p3 0.219 (5 encodes took
-                # 32.8%, 9 took 58.2%), p5 0.466 (5 took 70.0%). p1: 0.70 of p3, NVIDIA's Turing
-                # table; to be replaced by the T4 measurement.
-                "h264": {"p1": 0.153, "p3": 0.219, "p5": 0.466},
-                # HEVC Main10 (the HLG program): twice H.264 at the same preset, an assumption; to
-                # be replaced by the T4 measurement.
-                "hevc": {"p1": 0.306, "p3": 0.438, "p5": 0.932},
+                # Measured 2026-10-02, 1080p30, tune ull, CBR, no B-frames: H.264 p3 and p5 on the live
+                # show (5 encodes took 32.8% and 70.0%), the others from two real-time 1080p30 test
+                # encodes beside it (per encode: H.264 p1 6.0%, p3 6.5%, p5 14.9%; HEVC Main10 p1
+                # 4.5%, p3 9.0%, p5 13.1%), anchored to the show's 0.219 for H.264 p3.
+                "h264": {"p1": 0.204, "p3": 0.219, "p5": 0.466},
+                "hevc": {"p1": 0.153, "p3": 0.305, "p5": 0.442},   # Main10, the HLG program
             },
             "bitrate_kbps": [2000, 20000],   # the range the setup offers per output
-            "default_preset": "p3",          # every output's, until the setup sets another
+            # Each output's encode until the setup sets another: the programs (sdr, hdr) and the clean
+            # feed (sdr_clean) at p3, every aux bus, own or extra, at p1.
+            "defaults": {
+                "sdr": {"preset": "p3", "bitrate_kbps": 6000},
+                "hdr": {"preset": "p3", "bitrate_kbps": 8000},
+                "sdr_clean": {"preset": "p3", "bitrate_kbps": 6000},
+                "aux": {"preset": "p1", "bitrate_kbps": 4000},
+            },
         },
     },
 }

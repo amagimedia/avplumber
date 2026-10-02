@@ -41,11 +41,11 @@ These are graph limits. The setup page also applies the host's
 25 and 30 fps, 82 at 50 and 75 at 60 on an SDR canvas, keys included) and at most
 192 scenes; custom recipes must fit the host's GPU, decoder, upload and browser capacity.
 
-The setup page also offers **SDR · 4:2:0 · raw upload**, separately from the
-H.264/NVDEC count. It works in all three canvas modes. These cached NV12 patterns
+The setup page's Balanced mix includes **SDR · 4:2:0 · HW upload** sources beside the
+H.264/NVDEC ones, in all three canvas modes. These cached NV12 patterns
 are paced on the CPU, then uploaded once per frame; they use no NVDEC and need no
 pixel-format conversion before upload. Disk traffic and CPU-to-GPU bandwidth
-increase compared with encoded clips. The balanced preset leaves this count at zero.
+increase compared with encoded clips.
 In a custom recipe, add an input such as:
 
 ```json

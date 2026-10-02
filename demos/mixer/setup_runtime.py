@@ -21,7 +21,7 @@ from extra_aux import extra_buses
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import janus_mountpoints
 from pyplumber.mixer.color import default_codec
-from pyplumber.mixer.config import ConfigError, Rendition, aux_fps, aux_label, parse, parse_aux_buses
+from pyplumber.mixer.config import ConfigError, aux_fps, aux_label, parse, parse_aux_buses
 
 DEMO_DIR = Path(__file__).resolve().parent
 # Phase markers with durations: restart timings are read from the container log.
@@ -29,10 +29,7 @@ log = logging.getLogger("setup")
 # encodes: the NVENC preset and bitrate_kbps of each encoded output, by output id: the recipe's
 # renditions (sdr, and hdr on a 10-bit canvas), the clean copy of the SDR program (sdr_clean), each
 # of the show's own aux buses by bus id, and "extra", shared by every extra aux output. One the
-# settings omit takes the profile's default preset at its default bitrate: the recipe's
-# (demo.example.json), the SDR program's for its clean copy, an aux rendition's for the extra
-# outputs; an own bus keeps its own (_own_encode).
-DEFAULT_KBPS = {"sdr": 6000, "hdr": 8000, "sdr_clean": 6000, "extra": Rendition.bitrate_kbps}
+# settings omit takes the profile's default (nvenc.defaults), an aux bus, own or extra, its "aux".
 # A clean mixer stop releases browser DMA-BUF frames; a killed one leaves them quarantined
 # until /workers/recover restarts the browser workers. Groups stop concurrently (mixer.py
 # MixerApplication.stop), so this only bounds a hung stop. compose.yaml's stop_grace_period
@@ -86,30 +83,22 @@ def _in_range(profile, kbps):
     return min(max(kbps, low), high)
 
 
-def _own_encode(profile, bus):
-    """The encode of the own aux bus *bus* (a show's entry) the settings omit: the profile's
-    default preset at the bus's bitrate, within the profile's range."""
-    kbps = bus["renditions"][0].get("bitrate_kbps", Rendition.bitrate_kbps)
-    return {"preset": profile["nvenc"]["default_preset"], "bitrate_kbps": _in_range(profile, kbps)}
-
-
 def current_settings(profile, settings):
     """Saved *settings* in the current shape, every program encode filled in. Saved before extra
     aux outputs, they had none; the browser ring size the page no longer sets goes, and the show
     takes the frame rate's default (config.default_browser_ring_size); one program bitrate_kbps
-    sets the SDR program and its clean copy, the HLG program in the recipe's ratio to it."""
+    sets the SDR program and its clean copy, the HLG program in the defaults' ratio to it."""
     if not isinstance(settings, dict):
         return settings
     encodes, legacy = settings.get("encodes", {}), settings.get("bitrate_kbps")
     if not isinstance(encodes, dict) or len(encodes) > 64:
         raise ValueError("encodes must map at most 64 output ids to their preset and bitrate_kbps")
-    def kbps(output):
-        if type(legacy) is not int or output == "extra":
-            return DEFAULT_KBPS[output]
-        return _in_range(profile, round(DEFAULT_KBPS[output] * legacy / DEFAULT_KBPS["sdr"]))
-    defaults = {o: {"preset": profile["nvenc"]["default_preset"], "bitrate_kbps": kbps(o)} for o in DEFAULT_KBPS}
+    defaults = profile["nvenc"]["defaults"]
+    scale = legacy / defaults["sdr"]["bitrate_kbps"] if type(legacy) is int else 1
+    programs = {o: {**e, "bitrate_kbps": _in_range(profile, round(e["bitrate_kbps"] * scale))}
+                for o, e in defaults.items() if o != "aux"}
     return {"extra_aux": 0, **{k: v for k, v in settings.items() if k not in ("browser_ring_size", "bitrate_kbps")},
-            "encodes": {**defaults, **encodes}}
+            "encodes": {**programs, "extra": dict(defaults["aux"]), **encodes}}
 
 
 def _split_aux(buses, recipe):
@@ -345,7 +334,7 @@ class SetupRuntime:
         stored = json.loads(self.recipe_path.read_text()) if self.recipe_path.exists() else {}
         own, extra = _split_aux(previous.get("aux_buses", []), stored)
         self.aux_buses = [{"id": b["id"], "label": aux_label(b["id"], b.get("label", ""), b.get("layout")),
-                           "full_rate": b.get("full_rate", False), "encode": _own_encode(self.profile, b)} for b in own]
+                           "full_rate": b.get("full_rate", False)} for b in own]
         self.extra_ports = _ports(extra)
         return previous, own, extra
 
@@ -360,7 +349,7 @@ class SetupRuntime:
         wanted, encodes = recipe["setup"]["extra_aux"], recipe["setup"]["encodes"]
         extra = extra[:wanted]   # fewer drops the last ones
         for bus in own:
-            bus["renditions"][0].update(encodes.get(bus["id"]) or _own_encode(self.profile, bus))
+            bus["renditions"][0].update(encodes.get(bus["id"]) or self.profile["nvenc"]["defaults"]["aux"])
         live = {}
         if (own or extra) and self.process and self.process.poll() is None:
             live = {b["id"]: b for b in json.loads(self.bridge.command("mixer.aux_status"))}
