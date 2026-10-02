@@ -119,7 +119,8 @@ def main():
                     time.sleep(.01)
                 wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
                 assert control_json("mixer.status mixer")["pgm_scene"] == "blue"
-                wait_for(lambda: pvw_scene() == "")
+                # Swap Preview/Program: the bus then shows the scene that left program, as mixer.status does.
+                wait_for(lambda: pvw_scene() == control_json("mixer.status mixer")["pvw_scene"])
             # End on red: the program scene's sources stay warm on the bus (for the swap), so the
             # subscription checks below need blue off program.
             for scene in ("blue", "red") * 10:
