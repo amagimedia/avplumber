@@ -111,7 +111,12 @@
   .dip-picker { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; pointer-events: none; }
 
   /* ---------- workspace ---------- */
-  main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(480px, 1fr) auto; gap: 14px; }
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(480px, 1fr) 14px auto; row-gap: 14px; }
+  /* The deck/wall divider: drag or arrow keys set the deck's width; a double-click returns to automatic. */
+  #split { cursor: col-resize; display: flex; justify-content: center; touch-action: none; }
+  #split::before { content: ""; width: 2px; border-radius: 1px; background: var(--edge); }
+  #split:hover::before, #split:focus-visible::before, #split.drag::before { background: var(--accent); }
+  #split:focus-visible { outline: none; }
   .card { border: 1px solid var(--edge); border-radius: 10px; background: var(--panel); }
 
   #deck { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; container-type: inline-size; }
@@ -230,6 +235,7 @@
 
   /* ---------- monitor wall ---------- */
   #wall { display: flex; gap: 12px; min-height: 0; align-items: flex-start; }
+  #wall.stacked { flex-direction: column; }   /* wide outputs: one above the other */
   .viewer { position: relative; display: flex; flex-direction: column; min-width: 0; container-type: inline-size; --vstats-h: 27px; }
   .viewer > header { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; white-space: nowrap; padding: 8px 10px; border-bottom: 1px solid var(--edge); min-height: 45px; }
   .viewer .lbl { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
@@ -293,6 +299,7 @@
   @media (max-width: 900px) {
     body { overflow: auto; height: auto; min-height: 100%; }
     main { grid-template-columns: minmax(0, 1fr); }
+    #split { display: none; }
     #scenes-card { min-height: 420px; max-height: 80vh; }   /* keeps the viewers within reach below */
     #wall { flex-wrap: wrap; }
     .viewer { width: 100% !important; max-width: 440px; }
@@ -370,6 +377,8 @@
     </footer>
   </section>
 
+  <div id="split" role="separator" aria-orientation="vertical" aria-label="Resize controls and monitors" tabindex="0"
+       title="Drag to resize; double-click for automatic"></div>
   <section id="wall" aria-label="Monitor wall"></section>
 </main>
 
@@ -1209,14 +1218,24 @@ function secondOutput() {
   return options.find((o) => o.layout === "source_pages") || options.find((o) => o.layout) ||
          options.find((o) => !o.program) || options[0] || first;
 }
+// The deck width set with the divider, kept within both sides' minimums; null: automatic.
+function deckWidth(main) {
+  const px = store.get("deckWidth", null);
+  return px === null ? null : Math.max(DECK_MIN, Math.min(px, main.clientWidth - 14 - MIN_VIEWER));
+}
 function layoutWall() {
   const main = document.querySelector("main"), narrow = matchMedia("(max-width: 900px)").matches;
-  const room = main.clientWidth - DECK_MIN - 14, options = outputOptions();
+  const deck = narrow ? null : deckWidth(main);
+  main.style.gridTemplateColumns = deck === null ? "" : `${deck}px 14px minmax(0, 1fr)`;
+  const room = main.clientWidth - (deck ?? DECK_MIN) - 14, options = outputOptions();
   const aspectOf = (v) => { const [w, h] = canvasSize(auxById(optionOf(v, options).value)); return w / h; };
   // The video gets what is left between the header and the stats row, inside the card's borders.
-  const height = main.clientHeight - viewers[0].head.offsetHeight - viewers[0].statsRow.offsetHeight - 3;
+  const chrome = viewers[0].head.offsetHeight + viewers[0].statsRow.offsetHeight + 3, height = main.clientHeight - chrome;
+  // n viewers side by side share the width; stacked they share the height.
+  const sideWidth = (v, n) => Math.min(height * aspectOf(v), (room - (n - 1) * 12) / n);
+  const stackWidth = (v, n) => Math.min(room, (main.clientHeight - n * chrome - (n - 1) * 12) / n * aspectOf(v));
   // A second viewer only when both keep a usable size; the choice is kept for a larger window.
-  const fitsTwo = narrow || Math.min(height * aspectOf(viewers[0]), (room - 12) / 2) >= MIN_VIEWER;
+  const fitsTwo = narrow || Math.max(sideWidth(viewers[0], 2), stackWidth(viewers[0], 2)) >= MIN_VIEWER;
   const two = $("viewer-count").children[1];
   two.disabled = !fitsTwo;
   two.title = fitsTwo ? "" : "Window too narrow for two viewers";
@@ -1228,12 +1247,13 @@ function layoutWall() {
     v.dd.setLabel(`Output of viewer ${i + 1}`);
     refreshViewer(v, options);
   });
-  const shown = viewers.filter((v) => !v.el.hidden);
+  const shown = viewers.filter((v) => !v.el.hidden), n = shown.length;
+  // Stacked when that gives the videos more area: wide outputs in a tall wall.
+  const area = (width) => shown.reduce((sum, v) => sum + width(v, n) ** 2 / aspectOf(v), 0);
+  const stacked = !narrow && n > 1 && area(stackWidth) > area(sideWidth);
+  $("wall").classList.toggle("stacked", stacked);
   if (narrow) shown.forEach((v) => (v.el.style.width = ""));
-  else {
-    const share = (room - (shown.length - 1) * 12) / shown.length;
-    shown.forEach((v) => (v.el.style.width = `${Math.floor(Math.max(240, Math.min(height * aspectOf(v), share)))}px`));
-  }
+  else shown.forEach((v) => (v.el.style.width = `${Math.floor(Math.max(240, (stacked ? stackWidth : sideWidth)(v, n)))}px`));
   shown.forEach(fitHeader);
   trimTakebar();   // the deck got its width
 }
@@ -1260,6 +1280,25 @@ function trimTakebar() {
 }
 // main also shrinks when the top bar wraps, e.g. while the connection error shows.
 new ResizeObserver(layoutWall).observe(document.querySelector("main"));
+{
+  const split = $("split"), main = document.querySelector("main");
+  const setDeck = (px) => { store.set("deckWidth", px === null ? null : Math.round(px)); layoutWall(); };
+  split.addEventListener("pointerdown", (e) => {
+    split.setPointerCapture(e.pointerId);
+    split.classList.add("drag");
+    const move = (ev) => setDeck(ev.clientX - main.getBoundingClientRect().left - 7);
+    split.addEventListener("pointermove", move);
+    split.addEventListener("pointerup", () => { split.removeEventListener("pointermove", move); split.classList.remove("drag"); }, {once: true});
+  });
+  split.addEventListener("dblclick", () => setDeck(null));
+  split.addEventListener("keydown", (e) => {
+    const step = {ArrowLeft: -24, ArrowRight: 24}[e.key];
+    if (!step) return;
+    e.preventDefault();
+    e.stopPropagation();   // the arrows move the divider, not a mixer shortcut
+    setDeck((deckWidth(main) ?? $("deck").offsetWidth) + step);
+  });
+}
 for (const b of $("viewer-count").children) b.onclick = () => {
   const n = Number(b.dataset.n);
   viewersTouched = true;
