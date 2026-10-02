@@ -450,7 +450,7 @@ list order and the `pgm` cells last, over any cell they overlap.
 A bus gets a PGM pad (the program tap's subscribed output) only when its
 `layout` or one of its `layouts` has a `pgm` cell, as the default
 `pgm_pvw_grid` has. A `source_pages` bus has none by default: no program
-latency check, 192 sources. A bus without the pad can switch to any layout
+latency check, 193 sources. A bus without the pad can switch to any layout
 without a `pgm` cell and refuses one with it; list `{"preset": "pgm_pvw_grid"}`
 in its `layouts` to give it the pad.
 Each bus needs its own Janus RTP/RTCP port pair and a Janus mountpoint whose ID
@@ -516,7 +516,7 @@ the lock order and what each latency field measures.
 
 ## Known limitations
 
-- **192 sources per show, or 191 with an aux bus that can draw the program.** Every
+- **193 sources per show, or 192 with an aux bus that can draw the program.** Every
   source is a pad on the compositor; a bus with a `pgm` cell in its `layout` or
   `layouts` (by default, a `pgm_pvw_grid` bus) reserves one additional pad for PGM. 8-bit or 10-bit makes no difference;
   scenes and aliases are free. Sources cannot be added while running: the
@@ -531,7 +531,7 @@ the lock order and what each latency field measures.
   every rendition is 4:2:0.
 - **HLG and PQ need a 10-bit canvas.** Browser pages are SDR only.
 
-More than 192 pads and runtime source addition are not supported.
+More than 193 pads and runtime source addition are not supported.
 
 ## Generating one
 

@@ -31,7 +31,7 @@ WORKING_FORMATS = ("nv12", "p010le", "p210le")
 # A/B in demos/mixer/docs/cookbook/raw-uploads.html; the 110-input A/B is pending).
 RAW_UPLOADS = ("hwupload", "pinned")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
-MAX_SOURCES = 192         # mixer_compositor active_inputs is a 192-bit pad mask (SourceMask, kSourceMaskBits)
+MAX_SOURCES = 193         # mixer_compositor active_inputs is a 193-bit pad mask (SourceMask, kSourceMaskBits)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 256
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"

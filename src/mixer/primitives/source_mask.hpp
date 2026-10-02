@@ -15,7 +15,8 @@
 
 namespace avp::mixer {
 
-constexpr int kSourceMaskBits = 192;   // pyplumber/mixer/config.py MAX_SOURCES mirrors it
+// 193: 192 sources and the PGM pad of an aux bus that draws the program.
+constexpr int kSourceMaskBits = 193;   // pyplumber/mixer/config.py MAX_SOURCES mirrors it
 using SourceMask = std::bitset<kSourceMaskBits>;
 
 /// A mask as the control protocol carries it: a number while it fits in 64 bits
