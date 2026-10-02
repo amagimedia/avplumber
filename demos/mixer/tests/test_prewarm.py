@@ -341,7 +341,7 @@ def test_program_excludes_frames_from_before_prewarm_finished(native_boundary, m
     assert app.avp.events.index("inspect mixer_final_out") < app.avp.events.index("READY")
 
 
-@pytest.mark.parametrize("count, lit", [(70, [0, 63, 64, 69]), (200, [0, 63, 64, 127, 128, 199])])
+@pytest.mark.parametrize("count, lit", [(70, [0, 63, 64, 69]), (150, [0, 63, 64, 127, 128, 149])])
 def test_pad_masks_above_64_travel_as_bit_strings(native_boundary, tmp_path, count, lit):
     """A show wider than 64 pads cannot put active_inputs in a JSON number, so the builder sends
     the least-significant-bit-first bit string mixer_compositor also parses."""

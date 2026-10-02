@@ -116,7 +116,7 @@ def test_repeated_scenes_and_occurrences_share_pads(cfg):
     assert base_composition(cfg, grid_cells(cfg), [None] * 8)["layers"][0]["input"] == 64   # PGM only
 
 
-@pytest.mark.parametrize("count", [63, 64, 96, 127, 200, 255])
+@pytest.mark.parametrize("count", [63, 64, 96, 127, 150, 191])
 def test_aux_mask_addresses_high_source_and_program_pads(cfg, count):
     cfg = replace(cfg, sources=tuple(Source(f"s{i}", "video", f"clip{i}.mp4", 1920, 1080) for i in range(count)),
                   scenes=(Scene("last", (Item(f"s{count - 1}", Rect(0, 0, 1080, 1920)),)),))

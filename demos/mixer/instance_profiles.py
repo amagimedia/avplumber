@@ -71,7 +71,7 @@ INSTANCE_PROFILES = {
     # counts and tables (about 2.2x the T4's NVENC and 2.3-2.7x its NVDEC), not limits. Every value
     # is replaced by a measurement on the instance before the setup offers it to operators.
     InstanceType.NVIDIA_L4: {
-        "sources": {25: 220, 30: 200, 50: 150, 60: 130},
+        "sources": {25: 191, 30: 191, 50: 150, 60: 130},   # 191: the 192-pad mask less a PGM pad
         "mode_share": {"8:420": 1.0, "10:420": 1.0, "10:422": 1.0},
         "nvdec_decodes": {25: 100, 30: 83, 50: 50, 60: 41},
         "browser_windows": 40,
