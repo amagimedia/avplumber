@@ -6,9 +6,11 @@ per-rate baselines below stand on the source mixes listed beside them; the older
 output. None of them are decoder-only limits or guarantees for HDR, larger frames,
 arbitrary browser pages, or additional outputs.
 
-The setup (`setup_runtime.py`, mirrored in `setup.html`) applies the limits in
-[Source limits by mode and frame rate](cookbook/source-limits.html); this page has the
-measurements behind them.
+The setup applies these limits as the `tesla_t4` profile in `instance_profiles.py`
+(`webui.py --instance-type tesla_t4`): `setup_runtime.py` enforces it and serves it to
+`setup.html`. [Source limits by mode and frame rate](cookbook/source-limits.html) lists
+them; this page has the measurements behind them. Another machine needs its own measured
+profile, not these numbers scaled.
 
 | Input fps | Measured show, keys included | Result |
 | --- | --- | --- |
@@ -168,6 +170,27 @@ The browser service defaults to five workers with eight windows each (40 total);
 allows all 40 at every rate, downstream-key pages included.
 The setup allows 192 scenes; scenes describe layouts and do not each allocate a
 running compositor. Active layers and AUX outputs have separate limits.
+
+### NVENC and extra aux outputs
+
+The setup's **Extra aux outputs** fill the NVENC budget of the profile (`nvenc` in the
+`tesla_t4` entry). Measured 2026-10-02 on the live show with NVENC p3: three 1080p30 H.264
+encodes took 22% of the T4's single NVENC, the 50 fps SDR show above 35% and the 60 fps HDR
+show 70-76%. A 1920×1080 H.264 encode costs about 0.243% per encoded frame/s (7.3% at 30 fps),
+an HEVC Main10 (HLG) encode twice that, and the cost follows the pixel count. Every encode
+counts: the H.264 program, the HEVC HLG program on a 10-bit canvas, the H.264 clean feed and
+each aux bus, which encodes at the program rate at 25/30 fps and at half of it at 50/60
+(a `full_rate` bus at the program rate). Extra outputs take what is left of 80%
+(`setup_runtime.extra_aux_limit`). With the clean feed on and the live show's two aux buses
+(Program preview and Multiviewer):
+
+| Canvas | 25 fps | 30 fps | 50 fps | 60 fps |
+| --- | ---: | ---: | ---: | ---: |
+| SDR, 8-bit | 9 | 6 | 7 | 4 |
+| HLG, 10-bit | 7 | 4 | 3 | 0 |
+
+Each aux bus also composites on the GPU, which has not been measured per bus: the source
+limits do not change with the number of extra outputs.
 
 ## Why uploads limit this mix
 

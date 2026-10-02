@@ -39,6 +39,7 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from instance_profiles import InstanceType
 from pyplumber.mixer.control import AvpConnection, mixer_command
 
 log = logging.getLogger("webui")
@@ -500,9 +501,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--transition", choices=("cut", "fade", "wipe"),
                         help="Override the page's initial transition without changing the running mixer")
     parser.add_argument("--manage-setup", action="store_true", help="Own and restart the demo mixer process")
+    instance_types = [t.value for t in InstanceType]
+    parser.add_argument("--instance-type", choices=instance_types,
+                        help="The host type whose measured source limits the setup applies (instance_profiles.py); "
+                             "required with --manage-setup")
     parser.add_argument("--media-dir", type=Path, default=Path("/media"))
     parser.add_argument("--recipe", type=Path, default=Path("/media/demo.json"))
     parser.add_argument("--dmabuf-rest", default="http://127.0.0.1:9009")
+    parser.add_argument("--janus-api", metavar="URL",
+                        help="Janus HTTP API (e.g. http://127.0.0.1:8088/janus, no API secret) for the setup's "
+                             "extra aux outputs, one Streaming mountpoint each; without it the setup offers none")
     # A string default goes through type=int like a command-line value, so a bad env value is a usage error.
     parser.add_argument("--critical-nice", type=int, metavar="N", default=os.environ.get("MIXER_CRITICAL_NICE", "0"),
                         help="Keep the deadline-critical mixer threads at nice -N, 1 to 20, rechecked every "
@@ -514,6 +522,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--critical-nice must be 0 (off) or 1 to 20")
     if args.critical_nice and not args.manage_setup:
         parser.error("--critical-nice needs --manage-setup: the mixer pid comes from the managed process")
+    if args.manage_setup and not args.instance_type:
+        parser.error("--manage-setup needs --instance-type: source limits are measured per host type "
+                     f"({', '.join(instance_types)}); another machine needs its own measured profile "
+                     "in instance_profiles.py")
     return args
 
 
@@ -524,7 +536,8 @@ def main(argv: list[str] | None = None) -> None:
     setup = None
     if args.manage_setup:
         from setup_runtime import SetupRuntime
-        setup = SetupRuntime(args.media_dir, args.recipe, bridge, args.mixer_args, args.dmabuf_rest)
+        setup = SetupRuntime(args.media_dir, args.recipe, bridge, args.instance_type, args.mixer_args, args.dmabuf_rest,
+                             args.janus_api)
         setup.resume()
     def mixer_pid():
         process = setup.process if setup else None   # read once: the setup worker thread clears it when the mixer stops

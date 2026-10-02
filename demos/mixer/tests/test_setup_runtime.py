@@ -7,24 +7,28 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from instance_profiles import INSTANCE_PROFILES, InstanceType
 import prepare_demo
+from pyplumber.mixer.aux_layout import draws_program
+from pyplumber.mixer.config import parse
 from setup_runtime import (DEFAULT_SETTINGS, HEALTHY_RUN_SEC, RECOVER_TIMEOUT_SEC, RETRY_DELAYS_SEC, STOP_TIMEOUT_SEC,
-                           SetupRuntime, browser_limit, nvdec_limit, raw_upload_units, recipe_for, source_counts,
-                           source_limit)
+                           SetupRuntime, extra_aux_limit, recipe_for, source_counts, source_limit)
 from webui import serve
+
+T4 = INSTANCE_PROFILES[InstanceType.TESLA_T4]
 
 
 @pytest.mark.parametrize('count', [1, 8, 16, 32, 41, 42, 48, 50, 64, 83, 96, 100, 110])
 @pytest.mark.parametrize('fps', [25, 30, 50, 60])
 def test_generic_setups_expand(tmp_path, count, fps):
     # DEFAULT_SETTINGS is a 10-bit 4:2:2 canvas: above its capacity the setup scales the show down.
-    maximum = source_limit(fps, DEFAULT_SETTINGS["bit_depth"], DEFAULT_SETTINGS["chroma"])
+    maximum = source_limit(T4, fps, DEFAULT_SETTINGS["bit_depth"], DEFAULT_SETTINGS["chroma"])
     count = min(count, maximum)
-    if count > nvdec_limit(fps) + browser_limit(fps) + 4:
+    if count > T4["nvdec_decodes"][fps] + T4["browser_windows"] + T4["hlg_v210"]:
         with pytest.raises(ValueError, match="enable another source type"):
-            recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
+            recipe_for(T4, {**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
         return
-    recipe = recipe_for({**DEFAULT_SETTINGS, 'source_count': count, 'fps': fps})
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, 'source_count': count, 'fps': fps})
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     assert len(show['sources']) == count
     assert len(show['scenes']) == DEFAULT_SETTINGS['scene_count']
@@ -35,12 +39,12 @@ def test_generic_setups_expand(tmp_path, count, fps):
     {'weights': [0] * 5}, {'weights': [True] * 5}, {'resolution': '../../file'}, {'command': 'id'}])
 def test_reject_unbounded_settings(changes):
     with pytest.raises(ValueError):
-        recipe_for({**DEFAULT_SETTINGS, **changes})
+        recipe_for(T4, {**DEFAULT_SETTINGS, **changes})
 
 
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
-    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     manager.process = SimpleNamespace(poll=lambda: None)
     monkeypatch.setattr(manager, '_stop', lambda: None)
     monkeypatch.setattr(manager, '_close_removed_browsers', lambda *_: None)
@@ -151,7 +155,7 @@ def test_api_rejects_cross_origin_and_oversized_requests(runtime):
 def test_bit_depth_controls_canvas_sources_and_encoders(tmp_path, bit_depth):
     settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "chroma": "420" if bit_depth == 8 else "422",
                 "weights": [4, 0, 0, 0, 1, 0, 0]}
-    show, jobs, _ = prepare_demo.plan(recipe_for(settings), tmp_path)
+    show, jobs, _ = prepare_demo.plan(recipe_for(T4, settings), tmp_path)
     from pyplumber.mixer.config import parse
     cfg = parse(show)
     if bit_depth == 8:
@@ -167,21 +171,21 @@ def test_bit_depth_controls_canvas_sources_and_encoders(tmp_path, bit_depth):
 
 def test_8bit_rejects_ten_bit_sources():
     with pytest.raises(ValueError, match="SDR 4:2:0 and browser"):
-        recipe_for({**DEFAULT_SETTINGS, "bit_depth": 8})
+        recipe_for(T4, {**DEFAULT_SETTINGS, "bit_depth": 8})
 
 
 def test_bitrate_is_configurable_and_scales_every_rendition():
     """One control sets the SDR bitrate; other renditions keep their ratio to it."""
-    base = recipe_for(DEFAULT_SETTINGS)["renditions"]
+    base = recipe_for(T4, DEFAULT_SETTINGS)["renditions"]
     assert [r["bitrate_kbps"] for r in base] == [6000, 8000]
 
-    halved = recipe_for({**DEFAULT_SETTINGS, "bitrate_kbps": 3000})["renditions"]
+    halved = recipe_for(T4, {**DEFAULT_SETTINGS, "bitrate_kbps": 3000})["renditions"]
     assert [r["bitrate_kbps"] for r in halved] == [3000, 4000]
 
 
 @pytest.mark.parametrize("fps, size", [(25, 6), (30, 6), (50, 9), (60, 9)])
 def test_browser_ring_default_tracks_fps(tmp_path, fps, size):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": fps, "browser_ring_size": size})
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "fps": fps, "browser_ring_size": size})
     del recipe["browser_ring_size"]
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     from pyplumber.mixer.config import parse
@@ -194,7 +198,7 @@ def test_browser_ring_default_tracks_fps(tmp_path, fps, size):
 
 @pytest.mark.parametrize("size", [6, 9, 11])
 def test_browser_ring_limit_reaches_show(tmp_path, size):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "browser_ring_size": size})
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "browser_ring_size": size})
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     from pyplumber.mixer.config import parse
     assert parse(show).browser_ring_size == size
@@ -204,33 +208,33 @@ def test_browser_ring_limit_reaches_show(tmp_path, size):
 @pytest.mark.parametrize("size", [0, 65, 6.5, True, "6"])
 def test_browser_ring_limit_validation(size):
     with pytest.raises(ValueError, match="browser_ring_size"):
-        recipe_for({**DEFAULT_SETTINGS, "browser_ring_size": size})
+        recipe_for(T4, {**DEFAULT_SETTINGS, "browser_ring_size": size})
 
 
 @pytest.mark.parametrize("value", [499, 40001, 0, -1, 6000.0, "6000", True])
 def test_bitrate_outside_the_range_is_rejected(value):
     with pytest.raises(ValueError, match="bitrate_kbps"):
-        recipe_for({**DEFAULT_SETTINGS, "bitrate_kbps": value})
+        recipe_for(T4, {**DEFAULT_SETTINGS, "bitrate_kbps": value})
 
 
 @pytest.mark.parametrize("bit_depth", [8, 10])
 @pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 110), (50, 90), (60, 75)])
 def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
     chroma = "420" if bit_depth == 8 else "422"
-    maximum = source_limit(fps, bit_depth, chroma)   # the SDR rate limit, scaled for a 10-bit canvas
+    maximum = source_limit(T4, fps, bit_depth, chroma)   # the SDR rate limit, scaled for a 10-bit canvas
     settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "fps": fps, "chroma": chroma,
                 "source_count": maximum, "scene_count": 192,
                 "weights": [1, 0, 0, 0 if bit_depth == 8 else 1, 1, 1, 0]}
-    feasible = min(maximum, nvdec_limit(fps) + browser_limit(fps) + raw_upload_units(fps))
-    assert recipe_for({**settings, "source_count": feasible})["source_count"] == feasible
+    feasible = min(maximum, T4["nvdec_decodes"][fps] + T4["browser_windows"] + T4["raw_upload_units"][fps])
+    assert recipe_for(T4, {**settings, "source_count": feasible})["source_count"] == feasible
     if feasible == maximum:   # above the limit the show is scaled down to it, not refused
-        assert recipe_for({**settings, "source_count": maximum + 1})["source_count"] == maximum
+        assert recipe_for(T4, {**settings, "source_count": maximum + 1})["source_count"] == maximum
     with pytest.raises(ValueError, match="scene_count"):
-        recipe_for({**settings, "scene_count": 193})
+        recipe_for(T4, {**settings, "scene_count": 193})
 
 
 def test_hdr_420_canvas_and_assets(tmp_path):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "chroma": "420", "weights": [8, 6, 0, 0, 2, 0, 0]})
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "chroma": "420", "weights": [8, 6, 0, 0, 2, 0, 0]})
     show, jobs, _ = prepare_demo.plan(recipe, tmp_path)
     assert show["canvas"]["working_format"] == "p010le"
     assert show["canvas"]["color"] == "hlg"
@@ -243,7 +247,7 @@ def test_hdr_420_canvas_and_assets(tmp_path):
 def test_raw_sdr_420_mix_in_every_canvas_mode(tmp_path, bit_depth, chroma):
     settings = {**DEFAULT_SETTINGS, "source_count": 6, "weights": [2, 0, 0, 0, 1, 3, 0],
                 "bit_depth": bit_depth, "chroma": chroma}
-    show, jobs, _ = prepare_demo.plan(recipe_for(settings), tmp_path)
+    show, jobs, _ = prepare_demo.plan(recipe_for(T4, settings), tmp_path)
     from collections import Counter
     assert Counter(s["kind"] for s in show["sources"]) == {"video": 2, "browser": 1, "nv12": 3}
     assert len({s["id"] for s in show["sources"]}) == 6
@@ -255,7 +259,7 @@ def test_raw_sdr_420_mix_in_every_canvas_mode(tmp_path, bit_depth, chroma):
 def test_hdr_raw_420_uses_p010_without_nvdec(tmp_path, chroma):
     settings = {**DEFAULT_SETTINGS, "fps": 30, "chroma": chroma, "source_count": 6,
                 "weights": [1, 1, 0, 0, 1, 1, 2]}
-    show, jobs, _ = prepare_demo.plan(recipe_for(settings), tmp_path)
+    show, jobs, _ = prepare_demo.plan(recipe_for(T4, settings), tmp_path)
     raw = [s for s in show["sources"] if s["kind"] == "p010"]
     assert len(raw) == 2 and all(s["color"] == "hlg" for s in raw)
     assert sum(s["kind"] == "video" for s in show["sources"]) == 2
@@ -263,28 +267,28 @@ def test_hdr_raw_420_uses_p010_without_nvdec(tmp_path, chroma):
     from pyplumber.mixer.config import parse
     assert parse(show).settings()["source_counts"]["p010"] == 2
     with pytest.raises(ValueError, match="8-bit mode"):
-        recipe_for({**settings, "bit_depth": 8, "chroma": "420"})
+        recipe_for(T4, {**settings, "bit_depth": 8, "chroma": "420"})
 
 
 @pytest.mark.parametrize("fps,limit", [(25, 15), (30, 17), (50, 10), (60, 8)])
 def test_hdr_raw_upload_counts_twice_toward_byte_budget(fps, limit):
     weights = [0, 0, 0, 0, 0, 0, 1]
-    assert source_counts(limit, weights, fps)[6] == limit
+    assert source_counts(T4, limit, weights, fps)[6] == limit
     with pytest.raises(ValueError, match="upload units"):
-        source_counts(limit + 1, weights, fps)
-    mixed = source_counts(32, [1, 1, 0, 0, 1, 1, 1], fps)
-    assert mixed[5] + 2 * mixed[6] <= raw_upload_units(fps)
+        source_counts(T4, limit + 1, weights, fps)
+    mixed = source_counts(T4, 32, [1, 1, 0, 0, 1, 1, 1], fps)
+    assert mixed[5] + 2 * mixed[6] <= T4["raw_upload_units"][fps]
 
 
 @pytest.mark.parametrize("fps,limit", [(25, 40), (30, 36), (50, 22), (60, 18)])
 def test_sdr_and_hdr_share_nvdec_budget(fps, limit):
-    counts = source_counts(48, [100, 100, 0, 0, 1, 0, 0], fps)
+    counts = source_counts(T4, 48, [100, 100, 0, 0, 1, 0, 0], fps)
     assert counts[0] + counts[1] == limit
     assert sum(counts) == 48
 
 
 def test_raw_only_mix_keeps_a_steady_alpha_background(tmp_path):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "source_count": 2, "weights": [0, 0, 0, 0, 1, 1, 0]})
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "source_count": 2, "weights": [0, 0, 0, 0, 1, 1, 0]})
     show, jobs, _ = prepare_demo.plan(recipe, tmp_path)
     assert recipe["alpha_background"] == "sdr420_raw_000"
     assert any(path.name == "sdr420_raw_000_sdr_420_bars_nv12.nv12" for path in jobs)
@@ -299,15 +303,15 @@ def test_raw_only_mix_keeps_a_steady_alpha_background(tmp_path):
 ])
 def test_reject_incompatible_chroma(changes, message):
     with pytest.raises(ValueError, match=message):
-        recipe_for({**DEFAULT_SETTINGS, **changes})
+        recipe_for(T4, {**DEFAULT_SETTINGS, **changes})
 
 
 @pytest.mark.parametrize("total", [8, 16, 24, 32, 42, 60])
 @pytest.mark.parametrize("weights", [[8, 4, 2, 0, 2], [1, 1, 100, 0, 1]])
 def test_hdr_422_cap_preserves_total_and_disabled_types(tmp_path, total, weights):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": 25, "source_count": total, "weights": weights + [0, 0]})
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "fps": 25, "source_count": total, "weights": weights + [0, 0]})
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
-    counts = source_counts(total, weights)
+    counts = source_counts(T4, total, weights)
     assert len(show["sources"]) == sum(counts) == total
     assert 0 < counts[2] <= 4
     assert counts[3] == 0
@@ -316,7 +320,7 @@ def test_hdr_422_cap_preserves_total_and_disabled_types(tmp_path, total, weights
 
 
 def test_four_hdr_422_inputs_can_be_used_alone():
-    assert source_counts(4, [0, 0, 1, 0, 0]) == [0, 0, 4, 0, 0]
+    assert source_counts(T4, 4, [0, 0, 1, 0, 0]) == [0, 0, 4, 0, 0]
 
 
 @pytest.mark.parametrize('weights, expected', [
@@ -325,20 +329,20 @@ def test_four_hdr_422_inputs_can_be_used_alone():
     ([1, 0, 1, 0, 100], [20, 0, 4, 0, 40]),
 ])
 def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expected):
-    assert source_counts(64, weights) == expected
+    assert source_counts(T4, 64, weights) == expected
     # Above the capacity of a 10-bit 4:2:2 canvas at 25 fps the show is scaled down first.
-    recipe = recipe_for({**DEFAULT_SETTINGS, 'source_count': 64, 'fps': 25, 'weights': weights + [0, 0]})
-    capacity = min(64, source_limit(25, DEFAULT_SETTINGS['bit_depth'], DEFAULT_SETTINGS['chroma']))
-    assert [source['weight'] for source in recipe['inputs']] == source_counts(capacity, weights) + [0, 0]
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, 'source_count': 64, 'fps': 25, 'weights': weights + [0, 0]})
+    capacity = min(64, source_limit(T4, 25, DEFAULT_SETTINGS['bit_depth'], DEFAULT_SETTINGS['chroma']))
+    assert [source['weight'] for source in recipe['inputs']] == source_counts(T4, capacity, weights) + [0, 0]
 
 
 def test_browser_only_limit():
     settings = {**DEFAULT_SETTINGS, 'fps': 50, 'bit_depth': 8, 'chroma': '420', 'source_count': 40, 'weights': [0, 0, 0, 0, 1, 0, 0]}
-    assert next(s for s in recipe_for(settings)['inputs'] if s['kind'] == 'browser')['weight'] == 40
+    assert next(s for s in recipe_for(T4, settings)['inputs'] if s['kind'] == 'browser')['weight'] == 40
     with pytest.raises(ValueError, match='Browser is limited to 40'):
-        recipe_for({**settings, 'source_count': 41})
+        recipe_for(T4, {**settings, 'source_count': 41})
     with pytest.raises(ValueError, match='enable another source type'):
-        source_counts(45, [0, 0, 1, 0, 1], 50)
+        source_counts(T4, 45, [0, 0, 1, 0, 1], 50)
 
 
 def test_failed_first_start_does_not_leave_show_for_resume(runtime, monkeypatch):
@@ -372,9 +376,9 @@ def test_shutdown_during_prepare_restores_committed_show(runtime, monkeypatch, p
 
 def test_restart_changes_revision(tmp_path, monkeypatch):
     monkeypatch.setattr('setup_runtime.time.time_ns', lambda: 1_000_000_000_000)
-    first = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    first = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     monkeypatch.setattr('setup_runtime.time.time_ns', lambda: 2_000_000_000_000)
-    restarted = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    restarted = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     assert first.status()['revision'] != restarted.status()['revision']
     assert restarted.status()['revision'] < 2 ** 53
 
@@ -385,7 +389,7 @@ def test_setup_preserves_live_aux_through_color_change_and_resume(runtime, monke
         return {**DEFAULT_SETTINGS, "bit_depth": depth, "chroma": "420",
                 "weights": [4, 0, 0, 0, 1, 0, 0]}
     config = runtime.media_dir / "mixer.demo.json"
-    show, _, _ = prepare_demo.plan(recipe_for(settings(before)), runtime.media_dir)
+    show, _, _ = prepare_demo.plan(recipe_for(T4, settings(before)), runtime.media_dir)
     scene_ids = [s["id"] for s in show["scenes"]]
     show["aux_buses"] = [{"id": "mv", "scenes": [scene_ids[0]] * 8,
                           "renditions": [{"id": "monitor", "port": 5008}]}]
@@ -420,7 +424,7 @@ def test_setup_preserves_live_aux_through_color_change_and_resume(runtime, monke
 
 def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
     from pyplumber.mixer.config import parse
-    old, _, _ = prepare_demo.plan(recipe_for(DEFAULT_SETTINGS), runtime.media_dir)
+    old, _, _ = prepare_demo.plan(recipe_for(T4, DEFAULT_SETTINGS), runtime.media_dir)
     old["aux_buses"] = [{"id": "mv", "scenes": [old["scenes"][0]["id"], "removed", *([None] * 6)],
                          "renditions": [{"id": "monitor", "port": 5008, "width": 1080,
                                          "height": 1920, "fps": 30, "bitrate_kbps": 4500}]},
@@ -430,7 +434,7 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
                          "renditions": [{"id": "monitor", "port": 5016, "width": 1080, "height": 1920, "fps": 60}]}]
     (runtime.media_dir / "mixer.demo.json").write_text(json.dumps(old))
     runtime.process = None
-    recipe = recipe_for({**DEFAULT_SETTINGS, "orientation": "landscape",
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "orientation": "landscape",
                          "fps": 50, "scene_count": 1, "layout": "fullscreen"})
     show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
     runtime._preserve_aux(recipe, show)
@@ -447,7 +451,7 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
 
 @pytest.mark.parametrize("limit,tiles", [(256, 2), (512, 6)])
 def test_setup_clears_aux_tiles_that_exceed_new_draw_budget(runtime, limit, tiles):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": 30, "source_count": 64, "bit_depth": 8, "chroma": "420",
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "fps": 30, "source_count": 64, "bit_depth": 8, "chroma": "420",
                          "weights": [1, 0, 0, 0, 1, 0, 0], "layout": "grids"})
     show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
     grid = next(s["id"] for s in show["scenes"] if s["id"].startswith("grid_64_"))
@@ -496,21 +500,21 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
 def test_raw_upload_budget(fps, maximum):
     settings = {**DEFAULT_SETTINGS, "fps": fps, "source_count": maximum,
                 "weights": [0, 0, 0, 0, 0, 1, 0]}
-    assert recipe_for(settings)["inputs"][5]["weight"] == maximum
+    assert recipe_for(T4, settings)["inputs"][5]["weight"] == maximum
     with pytest.raises(ValueError, match=f"Raw 4:2:0 upload units is limited to {maximum}"):
-        recipe_for({**settings, "source_count": maximum + 1})
-    counts = source_counts(maximum + 4, [1, 0, 0, 0, 0, 100], fps)
+        recipe_for(T4, {**settings, "source_count": maximum + 1})
+    counts = source_counts(T4, maximum + 4, [1, 0, 0, 0, 0, 100], fps)
     assert counts == [4, 0, 0, 0, 0, maximum]
 
 
 def test_combined_source_caps():
-    assert source_counts(100, [1, 0, 100, 0, 100, 100]) == [26, 0, 4, 0, 40, 30]
+    assert source_counts(T4, 100, [1, 0, 100, 0, 100, 100]) == [26, 0, 4, 0, 40, 30]
     with pytest.raises(ValueError, match="enable another source type"):
-        source_counts(75, [0, 0, 1, 0, 1, 1])
+        source_counts(T4, 75, [0, 0, 1, 0, 1, 1])
 
 
 def test_192_scenes_expand(tmp_path):
-    recipe = recipe_for({**DEFAULT_SETTINGS, "scene_count": 192})
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "scene_count": 192})
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     assert len(show["scenes"]) == 192
 
@@ -529,7 +533,7 @@ def test_shutdown_reaps_killed_child_before_recovery(tmp_path, monkeypatch):
         process.returncode = -signal.SIGKILL
     process.wait.side_effect = wait
     monkeypatch.setattr('setup_runtime.os.killpg', lambda pid, sig: events.append(('signal', sig)))
-    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     manager.process = process
     manager._stop()
     assert events == [('signal', signal.SIGINT), ('wait', STOP_TIMEOUT_SEC), ('signal', signal.SIGKILL), ('wait', 10)]
@@ -551,7 +555,7 @@ def test_close_stops_the_mixer_before_waiting_for_setup_work(tmp_path, monkeypat
     events = []
     process, exited = exiting_process(events)
     monkeypatch.setattr('setup_runtime.os.killpg', lambda pid, sig: (events.append(sig), exited.set()))
-    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     manager.process = process
     manager.worker = SimpleNamespace(join=lambda timeout: events.append('joined'))
     manager.close()
@@ -564,7 +568,7 @@ def test_concurrent_stops_signal_the_mixer_once(tmp_path, monkeypatch):
     events = []
     process, exited = exiting_process(events)
     monkeypatch.setattr('setup_runtime.os.killpg', lambda pid, sig: events.append(sig))
-    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     manager.process = process
     stops = [threading.Thread(target=manager._stop) for _ in range(2)]
     for stop in stops:
@@ -583,7 +587,7 @@ def test_browser_recovery_requires_dead_consumer(tmp_path, monkeypatch):
         calls.append((method, path, body, timeout))
         return {'windows': [{'id': 'browser', 'stats': {'quarantinedFrameCount': 6}}]}
     monkeypatch.setattr('pyplumber.mixer.dmabuf_inputs.rest_request', request)
-    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     shows = [{'sources': [{'id': 'browser', 'kind': 'browser'}]}]
     manager.process = SimpleNamespace(poll=lambda: None)
     with pytest.raises(RuntimeError, match='while the mixer is running'):
@@ -665,7 +669,7 @@ def test_deliberate_stops_and_setup_changes_are_not_retried(runtime, timers):
 def test_real_process_stop_is_not_a_crash_but_a_kill_is(tmp_path, timers):
     import subprocess
     import sys
-    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     def spawn_watched():
         manager.process = subprocess.Popen(
             [sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGINT, lambda *_: exit(0)); '
@@ -731,7 +735,7 @@ def test_a_torn_write_never_reaches_the_show(tmp_path, monkeypatch):
 def test_live_aux_assignments_survive_resume(runtime, monkeypatch):
     settings = {**DEFAULT_SETTINGS, "bit_depth": 8, "chroma": "420", "weights": [4, 0, 0, 0, 1, 0, 0]}
     config = runtime.media_dir / "mixer.demo.json"
-    recipe = recipe_for(settings)
+    recipe = recipe_for(T4, settings)
     show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
     scene_ids = [s["id"] for s in show["scenes"]]
     recipe["aux_buses"] = show["aux_buses"] = [{"id": "mv", "scenes": [scene_ids[0]] * 8,
@@ -764,7 +768,7 @@ def test_stale_preparation_directories_are_removed_on_start(tmp_path):
         stale.mkdir(parents=True)
         (stale / "clip.nv12").write_bytes(b"partial")
     (tmp_path / "assets" / "clips" / "kept.nv12").write_bytes(b"complete")
-    SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     assert sorted(p.name for p in tmp_path.rglob("*")) == ["assets", "clips", "kept.nv12"]
 
 
@@ -833,7 +837,7 @@ def test_recovery_precedes_removing_quarantined_windows(runtime, monkeypatch):
 def test_unreaped_process_blocks_browser_recovery(tmp_path, monkeypatch):
     import subprocess
     from unittest.mock import Mock
-    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     process = Mock(pid=1234)
     process.poll.return_value = None
     process.wait.side_effect = subprocess.TimeoutExpired('mixer', 10)
@@ -852,7 +856,7 @@ def test_healthy_browsers_are_not_restarted(tmp_path, monkeypatch):
         calls.append(path)
         return {'windows': [{'id': 'browser', 'stats': {'quarantinedFrameCount': 0}}]}
     monkeypatch.setattr('pyplumber.mixer.dmabuf_inputs.rest_request', request)
-    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
+    manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     assert not manager._recover_browsers([{'sources': [{'id': 'browser', 'kind': 'browser'}]}])
     assert calls == ['/status']
 
@@ -861,7 +865,7 @@ def test_healthy_browsers_are_not_restarted(tmp_path, monkeypatch):
 def test_dsk_pages_are_browser_sources_with_clean_copies_of_each_output(tmp_path, bit_depth):
     settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "chroma": "420" if bit_depth == 8 else "422",
                 "weights": [4, 0, 0, 0, 1, 0, 0], "dsk": ["lower_third", "bug_left", "bug_right"], "clean_feed": True}
-    show, _, _ = prepare_demo.plan(recipe_for(settings), tmp_path)
+    show, _, _ = prepare_demo.plan(recipe_for(T4, settings), tmp_path)
     from pyplumber.mixer.config import parse
     cfg = parse(show)
     keys = {k.id: k for k in cfg.dsk_keys}
@@ -887,18 +891,18 @@ def test_dsk_pages_are_browser_sources_with_clean_copies_of_each_output(tmp_path
 
 def test_dsk_pages_take_their_share_of_the_source_budget():
     # 60 fps, 10-bit 4:2:2; SDR 4:2:2 v210 (no budget of its own) fills what the capped types leave
-    limit = source_limit(60, DEFAULT_SETTINGS["bit_depth"], DEFAULT_SETTINGS["chroma"])
+    limit = source_limit(T4, 60, DEFAULT_SETTINGS["bit_depth"], DEFAULT_SETTINGS["chroma"])
     keys = {"dsk": ["lower_third", "bug_left", "bug_right"], "weights": [8, 4, 2, 8, 2, 0, 0]}
-    assert recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 3, **keys})["source_count"] == limit - 3
-    assert recipe_for({**DEFAULT_SETTINGS, "source_count": limit - 2, **keys})["source_count"] == limit - 3
-    assert source_counts(45, [1, 0, 0, 0, 10], 25, reserved_browsers=3)[4] == 37   # 40 browsers at 25 fps minus 3 keys
+    assert recipe_for(T4, {**DEFAULT_SETTINGS, "source_count": limit - 3, **keys})["source_count"] == limit - 3
+    assert recipe_for(T4, {**DEFAULT_SETTINGS, "source_count": limit - 2, **keys})["source_count"] == limit - 3
+    assert source_counts(T4, 45, [1, 0, 0, 0, 10], 25, reserved_browsers=3)[4] == 37   # 40 browsers at 25 fps minus 3 keys
 
 
 @pytest.mark.parametrize("changes", [{"dsk": ["nope"]}, {"dsk": ["ticker", "ticker"]}, {"dsk": "ticker"},
                                      {"clean_feed": True}, {"dsk": ["ticker"], "clean_feed": 1}])
 def test_dsk_settings_are_bounded(changes):
     with pytest.raises(ValueError):
-        recipe_for({**DEFAULT_SETTINGS, **changes})
+        recipe_for(T4, {**DEFAULT_SETTINGS, **changes})
 
 
 @pytest.mark.parametrize('fps, mode, expected', [
@@ -909,8 +913,112 @@ def test_a_show_above_the_modes_capacity_is_scaled_down(tmp_path, fps, mode, exp
     """Switching 110 SDR inputs at 30 fps to a 10-bit canvas keeps the show within that canvas's capacity."""
     bit_depth, chroma = mode
     weights = [36, 0, 0, 0, 36, 34, 0] if bit_depth == 8 else [18, 18, 0, 0, 36, 17, 17]
-    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": fps, "bit_depth": bit_depth, "chroma": chroma,
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "fps": fps, "bit_depth": bit_depth, "chroma": chroma,
                          "source_count": 110, "weights": weights})
-    assert source_limit(fps, bit_depth, chroma) == expected
+    assert source_limit(T4, fps, bit_depth, chroma) == expected
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     assert len(show["sources"]) == expected
+
+
+@pytest.mark.parametrize("instance_type", list(InstanceType))
+def test_every_profile_covers_every_rate_and_canvas(tmp_path, instance_type):
+    """A new instance type fails here, not in a live Apply."""
+    profile = INSTANCE_PROFILES[instance_type]
+    assert set(profile["mode_share"]) == {"8:420", "10:420", "10:422"}
+    for fps in (25, 30, 50, 60):
+        recipe_for(profile, {**DEFAULT_SETTINGS, "fps": fps})
+    # setup.html indexes the served tables by frame rate, which JSON turns into string keys.
+    status = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), instance_type).status()
+    assert status["instance_type"] == instance_type.value
+    assert json.loads(json.dumps(status))["profile"]["nvdec_decodes"].keys() == {"25", "30", "50", "60"}
+    assert profile["nvenc"].keys() == {"budget_pct", "h264_pct_per_fps", "hevc_cost"}
+
+
+def own_aux():
+    """The live show's own buses: Program preview and Multiviewer."""
+    return [{"id": "mv", "renditions": [{"id": "monitor", "port": 5008}]},
+            {"id": "mv2", "layout": {"preset": "source_pages"}, "renditions": [{"id": "monitor", "port": 5012}]}]
+
+
+# A key page and the clean feed, on four NVDEC sources and a browser page.
+KEYED = {**DEFAULT_SETTINGS, "dsk": ["lower_third"], "clean_feed": True, "chroma": "420", "weights": [4, 0, 0, 0, 1, 0, 0]}
+
+
+@pytest.mark.parametrize("bit_depth, limits", [(8, [9, 6, 7, 4]), (10, [7, 4, 3, 0])])
+def test_extra_aux_fill_nvenc_beside_the_program_clean_feed_and_own_buses(tmp_path, bit_depth, limits):
+    """The live show's encodes (docs/capacity.md): the H.264 program and clean feed, the HEVC HLG
+    program on a 10-bit canvas and two own buses, at the program rate at 25/30 fps, half at 50/60."""
+    for fps, limit in zip((25, 30, 50, 60), limits):
+        recipe = recipe_for(T4, {**KEYED, "fps": fps, "bit_depth": bit_depth})
+        show, _, _ = prepare_demo.plan(recipe, tmp_path)
+        assert extra_aux_limit(T4, parse({**show, "aux_buses": own_aux()})) == limit, fps
+
+
+def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime, monkeypatch):
+    runtime.janus_api = "http://127.0.0.1:8088/janus"
+    syncs = []
+    monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", lambda api, ports, prune=False: syncs.append((ports, prune)))
+    config = runtime.media_dir / "mixer.demo.json"
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory: config.write_text(
+        json.dumps(prepare_demo.plan(recipe, directory)[0])))
+    settings = {**KEYED, "fps": 30, "bit_depth": 8}
+    show, _, _ = prepare_demo.plan(recipe_for(T4, settings), runtime.media_dir)
+    config.write_text(json.dumps({**show, "aux_buses": own_aux()}))
+    live = {}
+    runtime.bridge.command = lambda command: json.dumps(list(live.values()))
+
+    def apply(count, **changes):
+        runtime.apply({**settings, **changes, "extra_aux": count})
+        runtime.worker.join(3)
+        assert runtime.status()["phase"] == "running", runtime.status()
+        return parse(json.loads(config.read_text()))
+
+    cfg = apply(3)
+    ports = {"aux1": 5016, "aux2": 5020, "aux3": 5024}
+    # Each is an output of the control page, its mountpoint created before the mixer starts.
+    assert [(o["bus"], o["label"], o["mountpoint"]) for o in cfg.settings()["preview_outputs"]][-3:] == [
+        ("aux1", "Aux 1", 5016), ("aux2", "Aux 2", 5020), ("aux3", "Aux 3", 5024)]
+    assert syncs == [(ports, False), (ports, True)]
+    assert runtime.status()["aux_buses"] == [{"id": "mv", "full_rate": False}, {"id": "mv2", "full_rate": False}]
+    first = cfg.aux_buses
+    for bus in first[2:]:
+        assert len(bus.layouts) == 5 and bus.layout == bus.layouts[0] and not draws_program(cfg, bus.layouts)
+        assert bus.renditions[0].bitrate_kbps == first[0].renditions[0].bitrate_kbps
+    # Fewer drops the last ones; the operator's pick on aux2 stays.
+    live["aux2"] = {"id": "aux2", "layout": first[3].layouts[2], "layouts": list(first[3].layouts), "scenes": []}
+    cfg = apply(2)
+    assert [b.id for b in cfg.aux_buses] == ["mv", "mv2", "aux1", "aux2"]
+    assert cfg.aux_buses[3].layout == first[3].layouts[2]
+    assert syncs[-1] == ({"aux1": 5016, "aux2": 5020}, True)
+    # More adds them back: the same ids, ports and layouts.
+    cfg = apply(4)
+    assert [(b.id, b.label, b.renditions[0].port) for b in cfg.aux_buses[4:]] == [("aux3", "Aux 3", 5024), ("aux4", "Aux 4", 5028)]
+    assert cfg.aux_buses[4].layouts == first[4].layouts
+    # Another orientation draws them again, on the same outputs.
+    cfg = apply(4, orientation="landscape")
+    assert [b.renditions[0].port for b in cfg.aux_buses[2:]] == [5016, 5020, 5024, 5028]
+    assert cfg.aux_buses[2].layouts != first[2].layouts and (cfg.canvas_w, cfg.canvas_h) == (1920, 1080)
+    # None removes their mountpoints; with none before or after, Janus is not asked.
+    cfg = apply(0)
+    assert [b.id for b in cfg.aux_buses] == ["mv", "mv2"] and syncs[-1] == ({}, True)
+    calls = len(syncs)
+    apply(0)
+    assert len(syncs) == calls
+    with pytest.raises(ValueError, match="At most 6 extra aux outputs fit this setup's NVENC budget on tesla_t4"):
+        runtime.apply({**settings, "extra_aux": 7})
+    runtime.janus_api = None
+    with pytest.raises(ValueError, match="--janus-api"):
+        runtime.apply({**settings, "extra_aux": 1})
+
+
+def test_a_janus_failure_leaves_the_mixer_running_and_shows_in_the_status(runtime, monkeypatch):
+    runtime.janus_api = "http://127.0.0.1:8088/janus"
+    def refuse(*_):
+        raise OSError("Connection refused")
+    monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", refuse)
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory: (directory / "mixer.demo.json").write_text(
+        json.dumps(prepare_demo.plan(recipe, directory)[0])))
+    runtime.apply({**KEYED, "fps": 30, "bit_depth": 8, "extra_aux": 1})
+    runtime.worker.join(3)
+    status = runtime.status()
+    assert (status["phase"], status["message"]) == ("running", "Mixer ready. Extra aux mountpoints failed: Connection refused.")

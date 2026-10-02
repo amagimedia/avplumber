@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from dataclasses import replace
 import json
 import logging
 import os
@@ -15,6 +16,10 @@ import threading
 import time
 
 from demo_recipe import allocate, validate_dsk, write_atomic
+from extra_aux import extra_buses
+from instance_profiles import INSTANCE_PROFILES, InstanceType
+import janus_mountpoints
+from pyplumber.mixer.color import default_codec
 from pyplumber.mixer.config import ConfigError, aux_fps, default_browser_ring_size, parse, parse_aux_buses
 
 DEMO_DIR = Path(__file__).resolve().parent
@@ -42,56 +47,54 @@ PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
                         bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60),
-                        dsk=[], clean_feed=False)
-# Measured on the T4: 110 inputs at 25/30 fps; 75 at 60 fps, the NVDEC, browser and upload
-# caps below filled (cut-spam gate passes with its 3-frame deadline and the wipe cache; host CPU,
-# not the GPU, is the margin). 50 fps scales the 60 fps budgets by frame rate (source_limit).
-# Keys count as inputs.
-def browser_limit(fps):
-    return 40   # five browser workers of eight windows (compose.yaml)
+                        dsk=[], clean_feed=False, extra_aux=0)
 
 
-def nvdec_limit(fps):
-    # 40 streams at 25 fps (1000 decoded frames/s) measured 81% NVDEC on the T4; about
-    # 1100 frames/s stays near 90% at any rate, leaving room for content-dependent swings.
-    return min(40, 1100 // fps)
+def source_limit(profile, fps, bit_depth=8, chroma="420"):
+    """The instance's per-rate total scaled by the canvas's share, never above what the NVDEC,
+    browser and upload caps carry together. An unsupported pair (8-bit 4:2:2) is refused by the
+    mode checks in recipe_for."""
+    total = int(profile["sources"][fps] * profile["mode_share"].get(f"{bit_depth}:{chroma}", 1.0))
+    return min(total, profile["nvdec_decodes"][fps] + profile["browser_windows"] + profile["raw_upload_units"][fps])
 
 
-def raw_upload_units(fps):
-    # Above 30 fps the 60 fps budget (17 units, 1020 frames/s) scaled by frame rate: 20 at 50.
-    return {25: 30, 30: 34}.get(fps, 1020 // fps)
+def extra_aux_limit(profile, cfg):
+    """Extra aux outputs the instance's NVENC budget leaves beside *cfg*'s encodes, its renditions
+    and aux buses: each costs its frames/s at 1920x1080, scaled by its pixels, an HEVC one hevc_cost
+    times. An extra bus is a canvas-size H.264 encode at aux_fps."""
+    nvenc = profile["nvenc"]
+    def frames(width, height, fps, codec="h264"):
+        return fps * width * height / (1920 * 1080) * (nvenc["hevc_cost"] if "hevc" in codec else 1)
+    load = sum(frames(r.width, r.height, r.fps, r.codec or default_codec(cfg.working_format))
+               for r in (*cfg.renditions, *(b.renditions[0] for b in cfg.aux_buses)))
+    budget = nvenc["budget_pct"] / nvenc["h264_pct_per_fps"]
+    return max(0, int((budget - load) // frames(cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps))))
 
 
-# Share of the per-rate total a 10-bit canvas carries, measured on the T4 (see docs/capacity.md).
-# HLG 4:2:0 (P010): 90 of 110 at 30 fps, where above it the GPU-side SDR-to-HLG work drives NVDEC
-# to saturation, and 61 of 75 at 60 fps, where 64 runs out of GPU compute. HLG 4:2:2 (P210 canvas,
-# v210 unpack) costs more GPU per source: at 60 fps 55 keeps the margin of 61 at 4:2:0 (61 and 57
-# ran at GPU p95 92-96%). Each share applies at every rate (4:2:2: 81 at 25/30 fps, not measured;
-# 90 passed). The setup page carries the same table.
-MODE_CAPACITY = {(8, "420"): 1.0, (10, "420"): 0.82, (10, "422"): 0.74}
+def _split_aux(buses, recipe):
+    """*buses* as the instance's own and the setup's extra ones, which follow them: as many as
+    *recipe*'s setup asked for, none without one (an adopted show)."""
+    own = len(buses) - min(len(buses), (recipe.get("setup") or {}).get("extra_aux", 0))
+    return buses[:own], buses[own:]
 
 
-def source_limit(fps, bit_depth=8, chroma="420"):
-    # Above 30 fps the measured 60 fps total (75) scaled by frame rate, never above what the NVDEC,
-    # browser and upload caps carry together: 82 at 50 fps, where the 40 browser windows do not
-    # scale (the scaled 90 is not measured). An unsupported pair (8-bit 4:2:2) is refused by the
-    # mode checks in recipe_for.
-    total = int((110 if fps <= 30 else 75 * 60 // fps) * MODE_CAPACITY.get((bit_depth, chroma), 1.0))
-    return min(total, nvdec_limit(fps) + browser_limit(fps) + raw_upload_units(fps))
+def _ports(buses):
+    return {b["id"]: b["renditions"][0]["port"] for b in buses}
 
 
 def _browser_ids(*shows):
     return {s["id"] for show in shows for s in show.get("sources", []) if s["kind"] == "browser"}
 
 
-def source_counts(total, weights, fps=25, reserved_browsers=0):
+def source_counts(profile, total, weights, fps=25, reserved_browsers=0):
     """*reserved_browsers* are downstream-key pages: browser inputs outside the weighted mix."""
     counts = allocate(total, weights)
     # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
     for indices, costs, limit, name in (
-            ((2,), (1,), 4, "HDR 4:2:2"), ((4,), (1,), browser_limit(fps) - reserved_browsers, "Browser"),
-            ((0, 1), (1, 1), nvdec_limit(fps), "Combined NVDEC"),
-            ((5, 6), (1, 2), raw_upload_units(fps), "Raw 4:2:0 upload units")):
+            ((2,), (1,), profile["hlg_v210"], "HDR 4:2:2"),
+            ((4,), (1,), profile["browser_windows"] - reserved_browsers, "Browser"),
+            ((0, 1), (1, 1), profile["nvdec_decodes"][fps], "Combined NVDEC"),
+            ((5, 6), (1, 2), profile["raw_upload_units"][fps], "Raw 4:2:0 upload units")):
         group = [(i, cost) for i, cost in zip(indices, costs) if i < len(weights)]
         if sum(counts[i] * cost for i, cost in group) > limit:
             size = min(limit, sum(counts[i] for i, _ in group))
@@ -103,15 +106,18 @@ def source_counts(total, weights, fps=25, reserved_browsers=0):
             remaining = [0 if i in indices else w for i, w in enumerate(weights)]
             if not any(remaining):
                 raise ValueError(f"{name} is limited to {limit}; enable another source type")
-            counts = source_counts(total - size, remaining, fps, reserved_browsers)
+            counts = source_counts(profile, total - size, remaining, fps, reserved_browsers)
             for (i, _), count in zip(group, capped):
                 counts[i] = count
             break
     return counts
 
 
-def recipe_for(settings):
-    """Accept only the bounded generic setup controls, never paths or commands."""
+def recipe_for(profile, settings):
+    """Accept only the bounded generic setup controls, never paths or commands; *profile* is the
+    instance's entry in INSTANCE_PROFILES."""
+    if isinstance(settings, dict):
+        settings = {"extra_aux": 0, **settings}   # saved before extra aux outputs
     if not isinstance(settings, dict) or set(settings) != set(DEFAULT_SETTINGS):
         raise ValueError("Expected orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
     for key, choices in (("orientation", ("portrait", "landscape")),
@@ -126,26 +132,31 @@ def recipe_for(settings):
     # Key pages are sources too: they take their share of the same budget. A show above the
     # limit of its rate and canvas is scaled down to it, not refused: switching 110 SDR inputs
     # at 30 fps to a 10-bit canvas keeps the mix at the capacity of the new mode.
-    limit = source_limit(settings["fps"], settings["bit_depth"], settings["chroma"]) - len(dsk)
+    limit = source_limit(profile, settings["fps"], settings["bit_depth"], settings["chroma"]) - len(dsk)
     if type(settings["source_count"]) is int and settings["source_count"] > limit >= 1:
         settings = {**settings, "source_count": limit}
     for key, maximum in (("source_count", limit), ("scene_count", 192), ("browser_ring_size", 64)):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError(f"{key} must be an integer from 1 to {maximum}")
+    # 30: parse_aux_buses's cap on all buses. The NVENC budget bounds it further once the show's own
+    # buses are known (SetupRuntime.apply).
+    if type(settings["extra_aux"]) is not int or not 0 <= settings["extra_aux"] <= 30:
+        raise ValueError("extra_aux must be an integer from 0 to 30")
     bitrate = settings["bitrate_kbps"]
     if type(bitrate) is not int or not MIN_BITRATE_KBPS <= bitrate <= MAX_BITRATE_KBPS:
         raise ValueError(f"bitrate_kbps must be an integer from {MIN_BITRATE_KBPS} to {MAX_BITRATE_KBPS}")
     weights = settings["weights"]
-    if not isinstance(weights, list) or len(weights) != 7 or any(type(w) is not int or not 0 <= w <= 110 for w in weights):
-        raise ValueError("Provide seven integer source weights from 0 to 110")
+    most = max(profile["sources"].values())   # the page sends source counts as weights
+    if not isinstance(weights, list) or len(weights) != 7 or any(type(w) is not int or not 0 <= w <= most for w in weights):
+        raise ValueError(f"Provide seven integer source weights from 0 to {most}")
     if settings["bit_depth"] == 8 and (any(weights[1:4]) or weights[6]):
         raise ValueError("8-bit mode supports SDR 4:2:0 and browser sources only")
     if settings["bit_depth"] == 8 and settings["chroma"] != "420":
         raise ValueError("8-bit mode supports a 4:2:0 canvas only")
     if settings["chroma"] == "420" and any(weights[2:4]):
         raise ValueError("4:2:0 mode supports 4:2:0 and browser sources only")
-    counts = source_counts(settings["source_count"], weights, settings["fps"], len(dsk))
+    counts = source_counts(profile, settings["source_count"], weights, settings["fps"], len(dsk))
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
@@ -194,7 +205,8 @@ def recipe_for(settings):
 
 
 class SetupRuntime:
-    def __init__(self, media_dir, recipe_path, bridge, mixer_args=(), browser_url="http://127.0.0.1:9009"):
+    def __init__(self, media_dir, recipe_path, bridge, instance_type, mixer_args=(), browser_url="http://127.0.0.1:9009",
+                 janus_api=None):
         self.media_dir = Path(media_dir).resolve()
         self.media_dir.mkdir(parents=True, exist_ok=True)
         # prepare_demo stages every file in a .prepare-* directory; a killed preparation leaves it.
@@ -202,8 +214,18 @@ class SetupRuntime:
             shutil.rmtree(stale, ignore_errors=True)
         self.recipe_path = Path(recipe_path)
         self.bridge = bridge
+        self.instance_type = InstanceType(instance_type)
+        self.profile = INSTANCE_PROFILES[self.instance_type]
         self.mixer_args = list(mixer_args)
         self.browser_url = browser_url
+        # Extra aux outputs need a Janus mountpoint each, made through its HTTP API; none without it.
+        self.janus_api = janus_api
+        self.janus_error = ""
+        # The show's own buses, for setup.html's NVENC budget, and the RTP ports of its extra ones,
+        # whose mountpoints a smaller setup prunes: from _previous_show, then each synced setup.
+        self.aux_buses, self.extra_ports = [], {}
+        with suppress(OSError, ValueError):   # resume reports a broken show
+            self._previous_show()
         self.lock = threading.Lock()
         # Held for a whole _stop(): a second caller must not signal a mixer that is already
         # stopping (a second SIGINT would abort its clean shutdown).
@@ -223,7 +245,9 @@ class SetupRuntime:
         with self.lock:
             if self.phase == "running" and self.process and self.process.poll() is not None:
                 self.phase, self.message = "error", f"Mixer exited ({self.process.returncode}). Apply to retry."
-            return dict(phase=self.phase, message=self.message, settings=self.settings, revision=self.revision)
+            return dict(phase=self.phase, message=" ".join(filter(None, (self.message, self.janus_error))),
+                        settings=self.settings, revision=self.revision, instance_type=self.instance_type.value,
+                        profile=self.profile, aux_buses=self.aux_buses, janus_api=bool(self.janus_api))
 
     def _status(self, phase, message):
         with self.lock:
@@ -260,7 +284,7 @@ class SetupRuntime:
         # Before _preserve_aux asks the live mixer, which a running change may be stopping.
         with self.lock:
             self._check_idle()
-        recipe = recipe_for(settings) if settings is not None else json.loads(self.recipe_path.read_text())
+        recipe = recipe_for(self.profile, settings) if settings is not None else json.loads(self.recipe_path.read_text())
         # Plan validation happens before stopping the live mixer or writing files.
         from prepare_demo import plan
         show, _, _ = plan(recipe, self.media_dir)
@@ -274,23 +298,34 @@ class SetupRuntime:
             self.worker = threading.Thread(target=self._apply, args=(recipe, settings), daemon=True)
             self.worker.start()
 
-    def _preserve_aux(self, recipe, show):
-        """Keep instance outputs while replacing the generic sources and scenes: each bus keeps its
-        live layout, layouts and slot assignments, less the scenes that no longer exist or fit its budget."""
+    def _previous_show(self):
+        """The current show, its own aux buses and the setup's extra ones."""
         config = self.media_dir / "mixer.demo.json"
         previous = json.loads(config.read_text()) if config.exists() else {}
+        stored = json.loads(self.recipe_path.read_text()) if self.recipe_path.exists() else {}
+        own, extra = _split_aux(previous.get("aux_buses", []), stored)
+        self.aux_buses = [{"id": b["id"], "full_rate": b.get("full_rate", False)} for b in own]
+        self.extra_ports = _ports(extra)
+        return previous, own, extra
+
+    def _preserve_aux(self, recipe, show):
+        """Keep instance outputs while replacing the generic sources and scenes: each bus keeps its
+        live layout, layouts and slot assignments, less the scenes that no longer exist or fit its budget.
+        The setup's extra buses follow the own ones: as many as asked for, within the NVENC budget."""
+        previous, own, extra = self._previous_show()
         if "max_compositor_layers" in previous:
             recipe["max_compositor_layers"] = show["max_compositor_layers"] = previous["max_compositor_layers"]
-        buses = previous.get("aux_buses", [])
-        if not buses:
+        wanted = recipe["setup"]["extra_aux"]
+        extra = extra[:wanted]   # fewer drops the last ones
+        if not own and not wanted:
             return
         live = {}
-        if self.process and self.process.poll() is None:
+        if (own or extra) and self.process and self.process.poll() is None:
             live = {b["id"]: b for b in json.loads(self.bridge.command("mixer.aux_status"))}
         cfg = parse(show)
         scene_ids = {s.id for s in cfg.scenes}
         unpaged = lambda spec: {k: v for k, v in spec.items() if k != "page"}   # pages follow the new sources
-        for bus in buses:
+        for bus in own + extra:
             for rendition in bus["renditions"]:
                 rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=aux_fps(cfg.fps, bus.get("full_rate", False)))
             state = live.get(bus["id"], bus)
@@ -308,7 +343,17 @@ class SetupRuntime:
                     # A retained scene may have grown beyond the bus's draw budget.
                     scenes[i] = None
             bus["scenes"] = scenes
-        recipe["aux_buses"] = buses
+        if wanted:
+            from prepare_demo import CLEAN_PORT   # clean feed or not, extra buses never take its port
+            mine = parse({**show, "aux_buses": own})
+            limit = extra_aux_limit(self.profile, mine) if self.janus_api else 0
+            if wanted > limit:
+                raise ValueError(f"At most {limit} extra aux outputs fit this setup's NVENC budget on "
+                                 f"{self.instance_type.value}" if self.janus_api else
+                                 "Extra aux outputs need a Janus API (webui.py --janus-api)")
+            # Cells show the generic sources, not the key pages after them.
+            own = own + extra_buses(replace(mine, sources=mine.sources[:recipe["source_count"]]), extra, wanted, CLEAN_PORT)
+        recipe["aux_buses"] = own
 
     def remember_aux(self, bus_id, fields):
         """Persist an operator's change of a bus's ``layout`` or ``scenes`` (a mixer.aux,
@@ -474,6 +519,23 @@ class SetupRuntime:
             for name in sorted(removed & existing):
                 rest_request(self.browser_url, "POST", "/window/close", {"id": name})
 
+    def _mountpoints(self, recipe, prune=False):
+        """Janus mountpoints for *recipe*'s extra buses: before the mixer sends to them, and pruned of
+        the setup's others once it is on air, so a restored previous show keeps its own. Janus is not
+        asked while neither show has extra buses. A failure leaves the mixer running and shows in the
+        status until the next sync."""
+        ports = _ports(_split_aux(recipe.get("aux_buses", []), recipe)[1])
+        if not self.janus_api or not (ports or self.extra_ports):
+            return
+        try:
+            janus_mountpoints.sync(self.janus_api, ports, prune)
+            self.janus_error = ""
+            if prune:
+                self.extra_ports = ports
+        except Exception as exc:
+            self.janus_error = f"Extra aux mountpoints failed: {exc}."
+            log.warning("Janus mountpoints: %s", exc)
+
     def _apply(self, recipe, settings):
         from prepare_demo import prepare
         config = self.media_dir / "mixer.demo.json"
@@ -490,6 +552,7 @@ class SetupRuntime:
             log.info("Assets ready in %.1f s", time.monotonic() - started)
             if self.closing.is_set():
                 raise RuntimeError("Setup server is stopping")
+            self._mountpoints(recipe)
             self._status("starting", "Restarting mixer…")
             self._stop()
             stopped = True
@@ -497,6 +560,7 @@ class SetupRuntime:
             self._start_recovering(config, json.loads(previous or b"{}"))
             if settings is not None:
                 write_atomic(self.recipe_path, json.dumps(recipe, indent=2) + "\n")
+            self._mountpoints(recipe, prune=True)
             with self.lock:
                 self.settings = recipe.get("setup")
                 self.revision += 1
