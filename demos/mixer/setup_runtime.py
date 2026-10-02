@@ -21,6 +21,7 @@ from extra_aux import extra_buses
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import janus_mountpoints
 from pyplumber.mixer.color import default_codec
+from pyplumber.mixer.control import AvpProtocolError
 from pyplumber.mixer.aux_layout import parse_layout
 from pyplumber.mixer.config import ConfigError, aux_fps, aux_label, parse, parse_aux_buses
 
@@ -361,7 +362,9 @@ class SetupRuntime:
             bus["renditions"][0].update(encodes.get(bus["id"]) or self.profile["nvenc"]["defaults"]["aux"])
         live = {}
         if (own or extra) and self.process and self.process.poll() is None:
-            live = {b["id"]: b for b in json.loads(self.bridge.command("mixer.aux_status"))}
+            # A show started without aux buses has no mixer.aux_status, and so no live state to keep.
+            with suppress(AvpProtocolError):
+                live = {b["id"]: b for b in json.loads(self.bridge.command("mixer.aux_status"))}
         cfg = parse(show)
         scene_ids = {s.id for s in cfg.scenes}
         unpaged = lambda spec: {k: v for k, v in spec.items() if k != "page"}   # pages follow the new sources

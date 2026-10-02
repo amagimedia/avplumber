@@ -47,6 +47,11 @@ sed \
     "${config_dir}/janus.plugin.streaming.jcfg.template" > "${config_dir}/janus.plugin.streaming.jcfg.rendered"
 mv "${config_dir}/janus.plugin.streaming.jcfg.rendered" "${config_dir}/janus.plugin.streaming.jcfg"
 
+# Behind 1:1 NAT (a cloud VM: the public IP is not on any interface), JANUS_HOST_IP is the
+# interface address and JANUS_NAT_1_1 the public one Janus puts in its ICE candidates.
+nat_args=()
+[[ -z "${JANUS_NAT_1_1:-}" ]] || nat_args=(-1 "${JANUS_NAT_1_1}")
+
 exec /opt/janus-avp/bin/janus \
     -F "${config_dir}" \
     -C "${config_dir}/janus.jcfg" \
@@ -54,4 +59,5 @@ exec /opt/janus-avp/bin/janus \
     -r "${rtp_port_range}" \
     -d "${debug_level}" \
     -o \
+    "${nat_args[@]}" \
     "$@"

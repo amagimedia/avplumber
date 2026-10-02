@@ -19,6 +19,8 @@ revision="$(git -C "$repo" rev-parse HEAD)"
     git -C "$repo/$sub" archive --format=tar --prefix="$sub/" HEAD
   done
 } | gcloud compute ssh "$host" --project "$PROJECT" --zone "$zone" --quiet --command "
-  sudo rm -rf '$remote' && sudo mkdir -p '$remote' && sudo chown \$(id -u):\$(id -g) '$remote' &&
-  tar -x -i -C '$remote' -f - && printf 'avplumber %s\n' '$revision' > '$remote/SOURCE_REVISION' &&
-  cat '$remote/SOURCE_REVISION'"
+  set -e; sudo rm -rf '$remote.new' && sudo mkdir -p '$remote.new' '$remote' && sudo chown \$(id -u):\$(id -g) '$remote.new' '$remote'
+  tar -x -i -C '$remote.new' -f -
+  # The host's own data and settings stay: the generated media and the stack's .env.
+  rsync -a --delete --exclude /media/ --exclude /demos/mixer/.env '$remote.new/' '$remote/' && rm -rf '$remote.new'
+  printf 'avplumber %s\n' '$revision' > '$remote/SOURCE_REVISION' && cat '$remote/SOURCE_REVISION'"
