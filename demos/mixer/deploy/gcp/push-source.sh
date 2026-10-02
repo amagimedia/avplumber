@@ -22,5 +22,6 @@ revision="$(git -C "$repo" rev-parse HEAD)"
   set -e; sudo rm -rf '$remote.new' && sudo mkdir -p '$remote.new' '$remote' && sudo chown \$(id -u):\$(id -g) '$remote.new' '$remote'
   tar -x -i -C '$remote.new' -f -
   # The host's own data and settings stay: the generated media and the stack's .env.
-  rsync -a --delete --exclude /media/ --exclude /demos/mixer/.env '$remote.new/' '$remote/' && rm -rf '$remote.new'
+  rsync -a --delete --exclude /media/ --exclude /demos/mixer/.env '$remote.new/' '$remote/'
+  sudo rm -rf '$remote.new'   # in a root-owned parent
   printf 'avplumber %s\n' '$revision' > '$remote/SOURCE_REVISION' && cat '$remote/SOURCE_REVISION'"
