@@ -171,7 +171,8 @@ class AuxBus:
 
     def state(self):
         with self.lock:
-            status = self._status(self.node_name) or {"suspended": True}
+            status = self._status(self.node_name)
+            running, status = status is not None, status or {}
             follower = self._status(self.follower)
             if follower is not None:
                 self.follower_status = follower
@@ -186,7 +187,7 @@ class AuxBus:
                     "fps": self.fps, "latency_ms": self.latency_ms(), "pvw_align": self.bus.pvw_align,
                     "pgm_delay_frames": self.pgm_delay_frames, "follower": self.follower_status,
                     "pvw_scene": self.follower_status.get("pvw_scene", ""), **self._summary(), **status,
-                    "composition_pending": pending}
+                    "running": running, "composition_pending": pending}
 
     def assign(self, request):
         """Slot assignments: the complete ``scenes`` list as the status reports it, by slot index,

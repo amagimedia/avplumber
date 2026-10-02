@@ -32,9 +32,7 @@ class MixerCompositor : public CudaRectCompositor,
     std::string composition_error_; // protected by layers_mutex_
     std::string composition_revision_; // of the composition being drawn; protected by layers_mutex_
     bool aux_ = false;
-    std::atomic<bool> suspended_{false};
     std::atomic<uint64_t> output_drops_{0};
-    int blocked_ticks_ = 0;
     CUevent input_ready_ = nullptr;
     // Playout counters snapshotted every 60 frames for the status object; the
     // control thread never touches playout_ itself.
@@ -130,7 +128,7 @@ public:
 
     Parameters getObject(const std::string key) override {
         if (key != "status") throw Error("mixer_compositor: unknown object " + key);
-        Parameters result = {{"suspended", suspended_.load()}, {"output_drops", output_drops_.load()}};
+        Parameters result = {{"output_drops", output_drops_.load()}};
         {
             std::lock_guard<std::mutex> lock(playout_stats_mutex_);
             Parameters playout = Parameters::object();
@@ -166,13 +164,10 @@ public:
             }
             if (update) {
                 const auto mask = avp::mixer::parseSourceMask(update->at("active_inputs"));
-                const bool enabled = update->value("enabled", true);
-                const bool resume = suspended_.exchange(!enabled);
-                blocked_ticks_ = 0;
                 staged_composition_.reset();
                 composition_preparing_ = false;
-                if (!enabled || resume || !frame_counter_) {
-                    applyAuxComposition(*update, enabled ? mask : avp::mixer::SourceMask{});
+                if (!frame_counter_) {
+                    applyAuxComposition(*update, mask);
                     warmup_started_pts_ = wallclock.pts();
                 } else {
                     staged_mask_ = mask;
@@ -183,7 +178,6 @@ public:
                     auxInputs(applied_active_mask_, mask);
                 }
             }
-            if (suspended_) { event_wait_->wait(100); return; }
         }
         const int64_t now = avp::mixer::monotonicNs();
         auto [active, prewarm] = inputMasks();
@@ -280,26 +274,14 @@ public:
         // Warm inputs advance their bounded reference queues without allocating
         // an output surface or issuing any CUDA composition for an idle slot.
         if (active.any()) {
-            if (aux_ && output_edge_->occupied() >= int(output_edge_->capacity())) {
+            // A full aux output costs this tick's frame only: the playout still advances, so the
+            // next tick the encoder has room for draws current pictures.
+            if (aux_ && output_edge_->occupied() >= int(output_edge_->capacity()))
                 ++output_drops_;
-                ++blocked_ticks_;
-            } else {
-                blocked_ticks_ = 0;
+            else
                 composite(av::Timestamp(decision->index, av_inv_q(frame_rate_.getValue())), sources, metadata);
-            }
         }
         playout_->commit();
-        if (aux_ && blocked_ticks_ >= 3) {
-            staged_composition_.reset();
-            composition_preparing_ = false;
-            for (size_t i = 0; i < subscriptions_.size(); ++i) {
-                subscriptions_[i]->enable(false);
-                source_edges_[i]->clear();
-                playout_->resetInput(i);
-            }
-            suspended_ = true;
-            logstream << "aux: suspended after encoder backpressure; reapply composition to resume";
-        }
         if (frame_counter_ % 60 == 0) {
             std::vector<std::array<uint64_t, 3>> snapshot;
             snapshot.reserve(sources.size());

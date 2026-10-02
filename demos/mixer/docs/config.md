@@ -470,7 +470,9 @@ Control commands, each `{"bus": <id>, ...}`:
   `source_pages` layout; a step past the last page wraps around.
 - `mixer.aux_status` reports every bus: `id`, `layout`, `layouts`, `cells` (in
   canvas pixels, source cells with the source's `id` and `kind`), `scenes`,
-  `revision`, `max_layers`, `composition_pending`, `composition_error`,
+  `revision`, `max_layers`, `running` (false while the bus compositor is not
+  created or is stopped), `output_drops` (frames its encoder had no room for),
+  `composition_pending`, `composition_error`,
   `pvw_scene` and the follower's status under `follower`, and for a
   `source_pages` layout `page`, `pages`, `first` and `total`. A change is
   `composition_pending` until the bus compositor draws its revision: its new
@@ -485,8 +487,9 @@ Recipes accept the same block. Setup changes keep each bus's live layout,
 exists or no longer fits the bus's budget are cleared, and source pages follow
 the new source list from page 0.
 With a bus configured, scene definitions are fixed until the next setup,
-`mixer.scene` included. A bus suspends after sustained encoder backpressure;
-the next assignment, layout switch or page turn resumes it.
+`mixer.scene` included. A bus never waits for its encoder and never pauses: a
+frame the encoder has no room for is dropped (`output_drops`) and the next one
+is drawn as usual.
 
 The PGM cells run `pgm_delay_frames` (one aux frame, two at a 50/60 fps bus)
 behind the other cells: the finished program reaches the bus after the sources

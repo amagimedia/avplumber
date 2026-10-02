@@ -235,7 +235,7 @@ The error, in aux frames, for a cut or fade is 0 nominally, and:
   program frame's. The change is published at a random phase between the
   emission of frames K−1 and K, so the follower has what is left of one main
   tick (0 to 16.7 ms at 60 fps) minus the main compositor's render time, its
-  own wake and the composition set (never a status read). The host's `cut_spam.py` `late` count
+  own wake and the composition set. The host's `cut_spam.py` `late` count
   measures how often; no fraction is claimed.
 - A fade's change is published from a frame already presented, so such a tick
   has passed by construction (`target_unreachable`) and the change lands on

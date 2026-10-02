@@ -74,8 +74,7 @@ def make_bus(cfg, spec, avp=None, latency_ms=None):
 def reachable(avp, bus, **compositor):
     """The bus's compositor and follower exist; the compositor draws *compositor*'s revision."""
     avp.statuses[bus.follower] = {"layout_revision": bus.revision, "pvw_scene": ""}
-    avp.statuses[bus.node_name] = {"suspended": False, "composition_pending": False,
-                                   "composition_revision": bus.revision, **compositor}
+    avp.statuses[bus.node_name] = {"composition_pending": False, "composition_revision": bus.revision, **compositor}
 
 
 @pytest.mark.parametrize("program,aux", [(25, 25), (30, 30), (50, 25), (60, 30)])
@@ -371,9 +370,9 @@ def test_layout_over_the_budget_is_refused_and_changes_nothing(cfg):
 def test_status_is_pending_until_the_compositor_draws_the_revision(cfg):
     avp = FakeAvp()
     bus = make_bus(cfg, bus_json(), avp)
-    assert bus.state()["composition_pending"] and bus.state()["suspended"]   # nothing reachable yet
+    assert bus.state()["composition_pending"] and not bus.state()["running"]   # nothing reachable yet
     reachable(avp, bus)
-    assert not bus.state()["composition_pending"]
+    assert not bus.state()["composition_pending"] and bus.state()["running"]
     bus.assign({"expected_revision": bus.revision, "scenes": [None] * 8})
     assert bus.state()["composition_pending"]   # the follower has not set it yet
     avp.statuses[bus.node_name]["composition_revision"] = bus.revision

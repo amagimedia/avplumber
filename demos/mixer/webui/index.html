@@ -572,7 +572,7 @@ function renderSlots() {
   $("scenes").classList.toggle("armed", armedSlot !== null);
   if (!aux) return;
   $("slots-title").textContent = `${outputLabel(aux.id)} slots`;
-  const problem = auxError(aux) || (aux.suspended ? "suspended · assign a scene to resume" : "");
+  const problem = auxError(aux) || (aux.running ? "" : "compositor stopped");
   $("slot-note").textContent = armedSlot !== null ? `pick a scene for M${armedSlot + 1}` : problem ||
     (aux.composition_pending ? "preparing sources · the bus stays live" : `click a slot, then a scene · ⇧1–${Math.min(slots.length, 9)}`);
   $("slot-note").classList.toggle("warn", armedSlot === null && Boolean(problem));
@@ -679,11 +679,11 @@ function graphModel() {
   ];
   const aux = auxBuses().map((a) => {
     const out = outputs.find((o) => o.bus === a.id), slots = slotsOf(a);
-    const sub = auxError(a) ? "error" : a.suspended ? "suspended"
+    const sub = auxError(a) ? "error" : !a.running ? "stopped"
       : isPages(a) ? `page ${a.page + 1}/${a.pages}`
       : `${slots.length ? `${slots.filter((i) => a.scenes[i]).length}/${slots.length} slots` : layoutName(a.layout)}${a.composition_pending ? " · pending" : ""}`;
     return {id: a.id, grid: cellsOf(a, "pgm").length > 0, title: out?.label || a.id, sub,
-            tip: auxError(a) || a.id, warn: Boolean(auxError(a) || a.suspended),
+            tip: auxError(a) || a.id, warn: Boolean(auxError(a) || !a.running),
             encoder: out && {title: codecName(out.codec), sub: port(out)}};   // its row names the bus
   });
   return {

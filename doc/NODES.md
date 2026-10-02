@@ -1073,13 +1073,13 @@ Objects (`node.object.set`):
 -   `warm_reset` - reject frames stamped over a tick before the one being
     drawn; prewarmed inputs keep their held pictures
 -   `composition` (`aux_mode` only) - `{"layers": [...], "active_inputs": <mask>,
-    "enabled": true, "revision": "<string>"}`: applied on the tick its new
-    inputs are ready; if they are not ready within max(250 ms, twice
-    `latency_ms`), the previous layout stays and `composition_error` says so.
-    `enabled` false suspends the bus. `revision` (optional) names it in the
-    status once it is drawn.
+    "revision": "<string>"}`: applied on the tick its new inputs are ready; if
+    they are not ready within max(250 ms, twice `latency_ms`), the previous
+    layout stays and `composition_error` says so. `revision` (optional) names it
+    in the status once it is drawn.
 
-`node.object.get <node> status`: `suspended`, `output_drops`, `playout`
+`node.object.get <node> status`: `output_drops` (frames dropped for a full
+output edge; the bus keeps playing and draws again once it has room), `playout`
 (`frames`, `repeats`, `discarded`, `overflow`, `missed_deadlines`,
 `per_input`), with `aux_mode` `composition_pending`, `composition_error` and
 `composition_revision`, the revision of the composition being drawn (set when
@@ -1130,8 +1130,7 @@ Objects (`node.object.set`):
 -   `layout` - `{"revision": "<string>", "pvw": {"<scene>": {"layers": [...],
     "active_inputs": <mask>}, ...}, "base": {"layers": [...], "active_inputs":
     <mask>}}`, replaced as a whole and applied at the next wake. Every
-    composition carries its `revision`; a new layout resumes a bus the
-    compositor suspended for encoder backpressure.
+    composition carries its `revision`.
 
 `node.object.get <node> status`: the last change's `pvw_scene`, `pgm_scene`,
 `kind`, `align`, `target_tick` and latencies (`pvw_latency_ms`,

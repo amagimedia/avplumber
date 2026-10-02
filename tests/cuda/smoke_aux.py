@@ -145,7 +145,6 @@ def main():
             before = edge.enqueued_total
             assign(["blue"] * 8)
             wait_for(lambda: bool(bus.state().get("composition_error")))
-            assert not bus.state()["suspended"]
             assert edge.enqueued_total - before >= 3
             assert not subscription_flags()[bus.edges[-1]]
             assign(["blue"] * 8)
@@ -170,19 +169,17 @@ def main():
             # Blue is program now: its source stays subscribed, warm for the swap.
             wait_for(lambda: subscription_flags() == expected)
             time.sleep(1)
-            # Stall the first consumer: the compositor must suspend, unsubscribe
-            # every input, and let the main program keep advancing.
+            # Stall the first consumer: the bus keeps playing its inputs, dropping each frame its
+            # encoder has no room for, and the main program keeps advancing.
             gate.blocked = True
-            wait_for(lambda: bus.state()["suspended"])
-            assert subscription_flags() == {name: False for name in [*bus.edges, bus.pgm_edge]}
-            before = main_edge.enqueued_total
+            drops, before = bus.state()["output_drops"], main_edge.enqueued_total
             time.sleep(1)
+            assert bus.state()["output_drops"] - drops >= 20   # of the second's 30 aux ticks
             assert main_edge.enqueued_total - before >= 40
-            assert all(app.avp.getEdge(e).occupied == 0 for e in [*bus.edges, bus.pgm_edge])
+            assert subscription_flags() == expected
+            # Draining it brings the bus's frames back with nothing reapplied.
             gate.blocked = False
-            current = bus.state()
             before = edge.enqueued_total
-            bus.assign({"expected_revision": current["revision"], "scenes": current["scenes"]})
             wait_for(lambda: edge.enqueued_total >= before + 15)
             assert subscription_flags() == expected
             # Restart only the aux compositor. The main

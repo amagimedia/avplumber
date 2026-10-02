@@ -58,13 +58,6 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     std::optional<Change> pending_;
     Change applied_;
     avp::mixer::SourceMask applied_inputs_;   // the active inputs the compositor last accepted
-    // The compositor's `suspended` as this node last set or read it. Every composition sets it
-    // (`enabled`, unset resumes), so after an apply it is what was sent; only the compositor's
-    // own suspension (encoder backpressure) diverges it, until the next read between takes.
-    // A bus that suspended since then gets one resuming composition (as the 50 ms status
-    // poller before this node could send) and suspends again after three blocked ticks; so
-    // does one suspended before this node started, as the first composition sent resumes it.
-    bool suspended_ = false;
     std::optional<int64_t> settle_at_;   // when to add the program scene's inputs, for the swap
     bool dirty_retry_ = false;           // a layout apply failed: again at the next wake
     std::string warning_;                // from the last apply, shown as the status error
@@ -88,10 +81,8 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
 
     /// pvw[shown] ++ base; the program scene's inputs stay warm for the swap: `settle` adds
     /// them all, otherwise those active already are kept, so the composition adds nothing.
-    /// `enabled` unset resumes a suspended bus, as an operator's change does; a preview change
-    /// keeps it suspended. A scene without a PVW layout draws an empty cell and is reported
-    /// (`warning_`), not retried.
-    void apply(const Change& change, bool settle, std::optional<bool> enabled) {
+    /// A scene without a PVW layout draws an empty cell and is reported (`warning_`), not retried.
+    void apply(const Change& change, bool settle) {
         Parameters composition;
         avp::mixer::SourceMask inputs;
         {
@@ -106,16 +97,8 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
             composition = {{"layers", std::move(layers)}, {"active_inputs", avp::mixer::toParameters(inputs)},
                            {"revision", revision_}};
         }
-        if (enabled) composition["enabled"] = *enabled;
         compositor()->setObject("composition", composition);
         applied_inputs_ = inputs;
-        suspended_ = enabled ? !*enabled : false;
-    }
-
-    /// Waits on the compositor's start/stop lock (bounded), and throws while the compositor is
-    /// not created: a failed read must not pass for "not suspended", which would resume the bus.
-    bool compositorSuspended() {
-        return compositor()->getObject("status").value("suspended", false);
     }
 
     void report(const std::string& error) {
@@ -166,8 +149,6 @@ public:
     // time or one aux tick, whichever comes first. The processing lock is held throughout, so
     // every wait is bounded. A change whose apply time has passed is only still pending after a
     // failed apply; it is retried at the tick, never at once, so a dead compositor cannot spin.
-    // A wake that applies nothing, with no change waiting and no take in flight, refreshes
-    // `suspended_` instead.
     void process() override {
         int64_t now = avp::mixer::monotonicNs();
         int64_t wake_by = now + timing_.aux.time(1);
@@ -197,7 +178,7 @@ public:
             now = avp::mixer::monotonicNs();
             if (pending_ && (!pending_->target || now >= timing_.applyAt(pending_->target))) {
                 const Change change = *pending_;   // stays pending if apply() throws: retried next wake
-                apply(change, false, !suspended_);
+                apply(change, false);
                 const int64_t applied_at = avp::mixer::monotonicNs();
                 applied_ = change;
                 pending_.reset();
@@ -210,13 +191,11 @@ public:
                 std::lock_guard<std::mutex> lock(layouts_mutex_);
                 status_ = std::move(status);
             } else if (dirty) {
-                // A new layout keeps the warm inputs and resumes a suspended bus; a settle still due stays due.
-                apply(applied_, false, std::nullopt);
+                // A new layout keeps the warm inputs; a settle still due stays due.
+                apply(applied_, false);
             } else if (settle_at_ && now >= *settle_at_) {
-                apply(applied_, true, !suspended_);
+                apply(applied_, true);
                 settle_at_.reset();
-            } else if (!pending_ && state_->transition_mode == avp::mixer::MixerState::TransitionMode::Idle) {
-                suspended_ = compositorSuspended();
             }
             report(warning_);
         } catch (const std::exception& e) {
