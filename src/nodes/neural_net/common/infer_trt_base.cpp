@@ -609,17 +609,17 @@ bool CudaInferTrtBase::copyOutputsToHost(ModelRunner& model) {
     for (OutputTensor& ot : model.outputs) {
         size_t idx = ot.tensor_index;
         size_t bytes = model.tensor_bytes[idx];
-        void* dst = nullptr;
-        if (ot.dtype == nvinfer1::DataType::kHALF) {
-            dst = (void*)ot.host_output_half.data();
-        } else if (ot.dtype == nvinfer1::DataType::kINT32) {
-            dst = (void*)ot.host_output_i32.data();
-        } else if (ot.dtype == nvinfer1::DataType::kINT64) {
-            dst = (void*)ot.host_output_i64.data();
-        } else {
-            dst = (void*)ot.host_output.data();
+        // Pageable vectors make an Async transfer block inside the driver.
+        // Keep staging pinned for the model lifetime, and read it only after
+        // syncModel has completed the stream. Decoder-facing vectors stay
+        // unchanged, including their original integer/half representations.
+        if (ot.host_staging_bytes < bytes) {
+            void* staging = nullptr;
+            if (CUDA_CHECK_CU(cuMemHostAlloc(&staging, bytes, 0))) return false;
+            ot.host_staging.reset(staging);
+            ot.host_staging_bytes = bytes;
         }
-        if (CUDA_CHECK_CU(cuMemcpyDtoHAsync(dst, model.tensor_ptrs[idx], bytes, model.stream))) {
+        if (CUDA_CHECK_CU(cuMemcpyDtoHAsync(ot.host_staging.get(), model.tensor_ptrs[idx], bytes, model.stream))) {
             return false;
         }
     }
@@ -732,18 +732,24 @@ bool CudaInferTrtBase::runInference(ModelRunner& model) {
 bool CudaInferTrtBase::syncModel(ModelRunner& model) {
     if (CUDA_CHECK_CU(cuStreamSynchronize(model.stream))) return false;
     for (OutputTensor& ot : model.outputs) {
+        const size_t bytes = model.tensor_bytes[ot.tensor_index];
         if (ot.dtype == nvinfer1::DataType::kHALF) {
+            std::memcpy(ot.host_output_half.data(), ot.host_staging.get(), bytes);
             for (size_t i = 0; i < ot.host_output_half.size(); ++i) {
                 ot.host_output[i] = halfToFloat(ot.host_output_half[i]);
             }
         } else if (ot.dtype == nvinfer1::DataType::kINT32) {
+            std::memcpy(ot.host_output_i32.data(), ot.host_staging.get(), bytes);
             for (size_t i = 0; i < ot.host_output_i32.size(); ++i) {
                 ot.host_output[i] = (float)ot.host_output_i32[i];
             }
         } else if (ot.dtype == nvinfer1::DataType::kINT64) {
+            std::memcpy(ot.host_output_i64.data(), ot.host_staging.get(), bytes);
             for (size_t i = 0; i < ot.host_output_i64.size(); ++i) {
                 ot.host_output[i] = (float)ot.host_output_i64[i];
             }
+        } else {
+            std::memcpy(ot.host_output.data(), ot.host_staging.get(), bytes);
         }
     }
     return true;
