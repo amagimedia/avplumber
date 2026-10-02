@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Browser control surface for the generic mixer demo.
 
-Serves one static page and bridges it to AVPlumber's line protocol, so the
-mixer needs no HTTP server of its own and the page needs no build step:
+Serves static pages and bridges them to AVPlumber's line protocol, so the
+mixer needs no HTTP server of its own and the pages need no build step:
 
     GET  /              the page
+    GET  /wall          every output side by side, nothing to control
+    GET  /outputs.js    the output list both pages play from
     GET  /api/state     status + scenes + settings in one round trip
     GET  /api/status    mixer.status alone, for scripts that poll often
     POST /api/command   {"command": "cut"|"fade"|"wipe"|"preview", "scene": ...}
@@ -44,6 +46,8 @@ from pyplumber.mixer.control import AvpConnection, mixer_command
 
 log = logging.getLogger("webui")
 PAGE = Path(__file__).with_name("webui") / "index.html"
+WALL = PAGE.with_name("wall.html")
+OUTPUTS_JS = PAGE.with_name("outputs.js")
 # The page reads the backend's options from this script before its first request; the file holds `{}`, the defaults.
 CONFIG_SCRIPT = '<script id="config" type="application/json">%s</script>'
 TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")
@@ -52,13 +56,13 @@ AUX_COMMANDS = ("aux", "aux_layout", "aux_page")   # answered with the bus's lay
 STATE_TTL_S = 0.2
 
 
-def page(config: dict) -> bytes:
-    """The page with `config`, what it needs before its first request (where the player is), in its
-    config script."""
-    html = PAGE.read_text("utf-8")
+def page(config: dict, path: Path = PAGE) -> bytes:
+    """The page at `path` with `config`, what it needs before its first request (where the player is),
+    in its config script."""
+    html = path.read_text("utf-8")
     placeholder = CONFIG_SCRIPT % "{}"
     if placeholder not in html:
-        raise RuntimeError(f"{PAGE} has no config script to fill")
+        raise RuntimeError(f"{path} has no config script to fill")
     # `<` is escaped so no option value can end the script element.
     return html.replace(placeholder, CONFIG_SCRIPT % json.dumps(config).replace("<", "\\u003c"), 1).encode("utf-8")
 
@@ -408,6 +412,10 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.partition("?")[0]
         if path in ("/", "/index.html"):
             self._send(200, page(self.config), "text/html; charset=utf-8")
+        elif path in ("/wall", "/wall/"):
+            self._send(200, page(self.config, WALL), "text/html; charset=utf-8")
+        elif path == "/outputs.js":
+            self._send(200, OUTPUTS_JS.read_bytes(), "text/javascript; charset=utf-8")
         elif path in ("/setup", "/setup/"):
             self._send(200, Path(__file__).with_name("setup.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/setup" and self.setup_manager:

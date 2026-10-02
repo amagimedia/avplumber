@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AVPlumber outputs</title>
+<!-- webui.py fills in its options for the page, such as where the player is; the file holds the defaults. -->
+<script id="config" type="application/json">{}</script>
+<style>
+  /* Dark-only, in the mixer page's tokens (index.html). */
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d10; --edge: #232b34; --text: #e8edf2; --muted: #8b98a5; --pgm: #e5484d; --accent: #f5a524;
+  }
+  html, body { height: 100%; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); overflow: hidden;
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; gap: 12px; padding: 12px 16px;
+  }
+  header { display: flex; align-items: center; gap: 14px; }
+  h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
+  .link { color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+  .link:hover { color: var(--accent); }
+  #conn { margin-left: auto; color: var(--pgm); font-size: 12px; }
+  /* layout() sets the columns and rows; --cap is the label's height, which it also reads. */
+  #wall { flex: 1; min-height: 0; display: grid; gap: 12px; place-content: start center; --cap: 24px; }
+  /* Each cell centres a tile as wide as the output's aspect (--ar) allows under its label. */
+  .cell { min-width: 0; min-height: 0; container-type: size; display: grid; place-items: center; }
+  .tile { margin: 0; width: min(100cqw, (100cqh - var(--cap)) * var(--ar)); }
+  .tile figcaption { height: var(--cap); font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+                     font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .screen { position: relative; aspect-ratio: var(--ar); background: #050607; border-radius: 8px; outline: 1px solid var(--edge); overflow: hidden; }
+  /* As on the mixer page: a layer over the player, whose <video controls> would pause on a click, and a
+     frame --chrome taller than the screen and wide enough for one footer line, so the picture fills
+     the screen and the player's footer is clipped. */
+  .screen::after { content: ""; position: absolute; inset: 0; }
+  .screen iframe { position: absolute; top: 0; left: 50%; width: max(100%, 4096px); height: calc(100% + var(--chrome, 49px));
+                   transform: translateX(-50%); border: 0; background: #050607; }
+  .screen p { position: absolute; inset: 45% 10px auto; margin: 0; text-align: center; color: var(--muted); font-size: 12.5px; }
+</style>
+
+<header>
+  <h1>AVPlumber outputs</h1>
+  <a class="link" href="/">Mixer</a>
+  <span id="conn" role="status" hidden></span>
+</header>
+<main id="wall" aria-label="Every output"></main>
+
+<script src="/outputs.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let aspects = [], signature = "";
+
+// Every output the mixer encodes, in the mixer page's menu order: the program renditions this browser
+// can play, then the clean feed and every aux bus. Each keeps encoding whether a page shows it or not.
+function outputs(state) {
+  const s = state.settings || {}, buses = state.aux_buses || [];
+  return [...programOptions(s, Boolean(state.dsk?.length)), ...(s.preview_outputs || []).map(previewOption)]
+    .map((o) => ({...o, size: canvasSize(s, buses.find((aux) => aux.id === o.value))}));
+}
+function tile(o) {
+  const cell = document.createElement("div"), fig = document.createElement("figure"), cap = document.createElement("figcaption");
+  const screen = document.createElement("div");
+  cell.className = "cell";
+  cell.style.setProperty("--ar", o.size[0] / o.size[1]);
+  fig.className = "tile";
+  cap.textContent = cap.title = o.label;
+  screen.className = "screen";
+  if (o.unplayable) screen.append(Object.assign(document.createElement("p"), {textContent: "This browser cannot play H.265"}));
+  else {
+    const frame = Object.assign(document.createElement("iframe"), {src: o.url, title: o.label, tabIndex: -1});
+    frame.setAttribute("allow", "autoplay");
+    frame.style.setProperty("--chrome", `${o.chrome}px`);
+    screen.append(frame);
+  }
+  fig.append(cap, screen);
+  cell.append(fig);
+  return cell;
+}
+// The column count that shows the most picture: each tile fills its share of the window's width or
+// height, whichever its aspect reaches first. The cells shrink to the largest tile, so tiles sit one
+// gap apart and the grid is centred across the window.
+function layout() {
+  const wall = $("wall"), n = aspects.length, css = getComputedStyle(wall);
+  if (!n) return;
+  const gap = parseFloat(css.rowGap), cap = parseFloat(css.getPropertyValue("--cap"));
+  let best = {area: -1};
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols), w = (wall.clientWidth - gap * (cols - 1)) / cols, h = (wall.clientHeight - gap * (rows - 1)) / rows - cap;
+    const widths = aspects.map((ar) => Math.max(0, Math.min(w, h * ar)));
+    const area = widths.reduce((sum, fw, i) => sum + fw * fw / aspects[i], 0);
+    if (area > best.area) best = {area, cols, rows, w: Math.max(...widths), h: Math.max(...widths.map((fw, i) => fw / aspects[i]))};
+  }
+  wall.style.gridTemplateColumns = `repeat(${best.cols}, ${best.w}px)`;
+  wall.style.gridTemplateRows = `repeat(${best.rows}, ${best.h + cap}px)`;
+}
+// The outputs change only with the setup, whose new graph every player reconnects to, so a change rebuilds every tile.
+function render(state) {
+  const list = outputs(state);
+  const next = JSON.stringify([state.setup_revision, list.map((o) => [o.label, o.url, o.size, o.chrome, o.unplayable])]);
+  if (next === signature) return;
+  signature = next;
+  aspects = list.map((o) => o.size[0] / o.size[1]);
+  $("wall").replaceChildren(...list.map(tile));
+  layout();
+}
+let polling = false;
+async function refresh() {
+  if (polling) return;
+  polling = true;
+  try {
+    const response = await fetch("/api/state"), state = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(state.error || `${response.status} ${response.statusText}`);
+    $("conn").hidden = true;
+    render(state);
+  } catch (exc) {
+    $("conn").textContent = exc.message || String(exc);
+    $("conn").hidden = false;
+  } finally {
+    polling = false;
+  }
+}
+
+new ResizeObserver(layout).observe($("wall"));
+refresh();
+setInterval(refresh, 1000);
+addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>

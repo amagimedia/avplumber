@@ -71,7 +71,8 @@ change, so a restart shows the same buses. The container log times every phase
 
 Open **<http://127.0.0.1:7681>** for controls and HDR playback. Choose **SDR**
 in the player if your browser cannot decode HEVC. The standalone player remains
-at <http://127.0.0.1:8080>.
+at <http://127.0.0.1:8080>. **Wall** in the page's header, <http://127.0.0.1:7681/wall>,
+plays every output side by side: each program rendition, the clean feed and every aux bus.
 
 The player also shows host GPU/NVDEC usage and used/total VRAM from `nvidia-smi`,
 sampled once per second. Usage turns orange at 95% and red at 99%; VRAM turns

@@ -498,16 +498,22 @@ def test_a_failing_mixer_is_reported_not_swallowed(client):
     assert status == 502 and "mixer said no" in body["error"]
 
 
-def get_page(url):
-    with urllib.request.urlopen(url + "/", timeout=5) as response:
-        assert response.headers["Content-Type"].startswith("text/html")
+def get_page(url, path="/", content_type="text/html"):
+    with urllib.request.urlopen(url + path, timeout=5) as response:
+        assert response.headers["Content-Type"].startswith(content_type)
         return response.read().decode()
 
 
-def test_the_page_and_only_the_page_is_served(client):
+def test_the_pages_and_only_the_pages_are_served(client):
     url, _ = client(FakeBridge({"mixer.status": "{}", "mixer.scenes": "[]"}))
     html = get_page(url)
-    assert "AVPlumber mixer" in html and "/api/state" in html
+    assert "AVPlumber mixer" in html and "/api/state" in html and 'href="/wall"' in html
+    # The wall shows every output the mixer page lists, from the same script.
+    for path in ("/wall", "/wall/"):
+        wall = get_page(url, path)
+        assert "AVPlumber outputs" in wall and "/api/state" in wall and '<script src="/outputs.js">' in wall
+    assert '<script src="/outputs.js">' in html
+    assert "function programOptions" in get_page(url, "/outputs.js", "text/javascript")
     try:
         urllib.request.urlopen(url + "/nope", timeout=5)
         raise AssertionError("expected 404")
@@ -518,12 +524,13 @@ def test_the_page_and_only_the_page_is_served(client):
 def test_the_page_carries_where_the_player_is(client):
     # Without --preview-base the page keeps its own defaults: the player on port 8080 of its host.
     url, _ = client(FakeBridge())
-    assert CONFIG_SCRIPT % "{}" in get_page(url)
+    assert CONFIG_SCRIPT % "{}" in get_page(url) and CONFIG_SCRIPT % "{}" in get_page(url, "/wall")
     # Behind a reverse proxy every player loads from a path of the page's own origin; the page carries it
     # with the slash the player resolves its files against, whichever way the server was given it.
     for preview_base in ("/preview/", "/preview"):
         url, _ = client(FakeBridge(), preview_base=preview_base)
         assert CONFIG_SCRIPT % '{"preview_base": "/preview/"}' in get_page(url)
+        assert CONFIG_SCRIPT % '{"preview_base": "/preview/"}' in get_page(url, "/wall")
 
 
 def test_no_player_address_can_end_the_config_script():

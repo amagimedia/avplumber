@@ -312,6 +312,7 @@
   <h1>AVPlumber mixer</h1>
   <a class="link" href="/setup/">Setup</a>
   <a class="link" id="graph-link" target="_blank" rel="noopener" title="Opens the live graph view in a new tab">Graph view ↗</a>
+  <a class="link" href="/wall" target="_blank" rel="noopener" title="Opens every output side by side in a new tab">Wall ↗</a>
   <span id="counts"></span>
   <span class="viewers-ctl"><span class="seg-label">Viewers</span>
     <span class="seg" id="viewer-count" role="group" aria-label="Number of viewers">
@@ -381,6 +382,7 @@
   <section id="wall" aria-label="Monitor wall"></section>
 </main>
 
+<script src="/outputs.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -454,10 +456,7 @@ function layoutName(spec) {
 // Layouts the operator picks between: a preset whatever its page, or the same cells.
 const sameLayout = (a, b) => JSON.stringify(a.preset ?? a.cells) === JSON.stringify(b.preset ?? b.cells);
 const outputLabel = (bus) => settings().preview_outputs?.find((o) => o.bus === bus)?.label || bus;
-const codecName = (codec) => ({h264: "H.264", h265: "H.265"})[codec] || String(codec || "").toUpperCase();
-const canvasText = (c) => `${c.width}×${c.height}p${c.fps}`;
 const rateText = (o) => o.fps && `${o.fps} fps`;   // an output's encoded rate
-const formatText = (c) => c ? `${canvasText(c)} ${({nv12: "SDR", p210le: "HDR 4:2:2"})[c.working_format] || "HDR"}` : "";
 
 async function api(path, body) {
   const response = await fetch(path, body === undefined ? undefined :
@@ -980,68 +979,9 @@ const fadeColor = (() => {
 })();
 
 /* ---------- viewer outputs ---------- */
-const query = new URLSearchParams(location.search);
-// Where the player is, for every output's URL: the backend's --preview-base (a path on this origin,
-// such as /preview/ behind a reverse proxy, or a URL), else port 8080 of this host. ?preview_port=
-// replaces the port either way.
-const config = JSON.parse($("config").textContent);
-const playerBase = new URL(config.preview_base || "/", location.href);
-const previewPort = query.get("preview_port") || (!config.preview_base && "8080");
-if (previewPort) playerBase.port = previewPort;
-playerBase.search = playerBase.hash = "";
-// The player's own H.265 message sits in the footer the viewers clip, so the page never asks for a
-// codec the browser cannot receive.
-const h265Playable = (() => {
-  try { return RTCRtpReceiver.getCapabilities("video").codecs.some((c) => c.mimeType.toLowerCase() === "video/h265"); }
-  catch (_) { return false; }
-})();
-const playable = (codec) => codec !== "h265" || h265Playable;
-// ?codec= picks the program's default codec; HDR otherwise, where the browser can play it.
-const defaultCodec = (codecs) => [query.get("codec"), "h265", "h264"].find((c) => codecs.includes(c) && playable(c)) || codecs[0];
-// The dirty program plays from the player's own mountpoints in the preview codecs; every other output
-// is an H.264 mountpoint of its own, which the player plays as H.264 whatever codec the URL names.
-// Every viewer, the program and the multiviews alike, plays with the same receiver playout delay:
-// the browser's adaptive jitter buffer, or with ?lowlat=1 on this page the player's own ?lowlat=1
-// for all of them, the buffer pinned to its minimum (jitterBufferTarget and playoutDelayHint 0), so
-// a cut shows in the program and in the multiview's PVW tile at the same instant instead of each
-// stream settling on its own delay. Opt-in, as on the player: the pin gains 4-5 ms on a clean link
-// and removes the cushion on a bad one, and a software HEVC decoder drops late frames, while the
-// program viewport defaults to H.265 wherever the browser plays it.
-const lowLatency = query.get("lowlat") === "1";
-function playerUrl(output, codec) {
-  const url = new URL(playerBase);
-  const codecs = settings().preview_codecs;
-  if (output) url.searchParams.set("mountpoint", output.mountpoint);
-  else {
-    if (codecs?.length) url.searchParams.set("outputs", codecs.join(","));
-    url.searchParams.set("codec", codec);
-  }
-  if (lowLatency) url.searchParams.set("lowlat", "1");
-  return url.href;
-}
+// outputs.js lists the outputs (programOptions, previewOption) and builds their player URLs.
 // Program entries are "program", or "program:<codec>" when the mixer encodes the program twice.
 const isProgramValue = (value) => value === "program" || value.startsWith("program:");
-// Dirty renditions publish only their codec; like the player's own picker, H.265 is the HDR one.
-// On an SDR canvas both are SDR, so the codec names them.
-const RANGE_OF_CODEC = {h264: "SDR", h265: "HDR"};
-function programOptions(s, keys) {
-  const codecs = s.preview_codecs?.length ? s.preview_codecs : ["h265", "h264"].filter(playable);
-  const preferred = defaultCodec(codecs), name = keys ? "Program dirty" : "Program";
-  // The player shows its codec picker when the mixer has two program codecs.
-  const base = {group: "Program", dot: "var(--pgm)", program: true, chrome: s.preview_codecs?.length > 1 ? 60 : 49};
-  // Without the mixer's codecs yet, or with one, a single entry keeps the value saved by older pages.
-  if (!s.preview_codecs?.length || codecs.length < 2) {
-    return [{...base, value: "program", label: name, preferred: true, url: playerUrl(null, preferred),
-             unplayable: !playable(preferred),
-             meta: [keys && "with keys", s.preview_codecs?.length && codecName(preferred), formatText(s.canvas)].filter(Boolean).join(" · ")}];
-  }
-  const hdr = s.canvas.working_format !== "nv12";
-  return codecs.filter(playable).map((codec) => ({
-    ...base, value: `program:${codec}`, label: `${name} · ${(hdr && RANGE_OF_CODEC[codec]) || codecName(codec)}`,
-    preferred: codec === preferred, url: playerUrl(null, codec),
-    meta: [keys && "with keys", codecName(codec), s.canvas && canvasText(s.canvas)].filter(Boolean).join(" · "),
-  }));
-}
 function outputOptions() {
   const s = settings(), keys = Boolean(state?.dsk?.length);
   return [...programOptions(s, keys), ...(s.preview_outputs || []).map((o) => {
@@ -1051,8 +991,7 @@ function outputOptions() {
       : pages ? [`${aux.total} sources`, `${aux.pages} pages`, rateText(o)]
       : [["PGM", "PVW"].filter((role) => cellsOf(aux, role.toLowerCase()).length).join(" · "),
          slots && `${slots} scene slots`, sources && `${sources} sources`, rateText(o)];
-    return {value: o.bus, group: aux ? "Monitoring" : "Program", layout: o.layout, label: o.label || o.bus, url: playerUrl(o), chrome: 49,
-            unplayable: !playable(o.codec),
+    return {...previewOption(o), group: aux ? "Monitoring" : "Program", layout: o.layout,
             dot: !aux ? "var(--pgm)" : pages ? "var(--accent)" : "var(--pvw)", meta: meta.filter(Boolean).join(" · ")};
   })];
 }
@@ -1070,11 +1009,6 @@ const saveViewers = () => store.set("viewers", viewers.map((v) => v.out));
 // A saved output the mixer no longer offers, or "program" from a page without codec entries, plays the
 // default program.
 const optionOf = (v, options) => options.find((o) => o.value === v.out) || options.find((o) => o.preferred) || options[0];
-// Canvas pixels of an output: an aux bus reports its own, the program has the mixer's.
-function canvasSize(aux) {
-  const c = settings().canvas;
-  return aux?.canvas ? [aux.canvas.w, aux.canvas.h] : c ? [c.width, c.height] : [9, 16];
-}
 // The slots widget, the layout menu and the pager follow what the viewers show.
 const redraw = () => (state ? render() : layoutWall());
 
@@ -1133,7 +1067,7 @@ function addViewer(out) {
   viewers.push(v);
 }
 function refreshViewer(v, options) {
-  const opt = optionOf(v, options), aux = auxById(opt.value), size = canvasSize(aux);
+  const opt = optionOf(v, options), aux = auxById(opt.value), size = canvasSize(settings(), aux);
   v.dd.setOptions(options);
   v.dd.set(opt.value);
   v.el.style.setProperty("--tally", opt.dot);
@@ -1231,7 +1165,7 @@ function layoutWall() {
   // The deck takes whatever the monitors cannot use, so the divider stays at their edge and a drag resizes the video.
   main.style.gridTemplateColumns = deck === null ? "" : `minmax(${deck}px, 1fr) 14px auto`;
   const room = main.clientWidth - (deck ?? DECK_MIN) - 14, options = outputOptions();
-  const aspectOf = (v) => { const [w, h] = canvasSize(auxById(optionOf(v, options).value)); return w / h; };
+  const aspectOf = (v) => { const [w, h] = canvasSize(settings(), auxById(optionOf(v, options).value)); return w / h; };
   // The video gets what is left between the header and the stats row, inside the card's borders.
   const chrome = viewers[0].head.offsetHeight + viewers[0].statsRow.offsetHeight + 3, height = main.clientHeight - chrome;
   // n viewers side by side share the width; stacked they share the height.
