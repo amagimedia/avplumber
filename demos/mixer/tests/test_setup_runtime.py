@@ -185,8 +185,9 @@ def test_bitrate_is_configurable_and_scales_every_rendition():
 
 @pytest.mark.parametrize("fps, size", [(25, 6), (30, 6), (50, 9), (60, 9)])
 def test_browser_ring_default_tracks_fps(tmp_path, fps, size):
-    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "fps": fps, "browser_ring_size": size})
-    del recipe["browser_ring_size"]
+    # Settings saved with a ring size load; the setup leaves it to the frame rate's default.
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "fps": fps, "browser_ring_size": 11})
+    assert "browser_ring_size" not in recipe
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     from pyplumber.mixer.config import parse
     from mixer import GraphOptions
@@ -198,17 +199,11 @@ def test_browser_ring_default_tracks_fps(tmp_path, fps, size):
 
 @pytest.mark.parametrize("size", [6, 9, 11])
 def test_browser_ring_limit_reaches_show(tmp_path, size):
-    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "browser_ring_size": size})
+    recipe = {**recipe_for(T4, DEFAULT_SETTINGS), "browser_ring_size": size}   # a hand-written recipe
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     from pyplumber.mixer.config import parse
     assert parse(show).browser_ring_size == size
     assert parse(show).settings()["browser_ring_size"] == size
-
-
-@pytest.mark.parametrize("size", [0, 65, 6.5, True, "6"])
-def test_browser_ring_limit_validation(size):
-    with pytest.raises(ValueError, match="browser_ring_size"):
-        recipe_for(T4, {**DEFAULT_SETTINGS, "browser_ring_size": size})
 
 
 @pytest.mark.parametrize("value", [499, 40001, 0, -1, 6000.0, "6000", True])
@@ -949,9 +944,10 @@ def test_extra_aux_fill_nvenc_beside_the_program_clean_feed_and_own_buses(tmp_pa
     """The live show's encodes (docs/capacity.md): the H.264 program and clean feed, the HEVC HLG
     program on a 10-bit canvas and two own buses, at the program rate at 25/30 fps, half at 50/60."""
     for fps, limit in zip((25, 30, 50, 60), limits):
-        recipe = recipe_for(T4, {**KEYED, "fps": fps, "bit_depth": bit_depth})
-        show, _, _ = prepare_demo.plan(recipe, tmp_path)
-        assert extra_aux_limit(T4, parse({**show, "aux_buses": own_aux()})) == limit, fps
+        for settings in (KEYED, {**KEYED, "dsk": [], "clean_feed": False}):   # the clean feed counts even while off
+            recipe = recipe_for(T4, {**settings, "fps": fps, "bit_depth": bit_depth})
+            show, _, _ = prepare_demo.plan(recipe, tmp_path)
+            assert extra_aux_limit(T4, parse({**show, "aux_buses": own_aux()})) == limit, (fps, settings["clean_feed"])
 
 
 def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime, monkeypatch):

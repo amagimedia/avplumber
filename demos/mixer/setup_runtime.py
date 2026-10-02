@@ -20,7 +20,7 @@ from extra_aux import extra_buses
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import janus_mountpoints
 from pyplumber.mixer.color import default_codec
-from pyplumber.mixer.config import ConfigError, aux_fps, default_browser_ring_size, parse, parse_aux_buses
+from pyplumber.mixer.config import ConfigError, aux_fps, parse, parse_aux_buses
 
 DEMO_DIR = Path(__file__).resolve().parent
 # Phase markers with durations: restart timings are read from the container log.
@@ -46,8 +46,7 @@ HEALTHY_RUN_SEC = 300
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
-                        bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60),
-                        dsk=[], clean_feed=False, extra_aux=0)
+                        bitrate_kbps=DEFAULT_BITRATE_KBPS, dsk=[], clean_feed=False, extra_aux=0)
 def source_limit(profile, fps, bit_depth=8, chroma="420"):
     """The instance's per-rate total scaled by the canvas's share, never above what the NVDEC,
     browser and upload caps carry together. An unsupported pair (8-bit 4:2:2) is refused by the
@@ -65,6 +64,8 @@ def extra_aux_limit(profile, cfg):
         return fps * width * height / (1920 * 1080) * (nvenc["hevc_cost"] if "hevc" in codec else 1)
     load = sum(frames(r.width, r.height, r.fps, r.codec or default_codec(cfg.working_format))
                for r in (*cfg.renditions, *(b.renditions[0] for b in cfg.aux_buses)))
+    if not any(r.feed == "clean" for r in cfg.renditions):
+        load += frames(cfg.canvas_w, cfg.canvas_h, cfg.fps)   # the clean feed counts even while off
     budget = nvenc["budget_pct"] / nvenc["h264_pct_per_fps"]
     return max(0, int((budget - load) // frames(cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps))))
 
@@ -115,7 +116,9 @@ def recipe_for(profile, settings):
     """Accept only the bounded generic setup controls, never paths or commands; *profile* is the
     instance's entry in INSTANCE_PROFILES."""
     if isinstance(settings, dict):
-        settings = {"extra_aux": 0, **settings}   # saved before extra aux outputs
+        # Saved before extra aux outputs, or with the browser ring size the page no longer sets:
+        # the show takes the frame rate's default (config.default_browser_ring_size).
+        settings = {"extra_aux": 0, **{k: v for k, v in settings.items() if k != "browser_ring_size"}}
     if not isinstance(settings, dict) or set(settings) != set(DEFAULT_SETTINGS):
         raise ValueError("Expected orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
     for key, choices in (("orientation", ("portrait", "landscape")),
@@ -133,7 +136,7 @@ def recipe_for(profile, settings):
     limit = source_limit(profile, settings["fps"], settings["bit_depth"], settings["chroma"]) - len(dsk)
     if type(settings["source_count"]) is int and settings["source_count"] > limit >= 1:
         settings = {**settings, "source_count": limit}
-    for key, maximum in (("source_count", limit), ("scene_count", 192), ("browser_ring_size", 64)):
+    for key, maximum in (("source_count", limit), ("scene_count", 192)):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError(f"{key} must be an integer from 1 to {maximum}")
@@ -157,7 +160,6 @@ def recipe_for(profile, settings):
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
-    recipe["browser_ring_size"] = settings["browser_ring_size"]
     # Scale every rendition by what the SDR one was asked to change by, so their relative
     # quality is preserved and the recipe's own numbers stay the reference.
     reference = recipe["renditions"][0]["bitrate_kbps"]

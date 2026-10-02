@@ -33,6 +33,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 label { display: block; font-size: 12px; color: var(--muted); }
 label input, label select { display: block; width: 100%; margin-top: 5px; }
+label.toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
+label.toggle input { display: inline-block; width: auto; margin: 0; }
+.toggles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin-top: 12px; }
+.toggles + .toggles { padding-top: 12px; border-top: 1px solid var(--edge-soft); }
 .hint, details p { font-size: 12px; }
 .canvas-row { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--edge); }
 .canvas-row p { font-size: 12px; }
@@ -74,11 +78,12 @@ summary { cursor: pointer; }
 <label>Unique sources<input id="sources" type="number" min="1" max="41" step="1" value="16"></label>
 <label>Scenes<input id="scenes" type="number" min="1" max="192" step="1" value="32"></label>
 <label>Program bitrate<input id="bitrate" type="number" min="500" max="40000" step="500" value="6000"> <small>kbit/s</small></label>
-<label>Browser ring size<input id="browser-ring-size" type="number" min="1" max="64" step="1" value="9"> <small>Default: 6 at 25/30 fps, 9 at 50/60 fps</small></label>
+<label>Extra aux outputs<input id="extra-aux" type="number" min="0" max="0" step="1" value="0"></label>
 <label>Scene mix<select id="layout"><option value="balanced">Balanced · grids, fullscreen, PiP, random</option><option value="grids">Grids · up to your source count</option><option value="fullscreen">Fullscreen only</option></select></label>
 </div>
 <div class="canvas-row"><div><b id="canvas-label"></b><p id="canvas-format"></p><p id="input-size"></p></div></div>
 <p class="hint" id="source-limit"></p>
+<p class="hint" id="extra-aux-note"></p>
 <p class="hint">Unique sources are independent input chains. Scene count is the number of compositions you can switch between; scenes reuse those sources.</p>
 </section>
 <section class="card"><div class="card-title"><h2>Sources</h2></div>
@@ -90,18 +95,13 @@ summary { cursor: pointer; }
 </section>
 <section class="card"><div class="card-title"><h2>Downstream keys</h2></div>
 <p class="hint">Alpha browser graphics keyed over the finished program, above transitions and wipes. Each page is one more browser source and counts against the source and browser limits. Keys start off; switch them on the mixer page.</p>
-<div class="fields" id="dsk-pages">
-<label><input type="checkbox" value="lower_third"> Lower third · animated name plate</label>
-<label><input type="checkbox" value="ticker"> Ticker · second lower-third layer</label>
-<label><input type="checkbox" value="bug_left"> Corner bug · top left</label>
-<label><input type="checkbox" value="bug_right"> Clock bug · top right</label>
+<div class="toggles" id="dsk-pages">
+<label class="toggle"><input type="checkbox" value="lower_third"> Lower third · animated name plate</label>
+<label class="toggle"><input type="checkbox" value="ticker"> Ticker · second lower-third layer</label>
+<label class="toggle"><input type="checkbox" value="bug_left"> Corner bug · top left</label>
+<label class="toggle"><input type="checkbox" value="bug_right"> Clock bug · top right</label>
 </div>
-<label><input type="checkbox" id="clean-feed"> Clean feed: also encode the SDR program without keys (one more H.264 encode)</label>
-</section>
-<section class="card"><div class="card-title"><h2>Aux outputs</h2></div>
-<p class="hint">Extra monitor outputs after the instance’s own aux outputs, each with up to five random layouts of 4 to 16 sources. Each is one more H.264 encode: at the program rate at 25/30 fps, at half of it at 50/60.</p>
-<div class="fields"><label>Extra aux outputs<input id="extra-aux" type="number" min="0" max="0" step="1" value="0"></label></div>
-<p class="hint" id="extra-aux-note"></p>
+<div class="toggles"><label class="toggle"><input type="checkbox" id="clean-feed"> Clean feed · SDR program without keys</label></div>
 </section>
 <section class="card"><div class="card-title"><h2>Included with every setup</h2></div>
 <p class="hint">Two generated wipes: diagonal sweep and sliding panels. Each lasts two seconds at the selected FPS. Wipe caching is off.</p>
@@ -167,12 +167,12 @@ const sourceLimit = () => {
  return Math.min(Math.floor(profile.sources[fps]*profile.mode_share[$('mode').value]),nvdecLimit(fps)+browserLimit()+rawUploadUnits(fps))-dskPages().length;
 };
 // setup_runtime.extra_aux_limit for this page's encodes: the H.264 program, the HEVC HLG one on a
-// 10-bit canvas and the H.264 clean feed, then the instance's own aux buses (config.aux_fps); every
+// 10-bit canvas and the H.264 clean feed (counted even while off), then the instance's own aux buses (config.aux_fps); every
 // canvas here has 1080p's pixels.
 const auxFps=(fps,fullRate)=>fps>30&&!fullRate?fps/2:fps;
-function nvencShares(fps,tenBit,clean){
+function nvencShares(fps,tenBit){
  const {budget_pct,h264_pct_per_fps,hevc_cost}=profile.nvenc;
- const frames=fps*(1+(tenBit?hevc_cost:0)+(clean?1:0))+auxBuses.reduce((n,b)=>n+auxFps(fps,b.full_rate),0);
+ const frames=fps*(2+(tenBit?hevc_cost:0))+auxBuses.reduce((n,b)=>n+auxFps(fps,b.full_rate),0);
  return {used:frames*h264_pct_per_fps,each:auxFps(fps,false)*h264_pct_per_fps,
    limit:janusApi?Math.max(0,Math.floor((budget_pct/h264_pct_per_fps-frames)/auxFps(fps,false))):0};
 }
@@ -238,12 +238,12 @@ function update(){
  $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps${tenBit?` on a 10-bit ${outputMode().chroma==='422'?'4:2:2':'4:2:0'} canvas (estimated)`:''}.`+
    (scaledFrom?` Scaled down from ${scaledFrom} to fit this mode.`:'')+` Limits measured on ${instanceType}.`;
  $('browser-max').textContent=` · maximum ${browserLimit()}`;
- const clean=$('clean-feed').checked&&dskPages().length>0,nvenc=nvencShares(fps,tenBit,clean);
+ const clean=$('clean-feed').checked&&dskPages().length>0,nvenc=nvencShares(fps,tenBit);
  extraLimit=nvenc.limit;$('extra-aux').max=extraLimit;
  if(Number($('extra-aux').value)>extraLimit)$('extra-aux').value=extraLimit;
  const percent=n=>`${+n.toFixed(1)}%`;
- $('extra-aux-note').textContent=janusApi?`Maximum ${extraLimit} at ${fps} fps: the program encodes and ${auxBuses.length} aux output${auxBuses.length===1?'':'s'} take ${percent(nvenc.used)} of NVENC and each extra output ${percent(nvenc.each)}, of the ${profile.nvenc.budget_pct}% budget on ${instanceType}.`
-   :'Unavailable: webui.py needs --janus-api to create their Janus mountpoints.';
+ $('extra-aux-note').textContent=janusApi?`Extra aux outputs: at most ${extraLimit}, each with random layouts of 4–16 sources. The program, clean feed and ${auxBuses.length} aux output${auxBuses.length===1?'':'s'} use ${percent(nvenc.used)} of NVENC, each extra output ${percent(nvenc.each)} (budget ${profile.nvenc.budget_pct}%).`
+   :'Extra aux outputs need webui.py --janus-api to create their Janus mountpoints.';
  if(Number($('scenes').value)>192)$('scenes').value=192;
  const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,192),bitrate=integer('bitrate',500,40000);
  if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
@@ -258,7 +258,7 @@ function update(){
  }
  currentSettings={orientation:$('orientation').value,fps,
    source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts],
-   bitrate_kbps:bitrate,browser_ring_size:integer('browser-ring-size',1,64),
+   bitrate_kbps:bitrate,
    dsk:dskPages(),clean_feed:clean,extra_aux:integer('extra-aux',0,extraLimit)};
  types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(document.activeElement!==input&&(Number(input.value)!==counts[i]||input.value===''))input.value=counts[i];input.max=sourceMaximum(i);});
  $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
@@ -287,7 +287,7 @@ function update(){
 }
 function setBusy(value){
  busy=value||submitting;
- document.querySelectorAll('.fields input,.fields select,[data-preset]').forEach(el=>el.disabled=busy);
+ document.querySelectorAll('.fields input,.fields select,.toggles input,[data-preset]').forEach(el=>el.disabled=busy);
  types.forEach((t,i)=>{$(`count-${t.id}`).disabled=busy||!sourceEnabled(i)});
  $('extra-aux').disabled=busy||!extraLimit;
  $('apply').disabled=!currentSettings||busy||!online;
@@ -310,9 +310,8 @@ async function refresh(){
     const s=status.settings;
     previousDepth=s.bit_depth??10;
     $('mode').value=`${previousDepth}:${s.chroma??(previousDepth===8?'420':'422')}`;
-    for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps','browser-ring-size':'browser_ring_size','extra-aux':'extra_aux'}))if(s[key]!==undefined)$(id).value=s[key];
+    for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps','extra-aux':'extra_aux'}))if(s[key]!==undefined)$(id).value=s[key];
     document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;
-    if(s.browser_ring_size===undefined)$('browser-ring-size').value=Number($('fps').value)<=30?6:9;
     sourceValues=types.map((_,i)=>s.weights[i]??0);syncCounts();
    }
    loaded=true;update();
@@ -401,13 +400,10 @@ $('mode').addEventListener('input',()=>{
  previousDepth=bit_depth;
  syncCounts();update();
 });
-document.querySelectorAll('.fields input,.fields select,#clean-feed').forEach(input=>{
+document.querySelectorAll('.fields input,.fields select,.toggles input').forEach(input=>{
  if(input.id!=='mode')input.addEventListener('input',update);
  // A new total takes the Balanced mix of this canvas, whatever the counts were before.
  if(input.id==='sources')input.addEventListener('input',()=>{scaledFrom=0;resizeValues=foldForMode([...presets.balanced]);},{capture:true});
-});
-$('fps').addEventListener('input',()=>{
- $('browser-ring-size').value=Number($('fps').value)<=30?6:9;update();
 });
 $('sources').addEventListener('blur',()=>{resizeValues=null});
 setBusy(true);refresh();
