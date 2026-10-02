@@ -210,6 +210,14 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         have_prev_ = false;
     }
 
+    void destroyOFSession() {
+        destroyOFBuffers();
+        if (hOF_ && of_.nvOFDestroy) {
+            CCM_CHECK_OF(of_.nvOFDestroy(hOF_));
+            hOF_ = nullptr;
+        }
+    }
+
 #if HAVE_CCM_GPU_IRLS
     void releaseGpuIrlsBuffers() {
         if (d_gpu_irls_reduce_) {
@@ -298,10 +306,18 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
 #endif
 
     bool ensureSession(int width, int height) {
-        if (hOF_ && of_w_ == width && of_h_ == height && inBuf_ && refBuf_ && outBuf_) {
+        if (hOF_ && of_w_ == width && of_h_ == height && inBuf_ && refBuf_ && outBuf_ && costBuf_) {
             return true;
         }
-        destroyOFBuffers();
+        if (hOF_) {
+            // NvOFInit cannot resize an initialized handle. Drain this node's
+            // stream before replacing the session and its reference buffers.
+            if (CCM_CHECK_CU(cuStreamSynchronize(stream_))) return false;
+            logstream << "cuda_camera_motion: recreating NVOF session "
+                      << of_w_ << "x" << of_h_ << " -> " << width << "x" << height;
+        }
+        destroyOFSession();
+        if (!initOF()) return false;
 
         NV_OF_INIT_PARAMS init{};
         init.width = (uint32_t)width;
@@ -850,7 +866,7 @@ public:
 
     ~CudaCameraMotion() {
         if (cu_ctx_) CCM_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
-        destroyOFBuffers();
+        destroyOFSession();
 #if HAVE_CCM_GPU_IRLS
         releaseGpuIrlsBuffers();
         if (gpu_irls_module_) {
@@ -858,7 +874,6 @@ public:
             gpu_irls_module_ = nullptr;
         }
 #endif
-        if (hOF_ && of_.nvOFDestroy) { of_.nvOFDestroy(hOF_); hOF_ = nullptr; }
     }
 
     bool consumeEofIfPresent() override { return false; }
@@ -889,7 +904,7 @@ public:
             writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "invalid_luma_plane");
             this->sink_->put(frm); return;
         }
-        if (!initCudaContextFromFrame(frm) || !initOF() || !ensureSession(frm.width(), frm.height())) {
+        if (!initCudaContextFromFrame(frm) || !ensureSession(frm.width(), frm.height())) {
             if (strict_cuda_) throw Error("cuda_camera_motion: failed to initialize NVOF");
             writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "nvof_init_failed");
             this->sink_->put(frm); return;
