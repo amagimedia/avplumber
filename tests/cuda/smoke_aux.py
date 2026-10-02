@@ -129,8 +129,9 @@ def main():
             wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
             # Swap Preview/Program: the bus shows what mixer.status shows, the scene that left
             # program at the last switch ("blue"), or none when that take replaced a pending one.
-            pvw = pvw_scene()
-            assert pvw == control_json("mixer.status mixer")["pvw_scene"] and pvw in ("", "blue"), pvw
+            # The follower draws the last take a few frames after it, so wait for it to catch up.
+            wait_for(lambda: pvw_scene() == control_json("mixer.status mixer")["pvw_scene"])
+            assert pvw_scene() in ("", "blue"), pvw_scene()
             # An unavailable new input must leave the old AUX running, then
             # release the abandoned subscription. A newer request cancels it.
             app.mixer.preview("red")
