@@ -166,7 +166,8 @@ class AuxBus:
         return {"page": page, "pages": page_count(self.cfg), "first": page * per_page + 1, "total": len(self.cfg.sources)}
 
     def _summary(self):
-        return {"layout": self.layout, "scenes": list(self.scenes), "revision": self.revision, **self._pages()}
+        return {"layout": self.layout, "layouts": list(self.bus.layouts), "scenes": list(self.scenes),
+                "revision": self.revision, **self._pages()}
 
     def state(self):
         with self.lock:
@@ -180,7 +181,7 @@ class AuxBus:
             # Pending until the compositor draws this revision: the follower sets it a wake after
             # the change, and the compositor stages it until its new inputs have frames.
             pending = status.get("composition_pending", False) or status.get("composition_revision") != self.revision
-            return {"id": self.bus.id, "error": self.error, "layouts": list(self.bus.layouts), "cells": cells,
+            return {"id": self.bus.id, "error": self.error, "cells": cells,
                     "max_layers": self.bus.max_layers, "canvas": {"w": self.cfg.canvas_w, "h": self.cfg.canvas_h},
                     "fps": self.fps, "latency_ms": self.latency_ms(), "pvw_align": self.bus.pvw_align,
                     "pgm_delay_frames": self.pgm_delay_frames, "follower": self.follower_status,
@@ -208,7 +209,7 @@ class AuxBus:
         with self.lock:
             layout = parse_layout(self.cfg, request.get("layout"))
             if not self.pgm_edge and draws_program(self.cfg, [layout]):
-                raise ConfigError(f"aux {self.bus.id} has no program input: its layouts draw no pgm cell")
+                raise ConfigError(f"aux {self.bus.id} has no PGM pad for a pgm cell: neither its layout nor its layouts have one")
             cells = layout_cells(self.cfg, layout, layout.get("page", 0))
             scenes = self.scenes + [None] * (count(cells, "slot") - len(self.scenes))
             check_assignments(self.cfg, cells, scenes, self.bus.max_layers)

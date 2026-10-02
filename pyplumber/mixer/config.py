@@ -196,7 +196,7 @@ class AuxBusConfig:
     scenes: Tuple[Optional[str], ...]    # slot assignments by slot index, at least one per slot cell
     renditions: Tuple[Rendition, ...]
     layout: Dict[str, Any]               # the initial layout
-    layouts: Tuple[Dict[str, Any], ...]  # what the operator can switch to, the initial one first
+    layouts: Tuple[Dict[str, Any], ...]  # the operator's menu, the initial one first; a pgm cell adds the PGM pad
     max_layers: int                      # the compositor's layer budget, fixed at build
     # when a pvw cell changes on a take: "program", with the program output, or "pgm_tile", with
     # the pgm cell of the same frame (one pgm_delay_frames later).
@@ -614,10 +614,10 @@ def _parse_bus_timing(obj, canvas_fps):
 
 def parse_aux_buses(values, cfg):
     """Each bus: its initial `layout` (pgm_pvw_grid by default) and the `layouts` the operator can
-    switch to (both presets by default), its slot assignments `scenes`, and the layer budget
-    `max_layers`, by default what the largest of its layouts draws, up to max_compositor_layers."""
-    from .aux_layout import (PRESETS, check_assignments, count, draws_program, layout_cells, max_layer_count,
-                             parse_layout, same_kind)
+    switch to (by default the presets, pgm_pvw_grid only when `layout` has a pgm cell itself), its
+    slot assignments `scenes`, and the layer budget `max_layers`, max_compositor_layers by default.
+    The bus gets the PGM pad only when `layout` or `layouts` has a pgm cell."""
+    from .aux_layout import PRESETS, check_assignments, count, draws_program, layout_cells, parse_layout, same_kind
     if not isinstance(values, list) or len(values) > 30:
         raise ConfigError("aux_buses must be a list of at most 30 buses")
     if values and cfg.fps not in (25, 30, 50, 60):
@@ -629,7 +629,8 @@ def parse_aux_buses(values, cfg):
             raise ConfigError("aux bus IDs must be unique identifiers")
         ids.add(bid)
         layouts = [parse_layout(cfg, obj.get("layout", {"preset": "pgm_pvw_grid"}))]
-        offered = obj.get("layouts", [{"preset": p} for p in PRESETS])
+        offered = obj.get("layouts", [{"preset": p} for p in PRESETS
+                                      if draws_program(cfg, layouts) or not draws_program(cfg, [{"preset": p}])])
         if not isinstance(offered, list) or len(offered) > 16:
             raise ConfigError(f"aux {bid}: layouts must be a list of at most 16 layouts")
         for spec in (parse_layout(cfg, spec) for spec in offered):
@@ -637,8 +638,7 @@ def parse_aux_buses(values, cfg):
                 layouts.append(spec)
         if len(cfg.sources) + draws_program(cfg, layouts) > 128:
             raise ConfigError("an aux bus needs one pad per unique source, plus PGM when a layout draws it; limit is 128")
-        max_layers = obj.get("max_layers", min(cfg.max_compositor_layers,
-                                               max(max_layer_count(cfg, layout_cells(cfg, spec)) for spec in layouts)))
+        max_layers = obj.get("max_layers", cfg.max_compositor_layers)
         if type(max_layers) is not int or not 1 <= max_layers <= 2_147_483_647:
             raise ConfigError(f"aux {bid}: max_layers must be a positive 32-bit integer")
         cells = layout_cells(cfg, layouts[0], layouts[0].get("page", 0))

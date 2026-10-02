@@ -36,7 +36,7 @@ supplied by that file; the runtime does not depend on the recorded demo's inputs
 `canvas`, `sources` and `scenes` are required; everything else has a default.
 
 `max_compositor_layers` is the per-compositor draw budget (default 256), and
-caps an aux bus's default `max_layers`. Eight 64-input slots of a
+an aux bus's default `max_layers`. Eight 64-input slots of a
 `pgm_pvw_grid` aux bus need 577 layers: 512 for the slots, 64 reserved for PVW
 and one for the already-composited PGM. Set the budget to `640`, or
 override a show with `--max-compositor-layers 640`. Recipes accept the same field; setup changes
@@ -438,18 +438,20 @@ list order and the `pgm` cells last, over any cell they overlap.
 | field | default | meaning |
 | --- | --- | --- |
 | `layout` | `{"preset": "pgm_pvw_grid"}` | the layout the bus starts with |
-| `layouts` | both presets | further layouts the operator can switch to (at most 16); the control page offers `layout` and these |
+| `layouts` | `source_pages`, and `pgm_pvw_grid` when `layout` has a `pgm` cell | further layouts the control page offers besides `layout` (at most 16) |
 | `scenes` | none | slot assignments by slot index, `null` for an empty slot; padded with `null` to the layout's slot count |
-| `max_layers` | the largest of its layouts, at most `max_compositor_layers` | the bus compositor's layer budget, fixed at build: a layout's PVW reserve, slots, sources and PGM. A layout or assignment over it is refused |
+| `max_layers` | `max_compositor_layers` | the bus compositor's layer budget, fixed at build: a layout's PVW reserve, slots, sources and PGM. A layout or assignment over it is refused. Each frame's work follows the layers it draws; the budget sizes only the layer table, 128 bytes per layer on the GPU and in pinned host memory |
 | `latency_ms` | the mixer's `latency_ms` | the bus compositor's playout buffer. The sources reach a bus when they reach the program compositors, so the program's buffer leaves it the same slack (1.5 aux frames at 60 fps: 50 ms); a bus at the program's buffer can change its PVW cells when the program changes. Bus latency plus `pgm_delay_frames` must stay below six aux frames |
 | `pgm_delay_frames` | `1`, `2` at a 50/60 fps bus | aux frames the PGM pad is matched back. The finished program leaves the main compositor `latency_ms` after its timestamp, when the bus would already be drawing that frame's tick, and needs a margin to cross the output chain (snapshot, selectors, keyer, tap) to the bus: `pgm_delay_frames × aux frame + latency_ms` must exceed the mixer's `latency_ms` by at least one program frame (checked at build for a bus whose layouts draw the program). The default gives about 33 ms (40 at 25/50) at any rate, which is why a `full_rate` bus at 50/60 takes two of its frames; `1` there leaves one program frame (16.7 ms at 60), and `0` needs a bus `latency_ms` at least a program frame above the mixer's, which delays every cell instead of the PGM cells alone |
 | `pvw_align` | `"program"` | when the PVW cells change on a take. `program`: on the bus frame leaving the bus when the program frame of the take leaves the mixer, so the operator sees both at once; the PGM cells of the same frame follow `pgm_delay_frames` later. `pgm_tile`: together with those PGM cells, `pgm_delay_frames` after the program |
 | `full_rate` | `false` | run the bus at the canvas rate at 50/60 fps instead of half. Costs about twice the bus's compositor and encoder work on the GPU (a second bus's worth at 1080p60), and the rendition's `bitrate_kbps` then covers twice the frames, so raise it to keep the quality per frame; no change at 25/30 |
 
-A bus gets a PGM pad (the program tap's subscribed output) only when one of
-its layouts has a `pgm` cell; a bus without one refuses a switch to a layout
-that draws the program. `"layouts": []` keeps a `source_pages` bus to its own
-layout: no PGM pad, no program latency check, 128 sources.
+A bus gets a PGM pad (the program tap's subscribed output) only when its
+`layout` or one of its `layouts` has a `pgm` cell, as the default
+`pgm_pvw_grid` has. A `source_pages` bus has none by default: no program
+latency check, 128 sources. A bus without the pad can switch to any layout
+without a `pgm` cell and refuses one with it; list `{"preset": "pgm_pvw_grid"}`
+in its `layouts` to give it the pad.
 Each bus needs its own Janus RTP/RTCP port pair and a Janus mountpoint whose ID
 equals its RTP port; the bundled Janus config has one for 5008 (RTCP 5009).
 
@@ -476,9 +478,10 @@ Control commands, each `{"bus": <id>, ...}`:
 The control page offers each bus as an output, with a menu of its layouts when
 it has several, and M1… slot buttons for the bus a viewer shows: arm a slot,
 then click a scene; × clears it, and Shift+1–9 assigns the selected scene.
-Recipes accept the same block. Setup changes keep each bus's live layout and
-assignments: slots whose scene no longer exists or no longer fits the bus's
-budget are cleared, and source pages follow the new source list from page 0.
+Recipes accept the same block. Setup changes keep each bus's live layout,
+`layouts` (with them its PGM pad) and assignments: slots whose scene no longer
+exists or no longer fits the bus's budget are cleared, and source pages follow
+the new source list from page 0.
 With a bus configured, scene definitions are fixed until the next setup,
 `mixer.scene` included. A bus suspends after sustained encoder backpressure;
 the next assignment, layout switch or page turn resumes it.
@@ -509,8 +512,8 @@ the lock order and what each latency field measures.
 ## Known limitations
 
 - **128 sources per show, or 127 with an aux bus that can draw the program.** Every
-  source is a pad on the compositor; a bus with a `pgm` cell in one of its layouts
-  (by default, every bus) reserves one additional pad for PGM. 8-bit or 10-bit makes no difference;
+  source is a pad on the compositor; a bus with a `pgm` cell in its `layout` or
+  `layouts` (by default, a `pgm_pvw_grid` bus) reserves one additional pad for PGM. 8-bit or 10-bit makes no difference;
   scenes and aliases are free. Sources cannot be added while running: the
   pads are wired at build time. A document with more sources is rejected at load.
 - **16 boxes per scene** in the built-in `--input` layouts; a `--config` scene has no box limit.

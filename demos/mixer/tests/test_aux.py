@@ -218,12 +218,12 @@ def test_budget_counts_the_largest_preview_and_refuses_beyond_it(cfg):
         check_assignments(cfg, cells, ["missing"] + [None] * 7, 512)
 
 
-def test_bus_budget_defaults_to_its_largest_layout(cfg):
-    # Every slot with the 64-item scene: 9 * 64 + 1 = 577 layers, capped by max_compositor_layers.
-    assert parse_aux_buses([bus_json()], cfg)[0].max_layers == 577
+def test_bus_budget_defaults_to_max_compositor_layers(cfg):
+    # A frame draws only its own layers; the budget costs 128 bytes of layer table per layer.
+    assert parse_aux_buses([bus_json()], cfg)[0].max_layers == 640
     assert parse_aux_buses([bus_json()], replace(cfg, max_compositor_layers=256))[0].max_layers == 256
-    pages = parse_aux_buses([pages_json(layouts=[])], cfg)[0]
-    assert (pages.max_layers, pages.layouts) == (12, (pages.layout,))
+    pages = parse_aux_buses([pages_json()], cfg)[0]
+    assert (pages.max_layers, pages.layouts) == (640, (pages.layout,))
     assert parse_aux_buses([bus_json(max_layers=100, scenes=[])], cfg)[0].max_layers == 100
     with pytest.raises(ConfigError, match="max_layers is 100"):
         parse_aux_buses([bus_json(max_layers=100, scenes=["grid64", "grid64"])], cfg)
@@ -237,9 +237,9 @@ def test_bus_validation_and_distinct_outputs(cfg):
                              pages_json(id="third", renditions=[{"id": "monitor", "port": 5014}])], cfg)
     assert [b.id for b in buses] == ["multiview", "second", "third"]
     assert buses[0].renditions[0].fps == 30 and buses[0].renditions[0].codec == "h264_nvenc"
-    # Both presets are offered by default, the initial layout first.
+    # The presets by default, the initial layout first; the grid only beside a layout with a pgm cell.
     assert [l.get("preset") for l in buses[0].layouts] == ["pgm_pvw_grid", "source_pages"]
-    assert [l.get("preset") for l in buses[2].layouts] == ["source_pages", "pgm_pvw_grid"]
+    assert [l.get("preset") for l in buses[2].layouts] == ["source_pages"]
     assert buses[2].scenes == (None,) * 0 and buses[0].scenes == ("full",) * 8
     assert parse_aux_buses([bus_json(scenes=["full"])], cfg)[0].scenes == ("full",) + (None,) * 7
     custom = parse_aux_buses([bus_json(layout={"cells": CELLS}, scenes=[None] * 3)], cfg)[0]
@@ -257,13 +257,13 @@ def test_bus_validation_and_distinct_outputs(cfg):
 
 def test_program_pad_only_for_buses_whose_layouts_draw_it(cfg):
     many = replace(cfg, sources=tuple(Source(f"s{i}", "video", f"c{i}.mp4", 1920, 1080) for i in range(128)))
-    assert parse_aux_buses([pages_json(layouts=[])], many)
+    assert parse_aux_buses([pages_json()], many)
     with pytest.raises(ConfigError, match="128"):
-        parse_aux_buses([pages_json()], many)   # pgm_pvw_grid is offered: it needs the PGM pad
-    pages, grid = make_bus(cfg, pages_json(layouts=[])), make_bus(cfg, bus_json())
+        parse_aux_buses([pages_json(layouts=[{"preset": "pgm_pvw_grid"}])], many)   # listed: it needs the PGM pad
+    pages, grid = make_bus(cfg, pages_json()), make_bus(cfg, bus_json())
     assert (pages.pgm_edge, pages.inputs()[-1], pages.pgm_delay_frames) == (None, "aux_sources_source_63", 0)
     assert (grid.inputs()[-1], grid.pgm_delay_frames) == ("aux_multiview_pgm", 1)
-    with pytest.raises(ConfigError, match="no program input"):
+    with pytest.raises(ConfigError, match="no PGM pad for a pgm cell"):
         pages.set_layout({"layout": {"preset": "pgm_pvw_grid"}})
 
 
@@ -411,7 +411,7 @@ def test_commands_route_any_number_of_buses_by_id(cfg):
     assert [l.get("preset") for l in grid["layouts"]] == ["pgm_pvw_grid", "source_pages"]
     assert (pages["page"], pages["pages"], pages["first"], pages["total"]) == (3, 6, 37, 64)
     assert pages["cells"][0] == {"role": "source", "source": 36, "id": "s36", "kind": "video", **page_grid(cfg)[0]}
-    assert (grid["fps"], grid["latency_ms"], grid["pvw_align"], grid["pgm_delay_frames"], grid["max_layers"]) == (30, 50, "program", 1, 577)
+    assert (grid["fps"], grid["latency_ms"], grid["pvw_align"], grid["pgm_delay_frames"], grid["max_layers"]) == (30, 50, "program", 1, 640)
 
 
 def test_page_commands_show_and_step_pages(cfg):
@@ -483,7 +483,7 @@ def test_bus_builds_its_nodes_in_one_group(cfg, monkeypatch):
     compositor, converted, follower = (n.parameters for n in nodes)
     assert {p["group"] for p in (compositor, converted, follower)} == {"aux_multiview"}
     assert compositor["src"] == compositor["subscriptions"] == [*bus.edges, "aux_multiview_pgm"]
-    assert (compositor["max_layers"], compositor["pgm_delay_frames"]) == (577, 1)
+    assert (compositor["max_layers"], compositor["pgm_delay_frames"]) == (640, 1)
     assert compositor["layers"] == follower["layout"]["base"]["layers"]
     assert (follower["type"], follower["name"], follower["compositor"]) == ("mixer_pvw_follow", "aux_multiview_pvw", "aux_multiview_comp")
     assert (follower["fps"], follower["latency_ms"], follower["main_latency_ms"], follower["align"]) == ("30", 50, 50, "program")
@@ -510,12 +510,12 @@ def test_program_frame_must_reach_the_bus_before_its_deadline(cfg):
             _build_until_the_graph(cfg, bus_json(**options), 50)
     for spec in (bus_json(), bus_json(pgm_delay_frames=0, latency_ms=83.4), bus_json(pgm_delay_frames=0, latency_ms=66.7),
                  bus_json(full_rate=True), bus_json(full_rate=True, pgm_delay_frames=1),
-                 pages_json(layouts=[], pgm_delay_frames=0, latency_ms=20)):
+                 pages_json(pgm_delay_frames=0, latency_ms=20)):
         with pytest.raises(_Built):
             _build_until_the_graph(cfg, spec, 50)
 
 
-@pytest.mark.parametrize("spec,limit", [(bus_json(), 200), (pages_json(layouts=[]), 240)])
+@pytest.mark.parametrize("spec,limit", [(bus_json(), 200), (pages_json(), 240)])
 def test_latency_budget_counts_the_pgm_delay(cfg, spec, limit):
     """At 25 fps six ticks are 240 ms, and a bus's PGM input is held one tick more."""
     cfg25 = replace(cfg, fps=25)
@@ -532,3 +532,26 @@ def test_bus_latency_defaults_to_the_main_mixer(cfg):
     for latency, expected in ((default_latency_ms(25), 80), (120, 120), (20, 20)):
         assert make_bus(cfg25, pages_json(), latency_ms=latency).latency_ms() == expected
     assert make_bus(cfg, bus_json(latency_ms=70)).latency_ms() == 70   # the bus's own wins
+
+
+def test_a_bus_without_the_pgm_pad_draws_any_layout_but_pgm_cells(cfg):
+    """No layout of a source_pages bus asks for the program: no PGM pad, yet at runtime it draws any
+    layout without a pgm cell and refuses one with it. Listing the grid gives it the pad."""
+    avp = FakeAvp()
+    bus = make_bus(cfg, pages_json(), avp)
+    reachable(avp, bus)
+    no_pgm = [c for c in CELLS if c["role"] != "pgm"]
+    result = bus.set_layout({"layout": {"cells": no_pgm}})
+    assert (result["layout"], result["layouts"], result["scenes"]) == ({"cells": no_pgm}, [bus.bus.layout], [None] * 3)
+    bus.assign({"expected_revision": bus.revision, "scenes": [None, "full", None]})
+    assert [l["input"] for l in avp.layouts[-1]["base"]["layers"]] == [63, 0]   # cells in list order
+    before = bus.layout, bus.revision, len(avp.layouts)
+    for layout in ({"preset": "pgm_pvw_grid"}, {"cells": CELLS}):
+        with pytest.raises(ConfigError, match="no PGM pad for a pgm cell"):
+            bus.set_layout({"layout": layout})
+    assert (bus.layout, bus.revision, len(avp.layouts)) == before
+    cells = make_bus(cfg, bus_json(layout={"cells": no_pgm}, scenes=[]))
+    assert (cells.pgm_edge, [l.get("preset") for l in cells.bus.layouts]) == (None, [None, "source_pages"])
+    listed = make_bus(cfg, pages_json(layouts=[{"preset": "pgm_pvw_grid"}]))
+    assert (listed.inputs()[-1], listed.pgm_delay_frames) == ("aux_sources_pgm", 1)
+    assert [l.get("preset") for l in listed.bus.layouts] == ["source_pages", "pgm_pvw_grid"]

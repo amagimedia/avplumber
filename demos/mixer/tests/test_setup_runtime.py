@@ -391,9 +391,11 @@ def test_setup_preserves_live_aux_through_color_change_and_resume(runtime, monke
                           "renditions": [{"id": "monitor", "port": 5008}]}]
     config.write_text(json.dumps(show))
     live = [scene_ids[1], scene_ids[-1], *([None] * 6)]
-    # The live layout carries over; its page does not, pages follow the new source list.
+    # The live layout and layouts carry over, the grid's PGM pad with them; pages follow the new
+    # source list from page 0.
     layout = {"preset": "source_pages", "page": 1}
-    runtime.bridge.command = lambda cmd: json.dumps([{"id": "mv", "layout": layout, "scenes": live}])
+    layouts = [{"preset": "pgm_pvw_grid"}, layout]
+    runtime.bridge.command = lambda cmd: json.dumps([{"id": "mv", "layout": layout, "layouts": layouts, "scenes": live}])
     def prepare(recipe, directory):
         generated, _, _ = prepare_demo.plan(recipe, directory)
         config.write_text(json.dumps(generated))
@@ -405,6 +407,7 @@ def test_setup_preserves_live_aux_through_color_change_and_resume(runtime, monke
     assert changed["canvas"]["color"] == ("sdr" if after == 8 else "hlg")
     assert changed["aux_buses"][0]["scenes"] == live
     assert changed["aux_buses"][0]["layout"] == {"preset": "source_pages"}
+    assert changed["aux_buses"][0]["layouts"] == [{"preset": "pgm_pvw_grid"}, {"preset": "source_pages"}]
     from pyplumber.mixer.config import parse
     rendition = parse(changed).aux_buses[0].renditions[0]
     assert (rendition.codec, rendition.color, rendition.port) == ("h264_nvenc", "sdr", 5008)
@@ -737,11 +740,12 @@ def test_live_aux_assignments_survive_resume(runtime, monkeypatch):
     runtime.recipe_path.write_text(json.dumps(recipe))
     live = [scene_ids[1], None, scene_ids[-1], *([None] * 5)]
     layout = {"preset": "source_pages", "page": 0}
+    layouts = [{"preset": "pgm_pvw_grid"}, layout]   # a grid bus switched to its pages keeps the grid
     runtime.remember_aux("mv", {"scenes": live, "revision": "r"})
-    runtime.remember_aux("mv", {"layout": layout, "page": 0})
+    runtime.remember_aux("mv", {"layout": layout, "layouts": layouts, "page": 0})
     runtime.remember_aux("unknown", {"scenes": live})
     assert json.loads(config.read_text())["aux_buses"][0] == {
-        "id": "mv", "scenes": live, "layout": layout, "renditions": [{"id": "monitor", "port": 5008}]}
+        "id": "mv", "scenes": live, "layout": layout, "layouts": layouts, "renditions": [{"id": "monitor", "port": 5008}]}
     def prepare(recipe, directory):
         generated, _, _ = prepare_demo.plan(recipe, directory)
         config.write_text(json.dumps(generated))
@@ -752,7 +756,7 @@ def test_live_aux_assignments_survive_resume(runtime, monkeypatch):
     assert runtime.status()["phase"] == "running", runtime.status()
     from pyplumber.mixer.config import parse
     bus = parse(json.loads(config.read_text())).aux_buses[0]
-    assert (bus.layout, list(bus.scenes)) == (layout, live)
+    assert (bus.layout, list(bus.scenes), bus.layouts) == (layout, live, (layout, layouts[0]))
 
 
 def test_stale_preparation_directories_are_removed_on_start(tmp_path):

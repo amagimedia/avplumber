@@ -167,12 +167,6 @@ def layer_count(cfg, cells, scenes):
     return _reserved(cfg) * count(cells, "pvw") + len(base_composition(cfg, cells, scenes)["layers"])
 
 
-def max_layer_count(cfg, cells):
-    """layer_count() with the largest scene in every slot."""
-    largest = max(cfg.scenes, key=lambda s: len(s.items)).id
-    return layer_count(cfg, cells, [largest] * count(cells, "slot"))
-
-
 def check_assignments(cfg, cells, scenes, max_layers):
     """*scenes*, by slot index, must cover every slot cell, name known scenes, and fit *max_layers*."""
     if not isinstance(scenes, (list, tuple)) or len(scenes) < count(cells, "slot"):

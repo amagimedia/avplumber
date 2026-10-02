@@ -289,12 +289,15 @@ class SetupRuntime:
             live = {b["id"]: b for b in json.loads(self.bridge.command("mixer.aux_status"))}
         cfg = parse(show)
         scene_ids = {s.id for s in cfg.scenes}
+        unpaged = lambda spec: {k: v for k, v in spec.items() if k != "page"}   # pages follow the new sources
         for bus in buses:
             for rendition in bus["renditions"]:
                 rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=aux_fps(cfg.fps, bus.get("full_rate", False)))
             state = live.get(bus["id"], bus)
             if "layout" in state:
-                bus["layout"] = {k: v for k, v in state["layout"].items() if k != "page"}   # pages follow the new sources
+                bus["layout"] = unpaged(state["layout"])
+            if "layouts" in state:   # the live menu, and with it the PGM pad when a layout has a pgm cell
+                bus["layouts"] = [unpaged(spec) for spec in state["layouts"]]
             scenes = [s if s in scene_ids else None for s in state.get("scenes", [])]
             for i, scene in enumerate(scenes):
                 if not scene:
@@ -309,8 +312,9 @@ class SetupRuntime:
 
     def remember_aux(self, bus_id, fields):
         """Persist an operator's change of a bus's ``layout`` or ``scenes`` (a mixer.aux,
-        mixer.aux_layout or mixer.aux_page answer), so a resume or restart shows the same bus."""
-        fields = {k: fields[k] for k in ("layout", "scenes") if k in fields}
+        mixer.aux_layout or mixer.aux_page answer), so a resume or restart shows the same bus;
+        its ``layouts`` too, which keep the PGM pad of a bus switched away from its pgm cells."""
+        fields = {k: fields[k] for k in ("layout", "layouts", "scenes") if k in fields}
         with self.lock:   # an Apply carries the live bus over itself (_preserve_aux)
             if self.worker and self.worker.is_alive():
                 return
