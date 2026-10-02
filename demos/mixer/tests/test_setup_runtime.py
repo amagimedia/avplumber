@@ -9,8 +9,10 @@ import pytest
 
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import prepare_demo
+from pyplumber.mixer.aux_layout import draws_program
+from pyplumber.mixer.config import parse
 from setup_runtime import (DEFAULT_SETTINGS, HEALTHY_RUN_SEC, RECOVER_TIMEOUT_SEC, RETRY_DELAYS_SEC, STOP_TIMEOUT_SEC,
-                           SetupRuntime, recipe_for, source_counts, source_limit)
+                           SetupRuntime, extra_aux_limit, recipe_for, source_counts, source_limit)
 from webui import serve
 
 T4 = INSTANCE_PROFILES[InstanceType.TESLA_T4]
@@ -929,3 +931,94 @@ def test_every_profile_covers_every_rate_and_canvas(tmp_path, instance_type):
     status = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), instance_type).status()
     assert status["instance_type"] == instance_type.value
     assert json.loads(json.dumps(status))["profile"]["nvdec_decodes"].keys() == {"25", "30", "50", "60"}
+    assert profile["nvenc"].keys() == {"budget_pct", "h264_pct_per_fps", "hevc_cost"}
+
+
+def own_aux():
+    """The live show's own buses: Program preview and Multiviewer."""
+    return [{"id": "mv", "renditions": [{"id": "monitor", "port": 5008}]},
+            {"id": "mv2", "layout": {"preset": "source_pages"}, "renditions": [{"id": "monitor", "port": 5012}]}]
+
+
+# A key page and the clean feed, on four NVDEC sources and a browser page.
+KEYED = {**DEFAULT_SETTINGS, "dsk": ["lower_third"], "clean_feed": True, "chroma": "420", "weights": [4, 0, 0, 0, 1, 0, 0]}
+
+
+@pytest.mark.parametrize("bit_depth, limits", [(8, [9, 6, 7, 4]), (10, [7, 4, 3, 0])])
+def test_extra_aux_fill_nvenc_beside_the_program_clean_feed_and_own_buses(tmp_path, bit_depth, limits):
+    """The live show's encodes (docs/capacity.md): the H.264 program and clean feed, the HEVC HLG
+    program on a 10-bit canvas and two own buses, at the program rate at 25/30 fps, half at 50/60."""
+    for fps, limit in zip((25, 30, 50, 60), limits):
+        recipe = recipe_for(T4, {**KEYED, "fps": fps, "bit_depth": bit_depth})
+        show, _, _ = prepare_demo.plan(recipe, tmp_path)
+        assert extra_aux_limit(T4, parse({**show, "aux_buses": own_aux()})) == limit, fps
+
+
+def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime, monkeypatch):
+    runtime.janus_api = "http://127.0.0.1:8088/janus"
+    syncs = []
+    monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", lambda api, ports, prune=False: syncs.append((ports, prune)))
+    config = runtime.media_dir / "mixer.demo.json"
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory: config.write_text(
+        json.dumps(prepare_demo.plan(recipe, directory)[0])))
+    settings = {**KEYED, "fps": 30, "bit_depth": 8}
+    show, _, _ = prepare_demo.plan(recipe_for(T4, settings), runtime.media_dir)
+    config.write_text(json.dumps({**show, "aux_buses": own_aux()}))
+    live = {}
+    runtime.bridge.command = lambda command: json.dumps(list(live.values()))
+
+    def apply(count, **changes):
+        runtime.apply({**settings, **changes, "extra_aux": count})
+        runtime.worker.join(3)
+        assert runtime.status()["phase"] == "running", runtime.status()
+        return parse(json.loads(config.read_text()))
+
+    cfg = apply(3)
+    ports = {"aux1": 5016, "aux2": 5020, "aux3": 5024}
+    # Each is an output of the control page, its mountpoint created before the mixer starts.
+    assert [(o["bus"], o["label"], o["mountpoint"]) for o in cfg.settings()["preview_outputs"]][-3:] == [
+        ("aux1", "Aux 1", 5016), ("aux2", "Aux 2", 5020), ("aux3", "Aux 3", 5024)]
+    assert syncs == [(ports, False), (ports, True)]
+    assert runtime.status()["aux_buses"] == [{"id": "mv", "full_rate": False}, {"id": "mv2", "full_rate": False}]
+    first = cfg.aux_buses
+    for bus in first[2:]:
+        assert len(bus.layouts) == 5 and bus.layout == bus.layouts[0] and not draws_program(cfg, bus.layouts)
+        assert bus.renditions[0].bitrate_kbps == first[0].renditions[0].bitrate_kbps
+    # Fewer drops the last ones; the operator's pick on aux2 stays.
+    live["aux2"] = {"id": "aux2", "layout": first[3].layouts[2], "layouts": list(first[3].layouts), "scenes": []}
+    cfg = apply(2)
+    assert [b.id for b in cfg.aux_buses] == ["mv", "mv2", "aux1", "aux2"]
+    assert cfg.aux_buses[3].layout == first[3].layouts[2]
+    assert syncs[-1] == ({"aux1": 5016, "aux2": 5020}, True)
+    # More adds them back: the same ids, ports and layouts.
+    cfg = apply(4)
+    assert [(b.id, b.label, b.renditions[0].port) for b in cfg.aux_buses[4:]] == [("aux3", "Aux 3", 5024), ("aux4", "Aux 4", 5028)]
+    assert cfg.aux_buses[4].layouts == first[4].layouts
+    # Another orientation draws them again, on the same outputs.
+    cfg = apply(4, orientation="landscape")
+    assert [b.renditions[0].port for b in cfg.aux_buses[2:]] == [5016, 5020, 5024, 5028]
+    assert cfg.aux_buses[2].layouts != first[2].layouts and (cfg.canvas_w, cfg.canvas_h) == (1920, 1080)
+    # None removes their mountpoints; with none before or after, Janus is not asked.
+    cfg = apply(0)
+    assert [b.id for b in cfg.aux_buses] == ["mv", "mv2"] and syncs[-1] == ({}, True)
+    calls = len(syncs)
+    apply(0)
+    assert len(syncs) == calls
+    with pytest.raises(ValueError, match="At most 6 extra aux outputs fit this setup's NVENC budget on tesla_t4"):
+        runtime.apply({**settings, "extra_aux": 7})
+    runtime.janus_api = None
+    with pytest.raises(ValueError, match="--janus-api"):
+        runtime.apply({**settings, "extra_aux": 1})
+
+
+def test_a_janus_failure_leaves_the_mixer_running_and_shows_in_the_status(runtime, monkeypatch):
+    runtime.janus_api = "http://127.0.0.1:8088/janus"
+    def refuse(*_):
+        raise OSError("Connection refused")
+    monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", refuse)
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory: (directory / "mixer.demo.json").write_text(
+        json.dumps(prepare_demo.plan(recipe, directory)[0])))
+    runtime.apply({**KEYED, "fps": 30, "bit_depth": 8, "extra_aux": 1})
+    runtime.worker.join(3)
+    status = runtime.status()
+    assert (status["phase"], status["message"]) == ("running", "Mixer ready. Extra aux mountpoints failed: Connection refused.")

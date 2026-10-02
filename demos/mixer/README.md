@@ -88,6 +88,15 @@ These numbers are the `tesla_t4` profile in `instance_profiles.py`, which Compos
 with `--instance-type` (`MIXER_INSTANCE_TYPE`, default `tesla_t4`); another machine needs
 its own measured profile there, not scaled T4 numbers.
 
+**Extra aux outputs** adds that many monitor outputs after the show's own aux buses, as many
+as the profile's [NVENC budget](docs/capacity.md#nvenc-and-extra-aux-outputs) leaves beside
+the program encodes. Each has up to five random layouts of 4 to 16 sources, the same for the
+same sources, and its RTP port pair after the highest in use (5016, 5020, … beside buses on
+5008 and 5012). Its Janus Streaming mountpoint, whose ID is that port, is created through
+`webui.py --janus-api` (Compose passes the bundled Janus) before the mixer starts, and removed
+once a smaller setup is on air; without the flag the setup offers none. The mountpoints are not
+permanent: after a Janus restart, **Apply setup** creates them again.
+
 Settings persist in `media/demo.json`; later starts restore them and reuse
 `media/assets/` and `media/media_wipes/`. The HTTP server stays running while its
 mixer child restarts, without access to the Docker socket. The generic setup

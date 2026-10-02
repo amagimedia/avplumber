@@ -206,6 +206,7 @@ class AuxBusConfig:
     # (1, or 2 at a 50/60 fps bus).
     pgm_delay_frames: int = 1
     full_rate: bool = False              # run at the canvas rate at 50/60 fps instead of half
+    label: str = ""                      # the control page's name for it; "" names it by its preset or id
 
 
 @dataclass(frozen=True)
@@ -269,7 +270,7 @@ class MixerConfig:
                                  "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
                                  "port": r.port, "mountpoint": r.port, "fps": r.fps})
         labels = {"pgm_pvw_grid": "Program preview", "source_pages": "Multiviewer"}
-        previews += [{"bus": b.id, "label": labels.get(b.layout.get("preset"), f"Aux {b.id}"),
+        previews += [{"bus": b.id, "label": b.label or labels.get(b.layout.get("preset"), f"Aux {b.id}"),
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
                       "codec": "h264", "color": "sdr", "port": r.port, "mountpoint": r.port, "fps": r.fps}
                      for b in self.aux_buses for r in b.renditions]
@@ -660,7 +661,10 @@ def parse_aux_buses(values, cfg):
             raise ConfigError("aux rendition must be SDR/H.264 at canvas size and the aux frame rate")
         if not r.port:
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
-        result.append(AuxBusConfig(bid, tuple(scenes), (r,), layouts[0], tuple(layouts), max_layers, **timing))
+        if not isinstance(obj.get("label", ""), str):
+            raise ConfigError(f"aux {bid}: label must be a string")
+        result.append(AuxBusConfig(bid, tuple(scenes), (r,), layouts[0], tuple(layouts), max_layers,
+                                   label=obj.get("label", ""), **timing))
     check_janus_ports([*cfg.renditions, *(b.renditions[0] for b in result)])
     return tuple(result)
 

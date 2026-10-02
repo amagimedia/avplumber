@@ -508,6 +508,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--media-dir", type=Path, default=Path("/media"))
     parser.add_argument("--recipe", type=Path, default=Path("/media/demo.json"))
     parser.add_argument("--dmabuf-rest", default="http://127.0.0.1:9009")
+    parser.add_argument("--janus-api", metavar="URL",
+                        help="Janus HTTP API (e.g. http://127.0.0.1:8088/janus, no API secret) for the setup's "
+                             "extra aux outputs, one Streaming mountpoint each; without it the setup offers none")
     # A string default goes through type=int like a command-line value, so a bad env value is a usage error.
     parser.add_argument("--critical-nice", type=int, metavar="N", default=os.environ.get("MIXER_CRITICAL_NICE", "0"),
                         help="Keep the deadline-critical mixer threads at nice -N, 1 to 20, rechecked every "
@@ -533,7 +536,8 @@ def main(argv: list[str] | None = None) -> None:
     setup = None
     if args.manage_setup:
         from setup_runtime import SetupRuntime
-        setup = SetupRuntime(args.media_dir, args.recipe, bridge, args.instance_type, args.mixer_args, args.dmabuf_rest)
+        setup = SetupRuntime(args.media_dir, args.recipe, bridge, args.instance_type, args.mixer_args, args.dmabuf_rest,
+                             args.janus_api)
         setup.resume()
     def mixer_pid():
         process = setup.process if setup else None   # read once: the setup worker thread clears it when the mixer stops

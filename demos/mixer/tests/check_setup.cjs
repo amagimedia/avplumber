@@ -12,6 +12,8 @@ const { chromium } = require('playwright');
     const page = await browser.newPage();
     const errors = [], submissions = [];
     let initialSettings = null;
+    // The live show's own aux buses (Program preview and Multiviewer) and a Janus API for extra ones.
+    let auxStatus = {aux_buses: [{id: 'mv', full_rate: false}, {id: 'mv2', full_rate: false}], janus_api: true};
     page.on('pageerror', error => errors.push(error.message));
     const html = fs.readFileSync(path.join(__dirname, '../setup.html'), 'utf8');
     // The status carries the instance's profile as webui.py serves it: the limits asserted below are tesla_t4's.
@@ -22,7 +24,7 @@ const { chromium } = require('playwright');
       if (route.request().url().endsWith('/api/setup')) {
         if (route.request().method() === 'POST') submissions.push(route.request().postDataJSON());
         return route.fulfill({json: {phase: 'idle', message: 'Ready', settings: initialSettings,
-          instance_type: 'tesla_t4', profile}});
+          instance_type: 'tesla_t4', profile, ...auxStatus}});
       }
       return route.fulfill({contentType: 'text/html', body: html});
     });
@@ -193,8 +195,56 @@ const { chromium } = require('playwright');
     }
     await page.locator('#browser-ring-size').fill('0');
     assert.equal(await page.locator('#apply').isDisabled(), true);
+
+    // Extra aux outputs fill NVENC to the profile's budget beside the program, its HLG copy on a
+    // 10-bit canvas, the clean feed and the two own buses (setup_runtime.extra_aux_limit).
+    const extraAux = page.locator('#extra-aux');
+    for (const [mode, limits] of [['8:420', [9, 6, 7, 4]], ['10:420', [7, 4, 3, 0]]]) {
+      await reset();
+      await page.locator('#mode').selectOption(mode);
+      await page.locator('#dsk-pages input[value=lower_third]').check();
+      await page.locator('#clean-feed').check();
+      for (const [i, fps] of [25, 30, 50, 60].entries()) {
+        await page.locator('#fps').selectOption(String(fps));
+        assert.equal(await extraAux.getAttribute('max'), String(limits[i]), `${mode} at ${fps} fps`);
+        if (!limits[i]) {
+          assert.equal(await extraAux.isDisabled(), true, 'no room, no input');
+          continue;
+        }
+        await extraAux.fill('99');
+        const setup = await apply();
+        assert.equal(setup.extra_aux, limits[i], `${mode} at ${fps} fps stops at ${limits[i]}`);
+        assert.equal(setup.clean_feed, true);
+      }
+    }
+    // A change that lowers the limit lowers the count; one that raises it leaves the count.
+    await reset();
+    await page.locator('#mode').selectOption('8:420');
+    await page.locator('#dsk-pages input[value=lower_third]').check();
+    await page.locator('#clean-feed').check();
+    await page.locator('#fps').selectOption('25');
+    await extraAux.fill('9');
+    await page.locator('#fps').selectOption('30');
+    assert.equal(await extraAux.inputValue(), '6');
+    await page.locator('#mode').selectOption('10:420');
+    assert.equal(await extraAux.inputValue(), '4');
+    await page.locator('#clean-feed').uncheck();
+    assert.equal((await apply()).extra_aux, 4);
+    assert.match(await page.locator('#extra-aux-note').textContent(),
+      /^Maximum 5 at 30 fps: .* 2 aux outputs take 36\.4% of NVENC and each extra output 7\.3%, of the 80% budget on tesla_t4\.$/);
+    const saved = submissions.at(-1);
+    await reset(saved);
+    assert.equal(await extraAux.inputValue(), '4', 'the saved count loads');
+    const {extra_aux: _, ...older} = saved;
+    await reset(older);
+    assert.equal((await apply()).extra_aux, 0, 'settings saved before extra aux outputs load with none');
+    auxStatus = {aux_buses: [], janus_api: false};
+    await reset(saved);
+    assert.equal(await extraAux.isDisabled(), true);
+    assert.match(await page.locator('#extra-aux-note').textContent(), /--janus-api/);
+    assert.equal((await apply()).extra_aux, 0, 'without a Janus API there are none');
     assert.deepEqual(errors, []);
-    console.log('PASS: normal source-count editing, setup bitrate, allocation, limits and raw SDR/HDR upload');
+    console.log('PASS: normal source-count editing, setup bitrate, allocation, limits, raw SDR/HDR upload and extra aux outputs');
   } finally {
     await browser.close();
   }

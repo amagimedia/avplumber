@@ -444,6 +444,7 @@ list order and the `pgm` cells last, over any cell they overlap.
 | `latency_ms` | the mixer's `latency_ms` | the bus compositor's playout buffer. The sources reach a bus when they reach the program compositors, so the program's buffer leaves it the same slack (1.5 aux frames at 60 fps: 50 ms); a bus at the program's buffer can change its PVW cells when the program changes. Bus latency plus `pgm_delay_frames` must stay below six aux frames |
 | `pgm_delay_frames` | `1`, `2` at a 50/60 fps bus | aux frames the PGM pad is matched back. The finished program leaves the main compositor `latency_ms` after its timestamp, when the bus would already be drawing that frame's tick, and needs a margin to cross the output chain (snapshot, selectors, keyer, tap) to the bus: `pgm_delay_frames × aux frame + latency_ms` must exceed the mixer's `latency_ms` by at least one program frame (checked at build for a bus whose layouts draw the program). The default gives about 33 ms (40 at 25/50) at any rate, which is why a `full_rate` bus at 50/60 takes two of its frames; `1` there leaves one program frame (16.7 ms at 60), and `0` needs a bus `latency_ms` at least a program frame above the mixer's, which delays every cell instead of the PGM cells alone |
 | `pvw_align` | `"program"` | when the PVW cells change on a take. `program`: on the bus frame leaving the bus when the program frame of the take leaves the mixer, so the operator sees both at once; the PGM cells of the same frame follow `pgm_delay_frames` later. `pgm_tile`: together with those PGM cells, `pgm_delay_frames` after the program |
+| `label` | `Program preview`, `Multiviewer` or `Aux <id>` by its initial layout | the bus's name on the control page |
 | `full_rate` | `false` | run the bus at the canvas rate at 50/60 fps instead of half. Costs about twice the bus's compositor and encoder work on the GPU (a second bus's worth at 1080p60), and the rendition's `bitrate_kbps` then covers twice the frames, so raise it to keep the quality per frame; no change at 25/30 |
 
 A bus gets a PGM pad (the program tap's subscribed output) only when its
@@ -453,7 +454,8 @@ latency check, 128 sources. A bus without the pad can switch to any layout
 without a `pgm` cell and refuses one with it; list `{"preset": "pgm_pvw_grid"}`
 in its `layouts` to give it the pad.
 Each bus needs its own Janus RTP/RTCP port pair and a Janus mountpoint whose ID
-equals its RTP port; the bundled Janus config has one for 5008 (RTCP 5009).
+equals its RTP port; the bundled Janus config has one for 5008 (RTCP 5009), and the setup
+page's extra aux outputs create their own ([README](../README.md)).
 
 Control commands, each `{"bus": <id>, ...}`:
 

@@ -98,6 +98,11 @@ summary { cursor: pointer; }
 </div>
 <label><input type="checkbox" id="clean-feed"> Clean feed: also encode the SDR program without keys (one more H.264 encode)</label>
 </section>
+<section class="card"><div class="card-title"><h2>Aux outputs</h2></div>
+<p class="hint">Extra monitor outputs after the instance’s own aux outputs, each with up to five random layouts of 4 to 16 sources. Each is one more H.264 encode: at the program rate at 25/30 fps, at half of it at 50/60.</p>
+<div class="fields"><label>Extra aux outputs<input id="extra-aux" type="number" min="0" max="0" step="1" value="0"></label></div>
+<p class="hint" id="extra-aux-note"></p>
+</section>
 <section class="card"><div class="card-title"><h2>Included with every setup</h2></div>
 <p class="hint">Two generated wipes: diagonal sweep and sliding panels. Each lasts two seconds at the selected FPS. Wipe caching is off.</p>
 <p class="hint" id="scene-description"></p>
@@ -136,7 +141,7 @@ const presets = {balanced:[18,18,4,0,36,17,17],equal:[1,1,1,1,1,1,1],light:[2,1,
 const dskPages=()=>[...document.querySelectorAll('#dsk-pages input:checked')].map(i=>i.value);
 // The instance's measured limits (instance_profiles.py) arrive with the setup status; the page
 // applies them as setup_runtime.py does and computes nothing before they arrive.
-let profile=null, instanceType='';
+let profile=null, instanceType='', auxBuses=[], janusApi=false, extraLimit=0;
 const browserLimit=()=>profile.browser_windows, nvdecLimit=fps=>profile.nvdec_decodes[fps], rawUploadUnits=fps=>profile.raw_upload_units[fps];
 const sourceBudgets=()=>[
  [[2],[1],profile.hlg_v210,'HDR 4:2:2'],[[4],[1],browserLimit()-dskPages().length,'Browser'],
@@ -161,6 +166,16 @@ const sourceLimit = () => {
  const fps=Number($('fps').value);
  return Math.min(Math.floor(profile.sources[fps]*profile.mode_share[$('mode').value]),nvdecLimit(fps)+browserLimit()+rawUploadUnits(fps))-dskPages().length;
 };
+// setup_runtime.extra_aux_limit for this page's encodes: the H.264 program, the HEVC HLG one on a
+// 10-bit canvas and the H.264 clean feed, then the instance's own aux buses (config.aux_fps); every
+// canvas here has 1080p's pixels.
+const auxFps=(fps,fullRate)=>fps>30&&!fullRate?fps/2:fps;
+function nvencShares(fps,tenBit,clean){
+ const {budget_pct,h264_pct_per_fps,hevc_cost}=profile.nvenc;
+ const frames=fps*(1+(tenBit?hevc_cost:0)+(clean?1:0))+auxBuses.reduce((n,b)=>n+auxFps(fps,b.full_rate),0);
+ return {used:frames*h264_pct_per_fps,each:auxFps(fps,false)*h264_pct_per_fps,
+   limit:janusApi?Math.max(0,Math.floor((budget_pct/h264_pct_per_fps-frames)/auxFps(fps,false))):0};
+}
 let scaledFrom=0;   // the total before the last automatic scale-down, shown until the next edit
 function outputMode(){
  const [depth,chroma]=$('mode').value.split(':');return {bit_depth:Number(depth),chroma};
@@ -211,7 +226,7 @@ function sourceCounts(total,values){
  }
  return counts;
 }
-const FIELD_NAMES={sources:'Unique sources',scenes:'Scenes',bitrate:'Program bitrate'};
+const FIELD_NAMES={sources:'Unique sources',scenes:'Scenes',bitrate:'Program bitrate','extra-aux':'Extra aux outputs'};
 function integer(id,min,max){const v=Number($(id).value);if(!Number.isInteger(v)||v<min||v>max)throw Error(`${FIELD_NAMES[id]??id} must be a whole number from ${min} to ${max}.`);return v;}
 function update(){
  if(!profile)return;   // #clean-feed stays enabled before the first setup status
@@ -223,6 +238,12 @@ function update(){
  $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps${tenBit?` on a 10-bit ${outputMode().chroma==='422'?'4:2:2':'4:2:0'} canvas (estimated)`:''}.`+
    (scaledFrom?` Scaled down from ${scaledFrom} to fit this mode.`:'')+` Limits measured on ${instanceType}.`;
  $('browser-max').textContent=` · maximum ${browserLimit()}`;
+ const clean=$('clean-feed').checked&&dskPages().length>0,nvenc=nvencShares(fps,tenBit,clean);
+ extraLimit=nvenc.limit;$('extra-aux').max=extraLimit;
+ if(Number($('extra-aux').value)>extraLimit)$('extra-aux').value=extraLimit;
+ const percent=n=>`${+n.toFixed(1)}%`;
+ $('extra-aux-note').textContent=janusApi?`Maximum ${extraLimit} at ${fps} fps: the program encodes and ${auxBuses.length} aux output${auxBuses.length===1?'':'s'} take ${percent(nvenc.used)} of NVENC and each extra output ${percent(nvenc.each)}, of the ${profile.nvenc.budget_pct}% budget on ${instanceType}.`
+   :'Unavailable: webui.py needs --janus-api to create their Janus mountpoints.';
  if(Number($('scenes').value)>192)$('scenes').value=192;
  const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,192),bitrate=integer('bitrate',500,40000);
  if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
@@ -238,7 +259,7 @@ function update(){
  currentSettings={orientation:$('orientation').value,fps,
    source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts],
    bitrate_kbps:bitrate,browser_ring_size:integer('browser-ring-size',1,64),
-   dsk:dskPages(),clean_feed:$('clean-feed').checked&&dskPages().length>0};
+   dsk:dskPages(),clean_feed:clean,extra_aux:integer('extra-aux',0,extraLimit)};
  types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(document.activeElement!==input&&(Number(input.value)!==counts[i]||input.value===''))input.value=counts[i];input.max=sourceMaximum(i);});
  $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
  $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${nvdecLimit(fps)} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]}/${rawUploadUnits(fps)} units (NV12 = 1, P010 = 2). Capacity depends on codec and content.`;
@@ -268,6 +289,7 @@ function setBusy(value){
  busy=value||submitting;
  document.querySelectorAll('.fields input,.fields select,[data-preset]').forEach(el=>el.disabled=busy);
  types.forEach((t,i)=>{$(`count-${t.id}`).disabled=busy||!sourceEnabled(i)});
+ $('extra-aux').disabled=busy||!extraLimit;
  $('apply').disabled=!currentSettings||busy||!online;
 }
 function showStatus(status){
@@ -282,13 +304,13 @@ async function refresh(){
   if(!response.ok)throw Error('Setup backend unavailable. Open this page on the running demo instance.');
   const status=await response.json();
   if(submitting||requestedSubmission!==submission)return;
-  online=true;profile=status.profile;instanceType=status.instance_type;
+  online=true;profile=status.profile;instanceType=status.instance_type;auxBuses=status.aux_buses;janusApi=status.janus_api;
   if(!loaded&&!['preparing','starting'].includes(status.phase)){
    if(status.settings){
     const s=status.settings;
     previousDepth=s.bit_depth??10;
     $('mode').value=`${previousDepth}:${s.chroma??(previousDepth===8?'420':'422')}`;
-    for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps','browser-ring-size':'browser_ring_size'}))if(s[key]!==undefined)$(id).value=s[key];
+    for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps','browser-ring-size':'browser_ring_size','extra-aux':'extra_aux'}))if(s[key]!==undefined)$(id).value=s[key];
     document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;
     if(s.browser_ring_size===undefined)$('browser-ring-size').value=Number($('fps').value)<=30?6:9;
     sourceValues=types.map((_,i)=>s.weights[i]??0);syncCounts();

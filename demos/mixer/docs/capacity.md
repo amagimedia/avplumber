@@ -171,6 +171,27 @@ allows all 40 at every rate, downstream-key pages included.
 The setup allows 192 scenes; scenes describe layouts and do not each allocate a
 running compositor. Active layers and AUX outputs have separate limits.
 
+### NVENC and extra aux outputs
+
+The setup's **Extra aux outputs** fill the NVENC budget of the profile (`nvenc` in the
+`tesla_t4` entry). Measured 2026-10-02 on the live show with NVENC p3: three 1080p30 H.264
+encodes took 22% of the T4's single NVENC, the 50 fps SDR show above 35% and the 60 fps HDR
+show 70-76%. A 1920×1080 H.264 encode costs about 0.243% per encoded frame/s (7.3% at 30 fps),
+an HEVC Main10 (HLG) encode twice that, and the cost follows the pixel count. Every encode
+counts: the H.264 program, the HEVC HLG program on a 10-bit canvas, the H.264 clean feed and
+each aux bus, which encodes at the program rate at 25/30 fps and at half of it at 50/60
+(a `full_rate` bus at the program rate). Extra outputs take what is left of 80%
+(`setup_runtime.extra_aux_limit`). With the clean feed on and the live show's two aux buses
+(Program preview and Multiviewer):
+
+| Canvas | 25 fps | 30 fps | 50 fps | 60 fps |
+| --- | ---: | ---: | ---: | ---: |
+| SDR, 8-bit | 9 | 6 | 7 | 4 |
+| HLG, 10-bit | 7 | 4 | 3 | 0 |
+
+Each aux bus also composites on the GPU, which has not been measured per bus: the source
+limits do not change with the number of extra outputs.
+
 ## Why uploads limit this mix
 
 At 100 sources / 30 fps (40 NVDEC, 32 browser, 28 raw NV12), Nsight showed a

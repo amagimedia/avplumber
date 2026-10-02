@@ -35,5 +35,10 @@ INSTANCE_PROFILES = {
         "raw_upload_units": {25: 30, 30: 34, 50: 20, 60: 17},
         # HLG v210 4:2:2 inputs, unpacked on the GPU (the 60 fps 4:2:2 limit was measured with four).
         "hlg_v210": 4,
+        # Encodes, measured 2026-10-02 on the live show: three 1080p30 H.264 p3 encodes took 22% of
+        # NVENC, the 50 fps SDR show 35% and the 60 fps HDR show 70-76%. A 1920x1080 H.264 p3 encode
+        # costs about 0.243% per encoded frame/s (7.3% at 30 fps), HEVC Main10 twice that, and the
+        # cost follows the pixel count. Extra aux outputs fill encodes up to 80%.
+        "nvenc": {"budget_pct": 80, "h264_pct_per_fps": 0.243, "hevc_cost": 2},
     },
 }
