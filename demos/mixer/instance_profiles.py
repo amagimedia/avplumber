@@ -12,6 +12,18 @@ from enum import Enum
 
 class InstanceType(str, Enum):
     TESLA_T4 = "tesla_t4"
+    NVIDIA_L4 = "nvidia_l4"
+
+
+# Not capacities: the range the setup offers per output, and each output's encode until the setup
+# sets another: the programs (sdr, hdr) and the clean feed (sdr_clean) at p3, every aux bus at p1.
+_BITRATE_KBPS = [2000, 20000]
+_ENCODE_DEFAULTS = {
+    "sdr": {"preset": "p3", "bitrate_kbps": 6000},
+    "hdr": {"preset": "p3", "bitrate_kbps": 8000},
+    "sdr_clean": {"preset": "p3", "bitrate_kbps": 6000},
+    "aux": {"preset": "p1", "bitrate_kbps": 4000},
+}
 
 
 INSTANCE_PROFILES = {
@@ -50,15 +62,29 @@ INSTANCE_PROFILES = {
                 "h264": {"p1": 0.204, "p3": 0.219, "p5": 0.466},
                 "hevc": {"p1": 0.153, "p3": 0.305, "p5": 0.442},   # Main10, the HLG program
             },
-            "bitrate_kbps": [2000, 20000],   # the range the setup offers per output
-            # Each output's encode until the setup sets another: the programs (sdr, hdr) and the clean
-            # feed (sdr_clean) at p3, every aux bus, own or extra, at p1.
-            "defaults": {
-                "sdr": {"preset": "p3", "bitrate_kbps": 6000},
-                "hdr": {"preset": "p3", "bitrate_kbps": 8000},
-                "sdr_clean": {"preset": "p3", "bitrate_kbps": 6000},
-                "aux": {"preset": "p1", "bitrate_kbps": 4000},
+            "bitrate_kbps": _BITRATE_KBPS,
+            "defaults": _ENCODE_DEFAULTS,
+        },
+    },
+    # GCP g2-standard-16: one L4 (Ada: 2 NVENC, 4 NVDEC, 24 GB), 16 vCPU.
+    # PROVISIONAL, 2026-10-02: exploration ceilings for measuring this instance, from NVIDIA's engine
+    # counts and tables (about 2.2x the T4's NVENC and 2.3-2.7x its NVDEC), not limits. Every value
+    # is replaced by a measurement on the instance before the setup offers it to operators.
+    InstanceType.NVIDIA_L4: {
+        "sources": {25: 220, 30: 200, 50: 150, 60: 130},
+        "mode_share": {"8:420": 1.0, "10:420": 1.0, "10:422": 1.0},
+        "nvdec_decodes": {25: 100, 30: 83, 50: 50, 60: 41},
+        "browser_windows": 40,
+        "raw_upload_units": {25: 60, 30: 60, 50: 40, 60: 34},
+        "hlg_v210": 8,
+        "nvenc": {
+            "budget_pct": 80,
+            "pct_per_fps": {
+                "h264": {"p1": 0.093, "p3": 0.100, "p5": 0.212},
+                "hevc": {"p1": 0.070, "p3": 0.139, "p5": 0.201},
             },
+            "bitrate_kbps": _BITRATE_KBPS,
+            "defaults": _ENCODE_DEFAULTS,
         },
     },
 }
