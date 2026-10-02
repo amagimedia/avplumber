@@ -97,3 +97,20 @@ assert not poller.is_alive(), "node() lookups deadlocked the panic shutdown"
 assert stopped.is_set(), "Python doStop did not finish during the panic shutdown"
 avp.shutdown()
 print("Panic shutdown with concurrent node lookups passed", flush=True)
+
+# deleteNode joins a worker that is sleeping with the GIL released. Repeating
+# creation and deletion also exercises the per-thread Python state cleanup.
+avp = AVPlumber()
+for index in range(10):
+    started.clear()
+    stopped.clear()
+    name = f"deleted_worker_{index}"
+    worker = Worker({"name": name, "group": "test", "dst": "unused",
+                     "data_type": "VideoFrame", "auto_restart": "panic"})
+    avp.addNode(worker)
+    worker.start()
+    assert started.wait(5), "Worker to delete did not start"
+    avp.manager.deleteNode(name)
+    assert stopped.is_set(), "deleteNode returned before Python doStop finished"
+avp.shutdown()
+print("Repeated Python worker deletion passed", flush=True)

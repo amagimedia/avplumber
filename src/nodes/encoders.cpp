@@ -239,6 +239,19 @@ protected:
         if (metadata->realPixelFormat() != AV_PIX_FMT_NONE) {
             this->enc_.setPixelFormat(metadata->realPixelFormat());
         }
+        // avcpp has no VideoEncoderContext::setFrameRate (only Stream::setFrameRate,
+        // which the muxed/HLS path already sets in setOutput() below -- but that only
+        // touches container-level AVStream metadata, not what the encoder itself
+        // stamps into the bitstream's own SPS/VUI timing_info). Packet-sink branches
+        // with no muxer (e.g. Gemini VLM) never call setOutput() at all, so without
+        // this, AVCodecContext.framerate stays unset and h264_nvenc falls back to an
+        // internal default (observed: 30000/1001) baked into the SPS -- confirmed via
+        // ffprobe on a live capture: 48 packets meant to span 6s at 8fps instead
+        // reported ~1.6s at 29.97fps once demuxed from the raw annex-B stream.
+        std::shared_ptr<IFrameRateSource> frs = this->template findNodeUp<IFrameRateSource>();
+        if (frs) {
+            this->enc_.raw()->framerate = frs->frameRate().getValue();
+        }
     }
 };
 class AudioEncoder: public Encoder<AudioEncoder, av::AudioEncoderContext, av::AudioSamples> {

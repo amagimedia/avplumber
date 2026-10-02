@@ -198,6 +198,12 @@ public:
             if (!found) {
                 if (optional) {
                     logstream << "No optional stream " << sourcespec << " found.";
+                    // Create the edge typed as av::Packet so ATD-based downstream
+                    // nodes (e.g. Realtime) can detect their data type. Mark the
+                    // producer finished immediately so consumers receive EOF rather
+                    // than blocking forever waiting for data that will never arrive.
+                    auto missing_edge = edges.find<av::Packet>(route_to);
+                    missing_edge->finishProducer();
                 } else {
                     throw Error("No stream " + sourcespec + " found!");
                 }

@@ -211,12 +211,14 @@ public:
                 continue;
             requireDrawable(*p);
             av::VideoFrame consumed = *p;
-            // Metadata must follow the retained frame before the queue slot is released.
-            if (meta_src == p) meta_src = &held_[i];
+            const bool carries_metadata = p == meta_src;
             this->source_edges_[i]->pop();
             held_[i] = std::move(consumed);
             held_valid_[i] = true;
             src_for_layer[i] = &held_[i];
+            // pop destroys the queue entry; retain the metadata source along
+            // with the frame reference used for drawing this tick.
+            if (carries_metadata) meta_src = &held_[i];
         }
 
         // During slot warmup, do not emit a partial black composite just because
