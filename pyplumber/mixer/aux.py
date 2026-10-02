@@ -272,6 +272,16 @@ class AuxMultiview(_AuxOutput):
             "group": self.group, "auto_restart": "off", "on_error": "off",
         }))
 
+    def state(self):
+        state = super().state()
+        # An assignment reaches the compositor through the follower: pending until the follower
+        # has set a composition with this revision's base. Unreachable, this thread sets it.
+        with self.lock:
+            follower = self._follower_status()
+            if follower is not None and follower.get("applied_base_revision") != self.revision:
+                state["composition_pending"] = True
+        return state
+
     def details(self):
         return {"scenes": list(self.scenes), "revision": self.revision, "cells": multiview_cells(self.cfg),
                 "pvw_align": self.bus.pvw_align, "pgm_delay_frames": self.pgm_delay_frames,

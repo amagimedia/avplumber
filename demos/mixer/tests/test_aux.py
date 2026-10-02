@@ -427,7 +427,7 @@ def test_multiview_builds_a_follower_holding_the_layouts(cfg, monkeypatch):
 
 
 def test_assignment_hands_the_follower_the_base_or_falls_back(cfg):
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None)
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, latency_ms=default_latency_ms(cfg.fps))
     avp = StatusAvp()
     avp.follower = {"base_revision": "stale"}
     grid = AuxMultiview(avp, None, mixer, cfg, parse_aux_buses([bus_json()], cfg)[0])
@@ -442,6 +442,10 @@ def test_assignment_hands_the_follower_the_base_or_falls_back(cfg):
     assert grid._step() == 1.0 and len(avp.bases) == 2
     assert grid.details()["follower"] == avp.follower
     assert grid.preview == "repeat"   # what the node shows, for a composition set here later
+    # An assignment is pending until the follower has set a composition with its base.
+    assert grid.state()["composition_pending"]
+    avp.follower = {**avp.follower, "applied_base_revision": grid.revision}
+    assert not grid.state().get("composition_pending")   # the compositor's own flag decides
     # Unreachable: this thread follows the preview at 50 ms and sets the composition itself.
     avp.follower = None
     avp.status = {"suspended": False, "pvw_scene": "full"}

@@ -44,6 +44,7 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     std::mutex layouts_mutex_;
     Layout base_;
     std::string base_revision_;
+    std::string applied_base_revision_;   // the base of the last composition the compositor took
     std::unordered_map<std::string, Layout> pvw_;
     Parameters status_ = Parameters::object();
     std::string error_;
@@ -93,6 +94,7 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     void apply(const Change& change, bool settle, std::optional<bool> enabled) {
         Parameters composition;
         avp::mixer::SourceMask inputs;
+        std::string revision;
         {
             std::lock_guard<std::mutex> lock(layouts_mutex_);
             const Layout* pvw = change.pvw.empty() ? nullptr : layout(change.pvw);
@@ -103,9 +105,14 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
             if (const Layout* pgm = change.pgm.empty() ? nullptr : layout(change.pgm))
                 inputs |= settle ? pgm->inputs : pgm->inputs & applied_inputs_;
             composition = {{"layers", std::move(layers)}, {"active_inputs", avp::mixer::toParameters(inputs)}};
+            revision = base_revision_;
         }
         if (enabled) composition["enabled"] = *enabled;
         compositor()->setObject("composition", composition);
+        {
+            std::lock_guard<std::mutex> lock(layouts_mutex_);
+            applied_base_revision_ = std::move(revision);
+        }
         applied_inputs_ = inputs;
         suspended_ = enabled ? !*enabled : false;
     }
@@ -255,6 +262,7 @@ public:
         std::lock_guard<std::mutex> lock(layouts_mutex_);
         Parameters result = status_;
         result["base_revision"] = base_revision_;
+        result["applied_base_revision"] = applied_base_revision_;
         result["error"] = error_;
         return result;
     }
