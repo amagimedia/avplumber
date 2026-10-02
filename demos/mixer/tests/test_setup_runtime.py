@@ -926,7 +926,7 @@ def test_every_profile_covers_every_rate_and_canvas(tmp_path, instance_type):
     status = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), instance_type).status()
     assert status["instance_type"] == instance_type.value
     assert json.loads(json.dumps(status))["profile"]["nvdec_decodes"].keys() == {"25", "30", "50", "60"}
-    assert profile["nvenc"].keys() == {"budget_pct", "h264_pct_per_fps", "hevc_cost"}
+    assert profile["nvenc"].keys() == {"budget_pct", "h264_pct_per_fps", "hevc_cost", "preset"}
 
 
 def own_aux():
@@ -980,6 +980,7 @@ def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime
     for bus in first[2:]:
         assert len(bus.layouts) == 5 and bus.layout == bus.layouts[0] and not draws_program(cfg, bus.layouts)
         assert bus.renditions[0].bitrate_kbps == first[0].renditions[0].bitrate_kbps
+        assert bus.renditions[0].preset == T4["nvenc"]["preset"]   # not the renditions' p7 default
     # Fewer drops the last ones; the operator's pick on aux2 stays.
     live["aux2"] = {"id": "aux2", "layout": first[3].layouts[2], "layouts": list(first[3].layouts), "scenes": []}
     cfg = apply(2)

@@ -351,7 +351,8 @@ class SetupRuntime:
                                  f"{self.instance_type.value}" if self.janus_api else
                                  "Extra aux outputs need a Janus API (webui.py --janus-api)")
             # Cells show the generic sources, not the key pages after them.
-            own = own + extra_buses(replace(mine, sources=mine.sources[:recipe["source_count"]]), extra, wanted, CLEAN_PORT)
+            own = own + extra_buses(replace(mine, sources=mine.sources[:recipe["source_count"]]), extra, wanted, CLEAN_PORT,
+                                     self.profile["nvenc"]["preset"])
         recipe["aux_buses"] = own
 
     def remember_aux(self, bus_id, fields):

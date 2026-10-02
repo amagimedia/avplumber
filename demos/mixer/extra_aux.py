@@ -46,12 +46,13 @@ def layouts(bus_id, cfg):
     return [_layout(rng, cfg, cells) for cells in sorted(rng.sample(sizes, min(LAYOUTS, len(sizes))))]
 
 
-def extra_buses(cfg, kept, wanted, floor_port):
+def extra_buses(cfg, kept, wanted, floor_port, preset):
     """*wanted* extra buses for the show *cfg* describes with its own buses; its sources are those
     the cells show. *kept*, the previous show's extra buses, come first, each keeping its layouts
     while they still fit: another orientation, or a cell beyond the sources, draws new ones. New
     buses take the next free ids aux1, aux2, ..., the labels Aux 1, Aux 2, ... by position, and RTP
-    ports PORT_STEP apart above every port in use and *floor_port*, at the first own bus's bitrate."""
+    ports PORT_STEP apart above every port in use and *floor_port*, at the first own bus's bitrate.
+    Every one encodes at the NVENC *preset* the instance's encode costs were measured with."""
     result = []
     for bus in kept[:wanted]:
         try:
@@ -59,7 +60,7 @@ def extra_buses(cfg, kept, wanted, floor_port):
         except ConfigError:
             specs = layouts(bus["id"], cfg)
             bus = {**bus, "layout": specs[0], "layouts": specs}
-        result.append(bus)
+        result.append({**bus, "renditions": [{**bus["renditions"][0], "preset": preset}]})
     port = max([floor_port, *(r.port for r in cfg.renditions), *(b.renditions[0].port for b in cfg.aux_buses),
                 *(b["renditions"][0]["port"] for b in result)])
     taken = {b.id for b in cfg.aux_buses} | {b["id"] for b in result}
@@ -69,5 +70,5 @@ def extra_buses(cfg, kept, wanted, floor_port):
         bus_id, port = next(ids), port + PORT_STEP
         specs = layouts(bus_id, cfg)
         result.append({"id": bus_id, "label": f"Aux {position}", "layout": specs[0], "layouts": specs,
-                       "renditions": [{"id": "monitor", "port": port, **bitrate}]})
+                       "renditions": [{"id": "monitor", "port": port, "preset": preset, **bitrate}]})
     return result
