@@ -14,6 +14,7 @@
   <h1>One thread per GPU filter graph</h1>
   <p class="lede">The mixer runs filter graphs that only stamp metadata or call CUDA filters on one thread. FFmpeg would otherwise start an idle 16-thread slice pool for each of them.</p>
   <span class="pill live">Status: Live</span>
+  <p class="note">Decoder <code>options.threads=1</code> is a separate optimization: it avoids extra NVDEC surfaces reserved for frame threads. See <a href="nvdec-cuarray.html#baseline">the decoder baseline and low-DPB demo assets</a>; both savings were already present before the CUarray comparison.</p>
 
   <h2>The idea</h2>
   <p>Each <code>filter_video</code> node builds an FFmpeg filter graph. By default FFmpeg gives every graph a slice-thread pool with one thread per CPU: 16 on the T4 test host. A graph of <code>setparams</code> or <code>scale_cuda</code> never uses that pool. The GPU does the pixel work, and the node's own thread calls the filters.</p>

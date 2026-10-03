@@ -14,6 +14,7 @@
   <h1>One main CUDA stream, one per monitor</h1>
   <p class="lede">The program runs on one CUDA stream; each aux monitor gets its own non-blocking stream in the same CUDA context, so a slow monitor cannot hold up the program or the other monitor.</p>
   <span class="pill live">Status: Live</span>
+  <p class="note">The diagram below shows the linear decode layout. Opt-in <a href="nvdec-cuarray.html">NVDEC CUarray output</a> adds a private producer stream per decoder in the same context. Compositors wait on each source's advertised stream before reading its array; program and AUX output streams keep their existing roles.</p>
 
   <figure>
     <div class="diagram">
@@ -142,7 +143,7 @@
   <p>About 800 nodes' GPU work sharing one stream is not the bottleneck by itself. The measured limit at high source
     counts was CPU-side CUDA submission contention triggered by raw uploads, not stream ordering; see
     <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/capacity.md#why-uploads-limit-this-mix">Why uploads limit this mix</a>.</p>
-  <p class="note">Raw uploads are the other exception to the single stream. <code>v210_to_cuda</code> (4:2:2 raw) creates a private non-blocking stream per source and
+  <p class="note">Raw uploads are another exception to the single stream. <code>v210_to_cuda</code> (4:2:2 raw) creates a private non-blocking stream per source and
     synchronizes it before publishing, so consumers get a complete frame. <code>raw_to_cuda</code> (NV12 and P010 raw)
     does the same with <code>canvas.raw_upload: "pinned"</code>, which every show the setup builds uses. With the library
     default, <code>"hwupload"</code>, NV12 and P010 upload through FFmpeg <code>hwupload</code> on the default stream; see <a href="raw-uploads.html">Raw uploads</a>.</p>

@@ -30,6 +30,7 @@
 
   <h2 class="group">Live</h2>
   <ul class="entries">
+    <li><a href="nvdec-cuarray.html"><span class="pill optin">Opt-in, measured on L4</span><b>NVDEC arrays without a staging copy</b><span class="sum">At 192 inputs and 20 outputs: 20.65 → 15.77 GiB, saving 4.88 GiB (23.7%). Fixed pools and direct array sampling support 28 validated outputs while decoded queues stay at three frames.</span></a></li>
     <li><a href="source-limits.html"><span class="pill live">Live: setup default</span><b>Source limits by mode and frame rate</b><span class="sum">One table for SDR, HLG 4:2:0 and HLG 4:2:2 at 25, 30, 50 and 60 fps: 110/90/81 at 30 fps, 75/61/55 at 60, with per-type caps, the Balanced mix at each limit and what runs out first.</span></a></li>
     <li><a href="cuda-streams.html"><span class="pill live">Live</span><b>One main CUDA stream, one per monitor</b><span class="sum">The program runs on one CUDA stream; each aux monitor gets its own non-blocking stream, so a slow monitor cannot stall the program.</span></a></li>
     <li><a href="multiviewer.html"><span class="pill live">Live</span><b>Multiviewer: 100 sources, 12 at a time</b><span class="sum">Pages of 12 equal tiles. Only the 12 on screen send frames, so off-page sources cost no GPU work and no VRAM.</span></a></li>
@@ -51,9 +52,9 @@
     <li><a href="loop-continuous-timestamps.html"><span class="pill live">Live</span><b>Looped clips keep counting across the wrap</b><span class="sum">A looped file's next pass is shifted by the length of the one before, so timestamps keep rising and a wrap no longer costs the source a frame: about 0.9 drops/s per source with 2 s clips before.</span></a></li>
   </ul>
 
-  <h2 class="group">Proposed, not in code</h2>
+  <h2 class="group">Earlier proposal, not selected</h2>
   <ul class="entries">
-    <li><a href="frame-queues.html"><span class="pill proposed">Proposed, not in code</span><b>One decoded frame in flight per NVDEC source</b><span class="sum">At 30 fps and below, each NVDEC source could park one decoded frame instead of three: about 255 MB of VRAM across 40 sources, no added latency.</span></a></li>
+    <li><a href="frame-queues.html"><span class="pill">Not selected</span><b>One decoded frame in flight per NVDEC source</b><span class="sum">An earlier estimate proposed shrinking the queue. The implemented CUarray path instead saves decoded-image storage while retaining all three queue slots.</span></a></li>
   </ul>
 
   <h2 class="group">Rejected</h2>
