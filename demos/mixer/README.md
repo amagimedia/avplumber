@@ -79,6 +79,32 @@ sampled once per second. Usage turns orange at 95% and red at 99%; VRAM turns
 orange at 93.3% and red at 98.3% of the total (14 and 14.75 GiB on a 15 GiB T4). These totals include
 other GPU applications.
 
+The mixer header's **POWER** meter reads GPU board watts and the enforced power limit from
+the same sample; the limit is read from the driver, never assumed from the card model.
+Hover or focus it for configured input sources per GPU watt (keys included), and USD per
+input source per hour. Multiple GPUs use their combined draw and limit; missing readings
+stay unknown. This measures GPU board power, not whole-host electricity consumption.
+
+To show cost, pass `webui.py --compute-price <path>` or set `MIXER_COMPUTE_PRICE` to a JSON
+file accessible inside the container, for example `/media/compute-price.json`:
+
+```json
+{
+  "hourly_usd": 1.205773326,
+  "label": "Google Cloud g2-standard-16, europe-west4, VM + L4, on demand",
+  "as_of": "2026-10-03",
+  "source_url": "https://cloud.google.com/products/compute/pricing/accelerator-optimized"
+}
+```
+
+This public rate was verified against Google's regional table and USD Cloud Billing Catalog:
+16 vCPUs × $0.026263860 + 64 GiB × $0.003076895 + one L4 × $0.588630286 per hour.
+The GPU is already included in the total. At 192 inputs this is $0.00628/source/hour,
+excluding storage, network, taxes and discounts. Use the running VM's region, not the
+CLI's default region. Deployment supplies the rate and check date at startup; refresh this
+file and restart the UI when prices or the machine change. The UI does not query billing
+or require cloud credentials, and an unconfigured price remains unavailable.
+
 The setup limits unique sources, downstream-key pages included, to what the 16 GiB
 NVIDIA T4 test host carries: **110 at 25 and 30 fps, 82 at 50 and 75 at 60 fps** on
 an SDR canvas and fewer on a 10-bit one, within per-type caps for NVDEC decodes,

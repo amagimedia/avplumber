@@ -30,6 +30,7 @@ import collections
 import csv
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -74,6 +75,22 @@ def normalize_preview_base(value: str) -> str:
     return value + "/" if value and not value.endswith("/") else value
 
 
+def compute_price(path: Path | None) -> dict | None:
+    """Public hourly compute price, supplied by deployment rather than queried on each UI poll."""
+    if path is None:
+        return None
+    value = json.loads(path.read_text("utf-8"))
+    rate = value.get("hourly_usd")
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate) or rate <= 0:
+        raise ValueError("compute price hourly_usd must be a positive finite number")
+    for key in ("label", "as_of", "source_url"):
+        if not isinstance(value.get(key), str) or not value[key].strip():
+            raise ValueError(f"compute price needs {key}")
+    if urlsplit(value["source_url"]).scheme != "https":
+        raise ValueError("compute price source_url must use HTTPS")
+    return {key: value[key] for key in ("hourly_usd", "label", "as_of", "source_url")}
+
+
 class GpuStats:
     """Share one bounded nvidia-smi sample across all viewers each second."""
 
@@ -90,14 +107,22 @@ class GpuStats:
                 return self.values
             self.next_sample = time.monotonic() + 1
             output = subprocess.check_output([
-                "nvidia-smi", "--query-gpu=index,utilization.gpu,utilization.decoder,utilization.encoder,memory.used,memory.total",
+                "nvidia-smi", "--query-gpu=index,utilization.gpu,utilization.decoder,utilization.encoder,"
+                              "memory.used,memory.total,power.draw,enforced.power.limit",
                 "--format=csv,noheader,nounits"], text=True, stderr=subprocess.DEVNULL, timeout=1)
             keys = ("index", "gpu", "decoder", "encoder", "memory_used_mib", "memory_total_mib")
             values = []
             for row in csv.reader(output.splitlines()):
-                if len(row) != len(keys) or not row[0].strip().isdigit():
+                if len(row) != len(keys) + 2 or not row[0].strip().isdigit():
                     continue
-                values.append(dict(zip(keys, (int(v) if v.strip().isdigit() else None for v in row))))
+                sample = dict(zip(keys, (int(v) if v.strip().isdigit() else None for v in row[:len(keys)])))
+                for key, raw in zip(("power_draw_w", "power_limit_w"), row[len(keys):]):
+                    try:
+                        watts = float(raw)
+                        sample[key] = watts if math.isfinite(watts) and watts >= 0 else None
+                    except ValueError:
+                        sample[key] = None
+                values.append(sample)
             self.values = values
         except (OSError, subprocess.SubprocessError):
             self.values = []
@@ -484,11 +509,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(bridge: MixerBridge, bind: str, port: int, setup=None, host_stats: HostStats | None = None,
-          preview_base: str | None = None) -> ThreadingHTTPServer:
+          preview_base: str | None = None, price: dict | None = None) -> ThreadingHTTPServer:
     """`preview_base`: where the page's players load from, when not port 8080 of the page's host.
     Normalized here, so every caller's page carries a base the player resolves its files against."""
     preview_base = normalize_preview_base(preview_base or "")
     config = {"preview_base": preview_base} if preview_base else {}
+    if price:
+        config["compute_price"] = price
     server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=GpuStats(), host_stats=host_stats,
                                                         config=config))
     server.daemon_threads = True
@@ -508,6 +535,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "behind a reverse proxy, or a URL (default: port 8080 of the page's host)")
     parser.add_argument("--transition", choices=("cut", "fade", "wipe"),
                         help="Override the page's initial transition without changing the running mixer")
+    parser.add_argument("--compute-price", type=Path, default=os.environ.get("MIXER_COMPUTE_PRICE") or None,
+                        help="JSON file with public hourly_usd, label, as_of and source_url for compute + GPU; "
+                             "enables USD per input source per hour. Env: MIXER_COMPUTE_PRICE")
     parser.add_argument("--manage-setup", action="store_true", help="Own and restart the demo mixer process")
     instance_types = [t.value for t in InstanceType]
     parser.add_argument("--instance-type", choices=instance_types,
@@ -539,6 +569,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    price = compute_price(args.compute_price)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     bridge = MixerBridge(args.host, args.port, args.mixer, transition=args.transition)
     setup = None
@@ -554,7 +585,8 @@ def main(argv: list[str] | None = None) -> None:
     host_stats.start()
     if args.critical_nice:
         CriticalNice(mixer_pid, args.critical_nice).start()
-    server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats, preview_base=args.preview_base)
+    server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats,
+                   preview_base=args.preview_base, price=price)
     print(f"mixer web UI on http://{args.bind}:{args.http_port} "
           f"controlling {args.mixer} at {args.host}:{args.port}", flush=True)
     def stop(_signum, _frame):

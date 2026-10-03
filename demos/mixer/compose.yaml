@@ -44,6 +44,8 @@ services:
     environment:
       # Opt-in: webui.py keeps the deadline-critical mixer threads at nice -N (0 = off).
       MIXER_CRITICAL_NICE: ${MIXER_CRITICAL_NICE:-0}
+      # Optional public compute price JSON, for example /media/compute-price.json.
+      MIXER_COMPUTE_PRICE: ${MIXER_COMPUTE_PRICE:-}
     entrypoint: [python3, demos/mixer/webui.py]
     volumes:
       - ../../media:/media:rw,z

@@ -17,7 +17,7 @@ import pytest
 
 from pyplumber.mixer.control import mixer_command
 from webui import (CONFIG_SCRIPT, CriticalNice, GpuStats, HostStats, MixerBridge, normalize_preview_base, page,
-                   parse_args, serve)
+                   compute_price, parse_args, serve)
 
 
 class FakeBridge(MixerBridge):
@@ -66,12 +66,14 @@ def test_gpu_samples_are_cached_and_missing_metrics_stay_unknown(monkeypatch):
     monkeypatch.setattr('webui.time.monotonic', lambda: now[0])
     def query(*args, **kwargs):
         calls.append(args)
-        return '0, 93, [N/A], 12, 14336, 15360\n1, 0, 99, [N/A], 15104, 24576\n'
+        return '0, 93, [N/A], 12, 14336, 15360, 53.95, 72.00\n1, 0, 99, [N/A], 15104, 24576, [N/A], [Not Supported]\n'
     monkeypatch.setattr('webui.subprocess.check_output', query)
     stats = GpuStats()
     first = stats.snapshot()
-    assert first[0] == dict(index=0, gpu=93, decoder=None, encoder=12, memory_used_mib=14336, memory_total_mib=15360)
+    assert first[0] == dict(index=0, gpu=93, decoder=None, encoder=12, memory_used_mib=14336, memory_total_mib=15360,
+                          power_draw_w=53.95, power_limit_w=72.0)
     assert first[1]['encoder'] is None
+    assert first[1]['power_draw_w'] is None and first[1]['power_limit_w'] is None
     assert first[1]['index'] == 1 and first[1]['gpu'] == 0
     now[0] = .5
     assert stats.snapshot() == first and len(calls) == 1
@@ -83,6 +85,33 @@ def test_gpu_samples_are_cached_and_missing_metrics_stay_unknown(monkeypatch):
         stats.lock.release()
     stats.snapshot()
     assert len(calls) == 2
+    assert 'power.draw,enforced.power.limit' in calls[0][0][1]
+
+
+@pytest.mark.parametrize('raw', ['NaN', 'inf', '-1', '[N/A]'])
+def test_invalid_power_readings_do_not_hide_utilization(monkeypatch, raw):
+    monkeypatch.setattr('webui.subprocess.check_output', lambda *a, **kw: f'0, 60, 70, 40, 100, 200, {raw}, {raw}\n')
+    sample = GpuStats().snapshot()[0]
+    assert sample['gpu'] == 60
+    assert sample['power_draw_w'] is None and sample['power_limit_w'] is None
+
+
+def test_compute_price_config_is_optional_and_validated(tmp_path, monkeypatch):
+    monkeypatch.setenv('MIXER_COMPUTE_PRICE', '')
+    assert compute_price(parse_args([]).compute_price) is None
+    path = tmp_path / 'price.json'
+    value = dict(hourly_usd=1.2, label='Google Cloud VM + GPU, on demand', as_of='2026-10-03',
+                 source_url='https://cloud.google.com/products/compute/pricing/accelerator-optimized')
+    path.write_text(json.dumps(value))
+    monkeypatch.setenv('MIXER_COMPUTE_PRICE', str(path))
+    assert compute_price(parse_args([]).compute_price) == value
+    for rate in [0, -1, True, '1.2', float('nan'), float('inf')]:
+        path.write_text(json.dumps(dict(value, hourly_usd=rate)))
+        with pytest.raises(ValueError, match='hourly_usd'):
+            compute_price(path)
+    path.write_text(json.dumps(dict(value, source_url='javascript:alert(1)')))
+    with pytest.raises(ValueError, match='HTTPS'):
+        compute_price(path)
 
 
 @pytest.mark.parametrize('error', [FileNotFoundError(), subprocess.TimeoutExpired('nvidia-smi', 1)])
