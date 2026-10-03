@@ -654,6 +654,37 @@ def fake_browser_rest(base, method, path, body=None):
     return body if path == "/window/open" else {"windows": []}
 
 
+@pytest.mark.parametrize("budget", [None, 7])
+def test_array_decode_is_explicit_per_source_and_preserves_linear_defaults(tmp_path, budget):
+    camera = CONFIG["sources"][0]
+    array = {**camera, "decode_storage": "cuarray"}
+    if budget is not None:
+        array["extra_hw_frames"] = budget
+    linear = {**camera, "id": "linear", "path": "/media/linear.mp4"}
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps({**CONFIG, "sources": [array, linear], "wipes": [],
+                                "scenes": CONFIG["scenes"][:1], "initial_scene": "full"}))
+    app = build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
+    nodes = {node.parameters.get("name"): node.parameters for node in app.avp.nodes}
+    assert nodes["decode_0"]["pixel_format"] == "cuarray"
+    assert nodes["decode_0"]["auto_restart"] == "off"
+    assert nodes["decode_0"]["options"] == {
+        "threads": 1, "hwaccel_flags": "unsafe_output", "extra_hw_frames": 3 if budget is None else budget}
+    assert nodes["decode_1"]["pixel_format"] == "?cuda"
+    assert nodes["decode_1"]["options"] == {"threads": 1}
+    assert nodes["decode_1"]["auto_restart"] == "group"
+    assert "codec" not in nodes["decode_0"] and "codec" not in nodes["decode_1"]
+    assert ("*", 3) in app.avp.edges.plans
+
+
+@pytest.mark.parametrize("field,value", [("decode_storage", "invalid"), ("extra_hw_frames", True),
+                                        ("extra_hw_frames", -1), ("extra_hw_frames", 33)])
+def test_invalid_decode_storage_or_budget_is_rejected(field, value):
+    with pytest.raises(mixer_config.ConfigError, match=field):
+        mixer_config.parse({**CONFIG, "sources": [{**CONFIG["sources"][0], field: value},
+                                                  CONFIG["sources"][1]]})
+
+
 def _raw_420_nodes(tmp_path, kind, color, **canvas):
     doc = {"canvas": {**CONFIG["canvas"], **canvas}, "sources": [{"id": "raw", "kind": kind,
            "path": str(tmp_path / "pattern.raw"), "width": 320, "height": 180, "color": color}],

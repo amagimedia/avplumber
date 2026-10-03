@@ -15,11 +15,14 @@ extern "C" {
 }
 
 #include <memory>
+#include <vector>
 
 namespace avp::mixer {
 
 int checkCu(CUresult err, const char *func);
 #define AVP_CHECK_CU(x) ::avp::mixer::checkCu((x), #x)
+
+class RectArrayTextures;
 
 class CudaRectDraw {
 public:
@@ -33,9 +36,8 @@ public:
         float hdr_peak = kGraphicHdrPeak;
     };
 
-    CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int max_layers = 256)
-        : hwaccel_(std::move(hw)), canvas_(canvas), max_layers_(max_layers) {}
-    ~CudaRectDraw() { unload(); }
+    CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int max_layers = 256);
+    ~CudaRectDraw();
     CudaRectDraw(const CudaRectDraw &) = delete;
     CudaRectDraw &operator=(const CudaRectDraw &) = delete;
 
@@ -61,6 +63,7 @@ public:
 
     /// sw_format of a hardware frame, AV_PIX_FMT_NONE when it has no frames context.
     static AVPixelFormat frameSwFormat(const av::VideoFrame &f);
+    static bool frameSupported(AVPixelFormat format);
 
 private:
     std::shared_ptr<HWAccelDevice> hwaccel_;
@@ -72,13 +75,20 @@ private:
     CUfunction composite_yuv_kernel_ = nullptr;   // lean: no packed-RGB layers in the table
     CUfunction composite_packed_kernel_ = nullptr; // packed 4-byte RGB canvases
     CUfunction composite_opacity_kernel_ = nullptr; // full, plus faded RGBA layers (LayerSpec::opacity < 1)
+    CUfunction composite_array_kernel_ = nullptr;
+    CUfunction composite_yuv_array_kernel_ = nullptr;
+    CUfunction composite_opacity_array_kernel_ = nullptr;
     bool opacity_warned_ = false;   // an op with opacity < 1 on a kind that cannot blend, logged once
     // Rect table: pinned host staging + device copy, one entry per op, reused every frame
     // (the node synchronizes the stream after each frame).
     AvpRectLayer *table_host_ = nullptr;
     CUdeviceptr table_device_ = 0;
+    std::unique_ptr<RectArrayTextures> array_textures_;
+    CUevent producer_ready_ = nullptr;
+    std::vector<CUstream> waited_streams_;
 
-    void fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out) const;
+    void fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out);
+    void waitForProducer(const AVFrame *src, CUstream stream);
     void validateSourceColor(const av::VideoFrame &src, bool packed_rgb, const AVFrame *canvas) const;
 };
 

@@ -108,6 +108,15 @@ class Source:
     color_range: str = ""
     filter_graph: str = ""         # optional CUDA source filter, before scene/alias fan-out
     filter_output_format: str = ""
+    decode_storage: str = "cuda"
+    extra_hw_frames: int = 3       # CUarray application headroom, beyond codec/working surfaces
+
+    @property
+    def decoder_params(self):
+        if self.decode_storage != "cuarray":
+            return {}
+        return {"pixel_format": "cuarray", "auto_restart": "off", "options": {
+            "threads": 1, "hwaccel_flags": "unsafe_output", "extra_hw_frames": self.extra_hw_frames}}
 
     @property
     def color(self):
@@ -339,6 +348,11 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
         raise ConfigError(f"{where}: custom filter requires filter_output_format (CUDA YUV storage)")
     if source_filter and kind == "browser":
         raise ConfigError(f"{where}: browser source filters are unsupported; preserve packed RGB alpha")
+    storage, extra = s.get("decode_storage", "cuda"), s.get("extra_hw_frames", 3)
+    if storage not in ("cuda", "cuarray") or kind != "video" and ("decode_storage" in s or "extra_hw_frames" in s):
+        raise ConfigError(f"{where}: decode_storage applies to video sources and must be cuda or cuarray")
+    if type(extra) is not int or not 0 <= extra <= 32:
+        raise ConfigError(f"{where}: extra_hw_frames must be an integer from 0 to 32")
     hold_last_frame = s.get("hold_last_frame", True)
     if not isinstance(hold_last_frame, bool) or "hold_last_frame" in s and kind != "browser":
         raise ConfigError(f"{where}: hold_last_frame must be a boolean on a browser source")
@@ -358,7 +372,8 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)),
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), hold_last_frame=hold_last_frame, filter_graph=source_filter,
-                  filter_output_format=filter_format, **(color.tags if color else {}))
+                  filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
+                  **(color.tags if color else {}))
 
 
 def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int, fps: int) -> Rendition:

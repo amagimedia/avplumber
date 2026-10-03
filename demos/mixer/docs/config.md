@@ -222,11 +222,28 @@ decoder.
 | `hold_last_frame` | browser | default `true`: while a failed or crashed page reloads, repeat its last frame. `false` shows Chromium's empty error page (transparent or black) instead |
 | `width`, `height` | video | optional; probed with ffprobe at load when absent |
 | `loop` | both | default `true` |
+| `decode_storage` | video | default `cuda`; experimental `cuarray` requires the patched upstream FFmpeg build and compatible array consumers, and selects zero-copy NVDEC without CPU fallback |
+| `extra_hw_frames` | CUarray video | default `3`: fixed application headroom beyond codec and FFmpeg working surfaces; size it for the graph's retained-frame demand |
 | `filter` | video/v210/nv12/p010 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
 | `filter_output_format` | custom filters | required CUDA YUV output storage, e.g. `p010le` or `p210le` |
 
 Browser sources arrive over DMA-BUF from the `dma-page` service and are
 imported straight into CUDA; they mix with video sources on the same canvas.
+
+CUarray decoders disable automatic restart, so a failed decoder cannot recreate
+its pool while downstream frames still retain the old one. They do not fall back
+to copying or CPU decoding; restart deliberately after resolving the error or
+changing the fixed budget.
+
+The surface budget is separate from the decoded edge's three-frame capacity.
+Other stages and independently timed outputs also retain references. The tested
+192-input / 20-output show (120 low-DPB HEVC inputs, 32 raw inputs and 40 browsers)
+used `extra_hw_frames: 8`, giving those HEVC clips 17 fixed surfaces each.
+The 28-output version needed `extra_hw_frames: 12` (21 fixed surfaces); seventeen
+surfaces exhausted during its startup.
+The default three extras gave 12 surfaces and exhausted the pool during startup.
+This is a measured graph budget, not a bound for arbitrary clips or consumers;
+pool exhaustion can leave an input repeating even while output deadlines stay clean.
 
 Color normalization is automatic in `MixerGraphBuilder`, before alias and scene
 fan-out. Video sources use decoded frame metadata, including live SRT streams.

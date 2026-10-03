@@ -81,8 +81,21 @@ ARG BUILD_JOBS=4
 
 COPY deps/ffmpeg /build/deps/ffmpeg
 
-RUN git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
-        https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
+RUN if [ "${FFMPEG_TAG}" = "$(. /build/deps/ffmpeg/9/bases.env; echo "$upstream_ref")" ]; then \
+        . /build/deps/ffmpeg/9/bases.env; \
+        git clone --quiet --branch "$nv_codec_headers_tag" --depth 1 \
+            https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers \
+        && test "$(git -C /tmp/nv-codec-headers rev-parse HEAD)" = "$nv_codec_headers_commit" \
+        && make -C /tmp/nv-codec-headers install PREFIX=/usr/local \
+        && rm -rf /tmp/nv-codec-headers \
+        && git init --quiet /tmp/ffmpeg \
+        && git -C /tmp/ffmpeg remote add origin https://github.com/FFmpeg/FFmpeg.git \
+        && git -C /tmp/ffmpeg fetch --quiet --depth 1 origin "$upstream_commit" \
+        && git -C /tmp/ffmpeg checkout --quiet --detach FETCH_HEAD; \
+    else \
+        git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
+            https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg; \
+    fi \
     && bash /build/deps/ffmpeg/apply.sh /tmp/ffmpeg
 
 # PTX for the oldest deployed GPU (T4, sm_75); the driver JIT-compiles it for

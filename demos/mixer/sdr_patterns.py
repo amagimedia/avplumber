@@ -29,6 +29,12 @@ def rate(kbps: int) -> list:
     return ["-b:v", f"{kbps}k", "-maxrate", f"{PEAK_KBPS}k", "-bufsize", f"{2 * kbps}k"]
 
 
+def encoding_options(encoder: str, kbps: int, fps: int) -> list:
+    # Bound each demo decoder's reference surfaces without reducing its playout buffer.
+    references = ["-bf", "0", "-dpb_size", "2"] if encoder in ("h264_nvenc", "hevc_nvenc") else []
+    return [*rate(kbps), "-g", str(fps), *references]
+
+
 GENERATORS = {
     "testsrc2": "testsrc2",
     "bars": "smptehdbars",
@@ -53,7 +59,7 @@ def render(directory: pathlib.Path, name: str, graph: str, size: str, fps: int, 
                     *(["-filter_complex", graph_filter] if graph_filter else []), "-t", str(seconds),
                     "-c:v", encoder,
                     *(["-f", "rawvideo", "-pix_fmt", "nv12"] if raw else
-                      [*rate(kbps), "-g", str(fps), "-pix_fmt", "yuv420p"]), str(out)],
+                      [*encoding_options(encoder, kbps, fps), "-pix_fmt", "yuv420p"]), str(out)],
                    input=data, check=True)
     return out
 

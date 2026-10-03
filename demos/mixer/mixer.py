@@ -728,7 +728,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
-                               event_loop=_pacing_loop(index))
+                               event_loop=_pacing_loop(index), decoder_params=source.decoder_params)
         if source.filter_graph:
             filtered_edge = f"input_{index}_filtered"
             avp.addNode(api.FilterVideo({

@@ -28,7 +28,7 @@ import numpy as np
 DEMO_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(DEMO_DIR.parents[1]))
 
-from sdr_patterns import GENERATORS, input_kbps, rate, render  # noqa: E402
+from sdr_patterns import GENERATORS, input_kbps, encoding_options, render  # noqa: E402
 from demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic  # noqa: E402
 from hdr_patterns import write_hlg  # noqa: E402
 from pyplumber.mixer.config import MAX_SOURCES, default_browser_ring_size, parse  # noqa: E402
@@ -155,7 +155,7 @@ def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, sour
     inputs, graph, data = id_overlay(source_id, width, height, seconds)
     pixel_format = "yuv422p10le" if encoder == "v210" else "p010le"
     options = (["-f", "rawvideo"] if encoder in ("rawvideo", "v210") else
-               ["-profile:v", "main10", *rate(kbps), "-g", str(fps)])
+               ["-profile:v", "main10", *encoding_options(encoder, kbps, fps)])
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-f", "v210", "-video_size", f"{width}x{height}",
                     "-framerate", str(fps), "-i", str(raw), *inputs, "-an", "-filter_complex",
                     graph + ",setparams=range=limited:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
@@ -249,14 +249,20 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 pattern = spec.get("pattern", pool[index % len(pool)])
                 if pattern not in patterns:
                     raise ValueError(f"{name}: pattern must be one of {patterns}")
-                encoder = "h264_nvenc" if color == "sdr" else "hevc_nvenc"
+                codec = spec.get("codec", "h264" if color == "sdr" else "hevc")
+                if codec not in ("h264", "hevc") or color == "hlg" and codec != "hevc":
+                    raise ValueError(f"{name}: codec must be h264 or hevc; HLG requires hevc")
+                if "codec" in spec and (raw or chroma == "422"):
+                    raise ValueError(f"{name}: codec applies only to encoded 4:2:0 inputs")
+                encoder = f"{codec}_nvenc"
                 storage = raw or ("v210" if chroma == "422" else encoder)
                 # Version cache names when changing generation semantics. Every
                 # source has its own file, with its id burned in (id_overlay), so
                 # no two inputs share decode input or page cache; the name holds
                 # all that shapes the content, so re-applying reuses the file.
                 extension = raw or ("v210" if chroma == "422" else "mp4")
-                path = (media_dir / "assets" / f"synthetic_v4_{size}_{fps}fps_{seconds}s" /
+                version = 5 if extension == "mp4" else 4   # low-DPB encodes; raw pixels are unchanged
+                path = (media_dir / "assets" / f"synthetic_v{version}_{size}_{fps}fps_{seconds}s" /
                         f"{source['id']}_{color}_{chroma}_{pattern}_{storage}{f'_{input_kbps(index)}k' if extension == 'mp4' else ''}.{extension}")
                 encoder = "v210" if chroma == "422" else "rawvideo" if raw else encoder
                 if color == "hlg":
@@ -298,6 +304,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                     raise ValueError(f"{name}: a download or file feeds one source only (weight 1, unique clip)")
                 clips.add(path)
                 source.update(kind="video", path=runtime_path(path))
+            source.update({key: spec[key] for key in ("decode_storage", "extra_hw_frames") if key in spec})
             sources.append(source)
     # Graphics need fewer pixels than the program; the compositor scales them
     # in its draw pass. Bound decode/upload cost independently of canvas size.

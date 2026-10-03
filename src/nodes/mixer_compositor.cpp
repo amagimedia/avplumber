@@ -33,7 +33,6 @@ class MixerCompositor : public CudaRectCompositor,
     std::string composition_revision_; // of the composition being drawn; protected by layers_mutex_
     bool aux_ = false;
     std::atomic<uint64_t> output_drops_{0};
-    CUevent input_ready_ = nullptr;
     // Playout counters snapshotted every 60 frames for the status object; the
     // control thread never touches playout_ itself.
     std::mutex playout_stats_mutex_;
@@ -58,24 +57,6 @@ class MixerCompositor : public CudaRectCompositor,
 
     void composite(av::Timestamp pts, const std::vector<const av::VideoFrame *> &sources,
                    const av::VideoFrame *metadata_src) {
-        if (aux_) {
-            draw_.ensureDevice();
-            const CUstream stream = draw_.stream();
-            // Frame publication follows producer submission. Record after that
-            // submission and wait only on the aux stream; never synchronize PGM.
-            std::vector<CUstream> producers;
-            for (const auto *source : sources) {
-                if (!source || !source->raw()->hw_frames_ctx) continue;
-                auto *fc = reinterpret_cast<AVHWFramesContext *>(source->raw()->hw_frames_ctx->data);
-                auto *device = reinterpret_cast<AVCUDADeviceContext *>(fc->device_ctx->hwctx);
-                const auto producer = device->stream;
-                if (producer == stream || std::find(producers.begin(), producers.end(), producer) != producers.end()) continue;
-                producers.push_back(producer);
-                if (AVP_CHECK_CU(cuEventRecord(input_ready_, producer)) ||
-                    AVP_CHECK_CU(cuStreamWaitEvent(stream, input_ready_, 0)))
-                    throw Error("aux: source readiness wait failed");
-            }
-        }
         if (!this->sink_->put(compose(pts, sources, metadata_src), aux_)) ++output_drops_;
     }
 
@@ -110,11 +91,6 @@ public:
 
     ~MixerCompositor() override {
         MixerCompositor::flush();
-        if (aux_) {
-            draw_.ensureDevice();
-            AVP_CHECK_CU(cuStreamSynchronize(draw_.stream()));
-            if (input_ready_) { cuEventDestroy(input_ready_); input_ready_ = nullptr; }
-        }
     }
 
     void flush() override {
@@ -396,9 +372,6 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
             std::lock_guard<std::mutex> lock(state->mutex);
             state->scene_definitions_frozen = true;
         }
-        node->draw_.ensureDevice();
-        if (AVP_CHECK_CU(cuEventCreate(&node->input_ready_, CU_EVENT_DISABLE_TIMING)))
-            throw Error("aux: cannot create readiness event");
         if (!params.contains("subscriptions")) throw Error("aux: subscriptions are required");
     }
     if (params.contains("subscriptions")) {

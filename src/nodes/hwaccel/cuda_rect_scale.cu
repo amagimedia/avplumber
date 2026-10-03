@@ -71,17 +71,33 @@ __device__ __forceinline__ RowTaps row_taps(int sy, int sh, int oy, int dh) {
     t.y1 = sy + max(0, min(iy + 1, sh - 1));
     return t;
 }
-__device__ __forceinline__ float sample_lane(const unsigned char *src, int src_pitch, int sx, int sw,
+__device__ __forceinline__ float load_lane(unsigned long long storage, bool textured, int pitch,
+                                           int x, int y, int lanes, int c, int bytes, int shift) {
+    if (!textured)
+        return load_sample((const unsigned char *)storage + y * pitch + (x * lanes + c) * bytes, bytes, shift);
+    // Point sampling returns exact stored codes. Keep the same software bilinear
+    // arithmetic as linear inputs; CUDA's hardware interpolation has lower precision.
+    if (bytes == 1) {
+        if (lanes == 1) return float(tex2D<unsigned char>(storage, x + 0.5f, y + 0.5f));
+        const uchar2 pair = tex2D<uchar2>(storage, x + 0.5f, y + 0.5f);
+        return float(c ? pair.y : pair.x);
+    }
+    if (lanes == 1) return float(tex2D<unsigned short>(storage, x + 0.5f, y + 0.5f) >> shift);
+    const ushort2 pair = tex2D<ushort2>(storage, x + 0.5f, y + 0.5f);
+    return float((c ? pair.y : pair.x) >> shift);
+}
+
+__device__ __forceinline__ float sample_lane(unsigned long long src, bool textured, int src_pitch, int sx, int sw,
                                              int lanes, int c, int bytes, int shift, int ox, int dw, RowTaps t) {
     const float fx = (ox + 0.5f) * sw / dw - 0.5f;
     const int ix = int(floorf(fx));
     const float tx = fx - ix;
     const int x0 = sx + max(0, min(ix, sw - 1));
     const int x1 = sx + max(0, min(ix + 1, sw - 1));
-    const float a = load_sample(src + t.y0 * src_pitch + (x0 * lanes + c) * bytes, bytes, shift);
-    const float b = load_sample(src + t.y0 * src_pitch + (x1 * lanes + c) * bytes, bytes, shift);
-    const float d = load_sample(src + t.y1 * src_pitch + (x0 * lanes + c) * bytes, bytes, shift);
-    const float e = load_sample(src + t.y1 * src_pitch + (x1 * lanes + c) * bytes, bytes, shift);
+    const float a = load_lane(src, textured, src_pitch, x0, t.y0, lanes, c, bytes, shift);
+    const float b = load_lane(src, textured, src_pitch, x1, t.y0, lanes, c, bytes, shift);
+    const float d = load_lane(src, textured, src_pitch, x0, t.y1, lanes, c, bytes, shift);
+    const float e = load_lane(src, textured, src_pitch, x1, t.y1, lanes, c, bytes, shift);
     const float top = a + tx * (b - a), bottom = d + tx * (e - d);
     return top + t.ty * (bottom - top);
 }
@@ -142,7 +158,7 @@ __device__ __forceinline__ float sample_alpha_tex(unsigned long long tex, int sx
 // <1,false> luma, <2,true> chroma pairs, <4,false> packed RGB canvas. kOpacity=true also
 // weights each blended RGBA layer's alpha by its table `mul` (a key fade); only the
 // composite_planes_opacity entry sets it, so the other entries keep their code.
-template <bool kRgb, int kLanes, bool kChroma, bool kOpacity = false>
+template <bool kRgb, int kLanes, bool kChroma, bool kOpacity = false, bool kArrays = false>
 __device__ __forceinline__ void composite_body(
     const AvpRectLayer *__restrict__ layers, int n,
     unsigned char *dst_y, int y_pitch, unsigned char *dst_uv, int uv_pitch,
@@ -193,7 +209,7 @@ __device__ __forceinline__ void composite_body(
             if (oy < 0 || oy >= ldh || X0 + px <= ldx || X0 >= ldx + ldw) continue;
 
             if (L.kind == AVP_RECT_KIND_YUV || L.kind == AVP_RECT_KIND_PROMOTE) {
-                const unsigned char *src = (const unsigned char *)L.src[plane];
+                const unsigned long long src = L.src[plane];
                 const int pitch = L.src_pitch[plane];
                 const int sx = L.sx[plane], sy = L.sy[plane], sw = L.sw[plane], sh = L.sh[plane];
                 const int bytes = L.kind == AVP_RECT_KIND_YUV ? dst_sb : L.src_bytes;
@@ -206,7 +222,8 @@ __device__ __forceinline__ void composite_body(
                     if (ox < 0 || ox >= ldw) continue;
 #pragma unroll
                     for (int c = 0; c < lanes; ++c) {
-                        float sv = sample_lane(src, pitch, sx, sw, lanes, c, bytes, shift, ox, ldw, taps);
+                        float sv = sample_lane(src, kArrays && L.yuv_texture, pitch, sx, sw,
+                                               lanes, c, bytes, shift, ox, ldw, taps);
                         if (L.kind == AVP_RECT_KIND_PROMOTE) sv *= mul;
                         acc[p][c] = stored_code(sv);
                     }
@@ -374,4 +391,19 @@ extern "C" __global__ void __launch_bounds__(256) composite_planes_opacity(AVP_C
 // Packed 8-bit RGB canvas with 4 bytes per pixel (rgb0/bgr0/rgba/bgra), same-format sources (gridDim.z = 1).
 extern "C" __global__ void __launch_bounds__(256) composite_planes_packed4(AVP_COMPOSITE_ARGS) {
     composite_body<false, 4, false>(AVP_COMPOSITE_PASS);
+}
+
+// Keep array fetches out of the linear-only kernels' instruction/register budget.
+// These variants accept a mix of pointer and array YUV layers in the same draw.
+extern "C" __global__ void __launch_bounds__(256) composite_planes_array(AVP_COMPOSITE_ARGS) {
+    if (blockIdx.z) composite_body<true, 2, true, false, true>(AVP_COMPOSITE_PASS);
+    else composite_body<true, 1, false, false, true>(AVP_COMPOSITE_PASS);
+}
+extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv_array(AVP_COMPOSITE_ARGS) {
+    if (blockIdx.z) composite_body<false, 2, true, false, true>(AVP_COMPOSITE_PASS);
+    else composite_body<false, 1, false, false, true>(AVP_COMPOSITE_PASS);
+}
+extern "C" __global__ void __launch_bounds__(256) composite_planes_opacity_array(AVP_COMPOSITE_ARGS) {
+    if (blockIdx.z) composite_body<true, 2, true, true, true>(AVP_COMPOSITE_PASS);
+    else composite_body<true, 1, false, true, true>(AVP_COMPOSITE_PASS);
 }

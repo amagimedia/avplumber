@@ -22,11 +22,12 @@
 #define AVP_RECT_KIND_RGBA_TEX 5  // as RGBA, texture-backed
 
 struct AvpRectLayer {
-    unsigned long long src[2];   // device pointers of the source planes (RGB: [0] only; *_TEX: [0] is the texture)
+    unsigned long long src[2];   // device pointers, or texture handles when yuv_texture / *_TEX is set
     int src_pitch[2];
     int sx[2], sy[2], sw[2], sh[2];   // source rect per plane, lane groups (RGB: packed pixels in [0])
     int dx[2], dy[2], dw[2], dh[2];   // destination rect per canvas plane, lane groups
     int kind;
+    int yuv_texture;                  // YUV/PROMOTE: src[] holds exact integer plane textures
     int src_bytes, src_shift;         // PROMOTE: source storage; YUV: same as the canvas
     float mul;                        // PROMOTE: code multiplier; YUV, RGB: 1; RGBA: opacity in (0, 1]
     int step, r_off, g_off, b_off, a_off, premultiplied;   // RGB(A)

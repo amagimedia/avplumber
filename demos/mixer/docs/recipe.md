@@ -58,6 +58,13 @@ generated show declares these sources as `kind: "nv12"`.
 `canvas.raw_upload: "pinned"` in the recipe (copied to the show) uploads raw
 sources through `raw_to_cuda` instead; see [config](config.md#canvas).
 
+Generated, encoded 4:2:0 inputs accept `codec: "h264"` or `codec: "hevc"`.
+SDR defaults to H.264; HLG requires HEVC. An encoded input group can also set
+`decode_storage: "cuarray"` and `extra_hw_frames: 3`; preparation preserves these
+options on every generated video source. CUarray requires the patched upstream
+FFmpeg build and compatible GPU consumers; see [decoder options](config.md#sources).
+Other input groups keep their existing decoder storage.
+
 Both 10-bit canvas modes also offer **HDR · 4:2:0 · raw upload**. This generates
 cached HLG P010 patterns and uploads them directly, without NVDEC or a runtime
 SDR-to-HDR conversion. Use `storage: "p010"` and `color: "hlg"` in a generated

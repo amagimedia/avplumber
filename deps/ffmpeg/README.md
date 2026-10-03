@@ -1,4 +1,95 @@
-# FFmpeg patch series (FFmpeg 8.x)
+# FFmpeg patch series
+
+`apply.sh` selects the series from the upstream checkout. The `8/` series is
+unchanged. The experimental `9/` series targets the exact development revision
+`98e92563a3b60dbf6d370fd3491d7f896398e4c1` (`master-98e92563`), with libavcodec 63,
+libavfilter 12 and libavutil 61. It does **not** apply to release n9.0.2; that
+release also lacks the opaque CUDA array decode path being evaluated here.
+Pin the commit, not the moving `master` branch.
+
+```bash
+deps/ffmpeg/apply.sh <ffmpeg-checkout>
+deps/ffmpeg/verify.sh master-98e92563 <ffmpeg-repo>
+```
+
+Build the experimental revision with nv-codec-headers **n13.1.15.0**
+(`0a6fba9a2820628b8103464f4c8753ee05838baa`) to enable its SDK 13.1 CUARRAY path.
+The existing Docker defaults remain FFmpeg 8.1 / headers 13.0.19.0. A revision
+hash needs an explicit fetch/checkout; `git clone --branch` accepts a branch
+or tag, not a commit hash. Rebuild avcpp, the AVP binary and Python module
+against the selected library ABI, and keep runtime library selection consistent.
+The Fedora mixer Dockerfile accepts `--build-arg FFMPEG_TAG=master-98e92563`
+to fetch both pinned revisions; the default remains `n8.1`.
+
+## Development-series differences
+
+All seven custom CUDA filters remain: `convert_cuda`, `crop_cuda`,
+`overlay_many_cuda`, `pad_cuda`, `transition_cuda` (including 10-bit and dip),
+`tonemap_cuda` and `band_blur_cuda`. The RFC 4175, V4L2, optional NDI registration
+and AArch64 patches remain too. Changes from the 8.x series:
+
+- NPP compatibility is omitted because upstream removed NPP filter support.
+  `--enable-libnpp` now only warns and does nothing. This is a feature removal
+  for consumers using NPP; the mixer demo already disables it.
+- CUDA frame formats are checked generically upstream, including YUVA444P,
+  so the old format-list addition is redundant.
+- Upstream `scale_cuda` has a new antialiasing/filter path and already clips
+  and rounds scaled samples. Keep that implementation; port explicit texture
+  edge clamping and the stable Lanczos coefficient calculation without the
+  old duplicate sample-conversion helpers. Pixel-reference and timing tests
+  must cover the changed upstream scaler.
+- Registration context and the AArch64 helper insertion point changed.
+  The retained CUVID intra-only patch still recognizes the existing
+  `gop_size=100000` convention to set `ulIntraDecodeOnly`, with the existing
+  decoder-initialization logging.
+- Ordinary NVDEC zero-copy CUARRAY output honors an explicit
+  `options.extra_hw_frames` budget, already included by FFmpeg's frame-context
+  setup, instead of reserving another 16 surfaces. An unspecified budget retains
+  upstream's default; explicit pools above the registration limit fail before
+  allocating arrays. Linear CUDA, CPU and copying CUARRAY modes are unchanged.
+  Three extra frames are the opt-in source default, in addition to codec and
+  FFmpeg working surfaces, not a full-mixer sizing recommendation. The measured
+  192-input / 20-output graph used eight extras (17 surfaces for its HEVC
+  clips); 28 outputs needed twelve extras (21 surfaces). Twelve total surfaces
+  exhausted during 20-output startup, and seventeen exhausted with 28 outputs.
+  Size a fixed pool for the
+  complete downstream graph. The FFmpeg CLI adds its own queue allowance, so
+  CLI pool counts are not directly comparable to an AVP decoder node.
+- Internally allocated zero-copy CUARRAY pools use a private nonblocking CUDA
+  stream per decoder, sharing the parent CUDA context. The output frames expose
+  that producer stream through their device context so consumers can order
+  reads with events. This path requires `cuvidDecodePictureAsync`; it does not
+  fall back to synchronous decoding. Caller-supplied initialized frame pools
+  retain their existing stream, and linear CUDA decoding is unchanged.
+
+CUARRAY is a separate opt-in pixel format. Linear `AV_PIX_FMT_CUDA` and CPU
+decoding remain upstream options. The experimental series permits `scale_cuda`
+to forward matching-size, matching-format CUARRAY frames with passthrough enabled.
+Array resizing or format conversion fails explicitly; the scaling kernels are
+unchanged. Identity passthrough returns before loading unused scaling kernels.
+The `pad_cuda`, `crop_cuda` and `transition_cuda` extensions consume NV12/P010/P210
+arrays and produce ordinary linear CUDA output. Pad and transition sample array
+planes; crop copies its rectangle directly into the final output. Mixed
+array/linear transition inputs and different producer streams in the same CUDA
+context are supported without an intermediate image copy. Completion fences
+keep source frames alive through GPU reads. Other custom filters retain their
+existing linear-input contracts; array support is not enabled globally.
+Upstream supplies a GPU-to-GPU
+`av_hwframe_transfer_data()` path into a linear CUDA frame; its CUDA context
+does not supply the map callbacks needed by `hwmap`. Direct array consumption
+needs an explicit compatible consumer and lifetime handling. Do not label
+array handles as linear device pointers or enable opaque output globally.
+
+`verify.sh` proves exact patch application only. Compilation, custom-filter
+pixel tests, CPU/linear-NVDEC regressions and resource/latency comparisons on an
+NVIDIA host are separate acceptance gates; patch application is not evidence
+of a performance improvement.
+
+The [L4 capacity validation](../../doc/research/2026-10-03-cuarray-capacity.md)
+records the matched 20-output comparison and 28-output capacity result, including
+fixed-pool sizing failures and the zero-copy boundary.
+
+## FFmpeg 8.x
 
 One ordered series in `8/` applies to upstream **n8.0 and n8.1** from a single
 copy; there are no per-version directories. `8/bases.env` pins each base

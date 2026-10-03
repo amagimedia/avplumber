@@ -11,6 +11,7 @@ extern "C" {
 
 #include <string>
 #include <utility>
+#include "cuda_rect_array.hpp"
 
 namespace avp::mixer {
 
@@ -40,6 +41,15 @@ int plane0Lanes(AVPixelFormat fmt) {
 }
 
 } // namespace
+
+CudaRectDraw::CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int max_layers)
+    : hwaccel_(std::move(hw)), canvas_(canvas), max_layers_(max_layers) {}
+
+CudaRectDraw::~CudaRectDraw() { unload(); }
+
+bool CudaRectDraw::frameSupported(AVPixelFormat format) {
+    return format == AV_PIX_FMT_CUDA || isCudaArray(format);
+}
 
 AVPixelFormat CudaRectDraw::frameSwFormat(const av::VideoFrame &f) {
     if (!f.raw() || !f.raw()->hw_frames_ctx || !f.raw()->hw_frames_ctx->data)
@@ -78,7 +88,10 @@ void CudaRectDraw::ensureKernels() {
         AVP_CHECK_CU(cuModuleGetFunction(&composite_kernel_, module_, "composite_planes")) ||
         AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_kernel_, module_, "composite_planes_yuv")) ||
         AVP_CHECK_CU(cuModuleGetFunction(&composite_packed_kernel_, module_, "composite_planes_packed4")) ||
-        AVP_CHECK_CU(cuModuleGetFunction(&composite_opacity_kernel_, module_, "composite_planes_opacity")))
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_opacity_kernel_, module_, "composite_planes_opacity")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_array_kernel_, module_, "composite_planes_array")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_array_kernel_, module_, "composite_planes_yuv_array")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_opacity_array_kernel_, module_, "composite_planes_opacity_array")))
         throw Error("cuda_rect_overlay: cannot load the composite kernel");
     int shared_limit = 0;
     CUdevice device;
@@ -98,11 +111,15 @@ void CudaRectDraw::ensureKernels() {
 void CudaRectDraw::unload() {
     if (module_) {
         cuCtxSetCurrent(cuda_dev_->cuda_ctx);
+        AVP_CHECK_CU(cuStreamSynchronize(cuda_dev_->stream));
+        if (producer_ready_) { AVP_CHECK_CU(cuEventDestroy(producer_ready_)); producer_ready_ = nullptr; }
+        array_textures_.reset();
         if (table_device_) { AVP_CHECK_CU(cuMemFree(table_device_)); table_device_ = 0; }
         if (table_host_) { AVP_CHECK_CU(cuMemFreeHost(table_host_)); table_host_ = nullptr; }
         AVP_CHECK_CU(cuModuleUnload(module_));
         module_ = nullptr;
         composite_kernel_ = composite_yuv_kernel_ = composite_packed_kernel_ = composite_opacity_kernel_ = nullptr;
+        composite_array_kernel_ = composite_yuv_array_kernel_ = composite_opacity_array_kernel_ = nullptr;
     }
 }
 
@@ -122,7 +139,7 @@ void CudaRectDraw::validateSourceColor(const av::VideoFrame &src, bool packed_rg
 
 // One table entry from a resolved op. Per-plane geometry goes through lumaRectToPlaneRegion in
 // bytes and then lane groups.
-void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out) const {
+void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out) {
     const AVPixelFormat sw_fmt = canvas_.sw_fmt;
     const LayerSpec &L = op.layer;
     const AVFrame *src = op.src->raw();
@@ -136,6 +153,9 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     const int dst_bytes = sampleBytes(sw_fmt);
     const int planes = av_pix_fmt_count_planes(sw_fmt);
     out = AvpRectLayer{};
+    const bool array = isCudaArray(static_cast<AVPixelFormat>(src->format));
+    if (array && packed_rgb)
+        throw Error("cuda_rect_overlay: CUarray input must be semiplanar YUV");
     const TextureFrameDesc *texture = textureFrameDesc(src);
     if (texture && !(packed_rgb && src_sw_fmt != sw_fmt && isRgbToYuvConvertible(src_sw_fmt, sw_fmt)))
         throw Error("cuda_rect_overlay: texture-backed inputs require RGB-to-YUV composition; "
@@ -178,13 +198,19 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
         throw Error("cuda_rect_overlay: source format " + std::string(av_get_pix_fmt_name(src_sw_fmt)) +
                     " cannot be drawn onto a " + av_get_pix_fmt_name(sw_fmt) + " canvas");
     const AVPixelFormat geometry_fmt = promote ? src_sw_fmt : sw_fmt;
+    const std::array<CUtexObject, 2> *textures = nullptr;
+    if (array) {
+        if (!array_textures_) array_textures_ = std::make_unique<RectArrayTextures>();
+        textures = &array_textures_->get(src, cuda_dev_->cuda_ctx);
+    }
     out.kind = promote ? AVP_RECT_KIND_PROMOTE : AVP_RECT_KIND_YUV;
+    out.yuv_texture = array;
     out.src_bytes = sampleBytes(geometry_fmt);
     out.src_shift = storageShift(geometry_fmt);
     const AVPixFmtDescriptor *sd = av_pix_fmt_desc_get(geometry_fmt);
     out.mul = promote ? float(1 << (dd->comp[0].depth - sd->comp[0].depth)) : 1.f;
     for (int p = 0; p < planes; ++p) {
-        if (!src->data[p])
+        if (!array && !src->data[p])
             throw Error("cuda_rect_overlay: source frame lacks plane " + std::to_string(p));
         const int lanes = p ? 2 : plane0Lanes(sw_fmt);
         int sx, sy, sw, sh, dx, dy, dw, dh;
@@ -192,24 +218,49 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
         lumaRectToPlaneRegion(sw_fmt, L.dst_x, L.dst_y, dstw, dsth, p, dx, dy, dw, dh);
         sx /= lanes * out.src_bytes; sw /= lanes * out.src_bytes;
         dx /= lanes * dst_bytes; dw /= lanes * dst_bytes;
-        out.src[p] = (unsigned long long)(uintptr_t)src->data[p];
-        out.src_pitch[p] = src->linesize[p];
+        out.src[p] = array ? (*textures)[p] : (unsigned long long)(uintptr_t)src->data[p];
+        out.src_pitch[p] = array ? 0 : src->linesize[p];
         out.sx[p] = sx; out.sy[p] = sy; out.sw[p] = sw; out.sh[p] = sh;
         out.dx[p] = dx; out.dy[p] = dy; out.dw[p] = dw; out.dh[p] = dh;
     }
 }
 
+void CudaRectDraw::waitForProducer(const AVFrame *src, CUstream stream) {
+    if (!src->hw_frames_ctx) return;
+    const auto *frames = reinterpret_cast<const AVHWFramesContext *>(src->hw_frames_ctx->data);
+    if (!frames || !frames->device_ctx || frames->device_ctx->type != AV_HWDEVICE_TYPE_CUDA) return;
+    const auto *device = static_cast<const AVCUDADeviceContext *>(frames->device_ctx->hwctx);
+    if (!device || device->stream == stream) return;
+    // Filters retain their producer stream when converting opaque to linear
+    // storage. AUX streams also need ordering against the default stream.
+    if (device->cuda_ctx != cuda_dev_->cuda_ctx)
+        throw Error("cuda_rect_overlay: source and compositor must share a CUDA context");
+    if (std::find(waited_streams_.begin(), waited_streams_.end(), device->stream) != waited_streams_.end()) return;
+    if (!producer_ready_ && AVP_CHECK_CU(cuEventCreate(&producer_ready_, CU_EVENT_DISABLE_TIMING)))
+        throw Error("cuda_rect_overlay: cannot create producer readiness event");
+    // Each wait captures the event's current record, so the next producer may
+    // reuse this event. Inputs remain owned until the draw stream is synchronized.
+    if (AVP_CHECK_CU(cuEventRecord(producer_ready_, device->stream)) ||
+        AVP_CHECK_CU(cuStreamWaitEvent(stream, producer_ready_, 0)))
+        throw Error("cuda_rect_overlay: cannot order producer and composition");
+    waited_streams_.push_back(device->stream);
+}
+
 void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src) {
     ensureKernels();
     const AVPixelFormat sw_fmt = canvas_.sw_fmt;
+    waited_streams_.clear();
+    if (array_textures_) array_textures_->begin();
     int n = 0;
-    bool any_rgb = false, any_fade = false;
+    bool any_rgb = false, any_fade = false, any_array = false;
     for (const DrawOp &op : ops) {
         if (!op.src || !op.src->raw()) continue;
         if (n >= max_layers_)
             throw Error("cuda_rect_overlay: more than " + std::to_string(max_layers_) + " layers in one frame");
         AvpRectLayer &entry = table_host_[n];
+        waitForProducer(op.src->raw(), stream);
         fillTableEntry(op, canvas, entry);
+        any_array = any_array || entry.yuv_texture;
         any_rgb = any_rgb || entry.kind >= AVP_RECT_KIND_RGB;
         const bool fades = entry.kind >= AVP_RECT_KIND_RGB && entry.mul < 1.f;   // only a blended RGBA mul is below 1
         any_fade = any_fade || fades;
@@ -218,6 +269,7 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
             logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
         ++n;
     }
+    if (array_textures_) array_textures_->prune();
     const int planes = av_pix_fmt_count_planes(sw_fmt);
     uint16_t clear0 = 0, clear1 = 0;
     if (!planeClearValue(sw_fmt, color_src, 0, clear0) || (planes > 1 && !planeClearValue(sw_fmt, color_src, 1, clear1)))
@@ -245,8 +297,10 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
                     &canvas_w, &canvas_h, &chroma_w, &chroma_h,
                     &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y,
                     &clear0_i, &clear1_i, &transfer, &sdr_white, &hdr_peak};
-    const CUfunction kernel = planes == 1 ? composite_packed_kernel_ : any_fade ? composite_opacity_kernel_
-        : any_rgb ? composite_kernel_ : composite_yuv_kernel_;
+    const CUfunction kernel = planes == 1 ? composite_packed_kernel_
+        : any_fade ? (any_array ? composite_opacity_array_kernel_ : composite_opacity_kernel_)
+        : any_rgb ? (any_array ? composite_array_kernel_ : composite_kernel_)
+        : any_array ? composite_yuv_array_kernel_ : composite_yuv_kernel_;
     // 128x8 luma tiles per block; gridDim.z spans the planes.
     if (AVP_CHECK_CU(cuLaunchKernel(kernel,
                                     (canvas_w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas_h + 7) / 8,

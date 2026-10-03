@@ -143,8 +143,8 @@ protected:
     }
 
     void requireDrawable(const av::VideoFrame &f) const {
-        if (f.raw()->format != AV_PIX_FMT_CUDA)
-            throw Error(std::string(type_) + ": input must be AV_PIX_FMT_CUDA");
+        if (!CudaRectDraw::frameSupported(static_cast<AVPixelFormat>(f.raw()->format)))
+            throw Error(std::string(type_) + ": input must be a CUDA device frame or CUarray");
         if (!hwSwFormatMatch(f))
             throw Error(std::string(type_) + ": input hw sw_format mismatch node sw_format");
     }

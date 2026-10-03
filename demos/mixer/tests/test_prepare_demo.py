@@ -94,6 +94,17 @@ def test_weights_round_to_exact_total_and_zero_disables():
             allocate(16, weights)
 
 
+def test_hevc_recipe_preserves_decoder_selection(recipe, tmp_path):
+    recipe["inputs"] = [{"id": "hevc", "kind": "generated", "color": "sdr", "chroma": "420",
+                         "weight": 1, "codec": "hevc", "decode_storage": "cuarray", "extra_hw_frames": 3}]
+    doc, _, _ = plan(recipe, tmp_path)
+    assert all("hevc_nvenc" in source["path"] for source in doc["sources"])
+    assert all(source.decoder_params["pixel_format"] == "cuarray" for source in parse(doc).sources)
+    recipe["inputs"][0]["storage"] = "nv12"
+    with pytest.raises(ValueError, match="codec applies only"):
+        plan(recipe, tmp_path)
+
+
 @pytest.mark.parametrize("storage,color,pattern,bytes_per_pixel", [("nv12", "sdr", "testsrc2", 1.5), ("p010", "hlg", "0", 3)])
 def test_raw_420_assets_are_animated_exact_size_and_cached(recipe, tmp_path, storage, color, pattern, bytes_per_pixel):
     if not shutil.which("ffmpeg"):
