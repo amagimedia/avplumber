@@ -85,3 +85,7 @@ This adds capacity for packet bursts, not a fixed playout delay, and does not
 change encoded image quality. If packet loss persists downstream, measure frame
 sizes and receiver loss before reducing bitrate or the NVENC VBV budget: an
 overly small keyframe budget can make text and details in small tiles unreadable.
+
+The preview player signals over WebSocket through `/janus` (under the player prefix,
+e.g. `/preview/janus`). A reverse proxy must forward WebSocket upgrades on that path;
+Janus listens on `JANUS_WS_PORT` (8188 by default), and REST remains available for mountpoint management.

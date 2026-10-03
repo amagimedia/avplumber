@@ -30,3 +30,7 @@ when the image was made. A new driver or kernel means a new image, never a chang
 
 Source limits are measured per host type and live in [`../../instance_profiles.py`](../../instance_profiles.py);
 a new GPU type needs its own measured entry, never a scaled one.
+
+The preview player signals over WebSocket through `/janus` (under the player prefix,
+e.g. `/preview/janus`). A reverse proxy must forward WebSocket upgrades on that path;
+Janus listens on `JANUS_WS_PORT` (8188 by default), and REST remains available for mountpoint management.

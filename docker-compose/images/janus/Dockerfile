@@ -20,6 +20,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         libnice-devel \
         libsrtp-devel \
         libtool \
+        libwebsockets-devel \
         make \
         openssl-devel \
         pkgconf-pkg-config \
@@ -44,7 +45,7 @@ RUN sh autogen.sh \
         --disable-mqtt \
         --disable-nanomsg \
         --disable-unix-sockets \
-        --disable-websockets \
+        --enable-websockets \
     && make -j"$(nproc)" \
     && make install \
     && make configs
@@ -62,6 +63,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         libmicrohttpd \
         libnice \
         libsrtp \
+        libwebsockets \
         openssl-libs \
         zlib-ng-compat \
     && dnf clean all

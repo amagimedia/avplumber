@@ -5,6 +5,7 @@ set -euo pipefail
 
 readonly config_dir=/opt/janus-avp/etc/janus
 readonly http_port="${JANUS_HTTP_PORT:-8088}"
+readonly ws_port="${JANUS_WS_PORT:-8188}"
 readonly audio_enabled="${JANUS_AUDIO_ENABLED:-true}"
 readonly audio_port="${JANUS_AUDIO_PORT:-5002}"
 readonly audio_rtcp_port="${JANUS_AUDIO_RTCP_PORT:-5003}"
@@ -15,8 +16,6 @@ readonly hdr_video_rtcp_port="${JANUS_HDR_VIDEO_RTCP_PORT:-5007}"
 readonly rtp_port_range="${JANUS_RTP_PORT_RANGE:-20000-20100}"
 readonly debug_level="${JANUS_DEBUG_LEVEL:-4}"
 
-[[ -f "${config_dir}/janus.transport.http.jcfg.template" ]] || \
-    cp "${config_dir}/janus.transport.http.jcfg" "${config_dir}/janus.transport.http.jcfg.template"
 [[ -f "${config_dir}/janus.plugin.streaming.jcfg.template" ]] || \
     cp "${config_dir}/janus.plugin.streaming.jcfg" "${config_dir}/janus.plugin.streaming.jcfg.template"
 
@@ -31,10 +30,13 @@ sed \
     -e "s/__JANUS_DEBUG_LEVEL__/${debug_level}/g" \
     "${config_dir}/janus.jcfg.template" > "${config_dir}/janus.jcfg"
 
-sed \
-    -e "s/__JANUS_HTTP_PORT__/${http_port}/g" \
-    "${config_dir}/janus.transport.http.jcfg.template" > "${config_dir}/janus.transport.http.jcfg.rendered"
-mv "${config_dir}/janus.transport.http.jcfg.rendered" "${config_dir}/janus.transport.http.jcfg"
+for transport in http websockets; do
+    config="${config_dir}/janus.transport.${transport}.jcfg"
+    [[ -f "${config}.template" ]] || cp "${config}" "${config}.template"
+    sed -e "s/__JANUS_HTTP_PORT__/${http_port}/g" -e "s/__JANUS_WS_PORT__/${ws_port}/g" \
+        "${config}.template" > "${config}.rendered"
+    mv "${config}.rendered" "${config}"
+done
 
 sed \
     -e "s/__JANUS_AUDIO_ENABLED__/${audio_enabled}/g" \

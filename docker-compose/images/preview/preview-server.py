@@ -4,9 +4,12 @@ import json
 import math
 import os
 import re
+import selectors
+import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -14,6 +17,7 @@ JANUS_REST = os.environ.get(
     "JANUS_REST",
     f"http://127.0.0.1:{os.environ.get('JANUS_HTTP_PORT', '8088')}/janus",
 )
+JANUS_WS = os.environ.get("JANUS_WS", f"ws://127.0.0.1:{os.environ.get('JANUS_WS_PORT', '8188')}")
 MIXER_STATE_URL = os.environ.get("MIXER_STATE_URL", "")
 PREVIEW_PORT = int(os.environ.get("JANUS_PREVIEW_PORT", "8080"))
 
@@ -34,7 +38,7 @@ class ReceiverSamples:
     def _prune(self, now):
         while self.receivers:
             _, (seen, _) = next(iter(self.receivers.items()))
-            if seen >= now - 300 and len(self.receivers) <= 16:
+            if seen >= now - 300 and len(self.receivers) <= 64:
                 break
             self.receivers.popitem(last=False)
 
@@ -90,8 +94,11 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
-        if self.path.startswith("/janus"):
-            self._proxy_janus()
+        if self.path.split("?", 1)[0] == "/janus" or self.path.startswith("/janus/"):
+            if self.headers.get("Upgrade", "").lower() == "websocket":
+                self._tunnel_janus()
+            else:
+                self._proxy_janus()
             return
         super().do_GET()
 
@@ -109,7 +116,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
             return
-        if self.path.startswith("/janus"):
+        if self.path.split("?", 1)[0] == "/janus" or self.path.startswith("/janus/"):
             self._proxy_janus()
             return
         self.send_error(404, "File not found")
@@ -118,6 +125,38 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         suffix = self.path[len("/janus"):]
         upstream_url = f"{JANUS_REST}{suffix}"
         self._proxy(upstream_url)
+
+    def _tunnel_janus(self):
+        """The player's WebSocket: replays its handshake to JANUS_WS, then relays the bytes of both
+        directions, Janus's reply to the handshake included, until either side closes."""
+        self.close_connection = True
+        janus = urllib.parse.urlsplit(JANUS_WS)
+        try:
+            upstream = socket.create_connection((janus.hostname, janus.port or 80), timeout=10)
+        except OSError as error:
+            self.send_error(502, str(error))
+            return
+        handshake = [f"GET {janus.path or '/'} HTTP/1.1", f"Host: {janus.netloc}",
+                     "Upgrade: websocket", "Connection: Upgrade"]
+        handshake += [f"{name}: {value}" for name, value in self.headers.items()
+                      if name.lower().startswith("sec-websocket-") or name.lower() == "origin"]
+        with upstream, selectors.DefaultSelector() as selector:
+            # Bound a stalled write without treating an otherwise idle socket as a failure.
+            self.connection.settimeout(10)
+            # self.connection, not rfile: a WebSocket client sends nothing before the reply to its
+            # handshake, so rfile has buffered no more than the request.
+            selector.register(self.connection, selectors.EVENT_READ, upstream)
+            selector.register(upstream, selectors.EVENT_READ, self.connection)
+            try:
+                upstream.sendall("\r\n".join(handshake + ["", ""]).encode("latin-1"))
+                while True:
+                    for key, _ in selector.select():
+                        data = key.fileobj.recv(65536)
+                        if not data:
+                            return
+                        key.data.sendall(data)
+            except OSError:
+                pass
 
     def _proxy(self, upstream_url, timeout=65):
         body = None

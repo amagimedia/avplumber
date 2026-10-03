@@ -1,35 +1,38 @@
-import importlib.util
 import math
-from pathlib import Path
 import json
-import threading
 import urllib.error
 import urllib.request
 
 import pytest
 
 
-spec = importlib.util.spec_from_file_location("preview_server", Path(__file__).parents[1] / "preview-server.py")
-server = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(server)
-
-
-def test_receiver_history_is_bounded_and_expires():
+def test_receiver_history_is_bounded_and_expires(server):
     now = [1000]
     samples = server.ReceiverSamples(clock=lambda: now[0])
     for i in range(350):
         samples.add({"receiver": "viewer", "sample": {"framesDecoded": i}})
     history = samples.snapshot()[0]["samples"]
     assert len(history) == 300 and history[0]["framesDecoded"] == 50
-    for i in range(20):
+    for i in range(80):
         samples.add({"receiver": f"viewer-{i}", "sample": {"freezeCount": 0}})
-    assert len(samples.snapshot()) == 16
-    assert samples.snapshot()[0]["receiver"] == "viewer-4"
+    assert len(samples.snapshot()) == 64
+    assert samples.snapshot()[0]["receiver"] == "viewer-16"
     now[0] += 301
     assert samples.snapshot() == []
 
 
-def test_only_finite_playback_metrics_are_retained():
+def test_twenty_wall_viewers_keep_each_reporting_round(server):
+    samples = server.ReceiverSamples(clock=lambda: 1000)
+    for tick in range(3):
+        for viewer in range(20):
+            samples.add({"receiver": f"wall-{viewer}", "sample": {"framesDecoded": tick * 25}})
+    history = {entry["receiver"]: entry["samples"] for entry in samples.snapshot()}
+    assert set(history) == {f"wall-{viewer}" for viewer in range(20)}
+    for rounds in history.values():
+        assert [sample["framesDecoded"] for sample in rounds] == [0, 25, 50]
+
+
+def test_only_finite_playback_metrics_are_retained(server):
     samples = server.ReceiverSamples(clock=lambda: 1000)
     samples.add({"receiver": "viewer", "sample": {
         "fps": 30, "visible": True, "paused": False, "codec": "video/H265",
@@ -45,30 +48,22 @@ def test_only_finite_playback_metrics_are_retained():
 
 @pytest.mark.parametrize("payload", [None, [], {}, {"receiver": "bad id", "sample": {"fps": 30}},
     {"receiver": "v", "sample": []}, {"receiver": "v", "sample": {"unknown": 1}}])
-def test_bad_receiver_samples_are_rejected(payload):
+def test_bad_receiver_samples_are_rejected(server, payload):
     with pytest.raises(ValueError):
         server.ReceiverSamples().add(payload)
 
 
-def test_receiver_http_endpoint(monkeypatch):
+def test_receiver_http_endpoint(server, http, monkeypatch):
     monkeypatch.setattr(server, "receiver_samples", server.ReceiverSamples())
-    http = server.ThreadingHTTPServer(("127.0.0.1", 0), server.PreviewHandler)
-    worker = threading.Thread(target=http.serve_forever, daemon=True)
-    worker.start()
     url = f"http://127.0.0.1:{http.server_port}/receiver-stats"
-    try:
-        body = json.dumps({"receiver": "probe", "sample": {"fps": 30, "freezeCount": 0}}).encode()
-        with urllib.request.urlopen(urllib.request.Request(url, data=body), timeout=2) as response:
-            assert response.status == 204
-        with urllib.request.urlopen(url, timeout=2) as response:
-            assert response.headers["Cache-Control"] == "no-store"
-            snapshot = json.load(response)
-        assert snapshot[0]["samples"][0]["fps"] == 30
-        for body, status in [(b"invalid", 400), (b"x" * 4097, 413)]:
-            with pytest.raises(urllib.error.HTTPError) as error:
-                urllib.request.urlopen(urllib.request.Request(url, data=body), timeout=2)
-            assert error.value.code == status
-    finally:
-        http.shutdown()
-        http.server_close()
-        worker.join(timeout=2)
+    body = json.dumps({"receiver": "probe", "sample": {"fps": 30, "freezeCount": 0}}).encode()
+    with urllib.request.urlopen(urllib.request.Request(url, data=body), timeout=2) as response:
+        assert response.status == 204
+    with urllib.request.urlopen(url, timeout=2) as response:
+        assert response.headers["Cache-Control"] == "no-store"
+        snapshot = json.load(response)
+    assert snapshot[0]["samples"][0]["fps"] == 30
+    for body, status in [(b"invalid", 400), (b"x" * 4097, 413)]:
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(urllib.request.Request(url, data=body), timeout=2)
+        assert error.value.code == status

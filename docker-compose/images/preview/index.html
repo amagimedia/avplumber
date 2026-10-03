@@ -143,6 +143,7 @@
   <script type="module" src="cut-latency.mjs?v=combined"></script>
   <script type="module">
     import { createReceiverMonitor } from "./receiver-stats.mjs";
+    import { JanusSocket } from "./janus-socket.mjs";
     const codecSelect = document.getElementById("codec");
     function renderGpuStats(gpus) {
       const level = (value, orange, red) => !Number.isFinite(value) ? "unknown"
@@ -209,14 +210,11 @@
     const preview = document.getElementById("preview");
     const rttValue = document.getElementById("rtt-value");
 
-    let sessionId = null;
+    let janus = null;
     let handleId = null;
     let peer = null;
-    let pollAbort = null;
-    let keepaliveTimer = null;
     let retryTimer = null;
     let connectionTimer = null;
-    let transactionId = 0;
     let connecting = false;
     let stopping = false;
     let rttTimer = null;
@@ -272,30 +270,10 @@
       sample();
     }
 
-    function transaction() {
-      transactionId += 1;
-      return `avp-${Date.now()}-${transactionId}`;
-    }
-
     function setStatus(message, isError = false) {
       statusEl.textContent = message;
       statusEl.className = isError ? "error" : "";
       statusEl.hidden = message === "WebRTC connected" && !isError;
-    }
-
-    async function post(path, body) {
-      const response = await fetch(`${serverUrl.replace(/\/$/, "")}${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ transaction: transaction(), ...body }),
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const result = await response.json();
-      if (result.janus === "error") throw new Error(result.error?.reason || "Janus error");
-      return result;
     }
 
     function watchConnection() {
@@ -303,34 +281,26 @@
       connectionTimer = window.setTimeout(() => recover(new Error("No video received within 12 seconds")), 12000);
     }
 
-    async function createSession() {
-      const response = await post("", { janus: "create" });
-      sessionId = response.data.id;
-      keepaliveTimer = window.setInterval(() => {
-        if (sessionId) {
-          post(`/${sessionId}`, { janus: "keepalive" }).catch(() => {});
-        }
-      }, 25000);
-    }
-
-    async function attachStreamingPlugin() {
-      const response = await post(`/${sessionId}`, {
+    async function attachStreamingPlugin(transport) {
+      const response = await transport.request({
         janus: "attach",
         plugin: "janus.plugin.streaming",
       });
-      handleId = response.data.id;
+      if (janus === transport) handleId = response.data.id;
     }
 
-    async function sendTrickle(candidate) {
-      if (!sessionId || !handleId) return;
+    async function sendTrickle(candidate, transport = janus) {
+      if (!transport || transport !== janus || !handleId) return;
       const body = candidate ? { candidate } : { candidate: { completed: true } };
-      await post(`/${sessionId}/${handleId}`, { janus: "trickle", ...body });
+      await transport.request({ janus: "trickle", handle_id: handleId, ...body });
     }
 
     async function startPeerConnection(offer) {
+      const transport = janus;
       peer = new RTCPeerConnection({ iceServers: [] });
       const connection = peer;
       peer.ontrack = event => {
+        if (peer !== connection) return;
         const [stream] = event.streams;
         // Opt-in (?lowlat=1): render frames as soon as they are complete instead of
         // through the adaptive jitter buffer (9-34 ms measured on a 38 ms RTT path).
@@ -355,7 +325,9 @@
         });
       };
       peer.onicecandidate = event => {
-        sendTrickle(event.candidate).catch(error => setStatus(error.message, true));
+        sendTrickle(event.candidate, transport).catch(error => {
+          if (janus === transport) recover(error);
+        });
       };
       peer.onconnectionstatechange = () => {
         if (peer !== connection) return;
@@ -367,13 +339,17 @@
           window.clearTimeout(connectionTimer);
       };
       startRttMeter(peer);
-      await peer.setRemoteDescription(offer);
-      const answer = await peer.createAnswer();
-      await peer.setLocalDescription(answer);
-      await post(`/${sessionId}/${handleId}`, {
+      await connection.setRemoteDescription(offer);
+      if (janus !== transport) return;
+      const answer = await connection.createAnswer();
+      if (janus !== transport) return;
+      await connection.setLocalDescription(answer);
+      if (janus !== transport) return;
+      await transport.request({
         janus: "message",
+        handle_id: handleId,
         body: { request: "start" },
-        jsep: peer.localDescription,
+        jsep: connection.localDescription,
       });
     }
 
@@ -382,35 +358,13 @@
       if (event.janus === "event" && event.jsep) {
         await startPeerConnection(event.jsep);
       } else if (event.janus === "trickle" && peer) {
-        await peer.addIceCandidate(event.candidate);
+        await peer.addIceCandidate(event.candidate?.completed ? null : event.candidate);
       } else if (event.janus === "webrtcup") {
         setStatus("WebRTC connected");
-        // The long poll has done its work: the keepalive holds the session and the peer connection
-        // reports a failure. A browser opens six HTTP/1.1 connections per host, so on a page of many
-        // players (the wall) the polls of the first six would keep every later player from connecting.
-        pollAbort.abort();
-      } else if (event.janus === "hangup") {
-        throw new Error(event.reason || "WebRTC hung up");
+      } else if (event.janus === "hangup" || event.janus === "timeout" || event.janus === "detached") {
+        throw new Error(event.reason || `Janus ${event.janus}`);
       } else if (event.janus === "error") {
         throw new Error(event.error?.reason || "Janus error");
-      }
-    }
-
-    async function pollEvents() {
-      pollAbort = new AbortController();
-      while (!stopping && sessionId) {
-        const rid = Date.now();
-        const url = `${serverUrl.replace(/\/$/, "")}/${sessionId}?rid=${rid}&maxev=1`;
-        const response = await fetch(url, { signal: pollAbort.signal });
-        if (!response.ok) {
-          throw new Error(`Poll HTTP ${response.status}`);
-        }
-        const event = await response.json();
-        if (Array.isArray(event)) {
-          for (const item of event) await handleEvent(item);
-        } else {
-          await handleEvent(event);
-        }
       }
     }
 
@@ -420,15 +374,15 @@
       retryTimer = window.setTimeout(connect, 2000);
     }
 
-    async function recover(error) {
+    function recover(error) {
       if (stopping) return;
       const message = error?.message || "Connection failed";
-      await disconnect(false);
+      disconnect(false);
       scheduleReconnect(message);
     }
 
     async function connect() {
-      if (sessionId || connecting) return;
+      if (janus || connecting) return;
       const codecs = RTCRtpReceiver.getCapabilities?.("video")?.codecs;
       if (selectedCodec === "h265" && codecs && !codecs.some(c => c.mimeType.toLowerCase() === "video/h265")) {
         setStatus("This browser cannot play H.265. Choose H.264 / SDR.", true);
@@ -436,47 +390,49 @@
       }
       connecting = true;
       stopping = false;
+      let transport;
       try {
         setStatus("Creating Janus session");
         watchConnection();
-        await createSession();
-        pollEvents().catch(error => {
-          if (error.name !== "AbortError") recover(error);
+        transport = new JanusSocket(serverUrl, {
+          onEvent: event => janus === transport && handleEvent(event),
+          onError: error => { if (janus === transport) recover(error); },
         });
+        janus = transport;
+        await transport.createSession();
+        if (janus !== transport) return;
         setStatus("Attaching streaming plugin");
-        await attachStreamingPlugin();
+        await attachStreamingPlugin(transport);
+        if (janus !== transport) return;
         setStatus("Requesting stream");
-        await post(`/${sessionId}/${handleId}`, {
+        await transport.request({
           janus: "message",
+          handle_id: handleId,
           body: { request: "watch", id: MOUNTPOINT_ID },
         });
       } catch (error) {
-        await recover(error);
+        if (!transport || janus === transport) recover(error);
       } finally {
-        connecting = false;
+        if (!janus || janus === transport) connecting = false;
       }
     }
 
-    async function disconnect(showIdle = true) {
+    function disconnect(showIdle = true) {
       stopping = true;
+      connecting = false;
+      window.clearTimeout(retryTimer);
       window.clearTimeout(connectionTimer);
       stopRttMeter();
-      if (pollAbort) pollAbort.abort();
-      window.clearInterval(keepaliveTimer);
-      keepaliveTimer = null;
       if (peer) {
         peer.close();
         peer = null;
       }
       preview.srcObject = null;
-      try {
-        if (sessionId) await post(`/${sessionId}`, { janus: "destroy" });
-      } catch (_) {
-      } finally {
-        sessionId = null;
-        handleId = null;
-        if (showIdle) setStatus("Idle");
-      }
+      // Closing the socket is the "destroy": Janus ends the sessions of a closed WebSocket.
+      janus?.close();
+      janus = null;
+      handleId = null;
+      if (showIdle) setStatus("Idle");
     }
 
     // A page that embeds the player may clip this footer, so it gets the same numbers about once per
@@ -516,11 +472,8 @@
       stopRttMeter();
       window.clearTimeout(retryTimer);
       window.clearTimeout(connectionTimer);
-      if (pollAbort) pollAbort.abort();
       if (peer) peer.close();
-      if (sessionId) navigator.sendBeacon(`${serverUrl}/${sessionId}`, new Blob([
-        JSON.stringify({ janus: "destroy", transaction: transaction() }),
-      ], { type: "application/json" }));
+      janus?.close();
     });
   </script>
 </body>

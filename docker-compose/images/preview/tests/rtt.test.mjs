@@ -4,7 +4,7 @@ import { createContext, runInContext } from "node:vm";
 
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
-  .replace(/^\s*import .*;$/m, "")
+  .replace(/^\s*import .*;$/gm, "")
   // Inject the fetched setup state; transport is exercised by the server/live tests.
   .replace("const initialMixerState = await mixerState();", "const initialMixerState = fixtureState; monitorMixer = fixtureState !== null;");
 const elements = new Map();
@@ -141,17 +141,42 @@ assert.equal(value.textContent, "—");
 assert.equal(timers.size, 0, "a stopped request must not restart sampling");
 console.log("RTT selection, thresholds, unavailable data, failures and stop-race checks passed");
 
-const timeoutSignal = {};
-context.AbortSignal = { timeout(ms) { assert.equal(ms, 10000); return timeoutSignal; } };
-context.fetch = async (_url, options) => {
-  assert.equal(options.signal, timeoutSignal);
-  return { ok: true, json: async () => ({ janus: "error", error: { reason: "No such session" } }) };
-};
-await assert.rejects(context.post("/old-session", {}), /No such session/);
 await assert.rejects(context.handleEvent({ janus: "event", plugindata: { data: { error: "No such stream" } } }), /No such stream/);
 await assert.rejects(context.handleEvent({ janus: "hangup", reason: "ICE failed" }), /ICE failed/);
+
+// The player's use of the transport; janus-socket.test.mjs covers the transport itself.
+const requests = [];
+let socket;
+context.RTCRtpReceiver = {};
+context.JanusSocket = class {
+  constructor(url, callbacks) { socket = Object.assign(this, { url }, callbacks); }
+  async createSession() { requests.push("create"); }
+  async request(body) { requests.push(body); return { data: { id: 22 } }; }
+  close() { this.closed = true; }
+};
+runInContext("peer = null", context);
+await context.connect();
+assert.equal(socket.url, "http://127.0.0.1/janus");
+assert.equal(JSON.stringify(requests), JSON.stringify(["create",
+  { janus: "attach", plugin: "janus.plugin.streaming" },
+  { janus: "message", handle_id: 22, body: { request: "watch", id: 2 } }]));
+assert.equal(elements.get("status").textContent, "Requesting stream");
+await context.sendTrickle(null);
+assert.equal(JSON.stringify(requests.at(-1)),
+  JSON.stringify({ janus: "trickle", handle_id: 22, candidate: { completed: true } }));
+await socket.onEvent({ janus: "webrtcup" });
+assert.equal(elements.get("status").textContent, "WebRTC connected");
+socket.onError(Error("Janus connection lost"));
+assert.equal(socket.closed, true);
+assert.equal(runInContext("janus", context), null);
+assert.equal(elements.get("status").textContent, "Janus connection lost; retrying");
+assert.equal(timers.size, 1, "the connection deadline is gone, the retry is scheduled");
+await context.sendTrickle(null);
+assert.equal(requests.length, 4, "nothing is sent without a connection");
+timers.clear();
+
 const recovered = [];
-context.recover = async error => recovered.push(error.message);
+context.recover = error => recovered.push(error.message);
 context.watchConnection();
 context.watchConnection();
 assert.equal(timers.size, 1, "rearming must replace the previous connection deadline");
