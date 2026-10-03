@@ -51,6 +51,41 @@ and the filter changes) is base-independent.
     on NV12 CUDA frames; pixels outside the band are unchanged. Carries forward
     the filter from `1876208` and its FFmpeg 8.1 adaptation in `6dcda46` without
     changing its kernel or option defaults. The same patch applies to 8.0 and 8.1.
+11. **libmxl demuxer and muxer** — [MXL](https://github.com/dmf-mxl/mxl)
+    shared-memory flows: demuxer, muxer, URI parser, JSON/diagnostic helpers,
+    FATE coverage and `--enable-libmxl` glue. Squashed from `cbcrc/FFmpeg`
+    branch `dmf-mxl/8.1`, pinned at `9eddb90`, plus our fixes from
+    `mkpatch-fixups/` (currently one: monotonic PTS across a
+    `reset_on_drop` reset, which otherwise aborts the process mid-stream).
+    Built into the shared demo image by `demos/mixer/Dockerfile` (which
+    also pins the MXL SDK) and exercised by `demos/mxl`.
+
+### Regenerating `8/0011-avformat-libmxl-demuxer-muxer.patch`
+
+Docker only, and no compiler needed — the container just replays git history
+(works on Linux and macOS hosts):
+
+```bash
+docker build -f deps/ffmpeg/Dockerfile.mkpatch \
+    -t avplumber-mxl-mkpatch:local deps/ffmpeg
+docker run --rm \
+    -v "$PWD/deps/ffmpeg/8:/out" \
+    -v "$PWD/deps/ffmpeg/8:/patches:ro" \
+    avplumber-mxl-mkpatch:local
+```
+
+Everything in `mkpatch-fixups/` is `git am`-ed after the cherry-picks, so our
+own fixes end up inside the squashed patch with their commit messages listed
+as provenance. Retire one by deleting its file and regenerating.
+
+Set `MXL_REMOTE_REF`/`MXL_PIN` (and `FFMPEG_TAG`) to move to a newer fork
+branch, e.g. `dmf-mxl/9.0` for a future base. Afterwards refresh
+`8/bases.env`: `verify.sh` prints the actual tree per base when the pinned
+one no longer matches, and `patch_count` must match the file count.
+
+Cherry-pick conflicts stop the container with instructions; re-run it with
+`--entrypoint bash` and finish by hand (`git cherry-pick --continue`, then
+`/usr/local/bin/mkpatch-finish`).
 
 ## FFmpeg 8 notes
 

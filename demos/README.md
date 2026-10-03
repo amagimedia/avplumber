@@ -89,4 +89,7 @@ docker compose --env-file demos/dmabuf-browser/.env.example \
   a bundled animated page, Electron, GPU capture, Janus, and browser preview.
 - [CUDA overlay validation](cuda-overlay/README.md#run): run
   `./demos/cuda-overlay/run.sh` to build, generate fixtures, and compare results.
+- [MXL round-trip](mxl/README.md): publish into and read back from an MXL
+  shared-memory domain. Linux-only, uses the shared mixer image
+  (`avplumber-mixer:local`). GPU optional.
 

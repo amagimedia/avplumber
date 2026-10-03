@@ -13,15 +13,30 @@ protected:
     //av::Rational timebase_ = {0, 1};
     //av::Rational frame_rate_ = {0, 1};
     int32_t sws_flags_;
+    bool passthrough_ = false;
     bool sourceChanged(const av::VideoFrame &frame) {
         return src_params_ != VideoParameters(frame);
     }
     void createRescaler() {
+        const int dst_width = (dst_params_.width > 0) ? dst_params_.width : src_params_.width;
+        const int dst_height = (dst_params_.height > 0) ? dst_params_.height : src_params_.height;
+        // Converting a frame to the geometry and format it already has still
+        // costs swscale a full-frame copy, which at 1080p59.94 10-bit 4:2:2 is
+        // 1 ms and 8 MB per frame. Pass such frames on untouched: edges carry
+        // reference-counted frames, so nothing downstream can tell.
+        passthrough_ = (dst_width == src_params_.width) && (dst_height == src_params_.height) &&
+                       (dst_params_.pixel_format == src_params_.pixel_format);
+        if (passthrough_) {
+            rescaler_.reset();
+            return;
+        }
+        // No flags means av::SwsFlagAuto: avcpp then picks bicubic when
+        // upscaling and area otherwise. A flags list must therefore name a
+        // scaling algorithm, because swscale rejects modifier flags alone.
         rescaler_ = make_unique<av::VideoRescaler>(
-            (dst_params_.width > 0) ? dst_params_.width : src_params_.width,
-            (dst_params_.height > 0) ? dst_params_.height : src_params_.height,
-            dst_params_.pixel_format,
-            src_params_.width, src_params_.height, src_params_.pixel_format);
+            dst_width, dst_height, dst_params_.pixel_format,
+            src_params_.width, src_params_.height, src_params_.pixel_format,
+            sws_flags_);
     }
 public:
     virtual void process() {
@@ -38,6 +53,10 @@ public:
             if (sourceChanged(in_frame)) {
                 src_params_ = VideoParameters(in_frame);
                 createRescaler();
+            }
+            if (passthrough_) {
+                this->sink_->put(in_frame);
+                return;
             }
             //av::VideoFrame out_frame;
             //rescaler_->rescale(out_frame, in_frame);
