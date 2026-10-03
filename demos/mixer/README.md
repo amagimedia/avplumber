@@ -81,9 +81,19 @@ other GPU applications.
 
 The mixer header's **POWER** meter reads GPU board watts and the enforced power limit from
 the same sample; the limit is read from the driver, never assumed from the card model.
-Hover or focus it for configured input sources per GPU watt (keys included), and USD per
-input source per hour. Multiple GPUs use their combined draw and limit; missing readings
-stay unknown. This measures GPU board power, not whole-host electricity consumption.
+Hover or focus it for sources per GPU watt, encoded megapixels per joule, and USD per input
+source per hour. NVENC throughput sums each session's driver-reported FPS and resolution;
+these are measured, rounded driver averages. Multiple GPUs use their combined draw and
+throughput; missing readings stay unknown. Source counts include keys.
+
+The compact header stays on one row. **VRAM** shows sources per used GiB and free memory;
+**CPU** shows the mixer's occupied logical cores and sources per core; **ENC** shows NVENC
+session count and total FPS. **LAT** shows cut p95 over up to 100 observed successful cuts,
+the sample count, cumulative compositor deadline misses, and cumulative AUX output drops.
+Cut samples are deduplicated and reset with the mixer; they measure command receipt to
+encoded output, not browser display latency. The main LAT value remains the median of
+the probe's last three successful cuts. The output selector scrolls through every AUX;
+Home/End jump to the first/last entry.
 
 To show cost, pass `webui.py --compute-price <path>` or set `MIXER_COMPUTE_PRICE` to a JSON
 file accessible inside the container, for example `/media/compute-price.json`:

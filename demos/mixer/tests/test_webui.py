@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -17,7 +18,7 @@ import pytest
 
 from pyplumber.mixer.control import mixer_command
 from webui import (CONFIG_SCRIPT, CriticalNice, GpuStats, HostStats, MixerBridge, normalize_preview_base, page,
-                   compute_price, parse_args, serve)
+                   compute_price, parse_args, serve, _encoder_snapshot, _encoder_totals)
 
 
 class FakeBridge(MixerBridge):
@@ -60,40 +61,125 @@ def client(monkeypatch):
     yield start
 
 
+def mock_gpu_queries(monkeypatch, query):
+    monkeypatch.setattr('webui.subprocess.check_output', query)
+    monkeypatch.setattr('webui._encoder_snapshot', lambda counts: _encoder_totals(
+        query(['nvidia-smi', 'encodersessions'], timeout=1)))
+
+
 def test_gpu_samples_are_cached_and_missing_metrics_stay_unknown(monkeypatch):
     now = [0]
     calls = []
     monkeypatch.setattr('webui.time.monotonic', lambda: now[0])
     def query(*args, **kwargs):
         calls.append(args)
-        return '0, 93, [N/A], 12, 14336, 15360, 53.95, 72.00\n1, 0, 99, [N/A], 15104, 24576, [N/A], [Not Supported]\n'
-    monkeypatch.setattr('webui.subprocess.check_output', query)
+        assert kwargs['timeout'] == 1
+        if args[0] == ['nvidia-smi', 'encodersessions']:
+            return '# GPU Session Process Codec H V Average Average\n# Idx Id Id Type Res Res FPS Latency(us)\n' \
+                   '0 10 200 H.264 1920 1080 24.5 17000\n0 11 200 H.265 1280 720 25 12000\n' \
+                   '1 12 201 AV1 3840 2160 12.5 20000\n'
+        return '0, 93, [N/A], 12, 14336, 15360, 53.95, 72.00, 2\n1, 0, 99, [N/A], 15104, 24576, [N/A], [Not Supported], 1\n'
+    mock_gpu_queries(monkeypatch, query)
     stats = GpuStats()
     first = stats.snapshot()
     assert first[0] == dict(index=0, gpu=93, decoder=None, encoder=12, memory_used_mib=14336, memory_total_mib=15360,
-                          power_draw_w=53.95, power_limit_w=72.0)
+                          power_draw_w=53.95, power_limit_w=72.0, encoder_sessions=2,
+                          encoder_fps=49.5, encoder_mpix_s=pytest.approx(1920 * 1080 * 24.5 / 1e6 + 1280 * 720 * 25 / 1e6))
     assert first[1]['encoder'] is None
     assert first[1]['power_draw_w'] is None and first[1]['power_limit_w'] is None
     assert first[1]['index'] == 1 and first[1]['gpu'] == 0
+    assert first[1]['encoder_sessions'] == 1 and first[1]['encoder_fps'] == 12.5
+    assert first[1]['encoder_mpix_s'] == pytest.approx(3840 * 2160 * 12.5 / 1e6)
     now[0] = .5
-    assert stats.snapshot() == first and len(calls) == 1
+    assert stats.snapshot() == first and len(calls) == 2
     now[0] = 1
     stats.lock.acquire()
     try:
-        assert stats.snapshot() == first and len(calls) == 1
+        assert stats.snapshot() == first and len(calls) == 2
     finally:
         stats.lock.release()
     stats.snapshot()
-    assert len(calls) == 2
+    assert len(calls) == 4
     assert 'power.draw,enforced.power.limit' in calls[0][0][1]
+    assert 'encoder.stats.sessionCount' in calls[0][0][1]
 
 
 @pytest.mark.parametrize('raw', ['NaN', 'inf', '-1', '[N/A]'])
 def test_invalid_power_readings_do_not_hide_utilization(monkeypatch, raw):
-    monkeypatch.setattr('webui.subprocess.check_output', lambda *a, **kw: f'0, 60, 70, 40, 100, 200, {raw}, {raw}\n')
+    mock_gpu_queries(monkeypatch, lambda *a, **kw: f'0, 60, 70, 40, 100, 200, {raw}, {raw}, 1\n')
     sample = GpuStats().snapshot()[0]
     assert sample['gpu'] == 60
     assert sample['power_draw_w'] is None and sample['power_limit_w'] is None
+
+
+@pytest.mark.parametrize('sessions', ['', '# GPU Session Process Codec H V Average Average\n'])
+def test_encoder_zero_requires_a_driver_session_count(monkeypatch, sessions):
+    def query(command, **_):
+        if command[1] == 'encodersessions':
+            return sessions
+        return '0, 60, 70, 40, 100, 200, 50, 72, 0\n1, 10, 20, 30, 100, 200, 50, 72, [N/A]\n'
+    mock_gpu_queries(monkeypatch, query)
+    first, second = GpuStats().snapshot()
+    assert (first['encoder_sessions'], first['encoder_fps'], first['encoder_mpix_s']) == (0, 0, 0)
+    assert all(second[key] is None for key in ('encoder_sessions', 'encoder_fps', 'encoder_mpix_s'))
+
+
+@pytest.mark.parametrize('bad', [
+    '0 12 200 H.264 1920 1080', '0 - - - - - - -', '0 12 200 H.264 0 1080 25 1',
+    '0 12 200 H.264 1920 1080 NaN 1', '0 12 200 H.264 1920 1080 -1 1',
+    '0 12 200 H.264 1920 1080 1e308 1',
+])
+def test_incomplete_encoder_rows_do_not_publish_partial_totals(monkeypatch, bad):
+    def query(command, **_):
+        if command[1] == 'encodersessions':
+            return '0 10 200 H.264 1920 1080 25 1\n' + bad + '\n1 11 200 H.265 1280 720 0 0\n'
+        return '0, 60, 70, 40, 100, 200, 50, 72, 2\n1, 10, 20, 30, 100, 200, 40, 72, 1\n'
+    mock_gpu_queries(monkeypatch, query)
+    first, second = GpuStats().snapshot()
+    assert all(first[key] is None for key in ('encoder_sessions', 'encoder_fps', 'encoder_mpix_s'))
+    assert first['gpu'] == 60 and first['power_draw_w'] == 50
+    assert (second['encoder_sessions'], second['encoder_fps'], second['encoder_mpix_s']) == (1, 0, 0)
+
+
+@pytest.mark.parametrize('result', [
+    subprocess.TimeoutExpired('nvidia-smi', 1), subprocess.CalledProcessError(1, 'nvidia-smi'),
+    'Encoder sessions are not supported.', '', '0 10 200 H.264 1920 1080 25 1\n',
+])
+def test_missing_or_changing_encoder_sample_preserves_gpu_metrics(monkeypatch, result):
+    def query(command, **_):
+        if command[1] == 'encodersessions':
+            if isinstance(result, Exception):
+                raise result
+            return result
+        return '0, 60, 70, 40, 100, 200, 50.25, 72, 2\n'
+    mock_gpu_queries(monkeypatch, query)
+    sample = GpuStats().snapshot()[0]
+    assert all(sample[key] is None for key in ('encoder_sessions', 'encoder_fps', 'encoder_mpix_s'))
+    assert sample['encoder'] == 40 and sample['power_draw_w'] == 50.25 and sample['memory_used_mib'] == 100
+
+
+@pytest.mark.parametrize('complete', [True, False])
+def test_encoder_reader_stops_and_reaps_a_continuously_running_command(monkeypatch, complete):
+    real_popen, children = subprocess.Popen, []
+    row = '0 10 200 H.264 1920 1080 25 1' + ('\n' if complete else '')
+    def start(command, **kwargs):
+        assert command == ['nvidia-smi', 'encodersessions']
+        child = real_popen([sys.executable, '-c',
+                           f'import sys,time;sys.stdout.write({row!r});sys.stdout.flush();time.sleep(30)'], **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr('webui.subprocess.Popen', start)
+    at = time.monotonic()
+    sample = _encoder_snapshot({0: 1})
+    elapsed = time.monotonic() - at
+    if complete:
+        assert sample[0] == (1, 25, pytest.approx(1920 * 1080 * 25 / 1e6))
+        assert elapsed < .8, 'the first full table must not wait for the timeout'
+    else:
+        assert sample == {}, 'a partial last line is not a complete snapshot'
+        assert elapsed < 2
+    assert len(children) == 1 and children[0].poll() is not None
+    assert children[0].stdout.closed
 
 
 def test_compute_price_config_is_optional_and_validated(tmp_path, monkeypatch):
@@ -127,15 +213,22 @@ def test_gpu_query_failure_clears_old_sample_and_is_cached(monkeypatch, error):
     assert stats.snapshot() == [] and len(calls) == 1
 
 
-def fake_proc(root, load1, cpu, threads=None, pid=4242):
+def fake_proc(root, load1, cpu, threads=None, pid=4242, process_ticks=None, started=5):
     """A /proc with one host of two vCPUs and, given {tid: (comm, utime, stime)}, the mixer's threads."""
     (root / "loadavg").write_text(f"{load1} 20.1 18.7 3/1234 56789\n")
     (root / "stat").write_text(f"cpu {' '.join(map(str, cpu))} 0 0\ncpu0 1 0 0 1 0 0 0 0 0 0\ncpu1 1 0 0 1 0 0 0 0 0 0\n"
                                "intr 5 1 2\nctxt 9\n")
+    def stat(tid, comm, utime, stime):
+        return f"{tid} ({comm}) S 1 1 1 0 -1 4194560 0 0 0 0 {utime} {stime} 0 0 20 0 1 0 {started} 0 0\n"
     for tid, (comm, utime, stime) in (threads or {}).items():
         task = root / str(pid) / "task" / str(tid)
         task.mkdir(parents=True, exist_ok=True)
-        task.joinpath("stat").write_text(f"{tid} ({comm}) S 1 1 1 0 -1 4194560 0 0 0 0 {utime} {stime} 0 0 20 0 1 0 5 0 0\n")
+        task.joinpath("stat").write_text(stat(tid, comm, utime, stime))
+    if threads is not None:
+        process = root / str(pid)
+        process.mkdir(exist_ok=True)
+        used = sum(utime + stime for _, utime, stime in threads.values()) if process_ticks is None else process_ticks
+        process.joinpath("stat").write_text(stat(pid, "mixer (process)", used, 0))
 
 
 def test_host_stats_sample_load_cpu_and_the_busiest_mixer_thread(tmp_path, monkeypatch):
@@ -152,21 +245,48 @@ def test_host_stats_sample_load_cpu_and_the_busiest_mixer_thread(tmp_path, monke
     fake_proc(tmp_path, 21.4, [140, 2, 58, 840, 28, 1, 10, 1], {1: ("mixer.py", 505, 105), 2: ("mixer_comp_a", 84, 2),
                                                                 3: ("mixer (new)", 30, 1)})
     stats.sample()
-    assert stats.values == dict(load1=21.4, vcpus=2, cpu_pct=52, thread_pct=round(76 * 100 / hz / 2), thread_name="mixer_comp_a")
+    assert stats.values == dict(load1=21.4, vcpus=2, cpu_pct=52, mixer_cpu_pct=round(117 * 100 / hz / 2, 1),
+                               thread_pct=round(76 * 100 / hz / 2), thread_name="mixer_comp_a")
     # Without a mixer, or before its first diff after a restart, the thread fields stay unknown.
     pid[0] = None
     now[0] += 1.0
     stats.sample()
     assert stats.values["thread_pct"] is None and stats.values["thread_name"] is None
+    assert stats.values["mixer_cpu_pct"] is None
     pid[0] = 4243
     now[0] += 1.0
     fake_proc(tmp_path, 1.0, [150, 2, 58, 940, 28, 1, 10, 1], {1: ("mixer.py", 900, 100)}, pid=4243)
     stats.sample()
     assert stats.values["cpu_pct"] == 9 and stats.values["thread_pct"] is None
+    assert stats.values["mixer_cpu_pct"] is None
     now[0] += 1.0
     fake_proc(tmp_path, 1.0, [150, 2, 58, 1040, 28, 1, 10, 1], {1: ("mixer.py", 920, 100)}, pid=4243)
     stats.sample()
     assert stats.values["cpu_pct"] == 0 and stats.values["thread_pct"] == round(20 * 100 / hz) and stats.values["thread_name"] == "mixer.py"
+    assert stats.values["mixer_cpu_pct"] == round(20 * 100 / hz, 1)
+
+
+def test_mixer_cpu_counts_exited_threads_and_detects_pid_reuse(tmp_path, monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr("webui.time.monotonic", lambda: now[0])
+    hz = os.sysconf("SC_CLK_TCK")
+    stats = HostStats(lambda: 4242, proc=tmp_path)
+    def sample(ticks, started=5):
+        fake_proc(tmp_path, 1, [100, 0, 0, 900, 0, 0, 0, 0],
+                  {1: ("mixer.py", 10, 0)}, process_ticks=ticks, started=started)
+        stats.sample()
+        now[0] += 2
+    sample(1000)
+    sample(1000 + hz * 7 + 1)
+    assert stats.values['mixer_cpu_pct'] == round(350 + 50 / hz, 1)
+    assert stats.values['thread_pct'] == 0   # CPU of exited threads remains in the process counters.
+    sample(5000, started=6)
+    assert stats.values['mixer_cpu_pct'] is None and stats.values['thread_pct'] is None
+    sample(5000, started=6)
+    assert stats.values['mixer_cpu_pct'] == 0
+    (tmp_path / '4242' / 'stat').write_text('truncated')
+    stats.sample()
+    assert stats.values['mixer_cpu_pct'] is None and stats.values['cpu_pct'] is None
 
 
 def test_host_stats_thread_hides_the_meters_during_an_error_and_logs_it_once(tmp_path, monkeypatch, caplog):

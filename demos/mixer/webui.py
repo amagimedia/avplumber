@@ -33,6 +33,7 @@ import logging
 import math
 import os
 import re
+import selectors
 import subprocess
 import threading
 import signal
@@ -108,21 +109,33 @@ class GpuStats:
             self.next_sample = time.monotonic() + 1
             output = subprocess.check_output([
                 "nvidia-smi", "--query-gpu=index,utilization.gpu,utilization.decoder,utilization.encoder,"
-                              "memory.used,memory.total,power.draw,enforced.power.limit",
+                              "memory.used,memory.total,power.draw,enforced.power.limit,encoder.stats.sessionCount",
                 "--format=csv,noheader,nounits"], text=True, stderr=subprocess.DEVNULL, timeout=1)
             keys = ("index", "gpu", "decoder", "encoder", "memory_used_mib", "memory_total_mib")
             values = []
+            session_counts = {}
             for row in csv.reader(output.splitlines()):
-                if len(row) != len(keys) + 2 or not row[0].strip().isdigit():
+                if len(row) != len(keys) + 3 or not row[0].strip().isdigit():
                     continue
                 sample = dict(zip(keys, (int(v) if v.strip().isdigit() else None for v in row[:len(keys)])))
-                for key, raw in zip(("power_draw_w", "power_limit_w"), row[len(keys):]):
+                for key, raw in zip(("power_draw_w", "power_limit_w"), row[len(keys):-1]):
                     try:
                         watts = float(raw)
                         sample[key] = watts if math.isfinite(watts) and watts >= 0 else None
                     except ValueError:
                         sample[key] = None
+                sample.update(encoder_sessions=None, encoder_fps=None, encoder_mpix_s=None)
+                session_counts[sample["index"]] = int(row[-1]) if row[-1].strip().isdigit() else None
                 values.append(sample)
+            try:
+                totals = _encoder_snapshot(session_counts)
+                for sample in values:
+                    index = sample["index"]
+                    total = totals.get(index, (0, 0.0, 0.0) if session_counts[index] == 0 else None)
+                    if total is not None and session_counts[index] == total[0]:
+                        sample.update(zip(("encoder_sessions", "encoder_fps", "encoder_mpix_s"), total))
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass   # Missing session telemetry must not hide utilization or power.
             self.values = values
         except (OSError, subprocess.SubprocessError):
             self.values = []
@@ -131,17 +144,75 @@ class GpuStats:
         return self.values
 
 
+def _encoder_snapshot(session_counts):
+    """encodersessions loops by default. Stop after a complete count-verified first table."""
+    expected = {index: count for index, count in session_counts.items() if count}
+    if not expected:
+        return {}
+    with subprocess.Popen(["nvidia-smi", "encodersessions"], stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL) as process:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                deadline = time.monotonic() + 1
+                output, totals = bytearray(), {}
+                while len(output) < 1024 * 1024:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        break
+                    chunk = os.read(process.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    if not output.endswith(b"\n"):
+                        continue   # Never publish a row cut off halfway through a pipe read.
+                    totals = _encoder_totals(output.decode("ascii"))
+                    if all(totals.get(index) is not None and totals[index][0] >= count
+                           for index, count in expected.items()):
+                        return totals
+                return totals if output.endswith(b"\n") else {}
+        finally:
+            process.kill()
+            process.wait()
+
+
+def _encoder_totals(output):
+    """Aggregate complete driver session rows; a malformed row invalidates its GPU's totals."""
+    totals = {}
+    for line in output.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = line.split()
+        if not fields[0].isdigit():
+            raise ValueError("unrecognized encoder session output")
+        index = int(fields[0])
+        try:
+            if len(fields) != 8 or not all(fields[i].isdigit() for i in (1, 2, 4, 5)):
+                raise ValueError("incomplete encoder session")
+            width, height, fps, latency = map(float, fields[4:])
+            if (width <= 0 or height <= 0 or not all(math.isfinite(v) and v >= 0 for v in (width, height, fps, latency))
+                    or fields[3] in ("-", "N/A", "[N/A]")):
+                raise ValueError("invalid encoder session")
+            total = totals.setdefault(index, (0, 0.0, 0.0))
+            if total is not None:
+                total = (total[0] + 1, total[1] + fps, total[2] + width * height * fps / 1e6)
+                totals[index] = total if all(math.isfinite(v) for v in total) else None
+        except ValueError:
+            totals[index] = None
+    return totals
+
+
 class HostStats:
     """Host load, CPU use and the mixer's busiest thread, sampled once a second on one thread and
     shared by every viewer. Inside the container /proc/loadavg and /proc/stat still describe the
     whole host, not the container's share. `values` is None where /proc is missing and until the
-    second sample; its thread fields are None while no mixer process runs."""
+    second sample; its mixer fields are None while no mixer process runs."""
 
     def __init__(self, mixer_pid=lambda: None, proc=Path("/proc")):
         self.mixer_pid = mixer_pid   # the mixer's pid, or None while none runs
         self.proc = proc
         self.values = None
-        self._last = None   # (monotonic time, cpu counters, pid, {tid: (comm, ticks)}) of the previous sample
+        self._last = None   # Previous time, host counters, pid, thread counters and process counters.
 
     def start(self):
         threading.Thread(target=self._run, daemon=True, name="host-stats").start()
@@ -165,28 +236,48 @@ class HostStats:
         cpu = [int(v) for v in lines[0].split()[1:9]]
         pid, at = self.mixer_pid(), time.monotonic()
         threads = self._thread_ticks(pid) if pid else {}
-        last, self._last = self._last, (at, cpu, pid, threads)
+        process = self._process_ticks(pid) if pid else None
+        last, self._last = self._last, (at, cpu, pid, threads, process)
         if last is None:
             return
-        last_at, last_cpu, last_pid, last_threads = last
+        last_at, last_cpu, last_pid, last_threads, last_process = last
         total, idle = sum(cpu) - sum(last_cpu), cpu[3] + cpu[4] - last_cpu[3] - last_cpu[4]
         values = dict(load1=load1, vcpus=sum(line[3:4].isdigit() for line in lines if line.startswith("cpu")),
-                      cpu_pct=round((total - idle) / total * 100) if total > 0 else None, thread_pct=None, thread_name=None)
-        if pid and pid == last_pid:   # a restarted mixer's thread ids say nothing about the previous ones
+                      cpu_pct=round((total - idle) / total * 100) if total > 0 else None,
+                      mixer_cpu_pct=None, thread_pct=None, thread_name=None)
+        elapsed = at - last_at
+        same_process = pid and pid == last_pid and process and last_process and process[1] == last_process[1]
+        if same_process and elapsed > 0:
+            ticks = process[0] - last_process[0]
+            if ticks >= 0:
+                values["mixer_cpu_pct"] = round(ticks * 100 / os.sysconf("SC_CLK_TCK") / elapsed, 1)
+        if pid and pid == last_pid and elapsed > 0 and (not process or not last_process or same_process):
             name, ticks = max(((name, ticks - last_threads.get(tid, ("", 0))[1]) for tid, (name, ticks) in threads.items()),
                               key=lambda item: item[1], default=(None, 0))
             if name is not None:
-                values.update(thread_pct=round(ticks * 100 / os.sysconf("SC_CLK_TCK") / (at - last_at)), thread_name=name)
+                values.update(thread_pct=round(ticks * 100 / os.sysconf("SC_CLK_TCK") / elapsed), thread_name=name)
         self.values = values   # a fresh dict: HTTP threads read the previous one meanwhile
 
     def _thread_ticks(self, pid):
         """{tid: (comm, utime + stime)} for every thread of *pid*: one listing and one read per thread."""
         ticks = {}
         for tid, stat in _thread_files(self.proc, pid, "stat"):
-            head, _, rest = stat.rpartition(")")   # comm may hold spaces and parentheses
-            fields = rest.split()
-            ticks[tid] = (head.partition("(")[2], int(fields[11]) + int(fields[12]))   # stat fields 14 and 15
+            name, used, _ = _cpu_stat(stat)
+            ticks[tid] = (name, used)
         return ticks
+
+    def _process_ticks(self, pid):
+        try:
+            return _cpu_stat((self.proc / str(pid) / "stat").read_text())[1:]
+        except (OSError, ValueError, IndexError):
+            return None
+
+
+def _cpu_stat(stat):
+    head, _, rest = stat.rpartition(")")   # comm may hold spaces and parentheses
+    fields = rest.split()
+    # Process utime/stime include exited threads; summing current task stats would lose their CPU time.
+    return head.partition("(")[2], int(fields[11]) + int(fields[12]), int(fields[19])
 
 
 def _thread_files(proc, pid, name):
