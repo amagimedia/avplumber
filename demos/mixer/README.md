@@ -81,8 +81,9 @@ other GPU applications.
 
 The mixer header's **POWER** meter reads GPU board watts and the enforced power limit from
 the same sample; the limit is read from the driver, never assumed from the card model.
-Hover or focus it for sources per GPU watt, encoded megapixels per joule, and USD per input
-source per hour. NVENC throughput sums each session's driver-reported FPS and resolution;
+Hover or focus it for sources per GPU watt, total encoded megapixels per second,
+encoded megapixels per joule, and USD per input source per hour.
+NVENC throughput sums each session's driver-reported FPS and resolution;
 these are measured, rounded driver averages. Multiple GPUs use their combined draw and
 throughput; missing readings stay unknown. Source counts include keys.
 

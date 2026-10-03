@@ -38,7 +38,7 @@ const {chromium} = require('playwright');
     await page.goto('http://mixer.test/');
     await page.waitForFunction(() => document.querySelector('#power b').textContent === '50 / 72 W');
     const values = id => page.locator(`#${id}-tip dd`).allTextContents();
-    assert.deepEqual(await values('power'), ['3.84', '31.10', '$0.00625']);
+    assert.deepEqual(await values('power'), ['3.84', '1555.2', '31.10', '$0.00625']);
     assert.deepEqual(await values('gpu-vram'), ['10.67', '6.00 GiB']);
     assert.deepEqual(await values('gpu-enc'), ['30', '750']);
     assert.deepEqual(await values('cpu'), ['6.00', '32.0']);
@@ -79,7 +79,7 @@ const {chromium} = require('playwright');
       state.host.mixer_cpu_pct = null;
       renderMeters(); renderHost();
     });
-    assert.deepEqual(await values('power'), ['—', '—', '$0.00625']);
+    assert.deepEqual(await values('power'), ['—', '—', '—', '$0.00625']);
     assert.deepEqual(await values('cpu'), ['—', '—']);
     await page.evaluate(() => {
       state.setup_revision = 2;

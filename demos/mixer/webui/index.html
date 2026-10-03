@@ -902,9 +902,10 @@ function renderPower(gpus) {
     if (valid) meter.setAttribute(key, key === "aria-valuenow" ? Math.min(watts, limit) : value);
     else meter.removeAttribute(key);
   }
-  const price = config.compute_price;
+  const price = config.compute_price, mpix = gpuSum(gpus, "encoder_mpix_s");
   setMeterTip(meter, "Power efficiency", [["Sources / W", metric(ratio(sources, watts), 2)],
-    ["NVENC MPix / J", metric(ratio(gpuSum(gpus, "encoder_mpix_s"), watts), 2)],
+    ["NVENC MPix / s", metric(mpix, 1)],
+    ["NVENC MPix / J", metric(ratio(mpix, watts), 2)],
     ["USD / source / hour", price && sources > 0 ? `$${(price.hourly_usd / sources).toFixed(5)}` : "—"]]);
 }
 // mixer.status carries wipe_cache only while the mixer keeps decoded wipe clips in GPU memory.
