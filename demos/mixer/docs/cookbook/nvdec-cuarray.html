@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="NVDEC decodes into fixed CUDA array pools that the mixer samples directly. At 192 inputs and 20 outputs this saves 4.88 GiB; 28 outputs passed longer validation while decoded queues stayed at three frames.">
+  <title>NVDEC arrays without a staging copy · Mixer optimization cookbook</title>
+  <link rel="stylesheet" href="cookbook.css">
+  <style>
+    .table-wrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; font-size: 14px; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; }
+    th { color: var(--muted); }
+    td { color: var(--body); font-variant-numeric: tabular-nums; }
+    pre { overflow-x: auto; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+    pre code { padding: 0; border: 0; background: none; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>NVDEC arrays without a staging copy</h1>
+  <p class="lede">The mixer samples NVDEC's decoded CUDA arrays directly. At the same 192 inputs and 20 outputs, whole-GPU memory fell from 20.65 to 15.77 GiB: <strong>4.88 GiB saved, or 23.7%</strong>. The recovered room supports 28 encoded outputs, with the decoded queues still at three frames and AUX latency still at 80 ms.</p>
+  <span class="pill optin">Status: Opt-in, measured on L4</span>
+
+  <h2>The idea</h2>
+  <p>The linear CUDA baseline keeps decoded output images separately from NVDEC's decode surfaces. The new path registers a fixed pool of CUDA arrays with NVDEC and publishes references to those same arrays. Matching normalization forwards the handle; the compositor reads the planes through textures while rendering its output canvas. There is no intermediate decoded-image copy.</p>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 720 270" role="img" aria-labelledby="array-title array-desc">
+        <title id="array-title">Direct array sampling removes the separate decoded output image</title>
+        <desc id="array-desc">The linear baseline maps and copies decoder output into linear frames before composition. CUarray output uses a single fixed image pool; queues and outputs hold references to its arrays. Both paths render a new output canvas.</desc>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 L10 5 L0 10 Z" fill="#57dbc2"/>
+          </marker>
+        </defs>
+        <g font-family="system-ui, sans-serif" font-size="13" fill="#edf4ff">
+          <text x="12" y="25" font-size="15" font-weight="600">Linear CUDA baseline</text>
+          <rect x="12" y="45" width="176" height="60" rx="8" fill="#182236" stroke="#6e8bf5"/>
+          <text x="100" y="70" text-anchor="middle">NVDEC decode surfaces</text>
+          <text x="100" y="89" text-anchor="middle" fill="#a4b4ca">codec reference pictures</text>
+          <path d="M190 76 L262 76" stroke="#57dbc2" stroke-width="2" marker-end="url(#arrow)"/>
+          <text x="227" y="63" text-anchor="middle" font-size="11" fill="#a4b4ca">map / copy</text>
+          <rect x="270" y="45" width="176" height="60" rx="8" fill="#3a2a0c" stroke="#f5a524"/>
+          <text x="358" y="70" text-anchor="middle">Linear decoded frames</text>
+          <text x="358" y="89" text-anchor="middle" fill="#a4b4ca">separate image storage</text>
+          <path d="M448 76 L532 76" stroke="#57dbc2" stroke-width="2" marker-end="url(#arrow)"/>
+          <text x="491" y="63" text-anchor="middle" font-size="11" fill="#a4b4ca">composite</text>
+          <rect x="540" y="45" width="166" height="60" rx="8" fill="#101827" stroke="#57dbc2"/>
+          <text x="623" y="80" text-anchor="middle">Output canvas → NVENC</text>
+
+          <text x="12" y="149" font-size="15" font-weight="600">CUarray · fixed pool, shared references</text>
+          <rect x="12" y="169" width="176" height="60" rx="8" fill="#12281f" stroke="#30a46c"/>
+          <text x="100" y="194" text-anchor="middle">Registered CUDA arrays</text>
+          <text x="100" y="213" text-anchor="middle" fill="#a4b4ca">NVDEC writes here</text>
+          <path d="M190 200 L262 200" stroke="#57dbc2" stroke-width="2" marker-end="url(#arrow)"/>
+          <text x="227" y="187" text-anchor="middle" font-size="11" fill="#a4b4ca">same handle</text>
+          <rect x="270" y="169" width="176" height="60" rx="8" fill="#101827" stroke="#26354a" stroke-dasharray="5 4"/>
+          <text x="358" y="194" text-anchor="middle">Queues / output references</text>
+          <text x="358" y="213" text-anchor="middle" fill="#a4b4ca">no second image bank</text>
+          <path d="M448 200 L532 200" stroke="#57dbc2" stroke-width="2" marker-end="url(#arrow)"/>
+          <text x="491" y="187" text-anchor="middle" font-size="11" fill="#a4b4ca">sample directly</text>
+          <rect x="540" y="169" width="166" height="60" rx="8" fill="#101827" stroke="#57dbc2"/>
+          <text x="623" y="204" text-anchor="middle">Output canvas → NVENC</text>
+          <text x="12" y="255" fill="#a4b4ca">One decoded image can serve many outputs. Each output still renders its own canvas.</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Zero-copy describes the boundary from decode to composition. Rendering output pixels still takes GPU work. Optional pad/crop/transition filters produce their own final linear output; crop copies its selected rectangle directly, without a staging image.</figcaption>
+  </figure>
+
+  <h2>Measured gain</h2>
+  <p>The workload has 120 independent HEVC 1080p25 clips, 32 raw inputs and 40 DMA-BUF browser inputs. The 20-output runs use identical scenes, resolutions, rates and encoder settings. Twenty outputs means two program renditions, two monitors and 16 extra AUX buses; 28 adds eight AUX buses.</p>
+  <div class="table-wrap">
+    <table>
+      <caption>60-second warmed captures on the same L4</caption>
+      <thead><tr><th scope="col">Decode path</th><th scope="col">Outputs</th><th scope="col">Whole-GPU VRAM</th><th scope="col">Mixer CPU</th><th scope="col">GPU SM / NVDEC</th></tr></thead>
+      <tbody>
+        <tr><td>FFmpeg 8.1, linear CUDA</td><td>20</td><td>20.65 GiB</td><td>6.47 cores</td><td>49.0% / 68.0%</td></tr>
+        <tr><td>Pinned upstream, CUarray</td><td>20</td><td>15.77 GiB</td><td>6.01 cores</td><td>43.3% / 65.8%</td></tr>
+        <tr><td>Pinned upstream, CUarray</td><td>28</td><td>18.13 GiB</td><td>6.42 cores</td><td>44.4% / 65.6%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The matched comparison saves 4.88 GiB and about 7.2% mixer CPU. The 28-output run has <strong>40% more outputs</strong> while using 2.52 GiB less VRAM than the old 20-output baseline. Memory includes resident browser/GPU services; CPU sums the mixer threads in logical cores.</p>
+  <p>A fresh 28-output container also passed a <strong>five-minute quiet capture</strong>: all 120 decoders and 28 encoders advanced at 25.00–25.01 fps, with zero output drops, missed deadlines or overflows. A separate two-minute AUX page-switch repeat was clean. Cut/fade/wipe stress completed 136 cuts, 57 fades and 52 wipes with zero missed program deadlines. The <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/doc/research/2026-10-03-cuarray-capacity.md">full report</a> retains rejected runs and validation limits, including an earlier scheduling capture with three output drops.</p>
+  <p class="note">These are tested configurations, not a universal capacity ceiling. A 32-output attempt hit the existing downstream-key fanout limit before a valid run; it did not establish a VRAM or NVENC limit.</p>
+
+  <h2>Fixed surfaces are separate from queues</h2>
+  <p><code>extra_hw_frames</code> adds application headroom to the codec's reference and working surfaces. It does not change the decoded edge's capacity or the AUX deadline. Queues and independently timed outputs hold references to decoded pictures; they share the image storage but can keep different pictures alive.</p>
+  <div class="table-wrap">
+    <table>
+      <caption>Pool sizing for this HEVC workload: nine base surfaces plus the configured extras</caption>
+      <thead><tr><th scope="col">Extra frames</th><th scope="col">Fixed arrays per decoder</th><th scope="col">Observed result</th></tr></thead>
+      <tbody>
+        <tr><td>3, source default</td><td>12</td><td>Exhausted during 20-output startup; rejected</td></tr>
+        <tr><td>8</td><td>17</td><td>Passed 20 outputs; exhausted at 28 outputs</td></tr>
+        <tr><td>12</td><td>21</td><td>Passed the 28-output validation</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The pool is allocated up front and never grows or silently switches to copying. Other bitstreams can need a different base count. Validate decoder progress as well as output deadlines: a stalled input can leave downstream outputs repeating its last picture. The earlier <a href="frame-queues.html">one-frame queue proposal</a> was not selected; this optimization keeps all three decoded queue slots.</p>
+
+  <h2 id="baseline">Earlier savings already in the baseline</h2>
+  <p><strong>One decoder thread.</strong> GPU video sources use decoder <code>options.threads=1</code>. FFmpeg frame threading otherwise reserves additional decode surfaces per active frame thread while NVDEC does the decode work. This is separate from <a href="filter-threads.html">one thread per GPU filter graph</a>, and does not impose a one-thread policy on CPU decoding.</p>
+  <p><strong>Low-DPB demo assets.</strong> Generated H264/HEVC demo clips use <code>-bf 0 -dpb_size 2</code> to reduce reference-picture requirements at the source. Each clip remains an independent full-resolution input processed every frame. This changes the encoded media and can trade compression efficiency for a smaller decode footprint; it cannot remove reference pictures that an incoming live bitstream requires.</p>
+  <p>Both optimizations were already present in the 20.65 GiB linear baseline. Their savings are not counted again in the CUarray result.</p>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>Opt-in upstream FFmpeg NVDEC output into registered CUDA arrays, with fixed pools and direct compositor texture reads. The existing decoder node and AVP API stay in use.</li>
+    <li><b>Why</b>Remove separate decoded-image storage and its copy, while keeping the queues that absorb normal scheduling variation.</li>
+    <li><b>Latency</b>Decoded queue: three frames. AUX deadline: 80 ms. Matched 20-output cut p95 was 96.5 ms versus 99.4 ms on FFmpeg 8.1; at 28 outputs it was 111.2 ms.</li>
+    <li><b>Cost</b>Each decoder has a private producer stream. Consumer events order GPU reads, and frame references stay alive until reads finish. Fixed surface budgets must cover the whole graph.</li>
+    <li class="flag"><b>Risk</b>An undersized pool causes decode errors, not automatic growth. CUarray requires compatible filters and the pinned development build. Matching <code>scale_cuda</code> passes through; array scaling or format conversion is rejected.</li>
+    <li><b>Validation limits</b>Actual HEVC 10-bit 4:2:2 decoding still needs Blackwell; P210 array sampling passed synthetic GPU tests on L4. Replay seeking and sequence changes remain separate milestones. An idle compositor can retain its former scene's pool until its next draw or destruction.</li>
+    <li><b>Switch it off</b>Set the video source's <code>decode_storage</code> to <code>cuda</code> to use linear CUDA again. The default build remains FFmpeg 8.1. CUarray has no hidden CPU/copy fallback and disables decoder auto-restart to avoid overlapping replacement pools.</li>
+  </ul>
+
+  <h2>Use the measured configuration</h2>
+  <p>A video source entry for the tested 28-output graph uses the following settings. Twelve extras is that graph's validated budget, not a recommendation for every source or show. Build the exact FFmpeg revision and headers in the <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/ffmpeg/README.md">patch-series instructions</a>.</p>
+  <pre><code>{"id": "clip", "kind": "video", "path": "&lt;path&gt;",
+ "decode_storage": "cuarray", "extra_hw_frames": 12}</code></pre>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/doc/research/2026-10-03-cuarray-capacity.md">Capacity validation report</a>: matched resource captures, cut/AUX stress and regression boundaries.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/tree/mixer-improv/deps/ffmpeg/9">FFmpeg development patches</a>: explicit fixed budgets, identity passthrough, private decode streams and compatible CUDA filters.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_array.hpp">CUDA array texture cache</a> and <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_draw.cpp">compositor draw path</a>: direct reads, stream ordering and pool ownership.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/inputs.py">Source decoder setup</a> and <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/sdr_patterns.py">demo encoding options</a>: the earlier decoder-thread and DPB reductions already in the baseline.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#sources">Source configuration</a> and <a href="https://github.com/amagimedia/avplumber/tree/mixer-improv/tests/cuda/nvdec">NVDEC regression tests</a>: opt-in settings, pixel/PTS comparisons and capture tooling.</li>
+  </ul>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>

@@ -3,61 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="A proposed, rate-aware change, not in the code: keep one decoded frame instead of three on each NVDEC source's decoder-to-realtime edge at 30 fps and below, for about 255 MB of VRAM across 40 sources, no added latency, and less slack before a repeated frame.">
+  <meta name="description" content="An earlier one-frame decoded queue proposal, not selected. The implemented NVDEC CUarray optimization keeps three decoded frames and the existing AUX deadline while removing intermediate decoded-image storage.">
   <title>Frame queues · Mixer optimization cookbook</title>
+  <link rel="stylesheet" href="cookbook.css">
   <style>
-    :root {
-      color-scheme: dark;
-      font-family: system-ui, sans-serif;
-      color: #edf4ff;
-      background: #080d17;
-      --panel: #101827;
-      --line: #26354a;
-      --muted: #a4b4ca;
-      --body: #b5c4d8;
-      --accent: #57dbc2;
-      --red: #e5484d;
-      --green: #30a46c;
-      --amber: #f5a524;
-      --blue: #6e8bf5;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #080d17; }
-    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
-    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
-    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
-    .site a { font-weight: 600; text-decoration: none; }
-    .site a:hover { text-decoration: underline; }
-    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
-    h2 { font-size: 19px; margin: 34px 0 12px; }
-    p, li { color: var(--body); line-height: 1.6; }
-    p { max-width: 78ch; }
-    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
-    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
-    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
-            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
-    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
-    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
-    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
-    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
-    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
-    figure { margin: 22px 0 0; }
-    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
-    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
-    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
-    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
-    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
-    .cards > li.flag { border-left: 3px solid var(--amber); }
-    .cards p { margin: 0; }
-    .cards p + p { margin-top: 8px; }
-    .cards ul { margin: 4px 0 0; padding-left: 18px; }
-    .cards ul li { margin: 2px 0; }
-    .where { padding-left: 20px; }
-    .where li { margin: 6px 0; }
-    .note { font-size: 14px; color: var(--muted); }
-    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
-    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
     .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 22px 0 0; padding: 0; list-style: none; }
     .figures li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
     .figures b { display: block; font-size: 23px; font-weight: 650; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; color: #edf4ff; }
@@ -69,8 +18,9 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>One decoded frame in flight per NVDEC source</h1>
-  <p class="lede">At 30&nbsp;fps and below, each NVDEC source could park one decoded frame before pacing instead of three. That would free about 255&nbsp;MB of VRAM across 40 sources with no added latency.</p>
-  <span class="pill proposed">Status: Proposed, not in code</span>
+  <p class="lede">This earlier proposal was not selected. The implemented <a href="nvdec-cuarray.html">NVDEC CUarray path</a> keeps the decoded queue at three frames and AUX latency at 80 ms, saving 4.88 GiB in the matched 192-input / 20-output comparison.</p>
+  <span class="pill">Status: Not selected, not in code</span>
+  <p class="note">The original linear-CUDA analysis below is retained as background. Its estimated queue savings were not measured or shipped and do not describe the new fixed array pools.</p>
 
   <ul class="figures">
     <li><b>3 → 1</b><span>decoded frames parked per NVDEC source, only at ≤30&nbsp;fps</span></li>
@@ -195,8 +145,8 @@
     <li><b>Switch it off</b><p>Nothing to switch today: the code has no such setting, and every decoded edge keeps the instance default of&nbsp;3. If it is built, it should be off by default. Capacity&nbsp;2 would not halve the change: it behaves like&nbsp;3.</p></li>
   </ul>
 
-  <h2>Before building it</h2>
-  <p>Ship it as its own measured step, with nothing else changing. First record a repeat-rate baseline at capacity&nbsp;3: <code>force_fps</code> duplicated counters and compositor repeats per hour. Then set capacity&nbsp;1 and compare. Any regression is then attributable to this change. Keep it off if repeats rise.</p>
+  <h2>Original acceptance criteria</h2>
+  <p>The proposal required a separate repeat-rate comparison at capacities&nbsp;3 and&nbsp;1, using <code>force_fps</code> duplicated counters and compositor repeats per hour. That validation was not performed. The current configuration retains capacity&nbsp;3.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">

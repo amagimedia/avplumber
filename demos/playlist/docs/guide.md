@@ -59,7 +59,7 @@ element, and the same actions on keys:
 
 The same as the mixer demo: a Linux NVIDIA host with hardware decode and
 NVENC, `pyplumber` built with CUDA and NVCC, FFmpeg with CUDA decoding and
-`h264_nvenc`, the `avpmixer` package on `PYTHONPATH`, and a video-only Janus
+`h264_nvenc`, the `pyplumber.mixer` package on `PYTHONPATH`, and a video-only Janus
 Streaming mountpoint that accepts H.264 RTP (the shared Janus preview from the
 [demo setup guide](../../README.md) provides one on port 5004). Neural models
 and TensorRT are not needed.
@@ -113,8 +113,12 @@ ttyd -p 7681 -t fontSize=15 python3 demos/playlist/player.py --port 7778
 
 ## Docker
 
+The base image is the Fedora 44 / CUDA 13.4 mixer image, which needs host driver
+R615 or newer; `demos/mixer/Dockerfile` (Ubuntu 22.04 / CUDA 11.7) builds the
+same layout for an older driver.
+
 ```sh
-docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
+docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:local .
 docker build --build-arg AVP_BASE_IMAGE=avplumber-mixer:local \
     --tag avplumber-playlist:local demos/playlist
 docker run --rm --gpus all --network host avplumber-playlist:local
@@ -122,7 +126,7 @@ docker run --rm -it --network host --entrypoint python3 avplumber-playlist:local
 ```
 
 Set `AVP_BASE_IMAGE=<cuda-python-avplumber-image>` to any image that provides
-`pyplumber` and `avpmixer`. The image generates and validates the fixtures
+`pyplumber` and `pyplumber.mixer`. The image generates and validates the fixtures
 while building.
 
 ## Verifying frame continuity
@@ -168,7 +172,7 @@ transition changes.
 
 `engine.py` binds elements to sixteen fixed mixer sources (group
 `pl_item_<slot>`, fullscreen scene `item_<slot>`). The decode chain is
-`avpmixer.inputs.build_input` with the replay demo's playback controls: a
+`pyplumber.mixer.inputs.build_input` with the replay demo's playback controls: a
 pause team and pause node, a realtime sync team, and `h264_cuvid` with
 `flush_magic` so a seek lands on the exact frame. A parked element sits on its
 cue-in frame with the decoder resident; every chain loops between its cue

@@ -5,59 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Twelve mixer ideas we costed, measured or ruled out, from subcomposition reuse to FFmpeg hwupload at 60 fps.">
   <title>Ideas we measured and dropped · Mixer optimization cookbook</title>
+  <link rel="stylesheet" href="cookbook.css">
   <style>
-    :root {
-      color-scheme: dark;
-      font-family: system-ui, sans-serif;
-      color: #edf4ff;
-      background: #080d17;
-      --panel: #101827;
-      --line: #26354a;
-      --muted: #a4b4ca;
-      --body: #b5c4d8;
-      --accent: #57dbc2;
-      --red: #e5484d;
-      --green: #30a46c;
-      --amber: #f5a524;
-      --blue: #6e8bf5;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #080d17; }
-    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
-    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
-    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
-    .site a { font-weight: 600; text-decoration: none; }
-    .site a:hover { text-decoration: underline; }
-    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
-    h2 { font-size: 19px; margin: 34px 0 12px; }
-    p, li { color: var(--body); line-height: 1.6; }
-    p { max-width: 78ch; }
-    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
-    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
-    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
-            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
-    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
-    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
-    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
-    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
-    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
-    figure { margin: 22px 0 0; }
-    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
-    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
-    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
-    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
-    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
-    .cards > li.flag { border-left: 3px solid var(--amber); }
-    .cards p { margin: 0; }
-    .cards p + p { margin-top: 8px; }
-    .cards ul { margin: 4px 0 0; padding-left: 18px; }
-    .cards ul li { margin: 2px 0; }
-    .where { padding-left: 20px; }
-    .where li { margin: 6px 0; }
-    .note { font-size: 14px; color: var(--muted); }
-    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
-    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
     h3 { font-size: 15px; margin: 22px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
     .ideas { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
     .ideas li { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--red); border-radius: 10px; padding: 12px 16px; }
@@ -257,8 +206,8 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li>PGM tile is the finished program: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L109-L110">aux.py:109–110</a> (last input, <code>contain</code>), matched one frame back at <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L1098-L1103">cuda_rect_overlay.cpp:1098–1103</a></li>
-    <li>Idle compositor slot, no surface and no kernel: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L509-L511">cuda_rect_overlay.cpp:509–511</a>; empty mask means an idle PVW slot: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L692-L695">cuda_rect_overlay.cpp:692–695</a></li>
+    <li>PGM tile is the finished program: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L109-L110">aux.py:109–110</a> (last input, <code>contain</code>), matched one frame back at <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/mixer_compositor.cpp#L402-L407">mixer_compositor.cpp:402–407</a></li>
+    <li>Idle compositor slot, no surface and no kernel: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/mixer_compositor.cpp#L282-L284">mixer_compositor.cpp:282–284</a>; empty mask means an idle PVW slot: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L45-L48">cuda_rect_overlay.cpp:45–48</a></li>
     <li>Bilinear, 4 taps per sample: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_scale.cu#L81-L86">cuda_rect_scale.cu:81–86</a></li>
     <li>One chain per source: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/inputs.py#L18">inputs.py:18</a> (<code>build_input</code>); repeated locations and <code>independent</code>: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/config.py#L435-L441">config.py:435–441</a></li>
     <li>Own media per generated source, id burned in: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/prepare_demo.py#L254-L260">prepare_demo.py:254–260</a></li>

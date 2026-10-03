@@ -5,60 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="How downstream keys fade in and out in the same single keyer pass: a per-key opacity weight, a separate kernel entry used only on fade frames, and the old kernels left byte-identical.">
   <title>DSK fades in one pass · Mixer optimization cookbook</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      font-family: system-ui, sans-serif;
-      color: #edf4ff;
-      background: #080d17;
-      --panel: #101827;
-      --line: #26354a;
-      --muted: #a4b4ca;
-      --body: #b5c4d8;
-      --accent: #57dbc2;
-      --red: #e5484d;
-      --green: #30a46c;
-      --amber: #f5a524;
-      --blue: #6e8bf5;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #080d17; }
-    main { max-width: 960px; margin: auto; padding: 32px 24px 56px; }
-    a { color: var(--accent); text-underline-offset: 4px; overflow-wrap: anywhere; }
-    .site { font-size: 14px; color: var(--muted); margin: 0 0 22px; }
-    .site a { font-weight: 600; text-decoration: none; }
-    .site a:hover { text-decoration: underline; }
-    h1 { font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.8px; margin: 0; line-height: 1.2; }
-    h2 { font-size: 19px; margin: 34px 0 12px; }
-    p, li { color: var(--body); line-height: 1.6; }
-    p { max-width: 78ch; }
-    .lede { font-size: 17px; color: #d5e2f2; margin: 16px 0 0; }
-    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; overflow-wrap: anywhere; }
-    .pill { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap;
-            color: var(--muted); background: rgba(164, 180, 202, 0.10); border: 1px solid rgba(164, 180, 202, 0.45); }
-    .pill.live { color: #7fd6a8; background: rgba(48, 164, 108, 0.14); border-color: rgba(48, 164, 108, 0.6); }
-    .pill.impl { color: #aebdfb; background: rgba(110, 139, 245, 0.14); border-color: rgba(110, 139, 245, 0.6); }
-    .pill.optin { color: var(--amber); background: rgba(245, 165, 36, 0.12); border-color: rgba(245, 165, 36, 0.55); }
-    .pill.proposed { color: var(--accent); background: rgba(87, 219, 194, 0.10); border-color: rgba(87, 219, 194, 0.5); }
-    .pill.rejected { color: #f2878a; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.6); }
-    figure { margin: 22px 0 0; }
-    .diagram { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
-    .diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
-    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
-    .cards > li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0; line-height: 1.55; }
-    .cards > li > b { display: block; color: var(--accent); font-size: 13px; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 6px; }
-    .cards > li.flag { border-left: 3px solid var(--amber); }
-    .cards p { margin: 0; }
-    .cards p + p { margin-top: 8px; }
-    .cards ul { margin: 4px 0 0; padding-left: 18px; }
-    .cards ul li { margin: 2px 0; }
-    .where { padding-left: 20px; }
-    .where li { margin: 6px 0; }
-    .note { font-size: 14px; color: var(--muted); }
-    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
-    @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
-  </style>
+  <link rel="stylesheet" href="cookbook.css">
 </head>
 <body>
 <main>
@@ -213,7 +160,7 @@
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_scale.cu#L145">src/nodes/hwaccel/cuda_rect_scale.cu#L145</a>: the <code>kOpacity</code> template flag; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_scale.cu#L368-L373">L368-L373</a> the <code>composite_planes_opacity</code> entry.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_table.h#L31">src/nodes/hwaccel/cuda_rect_table.h#L31</a>: the table's <code>mul</code> float that carries the opacity.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_draw.cpp#L214-L218">src/nodes/hwaccel/cuda_rect_draw.cpp#L214-L218</a>: detects a faded RGBA layer; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_draw.cpp#L248-L249">L248-L249</a> picks the kernel entry per frame.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L557-L569">src/nodes/hwaccel/cuda_rect_overlay.cpp#L557-L569</a>: <code>stepKeyFades</code>, one envelope step per key per program frame; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L650">L650</a> a key is drawn only above level 0; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L931-L953">L931-L953</a> the <code>fade_inputs</code> command; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L954-L962">L954-L962</a> the race fix.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/mixer_keyer.cpp#L37-L49">src/nodes/mixer_keyer.cpp#L37-L49</a>: <code>stepKeyFades</code>, one envelope step per key per program frame; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/mixer_keyer.cpp#L139">L139</a> a key is drawn only above level 0; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/mixer_keyer.cpp#L152-L172">L152-L172</a> the <code>fade_inputs</code> command; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/mixer_keyer.cpp#L173-L175">L173-L175</a> the race fix.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/dsk.py#L67-L95">pyplumber/mixer/dsk.py#L67-L95</a>: <code>mixer.dsk</code>; a 0-second fade sends the old <code>active_inputs</code> cut.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/webui/index.html#L325">demos/mixer/webui/index.html#L325</a>: the key-fade seconds field in the Keys card header; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/webui/index.html#L531-L532">L531-L532</a> sends it with the curve.</li>
     <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#dsk">config.md · dsk</a> (fields <code>fade_seconds</code> and <code>fade_curve</code>, and the <code>mixer.dsk</code> command).</li>
