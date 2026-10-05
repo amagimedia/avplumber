@@ -33,7 +33,7 @@ extern "C" {
 /// edge of an output. `drop` discards an output's frame when its edge is full instead of waiting.
 class CudaTransform : public NodeSingleInput<av::VideoFrame>,
                       public NodeMultiOutput<av::VideoFrame>,
-                      public ReportsFinishByFlag {
+                      public NodeDoesNotBuffer {   // no frame is kept between process() calls: a stop only has to end the loop
     using CudaRectDraw = avp::mixer::CudaRectDraw;
     static constexpr const char *kType = "cuda_transform";
 
