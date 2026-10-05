@@ -192,15 +192,17 @@ class MixerApplication:
 
         The loader group is started only here. The player group runs already
         (mixer.start_groups); a take arms it to replay what this left behind.
-        A clip that is not cached whole fails the start.
+        A clip that is not cached whole, or that a later clip evicted, fails the start.
         """
         self._wait_for_node(f"{MIXER_NAME}_{clipcache.CACHE_NODE}")   # its group starts asynchronously with the mixer's
-        for clip in dict.fromkeys(c for c in (self.wipe_file, *self.wipe_files) if c):
+        clips = tuple(dict.fromkeys(c for c in (self.wipe_file, *self.wipe_files) if c))
+        for clip in clips:
             started = time.monotonic()
             held = clipcache.preload(self.avp, MIXER_NAME, clip, timeout_sec=self.preheat_timeout_sec,
                                      poll_sec=PREHEAT_POLL_INTERVAL_SEC, check=self._check_startup)
             print(f"wipe cached: {clip} {held['frames']} frames, {held['bytes'] / 1048576:.1f} MiB, "
                   f"{(time.monotonic() - started) * 1000:.0f} ms", flush=True)
+        clipcache.require_cached(self.avp, MIXER_NAME, clips)
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str, data_type: str | None = None) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
