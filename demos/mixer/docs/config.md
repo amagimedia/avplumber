@@ -300,7 +300,12 @@ cache (`--wipe-cache-mb 640`; the demo's two 2 s 540x960 clips take about
 the CPU per take missed program deadlines at 64+ sources at 60 fps. The cached
 player and the wipe compositor stay running and idle between wipes; a take
 arms them in place, so wipe spam creates, starts and stops no node. `0`
-decodes on each take, keeping GPU memory bounded by the playback queues. The
+decodes on each take, keeping GPU memory bounded by the playback queues. A clip
+is cached whole or the mixer does not start: a load ends on the decode chain's
+end-of-stream marker, the cached frame count must equal the decoder's, a clip
+that differs is loaded once more, and a second difference or a load that
+outlasts `--preheat-timeout` fails the start naming the clip. So does a budget
+too small for all wipes together: a later clip then evicts an earlier one. The
 web UI's WIPES meter shows how full the cache is and lists its clips on hover.
 
 ```json

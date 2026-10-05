@@ -18,13 +18,20 @@ extern "C" {
 /// The node runs for the life of the graph; nothing is created, started or
 /// stopped for a take. "load" <path> reads that clip from the decode chain
 /// upstream into the cache; "play" <path> replays a cached clip from its first
-/// frame; "stop" ends a replay. Between clips the thread waits on its events.
+/// frame; "stop" ends a replay; "forget" <path> drops a clip, cached or loading.
+/// Between clips the thread waits on its events.
+///
+/// A load ends when the decode chain's end-of-stream marker arrives (realtime
+/// passes it on with forward_eof), and on nothing else: a producer stalled for
+/// seconds looks exactly like the end of a clip to anyone timing the silence.
+/// The marker says the chain ended, not that every frame got here, so whoever
+/// asked for the load compares the frame count with the decoder's.
 ///
 /// A replay is stamped on the output tick grid from the tick after it was
 /// armed and each frame is pushed when its tick begins, so a clocked compositor
 /// downstream matches frame k to tick T0+k with its whole deadline to draw it,
 /// and rejects anything stamped before the arm with one reset.
-static constexpr int IDLE_END_MS = 200;
+static constexpr int IDLE_WAKE_MS = 200;
 
 class ClipCacheNode : public NodeSISO<av::VideoFrame, av::VideoFrame>,
                       public IInputsObjects, public IReturnsObjects,
@@ -43,7 +50,6 @@ protected:
     std::mutex mutex_;
     std::string loading_key_;                  // clip being read from upstream, empty when none
     size_t loaded_frames_ = 0;
-    int64_t last_input_ns_ = 0;
     int logged_first_ = 0;
     std::string key_;                          // clip being replayed
     std::vector<av::VideoFrame> playback_;
@@ -132,24 +138,20 @@ public:
     void process() override {
         if (replay()) return;
 
+        // The frame leaves the edge under the mutex, so it is either dropped before a
+        // load is accepted or belongs to that load, never taken before and stored after.
+        std::unique_lock<std::mutex> lock(mutex_);
         av::VideoFrame in;
         if (!this->source_->tryGet(in, 0)) {
-            {
-                // The decode chain stops delivering when the clip runs out and no
-                // marker is guaranteed to reach this far. Frames are paced at the
-                // clip's own rate, tens of milliseconds apart, so a quiet fifth of
-                // a second means the end.
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!loading_key_.empty() && loaded_frames_ > 0 &&
-                    avp::mixer::monotonicNs() - last_input_ns_ >= (int64_t)IDLE_END_MS * 1000000)
-                    finishLoad();
-            }
-            events_->wait(IDLE_END_MS);
+            lock.unlock();
+            events_->wait(IDLE_WAKE_MS);
             return;
         }
-
-        std::lock_guard<std::mutex> lock(mutex_);
         if (loading_key_.empty()) return;   // upstream only runs to fill the cache; nothing here is on air
+        if (isEofMarker(in)) {
+            finishLoad();   // without a single picture the clip stays incomplete
+            return;
+        }
         // A picture is anything with real dimensions and a timestamp; the
         // completeness flag is not reliable across every producer.
         const bool picture = in.raw() && in.width() > 0 && in.height() > 0 && in.pts().isValid();
@@ -157,16 +159,9 @@ public:
             ++logged_first_;
             logstream << "clip_cache: input frame " << in.width() << "x" << in.height()
                       << " pts_valid=" << in.pts().isValid() << " complete=" << in.isComplete()
-                      << " -> " << (picture ? "picture" : "marker");
+                      << " -> " << (picture ? "picture" : "ignored");
         }
-        if (!picture) {
-            // A marker frame. Before the first picture it is the chain starting
-            // up, not the clip ending; only the second kind means the cache now
-            // holds a whole clip, which is what a preload waits for.
-            if (loaded_frames_ > 0) finishLoad();
-            return;
-        }
-        last_input_ns_ = avp::mixer::monotonicNs();
+        if (!picture) return;
         if (!cache_->append(loading_key_, in, frameBytes(in))) {
             logstream << "clip_cache: " << loading_key_ << " does not fit the budget; not cached";
             loading_key_.clear();
@@ -178,13 +173,13 @@ public:
             logstream << "clip_cache: " << loaded_frames_ << " frame(s) so far of " << loading_key_;
     }
 
-    /// A loading pass ends when the group is torn down, which is also when the
-    /// decode chain has reached the end of the clip.
+    /// A clip still loading when the node goes away never reached its end: it is
+    /// dropped, not completed.
     ~ClipCacheNode() override {
         if (!loading_key_.empty() && cache_) {
             logstream << "clip_cache: torn down while loading " << loading_key_ << " after "
-                      << loaded_frames_ << " frame(s); completing what was read";
-            cache_->finish(loading_key_);
+                      << loaded_frames_ << " frame(s); dropping the partial clip";
+            cache_->forget(loading_key_);
         }
     }
 
@@ -210,17 +205,32 @@ public:
             logstream << "clip_cache: stopped replaying " << key_ << " at frame " << index_;
         } else if (key == "load") {
             load(value.get<std::string>());
+        } else if (key == "forget") {
+            const std::string clip = value.get<std::string>();
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (loading_key_ == clip) {
+                loading_key_.clear();
+                loaded_frames_ = 0;
+            }
+            cache_->forget(clip);
+            logstream << "clip_cache: forgot " << clip;
         } else {
             throw Error("clip_cache: unknown object key: " + key);
         }
     }
 
-    /// "status": the cache's, plus "playing" and "start_tick", the output tick of the
-    /// last replay's first frame, which is where that replay's output begins.
+    /// "status": the cache's, plus "loading", the clip being read ("" when none: a load
+    /// that ended shows there and in its clip's "complete"), "playing" and "start_tick",
+    /// the output tick of the last replay's first frame, which is where that replay's
+    /// output begins.
     Parameters getObject(const std::string key) override {
         if (key != "status") throw Error("clip_cache: unknown object key: " + key);
-        Parameters status = cache_->status();
+        // Locked before the cache is read: finishLoad() completes the clip and clears
+        // loading_key_ under mutex_, and a reader between the two would see a load that
+        // ended with its clip incomplete.
         std::lock_guard<std::mutex> lock(mutex_);
+        Parameters status = cache_->status();
+        status["loading"] = loading_key_;
         status["playing"] = playing_;
         status["start_tick"] = start_tick_;
         return status;

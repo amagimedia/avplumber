@@ -192,39 +192,17 @@ class MixerApplication:
 
         The loader group is started only here. The player group runs already
         (mixer.start_groups); a take arms it to replay what this left behind.
+        A clip that is not cached whole, or that a later clip evicted, fails the start.
         """
-        loader = clipcache.loader_group(MIXER_NAME)
-        cache_node = f"{MIXER_NAME}_wipe_cache"
-        self._wait_for_node(cache_node)   # its group starts asynchronously with the mixer's
-        for clip in dict.fromkeys(c for c in (self.wipe_file, *self.wipe_files) if c):
+        self._wait_for_node(f"{MIXER_NAME}_{clipcache.CACHE_NODE}")   # its group starts asynchronously with the mixer's
+        clips = tuple(dict.fromkeys(c for c in (self.wipe_file, *self.wipe_files) if c))
+        for clip in clips:
             started = time.monotonic()
-            # The reader needs the clip before its group starts, to open the file; the
-            # running cache is told which clip the chain is about to deliver.
-            value = json.dumps(clip)   # both commands parse the value as JSON
-            self.avp.executeCommandsFromString(
-                f"node.param.set {MIXER_NAME}_wipe_input url {value}\n"
-                f"node.object.set {cache_node} load {value}")
-            self.avp.group(loader).startNodes()
-            deadline = started + self.preheat_timeout_sec
-            held = None
-            while time.monotonic() < deadline:
-                self._check_startup()
-                try:
-                    status = self.avp.node(cache_node).getObject("status")
-                except Exception:
-                    time.sleep(PREHEAT_POLL_INTERVAL_SEC)   # the group is still starting
-                    continue
-                held = next((c for c in status.get("clips", [])
-                             if c["path"] == clip and c["complete"]), None)
-                if held:
-                    break
-                time.sleep(PREHEAT_POLL_INTERVAL_SEC)
-            self.avp.group(loader).stopNodes()
-            print(f"wipe cached: {clip} {held['frames'] if held else 0} frames, "
-                  f"{(held['bytes'] if held else 0) / 1048576:.1f} MiB, "
+            held = clipcache.preload(self.avp, MIXER_NAME, clip, timeout_sec=self.preheat_timeout_sec,
+                                     poll_sec=PREHEAT_POLL_INTERVAL_SEC, check=self._check_startup)
+            print(f"wipe cached: {clip} {held['frames']} frames, {held['bytes'] / 1048576:.1f} MiB, "
                   f"{(time.monotonic() - started) * 1000:.0f} ms", flush=True)
-            if not held:
-                raise RuntimeError(f"wipe clip did not cache within the preheat timeout: {clip}")
+        clipcache.require_cached(self.avp, MIXER_NAME, clips)
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str, data_type: str | None = None) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
