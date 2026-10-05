@@ -1,0 +1,13 @@
+{
+  "$schema": "https://ograf.ebu.io/v1/specification/json-schemas/graphics/schema.json",
+  "id": "io.github.amagimedia.avplumber.bug_right",
+  "name": "Clock bug",
+  "description": "top right",
+  "main": "graphic.js",
+  "supportsRealTime": true,
+  "supportsNonRealTime": false,
+  "v_avplumber": {
+    "window": {"width": 304, "height": 152},
+    "key": {"order": 4, "anchor": "top-right"}
+  }
+}

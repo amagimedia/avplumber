@@ -12,6 +12,7 @@ import pytest
 pytest.importorskip("numpy")
 from prepare_demo import ensure_asset, plan, prepare, download, render_wipe, WIPE_NAMES
 from demo_recipe import allocate
+from graphic_pages import graphic_url
 from pyplumber.mixer.config import MAX_SOURCES, load, parse, scene_layers
 from v210 import frame_stride
 
@@ -258,10 +259,22 @@ def test_browser_alpha_recipe_covers_sdr_and_hdr_with_an_embedded_page(tmp_path)
     overlays = [scene for scene in cfg.scenes if scene.id.startswith("alpha_overlay_")]
     assert {cfg.source(scene.items[0].source).color.transfer for scene in overlays} == {"sdr", "hlg"}
     browser = next(source for source in cfg.sources if source.kind == "browser")
-    prefix, payload = browser.location.split(",", 1)
-    assert prefix == "data:text/html;base64"
-    page = (directory / "browser_alpha.html").read_bytes()
-    assert base64.b64decode(payload) == page.replace(b"<html", b'<html data-source="overlay_000"', 1)
+    # The test graphic, linked for the rate its window paints at and named by its own source id.
+    assert browser.location == graphic_url("browser_alpha", cfg.fps, source="overlay_000")
+    page = base64.b64decode(browser.location.split(",", 1)[1]).decode("utf-8")
+    assert f'<html data-fps="{cfg.fps}" data-source="overlay_000"' in page
+
+
+def test_every_browser_source_is_its_own_page(recipe, tmp_path):
+    recipe.update(source_count=6, dsk=["lower_third", "ticker"],
+                  inputs=[{"id": "page", "kind": "browser", "pattern": "alpha", "weight": 1}],
+                  layouts={"fullscreen": 1})
+    doc, _, _ = plan(recipe, tmp_path)
+    urls = {source["id"]: source["url"] for source in doc["sources"]}
+    assert len(set(urls.values())) == len(urls) == 8, "no two windows share a page"
+    fps = recipe["canvas"]["fps"]
+    assert urls == {**{f"page_{i:03d}": graphic_url("browser_alpha", fps, source=f"page_{i:03d}") for i in range(6)},
+                    **{f"dsk_{key}": graphic_url(key, fps, source=f"dsk_{key}") for key in ("lower_third", "ticker")}}
 
 
 def test_equal_recipe_has_five_source_types_and_32_scenes(tmp_path):

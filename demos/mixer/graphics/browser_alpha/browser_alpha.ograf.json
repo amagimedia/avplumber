@@ -1,0 +1,16 @@
+{
+  "$schema": "https://ograf.ebu.io/v1/specification/json-schemas/graphics/schema.json",
+  "id": "io.github.amagimedia.avplumber.browser_alpha",
+  "name": "Browser alpha",
+  "description": "transparency test source",
+  "main": "graphic.js",
+  "supportsRealTime": true,
+  "supportsNonRealTime": true,
+  "customActions": [
+    {"id": "right", "name": "Slide the marker right", "schema": null},
+    {"id": "left", "name": "Slide the marker left", "schema": null}
+  ],
+  "schema": {"type": "object", "properties": {
+    "source": {"type": "string", "title": "Source id, shown in the title"}
+  }}
+}

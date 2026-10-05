@@ -29,8 +29,9 @@ services:
       # Opt-in: workers start their 60 fps frames at different points of the frame period
       # (deps/dma-browser/README.md).
       DMA_BROWSER_STAGGER_FRAMES: ${DMA_BROWSER_STAGGER_FRAMES:-0}
-      # Sources, then the downstream-key windows (prepare_demo.DSK_WINDOWS): keys
-      # export DMA-BUFs at the graphic's own size, not a transparent full frame.
+      # Sources, then the window of each downstream-key graphic (v_avplumber.window in
+      # graphics/<name>/<name>.ograf.json; tests/test_graphic_pages.py checks each is here):
+      # keys export DMA-BUFs at the graphic's own size, not a transparent full frame.
       DMA_BROWSER_ALLOWED_DIMS: 1920x1080,1080x1920,1016x172,1920x80,152x152,304x152
 
   mixer:

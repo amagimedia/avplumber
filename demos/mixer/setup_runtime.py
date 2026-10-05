@@ -19,6 +19,7 @@ import time
 
 from demo_recipe import allocate, validate_dsk, write_atomic
 from extra_aux import aux_encode, extra_buses
+from graphic_pages import key_graphics
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import janus_mountpoints
 from pyplumber.mixer.color import TRANSFER_TAGS, default_codec
@@ -52,6 +53,8 @@ PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
                         encodes={}, dsk=[], clean_feed=False, extra_aux=0)
+# The keys setup.html offers, in its order: the graphics whose manifest places them as a key.
+DSK_CHOICES = [{"id": page, "label": key["label"]} for page, key in key_graphics().items()]
 
 
 def for_mode(profile, bit_depth, chroma):
@@ -329,7 +332,8 @@ class SetupRuntime:
                 self.phase, self.message = "error", f"Mixer exited ({self.process.returncode}). Apply to retry."
             return dict(phase=self.phase, message=" ".join(filter(None, (self.message, self.janus_error))),
                         settings=self.settings, revision=self.revision, instance_type=self.instance_type.value,
-                        profile=self.profile, aux_buses=self.aux_buses, janus_api=bool(self.janus_api))
+                        profile=self.profile, aux_buses=self.aux_buses, janus_api=bool(self.janus_api),
+                        dsk_pages=DSK_CHOICES)
 
     def _status(self, phase, message):
         with self.lock:

@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from graphic_pages import graphic_url
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import prepare_demo
 from pyplumber.mixer.aux_layout import draws_program
@@ -1014,6 +1015,8 @@ def test_dsk_pages_are_browser_sources_with_clean_copies_of_each_output(tmp_path
         # The window is the graphic's own size (an allowlisted browser size), never a
         # transparent full canvas; a 1080-wide canvas maps it 1:1.
         assert source.kind == "browser" and (source.width, source.height) == prepare_demo.DSK_WINDOWS[key.id]
+        # Its page is the graphic of that name, linked for the canvas rate.
+        assert source.location == graphic_url(key.id, settings["fps"], source=key.source)
         assert (key.dst.w, key.dst.h) == (source.width, source.height)
         assert key.dst.x + key.dst.w <= cfg.canvas_w and key.dst.y + key.dst.h <= cfg.canvas_h
         assert key.on is False
@@ -1026,6 +1029,15 @@ def test_dsk_pages_are_browser_sources_with_clean_copies_of_each_output(tmp_path
     else:
         assert feeds == [("sdr", "dirty", 5004), ("hdr", "dirty", 5006), ("sdr_clean", "clean", 5010)]
     assert cfg.renditions[-1].codec == "h264_nvenc"
+
+
+def test_the_setup_status_lists_the_key_graphics(tmp_path):
+    # setup.html builds its key checkboxes from this: the graphics whose manifest places them as a key.
+    manager = SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777), InstanceType.TESLA_T4)
+    demo_keys = [{"id": "lower_third", "label": "Lower third · animated name plate"},
+                 {"id": "ticker", "label": "Ticker · second lower-third layer"},
+                 {"id": "bug_left", "label": "Corner bug · top left"}, {"id": "bug_right", "label": "Clock bug · top right"}]
+    assert [page for page in manager.status()["dsk_pages"] if page in demo_keys] == demo_keys
 
 
 def test_dsk_pages_take_their_share_of_the_source_budget():

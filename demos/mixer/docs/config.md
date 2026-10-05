@@ -394,6 +394,8 @@ Each key:
 Keys are ordinary sources and count toward the source limit. Size the browser
 window to the graphic (and allow that size in `DMA_BROWSER_ALLOWED_DIMS`),
 not to the canvas: Chromium then paints and exports only the graphic's pixels.
+The demo's own keys take window and `dst` from each graphic's manifest
+([`graphics/`](../graphics/README.md)).
 
 The keyer is one compositor pass clocked by the program: every program frame
 renders at once over each key's frame stamped for that tick (matched by

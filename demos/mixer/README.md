@@ -341,7 +341,10 @@ Recipe entries with `kind: "browser"` open their own Chromium windows (Electron 
 Chromium 152) whose DMA-BUFs are imported zero-copy into CUDA. Pages and
 files share every layout and transition; a page that stops painting holds its
 last frame. The included alpha page needs no external website; like a real
-graphic it rests most of the time and animates a third of it.
+graphic it rests most of the time and animates a third of it. It and the
+downstream-key graphics are declared under [`graphics/`](graphics/README.md): one
+motion engine plays them on whole frames and whole pixels, and a new graphic is
+one directory there.
 
 The stack allows 40 browser windows across five processes, eight per process.
 Set `MIXER_BROWSER_CAPACITY` when starting Compose to change the service capacity.

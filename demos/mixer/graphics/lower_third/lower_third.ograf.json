@@ -1,0 +1,17 @@
+{
+  "$schema": "https://ograf.ebu.io/v1/specification/json-schemas/graphics/schema.json",
+  "id": "io.github.amagimedia.avplumber.lower_third",
+  "name": "Lower third",
+  "description": "animated name plate",
+  "main": "graphic.js",
+  "supportsRealTime": true,
+  "supportsNonRealTime": true,
+  "schema": {"type": "object", "properties": {
+    "name": {"type": "string", "title": "Name"},
+    "role": {"type": "string", "title": "Role"}
+  }},
+  "v_avplumber": {
+    "window": {"width": 1016, "height": 172},
+    "key": {"order": 1, "anchor": "bottom-left", "above": "ticker"}
+  }
+}

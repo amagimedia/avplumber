@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>avplumber graphic</title>
+<!-- The one page shell of every graphic. graphic_pages.py puts the text of motion.js and of one
+     graphic.js in place of the two markers and the window's data-* attributes on the root element;
+     the page is then complete, so it travels as a data: URL and loads nothing at run time. -->
+<style>html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }</style>
+<body>
+<script>/*@motion.js*/</script>
+<script>/*@graphic.js*/</script>
+<script>Motion.host(graphic);</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://ograf.ebu.io/v1/specification/json-schemas/graphics/schema.json",
+  "id": "io.github.amagimedia.avplumber.ticker",
+  "name": "Ticker",
+  "description": "second lower-third layer",
+  "main": "graphic.js",
+  "supportsRealTime": true,
+  "supportsNonRealTime": true,
+  "schema": {"type": "object", "properties": {
+    "text": {"type": "string", "title": "Crawl text"}
+  }},
+  "v_avplumber": {
+    "window": {"width": 1920, "height": 80},
+    "key": {"order": 2, "anchor": "bottom"}
+  }
+}

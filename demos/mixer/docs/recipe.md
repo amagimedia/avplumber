@@ -145,7 +145,7 @@ Every entry has a unique `id`, `kind` and `weight`.
 | `generated` | `color`: `sdr` or `hlg`; `chroma`: `"420"` or `"422"`; optional `pattern` or `patterns` | Prepares synthetic clips. `pattern` selects one; `patterns` supplies a non-empty list to cycle through, e.g. `["bars", "gradients"]`. |
 | `download` | `url`; optional `color`: `sdr`, `hlg`, `pq` | Downloads a direct media file once into `media/assets/downloads/`; does not unpack archives. Untagged entries use decoded color metadata. |
 | `file` | `path`, relative to `--media-dir`; optional `color` | Uses an existing encoded clip, e.g. `assets/my-movie.mp4`. |
-| `browser` | `url` or `pattern: "alpha"`; optional `width`, `height` | Opens live SDR browser windows using the DMA-BUF browser stack. The alpha pattern embeds the bundled test page, with no HTTP server or external website. Dimensions default to the canvas. |
+| `browser` | `url` or `pattern: "alpha"`; optional `width`, `height` | Opens live SDR browser windows using the DMA-BUF browser stack. The alpha pattern embeds the bundled test page ([`graphics/browser_alpha`](../graphics/README.md)), with no HTTP server or external website. Dimensions default to the canvas. |
 
 SDR 4:2:0 defaults to seven H.264 patterns: `testsrc2`, `bars`, `rgbtest`,
 `mandelbrot`, `gradients`, `life`, `sierpinski`. The cellular-noise pattern
