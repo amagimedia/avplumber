@@ -1007,7 +1007,13 @@ Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
 -   `width`, `height` (int, required) - canvas size
 -   `sw_format` (string, default `nv12`) - canvas storage: semiplanar YUV
-    (`nv12`, `p010le`, `p210le`) or packed 8-bit RGB (`rgb0`, `bgr0`, `rgba`, `bgra`)
+    (`nv12`, `p010le`, `p210le`) or packed 8-bit RGB (`rgb0`, `bgr0`, `rgba`, `bgra`).
+    A semiplanar YUV input of another depth or chroma subsampling is converted
+    as it is drawn: 8-bit codes are multiplied up to a 10-bit canvas, 10-bit
+    codes divided down to an 8-bit one and rounded to nearest
+    (`min(255, (v + 2) >> 2)`), without dithering. That is a depth change
+    only: an HDR input is not tone mapped, and with `color` set it is refused
+    like any input whose colour tags differ from the canvas's.
 -   `layers` (array of objects, required) - at most `max_layers`; each draws
     `input` (an index in `src`; omitted, the layer's position) at `dst_x`,
     `dst_y`, `dst_w`, `dst_h` (size omitted: the source's), optionally from

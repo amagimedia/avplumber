@@ -1,9 +1,11 @@
-// NVIDIA integration test of the rect kernel's layer filters (bicubic, multisample 4 and 8).
-// Every sample a filtered layer draws is compared with a CPU reference of the same formulas,
-// for 2x enlarging, 3:1 and 1.5:1 shrinking, crops, rects partly off the canvas, NV12/P010/P210
-// and the depth promotions; linear buffers and CUarray planes must agree byte for byte. The
-// *_filter entries are also drawn against the existing entries for tables without a filter,
-// and each filter is timed on 1920x1080 -> 640x360 and 1280x720 -> 1920x1080.
+// NVIDIA integration test of the rect kernel's layer filters (bicubic, multisample 4 and 8) and
+// of sources deeper than the canvas (P010 and P210 on NV12).
+// Every sample a filtered or demoted layer draws is compared with a CPU reference of the same
+// formulas, for 2x enlarging, 3:1 and 1.5:1 shrinking, crops, rects partly off the canvas,
+// NV12/P010/P210 and the depth promotions and demotions; linear buffers and CUarray planes must
+// agree byte for byte. A 10-bit frame copied 1:1 onto NV12 must be min(255, (v + 2) >> 2) of
+// every code. The *_filter entries are also drawn against the existing entries for tables
+// without a filter, and each filter is timed on 1920x1080 -> 640x360 and 1280x720 -> 1920x1080.
 //   nvcc -std=c++17 -O2 tests/cuda/test_rect_filters.cu -lcuda -o /tmp/test_rect_filters
 #include <cuda.h>
 #include <algorithm>
@@ -121,11 +123,12 @@ struct Draw {
 static AvpRectLayer entry(const Draw &draw, const Format &canvas, bool arrays) {
     const Frame &source = *draw.source;
     AvpRectLayer out{};
-    out.kind = &source.format == &canvas ? AVP_RECT_KIND_YUV : AVP_RECT_KIND_PROMOTE;
+    out.kind = &source.format == &canvas ? AVP_RECT_KIND_YUV
+             : source.format.depth > canvas.depth ? AVP_RECT_KIND_DEMOTE : AVP_RECT_KIND_PROMOTE;
     out.yuv_texture = arrays;
     out.src_bytes = source.format.bytes;
     out.src_shift = source.format.shift;
-    out.mul = float(1 << (canvas.depth - source.format.depth));
+    out.mul = std::ldexp(1.f, canvas.depth - source.format.depth);
     out.filter = draw.filter;
     out.filter_param = draw.param;
     for (int p = 0; p < 2; ++p) {
@@ -283,7 +286,7 @@ static bool reference(const AvpRectLayer &layer, const Frame &source, const Form
     case AVP_RECT_FILTER_MULTISAMPLE8: value = multisample(view, fx, fy, xs, ys, 8, c); break;
     default: value = bilinear(view, fx, fy, c);
     }
-    if (layer.kind == AVP_RECT_KIND_PROMOTE) value *= layer.mul;
+    if (layer.kind != AVP_RECT_KIND_YUV) value *= layer.mul;   // promoted or demoted codes
     value = std::min(std::max(value, 0.), double((256 << (canvas.depth - 8)) - 1));
     return true;
 }
@@ -365,8 +368,13 @@ static void verifyFilters(const Frame &source, const Format &canvas_format) {
 }
 
 // The *_filter entries must draw layers without a filter, RGB(A) keys and key fades exactly as
-// the entries they stand in for, and a filtered layer must not disturb its neighbours.
-static void verifyEntries(const Frame &source, const Format &canvas_format, CUdeviceptr key_pixels) {
+// the entries they stand in for, and a filtered or demoted layer must not disturb its
+// neighbours. `left_source` may be deeper than the canvas; `right_source` is not.
+static void verifyEntries(const Frame &left_source, const Frame &right_source, const Format &canvas_format,
+                          CUdeviceptr key_pixels) {
+    const std::string names = std::string(left_source.format.name) + " and " + right_source.format.name + " -> " +
+                              canvas_format.name;
+    const bool demoted = left_source.format.depth > canvas_format.depth;
     auto key = [&](float opacity) {
         AvpRectLayer out{};
         out.kind = AVP_RECT_KIND_RGBA;
@@ -387,26 +395,32 @@ static void verifyEntries(const Frame &source, const Format &canvas_format, CUde
         a.draw(filter_kernel, layers);
         b.draw(plain_kernel, layers);
         if (a.pixels != b.pixels)
-            throw std::runtime_error(std::string(source.format.name) + " -> " + canvas_format.name + ": " + what +
-                                     " differs from the entry without filters");
+            throw std::runtime_error(names + ": " + what + " differs from the entry without filters");
     };
-    const Draw left{&source, 0, 0, 240, 144, 0, 0, 256, 288}, right{&source, 36, 20, 180, 108, 256, 0, 256, 200};
+    const Draw left{&left_source, 0, 0, 240, 144, 0, 0, 256, 288}, right{&right_source, 36, 20, 180, 108, 256, 0, 256, 200};
     for (bool arrays : {false, true}) {
-        const std::vector<AvpRectLayer> yuv = table({left, right}, canvas_format, arrays);
-        same(arrays ? composite_planes_yuv_array_filter : composite_planes_yuv_filter,
-             arrays ? composite_planes_yuv_array : composite_planes_yuv, yuv, "yuv filter entry");
-        auto keyed = yuv, faded = yuv;
-        keyed.push_back(key(1.f));
+        // The entries without filters cannot draw a demoted layer, so they get the right one alone;
+        // only that half is compared with them.
+        std::vector<AvpRectLayer> faded = table(demoted ? std::vector<Draw>{right} : std::vector<Draw>{left, right},
+                                                canvas_format, arrays);
+        if (!demoted) {
+            const std::vector<AvpRectLayer> yuv = faded;
+            same(arrays ? composite_planes_yuv_array_filter : composite_planes_yuv_filter,
+                 arrays ? composite_planes_yuv_array : composite_planes_yuv, yuv, "yuv filter entry");
+            auto keyed = yuv;
+            keyed.push_back(key(1.f));
+            same(composite_planes_filter, arrays ? composite_planes_yuv_array : composite_planes_yuv, yuv, "full filter entry, yuv only");
+            same(composite_planes_filter, arrays ? composite_planes_array : composite_planes, keyed, "full filter entry with a key");
+        }
         faded.push_back(key(0.4f));
-        same(composite_planes_filter, arrays ? composite_planes_yuv_array : composite_planes_yuv, yuv, "full filter entry, yuv only");
-        same(composite_planes_filter, arrays ? composite_planes_array : composite_planes, keyed, "full filter entry with a key");
-        same(composite_planes_filter, arrays ? composite_planes_opacity_array : composite_planes_opacity, faded,
-             "full filter entry with a faded key");
+        if (!demoted)
+            same(composite_planes_filter, arrays ? composite_planes_opacity_array : composite_planes_opacity, faded,
+                 "full filter entry with a faded key");
 
-        // A filtered layer on the left: the right half, key included, must not change, and the
-        // left half must be what the lean filter entry draws.
+        // A filtered (or demoted) layer on the left: the right half, key included, must not change,
+        // and the left half must be what the lean filter entry draws.
         for (const Filter &filter : filters) {
-            if (filter.code == AVP_RECT_FILTER_BILINEAR) continue;
+            if (filter.code == AVP_RECT_FILTER_BILINEAR && !demoted) continue;
             Draw filtered_left = left;
             filtered_left.filter = filter.code;
             filtered_left.param = filter.param;
@@ -422,14 +436,63 @@ static void verifyEntries(const Frame &source, const Format &canvas_format, CUde
                         for (int c = 0; c < (p ? 2 : 1); ++c) {
                             const bool is_left = x < (p ? 128 : 256);
                             if (full.code(p, x, y, c) != (is_left ? lean : plain).code(p, x, y, c))
-                                throw std::runtime_error(std::string(source.format.name) + " -> " + canvas_format.name + ", " +
-                                                         filter.name + ": a filtered layer next to a key differs on the " +
+                                throw std::runtime_error(names + ", " + filter.name + ": a filtered layer next to a key differs on the " +
                                                          (is_left ? "filtered" : "unfiltered") + " side");
                         }
         }
     }
-    std::printf("PASS %s -> %s: filter entries equal the plain entries without a filter (yuv, key, faded key, "
-                "arrays); a filtered layer leaves its neighbours and a key unchanged\n", source.format.name, canvas_format.name);
+    if (demoted)
+        std::printf("PASS %s: a demoted layer under every filter leaves its neighbour and a faded key as the "
+                    "plain entries draw them, linear and arrays\n", names.c_str());
+    else
+        std::printf("PASS %s: filter entries equal the plain entries without a filter (yuv, key, faded key, "
+                    "arrays); a filtered layer leaves its neighbours and a key unchanged\n", names.c_str());
+}
+
+// A frame deeper than the canvas copied 1:1: every drawn code against the integer formula, with
+// no float reference in between. Luma and 4:2:0 chroma are min(max, (v + r/2) / r) of the source
+// code v, r = 2^(depth difference); chroma of a 4:2:2 source on a 4:2:0 canvas is that of the mean of
+// the two source rows a canvas row covers, min(max, (a + b + r) / (2r)).
+static void verifyDemoteCopy(const Frame &source, const Format &canvas_format) {
+    const int ratio = 1 << (source.format.depth - canvas_format.depth), max_code = (256 << (canvas_format.depth - 8)) - 1;
+    const bool halves_rows = source.format.sub_y < canvas_format.sub_y;
+    const Draw copy{&source, 0, 0, source.width, source.height, 0, 0, source.width, source.height};
+    std::vector<bool> seen(size_t(256) << (source.format.depth - 8));
+    const struct { Kernel kernel; bool arrays; const char *name; } runs[] = {
+        {composite_planes_yuv_filter, false, "linear"},
+        {composite_planes_yuv_array_filter, true, "array"},
+        {composite_planes_filter, false, "linear, full entry"},
+        {composite_planes_filter, true, "array, full entry"},
+    };
+    for (const auto &run : runs) {
+        Canvas out(canvas_format, source.width, source.height);
+        out.draw(run.kernel, {entry(copy, canvas_format, run.arrays)});
+        for (int p = 0; p < 2; ++p)
+            for (int y = 0; y < (p ? out.uv_rows : out.height); ++y)
+                for (int x = 0; x < (p ? out.width / 2 : out.width); ++x)
+                    for (int c = 0; c < (p ? 2 : 1); ++c) {
+                        int want;
+                        if (p && halves_rows) {
+                            want = (source.code(p, x, 2 * y, c) + source.code(p, x, 2 * y + 1, c) + ratio) / (2 * ratio);
+                        } else {
+                            const int v = source.code(p, x, y, c);
+                            if (!p) seen[v] = true;
+                            want = (v + ratio / 2) / ratio;
+                        }
+                        want = std::min(want, max_code);
+                        if (out.code(p, x, y, c) != want)
+                            throw std::runtime_error(std::string(source.format.name) + " -> " + canvas_format.name + " 1:1 " +
+                                                     run.name + ": plane " + std::to_string(p) + " " + std::to_string(x) + "," +
+                                                     std::to_string(y) + " is " + std::to_string(out.code(p, x, y, c)) +
+                                                     ", want " + std::to_string(want));
+                    }
+    }
+    if (std::find(seen.begin(), seen.end(), false) != seen.end())
+        throw std::runtime_error("the 1:1 fixture does not hold every source code; the test is weaker than it says");
+    std::printf("PASS %s -> %s 1:1: every sample equals min(%d, (v + %d) >> %d)%s, all %zu source codes present; "
+                "linear and array sources, lean and full filter entries\n", source.format.name, canvas_format.name,
+                max_code, ratio / 2, source.format.depth - canvas_format.depth,
+                halves_rows ? " (chroma: of the mean of its two source rows)" : "", seen.size());
 }
 
 // Median and 90th percentile of 200 launches of one full-canvas layer (table already on the device).
@@ -461,6 +524,19 @@ static void timeLayer(const char *label, const Frame &source, const Format &canv
 
 static void timings(std::mt19937 &rng) {
     static const Filter plain{"bilinear, plain entry", AVP_RECT_FILTER_BILINEAR, 0.f};
+    {   // A 10-bit frame onto an 8-bit canvas, next to the same-depth copy the plain entry draws.
+        Frame deep(P010, 1920, 1080, rng);
+        for (bool arrays : {false, true}) {
+            const std::string storage = arrays ? " array" : " linear";
+            timeLayer(("1920x1080 p010 -> p010 1:1" + storage).c_str(), deep, P010, 1920, 1080,
+                      arrays ? composite_planes_yuv_array : composite_planes_yuv, plain, arrays);
+            const Kernel kernel = arrays ? composite_planes_yuv_array_filter : composite_planes_yuv_filter;
+            timeLayer(("1920x1080 p010 -> nv12 1:1" + storage).c_str(), deep, NV12, 1920, 1080, kernel, filters[0], arrays);
+            for (const Filter &filter : filters)
+                if (filter.code == AVP_RECT_FILTER_BILINEAR || filter.code == AVP_RECT_FILTER_MULTISAMPLE4)
+                    timeLayer(("1920x1080 p010 -> nv12 640x360" + storage).c_str(), deep, NV12, 640, 360, kernel, filter, arrays);
+        }
+    }
     struct Case { const char *name; int sw, sh, cw, ch; };
     for (const Case &c : {Case{"1920x1080 -> 640x360", 1920, 1080, 640, 360}, Case{"1280x720 -> 1920x1080", 1280, 720, 1920, 1080}})
         for (const Format *format : {&NV12, &P010}) {
@@ -494,8 +570,12 @@ int main(int argc, char **argv) {
                 Frame nv12(NV12, 240, 144, rng), p010(P010, 240, 144, rng), p210(P210, 240, 144, rng);
                 const std::pair<const Frame *, const Format *> pairs[] = {
                     {&nv12, &NV12}, {&p010, &P010}, {&p210, &P210}, {&nv12, &P010}, {&nv12, &P210}, {&p010, &P210}};
+                const Frame *deeper[] = {&p010, &p210};   // on an NV12 canvas
+                for (const Frame *source : deeper) verifyDemoteCopy(*source, NV12);
                 for (const auto &[source, canvas_format] : pairs) verifyFilters(*source, *canvas_format);
-                for (const auto &[source, canvas_format] : pairs) verifyEntries(*source, *canvas_format, key);
+                for (const Frame *source : deeper) verifyFilters(*source, NV12);
+                for (const auto &[source, canvas_format] : pairs) verifyEntries(*source, *source, *canvas_format, key);
+                for (const Frame *source : deeper) verifyEntries(*source, nv12, NV12, key);
             }
             check(cuMemFree(key), "release RGBA key");
         }

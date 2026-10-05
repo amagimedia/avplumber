@@ -1,7 +1,7 @@
 // CUDA compositor kernel: one launch composes a whole canvas from a rect table
 // (see cuda_rect_table.h and CudaRectDraw). Semiplanar YUV canvases (NV12,
-// P010, P210) take same-format YUV, lower-depth semiplanar and packed RGB(A)
-// sources; packed 8-bit canvases (rgb0, rgba) take same-format sources.
+// P010, P210) take same-format YUV, lower- and higher-depth semiplanar and
+// packed RGB(A) sources; packed 8-bit canvases (rgb0, rgba) take same-format sources.
 #include <cuda_runtime.h>
 #include "cuda_rect_table.h"
 #include "graphic_color.h"
@@ -118,11 +118,17 @@ __device__ __forceinline__ float sample_lane(unsigned long long src, bool textur
 }
 
 // ---------------------------------------------------------------------------
-// Filters of YUV/PROMOTE layers other than bilinear (AVP_RECT_FILTER_*). Only the *_filter
-// entry points compile them (kFilters), and a layer reaches them only when the host put a
-// filter in its table entry. All read exact stored codes through load_lane, so linear and
-// array sources give the same result, and every tap is clamped to the layer's source rect
-// like the bilinear taps.
+// What only the *_filter entry points draw (kFilters): the filters of YUV/PROMOTE/DEMOTE layers
+// other than bilinear (AVP_RECT_FILTER_*), and DEMOTE layers under any filter. A layer reaches
+// this code only when the host put a filter or the DEMOTE kind in its table entry. All of it
+// reads exact stored codes through load_lane, so linear and array sources give the same result,
+// and every tap is clamped to the layer's source rect like the bilinear taps.
+//
+// A DEMOTE layer (P010 or P210 on an NV12 canvas) is the mirror of PROMOTE: the sample, taken
+// in the source's codes, times 2^(canvas depth - source depth), limited to the canvas codes and
+// rounded to nearest, halves up. For a 10-bit code v at 1:1 that is min(255, (v + 2) >> 2):
+// 64, 512, 940 give 16, 128, 235. No dithering, and no tone mapping: an HDR signal keeps its
+// transfer and only loses depth.
 // ---------------------------------------------------------------------------
 
 // One plane of a layer as the filters read it, in lane groups.
@@ -139,6 +145,16 @@ struct LanePlane {
     __device__ __forceinline__ float bilinear(float fx, RowTaps rows, int c) const {
         return sample_lane_at(src, textured, pitch, sx, sw, lanes, c, bytes, shift, fx, rows);
     }
+};
+
+// The bilinear sample, for layers that need what draw_filtered adds to it (DEMOTE).
+struct BilinearFilter {
+    RowTaps rows;
+    __device__ __forceinline__ BilinearFilter(const LanePlane &P, int oy, int dh) : rows(row_taps(P.sy, P.sh, oy, dh)) {}
+    __device__ __forceinline__ float column(const LanePlane &P, int ox, int dw) const {
+        return source_coord(ox, P.sw, dw);
+    }
+    __device__ __forceinline__ float sample(const LanePlane &P, float fx, int c) const { return P.bilinear(fx, rows, c); }
 };
 
 // Four taps of one axis and their cubic weights. The weights are bicubic_coeffs of FFmpeg's
@@ -246,8 +262,9 @@ struct MultisampleFilter {
     }
 };
 
-// The lane groups of one thread from a filtered layer: sample, promote (`gain`), limit to the
-// canvas codes (a cubic overshoots) and round as a stored sample.
+// The lane groups of one thread from such a layer: sample, promote or demote (`gain`), limit to
+// the canvas codes (a cubic overshoots, and a demoted 1023 would round to 256) and round as a
+// stored sample.
 template <int kPx, int kLanes, class Filter>
 __device__ __forceinline__ void draw_filtered(float (*acc)[kLanes], const LanePlane &P, const Filter &F,
                                               int X0, int ldx, int ldw, float gain, float maxv) {
@@ -318,8 +335,8 @@ __device__ __forceinline__ float sample_alpha_tex(unsigned long long tex, int sx
 // <1,false> luma, <2,true> chroma pairs, <4,false> packed RGB canvas. kOpacity=true also
 // weights each blended RGBA layer's alpha by its table `mul` (a key fade); only the
 // composite_planes_opacity entry sets it, so the other entries keep their code. kFilters=true
-// also draws YUV/PROMOTE layers whose table `filter` is not bilinear; only the *_filter entries
-// set it.
+// also draws layers whose table `filter` is not bilinear and DEMOTE layers; only the *_filter
+// entries set it.
 template <bool kRgb, int kLanes, bool kChroma, bool kOpacity = false, bool kArrays = false, bool kFilters = false>
 __device__ __forceinline__ void composite_body(
     const AvpRectLayer *__restrict__ layers, int n,
@@ -370,18 +387,21 @@ __device__ __forceinline__ void composite_body(
             const int oy = Y - ldy;
             if (oy < 0 || oy >= ldh || X0 + px <= ldx || X0 >= ldx + ldw) continue;
 
-            if (L.kind == AVP_RECT_KIND_YUV || L.kind == AVP_RECT_KIND_PROMOTE) {
+            if (L.kind == AVP_RECT_KIND_YUV || L.kind == AVP_RECT_KIND_PROMOTE ||
+                (kFilters && L.kind == AVP_RECT_KIND_DEMOTE)) {
                 const unsigned long long src = L.src[plane];
                 const int pitch = L.src_pitch[plane];
                 const int sx = L.sx[plane], sy = L.sy[plane], sw = L.sw[plane], sh = L.sh[plane];
                 const int bytes = L.kind == AVP_RECT_KIND_YUV ? dst_sb : L.src_bytes;
                 const int shift = L.kind == AVP_RECT_KIND_YUV ? dst_shift : L.src_shift;
                 const float mul = L.mul;
-                if (kFilters && L.filter != AVP_RECT_FILTER_BILINEAR) {
+                if (kFilters && (L.filter != AVP_RECT_FILTER_BILINEAR || L.kind == AVP_RECT_KIND_DEMOTE)) {
                     // One branch per layer and thread; the sample loops below it are fixed.
                     const LanePlane P = {src, kArrays && L.yuv_texture, pitch, sx, sy, sw, sh, lanes, bytes, shift};
-                    const float gain = L.kind == AVP_RECT_KIND_PROMOTE ? mul : 1.f;
-                    if (L.filter == AVP_RECT_FILTER_BICUBIC_A0)
+                    const float gain = L.kind == AVP_RECT_KIND_YUV ? 1.f : mul;
+                    if (L.filter == AVP_RECT_FILTER_BILINEAR)
+                        draw_filtered<px, lanes>(acc, P, BilinearFilter(P, oy, ldh), X0, ldx, ldw, gain, maxv);
+                    else if (L.filter == AVP_RECT_FILTER_BICUBIC_A0)
                         draw_filtered<px, lanes>(acc, P, CubicA0Filter(P, oy, ldh), X0, ldx, ldw, gain, maxv);
                     else if (L.filter == AVP_RECT_FILTER_BICUBIC)
                         draw_filtered<px, lanes>(acc, P, CubicFilter(P, oy, ldh, L.filter_param), X0, ldx, ldw, gain, maxv);
@@ -584,10 +604,10 @@ extern "C" __global__ void __launch_bounds__(256) composite_planes_opacity_array
     else composite_body<true, 1, false, true, true>(AVP_COMPOSITE_PASS);
 }
 
-// Tables holding a layer with a filter other than bilinear. The host launches these only for
-// such tables, so every entry above keeps its code. A layer with the bilinear filter draws
-// here exactly as it does above.
-// Lean pair, the scaler's case: YUV/PROMOTE layers only, linear or with arrays.
+// Tables holding a layer with a filter other than bilinear or a DEMOTE layer. The host launches
+// these only for such tables, so every entry above keeps its code. A YUV or PROMOTE layer with
+// the bilinear filter draws here exactly as it does above.
+// Lean pair, the scaler's case: YUV/PROMOTE/DEMOTE layers only, linear or with arrays.
 extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv_filter(AVP_COMPOSITE_ARGS) {
     if (blockIdx.z) composite_body<false, 2, true, false, false, true>(AVP_COMPOSITE_PASS);
     else composite_body<false, 1, false, false, false, true>(AVP_COMPOSITE_PASS);

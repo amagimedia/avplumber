@@ -9,6 +9,7 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 }
 
+#include <cmath>
 #include <string>
 #include <utility>
 #include "cuda_rect_array.hpp"
@@ -210,21 +211,28 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     }
 
     const bool promote = src_sw_fmt != sw_fmt && isYuvPromoteConvertible(src_sw_fmt, sw_fmt);
-    if (!promote && src_sw_fmt != sw_fmt)
+    const bool demote = src_sw_fmt != sw_fmt && isYuvDemoteConvertible(src_sw_fmt, sw_fmt);
+    if (!promote && !demote && src_sw_fmt != sw_fmt)
         throw Error("cuda_rect_overlay: source format " + std::string(av_get_pix_fmt_name(src_sw_fmt)) +
                     " cannot be drawn onto a " + av_get_pix_fmt_name(sw_fmt) + " canvas");
-    const AVPixelFormat geometry_fmt = promote ? src_sw_fmt : sw_fmt;
+    // Not an error: without a canvas colour contract the node converts what it is given.
+    if (demote && (src->color_trc == AVCOL_TRC_SMPTE2084 || src->color_trc == AVCOL_TRC_ARIB_STD_B67) &&
+        !std::exchange(hdr_demote_warned_, true))
+        logstream << "cuda_rect_overlay: a PQ/HLG source is reduced to the canvas depth without tone mapping; "
+                     "the output keeps the transfer it is given";
+    const AVPixelFormat geometry_fmt = promote || demote ? src_sw_fmt : sw_fmt;
     const std::array<CUtexObject, 2> *textures = nullptr;
     if (array) {
         if (!array_textures_) array_textures_ = std::make_unique<RectArrayTextures>();
         textures = &array_textures_->get(src, cuda_dev_->cuda_ctx);
     }
-    out.kind = promote ? AVP_RECT_KIND_PROMOTE : AVP_RECT_KIND_YUV;
+    out.kind = demote ? AVP_RECT_KIND_DEMOTE : promote ? AVP_RECT_KIND_PROMOTE : AVP_RECT_KIND_YUV;
     out.yuv_texture = array;
     out.src_bytes = sampleBytes(geometry_fmt);
     out.src_shift = storageShift(geometry_fmt);
     const AVPixFmtDescriptor *sd = av_pix_fmt_desc_get(geometry_fmt);
-    out.mul = promote ? float(1 << (dd->comp[0].depth - sd->comp[0].depth)) : 1.f;
+    // 2^(canvas depth - source depth): 4 for NV12 on P010, 0.25 for P010 on NV12.
+    out.mul = promote || demote ? std::ldexp(1.f, dd->comp[0].depth - sd->comp[0].depth) : 1.f;
     // Chosen here, once per layer; the kernel only follows the table. Packed canvases have no
     // filter entry and stay bilinear.
     out.filter = planes > 1 ? tableFilter(L) : AVP_RECT_FILTER_BILINEAR;
@@ -287,7 +295,8 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
         // Not an error: a key without alpha (or on a packed canvas) still cuts cleanly.
         if (op.layer.opacity < 1.f && !fades && !std::exchange(opacity_warned_, true))
             logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
-        any_filter = any_filter || entry.filter != AVP_RECT_FILTER_BILINEAR;
+        // A demoted layer needs the filter entries' code limit whatever its filter.
+        any_filter = any_filter || entry.filter != AVP_RECT_FILTER_BILINEAR || entry.kind == AVP_RECT_KIND_DEMOTE;
         // Not an error either; `auto` is not named here, it simply finds nothing to choose.
         const ScaleFilter asked = op.layer.filter.mode;
         if ((asked == ScaleFilter::Bicubic || asked == ScaleFilter::Multisample) &&
@@ -324,7 +333,7 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
                     &canvas_w, &canvas_h, &chroma_w, &chroma_h,
                     &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y,
                     &clear0_i, &clear1_i, &transfer, &sdr_white, &hdr_peak};
-    // A table without a filtered layer takes the entries it always took.
+    // A table without a filtered or demoted layer takes the entries it always took.
     const CUfunction kernel = planes == 1 ? composite_packed_kernel_
         : any_filter ? (any_rgb ? composite_filter_kernel_
                         : any_array ? composite_yuv_array_filter_kernel_ : composite_yuv_filter_kernel_)
