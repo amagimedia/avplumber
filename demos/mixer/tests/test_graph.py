@@ -162,6 +162,7 @@ def fake_api():
         "assume_video_format",
         "bsf",
         "clip_cache",
+        "cuda_transform",
         "dec_video",
         "demux",
         "drm_prime_to_cuda",
@@ -194,6 +195,7 @@ def fake_api():
             "assume_video_format": "AssumeVideoFormat",
             "bsf": "Bsf",
             "clip_cache": "ClipCache",
+            "cuda_transform": "CudaTransform",
             "dec_video": "DecVideo",
             "demux": "Demux",
             "drm_prime_to_cuda": "DrmPrimeToCuda",
@@ -1115,13 +1117,111 @@ def test_renditions_encode_the_one_composited_program(tmp_path, monkeypatch):
                                          dmabuf_socket_dir=str(tmp_path)), api=fake_api())
     nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
 
-    assert nodes["split_renditions"]["dst"] == ["program_rendition_program", "program_rendition_square"]
+    # The canvas-size rendition reads the program; the other size goes through the transform.
+    assert nodes["split_renditions"]["dst"] == ["program_rendition_program", "program_transform"]
     assert nodes["scale_program"]["graph"] == Color().setparams   # SDR canvas to SDR output: tags only
-    assert nodes["scale_square"]["graph"].startswith("scale_cuda=w=1080:h=1080,")
+    assert "defer_preliminary_init" not in nodes["scale_program"]
+    transform = nodes["transform_renditions"]
+    assert transform == {
+        "type": "cuda_transform", "name": "transform_renditions", "src": "program_transform",
+        "hwaccel": "mixer_gpu", "group": "output", "on_error": "panic",
+        "outputs": [{"dst": ["program_sized_square"], "width": 1080, "height": 1080, "sw_format": "nv12",
+                     "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1080, "dst_h": 1080}]}]}
+    # Colour follows the transform, on the smaller picture; the filter no longer scales.
+    square = nodes["scale_square"]
+    assert (square["src"], square["dst"], square["graph"]) == (
+        "program_sized_square", "program_scaled_square", Color().setparams)
+    assert square["defer_preliminary_init"] is True
+    assert nodes["square_fps"]["src"] == "program_scaled_square"   # force_fps still makes the constant rate
     assert nodes["janus_encoder"]["options"]["preset"] == "p7"
     assert nodes["janus_encoder"]["options"]["profile"] == "baseline"
     assert nodes["janus_fps"]["fps"] == "30/1"
     assert FakeMixer.instances[-1].parameters["fps"] == (30, 1)
+
+
+def _rendition_nodes(tmp_path, renditions, canvas=None):
+    doc = {**CONFIG, "sources": CONFIG["sources"][:1], "scenes": CONFIG["scenes"][:1], "initial_scene": "full",
+           "wipes": [], "canvas": canvas or CONFIG["canvas"], "renditions": renditions}
+    path = tmp_path / "renditions.json"
+    path.write_text(json.dumps(doc))
+    app = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    assert len(nodes) == len(app.avp.nodes)
+    return nodes
+
+
+def _geometry_filters(nodes):
+    """filter_video graphs that scale or pad: geometry belongs to cuda_transform."""
+    return [name for name, p in nodes.items() if p["type"] == "filter_video"
+            and ("scale_cuda=w=" in p["graph"] or "pad_cuda" in p["graph"])]
+
+
+def test_renditions_of_one_size_share_one_draw_and_replace_the_split(tmp_path):
+    nodes = _rendition_nodes(tmp_path, [
+        {"id": "low", "port": 5004, "width": 1280, "height": 720},
+        {"id": "file", "target": "/rec/low.ts", "width": 1280, "height": 720},
+        {"id": "tiny", "port": 5006, "width": 640, "height": 360}])
+    # Every rendition is scaled, so the transform is the feed's only reader: no split.
+    assert "split_renditions" not in nodes
+    transform = nodes["transform_renditions"]
+    assert transform["src"] == "mixer_final_out"
+    assert [(o["dst"], o["width"], o["height"]) for o in transform["outputs"]] == [
+        (["program_sized_low", "program_sized_file"], 1280, 720), (["program_sized_tiny"], 640, 360)]
+    assert all("fps" not in o and "drop" not in o for o in transform["outputs"])
+    assert [nodes[f"scale_{rid}"]["src"] for rid in ("low", "file", "tiny")] == [
+        "program_sized_low", "program_sized_file", "program_sized_tiny"]
+    assert not _geometry_filters(nodes)
+
+
+def test_a_single_scaled_rendition_reads_the_feed_through_the_transform(tmp_path):
+    nodes = _rendition_nodes(tmp_path, [{"id": "low", "port": 5004, "width": 1280, "height": 720}])
+    assert "split_renditions" not in nodes
+    assert nodes["transform_renditions"]["src"] == "mixer_final_out"
+    assert nodes["scale_low"]["src"] == "program_sized_low"
+    assert nodes["janus_format"]["width"] == 1280 and nodes["janus_format"]["height"] == 720
+
+
+def test_canvas_size_renditions_build_no_transform(tmp_path):
+    nodes = _rendition_nodes(tmp_path, [{"id": "a", "port": 5004}, {"id": "b", "target": "/rec/b.ts"}])
+    assert not [name for name, p in nodes.items() if p["type"] == "cuda_transform"]
+    assert nodes["split_renditions"]["dst"] == ["program_rendition_a", "program_rendition_b"]
+    assert all("defer_preliminary_init" not in nodes[name] for name in ("scale_a", "scale_b"))
+
+
+def test_a_scaled_rendition_converts_color_after_the_transform(tmp_path):
+    """HDR canvas, smaller SDR output: the transform scales in the canvas storage and the
+    tone map then reads the smaller picture."""
+    nodes = _rendition_nodes(
+        tmp_path,
+        [{"id": "hdr", "port": 5006, "codec": "hevc_nvenc", "profile": "main10"},
+         {"id": "sdr", "port": 5004, "codec": "h264_nvenc", "color": "sdr", "tonemap": "mobius",
+          "tonemap_param": 0.9, "width": 1280, "height": 720}],
+        canvas={"width": 1920, "height": 1080, "fps": 60, "working_format": "p210le", "color": "hlg"})
+    assert nodes["split_renditions"]["dst"] == ["program_rendition_hdr", "program_transform"]
+    assert nodes["transform_renditions"]["outputs"] == [
+        {"dst": ["program_sized_sdr"], "width": 1280, "height": 720, "sw_format": "p210le",
+         "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1280, "dst_h": 720}]}]
+    sdr = nodes["scale_sdr"]
+    assert sdr["src"] == "program_sized_sdr"
+    assert sdr["graph"].startswith(Color("hlg").setparams + ",tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12")
+    # Storage changes are colour-path work and stay in the filter.
+    assert nodes["scale_hdr"]["graph"] == Color("hlg").setparams + ",scale_cuda=format=p010le"
+    assert nodes["janus_sdr_format"]["width"] == 1280 and nodes["janus_sdr_format"]["real_pixel_format"] == "nv12"
+    assert not _geometry_filters(nodes)
+
+
+def test_clean_and_dirty_feeds_scale_through_their_own_transform(tmp_path, monkeypatch):
+    low = {"width": 1280, "height": 720}
+    _, nodes = _dsk_app(tmp_path, monkeypatch, [
+        {"id": "sdr", "port": 5004, **low}, {"id": "full", "port": 5006},
+        {"id": "sdr_clean", "port": 5010, "feed": "clean", **low}])
+    assert nodes["split_renditions"]["dst"] == ["program_rendition_full", "program_transform"]
+    assert nodes["transform_renditions"]["src"] == "program_transform"
+    # The clean feed has one reader, the transform, which reads it directly.
+    assert "split_renditions_clean" not in nodes
+    clean = nodes["transform_renditions_clean"]
+    assert clean["src"] == "program_clean" and clean["outputs"][0]["dst"] == ["program_sized_sdr_clean"]
+    assert nodes["scale_sdr_clean"]["src"] == "program_sized_sdr_clean"
 
 
 def test_a_rendition_may_not_ask_for_more_than_the_composer_renders():

@@ -288,6 +288,8 @@ The demo uses these CUDA operations:
 
 - optional `scale_cuda` and `pad_cuda` for homogeneous catalogue inputs;
 - `mixer_compositor` for per-layer scaling and scene composition;
+- `cuda_transform` for a rendition whose size differs from the canvas: one node per
+  feed, one draw per distinct size, before the rendition's color conversion;
 - `transition_cuda` for fades and dips;
 - NVDEC and NVENC at the graph boundaries.
 

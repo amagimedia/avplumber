@@ -28,6 +28,7 @@ from pyplumber.mixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_ur
 from pyplumber.mixer.inputs import build_input, build_v210_input, build_raw420_input
 from pyplumber.mixer.janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE,
                            JanusVideoConfig, RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options)
+from pyplumber.transform import transform_output, transform_params
 
 try:
     from .layouts import (
@@ -339,6 +340,7 @@ def load_avp_api():
     from pyplumber.node import (
         AssumeVideoFormat,
         Bsf,
+        CudaTransform,
         DecVideo,
         Demux,
         DrmPrimeToCuda,
@@ -368,6 +370,7 @@ def load_avp_api():
         MixerGraphBuilder=MixerGraphBuilder,
         AssumeVideoFormat=AssumeVideoFormat,
         Bsf=Bsf,
+        CudaTransform=CudaTransform,
         DecVideo=DecVideo,
         Demux=Demux,
         DrmPrimeToCuda=DrmPrimeToCuda,
@@ -597,37 +600,57 @@ def _build_renditions(avp, api, options: GraphOptions, renditions, feeds, *,
                       canvas, working_format: str, color="sdr", backend=None):
     """One encoder per rendition, all fed from the single composited program.
 
-    The compositor renders once at the canvas rate; a rendition converts,
-    re-times and rescales that picture for its own target, so extra renditions
-    cost an encode, not another composite. *feeds* maps a rendition feed
-    (dirty/clean) to its program edge; a plain edge serves every feed.
+    The compositor renders once at the canvas rate, so an extra rendition costs an
+    encode, not another composite. Per feed, the renditions whose size differs from
+    the canvas are scaled by one cuda_transform, one draw per distinct size. Each
+    rendition then converts color and storage in its own filter, after the scaling,
+    so a smaller output converts fewer pixels; force_fps in its encoder chain makes
+    the constant rate. *feeds* maps a rendition feed (dirty/clean) to its program
+    edge; a plain edge serves every feed.
     """
     backend = mixer_backend(backend)
     if isinstance(feeds, str):
         feeds = dict.fromkeys(FEEDS, feeds)
-    edges = {}
+    resized = [r for r in renditions if (r.width, r.height) != canvas]
+    edges = {r.id: f"program_sized_{r.id}" for r in resized}
     for feed in FEEDS:
+        suffix = "" if feed == "dirty" else f"_{feed}"
         group = [r for r in renditions if r.feed == feed]
-        if len(group) == 1:
-            edges[group[0].id] = feeds[feed]
-        elif group:
-            split = [f"program_rendition_{r.id}" for r in group]
-            avp.addNode(api.Split({"name": "split_renditions" + ("" if feed == "dirty" else f"_{feed}"),
-                                   "src": feeds[feed], "dst": split, "group": OUTPUT_GROUP, "on_error": "panic"}))
-            edges.update((r.id, e) for r, e in zip(group, split))
+        direct = [r for r in group if r not in resized]
+        sized = {}   # (width, height) -> edges of the renditions of that size
+        for r in group:
+            if r in resized:
+                sized.setdefault((r.width, r.height), []).append(edges[r.id])
+        # The feed's readers: each canvas-size rendition, and one transform for all the others.
+        readers = [f"program_rendition_{r.id}" for r in direct] + (["program_transform" + suffix] if sized else [])
+        if len(readers) == 1:
+            readers = [feeds[feed]]
+        elif readers:
+            avp.addNode(api.Split({"name": "split_renditions" + suffix, "src": feeds[feed], "dst": readers,
+                                   "group": OUTPUT_GROUP, "on_error": "panic"}))
+        edges.update((r.id, edge) for r, edge in zip(direct, readers))
+        if sized:
+            # No per-output fps: one draw then serves renditions of any rate, and each
+            # rendition's force_fps picks and repeats frames as its encoder needs.
+            avp.addNode(api.CudaTransform(transform_params(
+                readers[-1], [transform_output(dst, width, height, sw_format=working_format)
+                              for (width, height), dst in sized.items()],
+                hwaccel=HWACCEL, name="transform_renditions" + suffix, group=OUTPUT_GROUP, on_error="panic")))
     listeners = []
     for r in renditions:
-        edge = edges[r.id]
         codec, target = _rendition_target(r, working_format, color)
         enc_format = rendition_format(working_format, codec, target, r.profile)
-        scale = backend.scale(width=r.width, height=r.height) + "," if (r.width, r.height) != canvas else ""
         scaled = f"program_scaled_{r.id}"
+        # Named scale_<id> for the size it used to change; it converts color and storage only.
         avp.addNode(api.FilterVideo({
-            "name": f"scale_{r.id}", "src": edge, "dst": scaled, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
+            "name": f"scale_{r.id}", "src": edges[r.id], "dst": scaled, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
             "threads": backend.graph_threads,
-            "graph": scale + backend.conversion(target, enc_format, source=color, source_format=working_format,
-                                              tonemap=r.tonemap or "clip", hdr_peak=r.tonemap_peak * 100,
-                                              desat=r.tonemap_desat, param=r.tonemap_param),
+            "graph": backend.conversion(target, enc_format, source=color, source_format=working_format,
+                                        tonemap=r.tonemap or "clip", hdr_peak=r.tonemap_peak * 100,
+                                        desat=r.tonemap_desat, param=r.tonemap_param),
+            # The nearest format declaration above a transform is still the canvas size;
+            # build the graph from the first frame instead of building it twice.
+            **({"defer_preliminary_init": True} if r in resized else {}),
         }))
         if r.target != "janus":
             _build_record_output(avp, api, scaled, r, codec=codec, enc_format=enc_format,
