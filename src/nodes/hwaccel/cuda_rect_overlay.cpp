@@ -1,4 +1,5 @@
 #include "cuda_rect_compositor.hpp"
+#include "cuda_stream.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -294,7 +295,15 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
         params.contains("subscriptions") || params.contains("pgm_delay_frames"))
         throw Error("cuda_rect_overlay: unclocked; fps, aux_mode, clock_input, subscriptions and "
                     "pgm_delay_frames are mixer_compositor's and mixer_keyer's");
-    auto node = std::make_shared<CudaRectOverlay>(parseConfig(nci, "cuda_rect_overlay"));
+    Config config = parseConfig(nci, "cuda_rect_overlay");
+    if (params.contains("output_hwaccel")) {
+        // Draw on a private stream of the same CUDA context and publish that device under this
+        // name. Filters follow their input frames' device and an encoder can name it, so the
+        // whole branch leaves the parent's stream and its work no longer delays nodes there.
+        config.hw = avp::mixer::makeCudaStreamDevice(config.hw);
+        InstanceSharedObjects<HWAccelDevice>::put(nci.instance, params.at("output_hwaccel"), config.hw);
+    }
+    auto node = std::make_shared<CudaRectOverlay>(config);
     node->connect(nci);
     return node;
 }
