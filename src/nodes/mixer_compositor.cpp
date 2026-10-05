@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -55,9 +56,47 @@ class MixerCompositor : public CudaRectCompositor,
     avp::mixer::SourceMask applied_active_mask_;
     avp::mixer::SourceMask applied_prewarm_mask_;
 
+    // Where the output thread's time went since it took up the previous tick; a skipped tick logs it.
+    int64_t taken_up_ns_ = 0;            // when the previous tick's decision was taken
+    int64_t compose_ns_ = 0;             // that tick's draw
+    int64_t put_ns_ = 0;                 // and its wait for room downstream
+    int64_t longest_input_wait_ns_ = 0;
+    int64_t skip_logged_ns_ = 0;         // at most one line a second
+    int64_t skips_unlogged_ = 0;
+
+    /// One line for output frames that were never composed. Called with a decision pending,
+    /// before its draw replaces the previous tick's timings.
+    void logSkippedTicks(int64_t tick) {
+        const int64_t now = avp::mixer::monotonicNs();
+        if (const int64_t skipped = playout_->skippedByPending()) {
+            if (now - skip_logged_ns_ < 1000000000) {
+                skips_unlogged_ += skipped;
+            } else {
+                std::ostringstream line;
+                line << std::fixed << std::setprecision(1) << "mixer_compositor: skipped " << skipped
+                     << " tick(s) before tick " << tick << ": " << (now - taken_up_ns_) / 1e6
+                     << " ms since the previous tick was taken up; its draw took " << compose_ns_ / 1e6
+                     << " ms, its wait for room downstream " << put_ns_ / 1e6
+                     << " ms, the longest wait for input since " << longest_input_wait_ns_ / 1e6 << " ms";
+                if (const auto input = playout_->heldBackBy()) line << "; held back by input " << *input;
+                if (skips_unlogged_) line << " (" << skips_unlogged_ << " more since the last line, not logged)";
+                logstream << line.str();
+                skip_logged_ns_ = now;
+                skips_unlogged_ = 0;
+            }
+        }
+        taken_up_ns_ = now;
+        compose_ns_ = put_ns_ = longest_input_wait_ns_ = 0;
+    }
+
     void composite(av::Timestamp pts, const std::vector<const av::VideoFrame *> &sources,
                    const av::VideoFrame *metadata_src) {
-        if (!this->sink_->put(compose(pts, sources, metadata_src), aux_)) ++output_drops_;
+        const int64_t started = avp::mixer::monotonicNs();
+        av::VideoFrame frame = compose(pts, sources, metadata_src);
+        const int64_t composed = avp::mixer::monotonicNs();
+        if (!this->sink_->put(frame, aux_)) ++output_drops_;
+        compose_ns_ = composed - started;
+        put_ns_ = avp::mixer::monotonicNs() - composed;
     }
 
     void auxInputs(avp::mixer::SourceMask active, avp::mixer::SourceMask preparing = {}) {
@@ -235,10 +274,12 @@ public:
             (warmup_timeout_ms_ <= 0 || wallclock.pts() - warmup_started_pts_ < warmup_timeout_ms_);
         const auto *decision = playout_->prepare(avp::mixer::monotonicNs(), require_all);
         if (!decision) {
-            this->findSourceWithData(avp::mixer::waitMilliseconds(
-                playout_->nextDeadline(), avp::mixer::monotonicNs()));
+            const int64_t waiting = avp::mixer::monotonicNs();
+            this->findSourceWithData(avp::mixer::waitMilliseconds(playout_->nextDeadline(), waiting));
+            longest_input_wait_ns_ = std::max(longest_input_wait_ns_, avp::mixer::monotonicNs() - waiting);
             return;
         }
+        logSkippedTicks(decision->index);
         std::vector<const av::VideoFrame *> sources;
         const av::VideoFrame *metadata = nullptr;
         for (size_t i = 0; i < decision->frames.size(); ++i) {

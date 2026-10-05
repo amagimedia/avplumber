@@ -53,6 +53,7 @@ private:
     std::optional<int64_t> index_;
     std::optional<Decision> pending_;
     std::optional<int64_t> waiting_deadline_;
+    std::optional<size_t> held_back_by_;   // see heldBackBy()
     std::vector<size_t> consume_;
     bool started_ = false;
     uint64_t missed_deadlines_ = 0;
@@ -147,10 +148,17 @@ public:
         auto scheduled = std::max(*index_, rate_.atOrBefore(now_ns - latency_ns_));
         waiting_deadline_.reset();
         if (require_all) {
-            for (const auto &input : inputs_) {
+            for (size_t i = 0; i < inputs_.size(); ++i) {
+                const auto &input = inputs_[i];
                 if (!input.active || input.held || input.ended) continue;
-                if (input.queue.empty()) return nullptr;
-                scheduled = std::max(scheduled, input.queue.front().index);
+                if (input.queue.empty()) {
+                    held_back_by_ = i;
+                    return nullptr;
+                }
+                if (input.queue.front().index > scheduled) {
+                    scheduled = input.queue.front().index;
+                    held_back_by_ = i;
+                }
             }
             waiting_deadline_ = rate_.time(scheduled) + latency_ns_;
             if (now_ns < *waiting_deadline_) return nullptr;
@@ -183,7 +191,8 @@ public:
                 ++input.stats.repeats;
             }
         }
-        if (started_ && !reset_since_commit_) missed_deadlines_ += pending_->index - *index_;
+        missed_deadlines_ += skippedByPending();
+        held_back_by_.reset();
         reset_since_commit_ = false;
         index_ = pending_->index + 1;
         pending_.reset();
@@ -262,6 +271,14 @@ public:
     }
     size_t queued(size_t input) const { return inputs_.at(input).queue.size(); }
     uint64_t missedDeadlines() const { return missed_deadlines_; }
+    /// Ticks the pending decision skips: output frames never composed because prepare() was
+    /// reached more than one tick after their deadline. commit() adds them to missedDeadlines().
+    int64_t skippedByPending() const {
+        return pending_ && started_ && !reset_since_commit_ ? pending_->index - *index_ : 0;
+    }
+    /// The input a decision that waits for every active input last waited for since the
+    /// previous commit: the one without a picture, or the one whose first picture is latest.
+    std::optional<size_t> heldBackBy() const { return held_back_by_; }
     int64_t latencyNs() const { return latency_ns_; }
     std::optional<int64_t> nextDeadline() const {
         if (waiting_deadline_) return waiting_deadline_;

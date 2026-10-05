@@ -225,6 +225,33 @@ void missed_deadlines_do_not_catch_up_in_bursts() {
     CHECK(!mix.prepare(85000000));
 }
 
+void a_pending_tick_says_what_it_skipped_and_which_input_held_it_back() {
+    // The compositor logs a skipped tick when it takes up the next one, before commit() counts it.
+    using namespace avp::mixer;
+    Playout<int> mix(1, TickGrid(av::Rational(60, 1)));
+    mix.push(0, 0, 0);
+    CHECK(mix.prepare(34000000) && mix.skippedByPending() == 0);
+    mix.commit();
+    mix.push(0, 1, 16666667);
+    mix.push(0, 2, 33333333);
+    mix.push(0, 3, 50000000);
+    CHECK(mix.skippedByPending() == 0);
+    CHECK(mix.prepare(85000000) && mix.skippedByPending() == 2);
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 2 && mix.skippedByPending() == 0);
+
+    // Waiting for every active input: the one without a picture is named until the commit.
+    Playout<int> all(2, TickGrid(av::Rational(60, 1)), {}, TimestampMode::Presentation);
+    all.push(0, 10, 0);
+    CHECK(!all.heldBackBy());
+    CHECK(!all.prepare(34000000, true) && all.heldBackBy() == std::optional<size_t>(1));
+    all.push(1, 20, 16666667);
+    CHECK(!all.prepare(34000000, true));
+    CHECK(all.prepare(51000000, true) && all.heldBackBy() == std::optional<size_t>(1));
+    all.commit();
+    CHECK(!all.heldBackBy());
+}
+
 void idle_and_warm_up_gaps_are_not_missed_deadlines() {
     // A slot compositor stops clocking an idle playout and holds its output while a
     // reloaded scene warms up; neither gap is a deadline the output missed.
@@ -768,6 +795,7 @@ int main(int argc, char **argv) {
         {"sixteen_independent_phases", sixteen_independent_phases},
         {"bounded_queue_counts_overflow", bounded_queue_counts_overflow},
         {"missed_deadlines_do_not_catch_up_in_bursts", missed_deadlines_do_not_catch_up_in_bursts},
+        {"a_pending_tick_says_what_it_skipped_and_which_input_held_it_back", a_pending_tick_says_what_it_skipped_and_which_input_held_it_back},
         {"idle_and_warm_up_gaps_are_not_missed_deadlines", idle_and_warm_up_gaps_are_not_missed_deadlines},
     };
     try {
