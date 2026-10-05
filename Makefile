@@ -16,6 +16,7 @@ HAVE_NVCC = 0
 HAVE_NVJPEG ?= 0
 # Build the retained drawing, tracking and reframing nodes. Model inference and
 # its TensorRT flags live in out-of-tree nodes (see EXTRA_NODES_MK below).
+# HAVE_TENSORRT and TENSORRT_ROOT are not read here; those fragments read them.
 # Optional hardware integrations still use their HAVE_* flags.
 # The old split flags remain aliases for downstream build compatibility.
 NEURAL_NET_COMMON ?= 0

@@ -113,6 +113,7 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
 -   NEURAL_NET=1: enable retained neural drawing, tracking, and reframing nodes. Model inference nodes and their TensorRT flags are out-of-tree (`EXTRA_NODES_MK`). `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` are supported as compatibility aliases when `NEURAL_NET` is not set explicitly.
+-   HAVE_TENSORRT=1, TENSORRT_ROOT=/path/to/TensorRT: not read by this Makefile. Out-of-tree node fragments included through `EXTRA_NODES_MK` read them to add the TensorRT include and library paths and `-lnvinfer -lnvinfer_plugin`, so builds that include inference nodes must keep passing both.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
 -   HAVE_NVCC=1: build CUDA module images used by CUDA processing nodes, including `luma_diff` and `hog_diff`. Requires `nvcc`.
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
