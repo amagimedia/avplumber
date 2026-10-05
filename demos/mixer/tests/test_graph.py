@@ -393,10 +393,30 @@ def test_large_catalogue_keeps_paging_without_geometry_filters():
     assert not mixer.sources
     assert len(mixer.routed_sources) == 16
     assert app.routed_inputs
-    assert len([n for n in app.avp.nodes if n.parameters["name"].startswith("normalize_")]) == 65
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    assert len([name for name in nodes if name.startswith("normalize_")]) == 65
+    # One cuda_transform per input fits the source into the canonical size with black bars; it
+    # declares that size, which the router compares across its inputs.
+    assert nodes["normalize_3"] == {
+        "type": "cuda_transform", "name": "normalize_3", "src": "input_3_fps", "dst": ["input_3_normalized"],
+        "hwaccel": "mixer_gpu", "group": "input_3", "auto_restart": "group",
+        "outputs": [{"dst": "input_3_normalized", "width": 1920, "height": 1080, "sw_format": "nv12",
+                     "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1920, "dst_h": 1080, "fit": "contain"}]}]}
+    assert nodes["layout_preheat_router"]["src"] == [f"input_{i}_normalized" for i in range(65)]
+    assert not _geometry_filters(nodes)
     assert mixer.scenes["fullscreen_64"]["routes"] == {"source_0": 64}
     assert mixer.scenes["grid_16_page_4"]["routes"] == {"source_0": 64}
     assert all(params["default_graph"] == "" for _, params in mixer.routed_sources)
+
+
+@pytest.mark.parametrize("working_format,storage", [("nv12", "nv12"), ("p010le", "p010le"), ("p210le", "p010le")])
+def test_a_large_catalogue_is_normalized_in_the_decoders_storage_at_the_working_depth(working_format, storage):
+    # 4:2:0 as NVDEC decodes it: a source already at the canonical size is passed on undrawn, and
+    # the routed slots' color graphs make 4:2:2 only for the slots that are on screen.
+    app = build_application(GraphOptions(inputs=tuple(f"source-{i}" for i in range(33)), output="program.ts",
+                                          working_format=working_format, codec="hevc_nvenc"), api=fake_api())
+    outputs = [n.parameters["outputs"] for n in app.avp.nodes if n.parameters["name"].startswith("normalize_")]
+    assert len(outputs) == 33 and all(len(o) == 1 and o[0]["sw_format"] == storage for o in outputs)
 
 
 def test_dmabuf_input_builds_browser_chain_next_to_files(tmp_path):
@@ -450,11 +470,30 @@ def test_cli_parses_dmabuf_options():
         GraphOptions(inputs=("dmabuf://", ), output="p.mp4").validate()
 
 
-def test_dmabuf_inputs_are_rejected_on_the_scaled_input_path():
+def test_a_browser_in_a_large_catalogue_is_normalized_like_a_file(tmp_path):
+    (tmp_path / "page_00.sock").touch()
     inputs = tuple(f"{i}.mp4" for i in range(DIRECT_INPUT_LIMIT)) + ("dmabuf://page_00",)
-    GraphOptions(inputs=inputs[1:], output="p.mp4").validate()
-    with pytest.raises(ValueError, match="--config"):
-        GraphOptions(inputs=inputs, output="p.mp4").validate()
+    app = build_application(GraphOptions(inputs=inputs, output="p.mp4", dmabuf_socket_dir=str(tmp_path)),
+                            api=fake_api())
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    browser = nodes[f"normalize_{DIRECT_INPUT_LIMIT}"]
+    # The transform reads the zero-copy browser frame and writes the canvas's YUV storage.
+    assert (browser["type"], browser["src"]) == ("cuda_transform", f"input_{DIRECT_INPUT_LIMIT}_held")
+    assert browser["outputs"] == [{**nodes["normalize_0"]["outputs"][0],
+                                   "dst": f"input_{DIRECT_INPUT_LIMIT}_normalized"}]
+    assert app.routed_inputs and app.browser_windows == ("page_00",)
+
+
+def test_a_browser_in_a_large_catalogue_cannot_share_a_declared_hdr_input_color():
+    # A routed slot shows any input, with the one --input-color; the direct path below the limit
+    # declares each browser SDR on its own.
+    inputs = tuple(f"{i}.mp4" for i in range(DIRECT_INPUT_LIMIT)) + ("dmabuf://page_00",)
+    for color in ("", "sdr"):
+        GraphOptions(inputs=inputs, output="p.mp4", input_color=color).validate()
+    GraphOptions(inputs=inputs[1:], output="p.mp4", input_color="hlg").validate()
+    for color in ("hlg", "pq"):
+        with pytest.raises(ValueError, match="a browser page is SDR"):
+            GraphOptions(inputs=inputs, output="p.mp4", input_color=color).validate()
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):

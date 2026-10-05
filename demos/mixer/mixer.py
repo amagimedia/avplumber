@@ -147,9 +147,10 @@ class GraphOptions:
         ids = self.dmabuf_inputs
         if len(ids) != len(set(ids)):
             raise ValueError("dmabuf window ids must be unique")
-        if ids and len(self.inputs) > DIRECT_INPUT_LIMIT:
-            raise ValueError(f"dmabuf:// inputs need --config above {DIRECT_INPUT_LIMIT} --input sources: "
-                             "scale_cuda cannot read zero-copy browser frames")
+        if ids and len(self.inputs) > DIRECT_INPUT_LIMIT and self.input_color not in ("", "sdr"):
+            raise ValueError(f"dmabuf:// inputs cannot join more than {DIRECT_INPUT_LIMIT} --input sources under "
+                             f"--input-color {self.input_color}; use --config. A routed slot applies that one "
+                             "color setting to every source it shows, and a browser page is SDR")
         if self.janus_output:
             if not self.janus_host:
                 raise ValueError("janus_host is required for Janus output")
@@ -477,25 +478,17 @@ def _build_input(
     if not normalize:
         return fps_edge
     normalized_edge = f"input_{index}_normalized"
-    avp.addNode(api.FilterVideo({
-        "name": f"normalize_{index}",
-        "src": fps_edge,
-        "dst": normalized_edge,
-        "graph": (
-            f"scale_cuda=w={CANONICAL_SOURCE_WIDTH}:h={CANONICAL_SOURCE_HEIGHT}:"
-            "force_original_aspect_ratio=decrease:force_divisible_by=2,"
-            f"pad_cuda=w={CANONICAL_SOURCE_WIDTH}:h={CANONICAL_SOURCE_HEIGHT}:"
-            "x=(ow-iw)/2:y=(oh-ih)/2:color=black"
-        ),
-        "dst_width": CANONICAL_SOURCE_WIDTH,
-        "dst_height": CANONICAL_SOURCE_HEIGHT,
-        "dst_pixel_format": "cuda",
-        "dst_frame_rate": f"{fps}/{FPS_DEN}",
-        "threads": mixer_backend().graph_threads,
-        "hwaccel": HWACCEL,
-        "auto_restart": "group",
-        "group": group,
-    }))
+    # Fit the source into the canonical size, black bars around it. The node declares that size
+    # to the router; rate and time base are still read from the pacing node above it.
+    # Storage is the decoders' 4:2:0 at the working depth: a source already at the canonical
+    # size is passed on undrawn, an 8-bit source is promoted on a 10-bit show and a browser
+    # frame is converted from RGB. cuda_transform does not reduce depth: a 10-bit source on an
+    # nv12 show fails at its first frame.
+    storage = "p010le" if options.working_format in TEN_BIT_FORMATS else "nv12"
+    avp.addNode(api.CudaTransform(transform_params(
+        fps_edge, [transform_output(normalized_edge, CANONICAL_SOURCE_WIDTH, CANONICAL_SOURCE_HEIGHT,
+                                    sw_format=storage, fit="contain")],
+        hwaccel=HWACCEL, name=f"normalize_{index}", group=group, auto_restart="group")))
     return normalized_edge
 
 
@@ -648,8 +641,9 @@ def _build_renditions(avp, api, options: GraphOptions, renditions, feeds, *,
             "graph": backend.conversion(target, enc_format, source=color, source_format=working_format,
                                         tonemap=r.tonemap or "clip", hdr_peak=r.tonemap_peak * 100,
                                         desat=r.tonemap_desat, param=r.tonemap_param),
-            # The nearest format declaration above a transform is still the canvas size;
-            # build the graph from the first frame instead of building it twice.
+            # Below a transform the graph is built from the first frame. A transform with
+            # several sizes declares no format to build it from earlier, and a CUDA graph built
+            # early is built again when the first frame brings its frame pool.
             **({"defer_preliminary_init": True} if r in resized else {}),
         }))
         if r.target != "janus":

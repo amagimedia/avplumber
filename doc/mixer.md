@@ -70,7 +70,11 @@ Geometry on one stream (crop, scale, placement, choice of frames by rate) is the
 node `cuda_transform`. Applications build its parameters with
 `pyplumber.transform.transform_output` and `transform_params` instead of
 writing the JSON, so the engine changes in one place; keep both signatures and
-the emitted keys stable (`tests/test_transform_params.py` pins them).
+the emitted keys stable (`tests/test_transform_params.py` pins them). The demo
+uses it for scaled renditions and for the sources of a large catalogue. One
+library path still scales with a filter: a source registered through
+`add_source` without `default_graph=""` gets a `scale_cuda` graph per slot,
+which the orchestrator rewrites on a scene change; the demos pass `""`.
 
 ## Graph
 
@@ -286,10 +290,14 @@ muxing, and control messages are not video-frame memory paths.
 
 The demo uses these CUDA operations:
 
-- optional `scale_cuda` and `pad_cuda` for homogeneous catalogue inputs;
 - `mixer_compositor` for per-layer scaling and scene composition;
 - `cuda_transform` for a rendition whose size differs from the canvas: one node per
   feed, one draw per distinct size, before the rendition's color conversion;
+- `cuda_transform` for each source of a catalogue of more than 32 `--input`
+  sources: the source is fitted into 1920x1080 with black bars, in the decoders'
+  4:2:0 storage at the working depth, so the router's inputs all have one format.
+  A source already of that size and storage is passed on undrawn. The node does
+  not reduce bit depth: a 10-bit source needs a 10-bit `--working-format` there;
 - `transition_cuda` for fades and dips;
 - NVDEC and NVENC at the graph boundaries.
 
