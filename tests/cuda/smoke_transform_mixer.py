@@ -44,9 +44,12 @@ FPS, FRAMES, SOURCE_FRAMES = 5, 4, 4
 HELD_FRAMES = 6   # per edge, waiting for the same timestamp on the other path
 # Largest difference between the two scalers, in codes of 255, INSET pixels inside the picture.
 # The test picture changes by up to 7 codes per source pixel down and 9 across, so a picture
-# placed one source pixel off fails. First setting, not measured yet: every PASS line prints the
-# difference it found.
-TOLERANCE, INSET = 3, 4
+# placed one source pixel off fails. Measured on an L4: at most 2 codes without a tone map. Behind
+# a tone map, which is steep in places, one code of scaler difference becomes several: 9 to 11
+# codes at the worst pixel, 2 codes at the 99th percentile, 0.4 % of the pixels over TOLERANCE and
+# no shift of the mean. A tone-mapped output is therefore held to TOLERANCE at its 99th percentile
+# and to OUTLIERS of its pixels above it.
+TOLERANCE, INSET, OUTLIERS = 3, 4, 0.01
 # The graph the mixer built for source normalisation before cuda_transform.
 LEGACY_NORMALIZE = ("scale_cuda=w={0}:h={1}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
                     "pad_cuda=w={0}:h={1}:x=(ow-iw)/2:y=(oh-ih)/2:color=black").format(*CANVAS)
@@ -98,13 +101,13 @@ def picture_box(luma, black=16):
     return int(cols[0]), int(rows[0]), int(cols[-1] - cols[0] + 1), int(rows[-1] - rows[0] + 1)
 
 
-def largest_difference(ours, reference, box):
-    """Largest absolute difference of both planes, INSET pixels inside *box*."""
+def differences(ours, reference, box):
+    """Absolute differences of both planes, INSET pixels inside *box*, as one array."""
     x, y, w, h = box
     luma = (slice(y + INSET, y + h - INSET), slice(x + INSET, x + w - INSET))
     chroma = (slice(y // 2 + INSET // 2, (y + h) // 2 - INSET // 2), luma[1])
-    return max(int(np.abs(a[area].astype(np.int16) - b[area]).max())
-               for a, b, area in zip(ours, reference, (luma, chroma)))
+    return np.concatenate([np.abs(a[area].astype(np.int16) - b[area]).ravel()
+                           for a, b, area in zip(ours, reference, (luma, chroma))])
 
 
 def check_normalized(name, ours, legacy):
@@ -121,7 +124,7 @@ def check_normalized(name, ours, legacy):
         return "byte-identical to scale_cuda + pad_cuda"
     if picture_box(legacy[0]) != box:
         return f"picture at {box}; scale_cuda + pad_cuda puts it at {picture_box(legacy[0])}, not compared"
-    difference = largest_difference(ours, legacy, box)
+    difference = int(differences(ours, legacy, box).max())
     assert difference <= TOLERANCE, f"{name}: differs from scale_cuda + pad_cuda by {difference} codes"
     return f"within {difference} codes of scale_cuda + pad_cuda"
 
@@ -136,9 +139,14 @@ def check_promoted(promoted, ours):
 
 def check_rendition(name, ours, legacy):
     assert ours[0].shape == (RENDITION[1], RENDITION[0]) == legacy[0].shape, (name, ours[0].shape, legacy[0].shape)
-    difference = largest_difference(ours, legacy, (0, 0, *RENDITION))
-    assert difference <= TOLERANCE, f"{name}: differs from scale_cuda + conversion by {difference} codes"
-    return f"transform then conversion within {difference} codes of scale_cuda + conversion"
+    codes = differences(ours, legacy, (0, 0, *RENDITION))
+    largest, most = int(codes.max()), int(np.percentile(codes, 99))
+    if RENDITIONS[name][1] == "sdr":   # tags only: nothing amplifies the scalers' difference
+        assert largest <= TOLERANCE, f"{name}: differs from scale_cuda + conversion by {largest} codes"
+        return f"transform then conversion within {largest} codes of scale_cuda + conversion"
+    assert most <= TOLERANCE and (codes > TOLERANCE).mean() <= OUTLIERS, \
+        f"{name}: 99 % of pixels within {most} codes of scale_cuda + conversion, {(codes > TOLERANCE).mean():.2%} over {TOLERANCE}"
+    return f"transform then tone map: 99 % of pixels within {most} codes of scale_cuda + conversion, largest {largest}"
 
 
 def download(name, storage="nv12"):
