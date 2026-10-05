@@ -6,10 +6,11 @@
    - A source that needs no scaling is byte-identical to the filter graph.
    - A scaled source whose fitted size is even without rounding equals the filter graph within
      TOLERANCE. The scalers differ (four-neighbour bilinear here, scale_cuda's default there).
-   - A source whose fitted size needs rounding is not compared: the node rounds the fitted size
-     down to the chroma grid and keeps the aspect ratio, the filter graph rounds to the nearest
-     even size. The smoke prints both boxes.
-   - An 8-bit source onto a 10-bit canvas gives the same picture with every code times four.
+   - A source whose fitted size needs rounding may land in a different box: the node rounds the
+     fitted size down to the chroma grid, the filter graph follows FFmpeg's rounding. The
+     pictures are compared only when the boxes agree; otherwise the smoke prints both boxes.
+   - An 8-bit source that needs no scaling, drawn onto a 10-bit canvas, is the same picture with
+     every code times four.
 2. A scaled output (rendition): the transform scales in the canvas format and the rendition's
    conversion filter follows, against scale_cuda followed by the same conversion in one filter
    graph, within TOLERANCE. One case only stamps tags (SDR to SDR), one tone-maps HLG to SDR.
@@ -42,7 +43,9 @@ LEGACY_NORMALIZE = ("scale_cuda=w={0}:h={1}:force_original_aspect_ratio=decrease
                     "pad_cuda=w={0}:h={1}:x=(ow-iw)/2:y=(oh-ih)/2:color=black").format(*CANVAS)
 SOURCES = {"pillarbox": (1440, 1080), "letterbox": (1920, 800), "upscale": (1280, 720),
            "small": (640, 480), "rounded": (854, 480)}
-PROMOTED = "pillarbox"   # also drawn onto a p010le canvas
+# Also drawn onto a p010le canvas. It must be a source that needs no scaling: a scaled picture
+# is interpolated at 10 bits and is then not four times its 8-bit result.
+PROMOTED = "pillarbox"
 RENDITION = (1280, 720)
 # name: (canvas storage, source color, target storage, tone-map options)
 RENDITIONS = {"sdr": ("nv12", "sdr", "nv12", {}),
