@@ -134,7 +134,7 @@ test('a wrong declaration fails when the page loads, naming the place', () => {
   const graphic = (declaration) => () => Motion.graphic({ html: '<div id="a"></div><div id="b"></div>', ...declaration });
   const move = { el: 'a', x: [0, 10], seconds: 1 };
   assert.throws(() => Motion.graphic({}), /Motion: html: must be the markup of the graphic, a string/);
-  assert.throws(graphic({ plya: [move] }), /Motion: graphic: unknown key "plya" \(known: html, css, data, update, play, stop, actions, loop, every, demo\)/);
+  assert.throws(graphic({ plya: [move] }), /Motion: graphic: unknown key "plya" \(known: html, css, data, update, play, stop, actions, loop, every, demo, stagger\)/);
   assert.throws(graphic({ play: move }), /Motion: play: must be a list/);
   assert.throws(graphic({ play: [{ ...move, x: [0, '3em'] }] }), /Motion: play\[0\]\.x: expected \[from, to\]/);
   assert.throws(graphic({ stop: [move, { ...move, opacity: [0, 1] }] }), /Motion: stop\[1\]\.el: "a" is already moved by stop\[0\]; one move per element/);

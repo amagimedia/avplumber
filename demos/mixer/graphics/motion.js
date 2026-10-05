@@ -193,23 +193,23 @@ const Motion = (() => {
     return result;
   }
 
-  // Where in its cycle an instance starts, as a fraction of the cycle: golden-ratio steps of the
-  // trailing number of its source id (browser_007 is 7) spread any count of windows evenly, so they
-  // do not all move, and paint, on the same frames. No number, no shift.
+  // Where an instance starts its cycle, as a fraction of the demo's stagger: golden-ratio steps of
+  // the trailing number of its source id (browser_007 is 7) spread any count of windows evenly, so
+  // they do not all move, and paint, on the same frames. No number, no shift.
   const phase = (source) => (/\d+$/.exec(source ?? '')?.[0] ?? 0) * 0.6180339887 % 1;
 
   /**
-   * Runs a demo, { schedule, cycle }, on a loaded graphic by calling its OGraf actions, as a
-   * controller would. A repeating demo is placed on the wall clock: a cycle starts whenever
-   * Date.now() is `fraction` of a cycle (see phase) past a multiple of the cycle. What an instance
-   * shows therefore depends on the time and its fraction, not on when its page loaded; cues already
-   * behind in the running cycle are applied without animation. One timer waits for the next cue.
-   * Returns a function that stops the demo.
+   * Runs a demo, { schedule, cycle, stagger }, on a loaded graphic by calling its OGraf actions, as
+   * a controller would. A repeating demo is placed on the wall clock: a cycle starts whenever
+   * Date.now() is `fraction` (see phase) of the stagger, by default the cycle, past a multiple of
+   * the cycle. What an instance shows therefore depends on the time and its fraction, not on when
+   * its page loaded; cues already behind in the running cycle are applied without animation. One
+   * timer waits for the next cue. Returns a function that stops the demo.
    */
-  function demo(element, { schedule: cues, cycle }, fraction = 0) {
+  function demo(element, { schedule: cues, cycle, stagger = cycle }, fraction = 0) {
     if (!cues.length) return () => {};
     const fire = ({ type, params }, skipAnimation) => element[type]({ ...params, skipAnimation });
-    const shift = cycle ? fraction * cycle : 0;
+    const shift = cycle ? fraction * stagger : 0;
     let start = cycle ? Math.floor((Date.now() - shift) / cycle) * cycle + shift : Date.now();
     let next = 0, timer;
     while (next < cues.length && start + cues[next].timestamp < Date.now()) fire(cues[next++].action, true);
@@ -232,7 +232,7 @@ const Motion = (() => {
 
   // ---- The graphic -----------------------------------------------------------------------------
 
-  const KEYS = ['html', 'css', 'data', 'update', 'play', 'stop', 'actions', 'loop', 'every', 'demo'];
+  const KEYS = ['html', 'css', 'data', 'update', 'play', 'stop', 'actions', 'loop', 'every', 'demo', 'stagger'];
   // resolve() against this box checks a declaration when the page loads, before any element exists.
   const DRY_BOX = { width: 100, height: 100, vw: 100, vh: 100, content: 100 };
   // The graphic fills the window (or whatever an OGraf renderer positions it in).
@@ -247,7 +247,7 @@ const Motion = (() => {
   function graphic(declaration) {
     known(declaration, KEYS, 'graphic');
     const { html, css: style = '', data: defaults = {}, update = () => {}, play = [], stop = [],
-      actions = {}, loop = [], every = [], demo: cues } = declaration;
+      actions = {}, loop = [], every = [], demo: cues, stagger } = declaration;
     if (typeof html !== 'string' || !html) fail('html', 'must be the markup of the graphic, a string');
     if (typeof update !== 'function') fail('update', 'must be a function (el, data)');
     // Every list of tracks, under the name errors use for it: play, stop, loop and actions.<id>.
@@ -275,9 +275,15 @@ const Motion = (() => {
       positive(seconds, `every[${i}].seconds`);
       if (typeof run !== 'function') fail(`every[${i}].run`, 'must be a function (el, n)');
     });
+    const ownDemo = cues === undefined ? null : schedule(cues, Object.keys(actions));
+    if (stagger !== undefined) {
+      positive(stagger, 'stagger');
+      if (!ownDemo?.cycle) fail('stagger', 'needs a demo that ends with repeat');
+      ownDemo.stagger = Math.round(stagger * 1000);
+    }
 
     return class extends HTMLElement {
-      static demo = cues === undefined ? null : schedule(cues, Object.keys(actions));
+      static demo = ownDemo;
 
       #fps;                     // set by load(), with the next four
       #els;                     // id → element, for every element of html that has an id

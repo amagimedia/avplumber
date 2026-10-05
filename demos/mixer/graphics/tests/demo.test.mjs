@@ -115,6 +115,20 @@ test('the stagger shifts the cycle by a fraction of itself, the same for every l
   }
 });
 
+test('a graphic may spread its windows over part of its cycle', async () => {
+  // Both halves of the 12 s cycle move alike, so 6 s is the period worth spreading over.
+  const { Motion, clock } = page({ now: 3 * HOUR + 1234 });
+  const Graphic = Motion.graphic({ ...ALPHA, stagger: 6 });
+  assert.deepEqual(Graphic.demo, { ...Motion.graphic(ALPHA).demo, stagger: 6000 });
+  const { element, calls } = recorder(clock);
+  Motion.demo(element, Graphic.demo, 0.25);
+  calls.length = 0;
+  await clock.advance(12000);
+  assert.deepEqual(calls.map(([at, , { id }]) => [at, id]), [[1500, 'right'], [7500, 'left']]);
+  assert.throws(() => Motion.graphic({ ...ALPHA, stagger: 0 }), /Motion: stagger: must be a positive number/);
+  assert.throws(() => Motion.graphic({ ...TICKER, stagger: 6 }), /Motion: stagger: needs a demo that ends with repeat/);
+});
+
 test('a demo without repeat runs once from load and leaves no timer', async () => {
   const { Motion, clock } = page({ now: 9 * HOUR + 4321 });
   const { element, calls } = recorder(clock);
@@ -161,6 +175,13 @@ test('host places each source in the cycle by its id, not by its load time', asy
   assert.deepEqual(element.parts.marker.animations, [], 'the cycle has not started for this source');
   assert.equal(element.parts.marker.style.transform, 'translate(0px, 0px)', 'left, where the previous cycle ended');
   assert.equal(Math.round(clock.pending[0] * 1000) / 1000, shift - 100);
+});
+
+test('host spreads sources over the stagger the graphic declares', async () => {
+  const { Motion, clock } = page({ now: 4 * HOUR + 100, dataset: { fps: '50', source: 'browser_007' } });
+  await Motion.host(Motion.graphic({ ...ALPHA, stagger: 6 }));
+  const shift = Motion.phase('browser_007') * 6000;
+  assert.ok(Math.abs(clock.pending[0] - (shift - 100)) < 1e-6, 'browser_007 starts 0.326 of 6 s in, as on the page this replaces');
 });
 
 test('host refuses a page without data-fps', async () => {
