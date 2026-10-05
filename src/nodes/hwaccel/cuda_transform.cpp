@@ -16,9 +16,15 @@ extern "C" {
 /// It is the rect compositor's drawing without input matching or a clock: every input frame
 /// gives one frame on each output that is due, with the input's timestamp and metadata.
 ///
+/// An output whose canvas would only repeat the input (one unblended layer, the whole frame at
+/// 1:1, the canvas's own sw_format) gets the input frame itself: nothing is drawn or copied. This
+/// is decided per frame, so a source that changes size is scaled when it has to be. A CUarray
+/// input is a different kind of storage from the CUDA frames the node draws; it is passed on only
+/// with `pass_arrays`, for consumers that read arrays as well.
+///
 /// Parameters: `src`, `hwaccel`, and `outputs`, an array of
 ///   { "dst": edge or [edges], "width", "height", "sw_format" (nv12), "layers": [...],
-///     "fps": rate (optional), "drop": bool (optional) }
+///     "fps": rate (optional), "drop": bool (optional), "pass_arrays": bool (optional) }
 /// `layers` are the compositor's layer objects (crop, dst rect, fit); all read the one input.
 /// With `fps` the output takes the first frame of each 1/fps slot of the input's timestamps, so
 /// the choice of frames follows timestamps and not arrival order. The same frame goes to every
@@ -37,6 +43,8 @@ class CudaTransform : public NodeSingleInput<av::VideoFrame>,
         AVRational slot = {0, 1};   // 1/fps; num 0: every frame
         int64_t last_slot = INT64_MIN;
         bool drop = false;
+        bool pass_arrays = false;
+        bool passing = false;   // the last frame was passed on, not drawn; logged when it changes
     };
     std::vector<Output> outputs_;
 
@@ -100,12 +108,23 @@ public:
             const CudaRectDraw::Canvas &cv = out.draw->canvas();
             if (in_fmt == AV_PIX_FMT_NONE || !avp::mixer::canvasAccepts(in_fmt, cv.sw_fmt))
                 throw Error(std::string(kType) + ": input hw sw_format mismatch output sw_format");
+            const auto ops = avp::mixer::resolveDrawOps(sources, out.layers, cv.width, cv.height, cv.sw_fmt);
+            const bool pass = in_fmt == cv.sw_fmt && avp::mixer::copiesWholeFrame(ops, cv.width, cv.height) &&
+                              (in->raw()->format == AV_PIX_FMT_CUDA || out.pass_arrays);
+            if (pass != out.passing) {
+                out.passing = pass;
+                logstream << kType << ": output " << (&out - outputs_.data())
+                          << (pass ? " passes the input frame on" : " draws the input frame");
+            }
+            if (pass) {
+                drawn.emplace_back(&out, *in);   // a new reference to the same buffers
+                continue;
+            }
             if (!stream) {
                 out.draw->ensureDevice();
                 stream = out.draw->stream();
             }
             av::VideoFrame outf = avp::mixer::canvasFrame(out.frames.get(), kType);
-            const auto ops = avp::mixer::resolveDrawOps(sources, out.layers, cv.width, cv.height, cv.sw_fmt);
             out.draw->draw(stream, ops, outf.raw(), in->raw());
             avp::mixer::copySourceProps(outf, *in, kType);
             outf.setPts(pts);
@@ -156,6 +175,7 @@ public:
                 out.slot = AVRational{fps.getDenominator(), fps.getNumerator()};
             }
             out.drop = spec.value("drop", false);
+            out.pass_arrays = spec.value("pass_arrays", false);
             for (const std::string &name : jsonToStringList(spec.at("dst"))) {
                 auto edge = nci.edges.find<av::VideoFrame>(name);
                 edge->setProducer(node);

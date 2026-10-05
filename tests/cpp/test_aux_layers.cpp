@@ -33,4 +33,20 @@ int main() {
     faded[1].opacity = 0.5f;
     const auto fops = resolveDrawOps(sources, faded, 320, 480, AV_PIX_FMT_NV12);
     assert(fops.size() == 2 && fops[1].src == &frame && fops[1].layer.opacity == 0.5f);
+
+    // A canvas that would only repeat the frame: one unblended layer, whole frame, same size.
+    auto copies = [&](const char *json, int canvas_w, int canvas_h) {
+        const auto one = parseLayersArray(Parameters::parse(json));
+        return copiesWholeFrame(resolveDrawOps(sources, one, canvas_w, canvas_h, AV_PIX_FMT_NV12), canvas_w, canvas_h);
+    };
+    assert(copies(R"([{"input":0,"dst_x":0,"dst_y":0,"dst_w":320,"dst_h":180}])", 320, 180));
+    assert(copies(R"([{"input":0}])", 320, 180));
+    assert(copies(R"([{"input":0,"dst_x":0,"dst_y":0,"dst_w":320,"dst_h":180,"fit":"contain"}])", 320, 180));
+    assert(!copies(R"([{"input":0,"dst_x":0,"dst_y":0,"dst_w":160,"dst_h":90}])", 160, 90));
+    assert(!copies(R"([{"input":0,"crop":{"x":0,"y":0,"w":160,"h":90},"dst_x":0,"dst_y":0,"dst_w":320,"dst_h":180}])", 320, 180));
+    assert(!copies(R"([{"input":0,"dst_x":2,"dst_y":0}])", 320, 180));
+    assert(!copies(R"([{"input":0,"blend":true}])", 320, 180));
+    assert(!copies(R"([{"input":0},{"input":0}])", 320, 180));
+    // Letterboxed: the frame covers only part of a taller canvas.
+    assert(!copies(R"([{"input":0,"dst_x":0,"dst_y":0,"dst_w":320,"dst_h":240,"fit":"contain"}])", 320, 240));
 }

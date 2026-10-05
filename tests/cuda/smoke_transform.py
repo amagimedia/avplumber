@@ -2,7 +2,9 @@
 
 Each output of the transform node must be byte-identical to a cuda_rect_overlay drawing the same
 layers from the same frame, carry that frame's timestamp, and an output with `fps` must take the
-first frame of each slot. The downloads are the verification boundary.
+first frame of each slot. That holds for the two outputs the node passes on undrawn as well. The
+downloads are the verification boundary; that those two were not copied shows only in the node's
+log ("passes the input frame on").
 """
 from pathlib import Path
 import tempfile
@@ -20,7 +22,9 @@ OUTPUTS = {
     "letterbox": (64, 48, [{"dst_x": 0, "dst_y": 6, "dst_w": 64, "dst_h": 36}], None),
     "crop": (96, 64, [{"crop": {"x": 32, "y": 20, "w": 128, "h": 72},
                        "dst_x": 0, "dst_y": 4, "dst_w": 96, "dst_h": 54}], "15/1"),
+    # Same size, format and storage as the input: the node passes the input frame on undrawn.
     "copy": (WIDTH, HEIGHT, [{"dst_x": 0, "dst_y": 0, "dst_w": WIDTH, "dst_h": HEIGHT}], None),
+    "copy_half_rate": (WIDTH, HEIGHT, [{"dst_x": 0, "dst_y": 0, "dst_w": WIDTH, "dst_h": HEIGHT}], "15/1"),
 }
 
 

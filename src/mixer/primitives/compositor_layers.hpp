@@ -241,6 +241,18 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
     return ops;
 }
 
+/// Whether drawing `ops` on a canvas of this size would only repeat one source frame: a single
+/// unblended layer that takes the whole frame to the whole canvas at 1:1.
+inline bool copiesWholeFrame(const std::vector<DrawOp> &ops, int canvas_w, int canvas_h) {
+    if (ops.size() != 1 || !ops[0].src)
+        return false;
+    const LayerSpec &l = ops[0].layer;
+    const int dst_w = l.dst_w ? l.dst_w : l.crop_w, dst_h = l.dst_h ? l.dst_h : l.crop_h;
+    return !l.blend && ops[0].src_w == canvas_w && ops[0].src_h == canvas_h &&
+           l.crop_x == 0 && l.crop_y == 0 && l.crop_w == canvas_w && l.crop_h == canvas_h &&
+           l.dst_x == 0 && l.dst_y == 0 && dst_w == canvas_w && dst_h == canvas_h;
+}
+
 /// One-line description of a resolved op list, for change-triggered logging.
 inline std::string describeDrawOps(const std::vector<DrawOp> &ops) {
     std::ostringstream desc;
