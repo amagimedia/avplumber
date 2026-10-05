@@ -84,6 +84,10 @@ accepts `score_bug`, [../prepare_demo.py](../prepare_demo.py) opens its window a
 the tests under [tests/](tests) and [../tests/test_graphic_pages.py](../tests/test_graphic_pages.py)
 run it at 25, 30, 50 and 60 fps without a line added to them.
 
+Any graphic is also a browser source: a recipe's browser input names it,
+`{"kind": "browser", "graphic": "score_bug"}` (see [../docs/recipe.md](../docs/recipe.md)); without
+a name it is `browser_alpha`.
+
 A wrong declaration throws when the page loads, naming the place (`Motion: play[0].x: expected
 [from, to], …`); the browser service logs the page's console. A wrong manifest stops the setup
 server and `prepare_demo.py` when they start, naming its place the same way
@@ -147,9 +151,9 @@ graphic with an `every`. What only the mixer needs is under `v_avplumber`:
 | Field | Value |
 | --- | --- |
 | `window` | `{ "width", "height" }` of the browser window, the graphic's own rectangle. Without it the window has the size of its source, by default the canvas. |
-| `key` | Makes the graphic a downstream key the setup page offers, labelled `name · description`. Needs `window`. A show keys at most four at once. |
+| `key` | Makes the graphic a downstream key the setup page offers, labelled `name · description`. Needs `window`, unless its anchor is `fill`. A show keys at most four at once, and does not start with a key whose rectangle leaves its canvas: `prepare_demo.py` names the graphic and the canvas. |
 | `key.order` | Position in the setup page's list, lowest first. |
-| `key.anchor` | `top-left`, `top-right`, `bottom-left` or `bottom-right`: the window, scaled by the canvas's short side over 1080, sits one margin (3 % of the short side) inside that corner. `top` or `bottom`: a strip scaled to span the canvas width. |
+| `key.anchor` | `top-left`, `top-right`, `bottom-left` or `bottom-right`: the window, scaled by the canvas's short side over 1080, sits one margin (3 % of the short side) inside that corner. `top` or `bottom`: a strip scaled to span the canvas width. `fill`: the whole canvas, from a window of the canvas's size; such a manifest has no `window`. |
 | `key.above` | Name of another key graphic: this one sits one margin above that one's place, whether or not the show keys it. Bottom anchors only. |
 
 ## Rules for a graphic

@@ -27,8 +27,8 @@ OGRAF_OPTIONAL = ("version", "description", "author", "customActions", "actionDu
 VENDOR = "v_avplumber"
 # What a manifest may say under v_avplumber, and inside each of the two.
 VENDOR_FIELDS = {"window": ("width", "height"), "key": ("order", "anchor", "above")}
-# Where a key sits on the canvas: a corner, or a strip along the top or the bottom edge.
-ANCHORS = ("top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right")
+# Where a key sits on the canvas: a corner, a strip along the top or the bottom edge, or all of it.
+ANCHORS = ("top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right", "fill")
 
 # What host.html holds exactly once: the root element, which receives the data-* attributes, and
 # one marker per inlined script.
@@ -115,8 +115,8 @@ def manifests(root: Path = GRAPHICS_DIR) -> dict[str, dict]:
 def key_graphics(root: Path = GRAPHICS_DIR) -> dict[str, dict]:
     """The graphics a show can key over its program: those whose manifest has a v_avplumber "key",
     in the "order" the keys give. Per name: "label" for a menu, "window" as (width, height) of the
-    browser window, which is the graphic's own rectangle, and the placement key_rects() reads:
-    "anchor" and, where given, "above"."""
+    browser window, which is the graphic's own rectangle (None for a "fill" key: its window is the
+    canvas), and the placement key_rects() reads: "anchor" and, where given, "above"."""
     keys: dict[str, dict] = {}
     order: dict[str, float] = {}
     for name, manifest in manifests(root).items():
@@ -129,12 +129,16 @@ def key_graphics(root: Path = GRAPHICS_DIR) -> dict[str, dict]:
             _known(value, VENDOR_FIELDS[field], f"{where}.{field}")
         if "key" not in vendor:
             continue
-        window = tuple(vendor.get("window", {}).get(side) for side in ("width", "height"))
-        if not all(isinstance(side, int) and not isinstance(side, bool) and side > 0 for side in window):
-            raise ValueError(f'{where}.window: needs whole, positive "width" and "height"; a key\'s window is its own rectangle')
         key = vendor["key"]
         if key.get("anchor") not in ANCHORS:
             raise ValueError(f"{where}.key.anchor: must be one of {', '.join(ANCHORS)}")
+        window = None
+        if key["anchor"] != "fill":
+            window = tuple(vendor.get("window", {}).get(side) for side in ("width", "height"))
+            if not all(isinstance(side, int) and not isinstance(side, bool) and side > 0 for side in window):
+                raise ValueError(f'{where}.window: needs whole, positive "width" and "height"; a key\'s window is its own rectangle')
+        elif "window" in vendor:
+            raise ValueError(f'{where}.window: a fill key\'s window is the canvas; leave "window" out')
         if isinstance(key.get("order"), bool) or not isinstance(key.get("order"), (int, float)):
             raise ValueError(f"{where}.key.order: must be a number; keys are listed from the lowest")
         order[name] = key["order"]
@@ -154,14 +158,16 @@ def key_graphics(root: Path = GRAPHICS_DIR) -> dict[str, dict]:
     return {name: keys[name] for name in sorted(keys, key=lambda name: (order[name], name))}
 
 
-def key_rects(width: int, height: int, root: Path = GRAPHICS_DIR) -> dict[str, tuple[int, int, int, int]]:
-    """Canvas rectangle (x, y, w, h) of every key graphic on a *width* x *height* canvas.
+def key_rects(width: int, height: int, root: Path = GRAPHICS_DIR, only=None) -> dict[str, tuple[int, int, int, int]]:
+    """Canvas rectangle (x, y, w, h) of every key graphic on a *width* x *height* canvas, or of the
+    keys *only* names: those a show uses. One whose rectangle leaves the canvas raises ValueError.
 
     A window is scaled by the canvas's short side over 1080, so a 1080p canvas shows it 1:1, and
     sits one margin, 3 % of the short side, inside the corner its anchor names. An anchor without
     a side, "top" or "bottom", is a strip: scaled to span the canvas width, with the margin only
     above or below it. "above" puts a graphic one margin above the place of another, whether or
     not the show keys that one. Chromium paints only the graphic, never a transparent canvas.
+    "fill" is the canvas itself.
     """
     keys = key_graphics(root)
     even = lambda value: max(2, round(value / 2) * 2)
@@ -172,13 +178,21 @@ def key_rects(width: int, height: int, root: Path = GRAPHICS_DIR) -> dict[str, t
     def place(name: str) -> tuple[int, int, int, int]:
         if name not in rects:
             key = keys[name]
-            window_w, window_h = key["window"]
             edge, _, side = key["anchor"].partition("-")
-            w, h = ((even(window_w * unit / 1080), even(window_h * unit / 1080)) if side
-                    else (width, even(window_h * width / window_w)))
-            x = {"": 0, "left": margin, "right": width - margin - w}[side]
-            floor = place(key["above"])[1] if "above" in key else height
-            rects[name] = (x, margin if edge == "top" else floor - margin - h, w, h)
+            if edge == "fill":
+                rects[name] = (0, 0, width, height)
+            else:
+                window_w, window_h = key["window"]
+                w, h = ((even(window_w * unit / 1080), even(window_h * unit / 1080)) if side
+                        else (width, even(window_h * width / window_w)))
+                x = {"": 0, "left": margin, "right": width - margin - w}[side]
+                floor = place(key["above"])[1] if "above" in key else height
+                rects[name] = (x, margin if edge == "top" else floor - margin - h, w, h)
         return rects[name]
 
-    return {name: place(name) for name in keys}
+    placed = {name: place(name) for name in (keys if only is None else only)}
+    for name, (x, y, w, h) in placed.items():
+        if x < 0 or y < 0 or x + w > width or y + h > height:
+            raise ValueError(f"{name}/{name}.ograf.json: {VENDOR}.key: its rectangle {(x, y, w, h)} "
+                             f"leaves the {width}x{height} canvas")
+    return placed

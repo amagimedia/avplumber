@@ -253,12 +253,11 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 source.update(kind=raw or ("v210" if chroma == "422" else "video"),
                               path=runtime_path(path), width=asset_width, height=asset_height)
             elif kind == "browser":
-                if "pattern" in spec:
-                    if spec["pattern"] != "alpha" or "url" in spec:
-                        raise ValueError(f"{name}: browser pattern must be alpha, without a url")
-                    url = graphic_url("browser_alpha", fps, source=source["id"])
-                else:
-                    url = spec["url"]
+                # A page of its own, or a graphic under graphics/: by default the transparency test
+                # source, which the older "pattern": "alpha" also asks for.
+                if spec.get("pattern", "alpha") != "alpha" or len({"url", "graphic", "pattern"} & spec.keys()) > 1:
+                    raise ValueError(f'{name}: a browser input takes one of url, graphic or pattern: "alpha"')
+                url = spec["url"] if "url" in spec else graphic_url(spec.get("graphic", "browser_alpha"), fps, source=source["id"])
                 source.update(kind="browser", url=url, width=spec.get("width", width), height=spec.get("height", height), color="sdr")
             else:
                 if kind == "download":
@@ -294,10 +293,10 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     # use, but generated layouts should not scatter graphics into grids.
     pages = recipe.get("dsk", [])
     validate_dsk(pages, recipe.get("clean_feed", False))
-    rects, keys = key_rects(width, height), []
+    rects, keys = key_rects(width, height, only=pages), []
     for page in pages:
         x, y, w, h = rects[page]
-        window_w, window_h = DSK_WINDOWS[page]
+        window_w, window_h = DSK_WINDOWS[page] or (width, height)   # a fill key's window is the canvas
         sources.append({"id": f"dsk_{page}", "kind": "browser", "url": graphic_url(page, fps, source=f"dsk_{page}"),
                         "width": window_w, "height": window_h, "color": "sdr"})
         keys.append({"id": page, "source": f"dsk_{page}", "dst": {"x": x, "y": y, "w": w, "h": h}})
