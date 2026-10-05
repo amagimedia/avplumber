@@ -10,6 +10,7 @@ the mixer needs: the browser window of the graphic and, for a downstream key, it
 from __future__ import annotations
 
 import base64
+from collections.abc import Iterable
 import html
 import json
 import math
@@ -158,7 +159,8 @@ def key_graphics(root: Path = GRAPHICS_DIR) -> dict[str, dict]:
     return {name: keys[name] for name in sorted(keys, key=lambda name: (order[name], name))}
 
 
-def key_rects(width: int, height: int, root: Path = GRAPHICS_DIR, only=None) -> dict[str, tuple[int, int, int, int]]:
+def key_rects(width: int, height: int, root: Path = GRAPHICS_DIR,
+              only: Iterable[str] | None = None) -> dict[str, tuple[int, int, int, int]]:
     """Canvas rectangle (x, y, w, h) of every key graphic on a *width* x *height* canvas, or of the
     keys *only* names: those a show uses. One whose rectangle leaves the canvas raises ValueError.
 
