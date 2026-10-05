@@ -83,8 +83,8 @@ def extra_aux_limit(profile, cfg, encodes):
     used, budget = sum(share(*e) for e in encoded), nvenc["budget_pct"]
     if used > budget:
         raise ValueError(f"The encodes need {used:.1f}% of NVENC, above its {budget}% budget: choose faster presets")
-    return math.floor((budget - used) / share(cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps), "h264",
-                                              encodes["extra"]["preset"]))
+    return min(30 - len(cfg.aux_buses), math.floor((budget - used) / share(
+        cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps), "h264", encodes["extra"]["preset"])))
 
 
 def _in_range(profile, kbps):
@@ -271,8 +271,11 @@ class SetupRuntime:
         # The show's own buses, for setup.html's NVENC budget, and the RTP ports of its extra ones,
         # whose mountpoints a smaller setup prunes: from _previous_show, then each synced setup.
         self.aux_buses, self.extra_ports = [], {}
+        self.settings = None
         with suppress(OSError, ValueError):   # resume reports a broken show
-            self._previous_show()
+            previous, _, _ = self._previous_show()
+            if not self.recipe_path.exists():
+                self.settings = current_settings(self.profile, previous.get("setup"))
         self.lock = threading.Lock()
         # Held for a whole _stop(): a second caller must not signal a mixer that is already
         # stopping (a second SIGINT would abort its clean shutdown).
@@ -284,7 +287,6 @@ class SetupRuntime:
         self.retry_timer = None
         self.phase = "idle"
         self.message = "Choose settings and apply to start the mixer."
-        self.settings = None
         # A restarted setup server must also invalidate existing control/player tabs.
         self.revision = time.time_ns() // 1_000_000
 
@@ -349,7 +351,8 @@ class SetupRuntime:
         """The current show, its own aux buses and the setup's extra ones."""
         config = self.media_dir / "mixer.demo.json"
         previous = json.loads(config.read_text()) if config.exists() else {}
-        stored = json.loads(self.recipe_path.read_text()) if self.recipe_path.exists() else {}
+        # An adopted explicit show can declare the same setup metadata as a generated recipe.
+        stored = json.loads(self.recipe_path.read_text()) if self.recipe_path.exists() else previous
         own, extra = _split_aux(previous.get("aux_buses", []), stored)
         self.aux_buses = [{"id": b["id"], "label": aux_label(b["id"], b.get("label", ""), b.get("layout")),
                            "full_rate": b.get("full_rate", False)} for b in own]
@@ -402,10 +405,10 @@ class SetupRuntime:
             bus["scenes"] = scenes
         mine = parse({**show, "aux_buses": own}) if own else cfg
         limit = extra_aux_limit(self.profile, mine, encodes)
-        if wanted > (limit if self.janus_api else 0):
-            raise ValueError(f"At most {limit} extra aux outputs fit this setup's NVENC budget on "
-                             f"{self.instance_type.value}" if self.janus_api else
-                             "Extra aux outputs need a Janus API (webui.py --janus-api)")
+        if wanted and not self.janus_api:
+            raise ValueError("Extra aux outputs need a Janus API (webui.py --janus-api)")
+        # Mode/rate changes shrink the managed tail, just as source_count follows its new limit.
+        wanted = recipe["setup"]["extra_aux"] = min(wanted, limit)
         if wanted:
             from prepare_demo import CLEAN_PORT   # clean feed or not, extra buses never take its port
             # Cells show the generic sources, not the key pages after them.

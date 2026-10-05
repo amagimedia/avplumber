@@ -128,13 +128,19 @@ its own measured profile there, not scaled T4 numbers.
 
 The **Extra aux** count under **Outputs** adds that many monitor outputs after the show's own
 aux buses, as many as the profile's [NVENC budget](docs/capacity.md#nvenc-and-extra-aux-outputs)
-leaves beside the other encodes; a change that lowers that maximum lowers the count. Each has
+leaves beside the other encodes, within 30 total AUX buses. A change to FPS, HDR or presets that
+lowers that maximum automatically lowers the count and shows the adjustment before Apply;
+the server applies the same limit. Each has
 up to five random layouts of 4 to 16 sources, the same for the same sources, and its RTP port
 pair after the highest in use (5016, 5020, … beside buses on 5008 and 5012). Its Janus
 Streaming mountpoint, whose ID is that port, is created through `webui.py --janus-api` (Compose
 passes the bundled Janus) before the mixer starts, and removed once a smaller setup is on air;
 without the flag the setup offers none. The mountpoints are not permanent: after a Janus
 restart, **Apply setup** creates them again.
+
+An adopted explicit show can carry the recipe's `setup` metadata in `mixer.demo.json`.
+Its `extra_aux` count identifies the trailing managed buses; the preceding instance outputs
+remain fixed. Without that metadata all existing buses remain fixed.
 
 **Outputs** lists every encoded output: the H.264 program, the HEVC HLG program on a 10-bit
 canvas, the clean feed while it is on (counted even while off), each of the instance's own aux

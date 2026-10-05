@@ -113,6 +113,7 @@ summary { cursor: pointer; }
 <div class="source output output-head" aria-hidden="true"><span></span><span id="count-head">Count</span><span>Preset</span><span>Mbit/s</span></div>
 <div id="encodes"></div><div class="allocation" id="nvenc-bar" aria-hidden="true"></div>
 <p class="hint" id="nvenc-note"></p>
+<p class="hint" id="aux-adjustment" role="status" hidden></p>
 </section>
 </div>
 <aside class="stack right">
@@ -250,7 +251,10 @@ function update(){
  const {budget_pct:budget,pct_per_fps,bitrate_kbps:[low,high]}=profile.nvenc;
  const share=(o,preset=encodes[o.id].preset)=>o.fps*pct_per_fps[o.codec][preset];
  const extra=outputs.find(o=>o.id==='extra'),used=outputs.reduce((n,o)=>o===extra?n:n+share(o),0),over=used>budget;
- extraLimit=extra&&!over?Math.floor((budget-used)/share(extra)):0;
+ extraLimit=extra&&!over?Math.max(0,Math.min(30-auxBuses.length,Math.floor((budget-used)/share(extra)))):0;
+ const reduced=Number(extraAux)>extraLimit;
+ $('aux-adjustment').hidden=!reduced;
+ $('aux-adjustment').textContent=reduced?`Extra AUX automatically reduced from ${extraAux} to ${extraLimit} to fit this setup.`:'';
  if(Number(extraAux)>extraLimit)extraAux=extraLimit;
  if(extra){$('extra-aux').max=extraLimit;if($('extra-aux').value!==String(extraAux))$('extra-aux').value=extraAux;}
  const total=used+(extra?share(extra)*(Number(extraAux)||0):0),nvenc=`NVENC ${Math.round(total)}% of ${budget}%`;

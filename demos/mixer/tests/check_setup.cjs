@@ -7,7 +7,7 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 
 (async () => {
-  const browser = await chromium.launch({args: ['--no-sandbox']});
+  const browser = await chromium.launch({args: ['--no-sandbox'], ...(process.env.CHROMIUM ? {executablePath: process.env.CHROMIUM} : {})});
   try {
     const page = await browser.newPage();
     const errors = [], submissions = [];
@@ -227,6 +227,21 @@ const { chromium } = require('playwright');
     await page.locator('#mode').selectOption('8:420');
     assert.match(await text('source-limit'), /^Maximum 170 /);
     assert.deepEqual((await apply()).weights, [83, 0, 0, 0, 40, 47, 0]);
+    // The adopted L4 show has 26 managed AUX, not 28 fixed outputs. HDR60 reduces that tail.
+    auxStatus = {aux_buses: ownAux, janus_api: true};
+    await reset({...eight, fps: 25, bit_depth: 8, chroma: '420', extra_aux: 26,
+      encodes: {...defaults, sdr: encode('p5', 6), mv: encode('p3', 4), mv2: encode('p3', 4), extra: encode('p3', 4)}});
+    await page.locator('#fps').selectOption('60');
+    await page.locator('#mode').selectOption('10:420');
+    assert.equal(await extraAux.inputValue(), '15');
+    assert.match(await text('aux-adjustment'), /automatically reduced .* to 15/);
+    assert.equal(await text('error'), '');
+    assert.equal((await apply()).extra_aux, 15);
+    await page.locator('#mode').selectOption('8:420');
+    await page.locator('#fps').selectOption('25');
+    await defaultsButton.click();
+    await extraAux.fill('30');
+    assert.equal((await apply()).extra_aux, 28, 'two fixed buses leave 28 of the 30 bus slots');
     assert.deepEqual(errors, []);
     console.log('PASS: Balanced source counts, the maximum total, per-output encodes, NVENC budget and extra aux outputs');
   } finally {

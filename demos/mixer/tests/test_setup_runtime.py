@@ -1142,11 +1142,48 @@ def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime
     calls = len(syncs)
     apply(0)
     assert len(syncs) == calls
-    with pytest.raises(ValueError, match="At most 8 extra aux outputs fit this setup's NVENC budget on tesla_t4"):
-        runtime.apply({**settings, "extra_aux": 9})
+    assert len(apply(9).aux_buses) == 10
+    assert runtime.status()["settings"]["extra_aux"] == 8
+    assert json.loads(runtime.recipe_path.read_text())["setup"]["extra_aux"] == 8
     runtime.janus_api = None
     with pytest.raises(ValueError, match="--janus-api"):
         runtime.apply({**settings, "extra_aux": 1})
+
+
+def test_adopted_setup_metadata_keeps_managed_aux_scalable(tmp_path):
+    from extra_aux import extra_buses
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    encodes = {"sdr": encode("p5", 6000), "mv": encode("p3"), "mv2": encode("p3"), "extra": encode("p3")}
+    settings = {**KEYED, "fps": 25, "bit_depth": 8, "extra_aux": 26, "encodes": encodes}
+    recipe = recipe_for(profile, settings)
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    show["aux_buses"] = own_aux(preset="p3")
+    show["aux_buses"] += extra_buses(parse(show), [], 26, prepare_demo.CLEAN_PORT, encode("p3"))
+    show["setup"] = recipe["setup"]
+    (tmp_path / "mixer.demo.json").write_text(json.dumps(show))
+    manager = SetupRuntime(tmp_path, tmp_path / "recipe.json", None, InstanceType.NVIDIA_L4, janus_api="http://127.0.0.1")
+    assert manager.status()["settings"]["extra_aux"] == 26
+    assert [b["id"] for b in manager.status()["aux_buses"]] == ["mv", "mv2"]
+    assert len(manager.extra_ports) == 26
+    recipe = recipe_for(profile, {**settings, "fps": 60, "bit_depth": 10})
+    changed, _, _ = prepare_demo.plan(recipe, tmp_path)
+    manager._preserve_aux(recipe, changed)
+    assert recipe["setup"]["extra_aux"] == 15
+    assert [b["id"] for b in recipe["aux_buses"]] == ["mv", "mv2", *(f"aux{i}" for i in range(15))]
+    assert all(b["renditions"][0]["fps"] == 30 for b in recipe["aux_buses"])
+    assert not manager.recipe_path.exists(), "planning does not alter the running show"
+    # Without explicit metadata, named instance outputs must never be silently discarded.
+    del show["setup"]
+    (tmp_path / "mixer.demo.json").write_text(json.dumps(show))
+    manager = SetupRuntime(tmp_path, tmp_path / "recipe.json", None, InstanceType.NVIDIA_L4)
+    assert manager.settings is None and len(manager.aux_buses) == 28
+
+
+def test_l4_extra_aux_limit_reserves_the_own_buses_in_the_thirty_bus_cap(tmp_path):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    recipe = recipe_for(profile, {**KEYED, "fps": 25, "bit_depth": 8})
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    assert extra_aux_limit(profile, parse({**show, "aux_buses": own_aux(preset="p1")}), recipe["setup"]["encodes"]) == 28
 
 
 def test_a_janus_failure_leaves_the_mixer_running_and_shows_in_the_status(runtime, monkeypatch):
