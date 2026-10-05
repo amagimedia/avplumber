@@ -55,6 +55,7 @@
 
   <h2 class="group">Built, not used by the show yet</h2>
   <ul class="entries">
+    <li><a href="wipe-preload.html"><span class="pill impl">Built, Python tests pass; not run on a GPU host yet</span><b>A wipe clip is cached whole or the start fails</b><span class="sum">A stalled GPU upload on a fresh container was taken for the end of a clip: one wipe was stored with 2 frames instead of 120, the next with 129. A load now ends on the end-of-stream marker, its frame count is checked, and compiled CUDA kernels are kept on the media volume.</span></a></li>
     <li><a href="cuda-transform.html"><span class="pill impl">Built, smoke-tested on L4; the mixer's two uses not run on a GPU</span><b>cuda_transform, the shared geometry node</b><span class="sum">One CUDA frame in, one frame per output canvas, drawn by the compositors' own module; an output that would only repeat the input gets the input frame itself. The 88-source show has no stage for it, and nothing was measured in a show.</span></a></li>
   </ul>
 

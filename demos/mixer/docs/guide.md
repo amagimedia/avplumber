@@ -240,6 +240,13 @@ condition: cuda>=13.4`). Like the Ubuntu toolchain, the build hardens explicitly
 images differ in toolchain, not hardening; [capacity.md](capacity.md) compares
 them on the same 68-input 60 fps show.
 
+The driver keeps the kernels it compiled in `CUDA_CACHE_PATH`, which
+`compose.yaml` points at `/media/.nv-cache` on the media volume. Without it the
+cache lives in the container (`~/.nv/ComputeCache`) and every new container
+compiles again on first use, stalling GPU work during startup; with it only the
+first start on an empty media directory does
+([deploy/l4/README.md](../deploy/l4/README.md)).
+
 `demos/mixer/Dockerfile` (Ubuntu 22.04 / CUDA 11.7) builds the same `/build`
 layout, entrypoint, ports and environment for a host whose driver is older than
 R615. `compose.yaml` selects it with one variable, which every later `up --build`

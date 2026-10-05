@@ -52,6 +52,17 @@ writable media directory. Subsequent starts keep saved settings and layouts;
 editing `settings.json` only affects an empty media directory. Use Setup to
 change an existing instance.
 
+The first start on a new media directory also compiles FFmpeg's CUDA filter
+kernels: the NVIDIA driver compiles them on first use, and on this host that
+stalled GPU work for about 15 s during startup. The compiled kernels are kept
+in `media/.nv-cache` (`CUDA_CACHE_PATH` in [compose.yaml](../../compose.yaml)),
+so a recreated container or a new image starts without the stall for as long as
+the media directory is kept. The driver decides when an entry no longer fits,
+for example after a driver upgrade, and then compiles once more. Deleting
+`media/.nv-cache` is safe and costs one such start. A stalled start is slower,
+not wrong: each wipe clip is cached whole or the start fails
+([cookbook](../../docs/cookbook/wipe-preload.html)).
+
 `nvidia_l4_cuarray` is an opt-in profile: generated SDR and HLG 4:2:0 clips use
 HEVC with fixed CUarray pools (`extra_hw_frames: 12`). Setup preserves those
 contracts when switching frame rate or canvas format. The ordinary `nvidia_l4`

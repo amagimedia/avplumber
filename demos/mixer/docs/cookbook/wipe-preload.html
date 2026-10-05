@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Wipe clips in the AVPlumber mixer are cached whole or startup fails: a load ends on the decode chain's end-of-stream marker instead of 200 ms of silence, the frame count is checked against the decoder's, and the driver's compiled CUDA kernels are kept on the media volume.">
+  <title>A wipe clip is cached whole or the start fails · Mixer optimization cookbook</title>
+  <link rel="stylesheet" href="cookbook.css">
+  <style>
+    .changes { padding-left: 20px; }
+    .changes li { margin: 10px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>A wipe clip is cached whole or the start fails</h1>
+  <p class="lede">The wipe preload used to decide that a clip had ended when no frame arrived for 200 ms. A stalled GPU upload looks the same, so a start on a fresh container cached a wipe of 2 frames. A load now ends only on the decode chain's end-of-stream marker, the stored frame count is checked, and the stall itself is avoided on every start but a host's first.</p>
+  <span class="pill impl">Status: built, Python tests pass; not run on a GPU host yet</span>
+
+  <h2>What went wrong</h2>
+  <p>A freshly created mixer container compiles FFmpeg's CUDA filter kernels on first use. On the L4 host that stalled GPU work for about 15 s during startup, while the wipe clips were being decoded into the GPU cache. Two things followed:</p>
+  <ul class="changes">
+    <li><b>A stall was taken for the end.</b> <code>clip_cache</code> finished a load after 200 ms without a frame. The upload of the diagonal wipe stalled after its first frames, and the clip was stored with 2 frames instead of 120. The operator saw a broken wipe.</li>
+    <li><b>Late frames went to the next clip.</b> Stopping the loader group is only a request. The next <code>load</code> was accepted while the stalled upload node was still alive, and the frames it delivered afterwards were stored in the next clip, which held 129 frames instead of 120.</li>
+  </ul>
+  <p>After a restart with the kernels already compiled, both clips held 120 frames.</p>
+
+  <h2>The rule now</h2>
+  <ol class="changes">
+    <li><b>The end is a fact, not a silence.</b> <code>input_rec</code> sends an end-of-stream marker at the end of the file, and <code>demux</code>, the decoder and the upload filter each pass it on behind their last frame. <code>realtime</code> used to consume it; with <code>forward_eof</code> it passes it on too, in order. <code>clip_cache</code> ends a load on that marker and on nothing else, so a stall of any length only delays it.</li>
+    <li><b>What was stored is counted.</b> When a load has ended, <code>clipcache.preload()</code> compares the cached frame count with the number of frames the decoder delivered for that load. A clip with a different count, fewer or more, is dropped (<code>forget</code>) and loaded once more. A second difference fails the start with the clip's name and both counts. So does a load that has not ended within <code>--preheat-timeout</code>, and a clip that ended without a picture or did not fit the cache budget.</li>
+    <li><b>Nothing is left over.</b> After each load the loader group is stopped, the preload waits until none of its nodes is running, clears the edges between them and waits until the cache has discarded what still reached it. Only then is the next <code>load</code> sent. Inside <code>clip_cache</code> a frame leaves the input edge under the same lock that accepts a load.</li>
+    <li><b>The clip keeps its own timestamps.</b> The loader's <code>realtime</code> still paces the clip but no longer restamps it (<code>set_pts</code> off when caching). A replay places frames by the timestamps they were stored with, and a restamped load that waited through a stall would have stored the stall as a gap in the wipe.</li>
+    <li><b>Compiled kernels outlive the container.</b> <code>CUDA_CACHE_PATH=/media/.nv-cache</code> puts the driver's kernel cache on the media volume, so a new container finds the kernels compiled and does not stall.</li>
+  </ol>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>A wipe load ends on the end-of-stream marker; the cached frame count must equal the decoder's; one reload, then the start fails. The loader is fully stopped and emptied between clips. The driver's kernel cache is kept in <code>media/.nv-cache</code>.</li>
+    <li><b>Why</b>With the cache on, every wipe must be in it, whole. A fresh container stored one wipe with 2 frames instead of 120 and the next with 129 instead of 120, and nothing reported it.</li>
+    <li><b>Latency</b>Program and command-to-screen latency: unchanged. A take replays the cache as before.</li>
+    <li class="flag"><b>Side effects</b>A start that used to come up with a broken wipe now waits for the clip, reloads it, or fails with a message naming it. Cached wipe frames carry the clip's own timestamps instead of load-time ones. <code>clip_cache</code> status gains <code>loading</code>; the node gains <code>forget</code>; <code>realtime</code> gains <code>forward_eof</code> (default off).</li>
+    <li><b>Cost</b>0 nodes, 0 queues, 0 threads, no GPU memory. Startup polls a few more states per clip. The kernel cache takes disk space on the media volume. The first start of a new host, or one with an empty <code>media/.nv-cache</code>, still compiles once and is slower by that stall.</li>
+    <li><b>Risk</b>A clip the decode chain cannot deliver whole twice now stops the mixer from starting, where it used to start with a damaged wipe. The check trusts the decoder's count: frames the decoder itself never produces are not missed. The C++ changes are syntax-checked only so far.</li>
+    <li><b>Switch it off</b>No switch for the rule. <code>--wipe-cache-mb 0</code> turns the cache and its preload off and decodes on each take. Remove <code>CUDA_CACHE_PATH</code> from <code>compose.yaml</code> to return the kernel cache to the container.</li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><code>src/nodes/clip_cache/clip_cache.cpp</code>: <code>process()</code> ends a load on the marker; <code>forget</code>; <code>loading</code> in the status.</li>
+    <li><code>src/nodes/realtime.cpp</code>: <code>forward_eof</code>.</li>
+    <li><code>pyplumber/mixer/clipcache.py</code>: <code>preload()</code>, the count check, the reload and the stop-and-discard between loads.</li>
+    <li><code>pyplumber/mixer/graph.py</code>: the loader's <code>realtime</code> with <code>forward_eof</code> and without <code>set_pts</code> when caching.</li>
+    <li><code>demos/mixer/compose.yaml</code>: <code>CUDA_CACHE_PATH</code>, also in effect for <code>deploy/l4</code>, which layers its file over this one.</li>
+    <li><code>demos/mixer/tests/test_wipe_preload.py</code>: short, long, never-ending and uncached loads, and the order between two loads, against a simulated loader.</li>
+  </ul>
+  <p class="note">To see the stall again on a GPU host, start a new container with an empty <code>media/.nv-cache</code>.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>
