@@ -101,12 +101,7 @@ summary { cursor: pointer; }
 </section>
 <section class="card"><div class="card-title"><h2>Downstream keys</h2></div>
 <p class="hint">Alpha browser graphics keyed over the finished program, above transitions and wipes. Each page is one more browser source and counts against the source and browser limits. Keys start off; switch them on the mixer page.</p>
-<div class="toggles" id="dsk-pages">
-<label class="toggle"><input type="checkbox" value="lower_third"> Lower third · animated name plate</label>
-<label class="toggle"><input type="checkbox" value="ticker"> Ticker · second lower-third layer</label>
-<label class="toggle"><input type="checkbox" value="bug_left"> Corner bug · top left</label>
-<label class="toggle"><input type="checkbox" value="bug_right"> Clock bug · top right</label>
-</div>
+<div class="toggles" id="dsk-pages"></div>
 <div class="toggles"><label class="toggle"><input type="checkbox" id="clean-feed"> Clean feed · SDR program without keys</label></div>
 </section>
 <section class="card"><div class="card-title title-row"><h2>Outputs</h2><button id="output-defaults">Defaults</button></div>
@@ -148,6 +143,15 @@ const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]]];
 // folds HLG into SDR).
 const BALANCED=[18,18,4,0,36,17,17];
 const dskPages=()=>[...document.querySelectorAll('#dsk-pages input:checked')].map(i=>i.value);
+// The key graphics arrive with the setup status too: one checkbox each, built once.
+function showDskPages(pages){
+ if($('dsk-pages').childElementCount)return;
+ $('dsk-pages').replaceChildren(...pages.map(({id,label})=>{
+  const toggle=document.createElement('label'),input=document.createElement('input');
+  toggle.className='toggle';input.type='checkbox';input.value=id;input.disabled=busy;input.addEventListener('input',update);
+  toggle.append(input,` ${label}`);return toggle;
+ }));
+}
 // The instance's measured limits (instance_profiles.py) arrive with the setup status; the page
 // applies them as setup_runtime.py does and computes nothing before they arrive.
 let profile=null, instanceType='', auxBuses=[], janusApi=false, extraLimit=0;
@@ -338,6 +342,7 @@ async function refresh(){
   const status=await response.json();
   if(submitting||requestedSubmission!==submission)return;
   online=true;profile=status.profile;instanceType=status.instance_type;auxBuses=status.aux_buses;janusApi=status.janus_api;
+  showDskPages(status.dsk_pages);
   if(!loaded&&!['preparing','starting'].includes(status.phase)){
    if(status.settings){
     const s=status.settings,depth=s.bit_depth??10;

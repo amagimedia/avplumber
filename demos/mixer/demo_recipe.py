@@ -4,15 +4,16 @@ import math
 import os
 import random
 
+from graphic_pages import key_graphics
 from pyplumber.mixer.config import MAX_DSK_KEYS
 
 
 LAYOUTS = ("fullscreen", "grid_2", "grid_4", "grid_8", "grid_16", "grid_32", "grid_64",
            "pip", "random", "alpha_overlay")
-# Browser window of each downstream-key page under dsk/, keyed over the finished program in
-# this order. The browser service exports only allowlisted sizes (DMA_BROWSER_ALLOWED_DIMS),
-# so these are fixed; keep that list in step.
-DSK_WINDOWS = {"lower_third": (1016, 172), "ticker": (1920, 80), "bug_left": (152, 152), "bug_right": (304, 152)}
+# Browser window of each downstream-key graphic, in the setup page's order: its manifest under
+# graphics/ says both (graphic_pages.key_graphics). The browser service exports only allowlisted
+# sizes; tests/test_graphic_pages.py checks each against DMA_BROWSER_ALLOWED_DIMS in compose.yaml.
+DSK_WINDOWS = {page: key["window"] for page, key in key_graphics().items()}
 DSK_PAGES = tuple(DSK_WINDOWS)
 
 

@@ -1,18 +1,21 @@
 """Verify browser DMA-BUF alpha survives CUDA import on an NVIDIA host.
 
-Requires the DMA-BUF browser service and the mixer browser_alpha.html page.
+Requires the DMA-BUF browser service and the mixer's browser_alpha graphic.
 The download is solely a verification boundary; the live mixer stays on GPU.
 """
 
 import argparse
-import base64
 import json
 from pathlib import Path
+import sys
 import uuid
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos/mixer"))
+
 from _harness import drain, finish, make_avp, start
+from graphic_pages import graphic_url
 from pyplumber.mixer.dmabuf_inputs import (
     dmabuf_cuda_input_nodes, open_windows, refresh_windows, rest_request, wait_for_sockets,
 )
@@ -33,8 +36,7 @@ def main():
 
     name = "alpha_probe_" + uuid.uuid4().hex[:8]
     width, height = 1280, 720
-    page = Path(__file__).resolve().parents[2] / "demos/mixer/browser_alpha.html"
-    url = "data:text/html;base64," + base64.b64encode(page.read_bytes()).decode("ascii")
+    url = graphic_url("browser_alpha", 30)   # the rate the window opens at, below
     avp, errors = make_avp("alpha_gpu", capacity=2)
     nodes = []
     try:

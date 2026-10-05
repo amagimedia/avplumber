@@ -10,7 +10,6 @@ are synthetic. Downloads and browser inputs are enabled only by recipe weights.
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import math
@@ -30,38 +29,13 @@ sys.path.insert(0, str(DEMO_DIR.parents[1]))
 
 from sdr_patterns import GENERATORS, input_kbps, encoding_options, render  # noqa: E402
 from demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic  # noqa: E402
+from graphic_pages import graphic_url, key_rects  # noqa: E402
 from hdr_patterns import write_hlg  # noqa: E402
 from pyplumber.mixer.config import MAX_SOURCES, default_browser_ring_size, parse  # noqa: E402
 
 # Janus RTP port of the clean SDR program; 5004/5006 carry the keyed program and
 # 5008 the multiview. The clean feed is SDR, with an independent codec.
 CLEAN_PORT = 5010
-
-
-def page_url(path: Path, **data) -> str:
-    """Embed a demo page, so browser inputs need no web server. *data* become
-    data- attributes of its <html> element, e.g. the rate the window paints at."""
-    page = path.read_bytes()
-    attrs = "".join(f' data-{key}="{value}"' for key, value in data.items())
-    page = page.replace(b"<html", b"<html" + attrs.encode(), 1)
-    return "data:text/html;base64," + base64.b64encode(page).decode("ascii")
-
-
-def dsk_rects(width: int, height: int) -> dict:
-    """Canvas rectangle of each key page: its window scaled by the canvas's short
-    side over 1080, so 1080p canvases map the window 1:1. The ticker spans the
-    canvas width. Chromium paints only the graphic, never a transparent canvas."""
-    even = lambda v: max(2, round(v / 2) * 2)
-    unit = min(width, height)
-    size = {page: (even(w * unit / 1080), even(h * unit / 1080)) for page, (w, h) in DSK_WINDOWS.items()}
-    size["ticker"] = (width, even(DSK_WINDOWS["ticker"][1] * width / DSK_WINDOWS["ticker"][0]))
-    margin = even(unit * 0.03)
-    ticker_y = height - margin - size["ticker"][1]
-    (plate_w, plate_h), (bug_w, bug_h), (clock_w, clock_h) = size["lower_third"], size["bug_left"], size["bug_right"]
-    return {"ticker": (0, ticker_y, *size["ticker"]),
-            "lower_third": (margin, ticker_y - margin - plate_h, plate_w, plate_h),
-            "bug_left": (margin, margin, bug_w, bug_h),
-            "bug_right": (width - margin - clock_w, margin, clock_w, clock_h)}
 
 
 def ensure_asset(path: Path, writer) -> None:
@@ -282,7 +256,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if "pattern" in spec:
                     if spec["pattern"] != "alpha" or "url" in spec:
                         raise ValueError(f"{name}: browser pattern must be alpha, without a url")
-                    url = page_url(DEMO_DIR / "browser_alpha.html", source=source["id"])
+                    url = graphic_url("browser_alpha", fps, source=source["id"])
                 else:
                     url = spec["url"]
                 source.update(kind="browser", url=url, width=spec.get("width", width), height=spec.get("height", height), color="sdr")
@@ -320,11 +294,11 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     # use, but generated layouts should not scatter graphics into grids.
     pages = recipe.get("dsk", [])
     validate_dsk(pages, recipe.get("clean_feed", False))
-    rects, keys = dsk_rects(width, height), []
+    rects, keys = key_rects(width, height), []
     for page in pages:
         x, y, w, h = rects[page]
         window_w, window_h = DSK_WINDOWS[page]
-        sources.append({"id": f"dsk_{page}", "kind": "browser", "url": page_url(DEMO_DIR / "dsk" / f"{page}.html", fps=fps),
+        sources.append({"id": f"dsk_{page}", "kind": "browser", "url": graphic_url(page, fps, source=f"dsk_{page}"),
                         "width": window_w, "height": window_h, "color": "sdr"})
         keys.append({"id": page, "source": f"dsk_{page}", "dst": {"x": x, "y": y, "w": w, "h": h}})
     renditions = recipe["renditions"]

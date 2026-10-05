@@ -18,15 +18,17 @@ const { chromium } = require('playwright');
     page.on('pageerror', error => errors.push(error.message));
     const html = fs.readFileSync(path.join(__dirname, '../setup.html'), 'utf8');
     // The status carries the instance's profile as webui.py serves it: the limits asserted below are tesla_t4's.
-    const profiles = JSON.parse(execFileSync(process.env.PYTHON || 'python3', ['-c',
-      'import json; from instance_profiles import INSTANCE_PROFILES as p; print(json.dumps({t.value: v for t, v in p.items()}))'],
+    const python = code => JSON.parse(execFileSync(process.env.PYTHON || 'python3', ['-c', `import json; ${code}`],
       {cwd: path.join(__dirname, '..')}));
+    const profiles = python('from instance_profiles import INSTANCE_PROFILES as p; print(json.dumps({t.value: v for t, v in p.items()}))');
+    // And the key graphics, from their manifests under graphics/ (setup_runtime.DSK_CHOICES).
+    const dskPages = python('from graphic_pages import key_graphics as k; print(json.dumps([{"id": p, "label": g["label"]} for p, g in k().items()]))');
     let instanceType = 'tesla_t4';
     await page.route('http://mixer.test/**', route => {
       if (route.request().url().endsWith('/api/setup')) {
         if (route.request().method() === 'POST') submissions.push(route.request().postDataJSON());
         return route.fulfill({json: {phase: 'idle', message: 'Ready', settings: initialSettings,
-          instance_type: instanceType, profile: profiles[instanceType], ...auxStatus}});
+          instance_type: instanceType, profile: profiles[instanceType], dsk_pages: dskPages, ...auxStatus}});
       }
       return route.fulfill({contentType: 'text/html', body: html});
     });
