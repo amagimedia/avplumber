@@ -70,6 +70,7 @@ def main():
                         continue
                     w, h = OUTPUTS[key[1]][:2]
                     seen[key][frame.pts.timestamp] = planes(frame, w, h)
+                    timebase = (frame.pts.timebase.num, frame.pts.timebase.den)
             assert not errors, errors
 
             for name, (w, h, layers, fps) in OUTPUTS.items():
@@ -80,14 +81,25 @@ def main():
                 assert not different, f"{name}: {len(different)} of {len(common)} frames differ from cuda_rect_overlay"
                 assert len({reference[pts] for pts in common}) >= 3, f"{name}: source frames did not vary"
                 if fps:
-                    stamps = sorted(ours)
-                    steps = set(np.diff(stamps).tolist())
-                    full = sorted(reference)
-                    step = full[1] - full[0]
-                    assert steps == {2 * step}, f"{name}: fps output is not every second frame: {steps}"
-                    assert all(pts in reference for pts in stamps), f"{name}: fps output has a timestamp the input lacks"
+                    # The rule: the first input frame of each 1/fps slot, slots shifted by a quarter.
+                    num, den = (int(v) for v in fps.split("/"))
+                    slot = lambda pts: (4 * pts * timebase[0] * num // (timebase[1] * den) + 1) >> 2
+                    full = sorted(seen[("t", "copy")])   # every input frame the node saw
+                    lo, hi = max(min(ours), full[0]), min(max(ours), full[-1])
+                    expected, last = [], None
+                    for pts in full:
+                        if slot(pts) != last:
+                            last = slot(pts)
+                            expected.append(pts)
+                    expected = [pts for pts in expected if lo < pts < hi]
+                    got = [pts for pts in sorted(ours) if lo < pts < hi]
+                    assert got == expected, (f"{name}: fps output took {got[:12]}, the slot rule gives {expected[:12]}; "
+                                             f"input {full[:16]} timebase {timebase}")
+                    assert len(got) >= FRAMES // 3, (name, len(got))
+                gaps = sorted(set(np.diff(sorted(reference)).tolist()))
                 print(f"PASS {name}: {len(common)} frames byte-identical to cuda_rect_overlay"
-                      + (f", {len(ours)} frames at {fps} taken on slot starts" if fps else ""), flush=True)
+                      + (f", {len(ours)} frames at {fps} taken on slot starts" if fps else "")
+                      + f" (input timestamp steps {gaps})", flush=True)
             copy = seen[("t", "copy")]
             assert all(data in source for data in copy.values()), "1:1 output is not an exact copy of the source"
             print(f"PASS copy: {len(copy)} frames are exact copies of the source", flush=True)
