@@ -315,6 +315,8 @@ class PreheatVideoRouter(InternalNode):
     TYPE = "preheat_video_router"
 class CudaRectOverlay(InternalNode):
     TYPE = "cuda_rect_overlay"
+class CudaTransform(InternalNode):
+    TYPE = "cuda_transform"
 class MixerCompositor(InternalNode):
     TYPE = "mixer_compositor"
 class MixerKeyer(InternalNode):

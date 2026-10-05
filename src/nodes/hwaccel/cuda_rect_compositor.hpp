@@ -9,6 +9,7 @@
 #include "../../mixer/primitives/frame_subscription.hpp"
 #include "../../mixer/primitives/source_mask.hpp"
 #include "cuda_rect_draw.hpp"
+#include "cuda_rect_frame.hpp"
 #include "cuda_rect_texture.h"
 
 extern "C" {
@@ -157,11 +158,7 @@ protected:
         draw_.ensureDevice();
         CUstream stream = draw_.stream();
 
-        av::VideoFrame outf;
-        int r = av_hwframe_get_buffer(out_frames_ref_.get(), outf.raw(), 0);
-        if (r < 0)
-            throw Error(std::string(type_) + ": av_hwframe_get_buffer failed: " + av::error2string(r));
-        outf.setComplete(true);   // av_hwframe_get_buffer set hw_frames_ctx, format and size
+        av::VideoFrame outf = avp::mixer::canvasFrame(out_frames_ref_.get(), type_);
 
         std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src);
         if (opacity)
@@ -183,15 +180,8 @@ protected:
         // Background and every layer in one kernel launch.
         draw_.draw(stream, ops, outf.raw(), hasCanvasColor() ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr));
 
-        if (metadata_src && metadata_src->raw()) {
-            const int cpy = av_frame_copy_props(outf.raw(), metadata_src->raw());
-            if (cpy < 0)
-                throw Error(std::string(type_) + ": av_frame_copy_props failed: " + av::error2string(cpy));
-            // The output owns a new canvas; an imported source texture describes
-            // only that source's storage, not these rendered pixels.
-            if (avp::mixer::textureFrameDesc(outf.raw()))
-                av_buffer_unref(&outf.raw()->opaque_ref);
-        }
+        if (metadata_src && metadata_src->raw())
+            avp::mixer::copySourceProps(outf, *metadata_src, type_);
         setCanvasColor(outf.raw());
         if (hasCanvasColor())
             av_frame_side_data_remove_by_props(&outf.raw()->side_data, &outf.raw()->nb_side_data,
@@ -245,17 +235,7 @@ public:
           default_layers_(config.layers),
           metadata_key_(config.metadata_key),
           debug_log_every_n_(config.debug_log_every_n) {
-        out_frames_ref_.reset(av_hwframe_ctx_alloc(config.hw->deviceContext()));
-        if (!out_frames_ref_)
-            throw Error(std::string(type_) + ": av_hwframe_ctx_alloc failed");
-        AVHWFramesContext *fc = (AVHWFramesContext *)out_frames_ref_->data;
-        fc->format = AV_PIX_FMT_CUDA;
-        fc->sw_format = config.canvas.sw_fmt;
-        fc->width = config.canvas.width;
-        fc->height = config.canvas.height;
-        int err = av_hwframe_ctx_init(out_frames_ref_.get());
-        if (err < 0)
-            throw Error(std::string(type_) + ": av_hwframe_ctx_init (output) failed: " + av::error2string(err));
+        out_frames_ref_ = avp::mixer::allocCanvasFrames(*config.hw, config.canvas, type_);
         this->auto_eof_ = false;
     }
 
@@ -327,34 +307,10 @@ inline CudaRectCompositor::Config CudaRectCompositor::parseConfig(NodeCreationIn
     if (!config.hw)
         throw Error(prefix + "failed to resolve hwaccel");
 
-    CudaRectDraw::Canvas &canvas = config.canvas;
-    canvas.width = params.at("width").get<int>();
-    canvas.height = params.at("height").get<int>();
-    if (canvas.width <= 0 || canvas.height <= 0)
-        throw Error(prefix + "width and height must be positive");
-    const std::string sw_name = params.value("sw_format", std::string("nv12"));
-    canvas.sw_fmt = av_get_pix_fmt(sw_name.c_str());
-    if (canvas.sw_fmt == AV_PIX_FMT_NONE)
-        throw Error(prefix + "unknown sw_format");
-    if (!CudaRectDraw::canvasSupported(canvas.sw_fmt))
-        throw Error(prefix + "sw_format must be semiplanar YUV (nv12, p010le, p210le) or packed 8-bit RGB");
+    config.canvas = avp::mixer::parseCanvas(params, prefix);
 
     config.output = nci.edges.find<av::VideoFrame>(params["dst"]);
     config.metadata_key = params.value("metadata_key", std::string("rect_overlay_v1"));
     config.debug_log_every_n = params.value("debug_log_every_n", 0);
-
-    if (params.contains("color")) {
-        const auto color = params.at("color").get<std::string>();
-        canvas.transfer = avp::mixer::graphicTransfer(color);
-        if (canvas.transfer == AVCOL_TRC_UNSPECIFIED)
-            throw Error(prefix + "color must be sdr, hlg or pq");
-        if (canvas.transfer != AVCOL_TRC_BT709 && av_pix_fmt_desc_get(canvas.sw_fmt)->comp[0].depth < 10)
-            throw Error(prefix + "HDR canvas requires 10-bit storage");
-        canvas.sdr_white = params.value("sdr_white", avp::mixer::kGraphicSdrWhite);
-        canvas.hdr_peak = params.value("hdr_peak", avp::mixer::kGraphicHdrPeak);
-        if (!(canvas.sdr_white >= 1.f && canvas.sdr_white <= canvas.hdr_peak &&
-              canvas.hdr_peak >= 100.f && canvas.hdr_peak <= 10000.f))
-            throw Error(prefix + "invalid display white/peak");
-    }
     return config;
 }

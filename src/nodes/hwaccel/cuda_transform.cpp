@@ -1,0 +1,174 @@
+#include "../node_common.hpp"
+#include "cuda_rect_frame.hpp"
+
+extern "C" {
+#include <libavutil/mathematics.h>
+}
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+/// One frame in, one frame per output out. Each output is a canvas of its own size whose layers
+/// crop, scale and place the input frame; where no layer draws, the canvas keeps its background.
+/// It is the rect compositor's drawing without input matching or a clock: every input frame
+/// gives one frame on each output that is due, with the input's timestamp and metadata.
+///
+/// Parameters: `src`, `hwaccel`, and `outputs`, an array of
+///   { "dst": edge or [edges], "width", "height", "sw_format" (nv12), "layers": [...],
+///     "fps": rate (optional), "drop": bool (optional) }
+/// `layers` are the compositor's layer objects (crop, dst rect, fit); all read the one input.
+/// With `fps` the output takes the first frame of each 1/fps slot of the input's timestamps, so
+/// the choice of frames follows timestamps and not arrival order. The same frame goes to every
+/// edge of an output. `drop` discards an output's frame when its edge is full instead of waiting.
+class CudaTransform : public NodeSingleInput<av::VideoFrame>,
+                      public NodeMultiOutput<av::VideoFrame>,
+                      public ReportsFinishByFlag {
+    using CudaRectDraw = avp::mixer::CudaRectDraw;
+    static constexpr const char *kType = "cuda_transform";
+
+    struct Output {
+        std::unique_ptr<CudaRectDraw> draw;
+        avp::AvBufferRef frames;
+        std::vector<avp::mixer::LayerSpec> layers;
+        std::vector<std::shared_ptr<Edge<av::VideoFrame>>> edges;
+        AVRational slot = {0, 1};   // 1/fps; num 0: every frame
+        int64_t last_slot = INT64_MIN;
+        bool drop = false;
+    };
+    std::vector<Output> outputs_;
+
+    /// Whether `out` takes the frame stamped `pts`. Slots are shifted by a quarter so a frame
+    /// whose timestamp was rounded just below a slot boundary still opens that slot.
+    static bool due(Output &out, const av::Timestamp &pts) {
+        if (out.slot.num == 0 || !pts.isValid())
+            return true;
+        const int64_t quarters = av_rescale_q_rnd(pts.timestamp(), pts.timebase().getValue(),
+                                                  AVRational{out.slot.num, out.slot.den * 4}, AV_ROUND_DOWN);
+        const int64_t slot = (quarters + 1) >> 2;
+        if (slot == out.last_slot)
+            return false;
+        out.last_slot = slot;
+        return true;
+    }
+
+public:
+    void onEofConsumed() override {
+        av::VideoFrame eof = createEofMarker<av::VideoFrame>();
+        for (auto &edge : this->sink_edges_)
+            edge->enqueue(eof);
+    }
+
+    using NodeSingleInput<av::VideoFrame>::NodeSingleInput;
+
+    ~CudaTransform() override {
+        for (auto &out : outputs_) {
+            out.draw->unload();
+            out.frames.reset();
+        }
+    }
+
+    void init(EdgeManager &edges, const Parameters &params) override {
+        for (auto &out : outputs_)
+            out.draw->ensureKernels();   // fail at graph build, not on the first frame
+        NodeSingleInput<av::VideoFrame>::init(edges, params);
+    }
+
+    void process() override {
+        av::VideoFrame *in = this->source_->peek();
+        if (in == nullptr)
+            return;
+        if (isEofMarker(*in)) {
+            this->source_->pop();
+            onEofConsumed();
+            this->finished_ = true;
+            return;
+        }
+        if (!CudaRectDraw::frameSupported(static_cast<AVPixelFormat>(in->raw()->format)))
+            throw Error(std::string(kType) + ": input must be a CUDA device frame or CUarray");
+        const AVPixelFormat in_fmt = CudaRectDraw::frameSwFormat(*in);
+
+        const av::Timestamp pts = in->pts();
+        const std::vector<const av::VideoFrame *> sources{in};
+        std::vector<std::pair<Output *, av::VideoFrame>> drawn;
+        CUstream stream = nullptr;
+        for (auto &out : outputs_) {
+            if (!due(out, pts))
+                continue;
+            const CudaRectDraw::Canvas &cv = out.draw->canvas();
+            if (in_fmt == AV_PIX_FMT_NONE || !avp::mixer::canvasAccepts(in_fmt, cv.sw_fmt))
+                throw Error(std::string(kType) + ": input hw sw_format mismatch output sw_format");
+            if (!stream) {
+                out.draw->ensureDevice();
+                stream = out.draw->stream();
+            }
+            av::VideoFrame outf = avp::mixer::canvasFrame(out.frames.get(), kType);
+            const auto ops = avp::mixer::resolveDrawOps(sources, out.layers, cv.width, cv.height, cv.sw_fmt);
+            out.draw->draw(stream, ops, outf.raw(), in->raw());
+            avp::mixer::copySourceProps(outf, *in, kType);
+            outf.setPts(pts);
+            drawn.emplace_back(&out, std::move(outf));
+        }
+        if (stream && AVP_CHECK_CU(cuStreamSynchronize(stream)))
+            throw Error(std::string(kType) + ": cuStreamSynchronize failed");
+
+        // Release the input before a put can wait: it may be a decoder surface.
+        this->source_->pop();
+        for (auto &item : drawn)
+            for (auto &edge : item.first->edges)
+                EdgeSink<av::VideoFrame>(edge).put(item.second, item.first->drop);
+    }
+
+    static std::shared_ptr<CudaTransform> create(NodeCreationInfo &nci) {
+        const Parameters &params = nci.params;
+        const std::string prefix = std::string(kType) + ": ";
+        if (!params.contains("hwaccel"))
+            throw Error(prefix + "hwaccel parameter required");
+        auto hw = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
+        if (!hw)
+            throw Error(prefix + "failed to resolve hwaccel");
+        if (!params.contains("outputs") || !params["outputs"].is_array() || params["outputs"].empty())
+            throw Error(prefix + "outputs array required");
+
+        auto in_edge = nci.edges.find<av::VideoFrame>(params["src"]);
+        auto node = std::make_shared<CudaTransform>(make_unique<EdgeSource<av::VideoFrame>>(in_edge));
+        for (const Parameters &spec : params["outputs"]) {
+            Output out;
+            const CudaRectDraw::Canvas canvas = avp::mixer::parseCanvas(spec, prefix);
+            if (canvas.transfer != AVCOL_TRC_UNSPECIFIED)
+                throw Error(prefix + "color is not supported on an output");
+            out.layers = avp::mixer::parseLayersParam(spec);
+            if (out.layers.empty())
+                throw Error(prefix + "an output needs at least one layer");
+            for (auto &layer : out.layers) {
+                if (layer.input > 0)
+                    throw Error(prefix + "a layer can only read input 0");
+                layer.input = 0;
+            }
+            out.draw = std::make_unique<CudaRectDraw>(hw, canvas, int(out.layers.size()));
+            out.frames = avp::mixer::allocCanvasFrames(*hw, canvas, kType);
+            if (spec.contains("fps")) {
+                const av::Rational fps = parseRatio(spec.at("fps").get<std::string>());
+                if (fps.getNumerator() <= 0 || fps.getDenominator() <= 0)
+                    throw Error(prefix + "fps must be positive");
+                out.slot = AVRational{fps.getDenominator(), fps.getNumerator()};
+            }
+            out.drop = spec.value("drop", false);
+            for (const std::string &name : jsonToStringList(spec.at("dst"))) {
+                auto edge = nci.edges.find<av::VideoFrame>(name);
+                edge->setProducer(node);
+                out.edges.push_back(edge);
+                node->sink_edges_.push_back(edge);
+            }
+            if (out.edges.empty())
+                throw Error(prefix + "an output needs a dst edge");
+            node->outputs_.push_back(std::move(out));
+        }
+        in_edge->setConsumer(node);
+        return node;
+    }
+};
+
+DECLNODE(cuda_transform, CudaTransform)
