@@ -65,7 +65,8 @@ class FakeAnimation {
 // layout[id]: { width, height } is the element's own box; { copies, content } gives it that many
 // children, each `content` px wide until the engine sets a width on it.
 class FakeElement {
-  style = {};
+  // As in a browser, an empty value removes the declaration.
+  style = new Proxy({}, { set: (style, name, value) => (value === '' ? delete style[name] : Reflect.set(style, name, value)) });
   animations = [];
   textContent = '';
   #clock;
@@ -119,10 +120,12 @@ export function page({ graphic = '', boot = '', dataset = {}, layout = {}, width
     /** The fake elements of the graphic, by id. */
     get parts() { return Object.fromEntries(this.shadowRoot.querySelectorAll('[id]').map((element) => [element.id, element])); }
   }
+  const parent = () => ({ children: [], appendChild(element) { this.children.push(element); return element; } });
   const document = {
     documentElement: { dataset },
-    body: { children: [], appendChild(element) { this.children.push(element); return element; } },
-    createElement: (tag) => new (registry.get(tag))(),
+    head: parent(),
+    body: parent(),
+    createElement: (tag) => (registry.has(tag) ? new (registry.get(tag))() : { tagName: tag, textContent: '' }),
     fonts: { ready: fontsReady },
   };
   const globals = {
@@ -177,6 +180,16 @@ export const LOWER_THIRD = {
   demo: [...PEOPLE.flatMap((person, i) => [[6 * i, 'update', person], [6 * i, 'play'], [6 * i + 5.2, 'stop']]), [12, 'repeat']],
 };
 export const LOWER_THIRD_LAYOUT = { plate: { width: 1016, height: 131 } };
+
+// Play and stop name different things: only play slides the plate, only stop fades it and drops its text.
+export const UNEVEN = {
+  html: '<div id="plate"><div id="text"></div></div>',
+  play: [{ el: 'plate', x: ['-100%', 0], seconds: 0.4 }],
+  stop: [{ el: 'plate', opacity: [1, 0], seconds: 0.2 }, { el: 'text', y: [0, 20], seconds: 0.2 }],
+};
+export const UNEVEN_LAYOUT = { plate: { width: 400, height: 100 } };
+/** The inline style of each of `parts`, as plain objects. */
+export const inline = (...parts) => parts.map((part) => ({ ...part.style }));
 
 export const TICKER = {
   html: '<div id="tag">LIVE</div><div id="band"><div id="crawl"><span></span><span></span></div></div>',

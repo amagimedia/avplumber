@@ -1,6 +1,7 @@
 """Recipe expansion plus real CPU asset preparation; no mixer or GPU required."""
 from collections import Counter
 import base64
+import functools
 import hashlib
 import json
 from pathlib import Path
@@ -12,7 +13,7 @@ import pytest
 pytest.importorskip("numpy")
 from prepare_demo import ensure_asset, plan, prepare, download, render_wipe, WIPE_NAMES
 from demo_recipe import allocate
-from graphic_pages import graphic_url
+from graphic_pages import GRAPHICS_DIR, graphic_url, key_graphics, key_rects
 from pyplumber.mixer.config import MAX_SOURCES, load, parse, scene_layers
 from v210 import frame_stride
 
@@ -275,6 +276,50 @@ def test_every_browser_source_is_its_own_page(recipe, tmp_path):
     fps = recipe["canvas"]["fps"]
     assert urls == {**{f"page_{i:03d}": graphic_url("browser_alpha", fps, source=f"page_{i:03d}") for i in range(6)},
                     **{f"dsk_{key}": graphic_url(key, fps, source=f"dsk_{key}") for key in ("lower_third", "ticker")}}
+
+
+def test_a_browser_input_names_its_graphic(recipe, tmp_path):
+    recipe.update(source_count=3, layouts={"fullscreen": 1}, inputs=[
+        {"id": "plate", "kind": "browser", "graphic": "lower_third", "weight": 1},
+        {"id": "plain", "kind": "browser", "weight": 1},
+        {"id": "older", "kind": "browser", "pattern": "alpha", "weight": 1}])
+    doc, _, _ = plan(recipe, tmp_path)
+    fps = recipe["canvas"]["fps"]
+    assert {source["id"]: source["url"] for source in doc["sources"]} == {
+        "plate_000": graphic_url("lower_third", fps, source="plate_000"),
+        "plain_000": graphic_url("browser_alpha", fps, source="plain_000"),
+        "older_000": graphic_url("browser_alpha", fps, source="older_000")}
+    for fields, message in (({"graphic": "missing"}, "no graphic 'missing'"),
+                            ({"graphic": "ticker", "url": "https://example.org/"}, "page: a browser input takes one of url, graphic"),
+                            ({"graphic": "ticker", "pattern": "alpha"}, "page: a browser input takes one of url, graphic"),
+                            ({"pattern": "bars"}, "page: a browser input takes one of url, graphic")):
+        recipe.update(source_count=1, inputs=[{"id": "page", "kind": "browser", "weight": 1, **fields}])
+        with pytest.raises(ValueError, match=message):
+            plan(recipe, tmp_path)
+
+
+def test_a_fill_key_covers_the_canvas_from_a_window_of_its_size(recipe, tmp_path, monkeypatch):
+    import demo_recipe
+    import prepare_demo
+    root = tmp_path / "graphics"
+    shutil.copytree(GRAPHICS_DIR, root)
+    (root / "frame").mkdir()
+    shutil.copy(root / "bug_left" / "graphic.js", root / "frame" / "graphic.js")
+    manifest = json.loads((root / "bug_left" / "bug_left.ograf.json").read_text())
+    manifest.update(id="test.frame", v_avplumber={"key": {"order": 9, "anchor": "fill"}})
+    (root / "frame" / "frame.ograf.json").write_text(json.dumps(manifest))
+    # What the three modules read from graphics/ when they are imported, read from the copy.
+    monkeypatch.setattr(demo_recipe, "DSK_PAGES", tuple(key_graphics(root)))
+    monkeypatch.setattr(prepare_demo, "DSK_WINDOWS", {name: key["window"] for name, key in key_graphics(root).items()})
+    monkeypatch.setattr(prepare_demo, "key_rects", functools.partial(key_rects, root=root))
+    monkeypatch.setattr(prepare_demo, "graphic_url", functools.partial(graphic_url, root=root))
+    recipe.update(dsk=["frame", "bug_left"])
+    doc, _, _ = plan(recipe, tmp_path / "media")
+    width, height = recipe["canvas"]["width"], recipe["canvas"]["height"]
+    assert doc["dsk"]["keys"][0] == {"id": "frame", "source": "dsk_frame", "dst": {"x": 0, "y": 0, "w": width, "h": height}}
+    windows = {source["id"]: (source["width"], source["height"]) for source in doc["sources"] if source["id"].startswith("dsk_")}
+    assert windows == {"dsk_frame": (width, height), "dsk_bug_left": (152, 152)}
+    assert [key.id for key in parse(doc).dsk_keys] == ["frame", "bug_left"]
 
 
 def test_equal_recipe_has_five_source_types_and_32_scenes(tmp_path):

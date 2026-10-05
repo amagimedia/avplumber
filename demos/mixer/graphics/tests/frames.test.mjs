@@ -165,4 +165,6 @@ test('a wrong move or loop names what is wrong and where', () => {
   assert.throws(resolve({ el: 'a', crawl: { pxPerSecond: 0 } }), /Motion: play\[2\]\.crawl\.pxPerSecond: must be a positive number/);
   assert.throws(resolve({ el: 'a', spin: {} }), /Motion: play\[2\]\.spin\.seconds: must be a positive number/);
   assert.throws(resolve({ el: 'a', spin: { seconds: 4 }, x: [0, 1] }), /Motion: play\[2\]: unknown key "x"/);
+  assert.throws(resolve({ el: 'a', crawl: { pxPerSecond: 110, axis: 'y' } }), /Motion: play\[2\]\.crawl: unknown key "axis" \(known: pxPerSecond\)/);
+  assert.throws(resolve({ el: 'a', spin: { seconds: 4, turns: 2 } }), /Motion: play\[2\]\.spin: unknown key "turns" \(known: seconds\)/);
 });

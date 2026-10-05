@@ -144,7 +144,8 @@ def test_every_key_window_is_a_size_the_browser_service_exports():
     compose = (GRAPHICS_DIR.parent / "compose.yaml").read_text(encoding="utf-8")
     (allowed,) = re.findall(r"^\s*DMA_BROWSER_ALLOWED_DIMS: (\S+)$", compose, flags=re.M)
     for name, key in key_graphics().items():
-        assert "{}x{}".format(*key["window"]) in allowed.split(","), f"allow the window of {name} in compose.yaml"
+        if key["window"]:   # a fill key's window is the canvas, like a browser source's
+            assert "{}x{}".format(*key["window"]) in allowed.split(","), f"allow the window of {name} in compose.yaml"
 
 
 @pytest.mark.parametrize("canvas,rects", [
@@ -184,13 +185,34 @@ def test_a_new_key_needs_only_its_manifest(root):
                                            "note": (1688, 866, 200, 50)}
 
 
+def test_a_key_must_stay_on_the_canvas_of_a_show_that_uses_it(root):
+    add_graphic(root, "plate", {**MANIFEST, "v_avplumber": KEY})
+    add_graphic(root, "wide", {**MANIFEST, "id": "test.wide", "v_avplumber": {
+        "window": {"width": 1900, "height": 100}, "key": {"order": 2, "anchor": "bottom-left"}}})
+    message = r"wide/wide\.ograf\.json: v_avplumber\.key: its rectangle \(32, 948, 1900, 100\) leaves the 1920x1080 canvas"
+    with pytest.raises(ValueError, match=message):
+        key_rects(1920, 1080, root)
+    with pytest.raises(ValueError, match=message):
+        key_rects(1920, 1080, root, only=["wide"])
+    # A key too large for this canvas stops only a show that keys it; a wider canvas holds it.
+    assert key_rects(1920, 1080, root, only=["plate"]) == {"plate": (32, 948, 400, 100)}
+    assert key_rects(3840, 1080, root)["wide"] == (32, 948, 1900, 100)
+
+
+def test_a_fill_key_covers_the_canvas_and_has_no_window_of_its_own(root):
+    add_graphic(root, "plate", {**MANIFEST, "v_avplumber": {"key": {"order": 1, "anchor": "fill"}}})
+    assert key_graphics(root) == {"plate": {"label": "Plate", "window": None, "anchor": "fill"}}
+    assert key_rects(1920, 1080, root) == {"plate": (0, 0, 1920, 1080)}
+    assert key_rects(1080, 1920, root) == {"plate": (0, 0, 1080, 1920)}
+
+
 def test_the_graphic_and_manifest_in_the_readme_add_a_key(tmp_path):
     root = tmp_path / "graphics"
     shutil.copytree(GRAPHICS_DIR, root)
     readme = (GRAPHICS_DIR / "README.md").read_text(encoding="utf-8")
     (root / "score_bug").mkdir()
     for block, name in (("js", "graphic.js"), ("json", "score_bug.ograf.json")):
-        (text,) = re.findall(rf"```{block}\n(.*?)```", readme, flags=re.S)
+        text = re.findall(rf"```{block}\n(.*?)```", readme, flags=re.S)[0]   # the first of each is the template
         (root / "score_bug" / name).write_text(text, encoding="utf-8")
     assert list(key_graphics(root))[-1] == "score_bug"
     assert key_graphics(root)["score_bug"] == {"label": "Score bug · above the lower third", "window": (640, 96),
@@ -208,10 +230,16 @@ def test_the_graphic_and_manifest_in_the_readme_add_a_key(tmp_path):
     ({"window": {"width": 400, "height": 100}}, r"plate\.ograf\.json: unknown field \"window\"; OGraf allows only its own and v_ fields"),
     ({"v_avplumber": {**KEY, "placement": "left"}}, r"plate\.ograf\.json: v_avplumber: unknown field \"placement\""),
     ({"v_avplumber": {**KEY, "window": [400, 100]}}, r"plate\.ograf\.json: v_avplumber\.window: must be an object"),
+    ({"v_avplumber": {"window": {"width": 400, "height": 100, "fps": 50}}},
+     r"plate\.ograf\.json: v_avplumber\.window: unknown field \"fps\" \(known: width, height\)"),
+    ({"v_avplumber": {**KEY, "key": {**KEY["key"], "anchour": "top"}}},
+     r"plate\.ograf\.json: v_avplumber\.key: unknown field \"anchour\" \(known: order, anchor, above\)"),
     ({"v_avplumber": {"key": KEY["key"]}}, r"plate\.ograf\.json: v_avplumber\.window: needs whole, positive \"width\" and \"height\""),
     ({"v_avplumber": {**KEY, "window": {"width": 400.5, "height": 100}}}, r"v_avplumber\.window: needs whole, positive"),
     ({"v_avplumber": {**KEY, "key": {"order": 1, "anchor": "left"}}}, r"v_avplumber\.key\.anchor: must be one of top, bottom, top-left"),
     ({"v_avplumber": {**KEY, "key": {"anchor": "top"}}}, r"v_avplumber\.key\.order: must be a number"),
+    ({"v_avplumber": {**KEY, "key": {"order": 1, "anchor": "fill"}}},
+     r"plate\.ograf\.json: v_avplumber\.window: a fill key's window is the canvas; leave \"window\" out"),
     ({"v_avplumber": {**KEY, "key": {**KEY["key"], "above": "ticker"}}}, r"v_avplumber\.key\.above: no key graphic \"ticker\""),
     ({"v_avplumber": {**KEY, "key": {**KEY["key"], "above": "plate"}}}, r"v_avplumber\.key\.above: \"plate\" stacks above itself"),
     ({"v_avplumber": {**KEY, "key": {"order": 1, "anchor": "top-left", "above": "other"}}}, r"v_avplumber\.key\.above: only a bottom anchor stacks"),

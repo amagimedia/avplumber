@@ -84,6 +84,10 @@ accepts `score_bug`, [../prepare_demo.py](../prepare_demo.py) opens its window a
 the tests under [tests/](tests) and [../tests/test_graphic_pages.py](../tests/test_graphic_pages.py)
 run it at 25, 30, 50 and 60 fps without a line added to them.
 
+Any graphic is also a browser source: a recipe's browser input names it,
+`{"kind": "browser", "graphic": "score_bug"}` (see [../docs/recipe.md](../docs/recipe.md)); without
+a name it is `browser_alpha`.
+
 A wrong declaration throws when the page loads, naming the place (`Motion: play[0].x: expected
 [from, to], …`); the browser service logs the page's console. A wrong manifest stops the setup
 server and `prepare_demo.py` when they start, naming its place the same way
@@ -94,10 +98,11 @@ server and `prepare_demo.py` when they start, naming its place the same way
 | Key | Value |
 | --- | --- |
 | `html` | The markup. Every element the graphic refers to has an `id`. |
-| `css` | Its styles. They and the ids are private to the graphic (a shadow root): style the root as `:host`, not `body`. |
+| `css` | Its styles. They and the ids are private to the graphic (a shadow root): style the root as `:host`, not `body`. A graphic brings a font as `@font-face { font-family: Plate; src: url(data:font/woff2;base64,…) format("woff2"); }` here; the engine gives those rules to the document, where they work, and measures once the font has loaded. |
 | `data` | Default data. `load()` and updates merge over it. On our pages the `data-*` attributes of `<html>` arrive as data, as strings: `source` is the id of the browser source showing the page. |
 | `update(el, data)` | Writes data into the page; `el` maps each id to its element. Runs at load and on every update. |
 | `play`, `stop` | Lists of moves for `playAction` and `stopAction`. A loaded graphic rests where its `play` moves start. |
+| `change` | List of moves `updateAction` plays once `update()` has written the new data. See [Moves on an update](#moves-on-an-update). |
 | `actions` | `{ id: [moves] }`: custom actions. |
 | `loop` | `{ el, crawl: { pxPerSecond } }` or `{ el, spin: { seconds } }` (one clockwise turn). The children of a crawl element are two or more copies of its content; the engine sizes them. |
 | `every` | `{ seconds, run(el, n) }`: a timed change, such as a clock's text. It runs when the graphic is played and then on each multiple of `seconds` of the wall clock; `n` counts those multiples. A timer, not an animation; changes that must land on one frame belong in one `every`. |
@@ -113,6 +118,27 @@ A move is `{ el, x, y, opacity, rotate, seconds, delay, ease }`:
 - `ease`: `'linear'` (default), `'in'`, `'out'`, `'in-out'` (the CSS curves), or `[x1, y1, x2, y2]`
   as in `cubic-bezier()`.
 
+### Moves on an update
+
+A score that rolls to its new value takes two elements, the value on show and the one before it:
+
+```js
+const graphic = Motion.graphic({
+  html: '<div id="roll"><b id="was"></b><b id="score"></b></div>',
+  css: '#roll { position: relative; height: 1.2em; overflow: hidden; } #roll b { position: absolute; inset: 0; }',
+  data: { score: '0 : 0' },
+  // The value on show becomes the old one before the new one is written.
+  update: (el, data) => { el.was.textContent = el.score.textContent; el.score.textContent = data.score; },
+  change: [{ el: 'was', y: [0, '-100%'], seconds: 0.3 }, { el: 'score', y: ['100%', 0], seconds: 0.3 }],
+  demo: [[0, 'update', { score: '0 : 0' }], [4, 'update', { score: '1 : 0' }], [8, 'repeat']],
+});
+```
+
+Every update runs `update()` and then the `change` moves, whatever data it brought. Where nothing
+animates the moves are at their end: in a loaded graphic, when `play` starts, in an update with
+`skipAnimation` and in the cues a demo catches up on. `goToTime` shows the frame the moves of the
+last scheduled update have reached.
+
 ## Manifest
 
 `<name>.ograf.json` follows the
@@ -125,14 +151,14 @@ graphic with an `every`. What only the mixer needs is under `v_avplumber`:
 | Field | Value |
 | --- | --- |
 | `window` | `{ "width", "height" }` of the browser window, the graphic's own rectangle. Without it the window has the size of its source, by default the canvas. |
-| `key` | Makes the graphic a downstream key the setup page offers, labelled `name · description`. Needs `window`. A show keys at most four at once. |
+| `key` | Makes the graphic a downstream key the setup page offers, labelled `name · description`. Needs `window`, unless its anchor is `fill`. A show keys at most four at once, and does not start with a key whose rectangle leaves its canvas: `prepare_demo.py` names the graphic and the canvas. |
 | `key.order` | Position in the setup page's list, lowest first. |
-| `key.anchor` | `top-left`, `top-right`, `bottom-left` or `bottom-right`: the window, scaled by the canvas's short side over 1080, sits one margin (3 % of the short side) inside that corner. `top` or `bottom`: a strip scaled to span the canvas width. |
+| `key.anchor` | `top-left`, `top-right`, `bottom-left` or `bottom-right`: the window, scaled by the canvas's short side over 1080, sits one margin (3 % of the short side) inside that corner. `top` or `bottom`: a strip scaled to span the canvas width. `fill`: the whole canvas, from a window of the canvas's size; such a manifest has no `window`. |
 | `key.above` | Name of another key graphic: this one sits one margin above that one's place, whether or not the show keys it. Bottom anchors only. |
 
 ## Rules for a graphic
 
-- All motion goes through `play`, `stop`, `actions` and `loop`; all timed changes through `every`.
+- All motion goes through `play`, `stop`, `change`, `actions` and `loop`; all timed changes through `every`.
   No `requestAnimationFrame`, `setInterval`, `setTimeout`, CSS `animation` or `transition` in a
   graphic: each one is a second clock, and an animation left running makes the window paint when
   nothing changes. The tests refuse them.
@@ -145,11 +171,30 @@ graphic with an `every`. What only the mixer needs is under `v_avplumber`:
 - One move per element in a list, and an element that loops is not also moved: wrap it.
 - A new action takes over an element whose move is still in flight; the new move starts from its
   own `from`.
+- `playAction` starts from the loaded state: no move in flight, every element a move or loop names
+  as the stylesheet has it, then where `play` starts. So play, stop, play ends as the first play did
+  even where `stop` or an action moves a property or an element `play` does not name; every other
+  action changes only what its own moves name.
 - A cycle of a repeating demo must end as it began. Cycles are placed on the wall clock, so a page
   that loads mid-cycle applies the cues already behind it, without animation, and continues; what a
   window shows depends on the time, not on when its page loaded.
 - Many windows of one graphic do not move at once: a page whose `data-source` ends in a number
   starts its cycle that many golden-ratio steps (0.618 of the `stagger` each) later.
+
+## What the engine does not do yet
+
+- Move anything but `x`, `y`, `rotate` and `opacity`: no scale, clip, size, colour or blur.
+- Two moves of one element in one list, such as a slide and a later fade: wrap the element.
+- Keep an axis a move leaves out, or start a move from where the element is: each runs from its `from`.
+- Move an element `update()` creates: a move names an id that `html` has when the graphic loads.
+- A second play step: a graphic has one, and a `playAction` past it is a stop.
+- A crawl in any direction but leftwards, or a loop other than `crawl` and `spin`.
+- `change` moves for one field only: the list plays on every update, and `update()` is not given the old data.
+- Put back what a custom action moved, except by `play`: a cycle of actions must end as it began.
+- `every` under `goToTime`: timed changes are real-time only.
+- A font or image from anywhere but a `data:` URL in the graphic's own text.
+- A key placed anywhere but at an anchor, or a `fill` key with a window of its own size.
+- Actions from outside: on our pages only the graphic's own `demo` calls them.
 
 ## OGraf
 

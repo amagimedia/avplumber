@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync } from 'node:fs';
 import { test } from 'node:test';
-import { RATES, elapse, page, read, settle, shellScripts } from './page.mjs';
+import { RATES, elapse, inline, page, read, settle, shellScripts } from './page.mjs';
 
 const ROOT = new URL('..', import.meta.url);
 const NAMES = readdirSync(ROOT, { withFileTypes: true })
@@ -87,6 +87,21 @@ for (const name of NAMES) {
     element.stopAction({});
     await elapse({ ...fake, element }, 10_000);
     assert.deepEqual([running(element), fake.clock.pending], [[], []], 'no animation and no timer');
+  });
+
+  test(`${name}: play, stop, play ends as the first play did, animated or not`, async () => {
+    for (const skipAnimation of [true, false]) {
+      const fake = page({ graphic: read(`${name}/graphic.js`), layout: LAYOUT });
+      const element = new fake.graphic();
+      await element.load({ renderCharacteristics: { frameRate: 50 } });
+      // Whole seconds apart, so a wall-clock `every` is on the same beat after each play.
+      const run = async (action) => { element[action]({ skipAnimation }); await elapse({ ...fake, element }, 10_000); };
+      await run('playAction');
+      const first = inline(...Object.values(element.parts));
+      await run('stopAction');
+      await run('playAction');
+      assert.deepEqual(inline(...Object.values(element.parts)), first);
+    }
   });
 }
 

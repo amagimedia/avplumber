@@ -10,9 +10,10 @@ from pyplumber.mixer.config import MAX_DSK_KEYS
 
 LAYOUTS = ("fullscreen", "grid_2", "grid_4", "grid_8", "grid_16", "grid_32", "grid_64",
            "pip", "random", "alpha_overlay")
-# Browser window of each downstream-key graphic, in the setup page's order: its manifest under
-# graphics/ says both (graphic_pages.key_graphics). The browser service exports only allowlisted
-# sizes; tests/test_graphic_pages.py checks each against DMA_BROWSER_ALLOWED_DIMS in compose.yaml.
+# Browser window of each downstream-key graphic (None for a fill key: the canvas), in the setup
+# page's order: its manifest under graphics/ says both (graphic_pages.key_graphics). The browser
+# service exports only allowlisted sizes; tests/test_graphic_pages.py checks each against
+# DMA_BROWSER_ALLOWED_DIMS in compose.yaml.
 DSK_WINDOWS = {page: key["window"] for page, key in key_graphics().items()}
 DSK_PAGES = tuple(DSK_WINDOWS)
 
