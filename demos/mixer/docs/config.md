@@ -138,7 +138,7 @@ output costs an encode, not another composite.
 | --- | --- | --- |
 | `id` | — | unique; names the nodes and edges of this output |
 | `target` | `"janus"` | `"janus"` for the WebRTC RTP output, or a file path to record |
-| `width`, `height` | canvas size | when they differ, scaled on the GPU by `cuda_transform`, stretched to the given size (bilinear over four neighbours, as the compositor: a large reduction can alias). Renditions of one size and feed share one scaled picture; color conversion follows on that smaller picture |
+| `width`, `height` | canvas size | when they differ, both must be even; scaled on the GPU by `cuda_transform`, stretched to the given size (bilinear over four neighbours, as the compositor: a large reduction can alias). Renditions of one size and feed share one scaled picture; color conversion follows on that smaller picture |
 | `aspect` | — | optional, e.g. `"9:16"`; checked against `width:height` |
 | `fps` | canvas fps | may only re-time **downwards**; a higher rate is rejected |
 | `bitrate_kbps` | `3000` | CBR target, also the `maxrate` and `bufsize` |

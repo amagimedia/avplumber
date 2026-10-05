@@ -1238,6 +1238,19 @@ def test_a_rendition_may_not_ask_for_more_than_the_composer_renders():
     assert cfg.renditions[0].aspect == "9:16" and cfg.renditions[0].fps == 30
 
 
+@pytest.mark.parametrize("size", [{"width": 853, "height": 480}, {"width": 854, "height": 481}])
+def test_a_scaled_rendition_needs_an_even_size(size):
+    # cuda_transform places a picture on the chroma grid: an odd size would lose its last
+    # column or row to black.
+    from pyplumber.mixer import config as mc
+    with pytest.raises(mc.ConfigError, match="even"):
+        mc.parse({**RENDITION_CONFIG, "renditions": [{"id": "program", "target": "janus", **size}]})
+    # A rendition at the canvas size is not scaled, whatever the canvas size is.
+    odd = {**RENDITION_CONFIG, "canvas": {"width": 1081, "height": 1920, "fps": 30},
+           "renditions": [{"id": "program", "target": "janus"}]}
+    assert mc.parse(odd).renditions[0].width == 1081
+
+
 @pytest.mark.parametrize("sdr_codec,sdr_profile", [("h264_nvenc", "baseline"), ("hevc_nvenc", "main")])
 def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path, sdr_codec, sdr_profile):
     doc = {**CONFIG, "sources": CONFIG["sources"][:1], "scenes": CONFIG["scenes"][:1],

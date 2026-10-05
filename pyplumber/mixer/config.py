@@ -402,6 +402,10 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
         raise ConfigError(f"{where}: feed must be one of {FEEDS}")
     if rendition.width <= 0 or rendition.height <= 0:
         raise ConfigError(f"{where}: width and height must be positive")
+    if (rendition.width, rendition.height) != (canvas_w, canvas_h) and (rendition.width % 2 or rendition.height % 2):
+        # cuda_transform places the picture on the chroma grid; an odd size would leave its last
+        # column or row black.
+        raise ConfigError(f"{where}: a size other than the canvas needs an even width and height")
     if rendition.fps <= 0 or rendition.bitrate_kbps <= 0:
         raise ConfigError(f"{where}: fps and bitrate_kbps must be positive")
     if rendition.tonemap_peak < 2.03 or rendition.tonemap_desat < 0 or rendition.tonemap_param < 0:
