@@ -263,7 +263,7 @@ Build arguments of `Dockerfile.fedora44`:
 
 | Argument | Default | Purpose |
 | --- | --- | --- |
-| `WITH_TENSORRT` | `0` | `1` builds the drawing, tracking and reframing nodes (`NEURAL_NET=1`) and ships TensorRT in the runtime stage. avplumber itself no longer links TensorRT: inference nodes are out-of-tree. |
+| `WITH_TENSORRT` | `0` | `1` builds the drawing, tracking and reframing nodes (`NEURAL_NET=1 HAVE_TENSORRT=1`) and ships TensorRT in the runtime stage. avplumber itself no longer links TensorRT: inference nodes are out-of-tree, and only their Makefile fragments read `HAVE_TENSORRT` and `TENSORRT_ROOT`. |
 | `--secret id=tensorrt_url` | none | Required with `WITH_TENSORRT=1`: the URL of your tensorrt-minimal tgz, a TensorRT build for CUDA 13 with `bin/trtexec`, `include/`, the `libnvinfer*` and `libnvonnxparser` libraries, and a builder resource for each GPU (`sm75` T4, `sm89` L4). Passed as a build secret (`--secret id=tensorrt_url,env=TENSORRT_URL`), so it stays out of the image history. `.plan` engines are TensorRT-version and GPU specific and are mounted at run time. |
 | `CUDA_VERSION` | `13.4` | Must not exceed the host driver's CUDA version (13.4 needs R615). For an R595 host: `13.2` with `CUDA_REPO_URL` set to NVIDIA's fedora43 repository, `gcc15-c++` and `NVCC_PREPEND_FLAGS='-ccbin g++-15'` (nvcc 13.2 supports GCC up to 15). |
 | `CUDA_REPO_URL` | NVIDIA's fedora44 repository | Carries CUDA 13.3 and newer. |
