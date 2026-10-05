@@ -336,8 +336,10 @@ __device__ __forceinline__ float sample_alpha_tex(unsigned long long tex, int sx
 // weights each blended RGBA layer's alpha by its table `mul` (a key fade); only the
 // composite_planes_opacity entry sets it, so the other entries keep their code. kFilters=true
 // also draws layers whose table `filter` is not bilinear and DEMOTE layers; only the *_filter
-// entries set it.
-template <bool kRgb, int kLanes, bool kChroma, bool kOpacity = false, bool kArrays = false, bool kFilters = false>
+// entries set it. 1 compiles what the scaler's defaults use (the limited bilinear of DEMOTE, the
+// cubic at A = 0, 4 samples); 2 adds the 4x4 cubic and 8 samples, whose registers would
+// otherwise slow every path of the lean entries.
+template <bool kRgb, int kLanes, bool kChroma, bool kOpacity = false, bool kArrays = false, int kFilters = 0>
 __device__ __forceinline__ void composite_body(
     const AvpRectLayer *__restrict__ layers, int n,
     unsigned char *dst_y, int y_pitch, unsigned char *dst_uv, int uv_pitch,
@@ -403,12 +405,12 @@ __device__ __forceinline__ void composite_body(
                         draw_filtered<px, lanes>(acc, P, BilinearFilter(P, oy, ldh), X0, ldx, ldw, gain, maxv);
                     else if (L.filter == AVP_RECT_FILTER_BICUBIC_A0)
                         draw_filtered<px, lanes>(acc, P, CubicA0Filter(P, oy, ldh), X0, ldx, ldw, gain, maxv);
-                    else if (L.filter == AVP_RECT_FILTER_BICUBIC)
-                        draw_filtered<px, lanes>(acc, P, CubicFilter(P, oy, ldh, L.filter_param), X0, ldx, ldw, gain, maxv);
-                    else if (L.filter == AVP_RECT_FILTER_MULTISAMPLE8)
-                        draw_filtered<px, lanes>(acc, P, MultisampleFilter<8>(P, oy, ldw, ldh), X0, ldx, ldw, gain, maxv);
-                    else
+                    else if (L.filter == AVP_RECT_FILTER_MULTISAMPLE4)
                         draw_filtered<px, lanes>(acc, P, MultisampleFilter<4>(P, oy, ldw, ldh), X0, ldx, ldw, gain, maxv);
+                    else if (kFilters > 1 && L.filter == AVP_RECT_FILTER_BICUBIC)
+                        draw_filtered<px, lanes>(acc, P, CubicFilter(P, oy, ldh, L.filter_param), X0, ldx, ldw, gain, maxv);
+                    else if (kFilters > 1)
+                        draw_filtered<px, lanes>(acc, P, MultisampleFilter<8>(P, oy, ldw, ldh), X0, ldx, ldw, gain, maxv);
                     continue;
                 }
                 const RowTaps taps = row_taps(sy, sh, oy, ldh);
@@ -607,18 +609,19 @@ extern "C" __global__ void __launch_bounds__(256) composite_planes_opacity_array
 // Tables holding a layer with a filter other than bilinear or a DEMOTE layer. The host launches
 // these only for such tables, so every entry above keeps its code. A YUV or PROMOTE layer with
 // the bilinear filter draws here exactly as it does above.
-// Lean pair, the scaler's case: YUV/PROMOTE/DEMOTE layers only, linear or with arrays.
+// Lean pair, the scaler's case: YUV/PROMOTE/DEMOTE layers only, linear or with arrays, without
+// the 4x4 cubic and the 8 samples. The host never sends them a table holding one of those.
 extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv_filter(AVP_COMPOSITE_ARGS) {
-    if (blockIdx.z) composite_body<false, 2, true, false, false, true>(AVP_COMPOSITE_PASS);
-    else composite_body<false, 1, false, false, false, true>(AVP_COMPOSITE_PASS);
+    if (blockIdx.z) composite_body<false, 2, true, false, false, 1>(AVP_COMPOSITE_PASS);
+    else composite_body<false, 1, false, false, false, 1>(AVP_COMPOSITE_PASS);
 }
 extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv_array_filter(AVP_COMPOSITE_ARGS) {
-    if (blockIdx.z) composite_body<false, 2, true, false, true, true>(AVP_COMPOSITE_PASS);
-    else composite_body<false, 1, false, false, true, true>(AVP_COMPOSITE_PASS);
+    if (blockIdx.z) composite_body<false, 2, true, false, true, 1>(AVP_COMPOSITE_PASS);
+    else composite_body<false, 1, false, false, true, 1>(AVP_COMPOSITE_PASS);
 }
-// Everything else in one entry: packed-RGB layers, key fades (an opacity of 1 weights nothing)
-// and either storage next to a filtered layer.
+// Everything else in one entry: every filter, packed-RGB layers, key fades (an opacity of 1
+// weights nothing) and either storage.
 extern "C" __global__ void __launch_bounds__(256) composite_planes_filter(AVP_COMPOSITE_ARGS) {
-    if (blockIdx.z) composite_body<true, 2, true, true, true, true>(AVP_COMPOSITE_PASS);
-    else composite_body<true, 1, false, true, true, true>(AVP_COMPOSITE_PASS);
+    if (blockIdx.z) composite_body<true, 2, true, true, true, 2>(AVP_COMPOSITE_PASS);
+    else composite_body<true, 1, false, true, true, 2>(AVP_COMPOSITE_PASS);
 }

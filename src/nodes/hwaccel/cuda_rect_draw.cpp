@@ -280,7 +280,7 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
     waited_streams_.clear();
     if (array_textures_) array_textures_->begin();
     int n = 0;
-    bool any_rgb = false, any_fade = false, any_array = false, any_filter = false;
+    bool any_rgb = false, any_fade = false, any_array = false, any_filter = false, any_wide = false;
     for (const DrawOp &op : ops) {
         if (!op.src || !op.src->raw()) continue;
         if (n >= max_layers_)
@@ -297,6 +297,8 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
             logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
         // A demoted layer needs the filter entries' code limit whatever its filter.
         any_filter = any_filter || entry.filter != AVP_RECT_FILTER_BILINEAR || entry.kind == AVP_RECT_KIND_DEMOTE;
+        // The 4x4 cubic and the 8 samples are compiled into the full filter entry only.
+        any_wide = any_wide || entry.filter == AVP_RECT_FILTER_BICUBIC || entry.filter == AVP_RECT_FILTER_MULTISAMPLE8;
         // Not an error either; `auto` is not named here, it simply finds nothing to choose.
         const ScaleFilter asked = op.layer.filter.mode;
         if ((asked == ScaleFilter::Bicubic || asked == ScaleFilter::Multisample) &&
@@ -335,7 +337,7 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
                     &clear0_i, &clear1_i, &transfer, &sdr_white, &hdr_peak};
     // A table without a filtered or demoted layer takes the entries it always took.
     const CUfunction kernel = planes == 1 ? composite_packed_kernel_
-        : any_filter ? (any_rgb ? composite_filter_kernel_
+        : any_filter ? (any_rgb || any_wide ? composite_filter_kernel_
                         : any_array ? composite_yuv_array_filter_kernel_ : composite_yuv_filter_kernel_)
         : any_fade ? (any_array ? composite_opacity_array_kernel_ : composite_opacity_kernel_)
         : any_rgb ? (any_array ? composite_array_kernel_ : composite_kernel_)

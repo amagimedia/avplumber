@@ -347,6 +347,13 @@ static const Filter filters[] = {
     {"multisample 8", AVP_RECT_FILTER_MULTISAMPLE8, 0.f},
 };
 
+// The entry CudaRectDraw::draw launches for a table of YUV layers holding this filter: the lean
+// pair has the filters the scaler's defaults use, the full entry also the 4x4 cubic and 8 samples.
+static Kernel filterKernel(const Filter &filter, bool arrays) {
+    if (filter.code == AVP_RECT_FILTER_BICUBIC || filter.code == AVP_RECT_FILTER_MULTISAMPLE8) return composite_planes_filter;
+    return arrays ? composite_planes_yuv_array_filter : composite_planes_yuv_filter;
+}
+
 static void verifyFilters(const Frame &source, const Format &canvas_format) {
     for (const Filter &filter : filters) {
         Tally tally;
@@ -355,9 +362,9 @@ static void verifyFilters(const Frame &source, const Format &canvas_format) {
             const std::string what = std::string(source.format.name) + " -> " + canvas_format.name + ", " + filter.name + ", " + g.name;
             Canvas linear(canvas_format, 512, 288), arrays(canvas_format, 512, 288);
             const AvpRectLayer layer = entry(draw, canvas_format, false);
-            linear.draw(composite_planes_yuv_filter, {layer});
+            linear.draw(filterKernel(filter, false), {layer});
             compare(linear, layer, source, what, tally);
-            arrays.draw(composite_planes_yuv_array_filter, {entry(draw, canvas_format, true)});
+            arrays.draw(filterKernel(filter, true), {entry(draw, canvas_format, true)});
             if (arrays.pixels != linear.pixels) throw std::runtime_error(what + ": array and linear sources differ");
         }
         std::printf("PASS %s -> %s, %-16s %zu samples in %zu geometries: %zu on the other side of a rounding tie, "
@@ -418,7 +425,7 @@ static void verifyEntries(const Frame &left_source, const Frame &right_source, c
                  "full filter entry with a faded key");
 
         // A filtered (or demoted) layer on the left: the right half, key included, must not change,
-        // and the left half must be what the lean filter entry draws.
+        // and the left half must be what the entry for YUV-only tables draws.
         for (const Filter &filter : filters) {
             if (filter.code == AVP_RECT_FILTER_BILINEAR && !demoted) continue;
             Draw filtered_left = left;
@@ -426,7 +433,7 @@ static void verifyEntries(const Frame &left_source, const Frame &right_source, c
             filtered_left.param = filter.param;
             auto mixed = table({filtered_left, right}, canvas_format, arrays);
             Canvas lean(canvas_format, 512, 288), full(canvas_format, 512, 288), plain(canvas_format, 512, 288);
-            lean.draw(arrays ? composite_planes_yuv_array_filter : composite_planes_yuv_filter, mixed);
+            lean.draw(filterKernel(filter, arrays), mixed);
             mixed.push_back(key(0.4f));
             full.draw(composite_planes_filter, mixed);
             plain.draw(arrays ? composite_planes_opacity_array : composite_planes_opacity, faded);
@@ -530,11 +537,12 @@ static void timings(std::mt19937 &rng) {
             const std::string storage = arrays ? " array" : " linear";
             timeLayer(("1920x1080 p010 -> p010 1:1" + storage).c_str(), deep, P010, 1920, 1080,
                       arrays ? composite_planes_yuv_array : composite_planes_yuv, plain, arrays);
-            const Kernel kernel = arrays ? composite_planes_yuv_array_filter : composite_planes_yuv_filter;
-            timeLayer(("1920x1080 p010 -> nv12 1:1" + storage).c_str(), deep, NV12, 1920, 1080, kernel, filters[0], arrays);
+            timeLayer(("1920x1080 p010 -> nv12 1:1" + storage).c_str(), deep, NV12, 1920, 1080,
+                      filterKernel(filters[0], arrays), filters[0], arrays);
             for (const Filter &filter : filters)
                 if (filter.code == AVP_RECT_FILTER_BILINEAR || filter.code == AVP_RECT_FILTER_MULTISAMPLE4)
-                    timeLayer(("1920x1080 p010 -> nv12 640x360" + storage).c_str(), deep, NV12, 640, 360, kernel, filter, arrays);
+                    timeLayer(("1920x1080 p010 -> nv12 640x360" + storage).c_str(), deep, NV12, 640, 360,
+                              filterKernel(filter, arrays), filter, arrays);
         }
     }
     struct Case { const char *name; int sw, sh, cw, ch; };
@@ -546,8 +554,7 @@ static void timings(std::mt19937 &rng) {
                 timeLayer(label.c_str(), source, *format, c.cw, c.ch,
                           arrays ? composite_planes_yuv_array : composite_planes_yuv, plain, arrays);
                 for (const Filter &filter : filters)
-                    timeLayer(label.c_str(), source, *format, c.cw, c.ch,
-                              arrays ? composite_planes_yuv_array_filter : composite_planes_yuv_filter, filter, arrays);
+                    timeLayer(label.c_str(), source, *format, c.cw, c.ch, filterKernel(filter, arrays), filter, arrays);
             }
         }
 }

@@ -83,9 +83,10 @@ private:
     CUfunction composite_opacity_array_kernel_ = nullptr;
     // Tables with a layer whose filter is not bilinear or whose source is deeper than the canvas;
     // no other table reaches these.
+    // The first two hold what the scaler's defaults use (demotion, the cubic at A = 0, 4 samples).
     CUfunction composite_yuv_filter_kernel_ = nullptr;        // no packed-RGB layers, linear sources
     CUfunction composite_yuv_array_filter_kernel_ = nullptr;  // no packed-RGB layers, some arrays
-    CUfunction composite_filter_kernel_ = nullptr;            // any layer kind, fade and storage
+    CUfunction composite_filter_kernel_ = nullptr;            // any layer kind, fade, storage and filter
     bool opacity_warned_ = false;   // an op with opacity < 1 on a kind that cannot blend, logged once
     bool filter_warned_ = false;    // an op naming a filter on a kind drawn bilinear, logged once
     bool hdr_demote_warned_ = false; // a PQ/HLG source reduced to a shallower canvas, logged once
