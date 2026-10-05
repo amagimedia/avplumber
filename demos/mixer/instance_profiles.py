@@ -47,7 +47,7 @@ INSTANCE_PROFILES = {
         # NV12 = 1 unit, P010 = 2 (twice the bytes, not measured). 30 and 34 with pinned uploads at
         # 25 and 30 fps; 17 at 60 (1020 frames/s), scaled by frame rate to 20 at 50.
         "raw_upload_units": {25: 30, 30: 34, 50: 20, 60: 17},
-        # HLG v210 4:2:2 inputs, unpacked on the GPU (the 60 fps 4:2:2 limit was measured with four).
+        # Combined SDR/HLG v210 inputs, unpacked on the GPU (the 60 fps limit was measured with four).
         "hlg_v210": 4,
         # NVENC share of one 1920x1080 encode per encoded frame/s (the cost follows the pixel count),
         # by codec and preset: the offered presets are the h264 keys. Extra aux outputs fill what the
@@ -76,6 +76,7 @@ INSTANCE_PROFILES = {
     # 25 fps keeps the 30 fps numbers; 50 fps scales the 60 fps decodes and uploads by frame rate
     # (not measured).
     InstanceType.NVIDIA_L4: {
+        "max_scenes": 256,
         # SDR canvas, keys included: 170 at 30 fps (83 NVDEC, 40 browser, 47 NV12), where the CPU is
         # the limit (46% idle), and 100 at 60 (41, 40, 19; CPU 47% idle) less the decode below.
         "sources": {25: 170, 30: 170, 50: 110, 60: 99},
@@ -84,27 +85,44 @@ INSTANCE_PROFILES = {
         # H.264: 83 decodes at 30 fps ran NVDEC at 88-89%; 41 at 60 fps ran it at 91% beside 15 and
         # beside 19 uploads, so 40.
         "nvdec_decodes": {25: 83, 30: 83, 50: 48, 60: 40},
+        # Main10 surfaces use more VRAM: bound their count even when NVDEC has throughput left.
+        "nvdec_hdr_decodes": {25: 53, 30: 53, 50: 32, 60: 27},
         "browser_windows": 40,
         "raw_upload_units": {25: 47, 30: 47, 50: 22, 60: 19},   # NV12 = 1, P010 = 2
         # Beside 44 decodes and the browsers at 60 fps (88 inputs): NVDEC 84%, GPU 75%. Eight ran
         # NVDEC at 86% and the GPU at 81%, 98% while cutting.
         "hlg_v210": 4,
         "mode_limits": {
+            # Full 256-scene cuts at 25 fps need margin below 30 outputs; 30/50 fps
+            # retain the conservative count of the neighboring validated rate.
+            "8:420": {"nvenc_max_outputs": {25: 26, 30: 26, 50: 22, 60: 22}},
             # Half the decodes of an HLG canvas are HEVC Main10, which loads NVDEC less than H.264:
             # 48 at 60 fps beside the browsers (88 inputs) ran it at 89-91%, 44 at 78%, 52 at 98%
             # (gate failed). No raw upload fits beside them. The 25/30 fps counts scale the 60 fps
             # ones by frame rate (not measured).
             "10:420": {"nvdec_decodes": {25: 96, 30: 96, 50: 57, 60: 48},
-                       "raw_upload_units": {25: 0, 30: 0, 50: 0, 60: 0}},
+                       "raw_upload_units": {25: 0, 30: 0, 50: 0, 60: 0},
+                       # 88 sources and 13 extra AUX passed the 60 fps cut test with zero
+                       # misses; 15 missed two deadlines. Presets match the 4:2:2 test below.
+                       "nvenc_budget_pct": {60: 75},
+                       "nvenc_max_outputs": {25: 20, 30: 20, 50: 18, 60: 18}},
             # NVDEC decodes 4:2:0 only, so a 4:2:2 canvas takes its native 4:2:2 inputs as v210
             # uploads (hlg_v210) and no 4:2:0 upload; four decodes make room for them.
             "10:422": {"nvdec_decodes": {25: 88, 30: 88, 50: 52, 60: 44},
-                       "raw_upload_units": {25: 0, 30: 0, 50: 0, 60: 0}},
+                       "raw_upload_units": {25: 0, 30: 0, 50: 0, 60: 0},
+                       # 88 sources, SDR p5 / HLG and AUX p3: 15 extra AUX missed deadlines
+                       # on cuts; 12 held 60 fps, zero misses and 34-48 ms encoded cut latency.
+                       # This modeled budget reserves the measured margin at 60 fps.
+                       "nvenc_budget_pct": {60: 70},
+                       "nvenc_max_outputs": {25: 20, 30: 20, 50: 17, 60: 17}},
         },
         # Not measured per preset: the T4's costs over 2.2 (two NVENC engines). The full outputs'
         # totals agree within 5 points: 22% on SDR at 30 fps, 30% at 60, 49% on HLG at 60.
         "nvenc": {
             "budget_pct": 80,
+            # Largest validated output count; mode/rate limits may lower this ceiling to
+            # reserve memory for input frames. Faster presets cannot bypass either limit.
+            "max_outputs": 30,
             "pct_per_fps": {
                 "h264": {"p1": 0.093, "p3": 0.100, "p5": 0.212},
                 "hevc": {"p1": 0.070, "p3": 0.139, "p5": 0.201},

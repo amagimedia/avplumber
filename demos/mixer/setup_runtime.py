@@ -9,6 +9,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import select
 import shutil
 import signal
 import subprocess
@@ -20,7 +21,7 @@ from demo_recipe import allocate, validate_dsk, write_atomic
 from extra_aux import extra_buses
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import janus_mountpoints
-from pyplumber.mixer.color import default_codec
+from pyplumber.mixer.color import TRANSFER_TAGS, default_codec
 from pyplumber.mixer.control import AvpProtocolError
 from pyplumber.mixer.aux_layout import parse_layout
 from pyplumber.mixer.config import ConfigError, aux_fps, aux_label, parse, parse_aux_buses
@@ -37,6 +38,7 @@ log = logging.getLogger("setup")
 # MixerApplication.stop), so this only bounds a hung stop. compose.yaml's stop_grace_period
 # covers it plus the reap and the setup worker join in close().
 STOP_TIMEOUT_SEC = 60
+FAILED_START_STOP_TIMEOUT_SEC = 10
 # /workers/recover answers once the affected browser workers have restarted, concurrently:
 # each stops (<= 5 s), boots Electron and reopens its pages four at a time, every open
 # bounded by the worker's 10 s request timeout.
@@ -74,16 +76,23 @@ def extra_aux_limit(profile, cfg, encodes):
     feed counts even while off, and an extra bus is a canvas-size H.264 encode at aux_fps, both at
     their preset in *encodes*. setup.html sums in the same order, so both round alike."""
     nvenc = profile["nvenc"]
+    mode = for_mode(profile, 8 if cfg.working_format == "nv12" else 10,
+                    "422" if cfg.working_format == "p210le" else "420")
     def share(width, height, fps, codec, preset):
         return fps * width * height / (1920 * 1080) * nvenc["pct_per_fps"]["hevc" if "hevc" in codec else "h264"][preset]
     encoded = [(r.width, r.height, r.fps, r.codec or default_codec(cfg.working_format), r.preset) for r in cfg.renditions]
     if not any(r.feed == "clean" for r in cfg.renditions):
         encoded.append((cfg.canvas_w, cfg.canvas_h, cfg.fps, "h264", encodes["sdr_clean"]["preset"]))
     encoded += [(r.width, r.height, r.fps, r.codec, r.preset) for b in cfg.aux_buses for r in b.renditions]
-    used, budget = sum(share(*e) for e in encoded), nvenc["budget_pct"]
+    used = sum(share(*e) for e in encoded)
+    budget = mode.get("nvenc_budget_pct", {}).get(cfg.fps, nvenc["budget_pct"])
+    max_outputs = mode.get("nvenc_max_outputs", {}).get(cfg.fps, nvenc.get("max_outputs", math.inf))
+    output_slots = max_outputs - len(encoded)
+    if output_slots < 0:
+        raise ValueError(f"The instance supports at most {max_outputs} encoded outputs, including programs")
     if used > budget:
         raise ValueError(f"The encodes need {used:.1f}% of NVENC, above its {budget}% budget: choose faster presets")
-    return min(30 - len(cfg.aux_buses), math.floor((budget - used) / share(
+    return min(output_slots, 30 - len(cfg.aux_buses), math.floor((budget - used) / share(
         cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps), "h264", encodes["extra"]["preset"])))
 
 
@@ -103,7 +112,9 @@ def current_settings(profile, settings):
     if not isinstance(encodes, dict) or len(encodes) > 64:
         raise ValueError("encodes must map at most 64 output ids to their preset and bitrate_kbps")
     defaults = profile["nvenc"]["defaults"]
-    scale = legacy / defaults["sdr"]["bitrate_kbps"] if type(legacy) is int else 1
+    # Bound a legacy integer before converting to float; JSON can carry arbitrarily large ints.
+    scale = (min(max(legacy, 0), profile["nvenc"]["bitrate_kbps"][1]) / defaults["sdr"]["bitrate_kbps"]
+             if type(legacy) is int else 1)
     programs = {o: {**e, "bitrate_kbps": _in_range(profile, round(e["bitrate_kbps"] * scale))}
                 for o, e in defaults.items() if o != "aux"}
     return {"extra_aux": 0, **{k: v for k, v in settings.items() if k not in ("browser_ring_size", "bitrate_kbps")},
@@ -130,7 +141,7 @@ def source_counts(profile, total, weights, fps=25, reserved_browsers=0):
     counts = allocate(total, weights)
     # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
     for indices, costs, limit, name in (
-            ((2,), (1,), profile["hlg_v210"], "HDR 4:2:2"),
+            ((2, 3), (1, 1), profile["hlg_v210"], "4:2:2 upload"),
             ((4,), (1,), profile["browser_windows"] - reserved_browsers, "Browser"),
             ((0, 1), (1, 1), profile["nvdec_decodes"][fps], "Combined NVDEC"),
             ((5, 6), (1, 2), profile["raw_upload_units"][fps], "Raw 4:2:0 upload units")):
@@ -163,7 +174,7 @@ def recipe_for(profile, settings):
                          ("bit_depth", (8, 10)),
                          ("chroma", ("420", "422")),
                          ("layout", ("balanced", "grids", "fullscreen"))):
-        if settings[key] not in choices:
+        if settings[key] not in choices or key in ("fps", "bit_depth") and type(settings[key]) is not int:
             raise ValueError(f"Unsupported {key}")
     dsk = settings["dsk"]
     validate_dsk(dsk, settings["clean_feed"])
@@ -173,7 +184,7 @@ def recipe_for(profile, settings):
     limit = source_limit(profile, settings["fps"], settings["bit_depth"], settings["chroma"]) - len(dsk)
     if type(settings["source_count"]) is int and settings["source_count"] > limit >= 1:
         settings = {**settings, "source_count": limit}
-    for key, maximum in (("source_count", limit), ("scene_count", 192)):
+    for key, maximum in (("source_count", limit), ("scene_count", profile.get("max_scenes", 192))):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError(f"{key} must be an integer from 1 to {maximum}")
@@ -199,6 +210,7 @@ def recipe_for(profile, settings):
         raise ValueError("4:2:0 mode supports 4:2:0 and browser sources only")
     counts = source_counts(for_mode(profile, settings["bit_depth"], settings["chroma"]), settings["source_count"],
                            weights, settings["fps"], len(dsk))
+    _check_hdr_decodes(profile, counts[1], settings["fps"])
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
@@ -241,6 +253,12 @@ def recipe_for(profile, settings):
     recipe["setup"] = settings
     recipe["layouts"] = layouts
     return recipe
+
+
+def _check_hdr_decodes(profile, count, fps):
+    maximum = profile.get("nvdec_hdr_decodes", {}).get(fps, math.inf)
+    if count > maximum:
+        raise ValueError(f"HDR NVDEC inputs are limited to {maximum} at {fps} fps to reserve VRAM")
 
 
 def _fits(cfg, spec):
@@ -337,9 +355,13 @@ class SetupRuntime:
         # Plan validation happens before stopping the live mixer or writing files.
         from prepare_demo import plan
         show, _, _ = plan(recipe, self.media_dir)
-        if settings is not None:
+        if settings is not None or isinstance(recipe.get("setup"), dict):
+            # Resume the saved input recipe, including its decoder/storage contracts, but
+            # reapply current output limits before restarting an older, larger setup.
+            recipe["setup"] = current_settings(self.profile, recipe["setup"])
             self._preserve_aux(recipe, show)
-            plan(recipe, self.media_dir)
+            show, _, _ = plan(recipe, self.media_dir)
+        self._validate_capacity(show, recipe.get("setup"))
         with self.lock:
             self._check_idle()
             self._cancel_retry()
@@ -432,7 +454,7 @@ class SetupRuntime:
                     bus.update(fields)
                     write_atomic(path, json.dumps(doc, indent=2) + "\n")
 
-    def _stop(self):
+    def _stop(self, timeout=STOP_TIMEOUT_SEC):
         with self.stop_lock:
             process = self.process
             if process and process.poll() is None:
@@ -441,7 +463,7 @@ class SetupRuntime:
                 with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGINT)
                 try:
-                    process.wait(timeout=STOP_TIMEOUT_SEC)
+                    process.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     log.warning("Mixer shutdown timed out; killing process before browser recovery")
                     with suppress(ProcessLookupError):
@@ -472,17 +494,26 @@ class SetupRuntime:
         shows = [json.loads(config.read_bytes()), previous_show or {}]
         self._recover_browsers(shows)
         self._close_removed_browsers(shows[1], shows[0])
-        try:
-            self._start(config)
-        except Exception:
-            self._stop()
-            # Disconnect/quarantine notification can arrive after the first
-            # status check. Retry only when a worker was actually recovered.
-            if self.closing.is_set() or not self._recover_browsers(shows):
-                raise
-            self._start(config)
+        for attempt in range(2):
+            try:
+                self._start(config)
+                break
+            except Exception:
+                self._stop(timeout=FAILED_START_STOP_TIMEOUT_SEC)
+                # Disconnect/quarantine notification can arrive after the first
+                # status check. Retry only when a worker was actually recovered.
+                if attempt or self.closing.is_set() or not self._recover_browsers(shows):
+                    raise
         # Every mixer that reached air is watched, a restored previous show included.
         threading.Thread(target=self._watch, args=(self.process,), daemon=True).start()
+
+    def _validate_capacity(self, show, settings=None):
+        """Saved and restored shows obey current limits without rewriting their input contracts."""
+        cfg = parse(show)
+        _check_hdr_decodes(self.profile, sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"])
+                                            for s in cfg.sources), cfg.fps)
+        encodes = current_settings(self.profile, settings or self.settings or {})["encodes"]
+        extra_aux_limit(self.profile, cfg, encodes)
 
     def _watch(self, process):
         started = time.monotonic()
@@ -538,16 +569,41 @@ class SetupRuntime:
 
     def _start(self, config):
         started = time.monotonic()
-        self.process = subprocess.Popen(
-            [sys.executable, "-u", str(DEMO_DIR / "mixer.py"), "--config", str(config),
-             "--remote-control-port", str(self.bridge.port), "--dmabuf-rest", self.browser_url,
-             *self.mixer_args], start_new_session=True)
-        log.info("Mixer process %s started", self.process.pid)
+        # Each explicit source has one normalization filter before shared fan-out.
+        # It must be running even when no scene currently consumes that source.
+        source_nodes = {f"mixer_color_{source['id']}" for source in json.loads(config.read_text())["sources"]}
+        read_fd, write_fd = os.pipe()
+        with os.fdopen(read_fd, "rb", buffering=0) as startup:
+            try:
+                self.process = subprocess.Popen(
+                    [sys.executable, "-u", str(DEMO_DIR / "mixer.py"), "--config", str(config),
+                     "--remote-control-port", str(self.bridge.port), "--dmabuf-rest", self.browser_url,
+                     *self.mixer_args], start_new_session=True, pass_fds=(write_fd,),
+                    env={**os.environ, "AVP_MIXER_STARTUP_FD": str(write_fd)})
+            finally:
+                os.close(write_fd)
+            log.info("Mixer process %s started", self.process.pid)
+            self._wait_started(source_nodes, startup, started)
+
+    def _wait_started(self, source_nodes, startup, started):
         deadline = time.monotonic() + 180
-        last_problem = "waiting for mixer control"
+        startup_complete = False
+        last_problem = "waiting for mixer startup"
         while not self.closing.wait(.5):
+            ready = False
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"Mixer startup timed out: {last_problem}")
+            if select.select([startup], [], [], 0)[0]:
+                error = startup.read(4000)
+                if error:
+                    raise RuntimeError("Mixer startup failed: " + error.decode(errors="replace"))
+                startup_complete = True
             if self.process.poll() is not None:
                 raise RuntimeError(f"Mixer exited during startup ({self.process.returncode}); see container logs")
+            # The native server also delays its greeting until setReady(). Wait on the
+            # child pipe so a control connection cannot hide an early startup failure.
+            if not startup_complete:
+                continue
             try:
                 state = self.bridge.state(timeout=30.0)
                 if not state.get("status", {}).get("pgm_scene"):
@@ -562,14 +618,19 @@ class SetupRuntime:
                         expected.add("janus_hdr_encoded")
                     expected.update(f"aux_{bid}_encoded" for bid in state.get("settings", {}).get("aux_buses", []))
                     encoded = {q["name"] for q in queues if q["enqueued_total"] > 0}
-                    if expected <= encoded:
-                        log.info("Mixer encoding in %.1f s", time.monotonic() - started)
-                        return
+                    ready = expected <= encoded
                     last_problem = "waiting for encoded output"
             except Exception as exc:
                 last_problem = f"{type(exc).__name__}: {exc}"
-            if time.monotonic() > deadline:
-                raise RuntimeError(f"Mixer startup timed out: {last_problem}")
+            if ready:
+                nodes = json.loads(self.bridge.command("nodes.json", timeout=60.0) or "[]")
+                working = {n["name"] for n in nodes if n["type"] == "filter_video" and n["working"]}
+                failed = source_nodes - working
+                if failed:
+                    raise RuntimeError("Source normalization not running: " + ", ".join(sorted(failed)) +
+                                       "; see container logs")
+                log.info("Mixer encoding in %.1f s", time.monotonic() - started)
+                return
         raise RuntimeError("Setup server is stopping")
 
     def _close_removed_browsers(self, old_show, new_show):
@@ -610,7 +671,8 @@ class SetupRuntime:
             previous = config.read_bytes() if had_previous else None
             # Complete missing assets while the old mixer continues to run.
             log.info("Preparing assets")
-            prepare(recipe, self.media_dir)
+            prepare(recipe, self.media_dir, progress=lambda done, total:
+                    self._status("preparing", f"Preparing assets… {done}/{total} ready."))
             log.info("Assets ready in %.1f s", time.monotonic() - started)
             if self.closing.is_set():
                 raise RuntimeError("Setup server is stopping")
@@ -620,7 +682,7 @@ class SetupRuntime:
             stopped = True
             recipe_show = json.loads(config.read_bytes())
             self._start_recovering(config, json.loads(previous or b"{}"))
-            if settings is not None:
+            if settings is not None or recipe != json.loads(self.recipe_path.read_text()):
                 write_atomic(self.recipe_path, json.dumps(recipe, indent=2) + "\n")
             self._mountpoints(recipe, prune=True)
             with self.lock:
@@ -641,6 +703,7 @@ class SetupRuntime:
                         # recover them a second time. The next Apply starts from a settled service.
                         message += "; the browser service is still busy, apply again when it settles."
                     elif stopped and not self.closing.is_set():
+                        self._validate_capacity(json.loads(previous))
                         self._start_recovering(config, recipe_show)
                         with self.lock:
                             self.revision += 1

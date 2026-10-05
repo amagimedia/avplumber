@@ -349,15 +349,20 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     return doc, jobs, allocation
 
 
-def prepare(recipe, media_dir: Path, *, runtime_media_dir=None, ffmpeg="ffmpeg") -> Path:
+def prepare(recipe, media_dir: Path, *, runtime_media_dir=None, ffmpeg="ffmpeg", progress=None) -> Path:
+    """Prepare cached assets; optional progress(completed, total) counts ready files."""
     media_dir = media_dir.resolve()
     doc, jobs, allocation = plan(recipe, media_dir, runtime_media_dir, ffmpeg)
     if not shutil.which(ffmpeg):
         raise ValueError(f"FFmpeg not found: {ffmpeg}")
     print("Independent sources: " + ", ".join(f"{name}={n}" for name, n in allocation.items()), flush=True)
     try:
-        for path, writer in jobs.items():
+        if progress:
+            progress(0, len(jobs))
+        for completed, (path, writer) in enumerate(jobs.items(), 1):
             ensure_asset(path, writer)
+            if progress:
+                progress(completed, len(jobs))
     finally:
         shutil.rmtree(media_dir / "assets" / HLG_PATTERNS, ignore_errors=True)
     config_path = media_dir / "mixer.demo.json"

@@ -42,6 +42,9 @@ class NativeEngine:
     def addNode(self, node):
         self.nodes[node.parameters["name"]] = node.parameters
 
+    def on_exception(self, name, kind, message):
+        pass
+
     def executeCommandsFromString(self, commands):
         for line in commands.splitlines():
             self.events.append(line)
@@ -62,8 +65,10 @@ class NativeEngine:
             getObject=lambda key: {"clips": [{"path": path, "frames": 120, "bytes": 1 << 20, "complete": True}
                                              for path in self.loaded_clips]})
 
-    def getEdge(self, name):
+    def getEdge(self, name, data_type=None):
         # Readiness is supplied by the engine boundary, never by the builder.
+        if name.endswith("_encoded"):
+            assert data_type == "packet", "readiness must not create a VideoFrame edge before the encoder"
         self.events.append("inspect " + name)
         return SimpleNamespace(occupied=0 if name in self.missing | self.drained else 1,
                                enqueued_total=0 if name in self.missing else 1)
@@ -112,6 +117,70 @@ def test_ready_requires_inputs_compositors_and_transition_prewarm(native_boundar
         assert transition_ready < restored < events.index("start output")
     assert events[-1] == "READY"
     assert engine.ready
+
+
+@pytest.mark.parametrize("phase", ["input", "transition"])
+def test_native_startup_error_aborts_without_waiting_for_frames(native_boundary, monkeypatch, phase):
+    app = application(native_boundary)
+    engine = app.avp
+    edge = app.input_edges[0] if phase == "input" else "mixer_trans_out"
+    engine.missing.add(edge)
+    received = []
+    original = engine.on_exception = lambda *args: received.append(args)
+    failure = ("mixer_color_camera0", "filter_video", "unsupported CUDA storage")
+    inspect = engine.getEdge
+    def get_edge(name, data_type=None):
+        if name == edge:
+            engine.on_exception(*failure)
+        return inspect(name, data_type)
+    monkeypatch.setattr(engine, "getEdge", get_edge)
+    monkeypatch.setattr("mixer.time.sleep", lambda _: None)
+    with pytest.raises(RuntimeError, match="mixer_color_camera0.*unsupported CUDA storage"):
+        app.start()
+    assert received == [failure]
+    assert engine.on_exception is original
+    assert not engine.ready
+
+
+def test_native_error_handler_restored_after_successful_start(native_boundary):
+    app = application(native_boundary)
+    received = []
+    original = app.avp.on_exception = lambda *args: received.append(args)
+    app.start()
+    assert app.avp.on_exception is original
+    failure = ("decoder", "dec_video", "later failure")
+    app.avp.on_exception(*failure)
+    assert received == [failure]
+    assert app._startup_error is None
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boundary, monkeypatch, failure):
+    app = application(native_boundary)
+    class Aux:
+        def __iter__(self):
+            return iter([SimpleNamespace(prefix="aux_test")])
+
+        def start(self):
+            app.avp.events.append("start aux_test")
+    app.aux_buses = Aux()
+    original = app.avp.on_exception
+    inspect = app.avp.getEdge
+    def get_edge(name, data_type=None):
+        if name == "aux_test_encoded" and failure:
+            app.avp.missing.add(name)
+            app.avp.on_exception("aux_test_encoder", "enc_video", "Cannot allocate memory")
+        return inspect(name, data_type)
+    monkeypatch.setattr(app.avp, "getEdge", get_edge)
+    monkeypatch.setattr("mixer.time.sleep", lambda _: None)
+    if failure:
+        with pytest.raises(RuntimeError, match="aux_test_encoder.*Cannot allocate memory"):
+            app.start()
+        assert not app.avp.ready
+    else:
+        app.start()
+        assert app.avp.events.index("inspect aux_test_encoded") < app.avp.events.index("READY")
+    assert app.avp.on_exception == original
 
 
 def test_cut_measurements_are_opt_in_and_enabled_after_encoder_start(native_boundary):
@@ -403,3 +472,39 @@ def test_existing_explicit_filter_sources_still_create_slot_filters(native_bound
     for slot in ("a", "b"):
         assert engine.nodes[f"mixer_cs_camera_{slot}"]["graph"] == graph + ",scale_cuda=format=nv12"
         assert engine.nodes[f"mixer_comp_{slot}"]["src"] == [f"mixer_camera_scaled_{slot}"]
+
+
+def test_startup_failure_is_reported_before_native_cleanup(monkeypatch):
+    import os
+    import mixer
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    monkeypatch.setenv("AVP_MIXER_STARTUP_FD", str(write_fd))
+    def start():
+        raise RuntimeError("aux_test_encoder: invalid preset")
+    def stop():
+        # A real native stop can hang here; the parent must already have the failure.
+        assert os.read(read_fd, 4000) == b"aux_test_encoder: invalid preset"
+        assert "AVP_MIXER_STARTUP_FD" not in os.environ
+    app = SimpleNamespace(start=start, stop=stop)
+    monkeypatch.setattr(mixer, "parse_args", lambda _: SimpleNamespace(webui_url=""))
+    monkeypatch.setattr(mixer, "build_application", lambda _: app)
+    try:
+        with pytest.raises(RuntimeError, match="aux_test_encoder: invalid preset"):
+            mixer.main([])
+    finally:
+        os.close(read_fd)
+
+
+def test_successful_start_closes_private_setup_pipe(monkeypatch):
+    import os
+    import mixer
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    monkeypatch.setenv("AVP_MIXER_STARTUP_FD", str(write_fd))
+    mixer._startup_result()
+    try:
+        assert os.read(read_fd, 4000) == b""
+        assert "AVP_MIXER_STARTUP_FD" not in os.environ
+    finally:
+        os.close(read_fd)

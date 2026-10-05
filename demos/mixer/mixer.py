@@ -8,12 +8,13 @@ path; use ``tui.py`` to preview and take scenes manually.
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 import json
 import logging
+import os
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 
 from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS, default_codec, hdr_metadata, rendition_color
@@ -178,6 +179,11 @@ class MixerApplication:
     wipe_cache_mb: float = 640.0            # hold decoded wipes in GPU memory
     cut_latency_encoder: str = ""
     prewarm_cut_scenes: tuple[str, ...] = ()
+    _startup_error: str | None = field(default=None, init=False, repr=False)
+
+    def _check_startup(self) -> None:
+        if self._startup_error:
+            raise RuntimeError(self._startup_error)
 
     def _preload_wipes(self) -> None:
         """Decode every wipe once into GPU memory (see pyplumber.mixer.clipcache).
@@ -200,6 +206,7 @@ class MixerApplication:
             deadline = started + self.preheat_timeout_sec
             held = None
             while time.monotonic() < deadline:
+                self._check_startup()
                 try:
                     status = self.avp.node(cache_node).getObject("status")
                 except Exception:
@@ -217,10 +224,11 @@ class MixerApplication:
             if not held:
                 raise RuntimeError(f"wipe clip did not cache within the preheat timeout: {clip}")
 
-    def _wait_for_edges(self, edges: tuple[str, ...], phase: str) -> None:
+    def _wait_for_edges(self, edges: tuple[str, ...], phase: str, data_type: str | None = None) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
         while True:
-            missing = [edge for edge in edges if self.avp.getEdge(edge).enqueued_total == 0]
+            self._check_startup()
+            missing = [edge for edge in edges if self.avp.getEdge(edge, data_type).enqueued_total == 0]
             if not missing:
                 return
             if time.monotonic() >= deadline:
@@ -233,11 +241,27 @@ class MixerApplication:
     def _wait_for_node(self, name: str) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
         while not self.avp.node(name).isWorking:
+            self._check_startup()
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"mixer preheat timed out starting node {name}")
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
 
     def start(self) -> None:
+        # Control requests wait for setReady(), so Setup cannot inspect failed nodes
+        # while preheating. Abort here on the native error instead of waiting for frames.
+        original = self.avp.on_exception
+        self._startup_error = None
+        def failed(name, kind, message):
+            if self._startup_error is None:
+                self._startup_error = f"Mixer startup failed at {name} ({kind}): {message}"
+            original(name, kind, message)
+        self.avp.on_exception = failed
+        try:
+            self._start()
+        finally:
+            self.avp.on_exception = original
+
+    def _start(self) -> None:
         started = time.monotonic()
         for group in self.input_groups:
             self.avp.group(group).startNodes()
@@ -282,9 +306,11 @@ class MixerApplication:
         if self.prewarm_cut_scenes:
             scenes = self.mixer.scenes() if self.prewarm_cut_scenes == ("*",) else list(self.prewarm_cut_scenes)
             self.avp.executeCommandsFromString("mixer.prewarm " + json.dumps({"mixer": MIXER_NAME, "scenes": scenes}))
-        self.avp.setReady()
         if self.aux_buses:
             self.aux_buses.start()
+            self._wait_for_edges(tuple(f"{bus.prefix}_encoded" for bus in self.aux_buses), "auxiliary output", "packet")
+        self._check_startup()
+        self.avp.setReady()
         log.info("Generic mixer preheat complete: compositors and transition ready in %.1f s",
                  time.monotonic() - started)
 
@@ -866,10 +892,23 @@ def main(argv: list[str] | None = None) -> None:
         _run_application(application, options)
     except KeyboardInterrupt:
         return
+    except Exception as exc:
+        _startup_result(str(exc))
+        raise
     finally:
         application.stop()
     # Nothing is on air any more; a supervisor (setup_runtime) restarts the mixer on this exit.
     sys.exit("Mixer graph shut down after a node failure (auto_restart panic); exiting")
+
+
+def _startup_result(error=None):
+    # Setup must see a startup failure even if native graph cleanup subsequently hangs.
+    fd = os.environ.pop("AVP_MIXER_STARTUP_FD", None)
+    if fd is not None:
+        with suppress(OSError):
+            if error:
+                os.write(int(fd), error.encode()[:4000])
+            os.close(int(fd))
 
 
 def _run_application(application: MixerApplication, options: GraphOptions) -> None:
@@ -877,6 +916,7 @@ def _run_application(application: MixerApplication, options: GraphOptions) -> No
     if options.webui_url:
         application.avp.registerWithWebUI(options.webui_url, "mixer", "")
     application.start()
+    _startup_result()
     targets = []
     if options.output:
         targets.append(options.output)

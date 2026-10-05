@@ -168,7 +168,7 @@ a 60 Hz rhythm that does not divide into a 50 fps grid. The program met every de
 
 The browser service defaults to five workers with eight windows each (40 total); the setup
 allows all 40 at every rate, downstream-key pages included.
-The setup allows 192 scenes; scenes describe layouts and do not each allocate a
+The T4 profile allows 192 scenes; the L4 profile allows 256. Scenes describe layouts and do not each allocate a
 running compositor. Active layers and AUX outputs have separate limits.
 
 ### NVENC and extra aux outputs
@@ -302,6 +302,118 @@ This locates a recovery boundary for this test, not an exact universal maximum
 between 105 and 110 sources.
 
 ## NVIDIA L4 (`nvidia_l4`)
+
+<!-- L4-CAPACITY-2026-10-05:BEGIN -->
+### CUarray reconfiguration and output capacity, 2026-10-05
+
+The [L4 capacity JSON](capacity-l4.json) records the current FFmpeg development build
+with direct CUarray decode, fixed `extra_hw_frames: 12` pools and three-frame decoded queues.
+These are 1920×1080 sources on one L4 / g2-standard-16. Program renditions run at the
+canvas rate; AUX outputs run at 25 fps for a 25 fps show and 30 fps for a 60 fps show.
+Totals include four browser keys. HDR 4:2:2 uses a P210 canvas and native v210 inputs;
+the L4 HEVC inputs in this test are 4:2:0.
+
+| Mode | Inputs / scenes | Extra AUX / total outputs | Observation | Missed deadlines / output drops | Result |
+| --- | ---: | ---: | --- | ---: | --- |
+| HLG 4:2:0, 25 fps | 136 / 128 | 25 / 30 | 30 s cuts | 0 / 0 | zero-miss observation |
+| HLG 4:2:0, 25 fps | 136 / 256 | 15 / 20 | 80 s cuts | 0 / 0 | zero-miss observation |
+| HLG 4:2:0, 25 fps | 136 / 128 | 25 / 30 | 20 s steady | 0 / 0 | zero-miss observation |
+| HLG 4:2:0, 60 fps | 88 / 128 | 13 / 18 | 30 s cuts | 0 / 0 | zero-miss observation |
+| HLG 4:2:0, 60 fps | 88 / 128 | 15 / 20 | 30 s cuts | 2 / 0 | gate not met |
+| HLG 4:2:0, 60 fps | 88 / 256 | 13 / 18 | 80 s cuts | 1 / 0 | gate not met |
+| HLG 4:2:0, 60 fps | 88 / 128 | 15 / 20 | 20 s steady | 0 / 0 | zero-miss observation |
+| HLG 4:2:2, 25 fps | 132 / 256 | 15 / 20 | 30 s cuts | 0 / 0 | zero-miss observation |
+| HLG 4:2:2, 25 fps | 132 / 128 | 25 / 30 | 20 s steady | 0 / 0 | zero-miss observation |
+| HLG 4:2:2, 60 fps | 88 / 128 | 12 / 17 | 30 s cuts | 0 / 0 | zero-miss observation |
+| HLG 4:2:2, 60 fps | 88 / 128 | 15 / 20 | 30 s cuts | 51 / 0 | gate not met |
+| HLG 4:2:2, 60 fps | 88 / 128 | 15 / 20 | 20 s steady | 4 / 0 | gate not met |
+| SDR 4:2:0, 25 fps | 192 / 256 | 22 / 26 | 80 s cuts | 0 / 1 | gate not met |
+| SDR 4:2:0, 25 fps | 192 / 256 | 22 / 26 | 80 s cuts | 0 / 0 | zero-miss observation |
+| SDR 4:2:0, 25 fps | 192 / 128 | 26 / 30 | 30 s cuts | 0 / 0 | zero-miss observation |
+| SDR 4:2:0, 25 fps | 192 / 256 | 26 / 30 | 80 s cuts | 693 / 856 | gate not met |
+| SDR 4:2:0, 60 fps | 99 / 128 | 18 / 22 | 30 s cuts | 0 / 0 | zero-miss observation |
+| SDR 4:2:0, 60 fps | 99 / 128 | 18 / 22 | 30 s cuts | 1 / 0 | gate not met |
+
+**256-scene coverage:** HLG 4:2:0 at 25 fps, 136 sources and
+20 outputs completed 80 seconds with all 256 scenes requested,
+256 successful cut requests and 0 failed requests. The capture had zero missed
+deadlines, output drops or stalled captured edges; VRAM peaked at 21463 MiB.
+
+**256-scene coverage:** SDR 4:2:0 at 25 fps, 192 sources and
+26 outputs completed 80 seconds with all 256 scenes requested,
+256 successful cut requests and 0 failed requests. The capture had zero missed
+deadlines, output drops or stalled captured edges; VRAM peaked at 19295 MiB.
+
+The 192-input SDR25 show with 30 outputs passed an earlier six-cut probe but failed
+the full 256-scene sweep: 693 missed deadlines across program/AUX timelines,
+856 AUX output drops and NVENC p95 of 100%. At 26 outputs the first sweep had one
+AUX drop; the repeat completed all 256 requests with zero missed deadlines or drops.
+Both observations are retained. The SDR output ceiling is now 26 at 25/30 fps and
+22 at 50/60 fps; 30/50 fps values remain derived rather than newly tested.
+
+
+The final HLG 4:2:0 / 60 fps sweep used 88 sources, 18 outputs and all 256 scenes.
+It recorded 1 missed deadline and 0 output drops, with no stalled captured edges.
+Decoder and program rates stayed near 60 fps and AUX rates near 30 fps, but this
+**did not meet the zero-miss gate**. No further sweep was run before handoff.
+
+
+Configured admission limits also bound 10-bit NVDEC input count and total encoded outputs:
+
+| fps | Maximum 10-bit NVDEC inputs | SDR outputs | HLG 4:2:0 outputs | HLG 4:2:2 outputs | Evidence |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 25 | 53 | 26 | 20 | 20 | specific combinations measured here |
+| 30 | 53 | 26 | 20 | 20 | derived; not tested in this update |
+| 50 | 32 | 22 | 18 | 17 | derived; not tested in this update |
+| 60 | 27 | 22 | 18 | 17 | specific combinations measured here |
+
+These are configuration guards, not measurements of every allowed combination. The largest
+10-bit decode counts in completed zero-miss captures here are 53 at 25 fps and 26 at 60 fps;
+the configured 27-input 60 fps bound was not directly exercised. The 30/50 fps settings are
+derived and have no completed captures in this update.
+
+
+The initial 30-second, six-cut HDR60 probes passed with 13 extra AUX (18 total outputs) at 4:2:0 and
+12 extra AUX (17 total) at 4:2:2. The earlier 15-extra-AUX setting missed 2 and 51
+deadlines respectively during cuts, despite finishing startup. The setup now reserves
+more encoding headroom for HDR. Steady observations and cut tests are identified separately;
+none is a long soak. SDR runs are listed separately, including
+the first one-miss 60 fps result; a later passing run does not invalidate that observation.
+
+The JSON includes measured decoder and encoder rates, CPU and GPU statistics, VRAM,
+power, counter deltas and cut latency. Expected rates are labelled separately. Cut events
+are deduplicated across samples, with pre-existing events excluded. Browser freshness is
+not covered by the captured queue counters; encoded output alone cannot prove every source is fresh.
+Missed deadlines sum independent program and AUX timelines. An encoder can retain its target
+FPS by repeating after backpressure; the gate also requires zero output drops.
+
+Preparation and restart timings are separate in the JSON. Uncached assets are prepared
+while the previous show runs. The restart pauses output; the reported restart-to-ready
+interval comes from setup polling and is not a measured browser blackout duration.
+
+Startup failures are recorded separately from completed captures. The source mix matters:
+a balanced HDR show passing does not qualify the same count of native HDR decodes.
+
+| Failed configuration | Scenes | Intended outputs | Observed VRAM | Result |
+| --- | ---: | ---: | ---: | --- |
+| HLG 25 fps: 96 HLG HEVC + 0 SDR HEVC + 40 browser | 128 | 25 | 22643 MiB | NVENC initialization out of memory |
+| HLG 25 fps: 96 HLG HEVC + 0 SDR HEVC + 40 browser | 256 | 15 | 22637 MiB | NVENC initialization out of memory |
+
+The failed startup snapshot is not a sampled peak or a successful capacity result.
+The 43-SDR / 53-HLG / 40-browser show completed the 25 fps cut test with 30 outputs
+and a sampled VRAM maximum of 22002 MiB; changing all 96 decodes to HLG exhausted
+startup headroom even with only 25 intended outputs. Automatic rollback to the previous
+balanced 136-input / 30-output show also ran out of memory and required a manual
+container stop. A second attempt with 256 scenes and only 15 intended outputs
+also failed at encoder initialization; immediate graph shutdown then blocked in
+native code, requiring another manual stop. Those failed configurations do not validate
+automatic recovery; the later balanced 256-scene pass is a separate configuration.
+Completed steady and cut captures do not cover all startup or
+rollback allocation transients.
+
+<!-- L4-CAPACITY-2026-10-05:END -->
+
+### Earlier measurements, 2026-10-02
 
 One L4 (two NVENC and four NVDEC engines, 24 GiB) on a GCP g2-standard-16 (16 vCPU), measured
 2026-10-02. Every show ran the full outputs: the program at p5 (H.264, plus HEVC Main10 on an HLG

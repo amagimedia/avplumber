@@ -163,7 +163,7 @@ let extraAux=0, typedSources=null, atDefaults=true;
 const limits=()=>({...profile,...profile.mode_limits?.[$('mode').value]});
 const browserLimit=()=>limits().browser_windows, nvdecLimit=fps=>limits().nvdec_decodes[fps], rawUploadUnits=fps=>limits().raw_upload_units[fps];
 const sourceBudgets=()=>[
- [[2],[1],limits().hlg_v210,'HDR 4:2:2'],[[4],[1],browserLimit()-dskPages().length,'Browser'],
+ [[2,3],[1,1],limits().hlg_v210,'4:2:2 upload'],[[4],[1],browserLimit()-dskPages().length,'Browser'],
  [[0,1],[1,1],nvdecLimit(Number($('fps').value)),'Combined NVDEC'],
  [[5,6],[1,2],rawUploadUnits(Number($('fps').value)),'Raw 4:2:0 upload units']
 ];
@@ -248,10 +248,13 @@ function update(){
  outputs.forEach(o=>encodes[o.id]??=defaultEncode(o.id));
  const shown=outputs.filter(o=>o.id!=='sdr_clean'||clean),rows=shown.map(encodeRow);
  if(rows.length!==$('encodes').children.length||rows.some((row,i)=>$('encodes').children[i]!==row))$('encodes').replaceChildren(...rows);
- const {budget_pct:budget,pct_per_fps,bitrate_kbps:[low,high]}=profile.nvenc;
+ const {pct_per_fps,bitrate_kbps:[low,high]}=profile.nvenc;
+ const budget=limits().nvenc_budget_pct?.[fps]??profile.nvenc.budget_pct;
+ const maxOutputs=limits().nvenc_max_outputs?.[fps]??profile.nvenc.max_outputs??Infinity;
+ const outputSlots=maxOutputs-outputs.filter(o=>o.id!=='extra').length;
  const share=(o,preset=encodes[o.id].preset)=>o.fps*pct_per_fps[o.codec][preset];
  const extra=outputs.find(o=>o.id==='extra'),used=outputs.reduce((n,o)=>o===extra?n:n+share(o),0),over=used>budget;
- extraLimit=extra&&!over?Math.max(0,Math.min(30-auxBuses.length,Math.floor((budget-used)/share(extra)))):0;
+ extraLimit=extra&&!over?Math.max(0,Math.min(outputSlots,30-auxBuses.length,Math.floor((budget-used)/share(extra)))):0;
  const reduced=Number(extraAux)>extraLimit;
  $('aux-adjustment').hidden=!reduced;
  $('aux-adjustment').textContent=reduced?`Extra AUX automatically reduced from ${extraAux} to ${extraLimit} to fit this setup.`:'';
@@ -259,7 +262,7 @@ function update(){
  if(extra){$('extra-aux').max=extraLimit;if($('extra-aux').value!==String(extraAux))$('extra-aux').value=extraAux;}
  const total=used+(extra?share(extra)*(Number(extraAux)||0):0),nvenc=`NVENC ${Math.round(total)}% of ${budget}%`;
  const percent=n=>n<10?`${n.toFixed(1)}%`:`${Math.round(n)}%`;
- let invalid='';
+ let invalid=outputSlots<0?`The instance supports at most ${maxOutputs} encoded outputs, including programs.`:'';
  shown.forEach((o,i)=>{
   const [name,detail]=rows[i].querySelectorAll('b,small'),mbps=Number(rows[i].querySelector('.mbit').value);
   name.textContent=o.name;
@@ -278,9 +281,12 @@ function update(){
  $('nvenc-note').classList.toggle('error',over);
  $('nvenc-note').textContent=over?`Over budget: ${nvenc}. ${lower?`Lower ${lower.name} to ${preset}.`:'Choose faster presets.'}`
    :`${nvenc}${clean?'':' (clean feed counted while off)'} · `+(!extra?'extra aux need webui.py --janus-api':free>0?`${free} more extra aux fit${free===1?'s':''}`:'no more extra aux fit');
- if(Number($('scenes').value)>192)$('scenes').value=192;
- const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,192);
+ const maxScenes=profile.max_scenes??192;
+ $('scenes').max=maxScenes;
+ if(Number($('scenes').value)>maxScenes)$('scenes').value=maxScenes;
+ const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,maxScenes);
  const counts=sourceCounts(sourceCount,foldForMode([...BALANCED])),[sourceWidth,sourceHeight]=[1920,1080];
+ if(counts[1]>(limits().nvdec_hdr_decodes?.[fps]??Infinity))throw Error(`HDR NVDEC inputs are limited to ${limits().nvdec_hdr_decodes[fps]} at ${fps} fps to reserve VRAM.`);
  sourceGroups.forEach(([,indices],k)=>{
   indices.forEach(i=>{const count=$(`count-${types[i].id}`);count.textContent=counts[i];count.parentElement.hidden=!counts[i];});
   groups[k].hidden=indices.every(i=>!counts[i]);

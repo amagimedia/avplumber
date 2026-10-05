@@ -218,6 +218,8 @@ const { chromium } = require('playwright');
     // mix, NVDEC and the browser windows full, v210 the only upload on 4:2:2 and none on 4:2:0.
     instanceType = 'nvidia_l4';
     await reset();
+    await page.locator('#scenes').fill('257');
+    assert.equal((await apply()).scene_count,256,'only L4 exposes the validated 256-scene limit');
     assert.match(await text('source-limit'), /^Maximum 88 .* measured on nvidia_l4\.$/);
     assert.deepEqual((await apply()).weights, [22, 22, 4, 0, 40, 0, 0]);
     await page.locator('#mode').selectOption('10:420');
@@ -233,15 +235,38 @@ const { chromium } = require('playwright');
       encodes: {...defaults, sdr: encode('p5', 6), mv: encode('p3', 4), mv2: encode('p3', 4), extra: encode('p3', 4)}});
     await page.locator('#fps').selectOption('60');
     await page.locator('#mode').selectOption('10:420');
-    assert.equal(await extraAux.inputValue(), '15');
-    assert.match(await text('aux-adjustment'), /automatically reduced .* to 15/);
+    assert.equal(await extraAux.inputValue(), '13');
+    assert.match(await text('aux-adjustment'), /automatically reduced .* to 13/);
+    assert.match(await text('nvenc-note'), /^NVENC 72% of 75%/);
     assert.equal(await text('error'), '');
-    assert.equal((await apply()).extra_aux, 15);
+    assert.equal((await apply()).extra_aux, 13);
+    await page.locator('#mode').selectOption('10:422');
+    assert.equal(await extraAux.inputValue(), '12');
+    assert.match(await text('aux-adjustment'), /automatically reduced .* to 12/);
+    assert.match(await text('nvenc-note'), /^NVENC 69% of 70%/);
+    const hdr422=await apply();
+    assert.equal(hdr422.extra_aux, 12);
+    assert.equal(hdr422.encodes.sdr.preset, 'p5', 'budget changes preserve operator presets');
+    await page.locator('#fps').selectOption('30');
+    assert.match(await text('nvenc-note'), /^NVENC .* of 80%/);
     await page.locator('#mode').selectOption('8:420');
     await page.locator('#fps').selectOption('25');
     await defaultsButton.click();
     await extraAux.fill('30');
-    assert.equal((await apply()).extra_aux, 28, 'two fixed buses leave 28 of the 30 bus slots');
+    assert.equal((await apply()).extra_aux, 22, 'program and reserved clean feed plus two fixed buses leave 22 of 26 outputs');
+    for(const mode of ['10:420','10:422']){
+      await page.locator('#mode').selectOption(mode);
+      for(const [fps,maximum] of [[25,15],[30,15],[50,mode==='10:420'?13:12],[60,mode==='10:420'?13:12]]){
+        await page.locator('#fps').selectOption(String(fps));
+        await extraAux.fill('30');
+        const setup=await apply();
+        assert.equal(setup.extra_aux,maximum,`${mode} at ${fps} keeps VRAM output margin even with fast presets`);
+        assert.ok(setup.weights[1]<=profiles.nvidia_l4.nvdec_hdr_decodes[fps]);
+      }
+    }
+    const v210Error=await page.evaluate(()=>{try{sourceCounts(5,[0,0,0,1,0,0,0]);return '';}catch(error){return error.message;}});
+    assert.match(v210Error, /4:2:2 upload is limited to 4/);
+    assert.deepEqual(await page.evaluate(()=>sourceCounts(4,[0,0,1,1,0,0,0])), [0,0,2,2,0,0,0]);
     assert.deepEqual(errors, []);
     console.log('PASS: Balanced source counts, the maximum total, per-output encodes, NVENC budget and extra aux outputs');
   } finally {

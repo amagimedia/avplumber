@@ -56,10 +56,15 @@ leaves the rest to the others.
 
 The same page changes an existing instance: it prepares missing assets, restarts
 the mixer, then refreshes the control page and player. Output pauses during the
-restart. If startup fails, the service attempts to restore the previous show.
+restart. Readiness requires encoded program and AUX packets plus running source
+normalization; a live process alone is insufficient. Startup failures are reported
+before native cleanup, and the service attempts to restore the previous show.
+Preparation reports how many assets are ready and reuses cached files on later
+changes. Mount the writable media directory as Compose does; a separate file
+mount for `mixer.demo.json` prevents Setup from atomically replacing the show.
 
-**Restarts.** A stop asks every input group at once, so even a large show stops in
-seconds. The web UI process stops its mixer cleanly on `docker compose stop` or
+**Restarts.** A stop signals all input groups together. The web UI process stops
+its mixer cleanly on `docker compose stop` or
 `restart` (90 s grace), which releases browser frames instead of forcing a
 browser-worker restart. If the mixer exits on its own (a crash, or a node panic
 that shuts the graph down), the setup page shows the exit and restarts the same
@@ -119,7 +124,7 @@ or require cloud credentials, and an unconfigured price remains unavailable.
 The setup limits unique sources, downstream-key pages included, to what the 16 GiB
 NVIDIA T4 test host carries: **110 at 25 and 30 fps, 82 at 50 and 75 at 60 fps** on
 an SDR canvas and fewer on a 10-bit one, within per-type caps for NVDEC decodes,
-browser windows and raw uploads, and at most **192 scenes**;
+browser windows and raw uploads, and at most **192 scenes on T4 or 256 on L4**;
 [Source limits by mode and frame rate](docs/cookbook/source-limits.html) has every
 mode in one table, and the [capacity measurements](docs/capacity.md) the tested mixes.
 These numbers are the `tesla_t4` profile in `instance_profiles.py`, which Compose selects
@@ -130,7 +135,13 @@ The **Extra aux** count under **Outputs** adds that many monitor outputs after t
 aux buses, as many as the profile's [NVENC budget](docs/capacity.md#nvenc-and-extra-aux-outputs)
 leaves beside the other encodes, within 30 total AUX buses. A change to FPS, HDR or presets that
 lowers that maximum automatically lowers the count and shows the adjustment before Apply;
-the server applies the same limit. Each has
+the server applies the same limit. The L4's overall ceiling is 30 encoded outputs, programs and the
+reserved clean feed included (`nvenc.max_outputs`). A mode's `nvenc_max_outputs` table can lower
+that ceiling at particular rates; faster presets cannot bypass it. SDR is limited to 26 outputs
+at 25/30 fps and 22 at 50/60 fps. The full 256-scene SDR25 sweep saturated NVENC at
+30 outputs; the repeated 26-output sweep completed without missed deadlines or drops.
+The capacity report also retains the first 26-output run's single AUX drop. SDR and HLG v210 sources share
+the profile's 4:2:2 upload limit. Each AUX has
 up to five random layouts of 4 to 16 sources, the same for the same sources, and its RTP port
 pair after the highest in use (5016, 5020, … beside buses on 5008 and 5012). Its Janus
 Streaming mountpoint, whose ID is that port, is created through `webui.py --janus-api` (Compose
@@ -141,6 +152,17 @@ restart, **Apply setup** creates them again.
 An adopted explicit show can carry the recipe's `setup` metadata in `mixer.demo.json`.
 Its `extra_aux` count identifies the trailing managed buses; the preceding instance outputs
 remain fixed. Without that metadata all existing buses remain fixed.
+
+A profile can reserve more encoder margin for a canvas and rate with
+`mode_limits["10:422"]["nvenc_budget_pct"] = {60: 70}`; other rates use the normal budget.
+The initial L4 30-second, six-cut probes held 88 sources with 13 extra AUX in HDR
+4:2:0 and 12 in HDR 4:2:2; 15 extra AUX missed deadlines in both modes. Full-scene
+sweeps exercise more demanding layouts and can lower the admitted output count.
+The [L4 capacity results](docs/capacity.md#nvidia-l4-nvidia_l4) distinguish those
+probes, complete scene sweeps and startup failures. Setup applies both modeled
+encoder budgets and measured output ceilings without changing presets. The final HDR
+4:2:0 / 60 fps full-scene sweep at 18 outputs recorded one missed deadline and zero
+output drops; it did not meet the zero-miss gate.
 
 **Outputs** lists every encoded output: the H.264 program, the HEVC HLG program on a 10-bit
 canvas, the clean feed while it is on (counted even while off), each of the instance's own aux

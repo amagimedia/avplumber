@@ -569,7 +569,10 @@ class Handler(BaseHTTPRequestHandler):
                 size = int(self.headers.get("Content-Length", "0"))
                 if not 0 < size <= 4096 or self.headers.get_content_type() != "application/json":
                     raise ValueError("Expected a JSON setup request of at most 4096 bytes")
-                self.setup_manager.apply(json.loads(self.rfile.read(size)))
+                settings = json.loads(self.rfile.read(size))
+                if not isinstance(settings, dict):
+                    raise ValueError("Expected a JSON setup object")
+                self.setup_manager.apply(settings)
                 self._send_json(202, self.setup_manager.status())
             except (ValueError, KeyError, TypeError) as exc:
                 self._send_json(400, {"error": str(exc)})

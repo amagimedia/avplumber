@@ -11,7 +11,7 @@ from instance_profiles import INSTANCE_PROFILES, InstanceType
 import prepare_demo
 from pyplumber.mixer.aux_layout import draws_program
 from pyplumber.mixer.config import MAX_SOURCES, parse
-from setup_runtime import (DEFAULT_SETTINGS, HEALTHY_RUN_SEC, RECOVER_TIMEOUT_SEC, RETRY_DELAYS_SEC, STOP_TIMEOUT_SEC,
+from setup_runtime import (DEFAULT_SETTINGS, FAILED_START_STOP_TIMEOUT_SEC, HEALTHY_RUN_SEC, RECOVER_TIMEOUT_SEC, RETRY_DELAYS_SEC, STOP_TIMEOUT_SEC,
                            SetupRuntime, current_settings, extra_aux_limit, recipe_for, source_counts, source_limit)
 from webui import serve
 
@@ -36,7 +36,8 @@ def test_generic_setups_expand(tmp_path, count, fps):
 
 
 @pytest.mark.parametrize('changes', [{'source_count': 0}, {'scene_count': 0}, {'scene_count': 193}, {'fps': 24},
-    {'weights': [0] * 5}, {'weights': [True] * 5}, {'resolution': '../../file'}, {'command': 'id'}])
+    {'weights': [0] * 5}, {'weights': [True] * 5}, {'resolution': '../../file'}, {'command': 'id'},
+    {'fps': 25.0}, {'bit_depth': 10.0}])
 def test_reject_unbounded_settings(changes):
     with pytest.raises(ValueError):
         recipe_for(T4, {**DEFAULT_SETTINGS, **changes})
@@ -46,11 +47,12 @@ def test_reject_unbounded_settings(changes):
 def runtime(tmp_path, monkeypatch):
     manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     manager.process = SimpleNamespace(poll=lambda: None)
-    monkeypatch.setattr(manager, '_stop', lambda: None)
+    monkeypatch.setattr(manager, '_stop', lambda **kwargs: None)
     monkeypatch.setattr(manager, '_close_removed_browsers', lambda *_: None)
     monkeypatch.setattr(manager, '_recover_browsers', lambda *_: False)
     monkeypatch.setattr(manager, '_start', lambda _: setattr(manager, 'process', SimpleNamespace(poll=lambda: None)))
     monkeypatch.setattr(manager, '_watch', lambda _: None)
+    monkeypatch.setattr(manager, '_validate_capacity', lambda *args: None)
     return manager
 
 
@@ -82,7 +84,7 @@ def crash(runtime, code=-11):
 def test_prepare_failure_keeps_old_show_and_process(runtime, monkeypatch):
     config = runtime.media_dir / 'mixer.demo.json'
     config.write_text('{"old": true}')
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise ValueError('disk full')
     monkeypatch.setattr(prepare_demo, 'prepare', fail)
     runtime.apply(DEFAULT_SETTINGS)
@@ -96,7 +98,7 @@ def test_prepare_failure_keeps_old_show_and_process(runtime, monkeypatch):
 def test_failed_start_restores_previous_show(runtime, monkeypatch):
     config = runtime.media_dir / 'mixer.demo.json'
     config.write_text('{"old": true}')
-    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_: config.write_text('{"new": true}'))
+    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_, **kwargs: config.write_text('{"new": true}'))
     starts = []
     def start(path):
         doc = json.loads(path.read_text())
@@ -114,7 +116,8 @@ def test_failed_start_restores_previous_show(runtime, monkeypatch):
 def test_single_job_and_persist_only_after_ready(runtime, monkeypatch):
     revision = runtime.revision
     entered, release = threading.Event(), threading.Event()
-    def prepare(*_):
+    def prepare(*_, **kwargs):
+        kwargs["progress"](2, 8)
         entered.set()
         assert release.wait(3)
         (runtime.media_dir / 'mixer.demo.json').write_text('{}')
@@ -122,6 +125,7 @@ def test_single_job_and_persist_only_after_ready(runtime, monkeypatch):
     runtime.apply(DEFAULT_SETTINGS)
     assert entered.wait(3)
     try:
+        assert runtime.status()["message"] == "Preparing assets… 2/8 ready."
         assert not runtime.recipe_path.exists()
         with pytest.raises(RuntimeError, match='already in progress'):
             runtime.apply(DEFAULT_SETTINGS)
@@ -141,7 +145,8 @@ def test_api_rejects_cross_origin_and_oversized_requests(runtime):
     url = f'http://127.0.0.1:{server.server_port}/api/setup'
     try:
         for headers, data, code in [({'Origin': 'http://elsewhere.invalid'}, b'{}', 403),
-                                    ({}, b' ' * 4097, 400), ({}, b'{}', 400)]:
+                                    ({}, b' ' * 4097, 400), ({}, b'{}', 400),
+                                    ({}, b'null', 400), ({}, b'[]', 400), ({}, b'"resume"', 400)]:
             request = Request(url, data=data, headers={'Content-Type': 'application/json', **headers})
             with pytest.raises(HTTPError) as error:
                 urlopen(request, timeout=3)
@@ -192,6 +197,7 @@ def test_every_program_encode_takes_its_own_preset_and_bitrate(tmp_path):
 
 
 @pytest.mark.parametrize("legacy, kbps", [(6000, [6000, 8000, 6000]), (3000, [3000, 4000, 3000]),
+                                        (10**1000, [20000, 20000, 20000]), (-10**1000, [2000, 2000, 2000]),
                                           (16000, [16000, 20000, 16000]), (500, [2000, 2000, 2000])])
 def test_settings_saved_with_one_program_bitrate_load_per_output(legacy, kbps):
     """The SDR program and its clean copy take it, the HLG one the defaults' ratio, within the range."""
@@ -226,7 +232,7 @@ def test_browser_ring_limit_reaches_show(tmp_path, size):
 
 def test_a_setup_saved_with_one_program_bitrate_resumes_with_per_output_encodes(runtime, monkeypatch):
     """The page loads the status's settings: per output, from the old bitrate or the defaults."""
-    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory: (directory / "mixer.demo.json").write_text(
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs: (directory / "mixer.demo.json").write_text(
         json.dumps(prepare_demo.plan(recipe, directory)[0])))
     older = {k: v for k, v in DEFAULT_SETTINGS.items() if k not in ("encodes", "extra_aux")}
     for saved, kbps in (({**older, "bitrate_kbps": 3000}, [3000, 4000, 3000]), (older, [6000, 8000, 6000])):
@@ -262,7 +268,7 @@ def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
     if feasible == maximum:   # above the limit the show is scaled down to it, not refused
         assert recipe_for(T4, {**settings, "source_count": maximum + 1})["source_count"] == maximum
     with pytest.raises(ValueError, match="scene_count"):
-        recipe_for(T4, {**settings, "scene_count": 193})
+        recipe_for(T4, {**settings, "scene_count": 257})
 
 
 def test_hdr_420_canvas_and_assets(tmp_path):
@@ -355,6 +361,15 @@ def test_four_hdr_422_inputs_can_be_used_alone():
     assert source_counts(T4, 4, [0, 0, 1, 0, 0]) == [0, 0, 4, 0, 0]
 
 
+@pytest.mark.parametrize("weights", [[0, 0, 0, 1, 0, 0, 0], [0, 0, 1, 1, 0, 0, 0]])
+def test_sdr_and_hdr_v210_share_upload_limit(weights):
+    assert sum(source_counts(T4, 4, weights)[2:4]) == 4
+    with pytest.raises(ValueError, match="4:2:2 upload is limited to 4"):
+        recipe_for(T4, {**DEFAULT_SETTINGS, "source_count": 5, "weights": weights})
+    counts = source_counts(T4, 64, [1, 1, weights[2], weights[3], 100, 0, 0])
+    assert sum(counts) == 64 and sum(counts[2:4]) <= 4 and counts[4] <= 40
+
+
 @pytest.mark.parametrize('weights, expected', [
     ([1, 0, 0, 0, 100], [24, 0, 0, 0, 40]),
     ([1, 0, 100, 0, 100], [20, 0, 4, 0, 40]),
@@ -379,7 +394,7 @@ def test_browser_only_limit():
 
 def test_failed_first_start_does_not_leave_show_for_resume(runtime, monkeypatch):
     config = runtime.media_dir / 'mixer.demo.json'
-    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_: config.write_text('{"sources": []}'))
+    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_, **kwargs: config.write_text('{"sources": []}'))
     def fail(*_):
         raise RuntimeError('encoder unavailable')
     monkeypatch.setattr(runtime, '_start', fail)
@@ -395,7 +410,7 @@ def test_shutdown_during_prepare_restores_committed_show(runtime, monkeypatch, p
     config = runtime.media_dir / 'mixer.demo.json'
     if previous is not None:
         config.write_bytes(previous)
-    def prepare(*_):
+    def prepare(*_, **kwargs):
         config.write_text('{"new": true}')
         runtime.closing.set()
     monkeypatch.setattr(prepare_demo, 'prepare', prepare)
@@ -432,7 +447,7 @@ def test_setup_preserves_live_aux_through_color_change_and_resume(runtime, monke
     layout = {"preset": "source_pages", "page": 1}
     layouts = [{"preset": "pgm_pvw_grid"}, layout]
     runtime.bridge.command = lambda cmd: json.dumps([{"id": "mv", "layout": layout, "layouts": layouts, "scenes": live}])
-    def prepare(recipe, directory):
+    def prepare(recipe, directory, **kwargs):
         generated, _, _ = prepare_demo.plan(recipe, directory)
         config.write_text(json.dumps(generated))
     monkeypatch.setattr(prepare_demo, "prepare", prepare)
@@ -464,7 +479,7 @@ def test_setup_drops_saved_aux_layouts_the_new_sources_no_longer_have(runtime, m
     cell = lambda source: {"role": "source", "source": source, "x": 0, "y": 0, "w": 960, "h": 540}
     gone, kept = {"cells": [cell(99)]}, {"cells": [cell(0)]}
     runtime.bridge.command = lambda cmd: json.dumps([{"id": "mv", "layout": gone, "layouts": [gone, kept], "scenes": []}])
-    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory: config.write_text(
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs: config.write_text(
         json.dumps(prepare_demo.plan(recipe, directory)[0])))
     runtime.apply(settings)
     runtime.worker.join(3)
@@ -524,7 +539,7 @@ def test_invalid_preserved_aux_rejected_before_preparation(runtime, monkeypatch)
     config.write_text(json.dumps({"aux_buses": [{"id": "mv", "scenes": [None] * 8,
                                               "renditions": [{"id": "monitor", "port": 5004}]}]}))
     runtime.process = None
-    monkeypatch.setattr(prepare_demo, "prepare", lambda *_: pytest.fail("must validate first"))
+    monkeypatch.setattr(prepare_demo, "prepare", lambda *_, **kwargs: pytest.fail("must validate first"))
     with pytest.raises(ValueError, match="port"):
         runtime.apply(DEFAULT_SETTINGS)
     assert runtime.worker is None
@@ -537,15 +552,80 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
     runtime.bridge.state = lambda **kw: {"status": {"pgm_scene": "full"},
         "settings": {"preview_codecs": ["h264", "h265"] if hdr else ["h264"], "aux_buses": ["mv"]}}
     expected = ["janus_encoded", "aux_mv_encoded", *(["janus_hdr_encoded"] if hdr else [])]
+    config = runtime.media_dir / "mixer.demo.json"
+    config.write_text(json.dumps({"sources": [{"id": "visible"}, {"id": "unused"}]}))
     calls = []
     def queues(command, **kw):
+        if command == "nodes.json":
+            # An unused source can wait for consumers; readiness must not require its frames.
+            return json.dumps([{"name": "mixer_color_" + name, "type": "filter_video", "working": True}
+                               for name in ("visible", "unused")])
         calls.append(command)
         assert len(calls) <= len(expected)
         return json.dumps([{"name": name, "enqueued_total": int(i < len(calls))}
                            for i, name in enumerate(expected)])
     runtime.bridge.command = queues
-    SetupRuntime._start(runtime, runtime.media_dir / "mixer.demo.json")
+    SetupRuntime._start(runtime, config)
     assert len(calls) == len(expected)
+
+
+@pytest.mark.parametrize("nodes", [[], [{"name": "mixer_color_hdr", "type": "filter_video", "working": False}]])
+def test_start_rejects_missing_or_failed_source_normalization(runtime, monkeypatch, nodes):
+    monkeypatch.setattr("setup_runtime.subprocess.Popen", lambda *a, **kw: SimpleNamespace(pid=1234, poll=lambda: None))
+    monkeypatch.setattr(runtime.closing, "wait", lambda _: False)
+    config = runtime.media_dir / "mixer.demo.json"
+    config.write_text(json.dumps({"sources": [{"id": "hdr"}]}))
+    runtime.bridge.state = lambda **kw: {"status": {"pgm_scene": "full"}}
+    runtime.bridge.command = lambda command, **kw: json.dumps(nodes if command == "nodes.json" else
+        [{"name": "janus_encoded", "enqueued_total": 100}])
+    with pytest.raises(RuntimeError, match="Source normalization not running: mixer_color_hdr"):
+        SetupRuntime._start(runtime, config)
+
+
+def test_start_reports_child_failure_while_native_cleanup_is_still_running(runtime, monkeypatch):
+    import os
+    from unittest.mock import Mock
+    config = runtime.media_dir / "mixer.demo.json"
+    config.write_text('{"sources": []}')
+    def launch(*args, pass_fds, env, **kwargs):
+        assert int(env["AVP_MIXER_STARTUP_FD"]) == pass_fds[0]
+        os.write(pass_fds[0], b"aux_test_encoder: invalid preset")
+        return SimpleNamespace(pid=1234, poll=lambda: None)
+    monkeypatch.setattr("setup_runtime.subprocess.Popen", launch)
+    monkeypatch.setattr(runtime.closing, "wait", lambda _: False)
+    monkeypatch.setattr(runtime, "_start", lambda path: SetupRuntime._start(runtime, path))
+    stop = Mock()
+    monkeypatch.setattr(runtime, "_stop", stop)
+    runtime.bridge.state = lambda **kwargs: pytest.fail("startup failure precedes control readiness")
+    with pytest.raises(RuntimeError, match="Mixer startup failed: aux_test_encoder: invalid preset"):
+        runtime._start_recovering(config, None)
+    stop.assert_called_once_with(timeout=FAILED_START_STOP_TIMEOUT_SEC)
+
+
+def test_start_waits_for_child_pipe_before_blocking_on_control_greeting(runtime, monkeypatch):
+    import os
+    config = runtime.media_dir / "mixer.demo.json"
+    config.write_text('{"sources": []}')
+    writer = None
+    def launch(*args, pass_fds, **kwargs):
+        nonlocal writer
+        writer = os.dup(pass_fds[0])
+        return SimpleNamespace(pid=1234, poll=lambda: None)
+    monkeypatch.setattr("setup_runtime.subprocess.Popen", launch)
+    waits = 0
+    def wait(_):
+        nonlocal waits
+        waits += 1
+        assert waits <= 2
+        if waits == 2:
+            os.write(writer, b"encoder initialization failed")
+            os.close(writer)
+        return False
+    monkeypatch.setattr(runtime.closing, "wait", wait)
+    runtime.bridge.state = lambda **kwargs: pytest.fail("control greeting waits for successful startup")
+    with pytest.raises(RuntimeError, match="Mixer startup failed: encoder initialization failed"):
+        SetupRuntime._start(runtime, config)
+    assert waits == 2
 
 
 @pytest.mark.parametrize("fps, maximum", [(25, 30), (30, 34), (50, 20), (60, 17)])
@@ -565,10 +645,13 @@ def test_combined_source_caps():
         source_counts(T4, 75, [0, 0, 1, 0, 1, 1])
 
 
-def test_192_scenes_expand(tmp_path):
-    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "scene_count": 192})
+def test_256_scenes_expand(tmp_path):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    recipe = recipe_for(profile, {**DEFAULT_SETTINGS, "scene_count": 256})
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
-    assert len(show["scenes"]) == 192
+    assert len(show["scenes"]) == 256
+    with pytest.raises(ValueError, match="scene_count must be an integer from 1 to 256"):
+        recipe_for(profile, {**DEFAULT_SETTINGS, "scene_count": 257})
 
 
 def test_shutdown_reaps_killed_child_before_recovery(tmp_path, monkeypatch):
@@ -653,7 +736,7 @@ def test_browser_recovery_requires_dead_consumer(tmp_path, monkeypatch):
 def test_recovery_timeout_is_not_recovered_again_by_the_rollback(runtime, monkeypatch):
     config = runtime.media_dir / 'mixer.demo.json'
     config.write_text('{"old": true}')
-    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_: config.write_text('{"new": true}'))
+    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_, **kwargs: config.write_text('{"new": true}'))
     recoveries = []
     def recover(shows):
         recoveries.append(shows)
@@ -745,7 +828,7 @@ def test_real_process_stop_is_not_a_crash_but_a_kill_is(tmp_path, timers):
 def test_apply_cancels_a_pending_restart(runtime, timers, monkeypatch):
     crash(runtime)
     pending = timers[-1]
-    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_: (runtime.media_dir / 'mixer.demo.json').write_text('{}'))
+    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_, **kwargs: (runtime.media_dir / 'mixer.demo.json').write_text('{}'))
     runtime.apply(DEFAULT_SETTINGS)
     runtime.worker.join(3)
     assert pending.cancelled and runtime.retries == 0
@@ -802,7 +885,7 @@ def test_live_aux_assignments_survive_resume(runtime, monkeypatch):
     runtime.remember_aux("unknown", {"scenes": live})
     assert json.loads(config.read_text())["aux_buses"][0] == {
         "id": "mv", "scenes": live, "layout": layout, "layouts": layouts, "renditions": [{"id": "monitor", "port": 5008}]}
-    def prepare(recipe, directory):
+    def prepare(recipe, directory, **kwargs):
         generated, _, _ = prepare_demo.plan(recipe, directory)
         config.write_text(json.dumps(generated))
     monkeypatch.setattr(prepare_demo, "prepare", prepare)
@@ -827,7 +910,7 @@ def test_stale_preparation_directories_are_removed_on_start(tmp_path):
 def test_apply_logs_timed_phases_and_ready(runtime, monkeypatch, caplog):
     import logging
     config = runtime.media_dir / 'mixer.demo.json'
-    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_: config.write_text('{}'))
+    monkeypatch.setattr(prepare_demo, 'prepare', lambda *_, **kwargs: config.write_text('{}'))
     with caplog.at_level(logging.INFO, logger='setup'):
         runtime.apply(DEFAULT_SETTINGS)
         runtime.worker.join(3)
@@ -852,7 +935,7 @@ def test_late_quarantine_retries_requested_setup_once(runtime, monkeypatch):
     events = []
     checks = iter([False, True])
     monkeypatch.setattr(runtime, '_recover_browsers', lambda _: next(checks))
-    monkeypatch.setattr(runtime, '_stop', lambda: events.append('reaped'))
+    monkeypatch.setattr(runtime, '_stop', lambda **kwargs: events.append('reaped'))
     def start(path):
         events.append('start')
         if events.count('start') == 1:
@@ -942,7 +1025,7 @@ def test_dsk_pages_are_browser_sources_with_clean_copies_of_each_output(tmp_path
 
 
 def test_dsk_pages_take_their_share_of_the_source_budget():
-    # 60 fps, 10-bit 4:2:2; SDR 4:2:2 v210 (no budget of its own) fills what the capped types leave
+    # Keys consume browser slots; SDR and HDR v210 share the same upload budget.
     limit = source_limit(T4, 60, DEFAULT_SETTINGS["bit_depth"], DEFAULT_SETTINGS["chroma"])
     keys = {"dsk": ["lower_third", "bug_left", "bug_right"], "weights": [8, 4, 2, 8, 2, 0, 0]}
     assert recipe_for(T4, {**DEFAULT_SETTINGS, "source_count": limit - 3, **keys})["source_count"] == limit - 3
@@ -985,7 +1068,8 @@ def test_every_profile_covers_every_rate_and_canvas(tmp_path, instance_type):
     assert status["instance_type"] == instance_type.value
     assert json.loads(json.dumps(status))["profile"]["nvdec_decodes"].keys() == {"25", "30", "50", "60"}
     nvenc = profile["nvenc"]
-    assert nvenc.keys() == {"budget_pct", "pct_per_fps", "bitrate_kbps", "defaults"}
+    assert nvenc.keys() == {"budget_pct", "pct_per_fps", "bitrate_kbps", "defaults"} | (
+        {"max_outputs"} if instance_type == InstanceType.NVIDIA_L4 else set())
     assert nvenc["defaults"].keys() == {"sdr", "hdr", "sdr_clean", "aux"}
     assert nvenc["pct_per_fps"]["hevc"].keys() == nvenc["pct_per_fps"]["h264"].keys() >= {e["preset"] for e in nvenc["defaults"].values()}
 
@@ -1073,7 +1157,7 @@ def test_encodes_above_the_nvenc_budget_are_refused_without_extra_aux(runtime, m
     """No Janus API and no extra aux outputs: the show's own encodes alone exceed the budget. At
     60 fps the programs and the clean feed at p5 do not fit beside two aux buses at p1, nor the SDR
     program and the clean feed at p5 beside the HLG program at p3."""
-    monkeypatch.setattr(prepare_demo, "prepare", lambda *_: pytest.fail("must validate first"))
+    monkeypatch.setattr(prepare_demo, "prepare", lambda *_, **kwargs: pytest.fail("must validate first"))
     settings = {**KEYED, "fps": 60, "bit_depth": 10}
     show, _, _ = prepare_demo.plan(recipe_for(T4, settings), runtime.media_dir)
     (runtime.media_dir / "mixer.demo.json").write_text(json.dumps({**show, "aux_buses": own_aux()}))
@@ -1088,7 +1172,7 @@ def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime
     syncs = []
     monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", lambda api, ports, prune=False: syncs.append((ports, prune)))
     config = runtime.media_dir / "mixer.demo.json"
-    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory: config.write_text(
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs: config.write_text(
         json.dumps(prepare_demo.plan(recipe, directory)[0])))
     settings = {**KEYED, "fps": 30, "bit_depth": 8}
     show, _, _ = prepare_demo.plan(recipe_for(T4, settings), runtime.media_dir)
@@ -1168,8 +1252,8 @@ def test_adopted_setup_metadata_keeps_managed_aux_scalable(tmp_path):
     recipe = recipe_for(profile, {**settings, "fps": 60, "bit_depth": 10})
     changed, _, _ = prepare_demo.plan(recipe, tmp_path)
     manager._preserve_aux(recipe, changed)
-    assert recipe["setup"]["extra_aux"] == 15
-    assert [b["id"] for b in recipe["aux_buses"]] == ["mv", "mv2", *(f"aux{i}" for i in range(15))]
+    assert recipe["setup"]["extra_aux"] == 13
+    assert [b["id"] for b in recipe["aux_buses"]] == ["mv", "mv2", *(f"aux{i}" for i in range(13))]
     assert all(b["renditions"][0]["fps"] == 30 for b in recipe["aux_buses"])
     assert not manager.recipe_path.exists(), "planning does not alter the running show"
     # Without explicit metadata, named instance outputs must never be silently discarded.
@@ -1179,11 +1263,154 @@ def test_adopted_setup_metadata_keeps_managed_aux_scalable(tmp_path):
     assert manager.settings is None and len(manager.aux_buses) == 28
 
 
-def test_l4_extra_aux_limit_reserves_the_own_buses_in_the_thirty_bus_cap(tmp_path):
+def test_l4_extra_aux_limit_reserves_programs_and_own_buses_in_output_cap(tmp_path):
     profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
     recipe = recipe_for(profile, {**KEYED, "fps": 25, "bit_depth": 8})
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
-    assert extra_aux_limit(profile, parse({**show, "aux_buses": own_aux(preset="p1")}), recipe["setup"]["encodes"]) == 28
+    assert extra_aux_limit(profile, parse({**show, "aux_buses": own_aux(preset="p1")}), recipe["setup"]["encodes"]) == 22
+
+
+def test_l4_fixed_outputs_above_memory_capacity_are_rejected(tmp_path):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    recipe = recipe_for(profile, {**KEYED, "fps": 25, "bit_depth": 8})
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    fixed = [{"id": f"fixed{i}", "layout": {"preset": "source_pages"},
+              "renditions": [{"id": "monitor", "port": 6000 + i * 4, **encode("p1")}]} for i in range(25)]
+    with pytest.raises(ValueError, match="at most 26 encoded outputs, including programs"):
+        extra_aux_limit(profile, parse({**show, "aux_buses": fixed}), recipe["setup"]["encodes"])
+
+
+@pytest.mark.parametrize("fps,expected", [(25, 22), (30, 22), (50, 18), (60, 18)])
+def test_sdr_output_count_ceiling_cannot_be_bypassed_by_fast_presets(tmp_path, fps, expected):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    recipe = recipe_for(profile, {**KEYED, "fps": fps, "bit_depth": 8,
+        "encodes": {output: encode("p1") for output in ("sdr", "sdr_clean", "extra")}})
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    assert extra_aux_limit(profile, parse({**show, "aux_buses": own_aux(preset="p1")}), recipe["setup"]["encodes"]) == expected
+
+
+@pytest.mark.parametrize("fps,expected", [(25, 15), (60, 13)])
+def test_mode_output_count_limit_overrides_only_its_rates(tmp_path, fps, expected):
+    base = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    profile = {**base, "mode_limits": {**base["mode_limits"], "10:420": {
+        **base["mode_limits"]["10:420"], "nvenc_max_outputs": {25: 20}}}}
+    recipe = recipe_for(profile, {**KEYED, "fps": fps,
+        "encodes": {"sdr": encode("p5", 6000), "extra": encode("p3")}})
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    assert extra_aux_limit(profile, parse({**show, "aux_buses": own_aux(preset="p3")}), recipe["setup"]["encodes"]) == expected
+
+
+def test_resume_clamps_saved_outputs_without_regenerating_custom_inputs(runtime, monkeypatch):
+    from extra_aux import extra_buses
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    settings = {**KEYED, "fps": 25, "extra_aux": 25, "encodes": {"extra": encode("p1")}}
+    recipe = recipe_for(profile, settings)
+    recipe["inputs"][0].update(codec="hevc", decode_storage="cuarray", extra_hw_frames=12)
+    show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
+    own = own_aux(preset="p1")
+    cfg = parse({**show, "aux_buses": own})
+    recipe["aux_buses"] = own + extra_buses(cfg, [], 25, prepare_demo.CLEAN_PORT, encode("p1"))
+    show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
+    config = runtime.media_dir / "mixer.demo.json"
+    config.write_text(json.dumps(show))
+    runtime.recipe_path.write_text(json.dumps(recipe))
+    runtime.profile = {**profile, "mode_limits": {**profile["mode_limits"], "10:420": {
+        **profile["mode_limits"]["10:420"], "nvenc_max_outputs": {25: 15}}}}
+    runtime.process = None
+    runtime.janus_api = "http://127.0.0.1"
+    monkeypatch.setattr(runtime, "_mountpoints", lambda *args, **kwargs: None)
+    monkeypatch.setattr("setup_runtime.recipe_for", lambda *args: pytest.fail("resume must preserve its saved recipe"))
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs: config.write_text(
+        json.dumps(prepare_demo.plan(recipe, directory)[0])))
+    runtime.apply()
+    runtime.worker.join(3)
+    assert runtime.status()["phase"] == "running", runtime.status()
+    saved = json.loads(runtime.recipe_path.read_text())
+    assert saved["inputs"] == recipe["inputs"]
+    assert saved["setup"]["extra_aux"] == runtime.status()["settings"]["extra_aux"] == 10
+    assert len(saved["aux_buses"]) == len(json.loads(config.read_text())["aux_buses"]) == 12
+    assert [bus["id"] for bus in runtime._previous_show()[1]] == ["mv", "mv2"]
+    assert all(source["decode_storage"] == "cuarray" and source["extra_hw_frames"] == 12
+               for source in json.loads(config.read_text())["sources"] if source["kind"] == "video")
+
+
+@pytest.mark.parametrize("fps,bit_depth,chroma,expected", [
+    (60, 10, "422", 12), (60, 10, "420", 13), (60, 8, "420", 18),
+    (50, 10, "422", 12), (30, 10, "422", 15), (25, 10, "422", 15)])
+def test_l4_nvenc_margin_applies_only_to_the_measured_mode_and_rate(tmp_path, fps, bit_depth, chroma, expected):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    encodes = {"sdr": encode("p5", 6000), "extra": encode("p3")}
+    recipe = recipe_for(profile, {**KEYED, "fps": fps, "bit_depth": bit_depth, "chroma": chroma, "encodes": encodes})
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    cfg = parse({**show, "aux_buses": own_aux(preset="p3")})
+    assert extra_aux_limit(profile, cfg, recipe["setup"]["encodes"]) == expected
+    assert recipe["setup"]["encodes"]["sdr"]["preset"] == "p5"
+
+
+def test_mode_nvenc_margin_also_validates_fixed_outputs(tmp_path):
+    base = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    profile = {**base, "mode_limits": {**base["mode_limits"], "10:422": {
+        **base["mode_limits"]["10:422"], "nvenc_max_outputs": {60: 30}}}}
+    recipe = recipe_for(profile, {**KEYED, "fps": 60, "chroma": "422", "encodes": {"sdr": encode("p5", 6000)}})
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    fixed = [{"id": f"fixed{i}", "layout": {"preset": "source_pages"},
+              "renditions": [{"id": "monitor", "port": 6000 + i * 4, **encode("p3")}]} for i in range(15)]
+    cfg = parse({**show, "aux_buses": fixed})
+    with pytest.raises(ValueError, match="72.1% of NVENC, above its 70% budget"):
+        extra_aux_limit(profile, cfg, recipe["setup"]["encodes"])
+
+
+@pytest.mark.parametrize("fps,maximum", [(25, 53), (30, 53), (50, 32), (60, 27)])
+def test_l4_hdr_decodes_have_a_vram_cap(fps, maximum):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    settings = {**DEFAULT_SETTINGS, "fps": fps, "chroma": "420", "source_count": maximum,
+                "weights": [0, 1, 0, 0, 0, 0, 0]}
+    assert recipe_for(profile, settings)["inputs"][1]["weight"] == maximum
+    with pytest.raises(ValueError, match=f"HDR NVDEC inputs are limited to {maximum}"):
+        recipe_for(profile, {**settings, "source_count": maximum + 1})
+
+
+def test_resume_rejects_saved_hdr_decodes_above_current_capacity(runtime, monkeypatch):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    recipe = recipe_for({**profile, "nvdec_hdr_decodes": {}}, {**DEFAULT_SETTINGS, "fps": 25,
+        "chroma": "420", "source_count": 96, "weights": [0, 1, 0, 0, 0, 0, 0]})
+    runtime.profile = profile
+    runtime.process = None
+    runtime.recipe_path.write_text(json.dumps(recipe))
+    monkeypatch.setattr(runtime, "_validate_capacity", lambda *args: SetupRuntime._validate_capacity(runtime, *args))
+    monkeypatch.setattr(prepare_demo, "prepare", lambda *args, **kwargs: pytest.fail("must reject before preparation"))
+    with pytest.raises(ValueError, match="HDR NVDEC inputs are limited to 53"):
+        runtime.apply()
+    assert runtime.worker is None
+    assert json.loads(runtime.recipe_path.read_text()) == recipe
+
+
+def test_failed_start_does_not_restart_previous_outputs_above_current_capacity(runtime, monkeypatch):
+    from extra_aux import extra_buses
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]
+    runtime.profile = profile
+    runtime.process = None
+    recipe = recipe_for(profile, {**KEYED, "fps": 25})
+    previous, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
+    previous["aux_buses"] = extra_buses(parse(previous), [], 20, prepare_demo.CLEAN_PORT, encode("p1"))
+    # Treat these as the old managed tail, so the requested setup can remove them first.
+    runtime.recipe_path.write_text(json.dumps({**recipe, "setup": {**recipe["setup"], "extra_aux": 20}}))
+    config = runtime.media_dir / "mixer.demo.json"
+    original = json.dumps(previous)
+    config.write_text(original)
+    monkeypatch.setattr(runtime, "_validate_capacity", lambda *args: SetupRuntime._validate_capacity(runtime, *args))
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs:
+        config.write_text(json.dumps(prepare_demo.plan(recipe, directory)[0])))
+    starts = []
+    def start(path):
+        starts.append(path)
+        raise RuntimeError("native startup failed")
+    monkeypatch.setattr(runtime, "_start", start)
+    runtime.apply({**KEYED, "fps": 25})
+    runtime.worker.join(3)
+    assert len(starts) == 1
+    assert config.read_text() == original
+    assert "recovery failed: The instance supports at most 20 encoded outputs" in runtime.status()["message"]
 
 
 def test_a_janus_failure_leaves_the_mixer_running_and_shows_in_the_status(runtime, monkeypatch):
@@ -1191,7 +1418,7 @@ def test_a_janus_failure_leaves_the_mixer_running_and_shows_in_the_status(runtim
     def refuse(*_):
         raise OSError("Connection refused")
     monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", refuse)
-    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory: (directory / "mixer.demo.json").write_text(
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs: (directory / "mixer.demo.json").write_text(
         json.dumps(prepare_demo.plan(recipe, directory)[0])))
     runtime.apply({**KEYED, "fps": 30, "bit_depth": 8, "extra_aux": 1})
     runtime.worker.join(3)

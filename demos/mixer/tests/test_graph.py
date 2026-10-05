@@ -48,6 +48,9 @@ class FakeAvp:
         self.edges = FakeEdges()
         self.shut_down = False
 
+    def on_exception(self, name, kind, message):
+        pass
+
     def addNode(self, node):
         self.nodes.append(node)
 

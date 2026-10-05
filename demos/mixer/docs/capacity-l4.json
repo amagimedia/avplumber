@@ -1,0 +1,4449 @@
+{
+  "schema_version": 1,
+  "measured_date": "2026-10-05",
+  "profile": "nvidia_l4",
+  "hardware": {
+    "gpu": "NVIDIA L4",
+    "gpu_count": 1,
+    "instance_type": "g2-standard-16",
+    "logical_cpus": 16,
+    "usable_vram_mib": 23034,
+    "enforced_gpu_power_limit_w": 72
+  },
+  "pipeline": {
+    "ffmpeg": "development master-98e92563 with avplumber 9-series patches 1-16",
+    "nvdec_codec": "hevc",
+    "decode_storage": "cuarray",
+    "extra_hw_frames": 12,
+    "decoded_queue_frames": 3,
+    "pool_policy": "fixed",
+    "input_width": 1920,
+    "input_height": 1080,
+    "source_rate_matches_canvas": true,
+    "program_rate_matches_canvas": true,
+    "aux_rate_rule": "program rate at 25 fps; half program rate at 60 fps",
+    "hdr_422_native_input": "v210 uploaded and unpacked on CUDA; L4 HEVC decodes in these tests are 4:2:0"
+  },
+  "methodology": {
+    "scope": "Short observations of this synthetic demo, not a long-soak capacity guarantee.",
+    "gpu_statistics": "Whole GPU, sampled about every two seconds; min/mean/p95/max are within each capture.",
+    "cpu_statistics": "Process group contains mixer and web backend; 100 percent equals one core. Host busy includes browser and other processes.",
+    "progress": "Queue frame-count deltas divided by their measured interval, not the nominal test duration. Browser fresh-frame progress is not captured by these edge counters.",
+    "rate_tolerance_fps": 0.1,
+    "cut_latency": "Encoder-output timestamps, deduplicated by kind/id/encoded_pts over all samples and final state; events already present before the capture are excluded. Small event counts limit percentile interpretation.",
+    "cut_coverage": "Counts successful API cut requests separately from sampled encoder latency events. A successful request does not itself establish the visible cut latency.",
+    "percentile": "Sorted values at min(n-1, int(n*0.95)); no pooling of percentiles from separate runs.",
+    "counters": "Sum of compositor counter deltas across program slots and AUX outputs, also separated by group. Input repeats/discards are separate from missed deadlines and output drops. ForceFPS can repeat frames to sustain encoded FPS after output drops; target FPS alone does not pass the gate.",
+    "restart_timings": "Observed setup polling phases, approximately two-second resolution. Asset preparation precedes mixer stop; restart_to_ready is the restart interval, not measured viewer blackout.",
+    "status": "zero_miss_observation also requires non-stalled captured edges, expected topology and rates within tolerance. A successful start or a separate passing run does not erase an earlier failure."
+  },
+  "measurements": [
+    {
+      "id": "hdr420-25-cuts",
+      "test": "scene_cuts",
+      "duration_s": 30.068,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "p010le"
+        },
+        "sources": {
+          "total": 136,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 43,
+          "hevc_hlg": 53,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 30,
+          "observed_encoders": 30,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 25,
+          "aux_total": 27,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 21884.0,
+          "mean": 21941.933,
+          "p95": 22002.0,
+          "max": 22002.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 50.0,
+          "mean": 53.4,
+          "p95": 57.0,
+          "max": 57.0
+        },
+        "memory_controller_percent": {
+          "min": 51.0,
+          "mean": 51.667,
+          "p95": 55.0,
+          "max": 55.0
+        },
+        "nvdec_percent": {
+          "min": 43.0,
+          "mean": 44.933,
+          "p95": 46.0,
+          "max": 46.0
+        },
+        "nvenc_percent": {
+          "min": 76.0,
+          "mean": 79.133,
+          "p95": 82.0,
+          "max": 82.0
+        },
+        "sm_clock_mhz": {
+          "min": 1680.0,
+          "mean": 1818.0,
+          "p95": 1995.0,
+          "max": 1995.0
+        },
+        "power_w": {
+          "min": 65.24,
+          "mean": 68.124,
+          "p95": 70.14,
+          "max": 70.14
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 424.708,
+          "mean": 434.486,
+          "p95": 440.284,
+          "max": 440.284
+        },
+        "process_group_mean_cores": 4.345,
+        "host_busy_percent": {
+          "min": 38.065,
+          "mean": 38.738,
+          "p95": 39.822,
+          "max": 39.822
+        },
+        "threads": 1212,
+        "active_threads": 1025,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 30.402,
+        "decoded_fps": {
+          "expected_fps": 25,
+          "count": 96,
+          "min": 24.998,
+          "mean": 25.005,
+          "p95": 25.031,
+          "max": 25.031
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 25,
+          "count": 96,
+          "min": 24.998,
+          "mean": 25.006,
+          "p95": 25.031,
+          "max": 25.031
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 25,
+            "count": 3,
+            "min": 24.998,
+            "mean": 24.998,
+            "p95": 24.998,
+            "max": 24.998
+          },
+          "aux": {
+            "expected_fps": 25,
+            "count": 27,
+            "min": 24.965,
+            "mean": 25.008,
+            "p95": 25.031,
+            "max": 25.031
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 21420,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 248,
+        "discarded": 8,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 840,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 166,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 20580,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 82,
+          "discarded": 8,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 6,
+        "direct": {
+          "count": 6,
+          "min": 67.381,
+          "mean": 89.371,
+          "p95": 109.374,
+          "max": 109.374
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr420-25-safe-scenes256-cuts",
+      "test": "scene_cuts",
+      "duration_s": 80.057,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": true
+      },
+      "cut_coverage": {
+        "recorded": true,
+        "request_count": 256,
+        "unique_requested_scenes": 256,
+        "successful_requests": 256,
+        "failed_requests": 0,
+        "unknown_requests": 0,
+        "configured_scenes_requested": 256,
+        "all_configured_scenes_requested": true
+      },
+      "show": {
+        "scene_count": 256,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "p010le"
+        },
+        "sources": {
+          "total": 136,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 43,
+          "hevc_hlg": 53,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 20,
+          "observed_encoders": 20,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 15,
+          "aux_total": 17,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 21392.0,
+          "mean": 21430.125,
+          "p95": 21462.0,
+          "max": 21463.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 32.0,
+          "mean": 35.3,
+          "p95": 40.0,
+          "max": 41.0
+        },
+        "memory_controller_percent": {
+          "min": 33.0,
+          "mean": 35.35,
+          "p95": 39.0,
+          "max": 41.0
+        },
+        "nvdec_percent": {
+          "min": 41.0,
+          "mean": 42.1,
+          "p95": 43.0,
+          "max": 44.0
+        },
+        "nvenc_percent": {
+          "min": 44.0,
+          "mean": 50.35,
+          "p95": 58.0,
+          "max": 58.0
+        },
+        "sm_clock_mhz": {
+          "min": 1980.0,
+          "mean": 2031.0,
+          "p95": 2040.0,
+          "max": 2040.0
+        },
+        "power_w": {
+          "min": 58.95,
+          "mean": 62.544,
+          "p95": 65.64,
+          "max": 66.18
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 354.255,
+          "mean": 370.049,
+          "p95": 384.74,
+          "max": 391.633
+        },
+        "process_group_mean_cores": 3.7,
+        "host_busy_percent": {
+          "min": 33.509,
+          "mean": 34.711,
+          "p95": 36.702,
+          "max": 45.802
+        },
+        "threads": 1092,
+        "active_threads": 928,
+        "created_threads": 0,
+        "exited_threads": 1
+      },
+      "progress": {
+        "sample_interval_s": 80.312,
+        "decoded_fps": {
+          "expected_fps": 25,
+          "count": 96,
+          "min": 24.99,
+          "mean": 24.999,
+          "p95": 25.002,
+          "max": 25.002
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 25,
+          "count": 96,
+          "min": 24.99,
+          "mean": 24.999,
+          "p95": 25.002,
+          "max": 25.002
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 25,
+            "count": 3,
+            "min": 24.99,
+            "mean": 24.994,
+            "p95": 25.002,
+            "max": 25.002
+          },
+          "aux": {
+            "expected_fps": 25,
+            "count": 17,
+            "min": 24.99,
+            "mean": 24.996,
+            "p95": 25.002,
+            "max": 25.002
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 36060,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 541,
+        "discarded": 1344,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 2280,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 492,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 33780,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 49,
+          "discarded": 1344,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 98,
+        "direct": {
+          "count": 98,
+          "min": 56.144,
+          "mean": 80.786,
+          "p95": 101.741,
+          "max": 113.259
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr420-25",
+      "test": "steady_state",
+      "duration_s": 20.067,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "p010le"
+        },
+        "sources": {
+          "total": 136,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 43,
+          "hevc_hlg": 53,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 30,
+          "observed_encoders": 30,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 25,
+          "aux_total": 27,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 21914.0,
+          "mean": 21928.0,
+          "p95": 21954.0,
+          "max": 21954.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 41.0,
+          "mean": 43.9,
+          "p95": 46.0,
+          "max": 46.0
+        },
+        "memory_controller_percent": {
+          "min": 43.0,
+          "mean": 44.2,
+          "p95": 46.0,
+          "max": 46.0
+        },
+        "nvdec_percent": {
+          "min": 45.0,
+          "mean": 46.3,
+          "p95": 47.0,
+          "max": 47.0
+        },
+        "nvenc_percent": {
+          "min": 84.0,
+          "mean": 86.4,
+          "p95": 88.0,
+          "max": 88.0
+        },
+        "sm_clock_mhz": {
+          "min": 1845.0,
+          "mean": 1884.0,
+          "p95": 1965.0,
+          "max": 1965.0
+        },
+        "power_w": {
+          "min": 67.23,
+          "mean": 68.039,
+          "p95": 69.26,
+          "max": 69.26
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 429.012,
+          "mean": 450.059,
+          "p95": 461.414,
+          "max": 461.414
+        },
+        "process_group_mean_cores": 4.501,
+        "host_busy_percent": {
+          "min": 39.428,
+          "mean": 40.419,
+          "p95": 41.422,
+          "max": 41.422
+        },
+        "threads": 1212,
+        "active_threads": 978,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 20.394,
+        "decoded_fps": {
+          "expected_fps": 25,
+          "count": 96,
+          "min": 24.958,
+          "mean": 25.002,
+          "p95": 25.007,
+          "max": 25.007
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 25,
+          "count": 96,
+          "min": 24.958,
+          "mean": 25.002,
+          "p95": 25.007,
+          "max": 25.007
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 25,
+            "count": 3,
+            "min": 25.007,
+            "mean": 25.007,
+            "p95": 25.007,
+            "max": 25.007
+          },
+          "aux": {
+            "expected_fps": 25,
+            "count": 27,
+            "min": 24.958,
+            "mean": 25.0,
+            "p95": 25.057,
+            "max": 25.057
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 15060,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 323,
+        "discarded": 0,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 960,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 165,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 14100,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 158,
+          "discarded": 0,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 0,
+        "direct": {
+          "count": 0
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr420-60-aux13-cuts",
+      "test": "scene_cuts",
+      "duration_s": 30.053,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 60,
+          "working_format": "p010le"
+        },
+        "sources": {
+          "total": 88,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 22,
+          "hevc_hlg": 26,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 18,
+          "observed_encoders": 18,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 13,
+          "aux_total": 15,
+          "program_fps": 60,
+          "aux_fps": 30.0
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 14858.0,
+          "mean": 15428.467,
+          "p95": 15878.0,
+          "max": 15878.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 49.0,
+          "mean": 54.933,
+          "p95": 62.0,
+          "max": 62.0
+        },
+        "memory_controller_percent": {
+          "min": 47.0,
+          "mean": 49.533,
+          "p95": 56.0,
+          "max": 56.0
+        },
+        "nvdec_percent": {
+          "min": 48.0,
+          "mean": 49.267,
+          "p95": 50.0,
+          "max": 50.0
+        },
+        "nvenc_percent": {
+          "min": 69.0,
+          "mean": 72.6,
+          "p95": 74.0,
+          "max": 74.0
+        },
+        "sm_clock_mhz": {
+          "min": 1785.0,
+          "mean": 1912.0,
+          "p95": 2010.0,
+          "max": 2010.0
+        },
+        "power_w": {
+          "min": 63.75,
+          "mean": 67.347,
+          "p95": 75.34,
+          "max": 75.34
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 407.823,
+          "mean": 422.918,
+          "p95": 436.149,
+          "max": 436.149
+        },
+        "process_group_mean_cores": 4.229,
+        "host_busy_percent": {
+          "min": 44.408,
+          "mean": 45.264,
+          "p95": 46.034,
+          "max": 46.034
+        },
+        "threads": 781,
+        "active_threads": 657,
+        "created_threads": 1,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 30.235,
+        "decoded_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 59.996,
+          "mean": 60.0,
+          "p95": 60.03,
+          "max": 60.03
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 59.996,
+          "mean": 59.999,
+          "p95": 60.03,
+          "max": 60.03
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 60,
+            "count": 3,
+            "min": 59.996,
+            "mean": 59.996,
+            "p95": 59.996,
+            "max": 59.996
+          },
+          "aux": {
+            "expected_fps": 30.0,
+            "count": 15,
+            "min": 29.965,
+            "mean": 29.994,
+            "p95": 29.998,
+            "max": 29.998
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 15540,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 846,
+        "discarded": 281,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 1980,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 699,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 13560,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 147,
+          "discarded": 281,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 6,
+        "direct": {
+          "count": 6,
+          "min": 31.201,
+          "mean": 41.337,
+          "p95": 58.914,
+          "max": 58.914
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr420-60-aux15-cuts",
+      "test": "scene_cuts",
+      "duration_s": 30.049,
+      "result": "did_not_meet_zero_miss_gate",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": false,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 60,
+          "working_format": "p010le"
+        },
+        "sources": {
+          "total": 88,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 22,
+          "hevc_hlg": 26,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 20,
+          "observed_encoders": 20,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 15,
+          "aux_total": 17,
+          "program_fps": 60,
+          "aux_fps": 30.0
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 15246.0,
+          "mean": 15553.133,
+          "p95": 15942.0,
+          "max": 15942.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 52.0,
+          "mean": 58.667,
+          "p95": 65.0,
+          "max": 65.0
+        },
+        "memory_controller_percent": {
+          "min": 46.0,
+          "mean": 52.2,
+          "p95": 58.0,
+          "max": 58.0
+        },
+        "nvdec_percent": {
+          "min": 49.0,
+          "mean": 49.867,
+          "p95": 51.0,
+          "max": 51.0
+        },
+        "nvenc_percent": {
+          "min": 72.0,
+          "mean": 80.933,
+          "p95": 88.0,
+          "max": 88.0
+        },
+        "sm_clock_mhz": {
+          "min": 1725.0,
+          "mean": 1862.0,
+          "p95": 1965.0,
+          "max": 1965.0
+        },
+        "power_w": {
+          "min": 70.87,
+          "mean": 74.859,
+          "p95": 78.31,
+          "max": 78.31
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 427.706,
+          "mean": 437.833,
+          "p95": 448.919,
+          "max": 448.919
+        },
+        "process_group_mean_cores": 4.379,
+        "host_busy_percent": {
+          "min": 45.041,
+          "mean": 46.044,
+          "p95": 47.363,
+          "max": 47.363
+        },
+        "threads": 804,
+        "active_threads": 679,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 30.331,
+        "decoded_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 59.972,
+          "mean": 60.005,
+          "p95": 60.005,
+          "max": 60.038
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 60.005,
+          "mean": 60.006,
+          "p95": 60.005,
+          "max": 60.038
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 60,
+            "count": 3,
+            "min": 60.005,
+            "mean": 60.016,
+            "p95": 60.038,
+            "max": 60.038
+          },
+          "aux": {
+            "expected_fps": 30.0,
+            "count": 17,
+            "min": 29.97,
+            "mean": 29.995,
+            "p95": 30.036,
+            "max": 30.036
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 17400,
+        "missed_deadlines": 2,
+        "output_drops": 0,
+        "repeats": 7285,
+        "discarded": 1113,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 1980,
+          "missed_deadlines": 2,
+          "output_drops": 0,
+          "repeats": 6627,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 15420,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 658,
+          "discarded": 1113,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 6,
+        "direct": {
+          "count": 6,
+          "min": 47.621,
+          "mean": 106.178,
+          "p95": 202.431,
+          "max": 202.431
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr420-60-final-scenes256-cuts",
+      "test": "scene_cuts",
+      "duration_s": 80.044,
+      "result": "did_not_meet_zero_miss_gate",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": false,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": true
+      },
+      "cut_coverage": {
+        "recorded": true,
+        "request_count": 256,
+        "unique_requested_scenes": 256,
+        "successful_requests": 256,
+        "failed_requests": 0,
+        "unknown_requests": 0,
+        "configured_scenes_requested": 256,
+        "all_configured_scenes_requested": true
+      },
+      "show": {
+        "scene_count": 256,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 60,
+          "working_format": "p010le"
+        },
+        "sources": {
+          "total": 88,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 22,
+          "hevc_hlg": 26,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 18,
+          "observed_encoders": 18,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 13,
+          "aux_total": 15,
+          "program_fps": 60,
+          "aux_fps": 30.0
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 14877.0,
+          "mean": 15015.075,
+          "p95": 15352.0,
+          "max": 15413.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 47.0,
+          "mean": 52.925,
+          "p95": 63.0,
+          "max": 68.0
+        },
+        "memory_controller_percent": {
+          "min": 45.0,
+          "mean": 47.75,
+          "p95": 56.0,
+          "max": 60.0
+        },
+        "nvdec_percent": {
+          "min": 46.0,
+          "mean": 48.225,
+          "p95": 51.0,
+          "max": 54.0
+        },
+        "nvenc_percent": {
+          "min": 66.0,
+          "mean": 71.6,
+          "p95": 80.0,
+          "max": 82.0
+        },
+        "sm_clock_mhz": {
+          "min": 1740.0,
+          "mean": 1942.875,
+          "p95": 2025.0,
+          "max": 2025.0
+        },
+        "power_w": {
+          "min": 59.7,
+          "mean": 68.539,
+          "p95": 76.5,
+          "max": 77.08
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 401.852,
+          "mean": 421.789,
+          "p95": 440.428,
+          "max": 445.569
+        },
+        "process_group_mean_cores": 4.216,
+        "host_busy_percent": {
+          "min": 42.829,
+          "mean": 47.167,
+          "p95": 52.488,
+          "max": 54.325
+        },
+        "threads": 780,
+        "active_threads": 665,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 80.243,
+        "decoded_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 59.993,
+          "mean": 59.999,
+          "p95": 60.005,
+          "max": 60.005
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 59.993,
+          "mean": 59.999,
+          "p95": 60.005,
+          "max": 60.005
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 60,
+            "count": 3,
+            "min": 59.993,
+            "mean": 60.001,
+            "p95": 60.005,
+            "max": 60.005
+          },
+          "aux": {
+            "expected_fps": 30.0,
+            "count": 15,
+            "min": 29.984,
+            "mean": 30.0,
+            "p95": 30.009,
+            "max": 30.009
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 41400,
+        "missed_deadlines": 1,
+        "output_drops": 0,
+        "repeats": 11655,
+        "discarded": 1486,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 5220,
+          "missed_deadlines": 1,
+          "output_drops": 0,
+          "repeats": 11482,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 36180,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 173,
+          "discarded": 1486,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 99,
+        "direct": {
+          "count": 99,
+          "min": 26.357,
+          "mean": 43.503,
+          "p95": 60.081,
+          "max": 85.249
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr420-60-first",
+      "test": "steady_state",
+      "duration_s": 20.049,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 60,
+          "working_format": "p010le"
+        },
+        "sources": {
+          "total": 88,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 22,
+          "hevc_hlg": 26,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 20,
+          "observed_encoders": 20,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 15,
+          "aux_total": 17,
+          "program_fps": 60,
+          "aux_fps": 30.0
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 15229.0,
+          "mean": 15286.2,
+          "p95": 15349.0,
+          "max": 15349.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 51.0,
+          "mean": 53.8,
+          "p95": 57.0,
+          "max": 57.0
+        },
+        "memory_controller_percent": {
+          "min": 48.0,
+          "mean": 49.1,
+          "p95": 50.0,
+          "max": 50.0
+        },
+        "nvdec_percent": {
+          "min": 48.0,
+          "mean": 48.1,
+          "p95": 49.0,
+          "max": 49.0
+        },
+        "nvenc_percent": {
+          "min": 75.0,
+          "mean": 77.7,
+          "p95": 81.0,
+          "max": 81.0
+        },
+        "sm_clock_mhz": {
+          "min": 1875.0,
+          "mean": 1912.5,
+          "p95": 1980.0,
+          "max": 1980.0
+        },
+        "power_w": {
+          "min": 61.9,
+          "mean": 63.189,
+          "p95": 65.44,
+          "max": 65.44
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 441.948,
+          "mean": 446.803,
+          "p95": 453.099,
+          "max": 453.099
+        },
+        "process_group_mean_cores": 4.468,
+        "host_busy_percent": {
+          "min": 46.398,
+          "mean": 47.322,
+          "p95": 48.735,
+          "max": 48.735
+        },
+        "threads": 804,
+        "active_threads": 669,
+        "created_threads": 1,
+        "exited_threads": 1
+      },
+      "progress": {
+        "sample_interval_s": 20.247,
+        "decoded_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 59.959,
+          "mean": 60.007,
+          "p95": 60.008,
+          "max": 60.008
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 59.959,
+          "mean": 60.002,
+          "p95": 60.008,
+          "max": 60.008
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 60,
+            "count": 3,
+            "min": 59.959,
+            "mean": 59.992,
+            "p95": 60.008,
+            "max": 60.008
+          },
+          "aux": {
+            "expected_fps": 30.0,
+            "count": 17,
+            "min": 29.979,
+            "mean": 30.02,
+            "p95": 30.029,
+            "max": 30.029
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 12780,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 278,
+        "discarded": 34,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 2400,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 246,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 10380,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 32,
+          "discarded": 34,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 0,
+        "direct": {
+          "count": 0
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr422-25-validated-scenes256-cuts",
+      "test": "scene_cuts",
+      "duration_s": 30.059,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": true
+      },
+      "cut_coverage": {
+        "recorded": true,
+        "request_count": 6,
+        "unique_requested_scenes": 5,
+        "successful_requests": 6,
+        "failed_requests": 0,
+        "unknown_requests": 0,
+        "configured_scenes_requested": 5,
+        "all_configured_scenes_requested": false
+      },
+      "show": {
+        "scene_count": 256,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "p210le"
+        },
+        "sources": {
+          "total": 132,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 44,
+          "hevc_hlg": 44,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 4
+        },
+        "outputs": {
+          "expected_total": 20,
+          "observed_encoders": 20,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 15,
+          "aux_total": 17,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 20165.0,
+          "mean": 20306.733,
+          "p95": 20340.0,
+          "max": 20340.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 39.0,
+          "mean": 42.133,
+          "p95": 45.0,
+          "max": 45.0
+        },
+        "memory_controller_percent": {
+          "min": 38.0,
+          "mean": 39.867,
+          "p95": 42.0,
+          "max": 42.0
+        },
+        "nvdec_percent": {
+          "min": 40.0,
+          "mean": 41.2,
+          "p95": 43.0,
+          "max": 43.0
+        },
+        "nvenc_percent": {
+          "min": 53.0,
+          "mean": 57.467,
+          "p95": 60.0,
+          "max": 60.0
+        },
+        "sm_clock_mhz": {
+          "min": 1905.0,
+          "mean": 1985.0,
+          "p95": 2040.0,
+          "max": 2040.0
+        },
+        "power_w": {
+          "min": 63.47,
+          "mean": 66.43,
+          "p95": 67.92,
+          "max": 67.92
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 374.094,
+          "mean": 388.312,
+          "p95": 401.129,
+          "max": 401.129
+        },
+        "process_group_mean_cores": 3.883,
+        "host_busy_percent": {
+          "min": 34.922,
+          "mean": 35.847,
+          "p95": 36.977,
+          "max": 36.977
+        },
+        "threads": 1068,
+        "active_threads": 893,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 30.31,
+        "decoded_fps": {
+          "expected_fps": 25,
+          "count": 88,
+          "min": 24.975,
+          "mean": 25.001,
+          "p95": 25.008,
+          "max": 25.008
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 25,
+          "count": 92,
+          "min": 24.975,
+          "mean": 25.003,
+          "p95": 25.008,
+          "max": 25.008
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 25,
+            "count": 3,
+            "min": 25.008,
+            "mean": 25.008,
+            "p95": 25.008,
+            "max": 25.008
+          },
+          "aux": {
+            "expected_fps": 25,
+            "count": 17,
+            "min": 24.975,
+            "mean": 25.006,
+            "p95": 25.008,
+            "max": 25.008
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 13860,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 187,
+        "discarded": 133,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 840,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 157,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 13020,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 30,
+          "discarded": 133,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 6,
+        "direct": {
+          "count": 6,
+          "min": 82.419,
+          "mean": 85.226,
+          "p95": 90.161,
+          "max": 90.161
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr422-25",
+      "test": "steady_state",
+      "duration_s": 20.064,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "p210le"
+        },
+        "sources": {
+          "total": 132,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 44,
+          "hevc_hlg": 44,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 4
+        },
+        "outputs": {
+          "expected_total": 30,
+          "observed_encoders": 30,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 25,
+          "aux_total": 27,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 20987.0,
+          "mean": 21010.0,
+          "p95": 21037.0,
+          "max": 21037.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 51.0,
+          "mean": 52.9,
+          "p95": 54.0,
+          "max": 54.0
+        },
+        "memory_controller_percent": {
+          "min": 49.0,
+          "mean": 51.3,
+          "p95": 53.0,
+          "max": 53.0
+        },
+        "nvdec_percent": {
+          "min": 43.0,
+          "mean": 44.9,
+          "p95": 46.0,
+          "max": 46.0
+        },
+        "nvenc_percent": {
+          "min": 76.0,
+          "mean": 79.5,
+          "p95": 83.0,
+          "max": 83.0
+        },
+        "sm_clock_mhz": {
+          "min": 1890.0,
+          "mean": 1950.0,
+          "p95": 2010.0,
+          "max": 2010.0
+        },
+        "power_w": {
+          "min": 67.23,
+          "mean": 68.671,
+          "p95": 70.01,
+          "max": 70.01
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 456.266,
+          "mean": 469.432,
+          "p95": 484.172,
+          "max": 484.172
+        },
+        "process_group_mean_cores": 4.694,
+        "host_busy_percent": {
+          "min": 40.987,
+          "mean": 41.689,
+          "p95": 42.614,
+          "max": 42.614
+        },
+        "threads": 1188,
+        "active_threads": 965,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 20.386,
+        "decoded_fps": {
+          "expected_fps": 25,
+          "count": 88,
+          "min": 24.968,
+          "mean": 25.015,
+          "p95": 25.017,
+          "max": 25.017
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 25,
+          "count": 92,
+          "min": 24.968,
+          "mean": 25.016,
+          "p95": 25.017,
+          "max": 25.066
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 25,
+            "count": 3,
+            "min": 25.017,
+            "mean": 25.017,
+            "p95": 25.017,
+            "max": 25.017
+          },
+          "aux": {
+            "expected_fps": 25,
+            "count": 27,
+            "min": 25.017,
+            "mean": 25.022,
+            "p95": 25.066,
+            "max": 25.066
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 14940,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 54,
+        "discarded": 0,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 960,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 34,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 13980,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 20,
+          "discarded": 0,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 0,
+        "direct": {
+          "count": 0
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr422-60-aux12-cuts",
+      "test": "scene_cuts",
+      "duration_s": 30.061,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 60,
+          "working_format": "p210le"
+        },
+        "sources": {
+          "total": 88,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 22,
+          "hevc_hlg": 22,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 4
+        },
+        "outputs": {
+          "expected_total": 17,
+          "observed_encoders": 17,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 12,
+          "aux_total": 14,
+          "program_fps": 60,
+          "aux_fps": 30.0
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 15090.0,
+          "mean": 15222.0,
+          "p95": 15433.0,
+          "max": 15433.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 62.0,
+          "mean": 65.8,
+          "p95": 74.0,
+          "max": 74.0
+        },
+        "memory_controller_percent": {
+          "min": 53.0,
+          "mean": 56.6,
+          "p95": 64.0,
+          "max": 64.0
+        },
+        "nvdec_percent": {
+          "min": 45.0,
+          "mean": 46.4,
+          "p95": 48.0,
+          "max": 48.0
+        },
+        "nvenc_percent": {
+          "min": 71.0,
+          "mean": 72.4,
+          "p95": 77.0,
+          "max": 77.0
+        },
+        "sm_clock_mhz": {
+          "min": 1770.0,
+          "mean": 1867.0,
+          "p95": 1950.0,
+          "max": 1950.0
+        },
+        "power_w": {
+          "min": 71.71,
+          "mean": 74.726,
+          "p95": 76.93,
+          "max": 76.93
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 480.619,
+          "mean": 493.003,
+          "p95": 501.583,
+          "max": 501.583
+        },
+        "process_group_mean_cores": 4.929,
+        "host_busy_percent": {
+          "min": 50.228,
+          "mean": 51.162,
+          "p95": 51.95,
+          "max": 51.95
+        },
+        "threads": 769,
+        "active_threads": 642,
+        "created_threads": 2,
+        "exited_threads": 1
+      },
+      "progress": {
+        "sample_interval_s": 30.238,
+        "decoded_fps": {
+          "expected_fps": 60,
+          "count": 44,
+          "min": 59.991,
+          "mean": 59.995,
+          "p95": 60.024,
+          "max": 60.024
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 59.991,
+          "mean": 59.996,
+          "p95": 60.024,
+          "max": 60.024
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 60,
+            "count": 3,
+            "min": 59.991,
+            "mean": 59.991,
+            "p95": 59.991,
+            "max": 59.991
+          },
+          "aux": {
+            "expected_fps": 30.0,
+            "count": 14,
+            "min": 29.962,
+            "mean": 29.995,
+            "p95": 30.028,
+            "max": 30.028
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 14580,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 1230,
+        "discarded": 196,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 1980,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 1094,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 12600,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 136,
+          "discarded": 196,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 6,
+        "direct": {
+          "count": 6,
+          "min": 34.244,
+          "mean": 39.757,
+          "p95": 48.187,
+          "max": 48.187
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr422-60-cuts",
+      "test": "scene_cuts",
+      "duration_s": 30.05,
+      "result": "did_not_meet_zero_miss_gate",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": false,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": false,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 60,
+          "working_format": "p210le"
+        },
+        "sources": {
+          "total": 88,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 22,
+          "hevc_hlg": 22,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 4
+        },
+        "outputs": {
+          "expected_total": 20,
+          "observed_encoders": 20,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 15,
+          "aux_total": 17,
+          "program_fps": 60,
+          "aux_fps": 30.0
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 16004.0,
+          "mean": 16629.933,
+          "p95": 17045.0,
+          "max": 17045.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 62.0,
+          "mean": 69.333,
+          "p95": 75.0,
+          "max": 75.0
+        },
+        "memory_controller_percent": {
+          "min": 55.0,
+          "mean": 59.6,
+          "p95": 65.0,
+          "max": 65.0
+        },
+        "nvdec_percent": {
+          "min": 46.0,
+          "mean": 47.733,
+          "p95": 52.0,
+          "max": 52.0
+        },
+        "nvenc_percent": {
+          "min": 77.0,
+          "mean": 84.533,
+          "p95": 92.0,
+          "max": 92.0
+        },
+        "sm_clock_mhz": {
+          "min": 1695.0,
+          "mean": 1848.0,
+          "p95": 1950.0,
+          "max": 1950.0
+        },
+        "power_w": {
+          "min": 70.15,
+          "mean": 73.541,
+          "p95": 77.64,
+          "max": 77.64
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 484.8,
+          "mean": 513.774,
+          "p95": 529.413,
+          "max": 529.413
+        },
+        "process_group_mean_cores": 5.138,
+        "host_busy_percent": {
+          "min": 51.296,
+          "mean": 52.319,
+          "p95": 53.813,
+          "max": 53.813
+        },
+        "threads": 804,
+        "active_threads": 678,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 30.256,
+        "decoded_fps": {
+          "expected_fps": 60,
+          "count": 44,
+          "min": 59.988,
+          "mean": 60.021,
+          "p95": 60.022,
+          "max": 60.022
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 59.988,
+          "mean": 60.02,
+          "p95": 60.022,
+          "max": 60.022
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 60,
+            "count": 3,
+            "min": 54.403,
+            "mean": 55.339,
+            "p95": 56.849,
+            "max": 56.849
+          },
+          "aux": {
+            "expected_fps": 30.0,
+            "count": 17,
+            "min": 29.978,
+            "mean": 30.005,
+            "p95": 30.011,
+            "max": 30.011
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 17400,
+        "missed_deadlines": 51,
+        "output_drops": 0,
+        "repeats": 13140,
+        "discarded": 5489,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 1920,
+          "missed_deadlines": 51,
+          "output_drops": 0,
+          "repeats": 8179,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 15480,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 4961,
+          "discarded": 5489,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 1,
+        "direct": {
+          "count": 1,
+          "min": 4804.324,
+          "mean": 4804.324,
+          "p95": 4804.324,
+          "max": 4804.324
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "hdr422-60-steady-random",
+      "test": "steady_state",
+      "duration_s": 20.049,
+      "result": "did_not_meet_zero_miss_gate",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": false,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": false,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 60,
+          "working_format": "p210le"
+        },
+        "sources": {
+          "total": 88,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 22,
+          "hevc_hlg": 22,
+          "browser": 40,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 4
+        },
+        "outputs": {
+          "expected_total": 20,
+          "observed_encoders": 20,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 15,
+          "aux_total": 17,
+          "program_fps": 60,
+          "aux_fps": 30.0
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 16124.0,
+          "mean": 16318.4,
+          "p95": 16502.0,
+          "max": 16502.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 64.0,
+          "mean": 69.7,
+          "p95": 74.0,
+          "max": 74.0
+        },
+        "memory_controller_percent": {
+          "min": 57.0,
+          "mean": 59.8,
+          "p95": 63.0,
+          "max": 63.0
+        },
+        "nvdec_percent": {
+          "min": 46.0,
+          "mean": 47.8,
+          "p95": 50.0,
+          "max": 50.0
+        },
+        "nvenc_percent": {
+          "min": 76.0,
+          "mean": 87.1,
+          "p95": 97.0,
+          "max": 97.0
+        },
+        "sm_clock_mhz": {
+          "min": 1740.0,
+          "mean": 1840.5,
+          "p95": 1965.0,
+          "max": 1965.0
+        },
+        "power_w": {
+          "min": 72.87,
+          "mean": 75.647,
+          "p95": 77.37,
+          "max": 77.37
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 503.557,
+          "mean": 516.679,
+          "p95": 523.298,
+          "max": 523.298
+        },
+        "process_group_mean_cores": 5.167,
+        "host_busy_percent": {
+          "min": 51.905,
+          "mean": 52.205,
+          "p95": 52.696,
+          "max": 52.696
+        },
+        "threads": 804,
+        "active_threads": 667,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 20.268,
+        "decoded_fps": {
+          "expected_fps": 60,
+          "count": 44,
+          "min": 59.997,
+          "mean": 60.005,
+          "p95": 60.047,
+          "max": 60.047
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 60,
+          "count": 48,
+          "min": 59.997,
+          "mean": 60.004,
+          "p95": 60.047,
+          "max": 60.047
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 60,
+            "count": 3,
+            "min": 57.629,
+            "mean": 58.846,
+            "p95": 60.096,
+            "max": 60.096
+          },
+          "aux": {
+            "expected_fps": 30.0,
+            "count": 17,
+            "min": 29.999,
+            "mean": 30.01,
+            "p95": 30.048,
+            "max": 30.048
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 11520,
+        "missed_deadlines": 4,
+        "output_drops": 0,
+        "repeats": 3805,
+        "discarded": 1267,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 1200,
+          "missed_deadlines": 4,
+          "output_drops": 0,
+          "repeats": 2530,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 10320,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 1275,
+          "discarded": 1267,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 0,
+        "direct": {
+          "count": 0
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "sdr420-25-aux22-scenes256-cuts",
+      "test": "scene_cuts",
+      "duration_s": 80.095,
+      "result": "did_not_meet_zero_miss_gate",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": false,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": true
+      },
+      "cut_coverage": {
+        "recorded": true,
+        "request_count": 256,
+        "unique_requested_scenes": 256,
+        "successful_requests": 256,
+        "failed_requests": 0,
+        "unknown_requests": 0,
+        "configured_scenes_requested": 256,
+        "all_configured_scenes_requested": true
+      },
+      "show": {
+        "scene_count": 256,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "nv12"
+        },
+        "sources": {
+          "total": 192,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 120,
+          "hevc_hlg": 0,
+          "browser": 40,
+          "raw_nv12": 32,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 26,
+          "observed_encoders": 26,
+          "program_renditions": 2,
+          "fixed_aux": 2,
+          "extra_aux": 22,
+          "aux_total": 24,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 19153.0,
+          "mean": 19207.175,
+          "p95": 19255.0,
+          "max": 19263.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 39.0,
+          "mean": 43.7,
+          "p95": 51.0,
+          "max": 52.0
+        },
+        "memory_controller_percent": {
+          "min": 24.0,
+          "mean": 27.75,
+          "p95": 35.0,
+          "max": 35.0
+        },
+        "nvdec_percent": {
+          "min": 61.0,
+          "mean": 65.125,
+          "p95": 67.0,
+          "max": 69.0
+        },
+        "nvenc_percent": {
+          "min": 56.0,
+          "mean": 64.25,
+          "p95": 70.0,
+          "max": 73.0
+        },
+        "sm_clock_mhz": {
+          "min": 2040.0,
+          "mean": 2040.0,
+          "p95": 2040.0,
+          "max": 2040.0
+        },
+        "power_w": {
+          "min": 49.97,
+          "mean": 52.599,
+          "p95": 55.55,
+          "max": 56.13
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 667.569,
+          "mean": 685.798,
+          "p95": 702.873,
+          "max": 710.067
+        },
+        "process_group_mean_cores": 6.858,
+        "host_busy_percent": {
+          "min": 54.822,
+          "mean": 56.614,
+          "p95": 59.45,
+          "max": 64.32
+        },
+        "threads": 1503,
+        "active_threads": 1272,
+        "created_threads": 1,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 80.469,
+        "decoded_fps": {
+          "expected_fps": 25,
+          "count": 120,
+          "min": 24.991,
+          "mean": 25.0,
+          "p95": 25.003,
+          "max": 25.003
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 25,
+          "count": 152,
+          "min": 24.991,
+          "mean": 24.999,
+          "p95": 25.003,
+          "max": 25.003
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 25,
+            "count": 2,
+            "min": 25.003,
+            "mean": 25.003,
+            "p95": 25.003,
+            "max": 25.003
+          },
+          "aux": {
+            "expected_fps": 25,
+            "count": 24,
+            "min": 24.991,
+            "mean": 24.999,
+            "p95": 25.003,
+            "max": 25.003
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 50340,
+        "missed_deadlines": 0,
+        "output_drops": 1,
+        "repeats": 794,
+        "discarded": 1312,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 2340,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 648,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 48000,
+          "missed_deadlines": 0,
+          "output_drops": 1,
+          "repeats": 146,
+          "discarded": 1312,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 98,
+        "direct": {
+          "count": 98,
+          "min": 55.964,
+          "mean": 83.402,
+          "p95": 104.445,
+          "max": 110.285
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "sdr420-25-aux22-scenes256-repeat-cuts",
+      "test": "scene_cuts",
+      "duration_s": 80.094,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": true
+      },
+      "cut_coverage": {
+        "recorded": true,
+        "request_count": 256,
+        "unique_requested_scenes": 256,
+        "successful_requests": 256,
+        "failed_requests": 0,
+        "unknown_requests": 0,
+        "configured_scenes_requested": 256,
+        "all_configured_scenes_requested": true
+      },
+      "show": {
+        "scene_count": 256,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "nv12"
+        },
+        "sources": {
+          "total": 192,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 120,
+          "hevc_hlg": 0,
+          "browser": 40,
+          "raw_nv12": 32,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 26,
+          "observed_encoders": 26,
+          "program_renditions": 2,
+          "fixed_aux": 2,
+          "extra_aux": 22,
+          "aux_total": 24,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 19166.0,
+          "mean": 19219.875,
+          "p95": 19285.0,
+          "max": 19295.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 38.0,
+          "mean": 43.45,
+          "p95": 48.0,
+          "max": 48.0
+        },
+        "memory_controller_percent": {
+          "min": 25.0,
+          "mean": 27.7,
+          "p95": 30.0,
+          "max": 31.0
+        },
+        "nvdec_percent": {
+          "min": 64.0,
+          "mean": 66.275,
+          "p95": 69.0,
+          "max": 69.0
+        },
+        "nvenc_percent": {
+          "min": 60.0,
+          "mean": 70.2,
+          "p95": 75.0,
+          "max": 75.0
+        },
+        "sm_clock_mhz": {
+          "min": 2040.0,
+          "mean": 2040.0,
+          "p95": 2040.0,
+          "max": 2040.0
+        },
+        "power_w": {
+          "min": 50.25,
+          "mean": 52.905,
+          "p95": 56.79,
+          "max": 56.95
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 669.393,
+          "mean": 698.671,
+          "p95": 723.691,
+          "max": 726.128
+        },
+        "process_group_mean_cores": 6.979,
+        "host_busy_percent": {
+          "min": 54.584,
+          "mean": 60.021,
+          "p95": 64.598,
+          "max": 65.49
+        },
+        "threads": 1502,
+        "active_threads": 1275,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 80.553,
+        "decoded_fps": {
+          "expected_fps": 25,
+          "count": 120,
+          "min": 24.99,
+          "mean": 24.995,
+          "p95": 25.002,
+          "max": 25.002
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 25,
+          "count": 152,
+          "min": 24.99,
+          "mean": 24.994,
+          "p95": 25.002,
+          "max": 25.002
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 25,
+            "count": 2,
+            "min": 24.99,
+            "mean": 24.99,
+            "p95": 24.99,
+            "max": 24.99
+          },
+          "aux": {
+            "expected_fps": 25,
+            "count": 24,
+            "min": 24.99,
+            "mean": 24.99,
+            "p95": 24.99,
+            "max": 24.99
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 50340,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 1057,
+        "discarded": 1342,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 2220,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 835,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 48120,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 222,
+          "discarded": 1342,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 98,
+        "direct": {
+          "count": 98,
+          "min": 49.082,
+          "mean": 84.442,
+          "p95": 105.514,
+          "max": 121.265
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "sdr420-25-cuts",
+      "test": "scene_cuts",
+      "duration_s": 30.099,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "nv12"
+        },
+        "sources": {
+          "total": 192,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 120,
+          "hevc_hlg": 0,
+          "browser": 40,
+          "raw_nv12": 32,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 30,
+          "observed_encoders": 30,
+          "program_renditions": 2,
+          "fixed_aux": 2,
+          "extra_aux": 26,
+          "aux_total": 28,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 18365.0,
+          "mean": 18413.4,
+          "p95": 18476.0,
+          "max": 18476.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 45.0,
+          "mean": 47.733,
+          "p95": 51.0,
+          "max": 51.0
+        },
+        "memory_controller_percent": {
+          "min": 31.0,
+          "mean": 32.2,
+          "p95": 34.0,
+          "max": 34.0
+        },
+        "nvdec_percent": {
+          "min": 66.0,
+          "mean": 66.933,
+          "p95": 68.0,
+          "max": 68.0
+        },
+        "nvenc_percent": {
+          "min": 73.0,
+          "mean": 76.6,
+          "p95": 82.0,
+          "max": 82.0
+        },
+        "sm_clock_mhz": {
+          "min": 2040.0,
+          "mean": 2040.0,
+          "p95": 2040.0,
+          "max": 2040.0
+        },
+        "power_w": {
+          "min": 52.39,
+          "mean": 55.705,
+          "p95": 57.87,
+          "max": 57.87
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 701.056,
+          "mean": 718.714,
+          "p95": 735.462,
+          "max": 735.462
+        },
+        "process_group_mean_cores": 7.187,
+        "host_busy_percent": {
+          "min": 58.143,
+          "mean": 58.697,
+          "p95": 59.456,
+          "max": 59.456
+        },
+        "threads": 1550,
+        "active_threads": 1304,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 30.577,
+        "decoded_fps": {
+          "expected_fps": 25,
+          "count": 120,
+          "min": 24.986,
+          "mean": 25.01,
+          "p95": 25.019,
+          "max": 25.019
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 25,
+          "count": 152,
+          "min": 24.986,
+          "mean": 25.01,
+          "p95": 25.019,
+          "max": 25.019
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 25,
+            "count": 2,
+            "min": 24.986,
+            "mean": 25.002,
+            "p95": 25.019,
+            "max": 25.019
+          },
+          "aux": {
+            "expected_fps": 25,
+            "count": 28,
+            "min": 24.986,
+            "mean": 25.007,
+            "p95": 25.019,
+            "max": 25.019
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 22020,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 192,
+        "discarded": 10,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 840,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 137,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 21180,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 55,
+          "discarded": 10,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 6,
+        "direct": {
+          "count": 6,
+          "min": 74.871,
+          "mean": 99.582,
+          "p95": 145.732,
+          "max": 145.732
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "sdr420-25-validated-scenes256-cuts",
+      "test": "scene_cuts",
+      "duration_s": 80.101,
+      "result": "did_not_meet_zero_miss_gate",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": false,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": false,
+        "all_recorded_cut_requests_succeeded": true
+      },
+      "cut_coverage": {
+        "recorded": true,
+        "request_count": 256,
+        "unique_requested_scenes": 256,
+        "successful_requests": 256,
+        "failed_requests": 0,
+        "unknown_requests": 0,
+        "configured_scenes_requested": 256,
+        "all_configured_scenes_requested": true
+      },
+      "show": {
+        "scene_count": 256,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "nv12"
+        },
+        "sources": {
+          "total": 192,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 120,
+          "hevc_hlg": 0,
+          "browser": 40,
+          "raw_nv12": 32,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 30,
+          "observed_encoders": 30,
+          "program_renditions": 2,
+          "fixed_aux": 2,
+          "extra_aux": 26,
+          "aux_total": 28,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 19666.0,
+          "mean": 19878.75,
+          "p95": 20150.0,
+          "max": 20229.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 37.0,
+          "mean": 46.15,
+          "p95": 58.0,
+          "max": 58.0
+        },
+        "memory_controller_percent": {
+          "min": 25.0,
+          "mean": 30.075,
+          "p95": 39.0,
+          "max": 41.0
+        },
+        "nvdec_percent": {
+          "min": 61.0,
+          "mean": 65.625,
+          "p95": 68.0,
+          "max": 68.0
+        },
+        "nvenc_percent": {
+          "min": 52.0,
+          "mean": 79.45,
+          "p95": 100.0,
+          "max": 100.0
+        },
+        "sm_clock_mhz": {
+          "min": 2040.0,
+          "mean": 2040.0,
+          "p95": 2040.0,
+          "max": 2040.0
+        },
+        "power_w": {
+          "min": 51.05,
+          "mean": 55.763,
+          "p95": 59.03,
+          "max": 59.36
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 583.921,
+          "mean": 704.245,
+          "p95": 727.852,
+          "max": 739.375
+        },
+        "process_group_mean_cores": 7.042,
+        "host_busy_percent": {
+          "min": 50.164,
+          "mean": 57.681,
+          "p95": 59.071,
+          "max": 59.073
+        },
+        "threads": 1550,
+        "active_threads": 1319,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 80.674,
+        "decoded_fps": {
+          "expected_fps": 25,
+          "count": 120,
+          "min": 25.002,
+          "mean": 25.003,
+          "p95": 25.014,
+          "max": 25.014
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 25,
+          "count": 152,
+          "min": 24.989,
+          "mean": 25.003,
+          "p95": 25.014,
+          "max": 25.014
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 25,
+            "count": 2,
+            "min": 24.655,
+            "mean": 24.655,
+            "p95": 24.655,
+            "max": 24.655
+          },
+          "aux": {
+            "expected_fps": 25,
+            "count": 28,
+            "min": 24.989,
+            "mean": 25.009,
+            "p95": 25.014,
+            "max": 25.014
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 57120,
+        "missed_deadlines": 693,
+        "output_drops": 856,
+        "repeats": 8002,
+        "discarded": 3464,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 2340,
+          "missed_deadlines": 127,
+          "output_drops": 0,
+          "repeats": 4363,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 54780,
+          "missed_deadlines": 566,
+          "output_drops": 856,
+          "repeats": 3639,
+          "discarded": 3464,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 88,
+        "direct": {
+          "count": 88,
+          "min": 62.112,
+          "mean": 107.459,
+          "p95": 148.296,
+          "max": 271.125
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "sdr420-60-budget-image-cuts",
+      "test": "scene_cuts",
+      "duration_s": 30.058,
+      "result": "zero_miss_observation",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": true,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 60,
+          "working_format": "nv12"
+        },
+        "sources": {
+          "total": 99,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 40,
+          "hevc_hlg": 0,
+          "browser": 40,
+          "raw_nv12": 19,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 22,
+          "observed_encoders": 22,
+          "program_renditions": 2,
+          "fixed_aux": 2,
+          "extra_aux": 18,
+          "aux_total": 20,
+          "program_fps": 60,
+          "aux_fps": 30.0
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 11232.0,
+          "mean": 11345.733,
+          "p95": 11474.0,
+          "max": 11474.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 56.0,
+          "mean": 62.333,
+          "p95": 69.0,
+          "max": 69.0
+        },
+        "memory_controller_percent": {
+          "min": 30.0,
+          "mean": 34.4,
+          "p95": 43.0,
+          "max": 43.0
+        },
+        "nvdec_percent": {
+          "min": 43.0,
+          "mean": 44.733,
+          "p95": 46.0,
+          "max": 46.0
+        },
+        "nvenc_percent": {
+          "min": 69.0,
+          "mean": 79.2,
+          "p95": 84.0,
+          "max": 84.0
+        },
+        "sm_clock_mhz": {
+          "min": 2040.0,
+          "mean": 2040.0,
+          "p95": 2040.0,
+          "max": 2040.0
+        },
+        "power_w": {
+          "min": 50.89,
+          "mean": 54.417,
+          "p95": 57.44,
+          "max": 57.44
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 655.202,
+          "mean": 676.006,
+          "p95": 689.174,
+          "max": 689.174
+        },
+        "process_group_mean_cores": 6.76,
+        "host_busy_percent": {
+          "min": 62.614,
+          "mean": 63.687,
+          "p95": 64.948,
+          "max": 64.948
+        },
+        "threads": 896,
+        "active_threads": 759,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 30.337,
+        "decoded_fps": {
+          "expected_fps": 60,
+          "count": 40,
+          "min": 59.993,
+          "mean": 60.006,
+          "p95": 60.026,
+          "max": 60.026
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 60,
+          "count": 59,
+          "min": 59.993,
+          "mean": 60.002,
+          "p95": 60.026,
+          "max": 60.026
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 60,
+            "count": 2,
+            "min": 59.993,
+            "mean": 59.993,
+            "p95": 59.993,
+            "max": 59.993
+          },
+          "aux": {
+            "expected_fps": 30.0,
+            "count": 20,
+            "min": 29.964,
+            "mean": 30.0,
+            "p95": 30.03,
+            "max": 30.03
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 20340,
+        "missed_deadlines": 0,
+        "output_drops": 0,
+        "repeats": 539,
+        "discarded": 208,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 1980,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 400,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 18360,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 139,
+          "discarded": 208,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 6,
+        "direct": {
+          "count": 6,
+          "min": 32.248,
+          "mean": 40.751,
+          "p95": 49.696,
+          "max": 49.696
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    },
+    {
+      "id": "sdr420-60-cuts",
+      "test": "scene_cuts",
+      "duration_s": 30.063,
+      "result": "did_not_meet_zero_miss_gate",
+      "checks": {
+        "zero_missed_deadlines_and_output_drops": false,
+        "no_stalled_captured_edges": true,
+        "captured_topology_matches_show": true,
+        "captured_rates_within_0_1_fps": true,
+        "all_recorded_cut_requests_succeeded": null
+      },
+      "cut_coverage": {
+        "recorded": false
+      },
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 60,
+          "working_format": "nv12"
+        },
+        "sources": {
+          "total": 99,
+          "includes_four_browser_keys": true,
+          "hevc_sdr": 40,
+          "hevc_hlg": 0,
+          "browser": 40,
+          "raw_nv12": 19,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 22,
+          "observed_encoders": 22,
+          "program_renditions": 2,
+          "fixed_aux": 2,
+          "extra_aux": 18,
+          "aux_total": 20,
+          "program_fps": 60,
+          "aux_fps": 30.0
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "gpu": {
+        "vram_used_mib": {
+          "min": 11550.0,
+          "mean": 11619.867,
+          "p95": 11705.0,
+          "max": 11705.0
+        },
+        "vram_total_mib": {
+          "min": 23034.0,
+          "mean": 23034.0,
+          "p95": 23034.0,
+          "max": 23034.0
+        },
+        "sm_percent": {
+          "min": 58.0,
+          "mean": 61.267,
+          "p95": 68.0,
+          "max": 68.0
+        },
+        "memory_controller_percent": {
+          "min": 31.0,
+          "mean": 34.067,
+          "p95": 43.0,
+          "max": 43.0
+        },
+        "nvdec_percent": {
+          "min": 44.0,
+          "mean": 45.0,
+          "p95": 46.0,
+          "max": 46.0
+        },
+        "nvenc_percent": {
+          "min": 76.0,
+          "mean": 77.6,
+          "p95": 81.0,
+          "max": 81.0
+        },
+        "sm_clock_mhz": {
+          "min": 2040.0,
+          "mean": 2040.0,
+          "p95": 2040.0,
+          "max": 2040.0
+        },
+        "power_w": {
+          "min": 50.73,
+          "mean": 52.975,
+          "p95": 55.51,
+          "max": 55.51
+        }
+      },
+      "cpu": {
+        "process_group_percent": {
+          "min": 666.175,
+          "mean": 679.602,
+          "p95": 694.495,
+          "max": 694.495
+        },
+        "process_group_mean_cores": 6.796,
+        "host_busy_percent": {
+          "min": 62.914,
+          "mean": 63.706,
+          "p95": 65.059,
+          "max": 65.059
+        },
+        "threads": 896,
+        "active_threads": 755,
+        "created_threads": 0,
+        "exited_threads": 0
+      },
+      "progress": {
+        "sample_interval_s": 30.348,
+        "decoded_fps": {
+          "expected_fps": 60,
+          "count": 40,
+          "min": 60.004,
+          "mean": 60.009,
+          "p95": 60.037,
+          "max": 60.037
+        },
+        "source_rate_edges_fps": {
+          "expected_fps": 60,
+          "count": 59,
+          "min": 60.004,
+          "mean": 60.009,
+          "p95": 60.037,
+          "max": 60.037
+        },
+        "encoder_fps": {
+          "programs": {
+            "expected_fps": 60,
+            "count": 2,
+            "min": 59.971,
+            "mean": 59.988,
+            "p95": 60.004,
+            "max": 60.004
+          },
+          "aux": {
+            "expected_fps": 30.0,
+            "count": 20,
+            "min": 29.986,
+            "mean": 30.01,
+            "p95": 30.019,
+            "max": 30.019
+          }
+        },
+        "stalled_edge_count": 0
+      },
+      "counter_deltas": {
+        "frames": 20100,
+        "missed_deadlines": 1,
+        "output_drops": 0,
+        "repeats": 777,
+        "discarded": 301,
+        "overflow": 0
+      },
+      "counter_deltas_by_group": {
+        "program_slots": {
+          "frames": 2040,
+          "missed_deadlines": 1,
+          "output_drops": 0,
+          "repeats": 531,
+          "discarded": 0,
+          "overflow": 0
+        },
+        "aux_outputs": {
+          "frames": 18060,
+          "missed_deadlines": 0,
+          "output_drops": 0,
+          "repeats": 246,
+          "discarded": 301,
+          "overflow": 0
+        }
+      },
+      "cut_latency_ms": {
+        "endpoint": "encoder_output",
+        "unique_new_events": 6,
+        "direct": {
+          "count": 6,
+          "min": 32.134,
+          "mean": 38.118,
+          "p95": 45.369,
+          "max": 45.369
+        },
+        "previewed": {
+          "count": 0
+        }
+      }
+    }
+  ],
+  "startup_failures": [
+    {
+      "id": "hdr420-25-all-hlg-aux20",
+      "measured_date": "2026-10-05",
+      "result": "startup_failed_nvenc_out_of_memory",
+      "show": {
+        "scene_count": 128,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "p010le"
+        },
+        "sources": {
+          "total": 136,
+          "hevc_sdr": 0,
+          "hevc_hlg": 96,
+          "browser": 40,
+          "includes_four_browser_keys": true,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 25,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 20,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "observed": {
+        "failure_stage": "NVENC encoder initialization",
+        "nvenc_error_code": 10,
+        "error": "InitializeEncoder failed: out of memory",
+        "vram_used_mib": 22643,
+        "vram_total_mib": 23034,
+        "vram_measurement": "single observed snapshot; not peak",
+        "subsequent_cuda_allocation_failures": true
+      },
+      "preparation_observed_s": 110,
+      "completed_capture": false,
+      "limitation": "No completed runtime capture; decoder and encoder rates, deadline counters and cut latency are not qualified.",
+      "recovery": {
+        "status": "automatic_rollback_failed_manual_container_stop_required",
+        "attempted_previous_show": {
+          "scene_count": 128,
+          "sources": {
+            "total": 136,
+            "hevc_sdr": 43,
+            "hevc_hlg": 53,
+            "browser": 40
+          },
+          "expected_outputs": 30
+        },
+        "observed_error": "CUDA compositor allocation failed with out of memory while restarting the previous balanced show",
+        "limitation": "The earlier successful steady and cut captures did not qualify startup or rollback allocation headroom."
+      }
+    },
+    {
+      "id": "hdr420-25-all-hlg-aux10-scenes256",
+      "measured_date": "2026-10-05",
+      "result": "startup_failed_nvenc_out_of_memory",
+      "show": {
+        "scene_count": 256,
+        "canvas": {
+          "width": 1920,
+          "height": 1080,
+          "fps": 25,
+          "working_format": "p010le"
+        },
+        "sources": {
+          "total": 136,
+          "hevc_sdr": 0,
+          "hevc_hlg": 96,
+          "browser": 40,
+          "includes_four_browser_keys": true,
+          "raw_nv12": 0,
+          "raw_p010": 0,
+          "raw_v210": 0
+        },
+        "outputs": {
+          "expected_total": 15,
+          "program_renditions": 3,
+          "fixed_aux": 2,
+          "extra_aux": 10,
+          "program_fps": 25,
+          "aux_fps": 25
+        },
+        "encode_settings": {
+          "sdr": {
+            "preset": "p5",
+            "bitrate_kbps": 6000
+          },
+          "hdr": {
+            "preset": "p3",
+            "bitrate_kbps": 8000
+          },
+          "sdr_clean": {
+            "preset": "p3",
+            "bitrate_kbps": 6000
+          },
+          "extra": {
+            "preset": "p3",
+            "bitrate_kbps": 3000
+          },
+          "mv": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          },
+          "mv2": {
+            "preset": "p3",
+            "bitrate_kbps": 4000
+          }
+        }
+      },
+      "observed": {
+        "failure_stage": "NVENC encoder initialization",
+        "nvenc_error_code": 10,
+        "error": "InitializeEncoder failed: out of memory",
+        "vram_used_mib": 22637,
+        "vram_total_mib": 23034,
+        "vram_measurement": "single observed snapshot; not peak"
+      },
+      "preparation_observed_s": null,
+      "completed_capture": false,
+      "limitation": "No completed runtime capture; neither this source mix nor 256-scene operation was validated by this failed start.",
+      "recovery": {
+        "status": "manual_container_stop_required",
+        "failure_callback": "Graph shutdown started immediately after the first encoder out-of-memory error.",
+        "native_shutdown": "Shutdown blocked; the parent continued waiting for its startup deadline."
+      }
+    }
+  ],
+  "reconfiguration_timings": [
+    {
+      "id": "hdr420-25-roundtrip",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 25,
+        "working_format": "p010le"
+      },
+      "extra_aux": 25,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 20,
+      "apply_to_verified_s": 21.593,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "hdr420-25-safe-scenes256",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 25,
+        "working_format": "p010le"
+      },
+      "extra_aux": 15,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 18,
+      "apply_to_verified_s": 18.621,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "hdr420-25",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 25,
+        "working_format": "p010le"
+      },
+      "extra_aux": 25,
+      "preparation_observed_s": 116,
+      "restart_to_ready_observed_s": 20,
+      "apply_to_verified_s": 136.737,
+      "preparing_phase_observed": true
+    },
+    {
+      "id": "hdr420-60-aux13",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "working_format": "p010le"
+      },
+      "extra_aux": 13,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 14,
+      "apply_to_verified_s": 14.553,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "hdr420-60-final-scenes256",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "working_format": "p010le"
+      },
+      "extra_aux": 13,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 20,
+      "apply_to_verified_s": 20.623,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "hdr420-60-first",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "working_format": "p010le"
+      },
+      "extra_aux": 15,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 20,
+      "apply_to_verified_s": 20.663,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "hdr420-60-roundtrip",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "working_format": "p010le"
+      },
+      "extra_aux": 15,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 14,
+      "apply_to_verified_s": 15.325,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "hdr422-25-validated-scenes256",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 25,
+        "working_format": "p210le"
+      },
+      "extra_aux": 15,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 18,
+      "apply_to_verified_s": 18.633,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "hdr422-25",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 25,
+        "working_format": "p210le"
+      },
+      "extra_aux": 25,
+      "preparation_observed_s": 57,
+      "restart_to_ready_observed_s": 35,
+      "apply_to_verified_s": 92.156,
+      "preparing_phase_observed": true
+    },
+    {
+      "id": "hdr422-60-aux12",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "working_format": "p210le"
+      },
+      "extra_aux": 12,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 14,
+      "apply_to_verified_s": 15.284,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "hdr422-60-safe-scenes256",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "working_format": "p210le"
+      },
+      "extra_aux": 12,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 33,
+      "apply_to_verified_s": 32.808,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "hdr422-60",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "working_format": "p210le"
+      },
+      "extra_aux": 15,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 18,
+      "apply_to_verified_s": 18.714,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "sdr420-25-aux22-scenes256",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 25,
+        "working_format": "nv12"
+      },
+      "extra_aux": 22,
+      "preparation_observed_s": 2,
+      "restart_to_ready_observed_s": 25,
+      "apply_to_verified_s": 27.623,
+      "preparing_phase_observed": true
+    },
+    {
+      "id": "sdr420-25-validated-scenes256",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 25,
+        "working_format": "nv12"
+      },
+      "extra_aux": 26,
+      "preparation_observed_s": 2,
+      "restart_to_ready_observed_s": 27,
+      "apply_to_verified_s": 29.163,
+      "preparing_phase_observed": true
+    },
+    {
+      "id": "sdr420-25",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 25,
+        "working_format": "nv12"
+      },
+      "extra_aux": 26,
+      "preparation_observed_s": 2,
+      "restart_to_ready_observed_s": 22,
+      "apply_to_verified_s": 25.998,
+      "preparing_phase_observed": true
+    },
+    {
+      "id": "sdr420-60-cached",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "working_format": "nv12"
+      },
+      "extra_aux": 18,
+      "preparation_observed_s": 0,
+      "restart_to_ready_observed_s": 20,
+      "apply_to_verified_s": 20.63,
+      "preparing_phase_observed": false
+    },
+    {
+      "id": "sdr420-60",
+      "target_canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "working_format": "nv12"
+      },
+      "extra_aux": 18,
+      "preparation_observed_s": 67,
+      "restart_to_ready_observed_s": 12,
+      "apply_to_verified_s": 80.398,
+      "preparing_phase_observed": true
+    }
+  ],
+  "configured_limits": {
+    "source": "instance_profiles.py",
+    "kind": "admission_policy_snapshot_not_independent_measurements",
+    "nvdec_hdr_decodes": {
+      "25": 53,
+      "30": 53,
+      "50": 32,
+      "60": 27
+    },
+    "hdr_max_encoded_outputs": {
+      "10:420": {
+        "25": 20,
+        "30": 20,
+        "50": 18,
+        "60": 18
+      },
+      "10:422": {
+        "25": 20,
+        "30": 20,
+        "50": 17,
+        "60": 17
+      }
+    },
+    "max_encoded_outputs_by_mode": {
+      "8:420": {
+        "25": 26,
+        "30": 26,
+        "50": 22,
+        "60": 22
+      },
+      "10:420": {
+        "25": 20,
+        "30": 20,
+        "50": 18,
+        "60": 18
+      },
+      "10:422": {
+        "25": 20,
+        "30": 20,
+        "50": 17,
+        "60": 17
+      }
+    },
+    "max_scenes": 256,
+    "global_max_encoded_outputs": 30,
+    "rate_evidence": {
+      "25": "specific completed configurations only",
+      "30": "derived, not tested in this update",
+      "50": "derived, not tested in this update",
+      "60": "specific completed configurations only"
+    },
+    "largest_hdr_decode_count_in_zero_miss_captures": {
+      "25": 53,
+      "60": 26
+    }
+  }
+}

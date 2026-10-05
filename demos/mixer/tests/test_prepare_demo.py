@@ -268,6 +268,18 @@ def test_conflicting_rtp_rtcp_pairs_fail_before_creating_assets(recipe, tmp_path
     assert not list(tmp_path.iterdir())
 
 
+def test_preparation_progress_counts_cached_and_generated_assets(tmp_path, monkeypatch):
+    cached, generated = tmp_path / "cached.mp4", tmp_path / "generated.mp4"
+    cached.write_bytes(b"cached")
+    jobs = {cached: lambda _: pytest.fail("must reuse cached media"),
+            generated: lambda path: path.write_bytes(b"generated")}
+    monkeypatch.setattr("prepare_demo.plan", lambda *args: ({"sources": [], "scenes": []}, jobs, {}))
+    monkeypatch.setattr("prepare_demo.shutil.which", lambda name: name)
+    updates = []
+    prepare({}, tmp_path, progress=lambda done, total: updates.append((done, total)))
+    assert updates == [(0, 2), (1, 2), (2, 2)]
+
+
 def test_downloads_are_opt_in_and_reused(recipe, tmp_path, monkeypatch):
     doc, jobs, _ = plan(recipe, tmp_path)
     assert not any("downloads" in p.parts for p in jobs)
