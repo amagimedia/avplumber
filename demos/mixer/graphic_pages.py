@@ -25,6 +25,8 @@ OGRAF_REQUIRED = ("$schema", "id", "name", "main", "supportsRealTime", "supports
 OGRAF_OPTIONAL = ("version", "description", "author", "customActions", "actionDurations", "stepCount",
                   "schema", "renderRequirements", "thumbnails")
 VENDOR = "v_avplumber"
+# What a manifest may say under v_avplumber, and inside each of the two.
+VENDOR_FIELDS = {"window": ("width", "height"), "key": ("order", "anchor", "above")}
 # Where a key sits on the canvas: a corner, or a strip along the top or the bottom edge.
 ANCHORS = ("top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right")
 
@@ -42,6 +44,12 @@ def _script(path: Path, root: Path) -> str:
         raise ValueError(f"{path.relative_to(root).as_posix()}: {ends[0]!r} would end the inline script; "
                          "write it as two concatenated strings")
     return text
+
+
+def _known(fields, known, where: str) -> None:
+    for field in fields:
+        if field not in known:
+            raise ValueError(f'{where}: unknown field "{field}" (known: {", ".join(known)})')
 
 
 def graphic_url(name: str, fps: float, *, root: Path = GRAPHICS_DIR, **data: object) -> str:
@@ -114,11 +122,11 @@ def key_graphics(root: Path = GRAPHICS_DIR) -> dict[str, dict]:
     for name, manifest in manifests(root).items():
         where = f"{name}/{name}.ograf.json: {VENDOR}"
         vendor = manifest.get(VENDOR, {})
+        _known(vendor, VENDOR_FIELDS, where)
         for field, value in vendor.items():
-            if field not in ("window", "key"):
-                raise ValueError(f'{where}: unknown field "{field}" (known: window, key)')
             if not isinstance(value, dict):
                 raise ValueError(f"{where}.{field}: must be an object")
+            _known(value, VENDOR_FIELDS[field], f"{where}.{field}")
         if "key" not in vendor:
             continue
         window = tuple(vendor.get("window", {}).get(side) for side in ("width", "height"))

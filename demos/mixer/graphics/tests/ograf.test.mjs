@@ -158,5 +158,6 @@ test('a wrong declaration fails when the page loads, naming the place', () => {
   assert.throws(graphic({ update: 'name' }), /Motion: update: must be a function \(el, data\)/);
   assert.throws(graphic({ every: [{ seconds: 0, run() {} }] }), /Motion: every\[0\]\.seconds: must be a positive number/);
   assert.throws(graphic({ every: [{ seconds: 1 }] }), /Motion: every\[0\]\.run: must be a function \(el, n\)/);
+  assert.throws(graphic({ every: [{ seconds: 1, run() {}, phase: 0.5 }] }), /Motion: every\[0\]: unknown key "phase" \(known: seconds, run\)/);
   assert.throws(graphic({ demo: [[0, 'slide']] }), /Motion: demo\[0\]: unknown action "slide" \(known: play, stop, update, repeat\)/);
 });

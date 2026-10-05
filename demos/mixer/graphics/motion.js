@@ -57,14 +57,17 @@ const Motion = (() => {
   const LOOPS = {
     // Content moves left by the same whole number of pixels on every frame and wraps after one copy
     // of itself: box.content, rounded up to a whole number of steps.
-    crawl({ pxPerSecond }, fps, box, where) {
-      const step = Math.max(1, Math.round(positive(pxPerSecond, `${where}.crawl.pxPerSecond`) / fps));
+    crawl(options, fps, box, where) {
+      known(options, ['pxPerSecond'], where);
+      const step = Math.max(1, Math.round(positive(options.pxPerSecond, `${where}.pxPerSecond`) / fps));
       const steps = Math.max(1, Math.ceil(box.content / step));
       return { frames: steps, from: { x: 0 }, to: { x: -steps * step } };
     },
     // One clockwise turn.
-    spin: ({ seconds }, fps, box, where) => (
-      { frames: frames(positive(seconds, `${where}.spin.seconds`), fps), from: { rotate: 0 }, to: { rotate: 360 } }),
+    spin(options, fps, box, where) {
+      known(options, ['seconds'], where);
+      return { frames: frames(positive(options.seconds, `${where}.seconds`), fps), from: { rotate: 0 }, to: { rotate: 360 } };
+    },
   };
 
   /**
@@ -79,7 +82,7 @@ const Motion = (() => {
     const kind = Object.keys(LOOPS).find((name) => name in spec);
     if (kind) {
       known(spec, ['el', kind], where);
-      return { el, loop: true, start: 0, ease: null, ...LOOPS[kind](spec[kind] ?? {}, fps, box, where) };
+      return { el, loop: true, start: 0, ease: null, ...LOOPS[kind](spec[kind] ?? {}, fps, box, `${where}.${kind}`) };
     }
     known(spec, ['el', 'seconds', 'delay', 'ease', ...Object.keys(PROPS)], where);
     positive(seconds, `${where}.seconds`);
@@ -272,9 +275,10 @@ const Motion = (() => {
     }
     const moved = [...new Set(Object.values(lists).flat().map((spec) => spec.el))];
     if (!Array.isArray(every)) fail('every', 'must be a list of { seconds, run }');
-    every.forEach(({ seconds, run } = {}, i) => {
-      positive(seconds, `every[${i}].seconds`);
-      if (typeof run !== 'function') fail(`every[${i}].run`, 'must be a function (el, n)');
+    every.forEach((entry = {}, i) => {
+      known(entry, ['seconds', 'run'], `every[${i}]`);
+      positive(entry.seconds, `every[${i}].seconds`);
+      if (typeof entry.run !== 'function') fail(`every[${i}].run`, 'must be a function (el, n)');
     });
     const ownDemo = cues === undefined ? null : schedule(cues, Object.keys(actions));
     if (stagger !== undefined) {
