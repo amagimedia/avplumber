@@ -85,6 +85,16 @@ process count remains available for isolation tests, but its combined capacity
 must cover `DMA_BROWSER_MAX_WINDOWS`. The public API always enforces
 `DMA_BROWSER_MAX_WINDOWS`, including when the last worker has unused slots.
 
+`DMA_BROWSER_STAGGER_FRAMES=1` (off by default) starts each worker's frames at
+a different point of the frame period: worker `i` of `DMA_BROWSER_PROCESS_COUNT`
+at `i / count`. Without it, every 60 fps window of every worker starts its
+frame at the same instant, because Chromium keeps its default frame timebase
+unless the frame interval differs from 1/60 s; the host then sees one burst of
+runnable threads per frame. Windows of one worker keep a common phase. Frame
+rate, frame count and timestamps are unchanged; only the instant within the
+period moves, so windows of different workers no longer paint at the same
+moment.
+
 ## REST API
 
 | Method | Path                | Body                                                              |

@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { BrowserWindow } from 'electron';
 import { AudioCaptureChannel } from './capture/AudioCaptureChannel';
 import { FrameCaptureChannel } from './capture/FrameCaptureChannel';
+import { alignFramePhase, MONOTONIC_CLOCK } from './capture/FramePhase';
 import type { AllowedDims } from './capture/AllowedDims';
 import { LoadWatchdog } from './LoadWatchdog';
 import { isPageLoadFailure, PageReloader } from './PageReloader';
@@ -76,6 +77,8 @@ export interface ManagedWindowOptions {
   readonly allowedDims: AllowedDims;
   readonly loadWatchdogMs: number;
   readonly retainedFramePoolSize: number;
+  /** Where in the frame period this window's frames start (0 to 1); null keeps Chromium's timing. */
+  readonly framePhase: number | null;
 }
 
 export interface IManagedWindow {
@@ -156,6 +159,25 @@ export class ManagedWindow implements IManagedWindow {
     const wc = this.win.webContents;
     this.frameChannel.attach(wc);
     wc.setFrameRate(this.config.fps);
+
+    const framePhase = this.opts.framePhase;
+    if (framePhase !== null) {
+      const target = {
+        setFrameRate: (fps: number): void => {
+          if (!wc.isDestroyed()) wc.setFrameRate(fps);
+        },
+      };
+      // Every navigation: it can give the page a new compositor, back on Chromium's own timing.
+      wc.on('did-navigate', () => {
+        alignFramePhase(target, this.config.fps, framePhase, MONOTONIC_CLOCK)
+          .then((aligned) => {
+            if (!aligned) log.write('frame phase not set: timers woke too late');
+          })
+          .catch((err: unknown) => {
+            log.write(`frame phase failed: ${String(err)}`);
+          });
+      });
+    }
 
     // Recovery reloads the page only: the capture channel and its socket stay up, so the
     // consumer keeps its connection and the frames it holds.
