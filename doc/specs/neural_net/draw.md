@@ -1,6 +1,6 @@
 # neural_net/draw — CUDA Overlay Nodes
 
-All draw nodes are SISO (single-input, single-output) operating on CUDA NV12 frames. Each uses paired luma/chroma CUDA kernels for correct NV12 color rendering.
+All draw nodes are SISO (single-input, single-output) operating on NV12 frames, linear CUDA or NVDEC CUarray; the output is always linear CUDA. Each uses paired luma/chroma CUDA kernels for correct NV12 color rendering. Which frame a node draws on (a copy, a linear picture of a CUarray, or its input frame) is described in [NODES.md](../../NODES.md).
 
 ## Shared base: `CudaOverlayBase`
 Handles CUDA context init, PTX module loading, kernel function lookup, and coordinate mapping from model space to output frame space via `model_content_width/height/offset_x/offset_y` and `width/height`.
@@ -12,7 +12,7 @@ Draw bounding boxes from detection metadata.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `metadata_key` / `metadata_keys` | "yolo_detections" | Detection source(s) |
+| `metadata_key` / `metadata_keys` | "reframer_bbox" | Detection source(s) |
 | `bbox_thickness` | 2 | Line thickness in pixels |
 | `min_conf` | 0.0 | Minimum confidence to draw |
 | `allowed_labels` | [] | Label whitelist (empty=all) |

@@ -862,6 +862,63 @@ Parameters:
 - `camera_shot_metadata_key` (string, optional) - reset tracks on shot transitions
 - `predict_on_empty`, `emit_lost_tracks` (bool, optional) - lost-track output behavior
 
+### `draw_bbox`, `draw_bbox_labels`, `draw_trail`, `draw_keypoints`, `draw_segmask`
+
+Draw detection results that are already attached to a video frame as JSON
+metadata: boxes, labels of 5x7 bitmap text (`A`-`Z`, `0`-`9`, `: _ - .`), a
+trail of line segments, pose keypoints, segmentation masks. Built with
+`HAVE_CUDA=1` and `NEURAL_NET=1`. The parameter tables are in
+[specs/neural_net/draw.md](specs/neural_net/draw.md).
+
+1 input: `av::VideoFrame`, hardware "pixel format" `cuda` or `cuarray`, software
+format `nv12` (anything else is an error), 1 output: `av::VideoFrame`, always
+`cuda`, with the input's timestamps, metadata and side data
+
+The node never draws on a frame another reader may hold. Which frame it draws
+on depends on its input:
+-   `cuda` from any other node: a copy, in a new frame from the input frame's
+    own pool. Every draw node of a chain copies, as before.
+-   `cuarray` (an NVDEC surface, which is also the decoder's reference
+    picture): a linear picture of it, read once through the rect compositor's
+    array reader (`cuda_rect_draw`, so it needs `HAVE_NVCC=1`) into a frame of
+    a pool the node owns. The surface is released before the frame is put, so
+    a draw node holds one decoder surface while it processes a frame and none
+    while it waits.
+-   `cuda` from the picture pool of a draw node above, when no other frame
+    references it: the input frame itself, without a copy. This is checked for
+    every frame. A `split`, a wiretap or a node that keeps frames between two
+    draw nodes leaves a second reference, and the node then copies.
+
+So a chain of draw nodes below a CUarray decoder makes the picture once. All
+nodes of the chain run on the CUDA stream of the frame's device, for a CUarray
+decoder its own stream; the nodes take no `hwaccel` parameter.
+
+`node.object.get <node> pictures` returns how many frames the node drew on a
+picture made of a CUarray (`from_array`), on a copy (`copied`) and on its input
+frame (`in_place`).
+
+Coordinates: `detections[].xyxy` is in model pixels unless the payload has a
+`coord_space` other than `model`, in which case it is in pixels of the frame
+the node receives. Model pixels are mapped with `model_content_width`,
+`model_content_height`, `model_content_offset_x`, `model_content_offset_y` when
+set (a letterboxed model input), otherwise scaled by the frame size over the
+payload's `model_width`, `model_height`.
+
+Parameters common to all:
+-   `metadata_key` (string) - the frame metadata entry to draw; default
+    `reframer_bbox` (`draw_bbox`), `yolo_players` (`draw_bbox_labels`),
+    `yolo_detections` (`draw_trail`, `draw_segmask`), `yolo_pose`
+    (`draw_keypoints`). `draw_bbox` and `draw_bbox_labels` also take
+    `metadata_keys` (array).
+-   `model_content_width`, `model_content_height`, `model_content_offset_x`,
+    `model_content_offset_y` (number, default `0`: unused)
+-   `debug_log_every_n` (int, default `0`)
+
+`tests/cuda/nvdec/draw_arrays.py` compares a chain on CUarray decode with the
+same chain on linear decode on an NVIDIA GPU; `tests/test_draw_picture_frame.py`
+checks without a GPU which frames count as private and that mask side data
+keeps its buffer.
+
 ### `drm_prime_to_egl_image`
 
 Import DRM PRIME (DMA-BUF) frames into an `EGLImageKHR` via `EGL_EXT_image_dma_buf_import` and output them as `EglImageFrame` (no CUDA processing).
