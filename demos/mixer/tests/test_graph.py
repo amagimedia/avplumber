@@ -1124,7 +1124,7 @@ def test_renditions_encode_the_one_composited_program(tmp_path, monkeypatch):
     transform = nodes["transform_renditions"]
     assert transform == {
         "type": "cuda_transform", "name": "transform_renditions", "src": "program_transform",
-        "hwaccel": "mixer_gpu", "group": "output", "on_error": "panic",
+        "dst": ["program_sized_square"], "hwaccel": "mixer_gpu", "group": "output", "on_error": "panic",
         "outputs": [{"dst": ["program_sized_square"], "width": 1080, "height": 1080, "sw_format": "nv12",
                      "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1080, "dst_h": 1080}]}]}
     # Colour follows the transform, on the smaller picture; the filter no longer scales.
@@ -1168,6 +1168,8 @@ def test_renditions_of_one_size_share_one_draw_and_replace_the_split(tmp_path):
     assert [(o["dst"], o["width"], o["height"]) for o in transform["outputs"]] == [
         (["program_sized_low", "program_sized_file"], 1280, 720), (["program_sized_tiny"], 640, 360)]
     assert all("fps" not in o and "drop" not in o for o in transform["outputs"])
+    # What the graph manager orders the group by: every scale_<id> comes after the transform.
+    assert transform["dst"] == ["program_sized_low", "program_sized_file", "program_sized_tiny"]
     assert [nodes[f"scale_{rid}"]["src"] for rid in ("low", "file", "tiny")] == [
         "program_sized_low", "program_sized_file", "program_sized_tiny"]
     assert not _geometry_filters(nodes)
