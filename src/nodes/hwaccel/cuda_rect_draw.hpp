@@ -59,6 +59,7 @@ public:
     /// kernel launch. Validates each source's color tags against the canvas contract first.
     /// `color_src` decides the clear level (JPEG-range sources clear to 0). A layer's opacity
     /// below 1 weights a blended RGBA source's alpha; other kinds cannot fade and draw opaque.
+    /// A layer's filter applies to YUV sources on YUV canvases; packed RGB draws bilinear.
     void draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src);
 
     /// sw_format of a hardware frame, AV_PIX_FMT_NONE when it has no frames context.
@@ -78,7 +79,12 @@ private:
     CUfunction composite_array_kernel_ = nullptr;
     CUfunction composite_yuv_array_kernel_ = nullptr;
     CUfunction composite_opacity_array_kernel_ = nullptr;
+    // Tables with a layer whose filter is not bilinear; no other table reaches these.
+    CUfunction composite_yuv_filter_kernel_ = nullptr;        // no packed-RGB layers, linear sources
+    CUfunction composite_yuv_array_filter_kernel_ = nullptr;  // no packed-RGB layers, some arrays
+    CUfunction composite_filter_kernel_ = nullptr;            // any layer kind, fade and storage
     bool opacity_warned_ = false;   // an op with opacity < 1 on a kind that cannot blend, logged once
+    bool filter_warned_ = false;    // an op naming a filter on a kind drawn bilinear, logged once
     // Rect table: pinned host staging + device copy, one entry per op, reused every frame
     // (the node synchronizes the stream after each frame).
     AvpRectLayer *table_host_ = nullptr;

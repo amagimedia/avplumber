@@ -26,6 +26,8 @@ extern "C" {
 ///   { "dst": edge or [edges], "width", "height", "sw_format" (nv12), "layers": [...],
 ///     "fps": rate (optional), "drop": bool (optional), "pass_arrays": bool (optional) }
 /// `layers` are the compositor's layer objects (crop, dst rect, fit); all read the one input.
+/// A layer's `filter` defaults to `auto` here (the compositor nodes default to `bilinear`):
+/// bicubic above 1.3x enlarging, multisample above 2x shrinking, bilinear between.
 /// With `fps` the output takes the first frame of each 1/fps slot of the input's timestamps, so
 /// the choice of frames follows timestamps and not arrival order. The same frame goes to every
 /// edge of an output. `drop` discards an output's frame when its edge is full instead of waiting.
@@ -158,7 +160,7 @@ public:
             const CudaRectDraw::Canvas canvas = avp::mixer::parseCanvas(spec, prefix);
             if (canvas.transfer != AVCOL_TRC_UNSPECIFIED)
                 throw Error(prefix + "color is not supported on an output");
-            out.layers = avp::mixer::parseLayersParam(spec);
+            out.layers = avp::mixer::parseLayersParam(spec, avp::mixer::ScaleFilter::Auto);
             if (out.layers.empty())
                 throw Error(prefix + "an output needs at least one layer");
             for (auto &layer : out.layers) {

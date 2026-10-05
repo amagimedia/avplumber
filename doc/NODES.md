@@ -1014,6 +1014,18 @@ Parameters:
     `crop` (`{"x", "y", "w", "h"}`), with `fit` `stretch` (default) or
     `contain` (`source_canvas` `{"w", "h"}` letterboxes into a virtual source
     canvas), in `z` order (lower first), `blend` honouring the source's alpha.
+    `filter` resamples a YUV source on a YUV canvas with `bilinear` (default),
+    `bicubic` (4x4 cubic, no prefilter when shrinking), `multisample` (the
+    mean of `samples` bilinear samples, `4` (default) or `8`, spread over the
+    source area of one output pixel) or `auto`: `multisample` when the layer
+    shrinks by more than `multisample_above` (default `2.0`), `bicubic` when
+    it enlarges by more than `bicubic_above` (default `1.3`), else `bilinear`;
+    the axis with the larger factor decides, shrinking first. `bicubic_param`
+    (default `0`) is the cubic's coefficient as FFmpeg `scale_cuda`'s `param`:
+    `0` is that filter's default bicubic, which weighs only the two inner taps
+    per axis (Hermite), `0.5` is Catmull-Rom. Packed RGB sources and canvases
+    are always bilinear. Per-frame metadata keeps a layer's filter settings
+    unless it names them.
     The format is parsed in `src/mixer/primitives/compositor_layers.hpp`.
 -   `max_layers` (int, default `256`) - layers per frame; sizes the GPU rect table
 -   `active_inputs` (mask, default all) - inputs drawn: a JSON number, or a
