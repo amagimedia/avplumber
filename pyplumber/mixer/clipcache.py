@@ -79,9 +79,10 @@ def preload(avp, mixer_name: str, clip: str, *, timeout_sec: float, poll_sec: fl
 
     A load ends when the loader chain's end-of-stream marker reaches the cache,
     never because frames stopped arriving. The cached frame count must then equal
-    the number of frames the decoder delivered; a clip that differs is dropped and
-    loaded once more, and a second difference raises. Each load has *timeout_sec*
-    to end; running out is a failure. *check* is called on every poll and raises
+    the number of frames the decoder delivered; a clip that differs, or of which
+    nothing was cached, is dropped and loaded once more, and a second such load
+    raises. Each load has *timeout_sec* to end, and its loader as long again to
+    stop; running out is a failure. *check* is called on every poll and raises
     to abort. A clip already held whole is returned as it is.
     """
     held = _complete(avp, mixer_name)[0].get(clip)
@@ -99,11 +100,12 @@ def preload(avp, mixer_name: str, clip: str, *, timeout_sec: float, poll_sec: fl
                 raise RuntimeError(f"wipe preload timed out waiting for {what} {clip}")
             time.sleep(poll_sec)
 
-    def stop_and_discard(deadline: float) -> None:
+    def stop_and_discard() -> None:
         # stopNodes() only requests the stop. A node stalled in a GPU call outlives it
         # and still delivers, so the next load waits until every node is gone, drops
         # what they left between them, and lets the cache discard what reached it.
         group.stopNodes()
+        deadline = time.monotonic() + timeout_sec   # its own: a load that ended in time is not failed by its stop
         wait(lambda: not any(avp.node(f"{mixer_name}_{node}").isWorking for node in LOADER_NODES),
              "the loader to stop after", deadline)
         for edge in LOADER_EDGES:
@@ -111,7 +113,7 @@ def preload(avp, mixer_name: str, clip: str, *, timeout_sec: float, poll_sec: fl
         wait(lambda: avp.getEdge(f"{mixer_name}_{CACHE_INPUT_EDGE}").occupied == 0,
              "the cache to discard late frames of", deadline)
 
-    def load() -> tuple[Dict[str, Any], int]:
+    def load() -> tuple[Dict[str, Any] | None, int]:
         deadline = time.monotonic() + timeout_sec
         decoded = avp.getEdge(decoded_edge).enqueued_total
         # The reader needs the clip before its group starts, to open the file; the
@@ -131,18 +133,17 @@ def preload(avp, mixer_name: str, clip: str, *, timeout_sec: float, poll_sec: fl
         wait(ended, "the end of", deadline)
         # The decoder ends its output with one end-of-stream marker, which the edge counts.
         expected = avp.getEdge(decoded_edge).enqueued_total - decoded - 1
-        stop_and_discard(deadline)
-        if held is None:
-            raise RuntimeError("wipe clip ended without being cached "
-                               f"(no picture in it, or over the cache budget): {clip}")
+        stop_and_discard()
         return held, expected
 
     for attempt in ("first", "second"):
         held, expected = load()
-        if held["frames"] == expected:
+        if held and held["frames"] == expected:
             return held
+        # Nothing cached has no count to compare: the decoder's is not final when the
+        # cache gives a clip up over its budget.
+        found = (f"{held['frames']} frames cached, {expected} frames decoded" if held else
+                 "ended without being cached (no picture in it, or over the cache budget)")
         avp.executeCommandsFromString(f"node.object.set {cache} forget {value}")
-        log.warning("wipe clip is not whole after the %s load: %s: %d frames cached, %d frames decoded",
-                    attempt, clip, held["frames"], expected)
-    raise RuntimeError(f"wipe clip is not whole after a second load: {clip}: "
-                       f"{held['frames']} frames cached, {expected} frames decoded")
+        log.warning("wipe clip is not whole after the %s load: %s: %s", attempt, clip, found)
+    raise RuntimeError(f"wipe clip is not whole after a second load: {clip}: {found}")
