@@ -212,10 +212,6 @@ class Split(InternalNode):
     TYPE = "split"
 
 
-class CudaInferYolo(InternalNode):
-    TYPE = "cuda_infer_yolo"
-
-
 class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 

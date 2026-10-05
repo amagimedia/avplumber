@@ -419,7 +419,7 @@ Useful for running heavy processing (e.g. neural network inference) on downscale
 
 ### `crop_metadata_cuda`
 
-Metadata-driven CUDA crop. Reads a bounding-box from per-frame metadata (e.g. produced by `cuda_infer_yolo`) and crops the frame to that region using an FFmpeg CUDA filter graph. Intended for reframing workflows such as face-detection crop.
+Metadata-driven CUDA crop. Reads a bounding-box from per-frame metadata (e.g. produced by a detection node) and crops the frame to that region using an FFmpeg CUDA filter graph. Intended for reframing workflows such as face-detection crop.
 
 Requires `HAVE_CUDA=1`.
 
@@ -846,40 +846,6 @@ Parameters:
 -   `width`, `height` (int, required) - multiples of the format's chroma subsampling
 -   `fps`, `timebase`, `sample_aspect_ratio`, and the color tags - as for `v210_to_cuda`; color tags default to unspecified
 
-### `cuda_infer_yolo`
-
-Run YOLO object detection on preprocessed CUDA frames using a prebuilt TensorRT engine (`.plan` / `.engine`).
-
-1 input: `av::VideoFrame` (expects CUDA frame, currently NV12 sw_format), 1 output: `av::VideoFrame` (same frame, with detection metadata attached)
-
-This node is inference-only in v1:
-- upstream graph must handle resize/pad/crop/format preprocessing
-- model input dimensions are read from the TensorRT engine
-- detections are attached in metadata key (default `yolo_detections_v1`)
-
-Parameters:
--   `models` (array of objects, required) - one or more model definitions. Each object has:
-    -   `engine` (string, required) - path to TensorRT serialized engine (`.plan`/`.engine`)
-    -   `class_names` (array of strings, optional) - class-label mapping by index
-    -   `class_index_remap` (array of ints, optional) - remap decoded class IDs (e.g. `[1, 0]` swaps class 0 and 1)
-    -   `output_box_format` (string, optional, default `end2end_xyxy`) - `end2end_xyxy` or `raw_cxcywh`
-    -   `boxes_normalized` (bool, optional, default `false`) - set `true` for DeepStream/Triton-style YOLO exports whose box coordinates are normalized to `[0,1]`. The decoder rescales them to model-space pixels using the engine input dimensions, so downstream consumers keep receiving `coord_space = "model"` pixel coordinates.
--   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
--   `metadata_key_out` (string, optional, default `yolo_detections_v1`) - output frame metadata key for detections JSON
--   `input_format` (string, optional, default `RGB`) - tensor channel order expected by model (`RGB` or `BGR`)
--   TensorRT input binding datatype may be `float32`, `float16`, or `uint8`; node preprocess selects the matching CUDA kernel automatically. `float32`/`float16` inputs are normalized to `[0,1]`; `uint8` inputs receive raw `0..255` values (for engines whose ONNX graph bakes in the `/255` normalization).
--   `conf_thresh` (float, optional, default `0.25`) - confidence threshold
--   `iou_thresh` (float, optional, default `0.45`) - NMS IoU threshold
--   `max_det` (int, optional, default `300`) - max detections per frame after NMS
--   `infer_every_n` (int, optional, default `1`) - run inference every Nth frame, pass through others unchanged
--   `debug_log_metadata` (bool, optional, default `false`) - print detection metadata to logs periodically
--   `debug_log_every_n` (int, optional, default `30`) - log period used with `debug_log_metadata`
-
-Detection coordinates in metadata are emitted in model space (`coord_space = "model"`).
-
-Example graph (RTMP -> CUVID decode -> CUDA preprocess -> YOLO -> null sink):
-- `library_examples/obs-avplumber-source/examples/rtmp_input_hw_dec_cuda_yolo.txt`
-
 ### `object_tracker`
 
 Apply ByteTrack to object detections already attached to a video frame. The node is
@@ -895,34 +861,6 @@ Parameters:
 - `frame_rate`, `track_buffer`, `track_thresh`, `high_thresh`, `match_thresh`, `low_match_thresh` - ByteTrack tuning
 - `camera_shot_metadata_key` (string, optional) - reset tracks on shot transitions
 - `predict_on_empty`, `emit_lost_tracks` (bool, optional) - lost-track output behavior
-
-### `cuda_infer_rtdetr`
-
-Run RT-DETR object detection on preprocessed CUDA frames using a prebuilt TensorRT engine (`.plan` / `.engine`).
-
-1 input: `av::VideoFrame` (expects CUDA frame, currently NV12 sw_format), 1 output: `av::VideoFrame` (same frame, with detection metadata attached)
-
-v1 constraints:
-- exactly one model entry in `models`
-- fixed-shape batch-1 engine
-- mandatory `output_contract: "rtdetr_e2e_v1"`
-- expects end-to-end outputs compatible with `boxes[1,N,4]`, `scores[1,N]/[N]`, `labels[1,N]/[N]`
-- `boxes_normalized=true` is not supported in v1
-
-Parameters:
-- `models` (array, required, size must be 1), model object fields:
-  - `engine` (string, required) - TensorRT engine path
-  - `output_contract` (string, required) - must be `rtdetr_e2e_v1`
-  - `class_names` (array of strings, optional) - class-label mapping by index
-  - `class_index_remap` (array of ints, optional) - remap decoded class IDs
-  - `boxes_normalized` (bool, optional, default `false`) - unsupported in v1
-- `metadata_key_detection` (string, optional, default `yolo_detections`) - output metadata key
-- `input_format` (string, optional, default `RGB`) - tensor channel order (`RGB` or `BGR`)
-- `conf_thresh` (float, optional, default `0.25`) - confidence threshold
-- `max_det` (int, optional, default `300`) - max detections per frame
-- `infer_every_n` (int, optional, default `1`) - run inference every Nth frame, pass through others unchanged
-- `debug_log_metadata` (bool, optional, default `false`) - print metadata periodically
-- `debug_log_every_n` (int, optional, default `30`) - log period when debug logging is enabled
 
 ### `drm_prime_to_egl_image`
 
