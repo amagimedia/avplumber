@@ -39,7 +39,7 @@ def fixture(fmt: str, variant: int) -> bytes:
     return result.tobytes()
 
 
-def run(ffmpeg: str, inputs: list[Path], fmt: str, graph: str) -> bytes:
+def run(ffmpeg: str, inputs: list[Path], fmt: str, graph: str, output_format: str | None = None) -> bytes:
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
            "-init_hw_device", "cuda=gpu:0", "-filter_hw_device", "gpu",
            "-filter_complex_threads", "1"]
@@ -47,7 +47,7 @@ def run(ffmpeg: str, inputs: list[Path], fmt: str, graph: str) -> bytes:
         cmd += ["-f", "rawvideo", "-pixel_format", fmt, "-video_size", f"{WIDTH}x{HEIGHT}",
                 "-framerate", "25", "-i", str(path)]
     cmd += ["-filter_complex", graph, "-map", "[out]", "-frames:v", str(FRAMES),
-            "-threads", "1", "-c:v", "rawvideo", "-pix_fmt", fmt, "-f", "rawvideo", "pipe:1"]
+            "-threads", "1", "-c:v", "rawvideo", "-pix_fmt", output_format or fmt, "-f", "rawvideo", "pipe:1"]
     completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     if completed.returncode:
         raise RuntimeError(completed.stderr.decode(errors="replace"))
@@ -101,7 +101,7 @@ def pad_reference(raw: bytes, fmt: str) -> bytes:
 
 
 def run_decoded(ffmpeg: str, clip: Path, storage: tuple[str, ...], operation: str,
-                preprocess: tuple[str, str] = ("null", "null")) -> bytes:
+                preprocess: tuple[str, str] = ("null", "null"), output_format: str = "nv12") -> bytes:
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
            "-init_hw_device", "cuda=gpu:0", "-filter_hw_device", "gpu",
            "-filter_complex_threads", "1"]
@@ -114,13 +114,13 @@ def run_decoded(ffmpeg: str, clip: Path, storage: tuple[str, ...], operation: st
             cmd += ["-ss", "0.4"]
         cmd += ["-i", str(clip)]
     if len(storage) == 1:
-        graph = f"[0:v]{operation},hwdownload,format=nv12[out]"
+        graph = f"[0:v]{operation},hwdownload,format={output_format}[out]"
     else:
         graph = (f"[0:v]setpts=PTS-STARTPTS,{preprocess[0]}[a];"
                  f"[1:v]setpts=PTS-STARTPTS,{preprocess[1]}[b];"
-                 f"[a][b]{operation},crop_cuda=320:180:8:8,hwdownload,format=nv12[out]")
+                 f"[a][b]{operation},crop_cuda=320:180:8:8,hwdownload,format={output_format}[out]")
     cmd += ["-filter_complex", graph, "-map", "[out]", "-frames:v", str(FRAMES),
-            "-threads", "1", "-c:v", "rawvideo", "-pix_fmt", "nv12", "-f", "rawvideo", "pipe:1"]
+            "-threads", "1", "-c:v", "rawvideo", "-pix_fmt", output_format, "-f", "rawvideo", "pipe:1"]
     completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     if completed.returncode or not completed.stdout:
         raise RuntimeError(completed.stderr.decode(errors="replace"))

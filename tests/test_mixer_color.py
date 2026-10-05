@@ -63,13 +63,20 @@ def test_tonemap_converts_storage_in_the_same_pass():
         conversion_graph("hlg", "p010le", source_format="rgba")
 
 
-@pytest.mark.parametrize("source", (None, "sdr", "hlg", "pq"))
+@pytest.mark.parametrize("source", (None, "sdr", "pq"))
 def test_auto_storage_preserves_chroma_without_a_second_conversion(source):
     graph = conversion_graph("hlg", None, source=source)
     assert "transfer_in=auto:transfer_out=hlg" in graph
     assert ":format=" not in graph
     assert "scale_cuda" not in graph
     assert graph.count("tonemap_cuda=") == 1
+
+
+@pytest.mark.parametrize("transfer", ("sdr", "hlg", "pq"))
+def test_matching_color_without_requested_storage_keeps_native_frames(transfer):
+    # A 4:2:2 HDR compositor samples native 4:2:0 CUarray inputs itself.
+    # Identity tonemapping would unnecessarily materialize a linear CUDA frame.
+    assert conversion_graph(transfer, None, source=transfer) == Color(transfer).setparams
 
 
 @pytest.mark.parametrize("canvas", ("sdr", "hlg", "pq"))

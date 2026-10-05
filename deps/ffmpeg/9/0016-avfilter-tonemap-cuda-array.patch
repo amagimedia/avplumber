@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Mon, 5 Oct 2026 11:00:38 +0200
+Subject: [PATCH] avfilter/tonemap_cuda: sample opaque CUDA arrays directly
+
+---
+ libavfilter/vf_tonemap_cuda.c  | 40 +++++++++++++++++++++++++++++++---
+ libavfilter/vf_tonemap_cuda.cu | 20 +++++++++++------
+ 2 files changed, 50 insertions(+), 10 deletions(-)
+
+diff --git a/libavfilter/vf_tonemap_cuda.c b/libavfilter/vf_tonemap_cuda.c
+index 0c58775..5680103 100644
+--- a/libavfilter/vf_tonemap_cuda.c
++++ b/libavfilter/vf_tonemap_cuda.c
+@@ -37,6 +37,7 @@
+ #include "filters.h"
+ 
+ #include "cuda/load_helper.h"
++#include "cuda/frame_input.h"
+ 
+ #define DIV_UP(a, b) (((a) + (b) - 1) / (b))
+ #define BLOCK_X 16
+@@ -106,6 +107,21 @@ typedef struct TonemapCUDAContext {
+     double desat;
+ } TonemapCUDAContext;
+ 
++/* A declared identity can retain opaque storage. Conversion and auto mode
++ * negotiate linear output because each frame must obey one storage contract. */
++static int tonemap_cuda_query_formats(const AVFilterContext *ctx,
++                                      AVFilterFormatsConfig **cfg_in,
++                                      AVFilterFormatsConfig **cfg_out)
++{
++    const TonemapCUDAContext *s = ctx->priv;
++    static const enum AVPixelFormat formats[] = {
++        AV_PIX_FMT_CUDA, AV_PIX_FMT_CUARRAY, AV_PIX_FMT_NONE
++    };
++    if (s->transfer_in == s->transfer_out && s->output_format == AV_PIX_FMT_NONE)
++        return ff_set_common_formats_from_list2(ctx, cfg_in, cfg_out, formats);
++    return ff_cuda_input_query_formats(ctx, cfg_in, cfg_out);
++}
++
+ static av_cold int tonemap_cuda_init(AVFilterContext *ctx)
+ {
+     TonemapCUDAContext *s = ctx->priv;
+@@ -261,7 +277,8 @@ static av_cold int tonemap_cuda_config_output(AVFilterLink *outlink)
+         s->output_422 = s->output_format == AV_PIX_FMT_NV16 || s->output_format == AV_PIX_FMT_P210;
+     }
+     /* Same transfer with no explicit format: forward frames at their own storage. */
+-    s->passthrough = s->transfer_in == s->transfer_out &&
++    s->passthrough = inlink->format == outlink->format &&
++                     s->transfer_in == s->transfer_out &&
+                      (s->output_format == AV_PIX_FMT_NONE ||
+                       (s->input_depth == s->output_depth && s->input_422 == s->output_422));
+ 
+@@ -317,6 +334,7 @@ static int tonemap_cuda_conv(AVFilterContext *ctx, AVFrame *out, AVFrame *in)
+ 
+     int width  = in->width;
+     int height = in->height;
++    CUtexObject textures[2] = { 0 };
+     int cw = width  / 2;
+     int ch = height / 2;
+ 
+@@ -335,6 +353,7 @@ static int tonemap_cuda_conv(AVFilterContext *ctx, AVFrame *out, AVFrame *in)
+     void *args[] = {
+         &in->data[0],           &in->linesize[0],
+         &in->data[1],           &in->linesize[1],
++        &textures[0], &textures[1],
+         &s->own_frame->data[0], &s->own_frame->linesize[0],
+         &s->own_frame->data[1], &s->own_frame->linesize[1],
+         &width, &height,
+@@ -342,10 +361,24 @@ static int tonemap_cuda_conv(AVFilterContext *ctx, AVFrame *out, AVFrame *in)
+         &transfer_out, &input_depth, &output_depth, &input_422, &output_422, &sdr_white, &hdr_peak
+     };
+ 
++    ret = ff_cuda_input_wait(ctx, cu, s->hwctx, in);
++    if (ret < 0)
++        return ret;
++    for (int i = 0; i < 2; i++) {
++        ret = ff_cuda_input_texture(ctx, cu, in, i, &textures[i]);
++        if (ret < 0)
++            goto finish;
++    }
+     ret = CHECK_CU(cu->cuLaunchKernel(s->cu_func,
+         DIV_UP(cw, BLOCK_X), DIV_UP(ch, BLOCK_Y), 1,
+         BLOCK_X, BLOCK_Y, 1,
+         0, s->cu_stream, args, NULL));
++finish:
++    if (in->format == AV_PIX_FMT_CUARRAY) {
++        int err = ff_cuda_input_finish(ctx, cu, s->cu_stream, textures, 2);
++        if (ret >= 0)
++            ret = err;
++    }
+     if (ret < 0)
+         return ret;
+ 
+@@ -430,7 +463,8 @@ static int tonemap_cuda_filter_frame(AVFilterLink *link, AVFrame *in)
+     if (ret < 0)
+         goto fail;
+     s->current_transfer = ret;
+-    if (s->passthrough || (s->current_transfer == s->transfer_out && s->input_depth == s->output_depth &&
++    if (s->passthrough || (in->format == outlink->format &&
++                           s->current_transfer == s->transfer_out && s->input_depth == s->output_depth &&
+                            s->input_422 == s->output_422)) {
+         // Identity frames leave with the resolved contract stamped: an assumed
+         // (untagged) SDR input must not stay untagged for the encoder VUI or a
+@@ -539,6 +573,6 @@ const FFFilter ff_vf_tonemap_cuda = {
+     .uninit         = tonemap_cuda_uninit,
+     FILTER_INPUTS(tonemap_cuda_inputs),
+     FILTER_OUTPUTS(tonemap_cuda_outputs),
+-    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    FILTER_QUERY_FUNC2(tonemap_cuda_query_formats),
+     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
+ };
+diff --git a/libavfilter/vf_tonemap_cuda.cu b/libavfilter/vf_tonemap_cuda.cu
+index ccfc54d..b9d0a27 100644
+--- a/libavfilter/vf_tonemap_cuda.cu
++++ b/libavfilter/vf_tonemap_cuda.cu
+@@ -22,6 +22,8 @@
+  * limited-range NV12/P010 and SDR BT.1886 with an ideal black display.
+  */
+ 
++#include "cuda/frame_input.cuh"
++
+ #define REFERENCE_WHITE 100.0f
+ #define ST2084_MAX_LUMINANCE 10000.0f
+ __device__ __constant__ float ST2084_M1 = 0.1593017578125f;
+@@ -219,9 +221,12 @@ __device__ static inline float3 rgb_to_yuv(float3 c, int transfer) {
+     return make_float3(y, (c.z - y) / 1.8814f, (c.x - y) / 1.4746f);
+ }
+ 
+-__device__ static inline float read_code(const unsigned char *p, int pitch, int x, int y, int depth) {
+-    const unsigned char *row = p + y * pitch;
+-    return depth == 10 ? ((const unsigned short *)row)[x] >> 6 : row[x];
++__device__ static inline float read_code(const unsigned char *p, int pitch,
++                                          cudaTextureObject_t texture, int lanes,
++                                          int x, int y, int depth) {
++    if (depth == 10)
++        return cuda_input_sample((const unsigned short *)p, pitch / 2, texture, lanes, x, y) >> 6;
++    return cuda_input_sample(p, pitch, texture, lanes, x, y);
+ }
+ 
+ __device__ static inline void write_code(unsigned char *p, int pitch, int x, int y, int depth, float code) {
+@@ -238,6 +243,7 @@ __device__ static inline void write_code(unsigned char *p, int pitch, int x, int
+ extern "C" __global__ void Tonemap_Cuda(
+     unsigned char *src_y, int src_y_linesize,
+     unsigned char *src_uv, int src_uv_linesize,
++    cudaTextureObject_t src_y_texture, cudaTextureObject_t src_uv_texture,
+     unsigned char *dst_y, int dst_y_linesize,
+     unsigned char *dst_uv, int dst_uv_linesize,
+     int width, int height,
+@@ -259,8 +265,8 @@ extern "C" __global__ void Tonemap_Cuda(
+     float cb[2], cr[2];
+     for (int r = 0; r < 2; ++r) {
+         int crow = input_422 ? y + r : yi;
+-        cb[r] = read_code(src_uv, src_uv_linesize, x, crow, input_depth);
+-        cr[r] = read_code(src_uv, src_uv_linesize, x + 1, crow, input_depth);
++        cb[r] = read_code(src_uv, src_uv_linesize, src_uv_texture, 2, x, crow, input_depth);
++        cr[r] = read_code(src_uv, src_uv_linesize, src_uv_texture, 2, x + 1, crow, input_depth);
+     }
+     if (transfer == transfer_out) {
+         // Depth-only conversion preserves code values, including foot/headroom.
+@@ -268,7 +274,7 @@ extern "C" __global__ void Tonemap_Cuda(
+         for (int i = 0; i < 4; ++i) {
+             int px = x + (i & 1), py = y + (i >> 1);
+             write_code(dst_y, dst_y_linesize, px, py, output_depth,
+-                       read_code(src_y, src_y_linesize, px, py, input_depth) * scale);
++                       read_code(src_y, src_y_linesize, src_y_texture, 1, px, py, input_depth) * scale);
+         }
+         if (output_422) {
+             for (int r = 0; r < 2; ++r) {
+@@ -284,7 +290,7 @@ extern "C" __global__ void Tonemap_Cuda(
+     float u[2] = {0.0f, 0.0f}, v[2] = {0.0f, 0.0f};
+     for (int i = 0; i < 4; ++i) {
+         int px = x + (i & 1), r = i >> 1, py = y + r;
+-        float code = read_code(src_y, src_y_linesize, px, py, input_depth);
++        float code = read_code(src_y, src_y_linesize, src_y_texture, 1, px, py, input_depth);
+         float3 c = rgb_to_yuv(convert_rgb(yuv_to_rgb(code, cb[r], cr[r], input_depth, transfer),
+                                           transfer, transfer_out, sdr_white, hdr_peak, op, param, desat),
+                               transfer_out);
+-- 
+2.55.0
+

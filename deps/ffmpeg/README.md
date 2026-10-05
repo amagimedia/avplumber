@@ -72,8 +72,14 @@ arrays and produce ordinary linear CUDA output. Pad and transition sample array
 planes; crop copies its rectangle directly into the final output. Mixed
 array/linear transition inputs and different producer streams in the same CUDA
 context are supported without an intermediate image copy. Completion fences
-keep source frames alive through GPU reads. Other custom filters retain their
-existing linear-input contracts; array support is not enabled globally.
+keep source frames alive through GPU reads. `tonemap_cuda` likewise reads arrays
+in its color/depth/chroma conversion kernel and writes the final linear output,
+without an intermediate input image. Declared identity conversions with no format
+request preserve opaque frames; auto mode negotiates stable linear output and
+retains zero-copy identity only for linear input. Known matching source colors
+should bypass the conversion filter to preserve opaque storage. Other custom
+filters retain their existing linear-input contracts; array support is not
+enabled globally.
 Upstream supplies a GPU-to-GPU
 `av_hwframe_transfer_data()` path into a linear CUDA frame; its CUDA context
 does not supply the map callbacks needed by `hwmap`. Direct array consumption

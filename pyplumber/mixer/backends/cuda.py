@@ -43,10 +43,11 @@ def conversion_graph(target, pixel_format, *, source=None, source_format=None,
     """
     target = validate_conversion(target, pixel_format, source_format=source_format, tonemap=tonemap,
                                  sdr_white=sdr_white, hdr_peak=hdr_peak, desat=desat, param=param)
-    if pixel_format is not None and source is not None and Color.parse(source) == target:
+    if source is not None and Color.parse(source) == target:
         # Same contract: stamp it and change storage only when necessary.
         parts = [target.setparams]
-        return ",".join(parts if source_format == pixel_format else parts + [f"scale_cuda=format={pixel_format}"])
+        return ",".join(parts if pixel_format is None or source_format == pixel_format
+                        else parts + [f"scale_cuda=format={pixel_format}"])
     parts = [Color.parse(source).setparams] if source is not None else []
     if source_format and source_format not in SEMIPLANAR_FORMATS:
         # tonemap_cuda works on semiplanar storage; planar sources are re-laid out at 10 bits.
