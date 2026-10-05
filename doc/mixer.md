@@ -66,6 +66,12 @@ Builder-level tests do not cover these uses; check a change against the
 downstream graph and layout contracts, including an unclocked metadata/alpha
 case on the GPU.
 
+Geometry on one stream (crop, scale, placement, choice of frames by rate) is the
+node `cuda_transform`. Applications build its parameters with
+`pyplumber.transform.transform_output` and `transform_params` instead of
+writing the JSON, so the engine changes in one place; keep both signatures and
+the emitted keys stable (`tests/test_transform_params.py` pins them).
+
 ## Graph
 
 Each source supplies one CUDA video-frame edge. A source can either fan out to
