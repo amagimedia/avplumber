@@ -27,6 +27,9 @@ services:
     volumes:
       - dma-browser-sockets:/tmp/dma-page
       - ../../pyplumber/mixer:/opt/avplumber/pyplumber/mixer:ro,z
+      # demos/mixer/mixer.py builds cuda_transform parameters with this module; an image built
+      # before it existed has no copy. The image still needs the cuda_transform node itself.
+      - ../../pyplumber/transform.py:/opt/avplumber/pyplumber/transform.py:ro,z
       - ../mixer:/opt/avplumber/demos/mixer:ro,z
     command:
       - sh
