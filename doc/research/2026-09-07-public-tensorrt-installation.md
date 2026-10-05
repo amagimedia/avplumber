@@ -10,7 +10,7 @@ For a native installation, NVIDIA's Linux tar distribution provides headers and 
 
 ## What avplumber needs
 
-The [Makefile](../../Makefile) enables TensorRT with `HAVE_CUDA=1 NEURAL_NET=1 HAVE_TENSORRT=1 HAVE_NVCC=1`, accepts `TENSORRT_ROOT` for the SDK's `include` and `lib` directories, and links `libnvinfer` plus `libnvinfer_plugin`. The [inference runtime](../../src/nodes/neural_net/common/infer_trt_base.cpp) deserializes engines and calls `enqueueV3`; it does not build engines. The [mixer Dockerfile](../../demos/mixer/Dockerfile), [CUDA overlay Dockerfile](../../demos/cuda-overlay/Dockerfile), and [DMA-BUF CUDA Dockerfile](../../demos/dmabuf-browser/consumer/Dockerfile.cuda) currently disable TensorRT.
+Since 2026-10-05 avplumber itself does not build or link TensorRT: inference nodes are out-of-tree, and their build fragment (`EXTRA_NODES_MK`) adds the SDK's `include` and `lib` directories and links `libnvinfer` plus `libnvinfer_plugin`. Their inference runtime deserializes engines and calls `enqueueV3`; it does not build engines. The [mixer Dockerfile](../../demos/mixer/Dockerfile), [CUDA overlay Dockerfile](../../demos/cuda-overlay/Dockerfile), and [DMA-BUF CUDA Dockerfile](../../demos/dmabuf-browser/consumer/Dockerfile.cuda) build without TensorRT.
 
 For a smaller inference image, keep headers, the ONNX parser, `trtexec`, and architecture-specific builder resources in the build stage. Copy the standard runtime and plugin shared libraries, preserving symlinks, plus required CUDA dependencies into the final image. Validate it by deserializing and executing an engine; `ldd` alone misses dynamically loaded dependencies.
 
