@@ -102,6 +102,7 @@
 
   <h2>Conditions</h2>
   <p>NVIDIA T4 16 GiB, 16 vCPU, driver R615, Fedora 44 image with CUDA 13.4, Electron 44 browsers. Portrait 1080×1920 canvas from 1920×1080 sources, program with clean feed and two multiviews, NVENC preset p3. Each limit passed the cut-spam gate (cuts, fades and wipes at 4 per second) with 0 missed program deadlines.</p>
+  <p class="note">An L4 host has its own profiles, <code>nvidia_l4</code> and the opt-in <code>nvidia_l4_cuarray</code>, which admits 192 sources at 25 fps on an SDR canvas. Their source tables, output ceilings and the runs that failed are in <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/capacity.md#nvidia-l4-nvidia_l4">capacity.md · NVIDIA L4</a>; this page is the T4's table only.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">
