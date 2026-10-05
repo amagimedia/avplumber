@@ -37,7 +37,7 @@
   .link:hover { color: var(--accent); }
   #counts { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
             flex: 1 1 0; min-width: 7ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* the counts line gives way first (its full text is its title), so the meters keep one row */
+  /* The counts line gives way first; its hover keeps the full details available. */
   #counts b { color: var(--text); font-weight: 600; }
   #conn { margin-left: auto; color: var(--pgm); font-size: 12px; }
   #stats { display: flex; align-items: center; margin-left: auto; gap: 8px; white-space: nowrap; }
@@ -796,11 +796,12 @@ function renderCounts() {
   // DSK keys are browser sources; the header lists them apart from the browser sources in scenes.
   const keys = new Set((s.dsk_keys || []).map((k) => k.source)).size, hdr = s.hdr_video || 0;
   const kinds = [[c.video - hdr, hdr ? "NVDEC SDR" : "NVDEC"], [hdr, "NVDEC HDR"], [c.browser - keys, "browser"], [c.nv12, "raw 4:2:0"], [c.p010, "raw 10-bit 4:2:0"],
-                 [c.v210, "raw 4:2:2"], [keys, "keys"]].filter(([n]) => n > 0).map(([n, what]) => `${n} ${what}`);
-  const parts = [[s.source_count ?? "—", " sources"], [scenes.length, " scenes"], ...kinds.map((t) => ["", t])];
+                 [c.v210, "raw 4:2:2"], [keys, "keys"]].filter(([n]) => n > 0);
+  const parts = [[s.source_count ?? "—", " sources"], [scenes.length, " scenes"], ...kinds.map(([n, what]) => ["", `${n} ${what}`])];
   if (s.canvas) parts.push(["", formatText(s.canvas)]);
   if (!changed($("counts"), parts)) return;
-  $("counts").title = parts.map(([n, text]) => `${n}${text}`).join(" · ");
+  setMeterTip($("counts"), "Mixer setup", [["Sources", String(s.source_count ?? "—")], ["Scenes", String(scenes.length)],
+    ...kinds.map(([n, what]) => [what, String(n)]), ...(s.canvas ? [["Canvas", formatText(s.canvas)]] : [])]);
   $("counts").replaceChildren(...parts.flatMap(([n, text], i) => [...(i ? [" · "] : []), ...(n === "" ? [] : [el("b", "", String(n))]), text]));
 }
 // Top-bar meters: the bar turns amber past 70% and red past 85%; memory reads "used / total GB".
