@@ -32,6 +32,19 @@ match the destination host. The graph UI uses TCP 22222. Internal service ports
 are 17681 for Setup, 18080 for the preview server, 8088/8188 for Janus and 9009
 for browser control.
 
+Allow the public proxy port and Janus UDP range through the destination firewall.
+The internal service ports stay behind the proxy. For GCP, an instance tag can
+scope the viewer rule to this mixer:
+
+```sh
+gcloud compute instances add-tags <name> --project <project> --zone <zone> --tags mixer-viewer
+gcloud compute firewall-rules create <rule-name> --project <project> --network <network> \
+  --target-tags mixer-viewer --allow tcp:7681,udp:20000-20100 --source-ranges <viewer-cidr>
+```
+
+Use the ports configured in `.env` if changing the defaults. Viewer access
+includes WebRTC UDP; making the Setup page reachable alone does not test video.
+
 The first start seeds `media/demo.json` from [settings.json](settings.json), then
 generates missing clips. It starts 88 sources including four key pages, 256
 scenes and 17 outputs on an HDR 4:2:2, 1080p60 canvas. Assets remain cached in the
