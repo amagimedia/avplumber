@@ -199,8 +199,8 @@ RUN git init --quiet /build \
 
 # CUDA kernels take the Makefile default image format: fatbin with SASS for
 # sm_75 to sm_89 plus PTX, so the driver never JIT-compiles avplumber's own
-# kernels. NEURAL_NET and HAVE_TENSORRT follow WITH_TENSORRT; the Makefile
-# ignores TENSORRT_ROOT when they are off.
+# kernels. NEURAL_NET follows WITH_TENSORRT; core itself no longer links
+# TensorRT (inference nodes are out-of-tree).
 RUN make -j"${BUILD_JOBS}" python_module \
         BUILD_TYPE=Release \
         HAVE_CUDA=1 \
@@ -209,9 +209,7 @@ RUN make -j"${BUILD_JOBS}" python_module \
         HAVE_NVOF_FRUC=0 \
         HAVE_NVCC=1 \
         HAVE_NVJPEG=0 \
-        HAVE_TENSORRT="${WITH_TENSORRT}" \
         NEURAL_NET="${WITH_TENSORRT}" \
-        TENSORRT_ROOT=/opt/tensorrt \
         PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
         CXXFLAGS+=" ${HARDENING_FLAGS}" \
         LFLAGS+=' -Wl,--disable-new-dtags'

@@ -61,8 +61,9 @@ interface, new shared object etc., or improving existing ones.
 * Don't build locally for x86/CUDA targets unless the host has the required hardware. Use a user-provided remote environment.
 * If `nvidia-smi` is unavailable locally, do not attempt CUDA, TensorRT, NVENC, Janus GPU, or neural build/run checks on localhost; use the configured SSH NVIDIA host instead.
 * Don't commit instance-specific build details (hostnames, IPs, SSH keys, CUDA/TensorRT paths).
-* CUDA/neural builds: preserve feature flags `CUDA`, `neural_net common`, `neural_net specific`, `NVCC/PTX`, `TensorRT`. Keep FRUC disabled unless testing frame interpolation.
-* pyplumber builds must use the same neural/CUDA/TensorRT feature set as the binary build.
+* Core has no model inference and no TensorRT: inference nodes and their TensorRT include/link flags live in out-of-tree nodes (`EXTRA_NODES_MK`). Don't add either back here.
+* CUDA/neural builds: preserve feature flags `CUDA`, `neural_net common`, `neural_net specific`, `NVCC/PTX`; `NEURAL_NET` gates the drawing, tracking and reframing nodes. Keep FRUC disabled unless testing frame interpolation.
+* pyplumber builds must use the same neural/CUDA feature set as the binary build.
 * DMA-BUF overlay builds need DRM/GL flags so `ipc_dmabuf_source`, `drm_prime_to_egl_image`, `drm_prime_to_cuda` are registered.
 * Prefer targeted tests for Python logic; do a remote build/run check for CUDA, TensorRT, Janus, or mixer graph changes.
 * When changing Python mixer code, rerun pytest covering `pyplumber/mixer.py`
@@ -74,7 +75,7 @@ Prepare `./build.sh` and `./run.sh` on the remote host if they don't exist. Adap
 
 Example `build.sh` (remove `python_module` for the default binary target):
 ```
-make -j8 NEURAL_NET=1 HAVE_DRM=1 HAVE_GL=1 HAVE_CUDA=1 HAVE_NVOF_FRUC=1 HAVE_NVCC=1 NVCC=/usr/local/cuda-13.0/bin/nvcc TENSORRT_ROOT=/opt/tensorrt PKG_CONFIG_PATH=/usr/local/lib/pkgconfig CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda-13.0/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' LFLAGS+=' -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib' python_module
+make -j8 NEURAL_NET=1 HAVE_DRM=1 HAVE_GL=1 HAVE_CUDA=1 HAVE_NVOF_FRUC=1 HAVE_NVCC=1 NVCC=/usr/local/cuda-13.0/bin/nvcc PKG_CONFIG_PATH=/usr/local/lib/pkgconfig CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda-13.0/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' LFLAGS+=' -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib' python_module
 ```
 
 Example `run.sh` for the generic mixer:
