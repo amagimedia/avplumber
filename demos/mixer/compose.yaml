@@ -49,6 +49,9 @@ services:
       MIXER_CRITICAL_NICE: ${MIXER_CRITICAL_NICE:-0}
       # Optional public compute price JSON, for example /media/compute-price.json.
       MIXER_COMPUTE_PRICE: ${MIXER_COMPUTE_PRICE:-}
+      # The driver compiles FFmpeg's CUDA filter kernels on first use and keeps them here. On the
+      # media volume a new container finds them compiled (default: ~/.nv/ComputeCache, lost with it).
+      CUDA_CACHE_PATH: /media/.nv-cache
     entrypoint: [python3, demos/mixer/webui.py]
     volumes:
       - ../../media:/media:rw,z

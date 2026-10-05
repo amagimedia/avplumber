@@ -776,7 +776,11 @@ class MixerGraphBuilder:
             "name": self._n("wipe_rt"),
             "src": self._e("wipe_fmt_out"),
             "dst": self._e("wipe_rt_out"),
-            "set_pts": True,
+            # Decoding per take, the clip is stamped as it plays. Filling the cache it is
+            # only paced: it keeps its own timestamps, so a stalled load leaves no gap in
+            # the stored clip, and its end-of-stream marker goes on to end the load.
+            "set_pts": not cached,
+            "forward_eof": cached,
             "group": load_group,
         }))
         if cached:

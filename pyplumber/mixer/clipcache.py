@@ -2,7 +2,7 @@
 
 An optional module beside the mixer graph: it inserts a ``clip_cache`` node at
 the end of a normal decode chain and splits that chain into two groups. The
-loader group is started once at startup to fill the cache; the player group
+loader group is started at startup, once per clip, to fill the cache; the player group
 runs from startup on, idle, and a live transition only arms it, so a take costs
 no file open, no decoder and no node or thread startup. Nothing here reaches
 into the compositor or the orchestrator.
@@ -10,11 +10,25 @@ into the compositor or the orchestrator.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+import json
+import logging
+import time
+from typing import Any, Callable, Dict
+
+log = logging.getLogger(__name__)
 
 # The shared store the cache node fills. The mixer reads it by this name for
 # mixer.status, so the status report and the node see the same clips.
 STORE = "clips"
+
+
+# The loader chain as MixerGraphBuilder names it, in stream order, and the edges
+# between its nodes. Its last node feeds the cache.
+LOADER_NODES = ("wipe_input", "wipe_demux", "wipe_dec", "wipe_fmt", "wipe_rt")
+LOADER_EDGES = ("wipe_raw_pkt", "wipe_v_pkt", "wipe_dec_out", "wipe_fmt_out")
+DECODED_EDGE = "wipe_dec_out"
+CACHE_INPUT_EDGE = "wipe_rt_out"
+CACHE_NODE = "wipe_cache"
 
 
 def loader_group(mixer_name: str) -> str:
@@ -37,3 +51,75 @@ def cache_node(*, name: str, src: str, dst: str, group: str, fps: str,
     if budget_mb is not None:
         node["budget_mb"] = budget_mb
     return node
+
+
+def preload(avp, mixer_name: str, clip: str, *, timeout_sec: float, poll_sec: float = 0.02,
+            check: Callable[[], None] = lambda: None) -> Dict[str, Any]:
+    """Decode *clip* once into the running cache and return its status entry.
+
+    A load ends when the loader chain's end-of-stream marker reaches the cache,
+    never because frames stopped arriving. The cached frame count must then equal
+    the number of frames the decoder delivered; a clip that differs is dropped and
+    loaded once more, and a second difference raises. Each load has *timeout_sec*
+    to end; running out is a failure. *check* is called on every poll and raises
+    to abort.
+    """
+    cache = f"{mixer_name}_{CACHE_NODE}"
+    decoded_edge = f"{mixer_name}_{DECODED_EDGE}"
+    group = avp.group(loader_group(mixer_name))
+    value = json.dumps(clip)   # the control commands parse the value as JSON
+
+    def wait(done: Callable[[], bool], what: str, deadline: float) -> None:
+        while not done():
+            check()
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"wipe preload timed out waiting for {what} {clip}")
+            time.sleep(poll_sec)
+
+    def stop_and_discard(deadline: float) -> None:
+        # stopNodes() only requests the stop. A node stalled in a GPU call outlives it
+        # and still delivers, so the next load waits until every node is gone, drops
+        # what they left between them, and lets the cache discard what reached it.
+        group.stopNodes()
+        wait(lambda: not any(avp.node(f"{mixer_name}_{node}").isWorking for node in LOADER_NODES),
+             "the loader to stop after", deadline)
+        for edge in LOADER_EDGES:
+            avp.getEdge(f"{mixer_name}_{edge}").clear()
+        wait(lambda: avp.getEdge(f"{mixer_name}_{CACHE_INPUT_EDGE}").occupied == 0,
+             "the cache to discard late frames of", deadline)
+
+    def load() -> tuple[Dict[str, Any], int]:
+        deadline = time.monotonic() + timeout_sec
+        decoded = avp.getEdge(decoded_edge).enqueued_total
+        # The reader needs the clip before its group starts, to open the file; the
+        # running cache is told which clip the chain is about to deliver.
+        avp.executeCommandsFromString(
+            f"node.param.set {mixer_name}_{LOADER_NODES[0]} url {value}\n"
+            f"node.object.set {cache} load {value}")
+        group.startNodes()
+        held = None
+
+        def ended() -> bool:
+            nonlocal held
+            status = avp.node(cache).getObject("status")
+            held = next((c for c in status["clips"] if c["path"] == clip and c["complete"]), None)
+            return held is not None or status["loading"] != clip
+
+        wait(ended, "the end of", deadline)
+        # The decoder ends its output with one end-of-stream marker, which the edge counts.
+        expected = avp.getEdge(decoded_edge).enqueued_total - decoded - 1
+        stop_and_discard(deadline)
+        if held is None:
+            raise RuntimeError("wipe clip ended without being cached "
+                               f"(no picture in it, or over the cache budget): {clip}")
+        return held, expected
+
+    for attempt in ("first", "second"):
+        held, expected = load()
+        if held["frames"] == expected:
+            return held
+        avp.executeCommandsFromString(f"node.object.set {cache} forget {value}")
+        log.warning("wipe clip is not whole after the %s load: %s: %d frames cached, %d frames decoded",
+                    attempt, clip, held["frames"], expected)
+    raise RuntimeError(f"wipe clip is not whole after a second load: {clip}: "
+                       f"{held['frames']} frames cached, {expected} frames decoded")
