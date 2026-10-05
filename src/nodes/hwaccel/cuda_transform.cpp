@@ -29,9 +29,20 @@ extern "C" {
 /// With `fps` the output takes the first frame of each 1/fps slot of the input's timestamps, so
 /// the choice of frames follows timestamps and not arrival order. The same frame goes to every
 /// edge of an output. `drop` discards an output's frame when its edge is full instead of waiting.
+///
+/// When all outputs have one canvas (the same width, height and sw_format; one output always
+/// does), the node declares it as its video format (IVideoFormatSource). A node below that asks
+/// for the stream's size (a router, an encoder, a filter's first init) then gets the canvas and
+/// not the size of the input above. The declaration is one per node, not one per edge: when the
+/// canvases differ the node cannot answer for one edge and the question fails. An encoder or a
+/// router below such an output needs an `assume_video_format` before it, as below every output
+/// before; `filter_video` takes the format from its first frame instead. A CUarray passed on
+/// with `pass_arrays` keeps its own pixel format. Frame rate and time base are not declared:
+/// readers find them above this node, which is right only for an output without `fps`.
 class CudaTransform : public NodeSingleInput<av::VideoFrame>,
                       public NodeMultiOutput<av::VideoFrame>,
-                      public ReportsFinishByFlag {
+                      public ReportsFinishByFlag,
+                      public IVideoFormatSource {
     using CudaRectDraw = avp::mixer::CudaRectDraw;
     static constexpr const char *kType = "cuda_transform";
 
@@ -70,6 +81,23 @@ public:
     }
 
     using NodeSingleInput<av::VideoFrame>::NodeSingleInput;
+
+    /// The one canvas of all outputs, which is what the node can declare for any of its edges.
+    /// create() rejects an empty `outputs`.
+    const CudaRectDraw::Canvas &commonCanvas() const {
+        const CudaRectDraw::Canvas &first = outputs_.front().draw->canvas();
+        for (const Output &out : outputs_) {
+            const CudaRectDraw::Canvas &cv = out.draw->canvas();
+            if (cv.width != first.width || cv.height != first.height || cv.sw_fmt != first.sw_fmt)
+                throw Error(std::string(kType) + ": outputs differ in size or sw_format, so the node declares "
+                            "no video format; put assume_video_format between the output and its reader");
+        }
+        return first;
+    }
+    int width() override { return commonCanvas().width; }
+    int height() override { return commonCanvas().height; }
+    av::PixelFormat pixelFormat() override { return av::PixelFormat(AV_PIX_FMT_CUDA); }
+    av::PixelFormat realPixelFormat() override { return av::PixelFormat(commonCanvas().sw_fmt); }
 
     ~CudaTransform() override {
         for (auto &out : outputs_) {
