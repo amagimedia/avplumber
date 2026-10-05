@@ -181,6 +181,21 @@ graphic with an `every`. What only the mixer needs is under `v_avplumber`:
 - Many windows of one graphic do not move at once: a page whose `data-source` ends in a number
   starts its cycle that many golden-ratio steps (0.618 of the `stagger` each) later.
 
+## What the engine does not do yet
+
+- Move anything but `x`, `y`, `rotate` and `opacity`: no scale, clip, size, colour or blur.
+- Two moves of one element in one list, such as a slide and a later fade: wrap the element.
+- Keep an axis a move leaves out, or start a move from where the element is: each runs from its `from`.
+- Move an element `update()` creates: a move names an id that `html` has when the graphic loads.
+- A second play step: a graphic has one, and a `playAction` past it is a stop.
+- A crawl in any direction but leftwards, or a loop other than `crawl` and `spin`.
+- `change` moves for one field only: the list plays on every update, and `update()` is not given the old data.
+- Put back what a custom action moved, except by `play`: a cycle of actions must end as it began.
+- `every` under `goToTime`: timed changes are real-time only.
+- A font or image from anywhere but a `data:` URL in the graphic's own text.
+- A key placed anywhere but at an anchor, or a `fill` key with a window of its own size.
+- Actions from outside: on our pages only the graphic's own `demo` calls them.
+
 ## OGraf
 
 `Motion.graphic()` returns a custom element class with the methods of an
