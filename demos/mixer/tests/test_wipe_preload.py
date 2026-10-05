@@ -55,11 +55,17 @@ def test_silence_is_not_the_end_and_the_timeout_is_a_failure():
     assert sim.loads == [CLIP]
 
 
-def test_a_clip_that_ends_uncached_fails_at_once():
+def test_a_clip_that_ends_uncached_is_loaded_again_like_a_short_one():
+    nothing = {"decoded": 120, "cached": 0}   # over the budget, or no picture at all
     sim = WipeLoaderSim()
-    sim.script = [{"decoded": 120, "cached": 0}]   # over the budget, or no picture at all
-    with pytest.raises(RuntimeError, match=f"without being cached.*{CLIP}"):
+    sim.script = [nothing]
+    assert preload(sim)["frames"] == 120
+
+    sim = WipeLoaderSim()
+    sim.script = [nothing, nothing]
+    with pytest.raises(RuntimeError, match=f"{CLIP}.*without being cached"):
         preload(sim, timeout_sec=60.0)
+    assert sim.loads == [CLIP, CLIP]
 
 
 def test_the_next_load_waits_until_the_earlier_chain_and_its_frames_are_gone():
