@@ -17,6 +17,7 @@ performance benchmarks. Retention checks hold GPU references without pixel reads
 | `compositor_decode.py` | Real NVDEC through identity normalization and two compositors; array-handle passthrough, pixels/PTS and repeated teardown. `--filter-linear` inserts pad/crop to test ordering on linear frames from a private producer stream. `--rounds 0` works on FFmpeg 8.1. |
 | `mixed_decode.py` | One shared device with HEVC CUarray plus H264/AV1 linear CUDA, compared against an all-linear canvas. Requires all three fixture paths. |
 | `compositor_arrays.cu` | Synthetic NV12/P010/P210 arrays against linear compositor output, including crops, resizing and mixed layers. The build command is at the top of the file. |
+| `draw_arrays.py` | Real NVDEC through `draw_bbox`, `draw_bbox_labels` and `draw_trail` with synthetic detections: CUarray input against linear CUDA input, exact pixels/PTS/metadata, and each node's `pictures` counters. Needs a `NEURAL_NET=1` build. |
 | `filters.py` | Synthetic pad/crop/transition pixel matrix. `--clip` adds real HEVC decode cases; `--decode-only` limits the run to those cases. |
 | `capture.py` | Whole-GPU, per-thread CPU and mixer counter deltas on a running show. `--control-port` additionally proves decoded/paced/encoded edge progress. It records evidence rather than applying arbitrary pass thresholds. |
 | `aux_cycles.py` | Changes subscriptions on extra AUX buses advertising source pages, waits for applied compositions, then restores layouts/pages and checks scene assignments. Pair with `capture.py`; use only an exclusively controlled test show. |
@@ -29,6 +30,7 @@ python3 tests/cuda/nvdec/probe.py "$clip" --mode cuarray --expected-frames 50 --
 python3 tests/cuda/nvdec/probe.py "$clip" --mode cuarray --action hold --hold 8 --expected-frames 50 --output "$reports/held.json"
 python3 tests/cuda/nvdec/compositor_decode.py --input "$clip" --report "$reports/compositor.json"
 python3 tests/cuda/nvdec/filters.py --clip "$clip" --output "$reports/filters.json"
+python3 tests/cuda/nvdec/draw_arrays.py --input "$clip" --frames 50 --report "$reports/draw_arrays.json"
 ```
 
 Use `--sw-format p010le` for Main10 probe fixtures. Different codecs and SPS
