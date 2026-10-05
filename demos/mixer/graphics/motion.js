@@ -240,6 +240,9 @@ const Motion = (() => {
   const DRY_BOX = { width: 100, height: 100, vw: 100, vh: 100, content: 100 };
   // The graphic fills the window (or whatever an OGraf renderer positions it in).
   const BASE_CSS = ':host{position:absolute;inset:0;display:block}';
+  // A shadow root ignores @font-face, so load() gives these rules of a graphic's css to the document.
+  // A rule ends at its first closing brace: a font travels as a base64 data: URL, which holds none.
+  const FONT_FACES = /@font-face\s*\{[^}]*\}/g;
 
   /**
    * Declares a graphic (README.md lists the keys) and returns its custom element class, an EBU OGraf
@@ -252,6 +255,9 @@ const Motion = (() => {
     const { html, css: style = '', data: defaults = {}, update = () => {}, play = [], stop = [],
       actions = {}, loop = [], every = [], demo: cues, stagger } = declaration;
     if (typeof html !== 'string' || !html) fail('html', 'must be the markup of the graphic, a string');
+    if (typeof style !== 'string') fail('css', 'must be the styles of the graphic, a string');
+    const faces = (style.match(FONT_FACES) ?? []).join('\n');
+    let faceSheet;   // the document's <style> of those rules, one for every instance
     if (typeof update !== 'function') fail('update', 'must be a function (el, data)');
     // Every list of tracks, under the name errors use for it: play, stop, loop and actions.<id>.
     const lists = { play, stop, loop };
@@ -313,7 +319,11 @@ const Motion = (() => {
         this.#halt();
         this.style.visibility = 'hidden';   // nothing is painted before the start state is in place
         const root = this.shadowRoot ?? this.attachShadow({ mode: 'open' });
-        root.innerHTML = `<style>${BASE_CSS}${style}</style>${html}`;
+        root.innerHTML = `<style>${BASE_CSS}${style.replace(FONT_FACES, '')}</style>${html}`;
+        if (faces && !faceSheet) {
+          faceSheet = document.head.appendChild(document.createElement('style'));
+          faceSheet.textContent = faces;
+        }
         const els = Object.fromEntries(Array.from(root.querySelectorAll('[id]'), (element) => [element.id, element]));
         for (const [name, specs] of Object.entries(lists)) {
           specs.forEach(({ el }, i) => {

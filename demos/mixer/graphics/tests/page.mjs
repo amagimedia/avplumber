@@ -120,10 +120,12 @@ export function page({ graphic = '', boot = '', dataset = {}, layout = {}, width
     /** The fake elements of the graphic, by id. */
     get parts() { return Object.fromEntries(this.shadowRoot.querySelectorAll('[id]').map((element) => [element.id, element])); }
   }
+  const parent = () => ({ children: [], appendChild(element) { this.children.push(element); return element; } });
   const document = {
     documentElement: { dataset },
-    body: { children: [], appendChild(element) { this.children.push(element); return element; } },
-    createElement: (tag) => new (registry.get(tag))(),
+    head: parent(),
+    body: parent(),
+    createElement: (tag) => (registry.has(tag) ? new (registry.get(tag))() : { tagName: tag, textContent: '' }),
     fonts: { ready: fontsReady },
   };
   const globals = {

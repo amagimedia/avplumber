@@ -87,6 +87,21 @@ test('nothing of the graphic is visible until its start state is in place', asyn
   assert.deepEqual(element.parts.plate.style, HIDDEN);
 });
 
+test('font faces go to the document, where they work, before the fonts are awaited', async () => {
+  const face = '@font-face { font-family: Plate; src: url(data:font/woff2;base64,d09GMgAB) format("woff2"); }';
+  const fake = page({ layout: LOWER_THIRD_LAYOUT, fontsReady: new Promise(() => {}) });
+  const Graphic = fake.Motion.graphic({ ...LOWER_THIRD, css: `:host { font-family: Plate; } ${face} #name { font-weight: 700; }` });
+  const element = new Graphic();
+  element.load({ renderCharacteristics: { frameRate: 50 } });
+  await settle();
+  assert.deepEqual(fake.document.head.children, [{ tagName: 'style', textContent: face }], 'in place while the fonts are still loading');
+  assert.match(element.shadowRoot.innerHTML, /:host \{ font-family: Plate; \}\s+#name \{ font-weight: 700; \}/);
+  assert.doesNotMatch(element.shadowRoot.innerHTML, /@font-face/, 'a shadow root ignores the rule');
+  new Graphic().load({ renderCharacteristics: { frameRate: 50 } });
+  assert.equal(fake.document.head.children.length, 1, 'once per page, however often the graphic loads');
+  await mount(LOWER_THIRD, { layout: LOWER_THIRD_LAYOUT }).then(({ document }) => assert.deepEqual(document.head.children, []));
+});
+
 test('playing asks the browser for exactly the baked move, at every rate', async () => {
   for (const fps of RATES) {
     const { element, parts } = await mount(LOWER_THIRD, { fps, layout: LOWER_THIRD_LAYOUT, width: 1016, height: 172 });

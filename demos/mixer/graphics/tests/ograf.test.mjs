@@ -155,6 +155,7 @@ test('a wrong declaration fails when the page loads, naming the place', () => {
   assert.throws(graphic({ play: [move], loop: [{ el: 'a', spin: { seconds: 4 } }] }),
     /Motion: play\[0\]\.el: "a" is turned or crawled by loop, which owns its transform; move a wrapper element/);
   assert.throws(graphic({ actions: { stop: [move] } }), /Motion: actions\.stop: the name is taken; choose another id/);
+  assert.throws(graphic({ css: ['#a { color: red; }'] }), /Motion: css: must be the styles of the graphic, a string/);
   assert.throws(graphic({ update: 'name' }), /Motion: update: must be a function \(el, data\)/);
   assert.throws(graphic({ every: [{ seconds: 0, run() {} }] }), /Motion: every\[0\]\.seconds: must be a positive number/);
   assert.throws(graphic({ every: [{ seconds: 1 }] }), /Motion: every\[0\]\.run: must be a function \(el, n\)/);

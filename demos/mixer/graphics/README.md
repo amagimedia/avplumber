@@ -94,7 +94,7 @@ server and `prepare_demo.py` when they start, naming its place the same way
 | Key | Value |
 | --- | --- |
 | `html` | The markup. Every element the graphic refers to has an `id`. |
-| `css` | Its styles. They and the ids are private to the graphic (a shadow root): style the root as `:host`, not `body`. |
+| `css` | Its styles. They and the ids are private to the graphic (a shadow root): style the root as `:host`, not `body`. A graphic brings a font as `@font-face { font-family: Plate; src: url(data:font/woff2;base64,…) format("woff2"); }` here; the engine gives those rules to the document, where they work, and measures once the font has loaded. |
 | `data` | Default data. `load()` and updates merge over it. On our pages the `data-*` attributes of `<html>` arrive as data, as strings: `source` is the id of the browser source showing the page. |
 | `update(el, data)` | Writes data into the page; `el` maps each id to its element. Runs at load and on every update. |
 | `play`, `stop` | Lists of moves for `playAction` and `stopAction`. A loaded graphic rests where its `play` moves start. |
