@@ -92,6 +92,9 @@ A move is `{ el, x, y, opacity, rotate, seconds, delay, ease }`:
   is a second clock, and an animation left running makes the window paint when nothing changes.
 - The engine owns `transform`, `opacity` and `will-change` of every element named in a move or loop.
   Put a layout transform on a wrapper.
+- A move that names `x`, `y` or `rotate` rewrites the element's whole `transform`, so an axis it
+  leaves out returns to 0. Give each such move of an element every axis that element ever moves on
+  (`y: [40, 40]` keeps it at 40). The engine does not check this.
 - One move per element in a list, and an element that loops is not also moved: wrap it.
 - A new action takes over an element whose move is still in flight; the new move starts from its
   own `from`.
