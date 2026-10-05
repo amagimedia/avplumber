@@ -21,6 +21,16 @@
 #define AVP_RECT_KIND_RGB_TEX 4   // as RGB, but src[0] is a CUtexObject over a CUDA array (zero-copy DMA-BUF)
 #define AVP_RECT_KIND_RGBA_TEX 5  // as RGBA, texture-backed
 
+// How a YUV/PROMOTE layer is resampled, decided by the host once per layer (ScaleFilter in
+// compositor_geometry.hpp resolves `auto`). 0 is the bilinear path every kernel has; the other
+// values are drawn only by the *_filter entry points, which the host launches when a table
+// holds one. Packed RGB(A) layers and packed canvases are always bilinear.
+#define AVP_RECT_FILTER_BILINEAR 0
+#define AVP_RECT_FILTER_BICUBIC 1        // 4x4 cubic, coefficient `filter_param`
+#define AVP_RECT_FILTER_BICUBIC_A0 2     // the cubic at A = 0: its outer taps weigh nothing, so 2x2 taps
+#define AVP_RECT_FILTER_MULTISAMPLE4 3   // mean of 4 bilinear samples, 2x2 grid over the pixel's source area
+#define AVP_RECT_FILTER_MULTISAMPLE8 4   // mean of 8 bilinear samples, Direct3D 8-sample pattern
+
 struct AvpRectLayer {
     unsigned long long src[2];   // device pointers, or texture handles when yuv_texture / *_TEX is set
     int src_pitch[2];
@@ -31,4 +41,6 @@ struct AvpRectLayer {
     int src_bytes, src_shift;         // PROMOTE: source storage; YUV: same as the canvas
     float mul;                        // PROMOTE: code multiplier; YUV, RGB: 1; RGBA: opacity in (0, 1]
     int step, r_off, g_off, b_off, a_off, premultiplied;   // RGB(A)
+    int filter;                       // YUV/PROMOTE: AVP_RECT_FILTER_*
+    float filter_param;               // BICUBIC: the cubic's A (0: Hermite, -0.5: Catmull-Rom)
 };
