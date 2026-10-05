@@ -78,13 +78,49 @@ describe('alignFramePhase', () => {
     expect(calls.map((c) => c.fps)).toEqual([59, 60]);
   });
 
-  it.each([25, 30, 50])('at %i fps sets only the requested rate', async (fps) => {
+  it.each([25, 30, 50])(
+    'leaves a %i fps window alone: Chromium already gives it its own phase',
+    async (fps) => {
+      const clock = new FakeClock(START);
+      const { target, calls } = recorder(clock);
+
+      expect(await alignFramePhase(target, fps, 0.2, clock)).toBe(true);
+
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it('reaches a phase later in the current period without waiting for the next one', async () => {
+    const clock = new FakeClock(START - (START % 16_666_000n) + 1_000_000n);
+    const { target, calls } = recorder(clock);
+    const begun = clock.t;
+
+    await alignFramePhase(target, 60, 0.4, clock);
+
+    expect(lastCallPhase(calls)).toBeGreaterThanOrEqual(6_666_400n);
+    expect(lastCallPhase(calls)).toBeLessThan(6_666_400n + TOLERANCE_NS);
+    expect(clock.t - begun).toBeLessThan(16_666_000n);
+  });
+
+  it('puts phase 0 on the start of a period', async () => {
     const clock = new FakeClock(START);
     const { target, calls } = recorder(clock);
 
-    await alignFramePhase(target, fps, 0.2, clock);
+    await alignFramePhase(target, 60, 0, clock);
 
-    expect(calls.map((c) => c.fps)).toEqual([fps]);
+    expect(lastCallPhase(calls)).toBeLessThan(TOLERANCE_NS);
+  });
+
+  it('gives every window of a worker its turn when twenty align at once', async () => {
+    const clock = new FakeClock(START);
+    const { target, calls } = recorder(clock);
+
+    const aligned = await Promise.all(
+      Array.from({ length: 20 }, () => alignFramePhase(target, 60, 0.4, clock)),
+    );
+
+    expect(aligned).toEqual(Array.from({ length: 20 }, () => true));
+    expect(calls.filter((c) => c.fps === 60)).toHaveLength(20);
   });
 
   it('takes the next period when a timer wakes after the instant has passed', async () => {
@@ -122,23 +158,29 @@ describe('workerFramePhase', () => {
   const worker = (index: number): Record<string, string> => ({
     DMA_BROWSER_STAGGER_FRAMES: '1',
     DMA_BROWSER_WORKER_INDEX: String(index),
-    DMA_BROWSER_PROCESS_COUNT: '5',
   });
+  const phases = (count: number): number[] =>
+    Array.from({ length: count }, (_, i) => workerFramePhase(worker(i)) ?? Number.NaN);
 
   it('is off unless DMA_BROWSER_STAGGER_FRAMES is set', () => {
-    expect(
-      workerFramePhase({ DMA_BROWSER_WORKER_INDEX: '2', DMA_BROWSER_PROCESS_COUNT: '5' }),
-    ).toBeNull();
+    expect(workerFramePhase({ DMA_BROWSER_WORKER_INDEX: '2' })).toBeNull();
   });
 
-  it('spreads the workers evenly over the frame period', () => {
-    expect([0, 1, 2, 3, 4].map((i) => workerFramePhase(worker(i)))).toEqual([
-      0, 0.2, 0.4, 0.6, 0.8,
-    ]);
-  });
-
-  it('is off without workers to spread', () => {
+  it('is off outside a worker process', () => {
     expect(workerFramePhase({ DMA_BROWSER_STAGGER_FRAMES: '1' })).toBeNull();
-    expect(workerFramePhase({ ...worker(0), DMA_BROWSER_PROCESS_COUNT: '1' })).toBeNull();
+  });
+
+  it('starts the first worker at the start of the period', () => {
+    expect(workerFramePhase(worker(0))).toBe(0);
+  });
+
+  // The supervisor runs only as many workers as the show needs, so any first n must be spread.
+  it.each([2, 3, 4, 5, 8, 16])('keeps the first %i workers apart', (count) => {
+    const sorted = phases(count).sort((a, b) => a - b);
+    const gaps = sorted.map((p, i) =>
+      i === 0 ? p + 1 - (sorted[count - 1] ?? 0) : p - (sorted[i - 1] ?? 0),
+    );
+
+    expect(Math.min(...gaps) * count).toBeGreaterThan(0.6);
   });
 });
