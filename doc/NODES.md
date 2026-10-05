@@ -56,6 +56,7 @@ This node is non-blocking.
     ~1.0006 are treated as 1.
 -   `tick_period` (string of rational, seconds) - if specified and [`tick_source`](#non-blocking-nodes) is also specified, anti-jitter filter will be enabled, assuming that tick source emits a tick every `tick_period`. Generally should be set to 1/FPS, e.g. `1/60`. The filter maintains its own clock independent of wallclock, but will resync to the wallclock if it drifts too much. If unspecified, wallclock will be used.
 -   `set_pts` (bool, default false) - set PTS to wallclock timestamps corresponding to time when packets are outputted (or, more precisely, when they would be outputted if there was no jitter)
+-   `forward_eof` (bool, default false) - pass the end-of-stream marker on to the output, in order behind the last frame and never stamped by `set_pts`. By default the marker is consumed here; a consumer that must tell the end of a file from a stalled producer (`clip_cache`) needs it. Do not enable it in front of a node that finishes on the marker unless that is intended.
 
 Input tolerance parameters:
 

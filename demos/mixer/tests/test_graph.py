@@ -9,6 +9,7 @@ from pyplumber.mixer import config as mixer_config
 from pyplumber.mixer.color import Color
 from pyplumber.mixer.graph import MixerGraphBuilder
 from mixer import DIRECT_INPUT_LIMIT, GraphOptions, build_application, infer_output_format, parse_args
+from wipe_loader_sim import WipeLoaderSim
 
 
 class FakeNode:
@@ -42,7 +43,7 @@ class FakeAvp:
     def __init__(self):
         self.nodes = []
         self.commands = []
-        self.armed_clips = []
+        self.wipes = WipeLoaderSim()
         self.control_port = None
         self.ready = False
         self.edges = FakeEdges()
@@ -56,21 +57,16 @@ class FakeAvp:
 
     def executeCommandsFromString(self, commands):
         self.commands.append(commands)
-        for line in commands.splitlines():
-            parts = line.split()
-            if parts[:1] == ["node.param.set"] and parts[2:3] == ["url"]:
-                self.armed_clips.append(json.loads(parts[3]))
+        self.wipes.executeCommandsFromString(commands)
 
     def enableControlServer(self, port):
         self.control_port = port
 
     def node(self, name):
-        # The clip cache reports every requested clip as already held, so start()
-        # exercises the preload path without a decoder.
-        return SimpleNamespace(getObject=lambda key: {
-            "clips": [{"path": path, "frames": 30, "bytes": 1 << 20, "complete": True}
-                      for path in self.armed_clips],
-            "bytes": 1 << 20, "budget_bytes": 768 << 20})
+        return self.wipes.node(name)
+
+    def getEdge(self, name, data_type=None):
+        return self.wipes.getEdge(name)
 
     def registerControlCommand(self, name, handler, _payload):
         self.commands_registered = getattr(self, "commands_registered", {})
@@ -82,8 +78,8 @@ class FakeAvp:
     def shutdown(self):
         self.shut_down = True
 
-    def group(self, _name):
-        return FakeGroup()
+    def group(self, name):
+        return self.wipes.group(name) or FakeGroup()
 
 
 class FakeMixer:
@@ -665,6 +661,17 @@ def test_wipe_file_preloads_into_the_clip_cache_at_start(monkeypatch):
     assert 'mixer_wipe_cache url' not in armed
     assert not hasattr(FakeMixer.instances[-1], "warmed_wipe")
     assert application.avp.ready
+
+
+def test_a_wipe_that_does_not_cache_whole_fails_the_start(monkeypatch):
+    application = build_application(
+        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_file="/media/wipe.mov", wipe_cache_mb=256), api=fake_api())
+    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
+    application.avp.wipes.script = [{"decoded": 120, "cached": 2}] * 2
+    with pytest.raises(RuntimeError, match="/media/wipe.mov: 2 frames cached, 120 frames decoded"):
+        application.start()
+    assert not application.avp.ready
 
     FakeMixer.instances.clear()
     plain = build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())

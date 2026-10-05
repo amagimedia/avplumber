@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 from mixer import GraphOptions, build_application
+from pyplumber.mixer import clipcache
+from wipe_loader_sim import WipeLoaderSim
 
 
 @pytest.fixture
@@ -35,7 +37,8 @@ class NativeEngine:
         self.drained = set()
         self.ready = False
         self.shutdown_complete = False
-        self.loaded_clips = []   # what the running clip cache was told to load
+        self.wipes = WipeLoaderSim()
+        self.loaded_clips = self.wipes.loads   # what the running clip cache was told to load
         self.edges = SimpleNamespace(planCapacity=lambda *_: None)
         self.manager = SimpleNamespace(shouldWork=True)
 
@@ -46,26 +49,31 @@ class NativeEngine:
         pass
 
     def executeCommandsFromString(self, commands):
-        for line in commands.splitlines():
-            self.events.append(line)
-            parts = line.split(" ", 3)
-            if parts[:1] == ["node.object.set"] and parts[2:3] == ["load"]:
-                self.loaded_clips.append(json.loads(parts[3]))
+        self.events.extend(commands.splitlines())
+        self.wipes.executeCommandsFromString(commands)
 
     def group(self, name):
+        loader = self.wipes.group(name)   # the wipe loader chain runs, ends and stops in the simulation
         def start():
             self.started.add(name)
             self.events.append("start " + name)
-        return SimpleNamespace(startNodes=start, stopNodes=lambda: self.events.append("stop " + name))
+            if loader:
+                loader.startNodes()
+        def stop():
+            self.events.append("stop " + name)
+            if loader:
+                loader.stopNodes()
+        return SimpleNamespace(startNodes=start, stopNodes=stop)
 
     def node(self, name):
-        # A node reports its clip cache as holding every clip it was told to load.
-        return SimpleNamespace(
-            isWorking=self.nodes[name]["group"] in self.started,
-            getObject=lambda key: {"clips": [{"path": path, "frames": 120, "bytes": 1 << 20, "complete": True}
-                                             for path in self.loaded_clips]})
+        if name in self.wipes.loader_nodes:
+            return self.wipes.node(name)
+        return SimpleNamespace(isWorking=self.nodes[name]["group"] in self.started, getObject=self.wipes.status)
 
     def getEdge(self, name, data_type=None):
+        wipe_edge = self.wipes.getEdge(name)
+        if wipe_edge:
+            return wipe_edge
         # Readiness is supplied by the engine boundary, never by the builder.
         if name.endswith("_encoded"):
             assert data_type == "packet", "readiness must not create a VideoFrame edge before the encoder"
@@ -278,6 +286,8 @@ def test_media_wipe_path_is_registered_without_starting_an_empty_clip(native_bou
     assert engine.nodes["mixer_wipe_rt_fps"]["group"] == "mixer_wipe"
     assert engine.nodes["mixer_wipe_overlay"]["src"] == ["mixer_final_wipe_in", "mixer_wipe_rt_fps_out"]
     assert engine.nodes["mixer_wipe_overlay"]["active_inputs"] == 3
+    pacer = engine.nodes["mixer_wipe_rt"]   # stamps the clip as it plays; a marker would end the compositor's input
+    assert pacer["set_pts"] is True and not pacer.get("forward_eof")
     assert "mixer_wipe" not in engine.started and "mixer_wipe_load" not in engine.started
     upload = engine.nodes["mixer_wipe_fmt"]
     assert upload["hwaccel"] == config["hwaccel"]
@@ -314,6 +324,17 @@ def test_cached_wipe_chain_runs_from_startup_parked_and_is_never_stopped(native_
     assert "stop mixer_wipe" not in events
     assert not any(event.startswith("mixer.wipe.warmup") for event in events)
     assert engine.loaded_clips == ["/media/wipe.mov"]
+    # The loader paces the clip but keeps its own timestamps, and passes the end-of-stream
+    # marker on: the cache ends a load on that marker and on nothing else.
+    pacer = engine.nodes["mixer_wipe_rt"]
+    assert pacer["forward_eof"] is True and pacer["set_pts"] is False
+    # clipcache.preload() stops, inspects and clears this chain by these names.
+    loader = [name for name, node in engine.nodes.items() if node["group"] == "mixer_wipe_load"]
+    assert loader == ["mixer_" + name for name in clipcache.LOADER_NODES]
+    assert [engine.nodes[name].get("dst") or engine.nodes[name]["routing"]["v:0"] for name in loader] == [
+        "mixer_" + edge for edge in (*clipcache.LOADER_EDGES, clipcache.CACHE_INPUT_EDGE)]
+    assert engine.nodes["mixer_wipe_dec"]["dst"] == "mixer_" + clipcache.DECODED_EDGE
+    assert engine.nodes["mixer_" + clipcache.CACHE_NODE]["src"] == "mixer_" + clipcache.CACHE_INPUT_EDGE
 
 
 @pytest.mark.parametrize("cache_mb, store", [(0, None), (256, "clips")])

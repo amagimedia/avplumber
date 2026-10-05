@@ -31,6 +31,7 @@ protected:
     bool is_master_ = true; // by default everyone is master and can resync
     // TODO: master election in case of failure of master specified by user
     bool set_pts_ = false;
+    bool forward_eof_ = false;
     std::atomic_int64_t last_frame_number_ = -1;
     std::atomic_int64_t last_frame_timestamp_ = -1;
     std::atomic_int64_t is_eof_ = false;
@@ -118,6 +119,7 @@ public:
             process_next = false;
             bool emit = true;
             bool consume = true;
+            bool marker = false; // an end-of-stream marker on its way to the sink (forward_eof)
             T* dataptr = this->source_->peek(0);
             if (dataptr==nullptr) {
                 woken_too_late_ = false;
@@ -255,9 +257,12 @@ public:
                     eof_frame_timestamp_.store(last_frame_timestamp_.load());
                     is_eof_ = true;
                     logstream << "EOF detected (wallclock: " << eof_frame_wallclock_.load() << ", timestamp: " << eof_frame_timestamp_.load() << ")";
+                    // Forwarded like a frame, with the same retry on a full sink, so it
+                    // stays in order behind the last frame.
+                    marker = forward_eof_;
                 }
-                emit = false;
-                if (!ticks) {
+                emit = marker;
+                if (!emit && !ticks) {
                     // process next packet
                     this->yieldAndProcess();
                 }
@@ -267,12 +272,13 @@ public:
 
             if (emit) {
                 av::Timestamp orig_pts = data.pts();
-                if (set_pts_) {
+                const bool stamp = set_pts_ && !marker; // a marker is recognised by having no PTS
+                if (stamp) {
                     data.setTimeBase(av::Rational());
                     data.setPts({new_pts, timebase_});
                 }
                 if (!this->sink_->put(data, true)) {
-                    if (set_pts_) {
+                    if (stamp) {
                         // putting failed, restore original PTS because we will process this frame next time
                         data.setTimeBase(av::Rational());
                         data.setPts(orig_pts);
@@ -283,7 +289,9 @@ public:
                     }
                     consume = false;
                 } else {
-                    setLastFrame(dataptr);
+                    if (!marker) {
+                        setLastFrame(dataptr);
+                    }
                     if (!ticks) {
                         // process next packet
                         this->yieldAndProcess();
@@ -560,6 +568,9 @@ public:
         }
         if (params.count("set_pts")) {
             r->set_pts_ = params["set_pts"];
+        }
+        if (params.count("forward_eof")) {
+            r->forward_eof_ = params["forward_eof"];
         }
         return r;
     }

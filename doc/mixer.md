@@ -140,7 +140,10 @@ With the clip cache (`mixer.init` `wipe_cache_store` and `wipe_overlay`) the
 player group runs for the life of the graph: the clip player and the wipe
 compositor idle between wipes, and a take arms them in place (`play` on the
 `clip_cache` node, a reset and `active_inputs` on the compositor), so a wipe
-creates, starts or stops nothing. A new take can interrupt an ongoing
+creates, starts or stops nothing. A `load` on the `clip_cache` node ends on the
+decode chain's end-of-stream marker (`realtime` `forward_eof`), never on
+silence; its `status` names the clip still `loading`, and `forget` drops one.
+A new take can interrupt an ongoing
 transition using the current output picture; interrupting a wipe parks the
 chain the same way.
 
