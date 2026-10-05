@@ -270,6 +270,7 @@ const Motion = (() => {
         }
       });
     }
+    const moved = [...new Set(Object.values(lists).flat().map((spec) => spec.el))];
     if (!Array.isArray(every)) fail('every', 'must be a list of { seconds, run }');
     every.forEach(({ seconds, run } = {}, i) => {
       positive(seconds, `every[${i}].seconds`);
@@ -325,7 +326,7 @@ const Motion = (() => {
         update(els, this.#data);
         await document.fonts.ready;   // text has its final width before anything is measured
         this.#measure();
-        this.#write(stateAt(this.#tracks.play, 0));   // rest where play starts
+        this.#rest();
         this.style.visibility = '';
         return { statusCode: 200 };
       }
@@ -392,6 +393,7 @@ const Motion = (() => {
           const { list, step } = this.#plan(type, params);
           if (step === 0 && this.#step !== 0) played = at;
           this.#step = step;
+          if (list === 'play') started.clear();   // play starts from the loaded state
           started.delete(list);
           started.set(list, params.skipAnimation ? Infinity : frame(at));
         }
@@ -400,8 +402,8 @@ const Motion = (() => {
         // As in real time, loops run from play until the stop move has ended.
         const stopFrames = Math.max(0, ...this.#tracks.stop.map((track) => track.start + track.frames));
         const looping = played !== undefined && (this.#step === 0 || started.get('stop') < stopFrames);
+        this.#rest();
         this.#write(stateAt(this.#tracks.loop, looping ? frame(played) : 0));
-        this.#write(stateAt(this.#tracks.play, 0));
         for (const [list, n] of started) this.#write(stateAt(this.#tracks[list] ?? [], n));
         return { statusCode: 200 };
       }
@@ -418,6 +420,7 @@ const Motion = (() => {
         const tracks = this.#loadedTracks()[list], turn = ++this.#turn;
         this.#step = step;
         if (step === 0) this.#on();
+        if (list === 'play') this.#rest();
         await this.#act(tracks, skipAnimation);
         if (this.#step === undefined && turn === this.#turn) this.#off();
       }
@@ -442,6 +445,14 @@ const Motion = (() => {
 
       #write(states) {
         for (const [id, state] of Object.entries(states)) Object.assign(this.#els[id].style, css(state));
+      }
+
+      // The loaded state, which every play starts from: no move in flight, each moved element as the
+      // stylesheet has it and then where play starts. So a play ends the same whatever ran before it.
+      #rest() {
+        this.#still();
+        for (const id of moved) Object.assign(this.#els[id].style, { transform: '', opacity: '' });
+        this.#write(stateAt(this.#tracks.play, 0));
       }
 
       #animate(track) {
@@ -501,9 +512,13 @@ const Motion = (() => {
         this.#timers = [];
       }
 
-      #halt() {
+      #still() {
         for (const animation of this.#moving.values()) animation.cancel();
         this.#moving.clear();
+      }
+
+      #halt() {
+        this.#still();
         this.#off();
       }
     };

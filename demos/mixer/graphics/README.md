@@ -145,6 +145,10 @@ graphic with an `every`. What only the mixer needs is under `v_avplumber`:
 - One move per element in a list, and an element that loops is not also moved: wrap it.
 - A new action takes over an element whose move is still in flight; the new move starts from its
   own `from`.
+- `playAction` starts from the loaded state: no move in flight, every element a move or loop names
+  as the stylesheet has it, then where `play` starts. So play, stop, play ends as the first play did
+  even where `stop` or an action moves a property or an element `play` does not name; every other
+  action changes only what its own moves name.
 - A cycle of a repeating demo must end as it began. Cycles are placed on the wall clock, so a page
   that loads mid-cycle applies the cues already behind it, without animation, and continues; what a
   window shows depends on the time, not on when its page loaded.

@@ -2,7 +2,8 @@
 // element.animate, the end state committed to inline style, and nothing left running at rest.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ALPHA, LOWER_THIRD, LOWER_THIRD_LAYOUT, RATES, TICKER, TICKER_LAYOUT, mount, page, settle } from './page.mjs';
+import { ALPHA, LOWER_THIRD, LOWER_THIRD_LAYOUT, RATES, TICKER, TICKER_LAYOUT, UNEVEN, UNEVEN_LAYOUT, elapse, inline, mount, page, settle }
+  from './page.mjs';
 
 const { Motion } = page();
 const PLATE = { vw: 1016, vh: 172, width: 1016, height: 131 };
@@ -143,6 +144,26 @@ test('a new action takes the element over: the move in flight is cancelled, not 
   assert.deepEqual(await stopped, { statusCode: 200 });
   assert.deepEqual(parts.plate.style, HIDDEN);
   assert.deepEqual(parts.plate.running, []);
+});
+
+test('play starts from the loaded state, whatever the moves since then changed', async () => {
+  const willChange = 'transform, opacity';
+  for (const skipAnimation of [true, false]) {
+    const mounted = await mount(UNEVEN, { layout: UNEVEN_LAYOUT });
+    const { element, parts: { plate, text } } = mounted;
+    const run = async (action) => { element[action]({ skipAnimation }); await elapse(mounted, 1000); };
+    await run('playAction');
+    const first = inline(plate, text);
+    assert.deepEqual(first, [{ transform: 'translate(0px, 0px)', willChange }, { willChange }]);
+    await run('stopAction');
+    assert.deepEqual(inline(plate, text), [{ transform: 'translate(0px, 0px)', opacity: '0', willChange }, { transform: 'translate(0px, 20px)', willChange }]);
+    await run('playAction');
+    assert.deepEqual(inline(plate, text), first, 'faded and dropped by stop, both are back');
+    element.stopAction({});
+    await elapse(mounted, 100);   // half of the stop move
+    await run('playAction');
+    assert.deepEqual([inline(plate, text), plate.running, text.running], [first, [], []], 'a play that overtakes the stop takes over the text too');
+  }
 });
 
 test('a custom action plays its own moves', async () => {

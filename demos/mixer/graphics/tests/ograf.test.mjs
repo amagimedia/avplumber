@@ -2,7 +2,7 @@
 // the step rule of playAction, and the non-real-time pair setActionsSchedule / goToTime.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ALPHA, LOWER_THIRD, LOWER_THIRD_LAYOUT, TICKER, TICKER_LAYOUT, mount, page } from './page.mjs';
+import { ALPHA, LOWER_THIRD, LOWER_THIRD_LAYOUT, TICKER, TICKER_LAYOUT, UNEVEN, UNEVEN_LAYOUT, inline, mount, page } from './page.mjs';
 
 const lowerThird = (options) => mount(LOWER_THIRD, { layout: LOWER_THIRD_LAYOUT, ...options });
 const shown = (plate) => [plate.style.transform, plate.style.opacity];
@@ -120,6 +120,18 @@ test('goToTime places loops by the frames since play, and stops what was running
   await element.goToTime({ timestamp: 50000 + 10 * 20 });
   assert.equal(parts.crawl.style.transform, 'translate(0px, 0px)', 'at rest once the stop move has ended');
   assert.deepEqual(parts.crawl.animations, [live]);
+});
+
+test('goToTime shows a play from the loaded state, as real time does', async () => {
+  const { element, parts: { plate, text } } = await mount(UNEVEN, { layout: UNEVEN_LAYOUT });
+  const at = (timestamp, type) => ({ timestamp, action: { type, params: {} } });
+  await element.setActionsSchedule({ schedule: [at(0, 'playAction'), at(1000, 'stopAction'), at(2000, 'playAction')] });
+  const seen = async (timestamp) => { await element.goToTime({ timestamp }); return inline(plate, text); };
+  const willChange = 'transform, opacity', played = await seen(900);
+  assert.deepEqual(played, [{ transform: 'translate(0px, 0px)', willChange }, { willChange }]);
+  assert.deepEqual(await seen(1900), [{ transform: 'translate(0px, 0px)', opacity: '0', willChange }, { transform: 'translate(0px, 20px)', willChange }]);
+  assert.deepEqual(await seen(2900), played, 'the second play ends as the first did');
+  assert.deepEqual(await seen(900), played, 'seeking back leaves nothing of the stop');
 });
 
 test('a scheduled action that skips its animation is at its end at once', async () => {
