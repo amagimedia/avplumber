@@ -828,7 +828,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="compositor/transition sw_format; p210le keeps 10-bit 4:2:2 on the canvas "
              "(renditions subsample to P010/NV12 for NVENC automatically)")
     add("--mixer-latency-ms", type=float, help="Native playout buffer (default: two output frames)")
-    add("--max-compositor-layers", type=int, help="Layer budget per compositor; overrides JSON max_compositor_layers (default: 256)")
+    add("--max-compositor-layers", type=int, help="Layer budget per compositor; overrides JSON max_compositor_layers "
+        f"(default: {mixer_config.DEFAULT_MAX_COMPOSITOR_LAYERS})")
     add("--loop-inputs", action="store_true")
     add("--remote-control-port", type=int, default=7777)
     add("--dmabuf-socket-dir", default="/tmp/dma-page",

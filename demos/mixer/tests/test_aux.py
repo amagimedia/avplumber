@@ -19,7 +19,7 @@ def cfg():
     scenes = (Scene("full", (Item("s0", Rect(0, 0, 1080, 1920)),)),
               Scene("repeat", (Item("s0", Rect(0, 0, 540, 960)), Item("s0", Rect(540, 960, 540, 960), blend=True))),
               Scene("grid64", items))
-    return MixerConfig(1080, 1920, 60, sources, scenes, max_compositor_layers=640)
+    return MixerConfig(1080, 1920, 60, sources, scenes)
 
 
 def bus_json(**kwargs):
@@ -218,8 +218,9 @@ def test_budget_counts_the_largest_preview_and_refuses_beyond_it(cfg):
 
 
 def test_bus_budget_defaults_to_max_compositor_layers(cfg):
-    # A frame draws only its own layers; the budget costs 128 bytes of layer table per layer.
+    # The default fits eight 64-layer slots, the largest PVW and PGM (577 layers).
     assert parse_aux_buses([bus_json()], cfg)[0].max_layers == 640
+    assert parse_aux_buses([bus_json(scenes=["grid64"] * 8)], cfg)[0].max_layers == 640
     assert parse_aux_buses([bus_json()], replace(cfg, max_compositor_layers=256))[0].max_layers == 256
     pages = parse_aux_buses([pages_json()], cfg)[0]
     assert (pages.max_layers, pages.layouts) == (640, (pages.layout,))

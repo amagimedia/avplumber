@@ -35,13 +35,13 @@ supplied by that file; the runtime does not depend on the recorded demo's inputs
 
 `canvas`, `sources` and `scenes` are required; everything else has a default.
 
-`max_compositor_layers` is the per-compositor draw budget (default 256), and
+`max_compositor_layers` is the per-compositor draw budget (default 640), and
 an aux bus's default `max_layers`. Eight 64-input slots of a
 `pgm_pvw_grid` aux bus need 577 layers: 512 for the slots, 64 reserved for PVW
-and one for the already-composited PGM. Set the budget to `640`, or
-override a show with `--max-compositor-layers 640`. Recipes accept the same field; setup changes
+and one for the already-composited PGM, within the default budget. Override
+a show with `--max-compositor-layers`. Recipes accept the same field; setup changes
 preserve it. Native compositor nodes call this parameter `max_layers`.
-The CUDA layer table allocates 128 bytes per configured layer on both the GPU
+The CUDA layer table allocates 136 bytes per configured layer on both the GPU
 and pinned host memory. The culling mask and per-frame work use the actual
 layer count; raising the budget does not allocate more video frames.
 
@@ -462,7 +462,7 @@ list order and the `pgm` cells last, over any cell they overlap.
 | `layout` | `{"preset": "pgm_pvw_grid"}` | the layout the bus starts with |
 | `layouts` | `source_pages`, and `pgm_pvw_grid` when `layout` has a `pgm` cell | further layouts the control page offers besides `layout` (at most 16) |
 | `scenes` | none | slot assignments by slot index, `null` for an empty slot; padded with `null` to the layout's slot count |
-| `max_layers` | `max_compositor_layers` | the bus compositor's layer budget, fixed at build: a layout's PVW reserve, slots, sources and PGM. A layout or assignment over it is refused. Each frame's work follows the layers it draws; the budget sizes only the layer table, 128 bytes per layer on the GPU and in pinned host memory |
+| `max_layers` | `max_compositor_layers` | the bus compositor's layer budget, fixed at build: a layout's PVW reserve, slots, sources and PGM. A layout or assignment over it is refused. Each frame's work follows the layers it draws; the budget sizes only the layer table, 136 bytes per layer on the GPU and in pinned host memory |
 | `latency_ms` | the mixer's `latency_ms` | the bus compositor's playout buffer. The sources reach a bus when they reach the program compositors, so the program's buffer leaves it the same slack (1.5 aux frames at 60 fps: 50 ms); a bus at the program's buffer can change its PVW cells when the program changes. Bus latency plus `pgm_delay_frames` must stay below six aux frames |
 | `pgm_delay_frames` | `1`, `2` at a 50/60 fps bus | aux frames the PGM pad is matched back. The finished program leaves the main compositor `latency_ms` after its timestamp, when the bus would already be drawing that frame's tick, and needs a margin to cross the output chain (snapshot, selectors, keyer, tap) to the bus: `pgm_delay_frames × aux frame + latency_ms` must exceed the mixer's `latency_ms` by at least one program frame (checked at build for a bus whose layouts draw the program). The default gives about 33 ms (40 at 25/50) at any rate, which is why a `full_rate` bus at 50/60 takes two of its frames; `1` there leaves one program frame (16.7 ms at 60), and `0` needs a bus `latency_ms` at least a program frame above the mixer's, which delays every cell instead of the PGM cells alone |
 | `pvw_align` | `"program"` | when the PVW cells change on a take. `program`: on the bus frame leaving the bus when the program frame of the take leaves the mixer, so the operator sees both at once; the PGM cells of the same frame follow `pgm_delay_frames` later. `pgm_tile`: together with those PGM cells, `pgm_delay_frames` after the program |

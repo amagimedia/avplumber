@@ -96,7 +96,7 @@ def test_bus_without_a_pgm_layout_skips_the_program_tap_and_labels_outputs(nativ
     assert pages["src"] == pages["subscriptions"] == [f"aux_mv2_source_{i}" for i in range(13)]
     assert [layer["input"] for layer in pages["layers"]] == list(range(12))
     assert pages["latency_ms"] == 80
-    assert pages["max_layers"] == 256 and graph["mixer_wipe_overlay"]["max_layers"] == 2
+    assert pages["max_layers"] == 640 and graph["mixer_wipe_overlay"]["max_layers"] == 2
     # Monitors keep one NVENC reference frame; the program output leaves it to NVENC.
     assert graph["aux_mv2_encoder"]["options"]["dpb_size"] == 1
     assert "dpb_size" not in graph["janus_encoder"]["options"]
@@ -108,7 +108,7 @@ def test_bus_without_a_pgm_layout_skips_the_program_tap_and_labels_outputs(nativ
         assert graph["aux_mv_comp"]["src"][-1] == "aux_mv_pgm"   # the delayed input is the last one
         assert "pgm_delay_frames" not in pages
         # max_compositor_layers, like the pages bus: a frame draws only its own layers.
-        assert graph["aux_mv_comp"]["max_layers"] == 256
+        assert graph["aux_mv_comp"]["max_layers"] == 640
         assert graph["aux_mv_encoder"]["options"]["dpb_size"] == 1
     else:
         assert "program_aux_tap" not in graph

@@ -206,9 +206,10 @@ def main():
             switch({"cells": [{"role": "pgm", "x": 0, "y": 0, "w": 320, "h": 240},
                               {"role": "source", "source": last, "x": 0, "y": 240, "w": 320, "h": 240}]},
                    (bus.pgm_edge, bus.edges[last]))
-            # 129 PVW cells reserve 129 times the largest scene (two items): over the default 256 layers.
+            # Each PVW cell reserves the largest scene (two items); exceed this bus's budget.
             try:
-                bus.set_layout({"layout": {"cells": [{"role": "pvw", "x": 0, "y": 0, "w": 32, "h": 48}] * 129}})
+                bus.set_layout({"layout": {"cells": [{"role": "pvw", "x": 0, "y": 0, "w": 32, "h": 48}]
+                                          * (bus.bus.max_layers // 2 + 1)}})
                 raise AssertionError("a layout over max_layers was accepted")
             except ConfigError as exc:
                 assert "max_layers" in str(exc), exc
