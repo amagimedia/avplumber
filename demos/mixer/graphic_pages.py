@@ -78,30 +78,28 @@ def manifests(root: Path = GRAPHICS_DIR) -> dict[str, dict]:
     found: dict[str, dict] = {}
     for script in sorted(root.glob("*/graphic.js")):
         name = script.parent.name
-        path = script.with_name(f"{name}.ograf.json")
-
-        def refuse(problem: str):
-            raise ValueError(f"{path.relative_to(root).as_posix()}: {problem}")
-
+        path, where = script.with_name(f"{name}.ograf.json"), f"{name}/{name}.ograf.json"
         if not path.is_file():
             raise ValueError(f"{name}: no manifest {path.name} beside graphic.js")
         try:
             manifest = json.loads(path.read_text(encoding="utf-8"))
         except ValueError as error:
-            refuse(str(error))
+            raise ValueError(f"{where}: {error}") from None
+        if not isinstance(manifest, dict):
+            raise ValueError(f"{where}: must be a JSON object")
         for field in OGRAF_REQUIRED:
             if field not in manifest:
-                refuse(f'needs "{field}"')
+                raise ValueError(f'{where}: needs "{field}"')
         for field in manifest:
             if field not in OGRAF_REQUIRED + OGRAF_OPTIONAL and not field.startswith("v_"):
-                refuse(f'unknown field "{field}"; OGraf allows only its own and v_ fields')
+                raise ValueError(f'{where}: unknown field "{field}"; OGraf allows only its own and v_ fields')
         if manifest["$schema"] != OGRAF_SCHEMA:
-            refuse(f'"$schema" must be {OGRAF_SCHEMA}')
+            raise ValueError(f'{where}: "$schema" must be {OGRAF_SCHEMA}')
         if manifest["main"] != "graphic.js":
-            refuse('"main" must be graphic.js, the file the page is linked from')
+            raise ValueError(f'{where}: "main" must be graphic.js, the file the page is linked from')
         twin = next((other for other, earlier in found.items() if earlier["id"] == manifest["id"]), None)
         if twin:
-            refuse(f'id "{manifest["id"]}" is also the id of {twin}')
+            raise ValueError(f'{where}: id "{manifest["id"]}" is also the id of {twin}')
         found[name] = manifest
     return found
 
@@ -116,9 +114,11 @@ def key_graphics(root: Path = GRAPHICS_DIR) -> dict[str, dict]:
     for name, manifest in manifests(root).items():
         where = f"{name}/{name}.ograf.json: {VENDOR}"
         vendor = manifest.get(VENDOR, {})
-        for field in vendor:
+        for field, value in vendor.items():
             if field not in ("window", "key"):
                 raise ValueError(f'{where}: unknown field "{field}" (known: window, key)')
+            if not isinstance(value, dict):
+                raise ValueError(f"{where}.{field}: must be an object")
         if "key" not in vendor:
             continue
         window = tuple(vendor.get("window", {}).get(side) for side in ("width", "height"))

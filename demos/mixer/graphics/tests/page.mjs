@@ -130,6 +130,9 @@ export function page({ graphic = '', boot = '', dataset = {}, layout = {}, width
     customElements: { define(tag, constructor) { if (registry.has(tag)) throw new Error(`${tag} defined twice`); registry.set(tag, constructor); } },
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, Date: PageDate,
     console: { error: (...args) => errors.push(args.join(' ')) },
+    // What the engine and a graphic must not use. Without these, Node's own would run for real.
+    ...Object.fromEntries(['requestAnimationFrame', 'setInterval', 'fetch', 'WebSocket', 'XMLHttpRequest'].map((name) => (
+      [name, () => { throw new Error(`${name}() has no place in a graphic page`); }]))),
   };
   const link = vm.compileFunction(
     `${read('motion.js')}\n${graphic}\n${boot}\n`

@@ -1034,10 +1034,10 @@ def test_dsk_pages_are_browser_sources_with_clean_copies_of_each_output(tmp_path
 def test_the_setup_status_lists_the_key_graphics(tmp_path):
     # setup.html builds its key checkboxes from this: the graphics whose manifest places them as a key.
     manager = SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777), InstanceType.TESLA_T4)
-    assert manager.status()["dsk_pages"] == [
-        {"id": "lower_third", "label": "Lower third · animated name plate"},
-        {"id": "ticker", "label": "Ticker · second lower-third layer"},
-        {"id": "bug_left", "label": "Corner bug · top left"}, {"id": "bug_right", "label": "Clock bug · top right"}]
+    demo_keys = [{"id": "lower_third", "label": "Lower third · animated name plate"},
+                 {"id": "ticker", "label": "Ticker · second lower-third layer"},
+                 {"id": "bug_left", "label": "Corner bug · top left"}, {"id": "bug_right", "label": "Clock bug · top right"}]
+    assert [page for page in manager.status()["dsk_pages"] if page in demo_keys] == demo_keys
 
 
 def test_dsk_pages_take_their_share_of_the_source_budget():

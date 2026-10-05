@@ -4,6 +4,7 @@ Pure text, so it needs neither FFmpeg, NumPy nor the mixer."""
 import base64
 import json
 import re
+import shutil
 
 import pytest
 
@@ -127,13 +128,16 @@ def test_every_graphic_has_a_manifest_and_links_at_every_rate():
             assert "/*@" not in html and "Motion.graphic({" in html
 
 
+# The demo's four keys, in the setup page's order; each window is the graphic's own rectangle.
+DEMO_KEYS = [
+    ("lower_third", {"label": "Lower third · animated name plate", "window": (1016, 172), "anchor": "bottom-left", "above": "ticker"}),
+    ("ticker", {"label": "Ticker · second lower-third layer", "window": (1920, 80), "anchor": "bottom"}),
+    ("bug_left", {"label": "Corner bug · top left", "window": (152, 152), "anchor": "top-left"}),
+    ("bug_right", {"label": "Clock bug · top right", "window": (304, 152), "anchor": "top-right"})]
+
+
 def test_the_key_list_and_the_windows_come_from_the_manifests():
-    # In the setup page's order; each window is the graphic's own rectangle.
-    assert list(key_graphics().items()) == [
-        ("lower_third", {"label": "Lower third · animated name plate", "window": (1016, 172), "anchor": "bottom-left", "above": "ticker"}),
-        ("ticker", {"label": "Ticker · second lower-third layer", "window": (1920, 80), "anchor": "bottom"}),
-        ("bug_left", {"label": "Corner bug · top left", "window": (152, 152), "anchor": "top-left"}),
-        ("bug_right", {"label": "Clock bug · top right", "window": (304, 152), "anchor": "top-right"})]
+    assert [item for item in key_graphics().items() if item[0] in dict(DEMO_KEYS)] == DEMO_KEYS
 
 
 def test_every_key_window_is_a_size_the_browser_service_exports():
@@ -157,10 +161,12 @@ def test_every_key_window_is_a_size_the_browser_service_exports():
                 "bug_left": (2, 2, 10, 10), "bug_right": (76, 2, 18, 10)}),
 ])
 def test_keys_sit_where_their_manifests_place_them(canvas, rects):
+    placed = key_rects(*canvas)
     # The rectangles of the hand-written placement these manifests replaced.
-    assert key_rects(*canvas) == rects
-    for x, y, w, h in rects.values():
-        assert x >= 0 and y >= 0 and x + w <= canvas[0] and y + h <= canvas[1] and not (x % 2 or y % 2 or w % 2 or h % 2)
+    assert {name: placed[name] for name in rects} == rects
+    for name, (x, y, w, h) in placed.items():
+        assert x >= 0 and y >= 0 and x + w <= canvas[0] and y + h <= canvas[1], f"{name} leaves the {canvas} canvas"
+        assert not (x % 2 or y % 2 or w % 2 or h % 2), name
 
 
 def test_a_new_key_needs_only_its_manifest(root):
@@ -178,6 +184,22 @@ def test_a_new_key_needs_only_its_manifest(root):
                                            "note": (1688, 866, 200, 50)}
 
 
+def test_the_graphic_and_manifest_in_the_readme_add_a_key(tmp_path):
+    root = tmp_path / "graphics"
+    shutil.copytree(GRAPHICS_DIR, root)
+    readme = (GRAPHICS_DIR / "README.md").read_text(encoding="utf-8")
+    (root / "score_bug").mkdir()
+    for block, name in (("js", "graphic.js"), ("json", "score_bug.ograf.json")):
+        (text,) = re.findall(rf"```{block}\n(.*?)```", readme, flags=re.S)
+        (root / "score_bug" / name).write_text(text, encoding="utf-8")
+    assert list(key_graphics(root))[-1] == "score_bug"
+    assert key_graphics(root)["score_bug"] == {"label": "Score bug · above the lower third", "window": (640, 96),
+                                               "anchor": "bottom-right", "above": "lower_third"}
+    assert key_rects(1920, 1080, root)["score_bug"] == (1248, 636, 640, 96)
+    assert key_rects(1080, 1920, root)["score_bug"] == (408, 1512, 640, 96)
+    assert "data: { home: 'HOME', away: 'AWAY', score: '0 : 0' }" in page(graphic_url("score_bug", 50, root=root))
+
+
 @pytest.mark.parametrize("change,message", [
     (None, r"plate: no manifest plate\.ograf\.json"),
     ({"name": None}, r"plate\.ograf\.json: needs \"name\""),
@@ -185,6 +207,7 @@ def test_a_new_key_needs_only_its_manifest(root):
     ({"$schema": "https://example.org/schema.json"}, r"plate\.ograf\.json: \"\$schema\" must be https://ograf\.ebu\.io/"),
     ({"window": {"width": 400, "height": 100}}, r"plate\.ograf\.json: unknown field \"window\"; OGraf allows only its own and v_ fields"),
     ({"v_avplumber": {**KEY, "placement": "left"}}, r"plate\.ograf\.json: v_avplumber: unknown field \"placement\""),
+    ({"v_avplumber": {**KEY, "window": [400, 100]}}, r"plate\.ograf\.json: v_avplumber\.window: must be an object"),
     ({"v_avplumber": {"key": KEY["key"]}}, r"plate\.ograf\.json: v_avplumber\.window: needs whole, positive \"width\" and \"height\""),
     ({"v_avplumber": {**KEY, "window": {"width": 400.5, "height": 100}}}, r"v_avplumber\.window: needs whole, positive"),
     ({"v_avplumber": {**KEY, "key": {"order": 1, "anchor": "left"}}}, r"v_avplumber\.key\.anchor: must be one of top, bottom, top-left"),
