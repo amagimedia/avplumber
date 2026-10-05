@@ -119,6 +119,15 @@ def test_hevc_recipe_preserves_decoder_selection(recipe, tmp_path):
         plan(recipe, tmp_path)
 
 
+def test_an_input_group_hands_its_transform_to_each_of_its_sources(recipe, tmp_path):
+    transform = {"width": 1920, "height": 1080, "sw_format": "nv12"}
+    recipe["inputs"] = [{"id": "sdr", "kind": "generated", "color": "sdr", "chroma": "420", "weight": 1,
+                         "transform": transform}]
+    doc, _, _ = plan(recipe, tmp_path)
+    assert doc["sources"] and all(source["transform"] == transform for source in doc["sources"] if source["kind"] != "browser")
+    assert all(source.transform.fit == "contain" for source in parse(doc).sources if source.kind != "browser")
+
+
 @pytest.mark.parametrize("storage,color,pattern,bytes_per_pixel", [("nv12", "sdr", "testsrc2", 1.5), ("p010", "hlg", "0", 3)])
 def test_raw_420_assets_are_animated_exact_size_and_cached(recipe, tmp_path, storage, color, pattern, bytes_per_pixel):
     if not shutil.which("ffmpeg"):

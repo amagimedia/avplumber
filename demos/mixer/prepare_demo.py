@@ -303,7 +303,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                     raise ValueError(f"{name}: a download or file feeds one source only (weight 1, unique clip)")
                 clips.add(path)
                 source.update(kind="video", path=runtime_path(path))
-            source.update({key: spec[key] for key in ("decode_storage", "extra_hw_frames") if key in spec})
+            source.update({key: spec[key] for key in ("decode_storage", "extra_hw_frames", "transform") if key in spec})
             sources.append(source)
     # Graphics need fewer pixels than the program; the compositor scales them
     # in its draw pass. Bound decode/upload cost independently of canvas size.

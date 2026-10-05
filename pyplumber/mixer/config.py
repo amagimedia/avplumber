@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from .color import Color, declared_color, default_codec, rendition_color, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
 
@@ -90,6 +90,21 @@ class Rect:
     h: int
 
 
+# What a raw source's frames are stored as on the GPU; a decoded file's storage is known only per frame.
+RAW_STORAGE = {"v210": "p210le", "nv12": "nv12", "p010": "p010le"}
+TRANSFORM_FORMATS = ("nv12", "p010le", "p210le")   # the canvases cuda_transform draws a video source on
+
+
+class SourceTransform(NamedTuple):
+    """Geometry applied to a source once, before color and fan-out: its frame, or a crop of it,
+    scaled onto a canvas of this size. A frame that already has the size and storage is passed on."""
+    width: int
+    height: int
+    sw_format: str
+    fit: str = "contain"
+    crop: Optional[Tuple[int, int, int, int]] = None
+
+
 @dataclass(frozen=True)
 class Source:
     id: str
@@ -108,6 +123,7 @@ class Source:
     color_range: str = ""
     filter_graph: str = ""         # optional CUDA source filter, before scene/alias fan-out
     filter_output_format: str = ""
+    transform: Optional[SourceTransform] = None   # before the source filter
     decode_storage: str = "cuda"
     extra_hw_frames: int = 3       # CUarray application headroom, beyond codec/working surfaces
 
@@ -339,6 +355,30 @@ _SOURCE_KEYS = {"browser": ("url", "width", "height"), "video": ("path",),
                 **{kind: ("path", "width", "height") for kind in ("v210", "nv12", "p010")}}
 
 
+def _parse_source_transform(t: Any, kind: str, where: str) -> SourceTransform:
+    where = f"{where}: transform"
+    if kind == "browser":
+        raise ConfigError(f"{where} is unsupported on a browser source: the canvas has no alpha")
+    if not isinstance(t, dict):
+        raise ConfigError(f"{where} must be an object")
+    unknown = sorted(set(t) - {"width", "height", "sw_format", "fit", "crop"})
+    if unknown:
+        raise ConfigError(f"{where}: unknown keys {', '.join(unknown)}")
+    if any(type(t.get(key)) is not int or t[key] <= 0 or t[key] % 2 for key in ("width", "height")):
+        raise ConfigError(f"{where} needs positive even width and height")
+    sw_format = t.get("sw_format", RAW_STORAGE.get(kind))
+    if sw_format not in TRANSFORM_FORMATS:
+        raise ConfigError(f"{where}: sw_format must be one of {', '.join(TRANSFORM_FORMATS)}"
+                          " (required for a video source, whose decoded storage is not declared)")
+    fit = t.get("fit", "contain")
+    if fit not in ("contain", "stretch"):
+        raise ConfigError(f"{where}: fit must be contain or stretch")
+    crop = t.get("crop")
+    if crop is not None and (not isinstance(crop, list) or len(crop) != 4 or any(type(v) is not int for v in crop)):
+        raise ConfigError(f"{where}: crop must be [x, y, w, h]")
+    return SourceTransform(t["width"], t["height"], sw_format, fit, tuple(crop) if crop else None)
+
+
 def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     sid, kind = str(s.get("id", "")), s.get("kind")
     if not sid or "#" in sid:
@@ -380,6 +420,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
+                  transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,
                   **(color.tags if color else {}))
 
 

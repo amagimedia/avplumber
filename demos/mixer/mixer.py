@@ -770,6 +770,16 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
                                event_loop=_pacing_loop(index), decoder_params=source.decoder_params)
+        if source.transform:
+            transformed_edge = f"input_{index}_transformed"
+            # pass_arrays: the color stage and the compositors read arrays, so a frame that already
+            # has the size goes on undrawn.
+            avp.addNode(api.CudaTransform(transform_params(
+                edge, [transform_output(transformed_edge, source.transform.width, source.transform.height,
+                                        sw_format=source.transform.sw_format, fit=source.transform.fit,
+                                        crop=source.transform.crop, pass_arrays=True)],
+                hwaccel=HWACCEL, name=f"transform_{index}", group=group, auto_restart="group")))
+            edge = transformed_edge
         if source.filter_graph:
             filtered_edge = f"input_{index}_filtered"
             avp.addNode(api.FilterVideo({
@@ -787,7 +797,8 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                              packed_rgb=source.kind == "browser",
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
                              pixel_format=source.filter_output_format or
-                             {"v210": "p210le", "nv12": "nv12", "p010": "p010le"}.get(source.kind))
+                             (source.transform.sw_format if source.transform
+                              else mixer_config.RAW_STORAGE.get(source.kind)))
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")

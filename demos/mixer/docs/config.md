@@ -224,6 +224,7 @@ decoder.
 | `loop` | both | default `true` |
 | `decode_storage` | video | default `cuda`; experimental `cuarray` requires the patched upstream FFmpeg build and compatible array consumers, and selects zero-copy NVDEC without CPU fallback |
 | `extra_hw_frames` | CUarray video | default `3`: fixed application headroom beyond codec and FFmpeg working surfaces; size it for the graph's retained-frame demand |
+| `transform` | video/v210/nv12/p010 | optional geometry applied once before the source filter, color and fan-out: `{"width", "height", "fit", "crop", "sw_format"}`. The frame, or its `crop` `[x, y, w, h]`, is scaled onto a canvas of that even size by `cuda_transform`; `fit` is `contain` (default, black bars) or `stretch`. `sw_format` (`nv12`, `p010le`, `p210le`) is the source's own storage: raw kinds supply it, a `video` source must state it. A frame that already has the size and storage is passed on undrawn; one of lower depth is promoted, one of higher depth is an error |
 | `filter` | video/v210/nv12/p010 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
 | `filter_output_format` | custom filters | required CUDA YUV output storage, e.g. `p010le` or `p210le` |
 

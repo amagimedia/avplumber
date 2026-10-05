@@ -924,6 +924,84 @@ def test_browser_hold_last_frame_defaults_on_and_reaches_the_window(tmp_path, mo
     assert opened[-1]["holdLastFrame"] is False
 
 
+def _source_transform_nodes(tmp_path, monkeypatch, source):
+    import json as _json
+    from pyplumber.mixer import config as mc, dmabuf_inputs
+    (tmp_path / "page.sock").touch()
+    path = tmp_path / "mixer.json"
+    path.write_text(_json.dumps({**CONFIG, "sources": [{**CONFIG["sources"][0], **source}, *CONFIG["sources"][1:]]}))
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
+    monkeypatch.setattr(mc, "probe_video_size", lambda path: (1920, 1080))
+    FakeMixer.instances.clear()
+    application = build_application(
+        GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)), api=fake_api())
+    return ({node.parameters.get("name"): node.parameters for node in application.avp.nodes},
+            dict(FakeMixer.instances[-1].sources))
+
+
+def test_config_source_transform_is_one_cuda_transform_before_the_fanout(tmp_path, monkeypatch):
+    nodes, sources = _source_transform_nodes(tmp_path, monkeypatch, {
+        "transform": {"width": 1280, "height": 720, "sw_format": "nv12", "crop": [320, 180, 1280, 720]}})
+
+    assert nodes["transform_0"] == {
+        "name": "transform_0", "type": "cuda_transform", "src": "input_0_fps", "dst": ["input_0_transformed"],
+        "hwaccel": "mixer_gpu", "group": "input_0", "auto_restart": "group",
+        "outputs": [{"dst": "input_0_transformed", "width": 1280, "height": 720, "sw_format": "nv12",
+                     "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1280, "dst_h": 720, "fit": "contain",
+                                 "crop": {"x": 320, "y": 180, "w": 1280, "h": 720}}],
+                     # The stages below read arrays, so a frame already of this size is passed on undrawn.
+                     "pass_arrays": True}]}
+    assert sources["cam"]["pre_otm_edge"] == sources["cam#2"]["pre_otm_edge"] == "input_0_transformed"
+    assert sources["cam"]["pixel_format"] == "nv12"
+
+
+def test_config_source_transform_runs_before_the_source_filter(tmp_path, monkeypatch):
+    nodes, sources = _source_transform_nodes(tmp_path, monkeypatch, {
+        "transform": {"width": 1920, "height": 1080, "sw_format": "nv12", "fit": "stretch"},
+        "filter": "tonemap_cuda=transfer_in=sdr:transfer_out=hlg", "filter_output_format": "p010le"})
+
+    assert "fit" not in nodes["transform_0"]["outputs"][0]["layers"][0]
+    assert nodes["source_filter_0"]["src"] == "input_0_transformed"
+    assert sources["cam"]["pre_otm_edge"] == "input_0_filtered"
+    assert sources["cam"]["pixel_format"] == "p010le"
+
+
+def test_config_without_a_source_transform_builds_no_cuda_transform(tmp_path, monkeypatch):
+    nodes, sources = _source_transform_nodes(tmp_path, monkeypatch, {})
+
+    assert not [name for name, node in nodes.items() if node.get("type") == "cuda_transform"]
+    assert sources["cam"]["pre_otm_edge"] == "input_0_fps"
+
+
+@pytest.mark.parametrize("transform, message", [
+    ({"width": 1280, "height": 720}, "sw_format"),                                # a decoded file's storage is not declared
+    ({"width": 1281, "height": 720, "sw_format": "nv12"}, "even"),
+    ({"width": 1280, "height": 720, "sw_format": "rgba"}, "sw_format"),
+    ({"width": 1280, "height": 720, "sw_format": "nv12", "fit": "cover"}, "fit"),
+    ({"width": 1280, "height": 720, "sw_format": "nv12", "crop": [0, 0, 1280]}, "crop"),
+    ({"width": 1280, "height": 720, "sw_format": "nv12", "zoom": 2}, "zoom"),
+])
+def test_config_refuses_a_wrong_source_transform(transform, message):
+    from pyplumber.mixer import config as mc
+    with pytest.raises(mc.ConfigError, match=message):
+        mc.parse({**CONFIG, "sources": [{**CONFIG["sources"][0], "transform": transform}, *CONFIG["sources"][1:]]})
+
+
+def test_config_refuses_a_transform_on_a_browser_source():
+    from pyplumber.mixer import config as mc
+    with pytest.raises(mc.ConfigError, match="browser"):
+        mc.parse({**CONFIG, "sources": [CONFIG["sources"][0], {**CONFIG["sources"][1], "transform": {
+            "width": 1280, "height": 720, "sw_format": "nv12"}}]})
+
+
+def test_config_raw_source_transform_takes_the_storage_of_its_kind():
+    from pyplumber.mixer import config as mc
+    raw = {"id": "raw", "kind": "v210", "path": "/media/raw.v210", "width": 1920, "height": 1080, "color": "hlg",
+           "transform": {"width": 1920, "height": 1080}}
+    cfg = mc.parse({**CONFIG, "sources": [raw, *CONFIG["sources"]]})
+    assert cfg.sources[0].transform.sw_format == "p210le" and cfg.sources[0].transform.fit == "contain"
+
+
 @pytest.mark.parametrize("source_filter", ["", "tonemap_cuda=transfer_in=sdr:transfer_out=hlg,scale_cuda=format=p210le"])
 def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypatch, source_filter):
     import json as _json
