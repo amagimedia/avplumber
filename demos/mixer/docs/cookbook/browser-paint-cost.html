@@ -31,6 +31,7 @@
   <h1>Browser CPU is per painted frame</h1>
   <p class="lede">Chromium's cost for a browser window follows the frames the window delivers, not what the page shows: about 3.5 ms of CPU for every painted frame, spread over the renderer, the GPU process and the browser's main process, about 0.2 core per window at 60 paints a second. The demo's browser test page slid its marker without pause, so all 29 windows painted at 60 fps. It now rests 4 s and slides 2 s, as a real graphic does, each window from its own point of the cycle; and the browser image moved from Electron 41 to 44.5.1. Electron went from 5.90 to 2.83 cores and host idle from 28 to 50&nbsp;% on the 68-input 60 fps show.</p>
   <span class="pill live">Status: Implemented, deployed on the test host</span>
+  <p class="note">Later audit: the per-frame figure is two costs. About 1.8 ms follows each painted frame; the rest is paid on every tick of every window, whether it paints or not. See <a href="#audit">Per tick and per paint</a> below.</p>
 
   <ul class="figures" aria-label="Measured facts">
     <li><b>~3.5 ms</b><span>Chromium CPU per delivered frame per window, whatever the page: about 0.2 core at 60 paints/s</span></li>
@@ -116,7 +117,7 @@
 
   <h2>Where a window's CPU goes</h2>
   <p>For every frame a window delivers, three Chromium processes do work: the renderer paints the damaged page (about 3&nbsp;% of a core per window at 60 paints/s), the GPU process composites it in VizCompositor and draws through ANGLE's GL (about 12&nbsp;%), and the browser's main process handles the paint event, passes the DMA-BUF descriptor over the socket and takes the mixer's release ack (about 6&nbsp;%; see <a href="browser-handoff.html">Browser frame hand-off</a>). Together about 3.5 ms of CPU per delivered frame, which at 60 paints/s is about 0.2 core per window (3 + 12 + 6&nbsp;% = 21&nbsp;%, computed). The cost tracks delivered frames, not page complexity.</p>
-  <p>Chromium paints only on damage, so a page that does not change delivers no frame and costs next to nothing. On the same show a static key page painting 3 times a second took about 7&nbsp;% of a core, and the always-sliding test page at 60 paints/s 21–25&nbsp;%. The number of Electron workers does not enter: the work is per window per frame, so grouping windows into fewer, bigger workers would not reduce it and would concentrate VizCompositor load in fewer GPU processes (<a href="rejected.html">rejected idea 9</a>). That leaves two levers, and this page pulls both: fewer delivered frames when nothing on the page moves, and a cheaper Chromium.</p>
+  <p>Chromium paints only on damage, so a page that does not change delivers no frame and pays none of the per-frame work. It is not free: its window is still woken on every tick (<a href="#audit">Per tick and per paint</a>). On the same show a static key page painting 3 times a second took about 7&nbsp;% of a core, and the always-sliding test page at 60 paints/s 21–25&nbsp;%. The number of Electron workers does not enter: the work is per window per frame, so grouping windows into fewer, bigger workers would not reduce it and would concentrate VizCompositor load in fewer GPU processes (<a href="rejected.html">rejected idea 9</a>). That leaves two levers, and this page pulls both: fewer delivered frames when nothing on the page moves, and a cheaper Chromium.</p>
   <p>This is not the shortcut the cookbook rules out. Every window is still an independent 60 fps input: while its marker moves it paints 60 frames a second and the mixer imports, stamps and composites every one; the sender, the chain and the ring are unchanged. What changed is the content: a graphic that holds still two thirds of the time, which is what real lower thirds, bugs and tickers do. Running browser sources at 30 fps in a 60 fps show, which halves the delivered rate of a page that is moving, stays rejected (<a href="rejected.html">idea 10</a>).</p>
 
   <h2>Measured at 68 inputs, 60 fps</h2>
@@ -140,6 +141,28 @@
     <li><b>The test page rests two thirds of the time.</b> Before, the marker of <code>browser_alpha.html</code> ran a CSS keyframe animation, 4 s each way, without pause, so every window painted every frame. Now the marker's <code>transform</code> has a 2 s transition, and a timer toggles its target every 6 s: slide 2 s, rest 4 s. It moves on <code>transform</code>, not <code>left</code>, which snaps to whole pixels and lays out on the main thread each frame. Each window starts its cycle at (index × 0.618 mod 1) × 6 s, where index is the number in the source's id (<code>browser_007</code> is 7), which <code>prepare_demo</code> embeds in the page as a data attribute; golden-ratio steps spread any count of windows evenly over the cycle, so 9–11 of the 29 slide at any moment instead of all of them. Paints fell from 1,748 to 594 a second, Electron from 5.90 to 3.25 cores, avplumber from 5.08 to 4.61, GPU utilisation from about 83 to 62&nbsp;%, host idle rose from 28 to 49&nbsp;%, with 0 missed program deadlines.</li>
     <li><b>Electron 44.5.1 (Chromium 152) on Fedora 44.</b> Electron 41 (Chromium 146) and Fedora 42 were both end of life. On the rested page, Electron CPU fell from 3.30 to 2.83 cores (−14&nbsp;%), host idle rose from 47.7 to 50.3&nbsp;%, avplumber went from 4.62 to 4.58 cores and CPU pressure (PSI some) from 17.6 to 16.4&nbsp;%, with no regression. Electron 42 and later no longer download the Electron binary in the package's npm postinstall, so the image build runs <code>node node_modules/electron/install.js</code> after <code>npm ci</code>. The image needs only Electron's runtime libraries; the NVIDIA userspace comes from the host through the container runtime. The GPU-process crash on recreating all windows is the same on Electron 41 and 44; its fix is on <a href="gpu-process-crash.html">Keeping Vulkan out of the GPU process</a>.</li>
   </ol>
+
+  <h2 id="audit">Per tick and per paint: a later audit on the L4</h2>
+  <p>A 20-minute capture of every browser thread's run time and wake-ups, on the 88-source 60 fps show on the L4 host: 40 windows in 5 workers on Electron 44, 36 test pages and 4 key pages, 864 paints a second in all, 2.86 cores in the browser container. Dividing one by the other gives 3.3 ms per painted frame, close to the figure this page starts with. The capture splits it:</p>
+  <div class="measured wide">
+    <table>
+      <thead><tr><th>Part of the 2.86 cores</th><th>Per event</th><th>Cores</th></tr></thead>
+      <tbody>
+        <tr><td>Per painted frame, 864 a second</td><td>1.5–1.9 ms</td><td>1.30–1.65</td></tr>
+        <tr><td>Per tick of each window, 2,400 a second, painting or not</td><td>0.45–0.59 ms</td><td>1.07–1.41</td></tr>
+        <tr><td>Page-specific: the ticker's script loop and five pages that grow</td><td>–</td><td>0.13</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The split is computed, not measured directly: it is a fit across the five workers, whose paint rates differ only by their key page, so it rests on five points and a long extrapolation to zero paints. One measured fact shows the tick cost without the fit: a key page that paints 2 times a second and a test page that paints 20.3 times a second cost the same on the renderer's <code>Compositor</code> thread, 12.05 against 12.18 thousandths of a core.</p>
+  <ul class="where">
+    <li><b>Every window is woken 60 times a second,</b> for about 0.5 ms each time, although 1,536 of the 2,400 window-ticks a second paint nothing. That is 1.1–1.4 cores, 37–49&nbsp;% of the container. Resting the test page two thirds of the time cut only the per-frame part. At 60 fps these ticks also all fell on one instant until the opt-in stagger (<a href="browser-frame-stagger.html">Browser frame ticks staggered at 60 fps</a>).</li>
+    <li><b>A painted frame is relayed, not drawn, on the CPU:</b> three processes, nine threads and about 25 wake-ups for each one, whatever the page shows.</li>
+    <li><b>The pixels are on the GPU.</b> The renderers' raster threads use 0.002 of the 2.86 cores. A 152×152 window costs the same CPU per delivered frame as a 1920×1080 one within noise: 1.5–1.6 ms against 1.4 ms.</li>
+    <li><b>One page is heavier than it needs to be.</b> The ticker moves its crawl from a <code>requestAnimationFrame</code> loop, which costs 0.047 core more than the same motion driven by the compositor.</li>
+    <li><b>Idea 9 rests on less than it says.</b> 36–44&nbsp;% of the cost in the GPU and browser processes is not per delivered frame. Whether that part is per window or per worker cannot be told from this capture, because every worker holds 8 windows (<a href="rejected.html">rejected idea 9</a>).</li>
+  </ul>
+  <p>Two things are open. Why a resting window ticks at all is not proven: 0.7–0.9 core is spent on ticks that paint nothing, and one test decides whether the page or the browser asks for them, an empty window beside a test page. And five pages' <code>Compositor</code> threads cost more the longer they run, 0.08 core in all after 4.5 hours of uptime; no data here explains it.</p>
 
   <h2>At a glance</h2>
   <ul class="cards">

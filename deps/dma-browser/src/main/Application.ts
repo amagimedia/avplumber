@@ -4,6 +4,7 @@ import { app } from 'electron';
 import { HwAccelConfigurator } from './HwAccelConfigurator';
 import { Logger } from './support/Logger';
 import { ManagedWindow, type IManagedWindowFactory } from './ManagedWindow';
+import { workerFramePhase } from './capture/FramePhase';
 import { WindowManager } from './WindowManager';
 import { AllowedDims } from './capture/AllowedDims';
 import { DEFAULT_RETAINED_FRAME_POOL_SIZE } from './capture/FrameCaptureChannel';
@@ -23,6 +24,7 @@ export interface ApplicationConfig {
   readonly loadWatchdogMs: number;
   readonly allowedDims: AllowedDims;
   readonly dmabufPoolSize: number;
+  readonly framePhase: number | null;
 }
 
 export class Application {
@@ -53,7 +55,7 @@ export class Application {
         this.cfg.maxWindows,
       )} allowedDims=${this.cfg.allowedDims.listForLogging()} dmabufPoolSize=${String(
         this.cfg.dmabufPoolSize,
-      )}`,
+      )} framePhase=${String(this.cfg.framePhase)}`,
     );
     try {
       this.logger.global(`gpuFeatureStatus=${JSON.stringify(app.getGPUFeatureStatus())}`);
@@ -72,6 +74,7 @@ export class Application {
           allowedDims: this.cfg.allowedDims,
           loadWatchdogMs: this.cfg.loadWatchdogMs,
           retainedFramePoolSize: windowCfg.ringSize ?? this.cfg.dmabufPoolSize,
+          framePhase: this.cfg.framePhase,
         }),
     };
 
@@ -135,6 +138,7 @@ export class Application {
       loadWatchdogMs,
       allowedDims,
       dmabufPoolSize,
+      framePhase: workerFramePhase(this.env),
     };
   }
 
