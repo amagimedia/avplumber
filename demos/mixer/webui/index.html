@@ -144,6 +144,7 @@
   #split::before { content: ""; width: 2px; border-radius: 1px; background: var(--edge); }
   #split:hover::before, #split:focus-visible::before, #split.drag::before { background: var(--accent); }
   #split:focus-visible { outline: none; }
+  #scenes:focus-visible { outline: none; }
   .card { border: 1px solid var(--edge); border-radius: 10px; background: var(--panel); }
 
   #deck { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; container-type: inline-size; }
@@ -388,7 +389,7 @@
         <a class="newtab" id="graph-open" target="_blank" rel="noopener" hidden>Open full graph in new tab
           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 2h3v3M10 2 5.5 6.5"/></svg></a>
       </header>
-      <div id="scenes"></div>
+      <div id="scenes" tabindex="-1"></div>
       <div id="graph" hidden></div>
     </section>
 
@@ -676,6 +677,7 @@ function setTab(next) {
   $("scenes").hidden = $("chips").hidden = tab !== "scenes";
   $("graph").hidden = $("graph-open").hidden = tab !== "graph";
   renderGraph();
+  if (tab === "scenes") restFocus();
 }
 
 /* ---------- signal flow ---------- */
@@ -1490,6 +1492,11 @@ $("wipe-file").oninput = () => { touched.wipe = true; };
 $("tab-scenes").onclick = () => setTab("scenes");
 $("tab-graph").onclick = () => setTab("graph");
 
+// The keyboard focus rests on the scene grid, so 1–9 and Shift+1–9 work without a click first. A field
+// keeps the digits typed into it and gives the focus back on Enter or Escape.
+function restFocus() { $("scenes").focus({preventScroll: true}); }
+for (const field of document.querySelectorAll("#deck input"))
+  field.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "Escape") restFocus(); });
 addEventListener("keydown", (e) => {
   if (e.target.closest?.("input, .dd-menu") || e.metaKey || e.ctrlKey || e.altKey) return;
   const shifted = Number(e.code.replace("Digit", ""));
