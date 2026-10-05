@@ -21,8 +21,12 @@ public:
           held_valid_(config.inputs) {}
 
     void process() override {
-        if (sent_eof_)
+        if (sent_eof_) {
+            // Nothing left to draw. Park until stop() or an active_inputs
+            // change wakes the node; returning here would spin the thread.
+            this->waitForInput();
             return;
+        }
 
         const size_t n = this->source_edges_.size();
         if (n == 0)
