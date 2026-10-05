@@ -50,6 +50,13 @@ def frame_planes(frame, fmt):
                  for d, p, w in zip(frame.data[:3], frame.linesize[:3], widths))
 
 
+def nv12_planes(frame):
+    """Downloaded NV12 frame -> (luma, interleaved chroma) as 8-bit arrays."""
+    data, linesize = frame.data, frame.linesize   # each access copies
+    return tuple(np.frombuffer(data[i], np.uint8).reshape(rows, linesize[i])[:, :frame.width]
+                 for i, rows in enumerate((frame.height, frame.height // 2)))
+
+
 def start(avp, nodes, group, edge):
     """Register nodes under one group with auto_restart off, start them, return the edge."""
     for node in nodes:

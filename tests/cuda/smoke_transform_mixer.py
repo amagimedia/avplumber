@@ -1,7 +1,7 @@
 """Remote GPU smoke for the two mixer uses of cuda_transform, built with pyplumber.transform.
 
 1. Fit with black bars (source normalisation): a frame of any size contained in the canonical
-   1920x1080 canvas, against the filter graph it replaces (scale_cuda, then pad_cuda).
+   1920x1080 canvas, against the filter graph it replaced (scale_cuda, then pad_cuda).
    - Bars are exactly black and the picture fills exactly the box of the node's placement rule.
    - A source that needs no scaling is byte-identical to the filter graph.
    - A scaled source whose fitted size is even without rounding equals the filter graph within
@@ -13,10 +13,19 @@
      every code times four.
 2. A scaled output (rendition): the transform scales in the canvas format and the rendition's
    conversion filter follows, against scale_cuda followed by the same conversion in one filter
-   graph, within TOLERANCE. One case only stamps tags (SDR to SDR), one tone-maps HLG to SDR.
+   graph, within TOLERANCE. One case only stamps tags (SDR to SDR), two tone-map HLG to SDR: from
+   a p010le canvas and from a p210le canvas, the storage of the live HLG show.
 
 Timestamps must survive: frames are matched by timestamp between the two paths. The downloads
-are the verification boundary. Not covered: p210le (4:2:2) input, CUarray and browser frames.
+are the verification boundary. Not covered: a 4:2:2, CUarray or browser frame as the input of a
+normalisation.
+
+The format the node declares is used but not asserted. Each download filter reads it when the
+graph is built. transform_pillarbox has two canvases of different storage and so declares none:
+its two download filters log "cuda_transform: outputs differ in size or sw_format ..." with a
+stack trace and "preliminary init failed, will retry when we get first frame", then build from
+their first frame. That is expected here. The mixer's router depends on the declared size; a run
+with more than 32 --input sources of different sizes shows it.
 """
 from pathlib import Path
 import tempfile
@@ -24,7 +33,7 @@ import time
 
 import numpy as np
 
-from _harness import EOF, finish, frame_planes, make_avp
+from _harness import EOF, finish, frame_planes, make_avp, nv12_planes
 from pyplumber import node as api
 from pyplumber.mixer.backends.cuda import CudaMixerBackend
 from pyplumber.mixer.inputs import build_raw420_input
@@ -38,18 +47,20 @@ HELD_FRAMES = 6   # per edge, waiting for the same timestamp on the other path
 # placed one source pixel off fails. First setting, not measured yet: every PASS line prints the
 # difference it found.
 TOLERANCE, INSET = 3, 4
-# The graph the mixer used for source normalisation before cuda_transform.
+# The graph the mixer built for source normalisation before cuda_transform.
 LEGACY_NORMALIZE = ("scale_cuda=w={0}:h={1}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
                     "pad_cuda=w={0}:h={1}:x=(ow-iw)/2:y=(oh-ih)/2:color=black").format(*CANVAS)
+# "uhd" is the one reduction: 2:1, where four-neighbour bilinear averages each 2x2 block.
 SOURCES = {"pillarbox": (1440, 1080), "letterbox": (1920, 800), "upscale": (1280, 720),
-           "small": (640, 480), "rounded": (854, 480)}
+           "small": (640, 480), "rounded": (854, 480), "uhd": (3840, 2160)}
 # Also drawn onto a p010le canvas. It must be a source that needs no scaling: a scaled picture
 # is interpolated at 10 bits and is then not four times its 8-bit result.
 PROMOTED = "pillarbox"
 RENDITION = (1280, 720)
 # name: (canvas storage, source color, target storage, tone-map options)
 RENDITIONS = {"sdr": ("nv12", "sdr", "nv12", {}),
-              "hlg_to_sdr": ("p010le", "hlg", "nv12", {"tonemap": "mobius", "param": 0.9})}
+              "hlg_to_sdr": ("p010le", "hlg", "nv12", {"tonemap": "mobius", "param": 0.9}),
+              "hlg422_to_sdr": ("p210le", "hlg", "nv12", {"tonemap": "mobius", "param": 0.9})}
 
 
 def pattern(width, height, index, storage="nv12"):
@@ -79,13 +90,6 @@ def contain_box(width, height, canvas_w, canvas_h, align=2):
         w, h = rescale(width, canvas_h, height), canvas_h
     w, h = down(w), down(h)
     return down((canvas_w - w) // 2), down((canvas_h - h) // 2), w, h
-
-
-def nv12(frame):
-    """Downloaded NV12 frame -> (luma, interleaved chroma)."""
-    data, linesize = frame.data, frame.linesize   # each access copies
-    return tuple(np.frombuffer(data[i], np.uint8).reshape(rows, linesize[i])[:, :frame.width]
-                 for i, rows in enumerate((frame.height, frame.height // 2)))
 
 
 def picture_box(luma, black=16):
@@ -174,7 +178,14 @@ def main():
 
             for name, (storage, color, target_storage, tonemap) in RENDITIONS.items():
                 conversion = backend.conversion("sdr", target_storage, source=color, source_format=storage, **tonemap)
-                nodes.append(api.Split({"name": f"split_{name}", "src": source(name, *CANVAS, storage),
+                canvas = source(name, *CANVAS, "nv12" if storage == "nv12" else "p010le")
+                if storage == "p210le":
+                    # The raw reader gives 4:2:0, as NVDEC does; the mixer's compositor makes 4:2:2.
+                    nodes.append(api.FilterVideo({"name": f"canvas_{name}", "src": canvas, "dst": f"{name}_canvas",
+                                                  "hwaccel": "gpu", "group": "probe", "threads": backend.graph_threads,
+                                                  "graph": backend.scale(pixel_format=storage)}))
+                    canvas = f"{name}_canvas"
+                nodes.append(api.Split({"name": f"split_{name}", "src": canvas,
                                         "dst": [f"{name}_to_transform", f"{name}_to_legacy"], "group": "probe"}))
                 nodes.append(api.CudaTransform(transform_params(
                     f"{name}_to_transform", [transform_output([f"{name}_sized"], *RENDITION, sw_format=storage)],
@@ -208,7 +219,7 @@ def main():
                     if frame is None or frame.pts.timestamp == EOF:
                         continue
                     held[name][frame.pts.timestamp] = (frame_planes(frame, "p010le") if name.endswith("_promoted")
-                                                       else nv12(frame))
+                                                       else nv12_planes(frame))
                     for pts in sorted(held[name])[:-HELD_FRAMES]:
                         del held[name][pts]
                 for label, (ours, reference, check) in pairs.items():
