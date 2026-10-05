@@ -72,6 +72,20 @@ test('a loaded graphic rests in its start state with nothing running', async () 
   assert.deepEqual([parts.name.textContent, parts.role.textContent], ['Ada Lovelace', 'Analyst · Engine No. 1']);
 });
 
+test('nothing of the graphic is visible until its start state is in place', async () => {
+  let fontsLoaded;
+  const fake = page({ layout: LOWER_THIRD_LAYOUT, fontsReady: new Promise((resolve) => { fontsLoaded = resolve; }) });
+  const element = new (fake.Motion.graphic(LOWER_THIRD))();
+  const loaded = element.load({ renderCharacteristics: { frameRate: 50 } });
+  await settle();
+  assert.equal(element.style.visibility, 'hidden');
+  assert.equal(element.parts.plate.style.transform, undefined, 'lengths wait for the fonts: text sets widths');
+  fontsLoaded();
+  await loaded;
+  assert.equal(element.style.visibility, '');
+  assert.deepEqual(element.parts.plate.style, HIDDEN);
+});
+
 test('playing asks the browser for exactly the baked move, at every rate', async () => {
   for (const fps of RATES) {
     const { element, parts } = await mount(LOWER_THIRD, { fps, layout: LOWER_THIRD_LAYOUT, width: 1016, height: 172 });
@@ -192,6 +206,22 @@ test('a play during the stop move keeps the loops', async () => {
   parts.plate.animations[0].finish();
   await stopped;
   assert.deepEqual(parts.ring.animations.map((animation) => animation.cancelled), [false]);
+});
+
+test('loops end with the last stop move, however many stops were asked', async () => {
+  const { element, parts } = await mount({
+    html: '<div id="plate"></div><div id="ring"></div>',
+    stop: [{ el: 'plate', opacity: [1, 0], seconds: 0.2 }],
+    loop: [{ el: 'ring', spin: { seconds: 4 } }],
+  });
+  await element.playAction({});
+  const first = element.stopAction({});
+  const second = element.stopAction({});   // takes the plate over: the first stop is done at once
+  await first;
+  assert.deepEqual(parts.ring.animations.map((animation) => animation.cancelled), [false]);
+  parts.plate.animations[1].finish();
+  await second;
+  assert.deepEqual(parts.ring.animations.map((animation) => animation.cancelled), [true]);
 });
 
 test('an update measures again, and restarts only a loop whose length changed', async () => {

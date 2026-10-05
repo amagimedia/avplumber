@@ -2,7 +2,7 @@
 // in its cycle, the per-source stagger, and the shell (host.html) that mounts the graphic.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ALPHA, LOWER_THIRD, LOWER_THIRD_LAYOUT, TICKER, TICKER_LAYOUT, page, read, settle } from './page.mjs';
+import { ALPHA, LOWER_THIRD, TICKER, page, read, settle } from './page.mjs';
 
 const ACTIONS = ['playAction', 'stopAction', 'updateAction', 'customAction'];
 /** An element that only records the actions the demo runner calls on it, with the clock time. */
@@ -191,6 +191,19 @@ test('host.html is the whole page: transparent, self-contained, engine then grap
   assert.equal(element.parts.plate.style.opacity, '0');
   await clock.advance(0);
   assert.equal(element.parts.plate.animations[0].keyframes.length, 11);
+});
+
+test('the template in README.md is a working graphic', async () => {
+  const [, graphic] = /```js\n([\s\S]*?)```/.exec(read('README.md'));
+  assert.ok(graphic.split('\n').length <= 14, 'README promises a complete graphic in about a dozen lines');
+  const [, , boot] = Array.from(read('host.html').matchAll(/<script>([\s\S]*?)<\/script>/g), ([, text]) => text);
+  const { clock, document, errors } = page({ graphic, boot, dataset: { fps: '50' }, layout: { plate: { width: 640, height: 77 } }, now: 5 * HOUR + 9000 });
+  await settle();
+  const [{ parts }] = document.body.children;
+  assert.deepEqual(errors, []);
+  assert.deepEqual([parts.plate.style.transform, parts.score.textContent], ['translate(0px, 0px)', '1 : 0'], 'caught up, 9 s into its cycle');
+  await clock.advance(5000);
+  assert.equal(parts.plate.animations[0].keyframes.at(-1).transform, 'translate(0px, -85px)');   // -110% of 77
 });
 
 test('the engine is one inlinable script: no module syntax, no frame loop, no network', () => {

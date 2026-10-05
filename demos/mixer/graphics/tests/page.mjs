@@ -10,7 +10,7 @@ export const read = (name) => readFileSync(new URL(`../${name}`, import.meta.url
 // Lets promise reactions run: an await inside the engine continues before the test looks again.
 export const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-export class Clock {
+class Clock {
   #timers = new Map();
   #ids = 0;
   constructor(now) { this.now = now; }
@@ -84,11 +84,13 @@ class FakeElement {
  * graphic and boot are script texts placed after motion.js, as in the linked page.
  * Returns Motion, the `graphic` that text declared (if any), and the fakes.
  */
-export function page({ graphic = '', boot = '', dataset = {}, layout = {}, width = 1920, height = 1080, now = 0 } = {}) {
+export function page({ graphic = '', boot = '', dataset = {}, layout = {}, width = 1920, height = 1080, now = 0,
+  fontsReady = Promise.resolve() } = {}) {
   const clock = new Clock(now);
   const registry = new Map();
   const errors = [];
   class HTMLElement {
+    style = {};
     shadowRoot = null;
     attachShadow() {
       const elements = [];
@@ -109,7 +111,7 @@ export function page({ graphic = '', boot = '', dataset = {}, layout = {}, width
     documentElement: { dataset },
     body: { children: [], appendChild(element) { this.children.push(element); return element; } },
     createElement: (tag) => new (registry.get(tag))(),
-    fonts: { ready: Promise.resolve() },
+    fonts: { ready: fontsReady },
   };
   const globals = {
     HTMLElement, document, innerWidth: width, innerHeight: height,
