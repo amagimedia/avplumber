@@ -2,7 +2,7 @@
 // and the wall (wall.html). A classic script: its declarations are globals of the page that loads it.
 const codecName = (codec) => ({h264: "H.264", h265: "H.265"})[codec] || String(codec || "").toUpperCase();
 const canvasText = (c) => `${c.width}×${c.height}p${c.fps}`;
-const formatText = (c) => c ? `${canvasText(c)} ${({nv12: "SDR", p210le: "HDR 4:2:2"})[c.working_format] || "HDR"}` : "";
+const formatText = (c) => c ? `${canvasText(c)} ${({nv12: "SDR 4:2:0", p010le: "HDR 4:2:0", p210le: "HDR 4:2:2"})[c.working_format] || "HDR"}` : "";
 
 const query = new URLSearchParams(location.search);
 // Where the player is, for every output's URL: the backend's --preview-base (a path on this origin,
