@@ -26,6 +26,9 @@ services:
       DMA_BROWSER_AUTO_OPEN_URL: ""
       DMA_BROWSER_MAX_WINDOWS: ${MIXER_BROWSER_CAPACITY:-40}
       DMA_BROWSER_WINDOWS_PER_PROCESS: 8
+      # Opt-in: workers start their 60 fps frames at different points of the frame period
+      # (deps/dma-browser/README.md).
+      DMA_BROWSER_STAGGER_FRAMES: ${DMA_BROWSER_STAGGER_FRAMES:-0}
       # Sources, then the downstream-key windows (prepare_demo.DSK_WINDOWS): keys
       # export DMA-BUFs at the graphic's own size, not a transparent full frame.
       DMA_BROWSER_ALLOWED_DIMS: 1920x1080,1080x1920,1016x172,1920x80,152x152,304x152
