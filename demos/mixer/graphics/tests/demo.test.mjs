@@ -2,7 +2,7 @@
 // in its cycle, the per-source stagger, and the shell (host.html) that mounts the graphic.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ALPHA, LOWER_THIRD, TICKER, page, read, settle } from './page.mjs';
+import { ALPHA, LOWER_THIRD, TICKER, page, read, settle, shellScripts } from './page.mjs';
 
 const ACTIONS = ['playAction', 'stopAction', 'updateAction', 'customAction'];
 /** An element that only records the actions the demo runner calls on it, with the clock time. */
@@ -196,7 +196,7 @@ test('host.html is the whole page: transparent, self-contained, engine then grap
   assert.equal(shell.split('<html').length, 2, 'graphic_pages.py adds the data-* attributes to the one <html');
   assert.match(shell, /html, body \{[^}]*background: transparent/);
   assert.doesNotMatch(shell, /\b(src|href)=|@import|url\(/, 'nothing is fetched at run time');
-  const scripts = Array.from(shell.matchAll(/<script>([\s\S]*?)<\/script>/g), ([, text]) => text);
+  const scripts = shellScripts();
   assert.deepEqual(scripts.slice(0, 2), ['/*@motion.js*/', '/*@graphic.js*/']);
   assert.ok(shell.indexOf('<body>') < shell.indexOf('<script>'), 'the body exists before the shell mounts into it');
 
@@ -217,7 +217,7 @@ test('host.html is the whole page: transparent, self-contained, engine then grap
 test('the template in README.md is a working graphic', async () => {
   const [, graphic] = /```js\n([\s\S]*?)```/.exec(read('README.md'));
   assert.ok(graphic.split('\n').length <= 14, 'README promises a complete graphic in about a dozen lines');
-  const [, , boot] = Array.from(read('host.html').matchAll(/<script>([\s\S]*?)<\/script>/g), ([, text]) => text);
+  const [, , boot] = shellScripts();
   const { clock, document, errors } = page({ graphic, boot, dataset: { fps: '50' }, layout: { plate: { width: 640, height: 77 } }, now: 5 * HOUR + 9000 });
   await settle();
   const [{ parts }] = document.body.children;

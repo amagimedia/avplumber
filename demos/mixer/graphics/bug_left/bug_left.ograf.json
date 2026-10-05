@@ -1,0 +1,13 @@
+{
+  "$schema": "https://ograf.ebu.io/v1/specification/json-schemas/graphics/schema.json",
+  "id": "io.github.amagimedia.avplumber.bug_left",
+  "name": "Corner bug",
+  "description": "top left",
+  "main": "graphic.js",
+  "supportsRealTime": true,
+  "supportsNonRealTime": true,
+  "v_avplumber": {
+    "window": {"width": 152, "height": 152},
+    "key": {"order": 3, "anchor": "top-left"}
+  }
+}

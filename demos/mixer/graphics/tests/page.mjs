@@ -7,6 +7,8 @@ import vm from 'node:vm';
 
 export const RATES = [25, 30, 50, 60];
 export const read = (name) => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8');
+/** The inline scripts of host.html, in order: the two markers, then the line that mounts the graphic. */
+export const shellScripts = () => Array.from(read('host.html').matchAll(/<script>([\s\S]*?)<\/script>/g), ([, text]) => text);
 // Lets promise reactions run: an await inside the engine continues before the test looks again.
 export const settle = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -42,11 +44,14 @@ class FakeAnimation {
   #settled = false;
   #resolve;
   #reject;
-  constructor(keyframes, timing) {
+  constructor(keyframes, timing, startedAt) {
     this.keyframes = keyframes;
     this.timing = timing;
+    /** When a browser would reach the end: never for a loop. */
+    this.endsAt = startedAt + (timing.delay ?? 0) + timing.duration * (timing.iterations ?? 1);
     this.finished = new Promise((resolve, reject) => { this.#resolve = resolve; this.#reject = reject; });
   }
+  get settled() { return this.#settled; }
   /** The browser reaching the end of the animation. */
   finish() { this.#settled = true; this.#resolve(this); }
   cancel() {
@@ -63,8 +68,10 @@ class FakeElement {
   style = {};
   animations = [];
   textContent = '';
-  constructor(id, layout = {}) {
+  #clock;
+  constructor(id, layout = {}, clock) {
     this.id = id;
+    this.#clock = clock;
     this.offsetWidth = layout.width ?? 0;
     this.offsetHeight = layout.height ?? 0;
     this.children = Array.from({ length: layout.copies ?? 0 }, () => ({
@@ -73,7 +80,7 @@ class FakeElement {
     }));
   }
   animate(keyframes, timing) {
-    const animation = new FakeAnimation(keyframes, timing);
+    const animation = new FakeAnimation(keyframes, timing, this.#clock.now);
     this.animations.push(animation);
     return animation;
   }
@@ -87,6 +94,11 @@ class FakeElement {
 export function page({ graphic = '', boot = '', dataset = {}, layout = {}, width = 1920, height = 1080, now = 0,
   fontsReady = Promise.resolve() } = {}) {
   const clock = new Clock(now);
+  // The real Date on the fake clock: Date.now() and new Date() read it, new Date(ms) is as ever.
+  class PageDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [clock.now])); }
+    static now() { return clock.now; }
+  }
   const registry = new Map();
   const errors = [];
   class HTMLElement {
@@ -98,7 +110,7 @@ export function page({ graphic = '', boot = '', dataset = {}, layout = {}, width
         get innerHTML() { return this.html; },
         set innerHTML(html) {
           this.html = html;
-          elements.splice(0, Infinity, ...Array.from(html.matchAll(/\bid="([^"]+)"/g), ([, id]) => new FakeElement(id, layout[id])));
+          elements.splice(0, Infinity, ...Array.from(html.matchAll(/\bid="([^"]+)"/g), ([, id]) => new FakeElement(id, layout[id], clock)));
         },
         querySelectorAll: () => elements,
       };
@@ -116,7 +128,7 @@ export function page({ graphic = '', boot = '', dataset = {}, layout = {}, width
   const globals = {
     HTMLElement, document, innerWidth: width, innerHeight: height,
     customElements: { define(tag, constructor) { if (registry.has(tag)) throw new Error(`${tag} defined twice`); registry.set(tag, constructor); } },
-    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, Date: { now: () => clock.now },
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, Date: PageDate,
     console: { error: (...args) => errors.push(args.join(' ')) },
   };
   const link = vm.compileFunction(
@@ -134,8 +146,23 @@ export async function mount(declaration, { fps = 50, data, ...options } = {}) {
   return { ...fake, element, parts: element.parts };
 }
 
-// Declarations with the motion of today's pages, to prove the engine can carry them. The templates
-// themselves live beside the engine, one directory each.
+/**
+ * Lets `ms` pass as a browser would: timers fire, and each move of `element` reaches its end when
+ * its last frame has been shown. Loops run on.
+ */
+export async function elapse({ clock, element }, ms) {
+  const end = clock.now + ms;
+  do {
+    const moves = Object.values(element.parts).flatMap((part) => part.running).filter((animation) => !animation.settled);
+    const next = Math.min(end, clock.now + (clock.pending[0] ?? Infinity), ...moves.map((animation) => animation.endsAt));
+    await clock.advance(next - clock.now);
+    for (const animation of moves) if (animation.endsAt <= clock.now && !animation.cancelled) animation.finish();
+    await settle();
+  } while (clock.now < end);
+}
+
+// Small declarations that pin the engine's contract in the other test files. The graphics that ship
+// live beside the engine, one directory each; graphics.test.mjs runs those.
 const PEOPLE = [{ name: 'Ada Lovelace', role: 'Analyst · Engine No. 1' }, { name: 'Grace Hopper', role: 'Compiler desk' }];
 export const LOWER_THIRD = {
   html: '<div id="plate"><div id="accent"></div><div id="text"><div id="name"></div><div id="role"></div></div></div>',
