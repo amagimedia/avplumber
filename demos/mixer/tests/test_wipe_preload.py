@@ -22,6 +22,13 @@ def test_a_whole_clip_is_loaded_once_and_its_loader_stopped():
     assert sim.loads == [CLIP]
 
 
+def test_a_clip_already_cached_is_returned_without_a_load():
+    sim = WipeLoaderSim()
+    sim.clips[CLIP] = 120
+    assert preload(sim)["frames"] == 120
+    assert sim.events == []
+
+
 @pytest.mark.parametrize("bad", (SHORT, LONG))
 def test_a_clip_with_the_wrong_frame_count_is_dropped_and_loaded_again(bad):
     sim = WipeLoaderSim()

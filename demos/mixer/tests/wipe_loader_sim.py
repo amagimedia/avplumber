@@ -28,6 +28,7 @@ class WipeLoaderSim:
         self.outcome = WHOLE
         self.decoded_total = 0
         self.clips = {}
+        self.budget_frames = 1 << 20   # the cache budget; a frame takes 1 MiB
         self.loading = ""
         self.alive = 0        # looks until the stopped chain's nodes are gone
         self.backlog = 0      # late frames the cache still has to discard
@@ -45,6 +46,7 @@ class WipeLoaderSim:
             if parts[2] == "forget":
                 self.clips.pop(clip, None)
             elif parts[2] == "load":
+                assert clip not in self.clips, "the node ignores a load of a clip it holds: no end would follow"
                 if self.alive or self.backlog or any(self.held.values()):
                     self.dirty_loads.append(clip)
                 self.loads.append(clip)
@@ -58,6 +60,8 @@ class WipeLoaderSim:
         if self.outcome.get("ends", True):
             if self.outcome["cached"]:
                 self.clips[self.loading] = self.outcome["cached"]
+                while sum(self.clips.values()) > self.budget_frames and len(self.clips) > 1:
+                    del self.clips[next(iter(self.clips))]   # least recently used: the oldest load
             self.loading = ""
 
     def stopNodes(self):
@@ -71,7 +75,8 @@ class WipeLoaderSim:
         return self if name == self.loader else None
 
     def status(self, _key="status"):
-        return {"loading": self.loading,
+        return {"loading": self.loading, "bytes": sum(self.clips.values()) << 20,
+                "budget_bytes": self.budget_frames << 20,
                 "clips": [{"path": path, "frames": frames, "bytes": frames << 20, "complete": True}
                           for path, frames in self.clips.items()]}
 

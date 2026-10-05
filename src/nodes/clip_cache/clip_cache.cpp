@@ -225,8 +225,11 @@ public:
     /// output begins.
     Parameters getObject(const std::string key) override {
         if (key != "status") throw Error("clip_cache: unknown object key: " + key);
-        Parameters status = cache_->status();
+        // Locked before the cache is read: finishLoad() completes the clip and clears
+        // loading_key_ under mutex_, and a reader between the two would see a load that
+        // ended with its clip incomplete.
         std::lock_guard<std::mutex> lock(mutex_);
+        Parameters status = cache_->status();
         status["loading"] = loading_key_;
         status["playing"] = playing_;
         status["start_tick"] = start_tick_;

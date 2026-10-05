@@ -31,6 +31,7 @@
   <ol class="changes">
     <li><b>The end is a fact, not a silence.</b> <code>input_rec</code> sends an end-of-stream marker at the end of the file, and <code>demux</code>, the decoder and the upload filter each pass it on behind their last frame. <code>realtime</code> used to consume it; with <code>forward_eof</code> it passes it on too, in order. <code>clip_cache</code> ends a load on that marker and on nothing else, so a stall of any length only delays it.</li>
     <li><b>What was stored is counted.</b> When a load has ended, <code>clipcache.preload()</code> compares the cached frame count with the number of frames the decoder delivered for that load. A clip with a different count, fewer or more, is dropped (<code>forget</code>) and loaded once more. A second difference fails the start with the clip's name and both counts. So does a load that has not ended within <code>--preheat-timeout</code>, and a clip that ended without a picture or did not fit the cache budget.</li>
+    <li><b>Every clip is still there at the end.</b> The cache makes room for a clip by evicting the least recently used ones, so a later wipe can push out an earlier one that passed its own check. After the last load <code>clipcache.require_cached()</code> reads the status once and fails the start if any wipe is missing, naming the evicted clips, the bytes cached and the budget (<code>--wipe-cache-mb</code>). A clip the cache already holds is not loaded again.</li>
     <li><b>Nothing is left over.</b> After each load the loader group is stopped, the preload waits until none of its nodes is running, clears the edges between them and waits until the cache has discarded what still reached it. Only then is the next <code>load</code> sent. Inside <code>clip_cache</code> a frame leaves the input edge under the same lock that accepts a load.</li>
     <li><b>The clip keeps its own timestamps.</b> The loader's <code>realtime</code> still paces the clip but no longer restamps it (<code>set_pts</code> off when caching). A replay places frames by the timestamps they were stored with, and a restamped load that waited through a stall would have stored the stall as a gap in the wipe.</li>
     <li><b>Compiled kernels outlive the container.</b> <code>CUDA_CACHE_PATH=/media/.nv-cache</code> puts the driver's kernel cache on the media volume, so a new container finds the kernels compiled and does not stall.</li>
@@ -51,10 +52,10 @@
   <ul class="where">
     <li><code>src/nodes/clip_cache/clip_cache.cpp</code>: <code>process()</code> ends a load on the marker; <code>forget</code>; <code>loading</code> in the status.</li>
     <li><code>src/nodes/realtime.cpp</code>: <code>forward_eof</code>.</li>
-    <li><code>pyplumber/mixer/clipcache.py</code>: <code>preload()</code>, the count check, the reload and the stop-and-discard between loads.</li>
+    <li><code>pyplumber/mixer/clipcache.py</code>: <code>preload()</code>, the count check, the reload and the stop-and-discard between loads; <code>require_cached()</code> after the last one.</li>
     <li><code>pyplumber/mixer/graph.py</code>: the loader's <code>realtime</code> with <code>forward_eof</code> and without <code>set_pts</code> when caching.</li>
     <li><code>demos/mixer/compose.yaml</code>: <code>CUDA_CACHE_PATH</code>, also in effect for <code>deploy/l4</code>, which layers its file over this one.</li>
-    <li><code>demos/mixer/tests/test_wipe_preload.py</code>: short, long, never-ending and uncached loads, and the order between two loads, against a simulated loader.</li>
+    <li><code>demos/mixer/tests/test_wipe_preload.py</code>: short, long, never-ending, uncached and already cached loads, and the order between two loads, against a simulated loader; <code>test_prewarm.py</code>: a wipe evicted by a later one.</li>
   </ul>
   <p class="note">To see the stall again on a GPU host, start a new container with an empty <code>media/.nv-cache</code>.</p>
 

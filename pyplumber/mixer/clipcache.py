@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Iterable
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +53,26 @@ def cache_node(*, name: str, src: str, dst: str, group: str, fps: str,
     return node
 
 
+def _complete(avp, mixer_name: str) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """The status entries of the clips held whole, by path, and the cache node's status."""
+    status = avp.node(f"{mixer_name}_{CACHE_NODE}").getObject("status")
+    return {c["path"]: c for c in status["clips"] if c["complete"]}, status
+
+
+def require_cached(avp, mixer_name: str, clips: Iterable[str]) -> None:
+    """Raise unless every one of *clips* is held whole.
+
+    preload() checks its own clip only, and a later load evicts earlier clips when
+    the budget does not hold them all; call this after the last load.
+    """
+    complete, status = _complete(avp, mixer_name)
+    evicted = [clip for clip in clips if clip not in complete]
+    if evicted:
+        raise RuntimeError(
+            f"the wipe cache does not hold every clip: {', '.join(evicted)} evicted to make room; "
+            f"{status['bytes'] / 1048576:.0f} MiB cached, budget {status['budget_bytes'] / 1048576:.0f} MiB")
+
+
 def preload(avp, mixer_name: str, clip: str, *, timeout_sec: float, poll_sec: float = 0.02,
             check: Callable[[], None] = lambda: None) -> Dict[str, Any]:
     """Decode *clip* once into the running cache and return its status entry.
@@ -62,8 +82,11 @@ def preload(avp, mixer_name: str, clip: str, *, timeout_sec: float, poll_sec: fl
     the number of frames the decoder delivered; a clip that differs is dropped and
     loaded once more, and a second difference raises. Each load has *timeout_sec*
     to end; running out is a failure. *check* is called on every poll and raises
-    to abort.
+    to abort. A clip already held whole is returned as it is.
     """
+    held = _complete(avp, mixer_name)[0].get(clip)
+    if held:   # the node ignores a load of a clip it holds, so no end would follow
+        return held
     cache = f"{mixer_name}_{CACHE_NODE}"
     decoded_edge = f"{mixer_name}_{DECODED_EDGE}"
     group = avp.group(loader_group(mixer_name))
@@ -101,8 +124,8 @@ def preload(avp, mixer_name: str, clip: str, *, timeout_sec: float, poll_sec: fl
 
         def ended() -> bool:
             nonlocal held
-            status = avp.node(cache).getObject("status")
-            held = next((c for c in status["clips"] if c["path"] == clip and c["complete"]), None)
+            complete, status = _complete(avp, mixer_name)
+            held = complete.get(clip)
             return held is not None or status["loading"] != clip
 
         wait(ended, "the end of", deadline)

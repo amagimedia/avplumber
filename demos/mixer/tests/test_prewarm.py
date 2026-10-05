@@ -337,6 +337,15 @@ def test_cached_wipe_chain_runs_from_startup_parked_and_is_never_stopped(native_
     assert engine.nodes["mixer_" + clipcache.CACHE_NODE]["src"] == "mixer_" + clipcache.CACHE_INPUT_EDGE
 
 
+def test_a_wipe_evicted_by_a_later_wipe_fails_the_start(native_boundary):
+    app = application(native_boundary, wipe_cache_mb=256, wipe_file="/media/wipe.mov")
+    app.wipe_files = ("/media/second.mov",)
+    app.avp.wipes.budget_frames = 200   # either clip of 120 frames fits, both do not
+    with pytest.raises(RuntimeError, match=r"/media/wipe\.mov.* 120 MiB.* 200 MiB"):
+        app.start()
+    assert app.avp.loaded_clips == ["/media/wipe.mov", "/media/second.mov"] and not app.avp.ready
+
+
 @pytest.mark.parametrize("cache_mb, store", [(0, None), (256, "clips")])
 def test_mixer_init_names_the_wipe_cache_store_only_when_caching(native_boundary, cache_mb, store):
     # mixer.status reports the store it is given; without one it has no wipe_cache.
