@@ -235,7 +235,7 @@ const Motion = (() => {
 
   // ---- The graphic -----------------------------------------------------------------------------
 
-  const KEYS = ['html', 'css', 'data', 'update', 'play', 'stop', 'actions', 'loop', 'every', 'demo', 'stagger'];
+  const KEYS = ['html', 'css', 'data', 'update', 'play', 'stop', 'change', 'actions', 'loop', 'every', 'demo', 'stagger'];
   // resolve() against this box checks a declaration when the page loads, before any element exists.
   const DRY_BOX = { width: 100, height: 100, vw: 100, vh: 100, content: 100 };
   // The graphic fills the window (or whatever an OGraf renderer positions it in).
@@ -252,15 +252,15 @@ const Motion = (() => {
    */
   function graphic(declaration) {
     known(declaration, KEYS, 'graphic');
-    const { html, css: style = '', data: defaults = {}, update = () => {}, play = [], stop = [],
+    const { html, css: style = '', data: defaults = {}, update = () => {}, play = [], stop = [], change = [],
       actions = {}, loop = [], every = [], demo: cues, stagger } = declaration;
     if (typeof html !== 'string' || !html) fail('html', 'must be the markup of the graphic, a string');
     if (typeof style !== 'string') fail('css', 'must be the styles of the graphic, a string');
     const faces = (style.match(FONT_FACES) ?? []).join('\n');
     let faceSheet;   // the document's <style> of those rules, one for every instance
     if (typeof update !== 'function') fail('update', 'must be a function (el, data)');
-    // Every list of tracks, under the name errors use for it: play, stop, loop and actions.<id>.
-    const lists = { play, stop, loop };
+    // Every list of tracks, under the name errors use for it: play, stop, change, loop and actions.<id>.
+    const lists = { play, stop, change, loop };
     for (const [id, moves] of Object.entries(actions)) {
       if ([...Object.keys(lists), 'update', 'repeat'].includes(id)) fail(`actions.${id}`, 'the name is taken; choose another id');
       lists[`actions.${id}`] = moves;
@@ -269,7 +269,7 @@ const Motion = (() => {
       if (!Array.isArray(specs)) fail(name, 'must be a list');
       specs.forEach((spec, i) => {
         const where = `${name}[${i}]`, track = resolve(spec, 50, DRY_BOX, where);
-        if (name === 'loop' && !track.loop) fail(where, 'a loop is a crawl or a spin; a move belongs in play, stop or actions');
+        if (name === 'loop' && !track.loop) fail(where, 'a loop is a crawl or a spin; a move belongs in play, stop, change or actions');
         if (name !== 'loop' && track.loop) fail(where, 'a spin or crawl belongs in loop');
         const earlier = specs.findIndex((other) => other.el === spec.el);
         if (earlier < i) fail(`${where}.el`, `"${spec.el}" is already moved by ${name}[${earlier}]; one move per element`);
@@ -353,12 +353,13 @@ const Motion = (() => {
         return { statusCode: 200 };
       }
 
-      async updateAction({ data } = {}) {
+      async updateAction({ data, skipAnimation } = {}) {
         this.#loadedTracks();
         Object.assign(this.#data, data);
         update(this.#els, this.#data);
         this.#measure();
         if (this.#step === 0) this.#on();   // a loop whose measure changed starts again
+        await this.#act(this.#tracks.change, skipAnimation);
         return { statusCode: 200 };
       }
 
@@ -398,12 +399,11 @@ const Motion = (() => {
         let played;                  // when play last took the graphic from rest
         this.#step = undefined;
         this.#data = { ...this.#loaded };
+        // update() runs as often as in real time: it may keep what was shown before, for a change move.
+        update(this.#els, this.#data);
         for (const { timestamp: at, action: { type, params = {} } } of this.#schedule) {
           if (at > timestamp) break;
-          if (type === 'updateAction') {
-            Object.assign(this.#data, params.data);
-            continue;
-          }
+          if (type === 'updateAction') update(this.#els, Object.assign(this.#data, params.data));
           const { list, step } = this.#plan(type, params);
           if (step === 0 && this.#step !== 0) played = at;
           this.#step = step;
@@ -411,7 +411,6 @@ const Motion = (() => {
           started.delete(list);
           started.set(list, params.skipAnimation ? Infinity : frame(at));
         }
-        update(this.#els, this.#data);
         this.#measure();
         // As in real time, loops run from play until the stop move has ended.
         const stopFrames = Math.max(0, ...this.#tracks.stop.map((track) => track.start + track.frames));
@@ -426,6 +425,7 @@ const Motion = (() => {
       // step: step 0 is "played", and a target past it is the end, which is what stop is.
       #plan(type, { goto, delta = 1, id } = {}) {
         if (type === 'customAction') return { list: `actions.${id}`, step: this.#step };
+        if (type === 'updateAction') return { list: 'change', step: this.#step };
         const target = type === 'stopAction' ? 1 : Number.isInteger(goto) && goto >= 0 ? goto : (this.#step ?? -1) + delta;
         return target >= 1 ? { list: 'stop', step: undefined } : { list: 'play', step: 0 };
       }
@@ -462,10 +462,12 @@ const Motion = (() => {
       }
 
       // The loaded state, which every play starts from: no move in flight, each moved element as the
-      // stylesheet has it and then where play starts. So a play ends the same whatever ran before it.
+      // stylesheet has it, then where the change moves end and where play starts. So a play ends the
+      // same whatever ran before it.
       #rest() {
         this.#still();
         for (const id of moved) Object.assign(this.#els[id].style, { transform: '', opacity: '' });
+        this.#write(stateAt(this.#tracks.change, Infinity));
         this.#write(stateAt(this.#tracks.play, 0));
       }
 

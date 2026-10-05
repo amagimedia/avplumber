@@ -2,7 +2,7 @@
 // in its cycle, the per-source stagger, and the shell (host.html) that mounts the graphic.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ALPHA, LOWER_THIRD, TICKER, page, read, settle, shellScripts } from './page.mjs';
+import { ALPHA, LOWER_THIRD, TICKER, elapse, page, read, settle, shellScripts } from './page.mjs';
 
 const ACTIONS = ['playAction', 'stopAction', 'updateAction', 'customAction'];
 /** An element that only records the actions the demo runner calls on it, with the clock time. */
@@ -225,6 +225,41 @@ test('the template in README.md is a working graphic', async () => {
   assert.deepEqual([parts.plate.style.transform, parts.score.textContent], ['translate(0px, 0px)', '1 : 0'], 'caught up, 9 s into its cycle');
   await clock.advance(5000);
   assert.equal(parts.plate.animations[0].keyframes.at(-1).transform, 'translate(0px, -85px)');   // -110% of 77
+});
+
+test('the roll in README.md plays on an update: live and in a demo, but not when skipped; goToTime shows its frame', async () => {
+  const [, graphic] = Array.from(read('README.md').matchAll(/```js\n([\s\S]*?)```/g), ([, text]) => text);
+  const layout = { was: { height: 40 }, score: { height: 40 } }, OUT = 'translate(0px, -40px)', IN = 'translate(0px, 0px)';
+  const shown = ({ was, score }) => [was.textContent, was.style.transform, score.textContent, score.style.transform];
+  const fake = page({ graphic, layout });
+  const element = new fake.graphic();
+  await element.load({ renderCharacteristics: { frameRate: 50 } });
+  const { parts } = element, { was, score } = parts;
+  assert.deepEqual(shown(parts), ['', OUT, '0 : 0', IN], 'loaded: the value in place, nothing rolling');
+
+  const updated = element.updateAction({ data: { score: '1 : 0' } });
+  await settle();
+  assert.deepEqual([was.textContent, score.textContent, was.running.length], ['0 : 0', '1 : 0', 1]);
+  assert.deepEqual([0, 5, 15].map((k) => score.running[0].keyframes[k].transform), ['translate(0px, 40px)', 'translate(0px, 27px)', IN]);
+  await elapse({ ...fake, element }, 300);
+  assert.deepEqual([await updated, shown(parts), was.running, score.running], [{ statusCode: 200 }, ['0 : 0', OUT, '1 : 0', IN], [], []]);
+  await element.updateAction({ data: { score: '2 : 0' }, skipAnimation: true });
+  assert.deepEqual([shown(parts), score.animations.length], [['1 : 0', OUT, '2 : 0', IN], 1], 'skipped: at its end at once');
+
+  const update = (timestamp, value) => ({ timestamp, action: { type: 'updateAction', params: { data: { score: value } } } });
+  await element.setActionsSchedule({ schedule: [update(1000, '0 : 1'), update(2000, '0 : 2')] });
+  await element.goToTime({ timestamp: 2000 + 5 * 20 });
+  assert.deepEqual(shown(parts), ['0 : 1', 'translate(0px, -13px)', '0 : 2', 'translate(0px, 27px)'], 'frame 5 of the second roll');
+  await element.goToTime({ timestamp: 1500 });
+  assert.deepEqual(shown(parts), ['0 : 0', OUT, '0 : 1', IN], 'seeking back: the first roll has ended');
+
+  // Its own demo, on a page opened 5 s into the 8 s cycle: both updates behind it are applied at once.
+  const hosted = page({ graphic, boot: shellScripts()[2], dataset: { fps: '50' }, layout, now: 5 * HOUR + 5000 });
+  await settle();
+  const [{ parts: live }] = hosted.document.body.children;
+  assert.deepEqual([shown(live), live.score.animations], [['0 : 0', OUT, '1 : 0', IN], []]);
+  await hosted.clock.advance(3000);
+  assert.deepEqual([live.was.textContent, live.score.textContent, live.score.running.length], ['1 : 0', '0 : 0', 1], 'the next update rolls');
 });
 
 test('the engine is one inlinable script: no module syntax, no frame loop, no network', () => {

@@ -98,6 +98,7 @@ server and `prepare_demo.py` when they start, naming its place the same way
 | `data` | Default data. `load()` and updates merge over it. On our pages the `data-*` attributes of `<html>` arrive as data, as strings: `source` is the id of the browser source showing the page. |
 | `update(el, data)` | Writes data into the page; `el` maps each id to its element. Runs at load and on every update. |
 | `play`, `stop` | Lists of moves for `playAction` and `stopAction`. A loaded graphic rests where its `play` moves start. |
+| `change` | List of moves `updateAction` plays once `update()` has written the new data. See [Moves on an update](#moves-on-an-update). |
 | `actions` | `{ id: [moves] }`: custom actions. |
 | `loop` | `{ el, crawl: { pxPerSecond } }` or `{ el, spin: { seconds } }` (one clockwise turn). The children of a crawl element are two or more copies of its content; the engine sizes them. |
 | `every` | `{ seconds, run(el, n) }`: a timed change, such as a clock's text. It runs when the graphic is played and then on each multiple of `seconds` of the wall clock; `n` counts those multiples. A timer, not an animation; changes that must land on one frame belong in one `every`. |
@@ -112,6 +113,27 @@ A move is `{ el, x, y, opacity, rotate, seconds, delay, ease }`:
 - `seconds`: duration. `delay`: seconds before it starts, default 0.
 - `ease`: `'linear'` (default), `'in'`, `'out'`, `'in-out'` (the CSS curves), or `[x1, y1, x2, y2]`
   as in `cubic-bezier()`.
+
+### Moves on an update
+
+A score that rolls to its new value takes two elements, the value on show and the one before it:
+
+```js
+const graphic = Motion.graphic({
+  html: '<div id="roll"><b id="was"></b><b id="score"></b></div>',
+  css: '#roll { position: relative; height: 1.2em; overflow: hidden; } #roll b { position: absolute; inset: 0; }',
+  data: { score: '0 : 0' },
+  // The value on show becomes the old one before the new one is written.
+  update: (el, data) => { el.was.textContent = el.score.textContent; el.score.textContent = data.score; },
+  change: [{ el: 'was', y: [0, '-100%'], seconds: 0.3 }, { el: 'score', y: ['100%', 0], seconds: 0.3 }],
+  demo: [[0, 'update', { score: '0 : 0' }], [4, 'update', { score: '1 : 0' }], [8, 'repeat']],
+});
+```
+
+Every update runs `update()` and then the `change` moves, whatever data it brought. Where nothing
+animates the moves are at their end: in a loaded graphic, when `play` starts, in an update with
+`skipAnimation` and in the cues a demo catches up on. `goToTime` shows the frame the moves of the
+last scheduled update have reached.
 
 ## Manifest
 
@@ -132,7 +154,7 @@ graphic with an `every`. What only the mixer needs is under `v_avplumber`:
 
 ## Rules for a graphic
 
-- All motion goes through `play`, `stop`, `actions` and `loop`; all timed changes through `every`.
+- All motion goes through `play`, `stop`, `change`, `actions` and `loop`; all timed changes through `every`.
   No `requestAnimationFrame`, `setInterval`, `setTimeout`, CSS `animation` or `transition` in a
   graphic: each one is a second clock, and an animation left running makes the window paint when
   nothing changes. The tests refuse them.

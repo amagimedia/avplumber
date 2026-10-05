@@ -190,7 +190,7 @@ def test_the_graphic_and_manifest_in_the_readme_add_a_key(tmp_path):
     readme = (GRAPHICS_DIR / "README.md").read_text(encoding="utf-8")
     (root / "score_bug").mkdir()
     for block, name in (("js", "graphic.js"), ("json", "score_bug.ograf.json")):
-        (text,) = re.findall(rf"```{block}\n(.*?)```", readme, flags=re.S)
+        text = re.findall(rf"```{block}\n(.*?)```", readme, flags=re.S)[0]   # the first of each is the template
         (root / "score_bug" / name).write_text(text, encoding="utf-8")
     assert list(key_graphics(root))[-1] == "score_bug"
     assert key_graphics(root)["score_bug"] == {"label": "Score bug · above the lower third", "window": (640, 96),
