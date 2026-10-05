@@ -63,6 +63,11 @@ class JanusVideoConfig:
                 "&buffer_size=2097152&fifo_size=8192")
 
 
+def janus_mountpoint_id(port: int) -> int:
+    """Preserve the demo's two program IDs; other outputs use their RTP port."""
+    return {5004: 1, 5006: 2}.get(port, port)
+
+
 JANUS_KEYFRAME_NODE = "janus_force_keyframe"
 
 

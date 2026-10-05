@@ -271,19 +271,26 @@ class MixerConfig:
         keys = {"dsk_keys": [{"id": k.id, "source": k.source} for k in self.dsk_keys],
                 "dsk_fade_seconds": self.dsk_fade_seconds, "dsk_fade_curve": self.dsk_fade_curve} if self.dsk_keys else {}
         # The keyer splits off the clean feed, so it exists only with keys.
+        from .janus import janus_mountpoint_id
+
+        def preview(r):
+            color = "sdr" if rendition_color(self.out_color, codec(r), r.color or None, r.tonemap).transfer == "sdr" else "hdr"
+            port = r.port or 5004
+            return {"rendition": r.id, "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
+                    "port": port, "mountpoint": janus_mountpoint_id(port), "fps": r.fps}
+
+        programs = [preview(r) for r in self.renditions if r.target == "janus" and r.feed == "dirty"]
         previews = []
         for r in self.renditions if self.dsk_keys else ():
             if r.feed == "clean" and r.target == "janus":
-                color = "sdr" if rendition_color(self.out_color, codec(r), r.color or None, r.tonemap).transfer == "sdr" else "hdr"
-                previews.append({"bus": f"clean_{r.id}", "label": f"Program clean · {color.upper()}", "rendition": r.id,
-                                 "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
-                                 "port": r.port, "mountpoint": r.port, "fps": r.fps})
+                output = preview(r)
+                previews.append({"bus": f"clean_{r.id}", "label": f"Program clean · {output['color'].upper()}", **output})
         previews += [{"bus": b.id, "label": aux_label(b.id, b.label, b.layout),
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
-                      "codec": "h264", "color": "sdr", "port": r.port, "mountpoint": r.port, "fps": r.fps}
+                      "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps}
                      for b in self.aux_buses for r in b.renditions]
         return {"source_count": len(self.sources), "browser_ring_size": self.browser_ring_size,
-                "preview_codecs": preview_codecs,
+                "preview_codecs": preview_codecs, **({"program_outputs": programs} if programs else {}),
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources) for kind in _SOURCE_KEYS},
@@ -679,13 +686,13 @@ def parse_aux_buses(values, cfg):
         fps = aux_fps(cfg.fps, timing["full_rate"])
         renditions = obj.get("renditions", [])
         if len(renditions) != 1:
-            raise ConfigError("v1 aux requires one SDR/H.264 Janus rendition")
+            raise ConfigError("aux requires one SDR H.264 or HEVC Janus rendition")
         # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
         r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
                              f"aux {bid}", cfg.canvas_w, cfg.canvas_h, fps)
-        if (r.target != "janus" or r.codec != "h264_nvenc" or r.color != "sdr" or
+        if (r.target != "janus" or r.codec not in ("h264_nvenc", "hevc_nvenc") or r.color != "sdr" or
                 (r.width, r.height, r.fps) != (cfg.canvas_w, cfg.canvas_h, fps)):
-            raise ConfigError("aux rendition must be SDR/H.264 at canvas size and the aux frame rate")
+            raise ConfigError("aux rendition must be SDR H.264 or HEVC at canvas size and the aux frame rate")
         if not r.port:
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
         if not isinstance(obj.get("label", ""), str):

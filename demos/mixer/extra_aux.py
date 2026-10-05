@@ -12,6 +12,12 @@ LAYOUTS = 5              # per bus, each with a different cell count
 PORT_STEP = 4            # as the demo's own buses (5008, 5012): then 5016, 5020, ...
 
 
+def aux_encode(encode):
+    """A codec change also replaces the old profile; every AUX remains SDR."""
+    codec = encode.get("codec", "h264_nvenc")
+    return {**encode, "codec": codec, "profile": "main" if codec == "hevc_nvenc" else "high", "color": "sdr"}
+
+
 def _even(value):
     return value // 2 * 2
 
@@ -52,7 +58,8 @@ def extra_buses(cfg, kept, wanted, floor_port, encode):
     while they still fit: another orientation, or a cell beyond the sources, draws new ones. New
     buses take the next free ids aux0, aux1, ..., the labels Aux 0, Aux 1, ... by position, and RTP
     ports PORT_STEP apart above every port in use and *floor_port*. Every one encodes at *encode*,
-    the setup's NVENC preset and bitrate_kbps of extra aux outputs."""
+    the setup's shared codec, NVENC preset and bitrate_kbps of extra aux outputs."""
+    encode = aux_encode(encode)
     result = []
     for bus in kept[:wanted]:
         try:

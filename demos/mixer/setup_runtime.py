@@ -18,7 +18,7 @@ import threading
 import time
 
 from demo_recipe import allocate, validate_dsk, write_atomic
-from extra_aux import extra_buses
+from extra_aux import aux_encode, extra_buses
 from instance_profiles import INSTANCE_PROFILES, InstanceType
 import janus_mountpoints
 from pyplumber.mixer.color import TRANSFER_TAGS, default_codec
@@ -29,7 +29,7 @@ from pyplumber.mixer.config import ConfigError, aux_fps, aux_label, parse, parse
 DEMO_DIR = Path(__file__).resolve().parent
 # Phase markers with durations: restart timings are read from the container log.
 log = logging.getLogger("setup")
-# encodes: the NVENC preset and bitrate_kbps of each encoded output, by output id: the recipe's
+# encodes: the codec, NVENC preset and bitrate_kbps of each encoded output, by output id: the recipe's
 # renditions (sdr, and hdr on a 10-bit canvas), the clean copy of the SDR program (sdr_clean), each
 # of the show's own aux buses by bus id, and "extra", shared by every extra aux output. One the
 # settings omit takes the profile's default (nvenc.defaults), an aux bus, own or extra, its "aux".
@@ -73,8 +73,8 @@ def extra_aux_limit(profile, cfg, encodes):
     """Extra aux outputs the instance's NVENC budget leaves beside *cfg*'s encodes, its renditions
     and aux buses; encodes above the budget on their own are refused. Each takes its frames/s at
     1920x1080, scaled by its pixels, times the profile's share of its codec at its preset; the clean
-    feed counts even while off, and an extra bus is a canvas-size H.264 encode at aux_fps, both at
-    their preset in *encodes*. setup.html sums in the same order, so both round alike."""
+    feed counts even while off, and an extra bus is a canvas-size encode at aux_fps, both at
+    their codec and preset in *encodes*. setup.html sums in the same order, so both round alike."""
     nvenc = profile["nvenc"]
     mode = for_mode(profile, 8 if cfg.working_format == "nv12" else 10,
                     "422" if cfg.working_format == "p210le" else "420")
@@ -82,7 +82,8 @@ def extra_aux_limit(profile, cfg, encodes):
         return fps * width * height / (1920 * 1080) * nvenc["pct_per_fps"]["hevc" if "hevc" in codec else "h264"][preset]
     encoded = [(r.width, r.height, r.fps, r.codec or default_codec(cfg.working_format), r.preset) for r in cfg.renditions]
     if not any(r.feed == "clean" for r in cfg.renditions):
-        encoded.append((cfg.canvas_w, cfg.canvas_h, cfg.fps, "h264", encodes["sdr_clean"]["preset"]))
+        encoded.append((cfg.canvas_w, cfg.canvas_h, cfg.fps,
+                        encodes["sdr_clean"].get("codec", "h264_nvenc"), encodes["sdr_clean"]["preset"]))
     encoded += [(r.width, r.height, r.fps, r.codec, r.preset) for b in cfg.aux_buses for r in b.renditions]
     used = sum(share(*e) for e in encoded)
     budget = mode.get("nvenc_budget_pct", {}).get(cfg.fps, nvenc["budget_pct"])
@@ -93,7 +94,7 @@ def extra_aux_limit(profile, cfg, encodes):
     if used > budget:
         raise ValueError(f"The encodes need {used:.1f}% of NVENC, above its {budget}% budget: choose faster presets")
     return min(output_slots, 30 - len(cfg.aux_buses), math.floor((budget - used) / share(
-        cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps), "h264", encodes["extra"]["preset"])))
+        cfg.canvas_w, cfg.canvas_h, aux_fps(cfg.fps), encodes["extra"].get("codec", "h264_nvenc"), encodes["extra"]["preset"])))
 
 
 def _in_range(profile, kbps):
@@ -117,8 +118,11 @@ def current_settings(profile, settings):
              if type(legacy) is int else 1)
     programs = {o: {**e, "bitrate_kbps": _in_range(profile, round(e["bitrate_kbps"] * scale))}
                 for o, e in defaults.items() if o != "aux"}
+    encodes = {**programs, "extra": dict(defaults["aux"]), **encodes}
+    encodes = {o: {"codec": "hevc_nvenc" if o == "hdr" else "h264_nvenc", **e} if isinstance(e, dict) else e
+               for o, e in encodes.items()}
     return {"extra_aux": 0, **{k: v for k, v in settings.items() if k not in ("browser_ring_size", "bitrate_kbps")},
-            "encodes": {**programs, "extra": dict(defaults["aux"]), **encodes}}
+            "encodes": encodes}
 
 
 def _split_aux(buses, recipe):
@@ -192,9 +196,14 @@ def recipe_for(profile, settings):
     # buses are known (SetupRuntime.apply).
     if type(settings["extra_aux"]) is not int or not 0 <= settings["extra_aux"] <= 30:
         raise ValueError("extra_aux must be an integer from 0 to 30")
-    presets, (low, high) = profile["nvenc"]["pct_per_fps"]["h264"], profile["nvenc"]["bitrate_kbps"]
+    low, high = profile["nvenc"]["bitrate_kbps"]
     for output, encode in settings["encodes"].items():
-        if not isinstance(encode, dict) or set(encode) != {"preset", "bitrate_kbps"} or encode["preset"] not in presets:
+        if not isinstance(encode, dict) or encode.get("codec") not in ("h264_nvenc", "hevc_nvenc"):
+            raise ValueError(f"encodes.{output}: codec must be h264_nvenc or hevc_nvenc")
+        if output == "hdr" and encode["codec"] != "hevc_nvenc":
+            raise ValueError("Program HDR requires hevc_nvenc (Main10)")
+        presets = profile["nvenc"]["pct_per_fps"]["hevc" if encode["codec"] == "hevc_nvenc" else "h264"]
+        if set(encode) != {"codec", "preset", "bitrate_kbps"} or encode["preset"] not in presets:
             raise ValueError(f"encodes.{output} must have a preset of {', '.join(presets)} and a bitrate_kbps")
         if type(encode["bitrate_kbps"]) is not int or not low <= encode["bitrate_kbps"] <= high:
             raise ValueError(f"encodes.{output}: bitrate_kbps must be an integer from {low} to {high}")
@@ -214,9 +223,13 @@ def recipe_for(profile, settings):
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
+    def program_encode(output):
+        encode = settings["encodes"][output]
+        return {**encode, "profile": "main10" if output == "hdr" else "main" if encode["codec"] == "hevc_nvenc" else "baseline",
+                "color": "hlg" if output == "hdr" else "sdr"}
     for rendition in recipe["renditions"]:
-        rendition.update(settings["encodes"][rendition["id"]])
-    recipe["clean_rendition"] = settings["encodes"]["sdr_clean"]
+        rendition.update(program_encode(rendition["id"]))
+    recipe["clean_rendition"] = program_encode("sdr_clean")
     canvas_width, canvas_height = (height, width) if settings["orientation"] == "portrait" else (width, height)
     recipe["canvas"].update(width=canvas_width, height=canvas_height, fps=settings["fps"])
     if settings["bit_depth"] == 8:
@@ -225,6 +238,8 @@ def recipe_for(profile, settings):
     else:
         recipe["canvas"]["working_format"] = "p010le" if settings["chroma"] == "420" else "p210le"
     recipe["generation"].update(width=width, height=height)
+    for source in recipe["inputs"][:2]:
+        source.update(profile.get("generated_decode", {}))
     recipe["inputs"].append({"id": "sdr420_raw", "kind": "generated", "color": "sdr",
                              "chroma": "420", "storage": "nv12"})
     recipe["inputs"].append({"id": "hlg420_raw", "kind": "generated", "color": "hlg",
@@ -375,7 +390,7 @@ class SetupRuntime:
         previous = json.loads(config.read_text()) if config.exists() else {}
         # An adopted explicit show can declare the same setup metadata as a generated recipe.
         stored = json.loads(self.recipe_path.read_text()) if self.recipe_path.exists() else previous
-        own, extra = _split_aux(previous.get("aux_buses", []), stored)
+        own, extra = _split_aux((previous or stored).get("aux_buses", []), stored)
         self.aux_buses = [{"id": b["id"], "label": aux_label(b["id"], b.get("label", ""), b.get("layout")),
                            "full_rate": b.get("full_rate", False)} for b in own]
         self.extra_ports = _ports(extra)
@@ -392,7 +407,7 @@ class SetupRuntime:
         wanted, encodes = recipe["setup"]["extra_aux"], recipe["setup"]["encodes"]
         extra = extra[:wanted]   # fewer drops the last ones
         for bus in own:
-            bus["renditions"][0].update(encodes.get(bus["id"]) or self.profile["nvenc"]["defaults"]["aux"])
+            bus["renditions"][0].update(aux_encode(encodes.get(bus["id"]) or self.profile["nvenc"]["defaults"]["aux"]))
         live = {}
         if (own or extra) and self.process and self.process.poll() is None:
             # A show started without aux buses has no mixer.aux_status, and so no live state to keep.
@@ -425,7 +440,7 @@ class SetupRuntime:
                     # A retained scene may have grown beyond the bus's draw budget.
                     scenes[i] = None
             bus["scenes"] = scenes
-        mine = parse({**show, "aux_buses": own}) if own else cfg
+        mine = parse({**show, "aux_buses": own})
         limit = extra_aux_limit(self.profile, mine, encodes)
         if wanted and not self.janus_api:
             raise ValueError("Extra aux outputs need a Janus API (webui.py --janus-api)")
@@ -438,6 +453,8 @@ class SetupRuntime:
                                      encodes["extra"])
         if own:
             recipe["aux_buses"] = own
+        else:
+            recipe.pop("aux_buses", None)
 
     def remember_aux(self, bus_id, fields):
         """Persist an operator's change of a bus's ``layout`` or ``scenes`` (a mixer.aux,
@@ -614,9 +631,11 @@ class SetupRuntime:
                     # give it far more than the default command budget.
                     queues = json.loads(self.bridge.command("queues.json", timeout=60.0) or "[]")
                     expected = {"janus_encoded"}
-                    if "h265" in state.get("settings", {}).get("preview_codecs", []):
-                        expected.add("janus_hdr_encoded")
-                    expected.update(f"aux_{bid}_encoded" for bid in state.get("settings", {}).get("aux_buses", []))
+                    outputs = state.get("settings", {})
+                    expected.update(f"janus_{o['rendition']}_encoded" for o in outputs.get("program_outputs", [])[1:])
+                    expected.update(f"janus_{o['rendition']}_encoded" for o in outputs.get("preview_outputs", [])
+                                    if o["bus"].startswith("clean_"))
+                    expected.update(f"aux_{bid}_encoded" for bid in outputs.get("aux_buses", []))
                     encoded = {q["name"] for q in queues if q["enqueued_total"] > 0}
                     ready = expected <= encoded
                     last_problem = "waiting for encoded output"
@@ -642,21 +661,20 @@ class SetupRuntime:
             for name in sorted(removed & existing):
                 rest_request(self.browser_url, "POST", "/window/close", {"id": name})
 
-    def _mountpoints(self, recipe, prune=False):
-        """Janus mountpoints for *recipe*'s extra buses: before the mixer sends to them, and pruned of
-        the setup's others once it is on air, so a restored previous show keeps its own. Janus is not
-        asked while neither show has extra buses. A failure leaves the mixer running and shows in the
-        status until the next sync."""
-        ports = _ports(_split_aux(recipe.get("aux_buses", []), recipe)[1])
-        if not self.janus_api or not (ports or self.extra_ports):
+    def _mountpoints(self, show, extra_aux=0, prune=False, replace=False):
+        """Replace codec contracts with encoders stopped; prune obsolete extras once on air."""
+        if not self.janus_api:
             return
         try:
-            janus_mountpoints.sync(self.janus_api, ports, prune)
+            janus_mountpoints.sync(self.janus_api, janus_mountpoints.outputs(show, extra_aux),
+                                  prune=prune, replace=replace)
             self.janus_error = ""
             if prune:
-                self.extra_ports = ports
+                self.extra_ports = _ports(show.get("aux_buses", [])[-extra_aux:]) if extra_aux else {}
         except Exception as exc:
-            self.janus_error = f"Extra aux mountpoints failed: {exc}."
+            if replace:
+                raise
+            self.janus_error = f"Janus mountpoints failed: {exc}."
             log.warning("Janus mountpoints: %s", exc)
 
     def _apply(self, recipe, settings):
@@ -666,6 +684,8 @@ class SetupRuntime:
         previous = None
         stopped = False
         recipe_show = {}
+        previous_extras = len(self.extra_ports)
+        wanted = (recipe.get("setup") or {}).get("extra_aux", 0)
         started = time.monotonic()
         try:
             previous = config.read_bytes() if had_previous else None
@@ -676,15 +696,15 @@ class SetupRuntime:
             log.info("Assets ready in %.1f s", time.monotonic() - started)
             if self.closing.is_set():
                 raise RuntimeError("Setup server is stopping")
-            self._mountpoints(recipe)
             self._status("starting", "Restarting mixer…")
             self._stop()
             stopped = True
             recipe_show = json.loads(config.read_bytes())
+            self._mountpoints(recipe_show, wanted, replace=True)
             self._start_recovering(config, json.loads(previous or b"{}"))
             if settings is not None or recipe != json.loads(self.recipe_path.read_text()):
                 write_atomic(self.recipe_path, json.dumps(recipe, indent=2) + "\n")
-            self._mountpoints(recipe, prune=True)
+            self._mountpoints(recipe_show, wanted, prune=True)
             with self.lock:
                 self.settings = current_settings(self.profile, recipe.get("setup"))
                 self.revision += 1
@@ -704,6 +724,7 @@ class SetupRuntime:
                         message += "; the browser service is still busy, apply again when it settles."
                     elif stopped and not self.closing.is_set():
                         self._validate_capacity(json.loads(previous))
+                        self._mountpoints(json.loads(previous), previous_extras, replace=True)
                         self._start_recovering(config, recipe_show)
                         with self.lock:
                             self.revision += 1

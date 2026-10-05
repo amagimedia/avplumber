@@ -15,13 +15,14 @@ revision="$(git -C "$repo" rev-parse HEAD)"
 {
   git -C "$repo" archive --format=tar HEAD
   # Only checked-out submodules: in an empty path git archive would archive the parent again.
-  git -C "$repo" submodule --quiet foreach 'echo "$sm_path"' | while read -r sub; do
+  git -C "$repo" submodule --quiet foreach --recursive 'echo "$displaypath"' | while read -r sub; do
     git -C "$repo/$sub" archive --format=tar --prefix="$sub/" HEAD
   done
 } | gcloud compute ssh "$host" --project "$PROJECT" --zone "$zone" --quiet --command "
   set -e; sudo rm -rf '$remote.new' && sudo mkdir -p '$remote.new' '$remote' && sudo chown \$(id -u):\$(id -g) '$remote.new' '$remote'
   tar -x -i -C '$remote.new' -f -
   # The host's own data and settings stay: the generated media and the stack's .env.
-  rsync -a --delete --exclude /media/ --exclude /demos/mixer/.env '$remote.new/' '$remote/'
+  rsync -a --delete --exclude /media/ --exclude /demos/mixer/.env \
+    --exclude /demos/mixer/deploy/l4/.env '$remote.new/' '$remote/'
   sudo rm -rf '$remote.new'   # in a root-owned parent
   printf 'avplumber %s\n' '$revision' > '$remote/SOURCE_REVISION' && cat '$remote/SOURCE_REVISION'"

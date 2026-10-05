@@ -22,8 +22,8 @@ const h265Playable = (() => {
 const playable = (codec) => codec !== "h265" || h265Playable;
 // ?codec= picks the program's default codec; HDR otherwise, where the browser can play it.
 const defaultCodec = (codecs) => [query.get("codec"), "h265", "h264"].find((c) => codecs.includes(c) && playable(c)) || codecs[0];
-// The dirty program plays from the player's own mountpoints in the preview codecs; every other output
-// is an H.264 mountpoint of its own, which the player plays as H.264 whatever codec the URL names.
+// Each rendition has its own mountpoint. Codec and dynamic range are independent:
+// a program may publish both SDR HEVC and HDR HEVC.
 // Every viewer, the program and the multiviews alike, plays with the same receiver playout delay:
 // the browser's adaptive jitter buffer, or with ?lowlat=1 on this page the player's own ?lowlat=1
 // for all of them, the buffer pinned to its minimum (jitterBufferTarget and playoutDelayHint 0), so
@@ -35,7 +35,11 @@ const lowLatency = query.get("lowlat") === "1";
 // `codecs`: the program renditions the player offers, the mixer's preview_codecs.
 function playerUrl(output, codec, codecs) {
   const url = new URL(playerBase);
-  if (output) url.searchParams.set("mountpoint", output.mountpoint);
+  if (output) {
+    url.searchParams.set("mountpoint", output.mountpoint);
+    url.searchParams.set("codec", output.codec || codec || "h264");
+    if (output.color) url.searchParams.set("color", output.color);
+  }
   else {
     if (codecs?.length) url.searchParams.set("outputs", codecs.join(","));
     url.searchParams.set("codec", codec);
@@ -43,10 +47,20 @@ function playerUrl(output, codec, codecs) {
   if (lowLatency) url.searchParams.set("lowlat", "1");
   return url.href;
 }
-// Dirty renditions publish only their codec; like the player's own picker, H.265 is the HDR one.
-// On an SDR canvas both are SDR, so the codec names them.
+// Older settings publish only codecs and conventionally assign H.265 to HDR.
 const RANGE_OF_CODEC = {h264: "SDR", h265: "HDR"};
 function programOptions(s, keys) {
+  if (s.program_outputs?.length) {
+    const outputs = s.program_outputs, name = keys ? "Program dirty" : "Program";
+    const preferred = outputs.find(o => o.codec === query.get("codec") && playable(o.codec)) ||
+      outputs.find(o => o.color === "hdr" && playable(o.codec)) || outputs.find(o => playable(o.codec)) || outputs[0];
+    return outputs.map(o => ({group: "Program", dot: "var(--pgm)", program: true, chrome: 49,
+      value: outputs.length === 1 ? "program" : `program:${o.rendition}`,
+      label: outputs.length === 1 ? name : `${name} · ${(o.color || "sdr").toUpperCase()} · ${codecName(o.codec)}`,
+      preferred: o === preferred, url: playerUrl(o), unplayable: !playable(o.codec),
+      meta: [keys && "with keys", (o.color || "sdr").toUpperCase(), codecName(o.codec),
+        s.canvas && canvasText({...s.canvas, fps: o.fps || s.canvas.fps})].filter(Boolean).join(" · ")}));
+  }
   const codecs = s.preview_codecs?.length ? s.preview_codecs : ["h265", "h264"].filter(playable);
   const preferred = defaultCodec(codecs), name = keys ? "Program dirty" : "Program";
   // The player shows its codec picker when the mixer has two program codecs.

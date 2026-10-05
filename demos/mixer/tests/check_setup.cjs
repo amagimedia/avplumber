@@ -67,15 +67,15 @@ const { chromium } = require('playwright');
     assert.equal(await bitrate('Program HLG').inputValue(), '8');
     await preset('Program').selectOption('p1');
     await bitrate('Program').fill('8.5');
-    const encode = (preset, mbps) => ({preset, bitrate_kbps: mbps * 1000});
-    const defaults = {sdr: encode('p3', 6), hdr: encode('p3', 8), sdr_clean: encode('p3', 6), mv: encode('p1', 4),
+    const encode = (preset, mbps, codec = "h264_nvenc") => ({codec, preset, bitrate_kbps: mbps * 1000});
+    const defaults = {sdr: encode('p3', 6), hdr: encode('p3', 8, 'hevc_nvenc'), sdr_clean: encode('p3', 6), mv: encode('p1', 4),
       mv2: encode('p1', 4), extra: encode('p1', 4)};
     const edited = await apply();
     assert.deepEqual(edited.encodes, {...defaults, sdr: encode('p1', 8.5)}, 'an encode edit alone must reach the backend');
     assert.equal('bitrate_kbps' in edited, false);
-    for (const value of ['25', '1.5', '']) {
+    for (const value of ['25', '.2', '']) {
       await bitrate('Multiviewer').fill(value);
-      assert.equal(await text('error'), 'Multiviewer: the bitrate must be from 2 to 20 Mbit/s.');
+      assert.equal(await text('error'), 'Multiviewer: the bitrate must be from 0.25 to 20 Mbit/s.');
       assert.equal(await page.locator('#apply').isDisabled(), true, `${value || 'no'} Mbit/s cannot be applied`);
     }
     await bitrate('Multiviewer').fill('20');
@@ -90,6 +90,36 @@ const { chromium } = require('playwright');
     const {encodes: _encodes, ...withoutEncodes} = edited;
     await reset(withoutEncodes);
     assert.deepEqual((await apply()).encodes, defaults, 'settings saved before per-output encodes load the defaults');
+
+    // Legacy per-output settings inherit codecs; each own output is independent of shared extras.
+    const codec = output => page.getByLabel(`${output} codec`, {exact: true});
+    const legacyEncodes = Object.fromEntries(Object.entries(defaults).map(([id, {codec: _, ...e}]) => [id, e]));
+    await reset({...edited, encodes: legacyEncodes});
+    assert.deepEqual((await apply()).encodes, defaults);
+    assert.equal(await codec('Program HLG').isDisabled(), true);
+    assert.deepEqual(await codec('Program HLG').locator('option').evaluateAll(options => options.map(o => o.value)), ['hevc_nvenc']);
+    await page.locator('#fps').selectOption('25');
+    await page.locator('#dsk-pages input[value=lower_third]').check();
+    await page.locator('#clean-feed').check();
+    await codec('Program').selectOption('hevc_nvenc');
+    await codec('Clean feed').selectOption('hevc_nvenc');
+    await codec('Program preview').selectOption('hevc_nvenc');
+    await extraAux.fill(await extraAux.getAttribute('max'));
+    const h264Extras = Number(await extraAux.inputValue());
+    await codec('Extra aux').selectOption('hevc_nvenc');
+    assert.ok(Number(await extraAux.getAttribute('max')) > h264Extras, 'the extra capacity calculation uses HEVC cost');
+    assert.equal(await page.getByLabel('Extra aux codec', {exact: true}).count(), 1, 'one codec controls all managed extras');
+    assert.equal(await codec('Multiviewer').inputValue(), 'h264_nvenc');
+    await bitrate('Program').fill('0.25');
+    const mixed = await apply();
+    assert.equal(mixed.encodes.sdr.bitrate_kbps, 250);
+    assert.deepEqual(Object.fromEntries(Object.entries(mixed.encodes).map(([id, e]) => [id, e.codec])), {
+      sdr: 'hevc_nvenc', hdr: 'hevc_nvenc', sdr_clean: 'hevc_nvenc', mv: 'hevc_nvenc', mv2: 'h264_nvenc', extra: 'hevc_nvenc'});
+    await reset(mixed);
+    assert.equal(await codec('Clean feed').inputValue(), 'hevc_nvenc');
+    assert.ok((await rows()).some(row => row.startsWith('Program | HEVC · 25 fps')), 'SDR HEVC is not labeled 10-bit');
+    await defaultsButton.click();
+    assert.deepEqual((await apply()).encodes, defaults, 'Defaults resets codecs as well as preset and bitrate');
 
     // The total follows the maximum unless a lower one is typed; that one stays, within the maximum.
     await reset();

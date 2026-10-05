@@ -113,6 +113,13 @@ def default_codec(pixel_format):
     return "hevc_nvenc" if pixel_format in TEN_BIT_FORMATS else "h264_nvenc"
 
 
+def rendition_format(canvas_format, codec, color, profile=""):
+    """Keep HEVC's canvas depth unless its SDR output explicitly requests Main8."""
+    ten_bit = Color.parse(color).transfer != "sdr" or (
+        canvas_format in TEN_BIT_FORMATS and "hevc" in codec and profile != "main")
+    return "p010le" if ten_bit else "nv12"
+
+
 def rendition_color(canvas, codec, requested=None, tonemap=""):
     canvas = Color.parse(canvas)
     if codec not in ("h264_nvenc", "hevc_nvenc"):

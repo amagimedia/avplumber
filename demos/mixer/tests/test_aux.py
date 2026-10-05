@@ -467,18 +467,24 @@ def test_scheduler_survives_an_unreachable_follower(cfg, monkeypatch):
     assert avp.layouts[-1]["revision"] == bus.revision
 
 
-def test_bus_builds_its_nodes_in_one_group(cfg, monkeypatch):
+@pytest.mark.parametrize("codec,profile", [("h264_nvenc", "high"), ("hevc_nvenc", "main")])
+def test_bus_builds_its_nodes_in_one_group(cfg, monkeypatch, codec, profile):
     import pyplumber.mixer.janus as janus
     nodes = []
-    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: "listener")
+    encoders = []
+    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: encoders.append(kw) or "listener")
     avp = SimpleNamespace(addNode=lambda node, **kw: nodes.append(node), edges=SimpleNamespace(planCapacity=lambda *a: None))
     api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
     mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
                             canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
                             backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
     options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="")
-    bus = AuxBus(avp, api, mixer, cfg, parse_aux_buses([bus_json(scenes=["repeat"])], cfg)[0])
+    spec = bus_json(scenes=["repeat"], renditions=[{"id": "monitor", "port": 5010, "codec": codec}])
+    bus = AuxBus(avp, api, mixer, cfg, parse_aux_buses([spec], cfg)[0])
     bus.build(options)
+    assert (encoders[0]["codec"], encoders[0]["profile"], encoders[0]["enc_format"]) == (codec, profile, "nv12")
+    preview = replace(cfg, aux_buses=parse_aux_buses([spec], cfg)).settings()["preview_outputs"][0]
+    assert preview["codec"] == ("h265" if codec == "hevc_nvenc" else "h264")
     compositor, converted, follower = (n.parameters for n in nodes)
     assert {p["group"] for p in (compositor, converted, follower)} == {"aux_multiview"}
     assert compositor["src"] == compositor["subscriptions"] == [*bus.edges, "aux_multiview_pgm"]

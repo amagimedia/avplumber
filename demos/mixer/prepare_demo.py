@@ -34,8 +34,7 @@ from hdr_patterns import write_hlg  # noqa: E402
 from pyplumber.mixer.config import MAX_SOURCES, default_browser_ring_size, parse  # noqa: E402
 
 # Janus RTP port of the clean SDR program; 5004/5006 carry the keyed program and
-# 5008 the multiview. Clean is SDR only: one more H.264 encode fits beside
-# the keyed SDR and HDR ones on a single NVENC, a clean HEVC would not.
+# 5008 the multiview. The clean feed is SDR, with an independent codec.
 CLEAN_PORT = 5010
 
 
@@ -330,10 +329,13 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
         keys.append({"id": page, "source": f"dsk_{page}", "dst": {"x": x, "y": y, "w": w, "h": h}})
     renditions = recipe["renditions"]
     if recipe.get("clean_feed"):
-        sdr = renditions[0]   # the recipe's first rendition is the H.264/SDR program
+        sdr = next((r for r in renditions if r.get("color") == "sdr" or r.get("id") == "sdr"), renditions[0])
         # clean_rendition: the fields in which the clean copy differs, such as its preset and bitrate.
-        renditions = [*renditions, {**sdr, "id": f"{sdr['id']}_clean", "feed": "clean", "port": CLEAN_PORT,
-                                    **recipe.get("clean_rendition", {})}]
+        clean = {**sdr, "id": f"{sdr['id']}_clean", "feed": "clean", "port": CLEAN_PORT,
+                 **recipe.get("clean_rendition", {}), "color": "sdr"}
+        if clean.get("codec") != sdr.get("codec") and "profile" not in recipe.get("clean_rendition", {}):
+            clean["profile"] = "main" if clean.get("codec") == "hevc_nvenc" else "baseline"
+        renditions = [*renditions, clean]
     doc = {"canvas": canvas, "sources": sources, "scenes": scene_list,
            "browser_ring_size": recipe.get("browser_ring_size", default_browser_ring_size(fps)),
            "initial_scene": scene_list[0]["id"], "renditions": renditions,

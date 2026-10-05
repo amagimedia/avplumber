@@ -8,24 +8,25 @@ and serves it to setup.html. Standard library only: tests/check_setup.cjs loads 
 python3.
 """
 
+from copy import deepcopy
 from enum import Enum
 
 
 class InstanceType(str, Enum):
     TESLA_T4 = "tesla_t4"
     NVIDIA_L4 = "nvidia_l4"
+    NVIDIA_L4_CUARRAY = "nvidia_l4_cuarray"
 
 
 # Not capacities: the range the setup offers per output, and each output's encode until the setup
 # sets another: the programs (sdr, hdr) and the clean feed (sdr_clean) at p3, every aux bus at p1.
-_BITRATE_KBPS = [2000, 20000]
+_BITRATE_KBPS = [250, 20000]
 _ENCODE_DEFAULTS = {
-    "sdr": {"preset": "p3", "bitrate_kbps": 6000},
-    "hdr": {"preset": "p3", "bitrate_kbps": 8000},
-    "sdr_clean": {"preset": "p3", "bitrate_kbps": 6000},
-    "aux": {"preset": "p1", "bitrate_kbps": 4000},
+    "sdr": {"codec": "h264_nvenc", "preset": "p3", "bitrate_kbps": 6000},
+    "hdr": {"codec": "hevc_nvenc", "preset": "p3", "bitrate_kbps": 8000},
+    "sdr_clean": {"codec": "h264_nvenc", "preset": "p3", "bitrate_kbps": 6000},
+    "aux": {"codec": "h264_nvenc", "preset": "p1", "bitrate_kbps": 4000},
 }
-
 
 INSTANCE_PROFILES = {
     # GCP: one Tesla T4 (one Turing NVENC, 15 GB), 16 vCPU; 1920x1080 inputs.
@@ -131,4 +132,14 @@ INSTANCE_PROFILES = {
             "defaults": _ENCODE_DEFAULTS,
         },
     },
+}
+
+# Opt-in measured HEVC fixtures and fixed CUarray pools; the FFmpeg 8.1/linear
+# profiles retain their decoder contracts and capacities.
+INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY] = deepcopy(INSTANCE_PROFILES[InstanceType.NVIDIA_L4])
+INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["sources"][25] = 192
+INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["nvdec_decodes"][25] = 120
+INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["raw_upload_units"][25] = 32
+INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["generated_decode"] = {
+    "codec": "hevc", "decode_storage": "cuarray", "extra_hw_frames": 12,
 }

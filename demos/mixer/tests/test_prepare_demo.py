@@ -40,6 +40,20 @@ def test_failed_generation_does_not_leave_a_cached_asset(tmp_path):
     assert path.read_bytes() == b"complete"
 
 
+@pytest.mark.parametrize("program,clean", [("h264_nvenc", "hevc_nvenc"), ("hevc_nvenc", "h264_nvenc")])
+def test_clean_codec_can_differ_from_program(recipe, tmp_path, program, clean):
+    recipe.update(dsk=["lower_third"], clean_feed=True,
+                  renditions=[{"id": "sdr", "codec": program, "color": "sdr", "port": 5004,
+                               "profile": "main" if program == "hevc_nvenc" else "baseline"}],
+                  clean_rendition={"codec": clean})
+    show, _, _ = plan(recipe, tmp_path)
+    rendition = show["renditions"][-1]
+    assert (rendition["feed"], rendition["color"], rendition["codec"], rendition["profile"]) == (
+        "clean", "sdr", clean, "main" if clean == "hevc_nvenc" else "baseline")
+    settings = parse(show).settings()
+    assert settings["preview_outputs"][0]["codec"] == ("h265" if clean == "hevc_nvenc" else "h264")
+
+
 @pytest.mark.parametrize("fps", [25, 30, 50, 60])
 @pytest.mark.parametrize("pattern", WIPE_NAMES)
 def test_wipes_move_and_cover_the_midpoint(tmp_path, fps, pattern):

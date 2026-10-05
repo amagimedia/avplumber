@@ -1136,22 +1136,27 @@ def test_a_rendition_may_not_ask_for_more_than_the_composer_renders():
     assert cfg.renditions[0].aspect == "9:16" and cfg.renditions[0].fps == 30
 
 
-def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path):
+@pytest.mark.parametrize("sdr_codec,sdr_profile", [("h264_nvenc", "baseline"), ("hevc_nvenc", "main")])
+def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path, sdr_codec, sdr_profile):
     doc = {**CONFIG, "sources": CONFIG["sources"][:1], "scenes": CONFIG["scenes"][:1],
            "initial_scene": "full", "wipes": [],
            "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "p010le",
                       "color": "hlg"},
            "renditions": [
                {"id": "hdr", "target": "janus", "port": 5006, "codec": "hevc_nvenc", "profile": "main10"},
-               {"id": "sdr", "target": "janus", "port": 5004, "codec": "h264_nvenc",
-                "profile": "baseline", "tonemap": "mobius", "tonemap_param": 0.9}]}
+               {"id": "sdr", "target": "janus", "port": 5004, "codec": sdr_codec,
+                "profile": sdr_profile, "color": "sdr", "tonemap": "mobius", "tonemap_param": 0.9}]}
     path = tmp_path / "dual.json"
     path.write_text(json.dumps(doc))
     app = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
     nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
     assert len(nodes) == len(app.avp.nodes)
     assert nodes["janus_encoder"]["options"]["profile"] == "main10"
-    assert nodes["janus_sdr_encoder"]["options"]["profile"] == "baseline"
+    assert nodes["janus_sdr_encoder"]["options"]["profile"] == sdr_profile
+    assert nodes["janus_sdr_encoder"]["codec"] == sdr_codec
+    settings = mixer_config.parse(doc).settings()
+    assert [(o["rendition"], o["color"], o["mountpoint"]) for o in settings["program_outputs"]] == [
+        ("hdr", "hdr", 2), ("sdr", "sdr", 1)]
     assert nodes["janus_sdr_encoder"]["options"]["color_trc"] == "bt709"
     assert nodes["janus_sdr_format"]["real_pixel_format"] == "nv12"
     assert "tonemap_cuda=transfer_in=auto:transfer_out=sdr" in nodes["scale_sdr"]["graph"]

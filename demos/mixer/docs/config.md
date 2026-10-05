@@ -418,7 +418,7 @@ Janus rendition only, even when that rendition is a clean feed.
 
 ## aux_buses
 
-Extra monitor outputs, any number of them, each its own compositor and H.264
+Extra monitor outputs, any number of them, each its own compositor and H.264 or HEVC
 encoder (SDR, canvas size, program rate halved above 30 fps unless `full_rate`)
 sent to Janus. They subscribe to the sources the main mixer already decodes: a
 source reaches a bus only while its layout draws it, and a bus never delays the
@@ -432,6 +432,11 @@ program.
    "renditions": [{"id": "monitor", "port": 5012}]}
 ]
 ```
+
+Each rendition accepts `codec` (`h264_nvenc`, the default, or `hevc_nvenc`),
+`bitrate_kbps` and `preset`. Both codecs use 8-bit NV12 SDR; HEVC uses Main,
+independently of the program's HDR rendition. Setup exposes separate controls for
+the show's own buses and one shared setting for all generated extra AUX buses.
 
 A bus draws a layout: a list of cells in canvas pixels, each with a role.
 

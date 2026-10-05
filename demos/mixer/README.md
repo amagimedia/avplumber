@@ -41,12 +41,16 @@ MIXER_DOCKERFILE=Dockerfile docker compose -f demos/mixer/compose.yaml up --buil
 
 Both are described in the [guide's Docker section](docs/guide.md#docker).
 
+For the measured L4 CUarray build, use the [portable L4 preset](deploy/l4/README.md).
+It selects the pinned FFmpeg 9 patch series, keeps generated HEVC inputs in fixed
+CUarray pools across Setup changes, and packages the player, Janus, browser and proxy.
+
 Open **<http://127.0.0.1:7681/setup/>**, choose orientation, FPS, mode, unique
 sources and scenes, then click **Apply setup**. The instance generates its assets and
 starts the mixer. No JSON editing or downloads are required.
-**8-bit** uses an SDR NV12 canvas and H.264 output only; the player hides its
-stream selector. **10-bit HDR** offers **4:2:2** (P210, default) or **4:2:0**
-(P010), with H.264 SDR and H.265 HDR outputs; 8-bit 4:2:2 is not offered. Unique
+**8-bit** uses an SDR NV12 canvas with H.264 or H.265 output. **10-bit HDR** offers
+**4:2:2** (P210, default) or **4:2:0** (P010), with a separate SDR output and H.265
+Main10 HDR output; 8-bit 4:2:2 is not offered. Unique
 sources start at the maximum of the mode and frame rate and follow it when either
 or the keys change, unless a lower total is typed: that one stays, within the
 maximum. The sources are always the Balanced mix of that total, shown read-only per
@@ -164,17 +168,20 @@ encoder budgets and measured output ceilings without changing presets. The final
 4:2:0 / 60 fps full-scene sweep at 18 outputs recorded one missed deadline and zero
 output drops; it did not meet the zero-miss gate.
 
-**Outputs** lists every encoded output: the H.264 program, the HEVC HLG program on a 10-bit
+**Outputs** lists every encoded output: the SDR program, the HEVC HLG program on a 10-bit
 canvas, the clean feed while it is on (counted even while off), each of the instance's own aux
-buses, and one row shared by the extra aux outputs. Each has its NVENC preset, p1 (fastest), p3
-or p5 (best quality), and its CBR bitrate, 2–20 Mbit/s. **Defaults** (`nvenc.defaults` in the
+buses, and one row shared by all extra aux outputs. SDR outputs independently select H.264 or
+H.265; the HDR program uses HEVC Main10. Each has its NVENC preset, p1 (fastest), p3
+or p5 (best quality), and its CBR bitrate, 0.25–20 Mbit/s. **Defaults** (`nvenc.defaults` in the
 profile) sets the programs and the clean feed to p3 at 6 Mbit/s, 8 for HLG, and every aux bus,
 own or extra, to p1 at 4 Mbit/s. Each row shows its share of NVENC, which follows the preset and
-frame rate, not the bitrate ([measured costs](docs/capacity.md#nvenc-and-extra-aux-outputs)); the
+codec and frame rate, not the bitrate ([measured costs](docs/capacity.md#nvenc-and-extra-aux-outputs)); the
 bar below shows the total against the budget and how many more extra outputs fit. Encodes above
 the budget on their own cannot be applied; the page names the output to lower. The saved
-settings keep one `{"preset", "bitrate_kbps"}` per output id in `encodes` (`sdr`, `hdr`,
-`sdr_clean`, an own bus's id, `extra`); settings saved with the former single program bitrate
+settings keep one `{"codec", "preset", "bitrate_kbps"}` per output id in `encodes` (`sdr`, `hdr`,
+`sdr_clean`, an own bus's id, `extra`). Older settings without `codec` retain H.264 SDR and
+HEVC HDR. Applying a codec change restarts the mixer and updates its Janus mountpoints;
+HEVC playback requires browser support. Settings saved with the former single program bitrate
 give it to the SDR program and its clean copy and scale the HLG program's as before.
 
 Settings persist in `media/demo.json`; later starts restore them and reuse

@@ -23,7 +23,7 @@ def _integer(value):
 
 class AuxBus:
     """One AUX bus: a compositor over subscribed sources (and the program, last, when one of its
-    layouts draws it), then SDR H.264 to Janus.
+    layouts draws it), then SDR H.264 or HEVC to Janus.
 
     A ``mixer_pvw_follow`` node (``<prefix>_pvw``) is the only writer of the composition: this class
     computes, for the current layout, every scene's preview layers and the base (everything else)
@@ -120,7 +120,7 @@ class AuxBus:
                              bitrate_kbps=r.bitrate_kbps, ssrc=options.janus_video_ssrc + r.port,
                              rtcp_bind=options.janus_rtcp_bind, rtcp_port=0),
             fps=fps, width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
-            codec="h264_nvenc", preset=r.preset, profile=r.profile or "high", enc_format="nv12",
+            codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1)
         self.avp.addNode(_PvwFollowNode({
             "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,

@@ -197,14 +197,14 @@ def test_every_program_encode_takes_its_own_preset_and_bitrate(tmp_path):
 
 
 @pytest.mark.parametrize("legacy, kbps", [(6000, [6000, 8000, 6000]), (3000, [3000, 4000, 3000]),
-                                        (10**1000, [20000, 20000, 20000]), (-10**1000, [2000, 2000, 2000]),
-                                          (16000, [16000, 20000, 16000]), (500, [2000, 2000, 2000])])
+                                        (10**1000, [20000, 20000, 20000]), (-10**1000, [250, 250, 250]),
+                                          (16000, [16000, 20000, 16000]), (500, [500, 667, 500])])
 def test_settings_saved_with_one_program_bitrate_load_per_output(legacy, kbps):
     """The SDR program and its clean copy take it, the HLG one the defaults' ratio, within the range."""
     older = {**{k: v for k, v in DEFAULT_SETTINGS.items() if k != "encodes"}, "bitrate_kbps": legacy}
     encodes = recipe_for(T4, older)["setup"]["encodes"]
-    assert [encodes[o] for o in ("sdr", "hdr", "sdr_clean")] == [encode("p3", n) for n in kbps]
-    assert encodes["extra"] == encode("p1", 4000)
+    assert [encodes[o] for o in ("sdr", "hdr", "sdr_clean")] == [{**encode("p3", n), "codec": codec} for n, codec in zip(kbps, ("h264_nvenc", "hevc_nvenc", "h264_nvenc"))]
+    assert encodes["extra"] == {**encode("p1", 4000), "codec": "h264_nvenc"}
 
 
 @pytest.mark.parametrize("fps, size", [(25, 6), (30, 6), (50, 9), (60, 9)])
@@ -240,15 +240,17 @@ def test_a_setup_saved_with_one_program_bitrate_resumes_with_per_output_encodes(
         runtime.apply()   # as a resume
         runtime.worker.join(3)
         encodes = runtime.status()["settings"]["encodes"]
-        assert [encodes[o] for o in ("sdr", "hdr", "sdr_clean", "extra")] == [*map(encode, ["p3"] * 3, kbps), encode("p1", 4000)]
+        assert [encodes[o] for o in ("sdr", "hdr", "sdr_clean", "extra")] == [{**e, "codec": "hevc_nvenc" if i == 1 else "h264_nvenc"}
+            for i, e in enumerate([*map(encode, ["p3"] * 3, kbps), encode("p1", 4000)])]
 
 
 @pytest.mark.parametrize("encodes, message", [
-    *(({"sdr": encode("p3", kbps)}, "encodes.sdr: bitrate_kbps must be an integer from 2000 to 20000")
-      for kbps in (1999, 20001, 0, 6000.0, "6000", True)),
-    ({"mv": encode("p3", 1000)}, "encodes.mv: bitrate_kbps"),
+    *(({"sdr": encode("p3", kbps)}, "encodes.sdr: bitrate_kbps must be an integer from 250 to 20000")
+      for kbps in (249, 20001, 0, 6000.0, "6000", True)),
+    ({"mv": encode("p3", 249)}, "encodes.mv: bitrate_kbps"),
     *(({"extra": value}, "encodes.extra must have a preset of p1, p3, p5 and a bitrate_kbps")
-      for value in (encode("p7"), encode("p4"), {"preset": "p3"}, {**encode(), "tune": "ll"}, 3000)),
+      for value in (encode("p7"), encode("p4"), {"preset": "p3"}, {**encode(), "tune": "ll"})),
+    ({"extra": 3000}, "encodes.extra: codec must be"),
     ([], "encodes must map"), ({f"aux{i}": encode() for i in range(65)}, "encodes must map")])
 def test_encodes_outside_the_profile_are_rejected(encodes, message):
     with pytest.raises(ValueError, match=message):
@@ -546,11 +548,13 @@ def test_invalid_preserved_aux_rejected_before_preparation(runtime, monkeypatch)
 
 
 @pytest.mark.parametrize("hdr", [False, True])
-def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
+@pytest.mark.parametrize("sdr_codec", ["h264", "h265"])
+def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr_codec):
     monkeypatch.setattr("setup_runtime.subprocess.Popen", lambda *a, **kw: SimpleNamespace(pid=1234, poll=lambda: None))
     monkeypatch.setattr(runtime.closing, "wait", lambda _: False)
     runtime.bridge.state = lambda **kw: {"status": {"pgm_scene": "full"},
-        "settings": {"preview_codecs": ["h264", "h265"] if hdr else ["h264"], "aux_buses": ["mv"]}}
+        "settings": {"preview_codecs": [sdr_codec, "h265"] if hdr else [sdr_codec], "aux_buses": ["mv"],
+                     "program_outputs": [{"rendition": "sdr"}, *([{"rendition": "hdr"}] if hdr else [])]}}
     expected = ["janus_encoded", "aux_mv_encoded", *(["janus_hdr_encoded"] if hdr else [])]
     config = runtime.media_dir / "mixer.demo.json"
     config.write_text(json.dumps({"sources": [{"id": "visible"}, {"id": "unused"}]}))
@@ -1069,7 +1073,7 @@ def test_every_profile_covers_every_rate_and_canvas(tmp_path, instance_type):
     assert json.loads(json.dumps(status))["profile"]["nvdec_decodes"].keys() == {"25", "30", "50", "60"}
     nvenc = profile["nvenc"]
     assert nvenc.keys() == {"budget_pct", "pct_per_fps", "bitrate_kbps", "defaults"} | (
-        {"max_outputs"} if instance_type == InstanceType.NVIDIA_L4 else set())
+        {"max_outputs"} if instance_type in (InstanceType.NVIDIA_L4, InstanceType.NVIDIA_L4_CUARRAY) else set())
     assert nvenc["defaults"].keys() == {"sdr", "hdr", "sdr_clean", "aux"}
     assert nvenc["pct_per_fps"]["hevc"].keys() == nvenc["pct_per_fps"]["h264"].keys() >= {e["preset"] for e in nvenc["defaults"].values()}
 
@@ -1170,7 +1174,12 @@ def test_encodes_above_the_nvenc_budget_are_refused_without_extra_aux(runtime, m
 def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime, monkeypatch):
     runtime.janus_api = "http://127.0.0.1:8088/janus"
     syncs = []
-    monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", lambda api, ports, prune=False: syncs.append((ports, prune)))
+    def sync(api, specs, prune=False, replace=False):
+        extra = {key.split(":")[0]: value["videoport"] for key, value in specs.items()
+                 if value["description"].startswith("avplumber extra aux")}
+        assert replace != prune
+        syncs.append((extra, prune))
+    monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", sync)
     config = runtime.media_dir / "mixer.demo.json"
     monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs: config.write_text(
         json.dumps(prepare_demo.plan(recipe, directory)[0])))
@@ -1220,12 +1229,12 @@ def test_extra_aux_buses_follow_the_own_ones_and_keep_their_live_layouts(runtime
     cfg = apply(4, orientation="landscape")
     assert [b.renditions[0].port for b in cfg.aux_buses[2:]] == [5016, 5020, 5024, 5028]
     assert cfg.aux_buses[2].layouts != first[2].layouts and (cfg.canvas_w, cfg.canvas_h) == (1920, 1080)
-    # None removes their mountpoints; with none before or after, Janus is not asked.
+    # None removes extra mountpoints; fixed output contracts are still synchronized.
     cfg = apply(0)
     assert [b.id for b in cfg.aux_buses] == ["mv", "mv2"] and syncs[-1] == ({}, True)
     calls = len(syncs)
     apply(0)
-    assert len(syncs) == calls
+    assert len(syncs) == calls + 2
     assert len(apply(9).aux_buses) == 10
     assert runtime.status()["settings"]["extra_aux"] == 8
     assert json.loads(runtime.recipe_path.read_text())["setup"]["extra_aux"] == 8
@@ -1413,14 +1422,130 @@ def test_failed_start_does_not_restart_previous_outputs_above_current_capacity(r
     assert "recovery failed: The instance supports at most 20 encoded outputs" in runtime.status()["message"]
 
 
-def test_a_janus_failure_leaves_the_mixer_running_and_shows_in_the_status(runtime, monkeypatch):
+def test_a_janus_prune_failure_leaves_the_mixer_running_and_shows_in_the_status(runtime, monkeypatch):
     runtime.janus_api = "http://127.0.0.1:8088/janus"
-    def refuse(*_):
-        raise OSError("Connection refused")
+    def refuse(*_, prune=False, replace=False):
+        if prune:
+            raise OSError("Connection refused")
     monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", refuse)
     monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs: (directory / "mixer.demo.json").write_text(
         json.dumps(prepare_demo.plan(recipe, directory)[0])))
     runtime.apply({**KEYED, "fps": 30, "bit_depth": 8, "extra_aux": 1})
     runtime.worker.join(3)
     status = runtime.status()
-    assert (status["phase"], status["message"]) == ("running", "Mixer ready. Extra aux mountpoints failed: Connection refused.")
+    assert (status["phase"], status["message"]) == ("running", "Mixer ready. Janus mountpoints failed: Connection refused.")
+
+
+@pytest.mark.parametrize("codec", ["h264", "av1_nvenc", "libx265", None, 1])
+def test_setup_rejects_non_offered_codecs(codec):
+    with pytest.raises(ValueError, match="codec must be"):
+        recipe_for(T4, {**DEFAULT_SETTINGS, "encodes": {"extra": {**encode(), "codec": codec}}})
+
+
+def test_hdr_program_cannot_be_changed_to_h264():
+    with pytest.raises(ValueError, match="Program HDR requires hevc_nvenc"):
+        recipe_for(T4, {**DEFAULT_SETTINGS, "encodes": {"hdr": {**encode(), "codec": "h264_nvenc"}}})
+
+
+@pytest.mark.parametrize("sdr_codec,clean_codec", [("hevc_nvenc", "h264_nvenc"), ("h264_nvenc", "hevc_nvenc")])
+def test_program_and_clean_codec_are_independent_on_hdr_canvas(tmp_path, sdr_codec, clean_codec):
+    encodes = {output: {**encode("p1", 250), "codec": codec}
+               for output, codec in (("sdr", sdr_codec), ("sdr_clean", clean_codec))}
+    show, _, _ = prepare_demo.plan(recipe_for(T4, {**KEYED, "encodes": encodes}), tmp_path)
+    got = {r["id"]: (r["codec"], r["profile"], r["color"], r["bitrate_kbps"]) for r in show["renditions"]}
+    assert got["sdr"] == (sdr_codec, "main" if sdr_codec == "hevc_nvenc" else "baseline", "sdr", 250)
+    assert got["sdr_clean"] == (clean_codec, "main" if clean_codec == "hevc_nvenc" else "baseline", "sdr", 250)
+    assert got["hdr"] == ("hevc_nvenc", "main10", "hlg", 8000)
+
+
+def test_cuarray_profile_only_changes_encoded_generated_inputs():
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]
+    recipe = recipe_for(profile, DEFAULT_SETTINGS)
+    for source in recipe["inputs"][:2]:
+        assert all(source[key] == value for key, value in profile["generated_decode"].items())
+    assert all("decode_storage" not in source and "extra_hw_frames" not in source for source in recipe["inputs"][2:])
+    for instance in (InstanceType.TESLA_T4, InstanceType.NVIDIA_L4):
+        assert all("decode_storage" not in source for source in recipe_for(INSTANCE_PROFILES[instance], DEFAULT_SETTINGS)["inputs"])
+
+
+def test_first_resume_keeps_declared_outputs_and_applies_shared_aux_codec(runtime, monkeypatch):
+    runtime.process = None
+    runtime.janus_api = "http://127.0.0.1:8088/janus"
+    monkeypatch.setattr(runtime, "_mountpoints", lambda *args, **kwargs: None)
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs: (directory / "mixer.demo.json").write_text(
+        json.dumps(prepare_demo.plan(recipe, directory)[0])))
+    encodes = {key: {**encode("p1", 250), "codec": codec} for key, codec in
+               (("mv", "hevc_nvenc"), ("mv2", "h264_nvenc"), ("extra", "hevc_nvenc"))}
+    recipe = recipe_for(T4, {**KEYED, "fps": 25, "extra_aux": 2, "encodes": encodes})
+    recipe["aux_buses"] = own_aux() + [
+        {"id": f"aux{i}", "layout": {"preset": "source_pages"},
+         "renditions": [{"id": "monitor", "port": 5016 + i * 4, "codec": "h264_nvenc", "profile": "high"}]}
+        for i in range(2)]
+    runtime.recipe_path.write_text(json.dumps(recipe))
+    runtime.resume()
+    runtime.worker.join(3)
+    assert runtime.status()["phase"] == "running", runtime.status()
+    saved = json.loads(runtime.recipe_path.read_text())
+    assert [b["id"] for b in saved["aux_buses"]] == ["mv", "mv2", "aux0", "aux1"]
+    assert [(b["renditions"][0]["codec"], b["renditions"][0]["profile"], b["renditions"][0]["bitrate_kbps"])
+            for b in saved["aux_buses"]] == [("hevc_nvenc", "main", 250), ("h264_nvenc", "high", 250),
+                                            ("hevc_nvenc", "main", 250), ("hevc_nvenc", "main", 250)]
+    # Shared extras change back without inheriting the old HEVC profile; own buses stay independent.
+    settings = {**saved["setup"], "encodes": {**saved["setup"]["encodes"], "extra": {**encode("p1", 500), "codec": "h264_nvenc"}}}
+    runtime.bridge.command = lambda *_: "[]"
+    runtime.apply(settings)
+    runtime.worker.join(3)
+    assert runtime.status()["phase"] == "running", runtime.status()
+    buses = json.loads(runtime.recipe_path.read_text())["aux_buses"]
+    assert buses[0]["renditions"][0]["codec"] == "hevc_nvenc"
+    assert all(b["renditions"][0]["profile"] == "high" for b in buses[1:])
+
+
+@pytest.mark.parametrize("extra_codec,expected", [("h264_nvenc", 8), ("hevc_nvenc", 11)])
+def test_extra_aux_budget_uses_selected_codec(tmp_path, extra_codec, expected):
+    recipe = recipe_for(T4, {**KEYED, "fps": 30, "bit_depth": 8,
+                             "encodes": {"extra": {**encode("p1"), "codec": extra_codec}}})
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    cfg = parse({**show, "aux_buses": own_aux(preset="p1")})
+    assert extra_aux_limit(T4, cfg, recipe["setup"]["encodes"]) == expected
+
+
+def test_janus_codec_replacement_happens_stopped_and_restores_before_rollback(runtime, monkeypatch):
+    runtime.janus_api = "http://127.0.0.1:8088/janus"
+    config = runtime.media_dir / "mixer.demo.json"
+    previous, _, _ = prepare_demo.plan(recipe_for(T4, KEYED), runtime.media_dir)
+    config.write_text(json.dumps(previous))
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs: config.write_text(
+        json.dumps(prepare_demo.plan(recipe, directory)[0])))
+    events = []
+    monkeypatch.setattr(runtime, "_stop", lambda **kwargs: events.append("stop"))
+    def sync(api, specs, prune=False, replace=False):
+        assert events[-1] == "stop"
+        assert replace and not prune
+        events.append(specs["sdr"]["videocodec"])
+    monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", sync)
+    def start(path):
+        events.append("start")
+        if events[-2] == "h265":
+            raise RuntimeError("new encoder failed")
+    monkeypatch.setattr(runtime, "_start", start)
+    runtime.apply({**KEYED, "encodes": {"sdr": {**encode(), "codec": "hevc_nvenc"}}})
+    runtime.worker.join(3)
+    assert "previous setup restored" in runtime.status()["message"]
+    assert events == ["stop", "h265", "start", "stop", "stop", "h264", "start"]
+    assert json.loads(config.read_text()) == previous
+
+
+def test_janus_replacement_failure_does_not_start_a_mismatched_encoder(runtime, monkeypatch):
+    runtime.janus_api = "http://127.0.0.1:8088/janus"
+    monkeypatch.setattr(prepare_demo, "prepare", lambda recipe, directory, **kwargs: (directory / "mixer.demo.json").write_text(
+        json.dumps(prepare_demo.plan(recipe, directory)[0])))
+    def fail(*args, **kwargs):
+        raise RuntimeError("mountpoint protected")
+    monkeypatch.setattr("setup_runtime.janus_mountpoints.sync", fail)
+    monkeypatch.setattr(runtime, "_start", lambda *_: pytest.fail("codec replacement must succeed first"))
+    runtime.apply({**KEYED, "encodes": {"sdr": {**encode(), "codec": "hevc_nvenc"}}})
+    runtime.worker.join(3)
+    assert runtime.status()["phase"] == "error"
+    assert "mountpoint protected" in runtime.status()["message"]
+    assert not (runtime.media_dir / "mixer.demo.json").exists()

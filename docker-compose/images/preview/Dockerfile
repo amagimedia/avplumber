@@ -9,6 +9,7 @@ COPY index.html ./
 COPY cut-latency.mjs ./
 COPY receiver-stats.mjs ./
 COPY janus-socket.mjs ./
+COPY output-selection.mjs ./
 COPY preview-server.py ./
 
 CMD ["python3", "preview-server.py"]

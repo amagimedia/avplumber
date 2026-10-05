@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 
-from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS, default_codec, hdr_metadata, rendition_color
+from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS, default_codec, hdr_metadata, rendition_color, rendition_format
 from pyplumber.mixer.backend import mixer_backend
 from pyplumber.mixer import clipcache
 from pyplumber.mixer import config as mixer_config
@@ -619,9 +619,7 @@ def _build_renditions(avp, api, options: GraphOptions, renditions, feeds, *,
     for r in renditions:
         edge = edges[r.id]
         codec, target = _rendition_target(r, working_format, color)
-        # 10-bit stays P010 for HEVC (Main10 carries depth and HDR); H.264 and 8-bit encode NV12.
-        ten_bit = target.transfer != "sdr" or (working_format in TEN_BIT_FORMATS and "hevc" in codec)
-        enc_format = "p010le" if ten_bit else "nv12"
+        enc_format = rendition_format(working_format, codec, target, r.profile)
         scale = backend.scale(width=r.width, height=r.height) + "," if (r.width, r.height) != canvas else ""
         scaled = f"program_scaled_{r.id}"
         avp.addNode(api.FilterVideo({
