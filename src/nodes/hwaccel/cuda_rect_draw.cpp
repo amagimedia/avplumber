@@ -215,11 +215,11 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     if (!promote && !demote && src_sw_fmt != sw_fmt)
         throw Error("cuda_rect_overlay: source format " + std::string(av_get_pix_fmt_name(src_sw_fmt)) +
                     " cannot be drawn onto a " + av_get_pix_fmt_name(sw_fmt) + " canvas");
-    // Not an error: without a canvas colour contract the node converts what it is given.
-    if (demote && (src->color_trc == AVCOL_TRC_SMPTE2084 || src->color_trc == AVCOL_TRC_ARIB_STD_B67) &&
-        !std::exchange(hdr_demote_warned_, true))
-        logstream << "cuda_rect_overlay: a PQ/HLG source is reduced to the canvas depth without tone mapping; "
-                     "the output keeps the transfer it is given";
+    // A canvas with a colour contract refused such a source above; one without must not turn
+    // it into an SDR-looking frame either.
+    if (demote && !canvas_.allow_hdr_depth_reduction)
+        if (const char *hdr = hdrOnEightBitCanvas(src->color_trc, sw_fmt))
+            throw Error(hdrOnEightBitError("cuda_rect_overlay", hdr));
     const AVPixelFormat geometry_fmt = promote || demote ? src_sw_fmt : sw_fmt;
     const std::array<CUtexObject, 2> *textures = nullptr;
     if (array) {

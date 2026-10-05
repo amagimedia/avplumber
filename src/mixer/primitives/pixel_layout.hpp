@@ -156,7 +156,8 @@ inline bool isYuvPromoteConvertible(AVPixelFormat src_fmt, AVPixelFormat canvas_
 // shallower semiplanar canvas (NV12): the mirror of the promotion. Codes are divided by
 // 2^(sbits-dbits), rounded to nearest and limited to the canvas range (P010->NV12:
 // min(255, (v + 2) >> 2), 64->16 / 940->235), and the chroma footprint is resampled. A plain
-// depth reduction without dithering; an HDR source is not tone mapped.
+// depth reduction without dithering; an HDR source is not tone mapped, which is why the nodes
+// refuse one on an 8-bit canvas (hdrOnEightBitCanvas in compositor_color.hpp).
 inline bool isYuvDemoteConvertible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
     return yuvDepthDifference(src_fmt, canvas_fmt).value_or(0) < 0;
 }
