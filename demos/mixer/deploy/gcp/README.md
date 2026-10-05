@@ -56,7 +56,8 @@ and the keyring SHA-256 matches the script. NVIDIA's
 [toolkit package index](https://nvidia.github.io/libnvidia-container/stable/deb/amd64/Packages)
 includes 1.20.1-1; Canonical provides
 [`docker-compose-v2` for Ubuntu 26.04](https://packages.ubuntu.com/resolute/amd64/docker-compose-v2).
-These checks establish availability, not successful installation on a new VM.
+The fresh-host installation was also verified on that image; see the boot
+validation below.
 
 ## Prepared host image
 
@@ -101,12 +102,17 @@ images, configure public endpoints and prepare media on the destination. The
 preview proxy must forward WebSocket upgrades for the player's `/janus` path;
 Janus REST remains available for mountpoint management.
 
-The stock-Ubuntu mixer provisioning path has been checked for shell syntax and
-launch argument handling, but has **not** been boot-tested on a fresh L4 VM.
-Destination GPU quota/capacity, package availability for its selected kernel,
-DKMS/Secure Boot compatibility, container registry access and firewall/UDP
-reachability still require verification there. Host readiness does not prove
-browser buffer allocation or sustained mixer performance: test the actual
-Fedora browser overlay and the chosen show after deployment. Capacity profiles
-in [`../../instance_profiles.py`](../../instance_profiles.py) are measured per
-host type and must not be scaled to an unmeasured GPU.
+On 2026-10-05, the unmodified installer completed on a fresh `g2-standard-16`
+with the public Ubuntu 26.04 image above and kernel `7.0.0-1011-gcp`. It built
+the pinned NVIDIA DKMS module, rebooted, and passed every current-boot readiness
+check, including GPU, DRM/GBM and video-library access inside the probe container.
+Docker was `29.1.3`, Compose `2.40.3`, and NVIDIA Container Toolkit `1.20.1`.
+CPU mitigations and automatic upgrades retained their Ubuntu defaults; Secure
+Boot was disabled on that VM.
+
+Destination GPU quota/capacity, other kernel or Secure Boot configurations,
+registry access and firewall/UDP reachability still need checking. Host readiness
+does not prove browser buffer allocation or sustained mixer performance: test
+the actual Fedora browser overlay and the chosen show after deployment. Capacity
+profiles in [`../../instance_profiles.py`](../../instance_profiles.py) are measured
+per host type and must not be scaled to an unmeasured GPU.

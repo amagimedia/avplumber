@@ -85,6 +85,26 @@ HEVC playback depends on browser support. The allowance uses the profile's
 existing HEVC Main10 costs for SDR HEVC too; a separate Main8 capacity sweep has
 not been measured.
 
+## Fresh-host validation
+
+On 2026-10-05, all six application images built from revision `899de927c21f`
+on a fresh public Ubuntu 26.04 `g2-standard-16` host prepared by the
+[GCP installer](../gcp/README.md). All 16 FFmpeg patches applied; no images or
+media from an existing mixer were needed. The generated shows passed these
+public WebRTC checks:
+
+| Canvas | Sources | Scenes | Outputs | Mean VRAM | 60-second deadline misses / output drops |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1080p60 HDR 4:2:2 | 88 | 256 | 17 | 14.2 GiB | 0 / 0 |
+| 1080p25 SDR 4:2:0 | 192 | 256 | 26 | 19.4 GiB | 0 / 0 |
+
+Every wall stream advanced before and after WebSocket reconnection in both
+shows. Setup changed from HDR60 to SDR25 and returned to `running`; the first
+SDR asset generation took about 287 seconds, followed by 25 seconds to restart.
+The final SDR show used HEVC at 2.5 Mbit/s for preview and multiviewer, with the
+remaining outputs at the defaults above. These are short deployment checks,
+not a sustained-load qualification or a sweep of every format/rate combination.
+
 ## Move an instance
 
 Keep the source revision, image release and media together. `.env` contains only
