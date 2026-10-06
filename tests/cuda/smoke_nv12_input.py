@@ -76,7 +76,9 @@ def check_v210(width):
             output = avp.getEdge("result", "VideoFrame")
             avp.group("probe").startNodes()
             seen, timestamps = [], []
-            for frame in drain(output, errors, timeout=10, limit=24):
+            # The first P210 scale kernel may JIT during asynchronous group
+            # creation. Include cold startup in the bounded fixture budget.
+            for frame in drain(output, errors, timeout=30, limit=24):
                 planes = frame_planes(frame, "p210le")
                 matches = [i for i, reference in enumerate(expected)
                            if all(np.array_equal(a, b) for a, b in zip(planes, reference))]
