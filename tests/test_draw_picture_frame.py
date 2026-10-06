@@ -1,4 +1,4 @@
-"""The draw nodes' private-picture gate and property copy; no GPU required."""
+"""The draw nodes' private-picture gate, the joined plane copy's bounds and the property copy; no GPU required."""
 import subprocess
 
 

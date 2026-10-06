@@ -4,6 +4,8 @@
 #include "../common/yolo_side_data.hpp"
 
 #include <cerrno>
+#include <cstddef>
+#include <cstdint>
 
 extern "C" {
 #include <libavutil/error.h>
@@ -35,6 +37,19 @@ inline bool isPicturePool(const AVBufferRef* frames) {
 inline bool isPrivatePicture(AVFrame* frame) {
     return frame && frame->format == AV_PIX_FMT_CUDA && isPicturePool(frame->hw_frames_ctx) &&
            av_frame_is_writable(frame) > 0;
+}
+
+/// Rows of pitch linesize[0] from the start of plane 0 to the start of plane 1, when both planes
+/// lie in the frame's single buffer at that pitch and `plane1_rows` rows of plane 1 end inside it:
+/// one 2D copy from plane 0 then reaches both planes and the rows between them. 0 when the planes
+/// need a copy each (separate buffers, as a mapped decoder surface has, or different pitches).
+inline size_t planeSpanRows(const AVFrame* frame, size_t plane1_rows) {
+    const AVBufferRef* buf = frame->buf[0];
+    const uintptr_t plane0 = (uintptr_t)frame->data[0], plane1 = (uintptr_t)frame->data[1];
+    if (!buf || frame->buf[1] || frame->data[0] != buf->data || frame->linesize[0] <= 0 ||
+        frame->linesize[1] != frame->linesize[0] || plane1 <= plane0) return 0;
+    const size_t pitch = (size_t)frame->linesize[0], offset = plane1 - plane0;
+    return offset % pitch == 0 && offset + plane1_rows * pitch <= (size_t)buf->size ? offset / pitch : 0;
 }
 
 /// av_frame_copy_props for a frame that is drawn on. Returns a negative AVERROR on failure.

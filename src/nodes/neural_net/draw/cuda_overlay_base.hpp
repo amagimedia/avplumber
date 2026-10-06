@@ -300,14 +300,22 @@ protected:
             return false;
         }
 
+        // Frames of two pools of one device, format and size hold the chroma plane at the same
+        // pitch and distance behind luma: one copy then takes both planes and the rows between.
+        const size_t chroma_rows = (size_t)((frm.height() + 1) / 2);
+        const size_t span = cuda_overlay::planeSpanRows(frm.raw(), chroma_rows);
+        const bool joined = span && frm.raw()->linesize[0] == out.raw()->linesize[0] &&
+                            span == cuda_overlay::planeSpanRows(out.raw(), chroma_rows);
+
         if (!copyPlane((CUdeviceptr)(uintptr_t)out.raw()->data[0], (size_t)out.raw()->linesize[0],
                        (CUdeviceptr)(uintptr_t)frm.raw()->data[0], (size_t)frm.raw()->linesize[0],
-                       (size_t)frm.width(), (size_t)frm.height())) {
+                       (size_t)frm.width(), joined ? span + chroma_rows : (size_t)frm.height())) {
             logstream << nodeName() << ": luma plane copy failed";
             return false;
         }
 
-        if (!copyPlane((CUdeviceptr)(uintptr_t)out.raw()->data[1], (size_t)out.raw()->linesize[1],
+        if (!joined &&
+            !copyPlane((CUdeviceptr)(uintptr_t)out.raw()->data[1], (size_t)out.raw()->linesize[1],
                        (CUdeviceptr)(uintptr_t)frm.raw()->data[1], (size_t)frm.raw()->linesize[1],
                        (size_t)frm.width(), (size_t)((frm.height() + 1) / 2))) {
             logstream << nodeName() << ": chroma plane copy failed";

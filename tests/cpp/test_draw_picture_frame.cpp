@@ -72,6 +72,48 @@ static void private_picture() {
     av_buffer_unref(&other);
 }
 
+static void plane_span() {
+    // An NV12 frame as a pool lays it out: one buffer of pitch 64, 8 luma rows, then 4 chroma rows.
+    static uint8_t storage[64 * 12];
+    AVFrame *f = av_frame_alloc();
+    assert(f);
+    f->buf[0] = av_buffer_create(storage, sizeof(storage), [](void *, uint8_t *) {}, nullptr, 0);
+    assert(f->buf[0]);
+    f->linesize[0] = f->linesize[1] = 64;
+    f->data[0] = storage;
+    f->data[1] = storage + 64 * 8;
+    assert(planeSpanRows(f, 4) == 8);
+    // A frame shorter than its pool's frames asks for fewer chroma rows.
+    assert(planeSpanRows(f, 3) == 8);
+    // Chroma rows that would end behind the buffer.
+    assert(planeSpanRows(f, 5) == 0);
+
+    f->linesize[1] = 32;
+    assert(planeSpanRows(f, 4) == 0);
+    f->linesize[1] = 64;
+
+    // Plane 1 not a whole number of rows behind plane 0, and not behind it at all.
+    f->data[1] = storage + 64 * 8 + 1;
+    assert(planeSpanRows(f, 3) == 0);
+    f->data[1] = storage;
+    assert(planeSpanRows(f, 4) == 0);
+
+    // Planes that do not start where the buffer starts: its size says nothing about their end.
+    f->data[0] = storage + 64;
+    f->data[1] = storage + 64 * 8;
+    assert(planeSpanRows(f, 4) == 0);
+    f->data[0] = storage;
+
+    // A second buffer, as a mapped decoder surface carries, and no buffer.
+    assert(planeSpanRows(f, 4) == 8);
+    f->buf[1] = av_buffer_ref(f->buf[0]);
+    assert(f->buf[1] && planeSpanRows(f, 4) == 0);
+    av_buffer_unref(&f->buf[1]);
+    av_buffer_unref(&f->buf[0]);
+    assert(planeSpanRows(f, 4) == 0);
+    av_frame_free(&f);
+}
+
 static void props() {
     AVFrame *src = av_frame_alloc(), *dst = av_frame_alloc();
     assert(src && dst);
@@ -119,6 +161,7 @@ static void props() {
 
 int main() {
     private_picture();
+    plane_span();
     props();
     return 0;
 }
