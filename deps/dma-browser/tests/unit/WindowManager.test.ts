@@ -12,6 +12,7 @@ function fakeWindow(config: WindowConfig, overrides: Partial<IManagedWindow> = {
     height: config.height,
     fps: config.fps,
     audio: config.audio,
+    holdLastFrame: config.holdLastFrame ?? true,
     visible: false,
     stats: {
       paintCount: 0,
@@ -20,6 +21,7 @@ function fakeWindow(config: WindowConfig, overrides: Partial<IManagedWindow> = {
       txFrameCount: 0,
       releasedFrameCount: 0,
       retainedFrameCount: 0,
+      quarantinedFrameCount: 0,
       lastPaintTsMs: null,
     },
   };

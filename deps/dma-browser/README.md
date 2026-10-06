@@ -6,12 +6,12 @@ Generic offscreen HTML page renderer for Linux + Electron, with GPU dmabuf captu
 Electron limit. The launcher groups at most `DMA_BROWSER_WINDOWS_PER_PROCESS`
 windows in one Electron process (default 8) and automatically starts enough
 workers for the requested maximum. All workers remain behind the same REST API
-on `127.0.0.1:9009`. The project configuration uses Electron 41 / Chromium
-146.
+on `127.0.0.1:9009`. The project configuration uses Electron 44 / Chromium
+152.
 
 To build the runtime-gated Electron native-handle change yourself, use the
 patch and script documented in
-[the browser demo](../../demos/dmabuf-browser/README.md#alternative-build-electron-without-the-shim).
+[DMA-BUF integration](../../doc/dmabuf.md#shim-and-chromium-patches).
 
 ## Quick start
 
@@ -35,7 +35,18 @@ DMA_BROWSER_FORCE_NVIDIA=1 npm start
 
 The shim is native to the host CPU architecture. `bin/run.sh` applies the
 Wayland, EGL/GBM, and DRM settings; hardware video decoding stays disabled.
-The [Docker demo](../../demos/dmabuf-browser/README.md#run) builds and enables
+
+Two switches keep the GPU process stable, both on by default:
+
+- `DMA_BROWSER_WEBGPU_OPENGLES=0` turns off `--use-webgpu-adapter=opengles`.
+  With `--ignore-gpu-blocklist`, Chromium runs WebGPU on Vulkan through GL
+  interop and creates a Vulkan context in the GPU process. Recreating windows
+  then crashes it in `AddCleanupTaskForSkiaFlush` (electron/electron#54553).
+  On OpenGL ES that Vulkan context is never created (Chromium 152+).
+- `DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT=0` turns off
+  `--disable-gpu-process-crash-limit`. Without it, a third GPU-process crash
+  within five minutes of the last makes Chromium quit the worker.
+The [shared Docker stack](../../docker-compose/dmabuf/compose.yaml) builds and enables
 the shim automatically. Alternatively, use the patched Electron build linked
 above without the shim.
 
@@ -74,27 +85,69 @@ process count remains available for isolation tests, but its combined capacity
 must cover `DMA_BROWSER_MAX_WINDOWS`. The public API always enforces
 `DMA_BROWSER_MAX_WINDOWS`, including when the last worker has unused slots.
 
+`DMA_BROWSER_STAGGER_FRAMES=1` (off by default) starts each worker's 60 fps
+frames at a different point of the frame period: worker 0 at the start, 1 at
+one half, 2 at a quarter, 3 at three quarters, and so on, so whichever workers
+a show runs stay apart. Without it, every 60 fps window of every worker starts
+its frame at the same instant, because Chromium hands a window's own frame
+timebase to its display only when the interval differs from 1/60 s; the host
+then sees one burst of runnable threads per frame. Windows at other rates
+already start at their own instants and are left alone. The 60 fps windows of
+one worker share a phase. Frame rate and frame count do not change, and a
+frame's timestamp is still the monotonic time of its paint, which now falls at
+the worker's point of the period.
+
 ## REST API
 
-| Method | Path                | Body                                                       |
-| ------ | ------------------- | ---------------------------------------------------------- |
-| POST   | `/window/open`      | `{ id, url, width, height, fps, audio }`                   |
-| POST   | `/window/close`     | `{ id }`                                                   |
-| GET    | `/window/close/all` |                                                            |
-| POST   | `/window/refresh`   | `{ id }`                                                   |
-| POST   | `/window/update`    | `{ id, url }`                                              |
-| POST   | `/window/show`      | `{ id, show }`                                             |
-| GET    | `/status`           |                                                            |
+| Method | Path                | Body                                                              |
+| ------ | ------------------- | ----------------------------------------------------------------- |
+| POST   | `/window/open`      | `{ id, url, width, height, fps, audio, ringSize, holdLastFrame }` |
+| POST   | `/window/close`     | `{ id }`                                                          |
+| GET    | `/window/close/all` |                                                                   |
+| POST   | `/window/refresh`   | `{ id }`                                                          |
+| POST   | `/window/update`    | `{ id, url }`                                                     |
+| POST   | `/window/show`      | `{ id, show }`                                                    |
+| GET    | `/status`           |                                                                   |
+| POST   | `/workers/recover`  | `{ ids }`                                                         |
 
 Frames go to `/tmp/dma-page/{id}.sock` (dmabuf FD + 48-byte TexInfo header).
 Audio (when `audio: true`) goes to `/tmp/dma-page/{id}-audio.sock` (raw interleaved float32 PCM).
 
+A main-frame load failure, a load exceeding `DMA_BROWSER_LOAD_WATCHDOG_MS` (30 s by default), or a
+renderer crash reloads the page after 1 s, doubling up to 30 s while reloads keep failing. The
+sockets stay open, so consumers keep their connection and held frames.
+With `holdLastFrame` (default `true`), the window sends no frames until a reload loads cleanly, so
+consumers repeat the last one they received; `false` sends Chromium's error page instead.
+
+### Frame lifetime and transport counters
+
+Rebuild the `fdpass` addon and avplumber together when updating the DMA-BUF
+protocol. A consumer sends 16-byte little-endian `ACK1` records: kind `0` at
+offset 4 releases the frame number at offset 8; kind `1` stops new deliveries;
+kind `2` confirms that all received frames have finished their GPU reads.
+`ipc_dmabuf_source` keeps the connection alive until its last frame is released,
+then sends kind `2`. Shut down consumers before closing browser windows.
+
+An unexpected disconnect cannot prove GPU reads have finished. The browser pins
+unacknowledged textures, pauses the affected source, and reports
+`quarantinedFrameCount` in `/status`. After stopping the affected consumer,
+restart its browser worker with `POST /workers/recover`; reopening the window
+alone is refused. Other windows in that worker also restart, so `ids` must list
+all of them. This protocol controls buffer reuse; it does not supply a
+producer-ready GPU fence.
+
+`txFrameCount` counts paints delivered to at least one consumer. `droppedFrames`
+counts paints with no consumer or any failed delivery, so a partial broadcast
+increments both counters. `fdpass_backpressure`, `fdpass_disconnected`, and
+`fdpass_errors` in `droppedReasons` count failed deliveries per consumer.
+
 The DMA-BUF socket is bidirectional. The browser retains every transmitted
 shared texture until the consumer acknowledges its frame number. The maximum
-sent-but-unacknowledged count is `DMA_BROWSER_DMABUF_POOL_SIZE` (default 11,
-range 1–64). If that limit is reached, the newest paint is dropped and released;
-an older in-flight texture is never released early. `/status` reports
-`releasedFrameCount` and `retainedFrameCount` for each window.
+sent-but-unacknowledged count is the window's `ringSize`, else
+`DMA_BROWSER_DMABUF_POOL_SIZE` (default 11; both range 1–64). If that limit is
+reached, the newest paint is dropped and released; an older in-flight texture is
+never released early. `/status` reports `releasedFrameCount` and
+`retainedFrameCount` for each window.
 
 ## Layout
 

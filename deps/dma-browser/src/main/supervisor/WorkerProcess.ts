@@ -10,6 +10,11 @@ import {
   ValidationError,
   WorkerUnavailableError,
 } from '../rest/errors';
+import { forEachBounded } from '../support/concurrency';
+
+// Pages a restarted worker reloads at once. Each /window/open waits for its page load, so
+// serial restores cost a worker's whole page count in load times.
+const RESTORE_CONCURRENCY = 4;
 
 interface DesiredWindow {
   readonly config: WindowConfig;
@@ -35,6 +40,9 @@ export interface BrowserWorker {
   readonly hasCapacity: boolean;
   start(): Promise<void>;
   stop(): Promise<void>;
+  /** Stops the Electron process when no window is assigned; the next open() starts it again. */
+  stopIfIdle(): Promise<void>;
+  restart(): Promise<void>;
   open(config: WindowConfig): Promise<WindowSnapshot>;
   close(id: string): Promise<void>;
   closeAll(): Promise<void>;
@@ -137,10 +145,19 @@ export class ElectronWorkerProcess implements BrowserWorker {
       exited.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000)),
     ]);
+    // TypeScript keeps the null narrowing from the early return across the await above.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (!graceful && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGKILL');
       await exited;
     }
+  }
+
+  public async stopIfIdle(): Promise<void> {
+    // Queued behind open(), so a window assigned while this waited keeps the process.
+    return this.enqueue(async () => {
+      if (this.desired.size === 0) await this.stop();
+    });
   }
 
   public async open(config: WindowConfig): Promise<WindowSnapshot> {
@@ -156,6 +173,15 @@ export class ElectronWorkerProcess implements BrowserWorker {
         this.desired.delete(config.id);
         throw err;
       }
+    });
+  }
+
+  public async restart(): Promise<void> {
+    return this.enqueue(async () => {
+      await this.stop();
+      await this.start();
+      await this.restoreDesiredWindows();
+      this.restarts += 1;
     });
   }
 
@@ -278,24 +304,24 @@ export class ElectronWorkerProcess implements BrowserWorker {
     if (this.restartTimer !== null || this.stopping) return;
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
-      void this.enqueue(async () => {
-        try {
-          await this.start();
-          await this.restoreDesiredWindows();
-        } catch (err) {
-          console.error(
-            `dma-browser worker ${String(this.index)} restart failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          this.scheduleRestart();
-        }
+      this.enqueue(async () => {
+        // stop() may have run while this restart waited in the queue; start() would undo it.
+        if (this.stopping) return;
+        await this.start();
+        await this.restoreDesiredWindows();
+      }).catch((err: unknown) => {
+        console.error(
+          `dma-browser worker ${String(this.index)} restart failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        this.scheduleRestart();
       });
     }, this.opts.restartDelayMs);
   }
 
   private async restoreDesiredWindows(): Promise<void> {
-    for (const desired of this.desired.values()) {
+    await forEachBounded([...this.desired.values()], RESTORE_CONCURRENCY, async (desired) => {
       try {
         await this.request('POST', '/window/open', desired.config);
       } catch (err) {
@@ -304,7 +330,7 @@ export class ElectronWorkerProcess implements BrowserWorker {
       if (desired.visible) {
         await this.request('POST', '/window/show', { id: desired.config.id, show: true });
       }
-    }
+    });
   }
 
   private async waitUntilReady(): Promise<void> {

@@ -14,9 +14,22 @@ const validBody = {
 };
 
 describe('ConfigService.validateWindowConfig', () => {
+  it('accepts an optional per-window ring limit', () => {
+    expect(svc.validateWindowConfig({ ...validBody, ringSize: 6 }).ringSize).toBe(6);
+    for (const ringSize of [0, 65, 6.5, true, '6']) {
+      expect(() => svc.validateWindowConfig({ ...validBody, ringSize })).toThrow(ValidationError);
+    }
+  });
+  it('holds the last frame unless holdLastFrame is false', () => {
+    expect(svc.validateWindowConfig(validBody).holdLastFrame).toBe(true);
+    expect(svc.validateWindowConfig({ ...validBody, holdLastFrame: false }).holdLastFrame).toBe(false);
+    for (const holdLastFrame of [0, 'false', null]) {
+      expect(() => svc.validateWindowConfig({ ...validBody, holdLastFrame })).toThrow(ValidationError);
+    }
+  });
   it('accepts a valid body', () => {
     const cfg = svc.validateWindowConfig(validBody);
-    expect(cfg).toEqual(validBody);
+    expect(cfg).toEqual({ ...validBody, holdLastFrame: true });
   });
 
   it('defaults audio to false when omitted', () => {
@@ -82,6 +95,14 @@ describe('ConfigService.validateId / validateUpdateUrl / validateShow', () => {
     expect(svc.validateId({ id: 'win-1' })).toEqual({ id: 'win-1' });
     expect(() => svc.validateId({ id: '' })).toThrow(ValidationError);
     expect(() => svc.validateId({})).toThrow(ValidationError);
+  });
+
+  it('validateIds checks the list and every id', () => {
+    expect(svc.validateIds({ ids: ['win-1', 'win-2'] })).toEqual(['win-1', 'win-2']);
+    expect(svc.validateIds({ ids: [] })).toEqual([]);
+    expect(() => svc.validateIds({ ids: 'win-1' })).toThrow(ValidationError);
+    expect(() => svc.validateIds({ ids: ['../invalid'] })).toThrow(ValidationError);
+    expect(() => svc.validateIds(null)).toThrow(ValidationError);
   });
 
   it('validateUpdateUrl checks id + url', () => {

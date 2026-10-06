@@ -8,7 +8,7 @@ import {
   NotFoundError,
   ValidationError,
 } from '../../../src/main/rest/errors';
-import type { WindowManager } from '../../../src/main/WindowManager';
+import type { WindowControl } from '../../../src/main/WindowControl';
 import type { WindowConfig, WindowSnapshot } from '../../../src/main/config/WindowConfig';
 
 function snapshotFor(cfg: WindowConfig): WindowSnapshot {
@@ -19,6 +19,7 @@ function snapshotFor(cfg: WindowConfig): WindowSnapshot {
     height: cfg.height,
     fps: cfg.fps,
     audio: cfg.audio,
+    holdLastFrame: cfg.holdLastFrame ?? true,
     visible: false,
     stats: {
       paintCount: 0,
@@ -27,13 +28,14 @@ function snapshotFor(cfg: WindowConfig): WindowSnapshot {
       txFrameCount: 0,
       releasedFrameCount: 0,
       retainedFrameCount: 0,
+      quarantinedFrameCount: 0,
       lastPaintTsMs: null,
     },
   };
 }
 
-function buildManager(overrides: Partial<WindowManager> = {}): WindowManager {
-  const mgr = {
+function buildManager(overrides: Partial<WindowControl> = {}): WindowControl {
+  return {
     open: vi.fn(),
     close: vi.fn(),
     closeAll: vi.fn().mockResolvedValue(undefined),
@@ -43,10 +45,9 @@ function buildManager(overrides: Partial<WindowManager> = {}): WindowManager {
     status: vi.fn().mockReturnValue({ windows: [], count: 0, maxWindows: 8 }),
     ...overrides,
   };
-  return mgr as unknown as WindowManager;
 }
 
-function buildServer(mgr: WindowManager) {
+function buildServer(mgr: WindowControl) {
   return new RestServer(mgr, { host: '127.0.0.1', port: 0 }, new ConfigService());
 }
 
@@ -178,5 +179,23 @@ describe('unknown routes', () => {
     const res = await request(buildServer(mgr).app).get('/no/such/path');
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('RouteNotFound');
+  });
+});
+
+describe('POST /workers/recover', () => {
+  it('validates ids before calling the supervisor', async () => {
+    const manager = buildManager({ recover: vi.fn().mockResolvedValue(undefined) });
+    const app = buildServer(manager).app;
+    expect((await request(app).post('/workers/recover').send({ ids: ['win-1'] })).status).toBe(200);
+    expect(manager.recover).toHaveBeenCalledWith(['win-1']);
+    expect((await request(app).post('/workers/recover').send({ ids: '../invalid' })).status).toBe(400);
+    expect((await request(app).post('/workers/recover').send({ ids: ['../invalid'] })).status).toBe(400);
+    expect(manager.recover).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports unsupported recovery and worker failures', async () => {
+    expect((await request(buildServer(buildManager()).app).post('/workers/recover').send({ ids: [] })).status).toBe(409);
+    const manager = buildManager({ recover: vi.fn().mockRejectedValue(new Error('worker failed')) });
+    expect((await request(buildServer(manager).app).post('/workers/recover').send({ ids: ['win-1'] })).status).toBe(500);
   });
 });
