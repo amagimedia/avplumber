@@ -39,15 +39,17 @@ cargo run --features=ffmpeg6
 
 Change `ffmpeg6` to the version you have on the host system (`ffmpeg6`, `ffmpeg7`, `ffmpeg7_1`, `ffmpeg8`, `ffmpeg9`). See [`avplumber_f7k/Cargo.toml`](avplumber_f7k/Cargo.toml).
 
-`rusty_ffmpeg` and `rsmpeg` live in `deps/` as submodules so they can be patched in place. FFmpeg source is the `deps/ffmpeg` submodule (`master`). Build that tree, or any other checkout, and link it instead of the distro libraries:
+`rusty_ffmpeg` and `rsmpeg` live in `deps/` as submodules so they can be patched in place. The command above links the system FFmpeg through pkg-config. No FFmpeg source tree is required.
+
+A custom build is optional. Pass its source directory; there is no default path:
 
 ```
-scripts/build-ffmpeg.sh
+scripts/build-ffmpeg.sh /path/to/ffmpeg
 source target/ffmpeg.env
 cargo run --features=ffmpeg9
 ```
 
-Arguments after the script name are passed to `./configure` (`scripts/build-ffmpeg.sh --enable-gpl --enable-libx264`). `FFMPEG_SRC` picks a different source tree. `FFMPEG_PREFIX` picks the install prefix (default `target/ffmpeg`) and, when set, wins over the FFmpeg pkg-config would find on the system.
+`FFMPEG_SRC=/path/to/ffmpeg` is the same as the path argument. Further arguments are passed to `./configure` (`scripts/build-ffmpeg.sh /path/to/ffmpeg --enable-gpl --enable-libx264`). `FFMPEG_PREFIX` picks the install prefix (default `target/ffmpeg`). While that variable is set, it wins over the FFmpeg pkg-config finds on the system. Unset it to go back to the system libraries.
 
 ----
 

@@ -13,9 +13,11 @@ default = []
 # The upstream features are additive
 # (ffmpeg6 ⊂ ffmpeg6_1 ⊂ ffmpeg7 ⊂ ffmpeg7_1 ⊂ ffmpeg8 ⊂ ffmpeg8_1 ⊂ ffmpeg9);
 # bindings are generated from the headers of whichever FFmpeg is linked, so the
-# selector must match that library. `link_system_ffmpeg` probes pkg-config.
-# `FFMPEG_PREFIX` (see scripts/build-ffmpeg.sh) or `FFMPEG_PKG_CONFIG_PATH` /
-# `FFMPEG_LIBS_DIR` selects a custom build instead of the distro libraries.
+# selector must match that library. `link_system_ffmpeg` probes pkg-config, so a
+# system install needs no FFmpeg build. `FFMPEG_PREFIX` (see
+# scripts/build-ffmpeg.sh) or `FFMPEG_PKG_CONFIG_PATH` / `FFMPEG_LIBS_DIR`
+# selects a custom build instead. The script takes the source directory as an
+# argument; it has no default path.
 ffmpeg = ["dep:rusty_ffmpeg", "dep:rsmpeg"]
 ffmpeg6 = ["ffmpeg", "rsmpeg/ffmpeg6", "rusty_ffmpeg/ffmpeg6"]
 ffmpeg7 = ["ffmpeg", "rsmpeg/ffmpeg7", "rusty_ffmpeg/ffmpeg7"]

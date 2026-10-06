@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-# Build a custom FFmpeg and install it where the Rust crates can link it.
+# Optionally build a custom FFmpeg and install it where the Rust crates can link it.
 #
-# Source defaults to deps/ffmpeg (the submodule, branch master).
-# Override with FFMPEG_SRC. Install prefix defaults to target/ffmpeg.
-# Override with FFMPEG_PREFIX. Extra arguments are passed to ./configure
-# after the defaults, so a patched tree or a different feature set is:
+# System FFmpeg needs none of this. With FFMPEG_PREFIX unset, cargo uses
+# pkg-config:
 #
-#   scripts/build-ffmpeg.sh --enable-gpl --enable-libx264
+#   cargo build -p avplumber_nodes --features ffmpeg6,async
+#
+# A custom tree is used only when a source directory is given, as the first
+# non-option argument or as FFMPEG_SRC. There is no default source path.
+# Install prefix defaults to target/ffmpeg. Override with FFMPEG_PREFIX.
+# Remaining arguments are passed to ./configure:
+#
+#   scripts/build-ffmpeg.sh /path/to/ffmpeg --enable-gpl --enable-libx264
 #   FFMPEG_SRC=/path/to/ffmpeg scripts/build-ffmpeg.sh
 #
-# The script writes target/ffmpeg.env. A matching selector is required:
+# The script writes target/ffmpeg.env. Source it so later cargo builds link
+# that install instead of the distro libraries, and pick the matching feature:
 #
 #   source target/ffmpeg.env
 #   cargo build -p avplumber_nodes --features ffmpeg9,async
@@ -21,19 +27,36 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-SRC=${FFMPEG_SRC:-$ROOT/deps/ffmpeg}
 PREFIX=${FFMPEG_PREFIX:-$ROOT/target/ffmpeg}
 BUILD=${FFMPEG_BUILD_DIR:-$ROOT/target/ffmpeg-build}
 
 reconfigure=0
 configure_args=()
+src_arg=
 for arg in "$@"; do
     if [[ "$arg" == "--reconfigure" ]]; then
         reconfigure=1
+    elif [[ -z "$src_arg" && "$arg" != -* ]]; then
+        src_arg=$arg
     else
         configure_args+=("$arg")
     fi
 done
+
+SRC=${src_arg:-${FFMPEG_SRC:-}}
+if [[ -z "$SRC" ]]; then
+    if [[ ${#configure_args[@]} -gt 0 ]]; then
+        echo "Configure flags need a FFmpeg source directory." >&2
+        echo "  scripts/build-ffmpeg.sh /path/to/ffmpeg ${configure_args[*]}" >&2
+        exit 1
+    fi
+    echo "No FFmpeg source given; nothing was built."
+    echo "System FFmpeg is used as-is:"
+    echo "  cargo build -p avplumber_nodes --features ffmpeg6,async"
+    echo "Pass a source directory to build a custom FFmpeg instead:"
+    echo "  scripts/build-ffmpeg.sh /path/to/ffmpeg"
+    exit 0
+fi
 
 # FFmpeg refuses to configure without nasm unless x86 assembly is disabled.
 # A host without nasm still gets a working build; install nasm and re-run for
@@ -52,8 +75,7 @@ if ! command -v nasm >/dev/null 2>&1; then
 fi
 
 if [[ ! -f "$SRC/configure" ]]; then
-    echo "No FFmpeg source at $SRC." >&2
-    echo "Expected the deps/ffmpeg submodule (git submodule update --init deps/ffmpeg)." >&2
+    echo "No FFmpeg source at $SRC (expected a checkout with ./configure)." >&2
     exit 1
 fi
 
