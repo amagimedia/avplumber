@@ -18,13 +18,14 @@
         feature = "ffmpeg6",
         feature = "ffmpeg7",
         feature = "ffmpeg7_1",
-        feature = "ffmpeg8"
+        feature = "ffmpeg8",
+        feature = "ffmpeg9"
     ))
 ))]
 compile_error!(
     "feature `ffmpeg` selects no ABI on its own: build with `ffmpeg6`, `ffmpeg7`, \
-     `ffmpeg7_1` or `ffmpeg8` (each implies `ffmpeg`), matching the FFmpeg this \
-     crate links against"
+     `ffmpeg7_1`, `ffmpeg8` or `ffmpeg9` (each implies `ffmpeg`), matching the \
+     FFmpeg this crate links against"
 );
 
 use avplumber_f7k::Instance;

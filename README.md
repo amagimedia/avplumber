@@ -37,7 +37,17 @@ We have video player demo working in Docker, with WebRTC output via Janus, with 
 cargo run --features=ffmpeg6
 ```
 
-Change `ffmpeg6` to the version you have on the host system. See [`avplumber_f7k/Cargo.toml`](avplumber_f7k/Cargo.toml) for supported versions.
+Change `ffmpeg6` to the version you have on the host system (`ffmpeg6`, `ffmpeg7`, `ffmpeg7_1`, `ffmpeg8`, `ffmpeg9`). See [`avplumber_f7k/Cargo.toml`](avplumber_f7k/Cargo.toml).
+
+`rusty_ffmpeg` and `rsmpeg` live in `deps/` as submodules so they can be patched in place. FFmpeg source is the `deps/ffmpeg` submodule (`master`). Build that tree, or any other checkout, and link it instead of the distro libraries:
+
+```
+scripts/build-ffmpeg.sh
+source target/ffmpeg.env
+cargo run --features=ffmpeg9
+```
+
+Arguments after the script name are passed to `./configure` (`scripts/build-ffmpeg.sh --enable-gpl --enable-libx264`). `FFMPEG_SRC` picks a different source tree. `FFMPEG_PREFIX` picks the install prefix (default `target/ffmpeg`) and, when set, wins over the FFmpeg pkg-config would find on the system.
 
 ----
 

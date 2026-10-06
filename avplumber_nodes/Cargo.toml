@@ -13,6 +13,7 @@ ffmpeg6 = ["ffmpeg", "avplumber_f7k/ffmpeg6", "rsmpeg/ffmpeg6", "rusty_ffmpeg/ff
 ffmpeg7 = ["ffmpeg", "avplumber_f7k/ffmpeg7", "rsmpeg/ffmpeg7", "rusty_ffmpeg/ffmpeg7"]
 ffmpeg7_1 = ["ffmpeg", "avplumber_f7k/ffmpeg7_1", "rsmpeg/ffmpeg7_1", "rusty_ffmpeg/ffmpeg7_1"]
 ffmpeg8 = ["ffmpeg", "avplumber_f7k/ffmpeg8", "rsmpeg/ffmpeg8", "rusty_ffmpeg/ffmpeg8"]
+ffmpeg9 = ["ffmpeg", "avplumber_f7k/ffmpeg9", "rsmpeg/ffmpeg9", "rusty_ffmpeg/ffmpeg9"]
 async = ["avplumber_f7k/async"]
 
 # The executable: runs scripts and serves the control protocol. Needs the
@@ -28,8 +29,8 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 # `std` for the executable's boxed logger.
 log = { version = "0.4", features = ["std"] }
-rusty_ffmpeg = { version = "0.16.7", optional = true, default-features = false, features = ["link_system_ffmpeg"] }
-rsmpeg = { version = "0.18.0", optional = true, default-features = false }
+rusty_ffmpeg = { path = "../deps/rusty_ffmpeg", optional = true, default-features = false, features = ["link_system_ffmpeg"] }
+rsmpeg = { path = "../deps/rsmpeg", optional = true, default-features = false }
 
 [dev-dependencies]
 # `mux`'s unit tests drive edges with `graph::media::test_media`, which the

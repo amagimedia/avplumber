@@ -1,3 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["avplumber_f7k", "avplumber_nodes"]
+# Patched in place. Not members: their own tests and dev-dependencies stay
+# out of `cargo test --workspace`.
+exclude = ["deps/rusty_ffmpeg", "deps/rsmpeg"]

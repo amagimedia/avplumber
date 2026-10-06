@@ -581,7 +581,7 @@ what lets their ordering and grammar rules be tested without FFmpeg.
 `Instance::new` registers **no** media node. An embedder calls
 `nodes::register_media_nodes(&inst)` explicitly, so a substrate-only build pays
 nothing for libav. The feature selectors (`ffmpeg6`, `ffmpeg7`, `ffmpeg7_1`,
-`ffmpeg8`) pick the ABI; `ffmpeg` alone is a code gate and fails the build.
+`ffmpeg8`, `ffmpeg9`) pick the ABI; `ffmpeg` alone is a code gate and fails the build.
 Version-divergent libav API belongs behind a cfg-gated helper in `src/libav/`,
 never in a node.
 

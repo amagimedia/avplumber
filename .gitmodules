@@ -24,3 +24,13 @@
 	path = deps/pybind11_json
 	url = https://github.com/pybind/pybind11_json
 	branch = master
+[submodule "deps/rusty_ffmpeg"]
+	path = deps/rusty_ffmpeg
+	url = https://github.com/CCExtractor/rusty_ffmpeg.git
+[submodule "deps/rsmpeg"]
+	path = deps/rsmpeg
+	url = https://github.com/larksuite/rsmpeg.git
+[submodule "deps/ffmpeg"]
+	path = deps/ffmpeg
+	url = https://github.com/FFmpeg/FFmpeg.git
+	branch = master

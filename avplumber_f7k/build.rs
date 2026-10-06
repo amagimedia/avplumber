@@ -1,4 +1,7 @@
+include!("../build_support/ffmpeg_prefix.rs");
+
 fn main() {
+    configure_ffmpeg_prefix();
     let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let src = manifest_dir.join("src/graph/capability.rs");
     let dest = manifest_dir.join("include/avplumber_ids.h");
