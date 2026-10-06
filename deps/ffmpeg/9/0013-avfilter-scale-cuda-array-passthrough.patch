@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Sat, 3 Oct 2026 00:38:23 +0200
+Subject: [PATCH] avfilter/scale_cuda: allow CUarray identity passthrough
+
+---
+ libavfilter/vf_scale_cuda.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/libavfilter/vf_scale_cuda.c b/libavfilter/vf_scale_cuda.c
+index b37ae4a..3e05d1c 100644
+--- a/libavfilter/vf_scale_cuda.c
++++ b/libavfilter/vf_scale_cuda.c
+@@ -529,6 +529,12 @@ static av_cold int init_processing_chain(AVFilterContext *ctx, int in_width, int
+ 
+         s->use_filters = 0;
+     } else {
++        if (in_frames_ctx->format == AV_PIX_FMT_CUARRAY) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "CUarray input supports passthrough only; dimensions and "
++                   "pixel format must match and passthrough must be enabled\n");
++            return AVERROR(ENOSYS);
++        }
+         s->passthrough = 0;
+ 
+         ret = init_hwframe_ctx(s, in_frames_ctx->device_ref, out_width, out_height);
+@@ -1010,6 +1016,11 @@ static av_cold int cudascale_config_props(AVFilterLink *outlink)
+            outlink->w, outlink->h, av_get_pix_fmt_name(s->out_fmt),
+            s->passthrough ? " (passthrough)" : "");
+ 
++    /* Identity frames are forwarded without launching a kernel. Avoid loading
++     * and JIT-compiling the CUDA module for every passthrough instance. */
++    if (s->passthrough)
++        return 0;
++
+     if (s->use_filters) {
+         ret = cudascale_setup_filters(ctx, inlink->w, inlink->h);
+         if (ret < 0)
+@@ -1443,7 +1454,7 @@ const FFFilter ff_vf_scale_cuda = {
+     FILTER_INPUTS(cudascale_inputs),
+     FILTER_OUTPUTS(cudascale_outputs),
+ 
+-    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    FILTER_PIXFMTS(AV_PIX_FMT_CUDA, AV_PIX_FMT_CUARRAY),
+ 
+     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
+ };
+-- 
+2.55.0
+
