@@ -12,8 +12,9 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>PGM delay instead of a longer aux deadline</h1>
+<p class="note">Reviewed 2026-10-06 against <a href="https://github.com/amagimedia/avplumber/tree/d1dc35fa071c703f145ed989ff98bbf585c563d2">mixer-improv at d1dc35fa</a>. Measurements retain their original workload and validation scope; this review does not certify a running deployment.</p><p class="note"><b>Current scope.</b> The 80 ms diagram is specifically the 25 fps example. Canvas latency defaults depend on frame rate; program-pad delay depends on AUX rate. Source pads do not inherit the program pad offset.</p>
   <p class="lede">The Program preview aux keeps the normal 80 ms deadline for all its sources and shows only its PGM pad one frame back, because the finished program arrives a frame later than the sources it is made of.</p>
-  <span class="pill live">Status: Live</span>
+  <span class="pill live">Status: Implemented</span>
 
   <h2>The timing</h2>
   <p>Every compositor draws output time T at T + 80 ms (a 2-frame playout deadline at 25 fps). An input that misses the deadline repeats its last frame; nothing stalls. The Program preview aux (layout <code>pgm_pvw_grid</code>: 100 source pads + 1 PGM pad) also takes the finished program. That leaves the M/E at about T + 2 frames + keyer ≈ T + 96 ms, after the deadline.</p>
@@ -137,13 +138,13 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/mixer_compositor.cpp#L402-L411">src/nodes/mixer_compositor.cpp#L402-L411</a>: reads <code>pgm_delay_frames</code> and applies it to the last input; <code>mixer_keyer</code>, which has no playout, takes none.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/mixer/Playout.hpp#L81-L92">src/mixer/Playout.hpp#L81-L92</a>: <code>Playout::setInputOffset</code> and its six-frame budget check; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/mixer/Playout.hpp#L105">L105</a> shifts the input's slot.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L253-L256">pyplumber/mixer/aux.py#L253-L256</a>: the bus field <code>pgm_delay_frames</code>, default 1 (2 at a 50/60 fps bus, <code>default_pgm_delay_frames</code>); <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L174-L176">L174-L176</a> check the budget in Python; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/aux.py#L190">L190</a> passes it to the node when it is not 0.</li>
-    <li>Tests: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_aux.py#L274-L300">demos/mixer/tests/test_aux.py#L274-L300</a>, <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/test_backend.py#L99-L103">demos/mixer/tests/test_backend.py#L99-L103</a>.</li>
-    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#aux_buses">config.md · aux_buses</a> (the paragraph on the PGM tile running one aux frame behind).</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/nodes/mixer_compositor.cpp">src/nodes/mixer_compositor.cpp</a>: reads <code>pgm_delay_frames</code> and applies it to the last input; <code>mixer_keyer</code>, which has no playout, takes none.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/mixer/Playout.hpp">src/mixer/Playout.hpp</a>: <code>Playout::setInputOffset</code> and its six-frame budget check; <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/mixer/Playout.hpp">source</a> shifts the input's slot.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/aux.py">pyplumber/mixer/aux.py</a>: the bus field <code>pgm_delay_frames</code>, default 1 (2 at a 50/60 fps bus, <code>default_pgm_delay_frames</code>); <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/aux.py">source</a> check the budget in Python; <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/aux.py">source</a> passes it to the node when it is not 0.</li>
+    <li>Tests: <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/tests/mixer/test_aux.py">tests/mixer/test_aux.py</a>, <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/tests/mixer/test_backend.py">tests/mixer/test_backend.py</a>.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/config.md#aux_buses">config.md · aux_buses</a> (the paragraph on the PGM tile running one aux frame behind).</li>
   </ul>
-  <p class="note">Live on the test host from mixer-improv; not merged to develop yet. Line numbers may have moved since.</p>
+  <p class="note">Source links identify the reviewed code, independently of deployment state.</p>
 
   <footer><a href="index.html">← All cookbook pages</a></footer>
 </main>

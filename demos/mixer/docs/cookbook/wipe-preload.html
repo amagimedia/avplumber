@@ -16,8 +16,9 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>A wipe clip is cached whole or the start fails</h1>
+<p class="note">Reviewed 2026-10-06 against <a href="https://github.com/amagimedia/avplumber/tree/d1dc35fa071c703f145ed989ff98bbf585c563d2">mixer-improv at d1dc35fa</a>. Measurements retain their original workload and validation scope; this review does not certify a running deployment.</p><p class="note"><b>Current scope.</b> EOF-based preload and count checks are implemented, with loader deadline/cleanup and one retry. Native builds and Python tests do not establish dedicated wipe GPU qualification. That validation remains separate from the cadence/transform smoke tests.</p>
   <p class="lede">The wipe preload used to decide that a clip had ended when no frame arrived for 200 ms. A stalled GPU upload looks the same, so a start on a fresh container cached a wipe of 2 frames. A load now ends only on the decode chain's end-of-stream marker, the stored frame count is checked, and the stall itself is avoided on every start but a host's first.</p>
-  <span class="pill impl">Status: built, Python tests pass; not run on a GPU host yet</span>
+  <span class="pill impl">Status: built, Python tests pass; dedicated wipe GPU qualification pending</span>
 
   <h2>What went wrong</h2>
   <p>A freshly created mixer container compiles FFmpeg's CUDA filter kernels on first use. On the L4 host that stalled GPU work for about 15 s during startup, while the wipe clips were being decoded into the GPU cache. Two things followed:</p>
@@ -54,8 +55,8 @@
     <li><code>src/nodes/realtime.cpp</code>: <code>forward_eof</code>.</li>
     <li><code>pyplumber/mixer/clipcache.py</code>: <code>preload()</code>, the count check, the reload and the stop-and-discard between loads; <code>require_cached()</code> after the last one.</li>
     <li><code>pyplumber/mixer/graph.py</code>: the loader's <code>realtime</code> with <code>forward_eof</code> and without <code>set_pts</code> when caching.</li>
-    <li><code>demos/mixer/compose.yaml</code>: <code>CUDA_CACHE_PATH</code>, also in effect for <code>deploy/l4</code>, which layers its file over this one.</li>
-    <li><code>demos/mixer/tests/test_wipe_preload.py</code>: short, long, never-ending, uncached and already cached loads, and the order between two loads, against a simulated loader; <code>test_prewarm.py</code>: a wipe evicted by a later one.</li>
+    <li><code>docker-compose/mixer/compose.yaml</code>: <code>CUDA_CACHE_PATH</code>, also in effect for <code>deploy/l4</code>, which layers its file over this one.</li>
+    <li><code>tests/mixer/test_wipe_preload.py</code>: short, long, never-ending, uncached and already cached loads, and the order between two loads, against a simulated loader; <code>test_prewarm.py</code>: a wipe evicted by a later one.</li>
   </ul>
   <p class="note">To see the stall again on a GPU host, start a new container with an empty <code>media/.nv-cache</code>.</p>
 

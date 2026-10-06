@@ -29,6 +29,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Keeping Vulkan out of the GPU process</h1>
+<p class="note">Reviewed 2026-10-06 against <a href="https://github.com/amagimedia/avplumber/tree/d1dc35fa071c703f145ed989ff98bbf585c563d2">mixer-improv at d1dc35fa</a>. Measurements retain their original workload and validation scope; this review does not certify a running deployment.</p><p class="note"><b>Current scope.</b> The restart result below applies to its recorded browser build and flags. It is not a new qualification of every later Chromium/Electron release.</p>
   <p class="lede">A restart that changes the browser page closes and reopens all 29 browser windows. On Electron 41 that crashed Chromium's GPU process: closing windows left a Vulkan cleanup task pending, and a surviving window's shared-texture copy flush tripped a <code>CHECK</code> on it. Vulkan was in that GL-only process at all because, with the GPU blocklist ignored, Chromium runs WebGPU on Vulkan through GL interop. Two Chromium switches, both on by default in the browser sender, address it: WebGPU on the OpenGL ES adapter, so no Vulkan context exists, and no GPU-process crash limit, so a crash never quits the worker; five window-recreating restarts on Electron 44 then ran with 0 crashes.</p>
   <span class="pill live">Status: Implemented, deployed on the test host</span>
 
@@ -141,11 +142,11 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/HwAccelConfigurator.ts#L57-L70">deps/dma-browser/src/main/HwAccelConfigurator.ts#L57-L70</a>: <code>--ignore-gpu-blocklist</code>, the comment stating the mechanism, and both switches behind their env flags; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/src/main/HwAccelConfigurator.ts#L54">L54</a> the <code>--disable-vulkan</code> that is not a Chromium switch.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts#L54-L55">deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts#L54-L55</a>: both switches present by default; <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts#L61">L61</a> both flags off, and neither switch appears.</li>
-    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/deps/dma-browser/README.md?plain=1#L39-L48">dma-browser README · NVIDIA GPUs</a>: the two switches and how to turn them off.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/deps/dma-browser/src/main/HwAccelConfigurator.ts">deps/dma-browser/src/main/HwAccelConfigurator.ts</a>: <code>--ignore-gpu-blocklist</code>, the comment stating the mechanism, and both switches behind their env flags; <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/deps/dma-browser/src/main/HwAccelConfigurator.ts">source</a> the <code>--disable-vulkan</code> that is not a Chromium switch.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts">deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts</a>: both switches present by default; <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts">source</a> both flags off, and neither switch appears.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/deps/dma-browser/README.md?plain=1">dma-browser README · NVIDIA GPUs</a>: the two switches and how to turn them off.</li>
   </ul>
-  <p class="note">Line numbers match the change under review and resolve on develop once it merges.</p>
+  <p class="note">Source links are pinned to the reviewed revision.</p>
 
   <p class="note">Measured on the T4 test host (16 vCPU) with the 68-input 60 fps show: 18 NVDEC, 29 browser sources, 17 raw NV12 files and 4 browser key pages. Before: Electron 41 (Chromium 146) on Fedora 42. After: Electron 44.5.1 (Chromium 152) on Fedora 44, the image described in <a href="browser-paint-cost.html">Browser CPU is per painted frame</a>.</p>
 

@@ -17,8 +17,9 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Event-loop sharding</h1>
+<p class="note">Reviewed 2026-10-06 against <a href="https://github.com/amagimedia/avplumber/tree/d1dc35fa071c703f145ed989ff98bbf585c563d2">mixer-improv at d1dc35fa</a>. Measurements retain their original workload and validation scope; this review does not certify a running deployment.</p><p class="note"><b>Current scope.</b> Current file-source pacers are realtime only; browser smooth_timestamps remains. The captured 188-source show plus four keys maps to 38 realtime + 10 browser pacers per shard: 48 nodes instead of 86. Four shards remain; removing 152 FPS nodes does not remove 152 threads. The default loop retains output/AUX and wipe pacing.</p>
   <p class="lede">Split the sources' pacing timers across four event-loop threads, so one thread no longer wakes for every source and rescans every source on each wake-up.</p>
-  <span class="pill live">Status: Live</span>
+  <span class="pill live">Status: Implemented</span>
 
   <figure>
     <div class="diagram">
@@ -129,8 +130,8 @@
 
   <h2>At a glance</h2>
   <ul class="cards">
-    <li><b>What</b>Source i's pacing nodes (<code>realtime</code> and <code>force_fps</code>; <code>smooth_timestamps</code> for browser sources) join event loop <code>pacing_{i % 4}</code> through the existing <code>event_loop</code> node parameter. Output, aux and wipe pacing stay on <code>default</code>.</li>
-    <li><b>Why</b>One loop for 100 sources used 43 % of a core at 924 wake-ups/s, its cost grows as N², and one slow timer delays every source behind it.</li>
+    <li><b>What</b>Source i's pacing nodes (<code>realtime</code>; <code>smooth_timestamps</code> for browser sources) join event loop <code>pacing_{i % 4}</code> through the existing <code>event_loop</code> node parameter. Output, aux and wipe pacing stay on <code>default</code>.</li>
+    <li><b>Why</b>One loop for 100 sources used 43 % of a core at 924 wake-ups/s, its modeled scaling term grows as N², and one slow timer delays every source behind it.</li>
     <li><b>Latency</b>0 frames added to program and to command-to-screen latency: no new queue, buffer or node. What changes is timer lateness: one busy loop delayed <code>realtime</code>'s timestamps and held decoders; four loops cut that delay. The improvement is not measured yet.</li>
     <li><b>Side effects</b>Sources on different loops now run their pacing callbacks in parallel, not one after another. Output, aux and wipe pacing get the <code>default</code> loop to themselves, so source timers no longer queue in front of them.</li>
     <li><b>Cost</b>0 nodes, 0 queues, 0 VRAM, 0 framework lines. 4 new event-loop threads (<code>pacing_0</code>…<code>pacing_3</code>): source pacing moves from 1 thread to 4. Code: one constant, a two-line helper and an <code>event_loop</code> argument passed through the input builders.</li>
@@ -140,14 +141,14 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/EventLoop.hpp#L47-L60"><code>src/EventLoop.hpp:47-60</code></a>: each wake-up rebuilds the <code>pollfd</code> array for every watched fd.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/EventLoop.hpp#L192-L203"><code>src/EventLoop.hpp:192-203</code></a>: <code>schedule()</code> walks the sorted timer list to insert each timer.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/graph_mgmt.cpp#L967-L969"><code>src/graph_mgmt.cpp:967-969</code></a>: the existing <code>event_loop</code> node parameter picks a named loop.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/mixer.py#L389-L399"><code>demos/mixer/mixer.py:389-399</code></a>: <code>PACING_LOOPS = 4</code> and <code>_pacing_loop()</code>.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/inputs.py#L86-L103"><code>pyplumber/mixer/inputs.py:86-103</code></a>: <code>_pace()</code> passes <code>event_loop</code> to <code>realtime</code> and <code>force_fps</code>; it also turns on <code>force_fps</code> <code>center_phase</code> (<a href="force-fps-center-phase.html">Centred force_fps phase</a>).</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/pyplumber/mixer/dmabuf_inputs.py#L81-L85"><code>pyplumber/mixer/dmabuf_inputs.py:81-85</code></a>: browser sources pass it to <code>smooth_timestamps</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/EventLoop.hpp"><code>src/EventLoop.hpp</code></a>: each wake-up rebuilds the <code>pollfd</code> array for every watched fd.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/EventLoop.hpp"><code>src/EventLoop.hpp</code></a>: <code>schedule()</code> walks the sorted timer list to insert each timer.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/graph_mgmt.cpp"><code>src/graph_mgmt.cpp</code></a>: the existing <code>event_loop</code> node parameter picks a named loop.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/application.py"><code>pyplumber/mixer/application.py</code></a>: <code>PACING_LOOPS = 4</code> and <code>_pacing_loop()</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/inputs.py"><code>pyplumber/mixer/inputs.py</code></a>: <code>_pace()</code> passes <code>event_loop</code> to <code>realtime</code>; normalized helper callers retain <code>force_fps.center_phase</code> (<a href="force-fps-center-phase.html">Native input cadence</a>).</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/dmabuf_inputs.py"><code>pyplumber/mixer/dmabuf_inputs.py</code></a>: browser sources pass it to <code>smooth_timestamps</code>.</li>
   </ul>
-  <p>Markdown reference: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/README.md#non-blocking-nodes">README · Non-blocking nodes</a> documents the <code>event_loop</code> field. No mixer doc section covers this change yet. <a href="cpu-pressure.html">Measuring CPU pressure at 60 Hz</a> shows what the 60 Hz wake-ups do to the run queues at 68 inputs: ~45k avplumber wake-ups a second, most of them per-source threads outside these loops.</p>
+  <p>Markdown reference: <a href="https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/README.md#non-blocking-nodes">README · Non-blocking nodes</a> documents the <code>event_loop</code> field. The mixer API documentation covers native pacing and sharding. <a href="cpu-pressure.html">Measuring CPU pressure at 60 Hz</a> shows what the 60 Hz wake-ups do to the run queues at 68 inputs: ~45k avplumber wake-ups a second, most of them per-source threads outside these loops.</p>
 
   <footer><a href="index.html">← All cookbook pages</a></footer>
 </main>

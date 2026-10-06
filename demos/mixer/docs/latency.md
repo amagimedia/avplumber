@@ -1,9 +1,9 @@
 # Mixer latency
 
-[Quick start](https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/README.md) · [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
+[Quick start](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/README.md) · [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
 - **Cut probe:** command receipt to the first matching encoded frame; enable
-  `--cut-latency-encoder janus_encoder`. [Setup and meaning](https://github.com/amagimedia/avplumber/blob/mixer-improv/doc/mixer_cut_latency.md).
+  `--cut-latency-encoder janus_encoder`. [Setup and meaning](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/doc/mixer_cut_latency.md).
 - **Browser probe:** mouse click to `requestVideoFrameCallback().expectedDisplayTime`
   for a verified destination frame. It includes playback, but not physical display scan-out.
 - Protocol acknowledgment and settled mixer state measure neither of those.
@@ -24,7 +24,7 @@ and [1080p load samples](https://amagimedia.github.io/avplumber/demos/mixer/docs
 
 ## Reproduce
 
-Generate numbered clips with [frame_codes.py](https://github.com/amagimedia/avplumber/blob/mixer-improv/tests/mixer/frame_codes.py). Start the
+Generate numbered clips with [frame_codes.py](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/tests/mixer/frame_codes.py). Start the
 mixer, a ttyd-hosted TUI and Janus player, then enable Chromium remote debugging.
 With Node.js 22+:
 
@@ -48,3 +48,23 @@ Requires the cut probe. The test compares spaced cuts, bursts, mixed takes and
 recovery against its own baseline, checks deadline misses and final scene, and
 reports AUX alignment separately. See `--help` for limits and overrides.
 It measures encoded cuts; fade/wipe onset is not measured. Run on the NVIDIA host.
+
+## Native input cadence check, 2026-10-06
+
+[Captured report](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixed-fps-20261006.json)
+from `tests/cuda/smoke_mixed_fps.py`: eight 320×180 CUarray sources at 25, 30,
+30000/1001, 469/20, 50, 24000/1001, 60000/1001 and 120 fps feed 60 fps program
+and full-rate AUX. Native code was `9f940e44`; Python pacing was `d577a12d`.
+Later source-routing and colour-tag changes are outside this report's scope.
+
+During 120.3667 seconds of steady output each stream produced 7,223 frames,
+with all 7,222 PTS steps exactly 1/60 second. All 29 checks passed, including
+four cuts, a one-second source stall, recovery, bounded queues and source phase.
+The 60000/1001 source repeated seven frames without skipped source frames;
+the 120 fps source advanced by two frames per canvas tick.
+
+The p95 output-PTS-to-diagnostic-observation age was 52.27 ms for program and
+52.12 ms for AUX. The diagnostic branch includes GPU download. This metric is
+neither decoded-source-to-output latency nor command-to-picture latency and
+must not be compared directly with the cut/browser probes above. The small
+fixture is not a full-show capacity test or a sustained latency qualification.
