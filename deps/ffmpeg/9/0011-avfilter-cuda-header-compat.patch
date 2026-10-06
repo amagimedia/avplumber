@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Sat, 3 Oct 2026 00:33:36 +0200
+Subject: [PATCH] avfilter/crop_cuda: use current math header and guard retired
+ API macro
+
+---
+ libavfilter/vf_crop_cuda.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/libavfilter/vf_crop_cuda.c b/libavfilter/vf_crop_cuda.c
+index a858679..dd38354 100644
+--- a/libavfilter/vf_crop_cuda.c
++++ b/libavfilter/vf_crop_cuda.c
+@@ -18,6 +18,7 @@
+  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+  */
+ 
++#include <math.h>
+ #include <stdio.h>
+ 
+ #include "avfilter.h"
+@@ -30,7 +31,6 @@
+ #include "libavutil/hwcontext_cuda_internal.h"
+ #include "libavutil/imgutils.h"
+ #include "libavutil/internal.h"
+-#include "libavutil/libm.h"
+ #include "libavutil/mathematics.h"
+ #include "libavutil/opt.h"
+ 
+@@ -47,7 +47,7 @@ static const char *const var_names[] = {
+     "x",
+     "y",
+     "n",
+-#if FF_API_FRAME_PKT
++#if defined(FF_API_FRAME_PKT) && FF_API_FRAME_PKT
+     "pos",
+ #endif
+     "t",
+@@ -67,7 +67,7 @@ enum var_name {
+     VAR_X,
+     VAR_Y,
+     VAR_N,
+-#if FF_API_FRAME_PKT
++#if defined(FF_API_FRAME_PKT) && FF_API_FRAME_PKT
+     VAR_POS,
+ #endif
+     VAR_T,
+@@ -187,7 +187,7 @@ static int config_input(AVFilterLink *link)
+     s->var_values[VAR_OUT_H] = s->var_values[VAR_OH] = NAN;
+     s->var_values[VAR_N]     = 0;
+     s->var_values[VAR_T]     = NAN;
+-#if FF_API_FRAME_PKT
++#if defined(FF_API_FRAME_PKT) && FF_API_FRAME_PKT
+     s->var_values[VAR_POS]   = NAN;
+ #endif
+ 
+@@ -340,7 +340,7 @@ static int filter_frame(AVFilterLink *link, AVFrame *frame_in)
+     s->var_values[VAR_N] = l->frame_count_out;
+     s->var_values[VAR_T] = frame_in->pts == AV_NOPTS_VALUE ?
+         NAN : frame_in->pts * av_q2d(link->time_base);
+-#if FF_API_FRAME_PKT
++#if defined(FF_API_FRAME_PKT) && FF_API_FRAME_PKT
+ FF_DISABLE_DEPRECATION_WARNINGS
+     s->var_values[VAR_POS] = frame_in->pkt_pos == -1 ? NAN : frame_in->pkt_pos;
+ FF_ENABLE_DEPRECATION_WARNINGS
+-- 
+2.55.0
+

@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
-# Apply the FFmpeg 8.x patch series to a checkout of upstream n8.0 or n8.1.
+# Apply the matching patch series to a supported upstream FFmpeg checkout.
 set -euo pipefail
 [[ $# -eq 1 ]] || { echo "usage: $0 /path/to/FFmpeg" >&2; exit 2; }
 dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 src=$1
+source "$dir/9/bases.env"
+series=8
+base=$(git -C "$src" rev-parse HEAD)
+if [[ $base == "$upstream_commit" ]]; then
+    series=9
+elif ! grep -Eq '^#define LIBAVCODEC_VERSION_MAJOR[[:space:]]+62$' "$src/libavcodec/version_major.h"; then
+    echo "unsupported FFmpeg base: $base (use n8.0, n8.1, or $upstream_ref)" >&2
+    exit 2
+fi
 git -C "$src" -c user.name="avplumber patches" -c user.email="patches@local" \
-    am --whitespace=nowarn "$dir"/8/*.patch
+    am --whitespace=nowarn "$dir"/"$series"/*.patch
+[[ $series == 8 ]] || exit 0
 # FFmpeg 8.1 added a libnpp configure check that fails on CUDA 13 (the legacy
 # nppiYCbCr420_8u_P2P3R symbol is gone); probe the stream-context API instead.
 # 8.0 has no such check, so this is a no-op there.

@@ -6,26 +6,14 @@ frame rate and stride supplied separately.
 """
 
 from pathlib import Path
+import sys
 
 import numpy as np
 
-HLG_A, HLG_B, HLG_C = 0.17883277, 0.28466892, 0.55991073
-
-
-def hlg_oetf(e):
-    """BT.2100 HLG OETF on scene-linear values in [0, 1]."""
-    e = np.asarray(e, dtype=np.float64)
-    return np.where(e <= 1 / 12, np.sqrt(3 * e), HLG_A * np.log(12 * np.maximum(e, 1 / 12) - HLG_B) + HLG_C)
-
-
-def frame_stride(width, stride=None):
-    if width <= 0 or width % 2:
-        raise ValueError("v210 requires a positive even width")
-    minimum = ((width * 2 + 2) // 3) * 4
-    stride = ((width + 47) // 48) * 128 if stride is None else stride
-    if stride < minimum or stride % 4:
-        raise ValueError("stride must fit a packed row and be a multiple of four")
-    return stride
+# Packing and HLG encoding live with the mixer demo, which ships them (demos/mixer/v210.py);
+# the smoke tests import them from here.
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+from demos.mixer.v210 import frame_stride, hlg_ycbcr422, pack_v210  # noqa: E402
 
 
 def sample_planes(width, height, index=0):
@@ -54,12 +42,7 @@ def hlg_planes(width, height, index=0):
     b = ((x * 5 + row * 11 + index * 17) % width) / (width - 1)
     for i, e in enumerate((0.0, 1 / 12, 1.0)):
         r[:2, 12 * i:12 * (i + 1)] = g[:2, 12 * i:12 * (i + 1)] = b[:2, 12 * i:12 * (i + 1)] = e
-    rp, gp, bp = hlg_oetf(r), hlg_oetf(g), hlg_oetf(b)
-    yp = 0.2627 * rp + 0.6780 * gp + 0.0593 * bp
-    y = np.rint(876 * yp + 64).astype("<u2")
-    u = np.rint(896 * (bp - yp) / 1.8814 + 512).astype("<u2")[:, 0::2]
-    v = np.rint(896 * (rp - yp) / 1.4746 + 512).astype("<u2")[:, 0::2]
-    return y, u, v
+    return hlg_ycbcr422(r, g, b)
 
 
 def sdr8_planes(width, height, index=0):
@@ -87,26 +70,6 @@ COLOR = {
     "hlg": {"color_range": "tv", "color_primaries": "bt2020", "color_trc": "arib-std-b67",
             "colorspace": "bt2020nc", "chroma_location": "left"},
 }
-
-
-def pack_v210(planes, stride=None):
-    y, u, v = planes
-    height, width = y.shape
-    stride = frame_stride(width, stride)
-    if u.shape != (height, width // 2) or v.shape != u.shape:
-        raise ValueError("expected planar 4:2:2 samples")
-    if any(np.any(plane > 1023) or np.any(plane < 0) for plane in planes):
-        raise ValueError("samples must be in the 10-bit range")
-    samples = np.zeros((height, ((width * 2 + 2) // 3) * 3), dtype=np.uint32)
-    active = samples[:, :width * 2]
-    active[:, 0::4], active[:, 1::4] = u, y[:, 0::2]
-    active[:, 2::4], active[:, 3::4] = v, y[:, 1::2]
-    words = samples.reshape(height, -1, 3)
-    packed = words[:, :, 0] | (words[:, :, 1] << 10) | (words[:, :, 2] << 20)
-    output = np.full((height, stride), 0xa5, dtype=np.uint8)
-    payload = packed.astype("<u4").view(np.uint8)
-    output[:, :payload.shape[1]] = payload
-    return output.tobytes()
 
 
 def write_fixture(path, width, height, frames, stride=None, family="ramp", source=0):
