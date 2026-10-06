@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
-import {playerOutputs} from "../../../docker-compose/images/preview/output-selection.mjs";
+import {playerOutputs} from "../../docker-compose/images/preview/output-selection.mjs";
 
 const settings = {
   canvas: {width: 1920, height: 1080, fps: 60, working_format: "p010le"},
@@ -13,7 +13,7 @@ const settings = {
   ],
   preview_outputs: [{bus: "mv", mountpoint: 5008, codec: "h265", color: "sdr"}],
 };
-const source = fs.readFileSync(new URL("../webui/outputs.js", import.meta.url), "utf8");
+const source = fs.readFileSync(new URL("../../pyplumber/mixer/gui/assets/outputs.js", import.meta.url), "utf8");
 function page(hevc) {
   const context = vm.createContext({URL, URLSearchParams,
     location: {href: "http://127.0.0.1/mixer/", search: ""},
