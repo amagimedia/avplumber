@@ -193,8 +193,9 @@ endpoints. For a GPU-native decode/crop/filter/encode check, use
 
 ## Pinned CPU-to-CUDA upload
 
-The final patch in each series extends `hwupload_cuda` with `pinned=1` for
-software NV12/P010 frames. It reuses the supplied filter CUDA device, copies
+Both patch series extend `hwupload_cuda` with `pinned=1` for
+software NV12/P010 frames. FFmpeg 9 also supports RGBA with alpha preserved,
+which the mixer uses for decoded alpha wipes. It reuses the supplied filter CUDA device, copies
 active pixels into reusable pinned host staging, and uploads on a private
 nonblocking stream. The default transfer path is unchanged. An event orders
 writes into recycled output frames after readers on the device stream, and
@@ -212,6 +213,7 @@ sources.
 
 On an NVIDIA host, `tests/cuda/smoke_nv12_input.py` checks both ordinary and
 pinned uploads, looping timestamps, and exact v210 samples including padded
-rows. `tests/cuda/benchmark_raw_upload.py` compares pinned and pageable filter uploads
+rows. `tests/cuda/smoke_rgba_upload.py` verifies FFmpeg 9 RGBA uploads, alpha,
+negative row strides and GPU consumers. `tests/cuda/benchmark_raw_upload.py` compares pinned and pageable filter uploads
 with matched input counts, pacing and downstream GPU reads. CPU comparisons
 must also retain the same output frame rate.

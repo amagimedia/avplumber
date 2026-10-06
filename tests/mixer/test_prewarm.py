@@ -279,7 +279,7 @@ def test_media_wipe_path_is_registered_without_starting_an_empty_clip(native_bou
     assert "mixer_wipe" not in engine.started and "mixer_wipe_load" not in engine.started
     upload = engine.nodes["mixer_wipe_fmt"]
     assert upload["hwaccel"] == config["hwaccel"]
-    assert upload["graph"].split(",")[-1] == "hwupload"
+    assert upload["graph"].split(",")[-1] == "hwupload_cuda=pinned=1"
 
 
 def test_cached_wipe_chain_runs_from_startup_parked_and_is_never_stopped(native_boundary):
