@@ -1,9 +1,7 @@
 #pragma once
-// Generation/mode check for transition workers and the abort-on-exception guard
-// used while a transition is being prepared under the control mutex.
-#include "MixerState.hpp"
+// Abort-on-exception guard used while a transition is prepared under the control mutex.
 #include <functional>
-#include <memory>
+#include <utility>
 
 namespace avp::mixer {
 
@@ -23,12 +21,5 @@ public:
         active_ = false;
     }
 };
-
-inline bool transitionIsCurrent(const std::shared_ptr<MixerState>& state,
-                         uint64_t generation,
-                         MixerState::TransitionMode mode) {
-    return state->transition_generation.load(std::memory_order_acquire) == generation &&
-           state->transition_mode.load(std::memory_order_acquire) == mode;
-}
 
 }

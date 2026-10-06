@@ -225,6 +225,57 @@ void missed_deadlines_do_not_catch_up_in_bursts() {
     CHECK(!mix.prepare(85000000));
 }
 
+void a_pending_tick_says_what_it_skipped_and_which_input_held_it_back() {
+    // The compositor logs a skipped tick when it takes up the next one, before commit() counts it.
+    using namespace avp::mixer;
+    Playout<int> mix(1, TickGrid(av::Rational(60, 1)));
+    mix.push(0, 0, 0);
+    CHECK(mix.prepare(34000000) && mix.skippedByPending() == 0);
+    mix.commit();
+    mix.push(0, 1, 16666667);
+    mix.push(0, 2, 33333333);
+    mix.push(0, 3, 50000000);
+    CHECK(mix.skippedByPending() == 0);
+    CHECK(mix.prepare(85000000) && mix.skippedByPending() == 2);
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 2 && mix.skippedByPending() == 0);
+
+    // Waiting for every active input: the one without a picture is named until the commit.
+    Playout<int> all(2, TickGrid(av::Rational(60, 1)), {}, TimestampMode::Presentation);
+    all.push(0, 10, 0);
+    CHECK(!all.heldBackBy());
+    CHECK(!all.prepare(34000000, true) && all.heldBackBy() == std::optional<size_t>(1));
+    all.push(1, 20, 16666667);
+    CHECK(!all.prepare(34000000, true));
+    CHECK(all.prepare(51000000, true) && all.heldBackBy() == std::optional<size_t>(1));
+    all.commit();
+    CHECK(!all.heldBackBy());
+}
+
+void idle_and_warm_up_gaps_are_not_missed_deadlines() {
+    // A slot compositor stops clocking an idle playout and holds its output while a
+    // reloaded scene warms up; neither gap is a deadline the output missed.
+    using namespace avp::mixer;
+    const TickGrid rate(av::Rational(30, 1));
+    Playout<int> mix(1, rate, {}, TimestampMode::Presentation);
+    for (int tick = 0; tick < 10; ++tick) {
+        mix.push(0, tick, rate.time(tick));
+        CHECK(mix.prepare(rate.time(tick) + mix.latencyNs()));
+        mix.commit();
+    }
+    mix.setActive(0, false);   // idle: ticks 10..19 are never prepared
+    mix.setActive(0, true);
+    mix.push(0, 20, rate.time(20));
+    CHECK(!mix.prepare(rate.time(19) + mix.latencyNs(), true));
+    CHECK(mix.prepare(rate.time(20) + mix.latencyNs(), true));
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 0);
+    mix.push(0, 22, rate.time(22));   // a tick the running output really skips
+    CHECK(mix.prepare(rate.time(22) + mix.latencyNs()));
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 1);
+}
+
 void latency_and_backpressure() {
     avp::mixer::Playout<int> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)), 50.0);
     mix.push(0, 42, 0);
@@ -541,9 +592,185 @@ void inactive_prewarm_retains_live_frames_without_rendering() {
     CHECK(!mix.prepare(rate.time(110), true));
 }
 
+void warm_reset_keeps_a_late_source_on_cadence() {
+    // A saturated source runs four ticks behind its timestamps. A warm scene
+    // load flips at the next deadline without waiting for the source's first
+    // frame inside the new window, and keeps that source's frames after its
+    // held picture: it neither repeats nor skips across the reset.
+    using namespace avp::mixer;
+    const TickGrid rate(av::Rational(30, 1));
+    Playout<int> mix(2, rate, {}, TimestampMode::Presentation);
+    for (size_t input : {0, 1}) {
+        mix.setPrewarm(input, true);
+        mix.setActive(input, false);
+    }
+    for (int tick = 0; tick < 30; ++tick) {
+        mix.push(0, tick, rate.time(tick));
+        if (tick >= 4) mix.push(1, 100 + tick - 4, rate.time(tick - 4));
+        CHECK(mix.prepare(rate.time(tick) + mix.latencyNs(), true));
+        mix.commit();
+    }
+    const auto late = mix.stats(1);
+    // The compositor's warm_reset: valid from one period before the playout window.
+    const auto now = rate.time(30) + mix.latencyNs();
+    for (size_t input : {0, 1}) {
+        mix.setActive(input, true);
+        mix.resetInput(input, now - mix.latencyNs() - rate.time(1), true);
+    }
+    for (int tick = 30; tick < 32; ++tick) {
+        mix.push(0, tick, rate.time(tick));
+        mix.push(1, 100 + tick - 4, rate.time(tick - 4));   // behind the new window, after the held picture
+        const auto *frame = mix.prepare(rate.time(tick) + mix.latencyNs(), true);
+        CHECK(frame && frame->index == tick);
+        CHECK(*frame->frames[0] == tick && *frame->frames[1] == 100 + tick - 4);
+        mix.commit();
+    }
+    CHECK(mix.stats(1).repeats == late.repeats && mix.stats(1).discarded == late.discarded);
+    CHECK(mix.missedDeadlines() == 0);
+}
+
+void staged_input_readiness_preserves_old_output() {
+    using namespace avp::mixer;
+    TickGrid rate(av::Rational(25, 1));
+    Playout<int> mix(3, rate, 120, TimestampMode::Presentation);
+    mix.setActive(1, false);
+    mix.setActive(2, false);
+    CHECK(!mix.readyAtNextTick(1, 0));
+    for (int tick = 0; tick < 12; ++tick) {
+        const auto now = rate.time(tick) + mix.latencyNs();
+        mix.push(0, tick, rate.time(tick));
+        if (tick == 2) {
+            mix.setPrewarm(1, true);
+            // This source's first frame belongs to a later output tick.
+            mix.push(1, 105, rate.time(5));
+        }
+        CHECK(mix.readyAtNextTick(0, now));
+        if (tick >= 2 && tick < 5) CHECK(!mix.readyAtNextTick(1, now));
+        if (tick == 5) {
+            CHECK(mix.readyAtNextTick(1, now));
+            mix.setActive(1, true);
+            mix.setPrewarm(1, false);
+        }
+        if (tick == 6) {
+            mix.setPrewarm(2, true); // a missing source must not stop the old layout
+            CHECK(!mix.readyAtNextTick(2, now));
+        }
+        if (tick == 8) {
+            // Supersede preparation: discard its future frame, keep active input 1.
+            mix.push(2, 220, rate.time(20));
+            CHECK(!mix.readyAtNextTick(2, now));
+            mix.setPrewarm(2, false);
+            CHECK(mix.queued(2) == 0 && !mix.readyAtNextTick(2, now));
+        }
+        const auto *frame = mix.prepare(now, false);
+        CHECK(frame && frame->index == tick && *frame->frames[0] == tick);
+        if (tick >= 5) CHECK(frame->frames[1] && *frame->frames[1] == 105);
+        mix.commit();
+    }
+    CHECK(mix.missedDeadlines() == 0);
+    mix.setActive(1, false);
+    CHECK(!mix.readyAtNextTick(1, rate.time(20)));
+}
+
+void input_offset_selects_a_late_source_one_tick_later() {
+    using namespace avp::mixer;
+    const TickGrid rate(av::Rational(25, 1));
+    const auto run = [&](std::optional<int64_t> offset, bool check_shift) {
+        Playout<int> mix(2, rate, 80, TimestampMode::Presentation);
+        if (offset) mix.setInputOffset(1, *offset);
+        std::vector<std::pair<int, int>> chosen;
+        int next[2] = {};
+        for (int tick = 0; tick < 50; ++tick) {
+            const auto now = rate.time(tick) + mix.latencyNs() + 100000;
+            for (int input = 0; input < 2; ++input) {
+                while (true) {
+                    const int id = next[input];
+                    // Input 1 is rendered downstream of the same clock: it reaches the
+                    // playout 5 ms either side of its unshifted deadline.
+                    const auto arrival = input == 0 ? rate.time(id) + 1000000
+                        : rate.time(id) + mix.latencyNs() + (id % 2 ? 5000000 : -5000000);
+                    if (arrival > now) break;
+                    mix.push(input, 100 * input + id, rate.time(id));
+                    ++next[input];
+                }
+            }
+            const auto *decision = mix.prepare(now);
+            CHECK(decision && decision->index == tick && *decision->frames[0] == tick);
+            chosen.emplace_back(*decision->frames[0], decision->frames[1] ? *decision->frames[1] : -1);
+            if (check_shift) CHECK(tick ? *decision->frames[1] == 100 + tick - 1 : !decision->frames[1]);
+            mix.commit();
+        }
+        if (check_shift) CHECK(mix.stats(1).repeats == 0 && mix.stats(1).discarded == 0);
+        else CHECK(mix.stats(1).repeats > 0 && mix.stats(1).discarded > 0);   // the jitter the offset absorbs
+        CHECK(mix.stats(0).repeats == 0 && mix.missedDeadlines() == 0);
+        return chosen;
+    };
+    run(1, true);
+    // A zero offset selects exactly what an unconfigured input does.
+    CHECK(run(0, false) == run(std::nullopt, false));
+
+    Playout<int> cadence(1, rate, 80);
+    bool threw = false;
+    try { cadence.setInputOffset(0, 1); } catch (const std::invalid_argument &) { threw = true; }
+    CHECK(threw);
+    Playout<int> budget(1, rate, 120, TimestampMode::Presentation);
+    budget.setInputOffset(0, 3);   // 3 + 3 ticks fill the six-frame budget
+    for (int64_t ticks : {-1, 4}) {
+        threw = false;
+        try { budget.setInputOffset(0, ticks); } catch (const std::invalid_argument &) { threw = true; }
+        CHECK(threw);
+    }
+}
+
+void prewarm_activation_keeps_the_reset_threshold() {
+    // The resident wipe compositor is parked between clips (inactive, no prewarm)
+    // and armed as prewarm -> reset(now) -> active, each possibly applied in its
+    // own loop iteration. Whatever the previous clip left in its edges is stamped
+    // before the arm and must stay rejected through the activation; the program
+    // frame in flight at the arm is rejected the same way, never a stale picture.
+    using namespace avp::mixer;
+    const TickGrid rate(av::Rational(60, 1));
+    Playout<int> mix(2, rate, {}, TimestampMode::Presentation);
+    mix.push(0, 1, rate.time(10));
+    mix.push(1, 2, rate.time(10));
+    CHECK(mix.prepare(rate.time(10) + mix.latencyNs(), true));
+    mix.commit();
+    mix.setActive(0, false);   // park: an inactive input without prewarm is reset
+    mix.setActive(1, false);
+    mix.setPrewarm(0, true);   // arm at tick 20, prewarm first
+    mix.setPrewarm(1, true);
+    mix.push(1, 3, rate.time(11));   // the previous clip's frame, still in the edge
+    mix.resetInput(0, rate.time(20));
+    mix.resetInput(1, rate.time(20));
+    mix.setActive(0, true);          // must not drop the threshold
+    mix.setActive(1, true);
+    mix.push(1, 4, rate.time(12));   // stale, delivered after the activation
+    mix.push(0, 5, rate.time(19));   // the program frame in flight at the arm
+    CHECK(!mix.prepare(rate.time(21) + mix.latencyNs(), true));   // nothing fresh yet: no stale composite
+    mix.push(0, 6, rate.time(20));
+    mix.push(1, 7, rate.time(21));
+    auto decision = mix.prepare(rate.time(21) + mix.latencyNs(), true);
+    CHECK(decision && decision->index == 21 && *decision->frames[0] == 6 && *decision->frames[1] == 7);
+    mix.commit();
+    CHECK(mix.stats(0).discarded == 1 && mix.stats(1).discarded == 2);
+    CHECK(mix.missedDeadlines() == 0);   // the parked ticks were not deadlines
+    // Park again: clearing prewarm on an inactive input resets it, and a parked
+    // input takes nothing, so the edges hold whatever arrives until the next arm.
+    mix.setActive(0, false);
+    mix.setActive(1, false);
+    mix.setPrewarm(0, false);
+    mix.setPrewarm(1, false);
+    mix.push(1, 8, rate.time(22));
+    CHECK(mix.queued(0) == 0 && mix.queued(1) == 0);
+}
+
 int main(int argc, char **argv) {
     const std::pair<const char *, void (*)()> cases[] = {
+        {"prewarm_activation_keeps_the_reset_threshold", prewarm_activation_keeps_the_reset_threshold},
+        {"input_offset_selects_a_late_source_one_tick_later", input_offset_selects_a_late_source_one_tick_later},
+        {"staged_input_readiness_preserves_old_output", staged_input_readiness_preserves_old_output},
         {"inactive_prewarm_retains_live_frames_without_rendering", inactive_prewarm_retains_live_frames_without_rendering},
+        {"warm_reset_keeps_a_late_source_on_cadence", warm_reset_keeps_a_late_source_on_cadence},
         {"complete_jitter_plateau_is_not_rate_drift", complete_jitter_plateau_is_not_rate_drift},
         {"stale_burst_is_not_retimestamped_as_fresh", stale_burst_is_not_retimestamped_as_fresh},
         {"rational_source_drift_does_not_amplify", rational_source_drift_does_not_amplify},
@@ -568,6 +795,8 @@ int main(int argc, char **argv) {
         {"sixteen_independent_phases", sixteen_independent_phases},
         {"bounded_queue_counts_overflow", bounded_queue_counts_overflow},
         {"missed_deadlines_do_not_catch_up_in_bursts", missed_deadlines_do_not_catch_up_in_bursts},
+        {"a_pending_tick_says_what_it_skipped_and_which_input_held_it_back", a_pending_tick_says_what_it_skipped_and_which_input_held_it_back},
+        {"idle_and_warm_up_gaps_are_not_missed_deadlines", idle_and_warm_up_gaps_are_not_missed_deadlines},
     };
     try {
         for (const auto &test : cases) {

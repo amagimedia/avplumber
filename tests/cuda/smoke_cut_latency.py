@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 
+from _harness import wait_for
 from pyplumber.mixer import MixerGraphBuilder
 from pyplumber import AVPlumber
 from pyplumber.node import AssumeVideoFormat, DecVideo, Demux, EncVideo, ForceFPS, InputRec, Realtime
@@ -38,7 +39,7 @@ def run(args):
     mixer = MixerGraphBuilder(avp, name="cut_test", canvas=(1080, 1920), fps=(30, 1),
                               hwaccel="cut_test_gpu", defer_output=True, enable_wipe=False)
     for i in range(args.source_count):
-        mixer.add_source(f"camera{i}", f"f{i}", "inputs", default_graph="")
+        mixer.add_source(f"camera{i}", f"f{i}", "inputs")
         mixer.add_scene(f"scene{i}", {f"camera{i}": {
             "dst_x": 0, "dst_y": 0, "dst_w": 1080, "dst_h": 1920, "fit": "contain"}})
     mixer.set_initial_scene("scene0")
@@ -85,30 +86,24 @@ def run(args):
             frames.append({"at": time.monotonic(), "data": packet.data,
                            "pts": round(packet.pts.timestamp * tb.num / tb.den * 30)})
 
-    def wait_for(predicate, label, timeout=15):
-        deadline = time.monotonic() + timeout
-        while not predicate():
-            assert not errors, errors
-            assert time.monotonic() < deadline, label
-            time.sleep(.005)
-
     reader = threading.Thread(target=read_frames, daemon=True)
     control = None
     channel = None
     try:
         avp.group("inputs").startNodes()
-        wait_for(lambda: all(avp.getEdge(f"f{i}").enqueued_total for i in range(args.source_count)), "input startup")
+        wait_for(lambda: all(avp.getEdge(f"f{i}").enqueued_total for i in range(args.source_count)),
+                 "input startup", 15, errors)
         mixer.start_groups()
         wait_for(lambda: all(avp.node(name).isWorking for name in (
             "cut_test_comp_a", "cut_test_comp_b", "cut_test_otm_scene_a",
-            "cut_test_otm_scene_b", "cut_test_out_sel_transition")), "mixer startup")
+            "cut_test_otm_scene_b", "cut_test_out_sel_transition")), "mixer startup", 15, errors)
         mixer.begin_transition_preheat()
-        wait_for(lambda: avp.getEdge("cut_test_trans_out").enqueued_total > 0, "preheat")
+        wait_for(lambda: avp.getEdge("cut_test_trans_out").enqueued_total > 0, "preheat", 15, errors)
         mixer.finish_transition_preheat()
         reader.start()
         avp.group("output").startNodes()
         mixer.start_output()
-        wait_for(lambda: len(frames) >= 15, "encoded frames")
+        wait_for(lambda: len(frames) >= 15, "encoded frames", 15, errors)
         avp.setReady()
         avp.registerWithWebUI(args.webui, "cut-latency-smoke", "")
         control = socket.create_connection(("127.0.0.1", args.port), timeout=5)
@@ -162,7 +157,8 @@ def run(args):
                     assert sample["state"] == "pending", sample
                     assert time.monotonic() < deadline, sample
                     time.sleep(.005)
-                wait_for(lambda: any(f["pts"] == sample["encoded_pts"] for f in frames), "matching encoded packet")
+                wait_for(lambda: any(f["pts"] == sample["encoded_pts"] for f in frames), "matching encoded packet",
+                         15, errors)
                 picture = next(f for f in frames if f["pts"] == sample["encoded_pts"])
                 observed_ms = (picture["at"] - before) * 1000
                 assert sample["scene"] == f"scene{target}", sample

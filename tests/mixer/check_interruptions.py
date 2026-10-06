@@ -5,7 +5,7 @@ import json
 import pathlib
 import sys
 import time
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from pyplumber.mixer.control import AvpConnection
 from pyplumber.mixer.control import mixer_command
 
@@ -22,12 +22,10 @@ async def run(args):
             if s['transition']=='idle' and s['pgm_scene']==scene: return s
             await asyncio.sleep(.02)
         raise AssertionError(('did not settle', scene, s))
-    async def take(kind, scene, delay=None):
+    async def take(kind, scene):
         payload={'scene':scene}
         if kind=='fade':payload['duration_sec']=1.2
         if kind=='wipe':payload['wipe_file']=args.wipe_file
-        if delay is not None:
-            payload['start_pts_ms']=(await status())['now_pts_ms']+delay
         await c.command(mixer_command(kind,args.mixer,**payload))
     try:
         for gap in [.05,.45,.95]:
@@ -36,7 +34,7 @@ async def run(args):
                     await take('cut','fullscreen_0')
                     await settle('fullscreen_0')
                     await asyncio.sleep(.15)
-                    await take(first,'grid_4_page_0',1500 if first=='cut' else None)
+                    await take(first,'grid_4_page_0')
                     await asyncio.sleep(gap)
                     before=await status()
                     started=time.monotonic()

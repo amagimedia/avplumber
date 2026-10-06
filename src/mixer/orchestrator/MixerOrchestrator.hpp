@@ -1,35 +1,29 @@
 #pragma once
 #include "../primitives/MixerState.hpp"
-#include "../TransitionScheduler.hpp"
-#include "../../SharedTimeline.hpp"
+#include "../MixerGraph.hpp"
 #include "../../graph_mgmt.hpp"
 #include "../../instance_shared.hpp"
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace avp::mixer {
 
+struct OutputSnapshot;
+
 class MixerOrchestrator {
-    std::shared_ptr<NodeManager> nodes_;
+    std::shared_ptr<MixerGraph> nodes_;
     std::shared_ptr<MixerState> state_;
-    std::shared_ptr<SharedTimeline> timeline_;
-    std::shared_ptr<TransitionScheduler> scheduler_;
 
     void setNodeObject(const std::string& node_name, const std::string& key, const Parameters& value);
-    void postTransitionTask(std::string label, int64_t delay_ms, std::function<void()> task);
     void publishRuntimeObject(const std::string& node_name, const std::string& key,
                               const Parameters& value);
 
-    /// Camera `one_to_many` uses `timeline` + `tlGetRaw`: stale `outputs` entries would override
-    /// `node.object.set`. Clear prior `outputs` schedule, update atomically, then publish at current wallclock.
-    void publishCameraOtmOutputs(const std::string& otm_name, uint32_t mask);
     void setNodeParam(const std::string& node_name, const std::string& param, const std::string& value);
-    void autoRestartNode(const std::string& node_name);
-    void createAndStartNode(const Parameters& params);
-    void deleteNodeIfExists(const std::string& name);
     void startGroup(const std::string& group_name);
     void stopGroup(const std::string& group_name);
 
@@ -37,124 +31,109 @@ class MixerOrchestrator {
     // Skips edges whose configured consumer is still working; readerwriterqueue
     // clear() is a consumer-side operation and must not race that node.
     void flushWipeEdges();
-    void flushSlotEdges(bool is_slot_a);
+    /// Cached wipes: wake the resident wipe compositor and start the clip replay.
+    /// Returns the output tick of the clip's first frame: the compositor's output is
+    /// this take's from that tick on. Caller holds state_->mutex.
+    int64_t armWipeChain(const std::string& wipe_file);
+    /// Decoding per take: point the stopped wipe reader at `wipe_file`, flush what the previous
+    /// clip left in the chain's edges and start the wipe group. Caller holds state_->mutex.
+    void startWipeDecode(const std::string& wipe_file);
+    /// Take the wipe chain off duty: park the resident chain (cached wipes), or stop
+    /// the per-take decode group. Caller holds state_->mutex.
+    void retireWipeChain();
 
     void loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name, bool warm_cut = false);
     bool canPrewarmScene(const SceneDefinition& scene) const;
-    void scheduleSceneControls(const SceneDefinition& scene, int64_t at_pts_ms);
+    void applySceneControls(const SceneDefinition& scene);
 
-    /// Rewrite every camera `one_to_many` bitmask for one slot bit from scene + active_inputs.
-    void rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene);
-    void applyRoutedSceneRoutesForSlot(bool is_slot_a, const SceneDefinition& scene,
-                                       int64_t at_pts_ms, bool immediate);
-    void publishRoutedRoutesForProgramOnly(bool pgm_is_slot_a, const SceneDefinition& scene,
-                                           int64_t at_pts_ms, bool immediate);
+    /// Publish both slots' source routes, preserving subscriptions and prewarmed inputs.
+    void publishSourceRoutes(const SceneDefinition* scene_a, const SceneDefinition* scene_b);
 
-    /// Restore steady-state routing after a cut or crossfade has concluded.
-    /// Centralizes the per-source OTM masks, post-otm/compositor flips, and
-    /// source_switcher reset that cut+fade cleanup paths used to duplicate.
-    /// Caller must hold state_->mutex. Wipe end has different semantics
-    /// (timeline-driven, doesn't immediately mutate node objects) and uses
-    /// its own logic.
-    void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene);
+    /// Caller holds state_->mutex. Points the source_switcher at slot A or B, the only setting
+    /// visible at the output, before applyPostTransitionRouting flips the rest: the window
+    /// between the two would show only if the new direct path were not producing frames yet,
+    /// and at every caller it is. Returns selectorOutputNs() read right after the switch, for
+    /// finishSnapshot(); a finishing take publishes its preview between the two calls
+    /// (MixerState::publishTakePreview), so the AUX followers start while the routing runs.
+    int64_t switchProgramSelector(bool new_pgm_is_slot_a);
+    /// Restore steady-state routing after a cut or crossfade has concluded, once
+    /// switchProgramSelector has switched the selector: the per-source OTM masks and the
+    /// post-otm/compositor flips. Caller must hold state_->mutex.
+    /// `picture_changed` false (the on-air picture stays the same) skips
+    /// the encoder keyframe request. Does nothing for an unknown scene.
+    void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene,
+                                    bool picture_changed = true);
 
     void ensureIdle() const;
-    void interruptTransition();
-    void finishSnapshot();
+    /// Why a transition being prepared or running is dropped. `Replaced`: by the take that
+    /// drops it, whose own switch publishes the next preview change, so the preview shown stays
+    /// as it is meanwhile (a multiview's PVW tile does not blank between takes under cut spam).
+    /// `Dropped`: with nothing to follow (`mixer.interrupt`), which clears the preview, as a
+    /// failed take does (abortTransition).
+    enum class Interruption : std::uint8_t { Dropped, Replaced };
+    void interruptTransition(Interruption why);
+    std::shared_ptr<OutputSnapshot> outputSnapshot() const;
+    /// Stops the slot substitution and releases a held output at the first selected frame
+    /// newer than `emitted`, the selector's newest output read after the selector was switched
+    /// (switchProgramSelector's return, or read now).
+    void finishSnapshot(int64_t emitted);
+    void finishSnapshot() { finishSnapshot(selectorOutputNs()); }
+    /// pts (ns) of the newest frame the selector has emitted, 0 before its first.
+    int64_t selectorOutputNs() const;
+    /// Caller holds state_->mutex. Ends a transition: program on `new_pgm_scene`, the preview
+    /// swapped or cleared (MixerState::completeTransition) from the program frame at
+    /// `effective_ns` (0: now).
+    void finishTransition(bool new_pgm_is_slot_a, std::string new_pgm_scene, int64_t effective_ns);
     // Caller holds state_->mutex; restores live program after failed preparation.
-    void restoreProgramRouting();
+    // Requests a keyframe unless the dropped transition was a cut that had not flipped
+    // and no frozen picture is on air: the caller then finishes the snapshot, which
+    // replaces a frozen picture with the live program.
+    void restoreProgramRouting(MixerState::TransitionMode dropped);
     void abortTransition(uint64_t generation) noexcept;
-    void startFadeWhenReady(std::string scene_name, double duration_sec, int64_t requested_pts,
-                           uint64_t generation, av::Timestamp initial_ts, int64_t deadline_ms);
-    void startFade(const std::string& scene_name, double duration_sec, int64_t start_ms,
-                   uint64_t transition_generation);
-    int64_t resolveTransitionStartPts(int64_t requested_start_pts_ms) const;
-
-    // Core hard-cut logic: ensure PVW is configured, enable cameras, write timeline entries.
-    // Does NOT modify pgm_is_slot_a, pgm_scene_name, or transition_mode.
-    // Caller must hold state_->mutex. Returns cleanup_ms timestamp.
-    int64_t cutInternal(const std::string& scene_name, int64_t start_pts_ms, bool warm_cut = false);
-
-    // Complete crossfade routing and state once the final frame is presented.
-    // `scheduler` is forwarded into the locally-constructed MixerOrchestrator so
-    // any future scheduler-using helper called from this path won't blow up with
-    // "transition scheduler is not configured".
-    static void deferredCleanup(std::shared_ptr<NodeManager> nodes,
-                                 std::shared_ptr<MixerState> state,
-                                 std::shared_ptr<SharedTimeline> timeline,
-                                 std::shared_ptr<TransitionScheduler> scheduler,
-                                 uint64_t transition_generation,
-                                 bool new_pgm_is_slot_a,
-                                 std::string new_pgm_scene,
-                                 int64_t end_pts_ms);
-    static void readyCutTask(std::shared_ptr<NodeManager> nodes,
-                             std::shared_ptr<MixerState> state,
-                             std::shared_ptr<SharedTimeline> timeline,
-                             std::shared_ptr<TransitionScheduler> scheduler,
-                             uint64_t transition_generation,
-                             bool new_pgm_is_slot_a,
-                             std::string new_pgm_scene,
-                             std::string ready_edge_name,
-                             av::Timestamp ready_edge_initial_ts,
-                             int64_t earliest_switch_pts_ms,
-                             bool require_new_ready_frame);
-
-    // Wipe lifecycle: midpoint scene switch (immediate, hidden behind opaque wipe)
-    // + end-of-wipe teardown.
-    static void runWipeMidpointAndCleanup(std::shared_ptr<NodeManager> nodes,
-                                          std::shared_ptr<MixerState> state,
-                                          std::shared_ptr<SharedTimeline> timeline,
-                                          std::shared_ptr<TransitionScheduler> scheduler,
-                                          uint64_t transition_generation,
-                                          std::string scene_name,
-                                          bool new_pgm_is_slot_a,
-                                          int64_t remaining_ms);
-    static int64_t prepareWipe(std::shared_ptr<NodeManager> nodes,
-                               std::shared_ptr<MixerState> state,
-                               std::shared_ptr<SharedTimeline> timeline,
-                               std::shared_ptr<TransitionScheduler> scheduler,
-                               uint64_t transition_generation,
-                               std::string scene_name,
-                               std::string wipe_file,
-                               double duration_sec,
-                               bool new_pgm_is_slot_a,
-                               int64_t earliest_visible_pts_ms);
-
-    std::string transition_node_name_ = "mixer_transition";
-    std::string transition_edge_name_ = "trans_out";
+    void beginTake(const std::string& scene_name, MixerState::TransitionMode mode);
+    void prepareScene(const std::string& scene_name);
+    bool destinationReady(const av::VideoFrame* frame) const;
+    void completeTake(int64_t pts_ns);
+    int selectProgram(const std::vector<const av::VideoFrame*>& frames, int active, int64_t last_ns);
+    int selectWipe(const std::vector<const av::VideoFrame*>& frames, int active, int64_t last_ns);
 
 public:
     /// Drop an armed or running transition and keep the current program picture (`mixer.interrupt`).
-    void interrupt() { interruptTransition(); }
-    MixerOrchestrator(std::shared_ptr<NodeManager> nodes,
-                      std::shared_ptr<MixerState> state,
-                      std::shared_ptr<SharedTimeline> timeline,
-                      std::shared_ptr<TransitionScheduler> scheduler = nullptr);
+    void interrupt() {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        interruptTransition(Interruption::Dropped);
+    }
+    MixerOrchestrator(std::shared_ptr<NodeManager> nodes, std::shared_ptr<MixerState> state);
+    MixerOrchestrator(std::shared_ptr<MixerGraph> nodes, std::shared_ptr<MixerState> state);
+    // Called with state.mutex held, on the selector's consumer thread before
+    // publishing a frame. Returns exactly one selected input for this tick.
+    int selectFrame(bool wipe, const std::vector<const av::VideoFrame*>& frames,
+                    int active, int64_t last_ns);
 
-    void defineSource(const std::string& name, const std::string& otm_node, int input_index,
-                      const std::string& cs_node_a, const std::string& cs_node_b);
+
+    void defineSource(const std::string& name, const std::string& otm_node, int input_index);
     void defineRoutedSource(const std::string& name, const std::string& router_node,
                             int input_index,
                             const std::string& route_output_label_a,
-                            const std::string& route_output_label_b,
-                            const std::string& cs_node_a, const std::string& cs_node_b);
+                            const std::string& route_output_label_b);
     void defineScene(const std::string& name, const SceneDefinition& def);
     void initializeRoutedRoutes();
 
     void preview(const std::string& scene_name);
-    void cut(const std::string& scene_name, int64_t start_pts_ms = -1,
+    void cut(const std::string& scene_name,
              avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now());
     void enableCutMeasurements(const std::string& mixer_name, const std::string& encoder_name);
     void prewarmCuts(const std::vector<std::string>& scenes);
-    void fade(const std::string& scene_name, double duration_sec, int64_t start_pts_ms = -1);
-    void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,
-              int64_t start_pts_ms = -1);
+    /// A set `dip` (opaque SDR RGB) fades through that colour instead of mixing.
+    void fade(const std::string& scene_name, double duration_sec,
+              FadeCurve curve = FadeCurve::Linear, std::optional<std::array<uint8_t, 3>> dip = std::nullopt,
+              avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now());
+    void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec);
     /// Run the wipe subgraph once on *wipe_file* with the output kept on the
     /// direct branch, so file open, decoder and GPU filter initialisation (PTX
     /// compilation included) happen before the first real wipe. Blocks until
     /// the overlay produced a frame or *timeout_ms* passed.
     void warmupWipe(const std::string& wipe_file, int64_t timeout_ms);
-    void setOverlayEnabled(bool enabled, int64_t ready_timeout_ms = -1);
 
     /// Returns the names of all registered scenes, sorted alphabetically.
     std::vector<std::string> sceneNames() const;

@@ -14,7 +14,18 @@ class MixerSnapshot : public NodeSISO<av::VideoFrame, av::VideoFrame>,
     avp::mixer::TickGrid rate_;
     int64_t latency_ns_;
     av::Timestamp last_pts_ = NOTS;
+    // Set while the output instance sees its Snapshot holding; the line logged at the release
+    // is how a host run shows how long a take kept the still on air.
+    std::optional<int64_t> held_since_ns_;
     static constexpr const char* kMarker = "avp.mixer.snapshot";
+
+    void endHold(avp::mixer::Snapshot<av::VideoFrame>& frames, const char* how) {
+        frames.release();
+        if (!held_since_ns_) return;
+        logstream << "mixer_snapshot: output held " << (avp::mixer::monotonicNs() - *held_since_ns_) / 1000000
+                  << " ms, released on a " << how << " frame";
+        held_since_ns_.reset();
+    }
 
 public:
     MixerSnapshot(std::unique_ptr<SourceType>&& source, std::unique_ptr<SinkType>&& sink,
@@ -44,16 +55,24 @@ public:
         auto& frames = state_->frames;
         bool replace = slot_ == -1 ? frames.holding() : frames.replaces(slot_);
         bool release = false;
-        if (slot_ == -1 && replace && input && input->isValid() && input->pts().isValid()) {
-            const auto* tag = av_dict_get(input->raw()->metadata, kMarker, nullptr, 0);
-            const uint64_t generation = tag ? avp::mixer::parseFrameToken(tag->value) : 0;
-            release = frames.canRelease(input->pts().timestamp({1, 1000000000}), generation);
-            if (release) replace = false;
+        if (slot_ == -1 && replace) {
+            if (!held_since_ns_) held_since_ns_ = avp::mixer::monotonicNs();
+            if (input && input->isValid() && input->pts().isValid()) {
+                const auto* tag = av_dict_get(input->raw()->metadata, kMarker, nullptr, 0);
+                const uint64_t generation = tag ? avp::mixer::parseFrameToken(tag->value) : 0;
+                release = frames.canRelease(input->pts().timestamp({1, 1000000000}), generation);
+                if (release) replace = false;
+            }
         }
 
         av::VideoFrame output;
         if (replace) {
-            const auto index = rate_.atOrBefore(avp::mixer::monotonicNs() - latency_ns_);
+            // The output instance stamps its still one tick behind the clock: a tick's live frame
+            // crosses the pipeline after a still of that tick would be stamped, so it lost that race,
+            // was dropped below as a duplicate and left the hold's end to scheduling luck. Slot
+            // instances stay on the current tick: their still must reach the output ahead of the
+            // output's own.
+            const auto index = rate_.atOrBefore(avp::mixer::monotonicNs() - latency_ns_) - (slot_ == -1 ? 1 : 0);
             auto pts = av::Timestamp(index, timeBase());
             // Draining is consumer-owned; no controller ever clears live edges.
             for (int i = 0; i < 8 && this->source_->peek(0); ++i) this->source_->pop();
@@ -68,6 +87,9 @@ public:
             output = *input;
             if (output.isValid() && last_pts_.isValid() && output.pts().isValid() && output.pts() <= last_pts_) {
                 this->source_->pop();
+                // A still of its tick went out first; the hold ends all the same, so the
+                // next live frame passes instead of losing the same race again.
+                if (release) endHold(frames, "duplicate");
                 return;
             }
         }
@@ -75,7 +97,7 @@ public:
         // never lock out the control thread or update the displayed snapshot.
         if (this->sink_->put(output, true)) {
             if (!replace) this->source_->pop();
-            if (release) frames.release();
+            if (release) endHold(frames, "live");
             if (output.isValid() && output.pts().isValid()) {
                 last_pts_ = output.pts();
                 if (slot_ == -1) frames.presented(output);
