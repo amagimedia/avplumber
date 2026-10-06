@@ -91,7 +91,7 @@
   <h2>What runs out first</h2>
   <ul class="cards">
     <li><b>SDR at 25 and 30 fps</b><p>NVDEC, at 86–89% with 36 streams at 30 fps. The GPU is near 55% and host CPU 55% idle.</p></li>
-    <li><b>SDR at 60 fps</b><p>Host CPU. At 75, 8.5 of 16 vCPUs are busy and the load average reaches 19. A browser window costs about 0.10 core, a raw NV12 upload 0.135, an NVDEC source 0.025. The GPU is at 72%.</p></li>
+    <li><b>SDR at 60 fps</b><p>Host CPU. At 75, 8.5 of 16 vCPUs are busy and the load average reaches 19 (a one-minute reading; it <a href="browser-frame-stagger.html">is not a capacity gauge here</a>). A browser window costs about 0.10 core, a raw NV12 upload 0.135, an NVDEC source 0.025. The GPU is at 72%.</p></li>
     <li><b>HDR at 30 fps</b><p>Every SDR input is converted to HLG on the GPU. With all-SDR inputs that work drives NVDEC to saturation above 90, and at 4:2:2 and 110 the backlog ran out of VRAM. The Balanced HLG mix at 90 leaves headroom.</p></li>
     <li><b>HDR at 60 fps</b><p>CUDA compute. HLG 4:2:0 at 61 runs at GPU p95 about 91%; 64 and 66 missed deadlines. HLG 4:2:2 costs more per source: 55 keeps the same margin.</p></li>
     <li class="flag"><b>NVENC at 60 fps HDR</b><p>The program in SDR and HLG plus the SDR clean feed are three 1080p60 encodes on the T4's single NVENC. At preset p5 it saturated and output fell seconds behind; the demo uses p3, which passes at 70–76%.</p></li>
@@ -102,6 +102,7 @@
 
   <h2>Conditions</h2>
   <p>NVIDIA T4 16 GiB, 16 vCPU, driver R615, Fedora 44 image with CUDA 13.4, Electron 44 browsers. Portrait 1080×1920 canvas from 1920×1080 sources, program with clean feed and two multiviews, NVENC preset p3. Each limit passed the cut-spam gate (cuts, fades and wipes at 4 per second) with 0 missed program deadlines.</p>
+  <p class="note">An L4 host has its own profiles, <code>nvidia_l4</code> and the opt-in <code>nvidia_l4_cuarray</code>, which admits 192 sources at 25 fps on an SDR canvas. Their source tables, output ceilings and the runs that failed are in <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/capacity.md#nvidia-l4-nvidia_l4">capacity.md · NVIDIA L4</a>; this page is the T4's table only.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">

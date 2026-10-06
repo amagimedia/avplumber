@@ -142,7 +142,7 @@
   <h2>Why not a stream per node?</h2>
   <p>About 800 nodes' GPU work sharing one stream is not the bottleneck by itself. The measured limit at high source
     counts was CPU-side CUDA submission contention triggered by raw uploads, not stream ordering; see
-    <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/capacity.md#why-uploads-limit-this-mix">Why uploads limit this mix</a>.</p>
+    <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/capacity.md#t4">Why uploads limit this mix</a>.</p>
   <p class="note">Raw uploads are another exception to the single stream. <code>v210_to_cuda</code> (4:2:2 raw) creates a private non-blocking stream per source and
     synchronizes it before publishing, so consumers get a complete frame. <code>raw_to_cuda</code> (NV12 and P010 raw)
     does the same with <code>canvas.raw_upload: "pinned"</code>, which every show the setup builds uses. With the library
@@ -166,6 +166,10 @@
       creates the main device with no stream of its own, so FFmpeg uses the default stream</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/v210_to_cuda.cpp#L86-L134"><code>src/nodes/hwaccel/v210_to_cuda.cpp:86</code></a>
       private upload stream for <code>v210_to_cuda</code> and <code>raw_to_cuda</code></li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/src/nodes/hwaccel/cuda_rect_overlay.cpp#L299-L305"><code>src/nodes/hwaccel/cuda_rect_overlay.cpp:299</code></a>
+      the generic <code>cuda_rect_overlay</code> takes <code>output_hwaccel</code> as well: it then draws on a private stream and
+      publishes that device, so the branch below it leaves the parent's stream. No mixer graph sets it on that node;
+      <a href="cuda-transform.html">cuda_transform</a> has no such option</li>
     <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/docs/config.md#aux_buses">config.md · aux_buses</a></li>
   </ul>
 

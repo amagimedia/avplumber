@@ -161,7 +161,8 @@
     <li><span class="name"><span class="num">8</span><code>__GL_YIELD=USLEEP</code></span>
       <p><span class="k">Dropped</span>Chromium's GPU processes made 0 <code>sched_yield</code> calls in 5 s: no spinning. Their CPU is ~12k futex/s thread hand-offs and ~1.1k ioctl/s.</p></li>
     <li><span class="name"><span class="num">9</span>Fewer, bigger browser workers</span>
-      <p><span class="k">Dropped</span>Cost is per window per delivered frame, not per process; fewer workers concentrate VizCompositor load (<a href="browser-paint-cost.html">Browser CPU is per painted frame</a>).</p></li>
+      <p><span class="k">Dropped</span>Cost is per window per delivered frame, not per process; fewer workers concentrate VizCompositor load (<a href="browser-paint-cost.html">Browser CPU is per painted frame</a>).</p>
+      <p><span class="k">Since</span>A later audit found that 36–44&nbsp;% of the cost in the GPU and browser processes is per tick, not per delivered frame. Whether that part is per window or per worker cannot be told while every worker holds 8 windows, so the idea was not re-opened and not re-tested (<a href="browser-paint-cost.html#audit">Per tick and per paint</a>).</p></li>
     <li><span class="name"><span class="num">11</span>cpuset split between containers</span>
       <p><span class="k">Dropped</span>Cores pinned to one side idle while the other is short: it idles capacity.</p></li>
     <li><span class="name"><span class="num">12</span>FFmpeg <code>hwupload</code> for raw sources at 60 fps</span>
