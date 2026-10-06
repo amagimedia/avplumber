@@ -65,6 +65,8 @@ export class WebGLSyncInstaller {
         'will-change:transform!important;' +
         'backface-visibility:hidden!important;' +
         '}';
+      // lib.dom types both non-null; either can be missing while the page is still parsing.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       const parent = document.head ?? document.documentElement ?? document;
       parent.appendChild(st);
     } catch {

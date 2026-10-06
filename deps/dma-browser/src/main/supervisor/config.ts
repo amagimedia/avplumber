@@ -14,6 +14,7 @@ export interface SupervisorConfig {
   readonly requestTimeoutMs: number;
   readonly startupTimeoutMs: number;
   readonly restartDelayMs: number;
+  readonly idleWorkerStopMs: number;
   readonly launcher: string;
   readonly userDataRoot: string;
   readonly autoOpen: WindowConfig | null;
@@ -69,6 +70,7 @@ export function readSupervisorConfig(env: Env, projectRoot: string): SupervisorC
     requestTimeoutMs: envInt(env, 'DMA_BROWSER_WORKER_REQUEST_TIMEOUT_MS', 10_000, 100, 120_000),
     startupTimeoutMs: envInt(env, 'DMA_BROWSER_WORKER_STARTUP_TIMEOUT_MS', 90_000, 1000, 600_000),
     restartDelayMs: envInt(env, 'DMA_BROWSER_WORKER_RESTART_DELAY_MS', 1000, 100, 60_000),
+    idleWorkerStopMs: envInt(env, 'DMA_BROWSER_IDLE_WORKER_STOP_MS', 5_000, 0, 3_600_000),
     launcher: envString(
       env,
       'DMA_BROWSER_WORKER_LAUNCHER',

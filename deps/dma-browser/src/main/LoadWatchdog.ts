@@ -5,7 +5,7 @@ export interface LoadWatchdogOptions {
 
 /**
  * Triggers `onTimeout()` once if `clear()` is not called within `timeoutMs`.
- * Used by ManagedWindow to detect stalled page loads and hard-reload.
+ * Used by ManagedWindow to detect stalled page loads and reload the page.
  */
 export class LoadWatchdog {
   private readonly opts: LoadWatchdogOptions;

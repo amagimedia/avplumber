@@ -5,6 +5,7 @@
 #include "../node_common.hpp"
 #include "../../hwaccel/EglImageFrame.hpp"
 #include "../../hwaccel/EglImagePoolToken.hpp"
+#include "EglDmabufDisplay.hpp"
 
 extern "C" {
 #include <libavutil/hwcontext_drm.h>
@@ -89,7 +90,6 @@ protected:
 	std::shared_ptr<EglState> egl_;
 	bool have_modifiers_ = false;
 	PFNEGLCREATEIMAGEKHRPROC create_image_ = nullptr;
-	PFNEGLDESTROYIMAGEKHRPROC destroy_image_ = nullptr;
 
 	uint64_t frames_ = 0;
 	uint64_t cache_hits_ = 0;
@@ -97,61 +97,18 @@ protected:
 	uint64_t evictions_ = 0;
 	int debug_log_every_n_ = 0;
 
-	static const char *safeString(const char *value) { return value ? value : ""; }
-
-	static bool extensionSupported(EGLDisplay display, const char *extension) {
-		const char *extensions = eglQueryString(display, EGL_EXTENSIONS);
-		if (!extensions || !extension || !extension[0])
-			return false;
-		const size_t len = std::strlen(extension);
-		const char *current = extensions;
-		while ((current = std::strstr(current, extension)) != nullptr) {
-			const bool starts = current == extensions || current[-1] == ' ';
-			const bool ends = current[len] == '\0' || current[len] == ' ';
-			if (starts && ends)
-				return true;
-			current += len;
-		}
-		return false;
-	}
-
 	bool ensureEGL() {
 		if (egl_ && egl_->dpy != EGL_NO_DISPLAY)
 			return true;
 
+		const auto display = EglDmabufDisplay::open("drm2egl");
+		if (!display)
+			return false;
+		have_modifiers_ = display->have_modifiers;
+		create_image_ = display->create;
 		auto state = std::make_shared<EglState>();
-		state->dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-		if (state->dpy == EGL_NO_DISPLAY) {
-			logstream << "drm2egl: eglGetDisplay failed";
-			return false;
-		}
-
-		EGLint major = 0;
-		EGLint minor = 0;
-		if (!eglInitialize(state->dpy, &major, &minor)) {
-			logstream << "drm2egl: eglInitialize failed";
-			return false;
-		}
-
-		if (!extensionSupported(state->dpy, "EGL_EXT_image_dma_buf_import")) {
-			logstream << "drm2egl: EGL_EXT_image_dma_buf_import missing, exts="
-			          << safeString(eglQueryString(state->dpy, EGL_EXTENSIONS));
-			return false;
-		}
-		have_modifiers_ = extensionSupported(state->dpy, "EGL_EXT_image_dma_buf_import_modifiers");
-
-		create_image_ = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
-		if (!create_image_)
-			create_image_ = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImage"));
-		destroy_image_ = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
-		if (!destroy_image_)
-			destroy_image_ = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImage"));
-		if (!create_image_ || !destroy_image_) {
-			logstream << "drm2egl: failed to load eglCreateImage/eglDestroyImage";
-			return false;
-		}
-
-		state->destroy_image = destroy_image_;
+		state->dpy = display->dpy;
+		state->destroy_image = display->destroy;
 		egl_ = std::move(state);
 		return true;
 	}
