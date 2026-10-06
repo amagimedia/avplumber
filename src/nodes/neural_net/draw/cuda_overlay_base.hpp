@@ -298,8 +298,9 @@ protected:
     /// The linear picture of a CUarray frame: one whole-frame layer drawn 1:1 by the rect
     /// compositor's draw into a frame of the node's own pool, on the stream of the frame's own
     /// device, which is the stream the node's kernels use. The pool is marked, so the draw nodes
-    /// below draw on the picture itself (isPrivatePicture). The read of `frm` is only queued:
-    /// the caller synchronizes the stream before it releases `frm`.
+    /// below draw on the picture itself (isPrivatePicture). The read of `frm` is only queued, as
+    /// the last thing that can fail here: the caller synchronizes the stream before it releases
+    /// `frm`, also when it fails.
     void linearPicture(const av::VideoFrame& frm, av::VideoFrame& out) {
         const AVHWFramesContext* src = (const AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
         const AVHWFramesContext* own = picture_frames_ ? (const AVHWFramesContext*)picture_frames_->data : nullptr;
@@ -313,13 +314,13 @@ protected:
             cuda_overlay::markPicturePool(picture_frames_.get());
         }
         out = avp::mixer::canvasFrame(picture_frames_.get(), nodeName());
-        const auto ops = avp::mixer::resolveDrawOps({&frm}, {avp::mixer::LayerSpec{}},
-                                                    frm.width(), frm.height(), AV_PIX_FMT_NV12);
-        picture_draw_->draw(cuda_dev_ctx_->stream, ops, out.raw(), frm.raw());
         const int ret = cuda_overlay::copyFrameProps(out.raw(), frm.raw());
         if (ret < 0) {
             throw Error(std::string(nodeName()) + ": copying frame properties failed: " + av::error2string(ret));
         }
+        const auto ops = avp::mixer::resolveDrawOps({&frm}, {avp::mixer::LayerSpec{}},
+                                                    frm.width(), frm.height(), AV_PIX_FMT_NV12);
+        picture_draw_->draw(cuda_dev_ctx_->stream, ops, out.raw(), frm.raw());
     }
 
     // Subclass must return its node type name for log messages.
@@ -410,7 +411,13 @@ public:
         av::VideoFrame& out = in_place ? frm : picture;
         ++(array ? from_array_ : in_place ? in_place_ : copied_);
 
-        drawOnFrame(frm, out);
+        try {
+            drawOnFrame(frm, out);
+        } catch (...) {
+            // The picture's read of the surface may still be queued, and unwinding releases frm.
+            if (array) CUDA_OVERLAY_CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream));
+            throw;
+        }
 
         out.setTimeBase(frm.timeBase());
         out.setComplete(true);
