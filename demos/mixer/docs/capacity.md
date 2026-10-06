@@ -34,7 +34,17 @@ preset, resolution and FPS affect admission; lowering bitrate does not raise
 that allowance. AUX normally runs at half rate above 30 fps. Use Setup's
 calculated limit rather than a copied table of extra-output counts.
 
-## NVIDIA L4 (`nvidia_l4`)
+## NVIDIA L4: linear and CUarray profiles
+
+`nvidia_l4` and `nvidia_l4_cuarray` are distinct profiles. The CUarray SDR25
+profile admits 192 total sources: 120 NVDEC, 32 raw, 36 browser scene sources
+and four browser keys (188 sources in the catalogue). The linear SDR25 profile
+uses 170 total: 83 NVDEC, 47 raw and 40 browser including keys.
+
+Current SDR output ceilings are 26 at 25/30 fps and 22 at 50/60 fps, below the
+hard 30-output encoder ceiling. HLG 4:2:0 uses 20/20/18/18, and HLG 4:2:2 uses
+20/20/17/17 at 25/30/50/60 fps. These are admission rules; not every entry has a
+separate measured qualification. Read the profile comments and trial scope.
 
 The [2026-10-05 raw report](https://amagimedia.github.io/avplumber/demos/mixer/docs/capacity-l4.json) covers 1080p inputs on one L4 /
 16-vCPU host, patched FFmpeg, HEVC CUarray decode, `extra_hw_frames: 12` and
@@ -57,3 +67,16 @@ The [CUarray cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/c
 fixed-pool sizing. Use the [portable L4 stack](../../../docker-compose/mixer/deploy/l4/README.md) for that build.
 After deployment, exercise actual content, every scene and Setup restart; check
 fresh deadline/drop counter deltas, not just encoder FPS.
+
+## Node reductions reviewed 2026-10-06
+
+For the captured 188-source catalogue plus four keys, native input pacing
+removes 152 `force_fps` nodes/queues and the guarded raw colour-tag bypass
+removes another 32. Applying those changes alone to the old 1,514-node graph
+would yield 1,330; other routing/wipe changes can affect the deployed total.
+The four pacing shards remain, now with 38 file pacers and ten browser pacers
+each rather than 86 nodes each. These are not 184 eliminated threads.
+
+The small mixed-rate GPU smoke verifies cadence, cuts and stall recovery; it
+does not qualify 188-source throughput. No admission cap was raised based on
+these node reductions. See [cadence evidence](latency.md#native-input-cadence-check-2026-10-06).

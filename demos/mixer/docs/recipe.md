@@ -76,3 +76,13 @@ A `file` or `download` entry may allocate only one source; duplicate clips are
 rejected. For capacity comparisons use separate clips of at least 1080p25 and
 record attribution/license with each URL. See the [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 for workload rules and implementation notes.
+
+## Capacity fixtures and mixed-rate correctness
+
+The balanced capacity recipe generates a show at its chosen canvas rate. It
+does not by itself test a mixture of native source rates. Use
+[the mixed-rate smoke](../../../tests/cuda/smoke_mixed_fps.py) on an NVIDIA host
+for that check, and keep its small barcoded fixture separate from full-resolution
+capacity results. Generated source counts include reserved browser keys when
+comparing them with profile totals; the 192-source CUarray SDR25 profile has
+188 catalogue sources plus four keys.

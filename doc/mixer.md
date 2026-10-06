@@ -51,6 +51,32 @@ edge's first frame. A callback exception or invalid edge name shuts down the
 partially built engine. Face policy and inference construction belong to the
 calling application; this callback does not implement bounding-box rendering.
 
+## Pacing loops and redundant colour tags
+
+File-source `realtime` and browser `smooth_timestamps` callbacks are distributed
+round-robin over four `pacing_*` event loops. Output, AUX and wipe pacing stay
+on the default loop. These are shared callback threads; removing one pacing
+node does not remove a thread. Blocking input, decode and filter nodes have
+separate execution costs.
+
+`MixerGraphBuilder.add_source(..., color_tagged=True)` promises that every upstream
+frame already carries the declared YUV colour tags. It requires an explicit
+YUV colour contract and rejects packed RGB. The builder skips a colour filter
+only when its entire generated graph equals that source's `setparams` string;
+colour conversion, tone mapping, format changes and alpha handling still run.
+
+The application makes this promise automatically for raw NV12, P010 and v210
+sources only when they have neither a user filter nor a `process_source`
+callback. The upload graph stamps tags without adding a node. Configured
+geometry transforms preserve frame properties. Other integrations must uphold
+the promise themselves; the default is `color_tagged=False`.
+
+The captured 188-source show (plus four browser keys) had 152 file pacers and
+32 eligible raw colour filters. These two changes remove 184 nodes and queues
+from that configuration. This is a derived count, not a newly measured deployed
+graph or a throughput claim. See the [cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
+for revision-specific evidence and the ranked optimization list.
+
 ## Shared GUI and setup
 
 Run `python -m pyplumber.mixer.gui --port 7777`: `/` controls the mixer and

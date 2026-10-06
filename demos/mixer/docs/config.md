@@ -184,3 +184,25 @@ python3 -m pyplumber.mixer.tools.make_config --fps 30 cam0=/media/camera.mp4 > m
 
 For generated workloads use a [recipe](recipe.md). Other mixer applications use
 `pyplumber.mixer.build_application` directly; see the [base API](../../../doc/mixer.md).
+
+## Input cadence and colour-tag guarantees
+
+Mixer file sources retain native cadence; the compositor samples them at the
+canvas rate. Keep rational source rates exact (for example `30000/1001` or
+`60000/1001`) instead of substituting decimal approximations. The input
+`realtime` node still paces/rebases timestamps, using a 1/120000 time base.
+Per-input `force_fps` is omitted; output/AUX normalization remains. The shared
+input helper's default normalized behavior for other applications is unchanged.
+Browser sources retain their separate timestamp smoothing/repeat chain.
+
+`canvas.raw_upload: "pinned"` uses patched FFmpeg's `hwupload_cuda`; the old
+custom raw uploader nodes are retired. NV12/P010 and v210 builders stamp declared
+YUV tags in the upload graph. The application bypasses a standalone tag-only
+colour filter only when no user filter or processing callback can invalidate
+that promise. Real colour conversion and alpha processing remain. A source
+`transform` preserves the tags, while an arbitrary `filter_graph` or
+`process_source` callback disables automatic eligibility.
+
+The library's `color_tagged` source contract is not a request to infer colour
+from content. See [the mixer API](../../../doc/mixer.md#pacing-loops-and-redundant-colour-tags)
+when integrating custom inputs in another repository.

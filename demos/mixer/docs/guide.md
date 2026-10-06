@@ -26,6 +26,12 @@ layouts. `--config` supplies its own canvas and scenes. Use `--output-format`
 for an ambiguous target; `--codec` and `--bitrate` select the NVENC output.
 Run `--help` for current defaults and the full option list.
 
+File inputs retain their native cadence; `--fps` selects the canvas/output rate.
+For encoded files, fractional rates come from their timestamps. The compositor
+selects, repeats or drops source frames as needed, while `realtime` still paces
+input delivery. Browser pacing follows its configured paint rate. See
+[configuration](config.md#input-cadence-and-colour-tag-guarantees).
+
 ## Controls
 
 The Compose stack starts the web UI. With a standalone backend:

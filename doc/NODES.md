@@ -54,7 +54,14 @@ This node is non-blocking.
 -   `speed` (float) - default 1, implemented by scaling wallclock's
     timebase (millisecond precision) so values between ~0.9995 and
     ~1.0006 are treated as 1.
--   `tick_period` (string of rational, seconds) - if specified and [`tick_source`](#non-blocking-nodes) is also specified, anti-jitter filter will be enabled, assuming that tick source emits a tick every `tick_period`. Generally should be set to 1/FPS, e.g. `1/60`. The filter maintains its own clock independent of wallclock, but will resync to the wallclock if it drifts too much. If unspecified, wallclock will be used.
+-   `tick_period` (string of rational, seconds) - if specified and [`tick_source`](#non-blocking-nodes) is also specified, anti-jitter filter will be enabled, assuming that tick source emits a tick every `tick_period`. Generally should be set to 1/FPS, e.g. `1/60`. The filter maintains its own clock independent of wallclock, but will resync to the wallclock if it drifts too much. Without `tick_source`, pacing still follows wallclock, but a specified
+    `tick_period` selects an internal time base of one quarter of that period.
+    For example, `1/30000` gives 1/120000-second timestamps with `set_pts`,
+    preserving common fractional frame periods. If omitted, the normal
+    millisecond wallclock time base is used. When selecting a finer time base,
+    explicitly set `negative_time_tolerance` and `discontinuity_threshold` in
+    seconds to preserve the intended durations; the legacy implicit tick
+    constants assume millisecond precision.
 -   `set_pts` (bool, default false) - set PTS to wallclock timestamps corresponding to time when packets are outputted (or, more precisely, when they would be outputted if there was no jitter)
 -   `forward_eof` (bool, default false) - pass the end-of-stream marker on to the output, in order behind the last frame and never stamped by `set_pts`. By default the marker is consumed here; a consumer that must tell the end of a file from a stalled producer (`clip_cache`) needs it. Do not enable it in front of a node that finishes on the marker unless that is intended.
 
@@ -738,7 +745,7 @@ Get audio frames from named pipe. See `src/nodes/ipc_audio_source.cpp` for heade
 
 1 input: `av::VideoFrame`, 1 output: `av::Packet`
 
-Extract ATSC A53 Part 4 Closed Captions data from video frame. Subtitle codec is usually EIA-708 or 608 in such side data. When outputted to UDP with libavformat's [special `data` 'muxer'](https://ffmpeg.org/ffmpeg-formats.html#Raw-muxers) (see [`examples/extract_cc_data.avplumber`](examples/extract_cc_data.avplumber)), subtitles can be parsed using [CCExtractor](https://ccextractor.org/) or GStreamer (YMMV).
+Extract ATSC A53 Part 4 Closed Captions data from video frame. Subtitle codec is usually EIA-708 or 608 in such side data. When outputted to UDP with libavformat's [special `data` 'muxer'](https://ffmpeg.org/ffmpeg-formats.html#Raw-muxers) (see [`examples/extract_cc_data.avplumber`](../examples/extract_cc_data.avplumber)), subtitles can be parsed using [CCExtractor](https://ccextractor.org/) or GStreamer (YMMV).
 
 no parameters
 
@@ -839,8 +846,9 @@ Parameters:
 Draw detection results that are already attached to a video frame as JSON
 metadata: boxes, labels of 5x7 bitmap text (`A`-`Z`, `0`-`9`, `: _ - .`), a
 trail of line segments, pose keypoints, segmentation masks. Built with
-`HAVE_CUDA=1` and `NEURAL_NET=1`. The parameter tables are in
-[specs/neural_net/draw.md](specs/neural_net/draw.md).
+`HAVE_CUDA=1` and `NEURAL_NET=1`. The box and label parameter tables are in
+[draw_bbox](../node_documentation/draw_bbox.md) and
+[draw_bbox_labels](../node_documentation/draw_bbox_labels.md).
 
 1 input: `av::VideoFrame`, hardware "pixel format" `cuda` or `cuarray`, software
 format `nv12` (anything else is an error), 1 output: `av::VideoFrame`, always
