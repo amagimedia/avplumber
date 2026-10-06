@@ -612,11 +612,13 @@ def test_browser_failure_precedes_native_initialization(monkeypatch):
     monkeypatch.setattr(mixer, "_init_avp", lambda *args: pytest.fail("native threads started before browser preparation"))
     with pytest.raises(RuntimeError, match="browser unavailable"):
         build_application(GraphOptions(inputs=("dmabuf://page_00",), output="p.mp4", dmabuf_open="http://p"), api=fake_api())
-    monkeypatch.setattr(mixer, "open_windows", fail)
+    from pyplumber.mixer import application
+    monkeypatch.setattr(application, "open_windows", fail)
+    monkeypatch.setattr(application, "_init_avp", lambda *args: pytest.fail("native threads started before browser preparation"))
     cfg = SimpleNamespace(fps=60, latency_ms=None, browser_ring_size=11, max_compositor_layers=256, sources=[SimpleNamespace(
         kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60, hold_last_frame=True)])
     with pytest.raises(RuntimeError, match="browser unavailable"):
-        mixer._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api(), ExitStack())
+        application._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api(), ExitStack())
 
 
 def test_startup_failure_shuts_down_application(monkeypatch):
