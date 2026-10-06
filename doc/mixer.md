@@ -65,6 +65,30 @@ finally:
 Pass `setup=` to `serve` for application-owned setup. It supplies `status()`,
 `apply(settings)`, `remember_aux(bus, fields)` and `page()` (HTML bytes).
 Status includes `phase`, `message` and a monotonically increasing `revision`.
+The `SetupController` protocol documents this interface; inheritance is not
+required. The shared HTTP layer passes the application's settings object to
+`apply` without interpreting its input types. Keep input discovery, credentials
+and preparation in the consuming application.
+
+GPU/NVENC and host monitoring are also usable without the server:
+
+```python
+from pyplumber.mixer.gui import GpuStats, HostStats, MixerBridge, serve
+
+gpu = GpuStats()  # reuse one sampler across viewers/servers
+host = HostStats(mixer_pid=lambda: application.mixer_pid())
+host.start()
+server = serve(MixerBridge("127.0.0.1", 7777, "mixer"), "127.0.0.1", 7681,
+               setup=application.setup, gpu=gpu, host_stats=host)
+```
+
+The application owns these samplers. `HostStats.sample()` can instead be called
+by an existing one-second scheduler. `GpuStats.snapshot()` keeps the existing
+bounded sampling and caching; its NVENC session count, FPS and megapixels/second
+fields are unchanged. `gpu=` also accepts a provider implementing
+`GpuTelemetry.snapshot()`, for example a shared remote-host sampler.
+An embedded caller owns server startup/shutdown as in the example above.
+
 `gui.setup_runtime.SetupRuntime` provides process restart/rollback, browser
 recovery and AUX persistence. Override `make_recipe`, `plan`, `prepare` and
 `page`; pass `mixer_command=` to launch your application's module. Its process
@@ -73,11 +97,23 @@ heartbeat, failure reporting and clean shutdown.
 For CLI integration, `gui.web.main(configure=..., setup_factory=...)` handles
 server startup, monitoring and shutdown; the factory receives parsed args and
 the control bridge.
+That CLI-managed setup also supplies `resume()`, `close()` and `process` (a
+running process with a `pid`, or `None`). Embedding with `serve()` does not
+require those lifecycle methods.
 
 Custom setup pages can load `/setup.js`: `MixerSetup.canvasControls` takes
 application-provided choices; `MixerSetup.encodeRow` renders codec, preset and
 bitrate controls from NVENC limits. Synthetic source allocation, generated
 SDR/HDR media and measured demo presets stay in `demos/mixer/`.
+For a separate mixer product, reuse `/setup.js` and its NVENC encoding controls
+unchanged, supply your own input controls from `SetupController.page()`, and
+translate those settings into a mixer configuration in your setup implementation.
+The control page, output wall and telemetry do not depend on the demo's inputs.
+
+Python boundaries are `gui.bridge` (AVP connection and command ordering),
+`gui.telemetry` (GPU/NVENC and host sampling), `gui.priority` (optional Linux
+thread priority), and `gui.web` (HTTP and CLI). Existing public imports from
+`gui.web` remain available; new applications can use `pyplumber.mixer.gui`.
 
 ## Native code layout
 

@@ -20,7 +20,8 @@ from demos.mixer.webui import parse_args
 
 from pyplumber.mixer.control import mixer_command
 from pyplumber.mixer.gui.web import (CONFIG_SCRIPT, CriticalNice, GpuStats, HostStats, MixerBridge, normalize_preview_base, page,
-                   compute_price, serve, _encoder_snapshot, _encoder_totals)
+                   compute_price, serve)
+from pyplumber.mixer.gui.telemetry import _encoder_snapshot, _encoder_totals
 
 
 class FakeBridge(MixerBridge):
@@ -59,15 +60,15 @@ def client(monkeypatch, http_server):
 
 
 def mock_gpu_queries(monkeypatch, query):
-    monkeypatch.setattr('pyplumber.mixer.gui.web.subprocess.check_output', query)
-    monkeypatch.setattr('pyplumber.mixer.gui.web._encoder_snapshot', lambda counts: _encoder_totals(
+    monkeypatch.setattr('pyplumber.mixer.gui.telemetry.subprocess.check_output', query)
+    monkeypatch.setattr('pyplumber.mixer.gui.telemetry._encoder_snapshot', lambda counts: _encoder_totals(
         query(['nvidia-smi', 'encodersessions'], timeout=1)))
 
 
 def test_gpu_samples_are_cached_and_missing_metrics_stay_unknown(monkeypatch):
     now = [0]
     calls = []
-    monkeypatch.setattr('pyplumber.mixer.gui.web.time.monotonic', lambda: now[0])
+    monkeypatch.setattr('pyplumber.mixer.gui.telemetry.time.monotonic', lambda: now[0])
     def query(*args, **kwargs):
         calls.append(args)
         assert kwargs['timeout'] == 1
@@ -165,7 +166,7 @@ def test_encoder_reader_stops_and_reaps_a_continuously_running_command(monkeypat
                            f'import sys,time;sys.stdout.write({row!r});sys.stdout.flush();time.sleep(30)'], **kwargs)
         children.append(child)
         return child
-    monkeypatch.setattr('pyplumber.mixer.gui.web.subprocess.Popen', start)
+    monkeypatch.setattr('pyplumber.mixer.gui.telemetry.subprocess.Popen', start)
     at = time.monotonic()
     sample = _encoder_snapshot({0: 1})
     elapsed = time.monotonic() - at
@@ -203,7 +204,7 @@ def test_gpu_query_failure_clears_old_sample_and_is_cached(monkeypatch, error):
     def fail(*args, **kwargs):
         calls.append(args)
         raise error
-    monkeypatch.setattr('pyplumber.mixer.gui.web.subprocess.check_output', fail)
+    monkeypatch.setattr('pyplumber.mixer.gui.telemetry.subprocess.check_output', fail)
     stats = GpuStats()
     stats.values = [{'gpu': 90}]
     assert stats.snapshot() == []
@@ -230,7 +231,7 @@ def fake_proc(root, load1, cpu, threads=None, pid=4242, process_ticks=None, star
 
 def test_host_stats_sample_load_cpu_and_the_busiest_mixer_thread(tmp_path, monkeypatch):
     now = [10.0]
-    monkeypatch.setattr("pyplumber.mixer.gui.web.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("pyplumber.mixer.gui.telemetry.time.monotonic", lambda: now[0])
     hz = os.sysconf("SC_CLK_TCK")
     pid = [4242]
     stats = HostStats(lambda: pid[0], proc=tmp_path)
@@ -265,7 +266,7 @@ def test_host_stats_sample_load_cpu_and_the_busiest_mixer_thread(tmp_path, monke
 
 def test_mixer_cpu_counts_exited_threads_and_detects_pid_reuse(tmp_path, monkeypatch):
     now = [10.0]
-    monkeypatch.setattr("pyplumber.mixer.gui.web.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("pyplumber.mixer.gui.telemetry.time.monotonic", lambda: now[0])
     hz = os.sysconf("SC_CLK_TCK")
     stats = HostStats(lambda: 4242, proc=tmp_path)
     def sample(ticks, started=5):
@@ -300,8 +301,8 @@ def test_host_stats_thread_hides_the_meters_during_an_error_and_logs_it_once(tmp
         published.append(stats.values)
         if len(published) == 4:
             raise Stop
-    monkeypatch.setattr("pyplumber.mixer.gui.web.time.monotonic", lambda: next(clock))
-    monkeypatch.setattr("pyplumber.mixer.gui.web.time.sleep", sleep)
+    monkeypatch.setattr("pyplumber.mixer.gui.telemetry.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("pyplumber.mixer.gui.telemetry.time.sleep", sleep)
     with caplog.at_level(logging.WARNING, logger="webui"), pytest.raises(Stop):
         stats._run()
     assert published[:3] == [None, None, None] and published[3]["thread_name"] == "mixer.py"   # the meters return with the next good sample
@@ -336,7 +337,7 @@ def record_setpriority(monkeypatch, fail=None):
         if (fail or {}).get(who):
             raise fail[who]
         calls.append((who, nice))
-    monkeypatch.setattr("pyplumber.mixer.gui.web.os.setpriority", setpriority)
+    monkeypatch.setattr("pyplumber.mixer.gui.priority.os.setpriority", setpriority)
     return calls
 
 
@@ -478,7 +479,7 @@ ONE_POLL = ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
 
 def test_polls_share_one_state_until_it_expires_or_a_take_lands(monkeypatch):
     now = [100.0]
-    monkeypatch.setattr("pyplumber.mixer.gui.web.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("pyplumber.mixer.gui.telemetry.time.monotonic", lambda: now[0])
     bridge = FakeBridge(STATE_REPLIES)
     first = bridge.state()
     first["gpus"] = []   # a caller's own keys stay out of the shared reply
