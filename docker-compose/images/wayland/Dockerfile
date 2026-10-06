@@ -1,11 +1,12 @@
-FROM fedora:42
+FROM fedora:44
 
+# libglvnd-gles obsoletes mesa-libGLES: Mesa's GLES goes through glvnd's libGLESv2.
 RUN dnf -y install --setopt=install_weak_deps=False \
         bash \
+        libglvnd-gles \
         mesa-dri-drivers \
         mesa-libEGL \
         mesa-libGL \
-        mesa-libGLES \
         shadow-utils \
         socat \
         sway \

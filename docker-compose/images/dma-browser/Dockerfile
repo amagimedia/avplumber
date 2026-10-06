@@ -1,4 +1,4 @@
-FROM fedora:42 AS builder
+FROM fedora:44 AS builder
 
 RUN dnf -y install --setopt=install_weak_deps=False \
         "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
@@ -17,14 +17,15 @@ WORKDIR /opt/dma-browser
 
 COPY deps/dma-browser/package.json deps/dma-browser/package-lock.json deps/dma-browser/.npmrc ./
 COPY deps/dma-browser/addons ./addons
-RUN npm ci
+# Electron 42+ no longer downloads its binary on install; fetch it explicitly.
+RUN npm ci && node node_modules/electron/install.js
 
 COPY deps/dma-browser ./
 RUN npm run build \
     && npm run rebuild:addons \
     && npm run rebuild:shim
 
-FROM fedora:42
+FROM fedora:44
 
 RUN dnf -y install --setopt=install_weak_deps=False \
         "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \

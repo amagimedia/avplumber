@@ -1,0 +1,66 @@
+name: avplumber-mixer-l4
+
+services:
+  mixer:
+    image: &mixer-image ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-mixer:${MIXER_RELEASE}
+    build:
+      dockerfile: docker-compose/mixer/Dockerfile.fedora44
+      args:
+        FFMPEG_TAG: ${FFMPEG_TAG:?Use deploy/l4/stack.sh}
+        AVPLUMBER_REVISION: ${AVPLUMBER_REVISION}
+        BUILD_JOBS: ${BUILD_JOBS:-4}
+    volumes:
+      - ${MIXER_MEDIA_DIR}:/media:rw,z
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      graph:
+        condition: service_started
+
+  seed:
+    image: *mixer-image
+    entrypoint: [python3, docker-compose/mixer/deploy/l4/seed.py]
+    command: [/initial-settings.json, /media]
+    volumes:
+      - ${MIXER_MEDIA_DIR}:/media:rw,z
+      - ${MIXER_INITIAL_SETTINGS}:/initial-settings.json:ro,z
+
+  janus:
+    image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-janus:${MIXER_RELEASE}
+    # Setup creates every program and AUX mountpoint with its selected codec.
+    volumes:
+      - ./deploy/l4/streaming.jcfg:/opt/janus-avp/etc/janus/janus.plugin.streaming.jcfg.template:ro,z
+
+  janus-preview:
+    image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-preview:${MIXER_RELEASE}
+
+  dma-browser:
+    image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-browser:${MIXER_RELEASE}
+
+  wayland:
+    image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-wayland:${MIXER_RELEASE}
+
+  graph:
+    image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-graph:${MIXER_RELEASE}
+    build:
+      context: ../..
+      dockerfile: docker-compose/images/web-ui/Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      WEBUI_PORT: "22222"
+
+  proxy:
+    image: nginx:alpine
+    network_mode: host
+    restart: unless-stopped
+    depends_on: [mixer, janus-preview, graph]
+    environment:
+      MIXER_PUBLIC_PORT: ${MIXER_PUBLIC_PORT:-7681}
+      MIXER_HTTP_PORT: ${MIXER_HTTP_PORT}
+      MIXER_PREVIEW_PORT: ${JANUS_PREVIEW_PORT}
+      MIXER_AUTH_REALM: ${MIXER_AUTH_REALM:-off}
+      NGINX_ENVSUBST_FILTER: ^MIXER_
+    volumes:
+      - ./deploy/l4/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro,z
+      - ${MIXER_HTPASSWD:-/dev/null}:/etc/nginx/mixer.htpasswd:ro

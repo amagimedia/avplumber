@@ -1,0 +1,34 @@
+name: Documentation policy
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  reject-planning-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reject tracked planning and research directories
+        shell: python
+        run: |
+          import subprocess
+          import sys
+          from pathlib import PurePosixPath
+
+          paths = subprocess.check_output(["git", "ls-files", "-z"]).decode().split("\0")
+          forbidden = []
+          for path in filter(None, paths):
+              directories = PurePosixPath(path).parts[:-1]
+              if "superpowers" in directories or any(
+                  parent in {"doc", "docs"} and child in {"specs", "research", "plans"}
+                  for parent, child in zip(directories, directories[1:])
+              ):
+                  forbidden.append(path)
+          if forbidden:
+              print("AI plans, specs and research must stay out of Git:", file=sys.stderr)
+              print("\n".join(forbidden), file=sys.stderr)
+              sys.exit(1)
