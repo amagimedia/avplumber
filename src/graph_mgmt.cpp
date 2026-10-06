@@ -486,7 +486,7 @@ std::shared_ptr< NodeWrapper > NodeManager::createNode(Parameters& params, const
                     auto n = weak_nw.lock();
                     if (!n) return;
                     logstream << "Node " << n->name() << " initiated group auto-restart";
-                    n->group()->restartNodes();
+                    n->group()->restartNodesAfterFinish();
                     logstream << "Auto-restart scheduled.";
                 };
             } else if (mode == "panic") {
@@ -639,6 +639,27 @@ std::list<NodeGroup::Item> NodeGroup::sortedNodes() {
 
 ///////////////////////////////////////////////////////////
 ////// NodeGroup
+
+void NodeGroup::goToState(State desired, bool automatic) {
+    std::lock_guard<std::mutex> lock(state_request_mutex_);
+    const State pending = desired_state_.load();
+    if (pending == State::FINISH_THREAD ||
+        (automatic && pending == State::STOPPED)) {
+        return;
+    }
+    if (desired == State::RESTART && pending == State::RESTART) {
+        return; // One pending restart covers all overlapping requests.
+    }
+    desired_state_ = desired;
+    // A newly started node may already have reached EOF or failed. Remember
+    // that restart, but finish starting its peers before stopping the group
+    // again. Dropping the request could leave a finished node unrestarted.
+    // Explicit start/stop/shutdown still invalidate the active transition.
+    if (desired != State::RESTART || !startup_in_progress_) {
+        ++start_id_;
+    }
+    mgmt_thread_wakeup_.signal();
+}
 
 void NodeGroup::reportException(const std::string &message) {
     if (!manager_) {
@@ -873,7 +894,17 @@ NodeGroup::NodeGroup(NodeManager* manager, const std::string name):
             if (!retry) {
                 mgmt_thread_wakeup_.wait();
             }
-            State desired = desired_state_;
+            State desired;
+            {
+                std::lock_guard<std::mutex> lock(state_request_mutex_);
+                desired = desired_state_.load();
+                startup_in_progress_ = desired == State::STARTED || desired == State::RESTART;
+                if (desired == State::RESTART) {
+                    // Consume this request under the same lock as goToState;
+                    // a later request must remain pending, including stop.
+                    desired_state_ = State::STARTED;
+                }
+            }
             State cur = currentState();
             if (cur != desired) {
                 try {
@@ -882,7 +913,6 @@ NodeGroup::NodeGroup(NodeManager* manager, const std::string name):
                     } else if (desired==State::STOPPED) {
                         stopNodesInternal();
                     } else if (desired==State::RESTART) {
-                        desired_state_ = State::STARTED;
                         restartNodesInternal();
                     } else if (desired==State::FINISH_THREAD) {
                         stopNodesInternal();
@@ -910,6 +940,10 @@ NodeGroup::NodeGroup(NodeManager* manager, const std::string name):
             } else if (retry) {
                 logstream << "BUG: currentState() == desired_state_ but retry==true, fixing to avoid infinite loop";
                 retry = false;
+            }
+            {
+                std::lock_guard<std::mutex> lock(state_request_mutex_);
+                startup_in_progress_ = false;
             }
         }
     });

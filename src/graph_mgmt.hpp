@@ -163,12 +163,12 @@ protected:
         FINISH_THREAD
     };
     std::atomic<State> desired_state_ = State::EMPTY;
+    // Never take busy_ in a finish callback: the management thread may be
+    // holding it while joining that callback's worker.
+    std::mutex state_request_mutex_;
+    bool startup_in_progress_ = false;
     Event mgmt_thread_wakeup_;
-    void goToState(State desired) {
-        desired_state_ = desired;
-        start_id_++;
-        mgmt_thread_wakeup_.signal();
-    }
+    void goToState(State desired, bool automatic = false);
     std::thread mgmt_thread_;
     bool is_sorted_ = false;
     std::unique_lock<decltype(busy_)> getLock() {
@@ -201,6 +201,9 @@ public:
     }
     void restartNodes() {
         goToState(State::RESTART);
+    }
+    void restartNodesAfterFinish() {
+        goToState(State::RESTART, true);
     }
     // Returns a copy taken under busy_ so callers may iterate without the
     // lock; the live list is rebuilt by sort() and cleared by add().
