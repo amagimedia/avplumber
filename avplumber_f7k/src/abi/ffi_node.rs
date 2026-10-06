@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use crate::graph::capability::AvpInterfaceId;
 use crate::graph::error::{NodeError, NodePhase};
 use crate::graph::node::{Node, NodeKind, Polled, Processed};
+use crate::graph::pad::NodePads;
 use crate::graph::poll_ctx::NodePollContext;
 
 #[repr(C)]
@@ -26,17 +27,24 @@ pub struct FfiNode {
     name: String,
     self_ptr: *mut c_void,
     vtable: &'static AvpNodeVtable,
+    pads: NodePads,
 }
 
 unsafe impl Send for FfiNode {}
 unsafe impl Sync for FfiNode {}
 
 impl FfiNode {
-    pub fn new(name: String, self_ptr: *mut c_void, vtable: &'static AvpNodeVtable) -> Self {
+    pub fn new(
+        name: String,
+        self_ptr: *mut c_void,
+        vtable: &'static AvpNodeVtable,
+        pads: NodePads,
+    ) -> Self {
         Self {
             name,
             self_ptr,
             vtable,
+            pads,
         }
     }
 
@@ -89,6 +97,9 @@ impl Drop for FfiNode {
 impl Node for FfiNode {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn pads(&self) -> NodePads {
+        self.pads.clone()
     }
     fn kind(&self) -> NodeKind {
         if self.vtable.process.is_some() {

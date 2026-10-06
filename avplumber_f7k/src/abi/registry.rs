@@ -3,7 +3,7 @@
 
 use std::ffi::c_void;
 use std::os::raw::c_char;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::abi::{AvpCore, AvpNode};
 use crate::factory::BuiltNode;
@@ -22,21 +22,19 @@ pub extern "C" fn avp_register_node_factory(
     type_name: *const c_char,
     c_fn: AvpNodeFactoryFn,
 ) {
-    let inst = unsafe { &mut *core };
+    // SAFETY: `core` is the Instance the caller is registering on. Every field
+    // this touches sits behind a mutex, so a shared borrow is enough.
+    let inst = unsafe { &*core };
     let type_name = crate::abi::node::cstr_to_string(type_name);
-    // Capture the core pointer as a usize so the closure is Send+Sync.
-    // SAFETY: the Instance outlives every factory call (the embedder holds it
-    // for the whole session); the cast back to *mut AvpCore is valid at call time.
-    let core_ptr = core as usize;
     inst.factories
         .lock()
         .unwrap()
-        // A C factory takes nothing from `BuildCtx`: it reaches the instance
-        // through the captured core pointer, and the edges it binds are leased
-        // against whatever generation later publishes them.
-        .register_built(&type_name, move |inst_name, params, _ctx| {
+        // Do not capture `core`. Module init runs inside `Instance::new` before
+        // that wrapper is returned or boxed, so a pointer taken then dangles.
+        // `BuildCtx::instance` is the live Instance at `node.add`.
+        .register_built(&type_name, move |inst_name, params, ctx| {
             let params_c = std::ffi::CString::new(params).map_err(|e| e.to_string())?;
-            let core = core_ptr as *mut AvpCore;
+            let core = ctx.instance as *const crate::Instance as *mut AvpCore;
             let existing = unsafe { &*core }
                 .node_handles
                 .lock()
@@ -70,6 +68,7 @@ pub extern "C" fn avp_register_node_factory(
                 new_handle.as_mut().expect("new handle allocated").as_mut() as *mut AvpNode
             });
             unsafe {
+                (*node_ptr).pads = crate::NodePads::default();
                 (*node_ptr).pending_self_ptr = std::ptr::null_mut();
                 (*node_ptr).pending_vtable = None;
                 (*node_ptr).pending_producer_leases.clear();
@@ -88,6 +87,7 @@ pub extern "C" fn avp_register_node_factory(
                         inst_name.to_string(),
                         pending_self_ptr,
                         vtable,
+                        crate::NodePads::default(),
                     ));
                 }
                 unsafe {
@@ -104,10 +104,12 @@ pub extern "C" fn avp_register_node_factory(
                     "node factory did not install a vtable".to_string()
                 });
             }
+            let pads = unsafe { (*node_ptr).pads.clone() };
             let native: Arc<dyn crate::Node> = Arc::new(crate::abi::FfiNode::new(
                 inst_name.to_string(),
                 pending_self_ptr,
                 pending_vtable.expect("checked above"),
+                pads,
             ));
             if let Some(mut handle) = new_handle {
                 handle.self_ptr = pending_self_ptr;
@@ -127,14 +129,30 @@ pub extern "C" fn avp_register_node_factory(
         });
 }
 
-/// Called once at load so a translation unit can self-register its factories
-/// before any graph is built. Currently a no-op: the C++ shim will drive this
-/// from static registrars. Pure-Rust nodes register via `register_factory`.
-/// The module-init queue lives on the Instance and runs at `avp_core_create`.
+/// Process-global, const-initialized, so a C++ static constructor can append
+/// before `main`. Replayed into every `Instance` rather than consumed: each
+/// core needs the factories, and a later `Instance::new` must not find the
+/// queue empty.
+static MODULE_INITS: Mutex<Vec<extern "C" fn(*mut AvpCore)>> = Mutex::new(Vec::new());
+
+/// Queue a registrar. `Instance::new` replays the queue. The callback must
+/// register factories only; the `AvpCore` it receives does not outlive the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn avp_register_module_init(_init: extern "C" fn(*mut AvpCore)) {
-    // No-op until the C++ shim queues inits; the smoke test registers
-    // Rust factories via `register_factory`.
+pub extern "C" fn avp_register_module_init(init: extern "C" fn(*mut AvpCore)) {
+    let mut inits = MODULE_INITS.lock().unwrap();
+    if !inits.contains(&init) {
+        inits.push(init);
+    }
+}
+
+/// # Safety
+/// `core` must point at a live `Instance` for the duration of the call and
+/// must not be stored by the registrars.
+pub(crate) unsafe fn replay_module_inits(core: *mut AvpCore) {
+    let inits = MODULE_INITS.lock().unwrap().clone();
+    for init in inits {
+        init(core);
+    }
 }
 
 /// Register retain/release for an opaque C++-owned media type (EGL, metadata).

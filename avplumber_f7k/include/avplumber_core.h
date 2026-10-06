@@ -205,6 +205,11 @@ void  avp_node_set_impl(AvpNode*, void* self, const AvpNodeVtable*);
 void* avp_node_impl(AvpNode*);
 const char* avp_node_name(AvpNode*);
 
+/* Declare one pad before the factory returns. `is_output` is 0 for an input
+ * and nonzero for an output. One pad per side is what node.add binds src/dst
+ * to, so a packet edge will not type-check against a video node. */
+void avp_node_declare_pad(AvpNode*, int is_output, const char* name, AvpMediaType media);
+
 /* Core services (clock, timeline, seek) are core-owned but domain-specific.
  * An embedder reaches them by service ID. Numeric IDs are in avplumber_ids.h
  * (generated from Rust); each service's vtable lives in avplumber_services_*.h. */
@@ -228,8 +233,9 @@ typedef AvpNode* (*AvpNodeFactoryFn)(AvpCore*, AvpNode* node, const char* json_p
 
 void avp_register_node_factory(AvpCore*, const char* type_name, AvpNodeFactoryFn);
 
-/* Called once at load to let a translation unit self-register its factories,
- * before any graph is built. C++ shim drives this from static registrars. */
+/* Queue a registrar. Every Instance replays the queue at construction, before
+ * any node.add. The AvpCore passed to the callback is only valid for that
+ * call: register a factory, do not store the pointer. */
 typedef void (*AvpModuleInit)(AvpCore*);
 void avp_register_module_init(AvpModuleInit);
 

@@ -49,8 +49,7 @@ pub use graph::{
     EdgeHintCell, EdgeItem, EdgeKind, EdgeLink, EdgeRestart, EdgeWaker, Grain, Graph, MuxStream,
     Node, NodeBody, NodeError, NodeKind, NodePads, NodePhase, NodePollContext, PacketSpec, Pad,
     PadDecl, Polled, Processed, Push, Spec, StreamSelection, Ts, TsDelta, Vertex, Wakeup,
-    generation_reader,
-    generation_writer, pending_generation_reader, pending_generation_writer,
+    generation_reader, generation_writer, pending_generation_reader, pending_generation_writer,
 };
 pub use node_api::{
     Blocking, BlockingIo, BlockingNode, EofAction, InputHandler, Io, NodeObjects, PollInput,
@@ -116,12 +115,17 @@ impl Drop for SharedEntry {
     }
 }
 
+#[cfg(feature = "cpp_nodes")]
+unsafe extern "C" {
+    fn avp_cpp_rescale_linked() -> i32;
+}
+
 impl Instance {
     pub fn new() -> Self {
         let graph = Arc::new(Mutex::new(Graph::new()));
         let mut factories = FactoryRegistry::new();
         factories.run_module_inits();
-        Self {
+        let inst = Self {
             inner: Arc::new(InstanceInner {
                 graph,
                 factories: Mutex::new(factories),
@@ -138,7 +142,21 @@ impl Instance {
                 planned_capacity: Mutex::new(HashMap::new()),
                 supervisor_action_hook: Mutex::new(None),
             }),
+        };
+        #[cfg(feature = "cpp_nodes")]
+        {
+            // Pulls the rescale_video object file in, so its registrar is linked.
+            // SAFETY: the symbol is defined by that translation unit and returns 1.
+            let linked = unsafe { avp_cpp_rescale_linked() };
+            assert_eq!(linked, 1, "rescale_video C++ node was not linked");
         }
+        // SAFETY: `inst` is the unique owner for this call. Replay only locks
+        // the factory registry. The pointer is not stored; factories read
+        // `BuildCtx` later, after this wrapper has a stable address.
+        unsafe {
+            crate::abi::registry::replay_module_inits(&inst as *const Instance as *mut Instance);
+        }
+        inst
     }
 
     pub(crate) fn from_inner(inner: Arc<InstanceInner>) -> Self {

@@ -22,7 +22,7 @@ pub use graph_mgmt::{
     avp_lookup_group, avp_lookup_node, avp_restart_group, avp_start_group, avp_stop_group,
 };
 pub use node::{
-    avp_node_bind_sink, avp_node_bind_source, avp_node_impl, avp_node_name,
+    avp_node_bind_sink, avp_node_bind_source, avp_node_declare_pad, avp_node_impl, avp_node_name,
     avp_node_query_interface, avp_node_set_impl,
 };
 pub use registry::{

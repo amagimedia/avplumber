@@ -37,7 +37,7 @@ pub extern "C" fn avp_node_set_impl(
     // SAFETY: the vtable is a C-side static (or &'static lifetime by contract).
     let vtable_ref: &'static AvpNodeVtable = unsafe { &*vtable };
     node.vtable = Some(vtable_ref);
-    let vt = FfiNode::new(node.name.clone(), self_ptr, vtable_ref);
+    let vt = FfiNode::new(node.name.clone(), self_ptr, vtable_ref, node.pads.clone());
     let native: std::sync::Arc<dyn crate::Node> = std::sync::Arc::new(vt);
     let core = node.core;
     let name = node.name.clone();
@@ -50,6 +50,32 @@ pub extern "C" fn avp_node_set_impl(
         // map in graph -> nodes -> handles order.
         let _ = node;
         unsafe { &*core }.replace_node_impl(&name, native, self_ptr, vtable_ref);
+    }
+}
+
+/// Append one pad to the handle the factory is filling in. `is_output` is 0
+/// for an input pad. A single pad on a side is what `node.add` binds `src` or
+/// `dst` to, whatever the script called the edge.
+#[unsafe(no_mangle)]
+pub extern "C" fn avp_node_declare_pad(
+    node: *mut AvpNode,
+    is_output: i32,
+    name: *const c_char,
+    media: AvpMediaType,
+) {
+    if node.is_null() || name.is_null() {
+        return;
+    }
+    let node = unsafe { &mut *node };
+    let pad_name = cstr_to_string(name);
+    if pad_name.is_empty() {
+        return;
+    }
+    let pad = crate::PadDecl::new(pad_name, media);
+    if is_output != 0 {
+        node.pads.sinks.push(pad);
+    } else {
+        node.pads.sources.push(pad);
     }
 }
 
