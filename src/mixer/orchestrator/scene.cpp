@@ -4,31 +4,34 @@
 
 namespace avp::mixer {
 
-void MixerOrchestrator::defineSource(const std::string& name, const std::string& otm_node, int input_index,
-                                      const std::string& cs_node_a, const std::string& cs_node_b) {
+namespace {
+void checkInputIndex(int input_index) {
+    if (input_index < 0 || input_index >= kSourceMaskBits)
+        throw Error("mixer source input_index must be in 0.." + std::to_string(kSourceMaskBits - 1));
+}
+}
+
+void MixerOrchestrator::defineSource(const std::string& name, const std::string& otm_node, int input_index) {
     std::lock_guard<std::mutex> lock(state_->mutex);
+    checkInputIndex(input_index);
     MixerState::SourceInfo info;
     info.otm_node_name = otm_node;
     info.input_index = input_index;
-    info.cs_node_a = cs_node_a;
-    info.cs_node_b = cs_node_b;
     state_->sources[name] = std::move(info);
 }
 
 void MixerOrchestrator::defineRoutedSource(const std::string& name, const std::string& router_node,
                                            int input_index,
                                            const std::string& route_output_label_a,
-                                           const std::string& route_output_label_b,
-                                           const std::string& cs_node_a, const std::string& cs_node_b) {
+                                           const std::string& route_output_label_b) {
     const int output_count = routerOutputCount(nodes_, router_node);
     const int route_output_a = routerOutputIndexFromLabel(nodes_, router_node, route_output_label_a);
     const int route_output_b = routerOutputIndexFromLabel(nodes_, router_node, route_output_label_b);
 
     std::lock_guard<std::mutex> lock(state_->mutex);
+    checkInputIndex(input_index);
     MixerState::SourceInfo info;
     info.input_index = input_index;
-    info.cs_node_a = cs_node_a;
-    info.cs_node_b = cs_node_b;
     info.routed = true;
     info.router_node_name = router_node;
     info.route_output_label_a = route_output_label_a;
@@ -49,8 +52,10 @@ void MixerOrchestrator::defineRoutedSource(const std::string& name, const std::s
 
 void MixerOrchestrator::defineScene(const std::string& name, const SceneDefinition& def) {
     std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->scene_definitions_frozen)
+        throw Error("mixer.scene: aux-enabled setup has fixed scene definitions; reload setup to edit");
     if (state_->prewarm_cut_scenes.count(name) &&
-            (!canPrewarmScene(def) || (state_->computeActiveInputsMask(def) & ~state_->prewarm_source_mask)))
+            (!canPrewarmScene(def) || (state_->computeActiveInputsMask(def) & ~state_->prewarm_source_mask).any()))
         state_->prewarm_cut_scenes.erase(name); // Edited source identity takes the ordinary cold path.
     state_->scenes[name] = def;
 }
@@ -59,9 +64,7 @@ bool MixerOrchestrator::canPrewarmScene(const SceneDefinition& scene) const {
     if (!scene.routes.empty() || !scene.controls.empty()) return false;
     for (const auto& [name, layout] : scene.sources) {
         const auto source = state_->sources.find(name);
-        if (source == state_->sources.end() || source->second.routed ||
-                !source->second.cs_node_a.empty() || !source->second.cs_node_b.empty() ||
-                !layout.crop_scale_graph.empty()) return false;
+        if (source == state_->sources.end() || source->second.routed) return false;
     }
     return !scene.sources.empty();
 }
@@ -69,11 +72,11 @@ bool MixerOrchestrator::canPrewarmScene(const SceneDefinition& scene) const {
 void MixerOrchestrator::prewarmCuts(const std::vector<std::string>& scenes) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     ensureIdle();
-    uint32_t mask = 0;
+    SourceMask mask;
     for (const auto& name : scenes) {
         const auto scene = state_->scenes.find(name);
         if (scene == state_->scenes.end() || !canPrewarmScene(scene->second))
-            throw Error("mixer.prewarm: scenes require fixed, filter-free sources without routes or controls: " + name);
+            throw Error("mixer.prewarm: scenes require fixed sources without routes or controls: " + name);
         mask |= state_->computeActiveInputsMask(scene->second);
     }
     for (const auto& slot : {state_->slot_a, state_->slot_b}) {
@@ -82,57 +85,26 @@ void MixerOrchestrator::prewarmCuts(const std::vector<std::string>& scenes) {
             throw Error("mixer.prewarm: requires created clocked compositors");
     }
     for (const auto& slot : {state_->slot_a, state_->slot_b})
-        setNodeObject(slot.compositor_name, "prewarm_inputs", Parameters(mask));
+        setNodeObject(slot.compositor_name, "prewarm_inputs", toParameters(mask));
     state_->prewarm_cut_scenes = {scenes.begin(), scenes.end()};
     state_->prewarm_source_mask = mask;
+    const auto* pgm = &state_->scenes.at(state_->pgm_scene_name);
+    const auto* pvw = state_->pvw_slot_scene.empty() ? nullptr : &state_->scenes.at(state_->pvw_slot_scene);
+    publishSourceRoutes(state_->pgm_is_slot_a ? pgm : pvw, state_->pgm_is_slot_a ? pvw : pgm);
+}
+
+void MixerOrchestrator::publishSourceRoutes(const SceneDefinition* scene_a, const SceneDefinition* scene_b) {
+    auto tables = currentRouterTables(*state_);
+    setRoutedSlotInTables(*state_, tables, true, scene_a);
+    setRoutedSlotInTables(*state_, tables, false, scene_b);
     for (const auto& [name, source] : state_->sources) {
-        if (source.routed) continue;
-        uint32_t outputs = state_->scenes.at(state_->pgm_scene_name).sources.count(name) ? state_->pgmOutputBit() : 0u;
-        if (!state_->pvw_scene_name.empty() && state_->scenes.at(state_->pvw_scene_name).sources.count(name))
-            outputs |= state_->pvwOutputBit();
-        publishCameraOtmOutputs(source.otm_node_name, state_->sourceOutputMask(source, outputs));
+        if (!source.routed)
+            publishRuntimeObject(source.otm_node_name, "outputs",
+                sourceOutputsForScenes(*state_, name, source, scene_a, scene_b));
     }
-}
-
-void MixerOrchestrator::applyRoutedSceneRoutesForSlot(bool is_slot_a, const SceneDefinition& scene,
-                                                       int64_t at_pts_ms, bool immediate) {
-    auto tables = currentRouterTables(*state_);
-    setRoutedSlotInTables(*state_, tables, is_slot_a, &scene);
-
-    for (const auto& [router_name, routes] : tables) {
-        Parameters value = routesToParameters(routes);
-        if (immediate) {
-            timeline_->clearKey(router_name, "routes");
-            if (!setNodeObjectIfCreated(nodes_, router_name, "routes", value)) {
-                logstream << "mixer: queued " << router_name
-                          << ".routes for router node not created yet";
-            }
-            state_->router_routes[router_name] = routes;
-        }
-        timeline_->set(router_name, "routes", at_pts_ms, value);
-    }
-}
-
-void MixerOrchestrator::publishRoutedRoutesForProgramOnly(bool pgm_is_slot_a,
-                                                           const SceneDefinition& scene,
-                                                           int64_t at_pts_ms,
-                                                           bool immediate) {
-    auto tables = currentRouterTables(*state_);
-    setRoutedSlotInTables(*state_, tables, true, nullptr);
-    setRoutedSlotInTables(*state_, tables, false, nullptr);
-    setRoutedSlotInTables(*state_, tables, pgm_is_slot_a, &scene);
-
-    for (const auto& [router_name, routes] : tables) {
-        Parameters value = routesToParameters(routes);
-        if (immediate) {
-            timeline_->clearKey(router_name, "routes");
-            if (!setNodeObjectIfCreated(nodes_, router_name, "routes", value)) {
-                logstream << "mixer: queued " << router_name
-                          << ".routes for router node not created yet";
-            }
-            state_->router_routes[router_name] = routes;
-        }
-        timeline_->set(router_name, "routes", at_pts_ms, value);
+    for (const auto& [router, routes] : tables) {
+        publishRuntimeObject(router, "routes", routesToParameters(routes));
+        state_->router_routes[router] = routes;
     }
 }
 
@@ -149,37 +121,35 @@ void MixerOrchestrator::initializeRoutedRoutes() {
     }
     if (state_->pgm_scene_name.empty() || !state_->scenes.count(state_->pgm_scene_name))
         return;
-    publishRoutedRoutesForProgramOnly(
-        state_->pgm_is_slot_a,
-        state_->scenes.at(state_->pgm_scene_name),
-        wallclock.pts(),
-        true);
+    const auto* scene = &state_->scenes.at(state_->pgm_scene_name);
+    publishSourceRoutes(state_->pgm_is_slot_a ? scene : nullptr, state_->pgm_is_slot_a ? nullptr : scene);
+}
+
+int64_t MixerOrchestrator::switchProgramSelector(bool new_pgm_is_slot_a) {
+    setNodeObject(state_->source_switcher_name, "active",
+                  Parameters(new_pgm_is_slot_a ? 0 : 1));
+    // Read at once: the selector drains its inactive inputs, so the new program's first frame
+    // arrives at the next main deadline, and the routing could take until then. The followers
+    // of a take get their change now, for the same reason.
+    return selectorOutputNs();
 }
 
 void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
-                                                   const std::string& new_pgm_scene) {
+                                                   const std::string& new_pgm_scene,
+                                                   bool picture_changed) {
     const auto scene_it = state_->scenes.find(new_pgm_scene);
     if (scene_it == state_->scenes.end())
         return;
 
     const SceneDefinition& scene = scene_it->second;
-    const uint32_t pgm_bit = new_pgm_is_slot_a ? 1u : 2u;
-    const uint32_t active = state_->computeActiveInputsMask(scene);
+    const SourceMask active = state_->computeActiveInputsMask(scene);
     const auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
     const auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
-
-    // Source_switcher first: this is the only setting visible at the SDI output.
-    // Any short window between this and the OTM/compositor flips below would only
-    // surface if the new direct path were not already producing frames; in both
-    // callers (ready cut and deferred fade cleanup) it is.
-    timeline_->clearKey(state_->source_switcher_name, "active");
-    setNodeObject(state_->source_switcher_name, "active",
-                  Parameters(new_pgm_is_slot_a ? 0 : 1));
 
     // The encoder must not make the receiver wait for the next periodic keyframe:
     // a cut changes the whole picture, and a P-frame carrying it can exceed what
     // the receiver can recover from. The node coalesces bursts into one keyframe.
-    if (!state_->keyframe_node_name.empty()) {
+    if (picture_changed && !state_->keyframe_node_name.empty()) {
         try {
             setNodeObject(state_->keyframe_node_name, "trigger", Parameters(true));
         } catch (const std::exception& e) {
@@ -187,113 +157,38 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
         }
     }
 
-    for (const auto& [src_name, info] : state_->sources) {
-        if (info.routed)
-            continue;
-        const bool in_scene = scene.sources.count(src_name) > 0;
-        const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
-        const uint32_t mask = state_->sourceOutputMask(info, (in_scene && active_input) ? pgm_bit : 0u);
-        timeline_->clearKey(info.otm_node_name, "outputs");
-        setNodeObjectIfCreated(nodes_, info.otm_node_name, "outputs", Parameters(mask));
-    }
-    publishRoutedRoutesForProgramOnly(new_pgm_is_slot_a, scene, wallclock.pts(), true);
+    publishSourceRoutes(new_pgm_is_slot_a ? &scene : nullptr, new_pgm_is_slot_a ? nullptr : &scene);
 
-    timeline_->clearKey(new_slot.post_otm_name, "outputs");
-    timeline_->clearKey(old_slot.post_otm_name, "outputs");
-    timeline_->clearKey(new_slot.compositor_name, "active_inputs");
-    timeline_->clearKey(old_slot.compositor_name, "active_inputs");
-    nodes_->node(new_slot.post_otm_name)->setObject("outputs", Parameters(1u));
-    nodes_->node(old_slot.post_otm_name)->setObject("outputs", Parameters(0u));
-    nodes_->node(new_slot.compositor_name)->setObject("active_inputs", Parameters(active));
-    nodes_->node(old_slot.compositor_name)->setObject("active_inputs", Parameters(0u));
-}
-
-void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene) {
-    uint32_t active = state_->computeActiveInputsMask(scene);
-    for (const auto& [src_name, info] : state_->sources) {
-        if (info.routed)
-            continue;
-        Parameters current_val;
-        uint32_t mask = nodes_->node(info.otm_node_name)->getObjectTry("outputs", current_val)
-                            ? current_val.get<uint32_t>()
-                            : 0u;
-        mask &= ~slot_bit;
-        if (scene.sources.count(src_name) && (active & (1u << (unsigned)info.input_index)))
-            mask |= slot_bit;
-        publishCameraOtmOutputs(info.otm_node_name, state_->sourceOutputMask(info, mask));
-    }
+    setNodeObject(new_slot.post_otm_name, "outputs", Parameters(1u));
+    setNodeObject(old_slot.post_otm_name, "outputs", Parameters(0u));
+    setNodeObject(new_slot.compositor_name, "active_inputs", toParameters(active));
+    setNodeObject(old_slot.compositor_name, "active_inputs", Parameters(0u));
 }
 
 void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name, bool warm_cut) {
     auto& scene = state_->scenes.at(scene_name);
-    const auto& slot = is_slot_a ? state_->slot_a : state_->slot_b;
+    auto& slot = is_slot_a ? state_->slot_a : state_->slot_b;
+    // Only frames carrying the new composition revision can complete this take.
+    // The compositor resets stale input on its own render thread.
+    state_->pvw_slot_scene.clear();
 
-    // The slot being loaded is the broadcast-inactive PVW slot.  Its compositor
-    // was previously idled with active_inputs=0, so it may still hold frames on
-    // its input edges. If left there, the next activation starts by rendering
-    // stale frames and appears to lag behind the scene switch.
-    flushSlotEdges(is_slot_a);
-    // Reset on the compositor's worker thread and reject frames from before
-    // this load, including those still travelling through live upstream edges.
-    if (warm_cut && state_->prewarm_cut_scenes.count(scene_name) && canPrewarmScene(scene))
-        setNodeObject(slot.compositor_name, "warm_reset", Parameters(true));
-    else
-        resetInputIf(nodes_, slot.compositor_name);
+    const SourceMask active_mask = state_->computeActiveInputsMask(scene);
+    slot.revision = std::to_string(++state_->scene_revision);
+    setNodeObject(slot.compositor_name, "composition", {
+        {"layers", compositorLayersFromScene(*state_, scene)},
+        {"active_inputs", toParameters(active_mask)}, {"revision", slot.revision},
+        {"warm", warm_cut && state_->prewarm_cut_scenes.count(scene_name) && canPrewarmScene(scene)}});
 
-    for (const auto& [src_name, layout] : scene.sources) {
-        auto src_it = state_->sources.find(src_name);
-        if (src_it == state_->sources.end()) continue;
-        const auto& info = src_it->second;
-        const std::string& cs_node = is_slot_a ? info.cs_node_a : info.cs_node_b;
-
-        if (cs_node.empty()) {
-            if (!layout.crop_scale_graph.empty())
-                throw Error("mixer: source " + src_name + " has no filter node for its scene graph");
-            continue;
-        }
-
-        // Only restart the crop/scale node when the graph string actually changed.
-        // Restarting a filter_video node tears down and rebuilds its FFmpeg filter
-        // graph, which briefly stops producing frames and allocates a new
-        // hw_frames_ctx pool.  Downstream filter_video nodes now absorb pool
-        // rotations via a semantic hw_frames_ctx comparison so this no longer
-        // causes a mid-wipe EXT_NULL gap, but the restart is still a wasted
-        // stall and a frame-timing hiccup when the graph string is unchanged.
-        const auto& node_params = nodes_->node(cs_node)->parameters();
-        const std::string old_graph = node_params.value("graph", std::string(""));
-        if (old_graph == layout.crop_scale_graph) {
-            logstream << "mixer: " << cs_node << " graph unchanged, no restart";
-        } else {
-            logstream << "mixer: " << cs_node << " graph changed (\"" << old_graph << "\" -> \""
-                      << layout.crop_scale_graph << "\"), restarting";
-            setNodeParam(cs_node, "graph", layout.crop_scale_graph);
-            autoRestartNode(cs_node);
-        }
-    }
-
-    setNodeObject(slot.compositor_name, "layers", compositorLayersFromScene(*state_, scene));
-
-    uint32_t active_mask = state_->computeActiveInputsMask(scene);
-    // Same pattern as camera otms: cuda_rect_overlay reads "active_inputs" from timeline only.
-    // clearKey does not touch "layers" or other keys on this compositor channel.
-    timeline_->clearKey(slot.compositor_name, "active_inputs");
-    setNodeObject(slot.compositor_name, "active_inputs", Parameters(active_mask));
-    timeline_->set(slot.compositor_name, "active_inputs", wallclock.pts(), Parameters(active_mask));
-
-    // Drop slot bit for every camera, then enable only sources in scene with active_inputs set.
-    // Keeps `outputs` consistent with compositor consumption (no frames into unused inputs).
-    const uint32_t slot_bit = is_slot_a ? 1u : 2u;
-    rewriteCameraOutputsForSlot(slot_bit, scene);
-    applyRoutedSceneRoutesForSlot(is_slot_a, scene, wallclock.pts(), true);
-
-    state_->pvw_scene_name = scene_name;
+    const auto* pgm = &state_->scenes.at(state_->pgm_scene_name);
+    publishSourceRoutes(is_slot_a ? &scene : pgm, is_slot_a ? pgm : &scene);
+    state_->pvw_slot_scene = scene_name;
 }
 
-void MixerOrchestrator::scheduleSceneControls(const SceneDefinition& scene, int64_t at_pts_ms) {
+void MixerOrchestrator::applySceneControls(const SceneDefinition& scene) {
     for (const auto& control : scene.controls) {
-        timeline_->set(control.node_name, control.key, at_pts_ms, control.value);
+        setNodeObject(control.node_name, control.key, control.value);
         logstream << "mixer scene control: " << control.node_name << "." << control.key
-                  << " at " << at_pts_ms << " -> " << control.value;
+                  << " -> " << control.value;
     }
 }
 
@@ -306,17 +201,17 @@ void MixerOrchestrator::preview(const std::string& scene_name) {
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
     const auto& slot = state_->pvwSlot();
 
-    if (state_->pvw_scene_name == scene_name) {
+    if (state_->pvw_slot_scene == scene_name) {
         logstream << "mixer preview: scene already loaded in PVW: " << scene_name;
     } else {
         loadSceneIntoSlot(pvw_is_slot_a, scene_name);
-        resetInputIf(nodes_, slot.norm_ts_name);
     }
 
     int64_t prep_ms = wallclock.pts();
-    timeline_->clearKey(slot.post_otm_name, "outputs");
     setNodeObject(slot.post_otm_name, "outputs", Parameters(1u));
-    timeline_->set(slot.post_otm_name, "outputs", prep_ms, Parameters(1u));
+    // Direct transitions also load this slot; only an explicit preview should
+    // publish its scene to the control UI and the AUX preview followers.
+    state_->publishPreview(scene_name, 0);
     logstream << "mixer preview armed: scene=" << scene_name
               << " slot=" << (pvw_is_slot_a ? 'A' : 'B')
               << " post_otm " << slot.post_otm_name << "->1";

@@ -2,10 +2,11 @@
 raw verification against an exact CPU reference.
 
 P210 runs ingest packed v210 (HLG and SDR-promoted families) through
-v210_to_cuda; P010 and planar 444 runs upload labeled CPU fixtures. Scene A is a
+patched hwupload_cuda; P010 and planar 444 runs upload labeled CPU fixtures. Scene A is a
 two-tile grid (scaled path), scene B is source 0 fullscreen (copy path), and
 the transition blends them at exact binary-fraction alphas so the float
-arithmetic reproduces bit-exactly on the CPU. Run on the NVIDIA host with the
+arithmetic reproduces bit-exactly on the CPU; dips pass through a solid colour
+at 1/4, 1/2 (the colour alone) and 3/4. Run on the NVIDIA host with the
 FFmpeg 8.1 avplumber module; the download is solely the verification boundary.
 """
 
@@ -24,7 +25,10 @@ W, H, FRAMES = 384, 216, 6
 # while it was waiting for input, dropping the other scene's queued tail.
 # ``--tail-margin N`` generates N extra frames and stops after the scored ones.
 TAIL_MARGIN = 0
-TRANSITIONS = (("fade", 0.0), ("fade", 0.25), ("fade", 1.0), ("wipe_left", 0.5))
+TRANSITIONS = (("fade", 0.0), ("fade", 0.25), ("fade", 1.0), ("wipe_left", 0.5),
+               ("dip", 0.25), ("dip", 0.5), ("dip", 0.75))
+# The dip colour as transition_cuda takes it: Y, Cb, Cr at 8-bit limited-range scale; x4 is exact.
+DIP_COLOR = (180.25, 100.0, 200.0)
 
 
 def planes444(index, source):
@@ -95,10 +99,16 @@ def scene_a(family, index, n=2):
 
 def blend(a_planes, b_planes, mode, coef):
     """transition_cuda word arithmetic: per-plane wipe position over that
-    plane's own pixel width, round-half-up store."""
+    plane's own pixel width, round-half-up store. A dip reads one side: A
+    towards the colour below alpha 1/2, the colour towards B above."""
     out = []
-    for pa, pb in zip(a_planes, b_planes):
+    for pa, pb, color in zip(a_planes, b_planes, DIP_COLOR):
         width = pa.shape[1]
+        if mode == "dip":
+            a, code = 2 * coef, color * 4
+            source, weight = (pa, 1 - a) if a <= 1 else (pb, a - 1)
+            out.append(np.floor(code + weight * (source - code) + 0.5).astype(np.int64))
+            continue
         if mode == "fade":
             alpha = np.full(width, coef)
         else:  # wipe_left
@@ -120,7 +130,7 @@ def upload_chain(nodes, tag, path, hwaccel, fmt):
     return f"gpu_{tag}"
 
 
-def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacity=3):
+def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacity=3, pad_offset=0):
     from pyplumber.node import CudaRectOverlay, FilterVideo
 
     gen_frames = FRAMES + margin
@@ -149,17 +159,21 @@ def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacit
     cols, tw, th = grid(n)
     layers_a = [{"dst_x": (s % cols) * tw, "dst_y": (s // cols) * th, "dst_w": tw, "dst_h": th}
                 for s in range(n)]
+    assert 0 <= pad_offset and pad_offset + n <= 64
+    pads = [f"inactive_{i}" for i in range(pad_offset)] + edges[:n]
+    layers_a = [full] * pad_offset + layers_a
     nodes += [
-        CudaRectOverlay({"name": "comp_a", "src": edges[:n], "dst": "scene_a", "hwaccel": "mix_gpu",
-                         "width": W, "height": H, "sw_format": fmt, "scale": True,
-                         "active_inputs": (1 << n) - 1, "layers": layers_a}),
+        CudaRectOverlay({"name": "comp_a", "src": pads, "dst": "scene_a", "hwaccel": "mix_gpu",
+                         "width": W, "height": H, "sw_format": fmt,
+                         "active_inputs": ((1 << n) - 1) << pad_offset, "layers": layers_a}),
         CudaRectOverlay({"name": "comp_b", "src": [edges[n]], "dst": "scene_b", "hwaccel": "mix_gpu",
-                         "width": W, "height": H, "sw_format": fmt, "scale": True, "active_inputs": 1,
+                         "width": W, "height": H, "sw_format": fmt, "active_inputs": 1,
                          "layers": [full]}),
         FilterVideo({"name": "trans", "src": ["scene_a", "scene_b"], "dst": "mixed",
                      "hwaccel": "mix_gpu", "dst_frame_rate": "60/1",
                      "defer_preliminary_init": True,
-                     "graph": f"transition_cuda=alpha='{coef}':mode={mode}:eval=init"}),
+                     "graph": f"transition_cuda=alpha='{coef}':mode={mode}:eval=init"
+                              + (":color='%g\\:%g\\:%g'" % DIP_COLOR if mode == "dip" else "")}),
         FilterVideo({"name": "verify", "src": "mixed", "dst": "result", "hwaccel": "mix_gpu",
                      "graph": f"hwdownload,format={fmt}"}),
     ]
@@ -186,12 +200,13 @@ def main():
     global FRAMES
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=60)
-    parser.add_argument("--families", nargs="+", default=["sdr8", "hlg", "420", "444"])
+    parser.add_argument("--families", nargs="+", default=["sdr8", "hlg", "420"])   # canvases are semiplanar: no 444
     parser.add_argument("--tail-margin", type=int, default=TAIL_MARGIN,
                         help="extra generated frames after the scored ones (default 0: drain to EOF)")
     parser.add_argument("--frames", type=int, default=FRAMES)
     parser.add_argument("--grid", type=int, default=16, help="sources in the grid run (0 skips it)")
     parser.add_argument("--capacity", type=int, default=3, help="edge queue capacity")
+    parser.add_argument("--pad-offset", type=int, default=0, help="inactive pads before the scored inputs, to exercise high mask bits")
     parser.add_argument("--no-pairs", action="store_true", help="skip the two-source transition runs")
     args = parser.parse_args()
     FRAMES = args.frames
@@ -199,14 +214,14 @@ def main():
         for family in args.families if not args.no_pairs else ():
             fmt = {"420": "p010le", "444": "yuv444p10le"}.get(family, "p210le")
             for mode, coef in TRANSITIONS:
-                run(root, family, fmt, mode, coef, args.timeout, margin=args.tail_margin, capacity=args.capacity)
+                run(root, family, fmt, mode, coef, args.timeout, margin=args.tail_margin, capacity=args.capacity, pad_offset=args.pad_offset)
                 print(f"PASS {family}/{fmt} {mode} alpha={coef}", flush=True)
         # Many simultaneous full-resolution sources drawn as a grid (16 = 4x4).
         for family in args.families if args.grid else ():
             if family in ("420", "444"):
                 continue  # CPU upload chains add nothing over the v210 grid
             run(root, family, "p210le", "fade", 0.25, args.timeout, n=args.grid,
-                margin=args.tail_margin, capacity=args.capacity)
+                margin=args.tail_margin, capacity=args.capacity, pad_offset=args.pad_offset)
             print(f"PASS {family}/p210le grid of {args.grid}, fade alpha=0.25", flush=True)
 
 

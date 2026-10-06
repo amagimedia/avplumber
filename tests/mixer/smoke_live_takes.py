@@ -11,11 +11,10 @@ import argparse
 import asyncio
 import json
 import sys
-import time
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from pyplumber.mixer.control import AvpConnection, mixer_command, parse_mixer_status, parse_scene_list  # noqa: E402
 
 

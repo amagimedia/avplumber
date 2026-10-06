@@ -2,6 +2,7 @@
 // Pure functions from MixerState/SceneDefinition to node parameters: router
 // route tables and the compositor layer array. No node access, unit-testable.
 #include "primitives/MixerState.hpp"
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -27,8 +28,6 @@ inline std::unordered_map<std::string, std::vector<int>> currentRouterTables(Mix
     for (const auto& [router_name, count] : st.router_output_counts) {
         ensureRouteTableSize(st, router_name);
         tables[router_name] = st.router_routes[router_name];
-        if ((int)tables[router_name].size() != count)
-            tables[router_name].assign(count, -1);
     }
     return tables;
 }
@@ -77,34 +76,26 @@ inline void setRoutedSlotInTables(MixerState& st,
     }
 }
 
-/// One cuda_rect_overlay layer per compositor src index (see mixer.source). Omitted sources use a dummy rect.
+/// Fanout bits are derived from the two requested scenes, never read back from nodes.
+inline uint32_t sourceOutputsForScenes(const MixerState& state, const std::string& name,
+        const MixerState::SourceInfo& source, const SceneDefinition* scene_a, const SceneDefinition* scene_b) {
+    const uint32_t requested = (scene_a && scene_a->sources.count(name) ? 1u : 0u) |
+                               (scene_b && scene_b->sources.count(name) ? 2u : 0u);
+    return state.sourceOutputMask(source, requested);
+}
+
+/// Explicit inputs allow sparse layers. Input order preserves ties in compositor z-order.
 inline Parameters compositorLayersFromScene(const MixerState& st, const SceneDefinition& scene) {
-    static const Parameters kUnusedLayer = Parameters({{"dst_x", 0}, {"dst_y", 0}});
-
-    int max_idx = -1;
-    for (const auto& [_, info] : st.sources)
-        max_idx = std::max(max_idx, info.input_index);
-
-    Parameters arr = Parameters::array();
-    for (int i = 0; i <= max_idx; ++i) {
-        std::string name_at;
-        for (const auto& [name, info] : st.sources) {
-            if (info.input_index == i) {
-                name_at = name;
-                break;
-            }
-        }
-        if (name_at.empty()) {
-            arr.push_back(kUnusedLayer);
-            continue;
-        }
-        auto it = scene.sources.find(name_at);
-        if (it == scene.sources.end())
-            arr.push_back(kUnusedLayer);
-        else
-            arr.push_back(it->second.layer);
+    std::map<int, Parameters> ordered;
+    for (const auto& [name, spec] : scene.sources) {
+        const int input = st.sources.at(name).input_index;
+        auto layer = spec;
+        layer["input"] = input;
+        ordered.emplace(input, std::move(layer));
     }
-    return arr;
+    Parameters layers = Parameters::array();
+    for (auto& [input, layer] : ordered) layers.push_back(std::move(layer));
+    return layers;
 }
 
 }

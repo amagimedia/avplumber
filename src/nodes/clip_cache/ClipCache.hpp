@@ -38,6 +38,12 @@ class ClipCache : public InstanceShared<ClipCache> {
             std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
+    /// Caller holds the lock.
+    void drop(std::map<std::string, Clip>::iterator it) {
+        bytes_ -= it->second.bytes;
+        clips_.erase(it);
+    }
+
     /// Caller holds the lock. Drops whole clips, least recently used first,
     /// never the one being written.
     void evictFor(size_t incoming, const std::string& keep) {
@@ -49,8 +55,7 @@ class ClipCache : public InstanceShared<ClipCache> {
                     oldest = it;
             }
             if (oldest == clips_.end()) return;   // nothing evictable; the caller decides
-            bytes_ -= oldest->second.bytes;
-            clips_.erase(oldest);
+            drop(oldest);
         }
     }
 
@@ -85,8 +90,7 @@ public:
         if (it == clips_.end()) return false;
         evictFor(bytes, key);
         if (bytes_ + bytes > budget_bytes_) {
-            bytes_ -= it->second.bytes;
-            clips_.erase(it);
+            drop(it);
             return false;
         }
         it->second.frames.push_back(frame);
@@ -99,6 +103,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = clips_.find(key);
         if (it != clips_.end()) it->second.complete = !it->second.frames.empty();
+    }
+
+    /// Removes *key*, complete or not. Frames a replay already took stay with it.
+    void forget(const std::string& key) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = clips_.find(key);
+        if (it != clips_.end()) drop(it);
     }
 
     Parameters status() {

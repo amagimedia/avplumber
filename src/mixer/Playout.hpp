@@ -43,6 +43,7 @@ private:
         bool ended = false;
         bool active = true;
         bool prewarm = false;
+        int64_t offset_ticks = 0;   // configuration: survives resetInput
         Stats stats;
     };
     TickGrid rate_;
@@ -52,9 +53,13 @@ private:
     std::optional<int64_t> index_;
     std::optional<Decision> pending_;
     std::optional<int64_t> waiting_deadline_;
+    std::optional<size_t> held_back_by_;   // see heldBackBy()
     std::vector<size_t> consume_;
     bool started_ = false;
     uint64_t missed_deadlines_ = 0;
+    // The ticks before the first commit after a reset were held for warm-up or not
+    // clocked at all (a node idles an inactive playout); they are not missed deadlines.
+    bool reset_since_commit_ = false;
 
 public:
     Playout(size_t inputs, TickGrid rate, std::optional<double> latency_ms = {},
@@ -74,18 +79,31 @@ public:
             throw std::invalid_argument("mixer latency_ms exceeds the six-frame buffer budget");
     }
 
+    // Presentation mode: treat this input's frames as `ticks` output ticks later than
+    // stamped, e.g. a source that is itself rendered one tick behind its timestamps,
+    // without raising the latency of every other input. The slot index moves, not the
+    // nanosecond timestamp, so rates whose tick is not a whole number of ns stay exact.
+    void setInputOffset(size_t input, int64_t ticks) {
+        if (timestamp_mode_ != TimestampMode::Presentation)
+            throw std::invalid_argument("mixer input offset requires presentation timestamps");
+        if (ticks < 0 || ticks > int64_t(kQueueCapacity) ||
+            latency_ns_ + rate_.time(ticks) > rate_.time(kQueueCapacity - 2))
+            throw std::invalid_argument("mixer latency plus input offset exceeds the six-frame buffer budget");
+        inputs_.at(input).offset_ticks = ticks;
+    }
+
     void push(size_t input, Frame frame, int64_t timestamp_ns) {
         if (pending_) throw std::logic_error("commit mixer decision before pushing");
         auto &state = inputs_.at(input);
         if (!state.active && !state.prewarm) return;
-        if (state.valid_from_ns && timestamp_ns < *state.valid_from_ns) {
+        if (state.valid_from_ns && timestamp_ns + rate_.time(state.offset_ticks) < *state.valid_from_ns) {
             ++state.stats.discarded;
             return;
         }
         state.ended = false;
         int64_t slot;
         if (timestamp_mode_ == TimestampMode::Presentation) {
-            slot = rate_.nearestIndex(timestamp_ns);
+            slot = rate_.nearestIndex(timestamp_ns) + state.offset_ticks;
             if (state.next_index && slot < *state.next_index - 1) {
                 state.stats.discarded += state.queue.size();
                 state.queue.clear();
@@ -130,10 +148,17 @@ public:
         auto scheduled = std::max(*index_, rate_.atOrBefore(now_ns - latency_ns_));
         waiting_deadline_.reset();
         if (require_all) {
-            for (const auto &input : inputs_) {
+            for (size_t i = 0; i < inputs_.size(); ++i) {
+                const auto &input = inputs_[i];
                 if (!input.active || input.held || input.ended) continue;
-                if (input.queue.empty()) return nullptr;
-                scheduled = std::max(scheduled, input.queue.front().index);
+                if (input.queue.empty()) {
+                    held_back_by_ = i;
+                    return nullptr;
+                }
+                if (input.queue.front().index > scheduled) {
+                    scheduled = input.queue.front().index;
+                    held_back_by_ = i;
+                }
             }
             waiting_deadline_ = rate_.time(scheduled) + latency_ns_;
             if (now_ns < *waiting_deadline_) return nullptr;
@@ -166,30 +191,49 @@ public:
                 ++input.stats.repeats;
             }
         }
-        if (started_) missed_deadlines_ += pending_->index - *index_;
+        missed_deadlines_ += skippedByPending();
+        held_back_by_.reset();
+        reset_since_commit_ = false;
         index_ = pending_->index + 1;
         pending_.reset();
         waiting_deadline_.reset();
         started_ = true;
     }
 
+    // Readiness for an atomic layout switch, without advancing the output clock.
+    bool readyAtNextTick(size_t input, int64_t now_ns) const {
+        if (!index_) return false;
+        const auto scheduled = std::max(*index_, rate_.atOrBefore(now_ns - latency_ns_));
+        const auto &state = inputs_.at(input);
+        return (state.held_index && *state.held_index <= scheduled) ||
+               (!state.queue.empty() && state.queue.front().index <= scheduled);
+    }
+
     const Stats &stats(size_t input) const { return inputs_.at(input).stats; }
     void resetInput(size_t input, std::optional<int64_t> valid_from_ns = {}, bool preserve_warm = false) {
         if (pending_) throw std::logic_error("commit mixer decision before resetting");
         auto &state = inputs_.at(input);
+        reset_since_commit_ = true;
         if (preserve_warm && state.prewarm && valid_from_ns) {
             // Scene geometry may change while source identity stays fixed.
-            // Retain only frames in the current playout window, never an old
-            // held picture from a source that stopped while the slot was idle.
-            while (!state.queue.empty() && rate_.time(state.queue.front().index) < *valid_from_ns) {
-                state.queue.pop_front();
-                ++state.stats.discarded;
-            }
-            if (state.held_index && rate_.time(*state.held_index) < *valid_from_ns) {
+            // A held picture older than the queue budget is from a source that
+            // stopped while the slot was idle; without one, retain only frames in
+            // the current playout window. A source running late keeps its held
+            // picture, so require_all does not hold the new scene back for it, and
+            // every frame after it, even before the window, so it keeps its cadence
+            // instead of repeating until it reaches the window. Frames arrive in
+            // order: anything stamped after the held tick is newer.
+            auto from = *valid_from_ns;
+            if (state.held_index && rate_.time(*state.held_index + int64_t(kQueueCapacity)) < from) {
                 state.held.reset();
                 state.held_index.reset();
             }
-            state.valid_from_ns = valid_from_ns;
+            if (state.held_index) from = std::min(from, rate_.time(*state.held_index) + 1);
+            while (!state.queue.empty() && rate_.time(state.queue.front().index) < from) {
+                state.queue.pop_front();
+                ++state.stats.discarded;
+            }
+            state.valid_from_ns = from;
             waiting_deadline_.reset();
             return;
         }
@@ -227,6 +271,14 @@ public:
     }
     size_t queued(size_t input) const { return inputs_.at(input).queue.size(); }
     uint64_t missedDeadlines() const { return missed_deadlines_; }
+    /// Ticks the pending decision skips: output frames never composed because prepare() was
+    /// reached more than one tick after their deadline. commit() adds them to missedDeadlines().
+    int64_t skippedByPending() const {
+        return pending_ && started_ && !reset_since_commit_ ? pending_->index - *index_ : 0;
+    }
+    /// The input a decision that waits for every active input last waited for since the
+    /// previous commit: the one without a picture, or the one whose first picture is latest.
+    std::optional<size_t> heldBackBy() const { return held_back_by_; }
     int64_t latencyNs() const { return latency_ns_; }
     std::optional<int64_t> nextDeadline() const {
         if (waiting_deadline_) return waiting_deadline_;

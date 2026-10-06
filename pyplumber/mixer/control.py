@@ -11,6 +11,11 @@ class AvpProtocolError(RuntimeError):
     pass
 
 
+def source_mask_param(mask: int):
+    """Native pad masks use a number up to 64 bits, then an LSB-first bit string."""
+    return mask if mask < 1 << 64 else f"{mask:b}"[::-1]
+
+
 class AvpConnection:
     """One serialized connection to AVPlumber's line-oriented TCP protocol."""
 
@@ -27,7 +32,9 @@ class AvpConnection:
 
     async def connect(self) -> None:
         await self.disconnect()
-        self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+        # queues.json is one line and exceeds asyncio's 64 KiB default on larger mixers.
+        self.reader, self.writer = await asyncio.open_connection(
+            self.host, self.port, limit=4 * 1024 * 1024)
         code, status, _ = await self._read_response()
         if code != 100:
             await self.disconnect()
@@ -43,11 +50,14 @@ class AvpConnection:
         self.reader = None
         self.writer = None
 
-    async def command(self, command: str) -> str | None:
+    async def command(self, command: str, timeout: float = 5.0) -> str | None:
+        """`timeout` bounds one exchange. The default suits the small mixer commands; a reply
+        that grows with the show (queues.json is ~160 KB and one line at 48 sources) needs more
+        while the machine is busy starting up."""
         async with self._lock:
             if self.reader is None or self.writer is None:
                 raise ConnectionError("not connected")
-            request = asyncio.create_task(asyncio.wait_for(self._exchange(command), 5.0))
+            request = asyncio.create_task(asyncio.wait_for(self._exchange(command), timeout))
             try:
                 return await asyncio.shield(request)
             except asyncio.CancelledError:
@@ -95,7 +105,8 @@ class AvpConnection:
 @dataclass(frozen=True)
 class MixerStatus:
     pgm_scene: str = ""
-    pvw_scene: str = ""
+    pvw_scene: str = ""        # shown to the operator; after a take, the scene that left program
+    pvw_slot_scene: str = ""   # loaded in the PVW slot, so a take of it is instant; "" while cold
     transition: str = "idle"
 
 
@@ -111,6 +122,7 @@ def parse_mixer_status(content: str) -> MixerStatus:
     return MixerStatus(
         pgm_scene=str(data.get("pgm_scene", "")),
         pvw_scene=str(data.get("pvw_scene", "")),
+        pvw_slot_scene=str(data.get("pvw_slot_scene", "")),
         transition=str(data.get("transition", "idle")),
     )
 
