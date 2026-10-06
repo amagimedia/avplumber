@@ -18,9 +18,14 @@ __pycache__/
 /.vscode/
 /avplumber
 /objs/
-/deps/dma-browser/docs/superpowers/
 # Agent plans, specs and handoffs stay local; they are not project documentation.
-/doc/superpowers/
+superpowers/
+**/doc/specs/
+**/doc/research/
+**/doc/plans/
+**/docs/specs/
+**/docs/research/
+**/docs/plans/
 /shaky-samples/
 /tools/web-ui/frontend/dist/
 /tools/web-ui/node_modules/

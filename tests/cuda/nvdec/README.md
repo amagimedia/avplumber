@@ -45,6 +45,3 @@ requirements allocate different base pools. The finite probes' default three
 extra surfaces are not a full-mixer sizing recommendation. No timing comparison
 is valid if inputs stalled, output counts changed, compilation overlapped, or
 the two builds silently loaded different libraries than intended.
-
-For the measured workload, failures and remaining replay/Blackwell boundaries,
-see the [capacity report](../../../doc/research/2026-10-03-cuarray-capacity.md).

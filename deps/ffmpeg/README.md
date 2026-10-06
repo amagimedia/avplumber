@@ -1,7 +1,6 @@
 # FFmpeg patch series
 
-`apply.sh` selects the series from the upstream checkout. The `8/` series is
-unchanged. The experimental `9/` series targets the exact development revision
+`apply.sh` selects the series from the upstream checkout. Both series include opt-in pinned CUDA upload and GPU v210 unpacking. The experimental `9/` series targets the exact development revision
 `98e92563a3b60dbf6d370fd3491d7f896398e4c1` (`master-98e92563`), with libavcodec 63,
 libavfilter 12 and libavutil 61. It does **not** apply to release n9.0.2; that
 release also lacks the opaque CUDA array decode path being evaluated here.
@@ -191,3 +190,28 @@ This synthetic-input test intentionally uploads/downloads frames to compare
 identity, band boundaries, luma gradients, neutral chroma and blur-radius
 endpoints. For a GPU-native decode/crop/filter/encode check, use
 `tests/cuda/smoke_crop_filter_chain.py --band-blur` with a bounded video fixture.
+
+## Pinned CPU-to-CUDA upload
+
+The final patch in each series extends `hwupload_cuda` with `pinned=1` for
+software NV12/P010 frames. It reuses the supplied filter CUDA device, copies
+active pixels into reusable pinned host staging, and uploads on a private
+nonblocking stream. The default transfer path is unchanged. An event orders
+writes into recycled output frames after readers on the device stream, and
+stream synchronization completes each output before it is forwarded. This
+preserves the custom packet uploader's synchronization contract; moving it
+into FFmpeg does not by itself eliminate driver locks or CPU waits.
+
+`hwupload_cuda=v210_width=<picture-width>` accepts rawvideo/gray frames whose
+width is the packed v210 byte stride. It uploads the packed bytes and unpacks
+them on the GPU into P210, without CPU v210 decoding. This mode implies pinned
+staging and requires NVCC or CUDA LLVM at build time; ordinary pinned upload
+does not require a CUDA compiler. Set color and chroma tags with `setparams`.
+The mixer uses this mode for v210 sources and `pinned=1` for pinned NV12/P010
+sources.
+
+On an NVIDIA host, `tests/cuda/smoke_nv12_input.py` checks both ordinary and
+pinned uploads, looping timestamps, and exact v210 samples including padded
+rows. `tests/cuda/benchmark_raw_upload.py` compares pinned and pageable filter uploads
+with matched input counts, pacing and downstream GPU reads. CPU comparisons
+must also retain the same output frame rate.

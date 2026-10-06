@@ -1,6 +1,6 @@
 """Raw byte simulator -> GPU v210 unpack -> CUDA scale -> CPU pixel verification.
 
-Run on an NVIDIA host with the FFmpeg 8.1 avplumber Python module and NumPy.
+Run on an NVIDIA host with the patched FFmpeg avplumber Python module and NumPy.
 The download is solely the test's verification boundary. No MXL service or
 NVDEC/NVENC is used. Each run also compares against FFmpeg's CPU v210 decoder,
 and the HLG fixture family's transfer checkpoints are asserted up front.
@@ -76,7 +76,7 @@ def run_graph(path, width, height, frames, stride, fmt, scale, timeout):
         assert not errors, errors
         assert state["eof"] and state["count"] == frames, \
             f"EOF/count mismatch: eof={state['eof']}, frames={state['count']}/{frames}"
-        while any(avp.node(n).isWorking for n in ("in_t", "demux_t", "unpack_t", "verify")):
+        while any(avp.node(n).isWorking for n in ("in_t", "demux_t", "decode_t", "unpack_t", "verify")):
             assert time.monotonic() < deadline, "EOF workers did not finish"
             time.sleep(0.01)
     finally:

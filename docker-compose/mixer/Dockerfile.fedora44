@@ -222,7 +222,7 @@ RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
     && ldd /build/_avplumber"$(python3-config --extension-suffix)" \
        | grep -q '/usr/local/lib/libavfilter' \
     && for node in ipc_dmabuf_source drm_prime_to_egl_image drm_prime_to_cuda \
-                   egl_image_cuda_overlay v210_to_cuda; do \
+                   egl_image_cuda_overlay; do \
            grep -q "\"${node}\"" /build/graph_factory.generated.cpp || exit 1; \
        done \
     && PYTHONPATH=/build python3 -c 'import _avplumber'

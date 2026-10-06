@@ -148,11 +148,11 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     realtime(set_pts) -> force_fps -> filter(hwupload)``. Pacing before upload bounds
     transfer work to the requested frame rate; rawvideo only wraps the existing bytes.
 
-    ``pinned``: ``input_rec -> demux -> raw_to_cuda -> realtime(set_pts) -> force_fps``.
-    raw_to_cuda uploads each packet through pinned staging on its own stream, so
-    no decoder, setpts or FFmpeg hwupload is involved; it uploads one frame ahead
-    of pacing (RAW_UPLOADED_CAPACITY). Opt-in; the setup recipe selects it (60 fps A/B in
-    https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html; the 110-input A/B is pending).
+    ``pinned``: ``input_rec -> demux -> dec_video(rawvideo) ->
+    filter(hwupload_cuda=pinned=1) -> realtime(set_pts) -> force_fps``.
+    The patched filter copies decoded planes through pinned staging on its own
+    stream, using the shared CUDA device. It uploads one frame ahead of pacing
+    (RAW_UPLOADED_CAPACITY). Requires the pinned-upload FFmpeg patch.
     """
     if pixel_format not in ("nv12", "p010le"):
         raise ValueError("raw 4:2:0 upload requires nv12 or p010le")
@@ -179,10 +179,15 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     uploaded = f"input_{tag}_cuda"
     # addNode creates the edge, so the plan must come first.
     avp.edges.planCapacity(uploaded, RAW_UPLOADED_CAPACITY)
-    avp.addNode(api.RawToCuda({
-        "name": f"upload_{tag}", "src": packets, "dst": uploaded,
-        "hwaccel": hwaccel, "width": width, "height": height, "pixel_format": pixel_format,
-        "fps": f"{fps}/{fps_den}", "timebase": "1/90000",
+    decoded = f"input_{tag}_decoded"
+    avp.addNode(api.DecVideo({
+        "name": f"decode_{tag}", "src": packets, "dst": decoded,
+        "codec": "rawvideo", "pixel_format": pixel_format,
+        "group": group, **_raw_file_restart(loop),
+    }))
+    avp.addNode(api.FilterVideo({
+        "name": f"upload_{tag}", "src": decoded, "dst": uploaded,
+        "graph": "hwupload_cuda=pinned=1", "hwaccel": hwaccel, "threads": 1,
         "group": group, **_raw_file_restart(loop),
     }))
     return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)
@@ -193,17 +198,33 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
                      color: Optional[dict] = None, event_loop: Optional[str] = None) -> str:
     """Headerless packed v210 file -> GPU unpack (P210, 10-bit 4:2:2) -> paced output edge.
 
-    ``input_rec -> demux -> v210_to_cuda -> realtime(set_pts) -> force_fps``.
+    ``input_rec -> demux -> dec_video(rawvideo/gray) ->
+    filter(hwupload_cuda=v210_width=...) -> realtime(set_pts) -> force_fps``.
     The packed bytes carry no metadata, so the color contract (HLG/BT.2020 for
     the HDR sources) is supplied here and stamped on the CUDA frames.
     """
     stride = v210_row_stride(width)
     packets = _raw_file_packets(avp, api, tag, path, pixel_format="gray", video_size=f"{stride}x{height}",
                                 group=group, fps=fps, fps_den=fps_den, loop=loop)
-    avp.addNode(api.V210ToCuda({
-        "name": f"unpack_{tag}", "src": packets, "dst": f"input_{tag}_cuda",
-        "hwaccel": hwaccel, "width": width, "height": height, "stride": stride,
-        "fps": f"{fps}/{fps_den}", "timebase": "1/90000", "sw_format": "p210le",
-        "group": group, **_raw_file_restart(loop), **(color or {}),
+    decoded = f"input_{tag}_decoded"
+    avp.addNode(api.DecVideo({
+        "name": f"decode_{tag}", "src": packets, "dst": decoded,
+        "codec": "rawvideo", "pixel_format": "gray",
+        "group": group, **_raw_file_restart(loop),
+    }))
+    # Gray wraps the packed bytes; the patched uploader performs v210 unpacking
+    # on the GPU and publishes P210 frames at the actual picture width.
+    graph = f"hwupload_cuda=v210_width={width}"
+    if color:
+        names = {"color_range": "range", "colorspace": "colorspace",
+                 "color_primaries": "color_primaries", "color_trc": "color_trc",
+                 "chroma_location": "chroma_location"}
+        tags = ":".join(f"{target}={color[source]}" for source, target in names.items() if source in color)
+        if tags:
+            graph += ",setparams=" + tags
+    avp.addNode(api.FilterVideo({
+        "name": f"unpack_{tag}", "src": decoded, "dst": f"input_{tag}_cuda",
+        "hwaccel": hwaccel, "graph": graph, "threads": 1,
+        "group": group, **_raw_file_restart(loop),
     }))
     return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)

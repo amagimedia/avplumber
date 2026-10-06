@@ -155,8 +155,6 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw
 endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVCC),11)
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/v210_to_cuda.cpp
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/v210_unpack.cu,avpl_v210_unpack_ptx,objs/src/nodes/hwaccel/v210_to_cuda.o))
 override CXXFLAGS += -DHAVE_CUDA_RECT_SCALE=1
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.cu,avpl_rect_scale_ptx,objs/src/nodes/hwaccel/cuda_rect_draw.o))
 objs/$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.ptx: $(SRCDIR)/nodes/hwaccel/cuda_rect_table.h $(SRCDIR)/nodes/hwaccel/graphic_color.h

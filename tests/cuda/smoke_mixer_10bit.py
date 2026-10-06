@@ -2,7 +2,7 @@
 raw verification against an exact CPU reference.
 
 P210 runs ingest packed v210 (HLG and SDR-promoted families) through
-v210_to_cuda; P010 and planar 444 runs upload labeled CPU fixtures. Scene A is a
+patched hwupload_cuda; P010 and planar 444 runs upload labeled CPU fixtures. Scene A is a
 two-tile grid (scaled path), scene B is source 0 fullscreen (copy path), and
 the transition blends them at exact binary-fraction alphas so the float
 arithmetic reproduces bit-exactly on the CPU; dips pass through a solid colour

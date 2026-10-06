@@ -209,7 +209,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="Input media file or URL; repeat for each mixer input")
     add("--config", metavar="FILE",
         help="JSON document with sources, wipes and scenes (replaces --input and the built-in "
-             "layouts; see doc/research/2026-09-08-mixer-config-schema.md)")
+             "layouts; see demos/mixer/docs/config.md)")
     add("--output", help="Optional video-only output URL or path")
     add("--output-format", help="Muxer format when it cannot be inferred from the output")
     add("--codec", default="h264_nvenc")
