@@ -10,7 +10,7 @@ For a native installation, NVIDIA's Linux tar distribution provides headers and 
 
 ## What avplumber needs
 
-Since 2026-10-05 avplumber itself does not build or link TensorRT: inference nodes are out-of-tree, and their build fragment (`EXTRA_NODES_MK`) adds the SDK's `include` and `lib` directories and links `libnvinfer` plus `libnvinfer_plugin`. Their inference runtime deserializes engines and calls `enqueueV3`; it does not build engines. The [mixer Dockerfile](../../demos/mixer/Dockerfile), [CUDA overlay Dockerfile](../../demos/cuda-overlay/Dockerfile), and [DMA-BUF CUDA Dockerfile](../../demos/dmabuf-browser/consumer/Dockerfile.cuda) build without TensorRT.
+Since 2026-10-05 avplumber itself does not build or link TensorRT. Out-of-tree inference nodes use `EXTRA_NODES_MK` to add the SDK headers and libraries. The [Ubuntu mixer image](../../docker-compose/mixer/Dockerfile) builds without TensorRT; the [Fedora mixer image](../../docker-compose/mixer/Dockerfile.fedora44) can supply it for external nodes with `WITH_TENSORRT=1` and a `tensorrt_url` build secret.
 
 For a smaller inference image, keep headers, the ONNX parser, `trtexec`, and architecture-specific builder resources in the build stage. Copy the standard runtime and plugin shared libraries, preserving symlinks, plus required CUDA dependencies into the final image. Validate it by deserializing and executing an engine; `ldd` alone misses dynamically loaded dependencies.
 

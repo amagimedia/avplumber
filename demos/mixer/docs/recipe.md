@@ -4,8 +4,8 @@ A recipe generates test media and a [mixer show](config.md). Setup handles this
 automatically; for manual preparation on the NVIDIA host:
 
 ```sh
-python3 demos/mixer/prepare_demo.py media/demo.json --media-dir media
-python3 demos/mixer/mixer.py --config media/mixer.demo.json --janus-output
+python3 -m demos.mixer.prepare_demo media/demo.json --media-dir media
+python3 -m pyplumber.mixer.cli --config media/mixer.demo.json --janus-output
 ```
 
 Edit `media/demo.json`; `media/mixer.demo.json` is generated. Preparation needs

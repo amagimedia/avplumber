@@ -33,7 +33,7 @@ def main():
 
     name = "alpha_probe_" + uuid.uuid4().hex[:8]
     width, height = 1280, 720
-    page = Path(__file__).resolve().parents[2] / "demos/mixer/browser_alpha.html"
+    page = Path(__file__).resolve().parents[2] / "pyplumber/mixer/tools/assets/browser_alpha.html"
     url = "data:text/html;base64," + base64.b64encode(page.read_bytes()).decode("ascii")
     avp, errors = make_avp("alpha_gpu", capacity=2)
     nodes = []

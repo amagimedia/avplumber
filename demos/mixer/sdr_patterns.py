@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render colorful SDR pattern clips for a many-source show (needs FFmpeg with lavfi).
 
-    python3 demos/mixer/sdr_patterns.py media/patterns --fps 60 --seconds 20 --encoder h264_nvenc
+    python3 -m demos.mixer.sdr_patterns media/patterns --fps 60 --seconds 20 --encoder h264_nvenc
 
 One clip per generator below; each is a distinct NVDEC-decodable source, far
 cheaper at run time than raw v210 (which streams ~330 MB/s per 1080p60 input).

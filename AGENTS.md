@@ -67,7 +67,7 @@ interface, new shared object etc., or improving existing ones.
 * DMA-BUF overlay builds need DRM/GL flags so `ipc_dmabuf_source`, `drm_prime_to_egl_image`, `drm_prime_to_cuda` are registered.
 * Prefer targeted tests for Python logic; do a remote build/run check for CUDA, TensorRT, Janus, or mixer graph changes.
 * When changing Python mixer code, rerun pytest covering `pyplumber/mixer.py`
-  and `demos/mixer/` before reporting done.
+  and `tests/mixer/` (including demo setup tests) before reporting done.
 * For remote mixer graph debugging, keep web UI backend running with web UI registration enabled.
 
 ## Build & test commands
@@ -80,7 +80,7 @@ make -j8 NEURAL_NET=1 HAVE_DRM=1 HAVE_GL=1 HAVE_CUDA=1 HAVE_NVOF_FRUC=1 HAVE_NVC
 
 Example `run.sh` for the generic mixer:
 ```
-LD_LIBRARY_PATH=/usr/local/lib venv/bin/python3 demos/mixer/mixer.py --input <path> --input <path> --output <path> --remote-control-port 22422
+LD_LIBRARY_PATH=/usr/local/lib venv/bin/python3 -m pyplumber.mixer.cli --input <path> --input <path> --output <path> --remote-control-port 22422
 ```
 
 # Domain-specific rules

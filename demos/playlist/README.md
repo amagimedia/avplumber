@@ -30,7 +30,7 @@ image is the Fedora 44 / CUDA 13.4 mixer image, host driver R615 or newer; the
 alternative for an older driver):
 
 ```sh
-docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:local .
+docker build -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:local .
 docker build --build-arg AVP_BASE_IMAGE=avplumber-mixer:local \
     --tag avplumber-playlist:local demos/playlist
 docker run --rm --gpus all --network host avplumber-playlist:local \

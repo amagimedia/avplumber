@@ -817,7 +817,7 @@ To keep the PoC minimal, everything below is reused, not rewritten:
 | PLI/FIR keyframe handling | `demos/replay` `RtcpFeedbackListener` |
 | Position/frame observation | `demos/replay` `PositionProbe` |
 | App start/stop lifecycle, `_add_node`, `_init_cuda`, `planCapacity` | `demos/replay/replay.py` |
-| TUI shell (Header/Footer, 0.2s refresh, `_execute`, notify) | `demos/replay/player.py`, `demos/mixer/tui.py` |
+| TUI shell (Header/Footer, 0.2s refresh, `_execute`, notify) | `demos/replay/player.py`, `pyplumber/mixer/gui/tui.py` |
 | Gapless cut (PTS-keyed timeline flip) | validated parent design; `src/nodes/source_switcher.cpp` |
 | Whole per-worker chain (InputRec->Demux->DecVideo->SpeedVideo->scale->ForceFPS->Pause->Realtime) | `demos/replay/replay.py` 727–751 — replicated per worker |
 | Freeze/hold a preloaded worker on frame 0 (backpressure) | `Pause` node — verified `src/nodes/pause.cpp`; replay already uses two (`replay_transition_gate`, `replay_pause`) |

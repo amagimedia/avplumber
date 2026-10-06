@@ -54,6 +54,6 @@ count of HDR decoders. Short probes do not qualify every scene or a long soak;
 30/50 fps admission values in that update were derived, not newly measured.
 
 The [CUarray cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/nvdec-cuarray.html) explains storage savings and
-fixed-pool sizing. Use the [portable L4 stack](../deploy/l4/README.md) for that build.
+fixed-pool sizing. Use the [portable L4 stack](../../../docker-compose/mixer/deploy/l4/README.md) for that build.
 After deployment, exercise actual content, every scene and Setup restart; check
 fresh deadline/drop counter deltas, not just encoder FPS.

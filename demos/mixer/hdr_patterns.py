@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from v210 import hlg_ycbcr422, pack_v210
+from demos.mixer.v210 import hlg_ycbcr422, pack_v210
 
 TAU = 2.0 * np.pi
 

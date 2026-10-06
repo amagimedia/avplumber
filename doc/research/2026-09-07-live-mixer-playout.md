@@ -83,7 +83,7 @@ for each input, followed by the PTS-driven `CudaRectOverlay` and another
 `ForceFPS` stage. `CudaRectOverlay` selects the minimum available input PTS,
 waits for required inputs, and retains prior images for inputs whose next PTS
 is later. This differs from the production DMA-BUF compositor's arrival-driven
-`drainLatest` plus independent output ticks. See `demos/mixer/mixer.py`,
+`drainLatest` plus independent output ticks. See `pyplumber/mixer/cli.py`,
 `pyplumber/mixer.py`, and `src/nodes/hwaccel/cuda_rect_overlay.cpp`.
 
 The DMA-BUF browser currently timestamps frames inside its paint handler using

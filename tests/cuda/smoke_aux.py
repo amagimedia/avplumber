@@ -13,9 +13,9 @@ import tempfile
 import time
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos/mixer"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _harness import wait_for
-from mixer import GraphOptions, build_application, load_avp_api
+from pyplumber.mixer.cli import GraphOptions, build_application, load_avp_api
 from pyplumber.node import PythonNode
 from pyplumber.mixer.config import ConfigError
 from pyplumber.mixer.control import AvpConnection
@@ -82,7 +82,7 @@ def main():
         filter_video = api.FilterVideo
         api.FilterVideo = lambda params: filter_video({**params, "src": "aux_test_gated"}
             if params["name"] == "aux_mv_sdr" else params)
-        with patch("mixer.load_avp_api", return_value=api):
+        with patch("pyplumber.mixer.cli.load_avp_api", return_value=api):
             app = build_application(GraphOptions(config=str(path), janus_output=True, remote_control_port=18777,
                                                  prewarm_cut_scenes=("*",)))
         app.avp.edges.planCapacity("aux_test_gated", 1)

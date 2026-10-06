@@ -176,10 +176,10 @@ More than 193 pads and runtime source addition are not supported.
 
 ## Generating one
 
-[make_config.py](../make_config.py) emits the built-in layouts as JSON:
+[make_config.py](../../../pyplumber/mixer/tools/make_config.py) emits the built-in layouts as JSON:
 
 ```sh
-python3 demos/mixer/make_config.py --fps 30 cam0=/media/camera.mp4 > mixer.json
+python3 -m pyplumber.mixer.tools.make_config --fps 30 cam0=/media/camera.mp4 > mixer.json
 ```
 
 For generated workloads use a [recipe](recipe.md). Other mixer applications use

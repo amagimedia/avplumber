@@ -1,10 +1,10 @@
 """Expand weighted source and layout choices into reproducible demo scenes."""
 
 import math
-import os
 import random
 
 from pyplumber.mixer.config import MAX_DSK_KEYS
+from pyplumber.mixer.gui.storage import write_atomic as write_atomic
 
 
 LAYOUTS = ("fullscreen", "grid_2", "grid_4", "grid_8", "grid_16", "grid_32", "grid_64",
@@ -23,12 +23,6 @@ def validate_dsk(pages, clean_feed):
     if not isinstance(clean_feed, bool) or clean_feed and not pages:
         raise ValueError("clean_feed must be a boolean and needs at least one dsk page")
 
-
-def write_atomic(path, text):
-    """A crash mid-write must not leave resume or a restart a torn show or recipe."""
-    staged = path.with_name(f".{path.name}.tmp")
-    staged.write_text(text, encoding="utf-8")
-    os.replace(staged, path)
 
 
 def allocate(total, weights):

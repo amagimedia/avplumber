@@ -135,7 +135,7 @@ class AuxBus:
 
     def stop(self):
         """Stop the RTCP listener. The application stops the group together with all others
-        (demos/mixer MixerApplication.stop), and not after a panic."""
+        (MixerApplication.stop), and not after a panic."""
         self.listener.stop()
 
     def _status(self, node):

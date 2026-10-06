@@ -8,14 +8,14 @@ and Janus output, on top of the pyplumber engine API.
 from .models import MixerScene, MixerSource
 
 __all__ = ["MixerGraphBuilder", "MixerScene", "MixerSource", "MixerOptions", "MixerApplication",
-           "SourceContext", "build_application"]
+           "SourceContext", "build_application", "run_application"]
 
 
 def __getattr__(name):
     if name == "MixerGraphBuilder":
         from .graph import MixerGraphBuilder
         return MixerGraphBuilder
-    if name in {"MixerOptions", "MixerApplication", "SourceContext", "build_application"}:
+    if name in {"MixerOptions", "MixerApplication", "SourceContext", "build_application", "run_application"}:
         from . import application
         return getattr(application, name)
     raise AttributeError(name)

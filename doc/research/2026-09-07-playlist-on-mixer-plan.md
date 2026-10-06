@@ -136,7 +136,7 @@ worker with a monotonic timer. The native form is preferred for jitter.
 
 The Janus output is the mixer's `_build_janus_output` (force_fps, keyframe on
 PLI, assume format, NVENC, `dump_extra`, RTP mux, RTCP listener). Move it and
-`_build_input` from `demos/mixer/mixer.py` into `pyplumber.mixer` so both demos import
+`_build_input` from `pyplumber/mixer/cli.py` into `pyplumber.mixer` so both demos import
 one implementation instead of carrying copies.
 
 ### Code layout

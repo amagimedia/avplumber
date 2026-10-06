@@ -7,18 +7,20 @@ out to scenes and auxiliary buses.
 
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field, replace
 import json
 import logging
+import os
+import sys
 import time
 from types import SimpleNamespace
-from typing import Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from . import clipcache
 from . import config as mixer_config
 from .backend import mixer_backend
-from .color import TEN_BIT_FORMATS, default_codec, hdr_metadata, rendition_color, rendition_format
+from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, rendition_color, rendition_format
 from .config import FEEDS
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .dmabuf_inputs import dmabuf_cuda_input_nodes, open_windows, refresh_windows, wait_for_sockets
@@ -27,6 +29,9 @@ from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, Janus
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options)
 from ..transform import transform_output, transform_params
 
+
+if TYPE_CHECKING:
+    from .aux import AuxBuses
 
 log = logging.getLogger("mixer")
 DEFAULT_FPS = 30
@@ -131,7 +136,7 @@ class SourceContext:
     timestamps. Branches that consume video must explicitly split the edge;
     queues do not broadcast to multiple readers.
     """
-    avp: object
+    avp: Any
     api: object
     source: mixer_config.Source
     index: int
@@ -143,18 +148,18 @@ class SourceContext:
 
 @dataclass
 class MixerApplication:
-    avp: object
-    mixer: object
+    avp: Any
+    mixer: Any
     input_groups: tuple[str, ...]
     input_edges: tuple[str, ...]
     routed_inputs: bool
     preheat_timeout_sec: float
-    rtcp_feedback_listener: object | None = None
+    rtcp_feedback_listener: Any = None
     wipe_file: str | None = None
     wipe_files: tuple[str, ...] = ()
     browser_windows: tuple[str, ...] = ()   # reloaded after the chains start: static pages paint only on load
     dmabuf_rest: str = ""
-    aux_buses: object = None                # pyplumber.mixer.aux.AuxBuses, with a config that has buses
+    aux_buses: AuxBuses | None = None                # pyplumber.mixer.aux.AuxBuses, with a config that has buses
     wipe_cache_mb: float = 640.0            # hold decoded wipes in GPU memory
     cut_latency_encoder: str = ""
     prewarm_cut_scenes: tuple[str, ...] = ()
@@ -388,7 +393,7 @@ def _init_avp(avp_options, api, on_error: ExitStack):
     return avp
 
 
-def _make_builder(avp, api, options, *, canvas, fps, working_format, color="sdr", wipe_color=None):
+def _make_builder(avp, api, options, *, canvas, fps, working_format, color: Color | str = "sdr", wipe_color=None):
     """The mixer builder, configured identically for both build paths (canvas,
     rate and working_format are the only per-path differences)."""
     return api.MixerGraphBuilder(
@@ -451,7 +456,7 @@ def _rendition_target(r, working_format, color):
 
 
 def _build_renditions(avp, api, options: MixerOptions, renditions, feeds, *,
-                      canvas, working_format: str, color="sdr", backend=None):
+                      canvas, working_format: str, color: Color | str = "sdr", backend=None):
     """One encoder per rendition, all fed from the single composited program.
 
     The compositor renders once at the canvas rate, so an extra rendition costs an
@@ -602,6 +607,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             # True 10-bit 4:2:2 sources: packed v210 unpacked to P210 on the GPU
             # and stamped with their declared color contract. NVDEC only yields
             # 4:2:0, so this is the one path that keeps 4:2:2 through the canvas.
+            assert source.color is not None  # config requires an explicit color contract for v210
             edge = build_v210_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
@@ -680,3 +686,35 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False,
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers), aux_buses=aux)
+
+
+def _startup_result(error=None):
+    # Setup must see a startup failure even if native graph cleanup subsequently hangs.
+    fd = os.environ.pop("AVP_MIXER_STARTUP_FD", None)
+    if fd is not None:
+        with suppress(OSError):
+            if error:
+                os.write(int(fd), error.encode()[:4000])
+            os.close(int(fd))
+
+
+
+def run_application(application: MixerApplication, *, webui_url: str = "") -> None:
+    """Start, supervise and stop a show; usable by custom mixers after build_application."""
+    try:
+        if webui_url:
+            application.avp.registerWithWebUI(webui_url, "mixer", "")
+        application.start()
+        _startup_result()
+        while application.avp.manager.shouldWork:
+            time.sleep(1)
+            if webui_url:
+                application.avp.heartbeat()
+        sys.exit("Mixer graph shut down after a node failure (auto_restart panic); exiting")
+    except KeyboardInterrupt:
+        pass
+    except Exception as exc:
+        _startup_result(str(exc))
+        raise
+    finally:
+        application.stop()

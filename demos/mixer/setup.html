@@ -82,9 +82,7 @@ summary { cursor: pointer; }
 <div class="stack">
 <section class="card"><div class="card-title"><h2>Mixer</h2></div>
 <div class="fields">
-<label>Orientation<select id="orientation"><option value="portrait">Portrait · 9:16</option><option value="landscape">Landscape · 16:9</option></select></label>
-<label>Frames per second<select id="fps"><option>25</option><option>30</option><option>50</option><option selected>60</option></select></label>
-<label>Mode<select id="mode"><option value="10:422">HDR · 10-bit · 4:2:2</option><option value="10:420">HDR · 10-bit · 4:2:0</option><option value="8:420">SDR · 8-bit · 4:2:0</option></select></label>
+<span id="canvas-controls" style="display:contents"></span>
 <label>Unique sources<input id="sources" type="number" min="1" step="1" value="16"></label>
 <label>Scenes<input id="scenes" type="number" min="1" max="192" step="1" value="32"></label>
 <label>Scene mix<select id="layout"><option value="balanced">Balanced · grids, fullscreen, PiP, random</option><option value="grids">Grids · up to your source count</option><option value="fullscreen">Fullscreen only</option></select></label>
@@ -129,9 +127,14 @@ summary { cursor: pointer; }
 </aside>
 </div>
 </main>
+<script src="/setup.js"></script>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
+MixerSetup.canvasControls($('canvas-controls'),{
+ orientation:[['portrait','Portrait · 9:16'],['landscape','Landscape · 16:9']],
+ fps:[25,30,50,60],mode:[['10:422','HDR · 10-bit · 4:2:2'],['10:420','HDR · 10-bit · 4:2:0'],['8:420','SDR · 8-bit · 4:2:0']]
+},{fps:60});
 const types = [
  {id:'sdr420',name:'SDR · 4:2:0 · NVDEC',detail:'H.264 patterns · NVDEC',color:'#439a86'},
  {id:'hlg420',name:'HDR · 4:2:0 · NVDEC',detail:'HEVC 10-bit HLG patterns · NVDEC',color:'#5a87b5'},
@@ -184,23 +187,11 @@ function encodeOutputs(fps,tenBit){
   ...auxBuses.map(b=>output(b.id,b.label,auxFps(fps,b.full_rate))),...janusApi?[output('extra','Extra aux',auxFps(fps,false))]:[]];
 }
 function encodeRow(o){
- if(!encodeRows.has(o.id)){
-  const row=document.createElement('div'),[low,high]=profile.nvenc.bitrate_kbps;
-  row.className='source output';
-  row.innerHTML=`<div><b></b><small></small></div>${o.id==='extra'?'<input id="extra-aux" type="number" min="0" step="1" aria-label="Extra aux outputs">':'<span></span>'}`+
-    `<select class="codec"></select><select class="preset"></select><input class="mbit" type="number" min="${low/1000}" max="${high/1000}" step="0.05">`;
-  const codec=row.querySelector('.codec'),select=row.querySelector('.preset'),mbit=row.querySelector('.mbit'),count=row.querySelector('#extra-aux');
-  codec.append(...(o.id==='hdr'?['hevc_nvenc']:['h264_nvenc','hevc_nvenc']).map(value=>new Option(value==='hevc_nvenc'?'H.265':'H.264',value)));
-  codec.value=encodes[o.id].codec;codec.setAttribute('aria-label',`${o.name} codec`);
-  codec.addEventListener('input',()=>{encodes[o.id].codec=codec.value;update();});
-  select.append(...Object.keys(profile.nvenc.pct_per_fps[o.codec]).map(preset=>new Option(preset)));
-  select.value=encodes[o.id].preset;mbit.value=encodes[o.id].bitrate_kbps/1000;
-  select.setAttribute('aria-label',`${o.name} preset`);mbit.setAttribute('aria-label',`${o.name} bitrate, Mbit/s`);
-  select.addEventListener('input',()=>{encodes[o.id].preset=select.value;update();});
-  mbit.addEventListener('input',update);
-  count?.addEventListener('input',()=>{extraAux=count.value;update();});
-  encodeRows.set(o.id,row);
- }
+ if(!encodeRows.has(o.id))encodeRows.set(o.id,MixerSetup.encodeRow({
+  output:o,encode:encodes[o.id],nvenc:profile.nvenc,onChange:update,
+  codecs:o.id==='hdr'?['hevc_nvenc']:['h264_nvenc','hevc_nvenc'],
+  count:o.id==='extra'?{id:'extra-aux',label:'Extra aux outputs',onChange:v=>{extraAux=v;update();}}:null
+ }));
  return encodeRows.get(o.id);
 }
 $('output-defaults').onclick=()=>{encodes={};encodeRows.clear();update();};

@@ -19,7 +19,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path[:0] = [str(ROOT), str(ROOT / "demos/mixer")]
+sys.path.insert(0, str(ROOT))
 
 
 def child(config, application_api):
@@ -34,7 +34,7 @@ def child(config, application_api):
         app = build_application(cfg, MixerOptions(remote_control_port=0), process_source=process_source)
         assert seen == [source.id for source in cfg.sources]
     else:
-        from mixer import GraphOptions, build_application
+        from pyplumber.mixer.cli import GraphOptions, build_application
         app = build_application(GraphOptions(config=str(config), janus_output=True, remote_control_port=0))
     try:
         app.start()

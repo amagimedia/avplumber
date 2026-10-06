@@ -114,11 +114,11 @@ ttyd -p 7681 -t fontSize=15 python3 demos/playlist/player.py --port 7778
 ## Docker
 
 The base image is the Fedora 44 / CUDA 13.4 mixer image, which needs host driver
-R615 or newer; `demos/mixer/Dockerfile` (Ubuntu 22.04 / CUDA 11.7) builds the
+R615 or newer; `docker-compose/mixer/Dockerfile` (Ubuntu 22.04 / CUDA 11.7) builds the
 same layout for an older driver.
 
 ```sh
-docker build -f demos/mixer/Dockerfile.fedora44 -t avplumber-mixer:local .
+docker build -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:local .
 docker build --build-arg AVP_BASE_IMAGE=avplumber-mixer:local \
     --tag avplumber-playlist:local demos/playlist
 docker run --rm --gpus all --network host avplumber-playlist:local

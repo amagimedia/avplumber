@@ -34,8 +34,8 @@ __pycache__/
 /neural-demo/.tensorrt*.tgz
 
 # Local Compose choices, e.g. MIXER_DOCKERFILE=Dockerfile (demos/mixer/docs/guide.md).
-/demos/mixer/.env
-/demos/mixer/deploy/l4/.env
+/docker-compose/mixer/.env
+/docker-compose/mixer/deploy/l4/.env
 
 # Replay media is published as release assets, never committed.
 /demos/replay/docs/*.mp4

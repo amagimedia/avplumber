@@ -76,7 +76,7 @@ NVENC output, and zero-copy CUDA with no CPU upload/download workaround.
 
 ## Accuracy and maintenance
 
-Treat `demos/mixer/mixer.py`, `demos/mixer/tui.py`, and their tests as the
+Treat `pyplumber/mixer/cli.py`, `pyplumber/mixer/gui/tui.py`, and their tests as the
 sources of truth. Preserve all useful CLI configuration, layout dimensions,
 container instructions, smoke-test instructions, and remote NVIDIA acceptance
 requirements. Move advanced graph construction and preheating details later in
@@ -91,6 +91,6 @@ the README so they do not obstruct the first-run path.
 - Confirm the settings-row controls fit inside the tested 160-by-45 screen.
 - Confirm documented mixer and TUI CLI defaults against their argument parsers.
 - Confirm the README image path resolves.
-- Run `python3 -m pytest -q demos/mixer/tests`.
+- Run `python3 -m pytest -q tests/mixer`.
 - Do not attempt a local CUDA runtime check when `nvidia-smi` is unavailable;
   retain the documented remote acceptance requirement instead.

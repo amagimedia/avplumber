@@ -3,8 +3,8 @@ avplumber
 objs
 tmp/
 media/
-demos/mixer/.env
-demos/mixer/deploy/l4/.env
+docker-compose/mixer/.env
+docker-compose/mixer/deploy/l4/.env
 .claude/
 .codex
 .specify/

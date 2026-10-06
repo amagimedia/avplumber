@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prepare cached demo media and expand a JSON recipe into a mixer show.
 
-    python3 demos/mixer/prepare_demo.py demos/mixer/demo.example.json
+    python3 -m demos.mixer.prepare_demo demos/mixer/demo.example.json
 
 Needs Python, NumPy and FFmpeg; the mixer image includes them. Default inputs
 are synthetic. Downloads and browser inputs are enabled only by recipe weights.
@@ -18,20 +18,18 @@ from pathlib import Path
 import random
 import shutil
 import subprocess
-import sys
 import tempfile
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import numpy as np
 
-DEMO_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(DEMO_DIR.parents[1]))
+from demos.mixer.sdr_patterns import GENERATORS, input_kbps, encoding_options, render
+from demos.mixer.demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic
+from demos.mixer.hdr_patterns import write_hlg
+from pyplumber.mixer.config import MAX_SOURCES, default_browser_ring_size, parse
 
-from sdr_patterns import GENERATORS, input_kbps, encoding_options, render  # noqa: E402
-from demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic  # noqa: E402
-from hdr_patterns import write_hlg  # noqa: E402
-from pyplumber.mixer.config import MAX_SOURCES, default_browser_ring_size, parse  # noqa: E402
+DEMO_DIR = Path(__file__).resolve().parent
 
 # Janus RTP port of the clean SDR program; 5004/5006 carry the keyed program and
 # 5008 the multiview. The clean feed is SDR, with an independent codec.

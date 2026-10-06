@@ -34,7 +34,7 @@ Tests will observe behavior only through these agreed seams:
    test pilot.
 
 Graph-construction tests may inject the same lightweight AVPlumber adapter
-pattern used by `demos/mixer/tests/test_graph.py`. They assert externally
+pattern used by `tests/mixer/test_graph.py`. They assert externally
 meaningful graph contracts such as video-only routing, codec options, team
 configuration, and RTP settings. They must not assert incidental node ordering
 or private helper calls.

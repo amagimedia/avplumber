@@ -12,8 +12,8 @@ import numpy as np
 
 # Packing and HLG encoding live with the mixer demo, which ships them (demos/mixer/v210.py);
 # the smoke tests import them from here.
-sys.path.append(str(Path(__file__).resolve().parents[2] / "demos/mixer"))
-from v210 import frame_stride, hlg_ycbcr422, pack_v210  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+from demos.mixer.v210 import frame_stride, hlg_ycbcr422, pack_v210  # noqa: E402
 
 
 def sample_planes(width, height, index=0):

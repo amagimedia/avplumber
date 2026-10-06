@@ -43,6 +43,42 @@ edge's first frame. A callback exception or invalid edge name shuts down the
 partially built engine. Face policy and inference construction belong to the
 calling application; this callback does not implement bounding-box rendering.
 
+## Shared GUI and setup
+
+Run `python -m pyplumber.mixer.gui --port 7777`: `/` controls the mixer and
+`/wall` shows its outputs. Both use `pyplumber/mixer/gui/assets/`; neither needs
+`demos/`. `--preview-base /preview/` supports a reverse-proxied Janus player.
+The optional terminal client is `python -m pyplumber.mixer.gui.tui`.
+
+Embed the same server in another application:
+
+```python
+from pyplumber.mixer.gui import MixerBridge, serve
+
+server = serve(MixerBridge("127.0.0.1", 7777, "mixer"), "127.0.0.1", 7681)
+try:
+    server.serve_forever()
+finally:
+    server.server_close()
+```
+
+Pass `setup=` to `serve` for application-owned setup. It supplies `status()`,
+`apply(settings)`, `remember_aux(bus, fields)` and `page()` (HTML bytes).
+Status includes `phase`, `message` and a monotonically increasing `revision`.
+`gui.setup_runtime.SetupRuntime` provides process restart/rollback, browser
+recovery and AUX persistence. Override `make_recipe`, `plan`, `prepare` and
+`page`; pass `mixer_command=` to launch your application's module. Its process
+can use `pyplumber.mixer.run_application(app)` for startup notification,
+heartbeat, failure reporting and clean shutdown.
+For CLI integration, `gui.web.main(configure=..., setup_factory=...)` handles
+server startup, monitoring and shutdown; the factory receives parsed args and
+the control bridge.
+
+Custom setup pages can load `/setup.js`: `MixerSetup.canvasControls` takes
+application-provided choices; `MixerSetup.encodeRow` renders codec, preset and
+bitrate controls from NVENC limits. Synthetic source allocation, generated
+SDR/HDR media and measured demo presets stay in `demos/mixer/`.
+
 ## Native code layout
 
 | Module | Role |
@@ -319,7 +355,7 @@ by the encoder's share. `mixer.aux_status` reports them under `follower` with
 `align`, `last_change_to_apply_ms`, `last_target_error_ticks`, the
 `layout_revision` it holds and `error`; `mixer.status` `pvw_latency` carries every follower's
 last timed change keyed by its node name, for a script polling the status
-alone (`demos/mixer/tests/cut_spam.py` reports them per kind, `late` counting
+alone (`tests/mixer/cut_spam.py` reports them per kind, `late` counting
 reachable misses only).
 
 ## Zero-copy contract
@@ -345,13 +381,13 @@ The demo uses these CUDA operations:
 
 ## Generic demo
 
-`demos/mixer/mixer.py` accepts a repeated `--input` option. File paths and URLs
+`pyplumber/mixer/cli.py` accepts a repeated `--input` option. File paths and URLs
 are runtime configuration and are never embedded in the repository. File
 inputs are paced in realtime and can be looped with `--loop-inputs`.
 
 The fixed portrait canvas is 1080x1920. The scene set contains one fullscreen
 scene per input plus paged 2-, 4-, 8-, and 16-box layouts. Manual control is
-available through `demos/mixer/tui.py`; output can be a video-only recording or
+available through `pyplumber/mixer/gui/tui.py`; output can be a video-only recording or
 a video-only Janus RTP mountpoint.
 
 Browser overlays use the same application API: declare `kind: "browser"` sources

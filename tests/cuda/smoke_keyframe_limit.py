@@ -15,9 +15,9 @@ import sys
 import threading
 import time
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos" / "mixer"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _harness import wait_for
-from mixer import GraphOptions, build_application
+from pyplumber.mixer.cli import GraphOptions, build_application
 
 
 def run(args):

@@ -37,7 +37,7 @@ TOLERANCE = 8                             # codes, per channel, at a bar centre
 def run_mixer(repo, cfg_path, outputs, seconds, timeout):
     """Run mixer.py until every output has grown past *seconds* of content, then kill it."""
     env = {**os.environ, "PYTHONPATH": f"{repo}:{os.environ.get('PYTHONPATH', '')}"}
-    proc = subprocess.Popen([sys.executable, str(repo / "demos/mixer/mixer.py"), "--config", str(cfg_path),
+    proc = subprocess.Popen([sys.executable, str(repo / "pyplumber/mixer/cli.py"), "--config", str(cfg_path),
                              "--output", str(Path(cfg_path).with_suffix(".unused.ts")), "--remote-control-port", "0"],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     deadline = time.monotonic() + timeout
