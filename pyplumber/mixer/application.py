@@ -644,7 +644,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         for k in range(1, aliases[source.id] + 1):
             # The reusable builder shares conversion and fan-out for identical edges.
             mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=edge,
-                             input_group=group, default_graph="",
+                             input_group=group,
                              color=None if source.filter_graph else source.color,
                              packed_rgb=source.kind == "browser",
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,

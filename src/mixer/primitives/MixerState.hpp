@@ -23,12 +23,6 @@ namespace avp::mixer {
 
 class MixerGraph;
 
-struct SourceLayout {
-    std::string crop_scale_graph; // e.g., "crop=1920:1080:0:0,scale_cuda=640:360"
-    /// Layer fields for mixer_compositor (dst_x, dst_y, …) — not including `graph`.
-    Parameters layer;
-};
-
 struct SceneControl {
     std::string node_name;
     std::string key;
@@ -37,8 +31,8 @@ struct SceneControl {
 
 struct SceneDefinition {
     std::string name;
-    /// Logical source name -> crop/scale graph + per-source layer (see mixer.source input_index).
-    std::unordered_map<std::string, SourceLayout> sources;
+    /// Logical source name -> compositor layer (see mixer.source input_index).
+    std::unordered_map<std::string, Parameters> sources;
     /// Logical routed source name -> router input index selected by this scene.
     std::unordered_map<std::string, int> routes;
     std::vector<SceneControl> controls;
@@ -54,7 +48,6 @@ struct MixerState : public InstanceShared<MixerState> {
     struct SourceInfo {
         std::string otm_node_name;          // "otm_cam1"
         int input_index;                    // index within compositor src array (0..kSourceMaskBits-1)
-        std::string cs_node_a, cs_node_b;   // "cs_cam1_a", "cs_cam1_b"
         bool routed = false;
         std::string router_node_name;
         std::string route_output_label_a;
@@ -202,7 +195,6 @@ struct MixerState : public InstanceShared<MixerState> {
     struct SlotNodes {
         std::string revision;
         std::string compositor_name;   // "comp_a" / "comp_b"
-        std::string norm_ts_name;      // "norm_a" / "norm_b"
         std::string post_otm_name;     // "otm_scene_a" / "otm_scene_b"
     };
     SlotNodes slot_a, slot_b;

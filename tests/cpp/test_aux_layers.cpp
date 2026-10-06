@@ -94,4 +94,11 @@ int main() {
         try { parseLayersArray(Parameters::parse(bad)); } catch (const std::exception &) { thrown = true; }
         assert(thrown);
     }
+    // Per-input metadata keeps its source identity when layers omit unused inputs.
+    auto sparse = parseLayersArray(Parameters::parse(R"([{"input":3,"dst_w":80,"dst_h":44}])"));
+    applyLayerMetadata(sparse, R"({"0":{"dst_x":999},"3":{"dst_x":16}})");
+    assert(sparse[0].input == 3 && sparse[0].dst_x == 16);
+    applyLayerMetadata(sparse, R"({"layers":[{"dst_x":999},{},{},{"dst_x":24}]})");
+    assert(sparse[0].input == 3 && sparse[0].dst_x == 24);
+
 }

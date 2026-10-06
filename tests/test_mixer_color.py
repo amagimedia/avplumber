@@ -117,7 +117,7 @@ def builder(monkeypatch):
 
 def test_aliases_share_one_color_conversion_before_all_scene_slots(builder):
     for name in ("cam", "cam#2"):
-        builder.add_source(name, "decoded", "input", default_graph="", color="sdr")
+        builder.add_source(name, "decoded", "input", color="sdr")
     builder.add_scene("full", {"cam": {}, "cam#2": {}})
     builder.set_initial_scene("full")
     builder.build()
@@ -136,7 +136,7 @@ def test_aliases_share_one_color_conversion_before_all_scene_slots(builder):
 @pytest.mark.parametrize("color", (None, "sdr", "hlg", "pq"))
 def test_routed_color_contract_reaches_both_slot_conversions(builder, color):
     builder.add_routed_source("cam", "route_a", "route_b", "input", "router", "a", "b",
-                              default_graph="", color=color)
+                              color=color)
     builder.add_scene("full", {"cam": {}}, routes={"cam": 0})
     builder.set_initial_scene("full")
     builder.build()
@@ -159,7 +159,7 @@ def test_shared_edge_cannot_have_conflicting_contracts(builder):
 
 
 def test_rgb_keeps_alpha_and_uses_hdr_compositor(builder):
-    builder.add_source("page", "rgba", "input", default_graph="", packed_rgb=True, color="sdr")
+    builder.add_source("page", "rgba", "input", packed_rgb=True, color="sdr")
     builder.add_scene("full", {"page": {"blend": True}})
     builder.set_initial_scene("full")
     builder.build()
@@ -170,7 +170,7 @@ def test_rgb_keeps_alpha_and_uses_hdr_compositor(builder):
 
 
 def test_premultiplied_rgb_alpha_is_tagged_by_the_colour_node(builder):
-    builder.add_source("page", "rgba", "input", default_graph="", packed_rgb=True, color="sdr",
+    builder.add_source("page", "rgba", "input", packed_rgb=True, color="sdr",
                        premultiplied_alpha=True)
     builder.add_scene("full", {"page": {"blend": True}})
     builder.set_initial_scene("full")
@@ -183,8 +183,8 @@ def test_premultiplied_rgb_alpha_is_tagged_by_the_colour_node(builder):
 def test_422_hdr_canvas_retains_native_source_chroma(builder, transfer):
     builder.working_format = "p210le"
     builder.color = Color(transfer)
-    builder.add_source("decoded", "nvdec", "input", default_graph="", color="sdr")
-    builder.add_source("raw422", "v210", "input", default_graph="", color=transfer, pixel_format="p210le")
+    builder.add_source("decoded", "nvdec", "input", color="sdr")
+    builder.add_source("raw422", "v210", "input", color=transfer, pixel_format="p210le")
     builder.add_scene("mixed", {"decoded": {}, "raw422": {}})
     builder.set_initial_scene("mixed")
     builder.build()
@@ -209,7 +209,7 @@ def test_media_wipe_blends_onto_an_hdr_canvas(monkeypatch, wipe_color):
             pass
     b = graph.MixerGraphBuilder(Avp(), canvas=(1920, 1080), fps=(60, 1), working_format="p210le",
                                 color="hlg", wipe_color=wipe_color, enable_wipe=True, cache_wipes_mb=512)
-    b.add_source("cam", "decoded", "input", default_graph="", color="sdr")
+    b.add_source("cam", "decoded", "input", color="sdr")
     b.add_scene("full", {"cam": {}})
     b.set_initial_scene("full")
     b.build()

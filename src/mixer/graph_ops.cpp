@@ -18,11 +18,6 @@ void resetInputIf(const std::shared_ptr<MixerGraph>& nodes, const std::string& n
         r->resetInput();
 }
 
-void resetSlotNormFps(const std::shared_ptr<MixerGraph>& nodes, const MixerState& st) {
-    resetInputIf(nodes, st.slot_a.norm_ts_name);
-    resetInputIf(nodes, st.slot_b.norm_ts_name);
-}
-
 static bool nodeConsumesEdge(const std::shared_ptr<NodeWrapper>& node, const std::string& edge_name) {
     if (!node)
         return false;
@@ -108,24 +103,20 @@ av::Timestamp edgeLastTsIfExists(const std::shared_ptr<MixerGraph>& nodes, const
 WipeReadyResult waitForWipeOverlayReady(const std::shared_ptr<MixerGraph>& nodes,
                                         const std::string& edge_name,
                                         av::Timestamp initial_ts,
-                                        int64_t earliest_visible_pts_ms,
                                         const std::shared_ptr<MixerState>& state, uint64_t generation,
                                         int64_t timeout_ms) {
     WipeReadyResult result;
     while (result.waited_ms < timeout_ms) {
         if (state->transition_generation.load() != generation) return result;
-        const bool time_ready = wallclock.pts() >= earliest_visible_pts_ms;
         av::Timestamp ts = edgeLastTsIfExists(nodes, edge_name);
         const bool frame_ready = ts.isValid() && (!initial_ts.isValid() || ts > initial_ts);
-        if (time_ready && frame_ready) {
+        if (frame_ready) {
             result.ready = true;
-            result.ready_ts = ts;
             return result;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
         result.waited_ms += kPollMs;
     }
-    result.ready_ts = edgeLastTsIfExists(nodes, edge_name);
     return result;
 }
 

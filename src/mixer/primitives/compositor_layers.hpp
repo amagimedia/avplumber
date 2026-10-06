@@ -94,7 +94,7 @@ inline void parseFilterFromJson(const Parameters &obj, FilterSpec &out) {
 }
 
 inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
-    out.input = obj.value("input", -1);
+    out.input = obj.value("input", out.input);
     if (out.input < -1) throw Error("cuda_rect_overlay: invalid input index");
     if (obj.contains("tile")) {
         const auto &t = obj.at("tile");
@@ -164,14 +164,15 @@ inline void applyLayerMetadata(std::vector<LayerSpec> &layers, const char *json)
     Parameters md = Parameters::parse(json);
     if (md.contains("layers") && md["layers"].is_array()) {
         const auto &arr = md["layers"];
-        for (size_t i = 0; i < arr.size() && i < layers.size(); ++i) {
-            if (!arr[i].is_object())
+        for (size_t i = 0; i < layers.size(); ++i) {
+            const size_t input = layers[i].sourceIndex(i);
+            if (input >= arr.size() || !arr[input].is_object())
                 continue;
-            parseLayerFromJson(arr[i], layers[i]);
+            parseLayerFromJson(arr[input], layers[i]);
         }
     } else {
         for (size_t i = 0; i < layers.size(); ++i) {
-            const std::string k = std::to_string(i);
+            const std::string k = std::to_string(layers[i].sourceIndex(i));
             if (md.contains(k) && md[k].is_object())
                 parseLayerFromJson(md[k], layers[i]);
         }

@@ -1,5 +1,5 @@
 #include "output_mask.hpp"
-#include "mixer/primitives/MixerState.hpp"
+#include "mixer/routing.hpp"
 #include <cassert>
 #include <limits>
 
@@ -45,4 +45,32 @@ int main() {
     try { parseBitmask(Parameters(std::string(33, '1'))); }
     catch (const Error&) { rejected = true; }
     assert(rejected);
+    // Sparse layer order follows source index, not name or insertion order.
+    SceneDefinition sparse, other;
+    sparse.sources["191"] = {{"dst_x", 80}, {"z", 4}};
+    sparse.sources["32"] = {{"dst_x", 0}, {"z", 4}};
+    other.sources["63"] = Parameters::object();
+    const auto layers = compositorLayersFromScene(state, sparse);
+    assert(layers.size() == 2);
+    assert(layers[0]["input"] == 32 && layers[1]["input"] == 191);
+    assert(layers[1]["dst_x"] == 80 && layers[0]["z"] == 4);
+    assert(sourceOutputsForScenes(state, "32", state.sources.at("32"), &sparse, &other) == 1);
+    assert(sourceOutputsForScenes(state, "63", state.sources.at("63"), &sparse, &other) == 2);
+    assert(sourceOutputsForScenes(state, "32", state.sources.at("32"), &sparse, &sparse) == 3);
+    assert(sourceOutputsForScenes(state, "32", state.sources.at("32"), nullptr, &sparse) == 2);
+    assert(sourceOutputsForScenes(state, "32", state.sources.at("32"), nullptr, nullptr) == 0);
+    assert(sourceOutputsForScenes(state, "191", state.sources.at("191"), nullptr, nullptr) == 3);
+
+    // Publishing both slots preserves unrelated router outputs and clears retired slots.
+    auto& routed = state.sources["routed"];
+    routed.routed = true; routed.router_node_name = "router";
+    routed.route_output_a = 0; routed.route_output_b = 2;
+    state.router_output_counts["router"] = 3;
+    state.router_routes["router"] = {8, 77, 9};
+    sparse.sources["routed"] = Parameters::object(); sparse.routes["routed"] = 64;
+    auto tables = currentRouterTables(state);
+    setRoutedSlotInTables(state, tables, true, &sparse);
+    setRoutedSlotInTables(state, tables, false, nullptr);
+    assert((tables.at("router") == std::vector<int>{64, 77, -1}));
+
 }

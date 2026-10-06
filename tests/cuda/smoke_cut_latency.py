@@ -39,7 +39,7 @@ def run(args):
     mixer = MixerGraphBuilder(avp, name="cut_test", canvas=(1080, 1920), fps=(30, 1),
                               hwaccel="cut_test_gpu", defer_output=True, enable_wipe=False)
     for i in range(args.source_count):
-        mixer.add_source(f"camera{i}", f"f{i}", "inputs", default_graph="")
+        mixer.add_source(f"camera{i}", f"f{i}", "inputs")
         mixer.add_scene(f"scene{i}", {f"camera{i}": {
             "dst_x": 0, "dst_y": 0, "dst_w": 1080, "dst_h": 1920, "fit": "contain"}})
     mixer.set_initial_scene("scene0")

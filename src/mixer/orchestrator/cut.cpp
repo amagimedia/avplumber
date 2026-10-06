@@ -6,7 +6,6 @@ void MixerOrchestrator::prepareScene(const std::string& scene_name) {
     if (state_->pvw_slot_scene != scene_name)
         loadSceneIntoSlot(!state_->pgm_is_slot_a, scene_name, true);
     setNodeObject(state_->pvwSlot().post_otm_name, "outputs", Parameters(1u));
-    resetSlotNormFps(nodes_, *state_);
 }
 
 void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::TransitionMode mode) {

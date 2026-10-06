@@ -117,7 +117,7 @@ def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int
         for index, (edge, url) in enumerate(zip(input_edges, urls)):
             browser = is_dmabuf_url(url)   # packed RGB, always SDR; decoded files follow --input-color
             mixer.add_source(f"source_{index}", pre_otm_edge=edge, input_group=_input_group(index),
-                             default_graph="", packed_rgb=browser, color="sdr" if browser else color or None)
+                             packed_rgb=browser, color="sdr" if browser else color or None)
         return False
     labels = [f"slot_{i}_{slot}" for i in range(16) for slot in ("a", "b")]
     edges = [f"route_{label}" for label in labels]
@@ -134,7 +134,7 @@ def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int
             f"source_{index}", pre_filter_edge_a=edges[2 * index],
             pre_filter_edge_b=edges[2 * index + 1], input_group=ROUTER_GROUP,
             route_router="layout_preheat_router", route_output_label_a=labels[2 * index],
-            route_output_label_b=labels[2 * index + 1], default_graph="", color=color or None,
+            route_output_label_b=labels[2 * index + 1], color=color or None,
         )
     return True
 

@@ -23,10 +23,10 @@ Typical usage
                            hwaccel="mixer_gpu", enable_wipe=True)
     mx.add_source("cam0", pre_otm_edge="cam0_fps", input_group="input_0")
     mx.add_source("cam1", pre_otm_edge="cam1_fps", input_group="input_1")
-    mx.add_scene("fullcam0", {"cam0": {"graph": "scale_cuda=w=1920:h=1080", "dst_x": 0, "dst_y": 0}})
+    mx.add_scene("fullcam0", {"cam0": {"dst_w": 1920, "dst_h": 1080}})
     mx.add_scene("pip", {
-        "cam0": {"graph": "scale_cuda=w=1920:h=1080", "dst_x": 0, "dst_y": 0},
-        "cam1": {"graph": "scale_cuda=w=640:h=360", "dst_x": 1280, "dst_y": 720},
+        "cam0": {"dst_w": 1920, "dst_h": 1080},
+        "cam1": {"dst_w": 640, "dst_h": 360, "dst_x": 1280, "dst_y": 720},
     })
     mx.set_initial_scene("fullcam0", slot="A")
     out_edge = mx.build()   # returns the name of the final output video edge
@@ -168,7 +168,6 @@ class MixerGraphBuilder:
         name: str,
         pre_otm_edge: str,
         input_group: str,
-        default_graph: Optional[str] = None,
         *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
@@ -181,9 +180,8 @@ class MixerGraphBuilder:
         premultiplied_alpha tags packed RGB alpha as premultiplied (Chromium's
         export), so the compositor applies opacity only once.
 
-        The source's one_to_many and per-slot crop-scale nodes will be
-        created in *input_group* during build() so that they restart
-        together with the input decode chain.
+        Source conversion and fan-out nodes are created in *input_group*.
+        Fixed filters belong in the input chain; scenes specify compositor geometry.
 
         Parameters
         ----------
@@ -193,16 +191,7 @@ class MixerGraphBuilder:
             Name of the avplumber edge that feeds into this source's
             one_to_many (typically the force_fps output of the input chain).
         input_group:
-            Avplumber group that owns this source's OTM and crop-scale nodes.
-        default_graph:
-            Initial crop/scale filter graph for this source's slot filters.
-            It must hold GPU filters only: slot filters run with the
-            backend's ``graph_threads`` (one thread for CUDA).
-            An empty string bypasses slot filters; scenes then use compositor
-            dst_w/dst_h and crop directly. Scene switches can still replace
-            nonempty filters, but preheated geometry
-            sources should start with their fixed graph to avoid a cold
-            filter restart on the first take.
+            Avplumber group that owns this source's conversion and fan-out nodes.
         """
         if self._built:
             raise RuntimeError("Cannot add sources after build()")
@@ -213,7 +202,7 @@ class MixerGraphBuilder:
         if packed_rgb and color != Color():
             raise ValueError(f"Source '{name}': packed RGB requires an explicit SDR color setting")
         idx = len(self._sources)
-        self._sources.append(MixerSource(name, pre_otm_edge, input_group, default_graph,
+        self._sources.append(MixerSource(name, pre_otm_edge, input_group,
                                                color=color, pixel_format=pixel_format, packed_rgb=packed_rgb,
                                                premultiplied_alpha=premultiplied_alpha))
         self._source_index[name] = idx
@@ -228,10 +217,9 @@ class MixerGraphBuilder:
         route_router: str,
         route_output_label_a: str,
         route_output_label_b: str,
-        default_graph: Optional[str] = None,
         *, color=None,
     ) -> "MixerGraphBuilder":
-        """Register a source whose slot filters are fed by a native preheat router.
+        """Register a source whose slot inputs are fed by a native preheat router.
 
         An explicit color contract applies to every camera routed into this
         source. Otherwise, normalization resolves each frame's color metadata.
@@ -245,7 +233,6 @@ class MixerGraphBuilder:
             name=name,
             pre_otm_edge=None,
             input_group=input_group,
-            default_graph=default_graph,
             pre_filter_edge_a=pre_filter_edge_a,
             pre_filter_edge_b=pre_filter_edge_b,
             route_router=route_router,
@@ -270,10 +257,8 @@ class MixerGraphBuilder:
         name:
             Scene identifier (must be unique).
         sources:
-            Mapping from logical source name to a dict with at minimum
-            ``graph`` (the FFmpeg filter chain for that camera's
-            crop/scale filter_video) and optional compositor layer
-            keys ``dst_x``, ``dst_y``, etc.
+            Mapping from logical source name to compositor layer fields
+            such as ``dst_x``, ``dst_y``, ``dst_w``, ``dst_h`` and crop geometry.
         """
         if self._built:
             raise RuntimeError("Cannot add scenes after build()")
@@ -292,9 +277,9 @@ class MixerGraphBuilder:
         After build, it also emits ``mixer.scene`` so runtime policies can
         reuse generic scene names with different source-slot assignments.
         """
-        sources = {source: ({**spec, "graph": self._normalized_graph(spec["graph"])}
-                            if spec.get("graph") else dict(spec))
-                   for source, spec in sources.items()}
+        if any("graph" in spec for spec in sources.values()):
+            raise ValueError("Scene filter graphs were removed; filter the source upstream")
+        sources = {source: dict(spec) for source, spec in sources.items()}
         unknown = [s for s in sources if s not in self._source_index]
         if unknown:
             raise ValueError(f"Scene '{name}' references unknown source(s): {unknown}")
@@ -307,15 +292,6 @@ class MixerGraphBuilder:
         if self._built:
             self.avp.executeCommandsFromString(self._scene_command(name, scene))
         return self
-
-    def _normalized_graph(self, graph: str) -> str:
-        """Keep scene geometry filters in the canvas storage format.
-
-        Color conversions belong before source fan-out. The compositor checks
-        the contract again so a custom scene filter cannot silently retag pixels.
-        """
-        suffix = self.backend.scale(pixel_format=self.working_format)
-        return graph if not graph or graph.endswith(suffix) else f"{graph},{suffix}"
 
     def set_initial_scene(self, scene_name: str, slot: str = "A") -> "MixerGraphBuilder":
         """Declare which scene starts on PGM.
@@ -551,7 +527,7 @@ class MixerGraphBuilder:
         return output
 
     def _build_per_source_nodes(self) -> None:
-        """Create one_to_many + per-slot filter_video nodes for every source."""
+        """Create source conversion and slot fan-out nodes."""
         prepared_edges = self._prepare_source_edges()
         initial_scene = self._initial_scene_def()
         pgm_slot_bit = 0 if self._initial_pgm_slot == "A" else 1
@@ -576,37 +552,11 @@ class MixerGraphBuilder:
 
                     "group": src.input_group,
                 }))
-                slot_a_edge = self._e(f"{src.name}_a")
-                slot_b_edge = self._e(f"{src.name}_b")
             else:
-                slot_a_edge = prepared_edges[(src.name, "a")]
-                slot_b_edge = prepared_edges[(src.name, "b")]
-                src.pre_filter_edge_a = slot_a_edge
-                src.pre_filter_edge_b = slot_b_edge
-
-            # Default scale: fit to canvas.  MixerOrchestrator rewrites the
-            # graph string on every scene switch via node.param.set + auto_restart.
-            fallback_graph = self.backend.scale(width=self.canvas_w, height=self.canvas_h, interpolation="lanczos")
-            default_graph = fallback_graph if src.default_graph is None else src.default_graph
-            default_graph = self._normalized_graph(default_graph)
-            if not default_graph:
-                continue
-
-            for slot, edge in (("a", slot_a_edge), ("b", slot_b_edge)):
-                self.avp.addNode(FilterVideo({
-                    "name": self._n(f"cs_{src.name}_{slot}"),
-                    "src": edge,
-                    "dst": self._e(f"{src.name}_scaled_{slot}"),
-                    "graph": default_graph,
-                    "threads": self.backend.graph_threads,
-                    "hwaccel": self.hwaccel,
-                    "group": src.input_group,
-                    "auto_restart": "on",
-                }))
+                src.pre_filter_edge_a = prepared_edges[(src.name, "a")]
+                src.pre_filter_edge_b = prepared_edges[(src.name, "b")]
 
     def _source_slot_edge(self, source: MixerSource, slot: str) -> str:
-        if source.default_graph != "":
-            return self._e(f"{source.name}_scaled_{slot}")
         if source.route_router is not None:
             return source.pre_filter_edge_a if slot == "a" else source.pre_filter_edge_b
         return self._e(f"{source.name}_{slot}")
@@ -631,8 +581,9 @@ class MixerGraphBuilder:
                 "fps": self._fps_str(),
                 "latency_ms": self.latency_ms,
                 "layers": [
-                    {k: v for k, v in self._initial_scene_def().sources.get(source.name, {}).items() if k != "graph"}
-                    if is_program else {} for source in self._sources
+                    {**self._initial_scene_def().sources[source.name], "input": i}
+                    for i, source in enumerate(self._sources)
+                    if is_program and source.name in self._initial_scene_def().sources
                 ],
                 "active_inputs": source_mask_param(active_pgm) if is_program else 0,
 
@@ -872,8 +823,6 @@ class MixerGraphBuilder:
                 lines.append(
                     f"mixer.source {self.name} {src.name}"
                     f" {self._n('otm_' + src.name)} {idx}"
-                    + (f" {self._n('cs_' + src.name + '_a')} {self._n('cs_' + src.name + '_b')}"
-                       if src.default_graph != "" else "")
                 )
             else:
                 lines.append(
@@ -885,8 +834,6 @@ class MixerGraphBuilder:
                         "input_index": idx,
                         "route_label_a": src.route_output_label_a,
                         "route_label_b": src.route_output_label_b,
-                        "cs_node_a": self._n("cs_" + src.name + "_a") if src.default_graph != "" else "",
-                        "cs_node_b": self._n("cs_" + src.name + "_b") if src.default_graph != "" else "",
                     })
                 )
 
