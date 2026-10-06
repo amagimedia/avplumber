@@ -1,0 +1,11 @@
+general: {
+	json = "compact"
+	ws = true
+	ws_port = __JANUS_WS_PORT__
+	wss = false
+}
+
+admin: {
+	admin_ws = false
+	admin_wss = false
+}

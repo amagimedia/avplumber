@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .color import TEN_BIT_FORMATS
+from .color import TEN_BIT_FORMATS, default_codec
 
 RTP_PACKET_SIZE = 1_200
 DEFAULT_KEYFRAME_MIN_INTERVAL_MS = 150
+# Periodic IDR period. Viewers joining or losing packets get an IDR through
+# RTCP PLI (RtcpFeedbackListener) and Janus retransmits on NACK, so a longer
+# period is possible; every IDR is a send burst (11-24 ms at 3x pacing for
+# 1080x1920p60) that also inflates the receiver's jitter estimate. 3 s was
+# validated on the live demo with H.264 and HEVC viewers (2026-09-25).
+DEFAULT_KEYFRAME_INTERVAL_SEC = 3
 
 
 @dataclass(frozen=True)
@@ -20,6 +26,7 @@ class JanusVideoConfig:
     rtcp_bind: str = "0.0.0.0"
     rtcp_port: int = 0
     keyframe_min_interval_ms: int = DEFAULT_KEYFRAME_MIN_INTERVAL_MS
+    keyframe_interval_sec: int = DEFAULT_KEYFRAME_INTERVAL_SEC
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -37,6 +44,8 @@ class JanusVideoConfig:
         if (type(self.keyframe_min_interval_ms) is not int
                 or not 0 <= self.keyframe_min_interval_ms <= 2_147_483_647):
             raise ValueError("keyframe_min_interval_ms must be a non-negative integer")
+        if type(self.keyframe_interval_sec) is not int or not 1 <= self.keyframe_interval_sec <= 60:
+            raise ValueError("keyframe_interval_sec must be an integer between 1 and 60")
 
     @property
     def rtcp_port_remote(self) -> int:
@@ -44,12 +53,27 @@ class JanusVideoConfig:
 
     @property
     def rtp_url(self) -> str:
-        return (f"rtp://{self.host}:{self.video_port}?pkt_size={RTP_PACKET_SIZE}"
-                f"&rtcp_port={self.rtcp_port_remote}")
+        # The RTP muxer still supplies packetization. Use UDP directly because
+        # FFmpeg's rtp:// wrapper does not forward UDP's pacing options. RTCP
+        # feedback has its own socket in RtcpFeedbackListener below.
+        # Three times the average rate drains keyframe bursts without building
+        # a sustained backlog or reducing the encoder's detail budget.
+        return (f"udp://{self.host}:{self.video_port}?pkt_size={RTP_PACKET_SIZE}"
+                f"&bitrate={self.bitrate_kbps * 3000}&burst_bits={RTP_PACKET_SIZE * 8 * 4}"
+                "&buffer_size=2097152&fifo_size=8192")
+
+
+def janus_mountpoint_id(port: int) -> int:
+    """Preserve the demo's two program IDs; other outputs use their RTP port."""
+    return {5004: 1, 5006: 2}.get(port, port)
 
 
 JANUS_KEYFRAME_NODE = "janus_force_keyframe"
-KEYFRAME_COMMAND = f"node.object.set {JANUS_KEYFRAME_NODE} trigger true"
+
+
+def keyframe_command(node: str) -> str:
+    """Ask a force_keyframe node for a keyframe; it coalesces bursts and keeps its min interval."""
+    return f"node.object.set {node} trigger true"
 
 
 class RtcpFeedbackGroup:
@@ -74,6 +98,15 @@ class RtcpFeedbackGroup:
             listener.stop()
 
 
+def dpb_options(dpb_size: int) -> dict:
+    """NVENC encoder options for a *dpb_size* reference-frame DPB; 0 keeps NVENC's choice.
+
+    With B-frames off a P-frame references only its predecessor, so a DPB of 1
+    frees the unused reference surfaces. ``refs`` stays unset: it also changes
+    how many references each frame may search."""
+    return {"dpb_size": dpb_size} if dpb_size else {}
+
+
 def add_nodes(avp, api, specs, **defaults):
     """Build and register nodes from ``(node_type, params)`` pairs, filling in shared
     parameters (``group``, ``auto_restart``) a node does not set itself."""
@@ -85,7 +118,8 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                        width: int, height: int, hwaccel: str = "@gpu", fps_den: int = 1,
                        group: str = "output", codec: str = "", profile: str = "",
                        preset: str = "p7", enc_format: str = "nv12", color=None,
-                       hdr_metadata=None, prefix: str = "janus"):
+                       hdr_metadata=None, prefix: str = "janus", failure_mode: str = "panic",
+                       dpb_size: int = 0, edge_capacity: int | None = None):
     """Add ``force_fps -> keyframe -> nvenc -> bsf -> rtp mux -> output``; return the RTCP listener.
 
     Defaults to HEVC (Main/Main10), which current Safari and Chrome negotiate
@@ -93,20 +127,22 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     same bitrate and it carries 10-bit + HDR signaling. ``enc_format`` is the
     encoder's CUDA input (``p010le`` keeps 10-bit, ``nv12`` is 8-bit) and
     ``color`` supplies the VUI so an HLG program signals BT.2020/arib-std-b67.
+    ``dpb_size`` sets the encoder's reference DPB (:func:`dpb_options`); 0 leaves it to NVENC.
+    ``edge_capacity`` plans the capacity of every edge the chain creates; None keeps the plan for ``*``.
     """
     node_name = lambda suffix: f"{prefix}_{suffix}"
     keyframe_node = node_name("force_keyframe")
     bitrate = f"{janus.bitrate_kbps}k"
     ten_bit = enc_format in TEN_BIT_FORMATS
-    if not codec:
-        codec = "hevc_nvenc" if ten_bit else "h264_nvenc"   # HEVC only when the input is 10-bit
+    codec = codec or default_codec(enc_format)   # HEVC only when the input is 10-bit
     if not profile:
         profile = ("main10" if ten_bit else "main") if "hevc" in codec else "baseline"
-    add_nodes(avp, api, [
+    specs = [
         ("ForceFPS", {"name": node_name("fps"), "src": src_edge, "dst": node_name("fps"),
                       "fps": f"{fps}/{fps_den}"}),
         ("ForceKeyFrame", {"name": keyframe_node, "src": node_name("fps"), "dst": node_name("keyframed"),
-                           "interval_sec": "1/1", "min_interval_ms": janus.keyframe_min_interval_ms}),
+                           "interval_sec": f"{janus.keyframe_interval_sec}/1",
+                           "min_interval_ms": janus.keyframe_min_interval_ms}),
         ("AssumeVideoFormat", {"name": node_name("format"), "src": node_name("keyframed"), "dst": node_name("video"),
                                "width": width, "height": height, "pixel_format": "cuda",
                                "real_pixel_format": enc_format}),
@@ -115,7 +151,10 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
             "codec": codec, "hwaccel": hwaccel,
             **({"hdr_metadata": hdr_metadata} if hdr_metadata else {}),
             "options": {
-                "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": max(1, round(fps / fps_den)), "bf": 0,
+                "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "bf": 0,
+                # The encoder GOP matches the ForceKeyFrame period; forced-idr lets
+                # PLI-triggered keyframes land in between without restarting the GOP grid.
+                "g": max(1, round(fps / fps_den)) * janus.keyframe_interval_sec,
                 # p5..p7 are NVENC's quality presets; with tune=ull it stays a
                 # one-pass, no-lookahead, no-reordering encode, so the extra quality
                 # costs GPU time rather than latency. B-frames stay off: they need
@@ -123,19 +162,24 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                 "preset": preset, "profile": profile, "tune": "ull", "rc": "cbr",
                 "rc-lookahead": 0, "zerolatency": 1, "delay": 0, "forced-idr": 1,
                 "no-scenecut": 1, "strict_gop": 1, "aud": 1, "spatial-aq": 1, "temporal-aq": 0,
-                **(color or {}),
+                **dpb_options(dpb_size), **(color or {}),
             },
         }),
         ("Bsf", {"name": node_name("repeat_headers"), "src": node_name("encoded"), "dst": node_name("repeat_headers"),
                  "bsf": "dump_extra=freq=keyframe"}),
         ("Mux", {"name": node_name("mux"), "src": [node_name("repeat_headers")], "dst": node_name("video_rtp_mux"),
-                 "ts_sort_wait": 0, "auto_restart": "on", "on_error": "panic"}),
+                 "ts_sort_wait": 0, "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode}),
         ("Output", {"name": node_name("rtp_output"), "src": node_name("video_rtp_mux"), "url": janus.rtp_url,
-                    "format": "rtp", "auto_restart": "on", "on_error": "panic",
+                    "format": "rtp", "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode,
                     "options": {"payload_type": janus.payload_type, "rtpflags": "skip_rtcp", "ssrc": janus.ssrc}}),
-    ], group=group, auto_restart="panic")
+    ]
+    if edge_capacity is not None:
+        for _, params in specs:
+            if "dst" in params:   # planned before addNode creates the edge
+                avp.edges.planCapacity(params["dst"], edge_capacity)
+    add_nodes(avp, api, specs, group=group, auto_restart=failure_mode)
     return api.RtcpFeedbackListener(
         bind_host=janus.rtcp_bind, bind_port=janus.rtcp_port, janus_host=janus.host,
         janus_rtcp_port=janus.rtcp_port_remote, media_ssrc=janus.ssrc,
-        on_keyframe_request=lambda _request: avp.executeCommandsFromString(f"node.object.set {keyframe_node} trigger true"),
+        on_keyframe_request=lambda _request: avp.executeCommandsFromString(keyframe_command(keyframe_node)),
     )

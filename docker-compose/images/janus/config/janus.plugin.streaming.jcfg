@@ -2,6 +2,48 @@ general: {
 	events = true
 }
 
+avplumber-multiview: {
+	type = "rtp"
+	id = 5008
+	description = "avplumber SDR multiview"
+	audio = false
+	video = true
+	videoport = 5008
+	videortcpport = 5009
+	videoiface = "127.0.0.1"
+	videopt = 96
+	videocodec = "h264"
+	videofmtp = "profile-level-id=640028;packetization-mode=1"
+}
+
+avplumber-clean: {
+	type = "rtp"
+	id = 5010
+	description = "avplumber SDR clean program"
+	audio = false
+	video = true
+	videoport = 5010
+	videortcpport = 5011
+	videoiface = "127.0.0.1"
+	videopt = 96
+	videocodec = "h264"
+	videofmtp = "profile-level-id=42e028;packetization-mode=1"
+}
+
+avplumber-hdr: {
+	type = "rtp"
+	id = 2
+	description = "avplumber HDR program WebRTC preview"
+	audio = false
+	video = true
+	videoport = __JANUS_HDR_VIDEO_PORT__
+	videortcpport = __JANUS_HDR_VIDEO_RTCP_PORT__
+	videoiface = "127.0.0.1"
+	videopt = 96
+	videocodec = "h265"
+	videofmtp = "profile-id=2"
+}
+
 avplumber-program: {
 	type = "rtp"
 	id = 1

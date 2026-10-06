@@ -3,16 +3,23 @@ import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
-const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
+  .replace(/^\s*import .*;$/gm, "")
+  // Inject the fetched setup state; transport is exercised by the server/live tests.
+  .replace("const initialMixerState = await mixerState();", "const initialMixerState = fixtureState; monitorMixer = fixtureState !== null;");
 const elements = new Map();
 const timers = new Map();
 let timerId = 0;
 const context = createContext({
-  location: { origin: "http://127.0.0.1" },
+  fixtureState: null, setTimeout() {},
+  createReceiverMonitor: () => ({ update() {}, stop() {} }),
+  URL,
+  location: { origin: "http://127.0.0.1", href: "http://127.0.0.1/?codec=h265" },
   document: {
     readyState: "loading",
+    querySelector() { return this.getElementById("codec-label"); },
     getElementById(id) {
-      if (!elements.has(id)) elements.set(id, { dataset: {}, setAttribute() {} });
+      if (!elements.has(id)) elements.set(id, { options: [{value:"h264"}, {value:"h265"}], dataset: {}, setAttribute() {}, addEventListener() {} });
       return elements.get(id);
     },
   },
@@ -23,6 +30,56 @@ const context = createContext({
   },
 });
 runInContext(script, context);
+assert.equal(runInContext("MOUNTPOINT_ID", context), 2);
+assert.equal(elements.get("codec").value, "h265");
+// Janus is next to the page: at the root standalone, under the prefix behind a reverse proxy.
+assert.equal(runInContext("serverUrl", context), "http://127.0.0.1/janus");
+{
+  const proxied = createContext({
+    fixtureState: null, setTimeout() {},
+    URL, location: { origin: "http://127.0.0.1", href: "http://127.0.0.1/preview/?codec=h264" },
+    document: context.document, window: context.window,
+  });
+  runInContext(script, proxied);
+  assert.equal(runInContext("serverUrl", proxied), "http://127.0.0.1/preview/janus");
+}
+for (const [usage, level] of [[0, "good"], [92, "good"], [94, "good"], [95, "warn"], [98, "warn"], [99, "bad"], [100, "bad"], [null, "unknown"]]) {
+  context.renderGpuStats([{index: 0, gpu: usage, decoder: usage, memory_used_mib: 4096, memory_total_mib: 15360}]);
+  for (const label of ["GPU", "NVDEC"]) {
+    assert(elements.get("gpu-stats").innerHTML.includes(`>${label}</span><span class="metric-value" data-level="${level}">`));
+  }
+}
+for (const [used, level] of [[14330, "good"], [14331, "warn"], [15098, "warn"], [15099, "bad"], [null, "unknown"]]) {
+  context.renderGpuStats([{index: 0, gpu: 30, decoder: 90, memory_used_mib: used, memory_total_mib: 15360}]);
+  assert(elements.get("gpu-stats").innerHTML.includes(`>VRAM</span><span class="metric-value" data-level="${level}">`));
+}
+context.renderGpuStats([{index: 0, gpu: 0, decoder: null, memory_used_mib: 4096, memory_total_mib: 15360}]);
+assert(elements.get("gpu-stats").innerHTML.includes("4.00 / 15.00 GiB"));
+context.renderGpuStats(null);
+assert.equal(elements.get("gpu-stats").innerHTML, "GPU —");
+for (const suffix of ["", "?codec=h264", "?codec=invalid"]) {
+  const other = createContext({
+    fixtureState: null, setTimeout() {},
+    URL, location: { origin: "http://127.0.0.1", href: `http://127.0.0.1/${suffix}` },
+    document: context.document, window: context.window,
+  });
+  runInContext(script, other);
+  assert.equal(runInContext("MOUNTPOINT_ID", other), 1);
+  assert.equal(elements.get("codec").value, "h264");
+}
+
+for (const codecs of [["h264"], ["h264", "h265"]]) {
+  const other = createContext({
+    fixtureState: {settings: {preview_codecs: codecs}, setup_revision: 1}, setTimeout() {},
+    URL, location: {origin: "http://127.0.0.1", href: "http://127.0.0.1/?codec=h265"},
+    document: context.document, window: context.window,
+  });
+  runInContext(script, other);
+  assert.equal(runInContext("MOUNTPOINT_ID", other), codecs.length === 1 ? 1 : 2);
+  assert.equal(elements.get("codec").hidden, codecs.length === 1);
+  assert.equal(elements.get("codec").disabled, codecs.length === 1);
+  assert.equal(elements.get("codec-label").hidden, codecs.length === 1);
+}
 
 function report(seconds, state = "succeeded") {
   return new Map([
@@ -83,3 +140,46 @@ await Promise.resolve();
 assert.equal(value.textContent, "—");
 assert.equal(timers.size, 0, "a stopped request must not restart sampling");
 console.log("RTT selection, thresholds, unavailable data, failures and stop-race checks passed");
+
+await assert.rejects(context.handleEvent({ janus: "event", plugindata: { data: { error: "No such stream" } } }), /No such stream/);
+await assert.rejects(context.handleEvent({ janus: "hangup", reason: "ICE failed" }), /ICE failed/);
+
+// The player's use of the transport; janus-socket.test.mjs covers the transport itself.
+const requests = [];
+let socket;
+context.RTCRtpReceiver = {};
+context.JanusSocket = class {
+  constructor(url, callbacks) { socket = Object.assign(this, { url }, callbacks); }
+  async createSession() { requests.push("create"); }
+  async request(body) { requests.push(body); return { data: { id: 22 } }; }
+  close() { this.closed = true; }
+};
+runInContext("peer = null", context);
+await context.connect();
+assert.equal(socket.url, "http://127.0.0.1/janus");
+assert.equal(JSON.stringify(requests), JSON.stringify(["create",
+  { janus: "attach", plugin: "janus.plugin.streaming" },
+  { janus: "message", handle_id: 22, body: { request: "watch", id: 2 } }]));
+assert.equal(elements.get("status").textContent, "Requesting stream");
+await context.sendTrickle(null);
+assert.equal(JSON.stringify(requests.at(-1)),
+  JSON.stringify({ janus: "trickle", handle_id: 22, candidate: { completed: true } }));
+await socket.onEvent({ janus: "webrtcup" });
+assert.equal(elements.get("status").textContent, "WebRTC connected");
+socket.onError(Error("Janus connection lost"));
+assert.equal(socket.closed, true);
+assert.equal(runInContext("janus", context), null);
+assert.equal(elements.get("status").textContent, "Janus connection lost; retrying");
+assert.equal(timers.size, 1, "the connection deadline is gone, the retry is scheduled");
+await context.sendTrickle(null);
+assert.equal(requests.length, 4, "nothing is sent without a connection");
+timers.clear();
+
+const recovered = [];
+context.recover = error => recovered.push(error.message);
+context.watchConnection();
+context.watchConnection();
+assert.equal(timers.size, 1, "rearming must replace the previous connection deadline");
+await [...timers.values()][0]();
+assert.deepEqual(recovered, ["No video received within 12 seconds"]);
+console.log("Connection deadline and Janus failure recovery checks passed");
