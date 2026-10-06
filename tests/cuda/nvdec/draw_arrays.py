@@ -39,8 +39,15 @@ build requires its linear cases to equal that report frame by frame.
 
 Run on the NVIDIA host with its built module (NEURAL_NET=1, HAVE_NVCC=1) on PYTHONPATH and
 --input CLIP: 8-bit 4:2:0, exactly --frames frames, with inter-predicted frames, and coded at its
-display size (1080p HEVC is; 1080p H.264 is coded 1088 high, and the copy of a linear frame has
-the size of its frames context while the picture of a CUarray has the frame's).
+display size. The copy of a linear frame has the size of its frames context, which for a decoder
+is the coded size, while the picture of a CUarray has the frame's: on a clip coded larger than it
+is displayed the two storages give frames of different sizes, and the rows below the picture are
+not copied. 1080p H.264 is always coded 1088 high; 1080p HEVC is coded 1080 or 1088 high depending
+on the encoder (ffprobe's coded_height says which); 720p is coded 720 high by both. Every case
+requires its downloaded frames to have the decoded size and names the two sizes when they differ.
+
+The metadata is compared with what the Python node attached, which it records: a payload is made
+for the size of the decoded frame the node saw.
 """
 import argparse
 import gc
@@ -97,19 +104,21 @@ def nothing(index, width, height):
 
 
 class Mark(api.PythonNode):
-    """Attaches the metadata; holds the end of the stream until `release` is set."""
+    """Attaches the metadata and records it in `attached`, one payload per frame, before the frame
+    goes on; holds the end of the stream until `release` is set."""
     release = None
     payloads = None
-    count = 0
+    attached = None
 
     def process(self):
         frame = self._src.get()
         if frame.pts.timestamp == EOF:
             self.release.wait(120)
         else:
-            for key, value in self.payloads(self.count, frame.width, frame.height).items():
+            payload = self.payloads(len(self.attached), frame.width, frame.height)
+            for key, value in payload.items():
                 frame.metadata[key] = value
-            self.count += 1
+            self.attached.append(payload)
         self._dst.enqueue(frame)
 
     def doStop(self):
@@ -129,10 +138,11 @@ def run(args, name, storage, chain=(), payloads=nothing, counters=True):
                       "hwaccel": "draw_gpu", "pixel_format": storage, "options": options}),
     ]
     release = threading.Event()
+    attached = []
     edge = "decoded"
     if chain:
         mark = Mark({"name": "mark", "src": edge, "dst": "marked"})
-        mark.release, mark.payloads = release, payloads
+        mark.release, mark.payloads, mark.attached = release, payloads, attached
         nodes.append(mark)
         edge = "marked"
         for node, kind, parameters in chain:
@@ -142,11 +152,13 @@ def run(args, name, storage, chain=(), payloads=nothing, counters=True):
                                   "graph": "hwdownload,format=nv12", "threads": 1,
                                   "defer_preliminary_init": True}))
     surfaces, formats = set(), set()
+    decoded_sizes, output_sizes = set(), set()
 
     def decoded(frame):
         if frame.pts.timestamp != EOF:
             formats.add(("decoded", frame.format.name))
             surfaces.add(frame.data_ptr[0])
+            decoded_sizes.add((frame.width, frame.height))
 
     def drawn(frame):
         if frame.pts.timestamp != EOF:
@@ -177,12 +189,24 @@ def run(args, name, storage, chain=(), payloads=nothing, counters=True):
             if frame.pts.timestamp == EOF:
                 ended = True
                 continue
-            for key, value in payloads(len(result), frame.width, frame.height).items():
-                assert frame.metadata[key] == value, f"{name} on {storage}: frame {len(result)} lost metadata {key}"
+            # The node recorded the payload before it passed the frame on, so it is there by now.
+            for key, value in (attached[len(result)] if chain else {}).items():
+                assert key in frame.metadata, f"{name} on {storage}: frame {len(result)} lost metadata {key}"
+                assert frame.metadata[key] == value, (
+                    f"{name} on {storage}: frame {len(result)} carries another {key} than was attached: "
+                    f"{frame.metadata[key]} != {value}")
+            output_sizes.add((frame.width, frame.height))
             result.append(pixels(frame))
         assert not errors, errors
         assert ended, f"{name} on {storage}: missing EOF after {len(result)} frames"
         assert len(result) == args.frames, (name, storage, len(result), args.frames)
+        # Compared here and not per frame: a wiretap runs after its frame was queued, so only the
+        # end of the stream says that the decoded sizes are complete.
+        assert len(decoded_sizes) == 1 and output_sizes == decoded_sizes, (
+            f"{name} on {storage}: decoded frames are {sorted(decoded_sizes)} (width, height) and downloaded "
+            f"frames {sorted(output_sizes)}. A draw node's copy of a linear frame has the size of the decoder's "
+            f"frames context, so {args.input} is coded larger than it is displayed and its cases cannot be "
+            f"compared; use a clip coded at its display size")
         assert len({item[:3] for item in result}) == args.frames, f"{name} on {storage}: duplicate output PTS"
         assert ("decoded", storage) in formats and len({f for f in formats if f[0] == "decoded"}) == 1, formats
         if chain:
