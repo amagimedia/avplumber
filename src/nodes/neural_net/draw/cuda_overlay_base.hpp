@@ -179,8 +179,9 @@ protected:
 
     uint64_t frame_counter_ = 0;
 
-    // A CUarray input is a decoder surface, which nothing may draw on: the node draws on a linear
-    // picture of it, read by the rect compositor's array reader into a frame of this pool.
+    // The node's own pool of the pictures it draws on. An input that is not a picture of a draw
+    // node above is copied into a frame of it. A CUarray input is a decoder surface, which nothing
+    // may draw on: the rect compositor's array reader reads it into a frame of this pool.
     std::unique_ptr<avp::mixer::CudaRectDraw> picture_draw_;
     avp::AvBufferRef picture_frames_;
     // Frames by where the picture the node drew on came from; see getObject.
@@ -219,6 +220,8 @@ protected:
         }
         if (cu_ctx_ && cu_ctx_ != next_dev_ctx->cuda_ctx) {
             unloadKernels();
+            // The array reader unloads under the context it was loaded in, which it makes current.
+            picture_draw_.reset();
         }
         cuda_dev_ctx_ = next_dev_ctx;
         cu_ctx_ = next_dev_ctx->cuda_ctx;
@@ -262,12 +265,36 @@ protected:
         return CUDA_OVERLAY_CHECK_CU(cuMemcpy2DAsync(&cpy, cuda_dev_ctx_->stream)) == 0;
     }
 
+    /// Makes picture_frames_ the node's own marked pool of linear NV12 frames of `width` x `height`
+    /// on the device of `src`. The array reader is made for the pool's device and size, so it goes
+    /// with the pool it was made for.
+    void ensurePictureFrames(const AVHWFramesContext* src, int width, int height) {
+        const AVHWFramesContext* own = picture_frames_ ? (const AVHWFramesContext*)picture_frames_->data : nullptr;
+        if (own && own->device_ctx == src->device_ctx && own->width == width && own->height == height) return;
+        picture_draw_.reset();
+        picture_frames_.reset();
+        HWAccelDevice hw(av_buffer_ref(src->device_ref));
+        picture_frames_ = avp::mixer::allocCanvasFrames(hw, {width, height, AV_PIX_FMT_NV12}, nodeName());
+        cuda_overlay::markPicturePool(picture_frames_.get());
+    }
+
     bool copyInputFrame(const av::VideoFrame& frm, av::VideoFrame& out) {
+        // The copy is a frame of a picture pool, so that the draw nodes below draw on it instead of
+        // copying it again. A picture that is still referenced elsewhere is copied within the pool
+        // it came from, which keeps a chain's output in one frames context. Any other input is
+        // copied into the node's own pool, which has the device, format and size of the input's
+        // pool and so gives the frame that pool would have given.
+        AVBufferRef* frames = frm.raw()->hw_frames_ctx;
+        if (!cuda_overlay::isPicturePool(frames)) {
+            const AVHWFramesContext* src = (const AVHWFramesContext*)frames->data;
+            ensurePictureFrames(src, src->width, src->height);
+            frames = picture_frames_.get();
+        }
         out.raw()->format = frm.raw()->format;
         out.raw()->width = frm.width();
         out.raw()->height = frm.height();
 
-        int ret = av_hwframe_get_buffer(frm.raw()->hw_frames_ctx, out.raw(), 0);
+        int ret = av_hwframe_get_buffer(frames, out.raw(), 0);
         if (ret < 0) {
             logstream << nodeName() << ": av_hwframe_get_buffer failed: " << av::error2string(ret);
             return false;
@@ -303,15 +330,11 @@ protected:
     /// `frm`, also when it fails.
     void linearPicture(const av::VideoFrame& frm, av::VideoFrame& out) {
         const AVHWFramesContext* src = (const AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
-        const AVHWFramesContext* own = picture_frames_ ? (const AVHWFramesContext*)picture_frames_->data : nullptr;
-        if (!own || own->device_ctx != src->device_ctx || own->width != frm.width() || own->height != frm.height()) {
-            picture_draw_.reset();
-            picture_frames_.reset();
-            auto hw = std::make_shared<HWAccelDevice>(av_buffer_ref(src->device_ref));
-            const avp::mixer::CudaRectDraw::Canvas canvas{frm.width(), frm.height(), AV_PIX_FMT_NV12};
-            picture_draw_ = std::make_unique<avp::mixer::CudaRectDraw>(hw, canvas, 1);
-            picture_frames_ = avp::mixer::allocCanvasFrames(*hw, canvas, nodeName());
-            cuda_overlay::markPicturePool(picture_frames_.get());
+        ensurePictureFrames(src, frm.width(), frm.height());
+        if (!picture_draw_) {
+            picture_draw_ = std::make_unique<avp::mixer::CudaRectDraw>(
+                std::make_shared<HWAccelDevice>(av_buffer_ref(src->device_ref)),
+                avp::mixer::CudaRectDraw::Canvas{frm.width(), frm.height(), AV_PIX_FMT_NV12}, 1);
         }
         out = avp::mixer::canvasFrame(picture_frames_.get(), nodeName());
         const int ret = cuda_overlay::copyFrameProps(out.raw(), frm.raw());

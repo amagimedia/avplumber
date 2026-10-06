@@ -39,12 +39,16 @@ static void private_picture() {
     AVFrame *shared = av_frame_clone(picture);
     assert(shared);
     assert(!isPrivatePicture(picture) && !isPrivatePicture(shared));
+    // It is copied, and within the pool it came from.
+    assert(isPicturePool(shared->hw_frames_ctx));
     av_frame_free(&shared);
     assert(isPrivatePicture(picture));
 
-    // The same single reference, but storage of another pool: an upstream node's frame.
+    // The same single reference, but storage of another pool: an upstream node's frame. It is
+    // copied into the copying node's own pool.
     AVFrame *foreign = frame(other);
     assert(!isPrivatePicture(foreign));
+    assert(!isPicturePool(foreign->hw_frames_ctx) && !isPicturePool(nullptr));
 
     // Storage nobody may write, as decoder surfaces and zero-copy imports are flagged.
     AVFrame *readonly = frame(pictures, AV_PIX_FMT_CUDA, AV_BUFFER_FLAG_READONLY);

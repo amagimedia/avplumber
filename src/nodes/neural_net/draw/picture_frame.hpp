@@ -13,13 +13,19 @@ extern "C" {
 
 namespace cuda_overlay {
 
-// Its address in AVHWFramesContext::user_opaque marks the pool a draw node makes its linear
-// pictures of CUarray inputs in. Only draw nodes allocate from such a pool: the first one its
-// pictures, a later one the copy of a picture that is still referenced elsewhere.
+// Its address in AVHWFramesContext::user_opaque marks the pool a draw node makes the pictures it
+// draws on in: the linear picture of a CUarray input and the copy of a linear input. Only draw
+// nodes allocate from such a pool: the first one of a chain from its own, a later one from the
+// pool of its input when that picture is still referenced elsewhere.
 inline const char kPicturePoolTag = 0;
 
 inline void markPicturePool(AVBufferRef* frames) {
     ((AVHWFramesContext*)frames->data)->user_opaque = (void*)&kPicturePoolTag;
+}
+
+/// Whether `frames` (a frame's hw_frames_ctx) is a draw node's picture pool.
+inline bool isPicturePool(const AVBufferRef* frames) {
+    return frames && ((const AVHWFramesContext*)frames->data)->user_opaque == &kPicturePoolTag;
 }
 
 /// Whether a draw node may draw on `frame` itself: linear CUDA memory from a draw node's picture
@@ -27,9 +33,8 @@ inline void markPicturePool(AVBufferRef* frames) {
 /// or a retaining node still references, and any frame of another pool, answers no and is copied
 /// before drawing.
 inline bool isPrivatePicture(AVFrame* frame) {
-    if (!frame || frame->format != AV_PIX_FMT_CUDA || !frame->hw_frames_ctx) return false;
-    const AVHWFramesContext* frames = (const AVHWFramesContext*)frame->hw_frames_ctx->data;
-    return frames->user_opaque == &kPicturePoolTag && av_frame_is_writable(frame) > 0;
+    return frame && frame->format == AV_PIX_FMT_CUDA && isPicturePool(frame->hw_frames_ctx) &&
+           av_frame_is_writable(frame) > 0;
 }
 
 /// av_frame_copy_props for a frame that is drawn on. Returns a negative AVERROR on failure.
