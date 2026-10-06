@@ -876,22 +876,43 @@ format `nv12` (anything else is an error), 1 output: `av::VideoFrame`, always
 
 The node never draws on a frame another reader may hold. Which frame it draws
 on depends on its input:
--   `cuda` from any other node: a copy, in a new frame from the input frame's
-    own pool. Every draw node of a chain copies, as before.
--   `cuarray` (an NVDEC surface, which is also the decoder's reference
-    picture): a linear picture of it, read once through the rect compositor's
-    array reader (`cuda_rect_draw`, so it needs `HAVE_NVCC=1`) into a frame of
-    a pool the node owns. The surface is released before the frame is put, so
-    a draw node holds one decoder surface while it processes a frame and none
-    while it waits.
 -   `cuda` from the picture pool of a draw node above, when no other frame
     references it: the input frame itself, without a copy. This is checked for
     every frame. A `split`, a wiretap or a node that keeps frames between two
-    draw nodes leaves a second reference, and the node then copies.
+    draw nodes leaves a second reference, and the node then copies, into a
+    frame of the pool the picture came from.
+-   any other `cuda` frame: a copy in a frame of a pool the node owns. The pool
+    has the device, the software format and the width and height of the input's
+    frames context, so the copy has the layout and the size a frame of the
+    input's own pool has (the size of the frames context, which for a decoder
+    can be the coded size, 1088 lines for 1080p H.264). Both planes are copied
+    with one call when the two frames hold them in a single buffer at one
+    pitch, otherwise with one call each.
+-   `cuarray` (an NVDEC surface, which is also the decoder's reference
+    picture): a linear picture of it at the frame's size, read once through
+    the rect compositor's array reader (`cuda_rect_draw`, so it needs
+    `HAVE_NVCC=1`) into a frame of the same pool. The stream is synchronized
+    and the surface released before the frame is put, also when the draw
+    fails, so a draw node holds one decoder surface while it processes a frame
+    and none while it waits.
 
-So a chain of draw nodes below a CUarray decoder makes the picture once. All
-nodes of the chain run on the CUDA stream of the frame's device, for a CUarray
-decoder its own stream; the nodes take no `hwaccel` parameter.
+So the first draw node of a chain makes the picture and the nodes below draw
+on it: one picture per frame and chain, whatever the input storage. This is
+the usual case, not a guarantee: a node releases its own reference to a frame
+only after it has put it, and a node below that takes the frame before that
+sees two references and copies. The `pictures` object counts both.
+
+The output frames of a chain belong to the frames context of its first node's
+pool, not to the one the input came from. It is recreated when the input's
+device, width or height changes and when the node is restarted. A consumer
+that binds to one frames context, such as an `hwdownload` filter, has to be
+set up again then, as it has to when the context of its input changes.
+
+All nodes of a chain run on the CUDA stream of the frame's device, for a
+CUarray decoder its own stream; the nodes take no `hwaccel` parameter. A node
+synchronizes that stream after its kernels. A node with nothing to draw on a
+linear frame launches nothing and does not synchronize: a copy it made is
+still queued on that stream when the frame is put.
 
 `node.object.get <node> pictures` returns how many frames the node drew on a
 picture made of a CUarray (`from_array`), on a copy (`copied`) and on its input
@@ -914,10 +935,13 @@ Parameters common to all:
     `model_content_offset_y` (number, default `0`: unused)
 -   `debug_log_every_n` (int, default `0`)
 
-`tests/cuda/nvdec/draw_arrays.py` compares a chain on CUarray decode with the
-same chain on linear decode on an NVIDIA GPU; `tests/test_draw_picture_frame.py`
-checks without a GPU which frames count as private and that mask side data
-keeps its buffer.
+`tests/cuda/nvdec/draw_arrays.py` runs chains on linear and on CUarray decode
+on an NVIDIA GPU: an undrawn chain against the plain decode, three `draw_bbox`
+against one, CUarray against linear, the `pictures` counters, and with
+`--expect` the linear cases against a report of another build.
+`tests/test_draw_picture_frame.py` checks without a GPU which frames count as
+private, which pool a copy comes from, when one call may copy both planes, and
+that mask side data keeps its buffer.
 
 ### `drm_prime_to_egl_image`
 

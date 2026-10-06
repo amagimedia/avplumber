@@ -1,6 +1,6 @@
 # neural_net/draw — CUDA Overlay Nodes
 
-All draw nodes are SISO (single-input, single-output) operating on NV12 frames, linear CUDA or NVDEC CUarray; the output is always linear CUDA. Each uses paired luma/chroma CUDA kernels for correct NV12 color rendering. Which frame a node draws on (a copy, a linear picture of a CUarray, or its input frame) is described in [NODES.md](../../NODES.md).
+All draw nodes are SISO (single-input, single-output) operating on NV12 frames, linear CUDA or NVDEC CUarray; the output is always linear CUDA. Each uses paired luma/chroma CUDA kernels for correct NV12 color rendering. The first node of a chain makes the picture (a copy of a linear frame, or a linear picture of a CUarray) in a pool it owns and the nodes below draw on that frame; the rules are in [NODES.md](../../NODES.md).
 
 ## Shared base: `CudaOverlayBase`
 Handles CUDA context init, PTX module loading, kernel function lookup, and coordinate mapping from model space to output frame space via `model_content_width/height/offset_x/offset_y` and `width/height`.
