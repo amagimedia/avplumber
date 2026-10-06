@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { groupGraph, focusGroup } from './graphGroups.mjs';
+import { groupGraph, focusGroup, expandedGroupKeys } from './graphGroups.mjs';
 const node = (name, group, src, dst, extra = {}) => ({name, working: true, params: {group, src, dst, ...extra}});
 const nodes = [node('demux0', 'input_0', 'packet0', undefined, {routing: {'v:0': 'decoded0'}}),
   node('decode0', 'input_0', 'decoded0', 'video0'), node('decode1', 'input_1', 'packet1', 'video1'),
@@ -25,6 +25,20 @@ test('family and group expansion exposes native node identities', () => {
   assert.equal(g.internalCount, 0);
   assert(g.queues.some(q => q.name === 'decoded0'));
   assert(g.membership.has('@view:group:input_1'));
+});
+const nativeNames = g => g.nodes.filter(n => !g.membership.has(n.name)).map(n => n.name).sort();
+test('expand link opens a numbered group inside its family and leaves siblings grouped', () => {
+  const keys = expandedGroupKeys(' input_0, output ,,', nodes);
+  assert.deepEqual([...keys].sort(), ['family:input_*', 'group:input_0', 'group:output']);
+  const g = groupGraph(nodes, queues, keys);
+  assert.deepEqual(nativeNames(g), ['decode0', 'demux0', 'enc']);
+  assert.deepEqual([...g.membership.keys()].sort(), ['@view:group:input_1', '@view:group:mix']);
+});
+test('expand link accepts a family pattern and ignores an absent parameter', () => {
+  const keys = expandedGroupKeys('input_*', nodes);
+  assert.deepEqual([...keys].sort(), ['family:input_*', 'group:input_0', 'group:input_1']);
+  assert.deepEqual(nativeNames(groupGraph(nodes, queues, keys)), ['decode0', 'decode1', 'demux0']);
+  assert.equal(expandedGroupKeys(null, nodes).size, 0);
 });
 test('ungrouped nodes and same-node feedback remain explicit', () => {
   const g = groupGraph([node('a', undefined, ['loop'], ['loop', 'unused'])]);

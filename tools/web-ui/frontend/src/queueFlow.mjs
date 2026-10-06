@@ -30,6 +30,8 @@ export function summarizeQueueFlow(queues) {
     total: queues.length,
     known: count(queue => queue.flow?.known),
     active: count(queue => queue.flow?.active),
+    subscriptions: count(queue => typeof queue.subscription_active === 'boolean'),
+    subscribed: count(queue => queue.subscription_active === true),
     growing: count(queue => queue.flow?.growing),
     held: count(queue => queue.flow?.held),
     dropping: count(queue => queue.flow?.dropped > 0),

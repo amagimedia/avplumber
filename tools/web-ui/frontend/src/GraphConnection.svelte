@@ -73,20 +73,20 @@
   $: flow = q?.flowSummary || summarizeQueueFlow(q ? [q] : []);
   $: stroke = {flowing: '#60a5fa', backlog: '#fbbf24', dropped: '#f87171', idle: '#64748b', unknown: '#475569'}[flow.state];
   $: flowText = `${flow.active}/${flow.total} active · ${flow.growing} accumulating · ${flow.held} not draining · ${flow.dropped} new drops · ${flow.total - flow.known} unknown`;
-  $: detail = `${label}${q ? `\n${flowText}\nEnqueue ${Number(q.enq_pps || 0).toFixed(1)} / dequeue ${pps.toFixed(1)} items/s\nFullest queue ${Math.round(flow.maxFill * 100)}%` : '\nNo fresh queue samples'}`;
+  $: detail = `${label}${q ? `\n${flowText}${flow.subscriptions ? `\nSubscriptions: ${flow.subscribed}/${flow.subscriptions} active` : ''}\nEnqueue ${Number(q.enq_pps || 0).toFixed(1)} / dequeue ${pps.toFixed(1)} items/s\nFullest queue ${Math.round(flow.maxFill * 100)}%` : '\nNo fresh queue samples'}`;
   // Reuse the destination segment; never measure paths during telemetry updates.
   $: lastRoute = __route[__route.length - 1] || [start, end];
   $: tip = lastRoute[lastRoute.length - 1] || end;
   $: approach = lastRoute[lastRoute.length - 2] || start;
   $: angle = Math.atan2(tip.y - approach.y, tip.x - approach.x) * 180 / Math.PI;
-  $: width = hovered ? 5 : 2.5;
+  $: width = flow.subscribed > 0 ? 2 : 1.5;
   $: mid = {
     x: (start.x + end.x) / 2,
     y: (start.y + end.y) / 2
   };
 </script>
 
-<svg data-testid="connection" data-flow-state={flow.state}>
+<svg data-testid="connection" data-flow-state={flow.state} data-subscribed={flow.subscribed > 0}>
   <defs><marker id={`arrow-${id}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
     <path d="M 0 0 L 10 5 L 0 10 z" style={`fill: ${stroke}; pointer-events: none`} />
   </marker></defs>
@@ -110,7 +110,7 @@
 
   {#if q}
     <g class="fill-marker" transform={`translate(${tip.x}, ${tip.y}) rotate(${angle})`} aria-hidden="true">
-      <rect x="-26" y="-3" width="16" height="6" rx="2" fill="#0f172a" stroke={stroke} stroke-width="1" />
+      <rect x="-26" y="-3" width="16" height="6" rx="2" fill="var(--bg)" stroke={stroke} stroke-width="1" />
       <rect x="-25" y="-2" width={14 * flow.maxFill} height="4" rx="1" fill={stroke} />
     </g>
   {/if}
@@ -149,31 +149,30 @@
   .fill-marker { pointer-events: none; }
 
   .badge-bg {
-    fill: rgba(2, 6, 23, 0.9);
-    stroke: rgba(229, 231, 235, 0.25);
+    fill: var(--panel);
+    stroke: var(--edge);
     stroke-width: 1px;
   }
 
   .badge-text {
     font-size: 14px;
-    fill: #e5e7eb;
+    fill: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
       monospace;
     text-shadow: 0 0 2px #000;
   }
 
   .badge-bar-bg {
-    fill: rgba(229, 231, 235, 0.14);
+    fill: var(--edge-soft);
     stroke: rgba(229, 231, 235, 0.18);
     stroke-width: 1px;
   }
 
   .badge-bar-text {
     font-size: 12px;
-    fill: #e5e7eb;
+    fill: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
       monospace;
     text-shadow: 0 0 2px #000;
   }
 </style>
-

@@ -110,7 +110,7 @@
         <summary>Detailed Statistics</summary>
         <div style="margin-top: 0.5em;">
           {#each c.correctionGroups as cg}
-            <div style="margin-bottom: 1em; padding: 0.5em; background: #f5f5f5; border-radius: 4px;">
+            <div style="margin-bottom: 1em; padding: 0.5em; background: var(--bg); border-radius: 4px;">
               <h4 style="margin: 0 0 0.5em 0;"><code>{cg.name}</code></h4>
               <pre class="small-text" style="margin: 0; white-space: pre-wrap;">{JSON.stringify(cg, null, 2)}</pre>
             </div>
@@ -135,18 +135,18 @@
     font-weight: bold;
   }
   .hint {
-    color: #9ca3af;
+    color: var(--muted);
     font-style: italic;
     padding: 1em;
   }
   code {
-    background: #1f2937;
-    color: #e5e7eb;
+    background: var(--panel);
+    color: var(--text);
     padding: 2px 6px;
     border-radius: 3px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     font-size: 0.9em;
-    border: 1px solid #374151;
+    border: 1px solid var(--edge);
   }
   .iso-scrollable {
     min-height: 300px;
@@ -154,7 +154,7 @@
     flex: 1 1 auto;
   }
   .toolbar label {
-    color: #9ca3af;
+    color: var(--muted);
   }
   .toolbar input[type="checkbox"] {
     cursor: pointer;

@@ -1,6 +1,7 @@
 <script>
   import { onDestroy, onMount } from 'svelte';
   import { sampleQueueFlow } from './queueFlow.mjs';
+  import { instanceRestarted } from './instanceRestart.mjs';
   import DockHost from './DockHost.svelte';
   import GraphPanel from './panels/GraphPanel.svelte';
   import NodesPanel from './panels/NodesPanel.svelte';
@@ -20,6 +21,11 @@
   let requestedInstanceId = new URLSearchParams(window.location.search).get('instance');
   let instanceGeneration = 0;
   let requestedGeneration = -1;
+  // The reload after a restart is answered as soon as the engine is ready, which can precede the
+  // start of some nodes (the mixer starts its aux buses after setReady()); one more nodes.json,
+  // this long after that reply, refreshes their ON/OFF state.
+  const restartNodesRecheckMs = 5000;
+  let restartNodesRecheckGeneration = -1;
 
   let nodes = [];
   let queues = [];
@@ -35,7 +41,6 @@
   let logs = [];
   let consoleLines = [];
   let autoRefreshQueues = true;
-  let autoRefreshQueuesUserSet = false;
   let autoRefreshMs = 1000;
   let autoRefreshISOs = true;
   let syncGroups = [];
@@ -52,7 +57,6 @@
     selectedNodeName = name ? String(name) : '';
   }
   function setAutoRefreshQueues(v) {
-    autoRefreshQueuesUserSet = true;
     autoRefreshQueues = !!v;
   }
 
@@ -157,16 +161,32 @@
     currentInstanceId && statsByInstance[currentInstanceId]
       ? JSON.stringify(statsByInstance[currentInstanceId], null, 2)
       : '';
-  $: if (!autoRefreshQueuesUserSet && Array.isArray(queues) && queues.length >= 150) {
-    autoRefreshQueues = false;
-  }
 
   function updateInstances(list) {
+    const previous = instances;
     instances = Array.isArray(list) ? list : [];
     const wanted = currentInstanceId || requestedInstanceId;
     currentInstanceId = wanted
       ? (instances.some(instance => instance.id === wanted) ? wanted : null)
       : (instances[0]?.id || null);
+    // Same instance, new process: re-request its graph but keep the shown one and the view
+    // state until the new nodes.json arrives.
+    if (currentInstanceId && instanceRestarted(previous, instances, currentInstanceId)) {
+      appendConsole(`# Instance ${currentInstanceId} may have restarted, reloading its graph`);
+      invalidateInstanceRequests();
+      restartNodesRecheckGeneration = instanceGeneration;
+    }
+  }
+
+  // Drops in-flight replies and queue-rate history of the previous instance or process; the
+  // reactive block below then re-requests everything for the current instance.
+  function invalidateInstanceRequests() {
+    instanceGeneration += 1;
+    for (const request of pending.values()) request.reject(new Error('Instance changed'));
+    pending.clear();
+    queuesFresh = false;
+    queuesObservedAt = 0;
+    queuesInstance = null;
   }
 
   async function loadInstances() {
@@ -227,6 +247,12 @@
               nodes = Array.isArray(arr) ? arr : [];
             } catch (e) {
               appendConsole(`nodes.json parse error: ${e}`);
+            }
+            if (request.generation === restartNodesRecheckGeneration) {
+              restartNodesRecheckGeneration = -1;
+              setTimeout(() => {
+                if (wsConnected && request.generation === instanceGeneration) refreshNodes();
+              }, restartNodesRecheckMs);
             }
           } else if (request.kind === 'queues.json') {
             try {
@@ -498,15 +524,10 @@
   $: {
     if (currentInstanceId !== lastInstanceSeen) {
       lastInstanceSeen = currentInstanceId;
-      instanceGeneration += 1;
-      for (const request of pending.values()) request.reject(new Error('Instance selection changed'));
-      pending.clear();
+      invalidateInstanceRequests();
       nodes = [];
       queues = [];
       queuesText = '';
-      queuesFresh = false;
-      queuesObservedAt = 0;
-      queuesInstance = null;
       selectedNodeName = '';
       clearNodeObjects();
       syncGroups = [];
@@ -835,7 +856,7 @@
 
 <div class="app-root">
   <header class="topbar">
-    <div class="title">avplumber web-ui</div>
+    <h1 class="title">AVPlumber graph</h1>
     <div class="status">
       <span class="badge {wsConnected ? 'badge-connected' : 'badge-disconnected'}">
         WS: {wsConnected ? 'connected' : 'disconnected'}
