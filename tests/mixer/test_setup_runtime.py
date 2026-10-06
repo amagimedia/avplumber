@@ -544,9 +544,10 @@ def test_invalid_preserved_aux_rejected_before_preparation(runtime, monkeypatch)
     assert runtime.worker is None
 
 
+@pytest.mark.parametrize("bypass", [False, True])
 @pytest.mark.parametrize("hdr", [False, True])
 @pytest.mark.parametrize("sdr_codec", ["h264", "h265"])
-def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr_codec):
+def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr_codec, bypass):
     monkeypatch.setattr("pyplumber.mixer.gui.setup_runtime.subprocess.Popen", lambda *a, **kw: SimpleNamespace(pid=1234, poll=lambda: None))
     monkeypatch.setattr(runtime.closing, "wait", lambda _: False)
     runtime.bridge.state = lambda **kw: {"status": {"pgm_scene": "full"},
@@ -559,7 +560,8 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr
     def queues(command, **kw):
         if command == "nodes.json":
             # An unused source can wait for consumers; readiness must not require its frames.
-            return json.dumps([{"name": "mixer_color_" + name, "type": "filter_video", "working": True}
+            return json.dumps([{"name": ("mixer_otm_" if bypass else "mixer_color_") + name,
+                                "type": "one_to_many" if bypass else "filter_video", "working": True}
                                for name in ("visible", "unused")])
         calls.append(command)
         assert len(calls) <= len(expected)
@@ -570,7 +572,10 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr
     assert len(calls) == len(expected)
 
 
-@pytest.mark.parametrize("nodes", [[], [{"name": "mixer_color_hdr", "type": "filter_video", "working": False}]])
+@pytest.mark.parametrize("nodes", [[], [{"name": "mixer_color_hdr", "type": "filter_video", "working": False}],
+    [{"name": "mixer_otm_hdr", "type": "one_to_many", "working": False}],
+    [{"name": "mixer_color_hdr", "type": "filter_video", "working": False},
+     {"name": "mixer_otm_hdr", "type": "one_to_many", "working": True}]])
 def test_start_rejects_missing_or_failed_source_normalization(runtime, monkeypatch, nodes):
     monkeypatch.setattr("pyplumber.mixer.gui.setup_runtime.subprocess.Popen", lambda *a, **kw: SimpleNamespace(pid=1234, poll=lambda: None))
     monkeypatch.setattr(runtime.closing, "wait", lambda _: False)

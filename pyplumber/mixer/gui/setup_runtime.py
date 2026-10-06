@@ -431,8 +431,8 @@ class SetupRuntime:
 
     def _start(self, config):
         started = time.monotonic()
-        # Each explicit source has one normalization filter before shared fan-out.
-        # It must be running even when no scene currently consumes that source.
+        # Check each source even when no scene currently consumes it. Already
+        # normalized sources bypass the color filter and feed fan-out directly.
         source_nodes = {f"mixer_color_{source['id']}" for source in json.loads(config.read_text())["sources"]}
         read_fd, write_fd = os.pipe()
         with os.fdopen(read_fd, "rb", buffering=0) as startup:
@@ -491,7 +491,12 @@ class SetupRuntime:
                 last_problem = f"{type(exc).__name__}: {exc}"
             if ready:
                 nodes = json.loads(self.bridge.command("nodes.json", timeout=60.0) or "[]")
+                defined = {n["name"] for n in nodes}
                 working = {n["name"] for n in nodes if n["type"] == "filter_video" and n["working"]}
+                working.update("mixer_color_" + n["name"][len("mixer_otm_"):]
+                               for n in nodes if n["type"] == "one_to_many" and n["working"]
+                               and n["name"].startswith("mixer_otm_")
+                               and "mixer_color_" + n["name"][len("mixer_otm_"):] not in defined)
                 failed = source_nodes - working
                 if failed:
                     raise RuntimeError("Source normalization not running: " + ", ".join(sorted(failed)) +
