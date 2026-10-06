@@ -690,13 +690,14 @@ def test_invalid_decode_storage_or_budget_is_rejected(field, value):
                                                   CONFIG["sources"][1]]})
 
 
-def _raw_420_nodes(tmp_path, kind, color, **canvas):
+def _raw_420_nodes(tmp_path, kind, color, *, source_options=None, process_source=None, **canvas):
     doc = {"canvas": {**CONFIG["canvas"], **canvas}, "sources": [{"id": "raw", "kind": kind,
-           "path": str(tmp_path / "pattern.raw"), "width": 320, "height": 180, "color": color}],
+           "path": str(tmp_path / "pattern.raw"), "width": 320, "height": 180, "color": color,
+           **(source_options or {})}],
            "scenes": [{"id": "full", "items": [{"source": "raw", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
-    path = tmp_path / "show.json"
-    path.write_text(json.dumps(doc))
-    app = build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+    app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4"), api=fake_api(),
+                      process_source=process_source)
     nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
     chain = [name for name in nodes if name.endswith("_0") and nodes[name].get("group") == nodes["input_0"]["group"]]
     return app, nodes, chain
@@ -717,7 +718,8 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
         assert nodes["filter_0"]["graph"] == "setpts=N*1/(60*TB)"
         assert nodes["realtime_0"]["src"] == "input_0_filtered"
         assert nodes["upload_0"]["src"] == "input_0_realtime"
-        assert (nodes["upload_0"]["type"], nodes["upload_0"]["graph"]) == ("filter_video", "hwupload")
+        assert (nodes["upload_0"]["type"], nodes["upload_0"]["graph"]) == (
+            "filter_video", "hwupload," + Color(color).setparams)
         # Neither graph does CPU slice work.
         assert nodes["filter_0"]["threads"] == nodes["upload_0"]["threads"] == 1
         assert not {"input_0_decoded", "input_0_cuda"} & dict(app.avp.edges.plans).keys()
@@ -732,15 +734,27 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
         assert nodes["decode_0"]["pixel_format"] == fmt
         assert nodes["decode_0"]["src"] == "input_0_packed"
         assert "hwaccel" not in nodes["decode_0"]
-        assert (upload["type"], upload["graph"]) == ("filter_video", "hwupload_cuda=pinned=1")
+        assert (upload["type"], upload["graph"]) == (
+            "filter_video", "hwupload_cuda=pinned=1," + Color(color).setparams)
         assert (upload["src"], upload["dst"]) == ("input_0_decoded", "input_0_cuda")
         assert (upload["hwaccel"], upload["threads"]) == ("mixer_gpu", 1)
-        # The mixer applies the source's colour contract; the upload leaves frames untagged as before.
-        assert not {"color_trc", "color_primaries", "colorspace", "color_range"} & upload.keys()
         assert nodes["realtime_0"]["src"] == "input_0_cuda"
         assert dict(app.avp.edges.plans)["input_0_cuda"] == 1
         source = dict(FakeMixer.instances[-1].sources)["raw"]
         assert source["pre_otm_edge"] == "input_0_realtime" and source["pixel_format"] == fmt
+    assert source["color_tagged"] is True
+
+
+@pytest.mark.parametrize("options,hook,tagged", [
+    ({"filter": "setparams=color_trc=smpte2084", "filter_output_format": "nv12"}, False, False),
+    ({}, True, False),
+    ({"transform": {"width": 640, "height": 360, "sw_format": "nv12"}}, False, True),
+])
+def test_raw_color_guarantee_survives_only_known_processing(tmp_path, options, hook, tagged):
+    _raw_420_nodes(tmp_path, "nv12", "sdr", source_options=options,
+                   process_source=(lambda ctx: ctx.edge) if hook else None)
+    source = dict(FakeMixer.instances[-1].sources)["raw"]
+    assert source["color_tagged"] is tagged
 
 
 def test_raw_upload_rejects_unknown_modes():
@@ -1862,7 +1876,7 @@ def test_clips_decode_on_the_gpu_and_raw_sources_upload_after_pacing(tmp_path):
     decode = nodes["decode_0"]
     assert (decode["hwaccel"], decode["pixel_format"]) == ("mixer_gpu", "?cuda")
     assert "codec_map" not in decode and decode["options"] == {"threads": 1}
-    assert nodes["upload_1"]["graph"] == "hwupload"   # raw uploads at its own size, after pacing
+    assert nodes["upload_1"]["graph"] == "hwupload," + Color().setparams
 
 
 def test_cli_file_inputs_keep_the_default_decoded_frames():

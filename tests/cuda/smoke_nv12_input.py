@@ -1,4 +1,4 @@
-"""Remote GPU smoke for raw NV12/P010: loop, pacing and byte-exact upload.
+"""Remote GPU smoke for raw NV12/P010: loop, pacing and byte-exact upload/compositing.
 
 The download is a verification boundary for this CPU/GPU interop source.
 """
@@ -9,12 +9,14 @@ import numpy as np
 
 from _harness import drain, finish, frame_planes, make_avp
 from pyplumber import node as api
+from pyplumber.mixer.color import Color
 from pyplumber.mixer.inputs import build_raw420_input, build_v210_input
 from v210_fixture import COLOR, sample_planes, write_fixture
 
 
-def check(fmt, pinned, native_rate=False):
+def check(fmt, pinned, native_rate=False, *, composite=False):
     width, height, fps = 96, 64, 30
+    color = Color("sdr" if fmt == "nv12" else "hlg")
     dtype, shift = (np.uint8, 0) if fmt == "nv12" else (np.uint16, 6)
     sample_bytes = np.dtype(dtype).itemsize
     frames = []
@@ -29,7 +31,19 @@ def check(fmt, pinned, native_rate=False):
         nodes = []
         try:
             edge = build_raw420_input(avp, api, "raw", str(path), width=width, height=height, pixel_format=fmt,
-                                    fps=fps, group="probe", hwaccel="raw_gpu", loop=True, pinned=pinned, native_rate=native_rate)
+                                    fps=fps, group="probe", hwaccel="raw_gpu", loop=True, pinned=pinned,
+                                    color=color, native_rate=native_rate)
+            if composite:
+                # Upload tags must satisfy the compositor without a separate color node.
+                compositor = api.MixerCompositor({
+                    "name": "compose", "src": [edge], "dst": "composed", "group": "probe",
+                    "hwaccel": "raw_gpu", "width": width, "height": height, "sw_format": fmt,
+                    "color": color.transfer, "fps": f"{fps}/1", "active_inputs": 1,
+                    "layers": [{"input": 0}],
+                })
+                nodes.append(compositor)
+                avp.addNode(compositor)
+                edge = "composed"
             verify = api.FilterVideo({"name": "verify", "src": edge, "dst": "result",
                                       "group": "probe", "hwaccel": "raw_gpu",
                                       "graph": f"hwdownload,format={fmt}"})
@@ -50,7 +64,7 @@ def check(fmt, pinned, native_rate=False):
             assert len(seen) == 24 and len(set(seen)) >= 3, seen
             assert any(b < a for a, b in zip(seen, seen[1:])), "raw clip did not loop"
             assert np.allclose(np.diff(timestamps), 1 / fps, atol=0.001), timestamps
-            print(f"PASS: 24 paced {fmt} frames, looping, byte-exact CPU → CUDA upload ({'pinned' if pinned else 'hwupload'}, native_rate={native_rate})", flush=True)
+            print(f"PASS: 24 paced {fmt} frames, looping, byte-exact upload ({'pinned' if pinned else 'hwupload'}, native_rate={native_rate}, composite={composite})", flush=True)
         finally:
             finish(avp, nodes)
 
@@ -101,5 +115,7 @@ if __name__ == "__main__":
         for fmt in ("nv12", "p010le"):
             for pinned in (False, True):
                 check(fmt, pinned, native_rate)
+                if native_rate:
+                    check(fmt, pinned, native_rate, composite=True)
         for width in (48, 50, 1920):
             check_v210(width, native_rate)

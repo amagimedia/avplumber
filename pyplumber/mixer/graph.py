@@ -169,6 +169,7 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
+        color_tagged=False,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -179,6 +180,9 @@ class MixerGraphBuilder:
         packed_rgb keeps alpha for fused compositing and requires explicit SDR.
         premultiplied_alpha tags packed RGB alpha as premultiplied (Chromium's
         export), so the compositor applies opacity only once.
+        color_tagged guarantees upstream frames already carry the declared YUV
+        color tags. Matching storage then needs no separate color node; this
+        guarantee must hold across restarts and input changes.
 
         Source conversion and fan-out nodes are created in *input_group*.
         Fixed filters belong in the input chain; scenes specify compositor geometry.
@@ -199,11 +203,14 @@ class MixerGraphBuilder:
             raise ValueError(f"Source '{name}' already registered")
         if color is not None:
             color = Color.parse(color)
+        if color_tagged and (color is None or packed_rgb):
+            raise ValueError("color_tagged requires an explicit YUV color contract")
         if packed_rgb and color != Color():
             raise ValueError(f"Source '{name}': packed RGB requires an explicit SDR color setting")
         idx = len(self._sources)
         self._sources.append(MixerSource(name, pre_otm_edge, input_group,
-                                               color=color, pixel_format=pixel_format, packed_rgb=packed_rgb,
+                                               color=color, color_tagged=color_tagged,
+                                               pixel_format=pixel_format, packed_rgb=packed_rgb,
                                                premultiplied_alpha=premultiplied_alpha))
         self._source_index[name] = idx
         return self
@@ -488,7 +495,8 @@ class MixerGraphBuilder:
                     result[(source.name, slot)] = self._color_edge(source, edge, f"{source.name}_{slot}")
         for edge, sources in shared.items():
             first = sources[0]
-            contract = lambda s: (s.input_group, s.color, s.pixel_format, s.packed_rgb, s.premultiplied_alpha)
+            contract = lambda s: (s.input_group, s.color, s.color_tagged, s.pixel_format,
+                                  s.packed_rgb, s.premultiplied_alpha)
             if any(contract(s) != contract(first) for s in sources):
                 raise ValueError(f"Conflicting color contracts for shared input edge {edge!r}")
             prepared = self._color_edge(first, edge, first.name)
@@ -517,6 +525,8 @@ class MixerGraphBuilder:
                 pixel_format = None
             graph = self.backend.conversion(self.color, pixel_format,
                                      source=source.color, source_format=source.pixel_format)
+            if source.color_tagged and graph == source.color.setparams:
+                return edge
         output = self._e(f"{label}_color")
         self.avp.addNode(FilterVideo({
             "name": self._n(f"color_{label}"), "src": edge, "dst": output,

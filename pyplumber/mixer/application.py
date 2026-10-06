@@ -613,7 +613,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 pixel_format="p010le" if source.kind == "p010" else "nv12",
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned", native_rate=True)
+                event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned", native_rate=True, color=source.color)
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
@@ -646,6 +646,10 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=edge,
                              input_group=group,
                              color=None if source.filter_graph else source.color,
+                             # Raw upload stamps tags; transforms preserve frame properties.
+                             # User filters/hooks can change them, so keep normalization there.
+                             color_tagged=(source.kind in ("nv12", "p010", "v210") and
+                                           not source.filter_graph and process_source is None),
                              packed_rgb=source.kind == "browser",
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
                              pixel_format=source.filter_output_format or

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .color import Color
+
 
 # Input watchdog in seconds: effectively never, so a looped or paused file input is not torn down.
 INPUT_TIMEOUT_S = 3_942_000_000
@@ -157,7 +159,7 @@ RAW_UPLOADED_CAPACITY = 1
 def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                        pixel_format: str, fps: int, fps_den: int = 1,
                        hwaccel: str = "@gpu", loop: bool = False, event_loop: Optional[str] = None,
-                       pinned: bool = False, native_rate: bool = False) -> str:
+                       pinned: bool = False, native_rate: bool = False, color=None) -> str:
     """CPU/GPU interop source: raw NV12/P010 file -> CUDA frames -> paced output edge.
 
     Default: ``input_rec -> demux -> dec_video(rawvideo) -> filter(setpts) ->
@@ -169,9 +171,11 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     The patched filter copies decoded planes through pinned staging on its own
     stream, using the shared CUDA device. It uploads one frame ahead of pacing
     (RAW_UPLOADED_CAPACITY). Requires the pinned-upload FFmpeg patch.
+    When supplied, color tags are stamped in the existing upload graph.
     """
     if pixel_format not in ("nv12", "p010le"):
         raise ValueError("raw 4:2:0 upload requires nv12 or p010le")
+    tags = "," + Color.parse(color).setparams if color is not None else ""
     if not pinned:
         from .backends.cuda import CudaMixerBackend   # backends load only when used
         # Neither setpts nor hwupload does CPU slice work: one filter thread each.
@@ -188,7 +192,7 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
                            event_loop=event_loop, native_rate=native_rate)
         output = f"input_{tag}_uploaded"
         avp.addNode(api.FilterVideo({"name": f"upload_{tag}", "src": edge, "dst": output,
-                                    "graph": "hwupload", "hwaccel": hwaccel, "threads": threads, "group": group}))
+                                    "graph": "hwupload" + tags, "hwaccel": hwaccel, "threads": threads, "group": group}))
         return output
     packets = _raw_file_packets(avp, api, tag, path, pixel_format=pixel_format, video_size=f"{width}x{height}",
                                 group=group, fps=fps, fps_den=fps_den, loop=loop)
@@ -203,7 +207,7 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     }))
     avp.addNode(api.FilterVideo({
         "name": f"upload_{tag}", "src": decoded, "dst": uploaded,
-        "graph": "hwupload_cuda=pinned=1", "hwaccel": hwaccel, "threads": 1,
+        "graph": "hwupload_cuda=pinned=1" + tags, "hwaccel": hwaccel, "threads": 1,
         "group": group, **_raw_file_restart(loop),
     }))
     return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop, native_rate=native_rate)

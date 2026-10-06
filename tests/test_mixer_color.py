@@ -158,6 +158,45 @@ def test_shared_edge_cannot_have_conflicting_contracts(builder):
         builder.build()
 
 
+@pytest.mark.parametrize("transfer,fmt", [("sdr", "nv12"), ("hlg", "p010le"), ("pq", "p210le")])
+def test_tagged_matching_sources_bypass_color_nodes_and_keep_alias_fanout(builder, transfer, fmt):
+    builder.color = Color(transfer)
+    builder.working_format = fmt
+    for name in ("cam", "cam#2"):
+        builder.add_source(name, "uploaded", "input", color=transfer, pixel_format=fmt, color_tagged=True)
+    builder.add_scene("full", {"cam": {}, "cam#2": {}})
+    builder.set_initial_scene("full")
+    builder.build()
+    nodes = {n["name"]: n for n in builder.avp.nodes}
+    assert "mixer_color_cam" not in nodes and "mixer_color_cam#2" not in nodes
+    fanout = nodes["mixer_color_alias_cam"]
+    assert fanout["src"] == "uploaded"
+    for name, edge in zip(("cam", "cam#2"), fanout["dst"]):
+        assert nodes[f"mixer_otm_{name}"]["src"] == edge
+
+
+@pytest.mark.parametrize("color,fmt,tagged", [
+    ("sdr", "nv12", True),       # tone mapping is still required
+    ("hlg", "p210le", True),    # storage conversion is still required
+    ("hlg", None, True),        # storage is unknown
+    ("hlg", "p010le", False),  # a declaration alone does not stamp frames
+])
+def test_color_bypass_requires_both_tagged_frames_and_matching_storage(builder, color, fmt, tagged):
+    builder.add_source("cam", "upstream", "input", color=color, pixel_format=fmt, color_tagged=tagged)
+    builder.add_scene("full", {"cam": {}})
+    builder.set_initial_scene("full")
+    builder.build()
+    nodes = {n["name"]: n for n in builder.avp.nodes}
+    assert nodes["mixer_color_cam"]["graph"] == conversion_graph("hlg", "p010le", source=color, source_format=fmt)
+    assert nodes["mixer_otm_cam"]["src"] == "mixer_cam_color"
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"color": "sdr", "packed_rgb": True}])
+def test_tagged_bypass_requires_a_yuv_contract(builder, kwargs):
+    with pytest.raises(ValueError, match="explicit YUV"):
+        builder.add_source("cam", "upstream", "input", color_tagged=True, **kwargs)
+
+
 def test_rgb_keeps_alpha_and_uses_hdr_compositor(builder):
     builder.add_source("page", "rgba", "input", packed_rgb=True, color="sdr")
     builder.add_scene("full", {"page": {"blend": True}})
