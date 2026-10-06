@@ -1,234 +1,79 @@
-# Mixer configuration file
+# Mixer configuration
 
-One JSON document describes a mixer run: the sources it opens, the wipe clips
-it caches, the scenes an operator can take, the defaults its control surfaces
-start from, and the encoded outputs it produces. Nothing about 2/4/8/16-box
-layouts lives in code — a grid is a scene somebody wrote or generated.
+[Quick start](../README.md) · [Example show](../config.example.json) ·
+[HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
-```sh
-python3 demos/mixer/mixer.py --config mixer.json --janus-output
-```
+`--config mixer.json` supplies sources, scenes, canvas and outputs. `canvas`,
+`sources` and `scenes` are required. The [parser](../../../pyplumber/mixer/config.py)
+is the validation authority; the example is the full editable starting point.
 
-`--config` replaces `--input` and the built-in layouts. The design rationale is
-in the [schema note](../../../doc/research/2026-09-08-mixer-config-schema.md);
-this file is the reference.
-
-[`config.example.json`](../config.example.json) is a generic schema example, not
-a deployed source list. Replace its placeholder URLs and paths in your own show
-file, kept outside the public checkout. Source IDs, source count and scenes are
-supplied by that file; the runtime does not depend on the recorded demo's inputs.
-
-## Shape
-
-```json
-{
-  "canvas":       { "width": 1080, "height": 1920, "fps": 30 },
-  "renditions":   [ ... ],
-  "sources":      [ ... ],
-  "wipes":        [ ... ],
-  "wipe_dir":     "/media/wipes",
-  "control":      { "direct": true, "transition": "cut", "fade_seconds": 0.5 },
-  "scenes":       [ ... ],
-  "initial_scene": "fullscreen_0"
-}
-```
-
-`canvas`, `sources` and `scenes` are required; everything else has a default.
-
-## Complete example
-
-Every meaningful option in one HDR show: three source kinds, two outputs, a wipe
-library and a scene with each fit mode. Paths and URLs are placeholders.
-
-```json
-{
-  "canvas": {"width": 1920, "height": 1080, "fps": 60,
-             "working_format": "p210le", "color": "hlg", "latency_ms": 50},
-  "sources": [
-    {"id": "movie", "kind": "video", "path": "/media/hdr-movie.mp4", "loop": true},
-    {"id": "cam", "kind": "video", "path": "srt://10.0.0.5:9000?mode=caller", "loop": false,
-     "color": "sdr", "width": 1920, "height": 1080},
-    {"id": "graded", "kind": "video", "path": "/media/graded.mp4",
-     "filter": "tonemap_cuda=transfer_in=pq:transfer_out=hlg,scale_cuda=format=p210le",
-     "filter_output_format": "p210le"},
-    {"id": "bars", "kind": "v210", "path": "/media/bars.v210", "width": 1920, "height": 1080,
-     "color_trc": "arib-std-b67", "color_primaries": "bt2020", "colorspace": "bt2020nc", "color_range": "tv"},
-    {"id": "page", "kind": "browser", "url": "https://example.org/lower-third",
-     "width": 1920, "height": 1080, "fps": 60, "color": "sdr"}
-  ],
-  "wipes": [{"id": "ribbons", "path": "/media/wipes/ribbons.mov", "name": "Ribbons", "duration_seconds": 2.0}],
-  "wipe_dir": "/media/wipes",
-  "wipe_color": "sdr",
-  "control": {"direct": true, "transition": "wipe", "fade_seconds": 0.5, "default_wipe": "ribbons"},
-  "renditions": [
-    {"id": "program", "target": "janus", "port": 5006, "width": 1920, "height": 1080, "aspect": "16:9",
-     "fps": 60, "bitrate_kbps": 8000, "codec": "hevc_nvenc", "profile": "main10", "preset": "p5"},
-    {"id": "sdr", "target": "janus", "port": 5004, "fps": 60, "bitrate_kbps": 6000,
-     "codec": "h264_nvenc", "profile": "baseline", "preset": "p5",
-     "tonemap": "mobius", "tonemap_param": 0.9, "tonemap_peak": 10, "tonemap_desat": 0},
-    {"id": "archive", "target": "/recordings/program.ts", "fps": 30, "bitrate_kbps": 12000,
-     "codec": "hevc_nvenc", "profile": "main10", "color": "pq", "max_cll": 1000, "max_fall": 400}
-  ],
-  "scenes": [
-    {"id": "pip", "items": [
-      {"source": "movie", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}, "fit": "cover"},
-      {"source": "cam", "dst": {"x": 1180, "y": 620, "w": 680, "h": 400}, "fit": "contain",
-       "crop": {"x": 240, "y": 0, "w": 1440, "h": 1080}},
-      {"source": "page", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}, "fit": "stretch"}
-    ]},
-    {"id": "bars_full", "items": [{"source": "bars", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}
-  ],
-  "initial_scene": "pip"
-}
-```
+Top-level `initial_scene` defaults to the first scene. `max_compositor_layers`
+defaults to 640. `browser_ring_size` is 1–64 (6 at 25/30 fps, otherwise 9).
+`wipe_color: "sdr"` overrides wipe tags; `--wipe-color` takes precedence.
 
 ## canvas
+
+HLG/PQ require 10-bit storage. Browser graphics are SDR; the compositor converts them to the canvas color.
 
 | field | default | meaning |
 | --- | --- | --- |
 | `width`, `height` | — | the program raster the compositor draws into |
 | `fps` | `30` | **how often the compositor renders**, and the clock the whole mixer runs on: inputs are re-timed to it and browser pages are asked to paint at it |
 | `working_format` | `nv12` | compositor and transition pixel storage: `nv12` (8-bit 4:2:0), `p010le` (10-bit 4:2:0) or `p210le` (10-bit 4:2:2). 8-bit sources are promoted onto a 10-bit canvas; `p210le` keeps 4:2:2 through conversion and compositing. Renditions are 4:2:0 for NVENC, subsampled once |
+| `raw_upload` | `hwupload` | `hwupload` or `pinned` (`hwupload_cuda=pinned=1`, requires the FFmpeg patch); Setup uses pinned staging. [Details](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html) |
 | `color` | `sdr` | canvas color contract: `sdr` (BT.709), `hlg` or `pq` (BT.2020). HLG/PQ need a 10-bit `working_format`. Every source is converted to it on the GPU; renditions convert from it |
-| `latency_ms` | two frames | playout buffer between a source frame's arrival and its tick (33 ms at 60 fps). A frame later than that is skipped and the previous one repeated, so set it just above the worst source jitter; must stay below six frames. `--mixer-latency-ms` on the command line overrides it |
-
-The canvas rate is the single biggest load knob. Halving it from 60 to 30 on
-the sixteen-source demo took the T4 from ~33% to ~17% GPU.
+| `latency_ms` | 2 frames up to 30 fps, 3 at 50/60 | playout buffer between a source frame's arrival and its tick (80 ms at 25 fps, 50 ms at 60). A frame later than that is skipped and the previous one repeated, so set it just above the worst source jitter; must stay below six frames. `--mixer-latency-ms` on the command line overrides it |
 
 ## renditions
 
-Each entry is one encoded output. The program is composited **once**; a
-rendition re-times and rescales that picture for its own target, so a second
-output costs an encode, not another composite.
+The program is composited once. Each rendition adds an encode. With no renditions, CLI output flags apply. Each Janus output needs a separate RTP/RTCP pair and matching mountpoint; Setup manages these, standalone callers must supply them.
 
 | field | default | meaning |
 | --- | --- | --- |
 | `id` | — | unique; names the nodes and edges of this output |
 | `target` | `"janus"` | `"janus"` for the WebRTC RTP output, or a file path to record |
-| `width`, `height` | canvas size | scaled on the GPU (`scale_cuda`) when they differ |
+| `width`, `height` | canvas size | when they differ, both must be even; scaled on the GPU by `cuda_transform`, stretched to the given size (bilinear over four neighbours, as the compositor: a large reduction can alias). Renditions of one size and feed share one scaled picture; color conversion follows on that smaller picture |
 | `aspect` | — | optional, e.g. `"9:16"`; checked against `width:height` |
 | `fps` | canvas fps | may only re-time **downwards**; a higher rate is rejected |
 | `bitrate_kbps` | `3000` | CBR target, also the `maxrate` and `bufsize` |
 | `codec` | from canvas depth | `h264_nvenc` for 8-bit or `hevc_nvenc` for 10-bit by default; applies to Janus and file targets |
 | `profile` | from codec/depth | HEVC `main`/`main10`; H.264 `baseline` for Janus, `high` for files. No B-frames |
-| `preset` | `"p7"` | NVENC quality preset |
+| `preset` | `"p7"` | NVENC quality preset. The setup page sets p1, p3 or p5 on every output it generates ([NVENC costs](capacity.md#nvenc-and-extra-aux-outputs)) |
 | `port` | — | Janus target: overrides the RTP port from the command line |
 | `color` | automatic | `sdr`, `hlg`, or `pq`; H.264 always requires SDR, HEVC otherwise inherits the canvas |
+| `feed` | `"dirty"` | `"clean"` encodes the program without the [downstream keys](#dsk); without keys both are the program |
 | `tonemap` | none | requests an SDR output from an HDR canvas: `clip` (exact SDR, hard-clipped highlights), `mobius` (see `tonemap_param`), `hable`, `reinhard`, `gamma`, `linear`, `none` |
 | `tonemap_peak` | `10` | HDR peak in units of 100 nits, minimum `2.03` |
 | `tonemap_desat` | `0` | highlight desaturation; `0` keeps saturation |
-| `max_cll`, `max_fall` | derived | HDR10 static metadata for **PQ** outputs, nits. Defaults: MaxCLL = `tonemap_peak`×100, MaxFALL = 40% of it; `max_fall` may not exceed MaxCLL. Needs nv-codec-headers 13 and driver ≥ 570 (`Dockerfile.cuda`), else the SEIs are silently absent. HLG needs none |
+| `max_cll`, `max_fall` | derived | PQ metadata in nits: MaxCLL = `tonemap_peak` × 100, MaxFALL = 40% of MaxCLL; MaxFALL cannot exceed MaxCLL. Requires compatible NVENC headers/driver. |
 | `tonemap_param` | `0` | operator knee in reference-white units; `0` = operator default (0.3 mobius/reinhard, 1.8 gamma). mobius must be below 1.0; `0.9` keeps 90% of SDR white untouched |
-
-With no `renditions` the demo builds its usual single output from the command
-line flags.
-
-```json
-"renditions": [
-  {"id": "program", "target": "janus", "width": 1080, "height": 1920,
-   "aspect": "9:16", "fps": 30, "bitrate_kbps": 2700,
-   "profile": "baseline", "preset": "p7"}
-]
-```
-
-Multiple Janus renditions need separate RTP ports and matching Janus
-mountpoints. Each has its own encoder and RTCP feedback. The first keeps the
-`janus_encoder` name used by cut-latency measurement; additional outputs use
-`janus_<id>_encoder`.
-
-For a P010 HLG canvas, these outputs provide simultaneous HDR and SDR previews:
-
-```json
-"renditions": [
-  {"id": "hdr", "target": "janus", "port": 5006,
-   "codec": "hevc_nvenc", "profile": "main10"},
-  {"id": "sdr", "target": "janus", "port": 5004,
-   "codec": "h264_nvenc", "profile": "baseline", "tonemap": "clip"}
-]
-```
-
-`clip` preserves SDR content embedded into HLG with the same 203-nit white;
-HDR highlights above that white are clipped. Operators such as `hable` compress
-highlights and also change midtone brightness. A preview selector chooses
-between the two continuously running outputs; the canvas remains HDR.
+| `dpb_size` | `0` | NVENC reference frames kept, 0–16; `0` lets NVENC choose. Without B-frames `1` is enough and frees the other reference surfaces; it may cost quality at low bitrates, so measure before setting it on a program output. Aux monitors default to `1` |
 
 ## sources
 
-One entry per **unique** clip or page: two entries with the same `url` or
-`path` are an error, because a source is decoded or captured exactly once
-however many scenes and slots show it. A scene that shows the same source
-twice fans the frames out under alias names (`id#2`, `id#3`), never a second
-decoder.
-
-```json
-{"id": "cam0", "kind": "video",   "path": "/media/camera-0.mp4", "loop": true}
-{"id": "page", "kind": "browser", "url": "https://example.org/live",
- "width": 1920, "height": 1080, "fps": 30, "color": "sdr"}
-```
+One source ID opens one decoder or browser window; scenes and aliases reuse it. Repeated locations require `independent: true` on every declaration. Browser import is provided by the [shared DMA-BUF integration](../../../doc/dmabuf.md). CUarray requires compatible FFmpeg/consumers and a fixed surface budget; it has no copy fallback or decoder auto-restart. See the [CUarray cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/nvdec-cuarray.html).
 
 | field | applies to | meaning |
 | --- | --- | --- |
 | `id` | both | referenced from scenes; no `#` |
-| `kind` | all | `"video"`, `"browser"` or `"v210"` (headerless packed 10-bit 4:2:2, e.g. generated HDR test content) |
-| `path` | video, v210 | file or stream |
-| `width`, `height` | v210 | required: the packed bytes carry no header |
-| `color` | browser, v210 | required color contract (`sdr`, `hlg`, `pq`); browser pages must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
+| `kind` | all | `"video"`, `"browser"`, `"nv12"` (raw SDR 8-bit 4:2:0), `"p010"` (raw 10-bit 4:2:0), or `"v210"` (headerless packed 10-bit 4:2:2, e.g. generated HDR test content) |
+| `path` | video, v210, nv12, p010 | file or stream |
+| `width`, `height` | v210, nv12, p010 | required: raw bytes carry no header; NV12/P010 dimensions must be positive and even |
+| `color` | browser, v210, nv12, p010 | required color contract (`sdr`, `hlg`, `pq`); browser and NV12 sources must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
 | `url`, `width`, `height` | browser | page and the window it is rendered in (all three required) |
 | `fps` | browser | paint rate; defaults to the canvas rate |
+| `hold_last_frame` | browser | default `true`: while a failed or crashed page reloads, repeat its last frame. `false` shows Chromium's empty error page (transparent or black) instead |
 | `width`, `height` | video | optional; probed with ffprobe at load when absent |
 | `loop` | both | default `true` |
-| `filter` | video/v210 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
+| `decode_storage` | video | default `cuda`; experimental `cuarray` requires the patched upstream FFmpeg build and compatible array consumers, and selects zero-copy NVDEC without CPU fallback |
+| `extra_hw_frames` | CUarray video | default `3`: fixed application headroom beyond codec and FFmpeg working surfaces; size it for the graph's retained-frame demand |
+| `transform` | video/v210/nv12/p010 | optional geometry applied once before the source filter, color and fan-out: `{"width", "height", "fit", "crop", "sw_format"}`. The frame, or its `crop` `[x, y, w, h]`, is scaled onto a canvas of that even size by `cuda_transform`; `fit` is `contain` (default, black bars) or `stretch`. `sw_format` (`nv12`, `p010le`, `p210le`) is the source's own storage: raw kinds supply it, a `video` source must state it. A frame that already has the size and storage is passed on undrawn; one of lower depth is promoted, one of higher depth is an error |
+| `filter` | video/v210/nv12/p010 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
 | `filter_output_format` | custom filters | required CUDA YUV output storage, e.g. `p010le` or `p210le` |
-
-Browser sources arrive over DMA-BUF from the `dma-page` service and are
-imported straight into CUDA; they mix with video sources on the same canvas.
-
-Color normalization is automatic in `MixerGraphBuilder`, before alias and scene
-fan-out. Video sources use decoded frame metadata, including live SRT streams.
-A `video` source without frame color tags is treated as BT.709 SDR. A declared
-contract is either the `color` preset (which supplies all four fields) or a complete,
-consistent set of `color_trc`, `color_primaries`, `colorspace` and `color_range`.
-Raw `v210` and browser inputs must declare one.
-
-For SDR Bunny on an HLG canvas, no manual tone-map filter is needed:
-
-```json
-"canvas": {"width": 1920, "height": 1080, "fps": 60,
-           "working_format": "p010le", "color": "hlg"},
-"sources": [{"id": "bunny", "kind": "video", "path": "<path>", "color": "sdr"}]
-```
-
-Supported video contracts are limited-range BT.709/BT.1886 SDR and BT.2020
-non-constant-luminance HLG/PQ. Full-range YUV, other gamuts/matrices and missing
-metadata fail explicitly. SDR uses a 203-nit reference white and HLG a 1000-nit
-peak. Frames already in the canvas storage (NV12, NV16, P010, P210) pass without GPU copies. Other declared CUDA YUV
-storage uses `scale_cuda` around conversion. Custom source filters receive the
-explicit source override first; their output metadata drives normalization, so
-a manually converted source is not converted from its original transfer again.
-
-Packed SDR RGB graphics retain alpha and convert in the compositor to its target
-transfer/gamut. This path requires NV12, P010 or P210 canvas storage. HDR alpha
-sources are unsupported. Missing transfer and primaries tags on RGB(A) wipes
-default to SDR BT.709; explicit tags are preserved and validated. Set top-level
-`wipe_color: "sdr"` to override the wipe library's color tags. The CLI option
-`--wipe-color sdr` provides the same override and takes precedence over the JSON
-setting. Neither the fallback nor the override changes alpha.
-
-H.264 renditions and the default output path automatically convert HDR to SDR.
-HEVC renditions inherit the canvas unless `color` requests another supported
-contract. HDR outputs require 10-bit storage. The `clip` default preserves the
-brightness of SDR embedded in HDR; it clips highlights above SDR white. Select
-another operator explicitly when highlight compression is preferred.
 
 ## wipes
 
-The media-wipe library. Every declared clip is decoded once at start and held
-as frames in the clip cache, so a take costs no file open and no decoder.
-
-```json
-"wipes": [{"id": "ribbons", "path": "/media/wipes/ribbons.mov",
-           "name": "Ribbons", "duration_seconds": 2.03}]
-```
+Alpha clips must cover the picture at the switch midpoint. `wipe_dir` adds clips by filename. `--wipe-cache-mb` defaults to 640; zero decodes per take. Incomplete clips or an insufficient cache budget fail startup.
 
 | field | default | meaning |
 | --- | --- | --- |
@@ -237,55 +82,84 @@ as frames in the clip cache, so a take costs no file open and no decoder.
 | `name` | the id | label shown on the web UI button and in the TUI picker |
 | `duration_seconds` | probed | how long the take runs |
 
-`"wipe_dir": "/media/wipes"` adds every clip in a directory under its file
-name; entries declared above keep their own id, label and duration.
-
 ## control
 
-Where the control surfaces (web UI and TUI) start. An operator's own choice
-always outranks these; they are the state a fresh browser tab picks up.
+Starting defaults for the web UI and TUI; operator choices take precedence. Published as `mixer.settings`.
 
 | field | default | meaning |
 | --- | --- | --- |
 | `direct` | `true` | a scene pick goes straight to program rather than loading preview |
 | `transition` | `"cut"` | what a direct-mode pick takes with: `cut`, `fade` or `wipe` |
 | `fade_seconds` | `0.5` | length of a fade |
+| `fade_curve` | `linear` | `linear`, `ease-in`, `ease-out`, `ease-in-out`; per-take `curve` overrides it. |
+| `fade_color` | `null` | `null` mixes; `#RRGGBB` dips through a color at the midpoint. Per-take `color` overrides it. |
 | `default_wipe` | first wipe | the clip a direct-mode wipe uses |
-
-The mixer publishes this over the control protocol as `mixer.settings`.
-The web bridge's optional `--transition cut` overrides its page's starting
-choice without reconfiguring or restarting the media pipeline. It does not
-override an operator's subsequent transition selection.
 
 ## scenes
 
-A scene is an ordered list of items; **order is z-order**, later items draw
-over earlier ones.
-
-```json
-{"id": "pip", "items": [
-  {"source": "cam0", "dst": {"x": 0, "y": 0, "w": 1080, "h": 1920}, "fit": "cover"},
-  {"source": "page", "dst": {"x": 40, "y": 100, "w": 1000, "h": 562}, "fit": "contain"},
-  {"source": "cam1", "dst": {"x": 600, "y": 420, "w": 420, "h": 236},
-   "fit": "stretch", "crop": {"x": 480, "y": 270, "w": 960, "h": 540}}
-]}
-```
+Each scene has an `id` and ordered `items`; later items draw above earlier ones. Padding is black. `cover` requires a known source size.
 
 | field | default | meaning |
 | --- | --- | --- |
 | `source` | — | a source id |
 | `dst` | — | `x`, `y`, `w`, `h` on the canvas |
 | `fit` | `"contain"` | `stretch`, `contain` (letterbox/pillarbox), `cover` (fill and crop the overflow) |
+| `blend` | `false` | honour source alpha, for example a transparent browser graphic over video; opaque sources remain opaque |
 | `crop` | whole frame | region of the source in source pixels, applied before the fit |
 
-Padding is always black. `cover` needs the source size, which is declared or
-probed. `initial_scene` names the scene on program at start (default: the
-first one).
+## dsk
+
+Up to four browser keys over the finished program. `feed: "clean"` omits them. Keys count as sources and stay subscribed while off. Change a key with `mixer.dsk {"key": "bug", "on": true}`. The first table describes the DSK block; the second describes each entry in `keys`.
+
+| field | default | meaning |
+| --- | --- | --- |
+| `fade_seconds` | `0.4` | how long a key change fades, 0 to 10; `0` cuts |
+| `fade_curve` | `"linear"` | easing of a key fade, the same presets as `control.fade_curve` |
+
+
+| field | default | meaning |
+| --- | --- | --- |
+| `id` | — | unique key name, used by `mixer.dsk` and the control page |
+| `source` | — | a **browser** source id; its alpha is always kept. Scenes may use the same source |
+| `dst` | whole canvas | `x`, `y`, `w`, `h` on the canvas; the window is scaled into it |
+| `on` | `false` | on air at start |
+
+## aux_buses
+
+Each bus has an `id`, layouts, scene assignments and Janus renditions (`port`, optional `codec`, `preset`, `bitrate_kbps`). It reuses source frames and drops output rather than blocking Program. SDR only; half canvas rate above 30 fps unless `full_rate`. Commands: `mixer.aux_layout`, `mixer.aux`, `mixer.aux_page`, `mixer.aux_status`. Assignment updates include the current `expected_revision`. Layout changes stage new sources; status exposes `composition_pending` and `composition_error`. See [timing details](../../../doc/mixer.md#aux-bus-follower).
+
+| role | draws |
+| --- | --- |
+| `pvw` | the mixer's preview scene, changed with the program on a take (see `pvw_align`) |
+| `pgm` | the finished, keyed program, `pgm_delay_frames` behind the other cells |
+| `slot` (+ `"slot": n`) | the scene assigned to slot `n` |
+| `source` (+ `"source": i`) | source `i` (its index in `sources`) |
+
+
+| layout | cells |
+| --- | --- |
+| `{"preset": "pgm_pvw_grid"}` (default) | PVW and PGM on top, slots 0–7 below in two rows of four |
+| `{"preset": "source_pages", "page": 0}` | one page of source cells, 12 per page (2 × 6 portrait, 4 × 3 landscape): page `page`, 0 by default |
+| `{"cells": [{"role": "slot", "slot": 0, "x": 0, "y": 0, "w": 540, "h": 960}, ...]}` | exactly these: even `x`, `y`, `w`, `h` inside the canvas, slots numbered 0 to n−1, each once; any number of `pvw` and `pgm` cells, including none |
+
+
+| field | default | meaning |
+| --- | --- | --- |
+| `layout` | `{"preset": "pgm_pvw_grid"}` | the layout the bus starts with |
+| `layouts` | `source_pages`, and `pgm_pvw_grid` when `layout` has a `pgm` cell | further layouts the control page offers besides `layout` (at most 16) |
+| `scenes` | none | slot assignments by slot index, `null` for an empty slot; padded with `null` to the layout's slot count |
+| `max_layers` | `max_compositor_layers` | Fixed layer budget for PVW reserves, slots, sources and PGM; oversized layouts are rejected. |
+| `latency_ms` | program latency | AUX playout buffer; combined with PGM delay must remain below six AUX frames. |
+| `pgm_delay_frames` | 1; 2 at 50/60 fps AUX | Delay only the PGM tile. Bus latency + delay must exceed program latency by at least one program frame, and remain below six AUX frames. |
+| `pvw_align` | `program` | Change PVW alongside Program, or `pgm_tile` to align with the delayed PGM cell. |
+| `label` | `Program preview`, `Multiviewer` or `Aux <id>` by its initial layout | the bus's name on the control page |
+| `full_rate` | `false` | Keep canvas rate above 30 fps; increases compositor/encoder work. |
 
 ## Known limitations
 
-- **32 sources per show.** Every source is a pad on the compositor, and the
-  active-pad mask is a 32-bit word. 8-bit or 10-bit makes no difference;
+- **193 sources per show, or 192 with an aux bus that can draw the program.** Every
+  source is a pad on the compositor; a bus with a `pgm` cell in its `layout` or
+  `layouts` (by default, a `pgm_pvw_grid` bus) reserves one additional pad for PGM. 8-bit or 10-bit makes no difference;
   scenes and aliases are free. Sources cannot be added while running: the
   pads are wired at build time. A document with more sources is rejected at load.
 - **16 boxes per scene** in the built-in `--input` layouts; a `--config` scene has no box limit.
@@ -298,26 +172,37 @@ first one).
   every rendition is 4:2:0.
 - **HLG and PQ need a 10-bit canvas.** Browser pages are SDR only.
 
-Lifting the 32-source and runtime-add limits means routing every show
-through the router with per-slot conversion; that is planned, not done.
+More than 193 pads and runtime source addition are not supported.
 
 ## Generating one
 
-`make_config.py` writes the demo's own fullscreen and 2/4/8/16-box layouts out
-as a document, so a config-driven run starts from what the demo already does:
+[make_config.py](../../../pyplumber/mixer/tools/make_config.py) emits the built-in layouts as JSON:
 
 ```sh
-python3 demos/mixer/make_config.py --fps 30 --bitrate-kbps 2700 \
-    --wipe /media/wipes/ribbons.mov \
-    cam0=/media/camera-0.mp4 page=https://example.org/live@1920x1080 > mixer.json
+python3 -m pyplumber.mixer.tools.make_config --fps 30 cam0=/media/camera.mp4 > mixer.json
 ```
 
-Repeated locations collapse to one source, and grid slots take every distinct
-source before any repeat — a 16-box of sixteen unique sources shows all
-sixteen rather than one of them three times.
+For generated workloads use a [recipe](recipe.md). Other mixer applications use
+`pyplumber.mixer.build_application` directly; see the [base API](../../../doc/mixer.md).
 
-`--color hlg|pq` with `--working-format p010le|p210le` emits an HDR canvas, a
-HEVC Main10 program rendition and, with `--sdr-port`, a tone-mapped H.264
-rendition (`--sdr-tonemap`, `--sdr-knee`). Source arguments take a color
-suffix (`clip=/m/c.mp4:hlg`) and raw v210 a size (`bars=/m/b.v210@1920x1080:hlg`);
-see the README for a 16-source HDR example.
+## Input cadence and colour-tag guarantees
+
+Mixer file sources retain native cadence; the compositor samples them at the
+canvas rate. Keep rational source rates exact (for example `30000/1001` or
+`60000/1001`) instead of substituting decimal approximations. The input
+`realtime` node still paces/rebases timestamps, using a 1/120000 time base.
+Per-input `force_fps` is omitted; output/AUX normalization remains. The shared
+input helper's default normalized behavior for other applications is unchanged.
+Browser sources retain their separate timestamp smoothing/repeat chain.
+
+`canvas.raw_upload: "pinned"` uses patched FFmpeg's `hwupload_cuda`; the old
+custom raw uploader nodes are retired. NV12/P010 and v210 builders stamp declared
+YUV tags in the upload graph. The application bypasses a standalone tag-only
+colour filter only when no user filter or processing callback can invalidate
+that promise. Real colour conversion and alpha processing remain. A source
+`transform` preserves the tags, while an arbitrary `filter_graph` or
+`process_source` callback disables automatic eligibility.
+
+The library's `color_tagged` source contract is not a request to infer colour
+from content. See [the mixer API](../../../doc/mixer.md#pacing-loops-and-redundant-colour-tags)
+when integrating custom inputs in another repository.

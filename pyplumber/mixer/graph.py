@@ -9,7 +9,7 @@ Typical usage
     from pyplumber.node import InputRec, Demux, DecVideo, Realtime, ForceFPS
 
     avp = AVPlumber()
-    avp.executeCommandsFromString('hwaccel.init { "name": "@gpu", "type": "cuda" }')
+    avp.executeCommandsFromString('hwaccel.init { "name": "mixer_gpu", "type": "cuda" }')
     avp.edges.planCapacity("*", 3)
 
     # Build input decode chains externally (the caller owns input groups)
@@ -20,13 +20,13 @@ Typical usage
                               "group": f"input_{i}"}))
 
     mx = MixerGraphBuilder(avp, name="mixer", canvas=(1920, 1080), fps=(30, 1),
-                           hwaccel="@gpu", timeline="mixer_tl", enable_wipe=True)
+                           hwaccel="mixer_gpu", enable_wipe=True)
     mx.add_source("cam0", pre_otm_edge="cam0_fps", input_group="input_0")
     mx.add_source("cam1", pre_otm_edge="cam1_fps", input_group="input_1")
-    mx.add_scene("fullcam0", {"cam0": {"graph": "scale_cuda=w=1920:h=1080", "dst_x": 0, "dst_y": 0}})
+    mx.add_scene("fullcam0", {"cam0": {"dst_w": 1920, "dst_h": 1080}})
     mx.add_scene("pip", {
-        "cam0": {"graph": "scale_cuda=w=1920:h=1080", "dst_x": 0, "dst_y": 0},
-        "cam1": {"graph": "scale_cuda=w=640:h=360", "dst_x": 1280, "dst_y": 720},
+        "cam0": {"dst_w": 1920, "dst_h": 1080},
+        "cam1": {"dst_w": 640, "dst_h": 360, "dst_x": 1280, "dst_y": 720},
     })
     mx.set_initial_scene("fullcam0", slot="A")
     out_edge = mx.build()   # returns the name of the final output video edge
@@ -54,7 +54,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from pyplumber.node import (
     InternalNode,
     ClipCache,
-    CudaRectOverlay,
     FilterVideo,
     ForceFPS,
     InputRec,
@@ -66,7 +65,10 @@ from pyplumber.node import (
 )
 
 
-from .color import Color, conversion_graph
+from .color import Color
+from .config import DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, default_latency_ms, fade_color, fade_curve
+from .backend import mixer_backend
+from .control import source_mask_param
 from . import clipcache
 from .models import MixerScene, MixerSource
 from .prewarm import TransitionPrewarm
@@ -74,6 +76,10 @@ from .prewarm import TransitionPrewarm
 
 class _SnapshotNode(InternalNode):
     TYPE = "mixer_snapshot"
+
+
+class _MixerSelector(InternalNode):
+    TYPE = "mixer_selector"
 
 
 class MixerGraphBuilder:
@@ -93,9 +99,7 @@ class MixerGraphBuilder:
         canvas: Tuple[int, int] = (1920, 1080),
         fps: Tuple[int, int] = (30, 1),
         hwaccel: str = "@gpu",
-        timeline: Optional[str] = None,
         enable_wipe: bool = True,
-        switch_margin_ms: int = 100,
         defer_initial_routes: bool = False,
         latency_ms: Optional[float] = None,
         defer_output: bool = False,
@@ -104,17 +108,16 @@ class MixerGraphBuilder:
         working_format: str = "nv12",   # compositor/transition sw_format
         color="sdr",
         wipe_color=None,
+        backend=None,
+        max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS,
     ):
-        if switch_margin_ms < 0:
-            raise ValueError("switch_margin_ms must be >= 0")
         self.avp = avp
         self.name = name
         self.canvas_w, self.canvas_h = canvas
         self.fps_num, self.fps_den = fps
         self.hwaccel = hwaccel
-        self.timeline = timeline or f"{name}_tl"
+        self.backend = mixer_backend(backend)
         self.enable_wipe = enable_wipe
-        self.switch_margin_ms = switch_margin_ms
         # Triggered when a transition reaches the output, so receivers do not wait
         # for the next periodic keyframe to see the new scene.
         self.keyframe_node = keyframe_node
@@ -122,7 +125,8 @@ class MixerGraphBuilder:
         # and a take replays them instead of opening and decoding the file again.
         self.cache_wipes_mb = cache_wipes_mb
         self.defer_initial_routes = defer_initial_routes
-        self.latency_ms = latency_ms
+        self.latency_ms = latency_ms if latency_ms is not None else default_latency_ms(self.fps_num / self.fps_den)
+        self.max_compositor_layers = max_compositor_layers
         self.working_format = working_format
         self.color = Color.parse(color)
         self.color.validate_format(working_format)
@@ -130,7 +134,7 @@ class MixerGraphBuilder:
         if self.wipe_color is not None and self.wipe_color != Color():
             raise ValueError("Alpha wipes currently require SDR; HDR alpha decode is unsupported")
         self._output_started = not defer_output
-        self._transition_prewarm = TransitionPrewarm(avp, self.name, self.timeline)
+        self._transition_prewarm = TransitionPrewarm(avp, self.name)
 
         self._sources: List[MixerSource] = []
         self._source_index: Dict[str, int] = {}
@@ -140,6 +144,20 @@ class MixerGraphBuilder:
         self._routes_initialized = False
         self._current_pgm: Optional[str] = None
         self._built = False
+        self._aux_routes: Dict[str, List[str]] = {}
+
+    def canvas_compositor(self, params: Dict[str, Any], *, keyer: bool = False, api=None):
+        """A compositor node (with *keyer*, the DSK's keyer) on this mixer's GPU, canvas size,
+        storage and colour; *params* carries the rest and may override those."""
+        return self.backend.compositor({"hwaccel": self.hwaccel, "width": self.canvas_w, "height": self.canvas_h,
+                                        "sw_format": self.working_format, "color": self.color.transfer,
+                                        **params}, keyer=keyer, api=api)
+
+    def add_aux_destination(self, source: str, edge: str) -> None:
+        """Add an independently subscribed destination before materializing the graph."""
+        if self._built or source not in self._source_index:
+            raise ValueError("Aux destinations need a registered source before build")
+        self._aux_routes.setdefault(source, []).append(edge)
 
     # ------------------------------------------------------------------
     # Graph construction API
@@ -150,8 +168,8 @@ class MixerGraphBuilder:
         name: str,
         pre_otm_edge: str,
         input_group: str,
-        default_graph: Optional[str] = None,
-        *, color=None, pixel_format=None, packed_rgb=False,
+        *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
+        color_tagged=False,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -160,10 +178,14 @@ class MixerGraphBuilder:
         the builder converts once, then fans out to their scene-slot routers.
         pixel_format is required for CUDA layouts other than NV12/P010.
         packed_rgb keeps alpha for fused compositing and requires explicit SDR.
+        premultiplied_alpha tags packed RGB alpha as premultiplied (Chromium's
+        export), so the compositor applies opacity only once.
+        color_tagged guarantees upstream frames already carry the declared YUV
+        color tags. Matching storage then needs no separate color node; this
+        guarantee must hold across restarts and input changes.
 
-        The source's one_to_many and per-slot crop-scale nodes will be
-        created in *input_group* during build() so that they restart
-        together with the input decode chain.
+        Source conversion and fan-out nodes are created in *input_group*.
+        Fixed filters belong in the input chain; scenes specify compositor geometry.
 
         Parameters
         ----------
@@ -173,14 +195,7 @@ class MixerGraphBuilder:
             Name of the avplumber edge that feeds into this source's
             one_to_many (typically the force_fps output of the input chain).
         input_group:
-            Avplumber group that owns this source's OTM and crop-scale nodes.
-        default_graph:
-            Initial crop/scale filter graph for this source's slot filters.
-            An empty string bypasses slot filters; scenes then use compositor
-            dst_w/dst_h and crop directly. Scene switches can still replace
-            nonempty filters, but preheated geometry
-            sources should start with their fixed graph to avoid a cold
-            filter restart on the first take.
+            Avplumber group that owns this source's conversion and fan-out nodes.
         """
         if self._built:
             raise RuntimeError("Cannot add sources after build()")
@@ -188,11 +203,15 @@ class MixerGraphBuilder:
             raise ValueError(f"Source '{name}' already registered")
         if color is not None:
             color = Color.parse(color)
+        if color_tagged and (color is None or packed_rgb):
+            raise ValueError("color_tagged requires an explicit YUV color contract")
         if packed_rgb and color != Color():
             raise ValueError(f"Source '{name}': packed RGB requires an explicit SDR color setting")
         idx = len(self._sources)
-        self._sources.append(MixerSource(name, pre_otm_edge, input_group, default_graph,
-                                               color=color, pixel_format=pixel_format, packed_rgb=packed_rgb))
+        self._sources.append(MixerSource(name, pre_otm_edge, input_group,
+                                               color=color, color_tagged=color_tagged,
+                                               pixel_format=pixel_format, packed_rgb=packed_rgb,
+                                               premultiplied_alpha=premultiplied_alpha))
         self._source_index[name] = idx
         return self
 
@@ -205,10 +224,9 @@ class MixerGraphBuilder:
         route_router: str,
         route_output_label_a: str,
         route_output_label_b: str,
-        default_graph: Optional[str] = None,
         *, color=None,
     ) -> "MixerGraphBuilder":
-        """Register a source whose slot filters are fed by a native preheat router.
+        """Register a source whose slot inputs are fed by a native preheat router.
 
         An explicit color contract applies to every camera routed into this
         source. Otherwise, normalization resolves each frame's color metadata.
@@ -222,7 +240,6 @@ class MixerGraphBuilder:
             name=name,
             pre_otm_edge=None,
             input_group=input_group,
-            default_graph=default_graph,
             pre_filter_edge_a=pre_filter_edge_a,
             pre_filter_edge_b=pre_filter_edge_b,
             route_router=route_router,
@@ -247,10 +264,8 @@ class MixerGraphBuilder:
         name:
             Scene identifier (must be unique).
         sources:
-            Mapping from logical source name to a dict with at minimum
-            ``graph`` (the FFmpeg filter chain for that camera's
-            crop/scale filter_video) and optional compositor layer
-            keys ``dst_x``, ``dst_y``, etc.
+            Mapping from logical source name to compositor layer fields
+            such as ``dst_x``, ``dst_y``, ``dst_w``, ``dst_h`` and crop geometry.
         """
         if self._built:
             raise RuntimeError("Cannot add scenes after build()")
@@ -269,9 +284,9 @@ class MixerGraphBuilder:
         After build, it also emits ``mixer.scene`` so runtime policies can
         reuse generic scene names with different source-slot assignments.
         """
-        sources = {source: ({**spec, "graph": self._normalized_graph(spec["graph"])}
-                            if spec.get("graph") else dict(spec))
-                   for source, spec in sources.items()}
+        if any("graph" in spec for spec in sources.values()):
+            raise ValueError("Scene filter graphs were removed; filter the source upstream")
+        sources = {source: dict(spec) for source, spec in sources.items()}
         unknown = [s for s in sources if s not in self._source_index]
         if unknown:
             raise ValueError(f"Scene '{name}' references unknown source(s): {unknown}")
@@ -284,15 +299,6 @@ class MixerGraphBuilder:
         if self._built:
             self.avp.executeCommandsFromString(self._scene_command(name, scene))
         return self
-
-    def _normalized_graph(self, graph: str) -> str:
-        """Keep scene geometry filters in the canvas storage format.
-
-        Color conversions belong before source fan-out. The compositor checks
-        the contract again so a custom scene filter cannot silently retag pixels.
-        """
-        suffix = f"scale_cuda=format={self.working_format}"
-        return graph if not graph or graph.endswith(suffix) else f"{graph},{suffix}"
 
     def set_initial_scene(self, scene_name: str, slot: str = "A") -> "MixerGraphBuilder":
         """Declare which scene starts on PGM.
@@ -342,11 +348,9 @@ class MixerGraphBuilder:
     # Runtime control
     # ------------------------------------------------------------------
 
-    def cut(self, scene: str, start_pts_ms: int = -1) -> None:
+    def cut(self, scene: str) -> None:
         """Hard cut to *scene*."""
         cmd = {"mixer": self.name, "scene": scene}
-        if start_pts_ms >= 0:
-            cmd["start_pts_ms"] = start_pts_ms
         self.avp.executeCommandsFromString(f"mixer.cut {json.dumps(cmd)}")
         self._current_pgm = scene
 
@@ -359,12 +363,17 @@ class MixerGraphBuilder:
         self,
         scene: str,
         duration_sec: float = 1.0,
-        start_pts_ms: int = -1,
+        curve: str = DEFAULT_FADE_CURVE,
+        color: Optional[str] = None,
     ) -> None:
-        """Crossfade to *scene* over *duration_sec* seconds."""
+        """Crossfade to *scene* over *duration_sec* seconds, eased by *curve* (config.FADE_CURVES);
+        a *color* ("#RRGGBB") dips through that colour instead, fully shown at the midpoint."""
         cmd = {"mixer": self.name, "scene": scene, "duration_sec": duration_sec}
-        if start_pts_ms >= 0:
-            cmd["start_pts_ms"] = start_pts_ms
+        if fade_curve(curve, "fade curve") != DEFAULT_FADE_CURVE:
+            cmd["curve"] = curve
+        color = fade_color(color, "fade color")
+        if color is not None:
+            cmd["color"] = color
         self.avp.executeCommandsFromString(f"mixer.fade {json.dumps(cmd)}")
         self._current_pgm = scene
 
@@ -373,7 +382,6 @@ class MixerGraphBuilder:
         scene: str,
         wipe_file: str,
         duration_sec: Optional[float] = None,
-        start_pts_ms: int = -1,
     ) -> None:
         """Media wipe to *scene* using *wipe_file* (must have alpha channel)."""
         if not self.enable_wipe:
@@ -381,8 +389,6 @@ class MixerGraphBuilder:
         cmd: Dict[str, Any] = {"mixer": self.name, "scene": scene, "wipe_file": wipe_file}
         if duration_sec is not None:
             cmd["duration_sec"] = duration_sec
-        if start_pts_ms >= 0:
-            cmd["start_pts_ms"] = start_pts_ms
         self.avp.executeCommandsFromString(f"mixer.wipe {json.dumps(cmd)}")
         self._current_pgm = scene
 
@@ -398,7 +404,8 @@ class MixerGraphBuilder:
     def warmup_wipe(self, wipe_file: str, timeout_ms: int = 30000) -> None:
         """Initialise the wipe chain on *wipe_file* once, invisibly, so the
         first real wipe does not pay for file open, decoder and GPU filter
-        setup (PTX compilation included)."""
+        setup (PTX compilation included). Decode-per-take chains only: with
+        cache_wipes_mb the chain stays running and clips are preloaded instead."""
         if not self.enable_wipe:
             raise RuntimeError("Wipe subgraph not enabled (pass enable_wipe=True)")
         cmd = {"mixer": self.name, "wipe_file": wipe_file, "timeout_ms": timeout_ms}
@@ -415,7 +422,11 @@ class MixerGraphBuilder:
             raise RuntimeError(
                 "initial mixer routes must be initialized before starting groups"
             )
-        for g in [f"{self.name}_a", f"{self.name}_b", self.name]:
+        groups = [f"{self.name}_a", f"{self.name}_b", self.name]
+        if self.enable_wipe and self.cache_wipes_mb is not None:
+            # The resident clip player and wipe compositor, parked until a take arms them.
+            groups.append(f"{self.name}_wipe")
+        for g in groups:
             self.avp.group(g).startNodes()
 
     def initialize_routes(self) -> None:
@@ -464,7 +475,7 @@ class MixerGraphBuilder:
         return self._scenes[self._initial_pgm_scene]
 
     def _active_inputs_mask(self, scene: MixerScene) -> int:
-        """Compute the cuda_rect_overlay active_inputs bitmask for a scene."""
+        """Compute the mixer_compositor active_inputs bitmask for a scene."""
         mask = 0
         for src_name in scene.sources:
             idx = self._source_index[src_name]
@@ -484,7 +495,8 @@ class MixerGraphBuilder:
                     result[(source.name, slot)] = self._color_edge(source, edge, f"{source.name}_{slot}")
         for edge, sources in shared.items():
             first = sources[0]
-            contract = lambda s: (s.input_group, s.color, s.pixel_format, s.packed_rgb)
+            contract = lambda s: (s.input_group, s.color, s.color_tagged, s.pixel_format,
+                                  s.packed_rgb, s.premultiplied_alpha)
             if any(contract(s) != contract(first) for s in sources):
                 raise ValueError(f"Conflicting color contracts for shared input edge {edge!r}")
             prepared = self._color_edge(first, edge, first.name)
@@ -492,6 +504,7 @@ class MixerGraphBuilder:
             if len(sources) > 1:
                 outputs = [self._e(f"{s.name}_color_alias") for s in sources]
                 self.avp.addNode(OneToMany({
+                "drop": True,
                     "name": self._n(f"color_alias_{first.name}"), "src": prepared, "dst": outputs,
                     "outputs": (1 << len(outputs)) - 1, "group": first.input_group,
                 }))
@@ -502,21 +515,29 @@ class MixerGraphBuilder:
         if source.packed_rgb:
             if self.working_format not in ("nv12", "p010le", "p210le"):
                 raise ValueError("Packed RGB compositing requires a semiplanar canvas (NV12/P010/P210)")
-            graph = source.color.setparams
+            graph = source.color.setparams + (":alpha_mode=premultiplied" if source.premultiplied_alpha else "")
         else:
-            graph = conversion_graph(self.color, self.working_format,
+            pixel_format = self.working_format
+            if (pixel_format == "p210le" and self.color.transfer != "sdr" and
+                    source.pixel_format not in ("nv16", "p210le", "yuv422p", "yuv422p10le")):
+                # Resolve chroma from the actual frames. The compositor samples
+                # 4:2:0 directly into the 4:2:2 canvas in its existing scale pass.
+                pixel_format = None
+            graph = self.backend.conversion(self.color, pixel_format,
                                      source=source.color, source_format=source.pixel_format)
+            if source.color_tagged and graph == source.color.setparams:
+                return edge
         output = self._e(f"{label}_color")
         self.avp.addNode(FilterVideo({
             "name": self._n(f"color_{label}"), "src": edge, "dst": output,
-            "graph": graph,
+            "graph": graph, "threads": self.backend.graph_threads,
             "hwaccel": self.hwaccel, "group": source.input_group,
             "defer_preliminary_init": True,
         }))
         return output
 
     def _build_per_source_nodes(self) -> None:
-        """Create one_to_many + per-slot filter_video nodes for every source."""
+        """Create source conversion and slot fan-out nodes."""
         prepared_edges = self._prepare_source_edges()
         initial_scene = self._initial_scene_def()
         pgm_slot_bit = 0 if self._initial_pgm_slot == "A" else 1
@@ -529,75 +550,53 @@ class MixerGraphBuilder:
             outputs_init = (1 << pgm_slot_bit) if is_in_initial else 0
 
             if src.route_router is None:
+                aux_edges = self._aux_routes.get(src.name, [])
                 self.avp.addNode(OneToMany({
+                "drop": True,
                     "type": "one_to_many",
                     "name": self._n(f"otm_{src.name}"),
                     "src": prepared_edges[src.name],
-                    "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b")],
+                    "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b"), *aux_edges],
+                    **({"subscribed_outputs": {edge: edge for edge in aux_edges}} if aux_edges else {}),
                     "outputs": outputs_init,
-                    "timeline": self.timeline,
+
                     "group": src.input_group,
                 }))
-                slot_a_edge = self._e(f"{src.name}_a")
-                slot_b_edge = self._e(f"{src.name}_b")
             else:
-                slot_a_edge = prepared_edges[(src.name, "a")]
-                slot_b_edge = prepared_edges[(src.name, "b")]
-                src.pre_filter_edge_a = slot_a_edge
-                src.pre_filter_edge_b = slot_b_edge
-
-            # Default scale: fit to canvas.  MixerOrchestrator rewrites the
-            # graph string on every scene switch via node.param.set + auto_restart.
-            fallback_graph = (
-                f"scale_cuda=w={self.canvas_w}:h={self.canvas_h}:interp_algo=lanczos"
-            )
-            default_graph = fallback_graph if src.default_graph is None else src.default_graph
-            default_graph = self._normalized_graph(default_graph)
-            if not default_graph:
-                continue
-
-            for slot, edge in (("a", slot_a_edge), ("b", slot_b_edge)):
-                self.avp.addNode(FilterVideo({
-                    "name": self._n(f"cs_{src.name}_{slot}"),
-                    "src": edge,
-                    "dst": self._e(f"{src.name}_scaled_{slot}"),
-                    "graph": default_graph,
-                    "hwaccel": self.hwaccel,
-                    "group": src.input_group,
-                    "auto_restart": "on",
-                }))
+                src.pre_filter_edge_a = prepared_edges[(src.name, "a")]
+                src.pre_filter_edge_b = prepared_edges[(src.name, "b")]
 
     def _source_slot_edge(self, source: MixerSource, slot: str) -> str:
-        if source.default_graph != "":
-            return self._e(f"{source.name}_scaled_{slot}")
         if source.route_router is not None:
             return source.pre_filter_edge_a if slot == "a" else source.pre_filter_edge_b
         return self._e(f"{source.name}_{slot}")
 
     def _build_compositors(self) -> None:
         """Build both slots around the native shared output clock."""
+        # No warmup_timeout_ms: after a scene load a slot waits for every active input
+        # rather than emitting a partial canvas. A cold load admits only frames stamped
+        # after it, which the playout reaches one latency (two frames by default) later,
+        # so a one-frame bound would put a black canvas on program at every cold cut.
+        # A warm load of a prewarmed scene already flips at the next deadline: a late
+        # source repeats its held picture (Playout::resetInput). The orchestrator bounds
+        # a take that waits on a dead source.
         active_pgm = self._active_inputs_mask(self._initial_scene_def())
-        timing = {} if self.latency_ms is None else {"latency_ms": self.latency_ms}
         for slot in ("a", "b"):
             is_program = slot.upper() == self._initial_pgm_slot
-            self.avp.addNode(CudaRectOverlay({
+            self.avp.addNode(self.canvas_compositor({
                 "name": self._n(f"comp_{slot}"),
                 "src": [self._source_slot_edge(source, slot) for source in self._sources],
                 "dst": self._e(f"scene_{slot}_composite"),
-                "hwaccel": self.hwaccel,
-                "width": self.canvas_w,
-                "height": self.canvas_h,
-                "sw_format": self.working_format,
-                "color": self.color.transfer,
+                "max_layers": self.max_compositor_layers,
                 "fps": self._fps_str(),
-                **timing,
-                "scale": any(source.default_graph == "" for source in self._sources),
+                "latency_ms": self.latency_ms,
                 "layers": [
-                    {k: v for k, v in self._initial_scene_def().sources.get(source.name, {}).items() if k != "graph"}
-                    if is_program else {} for source in self._sources
+                    {**self._initial_scene_def().sources[source.name], "input": i}
+                    for i, source in enumerate(self._sources)
+                    if is_program and source.name in self._initial_scene_def().sources
                 ],
-                "active_inputs": active_pgm if is_program else 0,
-                "timeline": self.timeline,
+                "active_inputs": source_mask_param(active_pgm) if is_program else 0,
+
                 "group": f"{self.name}_{slot}",
             }))
             self._add_snapshot_node(
@@ -606,20 +605,20 @@ class MixerGraphBuilder:
                 slot=0 if slot == "a" else 1,
             )
             self.avp.addNode(OneToMany({
+                "drop": True,
                 "name": self._n(f"otm_scene_{slot}"),
                 "src": self._e(f"scene_{slot}_out"),
                 "dst": [self._e(f"sc{slot.upper()}_direct"), self._e(f"sc{slot.upper()}_trans")],
                 "outputs": 1 if is_program else 0,
-                "timeline": self.timeline,
+
                 "group": f"{self.name}_{slot}",
             }))
 
     def _add_snapshot_node(self, name, source, destination, group, slot=-1):
-        timing = {} if self.latency_ms is None else {"latency_ms": self.latency_ms}
         self.avp.addNode(_SnapshotNode({
             "name": name, "src": source, "dst": destination, "group": group,
             "snapshot": self._n("out_sel_snapshot"), "slot": slot,
-            "fps": self._fps_str(), **timing,
+            "fps": self._fps_str(), "latency_ms": self.latency_ms,
         }))
 
     def _build_output_path(self) -> None:
@@ -628,17 +627,17 @@ class MixerGraphBuilder:
         pgm_is_a = self._initial_pgm_slot == "A"
         initial_active = 0 if pgm_is_a else 1
 
-        self.avp.addNode(FilterVideo({
+        self.avp.addNode(self.backend.transition({
             "name": self._n("out_sel_transition"),
             "src": [self._e("scA_trans"), self._e("scB_trans")],
             "dst": self._e("trans_out"),
-            "graph": "transition_cuda=alpha='0':eval=frame",
             "hwaccel": self.hwaccel,
             "defer_preliminary_init": True,
             "group": self.name,
         }))
 
-        self.avp.addNode(SourceSwitcher({
+        self.avp.addNode(_MixerSelector({
+            "mixer": self.name,
             "name": self._n("out_sel"),
             "src": [
                 self._e("scA_direct"),
@@ -647,7 +646,7 @@ class MixerGraphBuilder:
             ],
             "dst": self._e("mixer_out"),
             "active": initial_active,
-            "timeline": self.timeline,
+
             "group": self.name,
         }))
         self.avp.addNode(ForceFPS({
@@ -658,22 +657,23 @@ class MixerGraphBuilder:
             "group": self.name,
         }))
         self.avp.addNode(OneToMany({
+                "drop": True,
             "name": self._n("otm_final"),
             "src": self._e("final_wipe_pre"),
             "dst": [self._e("final_direct"), self._e("final_wipe_in")],
             "outputs": 1 if self._output_started else 0,
-            "timeline": self.timeline,
+
             "group": self.name,
         }))
-        self.avp.addNode(SourceSwitcher({
+        self.avp.addNode(_MixerSelector({
+            "mixer": self.name, "wipe": True,
             "name": self._n("wipe_sel"),
             "src": [self._e("final_direct"), self._e("wipe_overlay_out")],
             "dst": self._e("final_picture"),
             "active": 0,
             "fallback_active": 0,
-            "timeline_reference_input": 0,
             "fallback_when_active_missing": False,
-            "timeline": self.timeline,
+
             "group": self.name,
         }))
 
@@ -681,13 +681,19 @@ class MixerGraphBuilder:
                                 self._e("final_picture"), self._e("final_out"), self.name)
 
     def _build_wipe_subgraph(self) -> None:
-        """Create the pre-declared wipe subgraph (not started; orchestrator manages it)."""
+        """Create the pre-declared wipe subgraph.
+
+        Decoding per take, the orchestrator starts and stops it around each wipe. With
+        the clip cache, the player group runs from start_groups() on, parked, and a take
+        only arms it: nothing is created or started under the program.
+        """
         W, H = self.canvas_w, self.canvas_h
         fps_str = self._fps_str()
         wipe_group = f"{self.name}_wipe"
+        cached = self.cache_wipes_mb is not None
         # With the cache on, everything up to and including the decode lives in a
         # group a take never starts; the take only replays cached frames.
-        load_group = clipcache.loader_group(self.name) if self.cache_wipes_mb is not None else wipe_group
+        load_group = clipcache.loader_group(self.name) if cached else wipe_group
 
         self.avp.addNode(InputRec({
             "name": self._n("wipe_input"),
@@ -706,13 +712,11 @@ class MixerGraphBuilder:
             "name": self._n("wipe_dec"),
             "src": self._e("wipe_v_pkt"),
             "dst": self._e("wipe_dec_out"),
-            "pixel_format": "?cuda",
+            "pixel_format": "?" + self.backend.hardware_format,
             "hwaccel": self.hwaccel,
             "group": load_group,
         }))
-        # Alpha media codecs decode on the CPU. Upload the converted wipe to
-        # the configured mixer device; hwupload_cuda creates a separate CUDA
-        # context that overlay_many_cuda cannot mix with the program frames.
+        # Alpha media codecs decode on the CPU. Upload to the mixer device.
         self.avp.addNode(FilterVideo({
             "name": self._n("wipe_fmt"),
             "src": self._e("wipe_dec_out"),
@@ -720,7 +724,7 @@ class MixerGraphBuilder:
             # Upload the clip at its own size and let the compositor scale it on
             # the GPU. Resizing to the canvas on a CPU thread cost two thirds of
             # this chain and made the compositor miss 60 Hz ticks during a wipe.
-            "graph": (self.wipe_color.setparams + "," if self.wipe_color else "") + "format=rgba,hwupload",
+            "graph": self.backend.wipe_upload(self.wipe_color),
             "hwaccel": self.hwaccel,
             "group": load_group,
         }))
@@ -728,35 +732,46 @@ class MixerGraphBuilder:
             "name": self._n("wipe_rt"),
             "src": self._e("wipe_fmt_out"),
             "dst": self._e("wipe_rt_out"),
-            "set_pts": True,
+            # Decoding per take, the clip is stamped as it plays. Filling the cache it is
+            # only paced: it keeps its own timestamps, so a stalled load leaves no gap in
+            # the stored clip, and its end-of-stream marker goes on to end the load.
+            "set_pts": not cached,
+            "forward_eof": cached,
             "group": load_group,
         }))
-        if self.cache_wipes_mb is not None:
+        if cached:
+            # The resident player feeds the compositor directly: it stamps the clip on
+            # the output tick grid from the take that armed it, and a force_fps here
+            # would fill the gap between two takes with the previous clip's last frame.
             self.avp.addNode(ClipCache(clipcache.cache_node(
                 name=self._n("wipe_cache"), src=self._e("wipe_rt_out"),
                 dst=self._e("wipe_cached"), group=wipe_group, fps=fps_str,
                 budget_mb=self.cache_wipes_mb)))
-        self.avp.addNode(ForceFPS({
-            "name": self._n("wipe_rt_fps"),
-            "fps": fps_str,
-            "src": self._e("wipe_cached") if self.cache_wipes_mb is not None else self._e("wipe_rt_out"),
-            "dst": self._e("wipe_rt_fps_out"),
-            "group": wipe_group,
-        }))
+            clip_edge = self._e("wipe_cached")
+        else:
+            self.avp.addNode(ForceFPS({
+                "name": self._n("wipe_rt_fps"),
+                "fps": fps_str,
+                "src": self._e("wipe_rt_out"),
+                "dst": self._e("wipe_rt_fps_out"),
+                "group": wipe_group,
+            }))
+            clip_edge = self._e("wipe_rt_fps_out")
         # The wipe is one alpha-blended layer over the program, drawn by the same
         # compositor kernel the scenes use: no format round trip through
         # yuv420p, no second blend pass and no CPU resize.
-        self.avp.addNode(CudaRectOverlay({
+        self.avp.addNode(self.canvas_compositor({
             "name": self._n("wipe_overlay"),
-            "src": [self._e("final_wipe_in"), self._e("wipe_rt_fps_out")],
+            "src": [self._e("final_wipe_in"), clip_edge],
             "dst": self._e("wipe_overlay_out"),
-            "hwaccel": self.hwaccel,
-            "width": W, "height": H, "sw_format": self.working_format,
-            "color": self.color.transfer, "fps": fps_str, "scale": True,
+            "max_layers": 2,   # program and clip; per-frame metadata can move layers, never add them
+            "fps": fps_str,
             "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H},
                        {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H, "z": 1, "blend": True}],
-            "active_inputs": 3,
-            **({} if self.latency_ms is None else {"latency_ms": self.latency_ms}),
+            # Resident: parked with no active input, so it composes nothing until a take
+            # arms it. Per take: created active, with the group.
+            "active_inputs": 0 if cached else 3,
+            "latency_ms": self.latency_ms,
             "group": wipe_group,
         }))
 
@@ -776,11 +791,12 @@ class MixerGraphBuilder:
         ]
 
         init_cfg: Dict[str, Any] = {
-            "timeline": self.timeline,
+            "backend": self.backend.name,
+
             "hwaccel": self.hwaccel,
             "fps_num": self.fps_num,
             "fps_den": self.fps_den,
-            "switch_margin_ms": self.switch_margin_ms,
+            "color": self.color.transfer,   # the canvas a dip colour is converted for
             "source_switcher": self._n("out_sel"),
             **({"keyframe_node": self.keyframe_node} if self.keyframe_node else {}),
             "initial_pgm_slot": self._initial_pgm_slot,
@@ -799,12 +815,15 @@ class MixerGraphBuilder:
         }
 
         if self.enable_wipe:
+            cached = self.cache_wipes_mb is not None
             init_cfg.update({
                 "wipe_group": wipe_group,
-                "wipe_input_node": self._n("wipe_cache" if self.cache_wipes_mb is not None
-                                            else "wipe_input"),
-                "wipe_tail_edge": self._e("wipe_rt_fps_out"),
-                "wipe_flush_edges": wipe_flush_edges,
+                "wipe_input_node": self._n("wipe_cache" if cached else "wipe_input"),
+                # The edge feeding the compositor's clip input, drained before the wipe ends.
+                # The resident chain is armed and parked in place; only a stopped chain's
+                # edges are flushed.
+                **({"wipe_cache_store": clipcache.STORE, "wipe_overlay": self._n("wipe_overlay")}
+                   if cached else {"wipe_flush_edges": wipe_flush_edges}),
             })
 
         lines = [f"mixer.init {self.name} {json.dumps(init_cfg)}"]
@@ -814,8 +833,6 @@ class MixerGraphBuilder:
                 lines.append(
                     f"mixer.source {self.name} {src.name}"
                     f" {self._n('otm_' + src.name)} {idx}"
-                    + (f" {self._n('cs_' + src.name + '_a')} {self._n('cs_' + src.name + '_b')}"
-                       if src.default_graph != "" else "")
                 )
             else:
                 lines.append(
@@ -827,8 +844,6 @@ class MixerGraphBuilder:
                         "input_index": idx,
                         "route_label_a": src.route_output_label_a,
                         "route_label_b": src.route_output_label_b,
-                        "cs_node_a": self._n("cs_" + src.name + "_a") if src.default_graph != "" else "",
-                        "cs_node_b": self._n("cs_" + src.name + "_b") if src.default_graph != "" else "",
                     })
                 )
 

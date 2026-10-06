@@ -24,10 +24,13 @@ the [demo page](https://amagimedia.github.io/avplumber/demos/playlist/docs/).
 ## Run
 
 Use a Linux NVIDIA host with hardware decode and NVENC and follow the
-[shared Docker/NVIDIA setup](../README.md). From the repository root:
+[shared Docker/NVIDIA setup](../README.md). From the repository root (the base
+image is the Fedora 44 / CUDA 13.4 mixer image, host driver R615 or newer; the
+[shared setup](../README.md#build-the-python-video-runtime) names the Ubuntu
+alternative for an older driver):
 
 ```sh
-docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
+docker build -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:local .
 docker build --build-arg AVP_BASE_IMAGE=avplumber-mixer:local \
     --tag avplumber-playlist:local demos/playlist
 docker run --rm --gpus all --network host avplumber-playlist:local \

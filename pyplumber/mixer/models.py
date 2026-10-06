@@ -9,7 +9,6 @@ class MixerSource:
     name: str
     pre_otm_edge: Optional[str]
     input_group: str
-    default_graph: Optional[str] = None
     pre_filter_edge_a: Optional[str] = None
     pre_filter_edge_b: Optional[str] = None
     route_router: Optional[str] = None
@@ -18,12 +17,14 @@ class MixerSource:
     color: Any = None
     pixel_format: Optional[str] = None
     packed_rgb: bool = False
+    premultiplied_alpha: bool = False
+    color_tagged: bool = False
 
 
 @dataclass
 class MixerScene:
     name: str
-    # source_name -> {"graph": ..., "dst_x": ..., "dst_y": ..., ...}
+    # source_name -> compositor geometry
     sources: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     controls: List[Dict[str, Any]] = field(default_factory=list)
     routes: Dict[str, int] = field(default_factory=dict)
