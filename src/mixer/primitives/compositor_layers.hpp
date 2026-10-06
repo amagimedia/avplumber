@@ -7,6 +7,8 @@
 #include "pixel_layout.hpp"
 #include <avcpp/frame.h>
 #include <algorithm>
+#include <cmath>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -34,6 +36,9 @@ struct LayerSpec {
     // per frame by the downstream keyer's key fades (a key at 0 is left out, not drawn) and
     // never parsed from JSON, so layer descriptions and per-frame metadata cannot change it.
     float opacity = 1.f;
+    // How the layer is resampled (`filter`, `bicubic_param`, `samples`, `bicubic_above`,
+    // `multisample_above`). Bilinear unless the layer or its node's default says otherwise.
+    FilterSpec filter;
 
     /// The source this layer draws: `input`, or its position in the legacy one-layer-per-input order.
     size_t sourceIndex(size_t position) const { return input < 0 ? position : size_t(input); }
@@ -42,7 +47,7 @@ struct LayerSpec {
         return input == other.input && tile.x == other.tile.x && tile.y == other.tile.y &&
                tile.w == other.tile.w && tile.h == other.tile.h && scene_w == other.scene_w && scene_h == other.scene_h &&
                dst_x == other.dst_x && dst_y == other.dst_y && z == other.z && blend == other.blend &&
-               opacity == other.opacity &&
+               opacity == other.opacity && filter == other.filter &&
                crop_x == other.crop_x && crop_y == other.crop_y &&
                crop_w == other.crop_w && crop_h == other.crop_h &&
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
@@ -62,6 +67,31 @@ struct DrawOp {
                layer == other.layer;
     }
 };
+
+/// The filter settings a layer object names. Unlike the geometry, a setting the object omits
+/// keeps its value in `out`: a new layer starts from its node's default, and per-frame metadata,
+/// which usually carries only a crop, leaves the configured filter in place.
+inline void parseFilterFromJson(const Parameters &obj, FilterSpec &out) {
+    if (obj.contains("filter")) {
+        const std::string name = obj.at("filter").get<std::string>();
+        const auto known = std::find_if(std::begin(kScaleFilters), std::end(kScaleFilters),
+                                        [&](ScaleFilter f) { return name == scaleFilterName(f); });
+        if (known == std::end(kScaleFilters))
+            throw Error("cuda_rect_overlay: filter must be auto, bilinear, bicubic or multisample");
+        out.mode = *known;
+    }
+    out.bicubic_param = obj.value("bicubic_param", out.bicubic_param);
+    out.samples = obj.value("samples", out.samples);
+    out.bicubic_above = obj.value("bicubic_above", out.bicubic_above);
+    out.multisample_above = obj.value("multisample_above", out.multisample_above);
+    if (out.samples != 4 && out.samples != 8)
+        throw Error("cuda_rect_overlay: samples must be 4 or 8");
+    // Negated comparisons so that NaN fails too.
+    if (!(out.bicubic_above >= 1.) || !(out.multisample_above >= 1.))
+        throw Error("cuda_rect_overlay: bicubic_above and multisample_above must be at least 1");
+    if (!std::isfinite(out.bicubic_param))
+        throw Error("cuda_rect_overlay: bicubic_param must be a finite number");
+}
 
 inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     out.input = obj.value("input", -1);
@@ -103,9 +133,11 @@ inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
         out.crop_h = c.value("h", 0);
     }
     // No crop object → crop_x/y/w/h all stay 0 (full source frame from origin).
+    parseFilterFromJson(obj, out.filter);
 }
 
-inline std::vector<LayerSpec> parseLayersArray(const Parameters &arr) {
+/// `default_filter` is the filter of a layer that names none.
+inline std::vector<LayerSpec> parseLayersArray(const Parameters &arr, ScaleFilter default_filter = ScaleFilter::Bilinear) {
     std::vector<LayerSpec> layers;
     if (!arr.is_array())
         throw Error("cuda_rect_overlay: layers must be an array");
@@ -113,16 +145,17 @@ inline std::vector<LayerSpec> parseLayersArray(const Parameters &arr) {
         if (!item.is_object())
             throw Error("cuda_rect_overlay: layers entries must be objects");
         LayerSpec s;
+        s.filter.mode = default_filter;
         parseLayerFromJson(item, s);
         layers.push_back(s);
     }
     return layers;
 }
 
-inline std::vector<LayerSpec> parseLayersParam(const Parameters &params) {
+inline std::vector<LayerSpec> parseLayersParam(const Parameters &params, ScaleFilter default_filter = ScaleFilter::Bilinear) {
     if (!params.contains("layers") || !params["layers"].is_array())
         throw Error("cuda_rect_overlay: layers array required (one entry per input in src order)");
-    return parseLayersArray(params["layers"]);
+    return parseLayersArray(params["layers"], default_filter);
 }
 
 /// Apply a per-frame metadata override (JSON text) to `layers`: either {"layers": [...]} in src
@@ -241,6 +274,11 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
     return ops;
 }
 
+/// The filter that draws a resolved op's layer; its luma scale decides `auto` for both planes.
+inline ScaleFilter drawFilter(const LayerSpec &l) {
+    return resolveScaleFilter(l.filter, l.crop_w, l.crop_h, l.dst_w ? l.dst_w : l.crop_w, l.dst_h ? l.dst_h : l.crop_h);
+}
+
 /// Whether drawing `ops` on a canvas of this size would only repeat one source frame: a single
 /// unblended layer that takes the whole frame to the whole canvas at 1:1.
 inline bool copiesWholeFrame(const std::vector<DrawOp> &ops, int canvas_w, int canvas_h) {
@@ -268,7 +306,10 @@ inline std::string describeDrawOps(const std::vector<DrawOp> &ops) {
         }
         desc << " [" << i << ":" << op.src_w << "x" << op.src_h << " crop " << L.crop_x << "," << L.crop_y
              << " " << L.crop_w << "x" << L.crop_h << " -> " << L.dst_x << "," << L.dst_y << " "
-             << L.dst_w << "x" << L.dst_h << " z" << L.z << "]";
+             << L.dst_w << "x" << L.dst_h << " z" << L.z;
+        if (const ScaleFilter filter = drawFilter(L); filter != ScaleFilter::Bilinear)
+            desc << " " << scaleFilterName(filter);
+        desc << "]";
     }
     return desc.str();
 }

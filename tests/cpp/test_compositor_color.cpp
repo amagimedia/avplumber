@@ -76,4 +76,25 @@ int main() {
     assert(parseDipColor("#000000ff") == (Rgb{0, 0, 0}));
     for (const char *bad : {"", "#12345", "#1234567", "#gg0000", "nope", "#00000080", "black@0.5"})
         assert(rejected(bad));
+
+    // A PQ or HLG frame must not reach an 8-bit canvas, whatever the frame's own depth (the
+    // decision does not take it); SDR and untagged frames may, and so may HDR on deeper canvases.
+    using avp::mixer::hdrOnEightBitCanvas;
+    for (AVPixelFormat eight : {AV_PIX_FMT_NV12, AV_PIX_FMT_RGB0, AV_PIX_FMT_BGRA}) {
+        assert(std::string(hdrOnEightBitCanvas(AVCOL_TRC_SMPTE2084, eight)) == "pq");
+        assert(std::string(hdrOnEightBitCanvas(AVCOL_TRC_ARIB_STD_B67, eight)) == "hlg");
+        for (auto sdr : {AVCOL_TRC_BT709, AVCOL_TRC_UNSPECIFIED, AVCOL_TRC_SMPTE170M, AVCOL_TRC_BT2020_10})
+            assert(!hdrOnEightBitCanvas(sdr, eight));
+    }
+    for (AVPixelFormat ten : {AV_PIX_FMT_P010, AV_PIX_FMT_P210})
+        for (auto any : {AVCOL_TRC_SMPTE2084, AVCOL_TRC_ARIB_STD_B67, AVCOL_TRC_BT709, AVCOL_TRC_UNSPECIFIED})
+            assert(!hdrOnEightBitCanvas(any, ten));
+    assert(!hdrOnEightBitCanvas(AVCOL_TRC_SMPTE2084, AV_PIX_FMT_NONE));
+    assert(!avp::mixer::hdrTransferName(AVCOL_TRC_BT709) && !avp::mixer::hdrTransferName(AVCOL_TRC_UNSPECIFIED));
+    // The token callers parse, exactly, after the node's name.
+    const std::string pq = avp::mixer::hdrOnEightBitError("cuda_transform", hdrOnEightBitCanvas(AVCOL_TRC_SMPTE2084, AV_PIX_FMT_NV12));
+    const std::string hlg = avp::mixer::hdrOnEightBitError("cuda_transform", hdrOnEightBitCanvas(AVCOL_TRC_ARIB_STD_B67, AV_PIX_FMT_NV12));
+    assert(pq.rfind("cuda_transform: ", 0) == 0 && pq.find("hdr_source_transfer=pq)") != std::string::npos);
+    assert(hlg.find("hdr_source_transfer=hlg)") != std::string::npos && hlg.find("hdr_source_transfer=pq") == std::string::npos);
+    assert(pq.find("tone map") != std::string::npos);
 }

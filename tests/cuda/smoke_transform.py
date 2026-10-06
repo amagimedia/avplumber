@@ -3,6 +3,8 @@
 Each output of the transform node must be byte-identical to a cuda_rect_overlay drawing the same
 layers from the same frame, carry that frame's timestamp, and an output with `fps` must take the
 first frame of each slot. That holds for the two outputs the node passes on undrawn as well. The
+transform's layers default to `filter: auto` (the 3:1 letterbox is multisampled), so the reference
+overlay names that filter; a transform that defaulted to bilinear would differ there. The
 downloads are the verification boundary; that those two were not copied shows only in the node's
 log ("passes the input frame on").
 """
@@ -54,7 +56,8 @@ def main():
             for name, (w, h, layers, _) in OUTPUTS.items():
                 nodes.append(api.CudaRectOverlay({
                     "name": f"overlay_{name}", "src": [f"to_{name}"], "dst": f"o_{name}", "hwaccel": "gpu",
-                    "group": "probe", "width": w, "height": h, "layers": layers}))
+                    "group": "probe", "width": w, "height": h,
+                    "layers": [{**layer, "filter": "auto"} for layer in layers]}))
                 for side in "to":
                     nodes.append(api.FilterVideo({
                         "name": f"download_{side}_{name}", "src": f"{side}_{name}", "dst": f"r_{side}_{name}",

@@ -9,6 +9,7 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 }
 
+#include <cmath>
 #include <string>
 #include <utility>
 #include "cuda_rect_array.hpp"
@@ -38,6 +39,18 @@ int plane0Lanes(AVPixelFormat fmt) {
     for (int c = 0; d && c < d->nb_components; ++c)
         if (d->comp[c].plane == 0) lanes = std::max(lanes, d->comp[c].step / sampleBytes(fmt));
     return lanes;
+}
+
+/// Table code of the filter that draws a resolved layer.
+int tableFilter(const LayerSpec &layer) {
+    switch (drawFilter(layer)) {
+    case ScaleFilter::Bicubic:
+        return layer.filter.bicubic_param == 0.f ? AVP_RECT_FILTER_BICUBIC_A0 : AVP_RECT_FILTER_BICUBIC;
+    case ScaleFilter::Multisample:
+        return layer.filter.samples == 8 ? AVP_RECT_FILTER_MULTISAMPLE8 : AVP_RECT_FILTER_MULTISAMPLE4;
+    default:
+        return AVP_RECT_FILTER_BILINEAR;
+    }
 }
 
 } // namespace
@@ -91,7 +104,10 @@ void CudaRectDraw::ensureKernels() {
         AVP_CHECK_CU(cuModuleGetFunction(&composite_opacity_kernel_, module_, "composite_planes_opacity")) ||
         AVP_CHECK_CU(cuModuleGetFunction(&composite_array_kernel_, module_, "composite_planes_array")) ||
         AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_array_kernel_, module_, "composite_planes_yuv_array")) ||
-        AVP_CHECK_CU(cuModuleGetFunction(&composite_opacity_array_kernel_, module_, "composite_planes_opacity_array")))
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_opacity_array_kernel_, module_, "composite_planes_opacity_array")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_filter_kernel_, module_, "composite_planes_yuv_filter")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_array_filter_kernel_, module_, "composite_planes_yuv_array_filter")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_filter_kernel_, module_, "composite_planes_filter")))
         throw Error("cuda_rect_overlay: cannot load the composite kernel");
     int shared_limit = 0;
     CUdevice device;
@@ -120,6 +136,7 @@ void CudaRectDraw::unload() {
         module_ = nullptr;
         composite_kernel_ = composite_yuv_kernel_ = composite_packed_kernel_ = composite_opacity_kernel_ = nullptr;
         composite_array_kernel_ = composite_yuv_array_kernel_ = composite_opacity_array_kernel_ = nullptr;
+        composite_yuv_filter_kernel_ = composite_yuv_array_filter_kernel_ = composite_filter_kernel_ = nullptr;
     }
 }
 
@@ -194,21 +211,32 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     }
 
     const bool promote = src_sw_fmt != sw_fmt && isYuvPromoteConvertible(src_sw_fmt, sw_fmt);
-    if (!promote && src_sw_fmt != sw_fmt)
+    const bool demote = src_sw_fmt != sw_fmt && isYuvDemoteConvertible(src_sw_fmt, sw_fmt);
+    if (!promote && !demote && src_sw_fmt != sw_fmt)
         throw Error("cuda_rect_overlay: source format " + std::string(av_get_pix_fmt_name(src_sw_fmt)) +
                     " cannot be drawn onto a " + av_get_pix_fmt_name(sw_fmt) + " canvas");
-    const AVPixelFormat geometry_fmt = promote ? src_sw_fmt : sw_fmt;
+    // A canvas with a colour contract refused such a source above; one without must not turn
+    // it into an SDR-looking frame either.
+    if (demote && !canvas_.allow_hdr_depth_reduction)
+        if (const char *hdr = hdrOnEightBitCanvas(src->color_trc, sw_fmt))
+            throw Error(hdrOnEightBitError("cuda_rect_overlay", hdr));
+    const AVPixelFormat geometry_fmt = promote || demote ? src_sw_fmt : sw_fmt;
     const std::array<CUtexObject, 2> *textures = nullptr;
     if (array) {
         if (!array_textures_) array_textures_ = std::make_unique<RectArrayTextures>();
         textures = &array_textures_->get(src, cuda_dev_->cuda_ctx);
     }
-    out.kind = promote ? AVP_RECT_KIND_PROMOTE : AVP_RECT_KIND_YUV;
+    out.kind = demote ? AVP_RECT_KIND_DEMOTE : promote ? AVP_RECT_KIND_PROMOTE : AVP_RECT_KIND_YUV;
     out.yuv_texture = array;
     out.src_bytes = sampleBytes(geometry_fmt);
     out.src_shift = storageShift(geometry_fmt);
     const AVPixFmtDescriptor *sd = av_pix_fmt_desc_get(geometry_fmt);
-    out.mul = promote ? float(1 << (dd->comp[0].depth - sd->comp[0].depth)) : 1.f;
+    // 2^(canvas depth - source depth): 4 for NV12 on P010, 0.25 for P010 on NV12.
+    out.mul = promote || demote ? std::ldexp(1.f, dd->comp[0].depth - sd->comp[0].depth) : 1.f;
+    // Chosen here, once per layer; the kernel only follows the table. Packed canvases have no
+    // filter entry and stay bilinear.
+    out.filter = planes > 1 ? tableFilter(L) : AVP_RECT_FILTER_BILINEAR;
+    out.filter_param = -L.filter.bicubic_param;
     for (int p = 0; p < planes; ++p) {
         if (!array && !src->data[p])
             throw Error("cuda_rect_overlay: source frame lacks plane " + std::to_string(p));
@@ -252,7 +280,7 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
     waited_streams_.clear();
     if (array_textures_) array_textures_->begin();
     int n = 0;
-    bool any_rgb = false, any_fade = false, any_array = false;
+    bool any_rgb = false, any_fade = false, any_array = false, any_filter = false, any_wide = false;
     for (const DrawOp &op : ops) {
         if (!op.src || !op.src->raw()) continue;
         if (n >= max_layers_)
@@ -267,6 +295,16 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
         // Not an error: a key without alpha (or on a packed canvas) still cuts cleanly.
         if (op.layer.opacity < 1.f && !fades && !std::exchange(opacity_warned_, true))
             logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
+        // A demoted layer needs the filter entries' code limit whatever its filter.
+        any_filter = any_filter || entry.filter != AVP_RECT_FILTER_BILINEAR || entry.kind == AVP_RECT_KIND_DEMOTE;
+        // The 4x4 cubic and the 8 samples are compiled into the full filter entry only.
+        any_wide = any_wide || entry.filter == AVP_RECT_FILTER_BICUBIC || entry.filter == AVP_RECT_FILTER_MULTISAMPLE8;
+        // Not an error either; `auto` is not named here, it simply finds nothing to choose.
+        const ScaleFilter asked = op.layer.filter.mode;
+        if ((asked == ScaleFilter::Bicubic || asked == ScaleFilter::Multisample) &&
+            entry.filter == AVP_RECT_FILTER_BILINEAR && !std::exchange(filter_warned_, true))
+            logstream << "cuda_rect_overlay: a layer's filter applies to YUV sources on YUV canvases only; "
+                         "drawing it bilinear";
         ++n;
     }
     if (array_textures_) array_textures_->prune();
@@ -297,7 +335,10 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
                     &canvas_w, &canvas_h, &chroma_w, &chroma_h,
                     &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y,
                     &clear0_i, &clear1_i, &transfer, &sdr_white, &hdr_peak};
+    // A table without a filtered or demoted layer takes the entries it always took.
     const CUfunction kernel = planes == 1 ? composite_packed_kernel_
+        : any_filter ? (any_rgb || any_wide ? composite_filter_kernel_
+                        : any_array ? composite_yuv_array_filter_kernel_ : composite_yuv_filter_kernel_)
         : any_fade ? (any_array ? composite_opacity_array_kernel_ : composite_opacity_kernel_)
         : any_rgb ? (any_array ? composite_array_kernel_ : composite_kernel_)
         : any_array ? composite_yuv_array_kernel_ : composite_yuv_kernel_;

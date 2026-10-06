@@ -5,6 +5,7 @@
 // av_pix_fmt_count_planes. No CUDA, no node state.
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -130,25 +131,43 @@ inline bool isRgbToYuvConvertible(AVPixelFormat src_fmt, AVPixelFormat canvas_fm
            isPackedRgb8(src_fmt, step, r, g, b);
 }
 
+/// Canvas depth minus source depth for two different semiplanar YUV formats without alpha, the
+/// pairs the lane sampler converts between; empty for every other pair.
+inline std::optional<int> yuvDepthDifference(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
+    const AVPixFmtDescriptor *sd = av_pix_fmt_desc_get(src_fmt);
+    const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(canvas_fmt);
+    if (!sd || !cd || src_fmt == canvas_fmt) return {};
+    if ((sd->flags | cd->flags) & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_ALPHA)) return {};
+    if (sd->nb_components != 3 || cd->nb_components != 3) return {};
+    if (av_pix_fmt_count_planes(src_fmt) != 2 || av_pix_fmt_count_planes(canvas_fmt) != 2) return {};   // semiplanar UV
+    return cd->comp[0].depth - sd->comp[0].depth;
+}
+
 // A lower-depth semiplanar YUV source (e.g. NV12 from NVDEC) drawn onto a deeper
 // semiplanar canvas (P210): the fused scaler promotes its codes by 2^(dbits-sbits)
 // (NV12->P210 is <<2, 16->64 / 235->940) and resamples the chroma footprint,
 // so an 8-bit clip mixes onto a 10-bit program with no separate convert node.
 // SDR only, like the RGB path; the source keeps its own subsampling.
 inline bool isYuvPromoteConvertible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
-    const AVPixFmtDescriptor *sd = av_pix_fmt_desc_get(src_fmt);
-    const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(canvas_fmt);
-    if (!sd || !cd || src_fmt == canvas_fmt) return false;
-    if ((sd->flags | cd->flags) & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_ALPHA)) return false;
-    if (sd->nb_components != 3 || cd->nb_components != 3) return false;
-    if (av_pix_fmt_count_planes(src_fmt) != 2 || av_pix_fmt_count_planes(canvas_fmt) != 2) return false;   // semiplanar UV
-    return sd->comp[0].depth <= cd->comp[0].depth;
+    return yuvDepthDifference(src_fmt, canvas_fmt).value_or(-1) >= 0;
 }
 
-/// Every source format the canvas accepts: identical, opaque-onto-alpha, packed RGB, or promotable YUV.
+// A higher-depth semiplanar YUV source (P010 or P210 from a 10-bit decode) drawn onto a
+// shallower semiplanar canvas (NV12): the mirror of the promotion. Codes are divided by
+// 2^(sbits-dbits), rounded to nearest and limited to the canvas range (P010->NV12:
+// min(255, (v + 2) >> 2), 64->16 / 940->235), and the chroma footprint is resampled. A plain
+// depth reduction without dithering; an HDR source is not tone mapped, which is why the nodes
+// refuse one on an 8-bit canvas (hdrOnEightBitCanvas in compositor_color.hpp).
+inline bool isYuvDemoteConvertible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
+    return yuvDepthDifference(src_fmt, canvas_fmt).value_or(0) < 0;
+}
+
+/// Every source format the canvas accepts: identical, opaque-onto-alpha, packed RGB, or YUV of
+/// another depth or subsampling.
 inline bool canvasAccepts(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
     return src_fmt == canvas_fmt || isAlphaCompatible(src_fmt, canvas_fmt) ||
-           isRgbToYuvConvertible(src_fmt, canvas_fmt) || isYuvPromoteConvertible(src_fmt, canvas_fmt);
+           isRgbToYuvConvertible(src_fmt, canvas_fmt) || isYuvPromoteConvertible(src_fmt, canvas_fmt) ||
+           isYuvDemoteConvertible(src_fmt, canvas_fmt);
 }
 
 // Returns the plane index of the alpha component for planar formats, or -1 if there is none /

@@ -34,6 +34,9 @@ public:
         AVColorTransferCharacteristic transfer = AVCOL_TRC_UNSPECIFIED;
         float sdr_white = kGraphicSdrWhite;
         float hdr_peak = kGraphicHdrPeak;
+        // Draw a PQ/HLG source that is deeper than an 8-bit canvas anyway, keeping its tags.
+        // Off, such a layer is an error (hdrOnEightBitCanvas): it needs tone mapping first.
+        bool allow_hdr_depth_reduction = false;
     };
 
     CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int max_layers = 256);
@@ -59,6 +62,9 @@ public:
     /// kernel launch. Validates each source's color tags against the canvas contract first.
     /// `color_src` decides the clear level (JPEG-range sources clear to 0). A layer's opacity
     /// below 1 weights a blended RGBA source's alpha; other kinds cannot fade and draw opaque.
+    /// A layer's filter applies to YUV sources on YUV canvases; packed RGB draws bilinear.
+    /// A YUV source deeper than the canvas is reduced to its depth (rounded, not dithered, not
+    /// tone mapped); a PQ/HLG one on an 8-bit canvas throws unless the canvas allows it.
     void draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src);
 
     /// sw_format of a hardware frame, AV_PIX_FMT_NONE when it has no frames context.
@@ -78,7 +84,14 @@ private:
     CUfunction composite_array_kernel_ = nullptr;
     CUfunction composite_yuv_array_kernel_ = nullptr;
     CUfunction composite_opacity_array_kernel_ = nullptr;
+    // Tables with a layer whose filter is not bilinear or whose source is deeper than the canvas;
+    // no other table reaches these.
+    // The first two hold what the scaler's defaults use (demotion, the cubic at A = 0, 4 samples).
+    CUfunction composite_yuv_filter_kernel_ = nullptr;        // no packed-RGB layers, linear sources
+    CUfunction composite_yuv_array_filter_kernel_ = nullptr;  // no packed-RGB layers, some arrays
+    CUfunction composite_filter_kernel_ = nullptr;            // any layer kind, fade, storage and filter
     bool opacity_warned_ = false;   // an op with opacity < 1 on a kind that cannot blend, logged once
+    bool filter_warned_ = false;    // an op naming a filter on a kind drawn bilinear, logged once
     // Rect table: pinned host staging + device copy, one entry per op, reused every frame
     // (the node synchronizes the stream after each frame).
     AvpRectLayer *table_host_ = nullptr;

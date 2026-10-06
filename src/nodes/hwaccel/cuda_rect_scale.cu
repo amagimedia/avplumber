@@ -1,7 +1,7 @@
 // CUDA compositor kernel: one launch composes a whole canvas from a rect table
 // (see cuda_rect_table.h and CudaRectDraw). Semiplanar YUV canvases (NV12,
-// P010, P210) take same-format YUV, lower-depth semiplanar and packed RGB(A)
-// sources; packed 8-bit canvases (rgb0, rgba) take same-format sources.
+// P010, P210) take same-format YUV, lower- and higher-depth semiplanar and
+// packed RGB(A) sources; packed 8-bit canvases (rgb0, rgba) take same-format sources.
 #include <cuda_runtime.h>
 #include "cuda_rect_table.h"
 #include "graphic_color.h"
@@ -62,14 +62,20 @@ __device__ __forceinline__ bool rect_overlaps(int ax, int ay, int aw, int ah, in
 // Bilinear sample of lane `c` of a lane-group plane (canvas-format and promoted sources).
 // The vertical terms depend only on the row, so the caller computes them once per thread.
 struct RowTaps { int y0, y1; float ty; };
-__device__ __forceinline__ RowTaps row_taps(int sy, int sh, int oy, int dh) {
-    const float fy = (oy + 0.5f) * sh / dh - 0.5f;
+// Source coordinate of destination sample `o` when `sn` source samples map onto `dn`: sample
+// centres align, and the integer part is the tap left of (above) the position.
+__device__ __forceinline__ float source_coord(int o, int sn, int dn) { return (o + 0.5f) * sn / dn - 0.5f; }
+// The two rows around source coordinate `fy`, clamped to the layer's source rect.
+__device__ __forceinline__ RowTaps row_taps_at(int sy, int sh, float fy) {
     const int iy = int(floorf(fy));
     RowTaps t;
     t.ty = fy - iy;
     t.y0 = sy + max(0, min(iy, sh - 1));
     t.y1 = sy + max(0, min(iy + 1, sh - 1));
     return t;
+}
+__device__ __forceinline__ RowTaps row_taps(int sy, int sh, int oy, int dh) {
+    return row_taps_at(sy, sh, source_coord(oy, sh, dh));
 }
 __device__ __forceinline__ float load_lane(unsigned long long storage, bool textured, int pitch,
                                            int x, int y, int lanes, int c, int bytes, int shift) {
@@ -87,19 +93,190 @@ __device__ __forceinline__ float load_lane(unsigned long long storage, bool text
     return float((c ? pair.y : pair.x) >> shift);
 }
 
-__device__ __forceinline__ float sample_lane(unsigned long long src, bool textured, int src_pitch, int sx, int sw,
-                                             int lanes, int c, int bytes, int shift, int ox, int dw, RowTaps t) {
-    const float fx = (ox + 0.5f) * sw / dw - 0.5f;
-    const int ix = int(floorf(fx));
-    const float tx = fx - ix;
-    const int x0 = sx + max(0, min(ix, sw - 1));
-    const int x1 = sx + max(0, min(ix + 1, sw - 1));
+// The four taps where columns x0, x1 meet the rows of `t`, blended by `tx` and the row weight.
+__device__ __forceinline__ float blend_lane(unsigned long long src, bool textured, int src_pitch, int lanes, int c,
+                                            int bytes, int shift, int x0, int x1, float tx, RowTaps t) {
     const float a = load_lane(src, textured, src_pitch, x0, t.y0, lanes, c, bytes, shift);
     const float b = load_lane(src, textured, src_pitch, x1, t.y0, lanes, c, bytes, shift);
     const float d = load_lane(src, textured, src_pitch, x0, t.y1, lanes, c, bytes, shift);
     const float e = load_lane(src, textured, src_pitch, x1, t.y1, lanes, c, bytes, shift);
     const float top = a + tx * (b - a), bottom = d + tx * (e - d);
     return top + t.ty * (bottom - top);
+}
+// Bilinear sample at source column coordinate `fx` on the rows of `t`.
+__device__ __forceinline__ float sample_lane_at(unsigned long long src, bool textured, int src_pitch, int sx, int sw,
+                                                int lanes, int c, int bytes, int shift, float fx, RowTaps t) {
+    const int ix = int(floorf(fx));
+    const float tx = fx - ix;
+    const int x0 = sx + max(0, min(ix, sw - 1));
+    const int x1 = sx + max(0, min(ix + 1, sw - 1));
+    return blend_lane(src, textured, src_pitch, lanes, c, bytes, shift, x0, x1, tx, t);
+}
+__device__ __forceinline__ float sample_lane(unsigned long long src, bool textured, int src_pitch, int sx, int sw,
+                                             int lanes, int c, int bytes, int shift, int ox, int dw, RowTaps t) {
+    return sample_lane_at(src, textured, src_pitch, sx, sw, lanes, c, bytes, shift, source_coord(ox, sw, dw), t);
+}
+
+// ---------------------------------------------------------------------------
+// What only the *_filter entry points draw (kFilters): the filters of YUV/PROMOTE/DEMOTE layers
+// other than bilinear (AVP_RECT_FILTER_*), and DEMOTE layers under any filter. A layer reaches
+// this code only when the host put a filter or the DEMOTE kind in its table entry. All of it
+// reads exact stored codes through load_lane, so linear and array sources give the same result,
+// and every tap is clamped to the layer's source rect like the bilinear taps.
+//
+// A DEMOTE layer (P010 or P210 on an NV12 canvas) is the mirror of PROMOTE: the sample, taken
+// in the source's codes, times 2^(canvas depth - source depth), limited to the canvas codes and
+// rounded to nearest, halves up. For a 10-bit code v at 1:1 that is min(255, (v + 2) >> 2):
+// 64, 512, 940 give 16, 128, 235. No dithering, and no tone mapping: an HDR signal keeps its
+// transfer and only loses depth.
+// ---------------------------------------------------------------------------
+
+// One plane of a layer as the filters read it, in lane groups.
+struct LanePlane {
+    unsigned long long src;
+    bool textured;
+    int pitch, sx, sy, sw, sh, lanes, bytes, shift;
+    __device__ __forceinline__ float load(int x, int y, int c) const {
+        return load_lane(src, textured, pitch, x, y, lanes, c, bytes, shift);
+    }
+    __device__ __forceinline__ float blend(int x0, int x1, float tx, RowTaps rows, int c) const {
+        return blend_lane(src, textured, pitch, lanes, c, bytes, shift, x0, x1, tx, rows);
+    }
+    __device__ __forceinline__ float bilinear(float fx, RowTaps rows, int c) const {
+        return sample_lane_at(src, textured, pitch, sx, sw, lanes, c, bytes, shift, fx, rows);
+    }
+};
+
+// The bilinear sample, for layers that need what draw_filtered adds to it (DEMOTE).
+struct BilinearFilter {
+    RowTaps rows;
+    __device__ __forceinline__ BilinearFilter(const LanePlane &P, int oy, int dh) : rows(row_taps(P.sy, P.sh, oy, dh)) {}
+    __device__ __forceinline__ float column(const LanePlane &P, int ox, int dw) const {
+        return source_coord(ox, P.sw, dw);
+    }
+    __device__ __forceinline__ float sample(const LanePlane &P, float fx, int c) const { return P.bilinear(fx, rows, c); }
+};
+
+// Four taps of one axis and their cubic weights. The weights are bicubic_coeffs of FFmpeg's
+// libavfilter/vf_scale_cuda.cu (MIT-style licence, see that file's header), with its
+// A = -param already applied by the host. A = 0, scale_cuda's default, leaves the outer taps
+// without weight: a 2x2 interpolation with Hermite (smoothstep) weights.
+struct CubicTaps { int i[4]; float w[4]; };
+__device__ __forceinline__ CubicTaps cubic_taps(int s0, int sn, int o, int dn, float A) {
+    const float f = source_coord(o, sn, dn);
+    const int first = int(floorf(f));
+    const float x = f - first;
+    CubicTaps t;
+#pragma unroll
+    for (int k = 0; k < 4; ++k) t.i[k] = s0 + max(0, min(first - 1 + k, sn - 1));
+    t.w[0] = ((A * (x + 1) - 5 * A) * (x + 1) + 8 * A) * (x + 1) - 4 * A;
+    t.w[1] = ((A + 2) * x - (A + 3)) * x * x + 1;
+    t.w[2] = ((A + 2) * (1 - x) - (A + 3)) * (1 - x) * (1 - x) + 1;
+    t.w[3] = 1.f - t.w[0] - t.w[1] - t.w[2];
+    return t;
+}
+
+// 4x4 cubic without a prefilter: when shrinking it reads the same 4x4 samples and aliases.
+// The row taps are computed once per thread, the column taps once per lane group.
+struct CubicFilter {
+    CubicTaps rows;
+    float A;
+    __device__ __forceinline__ CubicFilter(const LanePlane &P, int oy, int dh, float param)
+        : rows(cubic_taps(P.sy, P.sh, oy, dh, param)), A(param) {}
+    __device__ __forceinline__ CubicTaps column(const LanePlane &P, int ox, int dw) const {
+        return cubic_taps(P.sx, P.sw, ox, dw, A);
+    }
+    __device__ __forceinline__ float sample(const LanePlane &P, const CubicTaps &cols, int c) const {
+        float v = 0.f;
+#pragma unroll
+        for (int r = 0; r < 4; ++r) {
+            float line = 0.f;
+#pragma unroll
+            for (int k = 0; k < 4; ++k) line += P.load(cols.i[k], rows.i[r], c) * cols.w[k];
+            v += line * rows.w[r];
+        }
+        return v;
+    }
+};
+
+// The cubic at A = 0. Its outer taps weigh nothing, so each axis blends its two inner taps with
+// the cubic's weight of the second one (res.z of bicubic_coeffs): four reads instead of sixteen.
+struct CubicA0Filter {
+    RowTaps rows;
+    __device__ __forceinline__ static RowTaps taps(int s0, int sn, int o, int dn) {
+        RowTaps t = row_taps(s0, sn, o, dn);
+        const float x = t.ty;
+        t.ty = (2.f * (1.f - x) - 3.f) * (1.f - x) * (1.f - x) + 1.f;
+        return t;
+    }
+    __device__ __forceinline__ CubicA0Filter(const LanePlane &P, int oy, int dh) : rows(taps(P.sy, P.sh, oy, dh)) {}
+    // The column pair of a lane group, in the row structure: y0, y1 are x0, x1 and ty its weight.
+    __device__ __forceinline__ RowTaps column(const LanePlane &P, int ox, int dw) const {
+        return taps(P.sx, P.sw, ox, dw);
+    }
+    __device__ __forceinline__ float sample(const LanePlane &P, const RowTaps &cols, int c) const {
+        return P.blend(cols.y0, cols.y1, cols.ty, rows, c);
+    }
+};
+
+// Mean of kN bilinear samples spread over the source area one destination sample covers.
+// 4: the 2x2 grid of scale_cuda's bilinear (Subsample_Bilinear in the file named above), at
+// +-w / (0.5 + w) with w = clamp((scale - 1) / 2, 0, 1) per axis, which is a {w, 1, w} filter
+// written as two bilinear taps; the grid stops widening at 3:1, and without shrinking all four
+// samples coincide with the bilinear one. 8: the positions of the Direct3D standard 8-sample
+// pattern (sixteenths of a pixel) scaled to that area. Only the row coordinate and the offset
+// units are kept per thread; each sample derives its taps, which costs less than the registers
+// a table of them would take from every path of the kernel.
+template <int kN>
+struct MultisampleFilter {
+    float fy, gx, gy;
+    __device__ __forceinline__ MultisampleFilter(const LanePlane &P, int oy, int dw, int dh)
+        : fy(source_coord(oy, P.sh, dh)) {
+        const float xs = float(P.sw) / dw, ys = float(P.sh) / dh;
+        if (kN == 4) {
+            const float wx = min(max(0.5f * (xs - 1.f), 0.f), 1.f), wy = min(max(0.5f * (ys - 1.f), 0.f), 1.f);
+            gx = wx / (0.5f + wx);
+            gy = wy / (0.5f + wy);
+        } else {
+            gx = xs * 0.0625f;
+            gy = ys * 0.0625f;
+        }
+    }
+    // Offset of sample `k` on `axis` (0: x, 1: y) for the unit `g` of that axis.
+    __device__ __forceinline__ static float offset(int k, int axis, float g) {
+        if (kN == 4) return (k >> axis) & 1 ? g : -g;
+        const int pattern[8][2] = {{1, -3}, {-1, 3}, {5, 1}, {-3, -5}, {-5, 5}, {-7, -1}, {3, 7}, {7, -7}};
+        // A plain product, never fused into the position's sum: a CPU reference can then
+        // reproduce the tap positions exactly.
+        return __fmul_rn(float(pattern[k][axis]), g);
+    }
+    __device__ __forceinline__ float column(const LanePlane &P, int ox, int dw) const {
+        return source_coord(ox, P.sw, dw);
+    }
+    __device__ __forceinline__ float sample(const LanePlane &P, float fx, int c) const {
+        float sum = 0.f;
+#pragma unroll
+        for (int k = 0; k < kN; ++k)
+            sum += P.bilinear(fx + offset(k, 0, gx), row_taps_at(P.sy, P.sh, fy + offset(k, 1, gy)), c);
+        return sum * (1.f / kN);
+    }
+};
+
+// The lane groups of one thread from such a layer: sample, promote or demote (`gain`), limit to
+// the canvas codes (a cubic overshoots, and a demoted 1023 would round to 256) and round as a
+// stored sample.
+template <int kPx, int kLanes, class Filter>
+__device__ __forceinline__ void draw_filtered(float (*acc)[kLanes], const LanePlane &P, const Filter &F,
+                                              int X0, int ldx, int ldw, float gain, float maxv) {
+#pragma unroll
+    for (int p = 0; p < kPx; ++p) {
+        const int ox = X0 + p - ldx;
+        if (ox < 0 || ox >= ldw) continue;
+        const auto column = F.column(P, ox, ldw);
+#pragma unroll
+        for (int c = 0; c < kLanes; ++c)
+            acc[p][c] = stored_code(min(max(F.sample(P, column, c) * gain, 0.f), maxv));
+    }
 }
 
 // Bilinear alpha at the footprint sample_rgb uses.
@@ -157,8 +334,12 @@ __device__ __forceinline__ float sample_alpha_tex(unsigned long long tex, int sx
 // compile-time so the per-sample loops unroll and the accumulators stay in registers:
 // <1,false> luma, <2,true> chroma pairs, <4,false> packed RGB canvas. kOpacity=true also
 // weights each blended RGBA layer's alpha by its table `mul` (a key fade); only the
-// composite_planes_opacity entry sets it, so the other entries keep their code.
-template <bool kRgb, int kLanes, bool kChroma, bool kOpacity = false, bool kArrays = false>
+// composite_planes_opacity entry sets it, so the other entries keep their code. kFilters=true
+// also draws layers whose table `filter` is not bilinear and DEMOTE layers; only the *_filter
+// entries set it. 1 compiles what the scaler's defaults use (the limited bilinear of DEMOTE, the
+// cubic at A = 0, 4 samples); 2 adds the 4x4 cubic and 8 samples, whose registers would
+// otherwise slow every path of the lean entries.
+template <bool kRgb, int kLanes, bool kChroma, bool kOpacity = false, bool kArrays = false, int kFilters = 0>
 __device__ __forceinline__ void composite_body(
     const AvpRectLayer *__restrict__ layers, int n,
     unsigned char *dst_y, int y_pitch, unsigned char *dst_uv, int uv_pitch,
@@ -208,13 +389,30 @@ __device__ __forceinline__ void composite_body(
             const int oy = Y - ldy;
             if (oy < 0 || oy >= ldh || X0 + px <= ldx || X0 >= ldx + ldw) continue;
 
-            if (L.kind == AVP_RECT_KIND_YUV || L.kind == AVP_RECT_KIND_PROMOTE) {
+            if (L.kind == AVP_RECT_KIND_YUV || L.kind == AVP_RECT_KIND_PROMOTE ||
+                (kFilters && L.kind == AVP_RECT_KIND_DEMOTE)) {
                 const unsigned long long src = L.src[plane];
                 const int pitch = L.src_pitch[plane];
                 const int sx = L.sx[plane], sy = L.sy[plane], sw = L.sw[plane], sh = L.sh[plane];
                 const int bytes = L.kind == AVP_RECT_KIND_YUV ? dst_sb : L.src_bytes;
                 const int shift = L.kind == AVP_RECT_KIND_YUV ? dst_shift : L.src_shift;
                 const float mul = L.mul;
+                if (kFilters && (L.filter != AVP_RECT_FILTER_BILINEAR || L.kind == AVP_RECT_KIND_DEMOTE)) {
+                    // One branch per layer and thread; the sample loops below it are fixed.
+                    const LanePlane P = {src, kArrays && L.yuv_texture, pitch, sx, sy, sw, sh, lanes, bytes, shift};
+                    const float gain = L.kind == AVP_RECT_KIND_YUV ? 1.f : mul;
+                    if (L.filter == AVP_RECT_FILTER_BILINEAR)
+                        draw_filtered<px, lanes>(acc, P, BilinearFilter(P, oy, ldh), X0, ldx, ldw, gain, maxv);
+                    else if (L.filter == AVP_RECT_FILTER_BICUBIC_A0)
+                        draw_filtered<px, lanes>(acc, P, CubicA0Filter(P, oy, ldh), X0, ldx, ldw, gain, maxv);
+                    else if (L.filter == AVP_RECT_FILTER_MULTISAMPLE4)
+                        draw_filtered<px, lanes>(acc, P, MultisampleFilter<4>(P, oy, ldw, ldh), X0, ldx, ldw, gain, maxv);
+                    else if (kFilters > 1 && L.filter == AVP_RECT_FILTER_BICUBIC)
+                        draw_filtered<px, lanes>(acc, P, CubicFilter(P, oy, ldh, L.filter_param), X0, ldx, ldw, gain, maxv);
+                    else if (kFilters > 1)
+                        draw_filtered<px, lanes>(acc, P, MultisampleFilter<8>(P, oy, ldw, ldh), X0, ldx, ldw, gain, maxv);
+                    continue;
+                }
                 const RowTaps taps = row_taps(sy, sh, oy, ldh);
 #pragma unroll
                 for (int p = 0; p < px; ++p) {
@@ -406,4 +604,24 @@ extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv_array(AVP
 extern "C" __global__ void __launch_bounds__(256) composite_planes_opacity_array(AVP_COMPOSITE_ARGS) {
     if (blockIdx.z) composite_body<true, 2, true, true, true>(AVP_COMPOSITE_PASS);
     else composite_body<true, 1, false, true, true>(AVP_COMPOSITE_PASS);
+}
+
+// Tables holding a layer with a filter other than bilinear or a DEMOTE layer. The host launches
+// these only for such tables, so every entry above keeps its code. A YUV or PROMOTE layer with
+// the bilinear filter draws here exactly as it does above.
+// Lean pair, the scaler's case: YUV/PROMOTE/DEMOTE layers only, linear or with arrays, without
+// the 4x4 cubic and the 8 samples. The host never sends them a table holding one of those.
+extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv_filter(AVP_COMPOSITE_ARGS) {
+    if (blockIdx.z) composite_body<false, 2, true, false, false, 1>(AVP_COMPOSITE_PASS);
+    else composite_body<false, 1, false, false, false, 1>(AVP_COMPOSITE_PASS);
+}
+extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv_array_filter(AVP_COMPOSITE_ARGS) {
+    if (blockIdx.z) composite_body<false, 2, true, false, true, 1>(AVP_COMPOSITE_PASS);
+    else composite_body<false, 1, false, false, true, 1>(AVP_COMPOSITE_PASS);
+}
+// Everything else in one entry: every filter, packed-RGB layers, key fades (an opacity of 1
+// weights nothing) and either storage.
+extern "C" __global__ void __launch_bounds__(256) composite_planes_filter(AVP_COMPOSITE_ARGS) {
+    if (blockIdx.z) composite_body<true, 2, true, true, true, 2>(AVP_COMPOSITE_PASS);
+    else composite_body<true, 1, false, true, true, 2>(AVP_COMPOSITE_PASS);
 }

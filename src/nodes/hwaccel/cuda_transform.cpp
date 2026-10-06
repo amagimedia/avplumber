@@ -1,4 +1,5 @@
 #include "../node_common.hpp"
+#include "../../mixer/primitives/compositor_color.hpp"
 #include "cuda_rect_frame.hpp"
 
 extern "C" {
@@ -24,11 +25,18 @@ extern "C" {
 ///
 /// Parameters: `src`, `hwaccel`, and `outputs`, an array of
 ///   { "dst": edge or [edges], "width", "height", "sw_format" (nv12), "layers": [...],
-///     "fps": rate (optional), "drop": bool (optional), "pass_arrays": bool (optional) }
+///     "fps": rate (optional), "drop": bool (optional), "pass_arrays": bool (optional),
+///     "allow_hdr_depth_reduction": bool (optional) }
 /// `layers` are the compositor's layer objects (crop, dst rect, fit); all read the one input.
+/// A layer's `filter` defaults to `auto` here (the compositor nodes default to `bilinear`):
+/// bicubic above 1.3x enlarging, multisample above 2x shrinking, bilinear between.
 /// With `fps` the output takes the first frame of each 1/fps slot of the input's timestamps, so
 /// the choice of frames follows timestamps and not arrival order. The same frame goes to every
 /// edge of an output. `drop` discards an output's frame when its edge is full instead of waiting.
+/// A frame tagged PQ or HLG is an error on an 8-bit output, drawn or passed on, whatever its own
+/// depth: the output would hold HDR-coded pixels that read as SDR. The error text carries
+/// `hdr_source_transfer=pq` or `=hlg`; tone map before the node. `allow_hdr_depth_reduction`
+/// takes the frame as it is and keeps its tags, for sources that are 8-bit HDR by intent.
 ///
 /// When all outputs have one canvas (the same width, height and sw_format; one output always
 /// does), the node declares it as its video format (IVideoFormatSource). A node below that asks
@@ -41,7 +49,7 @@ extern "C" {
 /// readers find them above this node, which is right only for an output without `fps`.
 class CudaTransform : public NodeSingleInput<av::VideoFrame>,
                       public NodeMultiOutput<av::VideoFrame>,
-                      public ReportsFinishByFlag,
+                      public NodeDoesNotBuffer,   // no frame is kept between process() calls: a stop only has to end the loop
                       public IVideoFormatSource {
     using CudaRectDraw = avp::mixer::CudaRectDraw;
     static constexpr const char *kType = "cuda_transform";
@@ -136,6 +144,10 @@ public:
             const CudaRectDraw::Canvas &cv = out.draw->canvas();
             if (in_fmt == AV_PIX_FMT_NONE || !avp::mixer::canvasAccepts(in_fmt, cv.sw_fmt))
                 throw Error(std::string(kType) + ": input hw sw_format mismatch output sw_format");
+            if (!cv.allow_hdr_depth_reduction)
+                if (const char *hdr = avp::mixer::hdrOnEightBitCanvas(in->raw()->color_trc, cv.sw_fmt))
+                    throw Error(avp::mixer::hdrOnEightBitError(kType, hdr) +
+                                ", or set allow_hdr_depth_reduction on the output");
             const auto ops = avp::mixer::resolveDrawOps(sources, out.layers, cv.width, cv.height, cv.sw_fmt);
             const bool pass = in_fmt == cv.sw_fmt && avp::mixer::copiesWholeFrame(ops, cv.width, cv.height) &&
                               (in->raw()->format == AV_PIX_FMT_CUDA || out.pass_arrays);
@@ -183,10 +195,11 @@ public:
         auto node = std::make_shared<CudaTransform>(make_unique<EdgeSource<av::VideoFrame>>(in_edge));
         for (const Parameters &spec : params["outputs"]) {
             Output out;
-            const CudaRectDraw::Canvas canvas = avp::mixer::parseCanvas(spec, prefix);
+            CudaRectDraw::Canvas canvas = avp::mixer::parseCanvas(spec, prefix);
             if (canvas.transfer != AVCOL_TRC_UNSPECIFIED)
                 throw Error(prefix + "color is not supported on an output");
-            out.layers = avp::mixer::parseLayersParam(spec);
+            canvas.allow_hdr_depth_reduction = spec.value("allow_hdr_depth_reduction", false);
+            out.layers = avp::mixer::parseLayersParam(spec, avp::mixer::ScaleFilter::Auto);
             if (out.layers.empty())
                 throw Error(prefix + "an output needs at least one layer");
             for (auto &layer : out.layers) {
