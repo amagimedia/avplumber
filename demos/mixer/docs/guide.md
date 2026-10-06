@@ -9,14 +9,14 @@ Use an NVIDIA host and a Python module built against the same patched FFmpeg
 as avplumber, with CUDA/NVCC and DRM/GL for browser sources.
 
 ```sh
-python3 demos/mixer/mixer.py --config mixer.json
+python3 -m pyplumber.mixer.cli --config mixer.json
 ```
 
 The config must declare outputs, or supply `--output <path>` / `--janus-output`.
 For a simple file-only show:
 
 ```sh
-python3 demos/mixer/mixer.py \
+python3 -m pyplumber.mixer.cli \
   --input <input-1> --input <input-2> --loop-inputs \
   --output program.mp4 --fps 30 --remote-control-port 7777
 ```
@@ -31,15 +31,15 @@ Run `--help` for current defaults and the full option list.
 The Compose stack starts the web UI. With a standalone backend:
 
 ```sh
-python3 demos/mixer/webui.py --host 127.0.0.1 --port 7777 --http-port 7681
+python3 -m pyplumber.mixer.gui --host 127.0.0.1 --port 7777 --http-port 7681
 ```
 
 For the optional terminal UI:
 
 ```sh
 python3 -m venv .venv-tui
-.venv-tui/bin/pip install -r demos/mixer/requirements.txt
-.venv-tui/bin/python demos/mixer/tui.py --host 127.0.0.1 --port 7777
+.venv-tui/bin/pip install -r pyplumber/mixer/gui/requirements.txt
+.venv-tui/bin/python -m pyplumber.mixer.gui.tui --host 127.0.0.1 --port 7777
 ```
 
 TUI keys: `1`–`9` select scenes, `c` cuts, `f` fades, `w` wipes, `t` toggles
@@ -67,7 +67,7 @@ from the shared [DMA-BUF stack](https://github.com/amagimedia/avplumber/blob/mix
 | `Dockerfile.fedora44` (default) | Fedora 44 / CUDA 13.4 / FFmpeg 8.1 | R615+ driver |
 | `Dockerfile` | Ubuntu 22.04 / CUDA 11.7 | Older compatible NVIDIA driver |
 
-Select the second with `MIXER_DOCKERFILE=Dockerfile`. The [L4 preset](https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/deploy/l4/README.md)
+Select the second with `MIXER_DOCKERFILE=Dockerfile`. The [L4 preset](https://github.com/amagimedia/avplumber/blob/mixer-improv/docker-compose/mixer/deploy/l4/README.md)
 pins its own FFmpeg build. Keep `media/.nv-cache` to reuse driver-compiled kernels.
 TensorRT is optional (`WITH_TENSORRT=1` and the `tensorrt_url` build secret in the
 Fedora image); the manual mixer needs no neural models.
@@ -77,20 +77,20 @@ Fedora image); the manual mixer needs no neural models.
 Serve controls at `/` and the preview server at `/preview/`, stripping that
 prefix. Set `MIXER_PREVIEW_BASE=/preview/` (or `webui.py --preview-base /preview/`).
 Forward WebSocket upgrades for the preview's Janus path as well as normal HTTP.
-The [L4 proxy template](https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/deploy/l4/nginx.conf.template) is a complete example.
+The [L4 proxy template](https://github.com/amagimedia/avplumber/blob/mixer-improv/docker-compose/mixer/deploy/l4/nginx.conf.template) is a complete example.
 WebRTC also needs the configured UDP range reachable from the viewer.
 
 ## Tests
 
 ```sh
-python3 -m pytest -q demos/mixer/tests
+python3 -m pytest -q tests/mixer
 ```
 
 NVIDIA-dependent cases require the configured GPU host. Against a running backend:
 
 ```sh
-python3 demos/mixer/smoke_test.py --port 7777 --wipe-file <alpha-clip>
-python3 demos/mixer/tests/cut_spam.py --url http://127.0.0.1:7681
+python3 tests/mixer/smoke_test.py --port 7777 --wipe-file <alpha-clip>
+python3 tests/mixer/cut_spam.py --url http://127.0.0.1:7681
 ```
 
 These change Program. See [latency](latency.md) for the cut probe and browser

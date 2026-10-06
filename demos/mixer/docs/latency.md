@@ -24,12 +24,12 @@ and [1080p load samples](https://amagimedia.github.io/avplumber/demos/mixer/docs
 
 ## Reproduce
 
-Generate numbered clips with [frame_codes.py](https://github.com/amagimedia/avplumber/blob/mixer-improv/demos/mixer/tests/frame_codes.py). Start the
+Generate numbered clips with [frame_codes.py](https://github.com/amagimedia/avplumber/blob/mixer-improv/tests/mixer/frame_codes.py). Start the
 mixer, a ttyd-hosted TUI and Janus player, then enable Chromium remote debugging.
 With Node.js 22+:
 
 ```sh
-node demos/mixer/tests/measure_click_latency.cjs \
+node tests/mixer/measure_click_latency.cjs \
   http://127.0.0.1:9222 http://127.0.0.1:8080/ \
   http://127.0.0.1:7681/ /tmp/click-latency.json
 ```
@@ -41,7 +41,7 @@ It changes Program. Preserve errors, raw samples and network conditions.
 ## Cut spam gate
 
 ```sh
-python3 demos/mixer/tests/cut_spam.py --url http://127.0.0.1:7681 --json
+python3 tests/mixer/cut_spam.py --url http://127.0.0.1:7681 --json
 ```
 
 Requires the cut probe. The test compares spaced cuts, bursts, mixed takes and
