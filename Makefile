@@ -14,14 +14,14 @@ HAVE_NVCC = 0
 # The NV12 encoder API used by nvjpeg_enc is unavailable in older CUDA
 # toolkits. Enable the node independently from the other CUDA nodes.
 HAVE_NVJPEG ?= 0
-HAVE_TENSORRT ?= 0
-# Build all retained neural inference, drawing, tracking, learned scene-cut,
-# and reframing nodes. Optional hardware integrations still use their HAVE_* flags.
+# Build the retained drawing, tracking and reframing nodes. Model inference and
+# its TensorRT flags live in out-of-tree nodes (see EXTRA_NODES_MK below).
+# HAVE_TENSORRT and TENSORRT_ROOT are not read here; those fragments read them.
+# Optional hardware integrations still use their HAVE_* flags.
 # The old split flags remain aliases for downstream build compatibility.
 NEURAL_NET_COMMON ?= 0
 NEURAL_NET_SPECIFIC ?= 0
 NEURAL_NET ?= $(if $(filter 1,$(NEURAL_NET_COMMON) $(NEURAL_NET_SPECIFIC)),1,0)
-TENSORRT_ROOT =
 NVCC ?= /usr/local/cuda/bin/nvcc
 ifeq ($(HAVE_VAAPI),1)
 HAVE_GL = 1
@@ -153,13 +153,6 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_TENSORRT)$(HAVE_NVCC),1111)
-NODES_SRC += $(SRCDIR)/nodes/neural_net/common/infer_trt_base.cpp
-NODES_SRC += $(SRCDIR)/nodes/neural_net/yolo/infer_yolo.cpp
-NODES_SRC += $(SRCDIR)/nodes/neural_net/rtdetr/infer_rtdetr.cpp
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.cu,avpl_yolo_preprocess_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu,avpl_yolo_mask_assemble_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
-endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVCC),11)
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/v210_to_cuda.cpp
@@ -191,14 +184,6 @@ else
 NODES_SRC := $(filter-out $(SRCDIR)/nodes/nvjpeg_enc.cpp,$(NODES_SRC))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_TENSORRT)$(HAVE_NVCC),1111)
-override CXXFLAGS += -DHAVE_TENSORRT=1
-ifneq ($(strip $(TENSORRT_ROOT)),)
-override CXXFLAGS += -I$(TENSORRT_ROOT)/include
-override LFLAGS += -L$(TENSORRT_ROOT)/lib -Wl,-rpath,$(TENSORRT_ROOT)/lib
-endif
-override LIBS_FLAGS += -lnvinfer -lnvinfer_plugin
-endif
 
 # NvOFFRUC (Frame Rate Up-Conversion) node, built only when headers are present
 ifeq ($(HAVE_CUDA)$(HAVE_NVOF_FRUC)$(NEURAL_NET),111)
