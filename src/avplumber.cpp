@@ -969,46 +969,6 @@ public:
             mixerOrchestrator(mixer_name).warmupWipe(wipe_file, timeout_ms);
         };
 
-        // mixer.overlay.init {"mixer":"mixer","source_otm":"otm_html_overlay_src",
-        //                     "overlay_otm":"otm_html_overlay","selector":"overlay_sel"}
-        commands_["mixer.overlay.init"] = [this, mixerJsonRequest](ClientStream &cs, std::string &arg) {
-            json req = mixerJsonRequest("mixer.overlay.init", arg);
-            std::string mixer_name = req.at("mixer").get<std::string>();
-            auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
-            std::lock_guard<std::mutex> lock(state->mutex);
-            state->overlay_source_otm_name = req.at("source_otm").get<std::string>();
-            state->overlay_otm_name = req.at("overlay_otm").get<std::string>();
-            state->overlay_selector_name = req.at("selector").get<std::string>();
-            state->overlay_enabled = req.value("enabled", false);
-            if (req.contains("ready_timeout_ms"))
-                state->overlay_ready_timeout_ms = req.at("ready_timeout_ms").get<int64_t>();
-            if (req.contains("ready_poll_ms"))
-                state->overlay_ready_poll_ms = req.at("ready_poll_ms").get<int64_t>();
-            if (state->overlay_ready_timeout_ms < 0)
-                throw Error("mixer.overlay.init: ready_timeout_ms must be >= 0");
-            if (state->overlay_ready_poll_ms <= 0)
-                throw Error("mixer.overlay.init: ready_poll_ms must be > 0");
-        };
-
-        // mixer.overlay {"mixer":"mixer","enabled":true,"ready_timeout_ms":1000}
-        commands_["mixer.overlay"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
-            json req = mixerJsonRequest("mixer.overlay", arg);
-            std::string mixer_name = req.at("mixer").get<std::string>();
-            bool enabled = req.at("enabled").get<bool>();
-            int64_t ready_timeout_ms = req.value("ready_timeout_ms", int64_t(-1));
-            if (req.contains("source_otm") || req.contains("overlay_otm") || req.contains("selector")) {
-                if (!req.contains("source_otm") || !req.contains("overlay_otm") || !req.contains("selector"))
-                    throw Error("mixer.overlay: source_otm, overlay_otm, and selector must be provided together");
-                auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
-                std::lock_guard<std::mutex> lock(state->mutex);
-                state->overlay_source_otm_name = req.at("source_otm").get<std::string>();
-                state->overlay_otm_name = req.at("overlay_otm").get<std::string>();
-                state->overlay_selector_name = req.at("selector").get<std::string>();
-            }
-            auto orch = mixerOrchestrator(mixer_name);
-            orch.setOverlayEnabled(enabled, ready_timeout_ms);
-        };
-
         // mixer.status <mixer_name>
         commands_["mixer.status"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
             std::string mixer_name = strutils::trim(arg);
@@ -1081,7 +1041,6 @@ public:
             if (cfg.contains("wipe_input_node")) state->wipe_input_node_name = cfg["wipe_input_node"].get<std::string>();
             if (cfg.contains("wipe_cache_store")) state->wipe_cache_store = cfg["wipe_cache_store"].get<std::string>();
             if (cfg.contains("wipe_overlay")) state->wipe_overlay_name = cfg["wipe_overlay"].get<std::string>();
-            if (cfg.contains("wipe_tail_edge")) state->wipe_tail_edge = cfg["wipe_tail_edge"].get<std::string>();
             if (cfg.contains("wipe_flush_edges")) {
                 state->wipe_flush_edges.clear();
                 for (const auto& e : cfg["wipe_flush_edges"])

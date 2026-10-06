@@ -81,7 +81,7 @@ override CXXFLAGS += -DSYNCMETER=1
 endif
 
 nodes_list_file = graph_factory.generated.cpp
-CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp mixer/graph_ops.cpp mixer/orchestrator/core.cpp mixer/orchestrator/scene.cpp mixer/orchestrator/cut.cpp mixer/orchestrator/fade.cpp mixer/orchestrator/wipe.cpp mixer/orchestrator/overlay.cpp mixer/transition_control.cpp mixer/backends/cuda/transition_control.cpp
+CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp mixer/graph_ops.cpp mixer/orchestrator/core.cpp mixer/orchestrator/scene.cpp mixer/orchestrator/cut.cpp mixer/orchestrator/fade.cpp mixer/orchestrator/wipe.cpp mixer/transition_control.cpp mixer/backends/cuda/transition_control.cpp
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
 # Boost.System is header-only since Boost 1.69; Fedora 44 (Boost 1.90) ships no libboost_system stub to link.

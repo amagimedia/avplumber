@@ -83,9 +83,6 @@ class MixerOrchestrator {
     /// (switchProgramSelector's return, or read now).
     void finishSnapshot(int64_t emitted);
     void finishSnapshot() { finishSnapshot(selectorOutputNs()); }
-    /// pts (ns) of the first frame of the new program: one main tick after `emitted`, the
-    /// selector's newest output read after it was switched; 0 before it emitted anything.
-    int64_t firstNewProgramFrameNs(int64_t emitted) const;
     /// pts (ns) of the newest frame the selector has emitted, 0 before its first.
     int64_t selectorOutputNs() const;
     /// Caller holds state_->mutex. Ends a transition: program on `new_pgm_scene`, the preview
@@ -144,7 +141,6 @@ public:
     /// compilation included) happen before the first real wipe. Blocks until
     /// the overlay produced a frame or *timeout_ms* passed.
     void warmupWipe(const std::string& wipe_file, int64_t timeout_ms);
-    void setOverlayEnabled(bool enabled, int64_t ready_timeout_ms = -1);
 
     /// Returns the names of all registered scenes, sorted alphabetically.
     std::vector<std::string> sceneNames() const;

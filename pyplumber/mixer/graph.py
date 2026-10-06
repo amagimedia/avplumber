@@ -859,7 +859,6 @@ class MixerGraphBuilder:
                 "wipe_group": wipe_group,
                 "wipe_input_node": self._n("wipe_cache" if cached else "wipe_input"),
                 # The edge feeding the compositor's clip input, drained before the wipe ends.
-                "wipe_tail_edge": self._e("wipe_cached" if cached else "wipe_rt_fps_out"),
                 # The resident chain is armed and parked in place; only a stopped chain's
                 # edges are flushed.
                 **({"wipe_cache_store": clipcache.STORE, "wipe_overlay": self._n("wipe_overlay")}

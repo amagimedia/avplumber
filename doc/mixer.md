@@ -84,7 +84,7 @@ SDR/HDR media and measured demo presets stay in `demos/mixer/`.
 | Module | Role |
 |---|---|
 | `src/mixer/orchestrator/MixerOrchestrator.hpp`, `core.cpp` | `MixerOrchestrator` core: node adapters, interruption/abort, status |
-| `src/mixer/orchestrator/{scene,cut,fade,wipe,overlay}.cpp` | one transition kind per file |
+| `src/mixer/orchestrator/{scene,cut,fade,wipe}.cpp` | scene operations and one take kind per file |
 | `src/mixer/routing.hpp` | state → router route tables and compositor layer arrays (pure) |
 | `src/mixer/graph_ops.{hpp,cpp}` | node/edge lookups, deferred `setObject`, readiness polls |
 | `src/nodes/mixer_selector.cpp` | commits immediate takes on input frames; advances fades and wipes by media PTS |
@@ -177,6 +177,9 @@ A readiness timeout aborts failed takes while preserving the current program.
 Takes are immediate. `start_pts_ms`, `switch_margin_ms`, the `timeline` graph
 parameter and the `timeline.*` commands have been removed. Transition duration
 still controls the length of a fade or wipe.
+
+The unused `mixer.overlay.init` and `mixer.overlay` handover commands have also
+been removed. Use the keyer through `mixer.dsk` for the application’s overlays.
 
 `MixerGraphBuilder` returns the final video-frame edge. The application owns
 input decode, output encoding/muxing, startup order, and shutdown.

@@ -267,7 +267,6 @@ def test_media_wipe_path_is_registered_without_starting_an_empty_clip(native_bou
     config = json.loads(init.split(" ", 2)[2])
     assert config["wipe_group"] == "mixer_wipe"
     assert config["wipe_input_node"] == "mixer_wipe_input"
-    assert config["wipe_tail_edge"] == "mixer_wipe_rt_fps_out"
     assert "wipe_overlay" not in config and "wipe_cache_store" not in config
     assert "mixer_wipe_cache" not in engine.nodes
     assert engine.nodes["mixer_wipe_input"]["group"] == "mixer_wipe"
@@ -295,7 +294,6 @@ def test_cached_wipe_chain_runs_from_startup_parked_and_is_never_stopped(native_
     assert config["wipe_input_node"] == "mixer_wipe_cache"
     assert config["wipe_overlay"] == "mixer_wipe_overlay"
     assert config["wipe_cache_store"] == "clips"
-    assert config["wipe_tail_edge"] == "mixer_wipe_cached"
     assert "wipe_flush_edges" not in config
     # The player feeds the compositor directly, stamped on the output grid; the
     # compositor starts parked.

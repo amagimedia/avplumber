@@ -234,26 +234,9 @@ struct MixerState : public InstanceShared<MixerState> {
     /// Cached wipes keep the player group running: no node is created, started or stopped
     /// for a take, so its CUDA allocations and threads never churn under the program.
     bool wipeChainStaysRunning() const { return !wipe_cache_store.empty(); }
-    /// Edge feeding the overlay's wipe input (e.g. "wipe_rt_fps_out"). Polled at
-    /// wipe end to ensure the tail of the wipe has been consumed by the overlay
-    /// before `wipe_selector` flips back to the direct path; otherwise the last
-    /// ~pipeline-latency worth of wipe frames is cut off at the selector.
-    std::string wipe_tail_edge;
-
     // Edges to flush before each wipe starts and after each wipe stops.
     // Prevents frames from a previous wipe run from bleeding into the next one.
     std::vector<std::string> wipe_flush_edges;
-
-    // Optional post-mixer HTML/DMA overlay path.  The native mixer.overlay
-    // command uses these static graph nodes to arm the hidden branch, wait for
-    // a monotonic candidate frame, and then switch the final selector.
-    std::string overlay_source_otm_name;  // e.g. "otm_html_overlay_src"
-    std::string overlay_otm_name;         // e.g. "otm_html_overlay"
-    std::string overlay_selector_name;    // e.g. "overlay_sel"
-    int64_t overlay_ready_timeout_ms = 1000;
-    int64_t overlay_ready_poll_ms = 5;
-    bool overlay_enabled = false;
-    std::atomic<uint64_t> overlay_generation{0};
 
     const SlotNodes& pgmSlot() const { return pgm_is_slot_a ? slot_a : slot_b; }
     const SlotNodes& pvwSlot() const { return pgm_is_slot_a ? slot_b : slot_a; }

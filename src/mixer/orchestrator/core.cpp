@@ -1,8 +1,7 @@
 // MixerOrchestrator core: construction, node/edge adapters, transition
-// interruption and abort, and status. Scene loading, cut, fade, wipe and
-// overlay live in the sibling scene/cut/fade/wipe/overlay.cpp files.
+// interruption and abort, and status. Scene loading and takes live in the
+// sibling scene/cut/fade/wipe.cpp files.
 #include "internal.hpp"
-#include "../primitives/TickGrid.hpp"
 #include "../../nodes/clip_cache/ClipCache.hpp"
 
 namespace avp::mixer {
@@ -287,10 +286,6 @@ void MixerOrchestrator::finishSnapshot(int64_t emitted) {
     snapshot->frames.arm(releaseAfter(emitted), false);
 }
 
-int64_t MixerOrchestrator::firstNewProgramFrameNs(int64_t emitted) const {
-    return emitted ? emitted + TickGrid(av::Rational(state_->fps_num, state_->fps_den)).time(1) : 0;
-}
-
 int64_t MixerOrchestrator::selectorOutputNs() const {
     const auto emitted = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->source_switcher_name));
     return emitted.isValid() ? emitted.timestamp({1, 1000000000}) : 0;
@@ -325,10 +320,6 @@ Parameters MixerOrchestrator::status() const {
     }
     s["prewarm_cut_scenes"] = state_->prewarm_cut_scenes;
     s["prewarm_source_mask"] = toParameters(state_->prewarm_source_mask);
-    if (!state_->overlay_selector_name.empty()) {
-        s["overlay_enabled"] = state_->overlay_enabled;
-        s["overlay_selector"] = state_->overlay_selector_name;
-    }
     auto mode = state_->transition_mode.load();
     switch (mode) {
         case MixerState::TransitionMode::Idle: s["transition"] = "idle"; break;

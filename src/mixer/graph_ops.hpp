@@ -1,7 +1,7 @@
 #pragma once
 // Thin helpers over NodeManager/edges used by the orchestrator: lookups that
 // tolerate missing nodes, setObject that queues for not-yet-created nodes,
-// router label resolution, and the readiness polls for wipe/overlay branches.
+// router label resolution, and the readiness poll for wipe warmup.
 #include "primitives/MixerState.hpp"
 #include "MixerGraph.hpp"
 #include "../avutils.hpp"
@@ -30,17 +30,12 @@ void resetInputIf(const std::shared_ptr<MixerGraph>& nodes, const std::string& n
 /// the last VFR guard before the encoder and resetting it would drop that guarantee.
 void resetSlotNormFps(const std::shared_ptr<MixerGraph>& nodes, const MixerState& st);
 
-bool nodeWorkingIfExists(const std::shared_ptr<MixerGraph>& nodes, const std::string& name);
-/// True while any node of the group still runs. Reads each node without the group's lock,
-/// which a stop in progress holds until its last node has stopped.
-bool groupWorking(const std::shared_ptr<MixerGraph>& nodes, const std::string& group_name);
 std::shared_ptr<NodeWrapper> workingConsumerForEdge(const std::shared_ptr<MixerGraph>& nodes,
                                                     const std::string& edge_name);
 /// Stores the value in the wrapper's parameters and applies it when the node exists; false when
 /// the node is not created yet (the value is picked up at creation).
 bool setNodeObjectIfCreated(const std::shared_ptr<MixerGraph>& nodes, const std::string& node_name,
                             const std::string& key, const Parameters& value);
-int edgeOccupiedIfExists(const std::shared_ptr<MixerGraph>& nodes, const std::string& name);
 std::string firstDstEdgeName(const std::shared_ptr<MixerGraph>& nodes, const std::string& node_name);
 std::string edgeNameAt(const std::shared_ptr<MixerGraph>& nodes, const std::string& node_name,
                        const std::string& param_name, size_t index);
@@ -55,23 +50,11 @@ struct WipeReadyResult {
     av::Timestamp ready_ts = NOTS;
 };
 
-struct OverlayReadyResult {
-    bool ready = false;
-    bool cancelled = false;
-    int64_t waited_ms = 0;
-    av::Timestamp ready_ts = NOTS;
-};
-
 /// Poll until `edge_name` carries a frame newer than `initial_ts` and wallclock reached
 /// `earliest_visible_pts_ms`, or the transition generation moved on, or `timeout_ms` passed.
 WipeReadyResult waitForWipeOverlayReady(const std::shared_ptr<MixerGraph>& nodes, const std::string& edge_name,
                                         av::Timestamp initial_ts, int64_t earliest_visible_pts_ms,
                                         const std::shared_ptr<MixerState>& state, uint64_t generation,
                                         int64_t timeout_ms = kWipeReadyTimeoutMs);
-bool overlayCommandCurrent(const std::shared_ptr<MixerState>& state, uint64_t generation);
-OverlayReadyResult waitForOverlayBranchReady(const std::shared_ptr<MixerGraph>& nodes,
-                                             const std::shared_ptr<MixerState>& state, uint64_t generation,
-                                             const std::string& edge_name, av::Timestamp initial_ts,
-                                             av::Timestamp minimum_ts, int64_t timeout_ms, int64_t poll_ms);
 
 }

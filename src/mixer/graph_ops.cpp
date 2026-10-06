@@ -23,22 +23,6 @@ void resetSlotNormFps(const std::shared_ptr<MixerGraph>& nodes, const MixerState
     resetInputIf(nodes, st.slot_b.norm_ts_name);
 }
 
-bool nodeWorkingIfExists(const std::shared_ptr<MixerGraph>& nodes, const std::string& name) {
-    if (name.empty())
-        return false;
-    auto w = nodes->node_if_exists(name);
-    return w && w->isWorking();
-}
-
-bool groupWorking(const std::shared_ptr<MixerGraph>& nodes, const std::string& group_name) {
-    const auto group = nodes->group(group_name);
-    for (const auto& [_, node] : nodes->allNodes()) {
-        if (node && node->group() == group && node->isWorking())
-            return true;
-    }
-    return false;
-}
-
 static bool nodeConsumesEdge(const std::shared_ptr<NodeWrapper>& node, const std::string& edge_name) {
     if (!node)
         return false;
@@ -83,13 +67,6 @@ bool setNodeObjectIfCreated(const std::shared_ptr<MixerGraph>& nodes,
             return false;
         throw;
     }
-}
-
-int edgeOccupiedIfExists(const std::shared_ptr<MixerGraph>& nodes, const std::string& name) {
-    if (name.empty())
-        return 0;
-    auto e = nodes->edges()->findAny(name);
-    return e ? e->occupied() : 0;
 }
 
 std::string firstDstEdgeName(const std::shared_ptr<MixerGraph>& nodes, const std::string& node_name) {
@@ -147,41 +124,6 @@ WipeReadyResult waitForWipeOverlayReady(const std::shared_ptr<MixerGraph>& nodes
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
         result.waited_ms += kPollMs;
-    }
-    result.ready_ts = edgeLastTsIfExists(nodes, edge_name);
-    return result;
-}
-
-bool overlayCommandCurrent(const std::shared_ptr<MixerState>& state, uint64_t generation) {
-    return state->overlay_generation.load(std::memory_order_acquire) == generation;
-}
-
-OverlayReadyResult waitForOverlayBranchReady(const std::shared_ptr<MixerGraph>& nodes,
-                                             const std::shared_ptr<MixerState>& state,
-                                             uint64_t generation,
-                                             const std::string& edge_name,
-                                             av::Timestamp initial_ts,
-                                             av::Timestamp minimum_ts,
-                                             int64_t timeout_ms,
-                                             int64_t poll_ms) {
-    OverlayReadyResult result;
-    timeout_ms = std::max<int64_t>(0, timeout_ms);
-    poll_ms = std::max<int64_t>(1, poll_ms);
-    while (result.waited_ms < timeout_ms) {
-        if (!overlayCommandCurrent(state, generation)) {
-            result.cancelled = true;
-            return result;
-        }
-        av::Timestamp ts = edgeLastTsIfExists(nodes, edge_name);
-        const bool fresh = ts.isValid() && (!initial_ts.isValid() || ts > initial_ts);
-        const bool monotonic = !minimum_ts.isValid() || (ts.isValid() && !(ts < minimum_ts));
-        if (fresh && monotonic) {
-            result.ready = true;
-            result.ready_ts = ts;
-            return result;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
-        result.waited_ms += poll_ms;
     }
     result.ready_ts = edgeLastTsIfExists(nodes, edge_name);
     return result;

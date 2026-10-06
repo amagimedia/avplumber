@@ -39,12 +39,20 @@ def check_graph(avp, mixer, output, errors, wipe_file, wipe_seconds):
         image = np.frombuffer(frame.data[0], np.uint8).reshape(360, frame.linesize[0])[:, :640].copy()
         return time.monotonic(), image
 
-    def collect(seconds):
+    def collect(seconds, *, allow_wipe_cancel=False):
         frames = []
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             if sample := receive():
                 frames.append(sample)
+        if allow_wipe_cancel:
+            # NodeGroup reports NotReallyError through the same callback as
+            # failures when a take cancels an in-progress decoder-group start.
+            # Accept only that notification, only during deliberate cancellation;
+            # the caller still checks live pixels and the replacement endpoint.
+            cancelled = ('recovery_wipe', 'NodeGroup',
+                         'Error while changing state: Another start of the group requested')
+            errors[:] = [error for error in errors if error != cancelled]
         assert not errors, errors
         return frames
 
@@ -99,7 +107,7 @@ def check_graph(avp, mixer, output, errors, wipe_file, wipe_seconds):
                 started = time.monotonic()
                 take(second, 'full0')
                 acknowledged = time.monotonic()
-                following = collect(max(2.0, wipe_seconds + 1))
+                following = collect(max(2.0, wipe_seconds + 1), allow_wipe_cancel=first == 'media_wipe')
                 assert len(following) >= 60, 'replacement stalled program output'
                 live_scene(0)
                 # A cancelled transition cannot reappear after its former end.
