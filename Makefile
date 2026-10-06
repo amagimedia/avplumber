@@ -84,7 +84,8 @@ nodes_list_file = graph_factory.generated.cpp
 CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp mixer/TransitionScheduler.cpp mixer/graph_ops.cpp mixer/orchestrator/core.cpp mixer/orchestrator/scene.cpp mixer/orchestrator/cut.cpp mixer/orchestrator/fade.cpp mixer/orchestrator/wipe.cpp mixer/orchestrator/overlay.cpp
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
-LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz
+# Boost.System is header-only since Boost 1.69; Fedora 44 (Boost 1.90) ships no libboost_system stub to link.
+LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz
 
 ifeq ($(HAVE_JACK),1)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/jack -maxdepth 1 -name '*.cpp')
@@ -153,10 +154,10 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
 endif
 
-
 ifeq ($(HAVE_CUDA)$(HAVE_NVCC),11)
 override CXXFLAGS += -DHAVE_CUDA_RECT_SCALE=1
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.cu,avpl_rect_scale_ptx,objs/src/nodes/hwaccel/cuda_rect_draw.o))
+objs/$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.ptx: $(SRCDIR)/nodes/hwaccel/cuda_rect_table.h $(SRCDIR)/nodes/hwaccel/graphic_color.h
 NODES_SRC += $(SRCDIR)/nodes/scene_cut/luma_diff.cpp
 NODES_SRC += $(SRCDIR)/nodes/scene_cut/hog_diff.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/scene_cut/luma_diff.cu,avpl_luma_diff_ptx,objs/src/nodes/scene_cut/luma_diff.o))
@@ -167,11 +168,15 @@ CUDA_ROOT ?= /usr/local/cuda
 ifeq ($(HAVE_CUDA),1)
 NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_rect_overlay.cpp
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_transform.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_rect_draw.cpp
 override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs -I$(CUDA_ROOT)/include -I$(CUDA_ROOT)/targets/x86_64-linux/include
 override LFLAGS += -L$(CUDA_ROOT)/targets/x86_64-linux/lib -Wl,-rpath,$(CUDA_ROOT)/targets/x86_64-linux/lib
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
+else
+# The mixer's compositor nodes draw with cuda_rect_draw.
+NODES_SRC := $(filter-out $(SRCDIR)/nodes/mixer_compositor.cpp $(SRCDIR)/nodes/mixer_keyer.cpp,$(NODES_SRC))
 endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVJPEG),11)
@@ -181,7 +186,6 @@ endif
 else
 NODES_SRC := $(filter-out $(SRCDIR)/nodes/nvjpeg_enc.cpp,$(NODES_SRC))
 endif
-
 
 # NvOFFRUC (Frame Rate Up-Conversion) node, built only when headers are present
 ifeq ($(HAVE_CUDA)$(HAVE_NVOF_FRUC)$(NEURAL_NET),111)
@@ -308,9 +312,16 @@ $(patsubst %.cpp,objs/%.o,$(CPPSRC_COMPILE)): objs/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c -o $@ $<
 	$(POSTCOMPILE)
 
+# Own dependency files under objs/python: these translation units are compiled twice (once
+# plain, once with -DPYTHON_MODULE) and must not share .d paths with the plain objects.
+# Without this the module silently kept objects built against an older header.
+PYTHON_DEPFLAGS = -MT $@ -MMD -MP -MF objs/python/$*.Td
+PYTHON_POSTCOMPILE = @mv -f objs/python/$*.Td objs/python/$*.d && touch $@
+
 $(PYTHON_MODULE_DEFINE_OBJS): objs/python/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(PYTHON_MODULE_EXTRA_CXXFLAGS) -DPYTHON_MODULE -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(PYTHON_MODULE_EXTRA_CXXFLAGS) -DPYTHON_MODULE $(PYTHON_DEPFLAGS) -c -o $@ $<
+	$(PYTHON_POSTCOMPILE)
 
 objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 	@mkdir -p $(dir $@)
@@ -373,3 +384,4 @@ objs/src/rest_client.o: deps/cpr/build/lib/libcpr.a
 .PRECIOUS: objs/%.d
 
 include $(wildcard $(patsubst %.cpp,objs/%.d,$(CPPSRC_COMPILE) $(CPPSRC_PYTHON)))
+include $(wildcard $(patsubst %.o,%.d,$(PYTHON_MODULE_DEFINE_OBJS)))

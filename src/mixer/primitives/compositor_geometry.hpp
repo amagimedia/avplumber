@@ -60,4 +60,47 @@ inline std::optional<Placement> placeInCanvas(int width, int height, Rect crop, 
     return Placement{inner->source, destination};
 }
 
+/// How a layer is resampled. `Auto` chooses among the other three by the layer's scale.
+enum class ScaleFilter { Auto, Bilinear, Bicubic, Multisample };
+inline constexpr ScaleFilter kScaleFilters[] = {ScaleFilter::Auto, ScaleFilter::Bilinear, ScaleFilter::Bicubic,
+                                                ScaleFilter::Multisample};
+
+inline const char *scaleFilterName(ScaleFilter filter) {
+    switch (filter) {
+    case ScaleFilter::Auto: return "auto";
+    case ScaleFilter::Bicubic: return "bicubic";
+    case ScaleFilter::Multisample: return "multisample";
+    default: return "bilinear";
+    }
+}
+
+/// A layer's filter settings. The defaults leave a layer bilinear.
+struct FilterSpec {
+    ScaleFilter mode = ScaleFilter::Bilinear;
+    // The cubic's coefficient with the sign of FFmpeg scale_cuda's `param` (the cubic's A is its
+    // negative). 0 is scale_cuda's default bicubic: no weight on the outer taps, so a 2x2
+    // interpolation with Hermite weights; 0.5 is Catmull-Rom.
+    float bicubic_param = 0.f;
+    int samples = 4;                // multisample: 4 or 8 bilinear samples per output sample
+    double bicubic_above = 1.3;     // auto: bicubic when a layer enlarges by more than this
+    double multisample_above = 2.;  // auto: multisample when a layer shrinks by more than this
+
+    bool operator==(const FilterSpec &other) const {
+        return mode == other.mode && bicubic_param == other.bicubic_param && samples == other.samples &&
+               bicubic_above == other.bicubic_above && multisample_above == other.multisample_above;
+    }
+};
+
+/// The filter that draws a layer scaling `sw`x`sh` source pixels to `dw`x`dh`: `spec.mode`, or for
+/// `Auto` the choice by scale, never `Auto` itself. The axis with the larger factor decides.
+/// Shrinking is tested first: a layer that shrinks on one axis and enlarges on the other aliases
+/// on the first under a cubic, while multisampling only stays soft on the second.
+inline ScaleFilter resolveScaleFilter(const FilterSpec &spec, int sw, int sh, int dw, int dh) {
+    if (spec.mode != ScaleFilter::Auto) return spec.mode;
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return ScaleFilter::Bilinear;
+    if (std::max(double(sw) / dw, double(sh) / dh) > spec.multisample_above) return ScaleFilter::Multisample;
+    if (std::max(double(dw) / sw, double(dh) / sh) > spec.bicubic_above) return ScaleFilter::Bicubic;
+    return ScaleFilter::Bilinear;
+}
+
 }

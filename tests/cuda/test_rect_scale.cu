@@ -1,10 +1,12 @@
-// NVIDIA integration test of the production scaler, including UV lane isolation.
+// NVIDIA integration test of the bilinear sampler (the reference kernels in
+// legacy_rect_kernels.cuh share load/store/sampling code with composite_planes).
 // nvcc -std=c++17 tests/cuda/test_rect_scale.cu -o /tmp/test_rect_scale
 #include <array>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
 #include "../../src/nodes/hwaccel/cuda_rect_scale.cu"
+#include "legacy_rect_kernels.cuh"
 
 void check(cudaError_t result) {
     if (result != cudaSuccess) throw std::runtime_error(cudaGetErrorString(result));
@@ -73,7 +75,8 @@ void checkUpscaleWord(int lanes, int origin_x, int shift) {
         for (int e=0; e<target_pitch_e; ++e) {
             const int x=e/lanes, lane=e%lanes, ox=x-origin_x, oy=y-2;
             const bool written=x<6 && ox>=0 && ox<4 && oy>=0 && oy<4;
-            const int logical=lane ? 1023-4*expected[oy*4+ox] : 4*expected[oy*4+ox];
+            const int code=written ? expected[oy*4+ox] : 0;
+            const int logical=lane ? 1023-4*code : 4*code;
             const int value=written ? logical<<shift : 0xa5a5;
             if (target[y*target_pitch_e+e]!=value)
                 throw std::runtime_error("word bilinear pixel, shift, lane or clipping mismatch");
@@ -105,7 +108,8 @@ void checkPromote(int lanes, int dst_shift) {
         for (int e=0; e<target_pitch_e; ++e) {
             const int x=e/lanes, lane=e%lanes, ox=x-2, oy=y-2;
             const bool written=x<6 && ox>=0 && ox<4 && oy>=0 && oy<4;
-            const int base=lane ? 255-expected[oy*4+ox] : expected[oy*4+ox];
+            const int code=written ? expected[oy*4+ox] : 0;
+            const int base=lane ? 255-code : code;
             const int value=written ? (base*4)<<dst_shift : 0xa5a5;
             if (target[y*target_pitch_e+e]!=value)
                 throw std::runtime_error("promote pixel, multiplier, shift or lane mismatch");

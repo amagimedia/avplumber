@@ -4,7 +4,7 @@
 // (NVOF) dense engine.
 //
 // Modeled on luma_diff.cpp: grabs the CUDA context/stream from the incoming
-// AV_PIX_FMT_CUDA frame, keeps the previous frame's luma in an NVOF input
+// linear CUDA or NV12 CUarray frame, keeps the previous frame's luma in an NVOF input
 // buffer, runs dense optical flow between (prev -> cur), reduces the flow grid
 // to background motion statistics, optionally fits a full 2x3 affine with
 // OpenCV, and writes {tx, ty, affine_2x3, nvof_cost, has_prev, ...} into frame
@@ -18,6 +18,7 @@
 // HAVE_NVOF=1 (see Makefile gate).
 
 #include "../../hwaccel.hpp"
+#include "cuda_frame_helpers.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -169,7 +170,8 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
     int irls_iters_ = 3;
     double irls_huber_px_ = 2.0;
 
-    AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
+    // In particular, a CUarray decoder owns a private stream through this device.
+    avp::AvBufferRef cuda_device_ref_;
     CUcontext cu_ctx_ = nullptr;
     CUstream stream_ = nullptr;
 
@@ -186,6 +188,15 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
     int grid_h_ = 0;
     bool have_prev_ = false;
     uint64_t frame_counter_ = 0;
+    // Retain the current decoder surface on an error until teardown drains the
+    // stream. Normal processing releases it after the final luma copy completes.
+    av::VideoFrame in_flight_;
+
+    void finishFrame() {
+        if (CCM_CHECK_CU(cuStreamSynchronize(stream_)))
+            throw Error("cuda_camera_motion: frame synchronization failed");
+        in_flight_ = av::VideoFrame();
+    }
 
     std::vector<NV_OF_FLOW_VECTOR> host_grid_;
     std::vector<uint8_t> host_cost_;
@@ -242,24 +253,15 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
     }
 
     bool initCudaContextFromFrame(const av::VideoFrame& frm) {
-        if (cu_ctx_) return true;
-        if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) {
-            logstream << "cuda_camera_motion: missing hw_frames_ctx";
-            return false;
-        }
-        AVHWFramesContext* fctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
-        if (!fctx || !fctx->device_ctx || !fctx->device_ctx->hwctx) {
-            logstream << "cuda_camera_motion: missing device_ctx/hwctx";
-            return false;
-        }
-        cuda_dev_ctx_ = (AVCUDADeviceContext*)fctx->device_ctx->hwctx;
-        if (!cuda_dev_ctx_ || !cuda_dev_ctx_->cuda_ctx) {
-            logstream << "cuda_camera_motion: missing CUDA context";
-            return false;
-        }
-        cu_ctx_ = cuda_dev_ctx_->cuda_ctx;
-        if (CCM_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
-        stream_ = cuda_dev_ctx_->stream;  // share ffmpeg's stream
+        auto *device = scene_cut_cuda::frameCudaDevice(frm, "cuda_camera_motion", cu_ctx_);
+        if (!device) return false;
+        cu_ctx_ = device->cuda_ctx;
+        // Every frame completes before the next process() call. A replacement
+        // decoder/pool can therefore supply a new producer stream in this context.
+        if (hOF_ && stream_ != device->stream &&
+            CCM_CHECK_OF(of_.nvOFSetIOCudaStreams(hOF_, device->stream, device->stream))) return false;
+        stream_ = device->stream;
+        scene_cut_cuda::retainFrameDevice(frm, cuda_device_ref_);
         return true;
     }
 
@@ -350,16 +352,15 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         return true;
     }
 
-    // Copy a device luma plane (pitched) into an NVOF GRAYSCALE8 input buffer.
-    bool uploadLuma(NvOFGPUBufferHandle buf, CUdeviceptr srcY, int srcPitch, int width, int height) {
+    // GPU-to-GPU luma copy directly into NVOF's required GRAYSCALE8 buffer.
+    bool uploadLuma(NvOFGPUBufferHandle buf, CUDA_MEMCPY2D copy) {
         NV_OF_CUDA_BUFFER_STRIDE_INFO si{};
-        of_.nvOFGPUBufferGetStrideInfo(buf, &si);
+        if (CCM_CHECK_OF(of_.nvOFGPUBufferGetStrideInfo(buf, &si))) return false;
         CUdeviceptr dst = of_.nvOFGPUBufferGetCUdeviceptr(buf);
-        CUDA_MEMCPY2D m{};
-        m.srcMemoryType = CU_MEMORYTYPE_DEVICE; m.srcDevice = srcY;  m.srcPitch = (size_t)srcPitch;
-        m.dstMemoryType = CU_MEMORYTYPE_DEVICE; m.dstDevice = dst;   m.dstPitch = si.strideInfo[0].strideXInBytes;
-        m.WidthInBytes = (size_t)width; m.Height = (size_t)height;
-        return CCM_CHECK_CU(cuMemcpy2DAsync(&m, stream_)) == 0;
+        copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+        copy.dstDevice = dst;
+        copy.dstPitch = si.strideInfo[0].strideXInBytes;
+        return CCM_CHECK_CU(cuMemcpy2DAsync(&copy, stream_)) == 0;
     }
 
     bool downloadGrid() {
@@ -865,7 +866,11 @@ public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
 
     ~CudaCameraMotion() {
-        if (cu_ctx_) CCM_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
+        if (cu_ctx_) {
+            CCM_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
+            CCM_CHECK_CU(cuStreamSynchronize(stream_));
+        }
+        in_flight_ = av::VideoFrame();
         destroyOFSession();
 #if HAVE_CCM_GPU_IRLS
         releaseGpuIrlsBuffers();
@@ -889,17 +894,20 @@ public:
         ++frame_counter_;
 
         AVFrame* raw = frm.raw();
-        if (!raw || raw->format != AV_PIX_FMT_CUDA) {
-            if (strict_cuda_) throw Error("cuda_camera_motion: input frame is not AV_PIX_FMT_CUDA");
+        const bool array = raw && avp::cuda::isArrayFormat(static_cast<AVPixelFormat>(raw->format));
+        if (!raw || (raw->format != AV_PIX_FMT_CUDA && !array)) {
+            if (strict_cuda_) throw Error("cuda_camera_motion: input frame must be CUDA or CUarray");
             writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "skipped_non_cuda");
             this->sink_->put(frm); return;
         }
-        if (!isSupportedCudaFormat(hwSwFormat(frm))) {
+        const auto sw_format = hwSwFormat(frm);
+        if (array ? sw_format != AV_PIX_FMT_NV12 : !isSupportedCudaFormat(sw_format)) {
             if (strict_cuda_) throw Error("cuda_camera_motion: unsupported CUDA sw_format");
             writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "unsupported_sw_format");
             this->sink_->put(frm); return;
         }
-        if (!raw->data[0] || raw->linesize[0] <= 0) {
+        if (!raw->data[0] || raw->width <= 0 || raw->height <= 0 ||
+            (!array && raw->linesize[0] < raw->width)) {
             if (strict_cuda_) throw Error("cuda_camera_motion: invalid luma plane");
             writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "invalid_luma_plane");
             this->sink_->put(frm); return;
@@ -910,20 +918,25 @@ public:
             this->sink_->put(frm); return;
         }
 
-        const CUdeviceptr y_plane = (CUdeviceptr)(uintptr_t)raw->data[0];
-        const int y_pitch = raw->linesize[0];
+        CUDA_MEMCPY2D luma{};
+        if (!scene_cut_cuda::lumaCopySource(raw, luma, "cuda_camera_motion")) {
+            if (strict_cuda_) throw Error("cuda_camera_motion: invalid luma plane");
+            writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "invalid_luma_plane");
+            this->sink_->put(frm); return;
+        }
 
+        in_flight_ = frm;
         // Upload current luma into inBuf_.
-        if (!uploadLuma(inBuf_, y_plane, y_pitch, of_w_, of_h_)) {
+        if (!uploadLuma(inBuf_, luma)) {
             throw Error("cuda_camera_motion: luma upload failed");
         }
 
         if (!have_prev_) {
             // First frame: no reference yet. Seed refBuf_ with current and emit tx=0.
-            if (!uploadLuma(refBuf_, y_plane, y_pitch, of_w_, of_h_)) {
+            if (!uploadLuma(refBuf_, luma)) {
                 throw Error("cuda_camera_motion: ref seed upload failed");
             }
-            CCM_CHECK_CU(cuStreamSynchronize(stream_));
+            finishFrame();
             have_prev_ = true;
             writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "ok");
             this->sink_->put(frm);
@@ -957,10 +970,10 @@ public:
             }
             if (estimate_status == GpuIrlsEstimateStatus::Invalid) {
                 writeMetadata(frm, true, motion, affine, cost, estimate_metadata_status);
-                if (!uploadLuma(refBuf_, y_plane, y_pitch, of_w_, of_h_)) {
+                if (!uploadLuma(refBuf_, luma)) {
                     throw Error("cuda_camera_motion: ref roll upload failed");
                 }
-                CCM_CHECK_CU(cuStreamSynchronize(stream_));
+                finishFrame();
                 this->sink_->put(frm);
                 return;
             }
@@ -978,10 +991,10 @@ public:
         writeMetadata(frm, true, motion, affine, cost, "ok");
 
         // Current becomes the reference for the next frame.
-        if (!uploadLuma(refBuf_, y_plane, y_pitch, of_w_, of_h_)) {
+        if (!uploadLuma(refBuf_, luma)) {
             throw Error("cuda_camera_motion: ref roll upload failed");
         }
-        CCM_CHECK_CU(cuStreamSynchronize(stream_));
+        finishFrame();
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
             logstream << "cuda_camera_motion: frame=" << (frame_counter_ - 1)

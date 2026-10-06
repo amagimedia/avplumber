@@ -39,6 +39,15 @@ int main() {
     assert(packedAlphaOffset(AV_PIX_FMT_BGRA) == 3 && packedAlphaOffset(AV_PIX_FMT_BGR0) == -1);
     assert(canvasAccepts(AV_PIX_FMT_NV12, AV_PIX_FMT_NV12) && canvasAccepts(AV_PIX_FMT_BGRA, AV_PIX_FMT_P210));
     assert(!canvasAccepts(AV_PIX_FMT_YUV420P, AV_PIX_FMT_NV12));
+    // A deeper semiplanar source on a shallower canvas is the demotion, never the promotion;
+    // equal depths with another subsampling stay a promotion by 1.
+    assert(isYuvDemoteConvertible(AV_PIX_FMT_P010, AV_PIX_FMT_NV12) && isYuvDemoteConvertible(AV_PIX_FMT_P210, AV_PIX_FMT_NV12));
+    assert(canvasAccepts(AV_PIX_FMT_P010, AV_PIX_FMT_NV12) && canvasAccepts(AV_PIX_FMT_P210, AV_PIX_FMT_NV12));
+    assert(!isYuvDemoteConvertible(AV_PIX_FMT_NV12, AV_PIX_FMT_P010) && !isYuvDemoteConvertible(AV_PIX_FMT_NV12, AV_PIX_FMT_NV12));
+    assert(!isYuvDemoteConvertible(AV_PIX_FMT_P210, AV_PIX_FMT_P010) && isYuvPromoteConvertible(AV_PIX_FMT_P210, AV_PIX_FMT_P010));
+    assert(!isYuvDemoteConvertible(AV_PIX_FMT_YUV420P10, AV_PIX_FMT_NV12) && !canvasAccepts(AV_PIX_FMT_YUV420P10, AV_PIX_FMT_NV12));
+    assert(!isYuvDemoteConvertible(AV_PIX_FMT_P010, AV_PIX_FMT_BGRA) && !canvasAccepts(AV_PIX_FMT_P010, AV_PIX_FMT_BGRA));
+    assert(yuvDepthDifference(AV_PIX_FMT_NV12, AV_PIX_FMT_P210) == 2 && yuvDepthDifference(AV_PIX_FMT_P010, AV_PIX_FMT_NV12) == -2);
 
     assert(alphaPlaneIndex(AV_PIX_FMT_YUVA420P) == 3 && alphaPlaneIndex(AV_PIX_FMT_BGRA) == -1);
     uint16_t v = 0;

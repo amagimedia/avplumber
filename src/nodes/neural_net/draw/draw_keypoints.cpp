@@ -218,6 +218,8 @@ public:
 
     ~DrawKeypoints() {
         if (gpu_points_buf_) {
+            // The destroying thread may have no current context (as ~CudaOverlayBase does).
+            if (cu_ctx_) CUDA_OVERLAY_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
             cuMemFree(gpu_points_buf_);
             gpu_points_buf_ = 0;
         }
