@@ -85,7 +85,7 @@ template<> struct FilterMediaSpecific<av::AudioSamples> {
     }
 };
 
-template<typename Child, typename T, AVMediaType media_type> class FilterNode: public NodeMultiInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag, public ITimeBaseSource, public IInputsObjects {
+template<typename Child, typename T, AVMediaType media_type> class FilterNode: public NodeMultiInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag, public IFlushable, public ITimeBaseSource, public IInputsObjects {
     friend struct FilterMediaSpecific<T>;
 protected:
     using MediaSpecific = FilterMediaSpecific<T>;
@@ -601,6 +601,19 @@ public:
     }
     virtual ~FilterNode() {
         freeFilterGraph();
+    }
+    void flush() override {
+        if (this->finished_) return;
+        // Explicit stop need not arrive behind an EOF marker. Close every
+        // buffersrc before draining frames already accepted by the graph;
+        // queued upstream frames belong to the cancelled run.
+        for (Port &source : sources_) {
+            int ret = source.closeAtEof();
+            if (ret < 0 && ret != AVERROR_EOF) {
+                throw Error("Error closing filter graph source: " + av::error2string(ret));
+            }
+        }
+        drainAndFinish();
     }
     // Pop EOF markers sitting at the head of any input and close that buffersrc.
     // Returns true once every input has reached EOF.
