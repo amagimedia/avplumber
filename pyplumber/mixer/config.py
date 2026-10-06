@@ -28,7 +28,7 @@ TRANSITIONS = ("cut", "fade", "wipe")
 WORKING_FORMATS = ("nv12", "p010le", "p210le")
 # How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (the library default), or
 # raw_to_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it. 60 fps
-# A/B in demos/mixer/docs/cookbook/raw-uploads.html; the 110-input A/B is pending).
+# A/B in https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html; the 110-input A/B is pending).
 RAW_UPLOADS = ("hwupload", "pinned")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 193         # mixer_compositor active_inputs is a 193-bit pad mask (SourceMask, kSourceMaskBits)

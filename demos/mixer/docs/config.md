@@ -20,7 +20,7 @@ HLG/PQ require 10-bit storage. Browser graphics are SDR; the compositor converts
 | `width`, `height` | — | the program raster the compositor draws into |
 | `fps` | `30` | **how often the compositor renders**, and the clock the whole mixer runs on: inputs are re-timed to it and browser pages are asked to paint at it |
 | `working_format` | `nv12` | compositor and transition pixel storage: `nv12` (8-bit 4:2:0), `p010le` (10-bit 4:2:0) or `p210le` (10-bit 4:2:2). 8-bit sources are promoted onto a 10-bit canvas; `p210le` keeps 4:2:2 through conversion and compositing. Renditions are 4:2:0 for NVENC, subsampled once |
-| `raw_upload` | `hwupload` | `hwupload` or `pinned` (`raw_to_cuda`); Setup uses pinned staging. [Details](cookbook/raw-uploads.html) |
+| `raw_upload` | `hwupload` | `hwupload` or `pinned` (`raw_to_cuda`); Setup uses pinned staging. [Details](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html) |
 | `color` | `sdr` | canvas color contract: `sdr` (BT.709), `hlg` or `pq` (BT.2020). HLG/PQ need a 10-bit `working_format`. Every source is converted to it on the GPU; renditions convert from it |
 | `latency_ms` | 2 frames up to 30 fps, 3 at 50/60 | playout buffer between a source frame's arrival and its tick (80 ms at 25 fps, 50 ms at 60). A frame later than that is skipped and the previous one repeated, so set it just above the worst source jitter; must stay below six frames. `--mixer-latency-ms` on the command line overrides it |
 
@@ -51,7 +51,7 @@ The program is composited once. Each rendition adds an encode. With no rendition
 
 ## sources
 
-One source ID opens one decoder or browser window; scenes and aliases reuse it. Repeated locations require `independent: true` on every declaration. Browser import is provided by the [shared DMA-BUF integration](../../../doc/dmabuf.md). CUarray requires compatible FFmpeg/consumers and a fixed surface budget; it has no copy fallback or decoder auto-restart. See the [CUarray cookbook](cookbook/nvdec-cuarray.html).
+One source ID opens one decoder or browser window; scenes and aliases reuse it. Repeated locations require `independent: true` on every declaration. Browser import is provided by the [shared DMA-BUF integration](../../../doc/dmabuf.md). CUarray requires compatible FFmpeg/consumers and a fixed surface budget; it has no copy fallback or decoder auto-restart. See the [CUarray cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/nvdec-cuarray.html).
 
 | field | applies to | meaning |
 | --- | --- | --- |

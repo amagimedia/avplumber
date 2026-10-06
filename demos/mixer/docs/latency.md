@@ -15,12 +15,12 @@ and a same-host Chromium software decoder. These are not current capacity claims
 
 | Run | Samples | Median | p95 / max |
 | --- | ---: | ---: | ---: |
-| [Initial baseline](latency-baseline.json) | 11 | 190.0 ms | 207.3 ms |
-| [Later graph](latency-current.json) | 11 | 188.8 ms | 503.9 ms |
+| [Initial baseline](https://amagimedia.github.io/avplumber/demos/mixer/docs/latency-baseline.json) | 11 | 190.0 ms | 207.3 ms |
+| [Later graph](https://amagimedia.github.io/avplumber/demos/mixer/docs/latency-current.json) | 11 | 188.8 ms | 503.9 ms |
 
 The later run retains two unexplained slow trials. Encoder settings differed;
-compare raw conditions before drawing conclusions. [Load samples](runtime-load.json)
-and [1080p load samples](runtime-load-1080p.json) describe separate workloads.
+compare raw conditions before drawing conclusions. [Load samples](https://amagimedia.github.io/avplumber/demos/mixer/docs/runtime-load.json)
+and [1080p load samples](https://amagimedia.github.io/avplumber/demos/mixer/docs/runtime-load-1080p.json) describe separate workloads.
 
 ## Reproduce
 

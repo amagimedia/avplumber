@@ -5,7 +5,7 @@ They depend on source mix, canvas rate/format, output count and encoder preset.
 Do not scale one GPU's profile to another GPU. This page summarizes historical
 runs; raw evidence and caveats remain linked below.
 
-[Source-limit cookbook](cookbook/source-limits.html) ·
+[Source-limit cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/source-limits.html) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
 ## T4
@@ -23,8 +23,8 @@ The September 2026 tests used mostly-still browser test pages and raw uploads.
 These are tested/declared profile baselines, not decoder-only limits. Short
 50/60 fps cut-spam checks passed; a separate 68-source 60 fps, 19.5-hour soak
 recorded 24 missed deadlines. Browser content can change CPU/GPU demand greatly.
-See [browser cost](cookbook/browser-paint-cost.html), [raw uploads](cookbook/raw-uploads.html)
-and [CPU pressure](cookbook/cpu-pressure.html) for the measurement context.
+See [browser cost](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/browser-paint-cost.html), [raw uploads](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html)
+and [CPU pressure](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/cpu-pressure.html) for the measurement context.
 
 ## NVENC and extra aux outputs
 
@@ -36,7 +36,7 @@ calculated limit rather than a copied table of extra-output counts.
 
 ## NVIDIA L4 (`nvidia_l4`)
 
-The [2026-10-05 raw report](capacity-l4.json) covers 1080p inputs on one L4 /
+The [2026-10-05 raw report](https://amagimedia.github.io/avplumber/demos/mixer/docs/capacity-l4.json) covers 1080p inputs on one L4 /
 16-vCPU host, patched FFmpeg, HEVC CUarray decode, `extra_hw_frames: 12` and
 three-frame decoded queues. Totals include keys; HDR 4:2:2 inputs use v210.
 
@@ -53,7 +53,7 @@ HDR decoders exhausted VRAM. A balanced show passing does not qualify the same
 count of HDR decoders. Short probes do not qualify every scene or a long soak;
 30/50 fps admission values in that update were derived, not newly measured.
 
-The [CUarray cookbook](cookbook/nvdec-cuarray.html) explains storage savings and
+The [CUarray cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/nvdec-cuarray.html) explains storage savings and
 fixed-pool sizing. Use the [portable L4 stack](../deploy/l4/README.md) for that build.
 After deployment, exercise actual content, every scene and Setup restart; check
 fresh deadline/drop counter deltas, not just encoder FPS.
