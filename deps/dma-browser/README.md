@@ -11,7 +11,7 @@ on `127.0.0.1:9009`. The project configuration uses Electron 44 / Chromium
 
 To build the runtime-gated Electron native-handle change yourself, use the
 patch and script documented in
-[the browser demo](../../demos/dmabuf-browser/README.md#alternative-build-electron-without-the-shim).
+[DMA-BUF integration](../../doc/dmabuf.md#shim-and-chromium-patches).
 
 ## Quick start
 
@@ -46,7 +46,7 @@ Two switches keep the GPU process stable, both on by default:
 - `DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT=0` turns off
   `--disable-gpu-process-crash-limit`. Without it, a third GPU-process crash
   within five minutes of the last makes Chromium quit the worker.
-The [Docker demo](../../demos/dmabuf-browser/README.md#run) builds and enables
+The [shared Docker stack](../../docker-compose/dmabuf/compose.yaml) builds and enables
 the shim automatically. Alternatively, use the patched Electron build linked
 above without the shim.
 

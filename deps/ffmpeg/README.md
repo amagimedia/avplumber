@@ -106,8 +106,7 @@ deps/ffmpeg/apply.sh  <ffmpeg-checkout>          # git am 8/*.patch + configure 
 deps/ffmpeg/verify.sh <n8.0|n8.1> <ffmpeg-repo>  # isolated worktree, whole series, tree check
 ```
 
-The demo Dockerfiles (`demos/mixer`, `demos/cuda-overlay`,
-`demos/dmabuf-browser/consumer`) call `apply.sh`; `FFMPEG_TAG` defaults to
+The mixer Dockerfiles call `apply.sh`; `FFMPEG_TAG` defaults to
 `n8.1` and may be set to `n8.0`. avcpp and avplumber must be rebuilt against
 the selected FFmpeg libraries.
 
@@ -177,7 +176,7 @@ Compilation, linking and filter registration are the acceptance criteria for
 the series itself; runtime behaviour is covered by the demo and `tests/cuda`
 suites. Validated on a T4 with FFmpeg 8.1: the 8-bit mixer at 30/60 fps with
 video and DMA-BUF browser inputs, wipe-cache loads, cut/fade/wipe, NVENC to a
-WebRTC browser; the `demos/cuda-overlay` 45-case pixel-reference matrix; and
+WebRTC browser; the former overlay demo’s 45-case pixel-reference matrix (now retired); and
 the live recorder surviving SRT disconnects (`ignore_eof` on the pre-sentinel
 format nodes, opt-in). NPP, NDI and AArch64 paths are not compiled in the demo
 images.

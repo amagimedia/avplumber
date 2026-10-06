@@ -1,5 +1,7 @@
 # CUDA Overlay Many Demo
 
+Historical design; the standalone demo has been removed. Use the [mixer](../../../../demos/mixer/README.md) and its AVP compositors.
+
 ## Goal
 
 Add a self-contained `demos/cuda-overlay/` directory that builds the repository's patched

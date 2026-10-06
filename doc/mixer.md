@@ -4,6 +4,45 @@ AVPlumber's mixer is a two-slot program/preview video switcher. The reusable
 graph builder is `pyplumber/mixer/graph.py`; the native control implementation is in
 `src/mixer/`; the maintained example is `demos/mixer/`.
 
+## Building a mixer application
+
+`pyplumber.mixer.build_application` assembles a complete config-driven show:
+inputs, scene mixer, DSK, AUX buses, renditions, control commands and startup
+preheat. An application in another repository imports the library directly;
+it does not need the demo's CLI, preset layouts, supervisor or media generator.
+
+```python
+from pyplumber.mixer import MixerOptions, build_application
+from pyplumber.mixer.config import load
+
+app = build_application(load("show.json"), MixerOptions(remote_control_port=7777))
+try:
+    app.start()
+    # Run the application's control/event loop here.
+finally:
+    app.stop()
+```
+
+The show supplies sources, scenes and renditions. `MixerOptions` supplies
+runtime settings and optional fallback outputs when the show has no renditions.
+The returned application exposes `avp`, `mixer` and `aux_buses`. Web UI
+registration and the application's event loop remain caller-owned. Importing
+the API does not load the native engine; building does.
+
+For per-camera inference, pass `process_source=callback`. The callback receives
+a `SourceContext` with `avp`, `api`, `source`, `index`, `edge`, `group`, `hwaccel`
+and `fps`, and returns the video edge to mix. It runs once per physical source,
+after its configured transform/filter and before scene aliases and AUX fan-out.
+Add processing nodes to the supplied group so startup, readiness and shutdown
+include them. Return the input edge for sources that need no processing.
+
+The returned frames must preserve geometry, color/storage contracts and
+timestamps; metadata may be added. A side branch must explicitly split the
+input: edges are queues, not broadcast channels. Startup waits for the returned
+edge's first frame. A callback exception or invalid edge name shuts down the
+partially built engine. Face policy and inference construction belong to the
+calling application; this callback does not implement bounding-box rendering.
+
 ## Native code layout
 
 | Module | Role |
@@ -314,3 +353,7 @@ The fixed portrait canvas is 1080x1920. The scene set contains one fullscreen
 scene per input plus paged 2-, 4-, 8-, and 16-box layouts. Manual control is
 available through `demos/mixer/tui.py`; output can be a video-only recording or
 a video-only Janus RTP mountpoint.
+
+Browser overlays use the same application API: declare `kind: "browser"` sources
+and configure `MixerOptions.dmabuf_rest` / `dmabuf_socket_dir`.
+[Shared DMA-BUF services and Chromium notes](dmabuf.md) live outside demos.
