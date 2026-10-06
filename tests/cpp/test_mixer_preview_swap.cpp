@@ -2,7 +2,7 @@
 // on), or cleared when the take keeps the program scene; the PVW slot is cold either way, and
 // every change wakes the followers on the feed's own lock, published before the take's routing
 // and once per take.
-#include "SharedTimeline.hpp"
+#include "output_mask.hpp"
 #include "mixer/primitives/MixerState.hpp"
 #include <atomic>
 #include <cassert>

@@ -267,7 +267,6 @@ def test_media_wipe_path_is_registered_without_starting_an_empty_clip(native_bou
     config = json.loads(init.split(" ", 2)[2])
     assert config["wipe_group"] == "mixer_wipe"
     assert config["wipe_input_node"] == "mixer_wipe_input"
-    assert config["wipe_tail_edge"] == "mixer_wipe_rt_fps_out"
     assert "wipe_overlay" not in config and "wipe_cache_store" not in config
     assert "mixer_wipe_cache" not in engine.nodes
     assert engine.nodes["mixer_wipe_input"]["group"] == "mixer_wipe"
@@ -280,7 +279,7 @@ def test_media_wipe_path_is_registered_without_starting_an_empty_clip(native_bou
     assert "mixer_wipe" not in engine.started and "mixer_wipe_load" not in engine.started
     upload = engine.nodes["mixer_wipe_fmt"]
     assert upload["hwaccel"] == config["hwaccel"]
-    assert upload["graph"].split(",")[-1] == "hwupload"
+    assert upload["graph"].split(",")[-1] == "hwupload_cuda=pinned=1"
 
 
 def test_cached_wipe_chain_runs_from_startup_parked_and_is_never_stopped(native_boundary):
@@ -295,7 +294,6 @@ def test_cached_wipe_chain_runs_from_startup_parked_and_is_never_stopped(native_
     assert config["wipe_input_node"] == "mixer_wipe_cache"
     assert config["wipe_overlay"] == "mixer_wipe_overlay"
     assert config["wipe_cache_store"] == "clips"
-    assert config["wipe_tail_edge"] == "mixer_wipe_cached"
     assert "wipe_flush_edges" not in config
     # The player feeds the compositor directly, stamped on the output grid; the
     # compositor starts parked.
@@ -422,10 +420,7 @@ def test_program_excludes_frames_from_before_prewarm_finished(native_boundary, m
     app = application(native_boundary)
     assert app.avp.nodes["mixer_otm_final"]["outputs"] == 0
     app.start()
-    gates = [json.loads(event.partition(" ")[2]) for event in app.avp.events
-             if event.startswith("timeline.set ")]
-    assert {"name": "mixer_tl", "ch": "mixer_otm_final", "key": "outputs",
-            "at": 123457, "val": 1} in gates
+    assert "node.object.set mixer_otm_final enable_from 123457" in app.avp.events
     assert app.avp.events.index("inspect mixer_final_out") < app.avp.events.index("READY")
 
 

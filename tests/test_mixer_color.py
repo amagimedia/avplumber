@@ -214,7 +214,7 @@ def test_media_wipe_blends_onto_an_hdr_canvas(monkeypatch, wipe_color):
     b.set_initial_scene("full")
     b.build()
     nodes = {n["name"]: n for n in b.avp.nodes}
-    assert nodes["mixer_wipe_fmt"]["graph"] == (Color().setparams + "," if wipe_color else "") + "format=rgba,hwupload"
+    assert nodes["mixer_wipe_fmt"]["graph"] == (Color().setparams + "," if wipe_color else "") + "format=rgba,hwupload_cuda=pinned=1"
     overlay = nodes["mixer_wipe_overlay"]
     assert overlay["sw_format"] == "p210le" and overlay["color"] == "hlg"
     # Cached wipes keep a resident chain, parked with no active input until a take arms it.

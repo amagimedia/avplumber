@@ -7,6 +7,7 @@
 # General guidelines
 
 ## Documentation & comments
+* Keep AI-generated plans, specs, research and handoffs out of Git. Do not add `superpowers/` directories or `specs/`, `research/`, or `plans/` under any `doc/` or `docs/` directory. Normal maintained project documentation stays in the repository.
 * Don't write obvious things, but prefer unambiguity over brevity. See [README.md](README.md) for style.
 
 ## Project shape

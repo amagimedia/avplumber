@@ -1,6 +1,6 @@
 """Mixer configuration file: sources, wipes and scenes as data.
 
-See doc/research/2026-09-08-mixer-config-schema.md. The loader validates the
+See demos/mixer/docs/config.md. The loader validates the
 document and turns scene items into compositor layers. Every source is one
 input chain however many scenes reference it; a source used more than once in
 the same scene gets alias names (``id#2``, ``id#3``...) that share its frames.
@@ -27,8 +27,7 @@ TRANSITIONS = ("cut", "fade", "wipe")
 # onto them, so they only fail later.
 WORKING_FORMATS = ("nv12", "p010le", "p210le")
 # How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (the library default), or
-# raw_to_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it. 60 fps
-# A/B in https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html; the 110-input A/B is pending).
+# patched hwupload_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it).
 RAW_UPLOADS = ("hwupload", "pinned")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 193         # mixer_compositor active_inputs is a 193-bit pad mask (SourceMask, kSourceMaskBits)

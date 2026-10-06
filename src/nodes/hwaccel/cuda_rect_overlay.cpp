@@ -35,16 +35,6 @@ public:
 
         // Read active_inputs bitmask: get a representative PTS from any peeked frame
         auto active_mask = activeInputs();
-        if (hasTimeline()) {
-            for (size_t i = 0; i < n; ++i) {
-                auto* p = this->source_edges_[i]->peek();
-                if (p && !isEofMarker(*p) && frameUsable(*p)) {
-                    auto opt = tlGetRaw("active_inputs", p->pts());
-                    if (opt) active_mask = avp::mixer::parseSourceMask(*opt);
-                    break;
-                }
-            }
-        }
         auto isActive = [active_mask](size_t i) { return active_mask.test((int)i); };
 
         // "All active inputs exhausted" == EOF only if there is at least one active

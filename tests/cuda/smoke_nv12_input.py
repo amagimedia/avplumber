@@ -7,9 +7,10 @@ import tempfile
 
 import numpy as np
 
-from _harness import drain, finish, make_avp
+from _harness import drain, finish, frame_planes, make_avp
 from pyplumber import node as api
-from pyplumber.mixer.inputs import build_raw420_input
+from pyplumber.mixer.inputs import build_raw420_input, build_v210_input
+from v210_fixture import COLOR, sample_planes, write_fixture
 
 
 def check(fmt, pinned):
@@ -54,7 +55,49 @@ def check(fmt, pinned):
             finish(avp, nodes)
 
 
+def check_v210(width):
+    height, fps = 64, 30
+    expected = [sample_planes(width, height, i) for i in range(6)]
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "pattern.v210"
+        write_fixture(path, width, height, 6)
+        avp, errors = make_avp("v210_gpu", capacity=2)
+        nodes = []
+        try:
+            edge = build_v210_input(avp, api, "raw", str(path), width=width, height=height,
+                                    fps=fps, group="probe", hwaccel="v210_gpu", loop=True,
+                                    color=COLOR["ramp"])
+            # Force a GPU read before release, exercising recycled pool ordering.
+            verify = api.FilterVideo({"name": "verify", "src": edge, "dst": "result",
+                                      "group": "probe", "hwaccel": "v210_gpu", "threads": 1,
+                                      "graph": "scale_cuda=passthrough=0,hwdownload,format=p210le"})
+            nodes.append(verify)
+            avp.addNode(verify)
+            output = avp.getEdge("result", "VideoFrame")
+            avp.group("probe").startNodes()
+            seen, timestamps = [], []
+            for frame in drain(output, errors, timeout=10, limit=24):
+                planes = frame_planes(frame, "p210le")
+                matches = [i for i, reference in enumerate(expected)
+                           if all(np.array_equal(a, b) for a, b in zip(planes, reference))]
+                assert matches, f"v210 unpack changed samples at width {width}"
+                assert (frame.width, frame.height) == (width, height)
+                seen.append(matches[0])
+                pts = frame.pts
+                timestamps.append(pts.timestamp * pts.timebase.num / pts.timebase.den)
+            assert not errors, errors
+            assert len(seen) == 24 and len(set(seen)) >= 3, seen
+            assert any(b < a for a, b in zip(seen, seen[1:])), "v210 did not loop"
+            assert np.allclose(np.diff(timestamps), 1 / fps, atol=.001), timestamps
+            print(f"PASS: 24 paced v210 frames at width {width}, looping, byte-exact GPU unpack", flush=True)
+        finally:
+            finish(avp, nodes)
+
+
 if __name__ == "__main__":
     for fmt in ("nv12", "p010le"):
         for pinned in (False, True):
             check(fmt, pinned)
+
+    for width in (48, 50, 1920):
+        check_v210(width)

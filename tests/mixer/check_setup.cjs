@@ -16,13 +16,15 @@ const { chromium } = require('playwright');
     const ownAux = [{id: 'mv', label: 'Program preview', full_rate: false}, {id: 'mv2', label: 'Multiviewer', full_rate: false}];
     let auxStatus = {aux_buses: ownAux, janus_api: true};
     page.on('pageerror', error => errors.push(error.message));
-    const html = fs.readFileSync(path.join(__dirname, '../setup.html'), 'utf8');
+    const html = fs.readFileSync(path.join(__dirname, '../../demos/mixer/setup.html'), 'utf8');
     // The status carries the instance's profile as webui.py serves it: the limits asserted below are tesla_t4's.
     const profiles = JSON.parse(execFileSync(process.env.PYTHON || 'python3', ['-c',
-      'import json; from instance_profiles import INSTANCE_PROFILES as p; print(json.dumps({t.value: v for t, v in p.items()}))'],
-      {cwd: path.join(__dirname, '..')}));
+      'import json; from demos.mixer.instance_profiles import INSTANCE_PROFILES as p; print(json.dumps({t.value: v for t, v in p.items()}))'],
+      {cwd: path.join(__dirname, '../..')}));
     let instanceType = 'tesla_t4';
     await page.route('http://mixer.test/**', route => {
+      if (route.request().url().endsWith('/setup.js')) return route.fulfill({contentType: 'text/javascript',
+        body: fs.readFileSync(path.join(__dirname, '../../pyplumber/mixer/gui/assets/setup.js'), 'utf8')});
       if (route.request().url().endsWith('/api/setup')) {
         if (route.request().method() === 'POST') submissions.push(route.request().postDataJSON());
         return route.fulfill({json: {phase: 'idle', message: 'Ready', settings: initialSettings,

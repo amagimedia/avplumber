@@ -101,8 +101,7 @@ def main():
             expected = {name: name in (bus.edges[0], bus.edges[-1], bus.pgm_edge)
                         for name in [*bus.edges, bus.pgm_edge]}
             assert subscription_flags() == expected
-            # Hold a direct cut pending long enough for AUX to poll repeatedly.
-            # Its hidden target must not appear as a user-selected preview.
+            # Immediate cuts publish their preview swap on the committed frame.
             app.mixer.cut("red")
             wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
             wait_for(lambda: pvw_scene() == "")
@@ -110,13 +109,7 @@ def main():
                 if preview:
                     app.mixer.preview(preview)
                     wait_for(lambda: pvw_scene() == preview)
-                app.mixer.cut("blue", start_pts_ms=int(time.monotonic() * 1000) + 500)
-                until = time.monotonic() + .25
-                while time.monotonic() < until:
-                    status = control_json("mixer.status mixer")
-                    assert status["pvw_scene"] == preview, status
-                    assert pvw_scene() == preview
-                    time.sleep(.01)
+                app.mixer.cut("blue")
                 wait_for(lambda: control_json("mixer.status mixer")["transition"] == "idle")
                 assert control_json("mixer.status mixer")["pgm_scene"] == "blue"
                 # Swap Preview/Program: the bus then shows the scene that left program, as mixer.status does.

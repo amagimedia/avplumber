@@ -1,322 +1,63 @@
-// Media wipe: pre-created wipe subgraph, overlay readiness, midpoint scene
-// switch hidden behind the opaque wipe, tail drain and teardown.
 #include "internal.hpp"
 
 namespace avp::mixer {
 
-namespace {
-constexpr int64_t kWipeSwitchGraceMs = 500;
-
-/// The clip has been read to its end: a per-take reader has stopped working, the
-/// resident player reports that it is no longer replaying. A status read that loses
-/// the race for the node's lock counts as still playing.
-bool wipeClipEnded(const std::shared_ptr<NodeManager>& nodes, const MixerState& state) {
-    if (!state.wipeChainStaysRunning())
-        return !nodeWorkingIfExists(nodes, state.wipe_input_node_name);
-    Parameters status;
-    const auto node = nodes->node_if_exists(state.wipe_input_node_name);
-    return node && node->getObjectTry("status", status) && status.contains("playing") &&
-           !status["playing"].get<bool>();
-}
-}
-
-// ---------------------------------------------------------------------------
-// runWipeMidpointAndCleanup:
-// Phase 1 (midpoint): PVW slot prep + timeline source_switcher (hidden under opaque wipe).
-// Phase 2 (end): routing cleanup, tear down wipe chain, flip state.
-//
-// Generation checks prevent an interrupted wipe from changing new routing.
-// ---------------------------------------------------------------------------
-void MixerOrchestrator::runWipeMidpointAndCleanup(
-        const std::shared_ptr<NodeManager>& nodes,
-        const std::shared_ptr<MixerState>& state,
-        const std::shared_ptr<SharedTimeline>& timeline,
-        const std::shared_ptr<TransitionScheduler>& scheduler,
-        uint64_t transition_generation,
-        const std::string& scene_name,
-        bool new_pgm_is_slot_a,
-        int64_t remaining_ms) {
-
-    if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-        return;
-
-    // --- Phase 1: midpoint - do invisible scene switch under the fully-opaque wipe ---
+void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec) {
+    if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid wipe duration");
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
+    if (state_->wipe_otm_name.empty() || state_->wipe_selector_name.empty() ||
+        state_->wipe_group_name.empty() || state_->wipe_input_node_name.empty())
+        throw Error("mixer: wipe requires the wipe subgraph");
     try {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-            return;
-        MixerOrchestrator orch(nodes, state, timeline, scheduler);
-
-        // wipe() loaded the scene into this slot and the generation check keeps
-        // it there; reloading would reset the compositor just before it is revealed.
-
-        // Same post-scene OTM flip as cutInternal: out_sel will read PVW `sc*_direct`, so that slot's
-        // `one_to_many` must have outputs=1. If it stays 0 (idle default), frames are popped from
-        // norm_* with nowhere to go and the wipe path freezes. Stop the old PGM branch to avoid backup.
-        int64_t Tw = wallclock.pts();
-        const auto& new_slot = state->pvwSlot();
-        const auto& old_slot = state->pgmSlot();
-        timeline->clearKey(old_slot.post_otm_name, "outputs");
-        orch.setNodeObject(old_slot.post_otm_name, "outputs", Parameters(0u));
-        timeline->set(old_slot.post_otm_name, "outputs", Tw, Parameters(0u));
-        timeline->clearKey(new_slot.post_otm_name, "outputs");
-        orch.setNodeObject(new_slot.post_otm_name, "outputs", Parameters(1u));
-        timeline->set(new_slot.post_otm_name, "outputs", Tw, Parameters(1u));
-
-        // Switch source_switcher (invisible behind wipe overlay); timeline for consistency with other switches
-        int sw = state->pvwSourceSwitcherIndex();
-        timeline->set(state->source_switcher_name, "active", Tw, Parameters(sw));
-        logstream << "mixer wipe midpoint: Tw=" << Tw << " scene=" << scene_name << " out_sel.active=" << sw
-                  << " new_slot post_otm=" << new_slot.post_otm_name << " old_slot post_otm="
-                  << old_slot.post_otm_name;
-        resetSlotNormFps(nodes, *state);
-    } catch (const std::exception& e) {
-        logstream << "mixer: wipe midpoint error: " << e.what();
-    }
-
-    // --- Phase 2: wipe end – tear down and flip ---
-    // Stage 2a: keep the overlay selected for the planned duration. Input EOF
-    // only means the demuxer has read ahead to the end; queued decoded frames
-    // can still contain much of the exit animation.
-    bool hit_input_eof = false;
-    if (remaining_ms > 0) {
-        int64_t waited_ms = 0;
-        constexpr int64_t kTailPollMs = 10;
-        while (waited_ms < remaining_ms) {
-            if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-                return;
-            if (!hit_input_eof && wipeClipEnded(nodes, *state)) {
-                logstream << "mixer wipe: input EOF after " << waited_ms
-                          << "ms of remaining tail; waiting for planned end";
-                hit_input_eof = true;
-            }
-            int64_t step_ms = std::min<int64_t>(kTailPollMs, remaining_ms - waited_ms);
-            std::this_thread::sleep_for(std::chrono::milliseconds(step_ms));
-            waited_ms += step_ms;
-        }
-    }
-
-    // Stage 2b: after source EOF, the tail of the wipe is still propagating through
-    // wipe_demux → wipe_dec → wipe_fmt → wipe_rt → wipe_rt_fps → wipe_overlay (six
-    // queues + filter internal buffering). Flipping `wipe_sel` now would cut those
-    // tail frames. Wait until the last pre-overlay edge (`wipe_tail_edge`) has been
-    // drained by the overlay, then give the overlay a short grace to emit the final
-    // blended frames through `wipe_overlay_out` to `wipe_sel`.
-    if (hit_input_eof && !state->wipe_tail_edge.empty()) {
-        constexpr int64_t kWipeDrainTimeoutMs = 1000;
-        constexpr int64_t kWipeDrainPollMs = 10;
-        // Grace period for the overlay filter to emit any frames already buffered
-        // in its filter graph after `wipe_tail_edge` drained. 120ms is ~3-4 frames
-        // at 30fps and ~7-8 frames at 60fps; both are within the typical libavfilter
-        // internal queue depth. If a future wipe overlay graph buffers more (e.g.
-        // a multi-stage temporal filter), bump this together with kWipeDrainTimeoutMs.
-        // Going below ~80ms risks cutting tail blended frames at 30fps.
-        constexpr int64_t kWipeOverlayTailMs = 120;
-        int64_t waited = 0;
-        while (waited < kWipeDrainTimeoutMs) {
-            if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-                return;
-            if (edgeOccupiedIfExists(nodes, state->wipe_tail_edge) == 0)
-                break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(kWipeDrainPollMs));
-            waited += kWipeDrainPollMs;
-        }
-        for (int64_t tail = 0; tail < kWipeOverlayTailMs; tail += 5) {
-            if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) return;
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-        logstream << "mixer wipe: drained " << state->wipe_tail_edge << " in " << waited
-                  << "ms + " << kWipeOverlayTailMs << "ms overlay tail";
-    }
-
-    try {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-            return;
-        MixerOrchestrator orch(nodes, state, timeline, scheduler);
-
-        int64_t Tw = wallclock.pts();
-        if (!state->wipe_otm_name.empty()) {
-            timeline->clearKey(state->wipe_otm_name, "outputs");
-            orch.setNodeObject(state->wipe_otm_name, "outputs", Parameters(1u));
-            timeline->set(state->wipe_otm_name, "outputs", Tw, Parameters(1u));
-        }
-        if (!state->wipe_selector_name.empty()) {
-            timeline->clearKey(state->wipe_selector_name, "active");
-            orch.setNodeObject(state->wipe_selector_name, "active", Parameters(0));
-            timeline->set(state->wipe_selector_name, "active", Tw, Parameters(0));
-        }
-        logstream << "mixer wipe cleanup: Tw=" << Tw << " otm_final.outputs=1 wipe_sel.active=0"
-                  << " retire_wipe_chain_in_ms=" << (state->wipeChainStaysRunning() ? 0 : kWipeSwitchGraceMs);
-
-        uint32_t new_pgm_bit = state->pvwOutputBit();
-        auto& scene = state->scenes.at(scene_name);
-        for (const auto& [src_name, info] : state->sources) {
-            if (info.routed)
-                continue;
-            uint32_t mask = scene.sources.count(src_name) ? new_pgm_bit : 0u;
-            timeline->set(info.otm_node_name, "outputs", Tw, Parameters(state->sourceOutputMask(info, mask)));
-        }
-        orch.publishRoutedRoutesForProgramOnly(new_pgm_is_slot_a, scene, Tw, true);
-
-        const auto& old_slot = state->pgmSlot();
-        timeline->set(old_slot.compositor_name, "active_inputs", Tw, Parameters(0u));
-    } catch (const std::exception& e) {
-        logstream << "mixer: wipe cleanup error: " << e.what();
-        if (transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-            state->transition_mode = MixerState::TransitionMode::Idle;
-        return;
-    }
-
-    // Stop a per-take wipe subgraph only after the direct-path switch has had time
-    // to land on the frame timeline. Tearing it down at the same wallclock instant
-    // as the switch starves wipe_sel/final_out for a few ticks and the encoder-side
-    // force_fps visibly repeats the last wipe frame. A resident chain is parked at
-    // once: the direct branch never depended on it.
-    const int64_t grace_ms = state->wipeChainStaysRunning() ? 0 : kWipeSwitchGraceMs;
-    for (int64_t waited = 0; waited < grace_ms; waited += 5) {
-        if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) return;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-        return;
-
-    try {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-            return;
-        MixerOrchestrator orch(nodes, state, timeline, scheduler);
-
-        if (!state->wipe_group_name.empty()) {
-            orch.retireWipeChain();
-            // Release any frames still sitting in a stopped chain's edges so they
-            // don't replay at the start of the next wipe. The resident chain rejects
-            // them by timestamp when it is armed again.
-            if (!state->wipeChainStaysRunning())
-                orch.flushWipeEdges();
-        }
-
-        orch.finishSnapshot();
-        // The switch happened under the wipe, well before this teardown: not timed.
-        orch.finishTransition(new_pgm_is_slot_a, scene_name, 0);
-    } catch (const std::exception& e) {
-        logstream << "mixer: wipe teardown error: " << e.what();
-        if (transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-            state->transition_mode = MixerState::TransitionMode::Idle;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// wipe: media wipe transition.  Uses the static wipe_otm + wipe_selector
-// nodes to route through the overlay without edge rewiring.
-// The wipe subgraph (group wipe_group_name) is pre-created. Decoding per take,
-// it is not running in steady state: started here, stopped at the end of the
-// wipe. With the clip cache it runs all along, parked, and is armed here.
-// ---------------------------------------------------------------------------
-int64_t MixerOrchestrator::prepareWipe(
-        const std::shared_ptr<NodeManager>& nodes,
-        const std::shared_ptr<MixerState>& state,
-        const std::shared_ptr<SharedTimeline>& timeline,
-        const std::shared_ptr<TransitionScheduler>& scheduler,
-        uint64_t transition_generation,
-        const std::string& scene_name,
-        const std::string& wipe_file,
-        double duration_sec,
-        bool new_pgm_is_slot_a,
-        int64_t earliest_visible_pts_ms) {
-    std::string overlay_edge_name;
-    av::Timestamp overlay_initial_ts = NOTS;
-
-    // Only the serialized transition worker reuses wipe nodes. Decoding per take, retire
-    // the previous clip outside the control mutex without joining its threads here: a
-    // take queued behind this task must not wait for decoder teardown, so poll with
-    // cancellation. The resident chain has nothing to wait for.
-    if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) return -1;
-    try {
-        if (!state->wipeChainStaysRunning()) {
-            nodes->group(state->wipe_group_name)->stopNodes();
-            for (int64_t waited = 0; groupWorking(nodes, state->wipe_group_name); waited += kPollMs) {
-                if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-                    return -1;
-                if (waited >= kWipeReadyTimeoutMs)
-                    throw Error("previous wipe clip did not stop within " + std::to_string(kWipeReadyTimeoutMs) + " ms");
-                std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
-            }
-        }
-        std::lock_guard<std::mutex> lock(state->mutex);
-        if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-            return -1;
-        MixerOrchestrator orch(nodes, state, timeline, scheduler);
-
-        overlay_edge_name = edgeNameAt(nodes, state->wipe_selector_name, "src", 1);
-        overlay_initial_ts = edgeLastTsIfExists(nodes, overlay_edge_name);
-
-        resetInputIf(nodes, state->wipe_base_fps_name);
-        if (state->wipeChainStaysRunning()) {
-            // The resident compositor may still be finishing a frame of the interrupted
-            // take, stamped before this arm; only its output from the clip's first tick
-            // on is this wipe's. That tick is on the compositor's grid, 1/fps.
-            const int64_t start_tick = orch.armWipeChain(wipe_file);
-            overlay_initial_ts = av::Timestamp(start_tick - 1, av::Rational(state->fps_den, state->fps_num));
+        beginTake(scene_name, MixerState::TransitionMode::Wipe);
+        state_->take_received_ns = monotonicNs();
+        state_->take_duration_ns = int64_t(duration_sec * 1000000000);
+        state_->take_deadline_ns = monotonicNs() + kWipeReadyTimeoutMs * 1000000;
+        state_->take_phase = MixerState::TakePhase::WipeReady;
+        resetInputIf(nodes_, state_->wipe_base_fps_name);
+        if (state_->wipeChainStaysRunning()) {
+            const auto tick = armWipeChain(wipe_file);
+            state_->wipe_first_ns = av::Timestamp(tick, {state_->fps_den, state_->fps_num}).timestamp({1, 1000000000});
         } else {
-            orch.startWipeDecode(wipe_file);
+            nodes_->group(state_->wipe_group_name)->stopNodesAndWait();
+            const auto previous = edgeLastTsIfExists(nodes_, edgeNameAt(nodes_, state_->wipe_selector_name, "src", 1));
+            state_->wipe_first_ns = previous.isValid() ? previous.timestamp({1, 1000000000}) + 1 : 0;
+            startWipeDecode(wipe_file);
         }
-
-        const int64_t prep_ms = wallclock.pts();
-        timeline->clearKey(state->wipe_otm_name, "outputs");
-        orch.setNodeObject(state->wipe_otm_name, "outputs", Parameters(3u));       // 0b11 both direct + wipe_in
-        timeline->set(state->wipe_otm_name, "outputs", prep_ms, Parameters(3u));
-        // Direct branch while prerolling: the node value alone, no timeline row. Frames
-        // reach the selector a playout deadline after their timestamp, so a row at
-        // prep_ms would still select the direct branch for the frames stamped between
-        // prep_ms and the visible switch below, hiding the wipe's first frames right
-        // after they were shown once.
-        timeline->clearKey(state->wipe_selector_name, "active");
-        orch.setNodeObject(state->wipe_selector_name, "active", Parameters(0));
-
-        int64_t total_ms = (int64_t)(duration_sec * 1000);
-        int64_t midpoint_ms = total_ms / 2;
-        logstream << "mixer wipe: scene=" << scene_name << " file=" << wipe_file << " prep_ms=" << prep_ms
-                  << " requested_visible=" << earliest_visible_pts_ms << " total_ms=" << total_ms << " midpoint_ms=" << midpoint_ms
-                  << " new_pgm_slot_" << (new_pgm_is_slot_a ? 'A' : 'B');
-    } catch (const std::exception& e) {
-        logstream << "mixer: wipe prep error: " << e.what();
-        std::lock_guard<std::mutex> lock(state->mutex);
-        MixerOrchestrator(nodes, state, timeline, scheduler).abortTransition(transition_generation);
-        return -1;
+        setNodeObject(state_->wipe_otm_name, "outputs", Parameters(3u));
+        setNodeObject(state_->wipe_selector_name, "active", Parameters(0));
+    } catch (...) {
+        abortTransition(state_->transition_generation);
+        throw;
     }
+}
 
-    WipeReadyResult ready = waitForWipeOverlayReady(
-        nodes, overlay_edge_name, overlay_initial_ts, earliest_visible_pts_ms, state, transition_generation);
-    if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) return -1;
-    if (!ready.ready) {
-        logstream << "mixer: wipe overlay did not become ready within " << kWipeReadyTimeoutMs
-                  << "ms: edge=" << overlay_edge_name << " last_ts=" << ready.ready_ts;
-        std::lock_guard<std::mutex> lock(state->mutex);
-        MixerOrchestrator(nodes, state, timeline, scheduler).abortTransition(transition_generation);
-        return -1;
+int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& frames, int active, int64_t last_ns) {
+    if (state_->transition_mode != MixerState::TransitionMode::Wipe) return 0;
+    const auto pts = [&](int input) {
+        const auto* frame = frames.at(input);
+        return frame && frame->isValid() && frame->pts().isValid()
+            ? frame->pts().timestamp({1, 1000000000}) : int64_t(0);
+    };
+    if (state_->take_phase == MixerState::TakePhase::WipeReady) {
+        const auto overlay = pts(1);
+        if (state_->destination_ready && overlay > 0 && overlay >= state_->wipe_first_ns) {
+            state_->take_start_ns = overlay;
+            state_->take_phase = MixerState::TakePhase::Wipe;
+            return 1;
+        }
+        return 0;
     }
-
-    try {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-            return -1;
-        MixerOrchestrator orch(nodes, state, timeline, scheduler);
-        int64_t visible_ms = wallclock.pts();
-        orch.setNodeObject(state->wipe_selector_name, "active", Parameters(1));    // wipe_overlay_out
-        timeline->set(state->wipe_selector_name, "active", visible_ms, Parameters(1));
-        logstream << "mixer wipe overlay ready: edge=" << overlay_edge_name
-                  << " waited_ms=" << ready.waited_ms
-                  << " ready_ts=" << ready.ready_ts
-                  << " visible_ms=" << visible_ms
-                  << " requested_visible=" << earliest_visible_pts_ms;
-        return visible_ms;
-    } catch (const std::exception& e) {
-        logstream << "mixer: wipe visible switch error: " << e.what();
-        std::lock_guard<std::mutex> lock(state->mutex);
-        MixerOrchestrator(nodes, state, timeline, scheduler).abortTransition(transition_generation);
-        return -1;
+    const auto direct = pts(0);
+    if (state_->wipe_switched && direct > last_ns &&
+        direct >= state_->take_start_ns + state_->take_duration_ns) {
+        completeTake(direct);
+        setNodeObject(state_->wipe_otm_name, "outputs", Parameters(1u));
+        retireWipeChain();
+        return 0;
     }
+    return active;
 }
 
 void MixerOrchestrator::warmupWipe(const std::string& wipe_file, int64_t timeout_ms) {
@@ -342,14 +83,12 @@ void MixerOrchestrator::warmupWipe(const std::string& wipe_file, int64_t timeout
         startWipeDecode(wipe_file);
         // Feed the overlay's program input as a real wipe would; the selector
         // stays on the direct branch so nothing of this reaches the output.
-        timeline_->clearKey(state_->wipe_otm_name, "outputs");
         setNodeObject(state_->wipe_otm_name, "outputs", Parameters(3u));
     }
     WipeReadyResult ready = waitForWipeOverlayReady(nodes_, overlay_edge_name, overlay_initial_ts, 0,
                                                     state_, generation, timeout_ms);
     {
         std::lock_guard<std::mutex> lock(state_->mutex);
-        timeline_->clearKey(state_->wipe_otm_name, "outputs");
         setNodeObject(state_->wipe_otm_name, "outputs", Parameters(1u));
         stopGroup(state_->wipe_group_name);
         flushWipeEdges();
@@ -360,50 +99,5 @@ void MixerOrchestrator::warmupWipe(const std::string& wipe_file, int64_t timeout
         throw Error("mixer: wipe warm-up did not produce an overlay frame within " + std::to_string(timeout_ms) + "ms");
 }
 
-void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,
-                             int64_t start_pts_ms) {
-    std::lock_guard<std::mutex> lock(state_->mutex);
-    if (!state_->scenes.count(scene_name))
-        throw Error("mixer: unknown scene: " + scene_name);
 
-    if (state_->wipe_otm_name.empty() || state_->wipe_selector_name.empty())
-        throw Error("mixer: wipe requires wipe_otm and wipe_selector nodes (see mixer.init)");
-    if (state_->wipe_group_name.empty() || state_->wipe_input_node_name.empty())
-        throw Error("mixer: wipe requires wipe_group and wipe_input_node (see mixer.init)");
-    if (state_->wipeChainStaysRunning() && state_->wipe_overlay_name.empty())
-        throw Error("mixer: cached wipes require wipe_overlay (see mixer.init)");
-
-    if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid wipe duration");
-    int64_t start_ms = resolveTransitionStartPts(start_pts_ms);
-    interruptTransition(Interruption::Replaced);
-    state_->transition_mode = MixerState::TransitionMode::Wipe;
-    uint64_t transition_generation = ++state_->transition_generation;
-    state_->transition_scene_name = scene_name;
-    TransitionGuard prep_guard([&] { abortTransition(transition_generation); });
-    bool pvw_is_slot_a = !state_->pgm_is_slot_a;
-    cutInternal(scene_name, start_ms);
-    scheduleSceneControls(state_->scenes.at(scene_name), start_ms);
-
-    int64_t total_ms = (int64_t)(duration_sec * 1000);
-    int64_t midpoint_ms = total_ms / 2;
-    int64_t remaining_ms = total_ms - midpoint_ms;
-    int64_t now_ms = wallclock.pts();
-    postTransitionTask("mixer.wipe.prepare", start_ms - now_ms,
-        [scheduler = scheduler_, nodes = nodes_, state = state_, timeline = timeline_, transition_generation,
-         scene_name, wipe_file, duration_sec, pvw_is_slot_a, start_ms, midpoint_ms, remaining_ms] {
-            int64_t visible_ms = prepareWipe(nodes, state, timeline, scheduler, transition_generation,
-                                            scene_name, wipe_file, duration_sec, pvw_is_slot_a,
-                                            start_ms);
-            if (visible_ms < 0)
-                return;
-
-            scheduler->postAfter("mixer.wipe.midpoint", midpoint_ms,
-                [nodes, state, timeline, scheduler, transition_generation, scene_name, pvw_is_slot_a, remaining_ms] {
-                    runWipeMidpointAndCleanup(nodes, state, timeline, scheduler, transition_generation,
-                                              scene_name, pvw_is_slot_a, remaining_ms);
-                });
-        });
-    prep_guard.release();
-}
-
-}  // namespace avp::mixer
+} // namespace avp::mixer

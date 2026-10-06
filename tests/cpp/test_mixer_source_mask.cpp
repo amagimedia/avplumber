@@ -1,4 +1,4 @@
-#include "SharedTimeline.hpp"
+#include "output_mask.hpp"
 #include "mixer/primitives/MixerState.hpp"
 #include <cassert>
 #include <limits>

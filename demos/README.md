@@ -55,10 +55,6 @@ Then follow [Mixer](mixer/README.md#run),
 The first build compiles FFmpeg and avplumber; subsequent builds reuse Docker's
 cache. These demos do not require neural models or TensorRT.
 
-For an inference application, see the
-[official TensorRT installation options](../doc/research/2026-09-07-public-tensorrt-installation.md),
-including the limits of native Fedora support and minimal runtime packages.
-
 ## Start a WebRTC preview
 
 Playlist and Replay require Janus; Mixer can also write directly to a file or

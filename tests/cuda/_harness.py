@@ -19,18 +19,26 @@ def make_avp(hwaccel, capacity=3):
     return avp, errors
 
 
-def v210_chain(nodes, tag, path, *, width, height, stride, fmt, hwaccel, color, **unpack):
-    """Input(rawvideo gray, stride x height packets) -> Demux -> V210ToCuda; returns the edge.
-    The gray demuxer only frames bytes, which also permits nonstandard row strides."""
-    from pyplumber.node import Demux, Input, V210ToCuda
+def v210_chain(nodes, tag, path, *, width, height, stride, fmt, hwaccel, color,
+               sample_aspect_ratio="1/1"):
+    """Frame packed CPU bytes as gray, then upload and unpack with patched FFmpeg."""
+    from pyplumber.node import DecVideo, Demux, FilterVideo, Input
+    tags = {"range" if key == "color_range" else key: value for key, value in color.items()}
+    graph = [f"hwupload_cuda=v210_width={width}", "settb=1/90000",
+             f"setsar={sample_aspect_ratio}"]
+    if tags:
+        graph.append("setparams=" + ":".join(f"{key}={value}" for key, value in tags.items()))
+    if fmt != "p210le":
+        graph.append(f"scale_cuda=format={fmt}")
     nodes += [
         Input({"name": f"in_{tag}", "url": str(path), "format": "rawvideo", "dst": f"pkt_{tag}",
                "options": {"pixel_format": "gray", "video_size": f"{stride}x{height}",
                            "framerate": "60"}}),
         Demux({"name": f"demux_{tag}", "src": f"pkt_{tag}", "routing": {"v:0": f"packed_{tag}"}}),
-        V210ToCuda({"name": f"unpack_{tag}", "src": f"packed_{tag}", "dst": f"gpu_{tag}",
-                    "hwaccel": hwaccel, "width": width, "height": height, "stride": stride,
-                    "fps": "60/1", "timebase": "1/90000", "format": fmt, **color, **unpack}),
+        DecVideo({"name": f"decode_{tag}", "src": f"packed_{tag}", "dst": f"bytes_{tag}",
+                  "codec": "rawvideo", "pixel_format": "gray"}),
+        FilterVideo({"name": f"unpack_{tag}", "src": f"bytes_{tag}", "dst": f"gpu_{tag}",
+                     "hwaccel": hwaccel, "threads": 1, "graph": ",".join(graph)}),
     ]
     return f"gpu_{tag}"
 

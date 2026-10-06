@@ -8,7 +8,7 @@
 
 namespace avp::mixer::graph {
 
-void resetInputIf(const std::shared_ptr<NodeManager>& nodes, const std::string& name) {
+void resetInputIf(const std::shared_ptr<MixerGraph>& nodes, const std::string& name) {
     if (name.empty())
         return;
     auto w = nodes->node_if_exists(name);
@@ -18,25 +18,9 @@ void resetInputIf(const std::shared_ptr<NodeManager>& nodes, const std::string& 
         r->resetInput();
 }
 
-void resetSlotNormFps(const std::shared_ptr<NodeManager>& nodes, const MixerState& st) {
+void resetSlotNormFps(const std::shared_ptr<MixerGraph>& nodes, const MixerState& st) {
     resetInputIf(nodes, st.slot_a.norm_ts_name);
     resetInputIf(nodes, st.slot_b.norm_ts_name);
-}
-
-bool nodeWorkingIfExists(const std::shared_ptr<NodeManager>& nodes, const std::string& name) {
-    if (name.empty())
-        return false;
-    auto w = nodes->node_if_exists(name);
-    return w && w->isWorking();
-}
-
-bool groupWorking(const std::shared_ptr<NodeManager>& nodes, const std::string& group_name) {
-    const auto group = nodes->group(group_name);
-    for (const auto& [_, node] : nodes->allNodes()) {
-        if (node && node->group() == group && node->isWorking())
-            return true;
-    }
-    return false;
 }
 
 static bool nodeConsumesEdge(const std::shared_ptr<NodeWrapper>& node, const std::string& edge_name) {
@@ -52,7 +36,7 @@ static bool nodeConsumesEdge(const std::shared_ptr<NodeWrapper>& node, const std
     return false;
 }
 
-std::shared_ptr<NodeWrapper> workingConsumerForEdge(const std::shared_ptr<NodeManager>& nodes,
+std::shared_ptr<NodeWrapper> workingConsumerForEdge(const std::shared_ptr<MixerGraph>& nodes,
                                                     const std::string& edge_name) {
     for (const auto& [_, node] : nodes->allNodes()) {
         if (node && node->isWorking() && nodeConsumesEdge(node, edge_name))
@@ -61,7 +45,7 @@ std::shared_ptr<NodeWrapper> workingConsumerForEdge(const std::shared_ptr<NodeMa
     return nullptr;
 }
 
-bool setNodeObjectIfCreated(const std::shared_ptr<NodeManager>& nodes,
+bool setNodeObjectIfCreated(const std::shared_ptr<MixerGraph>& nodes,
                             const std::string& node_name,
                             const std::string& key,
                             const Parameters& value) {
@@ -74,7 +58,9 @@ bool setNodeObjectIfCreated(const std::shared_ptr<NodeManager>& nodes,
         return false;
 
     try {
-        wrapper->setObject(key, value);
+        auto control = std::dynamic_pointer_cast<IInputsObjects>(wrapper->node());
+        if (!control) throw Error("Node has no runtime controls: " + node_name);
+        control->setObject(key, value);
         return true;
     } catch (const std::exception& e) {
         if (std::string(e.what()) == "Node not created")
@@ -83,14 +69,7 @@ bool setNodeObjectIfCreated(const std::shared_ptr<NodeManager>& nodes,
     }
 }
 
-int edgeOccupiedIfExists(const std::shared_ptr<NodeManager>& nodes, const std::string& name) {
-    if (name.empty())
-        return 0;
-    auto e = nodes->edges()->findAny(name);
-    return e ? e->occupied() : 0;
-}
-
-std::string firstDstEdgeName(const std::shared_ptr<NodeManager>& nodes, const std::string& node_name) {
+std::string firstDstEdgeName(const std::shared_ptr<MixerGraph>& nodes, const std::string& node_name) {
     auto node = nodes->node_if_exists(node_name);
     if (!node)
         return "";
@@ -101,7 +80,7 @@ std::string firstDstEdgeName(const std::shared_ptr<NodeManager>& nodes, const st
     return names.empty() ? "" : names.front();
 }
 
-std::string edgeNameAt(const std::shared_ptr<NodeManager>& nodes,
+std::string edgeNameAt(const std::shared_ptr<MixerGraph>& nodes,
                        const std::string& node_name,
                        const std::string& param_name,
                        size_t index) {
@@ -119,14 +98,14 @@ std::string edgeNameAt(const std::shared_ptr<NodeManager>& nodes,
     return *it;
 }
 
-av::Timestamp edgeLastTsIfExists(const std::shared_ptr<NodeManager>& nodes, const std::string& name) {
+av::Timestamp edgeLastTsIfExists(const std::shared_ptr<MixerGraph>& nodes, const std::string& name) {
     if (name.empty())
         return NOTS;
     auto e = nodes->edges()->findAny(name);
     return e ? e->lastTS() : NOTS;
 }
 
-WipeReadyResult waitForWipeOverlayReady(const std::shared_ptr<NodeManager>& nodes,
+WipeReadyResult waitForWipeOverlayReady(const std::shared_ptr<MixerGraph>& nodes,
                                         const std::string& edge_name,
                                         av::Timestamp initial_ts,
                                         int64_t earliest_visible_pts_ms,
@@ -150,42 +129,7 @@ WipeReadyResult waitForWipeOverlayReady(const std::shared_ptr<NodeManager>& node
     return result;
 }
 
-bool overlayCommandCurrent(const std::shared_ptr<MixerState>& state, uint64_t generation) {
-    return state->overlay_generation.load(std::memory_order_acquire) == generation;
-}
-
-OverlayReadyResult waitForOverlayBranchReady(const std::shared_ptr<NodeManager>& nodes,
-                                             const std::shared_ptr<MixerState>& state,
-                                             uint64_t generation,
-                                             const std::string& edge_name,
-                                             av::Timestamp initial_ts,
-                                             av::Timestamp minimum_ts,
-                                             int64_t timeout_ms,
-                                             int64_t poll_ms) {
-    OverlayReadyResult result;
-    timeout_ms = std::max<int64_t>(0, timeout_ms);
-    poll_ms = std::max<int64_t>(1, poll_ms);
-    while (result.waited_ms < timeout_ms) {
-        if (!overlayCommandCurrent(state, generation)) {
-            result.cancelled = true;
-            return result;
-        }
-        av::Timestamp ts = edgeLastTsIfExists(nodes, edge_name);
-        const bool fresh = ts.isValid() && (!initial_ts.isValid() || ts > initial_ts);
-        const bool monotonic = !minimum_ts.isValid() || (ts.isValid() && !(ts < minimum_ts));
-        if (fresh && monotonic) {
-            result.ready = true;
-            result.ready_ts = ts;
-            return result;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
-        result.waited_ms += poll_ms;
-    }
-    result.ready_ts = edgeLastTsIfExists(nodes, edge_name);
-    return result;
-}
-
-static std::shared_ptr<NodeWrapper> requireNodeWrapper(const std::shared_ptr<NodeManager>& nodes,
+static std::shared_ptr<NodeWrapper> requireNodeWrapper(const std::shared_ptr<MixerGraph>& nodes,
                                                 const std::string& node_name,
                                                 const std::string& context) {
     auto wrapper = nodes->node_if_exists(node_name);
@@ -194,7 +138,7 @@ static std::shared_ptr<NodeWrapper> requireNodeWrapper(const std::shared_ptr<Nod
     return wrapper;
 }
 
-static std::vector<std::string> routerLabels(const std::shared_ptr<NodeManager>& nodes, const std::string& router_name) {
+static std::vector<std::string> routerLabels(const std::shared_ptr<MixerGraph>& nodes, const std::string& router_name) {
     auto wrapper = requireNodeWrapper(nodes, router_name, "mixer.routed_source");
     const auto& params = wrapper->parameters();
     if (!params.count("dst"))
@@ -213,7 +157,7 @@ static std::vector<std::string> routerLabels(const std::shared_ptr<NodeManager>&
     return labels;
 }
 
-int routerOutputCount(const std::shared_ptr<NodeManager>& nodes, const std::string& router_name) {
+int routerOutputCount(const std::shared_ptr<MixerGraph>& nodes, const std::string& router_name) {
     auto wrapper = requireNodeWrapper(nodes, router_name, "mixer.init_routes");
     const auto& params = wrapper->parameters();
     if (!params.count("dst"))
@@ -221,7 +165,7 @@ int routerOutputCount(const std::shared_ptr<NodeManager>& nodes, const std::stri
     return static_cast<int>(jsonToStringList(params["dst"]).size());
 }
 
-int routerOutputIndexFromLabel(const std::shared_ptr<NodeManager>& nodes,
+int routerOutputIndexFromLabel(const std::shared_ptr<MixerGraph>& nodes,
                                const std::string& router_name,
                                const std::string& label) {
     auto labels = routerLabels(nodes, router_name);

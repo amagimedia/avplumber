@@ -163,8 +163,8 @@ def fake_api():
         "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input_rec",
         "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer",
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
-        "RawToCuda": "raw_to_cuda", "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
-        "SmoothTimestamps": "smooth_timestamps", "Split": "split", "V210ToCuda": "v210_to_cuda",
+        "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
+        "SmoothTimestamps": "smooth_timestamps", "Split": "split",
     }
     return SimpleNamespace(AVPlumber=FakeAvp, MixerGraphBuilder=FakeMixer,
                            RtcpFeedbackListener=FakeRtcpFeedbackListener,
@@ -724,13 +724,17 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
         source = dict(FakeMixer.instances[-1].sources)["raw"]
         assert source["pre_otm_edge"] == "input_0_uploaded" and source["pixel_format"] == fmt
     else:
-        # No decoder, setpts filter or FFmpeg hwupload: one node turns packets into CUDA frames.
-        assert chain == ["input_0", "demux_0", "upload_0", "realtime_0", "fps_0"]
+        # Rawvideo wraps the packets; the patched filter uploads on the shared device.
+        assert chain == ["input_0", "demux_0", "decode_0", "upload_0", "realtime_0", "fps_0"]
         assert nodes["demux_0"]["routing"] == {"v:0": "input_0_packed"}
         upload = nodes["upload_0"]
-        assert upload["type"] == "raw_to_cuda"
-        assert (upload["src"], upload["dst"], upload["pixel_format"]) == ("input_0_packed", "input_0_cuda", fmt)
-        assert (upload["width"], upload["height"], upload["hwaccel"]) == (320, 180, "mixer_gpu")
+        assert nodes["decode_0"]["codec"] == "rawvideo"
+        assert nodes["decode_0"]["pixel_format"] == fmt
+        assert nodes["decode_0"]["src"] == "input_0_packed"
+        assert "hwaccel" not in nodes["decode_0"]
+        assert (upload["type"], upload["graph"]) == ("filter_video", "hwupload_cuda=pinned=1")
+        assert (upload["src"], upload["dst"]) == ("input_0_decoded", "input_0_cuda")
+        assert (upload["hwaccel"], upload["threads"]) == ("mixer_gpu", 1)
         # The mixer applies the source's colour contract; the upload leaves frames untagged as before.
         assert not {"color_trc", "color_primaries", "colorspace", "color_range"} & upload.keys()
         assert nodes["realtime_0"]["src"] == "input_0_cuda"
@@ -828,7 +832,7 @@ def test_recipe_builds_all_independent_input_chains_and_renditions(tmp_path):
     path.write_text(json.dumps(doc))
     application = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
     nodes = {node.parameters.get("name"): node.parameters for node in application.avp.nodes}
-    assert len([n for n in nodes if n and n.startswith("decode_")]) == 12
+    assert len([n for n in nodes if n and n.startswith("decode_")]) == 16  # video plus gray-wrapped v210
     assert len([n for n in nodes if n and n.startswith("unpack_")]) == 4
     mixer = FakeMixer.instances[-1]
     assert len(mixer.sources) == 16 and len(mixer.scenes) == 24
@@ -1371,7 +1375,10 @@ def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path):
     app = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
     nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
     sources = dict(FakeMixer.instances[-1].sources)
-    assert nodes["unpack_0"]["sw_format"] == "p210le" and nodes["unpack_0"]["color_trc"] == "arib-std-b67"
+    assert nodes["unpack_0"]["type"] == "filter_video"
+    assert "hwupload_cuda=v210_width=1920" in nodes["unpack_0"]["graph"]
+    assert "color_trc=arib-std-b67" in nodes["unpack_0"]["graph"]
+    assert nodes["decode_0"]["pixel_format"] == "gray"
     assert sources["gen"]["pixel_format"] == "p210le" and sources["gen"]["color"] == Color("hlg")
     assert sources["cam"]["pixel_format"] is None and sources["cam"]["color"] is None   # NVDEC, tags from the frames
     # HDR out: one chroma subsample to P010 for NVENC, no tone-map pass.
@@ -1464,7 +1471,7 @@ def test_hdr_example_config_parses_and_builds(tmp_path, monkeypatch):
     app = build_application(GraphOptions(config=str(path), janus_output=True, dmabuf_socket_dir=str(tmp_path)),
                             api=fake_api())
     nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
-    assert nodes["unpack_0"]["sw_format"] == "p210le"
+    assert "hwupload_cuda=v210_width=1920" in nodes["unpack_0"]["graph"]
     assert nodes["scale_hdr"]["graph"] == Color("hlg").setparams + ",scale_cuda=format=p010le"
     assert ":tonemap=mobius:" in nodes["scale_sdr"]["graph"] and ":param=0.9" in nodes["scale_sdr"]["graph"]
     assert nodes["archive_encoder"]["hdr_metadata"]["max_cll"] == 1000

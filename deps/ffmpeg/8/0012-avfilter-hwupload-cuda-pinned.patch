@@ -1,0 +1,348 @@
+From 84d64c8f90a28c068fbbc11b7607de14b877cf17 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Tue, 6 Oct 2026 13:21:44 +0200
+Subject: [PATCH] avfilter/hwupload_cuda: opt-in pinned staging and GPU v210
+ unpack
+
+Reuse the supplied CUDA context, stage software frames in pinned memory and copy on a private nonblocking stream. Preserve default transfers. GPU v210 unpack accepts gray-wrapped packed rows and requires a CUDA compiler; ordinary pinned upload does not. Synchronize before forwarding, and order pooled output reuse against the device stream.
+---
+ doc/filters.texi                |  14 ++
+ libavfilter/Makefile            |   3 +
+ libavfilter/vf_hwupload_cuda.c  | 221 +++++++++++++++++++++++++++++++-
+ libavfilter/vf_hwupload_cuda.cu |  24 ++++
+ 4 files changed, 258 insertions(+), 4 deletions(-)
+ create mode 100644 libavfilter/vf_hwupload_cuda.cu
+
+diff --git a/doc/filters.texi b/doc/filters.texi
+index 3cf872b1c3..4071fb6cfc 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -15743,2 +15743,16 @@ It accepts the following optional parameters:
+ The number of the CUDA device to use
++@item pinned
++Use reusable pinned host staging and a private nonblocking CUDA stream for
++software NV12/P010 uploads. Default is disabled. If a CUDA filter device is
++provided, reuse its context. Upload completion is synchronized before the
++output frame is forwarded; this option does not eliminate CPU waits.
++
++@item v210_width
++Treat gray input frames as packed v210 rows and unpack them on the GPU into
++linear P210 frames of this picture width. The input width is the packed byte
++stride; it must be a multiple of four and large enough for an even picture
++width. Zero disables unpacking (the default). This option implies pinned
++staging and requires a CUDA compiler at build time. It does not perform CPU
++v210 decoding. Set the source's color properties explicitly.
++
+ @end table
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index 85d17e4827..a87e859907 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -362,2 +362,5 @@ OBJS-$(CONFIG_HWMAP_FILTER)                  += vf_hwmap.o
+ OBJS-$(CONFIG_HWUPLOAD_CUDA_FILTER)          += vf_hwupload_cuda.o
++ifneq ($(filter yes,$(CONFIG_CUDA_NVCC) $(CONFIG_CUDA_LLVM)),)
++OBJS-$(CONFIG_HWUPLOAD_CUDA_FILTER)          += vf_hwupload_cuda.ptx.o cuda/load_helper.o
++endif
+ OBJS-$(CONFIG_HWUPLOAD_FILTER)               += vf_hwupload.o
+diff --git a/libavfilter/vf_hwupload_cuda.c b/libavfilter/vf_hwupload_cuda.c
+index 8acfe5c5f9..f480b465ae 100644
+--- a/libavfilter/vf_hwupload_cuda.c
++++ b/libavfilter/vf_hwupload_cuda.c
+@@ -20,2 +20,5 @@
+ #include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/cuda_check.h"
++#include "libavutil/imgutils.h"
+ #include "libavutil/log.h"
+@@ -27,2 +30,6 @@
+ #include "video.h"
++#include "config.h"
++#if CONFIG_CUDA_NVCC || CONFIG_CUDA_LLVM
++#include "cuda/load_helper.h"
++#endif
+ 
+@@ -31,2 +38,14 @@ typedef struct CudaUploadContext {
+     int device_idx;
++    int pinned;
++    int v210_width;
++    CUdeviceptr packed;
++    CUmodule module;
++    CUfunction unpack;
++    AVCUDADeviceContext *cuda;
++    CUstream upload_stream;
++    CUevent readers_done;
++    uint8_t *staging;
++    uint8_t *planes[4];
++    int linesizes[4];
++    size_t plane_sizes[4];
+ 
+@@ -36,3 +55,3 @@ typedef struct CudaUploadContext {
+ 
+-static av_cold int cudaupload_init(AVFilterContext *ctx)
++static int cudaupload_init_device(AVFilterContext *ctx)
+ {
+@@ -41,2 +60,10 @@ static av_cold int cudaupload_init(AVFilterContext *ctx)
+ 
++    if (s->pinned && ctx->hw_device_ctx) {
++        AVHWDeviceContext *device = (AVHWDeviceContext *)ctx->hw_device_ctx->data;
++        if (device->type != AV_HWDEVICE_TYPE_CUDA)
++            return AVERROR(EINVAL);
++        s->hwdevice = av_buffer_ref(ctx->hw_device_ctx);
++        return s->hwdevice ? 0 : AVERROR(ENOMEM);
++    }
++
+     snprintf(buf, sizeof(buf), "%d", s->device_idx);
+@@ -46,2 +73,145 @@ static av_cold int cudaupload_init(AVFilterContext *ctx)
+ 
++static av_cold int cudaupload_init(AVFilterContext *ctx)
++{
++    CudaUploadContext *s = ctx->priv;
++    if (s->v210_width) {
++#if CONFIG_CUDA_NVCC || CONFIG_CUDA_LLVM
++        s->pinned = 1;
++#else
++        av_log(ctx, AV_LOG_ERROR, "v210 upload requires a CUDA compiler at build time\n");
++        return AVERROR(ENOSYS);
++#endif
++    }
++    /* Older callers attach hw_device_ctx after init but before configuration. */
++    return s->pinned ? 0 : cudaupload_init_device(ctx);
++}
++
++#define CHECK_CU(call) FF_CUDA_CHECK_DL(ctx, s->cuda->internal->cuda_dl, (call))
++
++static void pinned_uninit(AVFilterContext *ctx)
++{
++    CudaUploadContext *s = ctx->priv;
++    CudaFunctions *cu;
++    CUcontext previous;
++    if (!s->cuda)
++        return;
++    cu = s->cuda->internal->cuda_dl;
++    if (CHECK_CU(cu->cuCtxPushCurrent(s->cuda->cuda_ctx)) < 0)
++        return;
++    if (s->upload_stream)
++        CHECK_CU(cu->cuStreamSynchronize(s->upload_stream));
++    if (s->packed)
++        CHECK_CU(cu->cuMemFree(s->packed));
++    if (s->module)
++        CHECK_CU(cu->cuModuleUnload(s->module));
++    s->packed = 0;
++    s->module = NULL;
++    if (s->staging)
++        CHECK_CU(cu->cuMemFreeHost(s->staging));
++    if (s->readers_done)
++        CHECK_CU(cu->cuEventDestroy(s->readers_done));
++    if (s->upload_stream)
++        CHECK_CU(cu->cuStreamDestroy(s->upload_stream));
++    s->staging = NULL;
++    s->readers_done = NULL;
++    s->upload_stream = NULL;
++    CHECK_CU(cu->cuCtxPopCurrent(&previous));
++}
++
++static int pinned_init(AVFilterContext *ctx, AVHWFramesContext *frames)
++{
++    CudaUploadContext *s = ctx->priv;
++    CudaFunctions *cu;
++    CUcontext previous;
++    ptrdiff_t pitches[4];
++    int size, ret;
++    AVFilterLink *input = ctx->inputs[0];
++
++    pinned_uninit(ctx);
++    s->cuda = frames->device_ctx->hwctx;
++    cu = s->cuda->internal->cuda_dl;
++    size = av_image_get_buffer_size(input->format, input->w, input->h, 1);
++    if (size < 0)
++        return size;
++    ret = CHECK_CU(cu->cuCtxPushCurrent(s->cuda->cuda_ctx));
++    if (ret < 0)
++        return ret;
++    ret = CHECK_CU(cu->cuStreamCreate(&s->upload_stream, CU_STREAM_NON_BLOCKING));
++    if (ret >= 0)
++        ret = CHECK_CU(cu->cuEventCreate(&s->readers_done, CU_EVENT_DISABLE_TIMING));
++    if (ret >= 0)
++        ret = CHECK_CU(cu->cuMemHostAlloc((void **)&s->staging, size, 0));
++#if CONFIG_CUDA_NVCC || CONFIG_CUDA_LLVM
++    if (ret >= 0 && s->v210_width) {
++        extern const unsigned char ff_vf_hwupload_cuda_ptx_data[];
++        extern const unsigned int ff_vf_hwupload_cuda_ptx_len;
++        ret = CHECK_CU(cu->cuMemAlloc(&s->packed, size));
++        if (ret >= 0)
++            ret = ff_cuda_load_module(ctx, s->cuda, &s->module,
++                                      ff_vf_hwupload_cuda_ptx_data, ff_vf_hwupload_cuda_ptx_len);
++        if (ret >= 0)
++            ret = CHECK_CU(cu->cuModuleGetFunction(&s->unpack, s->module, "unpack_v210"));
++    }
++#endif
++    CHECK_CU(cu->cuCtxPopCurrent(&previous));
++    if (ret < 0)
++        return ret;
++    ret = av_image_fill_arrays(s->planes, s->linesizes, s->staging,
++                              input->format, input->w, input->h, 1);
++    if (ret < 0)
++        return ret;
++    for (int i = 0; i < 4; i++)
++        pitches[i] = s->linesizes[i];
++    return av_image_fill_plane_sizes(s->plane_sizes, input->format, input->h, pitches);
++}
++
++static int pinned_upload(AVFilterContext *ctx, AVFrame *out, const AVFrame *in)
++{
++    CudaUploadContext *s = ctx->priv;
++    CudaFunctions *cu = s->cuda->internal->cuda_dl;
++    CUcontext previous;
++    int ret, sync_ret;
++
++    /* Input strides can include padding or run backwards. Only active pixels
++     * enter the reusable pinned allocation. */
++    av_image_copy(s->planes, s->linesizes, (const uint8_t **)in->data,
++                  in->linesize, in->format, in->width, in->height);
++    ret = CHECK_CU(cu->cuCtxPushCurrent(s->cuda->cuda_ctx));
++    if (ret < 0)
++        return ret;
++    /* Filters may release a pool frame before their queued reads complete.
++     * Order writes after those reads without synchronizing the whole device. */
++    if (s->v210_width)
++        ret = CHECK_CU(cu->cuMemcpyHtoDAsync(s->packed, s->staging,
++                                           s->plane_sizes[0], s->upload_stream));
++    if (ret >= 0)
++        ret = CHECK_CU(cu->cuEventRecord(s->readers_done, s->cuda->stream));
++    if (ret >= 0)
++        ret = CHECK_CU(cu->cuStreamWaitEvent(s->upload_stream, s->readers_done, 0));
++    if (ret >= 0 && s->v210_width) {
++        void *args[] = { &s->packed, &s->linesizes[0], &out->width, &out->height,
++                         &out->data[0], &out->linesize[0], &out->data[1], &out->linesize[1] };
++        ret = CHECK_CU(cu->cuLaunchKernel(s->unpack,
++                       (out->width / 2 + 31) / 32, (out->height + 7) / 8, 1,
++                       32, 8, 1, 0, s->upload_stream, args, NULL));
++    }
++    for (int i = 0; !s->v210_width && ret >= 0 && i < 4 && s->linesizes[i]; i++) {
++        CUDA_MEMCPY2D copy = { 0 };
++        copy.srcMemoryType = CU_MEMORYTYPE_HOST;
++        copy.srcHost = s->planes[i];
++        copy.srcPitch = s->linesizes[i];
++        copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
++        copy.dstDevice = (CUdeviceptr)out->data[i];
++        copy.dstPitch = out->linesize[i];
++        copy.WidthInBytes = s->linesizes[i];
++        copy.Height = s->plane_sizes[i] / s->linesizes[i];
++        ret = CHECK_CU(cu->cuMemcpy2DAsync(&copy, s->upload_stream));
++    }
++    /* Also drain on failure: neither the output nor staging may be recycled
++     * while a previously queued copy still uses it. */
++    sync_ret = CHECK_CU(cu->cuStreamSynchronize(s->upload_stream));
++    CHECK_CU(cu->cuCtxPopCurrent(&previous));
++    return ret < 0 ? ret : sync_ret;
++}
++
+ static av_cold void cudaupload_uninit(AVFilterContext *ctx)
+@@ -50,2 +220,3 @@ static av_cold void cudaupload_uninit(AVFilterContext *ctx)
+ 
++    pinned_uninit(ctx);
+     av_buffer_unref(&s->hwframe);
+@@ -59,2 +230,12 @@ static int cudaupload_query_formats(const AVFilterContext *ctx,
+     int ret;
++    const CudaUploadContext *s = ctx->priv;
++    if (s->pinned) {
++        static const int raw[] = { AV_PIX_FMT_NV12, AV_PIX_FMT_P010, AV_PIX_FMT_NONE };
++        static const int packed[] = { AV_PIX_FMT_GRAY8, AV_PIX_FMT_NONE };
++        static const int cuda[] = { AV_PIX_FMT_CUDA, AV_PIX_FMT_NONE };
++        ret = ff_formats_ref(ff_make_format_list(s->v210_width ? packed : raw), &cfg_in[0]->formats);
++        if (ret < 0)
++            return ret;
++        return ff_formats_ref(ff_make_format_list(cuda), &cfg_out[0]->formats);
++    }
+ 
+@@ -99,2 +280,19 @@ static int cudaupload_config_output(AVFilterLink *outlink)
+ 
++    if (s->pinned && inl->hw_frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "Pinned upload requires software NV12/P010 input and linear CUDA output\n");
++        return AVERROR(EINVAL);
++    }
++
++    /* v210 has no AVPixelFormat: rawvideo/gray frames carry its packed rows.
++     * The declared input width is the byte stride, not the picture width. */
++    if (s->v210_width && (s->v210_width % 2 || inlink->format != AV_PIX_FMT_GRAY8 ||
++        inlink->w % 4 || inlink->w < ((int64_t)s->v210_width * 2 + 2) / 3 * 4))
++        return AVERROR(EINVAL);
++
++    if (!s->hwdevice) {
++        ret = cudaupload_init_device(ctx);
++        if (ret < 0)
++            return ret;
++    }
++
+     av_buffer_unref(&s->hwframe);
+@@ -112,3 +310,6 @@ static int cudaupload_config_output(AVFilterLink *outlink)
+     }
+-    hwframe_ctx->width     = inlink->w;
++    if (s->v210_width)
++        hwframe_ctx->sw_format = AV_PIX_FMT_P210;
++    hwframe_ctx->width     = s->v210_width ? s->v210_width : inlink->w;
++    outlink->w            = hwframe_ctx->width;
+     hwframe_ctx->height    = inlink->h;
+@@ -119,2 +320,8 @@ static int cudaupload_config_output(AVFilterLink *outlink)
+ 
++    if (s->pinned) {
++        ret = pinned_init(ctx, hwframe_ctx);
++        if (ret < 0)
++            return ret;
++    }
++
+     outl->hw_frames_ctx = av_buffer_ref(s->hwframe);
+@@ -140,6 +347,7 @@ static int cudaupload_filter_frame(AVFilterLink *link, AVFrame *in)
+ 
+-    out->width  = in->width;
++    out->width  = outlink->w;
+     out->height = in->height;
+ 
+-    ret = av_hwframe_transfer_data(out, in, 0);
++    ret = ((CudaUploadContext *)ctx->priv)->pinned
++        ? pinned_upload(ctx, out, in) : av_hwframe_transfer_data(out, in, 0);
+     if (ret < 0) {
+@@ -165,2 +373,4 @@ fail:
+ static const AVOption cudaupload_options[] = {
++    { "v210_width", "Unpack gray-wrapped v210 rows into P210 on the GPU (implies pinned)", OFFSET(v210_width), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
++    { "pinned", "Upload software NV12/P010 through pinned staging on a private stream", OFFSET(pinned), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
+     { "device", "Number of the device to use", OFFSET(device_idx), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
+@@ -192,2 +402,5 @@ const FFFilter ff_vf_hwupload_cuda = {
+     .p.priv_class  = &cudaupload_class,
++#ifdef AVFILTER_FLAG_HWDEVICE
++    .p.flags       = AVFILTER_FLAG_HWDEVICE,
++#endif
+ 
+diff --git a/libavfilter/vf_hwupload_cuda.cu b/libavfilter/vf_hwupload_cuda.cu
+new file mode 100644
+index 0000000000..c81a04d567
+--- /dev/null
++++ b/libavfilter/vf_hwupload_cuda.cu
+@@ -0,0 +1,24 @@
++#include <stdint.h>
++#include <stddef.h>
++
++// One thread owns a 4:2:2 pixel pair spanning two packed v210 words.
++extern "C" __global__ void unpack_v210(
++    const uint8_t *input, int input_pitch, int width, int height,
++    uint8_t *output_y, int y_pitch, uint8_t *output_uv, int uv_pitch)
++{
++    const int pair = blockIdx.x * blockDim.x + threadIdx.x;
++    const int row = blockIdx.y * blockDim.y + threadIdx.y;
++    if (pair >= width / 2 || row >= height) return;
++    const uint32_t *packed = reinterpret_cast<const uint32_t *>(
++        input + static_cast<size_t>(row) * input_pitch);
++    const int sample = pair * 4;
++    const int word = sample / 3;
++    const uint64_t bits = ((static_cast<uint64_t>(packed[word + 1] & 0x3fffffff) << 30)
++                          | (packed[word] & 0x3fffffff)) >> ((sample % 3) * 10);
++    uint16_t *y = reinterpret_cast<uint16_t *>(output_y + static_cast<size_t>(row) * y_pitch);
++    uint16_t *uv = reinterpret_cast<uint16_t *>(output_uv + static_cast<size_t>(row) * uv_pitch);
++    y[pair * 2] = ((bits >> 10) & 1023) << 6;
++    y[pair * 2 + 1] = ((bits >> 30) & 1023) << 6;
++    uv[pair * 2] = (bits & 1023) << 6;
++    uv[pair * 2 + 1] = ((bits >> 20) & 1023) << 6;
++}
+-- 
+2.55.0
+

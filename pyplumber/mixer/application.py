@@ -317,12 +317,10 @@ def load_avp_api():
         OneToMany,
         Output,
         PreheatVideoRouter,
-        RawToCuda,
         Realtime,
         RepeatLastFrame,
         SmoothTimestamps,
         Split,
-        V210ToCuda,
     )
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
 
@@ -347,13 +345,11 @@ def load_avp_api():
         OneToMany=OneToMany,
         Output=Output,
         PreheatVideoRouter=PreheatVideoRouter,
-        RawToCuda=RawToCuda,
         Realtime=Realtime,
         RepeatLastFrame=RepeatLastFrame,
         RtcpFeedbackListener=RtcpFeedbackListener,
         SmoothTimestamps=SmoothTimestamps,
         Split=Split,
-        V210ToCuda=V210ToCuda,
     )
 
 

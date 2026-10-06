@@ -25,7 +25,7 @@ const {chromium} = require('playwright');
         canvas: {width: 1920, height: 1080, fps: 25, working_format: 'nv12'}, preview_codecs: ['h264'],
         aux_buses: aux.map(a => a.id), preview_outputs: aux.map((a, i) => ({bus: a.id, label: a.label,
           codec: 'h264', mountpoint: 5000 + 4 * i, fps: 25}))}};
-    const root = path.join(__dirname, '../webui');
+    const root = path.join(__dirname, '../../pyplumber/mixer/gui/assets');
     await page.route('**/*', route => {
       const url = new URL(route.request().url());
       if (url.pathname === '/api/state') return route.fulfill({json: sample});

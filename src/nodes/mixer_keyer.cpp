@@ -80,13 +80,8 @@ public:
         av::VideoFrame *program = source_edges_[clock]->peek();
         // Step the envelopes on the frame about to be drawn (EOF markers have no PTS).
         if (program && frameUsable(*program)) {
-            std::optional<avp::mixer::SourceMask> timeline_mask;   // a timeline switches keys with cuts
-            if (hasTimeline())
-                if (auto value = tlGetRaw("active_inputs", program->pts()))
-                    timeline_mask = avp::mixer::parseSourceMask(*value);
-            // A few keys' arithmetic: the control thread is held off no longer than that.
             std::lock_guard<std::mutex> lock(masks_mutex_);
-            stepKeyFades(program->pts(), timeline_mask.value_or(active_inputs_), timeline_mask.has_value());
+            stepKeyFades(program->pts(), active_inputs_, false);
         }
         if (!keys_subscribed_) {
             for (auto &subscription : subscriptions_)

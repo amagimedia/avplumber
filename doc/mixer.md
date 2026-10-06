@@ -84,10 +84,11 @@ SDR/HDR media and measured demo presets stay in `demos/mixer/`.
 | Module | Role |
 |---|---|
 | `src/mixer/orchestrator/MixerOrchestrator.hpp`, `core.cpp` | `MixerOrchestrator` core: node adapters, interruption/abort, status |
-| `src/mixer/orchestrator/{scene,cut,fade,wipe,overlay}.cpp` | one transition kind per file |
+| `src/mixer/orchestrator/{scene,cut,fade,wipe}.cpp` | scene operations and one take kind per file |
 | `src/mixer/routing.hpp` | state → router route tables and compositor layer arrays (pure) |
 | `src/mixer/graph_ops.{hpp,cpp}` | node/edge lookups, deferred `setObject`, readiness polls |
-| `src/mixer/TransitionScheduler.{hpp,cpp}` | worker thread for scheduled transition steps |
+| `src/nodes/mixer_selector.cpp` | commits immediate takes on input frames; advances fades and wipes by media PTS |
+| `src/mixer/MixerGraph.hpp` | weak graph handles resolved outside frame processing, avoiding shutdown lock inversion |
 | `src/mixer/Playout.hpp` | clocked playout: per-input queues, deadlines, frame pick (unit-tested) |
 | `src/mixer/primitives/` | headers with no graph or CUDA dependency: `TickGrid`, `Cadence`, `MonotonicClock`, `CutLatency`, `CutLatencyProbe`, `Snapshot`, `OutputSnapshot`, `MixerState`, `TransitionGuard`, `PreviewFollow` (unit-tested where they carry logic), plus the compositor geometry headers below |
 | `src/nodes/mixer_compositor.cpp`, `mixer_keyer.cpp` | mixer-owned compositor nodes: the clocked playout of the scene slots, wipe and AUX buses (`mixer_compositor`); the DSK (`mixer_keyer`) |
@@ -162,14 +163,23 @@ CUDA source frames
   -> source fanout (or catalogue router)
   -> mixer_compositor A / mixer_compositor B
   -> permanent transition_cuda
-  -> source_switcher
+  -> mixer_selector
   -> NVENC
 ```
 
 Each slot has its own layer rectangles because an outgoing scene and incoming
-scene must remain live at the same time during a transition. Scene changes are
-scheduled against a shared timeline so router selection, compositor inputs,
-and the program selector change at consistent frame timestamps.
+scene must remain live at the same time during a transition. Scene loads apply layout and input activation together on the compositor thread.
+Each resulting frame carries the scene revision. The program selector commits a
+cut on the first usable frame of that revision; fades and wipes progress by
+frame PTS. There is no intentional take delay or separate transition scheduler.
+A readiness timeout aborts failed takes while preserving the current program.
+
+Takes are immediate. `start_pts_ms`, `switch_margin_ms`, the `timeline` graph
+parameter and the `timeline.*` commands have been removed. Transition duration
+still controls the length of a fade or wipe.
+
+The unused `mixer.overlay.init` and `mixer.overlay` handover commands have also
+been removed. Use the keyer through `mixer.dsk` for the application’s overlays.
 
 `MixerGraphBuilder` returns the final video-frame edge. The application owns
 input decode, output encoding/muxing, startup order, and shutdown.

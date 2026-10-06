@@ -27,8 +27,8 @@ class CudaMixerBackend:
         return conversion_graph(target, pixel_format, **options)
 
     def wipe_upload(self, color):
-        # Alpha clips decode on CPU; upload at native size to the mixer device.
-        return (color.setparams + "," if color else "") + "format=rgba,hwupload"
+        # Alpha clips decode on CPU; use pinned staging and a private upload stream.
+        return (color.setparams + "," if color else "") + "format=rgba,hwupload_cuda=pinned=1"
 
 
 def conversion_graph(target, pixel_format, *, source=None, source_format=None,
