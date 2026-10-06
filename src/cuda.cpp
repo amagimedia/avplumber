@@ -22,12 +22,10 @@ __attribute__((constructor)) void init_global_cuda() {
     cuda_error |= CHECK_CU(cuDeviceGetCount(&device_count));
     logstream << "initializing cuda. Device count: " << device_count;
 
-    cuda_error |= CHECK_CU(cuDeviceGet(&global_cuda.device, 0));
-    cuda_error |=
-        CHECK_CU(cuCtxCreate(&global_cuda.cu_ctx, 0, global_cuda.device));
-    
-    if (cuda_error) {
-        logstream << "failed to initialize CUDA context";
+    // No context is created here: nodes run in the context of their hwaccel device, and an
+    // unused process-wide context would still hold device memory.
+    if (cuda_error || device_count < 1) {
+        logstream << "failed to find a CUDA device";
         global_cuda.has_errors = true;
         return;
     }

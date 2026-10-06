@@ -3,9 +3,10 @@
 Pass-through CUDA video node that computes lightweight luma-difference metrics on
 consecutive frames and writes them to frame metadata.
 
-The node expects CUDA video frames with an 8-bit luma plane, typically produced by
-`scale_cuda=...:format=nv12`. It keeps the previous luma frame on GPU and emits
-only compact JSON metadata.
+The node accepts linear CUDA frames with NV12, YUV420P, YUVJ420P or GRAY8 storage,
+and native NV12 CUarray frames. Storage is detected per frame. CUarray luma is
+sampled directly; the existing GPU history buffers and copy count are unchanged.
+Input storage and timestamps pass through unchanged, with compact JSON metadata.
 
 ## Parameters
 
