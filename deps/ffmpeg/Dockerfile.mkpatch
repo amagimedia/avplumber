@@ -1,18 +1,34 @@
-# Build the MXL "0013" patch on top of the avplumber FFmpeg 8.x series.
+# Build the MXL patch on top of the avplumber FFmpeg 8/ or 9/ series.
 #
-# Usage from the repository root:
+# Usage from the repository root (8/ series example; see mkpatch-mxl.sh for
+# the full list of overridable env vars):
 #
 #   docker build -f deps/ffmpeg/Dockerfile.mkpatch \
 #       -t avplumber-mxl-mkpatch:local deps/ffmpeg
 #   docker run --rm \
 #       -v "$PWD/deps/ffmpeg/8:/out" \
 #       -v "$PWD/deps/ffmpeg/8:/patches:ro" \
+#       -e OUT_PATCH_NUM=0013 \
 #       avplumber-mxl-mkpatch:local
 #
-# On success this overwrites:
-#   deps/ffmpeg/8/0013-avformat-libmxl-demuxer-muxer.patch
+# For the 9/ series, point at dmf-mxl/9.0 and the pinned development
+# revision instead, with SERIES=9 so mkpatch-finish skips the n8.0/n8.1
+# configure re-anchoring:
 #
-# Then refresh deps/ffmpeg/8/bases.env from deps/ffmpeg/verify.sh (it prints
+#   docker run --rm \
+#       -v "$PWD/deps/ffmpeg/9:/out" \
+#       -v "$PWD/deps/ffmpeg/9:/patches:ro" \
+#       -e FFMPEG_TAG=98e92563a3b60dbf6d370fd3491d7f896398e4c1 \
+#       -e MXL_REMOTE_REF=dmf-mxl/9.0 \
+#       -e MXL_PIN=<pinned dmf-mxl/9.0 commit> \
+#       -e OUT_PATCH_NUM=0019 \
+#       -e SERIES=9 \
+#       avplumber-mxl-mkpatch:local
+#
+# On success this overwrites the numbered
+# 0NNN-avformat-libmxl-demuxer-muxer.patch in the mounted /out dir.
+#
+# Then refresh the matching bases.env from deps/ffmpeg/verify.sh (it prints
 # the actual tree for each base when the pinned one no longer matches).
 #
 # On cherry-pick conflicts the container exits with instructions; drop
@@ -27,9 +43,9 @@ RUN apt-get update \
         git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY mkpatch-0013-mxl.sh /usr/local/bin/mkpatch-0013-mxl
-COPY mkpatch-finish.sh   /usr/local/bin/mkpatch-finish
-COPY mkpatch-fixups      /fixups
-RUN chmod +x /usr/local/bin/mkpatch-0013-mxl /usr/local/bin/mkpatch-finish
+COPY mkpatch-mxl.sh    /usr/local/bin/mkpatch-mxl
+COPY mkpatch-finish.sh /usr/local/bin/mkpatch-finish
+COPY mkpatch-fixups    /fixups
+RUN chmod +x /usr/local/bin/mkpatch-mxl /usr/local/bin/mkpatch-finish
 
-ENTRYPOINT ["/usr/local/bin/mkpatch-0013-mxl"]
+ENTRYPOINT ["/usr/local/bin/mkpatch-mxl"]

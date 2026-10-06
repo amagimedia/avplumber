@@ -126,11 +126,20 @@ public:
         hwaccel_(hwaccel)
     {
         // The source stream's own codecpar (e.g. a real codec like v210) is what
-        // dec_(stream, codec_) just copied into this codec context. A packet
+        // dec_(stream, codec_) just copied into this codec context, including
+        // codec_id -- clobbering the id of the codec_ (rawvideo) just allocated
+        // for, which avcodec_open2 then rejects as a type/id mismatch. A packet
         // stream whose bytes are already raw (MXL's packed-v210 flow, read with
         // codec=rawvideo to hand them to a GPU unpack filter) needs those bytes
         // reinterpreted at the byte stride, not the real picture width, before
         // the rawvideo "decoder" opens.
+        if (reinterpret_width > 0 || !reinterpret_pixel_format.empty()) {
+            dec_.raw()->codec_id = codec_.raw()->id;
+            // rawvideo's decoder derives pix_fmt from codec_tag (the stream's
+            // real fourcc, e.g. "v210") when set, overriding whatever we put
+            // in pix_fmt below; clear it so the explicit format sticks.
+            dec_.raw()->codec_tag = 0;
+        }
         if (reinterpret_width > 0) {
             dec_.raw()->width = reinterpret_width;
         }

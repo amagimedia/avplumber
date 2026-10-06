@@ -48,9 +48,13 @@ pattern. `--gpu-scale` and `--writer-pack gpu` were checked separately at
 * NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
   are optional here (`--gpus all` selects the GPU reader path), though
   the other demos in the shared image do need CUDA.
-* The FFmpeg 8.x series applied to `n8.1` (or `n8.0`). The MXL patch
-  `8/0013-*` is generated from `cbcrc/FFmpeg` branch `dmf-mxl/8.1` —
-  see [`deps/ffmpeg/README.md`](../../deps/ffmpeg/README.md).
+* NVIDIA driver **615 or newer** — required by the FFmpeg 9/CUARRAY series
+  this demo targets by default (`nv-codec-headers` n13.1.15.0's NVENC SDK).
+* The FFmpeg `9/` development series (`master-98e92563`) applied by default;
+  the MXL patch `9/0019-*` is generated from `cbcrc/FFmpeg` branch
+  `dmf-mxl/9.0`. The `8/` series (`n8.1` or `n8.0`, MXL patch `8/0013-*`
+  from branch `dmf-mxl/8.1`) is still supported as an opt-in override — see
+  [`deps/ffmpeg/README.md`](../../deps/ffmpeg/README.md).
 
 ## Build
 
@@ -58,8 +62,14 @@ Shares its runtime image with `demos/mixer/`. From the repository root
 (after `git submodule update --init --recursive`):
 
 ```sh
-docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
+docker build -f docker-compose/mixer/Dockerfile -t avplumber-mixer:local \
+    --build-arg FFMPEG_TAG=master-98e92563 \
+    --build-arg NV_CODEC_HEADERS_TAG=n13.1.15.0 \
+    .
 ```
+
+Omit both `--build-arg`s to build the `8/` series (`n8.1`) instead — the
+Dockerfile's own defaults.
 
 MXL-specific parts of that build: gcc-13 from `ppa:ubuntu-toolchain-r/test`
 (the SDK needs C++20; FFmpeg and avplumber keep gcc-11), vcpkg and Rust

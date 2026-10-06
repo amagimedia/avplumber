@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Generate deps/ffmpeg/8/0013-avformat-libmxl-demuxer-muxer.patch by
-# replaying the MXL commits from cbcrc/FFmpeg on top of the avplumber
-# series (0001-0012).
+# Generate deps/ffmpeg/{8,9}/${OUT_PATCH_NUM}-avformat-libmxl-demuxer-muxer.patch
+# by replaying the MXL commits from cbcrc/FFmpeg on top of the rest of the
+# avplumber series for that base.
 #
 # Runs inside a plain Linux container (see Dockerfile.mkpatch). All state
 # lives in /tmp; the resulting patch is written to /out.
@@ -18,10 +18,15 @@ set -euo pipefail
 FFMPEG_TAG="${FFMPEG_TAG:-n8.1}"
 # cbcrc's guidance-for-building-ffmpeg-with-mxl (scripts/get-src.sh)
 # hosts the MXL FFmpeg work at cbcrc/FFmpeg. The dmf-mxl/8.1 branch
-# forks from the same n8.1 commit that 8/bases.env pins.
+# forks from the same n8.1 commit that 8/bases.env pins; dmf-mxl/9.0
+# forks from the development revision 9/bases.env pins.
 MXL_REMOTE_URL="${MXL_REMOTE_URL:-https://github.com/cbcrc/FFmpeg.git}"
 MXL_REMOTE_REF="${MXL_REMOTE_REF:-dmf-mxl/8.1}"
 MXL_PIN="${MXL_PIN:-9eddb90ac0cf6063aaacc4fc2775f19d873500eb}"
+# Which numbered slot in PATCH_DIR this run writes/replaces, e.g. 0013 for
+# the 8/ series or 0019 for the 9/ series. Passed through to mkpatch-finish.
+export OUT_PATCH_NUM="${OUT_PATCH_NUM:-0013}"
+export SERIES="${SERIES:-8}"
 OUT_DIR="${OUT_DIR:-/out}"
 PATCH_DIR="${PATCH_DIR:-/patches}"
 FIXUP_DIR="${FIXUP_DIR:-/fixups}"
@@ -41,15 +46,18 @@ git config user.name  "avplumber mxl builder"
 git config user.email "avplumber-mxl@local"
 
 # Blobless fetches keep this quick while preserving the history needed to
-# compute a merge base with the fork.
+# compute a merge base with the fork. FFMPEG_TAG may be a tag (n8.1) or a
+# bare commit hash (the 9/ series pins a development revision, not a tag);
+# GitHub allows fetching either directly, so try that first.
 log "fetching upstream $FFMPEG_TAG"
 git remote add upstream https://github.com/FFmpeg/FFmpeg.git
-git fetch --quiet --filter=blob:none --no-tags upstream "tag" "$FFMPEG_TAG"
-git checkout --quiet -b work "$FFMPEG_TAG"
+git fetch --quiet --filter=blob:none --no-tags upstream "$FFMPEG_TAG" 2>/dev/null \
+    || git fetch --quiet --filter=blob:none --no-tags upstream "tag" "$FFMPEG_TAG"
+git checkout --quiet -b work FETCH_HEAD
 
 log "applying the existing series (everything except the MXL patch)"
-# A previous 0013 in $PATCH_DIR is what we are about to replace, so skip it.
-mapfile -t EXISTING < <(ls "$PATCH_DIR"/0[0-9][0-9][0-9]-*.patch | sort | grep -v '/0013-')
+# A previous $OUT_PATCH_NUM in $PATCH_DIR is what we are about to replace, so skip it.
+mapfile -t EXISTING < <(ls "$PATCH_DIR"/0[0-9][0-9][0-9]-*.patch | sort | grep -v "/${OUT_PATCH_NUM}-")
 git am --whitespace=nowarn "${EXISTING[@]}"
 
 BASE_AFTER_STACK="$(git rev-parse HEAD)"

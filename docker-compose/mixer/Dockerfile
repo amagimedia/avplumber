@@ -102,8 +102,19 @@ RUN git clone --quiet --branch "${MXL_TAG}" --depth 1 \
 
 COPY deps/ffmpeg /build/deps/ffmpeg
 
-RUN git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
-        https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
+# FFMPEG_TAG=master-98e92563 (the 9/bases.env upstream_ref alias) names a bare
+# development revision, not a branch or tag `git clone --branch` can resolve;
+# fetch that one commit directly instead.
+RUN if [ "${FFMPEG_TAG}" = "$(. /build/deps/ffmpeg/9/bases.env; echo "$upstream_ref")" ]; then \
+        . /build/deps/ffmpeg/9/bases.env \
+        && git init --quiet /tmp/ffmpeg \
+        && git -C /tmp/ffmpeg remote add origin https://github.com/FFmpeg/FFmpeg.git \
+        && git -C /tmp/ffmpeg fetch --quiet --depth 1 origin "$upstream_commit" \
+        && git -C /tmp/ffmpeg checkout --quiet --detach FETCH_HEAD; \
+    else \
+        git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
+            https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg; \
+    fi \
     && git -C /tmp/ffmpeg config user.name "mixer-demo builder" \
     && git -C /tmp/ffmpeg config user.email "mixer-demo@local" \
     && bash /build/deps/ffmpeg/apply.sh /tmp/ffmpeg

@@ -25,7 +25,13 @@ to fetch both pinned revisions; the default remains `n8.1`.
 All seven custom CUDA filters remain: `convert_cuda`, `crop_cuda`,
 `overlay_many_cuda`, `pad_cuda`, `transition_cuda` (including 10-bit and dip),
 `tonemap_cuda` and `band_blur_cuda`. The RFC 4175, V4L2, optional NDI registration
-and AArch64 patches remain too. Changes from the 8.x series:
+and AArch64 patches remain too. The libmxl demuxer/muxer (see item 12 under
+[The series](#the-series)) is carried here too, as patch `0019` — squashed
+from `cbcrc/FFmpeg` branch `dmf-mxl/9.0`, pinned at `16abbf0`, which forks
+from the same development revision `9/bases.env` pins. `demos/mxl` targets
+this series by default; see [Regenerating the libmxl
+patch](#regenerating-the-libmxl-patch) to move the pin. Changes from the 8.x
+series:
 
 - NPP compatibility is omitted because upstream removed NPP filter support.
   `--enable-libnpp` now only warns and does nothing. This is a feature removal
@@ -158,13 +164,16 @@ and the filter changes) is base-independent.
     branch `dmf-mxl/8.1`, pinned at `9eddb90`, plus our fixes from
     `mkpatch-fixups/` (currently one: monotonic PTS across a
     `reset_on_drop` reset, which otherwise aborts the process mid-stream).
-    Built into the shared demo image by `demos/mixer/Dockerfile` (which
-    also pins the MXL SDK) and exercised by `demos/mxl`.
+    Also carried on the `9/` series (branch `dmf-mxl/9.0`) as patch `0019`,
+    which `demos/mxl` targets by default — see [Development-series
+    differences](#development-series-differences). Built into the shared
+    demo image by `docker-compose/mixer/Dockerfile` (which also pins the
+    MXL SDK).
 
-### Regenerating `8/0013-avformat-libmxl-demuxer-muxer.patch`
+### Regenerating the libmxl patch
 
 Docker only, and no compiler needed — the container just replays git history
-(works on Linux and macOS hosts):
+(works on Linux and macOS hosts). For the `8/` series:
 
 ```bash
 docker build -f deps/ffmpeg/Dockerfile.mkpatch \
@@ -172,6 +181,23 @@ docker build -f deps/ffmpeg/Dockerfile.mkpatch \
 docker run --rm \
     -v "$PWD/deps/ffmpeg/8:/out" \
     -v "$PWD/deps/ffmpeg/8:/patches:ro" \
+    -e OUT_PATCH_NUM=0013 \
+    avplumber-mxl-mkpatch:local
+```
+
+For the `9/` series, point at `dmf-mxl/9.0` and the pinned development
+revision, and set `SERIES=9` so `mkpatch-finish` skips the n8.0/n8.1
+configure re-anchoring (the 9/ series targets one base, not two):
+
+```bash
+docker run --rm \
+    -v "$PWD/deps/ffmpeg/9:/out" \
+    -v "$PWD/deps/ffmpeg/9:/patches:ro" \
+    -e FFMPEG_TAG=98e92563a3b60dbf6d370fd3491d7f896398e4c1 \
+    -e MXL_REMOTE_REF=dmf-mxl/9.0 \
+    -e MXL_PIN=16abbf041307fd08db2566e488c1f4e0714a158a \
+    -e OUT_PATCH_NUM=0019 \
+    -e SERIES=9 \
     avplumber-mxl-mkpatch:local
 ```
 
@@ -179,14 +205,13 @@ Everything in `mkpatch-fixups/` is `git am`-ed after the cherry-picks, so our
 own fixes end up inside the squashed patch with their commit messages listed
 as provenance. Retire one by deleting its file and regenerating.
 
-Set `MXL_REMOTE_REF`/`MXL_PIN` (and `FFMPEG_TAG`) to move to a newer fork
-branch, e.g. `dmf-mxl/9.0` for a future base. Afterwards refresh
-`8/bases.env`: `verify.sh` prints the actual tree per base when the pinned
-one no longer matches, and `patch_count` must match the file count.
+Afterwards refresh the matching `bases.env`: `verify.sh` prints the actual
+tree per base when the pinned one no longer matches, and `patch_count` must
+match the file count.
 
 Cherry-pick conflicts stop the container with instructions; re-run it with
 `--entrypoint bash` and finish by hand (`git cherry-pick --continue`, then
-`/usr/local/bin/mkpatch-finish`).
+`SERIES=... OUT_PATCH_NUM=... /usr/local/bin/mkpatch-finish`).
 
 ## FFmpeg 8 notes
 

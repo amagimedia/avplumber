@@ -10,6 +10,10 @@
 set -eu
 set -o pipefail
 FFMPEG_TAG="${FFMPEG_TAG:-n8.1}"
+# "8" needs the n8.0/n8.1 configure re-anchoring below; "9" targets a single
+# pinned development revision, so it's skipped.
+SERIES="${SERIES:-8}"
+OUT_PATCH_NUM="${OUT_PATCH_NUM:-0013}"
 
 BASE_AFTER_STACK="${1:-}"
 if [ -z "$BASE_AFTER_STACK" ]; then
@@ -18,31 +22,36 @@ if [ -z "$BASE_AFTER_STACK" ]; then
 fi
 
 OUT_DIR="${OUT_DIR:-/out}"
-OUT_FILE="$OUT_DIR/0013-avformat-libmxl-demuxer-muxer.patch"
+OUT_FILE="$OUT_DIR/${OUT_PATCH_NUM}-avformat-libmxl-demuxer-muxer.patch"
 
 log() { printf '[mkpatch] %s\n' "$*"; }
 
-# The series must apply to both n8.0 and n8.1 from one copy, so the configure
-# hunks may only touch lines the two bases share. As imported, the MXL work
-# anchors its `require_pkg_config libmxl` next to libmpeghdec, which exists
-# only in 8.1, and carries a whitespace-only reindent of the mmal check. Move
-# the require next to the mxl_* deps lines (whose neighbours are identical in
-# both bases) and drop the reindent.
-log "re-anchoring the configure hunks for n8.0/n8.1 portability"
-awk '
-    /^enabled libmxl  *&& require_pkg_config libmxl/ { require = $0; next }
-    /^ +check_func_headers interface\/mmal\/mmal\.h "MMAL_PARAMETER_VIDEO_MAX_NUM_CALLBACKS"; }$/ {
-        sub(/^ +/, "                               "); print; next
-    }
-    /^enabled mxl_demuxer  *&& prepend avformat_deps/ {
-        if (require == "") { print "mkpatch: libmxl require line not found" > "/dev/stderr"; exit 1 }
-        print require; moved = 1
-    }
-    { print }
-    END { if (!moved) { print "mkpatch: mxl_demuxer prepend line not found" > "/dev/stderr"; exit 1 } }
-' configure >configure.mkpatch
-mv configure.mkpatch configure
-chmod +x configure
+if [ "$SERIES" = 8 ]; then
+    # The series must apply to both n8.0 and n8.1 from one copy, so the
+    # configure hunks may only touch lines the two bases share. As imported,
+    # the MXL work anchors its `require_pkg_config libmxl` next to
+    # libmpeghdec, which exists only in 8.1, and carries a whitespace-only
+    # reindent of the mmal check. Move the require next to the mxl_* deps
+    # lines (whose neighbours are identical in both bases) and drop the
+    # reindent.
+    log "re-anchoring the configure hunks for n8.0/n8.1 portability"
+    awk '
+        /^enabled libmxl  *&& require_pkg_config libmxl/ { require = $0; next }
+        /^ +check_func_headers interface\/mmal\/mmal\.h "MMAL_PARAMETER_VIDEO_MAX_NUM_CALLBACKS"; }$/ {
+            sub(/^ +/, "                               "); print; next
+        }
+        /^enabled mxl_demuxer  *&& prepend avformat_deps/ {
+            if (require == "") { print "mkpatch: libmxl require line not found" > "/dev/stderr"; exit 1 }
+            print require; moved = 1
+        }
+        { print }
+        END { if (!moved) { print "mkpatch: mxl_demuxer prepend line not found" > "/dev/stderr"; exit 1 } }
+    ' configure >configure.mkpatch
+    mv configure.mkpatch configure
+    chmod +x configure
+else
+    log "series $SERIES targets a single pinned base; skipping n8.0/n8.1 configure re-anchoring"
+fi
 
 log "collecting authorship from cherry-picked commits"
 AUTHOR_TRAILERS="$(
@@ -63,9 +72,12 @@ MSG_FILE="$(mktemp)"
     printf 'Adds the MXL demuxer, muxer, URI parser, JSON/diagnostic helpers\n'
     printf 'and --enable-libmxl configure glue.\n\n'
     printf 'Cherry-picked from https://github.com/cbcrc/FFmpeg (branch\n'
-    printf '%s) and squashed onto %s on top of the avplumber\n' "${MXL_REMOTE_REF:-dmf-mxl/8.1}" "$FFMPEG_TAG"
-    printf 'series 0001-0012, with the configure hunks re-anchored so the\n'
-    printf 'patch applies to both n8.0 and n8.1.\n\n'
+    printf '%s) and squashed onto %s on top of the avplumber series.\n' "${MXL_REMOTE_REF:-dmf-mxl/8.1}" "$FFMPEG_TAG"
+    if [ "$SERIES" = 8 ]; then
+        printf 'The configure hunks are re-anchored so the patch applies to\n'
+        printf 'both n8.0 and n8.1.\n'
+    fi
+    printf '\n'
     printf 'Original commits:\n%s\n\n' "$ORIGINAL_COMMITS"
     [ -n "$AUTHOR_TRAILERS" ] && printf '%s\n' "$AUTHOR_TRAILERS"
 } >"$MSG_FILE"
@@ -82,6 +94,11 @@ log "writing patch to $OUT_FILE"
 git format-patch -1 --stdout --unified=1 HEAD >"$OUT_FILE"
 
 log "done."
-log "next: refresh deps/ffmpeg/8/bases.env (patch_count and both trees) from"
-log "      deps/ffmpeg/verify.sh n8.1 <ffmpeg-repo>"
-log "      deps/ffmpeg/verify.sh n8.0 <ffmpeg-repo>"
+if [ "$SERIES" = 8 ]; then
+    log "next: refresh deps/ffmpeg/8/bases.env (patch_count and both trees) from"
+    log "      deps/ffmpeg/verify.sh n8.1 <ffmpeg-repo>"
+    log "      deps/ffmpeg/verify.sh n8.0 <ffmpeg-repo>"
+else
+    log "next: refresh deps/ffmpeg/9/bases.env (patch_count and upstream_tree) from"
+    log "      deps/ffmpeg/verify.sh master-98e92563 <ffmpeg-repo>"
+fi
