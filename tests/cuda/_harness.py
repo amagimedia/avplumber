@@ -1,0 +1,115 @@
+"""Shared scaffolding for the CUDA smokes: AVPlumber setup, the packed-v210
+ingest chain, plane extraction, the frame drain loop and condition polling."""
+
+import time
+
+import numpy as np
+
+EOF = -(1 << 63)
+
+
+def make_avp(hwaccel, capacity=3):
+    """AVPlumber with a CUDA hwaccel and an error sink; returns (avp, errors)."""
+    from pyplumber import AVPlumber
+    avp = AVPlumber()
+    errors = []
+    avp.on_exception = lambda *e: errors.append(tuple(map(str, e)))
+    avp.edges.planCapacity("*", capacity)
+    avp.executeCommandsFromString(f'hwaccel.init {{"name":"{hwaccel}","type":"cuda"}}')
+    return avp, errors
+
+
+def v210_chain(nodes, tag, path, *, width, height, stride, fmt, hwaccel, color,
+               sample_aspect_ratio="1/1"):
+    """Frame packed CPU bytes as gray, then upload and unpack with patched FFmpeg."""
+    from pyplumber.node import DecVideo, Demux, FilterVideo, Input
+    tags = {"range" if key == "color_range" else key: value for key, value in color.items()}
+    graph = [f"hwupload_cuda=v210_width={width}", "settb=1/90000",
+             f"setsar={sample_aspect_ratio}"]
+    if tags:
+        graph.append("setparams=" + ":".join(f"{key}={value}" for key, value in tags.items()))
+    if fmt != "p210le":
+        graph.append(f"scale_cuda=format={fmt}")
+    nodes += [
+        Input({"name": f"in_{tag}", "url": str(path), "format": "rawvideo", "dst": f"pkt_{tag}",
+               "options": {"pixel_format": "gray", "video_size": f"{stride}x{height}",
+                           "framerate": "60"}}),
+        Demux({"name": f"demux_{tag}", "src": f"pkt_{tag}", "routing": {"v:0": f"packed_{tag}"}}),
+        DecVideo({"name": f"decode_{tag}", "src": f"packed_{tag}", "dst": f"bytes_{tag}",
+                  "codec": "rawvideo", "pixel_format": "gray"}),
+        FilterVideo({"name": f"unpack_{tag}", "src": f"bytes_{tag}", "dst": f"gpu_{tag}",
+                     "hwaccel": hwaccel, "threads": 1, "graph": ",".join(graph)}),
+    ]
+    return f"gpu_{tag}"
+
+
+def frame_planes(frame, fmt):
+    """Downloaded frame -> (Y, U, V) logical 10-bit planes."""
+    if fmt in ("p010le", "p210le"):
+        heights = (frame.height, (frame.height + 1) // 2 if fmt == "p010le" else frame.height)
+        y, uv = [np.frombuffer(d, "<u2").reshape(h, p // 2)
+                 for d, p, h in zip(frame.data[:2], frame.linesize[:2], heights)]
+        y, uv = y[:, :frame.width], uv[:, :frame.width]
+        assert not np.any(y & 63) and not np.any(uv & 63), f"{fmt} low bits must be zero"
+        return y >> 6, uv[:, 0::2] >> 6, uv[:, 1::2] >> 6
+    widths = [frame.width, frame.width // 2, frame.width // 2] if fmt != "yuv444p10le" \
+        else [frame.width] * 3
+    return tuple(np.frombuffer(d, "<u2").reshape(frame.height, p // 2)[:, :w]
+                 for d, p, w in zip(frame.data[:3], frame.linesize[:3], widths))
+
+
+def nv12_planes(frame):
+    """Downloaded NV12 frame -> (luma, interleaved chroma) as 8-bit arrays."""
+    data, linesize = frame.data, frame.linesize   # each access copies
+    return tuple(np.frombuffer(data[i], np.uint8).reshape(rows, linesize[i])[:, :frame.width]
+                 for i, rows in enumerate((frame.height, frame.height // 2)))
+
+
+def start(avp, nodes, group, edge):
+    """Register nodes under one group with auto_restart off, start them, return the edge."""
+    for node in nodes:
+        node.parameters.update({"group": group, "auto_restart": "off"})
+        avp.addNode(node)
+    out = avp.getEdge(edge, "VideoFrame")
+    avp.group(group).startNodes()
+    return out
+
+
+def wait_for(predicate, label="condition", timeout=10, errors=()):
+    """Poll *predicate* until it holds; fail on the first recorded error or after *timeout* seconds."""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert not errors, errors
+        assert time.monotonic() < deadline, f"{label} timed out"
+        time.sleep(.005)
+
+
+def drain(edge, errors, timeout, limit=None, state=None):
+    """Yield frames until EOF, *limit* frames, an error or the deadline.
+    ``state`` (a dict) receives ``eof`` and ``count`` for callers that care."""
+    deadline = time.monotonic() + timeout
+    count, eof = 0, False
+    while time.monotonic() < deadline and not errors and (limit is None or count < limit):
+        frame = edge.tryGet(100)
+        if frame is None:
+            continue
+        if frame.pts.timestamp == EOF:
+            eof = True
+            break
+        count += 1
+        yield frame
+    if state is not None:
+        state.update(eof=eof, count=count)
+
+
+def finish(avp, nodes, timeout=10):
+    """Tear the instance down. avplumber's finite-graph shutdown can hang in the
+    stop/start race of a group being torn down; a smoke must not stall on it,
+    so the instance is abandoned (leaked) after *timeout* seconds."""
+    import threading
+    nodes.clear()
+    worker = threading.Thread(target=avp.shutdown, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        print(f"WARNING: avp.shutdown() hung for {timeout}s; leaking the instance", flush=True)

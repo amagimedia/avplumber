@@ -25,8 +25,14 @@ module.exports = {
       { accessibility: 'explicit', overrides: { constructors: 'no-public' } },
     ],
     '@typescript-eslint/consistent-type-imports': 'error',
-    '@typescript-eslint/no-floating-promises': 'error',
+    // `void promise` satisfies the default setting but still drops the rejection; fire-and-forget
+    // calls must end in .catch(). await-thenable and require-await come from the preset.
+    '@typescript-eslint/no-floating-promises': ['error', { ignoreVoid: false }],
     '@typescript-eslint/no-misused-promises': 'error',
+    // Only where it changes behaviour: a promise returned un-awaited from try skips its catch.
+    '@typescript-eslint/return-await': ['error', 'error-handling-correctness-only'],
+    '@typescript-eslint/switch-exhaustiveness-check': 'error',
+    '@typescript-eslint/no-unnecessary-condition': 'error',
     '@typescript-eslint/prefer-readonly': 'error',
     'no-console': 'off',
   },

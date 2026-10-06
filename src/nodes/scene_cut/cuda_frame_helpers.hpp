@@ -1,6 +1,8 @@
 #pragma once
 
 #include "../node_common.hpp"
+#include "../../avbuffer.hpp"
+#include "../hwaccel/cuda_array.hpp"
 
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
@@ -74,6 +76,57 @@ inline AVPixelFormat hwSwFormat(const av::VideoFrame& frame) {
     const AVHWFramesContext* context =
         reinterpret_cast<const AVHWFramesContext*>(frame.raw()->hw_frames_ctx->data);
     return context ? context->sw_format : AV_PIX_FMT_NONE;
+}
+
+// Borrowed from frame; callers retain its device while holding a stream/session.
+inline AVCUDADeviceContext *frameCudaDevice(const av::VideoFrame &frame,
+                                           const char *node_name, CUcontext expected) {
+    const auto *raw = frame.raw();
+    const auto *frames = raw && raw->hw_frames_ctx
+        ? reinterpret_cast<const AVHWFramesContext *>(raw->hw_frames_ctx->data) : nullptr;
+    if (!frames || !frames->device_ref || !frames->device_ctx ||
+        frames->device_ctx->type != AV_HWDEVICE_TYPE_CUDA || !frames->device_ctx->hwctx) {
+        logstream << node_name << ": missing CUDA frame device";
+        return nullptr;
+    }
+    auto *device = static_cast<AVCUDADeviceContext *>(frames->device_ctx->hwctx);
+    if (!device->cuda_ctx || (expected && expected != device->cuda_ctx)) {
+        logstream << node_name << ": missing or changed CUDA context";
+        return nullptr;
+    }
+    if (checkCuda(cuCtxSetCurrent(device->cuda_ctx), node_name, "cuCtxSetCurrent")) return nullptr;
+    return device;
+}
+
+inline void retainFrameDevice(const av::VideoFrame &frame, avp::AvBufferRef &retained) {
+    auto *frames = reinterpret_cast<const AVHWFramesContext *>(frame.raw()->hw_frames_ctx->data);
+    if (!retained || retained->data != frames->device_ref->data) {
+        avp::AvBufferRef ref(av_buffer_ref(frames->device_ref));
+        if (!ref) throw Error("cannot retain CUDA frame device");
+        retained = std::move(ref);
+    }
+}
+
+// Resolve a borrowed 8-bit luma source for a GPU-to-GPU copy. The caller keeps
+// the frame alive until the destination stream completes.
+inline bool lumaCopySource(const AVFrame *frame, CUDA_MEMCPY2D &copy, const char *node_name) {
+    copy = {};
+    if (avp::cuda::isArrayFormat(static_cast<AVPixelFormat>(frame->format))) {
+        copy.srcMemoryType = CU_MEMORYTYPE_ARRAY;
+        if (checkCuda(avp::cuda::arrayGetPlane(&copy.srcArray,
+                reinterpret_cast<CUarray>(frame->data[0]), 0), node_name, "cuArrayGetPlane")) return false;
+        CUDA_ARRAY3D_DESCRIPTOR desc{};
+        if (checkCuda(cuArray3DGetDescriptor(&desc, copy.srcArray), node_name, "cuArray3DGetDescriptor")) return false;
+        if (desc.Format != CU_AD_FORMAT_UNSIGNED_INT8 || desc.NumChannels != 1 ||
+            desc.Width < size_t(frame->width) || desc.Height < size_t(frame->height)) return false;
+    } else {
+        copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+        copy.srcDevice = reinterpret_cast<CUdeviceptr>(frame->data[0]);
+        copy.srcPitch = frame->linesize[0];
+    }
+    copy.WidthInBytes = frame->width;
+    copy.Height = frame->height;
+    return true;
 }
 
 inline bool initCudaContextFromFrame(

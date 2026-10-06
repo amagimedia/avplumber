@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import List
 
-from avpmixer.janus import JanusVideoConfig
+from pyplumber.mixer.janus import JanusVideoConfig
 from control import VERBS, apply_verb, now_ms, status_json
 from engine import PlaylistConfig, PlaylistEngine, load_avp_api
 from playlist import Clip, ElementMode, PlaylistController, PlaylistMode, Transition
@@ -58,7 +58,6 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--janus-rtcp-port", type=int, default=0)
     p.add_argument("--preroll-ms", type=int, default=50,
                    help="resume the incoming chain this early before its cut")
-    p.add_argument("--switch-margin-ms", type=int, default=100)
     p.add_argument("--control-timeout", type=float, default=10.0)
     p.add_argument("--log-file", default="playlist-demo.log")
     p.add_argument("--record", help="Also write the program to this .mp4/.ts for verification")
@@ -70,7 +69,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 def build_config(args: argparse.Namespace) -> PlaylistConfig:
     return PlaylistConfig(
         fps=args.fps, control_port=args.control_port, control_timeout=args.control_timeout,
-        log_file=args.log_file, preroll_ms=args.preroll_ms, switch_margin_ms=args.switch_margin_ms,
+        log_file=args.log_file, preroll_ms=args.preroll_ms,
         wipe_file=args.wipe_file, record=args.record,
         janus=JanusVideoConfig(host=args.janus_host, video_port=args.janus_video_port,
                                payload_type=args.janus_video_pt, ssrc=args.janus_video_ssrc,

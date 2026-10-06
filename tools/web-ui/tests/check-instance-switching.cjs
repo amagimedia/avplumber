@@ -117,6 +117,19 @@ backend.on('connection', client => {
     assert.equal(await count(), 0, 'old response revived a previous selection generation');
     reply(newB, nodes('new'));
     await until(async () => await count() === 1);
+    // The process behind the selected instance restarted: a new generation reloads its graph
+    // without clearing the shown one first; the first generation seen is not a restart.
+    const generations = gens => instances.map(instance => ({ ...instance, generation: gens[instance.id] }));
+    from = requests.length;
+    socket.send(JSON.stringify({ type: 'instances', instances: generations({ a: 1, b: 1 }) }));
+    socket.send(JSON.stringify({ type: 'instances', instances: generations({ a: 2, b: 1 }) }));
+    await delay(150);
+    assert(!findRequest(from, 'b', 'nodes.json'), 'unchanged generation reloaded the graph');
+    socket.send(JSON.stringify({ type: 'instances', instances: generations({ a: 2, b: 2 }) }));
+    await until(() => findRequest(from, 'b', 'nodes.json'));
+    assert.equal(await count(), 1, 'restart cleared the graph before the new one arrived');
+    reply(findRequest(from, 'b', 'nodes.json'), nodes('old'));
+    await until(async () => await count() === 2);
     // Missing deep link stays pending; registration later selects that ID.
     registry = [instances[0]];
     from = requests.length;

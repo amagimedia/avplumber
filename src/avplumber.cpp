@@ -6,8 +6,9 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
-#include <boost/asio/io_service.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/streambuf.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/write.hpp>
@@ -20,6 +21,7 @@
 #include "stats.hpp"
 #include "logger_impls.hpp"
 #include "output_control.hpp"
+#include "output_subscriptions.hpp"
 #include "hwaccel_mgmt.hpp"
 #include "named_event.hpp"
 #include "RealTimeTeam.hpp"
@@ -28,9 +30,15 @@
 #include "InputSeekTeam.hpp"
 #include "PTSCorrectorCommon.hpp"
 #include "rest_client.hpp"
-#include "SharedTimeline.hpp"
-#include "MixerState.hpp"
-#include "mixer_orchestrator.hpp"
+#include "mixer/primitives/MixerState.hpp"
+#include "mixer/primitives/compositor_color.hpp"
+#include "nodes/hwaccel/graphic_color.h"
+#include "mixer/orchestrator/MixerOrchestrator.hpp"
+using avp::mixer::MixerOrchestrator;
+using avp::mixer::MixerState;
+using avp::mixer::SceneControl;
+using avp::mixer::SceneDefinition;
+#include "CommandTiming.hpp"
 #include <libavformat/avformat.h>
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
@@ -122,6 +130,7 @@ struct ControlPacket {
     };
     Type type;
     std::string data;
+    CommandTiming::Clock::time_point received = CommandTiming::Clock::now();
     ControlPacket(Type _type = None, std::string _data = ""): type(_type), data(_data) {
     }
 };
@@ -192,7 +201,7 @@ public:
                 std::istringstream line(pkt.data);
                 std::ostringstream result;
                 try {
-                    readExecCommands(line, result, false, true, &disconnect);
+                    readExecCommands(line, result, false, true, &disconnect, pkt.received);
                 } catch (std::exception &e) {
                     logstream << "BUG: readExecCommands error (should never happen) " << e.what();
                     break;
@@ -209,7 +218,8 @@ public:
         pipe.to_client.emplace(ControlPacket::End);
         pipe.send_to_client();
     }
-    template<typename InStream, typename OutStream> bool readExecCommands(InStream &in, OutStream &out, bool is_terminal = false, bool is_subcommand = false, bool* disconnect = nullptr) {
+    template<typename InStream, typename OutStream> bool readExecCommands(InStream &in, OutStream &out, bool is_terminal = false, bool is_subcommand = false, bool* disconnect = nullptr,
+            std::optional<CommandTiming::Clock::time_point> received = std::nullopt) {
         bool dowork = true;
         bool all_good = true;
         if (!is_subcommand) {
@@ -243,6 +253,8 @@ public:
 
             // get argument:
             std::getline(in, arg);
+
+            CommandTiming command_timing(received.value_or(CommandTiming::Clock::now()));
 
             auto mngr = manager_;
             if (!mngr) {
@@ -339,6 +351,7 @@ public:
             detached_threads_.clear();
         }
         if (manager_) {
+            InstanceSharedObjectsDestructors::callInstanceDestructors(&manager_->instanceData());
             if (manager_.use_count() <= 1) {
                 logstream << "Destroying NodeManager";
             } else {
@@ -487,6 +500,20 @@ public:
         // ]
         commands_["queues.json"] = [this](ClientStream &cs, std::string&) {
             json j = manager_->edges()->edgesStatsJson();
+            std::map<std::string, bool> subscriptions;
+            for (const auto &entry : manager_->allNodes()) {
+                if (!entry.second) continue;
+                std::shared_ptr<Node> n;
+                if (!entry.second->doLockedTry([&]() { n = entry.second->node(); })) continue;
+                if (auto source = std::dynamic_pointer_cast<IOutputSubscriptions>(n)) {
+                    const auto states = source->outputSubscriptions();
+                    subscriptions.insert(states.begin(), states.end());
+                }
+            }
+            for (auto &queue : j) {
+                const auto state = subscriptions.find(queue.at("name").get<std::string>());
+                if (state != subscriptions.end()) queue["subscription_active"] = state->second;
+            }
             cs << j << "\n";
         };
         // Reset per-queue occupancy statistics used by queues.json (frames_in_queue.* fields).
@@ -735,83 +762,9 @@ public:
             team->setSpeed(speed);
         };
 
-        // timeline.set {"name":"mixer_tl","ch":"otm_cam1","at":1234567,"key":"outputs","val":3}
-        commands_["timeline.set"] = [this](ClientStream &cs, std::string &arg) {
-            json req = json::parse(arg);
-            if (!req.is_object())
-                throw Error("timeline.set: expected JSON object");
-            std::string tl_name = req.at("name").get<std::string>();
-            std::string channel = req.contains("ch")
-                                      ? req.at("ch").get<std::string>()
-                                      : req.at("channel").get<std::string>();
-            std::string key = req.at("key").get<std::string>();
-            int64_t at_pts_ms = req.at("at").get<int64_t>();
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
-            tl->set(channel, key, at_pts_ms, req.at("val"));
-        };
-
-        // timeline.batch <name> <entries_json_array>
-        // Each entry: {"ch":"...", "at":int64, "key":"...", "val":...}
-        commands_["timeline.batch"] = [this](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            std::string tl_name, entries_str;
-            ss >> tl_name;
-            std::getline(ss, entries_str);
-            entries_str = strutils::trim(entries_str);
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
-            json entries = json::parse(entries_str);
-            if (!entries.is_array())
-                throw Error("timeline.batch: expected JSON array");
-            std::vector<SharedTimeline::BatchEntry> batch;
-            batch.reserve(entries.size());
-            for (const auto& e : entries) {
-                batch.push_back(SharedTimeline::BatchEntry{
-                    e.at("ch").get<std::string>(),
-                    e.at("key").get<std::string>(),
-                    e.at("at").get<int64_t>(),
-                    e.at("val")
-                });
-            }
-            tl->setBatch(batch);
-        };
-
-        // timeline.clear <name> [channel]
-        commands_["timeline.clear"] = [this](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            std::string tl_name, channel;
-            ss >> tl_name;
-            if (ss >> channel) {
-                channel = strutils::trim(channel);
-            }
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
-            if (channel.empty())
-                tl->clearAll();
-            else
-                tl->clear(channel);
-        };
-
-        // timeline.gc <name> <before_pts_ms>
-        commands_["timeline.gc"] = [this](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            std::string tl_name;
-            int64_t before_pts_ms;
-            ss >> tl_name >> before_pts_ms;
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
-            tl->gc(before_pts_ms);
-        };
-
-        // timeline.dump <name>
-        commands_["timeline.dump"] = [this](ClientStream &cs, std::string &arg) {
-            std::string tl_name = strutils::trim(arg);
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
-            cs << tl->dump() << "\n";
-        };
-
         auto mixerOrchestrator = [this](const std::string& mixer_name) {
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), state->timeline_name);
-            auto scheduler = InstanceSharedObjects<MixerTransitionScheduler>::get(manager_->instanceData(), mixer_name);
-            return MixerOrchestrator(manager_->shared_from_this(), state, tl, scheduler);
+            return MixerOrchestrator(manager_->shared_from_this(), state);
         };
 
         auto mixerJsonRequest = [](const std::string& command, const std::string& arg) {
@@ -821,22 +774,24 @@ public:
             return req;
         };
 
-        // mixer.source <name> <otm_node> <input_index> <cs_node_a> <cs_node_b>
+        // mixer.source <mixer> <name> <otm_node> <input_index>
         commands_["mixer.source"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
-            std::string mixer_name, src_name, otm_node, cs_a, cs_b;
+            std::string mixer_name, src_name, otm_node;
             int input_index;
-            ss >> mixer_name >> src_name >> otm_node >> input_index >> cs_a >> cs_b;
+            if (!(ss >> mixer_name >> src_name >> otm_node >> input_index))
+                throw Error("mixer.source: expected mixer, source, fanout and input index");
+            std::string extra;
+            if (ss >> extra) throw Error("mixer.source: per-slot filters were removed; filter the source upstream");
             auto orch = mixerOrchestrator(mixer_name);
-            orch.defineSource(src_name, otm_node, input_index, cs_a, cs_b);
+            orch.defineSource(src_name, otm_node, input_index);
         };
 
         // mixer.routed_source {"mixer":"...","name":"...","router":"...","input_index":0,
-        //                      "route_label_a":"...","route_label_b":"...",
-        //                      "cs_node_a":"...","cs_node_b":"..."}
+        //                      "route_label_a":"...","route_label_b":"..."}
         commands_["mixer.routed_source"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             std::string trimmed = strutils::trim(arg);
-            std::string mixer_name, src_name, router_node, route_label_a, route_label_b, cs_a, cs_b;
+            std::string mixer_name, src_name, router_node, route_label_a, route_label_b;
             int input_index;
             if (!trimmed.empty() && trimmed[0] == '{') {
                 json req = mixerJsonRequest("mixer.routed_source", arg);
@@ -846,17 +801,20 @@ public:
                 input_index = req.at("input_index").get<int>();
                 route_label_a = req.at("route_label_a").get<std::string>();
                 route_label_b = req.at("route_label_b").get<std::string>();
-                cs_a = req.at("cs_node_a").get<std::string>();
-                cs_b = req.at("cs_node_b").get<std::string>();
+                if (req.contains("cs_node_a") || req.contains("cs_node_b"))
+                    throw Error("mixer.routed_source: per-slot filters were removed; filter the source upstream");
             } else {
                 std::stringstream ss(arg);
                 int route_out_a, route_out_b;
-                ss >> mixer_name >> src_name >> router_node >> input_index >> route_out_a >> route_out_b >> cs_a >> cs_b;
+                if (!(ss >> mixer_name >> src_name >> router_node >> input_index >> route_out_a >> route_out_b))
+                    throw Error("mixer.routed_source: expected mixer, source, router, input index and two outputs");
+                std::string extra;
+                if (ss >> extra) throw Error("mixer.routed_source: per-slot filters were removed");
                 route_label_a = std::to_string(route_out_a);
                 route_label_b = std::to_string(route_out_b);
             }
             auto orch = mixerOrchestrator(mixer_name);
-            orch.defineRoutedSource(src_name, router_node, input_index, route_label_a, route_label_b, cs_a, cs_b);
+            orch.defineRoutedSource(src_name, router_node, input_index, route_label_a, route_label_b);
         };
 
         // mixer.scene <mixer_name> <scene_name> <json_definition>
@@ -873,20 +831,13 @@ public:
             if (jdef.contains("width")) def.width = jdef["width"].get<int>();
             if (jdef.contains("height")) def.height = jdef["height"].get<int>();
             if (!jdef.contains("sources") || !jdef["sources"].is_object())
-                throw Error("mixer.scene: sources object required (logical source name -> { graph, dst_x, dst_y, ... })");
+                throw Error("mixer.scene: sources object required (logical source name -> { dst_x, dst_y, ... })");
             for (auto it = jdef["sources"].begin(); it != jdef["sources"].end(); ++it) {
-                SourceLayout sl;
-                const json& inj = it.value();
-                sl.crop_scale_graph = inj.value("graph", std::string(""));
-                Parameters layer = json::object();
-                for (auto jt = inj.begin(); jt != inj.end(); ++jt) {
-                    if (jt.key() != "graph")
-                        layer[jt.key()] = jt.value();
-                }
-                if (layer.empty())
-                    layer = {{"dst_x", 0}, {"dst_y", 0}};
-                sl.layer = std::move(layer);
-                def.sources[it.key()] = std::move(sl);
+                const json& layer = it.value();
+                if (!layer.is_object()) throw Error("mixer.scene: each source layer must be an object");
+                if (layer.contains("graph"))
+                    throw Error("mixer.scene: scene filter graphs were removed; filter the source upstream");
+                def.sources[it.key()] = layer;
             }
             if (jdef.contains("controls")) {
                 if (!jdef["controls"].is_array())
@@ -942,83 +893,77 @@ public:
             orch.interrupt();
         };
 
-        // mixer.cut {"mixer":"mixer","scene":"scene_name","start_pts_ms":123456789}
+        // mixer.cut {"mixer":"mixer","scene":"scene_name"}
         commands_["mixer.cut"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.cut", arg);
             std::string mixer_name = req.at("mixer").get<std::string>();
             std::string scene_name = req.at("scene").get<std::string>();
-            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (req.contains("start_pts_ms"))
+                throw Error("mixer: future-scheduled takes were removed; takes are immediate");
             auto orch = mixerOrchestrator(mixer_name);
-            orch.cut(scene_name, start_pts_ms);
+            orch.cut(scene_name, CommandTiming::received());
         };
 
-        // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,"start_pts_ms":123456789}
+        // Opt-in observers only; no node replacement or graph rewiring.
+        commands_["mixer.measurements"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            const auto req = mixerJsonRequest("mixer.measurements", arg);
+            const auto mixer = req.at("mixer").get<std::string>();
+            auto orch = mixerOrchestrator(mixer);
+            orch.enableCutMeasurements(mixer, req.at("encoder").get<std::string>());
+        };
+
+        // Keep source references warm, without rendering hidden scenes.
+        commands_["mixer.prewarm"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            const auto req = mixerJsonRequest("mixer.prewarm", arg);
+            auto orch = mixerOrchestrator(req.at("mixer").get<std::string>());
+            orch.prewarmCuts(req.at("scenes").get<std::vector<std::string>>());
+        };
+
+        // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,
+        //             "curve":"linear","color":"#000000"}; curve is linear (default), ease-in, ease-out or
+        //             ease-in-out; a color (opaque RGB) dips through it instead of mixing
         commands_["mixer.fade"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.fade", arg);
             std::string mixer_name = req.at("mixer").get<std::string>();
             std::string scene_name = req.at("scene").get<std::string>();
             double duration_sec = req.value("duration_sec", 1.0);
-            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (req.contains("start_pts_ms"))
+                throw Error("mixer: future-scheduled takes were removed; takes are immediate");
             if (duration_sec <= 0)
                 throw Error("mixer.fade: duration_sec must be > 0");
+            const auto curve = avp::mixer::parseFadeCurve(req.value("curve", std::string("linear")));
+            std::optional<std::array<uint8_t, 3>> dip;   // "color": null mixes, like no color
+            if (req.contains("color") && !req.at("color").is_null())
+                dip = avp::mixer::parseDipColor(req.at("color").get<std::string>());
             auto orch = mixerOrchestrator(mixer_name);
-            orch.fade(scene_name, duration_sec, start_pts_ms);
+            orch.fade(scene_name, duration_sec, curve, dip, CommandTiming::received());
         };
 
-        // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0,"start_pts_ms":123456789}
+        // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0}
         commands_["mixer.wipe"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.wipe", arg);
             std::string mixer_name = req.at("mixer").get<std::string>();
             std::string scene_name = req.at("scene").get<std::string>();
             std::string wipe_file = req.at("wipe_file").get<std::string>();
             double duration_sec = req.value("duration_sec", 0.0);
-            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (req.contains("start_pts_ms"))
+                throw Error("mixer: future-scheduled takes were removed; takes are immediate");
             if (!req.contains("duration_sec"))
                 duration_sec = probeMediaDurationSec(wipe_file);
             if (duration_sec <= 0)
                 throw Error("mixer.wipe: duration_sec must be > 0");
             auto orch = mixerOrchestrator(mixer_name);
-            orch.wipe(scene_name, wipe_file, duration_sec, start_pts_ms);
+            orch.wipe(scene_name, wipe_file, duration_sec);
         };
 
-        // mixer.overlay.init {"mixer":"mixer","source_otm":"otm_html_overlay_src",
-        //                     "overlay_otm":"otm_html_overlay","selector":"overlay_sel"}
-        commands_["mixer.overlay.init"] = [this, mixerJsonRequest](ClientStream &cs, std::string &arg) {
-            json req = mixerJsonRequest("mixer.overlay.init", arg);
+        // mixer.wipe.warmup {"mixer":"mixer","wipe_file":"/path/wipe.mov","timeout_ms":30000}:
+        // initialise the wipe chain once (file, decoder, GPU filters) without showing it
+        commands_["mixer.wipe.warmup"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.wipe.warmup", arg);
             std::string mixer_name = req.at("mixer").get<std::string>();
-            auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
-            std::lock_guard<std::mutex> lock(state->mutex);
-            state->overlay_source_otm_name = req.at("source_otm").get<std::string>();
-            state->overlay_otm_name = req.at("overlay_otm").get<std::string>();
-            state->overlay_selector_name = req.at("selector").get<std::string>();
-            state->overlay_enabled = req.value("enabled", false);
-            if (req.contains("ready_timeout_ms"))
-                state->overlay_ready_timeout_ms = req.at("ready_timeout_ms").get<int64_t>();
-            if (req.contains("ready_poll_ms"))
-                state->overlay_ready_poll_ms = req.at("ready_poll_ms").get<int64_t>();
-            if (state->overlay_ready_timeout_ms < 0)
-                throw Error("mixer.overlay.init: ready_timeout_ms must be >= 0");
-            if (state->overlay_ready_poll_ms <= 0)
-                throw Error("mixer.overlay.init: ready_poll_ms must be > 0");
-        };
-
-        // mixer.overlay {"mixer":"mixer","enabled":true,"ready_timeout_ms":1000}
-        commands_["mixer.overlay"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
-            json req = mixerJsonRequest("mixer.overlay", arg);
-            std::string mixer_name = req.at("mixer").get<std::string>();
-            bool enabled = req.at("enabled").get<bool>();
-            int64_t ready_timeout_ms = req.value("ready_timeout_ms", int64_t(-1));
-            if (req.contains("source_otm") || req.contains("overlay_otm") || req.contains("selector")) {
-                if (!req.contains("source_otm") || !req.contains("overlay_otm") || !req.contains("selector"))
-                    throw Error("mixer.overlay: source_otm, overlay_otm, and selector must be provided together");
-                auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
-                std::lock_guard<std::mutex> lock(state->mutex);
-                state->overlay_source_otm_name = req.at("source_otm").get<std::string>();
-                state->overlay_otm_name = req.at("overlay_otm").get<std::string>();
-                state->overlay_selector_name = req.at("selector").get<std::string>();
-            }
-            auto orch = mixerOrchestrator(mixer_name);
-            orch.setOverlayEnabled(enabled, ready_timeout_ms);
+            std::string wipe_file = req.at("wipe_file").get<std::string>();
+            int64_t timeout_ms = req.value("timeout_ms", int64_t(30000));
+            mixerOrchestrator(mixer_name).warmupWipe(wipe_file, timeout_ms);
         };
 
         // mixer.status <mixer_name>
@@ -1049,19 +994,21 @@ public:
 
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             std::lock_guard<std::mutex> lock(state->mutex);
-
-            if (cfg.contains("timeline")) state->timeline_name = cfg["timeline"].get<std::string>();
+            if (cfg.contains("backend")) state->transition_control = avp::mixer::transitionControl(cfg["backend"].get<std::string>());
             if (cfg.contains("hwaccel")) state->hwaccel_name = cfg["hwaccel"].get<std::string>();
             if (cfg.contains("fps_num")) state->fps_num = cfg["fps_num"].get<int>();
             if (cfg.contains("fps_den")) state->fps_den = cfg["fps_den"].get<int>();
-            if (cfg.contains("switch_margin_ms")) {
-                state->switch_margin_ms = cfg["switch_margin_ms"].get<int64_t>();
-                if (state->switch_margin_ms < 0)
-                    throw Error("mixer.init: switch_margin_ms must be >= 0");
+            if (cfg.contains("color")) {
+                // The compositors' canvas color (sdr, hlg, pq): a dip colour is converted for it.
+                const auto transfer = avp::mixer::graphicTransfer(cfg["color"].get<std::string>());
+                if (transfer == AVCOL_TRC_UNSPECIFIED)
+                    throw Error("mixer.init: color must be sdr, hlg or pq");
+                state->canvas_transfer = transfer;
             }
             if (cfg.contains("source_switcher")) state->source_switcher_name = cfg["source_switcher"].get<std::string>();
+            if (cfg.contains("keyframe_node")) state->keyframe_node_name = cfg["keyframe_node"].get<std::string>();
             if (cfg.contains("initial_pgm_scene")) state->pgm_scene_name = cfg["initial_pgm_scene"].get<std::string>();
-            if (cfg.contains("initial_pvw_scene")) state->pvw_scene_name = cfg["initial_pvw_scene"].get<std::string>();
+            if (cfg.contains("initial_pvw_scene")) state->publishPreview(cfg["initial_pvw_scene"].get<std::string>(), 0);
             if (cfg.contains("initial_pgm_slot")) {
                 std::string slot = cfg["initial_pgm_slot"].get<std::string>();
                 if (slot == "A")
@@ -1075,13 +1022,13 @@ public:
             if (cfg.contains("slot_a")) {
                 auto& sa = cfg["slot_a"];
                 state->slot_a.compositor_name = sa.value("compositor", std::string(""));
-                state->slot_a.norm_ts_name = sa.value("norm_ts", std::string(""));
+                if (sa.contains("norm_ts")) throw Error("mixer.init: norm_ts was removed; slots use clocked compositors");
                 state->slot_a.post_otm_name = sa.value("post_otm", std::string(""));
             }
             if (cfg.contains("slot_b")) {
                 auto& sb = cfg["slot_b"];
                 state->slot_b.compositor_name = sb.value("compositor", std::string(""));
-                state->slot_b.norm_ts_name = sb.value("norm_ts", std::string(""));
+                if (sb.contains("norm_ts")) throw Error("mixer.init: norm_ts was removed; slots use clocked compositors");
                 state->slot_b.post_otm_name = sb.value("post_otm", std::string(""));
             }
             if (cfg.contains("wipe_otm")) state->wipe_otm_name = cfg["wipe_otm"].get<std::string>();
@@ -1089,7 +1036,8 @@ public:
             if (cfg.contains("wipe_selector")) state->wipe_selector_name = cfg["wipe_selector"].get<std::string>();
             if (cfg.contains("wipe_group")) state->wipe_group_name = cfg["wipe_group"].get<std::string>();
             if (cfg.contains("wipe_input_node")) state->wipe_input_node_name = cfg["wipe_input_node"].get<std::string>();
-            if (cfg.contains("wipe_tail_edge")) state->wipe_tail_edge = cfg["wipe_tail_edge"].get<std::string>();
+            if (cfg.contains("wipe_cache_store")) state->wipe_cache_store = cfg["wipe_cache_store"].get<std::string>();
+            if (cfg.contains("wipe_overlay")) state->wipe_overlay_name = cfg["wipe_overlay"].get<std::string>();
             if (cfg.contains("wipe_flush_edges")) {
                 state->wipe_flush_edges.clear();
                 for (const auto& e : cfg["wipe_flush_edges"])
@@ -1116,13 +1064,13 @@ class TcpControlServer: public ControlServerBase {
         ControlImpl &control;
         TcpControlServer &server;
         std::list<std::shared_ptr<Client>>::iterator iter;
-        boost::asio::io_service &io_service;
+        boost::asio::io_context &io_service;
         tcp::socket socket;
         boost::asio::streambuf buff;
         ClientPipe pipe;
         std::thread thread;
         bool closing = false;
-        Client(ControlImpl &_control, TcpControlServer &_server, boost::asio::io_service &_io_service):
+        Client(ControlImpl &_control, TcpControlServer &_server, boost::asio::io_context &_io_service):
             control(_control), server(_server), io_service(_io_service), socket(_io_service),
             pipe([this]() {
                 postToClient();
@@ -1136,7 +1084,8 @@ class TcpControlServer: public ControlServerBase {
         }
         void postToClient() {
             auto self = shared_from_this();
-            io_service.post([self]() {
+            // Boost 1.87 removed io_context::post() (and the io_service alias).
+            boost::asio::post(io_service, [self]() {
                 self->sendToClient();
             });
         }
@@ -1195,7 +1144,7 @@ class TcpControlServer: public ControlServerBase {
     };
 
     ControlImpl &control_;
-    boost::asio::io_service io_service_;
+    boost::asio::io_context io_service_;
     tcp::acceptor acceptor_;
     // clients_ is mutated only from the io_service thread (net_thread_):
     // accept() inserts, Client::closeAndRemove() erases via the saved iterator.

@@ -1,0 +1,235 @@
+From 9182da7189636d07c12b4ab89f8aa07d5f85c638 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Thu, 17 Sep 2026 13:16:00 +0200
+Subject: [PATCH 8/9] avfilter/transition_cuda: 10-bit and 4:2:2/4:4:4 layouts
+ in a word-sample path
+
+Add YUV420P10/422P10/444P10, P010 and P210 (plus 8-bit YUV422P/YUV444P)
+to transition_cuda. Formats above 8 bits run a 16-bit word kernel whose
+lanes group interleaved Cb/Cr so a wipe boundary moves per chroma pixel.
+Both inputs must arrive in the identical layout and depth; no alpha-
+carrying CUDA formats exist for these yet.
+---
+ libavfilter/vf_transition_cuda.c  | 106 ++++++++++++++++++++++++++++++
+ libavfilter/vf_transition_cuda.cu |  41 ++++++++++++
+ 2 files changed, 147 insertions(+)
+
+diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
+index 0c055a7..77132f8 100644
+--- a/libavfilter/vf_transition_cuda.c
++++ b/libavfilter/vf_transition_cuda.c
+@@ -50,6 +50,13 @@
+ static const enum AVPixelFormat supported_main_formats[] = {
+     AV_PIX_FMT_NV12,
+     AV_PIX_FMT_YUV420P,
++    AV_PIX_FMT_YUV422P,
++    AV_PIX_FMT_YUV444P,
++    AV_PIX_FMT_YUV420P10,
++    AV_PIX_FMT_YUV422P10,
++    AV_PIX_FMT_YUV444P10,
++    AV_PIX_FMT_P010,
++    AV_PIX_FMT_P210,
+     AV_PIX_FMT_NONE,
+ };
+ 
+@@ -57,6 +64,13 @@ static const enum AVPixelFormat supported_overlay_formats[] = {
+     AV_PIX_FMT_NV12,
+     AV_PIX_FMT_YUV420P,
+     AV_PIX_FMT_YUVA420P,
++    AV_PIX_FMT_YUV422P,
++    AV_PIX_FMT_YUV444P,
++    AV_PIX_FMT_YUV420P10,
++    AV_PIX_FMT_YUV422P10,
++    AV_PIX_FMT_YUV444P10,
++    AV_PIX_FMT_P010,
++    AV_PIX_FMT_P210,
+     AV_PIX_FMT_NONE,
+ };
+ 
+@@ -114,6 +128,7 @@ typedef struct TransitionCUDAContext {
+     CUcontext cu_ctx;
+     CUmodule cu_module;
+     CUfunction cu_func;
++    CUfunction cu_func_word;
+     CUstream cu_stream;
+ 
+     FFFrameSync fs;
+@@ -184,6 +199,16 @@ static int formats_match(const enum AVPixelFormat format_main, const enum AVPixe
+     case AV_PIX_FMT_YUV420P:
+         return format_overlay == AV_PIX_FMT_YUV420P ||
+                format_overlay == AV_PIX_FMT_YUVA420P;
++    case AV_PIX_FMT_YUV422P:
++    case AV_PIX_FMT_YUV444P:
++    case AV_PIX_FMT_YUV420P10:
++    case AV_PIX_FMT_YUV422P10:
++    case AV_PIX_FMT_YUV444P10:
++    case AV_PIX_FMT_P010:
++    case AV_PIX_FMT_P210:
++        /* No alpha-carrying CUDA frame formats exist for these yet: both
++         * inputs must arrive in the identical layout and depth. */
++        return format_overlay == format_main;
+     default:
+         return 0;
+     }
+@@ -222,6 +247,40 @@ static int transition_cuda_call_kernel(
+         0, ctx->cu_stream, kernel_args, NULL));
+ }
+ 
++/**
++ * Call the word transition kernel for one 16-bit-stored plane.
++ * Widths, coordinates and linesizes count 16-bit elements; `lanes` groups
++ * interleaved Cb/Cr so wipes move per chroma pixel. No alpha plane: word
++ * formats have no alpha-capable CUDA frame layout yet.
++ */
++static int transition_cuda_call_kernel_word(
++    TransitionCUDAContext *ctx,
++    uint16_t* main_data, int main_linesize,
++    int main_width, int main_height,
++    uint16_t* overlay_data, int overlay_linesize,
++    int overlay_width, int overlay_height,
++    int lanes, int shift,
++    float alpha_coef,
++    int transition_mode) {
++
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++
++    void* kernel_args[] = {
++        &main_data, &main_linesize,
++        &overlay_data, &overlay_linesize,
++        &overlay_width, &overlay_height,
++        &lanes, &shift,
++        &alpha_coef,
++        &transition_mode
++    };
++
++    return CHECK_CU(cu->cuLaunchKernel(
++        ctx->cu_func_word,
++        DIV_UP(main_width, BLOCK_X), DIV_UP(main_height, BLOCK_Y), 1,
++        BLOCK_X, BLOCK_Y, 1,
++        0, ctx->cu_stream, kernel_args, NULL));
++}
++
+ /**
+  * Perform blend overlay picture over main picture
+  */
+@@ -285,6 +344,33 @@ static int transition_cuda_blend(FFFrameSync *fs)
+                ctx->alpha_coef);
+     }
+ 
++    // Word-stored formats (P010/P210, planar 10-bit) arrive as identical
++    // main/overlay layouts with no alpha plane; every plane blends through
++    // the sample kernel with its own geometry.
++
++    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(ctx->in_format_main);
++    if (desc->comp[0].depth > 8) {
++        const int shift = desc->comp[0].shift;
++        for (int p = 0; p < av_pix_fmt_count_planes(ctx->in_format_main); p++) {
++            const int sub_x = (p == 1 || p == 2) ? desc->log2_chroma_w : 0;
++            const int sub_y = (p == 1 || p == 2) ? desc->log2_chroma_h : 0;
++            int lanes = 1;
++            for (int c = 0; c < desc->nb_components; c++)
++                if (desc->comp[c].plane == p && desc->comp[c].step / 2 > lanes)
++                    lanes = desc->comp[c].step / 2;
++            transition_cuda_call_kernel_word(ctx,
++                (uint16_t*)input_main->data[p], input_main->linesize[p] / 2,
++                AV_CEIL_RSHIFT(input_main->width, sub_x) * lanes,
++                AV_CEIL_RSHIFT(input_main->height, sub_y),
++                (uint16_t*)input_overlay->data[p], input_overlay->linesize[p] / 2,
++                AV_CEIL_RSHIFT(input_overlay->width, sub_x) * lanes,
++                AV_CEIL_RSHIFT(input_overlay->height, sub_y),
++                lanes, shift, ctx->alpha_coef, ctx->transition_mode);
++        }
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        return ff_filter_frame(outlink, input_main);
++    }
++
+     // overlay first plane
+ 
+     transition_cuda_call_kernel(ctx,
+@@ -325,6 +411,20 @@ static int transition_cuda_blend(FFFrameSync *fs)
+             input_overlay->data[3], input_overlay->linesize[3], 2, 2,
+             ctx->alpha_coef, ctx->transition_mode);
+         break;
++    case AV_PIX_FMT_YUV422P:
++    case AV_PIX_FMT_YUV444P:
++        // 8-bit planar chroma at its own subsampling, no alpha plane.
++        for (int p = 1; p <= 2; p++)
++            transition_cuda_call_kernel(ctx,
++                input_main->data[p], input_main->linesize[p],
++                AV_CEIL_RSHIFT(input_main->width, desc->log2_chroma_w),
++                AV_CEIL_RSHIFT(input_main->height, desc->log2_chroma_h),
++                input_overlay->data[p], input_overlay->linesize[p],
++                AV_CEIL_RSHIFT(input_overlay->width, desc->log2_chroma_w),
++                AV_CEIL_RSHIFT(input_overlay->height, desc->log2_chroma_h),
++                0, 0, 0, 0,
++                ctx->alpha_coef, ctx->transition_mode);
++        break;
+     default:
+         av_log(ctx, AV_LOG_ERROR, "Passed unsupported overlay pixel format\n");
+         av_frame_free(&input_main);
+@@ -504,6 +604,12 @@ static int transition_cuda_config_output(AVFilterLink *outlink)
+         return err;
+     }
+ 
++    err = CHECK_CU(cu->cuModuleGetFunction(&ctx->cu_func_word, ctx->cu_module, "Transition_Cuda_Word"));
++    if (err < 0) {
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        return err;
++    }
++
+     CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+ 
+     // init dual input
+diff --git a/libavfilter/vf_transition_cuda.cu b/libavfilter/vf_transition_cuda.cu
+index c688e66..86a2eaf 100644
+--- a/libavfilter/vf_transition_cuda.cu
++++ b/libavfilter/vf_transition_cuda.cu
+@@ -53,4 +53,45 @@ __global__ void Transition_Cuda(
+     main[x + y*main_linesize] = alpha * overlay[x + y*overlay_linesize] + (1.f - alpha) * main[x + y*main_linesize];
+ }
+ 
++/*
++ * Word-stored planes (P210/P010 use shift 6, planar 10-bit shift 0): logical
++ * samples blend like the byte kernel but store round-to-nearest, keeping the
++ * padding bits zero. Interleaved Cb/Cr passes lanes=2 so a wipe boundary
++ * moves per chroma pixel and can never split one pixel's U from its V.
++ * Coordinates and linesizes count 16-bit elements.
++ */
++__global__ void Transition_Cuda_Word(
++    unsigned short* main, int main_linesize,
++    unsigned short* overlay, int overlay_linesize,
++    int overlay_w, int overlay_h,
++    int lanes, int shift,
++    float alpha_coef, int transition_mode)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++
++    if (x >= overlay_w ||
++        y >= overlay_h) {
++        return;
++    }
++
++    float alpha = alpha_coef;
++    int px = x / lanes;
++    int pw = overlay_w / lanes;
++    if (transition_mode == 1) {
++        alpha = (px + 0.5f) / pw <= alpha_coef;
++    } else if (transition_mode == 2) {
++        alpha = (px + 0.5f) / pw >= 1.f - alpha_coef;
++    } else if (transition_mode == 3) {
++        alpha = (y + 0.5f) / overlay_h <= alpha_coef;
++    } else if (transition_mode == 4) {
++        alpha = (y + 0.5f) / overlay_h >= 1.f - alpha_coef;
++    }
++
++    float m = float(main[x + y*main_linesize] >> shift);
++    float o = float(overlay[x + y*overlay_linesize] >> shift);
++    main[x + y*main_linesize] =
++        (unsigned short)((unsigned short)(alpha * o + (1.f - alpha) * m + 0.5f) << shift);
++}
++
+ }
+-- 
+2.55.0
+

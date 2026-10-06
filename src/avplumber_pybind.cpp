@@ -444,6 +444,12 @@ namespace {
             .def_property_readonly("enqueued_total", [](Edge<T> &e) { return e.enqueuedTotal(); })
             .def_property_readonly("free", [](Edge<T> &e) { return e.free(); })
             .def("enqueue", [](Edge<T> &e, const T &elem) {
+                // A queue with room needs no wait. Keep the GIL then: every
+                // release makes this thread queue for it again behind the
+                // other Python node threads.
+                if (e.try_enqueue(elem)) {
+                    return true;
+                }
                 py::gil_scoped_release release;
                 return e.enqueue(elem);
             })
@@ -486,15 +492,17 @@ namespace {
             }, py::arg("timeout_ms") = -1)
             .def("tryGet", [](Edge<T> &e, int timeout_ms) -> py::object {
                 T elem{};
-                bool ok = false;
-                {
+                // An item that is already queued needs no wait: take it
+                // without releasing the GIL (see enqueue).
+                bool ok = e.wait_dequeue_timed_ms(elem, 0);
+                if (!ok && timeout_ms > 0) {
                     py::gil_scoped_release release;
-                    ok = e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(std::max(0, timeout_ms)));
+                    ok = e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(timeout_ms));
                 }
                 if (!ok) {
                     return py::none();
                 }
-                return py::cast(elem);
+                return py::cast(std::move(elem));
             }, py::arg("timeout_ms") = 0)
             .def("peek", &Edge<T>::peek, py::return_value_policy::reference)
             .def("wait_peek", [](Edge<T> &e, int timeout_ms) {
@@ -598,7 +606,13 @@ PYBIND11_MODULE(_avplumber, m) {
             });
         }, py::arg("callback"))
         .def("setReady", &AVPlumber::setReady)
-        .def("shutdown", &AVPlumber::shutdown)
+        .def("shutdown", [](AVPlumber &avp) {
+            // Keep Python callbacks alive until the GIL is reacquired, while
+            // allowing worker process/doStop hooks to run during the joins.
+            auto manager = avp.manager();
+            py::gil_scoped_release release;
+            avp.shutdown();
+        })
         .def("mainLoop", &AVPlumber::mainLoop)
         .def("stopMainLoop", &AVPlumber::stopMainLoop)
         .def("heartbeat", &AVPlumber::heartbeat)
@@ -634,19 +648,39 @@ PYBIND11_MODULE(_avplumber, m) {
             }
             return result;
         })
-        .def("deleteNode", &NodeManager::deleteNode)
-        .def("node", &NodeManager::node, py::arg("name"))
-        .def("node_if_exists", &NodeManager::node_if_exists, py::arg("name"))
-        .def("nodes", &NodeManager::nodes, py::arg("type"))
+        // deleteNode joins the node's thread. A Python node's thread needs the
+        // GIL to finish process() and to drop its thread state on exit, so the
+        // caller must not hold it across the join.
+        .def("deleteNode", &NodeManager::deleteNode,
+             py::call_guard<py::gil_scoped_release>())
+        // Lookups wait for the manager lock, which a panic's shutdown() holds until every node
+        // has stopped. Same GIL-release rationale as NodeGroup.sortedNodes below; results are
+        // cast to Python after the GIL is reacquired.
+        .def("node", &NodeManager::node, py::arg("name"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("node_if_exists", &NodeManager::node_if_exists, py::arg("name"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("nodes", &NodeManager::nodes, py::arg("type"),
+             py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("edges", [](NodeManager &nm) { return nm.edges(); })
-        .def("group", &NodeManager::group, py::arg("name"))
+        .def("group", &NodeManager::group, py::arg("name"),
+             py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("allNodes", [](NodeManager &nm) {
+            std::unordered_map<std::string, std::shared_ptr<NodeWrapper>> nodes;
+            {
+                py::gil_scoped_release release;
+                nodes = nm.allNodes();
+            }
             py::dict out;
-            for (auto &node: nm.allNodes()) {
+            for (auto &node: nodes) {
                 out[node.first.c_str()] = node.second;
             }
             return out;
         })
+        // False once shutdown() began, including one a panic started on its own thread. An
+        // atomic read: unlike the calls above it never waits for the manager lock, which a
+        // shutdown holds until every node has stopped.
+        .def_property_readonly("shouldWork", &NodeManager::shouldWork)
     ;
 
     py::class_<NodeGroup, std::shared_ptr<NodeGroup>>(m, "NodeGroup")
@@ -693,11 +727,15 @@ PYBIND11_MODULE(_avplumber, m) {
         })
         .def_property_readonly("parameters", &NodeWrapper::parameters)
         .def("getObject", &NodeWrapper::getObject)
-        .def("start", &NodeWrapper::start)
-        .def("stop", &NodeWrapper::stop)
-        .def("interrupt", &NodeWrapper::interrupt, py::arg("optional") = false)
-        .def("stopAndWait", &NodeWrapper::stopAndWait)
-        .def("join", &NodeWrapper::join)
+        // These block on node threads (which may need the GIL for Python nodes
+        // or callbacks); release it like NodeGroup.startNodes/stopNodes do, so a
+        // slow stop cannot freeze the interpreter.
+        .def("start", &NodeWrapper::start, py::call_guard<py::gil_scoped_release>())
+        .def("stop", &NodeWrapper::stop, py::call_guard<py::gil_scoped_release>())
+        .def("interrupt", &NodeWrapper::interrupt, py::arg("optional") = false,
+             py::call_guard<py::gil_scoped_release>())
+        .def("stopAndWait", &NodeWrapper::stopAndWait, py::call_guard<py::gil_scoped_release>())
+        .def("join", &NodeWrapper::join, py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("isWorking", [](NodeWrapper &nw) { return nw.isWorking(); })
     ;
 

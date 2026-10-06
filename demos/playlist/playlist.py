@@ -2,12 +2,11 @@
 """Playlist policy for the mixer-backed playlist demo.
 
 The controller decides *what* plays and *when* it ends; the backend (see
-``engine.py``) turns that into native mixer transitions scheduled on the host
+``engine.py``) turns that into immediate mixer commands issued on the host
 monotonic clock.  Nothing here imports the native bindings, so the policy is
 fully testable on any machine.
 
-Time values are milliseconds on the same monotonic clock AVPlumber uses for
-``start_pts_ms`` (``time.monotonic_ns() // 1_000_000``).
+Time values are monotonic milliseconds (``time.monotonic_ns() // 1_000_000``).
 """
 
 from __future__ import annotations

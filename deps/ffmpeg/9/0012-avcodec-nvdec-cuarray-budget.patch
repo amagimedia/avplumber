@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Sat, 3 Oct 2026 00:35:36 +0200
+Subject: [PATCH] avcodec/nvdec: honor explicit opaque output surface budgets
+
+---
+ libavcodec/nvdec.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/nvdec.c b/libavcodec/nvdec.c
+index f0ae213..5e72d84 100644
+--- a/libavcodec/nvdec.c
++++ b/libavcodec/nvdec.c
+@@ -466,7 +466,18 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+     if (opaque_output) {
+         if (unsafe_output) {
+-            decode_pool_size = FFMIN(frames_ctx->initial_pool_size + 16, MAX_NUM_REGISTERED_DECODE_SURFACES);
++            /* avcodec_get_hw_frames_parameters already includes extra_hw_frames
++             * budget. Only add the conservative default for an unspecified
++             * budget; adding both needlessly retains sixteen more arrays. */
++            if (avctx->extra_hw_frames < 0)
++                decode_pool_size = FFMIN(decode_pool_size + 16,
++                                        MAX_NUM_REGISTERED_DECODE_SURFACES);
++            else if (decode_pool_size > MAX_NUM_REGISTERED_DECODE_SURFACES) {
++                av_log(avctx, AV_LOG_ERROR,
++                       "Requested CUarray pool needs %d surfaces, maximum is %d\n",
++                       decode_pool_size, MAX_NUM_REGISTERED_DECODE_SURFACES);
++                return AVERROR(EINVAL);
++            }
+             av_log(avctx, AV_LOG_VERBOSE, "unsafe_output + cuarray: %d decode surfaces (pool=%d, max=%d)\n",
+                    decode_pool_size, frames_ctx->initial_pool_size, MAX_NUM_REGISTERED_DECODE_SURFACES);
+         } else if (avctx->extra_hw_frames > 0) {
+-- 
+2.55.0
+

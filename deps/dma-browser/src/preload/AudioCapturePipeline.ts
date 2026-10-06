@@ -55,7 +55,7 @@ interface MediaSource {
 
 export class AudioCapturePipeline {
   private readonly opts: AudioCapturePipelineOptions;
-  private audioCtx: AudioContext | null = null;
+  private collectorReady: Promise<AudioContext> | null = null;
   private collector: AudioWorkletNode | null = null;
   private masterGain: GainNode | null = null;
   private readonly sources = new Map<HTMLMediaElement, MediaSource>();
@@ -80,6 +80,8 @@ export class AudioCapturePipeline {
       }
     });
     const target = document.documentElement;
+    // lib.dom types it non-null, but a preload can run before the parser creates <html>.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (target) observer.observe(target, { childList: true, subtree: true });
   }
 
@@ -120,10 +122,20 @@ export class AudioCapturePipeline {
       });
   }
 
-  private async ensureCollector(): Promise<AudioContext> {
-    if (this.audioCtx && this.collector && this.masterGain) return this.audioCtx;
+  /**
+   * Elements bound in the same tick share one pending setup; each would otherwise build its own
+   * AudioContext and collector, and connecting across contexts throws. A failed setup is retried.
+   */
+  private ensureCollector(): Promise<AudioContext> {
+    this.collectorReady ??= this.createCollector().catch((err: unknown) => {
+      this.collectorReady = null;
+      throw err;
+    });
+    return this.collectorReady;
+  }
+
+  private async createCollector(): Promise<AudioContext> {
     const ctx = new AudioContext();
-    this.audioCtx = ctx;
     const blob = new Blob([WORKLET_SOURCE], { type: 'application/javascript' });
     const url = URL.createObjectURL(blob);
     try {

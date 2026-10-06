@@ -1,0 +1,223 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Sat, 3 Oct 2026 01:17:06 +0200
+Subject: [PATCH] avcodec/nvdec: isolate opaque decoders on private CUDA
+ streams
+
+Keep internally allocated unsafe-output CUarray pools on individual nonblocking streams in the same CUDA context. Advertise each producer stream through the output frames device so filters and compositors can order their reads without a global synchronization. Preserve caller-supplied frames contexts and all linear output paths.
+---
+ libavcodec/nvdec.c        | 33 ++++++++++++--
+ libavcodec/nvdec_stream.h | 95 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 124 insertions(+), 4 deletions(-)
+ create mode 100644 libavcodec/nvdec_stream.h
+
+diff --git a/libavcodec/nvdec.c b/libavcodec/nvdec.c
+index 5e72d84..45f7f4d 100644
+--- a/libavcodec/nvdec.c
++++ b/libavcodec/nvdec.c
+@@ -41,6 +41,10 @@
+ #include "internal.h"
+ #include "libavutil/refstruct.h"
+ 
++#ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
++#include "nvdec_stream.h"
++#endif
++
+ #if !NVDECAPI_CHECK_VERSION(9, 0)
+ #define cudaVideoSurfaceFormat_YUV444 2
+ #define cudaVideoSurfaceFormat_YUV444_16Bit 3
+@@ -63,6 +67,7 @@ typedef struct NVDECDecoder {
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+     atomic_int *surface_in_use;
+     int          num_surfaces;
++    int          private_stream;
+ #endif
+ } NVDECDecoder;
+ 
+@@ -192,7 +197,10 @@ static void nvdec_decoder_free(AVRefStructOpaque unused, void *obj)
+              * is purely a guard against a future regression of that invariant;
+              * it must never defer destruction (which would leak the decoder).
+              */
+-            decoder->cudl->cuCtxSynchronize();
++            if (decoder->private_stream)
++                CHECK_CU(decoder->cudl->cuStreamSynchronize(decoder->stream));
++            else
++                CHECK_CU(decoder->cudl->cuCtxSynchronize());
+             if (decoder->surface_in_use) {
+                 int busy = 0;
+                 for (int i = 0; i < decoder->num_surfaces; i++)
+@@ -408,6 +416,7 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+     NVDECDecoder        *decoder;
+     AVBufferRef         *decode_hw_frames_ref = NULL;
+     AVBufferRef         *real_hw_frames_ref = NULL;
++    AVBufferRef         *stream_device_ref = NULL;
+     NVDECFramePool      *pool;
+     AVHWFramesContext   *frames_ctx;
+     const AVPixFmtDescriptor *sw_desc;
+@@ -535,13 +544,25 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+         return AVERROR(ENOSYS);
+     }
+ 
++#ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
++    /* A shared stream serializes otherwise independent opaque decoders. Only
++     * wrap internally allocated pools: callers supplying an initialized frames
++     * context own its stream selection and must retain that contract. */
++    if (opaque_output && unsafe_output && need_real_hwframes) {
++        ret = nvdec_stream_device_create(&stream_device_ref, frames_ctx->device_ref);
++        if (ret < 0)
++            goto fail;
++    }
++#endif
++
+     if (need_real_hwframes) {
+         if (frames_ctx->format == AV_PIX_FMT_CUARRAY) {
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+             AVHWFramesContext *real_ctx;
+             AVCUDAFramesContext *cuda_priv;
+ 
+-            ret = avcodec_get_hw_frames_parameters(avctx, avctx->hw_device_ctx,
++            ret = avcodec_get_hw_frames_parameters(avctx, stream_device_ref ?
++                                                   stream_device_ref : avctx->hw_device_ctx,
+                                                    avctx->hwaccel->pix_fmt,
+                                                    &real_hw_frames_ref);
+             if (ret < 0)
+@@ -672,7 +693,8 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+     params.ulNumDecodeSurfaces = FFMIN(decode_pool_size, NVDEC_MAX_DECODE_SURFACES);
+     params.ulNumOutputSurfaces = opaque_output ? 0 : (unsafe_output ? FFMIN(frames_ctx->initial_pool_size, 64) : 1);
+ 
+-    ret = nvdec_decoder_create(&ctx->decoder, frames_ctx->device_ref, &params, avctx);
++    ret = nvdec_decoder_create(&ctx->decoder, stream_device_ref ?
++                                stream_device_ref : frames_ctx->device_ref, &params, avctx);
+     if (ret < 0)
+         goto fail;
+ 
+@@ -681,6 +703,7 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+     decoder->opaque_output = opaque_output;
+ 
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
++    decoder->private_stream = !!stream_device_ref;
+     if (opaque_output) {
+         void *logctx = avctx;
+         AVHWFramesContext *real_ctx = (AVHWFramesContext*)decode_hw_frames_ref->data;
+@@ -688,7 +711,8 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+         CUVIDREGISTERDECODESURFACESINFO reg_info = { 0 };
+         CUcontext dummy;
+ 
+-        if (!decoder->cvdl->cuvidRegisterDecodeSurfaces) {
++        if (!decoder->cvdl->cuvidRegisterDecodeSurfaces ||
++            (decoder->private_stream && !decoder->cvdl->cuvidDecodePictureAsync)) {
+             av_log(logctx, AV_LOG_ERROR, "Driver lacking CUarray output support.\n");
+             ret = AVERROR(ENOSYS);
+             goto fail;
+@@ -739,6 +763,7 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+     ret = 0;
+ 
+ fail:
++    av_buffer_unref(&stream_device_ref);
+     av_buffer_unref(&decode_hw_frames_ref);
+     av_buffer_unref(&real_hw_frames_ref);
+ 
+diff --git a/libavcodec/nvdec_stream.h b/libavcodec/nvdec_stream.h
+new file mode 100644
+index 0000000..342b0ed
+--- /dev/null
++++ b/libavcodec/nvdec_stream.h
+@@ -0,0 +1,95 @@
++/*
++ * Private CUDA streams for NVDEC opaque output.
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#ifndef AVCODEC_NVDEC_STREAM_H
++#define AVCODEC_NVDEC_STREAM_H
++
++#include "libavutil/cuda_check.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++
++static void nvdec_stream_device_free(AVHWDeviceContext *device)
++{
++    AVBufferRef *parent_ref = device->user_opaque;
++    AVHWDeviceContext *parent = (AVHWDeviceContext *)parent_ref->data;
++    AVCUDADeviceContext *parent_cuda = parent->hwctx;
++    AVCUDADeviceContext *cuda = device->hwctx;
++    /* device_uninit has already released this wrapper's CUDA loader. */
++    CudaFunctions *cu = parent_cuda->internal->cuda_dl;
++    CUcontext dummy;
++
++    if (cuda->stream &&
++        FF_CUDA_CHECK_DL(device, cu, cu->cuCtxPushCurrent(cuda->cuda_ctx)) >= 0) {
++        FF_CUDA_CHECK_DL(device, cu, cu->cuStreamSynchronize(cuda->stream));
++        FF_CUDA_CHECK_DL(device, cu, cu->cuStreamDestroy(cuda->stream));
++        FF_CUDA_CHECK_DL(device, cu, cu->cuCtxPopCurrent(&dummy));
++    }
++    av_buffer_unref(&parent_ref);
++}
++
++/* Keep the CUDA context shared, but advertise the actual producer stream to
++ * consumers through the device of the output frames. The parent reference
++ * outlives both the wrapper's stream and all frames allocated on it. */
++static int nvdec_stream_device_create(AVBufferRef **out, AVBufferRef *parent_ref)
++{
++    AVHWDeviceContext *parent = (AVHWDeviceContext *)parent_ref->data;
++    AVCUDADeviceContext *parent_cuda = parent->hwctx;
++    CudaFunctions *cu = parent_cuda->internal->cuda_dl;
++    AVBufferRef *ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_CUDA);
++    AVHWDeviceContext *device;
++    AVCUDADeviceContext *cuda;
++    CUcontext dummy;
++    int ret, pop_ret;
++
++    if (!ref)
++        return AVERROR(ENOMEM);
++    device = (AVHWDeviceContext *)ref->data;
++    device->user_opaque = av_buffer_ref(parent_ref);
++    if (!device->user_opaque) {
++        ret = AVERROR(ENOMEM);
++        goto fail;
++    }
++    device->free = nvdec_stream_device_free;
++    cuda = device->hwctx;
++    cuda->cuda_ctx = parent_cuda->cuda_ctx;
++
++    ret = av_hwdevice_ctx_init(ref);
++    if (ret < 0)
++        goto fail;
++    ret = FF_CUDA_CHECK_DL(device, cu, cu->cuCtxPushCurrent(cuda->cuda_ctx));
++    if (ret < 0)
++        goto fail;
++    ret = FF_CUDA_CHECK_DL(device, cu, cu->cuCtxGetDevice(&cuda->internal->cuda_device));
++    if (ret >= 0)
++        ret = FF_CUDA_CHECK_DL(device, cu,
++                              cu->cuStreamCreate(&cuda->stream, CU_STREAM_NON_BLOCKING));
++    pop_ret = FF_CUDA_CHECK_DL(device, cu, cu->cuCtxPopCurrent(&dummy));
++    if (ret >= 0)
++        ret = pop_ret;
++    if (ret < 0)
++        goto fail;
++
++    *out = ref;
++    return 0;
++fail:
++    av_buffer_unref(&ref);
++    return ret;
++}
++
++#endif /* AVCODEC_NVDEC_STREAM_H */
+-- 
+2.55.0
+

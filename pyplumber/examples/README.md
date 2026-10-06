@@ -24,8 +24,7 @@ Feature-specific examples:
 - `src/nodes/scene_cut/example.py`: CUDA scene-change detection;
 - `src/nodes/neural_net/examples`: generic PyTorch, torchvision, and
   BlazeFace examples;
-- `src/nodes/neural_net/tracking/example.py`: Ultralytics with ByteTrack;
-- `src/nodes/neural_net/vlm/molmo/example.py`: Molmo video-window inference.
+- `src/nodes/neural_net/tracking/example.py`: Ultralytics with ByteTrack.
 
 The generic manual N-input mixer is maintained separately under
 `demos/mixer/`. It provides fullscreen and 2/4/8/16-box portrait layouts,

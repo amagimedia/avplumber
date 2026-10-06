@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { WindowConfig, WindowSnapshot } from '../../../src/main/config/WindowConfig';
 import { ProcessManager } from '../../../src/main/supervisor/ProcessManager';
 import type { BrowserWorker, WorkerStatus } from '../../../src/main/supervisor/WorkerProcess';
@@ -8,6 +8,7 @@ import type { StatusReport } from '../../../src/main/WindowControl';
 function snapshot(config: WindowConfig): WindowSnapshot {
   return {
     ...config,
+    holdLastFrame: config.holdLastFrame ?? true,
     visible: false,
     stats: {
       paintCount: 0,
@@ -16,6 +17,7 @@ function snapshot(config: WindowConfig): WindowSnapshot {
       txFrameCount: 0,
       releasedFrameCount: 0,
       retainedFrameCount: 0,
+      quarantinedFrameCount: 0,
       lastPaintTsMs: null,
     },
   };
@@ -25,6 +27,7 @@ class FakeWorker implements BrowserWorker {
   public readonly windows = new Map<string, WindowSnapshot>();
   public started = false;
   public stopped = false;
+  public restarts = 0;
 
   constructor(
     public readonly index: number,
@@ -48,7 +51,20 @@ class FakeWorker implements BrowserWorker {
     this.stopped = true;
   }
 
+  public async stopIfIdle(): Promise<void> {
+    if (this.windows.size === 0) this.stopped = true;
+  }
+
+  public async restart(): Promise<void> {
+    this.restarts++;
+    for (const [id, window] of this.windows) {
+      this.windows.set(id, { ...window, stats: { ...window.stats, quarantinedFrameCount: 0 } });
+    }
+  }
+
   public async open(config: WindowConfig): Promise<WindowSnapshot> {
+    this.started = true;
+    this.stopped = false;
     const value = snapshot(config);
     this.windows.set(config.id, value);
     return value;
@@ -124,7 +140,6 @@ describe('ProcessManager', () => {
       (_, index) => new FakeWorker(index, 9010 + index, 1),
     );
     const manager = new ProcessManager(workers);
-    await manager.start();
     await Promise.all(Array.from({ length: 16 }, async (_, index) => manager.open(config(index))));
 
     expect(workers.map((worker) => worker.windows.size)).toEqual(Array(16).fill(1));
@@ -138,7 +153,6 @@ describe('ProcessManager', () => {
   it('enforces global ids and routes operations to the owning worker', async () => {
     const workers = [new FakeWorker(0, 9010, 1), new FakeWorker(1, 9011, 1)];
     const manager = new ProcessManager(workers);
-    await manager.start();
     await manager.open(config(0));
     await expect(manager.open(config(0))).rejects.toBeInstanceOf(ConflictError);
 
@@ -149,10 +163,9 @@ describe('ProcessManager', () => {
     expect((await manager.status()).count).toBe(0);
   });
 
-  it('starts, clears, and stops every worker', async () => {
+  it('clears and stops every worker', async () => {
     const workers = [new FakeWorker(0, 9010, 1), new FakeWorker(1, 9011, 1)];
     const manager = new ProcessManager(workers);
-    await manager.start();
     await manager.open(config(0));
     await manager.open(config(1));
     await manager.closeAll();
@@ -169,8 +182,102 @@ describe('ProcessManager', () => {
     const manager = new ProcessManager(workers, 20);
     await Promise.all(Array.from({ length: 20 }, async (_, index) => manager.open(config(index))));
 
-    expect(workers.map((worker) => worker.windows.size)).toEqual([7, 7, 6]);
+    expect(workers.map((worker) => worker.windows.size)).toEqual([8, 8, 4]);
     expect((await manager.status()).maxWindows).toBe(20);
     await expect(manager.open(config(20))).rejects.toBeInstanceOf(CapacityError);
+  });
+});
+
+describe('workers on demand', () => {
+  it('runs no worker before a window and fills the fewest workers', async () => {
+    const workers = Array.from({ length: 5 }, (_, index) => new FakeWorker(index, 9010 + index, 8));
+    const manager = new ProcessManager(workers);
+    const idle = await manager.status();
+    expect(idle.count).toBe(0);
+    expect(idle.workers.every((worker) => !worker.alive && worker.error === undefined)).toBe(true);
+    for (let i = 0; i < 9; i++) await manager.open(config(i));
+    expect(workers.map((worker) => worker.windows.size)).toEqual([8, 1, 0, 0, 0]);
+    expect(workers.map((worker) => worker.started)).toEqual([true, true, false, false, false]);
+  });
+
+  it('spreads a planned show evenly over the fewest workers', async () => {
+    const workers = Array.from({ length: 5 }, (_, index) => new FakeWorker(index, 9010 + index, 8));
+    const manager = new ProcessManager(workers);
+    manager.plan(20);
+    for (let i = 0; i < 20; i++) await manager.open(config(i));
+    expect(workers.map((worker) => worker.windows.size)).toEqual([7, 7, 6, 0, 0]);
+    expect(workers.map((worker) => worker.started)).toEqual([true, true, true, false, false]);
+  });
+
+  it('stops a worker after its last window unless a window returns in time', async () => {
+    vi.useFakeTimers();
+    try {
+      const workers = [new FakeWorker(0, 9010, 8), new FakeWorker(1, 9011, 8)];
+      const manager = new ProcessManager(workers, 16, 1000);
+      for (let i = 0; i < 9; i++) await manager.open(config(i));
+      await manager.close(config(8).id);
+      await vi.advanceTimersByTimeAsync(500);
+      await manager.open(config(8));   // a re-applied setup reopens its page: keep the worker
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(workers[1]!.stopped).toBe(false);
+      await manager.closeAll();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(workers.map((worker) => worker.stopped)).toEqual([true, true]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('quarantined consumer recovery', () => {
+  it('restarts only affected workers and preserves desired windows', async () => {
+    const workers = [new FakeWorker(0, 9010, 2), new FakeWorker(1, 9011, 2)];
+    const manager = new ProcessManager(workers);
+    for (let i = 0; i < 4; i++) await manager.open(config(i));
+    const first = workers[0]!.windows.get(config(0).id)!;
+    workers[0]!.windows.set(first.id, { ...first, stats: { ...first.stats, quarantinedFrameCount: 6 } });
+    await manager.recover([0, 1, 2, 3].map((i) => config(i).id));
+    expect(workers.map((w) => w.restarts)).toEqual([1, 0]);
+    expect((await manager.status()).windows).toHaveLength(4);
+    await manager.recover([0, 1, 2, 3].map((i) => config(i).id));
+    expect(workers.map((w) => w.restarts)).toEqual([1, 0]);
+  });
+
+  it('restarts affected workers concurrently', async () => {
+    const workers = [new FakeWorker(0, 9010, 1), new FakeWorker(1, 9011, 1)];
+    const manager = new ProcessManager(workers);
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const entered: number[] = [];
+    for (const worker of workers) {
+      await manager.open(config(worker.index));
+      const window = worker.windows.get(config(worker.index).id)!;
+      worker.windows.set(window.id, {
+        ...window,
+        stats: { ...window.stats, quarantinedFrameCount: 6 },
+      });
+      const restart = worker.restart.bind(worker);
+      worker.restart = async () => {
+        entered.push(worker.index);
+        await gate;
+        await restart();
+      };
+    }
+    const recovering = manager.recover([config(0).id, config(1).id]);
+    await vi.waitFor(() => expect(entered).toEqual([0, 1]));
+    release();
+    await recovering;
+    expect(workers.map((w) => w.restarts)).toEqual([1, 1]);
+  });
+
+  it('does not restart a worker shared with another consumer', async () => {
+    const worker = new FakeWorker(0, 9010, 2);
+    const manager = new ProcessManager([worker]);
+    await manager.open(config(0));
+    await manager.open(config(1));
+    const first = worker.windows.get(config(0).id)!;
+    worker.windows.set(first.id, { ...first, stats: { ...first.stats, quarantinedFrameCount: 6 } });
+    await expect(manager.recover([first.id])).rejects.toThrow('shared with another consumer');
+    expect(worker.restarts).toBe(0);
   });
 });

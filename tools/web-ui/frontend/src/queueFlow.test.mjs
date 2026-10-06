@@ -7,6 +7,27 @@ const queue = (extra = {}) => ({name: 'frame', type: 'VideoFrame', capacity: 10,
 const observe = (extra, previous) => sampleQueueFlow([queue(extra)], previous);
 const state = samples => summarizeQueueFlow(samples).state;
 
+test('subscription demand is independent of flow, including paused and legacy inputs', () => {
+  const idle = observe({subscription_active: true}, observe({}));
+  assert.equal(state(idle), 'idle');
+  assert.equal(summarizeQueueFlow(idle).subscribed, 1);
+  const flowing = observe({subscription_active: false, dequeued_total: 101}, idle);
+  assert.equal(state(flowing), 'flowing');
+  assert.equal(summarizeQueueFlow(flowing).subscribed, 0);
+  assert.equal(summarizeQueueFlow(observe({})).subscriptions, 0);
+  assert.equal(summarizeQueueFlow([]).subscribed, 0);
+});
+
+test('grouped connection counts active subscriptions without counting ordinary queues', () => {
+  const graph = [{name: 'producer', params: {group: 'in', dst: ['a', 'b', 'c']}},
+    {name: 'consumer', params: {group: 'aux', src: ['a', 'b', 'c']}}];
+  const queues = [queue({name: 'a', subscription_active: true}),
+    queue({name: 'b', subscription_active: false}), queue({name: 'c'})];
+  const summary = groupGraph(graph, queues).queues[0].flowSummary;
+  assert.equal(summary.subscribed, 1);
+  assert.equal(summary.subscriptions, 2);
+});
+
 test('new, missing and reset counters are unknown; an observed empty queue is idle', () => {
   const first = observe({});
   assert.equal(state(first), 'unknown');

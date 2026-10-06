@@ -1,0 +1,132 @@
+From 01084d45b0b91ee8d14118b44eeaa84f042c6026 Mon Sep 17 00:00:00 2001
+From: x <x@y>
+Date: Wed, 16 Sep 2026 19:56:02 +0200
+Subject: [PATCH] 0005-avformat-rtp-rfc4175.patch
+
+---
+ libavformat/rtpdec_rfc4175.c | 88 ++++++++++++++++++++++++++++++++----
+ 1 file changed, 80 insertions(+), 8 deletions(-)
+
+diff --git a/libavformat/rtpdec_rfc4175.c b/libavformat/rtpdec_rfc4175.c
+index b49fc55..2f0dff0 100644
+--- a/libavformat/rtpdec_rfc4175.c
++++ b/libavformat/rtpdec_rfc4175.c
+@@ -45,2 +45,5 @@ struct PayloadContext {
+     unsigned int xinc;
++    int is_yuv420;
++    int next_offset;
++    int next_line;
+ 
+@@ -55,2 +58,3 @@ static int rfc4175_parse_format(AVStream *stream, PayloadContext *data)
+ 
++    data->is_yuv420 = 0;
+     if (!strncmp(data->sampling, "YCbCr-4:2:2", 11)) {
+@@ -73,2 +77,3 @@ static int rfc4175_parse_format(AVStream *stream, PayloadContext *data)
+         data->xinc = 4;
++        data->is_yuv420 = 1;
+ 
+@@ -110,2 +115,4 @@ static int rfc4175_parse_format(AVStream *stream, PayloadContext *data)
+     data->frame_size = data->width * data->height * data->pgroup / data->xinc;
++    data->next_offset = 0;
++    data->next_line = 0;
+ 
+@@ -227,2 +234,4 @@ static int rfc4175_finalize_packet(PayloadContext *data, AVPacket *pkt,
+         data->frame = NULL;
++        data->next_offset = 0;
++        data->next_line = 0;
+     }
+@@ -234,2 +243,10 @@ static int rfc4175_finalize_packet(PayloadContext *data, AVPacket *pkt,
+ 
++static void rfc4175_discard_packet(PayloadContext *data)
++{
++    av_freep(&data->frame);
++    data->frame = NULL;
++    data->next_offset = 0;
++    data->next_line = 0;
++}
++
+ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+@@ -257,4 +274,8 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+             av_log(ctx, AV_LOG_ERROR, "Missed previous RTP Marker\n");
+-            missed_last_packet = 1;
+-            rfc4175_finalize_packet(data, pkt, st->index);
++            if (ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) {
++                rfc4175_discard_packet(data);
++            } else {
++                missed_last_packet = 1;
++                rfc4175_finalize_packet(data, pkt, st->index);
++            }
+         }
+@@ -272,2 +293,7 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+ 
++    if (!data->frame) {
++        /* buffer already freed by discard, or duplicate packet */
++        return AVERROR(EAGAIN);
++    }
++
+     /*
+@@ -312,9 +338,55 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+ 
+-        /* prevent ill-formed packets to write after buffer's end */
+-        copy_offset = (line * data->width + offset) * data->pgroup / data->xinc;
+-        if (copy_offset + length > data->frame_size || !data->frame)
+-            return AVERROR_INVALIDDATA;
++        if ((ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) &&
++            (data->next_line != line || data->next_offset != offset)) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "packet loss: line %d -> %d, offset %d -> %d\n",
++                   data->next_line, line, data->next_offset, offset);
++            rfc4175_discard_packet(data);
++            return AVERROR(EAGAIN);
++        }
++        if (ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) {
++            data->next_offset = offset + length * data->xinc /
++                                         (data->pgroup * (1 + !!data->is_yuv420));
++            if (data->next_offset >= data->width) {
++                data->next_offset = 0;
++                data->next_line = line + 1 + !!data->is_yuv420;
++            }
++        }
+ 
+-        dest = data->frame + copy_offset;
+-        memcpy(dest, payload, length);
++        if (data->is_yuv420) {
++            uint8_t *yd1p, *yd2p, *up, *vp, *udp, *vdp;
++            const uint8_t *p;
++            int uvoff, i;
++
++            /* libavformat stores YUV420 planar frames, depacketized payload is interleaved */
++            if (line % 2 != 0 || !data->frame || (offset % 2) != 0 || (length % 6) != 0)
++                return AVERROR_INVALIDDATA;
++
++            yd1p = data->frame + line * data->width + offset;
++            yd2p = yd1p + data->width;
++            up = data->frame + data->width * data->height;
++            vp = up + data->width / 2 * data->height / 2;
++            uvoff = line / 2 * data->width / 2 + offset / 2;
++            udp = up + uvoff;
++            vdp = vp + uvoff;
++            p = payload;
++
++            for (i = 0; i < length; i += 6) {
++                *yd1p++ = p[0];
++                *yd1p++ = p[1];
++                *yd2p++ = p[2];
++                *yd2p++ = p[3];
++                *udp++ = p[4];
++                *vdp++ = p[5];
++                p += 6;
++            }
++        } else {
++            /* prevent ill-formed packets to write after buffer's end */
++            copy_offset = (line * data->width + offset) * data->pgroup / data->xinc;
++            if (copy_offset + length > data->frame_size || !data->frame)
++                return AVERROR_INVALIDDATA;
++
++            dest = data->frame + copy_offset;
++            memcpy(dest, payload, length);
++        }
+ 
+-- 
+2.55.0
+

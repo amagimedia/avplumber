@@ -5,45 +5,12 @@ const binary = require('node-gyp-build');
 
 const addon = binary(path.join(__dirname));
 
-async function sendFd(socketPath, fd) {
-  return new Promise((resolve, reject) => {
-    try {
-      addon.sendFd(socketPath, fd);
-      resolve();
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-async function sendFdWithInfo(socketPath, fd, texInfoBuffer) {
-  return new Promise((resolve, reject) => {
-    try {
-      addon.sendFdWithInfo(socketPath, fd, texInfoBuffer);
-      resolve();
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
 function createServer(socketPath) {
   return addon.createServer(socketPath);
 }
 
 async function broadcastFd(socketPath, fd, texInfoBuffer) {
-  return new Promise((resolve, reject) => {
-    try {
-      if (texInfoBuffer && typeof addon.broadcastFdWithInfo === 'function') {
-        addon.broadcastFdWithInfo(socketPath, fd, texInfoBuffer);
-      } else {
-        addon.broadcastFd(socketPath, fd, texInfoBuffer);
-      }
-      resolve();
-    } catch (err) {
-      reject(err);
-    }
-  });
+  return addon.broadcastFd(socketPath, fd, texInfoBuffer);
 }
 
 function closeServer(socketPath) {
@@ -62,18 +29,11 @@ function monotonicTimeNs() {
   return addon.monotonicTimeNs();
 }
 
-function close() {
-  if (typeof addon.close === 'function') addon.close();
-}
-
 module.exports = {
-  sendFd,
-  sendFdWithInfo,
   createServer,
   broadcastFd,
   closeServer,
   setServerLogger,
   setReleaseCallback,
   monotonicTimeNs,
-  close,
 };

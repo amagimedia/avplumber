@@ -44,6 +44,11 @@ private:
         }
     }
 public:
+    // Release instance resources after workers join, even when Python wrappers
+    // keep InstanceData alive beyond shutdown (and CUDA library teardown).
+    static void callInstanceDestructors(const InstanceData* instance) {
+        callDestructors(instance);
+    }
     static void addDestructor(const InstanceData* instance, std::function<void()> destructor) {
         std::unique_lock<decltype(busy_)> lock(busy_);
         destructors_[instance].push_back(destructor);
@@ -193,4 +198,3 @@ std::unordered_map<const InstanceData*, std::unordered_map<std::string, std::sha
 
 template<typename Object>
 std::mutex InstanceSharedObjects<Object>::busy_;
-

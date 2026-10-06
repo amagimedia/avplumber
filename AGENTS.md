@@ -7,6 +7,7 @@
 # General guidelines
 
 ## Documentation & comments
+* Keep AI-generated plans, specs, research and handoffs out of Git. Do not add `superpowers/` directories or `specs/`, `research/`, or `plans/` under any `doc/` or `docs/` directory. Normal maintained project documentation stays in the repository.
 * Don't write obvious things, but prefer unambiguity over brevity. See [README.md](README.md) for style.
 
 ## Project shape
@@ -22,6 +23,10 @@
 * Rust/C++/Python project:
   * prefer writing in Rust, especially the core framework (graph management) parts. However, C/C++/Python compatibility layers are allowed and, in fact, necessary.
   * in C++ code, prefer C++ idioms (RAII, exceptions) over C patterns, but don't over-apply OOP.
+* Reuse rsmpeg, rusty_ffmpeg, Rust standard library, libav* or avcpp before writing a helper: `av::Rational`/`av_inv_q`/`av_rescale*` for rates and timestamps,
+  `av::Timestamp` comparisons, `av_pix_fmt_*`/`av_image_*` for pixel-format geometry, `av_color_*_from_name` for colour
+  tags, `av_frame_*`/`av_*_metadata_alloc*` for frames and side data. A local reimplementation needs a comment saying
+  what existing libraries lacks (e.g. the mixer's `TickGrid` rounding rule).
 
 ## Framework changes
 * Call out framework-wide behavior changes explicitly; don't make incidental edits during nodes work.
@@ -63,12 +68,12 @@ Prepare `./build.sh` and `./run.sh` on the remote host if they don't exist. Adap
 
 Example `build.sh` (remove `python_module` for the default binary target):
 ```
-make -j8 NEURAL_NET=1 HAVE_DRM=1 HAVE_GL=1 HAVE_CUDA=1 HAVE_NVOF_FRUC=1 HAVE_NVCC=1 NVCC=/usr/local/cuda-13.0/bin/nvcc TENSORRT_ROOT=/opt/tensorrt PKG_CONFIG_PATH=/usr/local/lib/pkgconfig CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda-13.0/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' LFLAGS+=' -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib' python_module
+make -j8 NEURAL_NET=1 HAVE_DRM=1 HAVE_GL=1 HAVE_CUDA=1 HAVE_NVOF_FRUC=1 HAVE_NVCC=1 NVCC=/usr/local/cuda-13.0/bin/nvcc PKG_CONFIG_PATH=/usr/local/lib/pkgconfig CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda-13.0/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' LFLAGS+=' -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib' python_module
 ```
 
 Example `run.sh` for the generic mixer:
 ```
-LD_LIBRARY_PATH=/usr/local/lib venv/bin/python3 pyplumber/examples/auto_mixer.py --webui-api http://localhost:22222 --input-start-ts 660000 --remote-control-port 22422 --inputs /data/test-content/*.ts --output rtmp://... --debug-mouth-roi-bboxes
+LD_LIBRARY_PATH=/usr/local/lib venv/bin/python3 -m pyplumber.mixer.cli --input <path> --input <path> --output <path> --remote-control-port 22422
 ```
 
 Example `run.sh` for avplumber (C++):

@@ -29,9 +29,9 @@
   <h1>AVPlumber Playlist</h1>
   <p>Program video on the left, the real terminal controls on the right. Clips are mixer sources with resident decoders; every cut and fade is armed inside the engine at a wallclock time. The recording shows a manual take, two scheduled cuts landing on the configured cue frames, and a fade, in a 1600×900, 30 fps MP4 recorded on a Tesla T4 with generated 1080p30 clips.</p>
 
-  <video id="demo" controls playsinline preload="metadata" poster="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.jpg">
+  <video id="demo" controls playsinline preload="metadata" poster="playlist-demo.jpg">
     <source src="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4" type="video/mp4">
-    <a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4"><img src="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.jpg" alt="Playlist program video beside terminal controls; click to download the MP4."></a>
+    <a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4"><img src="playlist-demo.jpg" alt="Playlist program video beside terminal controls; click to download the MP4."></a>
   </video>
   <nav class="chapters" aria-label="Jump to a demonstration" id="chapters"></nav>
   <p><a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4" download>Download the MP4</a> · <span id="media-line">26 seconds · 2.2 MB · 1600×900 · 30 fps · silent H.264 video</span>. The program track is the engine's own recording of the program (never resampled in time); the terminal is a separate browser capture of the TUI served by ttyd.</p>
@@ -41,7 +41,7 @@
 
   <h2>The processing graph</h2>
   <figure>
-    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=playlist" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/playlist-graph-grouped.png" alt="Grouped playlist graph: element chains, two compositor slots, mixer core, wipe branch and outputs. Click for the full ungrouped graph." loading="lazy"></a>
+    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=playlist" target="_blank" rel="noopener noreferrer"><img src="playlist-graph-grouped.png" alt="Grouped playlist graph: element chains, two compositor slots, mixer core, wipe branch and outputs. Click for the full ungrouped graph." loading="lazy"></a>
     <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=playlist" target="_blank" rel="noopener noreferrer">Open the full processing graph</a> in the viewer to zoom and inspect every node: five element chains (input, demux, NVDEC, speed, pause, realtime, fps), sixteen mixer inputs, both compositor slots, the transition and wipe branches, the Janus RTP output and the verification recorder. The grouped overview bundles the element chains.</figcaption>
   </figure>
 

@@ -85,7 +85,7 @@ template<> struct FilterMediaSpecific<av::AudioSamples> {
     }
 };
 
-template<typename Child, typename T, AVMediaType media_type> class FilterNode: public NodeMultiInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag, public ITimeBaseSource, public IInputsObjects {
+template<typename Child, typename T, AVMediaType media_type> class FilterNode: public NodeMultiInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag, public IFlushable, public ITimeBaseSource, public IInputsObjects {
     friend struct FilterMediaSpecific<T>;
 protected:
     using MediaSpecific = FilterMediaSpecific<T>;
@@ -191,16 +191,13 @@ protected:
                 logstream << "Unable to init source filter " << name << ": in_args_ not initialized";
             }
             
-            // create buffersrc filter
             const AVFilter* buffersrc = avfilter_get_by_name(ms_.source_filter_name);
-            int ret = avfilter_graph_create_filter(&ctx_, buffersrc, name.c_str(), in_args_.c_str(), nullptr, filter_graph);
-            if (ret < 0) {
-                throw Error("Couldn't create buffer source");
+            if (!buffersrc) {
+                throw Error("Couldn't find buffer source filter");
             }
-            
-            ret = avfilter_link(ctx_, 0, dst->filter_ctx, dst->pad_idx);
-            if (ret != 0) {
-                throw Error("Couldn't link " + name);
+            ctx_ = avfilter_graph_alloc_filter(filter_graph, buffersrc, name.c_str());
+            if (!ctx_) {
+                throw Error("Couldn't allocate buffer source");
             }
             
             // Prefer copying hw_frames_ctx from the first frame (if captured),
@@ -237,6 +234,17 @@ protected:
                 // av_buffersrc_parameters_set has increased the refcount, we should unref
                 av_buffer_unref(&params->hw_frames_ctx);
                 av_freep(&params);
+            }
+
+            // FFmpeg 8.1 validates hardware inputs during initialization, so the
+            // buffersrc must already have its hw_frames_ctx at this point.
+            int ret = avfilter_init_str(ctx_, in_args_.c_str());
+            if (ret < 0) {
+                throw Error("Couldn't initialize buffer source: " + av::error2string(ret));
+            }
+            ret = avfilter_link(ctx_, 0, dst->filter_ctx, dst->pad_idx);
+            if (ret != 0) {
+                throw Error("Couldn't link " + name);
             }
         }
         void initSinkFilter(const int index, AVFilterGraph *filter_graph, AVFilterInOut *src) {
@@ -295,6 +303,7 @@ protected:
     std::string node_label_ = "<unnamed>";
     bool do_shift_ = true;
     bool defer_preliminary_init_ = false;
+    int threads_ = 0; // AVFilterGraph::nb_threads; 0 lets FFmpeg pick one slice thread per CPU
     std::shared_ptr<HWAccelDevice> hwaccel_;
     std::vector<bool> input_eof_;
 
@@ -352,6 +361,35 @@ protected:
         sinks_.resize(this->sink_edges_.size());
         input_eof_.resize(this->source_edges_.size(), false);
     }
+    int parseFilterGraph(AVFilterInOut **inputs, AVFilterInOut **outputs) {
+        #ifdef AVFILTER_FLAG_HWDEVICE
+        if (hwaccel_) {
+            AVFilterGraphSegment *raw_segment = nullptr;
+            int ret = avfilter_graph_segment_parse(filter_graph_, graph_desc_.c_str(),
+                                                   0, &raw_segment);
+            auto free_segment = [](AVFilterGraphSegment *segment) {
+                avfilter_graph_segment_free(&segment);
+            };
+            std::unique_ptr<AVFilterGraphSegment, decltype(free_segment)>
+                segment(raw_segment, free_segment);
+            if (ret < 0) return ret;
+            ret = avfilter_graph_segment_create_filters(segment.get(), 0);
+            if (ret < 0) return ret;
+
+            // FFmpeg 8.1's hwupload requires the device during init, not just
+            // format negotiation. Attach it before segment_apply initializes.
+            for (unsigned j = 0; j < filter_graph_->nb_filters; j++) {
+                AVFilterContext *fctx = filter_graph_->filters[j];
+                if (fctx->filter->flags & AVFILTER_FLAG_HWDEVICE) {
+                    fctx->hw_device_ctx = hwaccel_->refDeviceContext();
+                    if (!fctx->hw_device_ctx) return AVERROR(ENOMEM);
+                }
+            }
+            return avfilter_graph_segment_apply(segment.get(), 0, inputs, outputs);
+        }
+        #endif
+        return avfilter_graph_parse2(filter_graph_, graph_desc_.c_str(), inputs, outputs);
+    }
     bool maybeInitFilterGraph(bool frame_waiting = false) {
         if (filter_graph_ != nullptr) {
             freeFilterGraph();
@@ -379,31 +417,19 @@ protected:
         };
 
         filter_graph_ = avfilter_graph_alloc();
+        if (!filter_graph_) throw Error("avfilter_graph_alloc failed");
+        // Before parsing: FFmpeg starts the slice thread pool when the first filter is allocated.
+        filter_graph_->nb_threads = threads_;
         
         AVFilterInOut* inputs = nullptr;
         AVFilterInOut* outputs = nullptr;
         
         int ret;
-        ret = avfilter_graph_parse2(filter_graph_, graph_desc_.c_str(), &inputs, &outputs);
+        ret = parseFilterGraph(&inputs, &outputs);
         if (ret < 0) {
             log_init("error_parse", elapsed_ms());
             throw Error("Couldn't parse filter graph");
         }
-        
-        #ifdef AVFILTER_FLAG_HWDEVICE
-        // Provide the hardware device to any filter in the graph that requests it
-        // (e.g. hwupload_cuda, hwupload, scale_cuda). This lets those filters
-        // allocate output HW frames even when the buffersrc is a software format.
-        // ffmpeg 6.1+ is required for this to work.
-        if (hwaccel_) {
-            for (unsigned j = 0; j < filter_graph_->nb_filters; j++) {
-                AVFilterContext *fctx = filter_graph_->filters[j];
-                if (fctx->filter->flags & AVFILTER_FLAG_HWDEVICE) {
-                    fctx->hw_device_ctx = hwaccel_->refDeviceContext();
-                }
-            }
-        }
-        #endif
         
         auto forEachInOut = [](AVFilterInOut *inout, std::function<void(AVFilterInOut*)> cb) {
             for (; inout != nullptr; inout = inout->next) {
@@ -576,8 +602,22 @@ public:
     virtual ~FilterNode() {
         freeFilterGraph();
     }
-    virtual void process() {
-        // Check for EOF markers on all inputs before normal processing
+    void flush() override {
+        if (this->finished_) return;
+        // Explicit stop need not arrive behind an EOF marker. Close every
+        // buffersrc before draining frames already accepted by the graph;
+        // queued upstream frames belong to the cancelled run.
+        for (Port &source : sources_) {
+            int ret = source.closeAtEof();
+            if (ret < 0 && ret != AVERROR_EOF) {
+                throw Error("Error closing filter graph source: " + av::error2string(ret));
+            }
+        }
+        drainAndFinish();
+    }
+    // Pop EOF markers sitting at the head of any input and close that buffersrc.
+    // Returns true once every input has reached EOF.
+    bool consumeEofMarkers() {
         for (int i = 0; i < (int)this->source_edges_.size(); i++) {
             if (input_eof_[i]) continue;
             T* p = this->source_edges_[i]->peek();
@@ -593,7 +633,10 @@ public:
                 }
             }
         }
-        if (allInputsEof()) {
+        return allInputsEof();
+    }
+    virtual void process() {
+        if (consumeEofMarkers()) {
             drainAndFinish();
             return;
         }
@@ -603,6 +646,16 @@ public:
         if (source_index >= 0) {
             std::shared_ptr<Edge<T>> edge = this->source_edges_[source_index];
             frmin = edge->peek();
+            if (frmin && isEofMarker(*frmin)) {
+                // The marker arrived while findSourceWithData() was waiting, after the
+                // check above. Treating it as an invalid frame used to finish the node
+                // immediately and drop every frame still queued on the other inputs
+                // (a multi-input transition lost its tail whenever one scene ended first).
+                if (consumeEofMarkers()) {
+                    drainAndFinish();
+                }
+                return;
+            }
             if (frmin && (!frmin->isNull()) && frmin->isComplete() && frmin->timeBase().getNumerator() && frmin->timeBase().getDenominator()) {
                 Port &source_port = sources_[source_index];
                 if (!source_port.checkFrame(*frmin, edge)) {
@@ -740,6 +793,9 @@ public:
         if (params.count("defer_preliminary_init")==1) {
             result->defer_preliminary_init_ = params["defer_preliminary_init"].get<bool>();
         }
+        result->threads_ = params.value("threads", 0);
+        // Assigning nb_threads directly skips the range check of FFmpeg's "threads" option.
+        if (result->threads_ < 0) throw Error("filter node: threads must be 0 (FFmpeg's default) or positive");
         if (params.count("hwaccel")) {
             result->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
         }

@@ -1,0 +1,26 @@
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+server {
+    listen ${MIXER_PUBLIC_PORT};
+    auth_basic "${MIXER_AUTH_REALM}";
+    auth_basic_user_file /etc/nginx/mixer.htpasswd;
+    client_max_body_size 16k;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_read_timeout 3600s;
+
+    location /preview/ {
+        proxy_pass http://127.0.0.1:${MIXER_PREVIEW_PORT}/;
+    }
+    location /ws {
+        proxy_pass http://127.0.0.1:22222;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:${MIXER_HTTP_PORT};
+    }
+}

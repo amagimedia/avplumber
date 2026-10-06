@@ -13,6 +13,7 @@ const path = require('path');
 const url = require('url');
 const net = require('net');
 const WebSocket = require('ws');
+const { generationCounter, noteConnectionLost, noteHeartbeat, heartbeatExpired } = require('./instanceRestart');
 
 const HTTP_PORT = parseInt(process.env.WEBUI_PORT || process.env.PORT || '22222', 10);
 const AVP_HOST = process.env.AVPLUMBER_HOST || '127.0.0.1';
@@ -22,8 +23,12 @@ const LOG_FILE = process.env.AVPLUMBER_LOGFILE || process.env.LOG_FILE || '';
 const DIST_DIR = path.join(__dirname, '..', 'frontend', 'dist');
 const PUBLIC_DIR = path.join(__dirname, '..', 'frontend', 'public');
 
-// In-memory instance registry: { id: { id, name, host, port, logFile, lastHeartbeat, usesHeartbeat } }
+// In-memory instance registry:
+// { id: { id, name, host, port, logFile, generation, lastHeartbeat, usesHeartbeat, explicit, connectionLost } }
+// `generation` changes when the process behind the instance restarts; `explicit` instances (not
+// created by a heartbeat) survive a heartbeat timeout (see instanceRestart.js).
 const instances = new Map();
+const nextGeneration = generationCounter();
 const HEARTBEAT_TIMEOUT_MS = 30000; // 30 seconds
 const HEARTBEAT_CLEANUP_INTERVAL_MS = 5000; // Check every 5 seconds
 
@@ -57,8 +62,10 @@ function addInstance(def, usesHeartbeat = false) {
     host, 
     port, 
     logFile, 
+    generation: nextGeneration(),
     lastHeartbeat: usesHeartbeat ? Date.now() : null,
-    usesHeartbeat 
+    usesHeartbeat,
+    explicit: !usesHeartbeat
   };
   instances.set(id, inst);
   return inst;
@@ -83,6 +90,7 @@ function updateInstanceHeartbeat(def) {
   if (foundId) {
     // Update existing instance
     const inst = instances.get(foundId);
+    const restarted = noteHeartbeat(inst, nextGeneration);
     inst.lastHeartbeat = Date.now();
     inst.usesHeartbeat = true;
     // Update name and logFile if provided
@@ -92,11 +100,11 @@ function updateInstanceHeartbeat(def) {
     if (def.logFile || def.log_file || def.log) {
       inst.logFile = def.logFile || def.log_file || def.log;
     }
-    return { inst, wasNew: false };
+    return { inst, wasNew: false, restarted };
   } else {
     // Create new instance with heartbeat tracking
     const inst = addInstance(def, true);
-    return { inst, wasNew: true };
+    return { inst, wasNew: true, restarted: false };
   }
 }
 
@@ -105,8 +113,7 @@ setInterval(() => {
   const now = Date.now();
   const toRemove = [];
   for (const [id, inst] of instances.entries()) {
-    // Only remove instances that use heartbeat and have timed out
-    if (inst.usesHeartbeat && inst.lastHeartbeat && (now - inst.lastHeartbeat) > HEARTBEAT_TIMEOUT_MS) {
+    if (heartbeatExpired(inst, now, HEARTBEAT_TIMEOUT_MS)) {
       toRemove.push(id);
     }
   }
@@ -124,9 +131,15 @@ setInterval(() => {
   }
 }, HEARTBEAT_CLEANUP_INTERVAL_MS);
 
-// Initialize default instance from env for backwards compatibility
-// Note: This instance won't be automatically removed since it doesn't send heartbeats
-// It's kept for backwards compatibility with manual registration
+// Registry entry without the backend's bookkeeping fields, for the API and WebSocket clients.
+function publicInstance(inst) {
+  const { lastHeartbeat, usesHeartbeat, explicit, connectionLost, ...rest } = inst;
+  return rest;
+}
+
+// Initialize default instance from env for backwards compatibility.
+// Like manually registered instances, it is never removed automatically, even when the engine on
+// its host:port also sends heartbeats and they stop (see heartbeatExpired).
 if (AVP_PORT) {
   addInstance({
     id: 'default',
@@ -224,14 +237,9 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'GET' && parsed.pathname === '/api/instances') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    // Return instances without internal fields for API compatibility
-    const instancesArray = Array.from(instances.values()).map(inst => {
-      const { lastHeartbeat, usesHeartbeat, ...rest } = inst;
-      return rest;
-    });
     res.end(
       JSON.stringify({
-        instances: instancesArray
+        instances: Array.from(instances.values()).map(publicInstance)
       })
     );
     return;
@@ -255,7 +263,7 @@ const server = http.createServer((req, res) => {
         startLogTailForInstance(inst);
         broadcastInstancesUpdate();
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(inst));
+        res.end(JSON.stringify(publicInstance(inst)));
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ error: String(e && e.message ? e.message : e) }));
@@ -277,15 +285,18 @@ const server = http.createServer((req, res) => {
         const obj = JSON.parse(body || '{}');
         const peer = peerHost(req);
         if (peer) obj.host = peer;
-        const { inst, wasNew } = updateInstanceHeartbeat(obj);
+        const { inst, wasNew, restarted } = updateInstanceHeartbeat(obj);
         // start per-instance log tailing if logfile provided and not already started
         startLogTailForInstance(inst);
-        // Only broadcast if this was a new instance (first heartbeat)
-        if (wasNew) {
+        if (restarted) {
+          console.log(`Instance ${inst.id}: heartbeat after a lost control connection, new generation ${inst.generation}`);
+        }
+        // Broadcast only on the first heartbeat or a restart; clients reload the graph on the latter.
+        if (wasNew || restarted) {
           broadcastInstancesUpdate();
         }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(inst));
+        res.end(JSON.stringify(publicInstance(inst)));
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ error: String(e && e.message ? e.message : e) }));
@@ -339,9 +350,12 @@ const server = http.createServer((req, res) => {
 
 // Lightweight parser for avplumber control protocol, one outstanding command at a time
 class AvpConnection {
-  constructor(host, port) {
+  // onLost: called when the connection closes or fails without close() having been called.
+  constructor(host, port, onLost) {
     this.host = host;
     this.port = port;
+    this.onLost = onLost;
+    this.closing = false;
     this.socket = null;
     this.buffer = '';
     this.handshakeDone = false;
@@ -369,6 +383,7 @@ class AvpConnection {
     });
     this.socket.on('close', () => {
       this.closed = true;
+      if (!this.closing && this.onLost) this.onLost();
       if (this.current && this.current.reject) {
         this.current.reject(new Error('Connection closed'));
         this.current = null;
@@ -469,6 +484,7 @@ class AvpConnection {
   }
 
   close() {
+    this.closing = true;
     try {
       this.socket.end('bye\n');
     } catch (_) {
@@ -481,13 +497,9 @@ const wss = new WebSocket.Server({ server, path: '/ws' });
 
 // Broadcast instance list updates to all WebSocket clients
 function broadcastInstancesUpdate() {
-  const instancesArray = Array.from(instances.values()).map(inst => {
-    const { lastHeartbeat, usesHeartbeat, ...rest } = inst;
-    return rest;
-  });
   const msg = JSON.stringify({
     type: 'instances',
-    instances: instancesArray
+    instances: Array.from(instances.values()).map(publicInstance)
   });
   for (const client of wss.clients) {
     if (client.readyState === WebSocket.OPEN) {
@@ -556,7 +568,9 @@ wss.on('connection', (ws) => {
     }
     let conn = connByInstance.get(instanceId);
     if (!conn || conn.closed) {
-      conn = new AvpConnection(inst.host, inst.port);
+      // Look the instance up when the connection is lost: it may have timed out and registered
+      // again under the same id while this connection stayed open.
+      conn = new AvpConnection(inst.host, inst.port, () => noteConnectionLost(instances.get(instanceId)));
       connByInstance.set(instanceId, conn);
     }
     return conn;

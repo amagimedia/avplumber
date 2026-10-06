@@ -1,8 +1,9 @@
-FROM fedora:42 AS builder
+FROM fedora:44 AS builder
 
 ARG JANUS_REPO=https://github.com/meetecho/janus-gateway.git
 ARG JANUS_REF=v1.4.1
 
+# zlib-ng-compat(-devel) is Fedora's zlib since Fedora 40; it obsoletes zlib(-devel).
 RUN dnf -y install --setopt=install_weak_deps=False \
         autoconf \
         automake \
@@ -19,11 +20,12 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         libnice-devel \
         libsrtp-devel \
         libtool \
+        libwebsockets-devel \
         make \
         openssl-devel \
         pkgconf-pkg-config \
         which \
-        zlib-devel \
+        zlib-ng-compat-devel \
     && dnf clean all
 
 WORKDIR /build
@@ -43,12 +45,12 @@ RUN sh autogen.sh \
         --disable-mqtt \
         --disable-nanomsg \
         --disable-unix-sockets \
-        --disable-websockets \
+        --enable-websockets \
     && make -j"$(nproc)" \
     && make install \
     && make configs
 
-FROM fedora:42
+FROM fedora:44
 
 RUN dnf -y install --setopt=install_weak_deps=False \
         bash \
@@ -61,8 +63,9 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         libmicrohttpd \
         libnice \
         libsrtp \
+        libwebsockets \
         openssl-libs \
-        zlib \
+        zlib-ng-compat \
     && dnf clean all
 
 COPY --from=builder /opt/janus-avp /opt/janus-avp

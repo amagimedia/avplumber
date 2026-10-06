@@ -5,16 +5,17 @@ set -euo pipefail
 
 readonly config_dir=/opt/janus-avp/etc/janus
 readonly http_port="${JANUS_HTTP_PORT:-8088}"
+readonly ws_port="${JANUS_WS_PORT:-8188}"
 readonly audio_enabled="${JANUS_AUDIO_ENABLED:-true}"
 readonly audio_port="${JANUS_AUDIO_PORT:-5002}"
 readonly audio_rtcp_port="${JANUS_AUDIO_RTCP_PORT:-5003}"
 readonly video_port="${JANUS_VIDEO_PORT:-5004}"
 readonly video_rtcp_port="${JANUS_VIDEO_RTCP_PORT:-5005}"
+readonly hdr_video_port="${JANUS_HDR_VIDEO_PORT:-5006}"
+readonly hdr_video_rtcp_port="${JANUS_HDR_VIDEO_RTCP_PORT:-5007}"
 readonly rtp_port_range="${JANUS_RTP_PORT_RANGE:-20000-20100}"
 readonly debug_level="${JANUS_DEBUG_LEVEL:-4}"
 
-[[ -f "${config_dir}/janus.transport.http.jcfg.template" ]] || \
-    cp "${config_dir}/janus.transport.http.jcfg" "${config_dir}/janus.transport.http.jcfg.template"
 [[ -f "${config_dir}/janus.plugin.streaming.jcfg.template" ]] || \
     cp "${config_dir}/janus.plugin.streaming.jcfg" "${config_dir}/janus.plugin.streaming.jcfg.template"
 
@@ -29,10 +30,13 @@ sed \
     -e "s/__JANUS_DEBUG_LEVEL__/${debug_level}/g" \
     "${config_dir}/janus.jcfg.template" > "${config_dir}/janus.jcfg"
 
-sed \
-    -e "s/__JANUS_HTTP_PORT__/${http_port}/g" \
-    "${config_dir}/janus.transport.http.jcfg.template" > "${config_dir}/janus.transport.http.jcfg.rendered"
-mv "${config_dir}/janus.transport.http.jcfg.rendered" "${config_dir}/janus.transport.http.jcfg"
+for transport in http websockets; do
+    config="${config_dir}/janus.transport.${transport}.jcfg"
+    [[ -f "${config}.template" ]] || cp "${config}" "${config}.template"
+    sed -e "s/__JANUS_HTTP_PORT__/${http_port}/g" -e "s/__JANUS_WS_PORT__/${ws_port}/g" \
+        "${config}.template" > "${config}.rendered"
+    mv "${config}.rendered" "${config}"
+done
 
 sed \
     -e "s/__JANUS_AUDIO_ENABLED__/${audio_enabled}/g" \
@@ -40,8 +44,15 @@ sed \
     -e "s/__JANUS_AUDIO_RTCP_PORT__/${audio_rtcp_port}/g" \
     -e "s/__JANUS_VIDEO_PORT__/${video_port}/g" \
     -e "s/__JANUS_VIDEO_RTCP_PORT__/${video_rtcp_port}/g" \
+    -e "s/__JANUS_HDR_VIDEO_PORT__/${hdr_video_port}/g" \
+    -e "s/__JANUS_HDR_VIDEO_RTCP_PORT__/${hdr_video_rtcp_port}/g" \
     "${config_dir}/janus.plugin.streaming.jcfg.template" > "${config_dir}/janus.plugin.streaming.jcfg.rendered"
 mv "${config_dir}/janus.plugin.streaming.jcfg.rendered" "${config_dir}/janus.plugin.streaming.jcfg"
+
+# Behind 1:1 NAT (a cloud VM: the public IP is not on any interface), JANUS_HOST_IP is the
+# interface address and JANUS_NAT_1_1 the public one Janus puts in its ICE candidates.
+nat_args=()
+[[ -z "${JANUS_NAT_1_1:-}" ]] || nat_args=(-1 "${JANUS_NAT_1_1}")
 
 exec /opt/janus-avp/bin/janus \
     -F "${config_dir}" \
@@ -50,4 +61,5 @@ exec /opt/janus-avp/bin/janus \
     -r "${rtp_port_range}" \
     -d "${debug_level}" \
     -o \
+    "${nat_args[@]}" \
     "$@"

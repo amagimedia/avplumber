@@ -84,6 +84,27 @@ void zero_area_boxes_do_not_manufacture_overlap()
 		"zero-area boxes should have zero IoU and must not retain the track ID");
 }
 
+void scheduled_skip_predicts_without_a_false_miss()
+{
+	BYTETracker tracker(60, 90);
+	const int id = single_track_id(tracker.update({detection(100, 100, 60, 160)}), "start");
+	auto observed = tracker.update({detection(104, 100, 60, 160)});
+	const int hits = observed.front().tracklet_len;
+	const float score = observed.front().score;
+	auto predicted = tracker.predict_only();
+	require(single_track_id(predicted, "skip") == id, "skip must retain identity");
+	require(predicted.front().state == bytetrack::TrackState::Tracked, "skip must not mark lost");
+	require(predicted.front().tracklet_len == hits, "prediction must not add detector support");
+	require(predicted.front().score == score, "prediction must not increase confidence");
+	require(predicted.front().tlbr[0] > observed.front().tlbr[0], "skip must advance motion");
+	require(tracker.get_lost_stracks().empty(), "skip must not populate lost tracks");
+	auto resumed = tracker.update({detection(112, 100, 60, 160)});
+	require(single_track_id(resumed, "resumed") == id, "next observation must retain identity");
+	require(resumed.front().frame_id == 4, "skip must advance the source-frame clock");
+	require(tracker.update({}).empty(), "a real empty observation is still a miss");
+	require(tracker.predict_only().empty(), "prediction must not resurrect a lost track");
+}
+
 } // namespace
 
 int main()
@@ -94,6 +115,7 @@ int main()
 		disjoint_normalized_boxes_get_distinct_identities();
 		coordinate_scale_does_not_change_association();
 		zero_area_boxes_do_not_manufacture_overlap();
+		scheduled_skip_predicts_without_a_false_miss();
 	}
 	catch (const std::exception& error)
 	{

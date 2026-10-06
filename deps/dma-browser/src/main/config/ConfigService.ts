@@ -76,7 +76,9 @@ export class ConfigService {
     const height = requireFiniteInt(input, 'height', MIN_DIMENSION, MAX_DIMENSION);
     const fps = requireFiniteInt(input, 'fps', MIN_FPS, MAX_FPS);
     const audio = requireBoolean(input, 'audio', false);
-    return { id, url, width, height, fps, audio };
+    const ring = input.ringSize === undefined ? {} : { ringSize: requireFiniteInt(input, 'ringSize', 1, 64) };
+    const holdLastFrame = requireBoolean(input, 'holdLastFrame', true);
+    return { id, url, width, height, fps, audio, ...ring, holdLastFrame };
   }
 
   public validateId(input: unknown): { id: string } {
@@ -88,6 +90,13 @@ export class ConfigService {
       throw new ValidationError('Field "id" must match /^[A-Za-z0-9_-]{1,64}$/');
     }
     return { id };
+  }
+
+  public validateIds(input: unknown): string[] {
+    if (!isRecord(input) || !Array.isArray(input.ids)) {
+      throw new ValidationError('Expected a list of window ids');
+    }
+    return input.ids.map((id: unknown) => this.validateId({ id }).id);
   }
 
   public validateUpdateUrl(input: unknown): UpdateUrlPayload {

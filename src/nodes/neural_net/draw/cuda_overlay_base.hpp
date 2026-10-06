@@ -3,7 +3,8 @@
 #include "../../node_common.hpp"
 #include "../../../video_parameters.hpp"
 #include "../../../hwaccel.hpp"
-#include "../common/yolo_side_data.hpp"
+#include "../../hwaccel/cuda_rect_frame.hpp"
+#include "picture_frame.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -13,8 +14,10 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -161,7 +164,8 @@ class CudaOverlayBase : public NodeSISO<av::VideoFrame, av::VideoFrame>,
                          public IVideoFormatSource,
                          public IFrameRateSource,
                          public ITimeBaseSource,
-                         public ReportsFinishByFlag {
+                         public ReportsFinishByFlag,
+                         public IReturnsObjects {
 protected:
     VideoParameters input_params_{};
     av::Rational frame_rate_{0, 0};
@@ -174,6 +178,14 @@ protected:
     CUfunction draw_chroma_kernel_ = nullptr;
 
     uint64_t frame_counter_ = 0;
+
+    // The node's own pool of the pictures it draws on. An input that is not a picture of a draw
+    // node above is copied into a frame of it. A CUarray input is a decoder surface, which nothing
+    // may draw on: the rect compositor's array reader reads it into a frame of this pool.
+    std::unique_ptr<avp::mixer::CudaRectDraw> picture_draw_;
+    avp::AvBufferRef picture_frames_;
+    // Frames by where the picture the node drew on came from; see getObject.
+    std::atomic<uint64_t> from_array_{0}, copied_{0}, in_place_{0};
 
     using NodeSISO::NodeSISO;
 
@@ -208,6 +220,8 @@ protected:
         }
         if (cu_ctx_ && cu_ctx_ != next_dev_ctx->cuda_ctx) {
             unloadKernels();
+            // The array reader unloads under the context it was loaded in, which it makes current.
+            picture_draw_.reset();
         }
         cuda_dev_ctx_ = next_dev_ctx;
         cu_ctx_ = next_dev_ctx->cuda_ctx;
@@ -251,67 +265,101 @@ protected:
         return CUDA_OVERLAY_CHECK_CU(cuMemcpy2DAsync(&cpy, cuda_dev_ctx_->stream)) == 0;
     }
 
+    /// Makes picture_frames_ the node's own marked pool of linear NV12 frames of `width` x `height`
+    /// on the device of `src`. The array reader is made for the pool's device and size, so it goes
+    /// with the pool it was made for.
+    void ensurePictureFrames(const AVHWFramesContext* src, int width, int height) {
+        const AVHWFramesContext* own = picture_frames_ ? (const AVHWFramesContext*)picture_frames_->data : nullptr;
+        if (own && own->device_ctx == src->device_ctx && own->width == width && own->height == height) return;
+        picture_draw_.reset();
+        picture_frames_.reset();
+        HWAccelDevice hw(av_buffer_ref(src->device_ref));
+        picture_frames_ = avp::mixer::allocCanvasFrames(hw, {width, height, AV_PIX_FMT_NV12}, nodeName());
+        cuda_overlay::markPicturePool(picture_frames_.get());
+    }
+
     bool copyInputFrame(const av::VideoFrame& frm, av::VideoFrame& out) {
+        // The copy is a frame of a picture pool, so that the draw nodes below draw on it instead of
+        // copying it again. A picture that is still referenced elsewhere is copied within the pool
+        // it came from, which keeps a chain's output in one frames context. Any other input is
+        // copied into the node's own pool, which has the device, format and size of the input's
+        // pool and so gives the frame that pool would have given.
+        AVBufferRef* frames = frm.raw()->hw_frames_ctx;
+        if (!cuda_overlay::isPicturePool(frames)) {
+            const AVHWFramesContext* src = (const AVHWFramesContext*)frames->data;
+            ensurePictureFrames(src, src->width, src->height);
+            frames = picture_frames_.get();
+        }
         out.raw()->format = frm.raw()->format;
         out.raw()->width = frm.width();
         out.raw()->height = frm.height();
 
-        int ret = av_hwframe_get_buffer(frm.raw()->hw_frames_ctx, out.raw(), 0);
+        int ret = av_hwframe_get_buffer(frames, out.raw(), 0);
         if (ret < 0) {
             logstream << nodeName() << ": av_hwframe_get_buffer failed: " << av::error2string(ret);
             return false;
         }
 
+        // Frames of two pools of one device, format and size hold the chroma plane at the same
+        // pitch and distance behind luma: one copy then takes both planes and the rows between.
+        const size_t chroma_rows = (size_t)((frm.height() + 1) / 2);
+        const size_t span = cuda_overlay::planeSpanRows(frm.raw(), chroma_rows);
+        const bool joined = span && frm.raw()->linesize[0] == out.raw()->linesize[0] &&
+                            span == cuda_overlay::planeSpanRows(out.raw(), chroma_rows);
+
         if (!copyPlane((CUdeviceptr)(uintptr_t)out.raw()->data[0], (size_t)out.raw()->linesize[0],
                        (CUdeviceptr)(uintptr_t)frm.raw()->data[0], (size_t)frm.raw()->linesize[0],
-                       (size_t)frm.width(), (size_t)frm.height())) {
+                       (size_t)frm.width(), joined ? span + chroma_rows : (size_t)frm.height())) {
             logstream << nodeName() << ": luma plane copy failed";
             return false;
         }
 
-        if (!copyPlane((CUdeviceptr)(uintptr_t)out.raw()->data[1], (size_t)out.raw()->linesize[1],
+        if (!joined &&
+            !copyPlane((CUdeviceptr)(uintptr_t)out.raw()->data[1], (size_t)out.raw()->linesize[1],
                        (CUdeviceptr)(uintptr_t)frm.raw()->data[1], (size_t)frm.raw()->linesize[1],
                        (size_t)frm.width(), (size_t)((frm.height() + 1) / 2))) {
             logstream << nodeName() << ": chroma plane copy failed";
             return false;
         }
 
-        ret = av_frame_copy_props(out.raw(), frm.raw());
+        ret = cuda_overlay::copyFrameProps(out.raw(), frm.raw());
         if (ret < 0) {
-            logstream << nodeName() << ": av_frame_copy_props failed: " << av::error2string(ret);
+            logstream << nodeName() << ": copying frame properties failed: " << av::error2string(ret);
             return false;
         }
-
-        // av_frame_copy_props clones side-data payload bytes, which is unsafe for our
-        // custom YOLO seg GPU side data because the payload contains a raw device
-        // pointer whose lifetime is carried by the side-data buffer ref itself.
-        if (frm.raw()->nb_side_data > 0) {
-            for (int i = 0; i < frm.raw()->nb_side_data; ++i) {
-                const AVFrameSideData* sd_src = frm.raw()->side_data[i];
-                if (!sd_src || !sd_src->buf) continue;
-                if (!yoloSegIsManagedSideDataType(sd_src->type)) continue;
-
-                av_frame_remove_side_data(out.raw(), sd_src->type);
-                AVBufferRef* ref = av_buffer_ref(sd_src->buf);
-                if (!ref) {
-                    logstream << nodeName() << ": av_buffer_ref failed for YOLO seg side data type " << (int)sd_src->type;
-                    return false;
-                }
-                if (!av_frame_new_side_data_from_buf(out.raw(), sd_src->type, ref)) {
-                    av_buffer_unref(&ref);
-                    logstream << nodeName() << ": av_frame_new_side_data_from_buf failed for YOLO seg side data type " << (int)sd_src->type;
-                    return false;
-                }
-            }
-        }
         return true;
+    }
+
+    /// The linear picture of a CUarray frame: one whole-frame layer drawn 1:1 by the rect
+    /// compositor's draw into a frame of the node's own pool, on the stream of the frame's own
+    /// device, which is the stream the node's kernels use. The pool is marked, so the draw nodes
+    /// below draw on the picture itself (isPrivatePicture). The read of `frm` is only queued, as
+    /// the last thing that can fail here: the caller synchronizes the stream before it releases
+    /// `frm`, also when it fails.
+    void linearPicture(const av::VideoFrame& frm, av::VideoFrame& out) {
+        const AVHWFramesContext* src = (const AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
+        ensurePictureFrames(src, frm.width(), frm.height());
+        if (!picture_draw_) {
+            picture_draw_ = std::make_unique<avp::mixer::CudaRectDraw>(
+                std::make_shared<HWAccelDevice>(av_buffer_ref(src->device_ref)),
+                avp::mixer::CudaRectDraw::Canvas{frm.width(), frm.height(), AV_PIX_FMT_NV12}, 1);
+        }
+        out = avp::mixer::canvasFrame(picture_frames_.get(), nodeName());
+        const int ret = cuda_overlay::copyFrameProps(out.raw(), frm.raw());
+        if (ret < 0) {
+            throw Error(std::string(nodeName()) + ": copying frame properties failed: " + av::error2string(ret));
+        }
+        const auto ops = avp::mixer::resolveDrawOps({&frm}, {avp::mixer::LayerSpec{}},
+                                                    frm.width(), frm.height(), AV_PIX_FMT_NV12);
+        picture_draw_->draw(cuda_dev_ctx_->stream, ops, out.raw(), frm.raw());
     }
 
     // Subclass must return its node type name for log messages.
     virtual const char* nodeName() const = 0;
 
-    // Subclass implements the actual drawing on the copied output frame.
-    // Called between copyInputFrame and putting the frame to the sink.
+    // Subclass implements the actual drawing on the output frame, which is a copy of the
+    // input or, for a private picture, the input frame itself. Called before the frame is put
+    // to the sink.
     virtual void drawOnFrame(const av::VideoFrame& input, av::VideoFrame& output) = 0;
 
     // Common video params parsing for create() factories.
@@ -360,8 +408,9 @@ public:
 
         ++frame_counter_;
 
-        if (frm.raw()->format != AV_PIX_FMT_CUDA) {
-            throw Error(std::string(nodeName()) + ": non-CUDA frame received");
+        const AVPixelFormat format = (AVPixelFormat)frm.raw()->format;
+        if (!avp::mixer::CudaRectDraw::frameSupported(format)) {
+            throw Error(std::string(nodeName()) + ": input must be a CUDA device frame or CUarray");
         }
 
         input_params_ = VideoParameters(frm);
@@ -376,29 +425,62 @@ public:
         }
 
         if (input_params_.realPixelFormat() != AV_PIX_FMT_NV12) {
-            throw Error(std::string(nodeName()) + ": only NV12 CUDA frames are supported");
+            throw Error(std::string(nodeName()) + ": only NV12 frames are supported");
         }
         if (!initCudaContextFromFrame(frm)) {
             throw Error(std::string(nodeName()) + ": failed to init CUDA context");
         }
 
-        av::VideoFrame out;
-        if (!copyInputFrame(frm, out)) {
+        const bool array = format != AV_PIX_FMT_CUDA;
+        const bool in_place = !array && cuda_overlay::isPrivatePicture(frm.raw());
+        av::VideoFrame picture;
+        if (array) {
+            linearPicture(frm, picture);
+        } else if (!in_place && !copyInputFrame(frm, picture)) {
             throw Error(std::string(nodeName()) + ": failed to copy input frame");
         }
+        av::VideoFrame& out = in_place ? frm : picture;
+        ++(array ? from_array_ : in_place ? in_place_ : copied_);
 
-        drawOnFrame(frm, out);
+        try {
+            drawOnFrame(frm, out);
+        } catch (...) {
+            // The picture's read of the surface may still be queued, and unwinding releases frm.
+            if (array) CUDA_OVERLAY_CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream));
+            throw;
+        }
 
         out.setTimeBase(frm.timeBase());
         out.setComplete(true);
+        if (array) {
+            // frm is a decoder surface. The picture's read of it must have finished before the
+            // decoder gets it back, and it must not stay referenced while put waits.
+            if (CUDA_OVERLAY_CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream))) {
+                throw Error(std::string(nodeName()) + ": cuStreamSynchronize failed");
+            }
+            frm = av::VideoFrame();
+        }
         this->sink_->put(out);
+    }
+
+    /// `pictures`: how many frames the node drew on a linear picture it made of a CUarray
+    /// (`from_array`), on a copy of its input (`copied`) and on its input frame (`in_place`).
+    Parameters getObject(const std::string name) override {
+        if (name != "pictures") {
+            throw Error(std::string(nodeName()) + ": unknown object " + name);
+        }
+        return {{"from_array", from_array_.load()}, {"copied", copied_.load()}, {"in_place", in_place_.load()}};
     }
 
     int width() override { return input_params_.width; }
     int height() override { return input_params_.height; }
 
+    // The output is linear CUDA whatever the input's storage: a CUarray is declared as the
+    // frame it becomes.
     av::PixelFormat pixelFormat() override {
-        return input_params_.pixel_format == AV_PIX_FMT_NONE ? av::PixelFormat(AV_PIX_FMT_CUDA) : input_params_.pixel_format;
+        const AVPixelFormat format = input_params_.pixel_format.get();
+        return format == AV_PIX_FMT_NONE || avp::mixer::CudaRectDraw::frameSupported(format)
+            ? av::PixelFormat(AV_PIX_FMT_CUDA) : input_params_.pixel_format;
     }
 
     av::PixelFormat realPixelFormat() override {

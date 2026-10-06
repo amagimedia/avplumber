@@ -1,1 +1,0 @@
-"""Vision-language model nodes."""

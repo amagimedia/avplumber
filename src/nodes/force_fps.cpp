@@ -13,8 +13,16 @@ private:
     int dropped_ = 0;
     int duplicated_ = 0;
     int total_out_ = 0;
+    int64_t last_gap_log_ms_ = 0;
+    int gap_bursts_since_log_ = 0;
     int total_in_ = 0;
     av::Timestamp last_printed_stats_ = NOTS;
+    // center_phase: input timestamps shift by a constant, chosen on the first frame (again after a
+    // discontinuity), that puts that frame exactly on an output tick. Rounding onto the grid then has
+    // half a frame of slack either way, so timestamp deviations below that (e.g. realtime's set_pts
+    // schedule rounded to whole milliseconds) neither duplicate nor drop, whatever the source's phase.
+    bool center_phase_ = false;
+    av::Timestamp phase_ = NOTS;   // in the input time base
 
     void setLast(T &frm, bool unused) {
         if (last_unused_) {
@@ -29,10 +37,10 @@ public:
              const av::Rational fps, const av::Rational timebase, std::string label):
             NodeSISO<T, T>(std::move(source), std::move(sink)), fps_(fps), label_(std::move(label)), timebase_(timebase) {
         if (timebase_.getDenominator()==0 || timebase_.getNumerator()==0) {
-            timebase_ = av::Rational(fps_.getDenominator(), fps_.getNumerator());
+            timebase_ = av_inv_q(fps_.getValue());
             frame_delta_ = av::Timestamp(1, timebase_);
         } else {
-            frame_delta_ = rescaleTS(av::Timestamp(1, {fps_.getDenominator(), fps_.getNumerator()}), timebase_);
+            frame_delta_ = rescaleTS(av::Timestamp(1, av_inv_q(fps_.getValue())), timebase_);
         }
         logstream << "Set timebase " << timebase_ << ", frame rate " << fps_ << ", frame delta " << frame_delta_;
     }
@@ -78,6 +86,11 @@ public:
             }
             
             av::Timestamp in_ts = pkt.pts();
+            if (center_phase_ && in_ts.isValid()) {
+                if (!phase_.isValid() || phase_.timebase() != in_ts.timebase())
+                    phase_ = in_ts - rescaleTS(rescaleTS(in_ts, timebase_), in_ts.timebase());
+                in_ts = av::Timestamp(in_ts.timestamp() - phase_.timestamp(), in_ts.timebase());
+            }
             if ((in_ts.timebase() != timebase_) || (pkt.timeBase() != timebase_)) {
                 pkt.setTimeBase(timebase_);
                 in_ts = rescaleTS(in_ts, timebase_);
@@ -87,6 +100,7 @@ public:
                 bool discontinuity = (delta_from_last.seconds() > frame_delta_.seconds() + 0.5) || (delta_from_last.timestamp() < 0);
                 if (discontinuity) {
                     logstream << "force_fps[" << label_ << "]: Discontinuity " << last_ts_ << " -> " << in_ts;
+                    phase_ = NOTS;   // the next frame picks the new phase
                 }
                 /*if (delta_from_last == frame_delta_) {
                     logstream << "Frame PTS = " << in_ts << " perfectly aligned";
@@ -123,9 +137,17 @@ public:
                             }
                             next_ts_ = addTS(next_ts_, frame_delta_);
                         }
-                        if (dup_burst > 1)
-                            logstream << "force_fps[" << label_ << "]: filled PTS gap with " << dup_burst << " duplicate(s); "
-                                      << "grid " << gap_start << " ..< " << in_ts;
+                        if (dup_burst > 1) {
+                            ++gap_bursts_since_log_;
+                            const int64_t now_ms = wallclock.pts();
+                            if (now_ms - last_gap_log_ms_ >= 1000) {
+                                logstream << "force_fps[" << label_ << "]: filled PTS gap with " << dup_burst
+                                          << " duplicate(s); grid " << gap_start << " ..< " << in_ts
+                                          << (gap_bursts_since_log_ > 1 ? " (" + std::to_string(gap_bursts_since_log_) + " gaps since last report)" : "");
+                                last_gap_log_ms_ = now_ms;
+                                gap_bursts_since_log_ = 0;
+                            }
+                        }
                         // now in_ts <= next_ts_
                         //  if in_ts == next_ts, all OK
                         //  if in_ts < next_ts_, it means that in_ts is too small and unaligned
@@ -204,6 +226,7 @@ public:
     void resetInput() override {
         last_ts_ = NOTS;
         next_ts_ = NOTS;
+        phase_ = NOTS;
     }
     static std::shared_ptr<ForceFPS> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
@@ -220,7 +243,9 @@ public:
         if (params.count("timebase")==1) {
             timebase = parseRatio(params["timebase"]);
         }
-        return NodeSISO<T, T>::template createCommon<ForceFPS<T>>(edges, params, fps, timebase, label);
+        auto r = NodeSISO<T, T>::template createCommon<ForceFPS<T>>(edges, params, fps, timebase, label);
+        r->center_phase_ = params.value("center_phase", false);
+        return r;
     }
 };
 

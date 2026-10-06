@@ -3,8 +3,10 @@
 #include <avcpp/codeccontext.h>
 #include <avcpp/avutils.h>
 #include "../hwaccel.hpp"
+#include "../hdr_metadata.hpp"
+#include "../mixer/primitives/CutLatencyProbe.hpp"
 
-template<typename Child, typename EncoderContext, typename InputFrame> class Encoder: public NodeSISO<InputFrame, av::Packet>, public IEncoder, public ReportsFinishByFlag, public IFlushable {
+template<typename Child, typename EncoderContext, typename InputFrame> class Encoder: public NodeSISO<InputFrame, av::Packet>, public IEncoder, public ReportsFinishByFlag, public IFlushable, public avp::mixer::CutLatencyObserver {
 protected:
     AVCodecParameters* codecpar_ = nullptr;
     std::unordered_set<AVCodecParameters*> codecpars_;
@@ -14,8 +16,15 @@ protected:
     av::Dictionary options_;
     int enc_flags_ = 0;
     bool timestamps_passthrough_ = false;
+    Parameters hdr_metadata_;   // optional static HDR side data, serialised verbatim (see hdr_metadata.hpp)
     av::Timestamp prev_ts_ = NOTS;
     std::shared_ptr<HWAccelDevice> hwaccel_;
+    void emitPacket(const av::Packet& pkt) {
+        this->sink_->put(pkt);
+        const auto emitted = avp::mixer::CutLatency::Clock::now();
+        if (auto probe = this->cutLatencyProbe(); probe && pkt.pts().isValid())
+            probe->timing.encoderOutput(pkt.pts().timestamp(enc_.timeBase()), emitted);
+    }
     virtual void initEncoderPreOpen(av::Stream&) {
     }
     virtual void initEncoderPostOpen() {
@@ -74,6 +83,7 @@ public:
             }
             
             enc_.setTimeBase(getTimeBase());
+            if (hdr_metadata_.is_object()) attachHdrMetadata(enc_.raw(), hdr_metadata_);
             
             // make copy of options because otherwise enc_.open will remove all consumed ones
             av::Dictionary options(options_);
@@ -128,7 +138,7 @@ public:
                 if (!(pkt.timeBase().getDenominator() && pkt.timeBase().getNumerator())) {
                     logstream << "enc flush out: invalid timebase, not outputting! " << pkt.timeBase();
                 } else {
-                    this->sink_->put(pkt);
+                    emitPacket(pkt);
                 }
             } catch (std::exception &e) {
                 logstream << "Warning: Exception " << e.what() << " when flushing encoder." << std::endl;
@@ -150,6 +160,10 @@ public:
                     logstream << "input PTS went backwards " << prev_ts_ << " -> " << frame.pts() << ", discarding frame";
                     return;
                 }
+                if constexpr (std::is_same_v<InputFrame, av::VideoFrame>) {
+                    if (auto probe = this->cutLatencyProbe(); probe && frame.pts().isValid())
+                        probe->timing.encoderInput(probe->frameToken(frame), frame.pts().timestamp(enc_.timeBase()));
+                }
                 av::Packet pkt = enc_.encode(frame);
                 if (pkt) {
                     if (timestamps_passthrough_) {
@@ -158,7 +172,7 @@ public:
                         pkt.setDts(rescaleTS(frame.pts(), pkt.dts().timebase()));
                     }
                     //logstream << "enc out: PTS = " << pkt.pts() << std::endl;
-                    this->sink_->put(pkt);
+                    emitPacket(pkt);
                 } else if (timestamps_passthrough_) {
                     logstream << "WARNING: encoder does buffer but we overwrite timestamps, this may cause desync!";
                 }
@@ -187,6 +201,13 @@ public:
         }
         if (params.count("timestamps_passthrough") > 0) {
             r->timestamps_passthrough_ = params["timestamps_passthrough"];
+        }
+        if (params.count("hdr_metadata") > 0) {
+            if constexpr (!std::is_same_v<InputFrame, av::VideoFrame>)
+                throw Error("hdr_metadata applies to enc_video only");
+            if (!params["hdr_metadata"].is_object())
+                throw Error("hdr_metadata must be an object (primaries, white_point, max_luminance, min_luminance, max_cll, max_fall)");
+            r->hdr_metadata_ = params["hdr_metadata"];
         }
         return r;
     }
@@ -217,6 +238,19 @@ protected:
 #endif
         if (metadata->realPixelFormat() != AV_PIX_FMT_NONE) {
             this->enc_.setPixelFormat(metadata->realPixelFormat());
+        }
+        // avcpp has no VideoEncoderContext::setFrameRate (only Stream::setFrameRate,
+        // which the muxed/HLS path already sets in setOutput() below -- but that only
+        // touches container-level AVStream metadata, not what the encoder itself
+        // stamps into the bitstream's own SPS/VUI timing_info). Packet-sink branches
+        // with no muxer (e.g. Gemini VLM) never call setOutput() at all, so without
+        // this, AVCodecContext.framerate stays unset and h264_nvenc falls back to an
+        // internal default (observed: 30000/1001) baked into the SPS -- confirmed via
+        // ffprobe on a live capture: 48 packets meant to span 6s at 8fps instead
+        // reported ~1.6s at 29.97fps once demuxed from the raw annex-B stream.
+        std::shared_ptr<IFrameRateSource> frs = this->template findNodeUp<IFrameRateSource>();
+        if (frs) {
+            this->enc_.raw()->framerate = frs->frameRate().getValue();
         }
     }
 };

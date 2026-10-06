@@ -1,4 +1,4 @@
-#include "mixer/Snapshot.hpp"
+#include "mixer/primitives/Snapshot.hpp"
 #include <cassert>
 #include <memory>
 

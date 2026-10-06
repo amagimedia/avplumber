@@ -160,6 +160,14 @@ class Realtime(InternalNode):
     TYPE = "realtime"
 
 
+class ClipCache(InternalNode):
+    TYPE = "clip_cache"
+
+
+class RepeatLastFrame(InternalNode):
+    TYPE = "repeat_last_frame"
+
+
 class RescaleVideo(InternalNode):
     TYPE = "rescale_video"
 
@@ -196,10 +204,6 @@ class Split(InternalNode):
     TYPE = "split"
 
 
-class CudaInferYolo(InternalNode):
-    TYPE = "cuda_infer_yolo"
-
-
 class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 
@@ -226,10 +230,6 @@ class CudaCameraMotion(InternalNode):
 
 class LumaSceneCut(InternalNode):
     TYPE = "luma_scene_cut"
-
-
-class CudaInferSceneCutOnnx(InternalNode):
-    TYPE = "cuda_infer_scene_cut_onnx"
 
 
 class DrawTrail(InternalNode):
@@ -303,6 +303,12 @@ class PreheatVideoRouter(InternalNode):
     TYPE = "preheat_video_router"
 class CudaRectOverlay(InternalNode):
     TYPE = "cuda_rect_overlay"
+class CudaTransform(InternalNode):
+    TYPE = "cuda_transform"
+class MixerCompositor(InternalNode):
+    TYPE = "mixer_compositor"
+class MixerKeyer(InternalNode):
+    TYPE = "mixer_keyer"
 class Input(InternalNode):
     TYPE = "input"
 class ResampleAudio(InternalNode):
