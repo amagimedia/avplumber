@@ -133,8 +133,8 @@ def main():
                 bus.assign({"expected_revision": bus.state()["revision"], "scenes": scenes})
             assign(["red"] * 8)
             wait_for(lambda: not subscription_flags()[bus.edges[-1]])
-            blue_fps = app.avp.node(f"fps_{args.sources - 1}")
-            blue_fps.stopAndWait()
+            blue_pacer = app.avp.node(f"realtime_{args.sources - 1}")
+            blue_pacer.stopAndWait()
             time.sleep(.3)
             before = edge.enqueued_total
             assign(["blue"] * 8)
@@ -146,7 +146,7 @@ def main():
             wait_for(lambda: not bus.state()["composition_pending"])
             assert not bus.state()["composition_error"]
             assert not subscription_flags()[bus.edges[-1]]
-            blue_fps.start()
+            blue_pacer.start()
             assign(["blue"] * 8)
             wait_for(lambda: not bus.state()["composition_pending"])
             assert not bus.state()["composition_error"]

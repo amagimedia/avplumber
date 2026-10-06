@@ -248,7 +248,7 @@ def test_cli_accepts_ordered_repeatable_input_paths():
     assert options.loop_inputs is True
 
 
-def test_configured_fps_reaches_input_mixer_and_outputs():
+def test_input_keeps_native_rate_and_outputs_use_configured_fps():
     FakeMixer.instances.clear()
     application = build_application(
         GraphOptions(
@@ -261,8 +261,10 @@ def test_configured_fps_reaches_input_mixer_and_outputs():
     )
     nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
 
-    assert nodes["fps_0"]["fps"] == "60/1"
-    assert nodes["fps_0"]["center_phase"] is True   # set_pts jitter never flips frames between ticks
+    assert "fps_0" not in nodes
+    assert nodes["realtime_0"]["tick_period"] == "1/30000"
+    assert nodes["realtime_0"]["negative_time_tolerance"] == .25
+    assert nodes["realtime_0"]["discontinuity_threshold"] == 1.0
     assert "center_phase" not in nodes["program_fps"]
     assert "normalize_0" not in nodes
     assert nodes["program_fps"]["fps"] == "60/1"
@@ -346,7 +348,7 @@ def test_large_catalogue_keeps_paging_without_geometry_filters():
     # One cuda_transform per input fits the source into the canonical size with black bars; it
     # declares that size, which the router compares across its inputs.
     assert nodes["normalize_3"] == {
-        "type": "cuda_transform", "name": "normalize_3", "src": "input_3_fps", "dst": ["input_3_normalized"],
+        "type": "cuda_transform", "name": "normalize_3", "src": "input_3_realtime", "dst": ["input_3_normalized"],
         "hwaccel": "mixer_gpu", "group": "input_3", "auto_restart": "group",
         "outputs": [{"dst": "input_3_normalized", "width": 1920, "height": 1080, "sw_format": "nv12",
                      "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1920, "dst_h": 1080, "fit": "contain"}]}]}
@@ -394,7 +396,7 @@ def test_dmabuf_input_builds_browser_chain_next_to_files(tmp_path):
     assert nodes["decode_0"]["options"] == {"threads": 1}   # NVDEC decodes; a frame thread only reserves a surface
     sources = dict(FakeMixer.instances[-1].sources)
     assert sources["source_1"]["pre_otm_edge"] == "input_1_held"
-    assert sources["source_0"]["pre_otm_edge"] == "input_0_fps"
+    assert sources["source_0"]["pre_otm_edge"] == "input_0_realtime"
 
 
 def test_file_inputs_do_not_touch_drm_or_sockets(tmp_path):
@@ -709,14 +711,14 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
     assert nodes["input_0"]["format"] == "rawvideo"
     assert nodes["input_0"]["options"] == {"pixel_format": fmt, "video_size": "320x180", "framerate": "60/1"}
     if upload == "hwupload":
-        assert chain == ["input_0", "demux_0", "decode_0", "filter_0", "realtime_0", "fps_0", "upload_0"]
+        assert chain == ["input_0", "demux_0", "decode_0", "filter_0", "realtime_0", "upload_0"]
         assert nodes["input_0"]["loop_continuous_ts"] is False   # setpts counts frames across loops instead
         assert nodes["decode_0"]["codec"] == "rawvideo"
         assert "hwaccel" not in nodes["decode_0"] and "options" not in nodes["decode_0"]
         assert nodes["filter_0"]["src"] == "input_0_decoded"
         assert nodes["filter_0"]["graph"] == "setpts=N*1/(60*TB)"
         assert nodes["realtime_0"]["src"] == "input_0_filtered"
-        assert nodes["upload_0"]["src"] == "input_0_fps"
+        assert nodes["upload_0"]["src"] == "input_0_realtime"
         assert (nodes["upload_0"]["type"], nodes["upload_0"]["graph"]) == ("filter_video", "hwupload")
         # Neither graph does CPU slice work.
         assert nodes["filter_0"]["threads"] == nodes["upload_0"]["threads"] == 1
@@ -725,7 +727,7 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
         assert source["pre_otm_edge"] == "input_0_uploaded" and source["pixel_format"] == fmt
     else:
         # Rawvideo wraps the packets; the patched filter uploads on the shared device.
-        assert chain == ["input_0", "demux_0", "decode_0", "upload_0", "realtime_0", "fps_0"]
+        assert chain == ["input_0", "demux_0", "decode_0", "upload_0", "realtime_0"]
         assert nodes["demux_0"]["routing"] == {"v:0": "input_0_packed"}
         upload = nodes["upload_0"]
         assert nodes["decode_0"]["codec"] == "rawvideo"
@@ -740,7 +742,7 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
         assert nodes["realtime_0"]["src"] == "input_0_cuda"
         assert dict(app.avp.edges.plans)["input_0_cuda"] == 1
         source = dict(FakeMixer.instances[-1].sources)["raw"]
-        assert source["pre_otm_edge"] == "input_0_fps" and source["pixel_format"] == fmt
+        assert source["pre_otm_edge"] == "input_0_realtime" and source["pixel_format"] == fmt
 
 
 def test_raw_upload_rejects_unknown_modes():
@@ -903,7 +905,7 @@ def test_config_source_transform_is_one_cuda_transform_before_the_fanout(tmp_pat
         "transform": {"width": 1280, "height": 720, "sw_format": "nv12", "crop": [320, 180, 1280, 720]}})
 
     assert nodes["transform_0"] == {
-        "name": "transform_0", "type": "cuda_transform", "src": "input_0_fps", "dst": ["input_0_transformed"],
+        "name": "transform_0", "type": "cuda_transform", "src": "input_0_realtime", "dst": ["input_0_transformed"],
         "hwaccel": "mixer_gpu", "group": "input_0", "auto_restart": "group",
         "outputs": [{"dst": "input_0_transformed", "width": 1280, "height": 720, "sw_format": "nv12",
                      "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1280, "dst_h": 720, "fit": "contain",
@@ -929,7 +931,7 @@ def test_config_without_a_source_transform_builds_no_cuda_transform(tmp_path, mo
     nodes, sources = _source_transform_nodes(tmp_path, monkeypatch, {})
 
     assert not [name for name, node in nodes.items() if node.get("type") == "cuda_transform"]
-    assert sources["cam"]["pre_otm_edge"] == "input_0_fps"
+    assert sources["cam"]["pre_otm_edge"] == "input_0_realtime"
 
 
 @pytest.mark.parametrize("transform, message", [
@@ -978,12 +980,12 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     mixer = FakeMixer.instances[-1]
 
     assert [name for name in nodes if name and name.startswith("decode_")] == ["decode_0"]
-    source_edge = "input_0_filtered" if source_filter else "input_0_fps"
+    source_edge = "input_0_filtered" if source_filter else "input_0_realtime"
     assert dict(mixer.sources)["cam"]["pre_otm_edge"] == source_edge
     assert dict(mixer.sources)["cam#2"]["pre_otm_edge"] == source_edge
     if source_filter:
         assert nodes["source_filter_0"]["graph"] == source_filter
-        assert nodes["source_filter_0"]["src"] == "input_0_fps"
+        assert nodes["source_filter_0"]["src"] == "input_0_realtime"
         assert nodes["source_filter_0"]["hwaccel"] == "mixer_gpu"
         assert nodes["source_filter_0"]["group"] == "input_0"
         assert [n for n in nodes if n and n.startswith("source_filter_")] == ["source_filter_0"]

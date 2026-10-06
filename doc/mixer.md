@@ -29,6 +29,14 @@ The returned application exposes `avp`, `mixer` and `aux_buses`. Web UI
 registration and the application's event loop remain caller-owned. Importing
 the API does not load the native engine; building does.
 
+Mixer file inputs retain their native cadence. `realtime` paces and rebases them
+onto the host clock with a 1/120000 time base, preserving the common NTSC frame
+periods exactly. The compositor selects, repeats or drops frames at the canvas
+rate; there is no per-input `force_fps`. Output encoders retain their rate
+normalization. The shared input helper defaults to the previous normalized
+chain for playlist and other callers; the mixer opts into `native_rate=True`.
+`SourceContext.fps` is the canvas rate, not a promise about callback input cadence.
+
 For per-camera inference, pass `process_source=callback`. The callback receives
 a `SourceContext` with `avp`, `api`, `source`, `index`, `edge`, `group`, `hwaccel`
 and `fps`, and returns the video edge to mix. It runs once per physical source,

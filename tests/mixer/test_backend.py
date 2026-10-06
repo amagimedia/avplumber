@@ -151,7 +151,7 @@ def test_pacing_loops_and_single_threaded_gpu_graphs(native_boundary, tmp_path, 
                                          dmabuf_socket_dir=str(tmp_path)), api=api)
     graph = {n.parameters["name"]: n.parameters for n in app.avp.nodes if "name" in n.parameters}
 
-    source_pacing = {**{f"{kind}_{i}": i for kind in ("realtime", "fps") for i in (*range(PACING_LOOPS), 5, 6)},
+    source_pacing = {**{f"{kind}_{i}": i for kind in ("realtime",) for i in (*range(PACING_LOOPS), 5, 6)},
                      f"input_{PACING_LOOPS}_smooth": PACING_LOOPS}
     assert {name: graph[name].get("event_loop") for name in source_pacing} == {
         name: f"pacing_{index % PACING_LOOPS}" for name, index in source_pacing.items()}

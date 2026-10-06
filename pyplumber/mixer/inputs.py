@@ -1,9 +1,10 @@
 """Decode chain shared by the mixer and playlist demos.
 
-``input_rec -> demux -> dec_video -> [speed_video] -> realtime(set_pts) -> force_fps``
+``input_rec -> demux -> dec_video -> [speed_video] -> realtime(set_pts) -> [force_fps]``
 
 ``realtime(set_pts=True)`` rebases every source onto the host monotonic clock,
-which is the time base the native mixer schedules cuts in.
+which is the time base the native mixer schedules cuts in. The mixer keeps
+native input cadence; other callers retain rate normalization by default.
 """
 
 from __future__ import annotations
@@ -23,8 +24,12 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
                 realtime_params: Optional[dict] = None, decoder_params: Optional[dict] = None,
                 decoded_filter: str = "", decoded_filter_threads: Optional[int] = None,
                 pause_params: Optional[dict] = None,
-                auto_restart: Optional[str] = "group", event_loop: Optional[str] = None) -> str:
-    """Add the chain for one source and return its output edge (``input_<tag>_fps``).
+                auto_restart: Optional[str] = "group", event_loop: Optional[str] = None,
+                native_rate: bool = False) -> str:
+    """Add the chain for one source and return its paced output edge.
+
+    ``native_rate`` preserves source cadence for a clocked compositor; otherwise
+    the shared playlist chain still normalizes to ``fps/fps_den``.
 
     ``auto_restart="group"`` restarts the chain when a live source drops; pass
     ``None`` for file playback that is looped or seeked instead.  ``continuous_loop``
@@ -82,20 +87,31 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
         }))
         realtime_src = edge("paused")
     return _pace(avp, api, tag, realtime_src, fps=fps, fps_den=fps_den, group=group,
-                 sync_team=sync_team, realtime_params=realtime_params, event_loop=event_loop)
+                 sync_team=sync_team, realtime_params=realtime_params, event_loop=event_loop, native_rate=native_rate)
 
 
 def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
           sync_team: Optional[str] = None, realtime_params: Optional[dict] = None,
-          event_loop: Optional[str] = None) -> str:
-    """``realtime(set_pts) -> force_fps`` tail shared by every source chain:
-    rebase onto the host clock, then fix the rate. Returns ``input_<tag>_fps``."""
+          event_loop: Optional[str] = None, native_rate: bool = False) -> str:
+    """Rebase onto the host clock; optionally normalize cadence for non-clocked consumers."""
     loop = {} if event_loop is None else {"event_loop": event_loop}
+    timing = {}
+    if native_rate:
+        # Without tick_source, realtime still follows wallclock. tick_period selects
+        # its internal time base (one quarter of this period): 1/120000 represents
+        # 1001/24000, 1001/30000 and 1001/60000 exactly. Millisecond PTS can cross
+        # the compositor's nearest-tick boundary and cause repeat/drop pairs.
+        # Its built-in thresholds are in milliseconds, so preserve their durations
+        # explicitly when choosing the finer time base.
+        timing = {"tick_period": "1/30000", "negative_time_tolerance": .25,
+                  "discontinuity_threshold": 1.0}
     avp.addNode(api.Realtime({
         "name": f"realtime_{tag}", "src": src, "dst": f"input_{tag}_realtime",
         "set_pts": True, "group": group, **loop,
-        **({} if sync_team is None else {"team": sync_team}), **(realtime_params or {}),
+        **({} if sync_team is None else {"team": sync_team}), **timing, **(realtime_params or {}),
     }))
+    if native_rate:
+        return f"input_{tag}_realtime"
     # set_pts stamps the release schedule in whole milliseconds: center_phase keeps that rounding from
     # flipping frames between output ticks (duplicate + drop pairs) on sources half a frame off the grid.
     avp.addNode(api.ForceFPS({
@@ -141,7 +157,7 @@ RAW_UPLOADED_CAPACITY = 1
 def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                        pixel_format: str, fps: int, fps_den: int = 1,
                        hwaccel: str = "@gpu", loop: bool = False, event_loop: Optional[str] = None,
-                       pinned: bool = False) -> str:
+                       pinned: bool = False, native_rate: bool = False) -> str:
     """CPU/GPU interop source: raw NV12/P010 file -> CUDA frames -> paced output edge.
 
     Default: ``input_rec -> demux -> dec_video(rawvideo) -> filter(setpts) ->
@@ -169,7 +185,7 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
                            # InputRec seeks back to PTS zero at each loop. Count frames
                            # before pacing; setpts changes metadata only, not pixels.
                            decoded_filter=f"setpts=N*{fps_den}/({fps}*TB)", decoded_filter_threads=threads,
-                           event_loop=event_loop)
+                           event_loop=event_loop, native_rate=native_rate)
         output = f"input_{tag}_uploaded"
         avp.addNode(api.FilterVideo({"name": f"upload_{tag}", "src": edge, "dst": output,
                                     "graph": "hwupload", "hwaccel": hwaccel, "threads": threads, "group": group}))
@@ -190,12 +206,13 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
         "graph": "hwupload_cuda=pinned=1", "hwaccel": hwaccel, "threads": 1,
         "group": group, **_raw_file_restart(loop),
     }))
-    return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)
+    return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop, native_rate=native_rate)
 
 
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                      fps: int, fps_den: int = 1, hwaccel: str = "@gpu", loop: bool = False,
-                     color: Optional[dict] = None, event_loop: Optional[str] = None) -> str:
+                     color: Optional[dict] = None, event_loop: Optional[str] = None,
+                     native_rate: bool = False) -> str:
     """Headerless packed v210 file -> GPU unpack (P210, 10-bit 4:2:2) -> paced output edge.
 
     ``input_rec -> demux -> dec_video(rawvideo/gray) ->
@@ -227,4 +244,4 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
         "hwaccel": hwaccel, "graph": graph, "threads": 1,
         "group": group, **_raw_file_restart(loop),
     }))
-    return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)
+    return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop, native_rate=native_rate)

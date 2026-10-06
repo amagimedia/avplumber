@@ -607,17 +607,17 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             edge = build_v210_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                color=source.color.tags, event_loop=_pacing_loop(index))
+                color=source.color.tags, event_loop=_pacing_loop(index), native_rate=True)
         elif source.kind in ("nv12", "p010"):
             edge = build_raw420_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 pixel_format="p010le" if source.kind == "p010" else "nv12",
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned")
+                event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned", native_rate=True)
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
-                               event_loop=_pacing_loop(index), decoder_params=source.decoder_params)
+                               event_loop=_pacing_loop(index), decoder_params=source.decoder_params, native_rate=True)
         if source.transform:
             transformed_edge = f"input_{index}_transformed"
             # pass_arrays: the color stage and the compositors read arrays, so a frame that already
