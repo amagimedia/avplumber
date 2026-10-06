@@ -5,13 +5,29 @@ export const sourceQueues = (params = {}) => refs(params.src);
 export const destinationQueues = (params = {}) => [...new Set([
   ...refs(params.dst), ...Object.values(params.routing || {}).flatMap(refs),
 ])];
+const familyName = group => group.replace(/\d+$/, '*');
+
+// `expand` is a comma-separated list of groups to show as native nodes, e.g. from
+// a `?expand=` link. A numbered group also opens its family (the key is unused
+// while the group has no siblings); a `name*` family opens with all its members.
+export function expandedGroupKeys(expand = '', nodes = []) {
+  const keys = new Set();
+  for (const name of String(expand || '').split(',').map(s => s.trim()).filter(Boolean)) {
+    const family = familyName(name);
+    if (family.endsWith('*')) keys.add(`family:${family}`);
+    const members = name.endsWith('*')
+      ? nodes.map(n => n.params?.group).filter(group => group && familyName(group) === name) : [name];
+    for (const group of members) keys.add(`group:${group}`);
+  }
+  return keys;
+}
 
 // A projection only: native nodes/queues remain available for inspection.
 export function groupGraph(nodes = [], queues = [], expanded = new Set()) {
   const groups = new Set(nodes.map(n => n.params?.group).filter(Boolean));
   const families = new Map();
   for (const group of groups) {
-    const family = group.replace(/\d+$/, '*');
+    const family = familyName(group);
     if (family !== group) families.set(family, [...(families.get(family) || []), group]);
   }
   const familyOf = new Map();

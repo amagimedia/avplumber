@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from tui import MixerTui, SceneButton
+from pyplumber.mixer.gui.tui import MixerTui, SceneButton
 from textual.widgets import Input, Select
 
 
@@ -34,6 +34,7 @@ class FakeConnection:
                 {
                     "pgm_scene": self.program,
                     "pvw_scene": self.preview,
+                    "pvw_slot_scene": self.preview,
                     "transition": "idle",
                 }
             )
@@ -327,3 +328,33 @@ async def test_direct_is_on_by_default_and_mixer_settings_apply():
         assert app.query_one("#direct_transition").value == "wipe"
         assert app.query_one("#wipe_file").value == "/media/w.mov"
         assert str(app.query_one("#direct").label) == "Direct: OFF"
+
+
+@pytest.mark.parametrize("color", [None, "#ffffff"])
+def test_fade_take_uses_the_configured_curve_and_colour(color):
+    class CurveConnection(FakeConnection):
+        async def command(self, command):
+            if command.startswith("mixer.settings"):
+                return json.dumps({"fade_curve": "ease-out", "fade_color": color})
+            if command.startswith("mixer.fade "):
+                self.commands.append(command)
+                self.program = json.loads(command.partition(" ")[2])["scene"]
+                return None
+            return await super().command(command)
+
+    async def exercise():
+        app = MixerTui("127.0.0.1", 7777, "mixer", fade_duration=0.25, direct=False, wipe_file="")
+        connection = CurveConnection()
+        app.connection = connection
+        async with app.run_test(size=(160, 45)) as pilot:
+            await pilot.pause()
+            app.query_one("#direct_transition", Select).value = "fade"
+            await pilot.press("t")
+            await pilot.press("f3")
+            await pilot.pause()
+            fades = [c for c in connection.commands if c.startswith("mixer.fade ")]
+            assert [json.loads(c.partition(" ")[2]) for c in fades] == [
+                {"mixer": "mixer", "scene": "grid_4_page_0", "duration_sec": 0.25, "curve": "ease-out",
+                 **({"color": color} if color else {})}]
+
+    asyncio.run(exercise())

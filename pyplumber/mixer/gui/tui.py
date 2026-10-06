@@ -1,4 +1,4 @@
-"""Textual manual control surface for the generic mixer demo."""
+"""Textual manual control surface for the mixer."""
 
 from __future__ import annotations
 
@@ -175,10 +175,13 @@ class MixerTui(App):
         self.default_transition = transition
         self._transition_chosen = False   # an operator pick outranks the config
         self._wipes: dict[str, dict] = {}
+        self._fade_curve = "linear"   # control.fade_curve from mixer.settings; the TUI has no picker
+        self._fade_color = None       # control.fade_color: a fade dips through it; None mixes
         self.scenes: list[str] = []
         self.selected_scene = ""
         self.pgm_scene = ""
         self.pvw_scene = ""
+        self.pvw_slot_scene = ""
         self.transition = "idle"
         self.direct_mode = direct
         self._poll_timer = None
@@ -228,12 +231,13 @@ class MixerTui(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#scenes").horizontal_scrollbar.renderer = SceneScrollBarRender
+        self.query_one("#scenes").horizontal_scrollbar.renderer = SceneScrollBarRender  # pyright: ignore[reportAttributeAccessIssue] -- Textual reads this per widget.
         self._poll_timer = self.set_interval(0.5, self._poll_status)
         self.action_reconnect()
 
     async def on_unmount(self) -> None:
-        self._poll_timer.stop()
+        if self._poll_timer:
+            self._poll_timer.stop()
         await self.connection.disconnect()
 
     def _set_connection_text(self, text: str) -> None:
@@ -275,6 +279,7 @@ class MixerTui(App):
             return
         self.pgm_scene = status.pgm_scene
         self.pvw_scene = status.pvw_scene
+        self.pvw_slot_scene = status.pvw_slot_scene
         self.transition = status.transition
         self.query_one("#program_scene", Static).update(self.pgm_scene or "(none)")
         self.query_one("#preview_scene", Static).update(self.pvw_scene or "(none)")
@@ -320,15 +325,18 @@ class MixerTui(App):
         self._reconnect()
 
     async def _preview_and_wait(self, scene: str) -> None:
+        """Load *scene* into the PVW slot unless it is there. The shown preview is not enough:
+        after a take it is the scene that left program, whose slot is cold (a mixer without
+        pvw_slot_scene reports "", which loads every time)."""
         if self.transition != "idle":
             raise RuntimeError(f"transition is busy: {self.transition}")
-        if self.pvw_scene != scene:
+        if self.pvw_slot_scene != scene:
             await self.connection.command(
                 mixer_command("preview", self.mixer_name, scene=scene)
             )
         for _ in range(80):
             await self._read_status()
-            if self.pvw_scene == scene and self.transition == "idle":
+            if self.pvw_slot_scene == scene and self.transition == "idle":
                 return
             await asyncio.sleep(0.05)
         raise TimeoutError(f"preview did not become ready: {scene}")
@@ -344,15 +352,19 @@ class MixerTui(App):
             # Every take reaches the native mixer, including a correction back
             # to Program while its previous transition is still in flight.
             # Preview is optional preparation, never a prerequisite for a take.
-            payload = {"scene": scene}
+            payload: dict = {"scene": scene}
             if transition == "fade":
                 duration = float(self.query_one("#fade_duration", Input).value)
                 if duration <= 0:
                     raise ValueError("transition duration must be positive")
                 payload["duration_sec"] = duration
+                if self._fade_curve != "linear":
+                    payload["curve"] = self._fade_curve
+                if self._fade_color:
+                    payload["color"] = self._fade_color
             elif transition == "wipe":
                 chosen = self.query_one("#wipe_choice", Select).value
-                wipe = self._wipes.get(chosen) if chosen is not Select.BLANK else None
+                wipe = self._wipes.get(chosen) if isinstance(chosen, str) else None
                 wipe_file = wipe["path"] if wipe else self.query_one("#wipe_file", Input).value.strip()
                 if wipe and wipe.get("duration_seconds"):
                     payload["duration_sec"] = wipe["duration_seconds"]
@@ -439,6 +451,8 @@ class MixerTui(App):
             self._set_direct(bool(settings["direct"]))
         if "fade_seconds" in settings:
             self.query_one("#fade_duration", Input).value = str(settings["fade_seconds"])
+        self._fade_curve = str(settings.get("fade_curve") or "linear")
+        self._fade_color = settings.get("fade_color") or None
         if settings.get("transition") and not self._transition_chosen:
             self.query_one("#direct_transition", Select).value = str(settings["transition"])
         library = settings.get("wipes") or []
