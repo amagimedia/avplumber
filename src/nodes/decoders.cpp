@@ -119,12 +119,24 @@ protected:
 #endif
     }
 public:
-    template<typename ...Ts> Decoder(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<OutputFrame>> &&sink, av::Stream &stream, const std::string codec_name, av::Dictionary options, std::string pixel_format, std::shared_ptr<HWAccelDevice> hwaccel):
+    template<typename ...Ts> Decoder(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<OutputFrame>> &&sink, av::Stream &stream, const std::string codec_name, av::Dictionary options, std::string pixel_format, std::shared_ptr<HWAccelDevice> hwaccel, int reinterpret_width = 0, std::string reinterpret_pixel_format = ""):
         NodeSISO<av::Packet, OutputFrame>(std::move(source), std::move(sink)),
         codec_(codecFromName(codec_name)),
         dec_(stream, codec_),
         hwaccel_(hwaccel)
     {
+        // The source stream's own codecpar (e.g. a real codec like v210) is what
+        // dec_(stream, codec_) just copied into this codec context. A packet
+        // stream whose bytes are already raw (MXL's packed-v210 flow, read with
+        // codec=rawvideo to hand them to a GPU unpack filter) needs those bytes
+        // reinterpreted at the byte stride, not the real picture width, before
+        // the rawvideo "decoder" opens.
+        if (reinterpret_width > 0) {
+            dec_.raw()->width = reinterpret_width;
+        }
+        if (!reinterpret_pixel_format.empty()) {
+            dec_.raw()->pix_fmt = av::PixelFormat(reinterpret_pixel_format);
+        }
         this->auto_eof_ = false;
         if (!pixel_format.empty()) {
             pixel_format_optional_ = pixel_format[0]=='?';
@@ -422,6 +434,14 @@ public:
         if (params.count("pixel_format")) {
             pixel_format = params["pixel_format"];
         }
+        int reinterpret_width = 0;
+        if (params.count("reinterpret_width")) {
+            reinterpret_width = params["reinterpret_width"];
+        }
+        std::string reinterpret_pixel_format;
+        if (params.count("reinterpret_pixel_format")) {
+            reinterpret_pixel_format = params["reinterpret_pixel_format"];
+        }
         std::shared_ptr<HWAccelDevice> hwaccel;
         if (params.count("hwaccel")) {
             bool use_hw = true;
@@ -437,7 +457,7 @@ public:
         if (params.count("options")) {
             options = parametersToDict(params["options"]);
         }
-        std::shared_ptr<Child> r = std::make_shared<Child>(src_edge->makeSource(), dst_edge->makeSink(), md->source_stream, codec_name, options, pixel_format, hwaccel);
+        std::shared_ptr<Child> r = std::make_shared<Child>(src_edge->makeSource(), dst_edge->makeSink(), md->source_stream, codec_name, options, pixel_format, hwaccel, reinterpret_width, reinterpret_pixel_format);
         if (params.count("flush_magic")) {
             r->flush_magic_ = params["flush_magic"];
         }

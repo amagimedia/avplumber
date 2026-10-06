@@ -6,8 +6,8 @@ Builds two avplumber graphs in one process:
 * writer: file -> demux -> decode -> v210 encode -> mxl mux -> mxl:// URL
 * reader: mxl:// URL -> demux -> v210 unpack -> re-encode -> file
 
-The reader unpacks on the GPU (`v210_to_cuda` + NVENC) when a CUDA
-device is present and falls back to the CPU v210 decoder otherwise, and
+The reader unpacks on the GPU (`hwupload_cuda=v210_width=...` + NVENC) when a
+CUDA device is present and falls back to the CPU v210 decoder otherwise, and
 takes grains zero-copy out of the shared-memory ring by default.
 
 The two graphs share a `/dev/shm/mxl` domain and a set of flow UUIDs so
@@ -168,7 +168,7 @@ def _parse_args() -> argparse.Namespace:
         choices=("auto", "on", "off"),
         default=os.environ.get("AVP_GPU_UNPACK", "auto"),
         help=(
-            "Read the flow straight onto the GPU: v210_to_cuda unpacks each "
+            "Read the flow straight onto the GPU: hwupload_cuda=v210_width unpacks each "
             "grain into CUDA P210 frames and NVENC encodes the output. "
             "'auto' (default) uses it when a CUDA device is present, else "
             "falls back to the CPU v210 decoder and mpeg4."
@@ -247,7 +247,7 @@ def _cuda_present() -> bool:
 
     Cheaper and more reliable than probing the driver: the NVIDIA
     Container Toolkit maps /dev/nvidiactl in, and its absence is exactly
-    the case where v210_to_cuda cannot run.
+    the case where the GPU unpack path cannot run.
     """
     return os.path.exists("/dev/nvidiactl")
 
@@ -524,7 +524,7 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
     """mxl:// -> demux -> v210 unpack -> convert -> encode -> file.
 
     With `--gpu-unpack` the packed grains go straight to the GPU
-    (`v210_to_cuda`) and NVENC writes the file; otherwise the CPU v210
+    (`hwupload_cuda=v210_width=...`) and NVENC writes the file; otherwise the CPU v210
     decoder plus swscale feed the mpeg4 encoder. `--gpu-unpack` and
     `--reader-encoder` pick those two ends independently, and the
     conversion in between follows from them. `--reader-tail` cuts the
@@ -614,36 +614,43 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
 
 
 def _build_gpu_unpack(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> str:
-    """r_vpkt -> v210_to_cuda -> r_vcuda, returning the frame edge.
+    """r_vpkt -> dec_video(reinterpreted raw) -> filter(hwupload_cuda) -> r_vcuda.
 
-    One packed frame per grain is exactly `v210_to_cuda`'s input
-    contract, so the whole CPU v210 decoder and swscale drop out: the
-    grain is copied once into pinned memory, unpacked to CUDA P210 by
-    the PTX kernel, and never touches host memory again.
+    The MXL stream reports a real `v210` codec with the actual picture
+    width/height (`_build_cpu_unpack` decodes it with no overrides at all),
+    so unlike a packed-v210 *file* (opened through the `rawvideo` demuxer at
+    the byte stride) this stream's codecpar has to be reinterpreted before
+    decode: `reinterpret_width`/`reinterpret_pixel_format` force the decoder
+    to treat each packet as `stride * height` raw gray bytes instead of
+    letting the real v210 decoder run. `hwupload_cuda=v210_width=...` then
+    unpacks those bytes straight into a CUDA P210 frame, same as a packed
+    v210 file read with `--gpu-unpack` through `build_v210_input`. PTS and
+    frame rate still come from the real stream metadata; only the packet
+    payload's shape needs reinterpreting.
     """
-    from pyplumber.node import V210ToCuda
+    from pyplumber.node import FilterVideo
 
-    avp.addNode(V210ToCuda({
+    avp.addNode(DecVideo({
         "src": "r_vpkt",
+        "dst": "r_vraw",
+        "group": "r_in",
+        "name": "r_dec_raw",
+        "codec": "rawvideo",
+        "reinterpret_width": v210_row_stride(args.width),
+        "reinterpret_pixel_format": "gray",
+        "auto_restart": "off",
+    }))
+    # Packed v210 carries no color metadata at all, so the output is stamped
+    # here, same as the CPU path's downstream assumptions.
+    avp.addNode(FilterVideo({
+        "src": "r_vraw",
         "dst": "r_vcuda",
         "group": "r_in",
         "name": "r_unpack",
         "hwaccel": _HWACCEL,
-        "width": args.width,
-        "height": args.height,
-        "stride": v210_row_stride(args.width),
-        "fps": _fps_ratio(args.fps),
-        # Packed v210 has no timebase either, so the node picks one. 90 kHz
-        # is the usual choice, but mpeg4 refuses any denominator above
-        # 65535, so stamp the frame period when it is the output encoder.
-        "timebase": ("1/90000" if args.reader_encoder == "nvenc"
-                     else _fps_period(args.fps)),
-        "format": "p210le",
-        # Packed v210 carries no metadata at all, so the node stamps it.
-        "colorspace": "bt709",
-        "color_primaries": "bt709",
-        "color_trc": "bt709",
-        "color_range": "tv",
+        "graph": (f"hwupload_cuda=v210_width={args.width}"
+                 ",setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"),
+        "threads": 1,
         "auto_restart": "off",
     }))
     return "r_vcuda"
@@ -668,7 +675,7 @@ def _build_convert(avp: pyplumber.AVPlumber, args: argparse.Namespace,
     NVENC wants CUDA nv12 -- it only accepts 4:2:2 10-bit on
     Blackwell-class hardware -- and mpeg4 wants host yuv420p, so either
     way the 10-bit 4:2:2 flow is converted here. The frames arrive either
-    on the GPU (`v210_to_cuda`) or in host memory (the `v210` decoder),
+    on the GPU (`hwupload_cuda=v210_width=...`) or in host memory (the `v210` decoder),
     which leaves four shapes for the same step: swscale, scale_cuda with
     an upload and a download around it (`--gpu-scale reader`), scale_cuda
     plus one download, or scale_cuda alone. It is the reader's most

@@ -16,10 +16,11 @@ Two graphs run in one process:
 * **reader** — `input(format="mxl", url="mxl:///dev/shm/mxl?id=<uuid>")`
   → demux → v210 unpack → encode → fragmented mp4. `--gpu-unpack`
   (default `auto`) picks the unpack:
-  * **GPU** — `v210_to_cuda` copies each grain once into pinned memory
-    and unpacks it to a CUDA `p210le` frame with a PTX kernel;
-    `scale_cuda` and `h264_nvenc` finish the file. No CPU codec, no
-    swscale.
+  * **GPU** — `dec_video` reinterprets each grain's packet as raw bytes
+    at the `v210` byte stride, and `hwupload_cuda=v210_width=...` stages
+    it through pinned memory and unpacks it to a CUDA `p210le` frame on
+    the GPU; `scale_cuda` and `h264_nvenc` finish the file. No CPU codec,
+    no swscale.
   * **CPU** (no CUDA device) — libavcodec `v210` decoder, swscale to
     yuv420p, `mpeg4`.
 
