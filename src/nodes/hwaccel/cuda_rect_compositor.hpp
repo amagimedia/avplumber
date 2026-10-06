@@ -4,7 +4,7 @@
 #include "../node_common.hpp"
 #include "../../hwaccel.hpp"
 #include "../../avbuffer.hpp"
-#include "../../SharedTimeline.hpp"
+#include "../../output_mask.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
 #include "../../mixer/primitives/frame_subscription.hpp"
 #include "../../mixer/primitives/source_mask.hpp"
@@ -26,14 +26,13 @@ extern "C" {
 
 /// Multi-input GPU compositor. Each node decides which frames to draw when; this class holds
 /// what they share: the canvas and its output frame pool, control (`layers`, per-frame
-/// `metadata_key` layers, `active_inputs`, timeline), input checks and the drawing of one output
+/// `metadata_key` layers, `active_inputs`), input checks and the drawing of one output
 /// frame. Layer geometry is resolved by compositor_layers.hpp and the CUDA work is done by
 /// CudaRectDraw.
 class CudaRectCompositor : public NodeMultiInput<av::VideoFrame>,
                            public NodeSingleOutput<av::VideoFrame>,
                            public IVideoFormatSource,
                            public IFrameRateSource,
-                           public TimelineReader,
                            public IInputsObjects {
 public:
     using CudaRectDraw = avp::mixer::CudaRectDraw;
@@ -198,12 +197,11 @@ protected:
         return outf;
     }
 
-    /// Wires a created node into the graph (`src` edges, the output edge, the timeline) and reads
+    /// Wires a created node into the graph (`src` edges and the output edge) and reads
     /// `active_inputs` and `warmup_timeout_ms`.
     void connect(NodeCreationInfo &nci) {
         createSourcesFromParameters(nci.edges, nci.params);
         output_edge_->setProducer(this->shared_from_this());
-        initTimeline(nci);
         if (nci.params.count("active_inputs"))
             active_inputs_ = avp::mixer::parseSourceMask(nci.params["active_inputs"]);
         warmup_timeout_ms_ = nci.params.value("warmup_timeout_ms", (int64_t)0);

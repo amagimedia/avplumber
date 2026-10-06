@@ -1,5 +1,5 @@
 #include "node_common.hpp"
-#include "../SharedTimeline.hpp"
+#include "../output_mask.hpp"
 
 #include <algorithm>
 #include <mutex>
@@ -7,13 +7,12 @@
 #include <unordered_set>
 #include <vector>
 
-// preheat_video_router: video-only N->M router with a timeline-driven route
+// preheat_video_router: video-only N->M router with a runtime route
 // table. Assumes all inputs share width/height/pixel format/frame rate/time
 // base. Enforces per-output monotonic PTS by default; intended for the current
 // preheated wallclock-PTS mixer pipelines rather than as a generic media router.
 class PreheatVideoRouter : public NodeMultiInput<av::VideoFrame>,
                            public NodeMultiOutput<av::VideoFrame>,
-                           public TimelineReader,
                            public ReportsFinishByFlag,
                            public IInputsObjects,
                            public IReturnsObjects,
@@ -151,23 +150,10 @@ class PreheatVideoRouter : public NodeMultiInput<av::VideoFrame>,
         }
     }
 
-    // Atomically resolve the route table for `pts` *and* publish it as the
-    // current effective table so per-output backward-PTS guards stay coherent.
-    // Returns the routes actually applied. Holding both locks for the whole
-    // window prevents the routesAt -> applyEffectiveRoutes race where a
-    // concurrent setObject("routes") could observe a stale effective_routes_
-    // and reset last_output_pts_ relative to a now-outdated baseline.
-    std::vector<int> resolveAndApplyRoutesAt(const av::Timestamp& pts) {
+    // Route updates and backward-PTS guards use the same lock pair.
+    std::vector<int> resolveAndApplyRoutes() {
         std::scoped_lock lock(routes_mutex_, stats_mutex_);
-        std::vector<int> resolved;
-        if (pts.isValid()) {
-            auto opt = tlGetRaw("routes", pts);
-            if (opt) {
-                resolved = parseRoutes(*opt, &effective_routes_);
-            }
-        }
-        if (resolved.empty())
-            resolved = routes_;
+        const auto& resolved = routes_;
         if (effective_routes_ != resolved) {
             resetOutputsForRouteChangesLocked(effective_routes_, resolved);
             effective_routes_ = resolved;
@@ -375,7 +361,7 @@ public:
             return;
         }
 
-        std::vector<int> routes = resolveAndApplyRoutesAt(frame->pts());
+        std::vector<int> routes = resolveAndApplyRoutes();
         copyToRoutedOutputs(*frame, routes, srci);
         this->source_edges_[srci]->pop();
         {
@@ -456,7 +442,6 @@ public:
         auto r = std::make_shared<PreheatVideoRouter>();
         r->createSourcesFromParameters(nci.edges, params);
         r->createSinksFromParameters(nci.edges, params);
-        r->initTimeline(nci);
 
         if (params.count("name"))
             r->label_ = params["name"].get<std::string>();

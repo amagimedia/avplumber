@@ -21,11 +21,14 @@ from frame_codes import read_code
 
 
 @contextmanager
-def recovery_graph(paths):
+def recovery_graph(paths, *, webui=None, port=18779):
     avp = AVPlumber()
     errors = []
     avp.on_exception = lambda name, kind, message: errors.append((name, kind, message))
     avp.executeCommandsFromString('hwaccel.init {"name":"recovery_gpu","type":"cuda"}')
+    if webui:
+        avp.enableControlServer(port)
+        avp.registerWithWebUI(webui, "immediate-transition-test", "")
     avp.edges.planCapacity('*', 3)
     for index, path in enumerate(paths):
         stages = (
@@ -137,8 +140,10 @@ def check_recovery(avp, mixer, output, errors):
         return len(samples)
 
     def interruptible_cut():
-        # A future cut stays active while we inject the replacement failure.
-        mixer.cut('full1', start_pts_ms=time.monotonic_ns() // 1000000 + 30000)
+        # Keep the immediate cut pending on real input readiness, not a timer.
+        command('node.object.set target_gate active 1')
+        sample(0.15)
+        mixer.cut('full1')
         sample(0.1)
 
     results = []
@@ -168,6 +173,7 @@ def check_recovery(avp, mixer, output, errors):
     # executeCommandsFromString reports protocol errors on its output stream;
     # the assertion is recovery of live pixels, not a Python exception.
     mixer.fade('invalid', duration_sec=0.3)
+    command('node.object.set target_gate active 0')
     sample(0.3)
     results.append({'failure': 'invalid_scene', 'moving_program_frames': moving_program(0)})
 
@@ -178,6 +184,7 @@ def check_recovery(avp, mixer, output, errors):
         interruptible_cut()
         mixer.wipe('full1', missing, duration_sec=0.5)
         sample(5.7)
+        command('node.object.set target_gate active 0')
         results.append({'failure': 'missing_wipe', 'moving_program_frames': moving_program(0)})
 
     # Cancelling a failed preparation must not let its old poll undo a take.
@@ -201,11 +208,8 @@ def check_recovery(avp, mixer, output, errors):
 
 
 def run(paths, prewarm=False, webui=None, port=None):
-    with recovery_graph(paths) as graph:
+    with recovery_graph(paths, webui=webui, port=port or 18779) as graph:
         avp = graph[0]
-        if webui:
-            avp.enableControlServer(port)
-            avp.registerWithWebUI(webui, "prewarm-transition-recovery", "")
         if prewarm:
             avp.executeCommandsFromString('mixer.prewarm {"mixer":"recovery","scenes":["full0","full1"]}')
         check_recovery(*graph)

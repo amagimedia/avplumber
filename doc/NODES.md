@@ -1030,8 +1030,6 @@ Parameters:
 -   `max_layers` (int, default `256`) - layers per frame; sizes the GPU rect table
 -   `active_inputs` (mask, default all) - inputs drawn: a JSON number, or a
     least-significant-bit-first bit string (`"1011"`) beyond 64 inputs
--   `timeline` (string, optional) - shared timeline whose `active_inputs`
-    entries override the mask at frame timestamps
 -   `metadata_key` (string, default `rect_overlay_v1`) - frame metadata key
     with per-frame layer changes, `{"layers": [...]}` in `src` order or
     `{"<index>": {...}}`, read from the frame the output copies its properties from

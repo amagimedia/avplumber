@@ -15,26 +15,18 @@ int64_t releaseAfter(int64_t emitted_ns) {
 }
 }
 
-MixerOrchestrator::MixerOrchestrator(
-    std::shared_ptr<NodeManager> nodes,
-    std::shared_ptr<MixerState> state,
-    std::shared_ptr<SharedTimeline> timeline,
-    std::shared_ptr<TransitionScheduler> scheduler)
-    : nodes_(std::move(nodes)),
-      state_(std::move(state)),
-      timeline_(std::move(timeline)),
-      scheduler_(std::move(scheduler)) {}
+MixerOrchestrator::MixerOrchestrator(std::shared_ptr<NodeManager> nodes, std::shared_ptr<MixerState> state)
+    : MixerOrchestrator(std::make_shared<MixerGraph>(nodes), std::move(state)) {}
 
-void MixerOrchestrator::postTransitionTask(std::string label, int64_t delay_ms, std::function<void()> task) {
-    if (!scheduler_)
-        throw Error("mixer: transition scheduler is not configured");
-    scheduler_->postAfter(std::move(label), delay_ms, std::move(task));
-}
+MixerOrchestrator::MixerOrchestrator(std::shared_ptr<MixerGraph> nodes, std::shared_ptr<MixerState> state)
+    : nodes_(std::move(nodes)), state_(std::move(state)) {}
 
 void MixerOrchestrator::setNodeObject(const std::string& node_name, const std::string& key, const Parameters& value) {
     try {
-        auto node = nodes_->node(node_name);
-        node->setObject(key, value);
+        auto node = nodes_->node(node_name)->node();
+        auto control = std::dynamic_pointer_cast<IInputsObjects>(node);
+        if (!control) throw Error("node has no runtime controls");
+        control->setObject(key, value);
     } catch (const std::exception& e) {
         throw Error("mixer: set " + node_name + "." + key + " failed: " + e.what());
     }
@@ -43,26 +35,14 @@ void MixerOrchestrator::setNodeObject(const std::string& node_name, const std::s
 void MixerOrchestrator::publishRuntimeObject(const std::string& node_name,
                                              const std::string& key,
                                              const Parameters& value) {
-    timeline_->clearKey(node_name, key);
     if (!setNodeObjectIfCreated(nodes_, node_name, key, value)) {
         logstream << "mixer: queued " << node_name << "." << key
                   << " for node not created yet";
     }
-    timeline_->set(node_name, key, wallclock.pts(), value);
 }
 
 void MixerOrchestrator::publishCameraOtmOutputs(const std::string& otm_name, uint32_t mask) {
-    // `one_to_many` with `timeline` uses tlGetRaw("outputs") whenever any entry matches; stale
-    // rows (e.g. an old cleanup_ms) would override setObject. We drop only the "outputs" key on
-    // this OTM channel — not post-scene otms, not source_switcher, not other keys here.
-    // cut/fade append new `outputs` rows at cleanup_ms *after* loadSceneIntoSlot returns, so
-    // those are not cleared by this call. Overlapping mixer commands are rejected by ensureIdle().
-    timeline_->clearKey(otm_name, "outputs");
-    if (!setNodeObjectIfCreated(nodes_, otm_name, "outputs", Parameters(mask))) {
-        logstream << "mixer: queued " << otm_name << ".outputs=" << mask
-                  << " for node not created yet";
-    }
-    timeline_->set(otm_name, "outputs", wallclock.pts(), Parameters(mask));
+    publishRuntimeObject(otm_name, "outputs", Parameters(mask));
 }
 
 void MixerOrchestrator::setNodeParam(const std::string& node_name, const std::string& param, const std::string& value) {
@@ -74,18 +54,6 @@ void MixerOrchestrator::setNodeParam(const std::string& node_name, const std::st
 void MixerOrchestrator::autoRestartNode(const std::string& node_name) {
     auto node = nodes_->node(node_name);
     node->stop(false);
-}
-
-void MixerOrchestrator::createAndStartNode(const Parameters& params) {
-    Parameters p = params;
-    nodes_->createNode(p, true, true);
-}
-
-void MixerOrchestrator::deleteNodeIfExists(const std::string& name) {
-    auto node = nodes_->node_if_exists(name);
-    if (node) {
-        nodes_->deleteNode(name);
-    }
 }
 
 void MixerOrchestrator::startGroup(const std::string& group_name) {
@@ -266,19 +234,12 @@ void MixerOrchestrator::restoreProgramRouting(MixerState::TransitionMode dropped
         picture_changed = snapshot->frames.holding() ||
             snapshot->frames.replaces(state_->pgmSourceSwitcherIndex());
     }
-    // Remove scheduled controls as well as routes; cancelling a worker alone
-    // cannot cancel a future selector flip.
-    if (auto scene = state_->scenes.find(state_->transition_scene_name); scene != state_->scenes.end()) {
-        for (const auto& control : scene->second.controls)
-            timeline_->clearKey(control.node_name, control.key);
-    }
     switchProgramSelector(state_->pgm_is_slot_a);
     applyPostTransitionRouting(state_->pgm_is_slot_a, state_->pgm_scene_name, picture_changed);
-    scheduleSceneControls(state_->scenes.at(state_->pgm_scene_name), wallclock.pts());
+    applySceneControls(state_->scenes.at(state_->pgm_scene_name));
     for (const auto& [name, key, value] : std::vector<std::tuple<std::string, std::string, int>>{
             {state_->wipe_selector_name, "active", 0}, {state_->wipe_otm_name, "outputs", 1}}) {
         if (name.empty()) continue;
-        timeline_->clearKey(name, key);
         setNodeObject(name, key, Parameters(value));
     }
 }
@@ -335,17 +296,6 @@ int64_t MixerOrchestrator::selectorOutputNs() const {
     return emitted.isValid() ? emitted.timestamp({1, 1000000000}) : 0;
 }
 
-int64_t MixerOrchestrator::resolveTransitionStartPts(int64_t requested_start_pts_ms) const {
-    int64_t now = wallclock.pts();
-    if (requested_start_pts_ms < 0)
-        return now;
-    int64_t earliest = now + state_->switch_margin_ms;
-    if (requested_start_pts_ms < earliest)
-        throw Error("mixer: start_pts_ms must be at least " + std::to_string(state_->switch_margin_ms) +
-                    "ms in the future");
-    return requested_start_pts_ms;
-}
-
 std::vector<std::string> MixerOrchestrator::sceneNames() const {
     std::lock_guard<std::mutex> lock(state_->mutex);
     std::vector<std::string> names;
@@ -363,7 +313,6 @@ Parameters MixerOrchestrator::status() const {
     s["pvw_slot_scene"] = state_->pvw_slot_scene;
     s["preview_followers"] = state_->preview_followers.load();
     s["pgm_slot"] = state_->pgm_is_slot_a ? "A" : "B";
-    s["switch_margin_ms"] = state_->switch_margin_ms;
     s["now_pts_ms"] = wallclock.pts();
     s["cut_latency"] = state_->cut_latency ? state_->cut_latency->status() : Parameters(nullptr);
     {

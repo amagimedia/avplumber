@@ -30,7 +30,6 @@
 #include "InputSeekTeam.hpp"
 #include "PTSCorrectorCommon.hpp"
 #include "rest_client.hpp"
-#include "SharedTimeline.hpp"
 #include "mixer/primitives/MixerState.hpp"
 #include "mixer/primitives/compositor_color.hpp"
 #include "nodes/hwaccel/graphic_color.h"
@@ -40,7 +39,6 @@ using avp::mixer::MixerState;
 using avp::mixer::SceneControl;
 using avp::mixer::SceneDefinition;
 using avp::mixer::SourceLayout;
-using avp::mixer::TransitionScheduler;
 #include "CommandTiming.hpp"
 #include <libavformat/avformat.h>
 #ifdef EMBED_IN_OBS
@@ -765,83 +763,9 @@ public:
             team->setSpeed(speed);
         };
 
-        // timeline.set {"name":"mixer_tl","ch":"otm_cam1","at":1234567,"key":"outputs","val":3}
-        commands_["timeline.set"] = [this](ClientStream &cs, std::string &arg) {
-            json req = json::parse(arg);
-            if (!req.is_object())
-                throw Error("timeline.set: expected JSON object");
-            std::string tl_name = req.at("name").get<std::string>();
-            std::string channel = req.contains("ch")
-                                      ? req.at("ch").get<std::string>()
-                                      : req.at("channel").get<std::string>();
-            std::string key = req.at("key").get<std::string>();
-            int64_t at_pts_ms = req.at("at").get<int64_t>();
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
-            tl->set(channel, key, at_pts_ms, req.at("val"));
-        };
-
-        // timeline.batch <name> <entries_json_array>
-        // Each entry: {"ch":"...", "at":int64, "key":"...", "val":...}
-        commands_["timeline.batch"] = [this](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            std::string tl_name, entries_str;
-            ss >> tl_name;
-            std::getline(ss, entries_str);
-            entries_str = strutils::trim(entries_str);
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
-            json entries = json::parse(entries_str);
-            if (!entries.is_array())
-                throw Error("timeline.batch: expected JSON array");
-            std::vector<SharedTimeline::BatchEntry> batch;
-            batch.reserve(entries.size());
-            for (const auto& e : entries) {
-                batch.push_back(SharedTimeline::BatchEntry{
-                    e.at("ch").get<std::string>(),
-                    e.at("key").get<std::string>(),
-                    e.at("at").get<int64_t>(),
-                    e.at("val")
-                });
-            }
-            tl->setBatch(batch);
-        };
-
-        // timeline.clear <name> [channel]
-        commands_["timeline.clear"] = [this](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            std::string tl_name, channel;
-            ss >> tl_name;
-            if (ss >> channel) {
-                channel = strutils::trim(channel);
-            }
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
-            if (channel.empty())
-                tl->clearAll();
-            else
-                tl->clear(channel);
-        };
-
-        // timeline.gc <name> <before_pts_ms>
-        commands_["timeline.gc"] = [this](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            std::string tl_name;
-            int64_t before_pts_ms;
-            ss >> tl_name >> before_pts_ms;
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
-            tl->gc(before_pts_ms);
-        };
-
-        // timeline.dump <name>
-        commands_["timeline.dump"] = [this](ClientStream &cs, std::string &arg) {
-            std::string tl_name = strutils::trim(arg);
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
-            cs << tl->dump() << "\n";
-        };
-
         auto mixerOrchestrator = [this](const std::string& mixer_name) {
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
-            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), state->timeline_name);
-            auto scheduler = InstanceSharedObjects<TransitionScheduler>::get(manager_->instanceData(), mixer_name);
-            return MixerOrchestrator(manager_->shared_from_this(), state, tl, scheduler);
+            return MixerOrchestrator(manager_->shared_from_this(), state);
         };
 
         auto mixerJsonRequest = [](const std::string& command, const std::string& arg) {
@@ -972,14 +896,15 @@ public:
             orch.interrupt();
         };
 
-        // mixer.cut {"mixer":"mixer","scene":"scene_name","start_pts_ms":123456789}
+        // mixer.cut {"mixer":"mixer","scene":"scene_name"}
         commands_["mixer.cut"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.cut", arg);
             std::string mixer_name = req.at("mixer").get<std::string>();
             std::string scene_name = req.at("scene").get<std::string>();
-            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (req.contains("start_pts_ms"))
+                throw Error("mixer: future-scheduled takes were removed; takes are immediate");
             auto orch = mixerOrchestrator(mixer_name);
-            orch.cut(scene_name, start_pts_ms, CommandTiming::received());
+            orch.cut(scene_name, CommandTiming::received());
         };
 
         // Opt-in observers only; no node replacement or graph rewiring.
@@ -997,7 +922,7 @@ public:
             orch.prewarmCuts(req.at("scenes").get<std::vector<std::string>>());
         };
 
-        // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,"start_pts_ms":123456789,
+        // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,
         //             "curve":"linear","color":"#000000"}; curve is linear (default), ease-in, ease-out or
         //             ease-in-out; a color (opaque RGB) dips through it instead of mixing
         commands_["mixer.fade"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
@@ -1005,7 +930,8 @@ public:
             std::string mixer_name = req.at("mixer").get<std::string>();
             std::string scene_name = req.at("scene").get<std::string>();
             double duration_sec = req.value("duration_sec", 1.0);
-            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (req.contains("start_pts_ms"))
+                throw Error("mixer: future-scheduled takes were removed; takes are immediate");
             if (duration_sec <= 0)
                 throw Error("mixer.fade: duration_sec must be > 0");
             const auto curve = avp::mixer::parseFadeCurve(req.value("curve", std::string("linear")));
@@ -1013,23 +939,24 @@ public:
             if (req.contains("color") && !req.at("color").is_null())
                 dip = avp::mixer::parseDipColor(req.at("color").get<std::string>());
             auto orch = mixerOrchestrator(mixer_name);
-            orch.fade(scene_name, duration_sec, start_pts_ms, curve, dip, CommandTiming::received());
+            orch.fade(scene_name, duration_sec, curve, dip, CommandTiming::received());
         };
 
-        // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0,"start_pts_ms":123456789}
+        // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0}
         commands_["mixer.wipe"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.wipe", arg);
             std::string mixer_name = req.at("mixer").get<std::string>();
             std::string scene_name = req.at("scene").get<std::string>();
             std::string wipe_file = req.at("wipe_file").get<std::string>();
             double duration_sec = req.value("duration_sec", 0.0);
-            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (req.contains("start_pts_ms"))
+                throw Error("mixer: future-scheduled takes were removed; takes are immediate");
             if (!req.contains("duration_sec"))
                 duration_sec = probeMediaDurationSec(wipe_file);
             if (duration_sec <= 0)
                 throw Error("mixer.wipe: duration_sec must be > 0");
             auto orch = mixerOrchestrator(mixer_name);
-            orch.wipe(scene_name, wipe_file, duration_sec, start_pts_ms);
+            orch.wipe(scene_name, wipe_file, duration_sec);
         };
 
         // mixer.wipe.warmup {"mixer":"mixer","wipe_file":"/path/wipe.mov","timeout_ms":30000}:
@@ -1111,7 +1038,6 @@ public:
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             std::lock_guard<std::mutex> lock(state->mutex);
             if (cfg.contains("backend")) state->transition_control = avp::mixer::transitionControl(cfg["backend"].get<std::string>());
-            if (cfg.contains("timeline")) state->timeline_name = cfg["timeline"].get<std::string>();
             if (cfg.contains("hwaccel")) state->hwaccel_name = cfg["hwaccel"].get<std::string>();
             if (cfg.contains("fps_num")) state->fps_num = cfg["fps_num"].get<int>();
             if (cfg.contains("fps_den")) state->fps_den = cfg["fps_den"].get<int>();
@@ -1121,11 +1047,6 @@ public:
                 if (transfer == AVCOL_TRC_UNSPECIFIED)
                     throw Error("mixer.init: color must be sdr, hlg or pq");
                 state->canvas_transfer = transfer;
-            }
-            if (cfg.contains("switch_margin_ms")) {
-                state->switch_margin_ms = cfg["switch_margin_ms"].get<int64_t>();
-                if (state->switch_margin_ms < 0)
-                    throw Error("mixer.init: switch_margin_ms must be >= 0");
             }
             if (cfg.contains("source_switcher")) state->source_switcher_name = cfg["source_switcher"].get<std::string>();
             if (cfg.contains("keyframe_node")) state->keyframe_node_name = cfg["keyframe_node"].get<std::string>();

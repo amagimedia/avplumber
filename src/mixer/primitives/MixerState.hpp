@@ -21,6 +21,8 @@ extern "C" {
 
 namespace avp::mixer {
 
+class MixerGraph;
+
 struct SourceLayout {
     std::string crop_scale_graph; // e.g., "crop=1920:1080:0:0,scale_cuda=640:360"
     /// Layer fields for mixer_compositor (dst_x, dst_y, …) — not including `graph`.
@@ -165,7 +167,6 @@ struct MixerState : public InstanceShared<MixerState> {
     }
 
     int fps_num = 30, fps_den = 1;
-    int64_t switch_margin_ms = 100;
     /// The compositors' canvas transfer (mixer.init "color"); a dip colour is converted for it.
     AVColorTransferCharacteristic canvas_transfer = AVCOL_TRC_BT709;
 
@@ -182,8 +183,24 @@ struct MixerState : public InstanceShared<MixerState> {
     }
     std::atomic<uint64_t> transition_generation{0};
     std::string transition_scene_name;
+    // One take, advanced by the selector's input frames. No task queue or
+    // timestamped property history; replacing a take replaces this state.
+    enum class TakePhase { Ready, Fade, WipeReady, Wipe };
+    TakePhase take_phase = TakePhase::Ready;
+    std::shared_ptr<MixerGraph> graph;
+    int64_t take_deadline_ns = 0;
+    int64_t take_start_ns = 0;
+    int64_t take_duration_ns = 0;
+    int64_t wipe_first_ns = 0;
+    bool wipe_switched = false;
+    bool destination_ready = false;
+    FadeCurve take_curve = FadeCurve::Linear;
+    std::optional<std::array<uint8_t, 3>> take_dip;
+    uint64_t scene_revision = 0;
+
 
     struct SlotNodes {
+        std::string revision;
         std::string compositor_name;   // "comp_a" / "comp_b"
         std::string norm_ts_name;      // "norm_a" / "norm_b"
         std::string post_otm_name;     // "otm_scene_a" / "otm_scene_b"
@@ -195,7 +212,6 @@ struct MixerState : public InstanceShared<MixerState> {
     /// waiting for the next periodic keyframe.
     std::string keyframe_node_name;
     std::shared_ptr<avp::mixer::CutLatencyProbe> cut_latency;
-    std::string timeline_name;         // "mixer_tl"
     std::string hwaccel_name;          // "@gpu"
 
     // Static nodes for wipe output path (otm splits mixer_out, selector chooses direct vs overlay)

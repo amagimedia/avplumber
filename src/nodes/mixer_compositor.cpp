@@ -93,6 +93,8 @@ class MixerCompositor : public CudaRectCompositor,
                    const av::VideoFrame *metadata_src) {
         const int64_t started = avp::mixer::monotonicNs();
         av::VideoFrame frame = compose(pts, sources, metadata_src);
+        if (!aux_ && !composition_revision_.empty())
+            av_dict_set(&frame.raw()->metadata, "avp.mixer.scene", composition_revision_.c_str(), 0);
         const int64_t composed = avp::mixer::monotonicNs();
         if (!this->sink_->put(frame, aux_)) ++output_drops_;
         compose_ns_ = composed - started;
@@ -171,13 +173,23 @@ public:
     }
 
     void process() override {
-        if (aux_) {
+        {
             std::optional<Parameters> update;
             {
                 std::lock_guard<std::mutex> lock(layers_mutex_);
                 update.swap(pending_composition_);
             }
-            if (update) {
+            if (update && !aux_) {
+                const auto layers = avp::mixer::parseLayersArray(update->at("layers"));
+                {
+                    std::lock_guard<std::mutex> lock(layers_mutex_);
+                    default_layers_ = layers;
+                    composition_revision_ = update->at("revision").get<std::string>();
+                }
+                setActiveInputs(avp::mixer::parseSourceMask(update->at("active_inputs")));
+                if (update->value("warm", false)) setObject("warm_reset", true);
+                else resetInput();
+            } else if (update) {
                 const auto mask = avp::mixer::parseSourceMask(update->at("active_inputs"));
                 staged_composition_.reset();
                 composition_preparing_ = false;
@@ -196,13 +208,6 @@ public:
         }
         const int64_t now = avp::mixer::monotonicNs();
         auto [active, prewarm] = inputMasks();
-        if (hasTimeline()) {
-            const auto deadline = playout_->nextDeadline();
-            const int64_t content_time = std::max(now - playout_->latencyNs(),
-                deadline ? *deadline - playout_->latencyNs() : now);
-            const auto value = tlGetRaw("active_inputs", av::Timestamp(content_time, {1, 1000000000}));
-            if (value) active = avp::mixer::parseSourceMask(*value);
-        }
         const auto generation = input_generation_.load(std::memory_order_acquire);
         if (generation != applied_generation_ || active != applied_active_mask_ || prewarm != applied_prewarm_mask_) {
             for (size_t i = 0; i < source_edges_.size(); ++i) {
@@ -334,13 +339,13 @@ public:
 
     void setObject(const std::string key, const Parameters& value) override {
         if (key == "composition") {
-            if (!aux_) throw Error("composition requires aux_mode");
             auto layers = avp::mixer::parseLayersArray(value.at("layers"));
             if (layers.size() > size_t(draw_.maxLayers())) throw Error("aux: too many layers");
             const auto mask = avp::mixer::parseSourceMask(value.at("active_inputs"));
             if (value.contains("revision") && !value.at("revision").is_string()) throw Error("aux: revision must be a string");
-            for (const auto &layer : layers)
-                if (layer.input < 0 || size_t(layer.input) >= source_edges_.size()) throw Error("aux: invalid input index");
+            for (size_t i = 0; i < layers.size(); ++i)
+                if ((aux_ && layers[i].input < 0) || layers[i].sourceIndex(i) >= source_edges_.size())
+                    throw Error("mixer_compositor: invalid input index");
             for (int i = static_cast<int>(source_edges_.size()); i < avp::mixer::kSourceMaskBits; ++i)
                 if (mask.test(i)) throw Error("aux: active input out of range");
             {

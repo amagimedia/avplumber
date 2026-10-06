@@ -6,9 +6,9 @@ chain (``pyplumber.mixer.inputs.build_input`` with a pause node and a realtime s
 team, the replay demo's wiring) lives in group ``pl_item_<slot>`` and feeds
 scene ``item_<slot>``, a fullscreen layout on the native two-slot mixer.
 
-A transition is *armed* natively shortly before its start: ``mixer.cut`` /
-``fade`` / ``wipe`` with a wallclock ``start_pts_ms``, then ``resume <team>
-at`` so the incoming chain runs just ahead of the cut.  The engine confirms
+The Python worker issues immediate ``mixer.cut`` / ``fade`` / ``wipe`` when
+its monotonic deadline arrives. ``resume <team> at`` starts the incoming
+chain just ahead of that deadline. The engine confirms
 the switch from ``mixer.status`` over the local control port.  Python never
 sits on the frame path.
 
@@ -84,8 +84,7 @@ class PlaylistConfig:
     control_timeout: float = 10.0
     log_file: str = "playlist-demo.log"
     preroll_ms: int = 50            # resume the incoming chain this early
-    switch_margin_ms: int = 100     # mixer's minimum lead for a scheduled cut
-    arm_lead_ms: int = 600          # issue the native transition this early
+    arm_lead_ms: int = 600          # prepare the incoming chain this early
     wipe_file: Optional[str] = None
     record: Optional[str] = None    # also write the program to this MP4/TS (verification)
 
@@ -94,8 +93,8 @@ class PlaylistConfig:
             raise ValueError("output format must be positive")
         if self.control_timeout <= 0:
             raise ValueError("control timeout must be positive")
-        if min(self.preroll_ms, self.switch_margin_ms) < 0 or self.arm_lead_ms <= self.switch_margin_ms:
-            raise ValueError("preroll >= 0, switch margin >= 0 and arm lead > switch margin required")
+        if self.preroll_ms < 0 or self.arm_lead_ms <= self.preroll_ms:
+            raise ValueError("preroll >= 0 and arm lead > preroll required")
 
 
 def load_avp_api():
@@ -195,6 +194,7 @@ class _Armed:
     transition: Transition
     transition_ms: int
     issued: bool = False
+    resumed: bool = False
 
     @property
     def duration_ms(self) -> int:
@@ -234,7 +234,7 @@ class PlaylistEngine:
         avp.edges.planCapacity("*", 4)
         self.mixer = api.MixerGraphBuilder(
             avp, name=MIXER, canvas=(cfg.width, cfg.height), fps=(cfg.fps, 1), hwaccel=HWACCEL,
-            enable_wipe=True, switch_margin_ms=cfg.switch_margin_ms,
+            enable_wipe=True,
             defer_initial_routes=True, defer_output=True)
         full = {"dst_x": 0, "dst_y": 0, "dst_w": cfg.width, "dst_h": cfg.height, "fit": "contain"}
         for slot in range(SLOT_CAPACITY):
@@ -421,7 +421,9 @@ class PlaylistEngine:
         armed, now = self._armed, now_ms()
         if armed is not None:
             try:
-                if not armed.issued and now >= armed.start - self.config.arm_lead_ms:
+                if not armed.resumed and now >= armed.start - self.config.arm_lead_ms:
+                    self._resume(armed)
+                if not armed.issued and now >= armed.start:
                     self._issue(armed)
                 elif armed.issued and now >= armed.start:
                     self._confirm(armed, now)
@@ -540,28 +542,32 @@ class PlaylistEngine:
         if task.transition is Transition.WIPE and not self.config.wipe_file:
             raise RuntimeError("no --wipe-file configured; choose Cut or Fade")
         duration = task.transition_ms if task.transition is not Transition.CUT else 0
-        end = task.at_ms if task.at_ms is not None else now + self.config.switch_margin_ms + duration
+        end = task.at_ms if task.at_ms is not None else now + duration
         self._armed = _Armed(task.request_id, clip.item_id, slot, end - duration, end,
                              task.transition, task.transition_ms)
-        if task.at_ms is None or self._armed.start - now <= self.config.arm_lead_ms:
+        if self._armed.start - now <= self.config.arm_lead_ms:
+            self._resume(self._armed)
+        if self._armed.start <= now:
             self._issue(self._armed)
 
+    def _resume(self, armed: _Armed) -> None:
+        self._exec(f"resume {slot_pause_team(armed.slot)} at {max(now_ms(), armed.start - self.config.preroll_ms)}")
+        armed.resumed = True
+
     def _issue(self, armed: _Armed) -> None:
-        """Arm the native transition, then schedule the incoming chain's resume."""
+        """Commit the take now; scheduling belongs to this application's worker."""
         cfg, now = self.config, now_ms()
         scene, seconds = slot_scene(armed.slot), armed.transition_ms / 1000
-        immediate = armed.start - now < cfg.switch_margin_ms + 50
-        start_pts = -1 if immediate else armed.start           # -1: the mixer picks now + margin
+        if not armed.resumed:
+            self._resume(armed)
         if armed.transition is Transition.CUT:
-            self.mixer.cut(scene, start_pts_ms=start_pts)
+            self.mixer.cut(scene)
         elif armed.transition is Transition.FADE:
-            self.mixer.fade(scene, duration_sec=seconds, start_pts_ms=start_pts)
+            self.mixer.fade(scene, duration_sec=seconds)
         else:
-            self.mixer.wipe(scene, cfg.wipe_file, duration_sec=seconds, start_pts_ms=start_pts)
-        if immediate:
-            armed.start = now + cfg.switch_margin_ms
-            armed.end = armed.start + armed.duration_ms
-        self._exec(f"resume {slot_pause_team(armed.slot)} at {max(now, armed.start - cfg.preroll_ms)}")
+            self.mixer.wipe(scene, cfg.wipe_file, duration_sec=seconds)
+        armed.start = max(now, armed.start)
+        armed.end = armed.start + armed.duration_ms
         armed.issued = True
 
     def _confirm(self, armed: _Armed, now: int) -> None:

@@ -422,10 +422,7 @@ def test_program_excludes_frames_from_before_prewarm_finished(native_boundary, m
     app = application(native_boundary)
     assert app.avp.nodes["mixer_otm_final"]["outputs"] == 0
     app.start()
-    gates = [json.loads(event.partition(" ")[2]) for event in app.avp.events
-             if event.startswith("timeline.set ")]
-    assert {"name": "mixer_tl", "ch": "mixer_otm_final", "key": "outputs",
-            "at": 123457, "val": 1} in gates
+    assert "node.object.set mixer_otm_final enable_from 123457" in app.avp.events
     assert app.avp.events.index("inspect mixer_final_out") < app.avp.events.index("READY")
 
 

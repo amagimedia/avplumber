@@ -20,7 +20,7 @@ Typical usage
                               "group": f"input_{i}"}))
 
     mx = MixerGraphBuilder(avp, name="mixer", canvas=(1920, 1080), fps=(30, 1),
-                           hwaccel="mixer_gpu", timeline="mixer_tl", enable_wipe=True)
+                           hwaccel="mixer_gpu", enable_wipe=True)
     mx.add_source("cam0", pre_otm_edge="cam0_fps", input_group="input_0")
     mx.add_source("cam1", pre_otm_edge="cam1_fps", input_group="input_1")
     mx.add_scene("fullcam0", {"cam0": {"graph": "scale_cuda=w=1920:h=1080", "dst_x": 0, "dst_y": 0}})
@@ -78,6 +78,10 @@ class _SnapshotNode(InternalNode):
     TYPE = "mixer_snapshot"
 
 
+class _MixerSelector(InternalNode):
+    TYPE = "mixer_selector"
+
+
 class MixerGraphBuilder:
     """Build and operate an avplumber 2-slot video mixer (MixerOrchestrator).
 
@@ -95,9 +99,7 @@ class MixerGraphBuilder:
         canvas: Tuple[int, int] = (1920, 1080),
         fps: Tuple[int, int] = (30, 1),
         hwaccel: str = "@gpu",
-        timeline: Optional[str] = None,
         enable_wipe: bool = True,
-        switch_margin_ms: int = 100,
         defer_initial_routes: bool = False,
         latency_ms: Optional[float] = None,
         defer_output: bool = False,
@@ -109,17 +111,13 @@ class MixerGraphBuilder:
         backend=None,
         max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS,
     ):
-        if switch_margin_ms < 0:
-            raise ValueError("switch_margin_ms must be >= 0")
         self.avp = avp
         self.name = name
         self.canvas_w, self.canvas_h = canvas
         self.fps_num, self.fps_den = fps
         self.hwaccel = hwaccel
         self.backend = mixer_backend(backend)
-        self.timeline = timeline or f"{name}_tl"
         self.enable_wipe = enable_wipe
-        self.switch_margin_ms = switch_margin_ms
         # Triggered when a transition reaches the output, so receivers do not wait
         # for the next periodic keyframe to see the new scene.
         self.keyframe_node = keyframe_node
@@ -136,7 +134,7 @@ class MixerGraphBuilder:
         if self.wipe_color is not None and self.wipe_color != Color():
             raise ValueError("Alpha wipes currently require SDR; HDR alpha decode is unsupported")
         self._output_started = not defer_output
-        self._transition_prewarm = TransitionPrewarm(avp, self.name, self.timeline)
+        self._transition_prewarm = TransitionPrewarm(avp, self.name)
 
         self._sources: List[MixerSource] = []
         self._source_index: Dict[str, int] = {}
@@ -367,11 +365,9 @@ class MixerGraphBuilder:
     # Runtime control
     # ------------------------------------------------------------------
 
-    def cut(self, scene: str, start_pts_ms: int = -1) -> None:
+    def cut(self, scene: str) -> None:
         """Hard cut to *scene*."""
         cmd = {"mixer": self.name, "scene": scene}
-        if start_pts_ms >= 0:
-            cmd["start_pts_ms"] = start_pts_ms
         self.avp.executeCommandsFromString(f"mixer.cut {json.dumps(cmd)}")
         self._current_pgm = scene
 
@@ -384,15 +380,12 @@ class MixerGraphBuilder:
         self,
         scene: str,
         duration_sec: float = 1.0,
-        start_pts_ms: int = -1,
         curve: str = DEFAULT_FADE_CURVE,
         color: Optional[str] = None,
     ) -> None:
         """Crossfade to *scene* over *duration_sec* seconds, eased by *curve* (config.FADE_CURVES);
         a *color* ("#RRGGBB") dips through that colour instead, fully shown at the midpoint."""
         cmd = {"mixer": self.name, "scene": scene, "duration_sec": duration_sec}
-        if start_pts_ms >= 0:
-            cmd["start_pts_ms"] = start_pts_ms
         if fade_curve(curve, "fade curve") != DEFAULT_FADE_CURVE:
             cmd["curve"] = curve
         color = fade_color(color, "fade color")
@@ -406,7 +399,6 @@ class MixerGraphBuilder:
         scene: str,
         wipe_file: str,
         duration_sec: Optional[float] = None,
-        start_pts_ms: int = -1,
     ) -> None:
         """Media wipe to *scene* using *wipe_file* (must have alpha channel)."""
         if not self.enable_wipe:
@@ -414,8 +406,6 @@ class MixerGraphBuilder:
         cmd: Dict[str, Any] = {"mixer": self.name, "scene": scene, "wipe_file": wipe_file}
         if duration_sec is not None:
             cmd["duration_sec"] = duration_sec
-        if start_pts_ms >= 0:
-            cmd["start_pts_ms"] = start_pts_ms
         self.avp.executeCommandsFromString(f"mixer.wipe {json.dumps(cmd)}")
         self._current_pgm = scene
 
@@ -530,6 +520,7 @@ class MixerGraphBuilder:
             if len(sources) > 1:
                 outputs = [self._e(f"{s.name}_color_alias") for s in sources]
                 self.avp.addNode(OneToMany({
+                "drop": True,
                     "name": self._n(f"color_alias_{first.name}"), "src": prepared, "dst": outputs,
                     "outputs": (1 << len(outputs)) - 1, "group": first.input_group,
                 }))
@@ -575,13 +566,14 @@ class MixerGraphBuilder:
             if src.route_router is None:
                 aux_edges = self._aux_routes.get(src.name, [])
                 self.avp.addNode(OneToMany({
+                "drop": True,
                     "type": "one_to_many",
                     "name": self._n(f"otm_{src.name}"),
                     "src": prepared_edges[src.name],
                     "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b"), *aux_edges],
                     **({"subscribed_outputs": {edge: edge for edge in aux_edges}} if aux_edges else {}),
                     "outputs": outputs_init,
-                    "timeline": self.timeline,
+
                     "group": src.input_group,
                 }))
                 slot_a_edge = self._e(f"{src.name}_a")
@@ -643,7 +635,7 @@ class MixerGraphBuilder:
                     if is_program else {} for source in self._sources
                 ],
                 "active_inputs": source_mask_param(active_pgm) if is_program else 0,
-                "timeline": self.timeline,
+
                 "group": f"{self.name}_{slot}",
             }))
             self._add_snapshot_node(
@@ -652,11 +644,12 @@ class MixerGraphBuilder:
                 slot=0 if slot == "a" else 1,
             )
             self.avp.addNode(OneToMany({
+                "drop": True,
                 "name": self._n(f"otm_scene_{slot}"),
                 "src": self._e(f"scene_{slot}_out"),
                 "dst": [self._e(f"sc{slot.upper()}_direct"), self._e(f"sc{slot.upper()}_trans")],
                 "outputs": 1 if is_program else 0,
-                "timeline": self.timeline,
+
                 "group": f"{self.name}_{slot}",
             }))
 
@@ -682,7 +675,8 @@ class MixerGraphBuilder:
             "group": self.name,
         }))
 
-        self.avp.addNode(SourceSwitcher({
+        self.avp.addNode(_MixerSelector({
+            "mixer": self.name,
             "name": self._n("out_sel"),
             "src": [
                 self._e("scA_direct"),
@@ -691,7 +685,7 @@ class MixerGraphBuilder:
             ],
             "dst": self._e("mixer_out"),
             "active": initial_active,
-            "timeline": self.timeline,
+
             "group": self.name,
         }))
         self.avp.addNode(ForceFPS({
@@ -702,22 +696,23 @@ class MixerGraphBuilder:
             "group": self.name,
         }))
         self.avp.addNode(OneToMany({
+                "drop": True,
             "name": self._n("otm_final"),
             "src": self._e("final_wipe_pre"),
             "dst": [self._e("final_direct"), self._e("final_wipe_in")],
             "outputs": 1 if self._output_started else 0,
-            "timeline": self.timeline,
+
             "group": self.name,
         }))
-        self.avp.addNode(SourceSwitcher({
+        self.avp.addNode(_MixerSelector({
+            "mixer": self.name, "wipe": True,
             "name": self._n("wipe_sel"),
             "src": [self._e("final_direct"), self._e("wipe_overlay_out")],
             "dst": self._e("final_picture"),
             "active": 0,
             "fallback_active": 0,
-            "timeline_reference_input": 0,
             "fallback_when_active_missing": False,
-            "timeline": self.timeline,
+
             "group": self.name,
         }))
 
@@ -836,12 +831,11 @@ class MixerGraphBuilder:
 
         init_cfg: Dict[str, Any] = {
             "backend": self.backend.name,
-            "timeline": self.timeline,
+
             "hwaccel": self.hwaccel,
             "fps_num": self.fps_num,
             "fps_den": self.fps_den,
             "color": self.color.transfer,   # the canvas a dip colour is converted for
-            "switch_margin_ms": self.switch_margin_ms,
             "source_switcher": self._n("out_sel"),
             **({"keyframe_node": self.keyframe_node} if self.keyframe_node else {}),
             "initial_pgm_slot": self._initial_pgm_slot,

@@ -1,5 +1,5 @@
 #include "node_common.hpp"
-#include "../SharedTimeline.hpp"
+#include "../output_mask.hpp"
 #include "../output_subscriptions.hpp"
 #include "../mixer/primitives/frame_subscription.hpp"
 
@@ -7,11 +7,11 @@ static uint32_t parseOutputsMask(const Parameters& value) { return parseBitmask(
 
 template <typename T>
 class OneToMany : public NodeSingleInput<T>, public NodeMultiOutput<T>,
-                  public TimelineReader, public IInputsObjects, public IReturnsObjects,
+                  public IInputsObjects, public IReturnsObjects,
                   public IOutputSubscriptions {
     std::atomic<uint32_t> outputs_mask_{1};
     bool drop_ = false;
-    bool drop_dynamic_ = false;
+    std::atomic<int64_t> enable_from_ms_{0};
     std::vector<std::shared_ptr<avp::mixer::FrameSubscription>> subscriptions_;
     std::vector<std::string> output_names_;
 
@@ -30,12 +30,9 @@ public:
         if (!data) return;
 
         uint32_t mask = outputs_mask_.load(std::memory_order_relaxed);
-        if (hasTimeline()) {
-            auto opt = tlGetRaw("outputs", data->pts());
-            if (opt) mask = parseOutputsMask(*opt);
-        }
-
-        bool drop = drop_ || drop_dynamic_;
+        const auto from = enable_from_ms_.load(std::memory_order_acquire);
+        if (from && (!data->pts().isValid() || data->pts() < av::Timestamp(from, {1, 1000}))) mask = 0;
+        bool drop = drop_;
         for (size_t i = 0; i < this->sink_edges_.size(); i++) {
             if (subscriptions_[i])
                 subscriptions_[i]->publish(*data, [&] { EdgeSink<T>(this->sink_edges_[i]).put(*data, true); });
@@ -48,6 +45,10 @@ public:
     void setObject(const std::string key, const Parameters& value) override {
         if (key == "outputs")
             outputs_mask_.store(parseOutputsMask(value), std::memory_order_relaxed);
+        else if (key == "enable_from") {
+            enable_from_ms_.store(value.get<int64_t>(), std::memory_order_release);
+            outputs_mask_.store(1, std::memory_order_release);
+        }
     }
 
     Parameters getObject(const std::string key) override {
@@ -80,16 +81,10 @@ public:
             }
         }
         in_edge->setConsumer(r);
-        r->initTimeline(nci);
         if (params.count("outputs"))
             r->outputs_mask_.store(parseOutputsMask(params["outputs"]), std::memory_order_relaxed);
         if (params.count("drop"))
             r->drop_ = params["drop"].get<bool>();
-        // When outputs change dynamically via timeline, a blocking put on a
-        // full queue whose consumer is inactive would stall the entire node
-        // (preventing mask re-evaluation and starving all other outputs).
-        if (r->hasTimeline())
-            r->drop_dynamic_ = true;
         return r;
     }
 };
