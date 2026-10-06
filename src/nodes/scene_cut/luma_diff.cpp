@@ -1,6 +1,7 @@
 #include "../node_common.hpp"
 #include "../../hwaccel.hpp"
 #include "cuda_frame_helpers.hpp"
+#include "../hwaccel/cuda_array_textures.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -23,7 +24,12 @@ extern "C" {
 
 #include "../../../objs/src/nodes/scene_cut/luma_diff.ptx.h"
 
-#define LUMA_DIFF_CHECK_CU(x) scene_cut_cuda::checkCuda((x), "luma_diff", #x)
+namespace {
+int checkLumaCuda(CUresult result, const char *function) {
+    return scene_cut_cuda::checkCuda(result, "luma_diff", function);
+}
+}
+#define LUMA_DIFF_CHECK_CU(x) checkLumaCuda((x), #x)
 
 class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
     std::string metadata_key_ = "scene_diff";
@@ -33,12 +39,14 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     // always-emitted backward scene_diff. 0 = only scene_diff (Y_{idx-1} vs Y_idx).
     int frames_lookahead_ = 0;
 
-    AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
+    avp::AvBufferRef cuda_device_ref_;
     CUcontext cu_ctx_ = nullptr;
     CUstream stream_ = nullptr;
-    bool owns_stream_ = false;
     CUmodule cu_module_ = nullptr;
     CUfunction kernel_ = nullptr;
+    CUfunction array_kernel_ = nullptr;
+    avp::cuda::ArrayTextures<1, checkLumaCuda> array_textures_;
+    av::VideoFrame in_flight_;
 
     // Ring of previous Y planes. Index (ring_head_ - k + N) % N holds Y_{t-k} at frame t.
     std::vector<CUdeviceptr> d_ring_y_;
@@ -101,7 +109,8 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         if (LUMA_DIFF_CHECK_CU(cuModuleLoadDataEx(&cu_module_, ptx.c_str(), 0, nullptr, nullptr))) {
             return false;
         }
-        if (LUMA_DIFF_CHECK_CU(cuModuleGetFunction(&kernel_, cu_module_, "kLumaDiffReduce"))) {
+        if (LUMA_DIFF_CHECK_CU(cuModuleGetFunction(&kernel_, cu_module_, "kLumaDiffReduce")) ||
+            LUMA_DIFF_CHECK_CU(cuModuleGetFunction(&array_kernel_, cu_module_, "kLumaDiffReduceArray"))) {
             return false;
         }
         return true;
@@ -147,7 +156,7 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     // clobber with the current Y.
     bool launchDiffKernel(CUdeviceptr y_plane, int y_pitch, CUdeviceptr prev_y,
                           int width, int height, int has_prev, int blocks, int threads,
-                          DiffResult* out) {
+                          DiffResult* out, bool array) {
         void* args[] = {
             (void*)&y_plane,
             (void*)&y_pitch,
@@ -159,7 +168,7 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
             (void*)&d_block_signed_,
         };
         const unsigned int shared_bytes = (unsigned int)(threads * 2 * sizeof(float));
-        if (LUMA_DIFF_CHECK_CU(cuLaunchKernel(kernel_,
+        if (LUMA_DIFF_CHECK_CU(cuLaunchKernel(array ? array_kernel_ : kernel_,
                                                (unsigned int)blocks, 1, 1,
                                                (unsigned int)threads, 1, 1,
                                                shared_bytes, stream_, args, nullptr))) {
@@ -272,13 +281,10 @@ public:
     ~LumaDiff() {
         if (cu_ctx_) {
             LUMA_DIFF_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
+            LUMA_DIFF_CHECK_CU(cuStreamSynchronize(stream_));
         }
+        in_flight_ = av::VideoFrame();
         releaseBuffers();
-        if (owns_stream_ && stream_) {
-            LUMA_DIFF_CHECK_CU(cuStreamDestroy(stream_));
-            stream_ = nullptr;
-            owns_stream_ = false;
-        }
         if (cu_module_) {
             LUMA_DIFF_CHECK_CU(cuModuleUnload(cu_module_));
             cu_module_ = nullptr;
@@ -290,6 +296,13 @@ public:
     }
 
     void process() override {
+        // A non-strict failure may have left GPU reads queued. Finish those
+        // before releasing their source or pruning its cached textures.
+        if (in_flight_) {
+            if (LUMA_DIFF_CHECK_CU(cuStreamSynchronize(stream_)))
+                throw Error("luma_diff: cannot finish previous frame");
+            in_flight_ = av::VideoFrame();
+        }
         av::VideoFrame frm = this->source_->get();
         if (isEofMarker(frm)) {
             drainPendingOnEof();
@@ -302,9 +315,10 @@ public:
         ++frame_counter_;
         const uint64_t this_index = frame_counter_ - 1;
         AVFrame* raw = frm.raw();
-        if (!raw || raw->format != AV_PIX_FMT_CUDA) {
+        const bool array = raw && avp::cuda::isArrayFormat(static_cast<AVPixelFormat>(raw->format));
+        if (!raw || (raw->format != AV_PIX_FMT_CUDA && !array)) {
             if (strict_cuda_) {
-                throw Error("luma_diff: input frame is not AV_PIX_FMT_CUDA");
+                throw Error("luma_diff: input frame must be CUDA or CUarray");
             }
             writeStatusStubToCurrent(frm, frm.width(), frm.height(), "skipped_non_cuda");
             this->sink_->put(frm);
@@ -312,7 +326,7 @@ public:
         }
 
         const AVPixelFormat sw_fmt = scene_cut_cuda::hwSwFormat(frm);
-        if (!scene_cut_cuda::isSupportedLumaCudaFormat(sw_fmt)) {
+        if (array ? sw_fmt != AV_PIX_FMT_NV12 : !scene_cut_cuda::isSupportedLumaCudaFormat(sw_fmt)) {
             std::ostringstream msg;
             msg << "unsupported_sw_format_" << (int)sw_fmt;
             if (strict_cuda_) {
@@ -323,7 +337,8 @@ public:
             return;
         }
 
-        if (!raw->data[0] || raw->linesize[0] <= 0) {
+        if (!raw->data[0] || raw->width <= 0 || raw->height <= 0 ||
+            (!array && raw->linesize[0] < raw->width)) {
             if (strict_cuda_) {
                 throw Error("luma_diff: invalid luma plane");
             }
@@ -332,9 +347,13 @@ public:
             return;
         }
 
-        if (!scene_cut_cuda::initCudaContextFromFrame(
-                frm, "luma_diff", cuda_dev_ctx_, cu_ctx_, stream_, owns_stream_) ||
-            !loadKernel()) {
+        auto *device = scene_cut_cuda::frameCudaDevice(frm, "luma_diff", cu_ctx_);
+        if (device) {
+            cu_ctx_ = device->cuda_ctx;
+            stream_ = device->stream;
+            scene_cut_cuda::retainFrameDevice(frm, cuda_device_ref_);
+        }
+        if (!device || !loadKernel()) {
             if (strict_cuda_) {
                 throw Error("luma_diff: failed to initialize CUDA");
             }
@@ -359,8 +378,18 @@ public:
 
         const int L = frames_lookahead_;       // number of forward diffs per frame
         const int Ncap = ringCapacity();       // == frames_lookahead_ + 1
-        const CUdeviceptr y_plane = (CUdeviceptr)(uintptr_t)raw->data[0];
-        const int y_pitch = raw->linesize[0];
+        CUDA_MEMCPY2D copy{};
+        if (!scene_cut_cuda::lumaCopySource(raw, copy, "luma_diff")) {
+            if (strict_cuda_) throw Error("luma_diff: invalid luma plane");
+            writeStatusStubToCurrent(frm, width, height, "invalid_luma_plane");
+            this->sink_->put(frm);
+            return;
+        }
+        array_textures_.begin();
+        const CUdeviceptr y_plane = array ? array_textures_.get(raw, cu_ctx_)[0] : copy.srcDevice;
+        const int y_pitch = array ? 0 : raw->linesize[0];
+        array_textures_.prune();
+        in_flight_ = frm;
 
         // For each pending frame pf (index = idx), the incoming Y_t plays the role
         // of Y_{idx + k} where k = this_index - pf.index. The anchor Y_{idx-1} sits
@@ -399,7 +428,7 @@ public:
             }
             DiffResult r;
             if (!launchDiffKernel(y_plane, y_pitch, d_scratch_y_, width, height,
-                                   /*has_prev=*/1, blocks, threads, &r)) {
+                                   /*has_prev=*/1, blocks, threads, &r, array)) {
                 if (strict_cuda_) {
                     throw Error("luma_diff: kernel launch/read failed");
                 }
@@ -437,7 +466,7 @@ public:
             }
             DiffResult r;
             if (!launchDiffKernel(y_plane, y_pitch, d_scratch_y_, width, height,
-                                   /*has_prev=*/1, blocks, threads, &r)) {
+                                   /*has_prev=*/1, blocks, threads, &r, array)) {
                 if (strict_cuda_) {
                     throw Error("luma_diff: kernel launch/read (primary) failed");
                 }
@@ -450,13 +479,9 @@ public:
         const bool current_primary_ready = pf.diffs[0].has_value();
         pending_.push_back(std::move(pf));
 
-        // Store Y_t into the ring for future anchor lookups. Copy the source (with
-        // pitch >= width) into d_ring_y_[ring_head_] as a compact plane.
+        // Store Y_t in the existing history ring. Array input is sampled directly
+        // above and adds no linear staging plane or extra full-image copy.
         {
-            CUDA_MEMCPY2D copy = {};
-            copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-            copy.srcDevice = y_plane;
-            copy.srcPitch = (size_t)y_pitch;
             copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
             copy.dstDevice = d_ring_y_[ring_head_];
             copy.dstPitch = (size_t)width;
@@ -474,6 +499,7 @@ public:
             ring_head_ = (ring_head_ + 1) % Ncap;
             ring_filled_ = std::min(ring_filled_ + 1, Ncap);
         }
+        in_flight_ = av::VideoFrame();
 
         // Drain pending frames whose forward diffs are fully resolved. A frame at
         // index idx is complete when we have seen Y_{idx + L}, i.e. when

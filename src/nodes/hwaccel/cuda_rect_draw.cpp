@@ -48,7 +48,7 @@ CudaRectDraw::CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int
 CudaRectDraw::~CudaRectDraw() { unload(); }
 
 bool CudaRectDraw::frameSupported(AVPixelFormat format) {
-    return format == AV_PIX_FMT_CUDA || isCudaArray(format);
+    return format == AV_PIX_FMT_CUDA || avp::cuda::isArrayFormat(format);
 }
 
 AVPixelFormat CudaRectDraw::frameSwFormat(const av::VideoFrame &f) {
@@ -153,7 +153,7 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     const int dst_bytes = sampleBytes(sw_fmt);
     const int planes = av_pix_fmt_count_planes(sw_fmt);
     out = AvpRectLayer{};
-    const bool array = isCudaArray(static_cast<AVPixelFormat>(src->format));
+    const bool array = avp::cuda::isArrayFormat(static_cast<AVPixelFormat>(src->format));
     if (array && packed_rgb)
         throw Error("cuda_rect_overlay: CUarray input must be semiplanar YUV");
     const TextureFrameDesc *texture = textureFrameDesc(src);
