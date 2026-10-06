@@ -175,14 +175,27 @@ private:
         return true;
     }
 
-    bool tryParseViewportCropFromFrame(const av::VideoFrame &frm, int dst_w, int dst_h, int &x_out, int &y_out) const {
+    // The payloads of the node's metadata keys on this frame, in key order, each parsed once. A key
+    // that is absent or is not JSON has no payload.
+    std::vector<Parameters> parsePayloads(const av::VideoFrame &frm) const {
+        std::vector<Parameters> payloads;
         const AVFrame *raw = frm.raw();
-        if (!raw || !raw->metadata) return false;
+        if (!raw || !raw->metadata) return payloads;
         for (const std::string &key : metadata_keys_) {
             AVDictionaryEntry *entry = av_dict_get(raw->metadata, key.c_str(), nullptr, 0);
             if (!entry || !entry->value) continue;
             try {
-                Parameters md = Parameters::parse(entry->value);
+                payloads.push_back(Parameters::parse(entry->value));
+            } catch (const std::exception &) {
+                continue;
+            }
+        }
+        return payloads;
+    }
+
+    bool tryParseViewportCrop(const std::vector<Parameters> &payloads, int dst_w, int dst_h, int &x_out, int &y_out) const {
+        for (const Parameters &md : payloads) {
+            try {
                 if (parseViewportCropPositionFromMd(md, dst_w, dst_h, x_out, y_out)) return true;
             } catch (const std::exception &) {
                 continue;
@@ -191,14 +204,9 @@ private:
         return false;
     }
 
-    bool tryReadViewportDstDims(const av::VideoFrame &frm, int &w_out, int &h_out) const {
-        const AVFrame *raw = frm.raw();
-        if (!raw || !raw->metadata) return false;
-        for (const std::string &key : metadata_keys_) {
-            AVDictionaryEntry *entry = av_dict_get(raw->metadata, key.c_str(), nullptr, 0);
-            if (!entry || !entry->value) continue;
+    bool tryReadViewportDstDims(const std::vector<Parameters> &payloads, int &w_out, int &h_out) const {
+        for (const Parameters &md : payloads) {
             try {
-                Parameters md = Parameters::parse(entry->value);
                 if (!metadataHasViewportDstDims(md)) continue;
                 const int w = md["viewport_dst_width"].get<int>();
                 const int h = md["viewport_dst_height"].get<int>();
@@ -215,10 +223,10 @@ private:
         return false;
     }
 
-    void updateViewportCropPosition(const av::VideoFrame &frm, int dst_w, int dst_h, int &x_out, int &y_out) {
+    void updateViewportCropPosition(const std::vector<Parameters> &payloads, int dst_w, int dst_h, int &x_out, int &y_out) {
         int next_x = 0;
         int next_y = 0;
-        const bool parsed = tryParseViewportCropFromFrame(frm, dst_w, dst_h, next_x, next_y);
+        const bool parsed = tryParseViewportCrop(payloads, dst_w, dst_h, next_x, next_y);
         if (!parsed) {
             if (have_last_viewport_crop_) {
                 next_x = last_viewport_crop_x_;
@@ -309,19 +317,11 @@ private:
         }
     }
 
-    bool parseBBoxes(const av::VideoFrame &frm, std::vector<BBox> &boxes_out) const {
-        const AVFrame *raw = frm.raw();
-        if (!raw || !raw->metadata)
-            return false;
-
+    bool parseBBoxes(const std::vector<Parameters> &payloads, std::vector<BBox> &boxes_out) const {
         boxes_out.clear();
         bool any = false;
-        for (const std::string &key : metadata_keys_) {
-            AVDictionaryEntry *entry = av_dict_get(raw->metadata, key.c_str(), nullptr, 0);
-            if (!entry || !entry->value)
-                continue;
+        for (const Parameters &md : payloads) {
             try {
-                Parameters md = Parameters::parse(entry->value);
                 if (parseMetadataBlob(md, boxes_out))
                     any = true;
             } catch (const std::exception &) {
@@ -420,10 +420,11 @@ private:
         }
 
         std::vector<BBox> all_boxes;
+        const std::vector<Parameters> payloads = parsePayloads(input);
 
         int vdw = 0;
         int vdh = 0;
-        if (tryReadViewportDstDims(input, vdw, vdh)) {
+        if (tryReadViewportDstDims(payloads, vdw, vdh)) {
             if (input_params_.width != last_viewport_input_w_ || input_params_.height != last_viewport_input_h_) {
                 have_last_viewport_crop_ = false;
                 last_viewport_input_w_ = input_params_.width;
@@ -436,7 +437,7 @@ private:
             }
             int vx = 0;
             int vy = 0;
-            updateViewportCropPosition(input, vdw, vdh, vx, vy);
+            updateViewportCropPosition(payloads, vdw, vdh, vx, vy);
             DrawColor white{};
             if (!cuda_overlay::tryParseNamedColor("white", white)) {
                 white = DrawColor{235, 128, 128};
@@ -464,7 +465,7 @@ private:
         }
 
         std::vector<BBox> boxes;
-        const bool have_bbox = parseBBoxes(input, boxes);
+        const bool have_bbox = parseBBoxes(payloads, boxes);
         if (have_bbox) {
             all_boxes.insert(all_boxes.end(), boxes.begin(), boxes.end());
         }
