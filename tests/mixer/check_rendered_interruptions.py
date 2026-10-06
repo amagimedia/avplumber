@@ -79,6 +79,39 @@ def check_graph(avp, mixer, output, errors, wipe_file, wipe_seconds):
     mixer.cut('full0')
     collect(0.5)
     endpoint0 = live_scene(0)
+    # Reverse declaration order deliberately: ties must still follow input order.
+    routes = {'camera0': 0, 'camera1': 1} if mixer._sources[0].route_router else None
+    mixer.define_scene('split', {
+        'camera1': {'dst_x': 320, 'dst_w': 320, 'dst_h': 360},
+        'camera0': {'dst_w': 320, 'dst_h': 360},
+    }, routes=routes)
+    mixer.cut('split')
+    split = collect(0.7)
+    for _, image in split[-12:]:
+        for index in (0, 1):
+            code = read_code(image[:, index*320:(index+1)*320])
+            assert code and code[0] == index, ('split scene source mismatch', index, code)
+    if routes:
+        mixer.define_scene('routed_swap', {
+            'camera0': {'dst_w': 320, 'dst_h': 360},
+            'camera1': {'dst_x': 320, 'dst_w': 320, 'dst_h': 360},
+        }, routes={'camera0': 1, 'camera1': 0})
+        mixer.cut('routed_swap')
+        swapped = collect(0.7)
+        for _, image in swapped[-12:]:
+            for index in (0, 1):
+                code = read_code(image[:, index*320:(index+1)*320])
+                assert code and code[0] == 1-index, ('routed scene source mismatch', index, code)
+    for z, expected in ((0, 1), (1, 0)):
+        mixer.define_scene('overlap', {
+            'camera1': {'dst_w': 640, 'dst_h': 360, 'z': 0},
+            'camera0': {'dst_w': 640, 'dst_h': 360, 'z': z},
+        }, routes=routes)
+        mixer.cut('overlap')
+        collect(0.5)
+        live_scene(expected)
+    mixer.cut('full0')
+    collect(0.5)
     results = []
     for first in ('cut', 'fade', 'media_wipe'):
         for second in ('cut', 'fade', 'media_wipe'):
@@ -139,12 +172,13 @@ def main():
     parser.add_argument('--wipe-seconds', type=float, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--webui')
+    parser.add_argument('--routed', action='store_true')
     parser.add_argument('--port', type=int, default=18779)
     args = parser.parse_args()
     if not np.isfinite(args.wipe_seconds) or args.wipe_seconds <= 0:
         parser.error('--wipe-seconds must be finite and positive')
     from check_transition_recovery import recovery_graph
-    with recovery_graph(args.inputs, webui=args.webui, port=args.port) as graph:
+    with recovery_graph(args.inputs, webui=args.webui, port=args.port, routed=args.routed) as graph:
         results = check_graph(*graph, args.wipe_file, args.wipe_seconds)
     args.output.write_text(json.dumps({'passed': results}, indent=2) + '\n')
 

@@ -239,7 +239,7 @@ class PlaylistEngine:
         full = {"dst_x": 0, "dst_y": 0, "dst_w": cfg.width, "dst_h": cfg.height, "fit": "contain"}
         for slot in range(SLOT_CAPACITY):
             self.mixer.add_source(f"source_{slot}", pre_otm_edge=chain_edge(slot),
-                                  input_group=slot_group(slot), default_graph="")
+                                  input_group=slot_group(slot))
             self.mixer.add_scene(slot_scene(slot), {f"source_{slot}": full})
         self.mixer.set_initial_scene(slot_scene(0), slot="A")
         self._add_chain(0, first_clip)

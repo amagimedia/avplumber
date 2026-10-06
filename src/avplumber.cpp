@@ -38,7 +38,6 @@ using avp::mixer::MixerOrchestrator;
 using avp::mixer::MixerState;
 using avp::mixer::SceneControl;
 using avp::mixer::SceneDefinition;
-using avp::mixer::SourceLayout;
 #include "CommandTiming.hpp"
 #include <libavformat/avformat.h>
 #ifdef EMBED_IN_OBS
@@ -775,22 +774,24 @@ public:
             return req;
         };
 
-        // mixer.source <name> <otm_node> <input_index> <cs_node_a> <cs_node_b>
+        // mixer.source <mixer> <name> <otm_node> <input_index>
         commands_["mixer.source"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
-            std::string mixer_name, src_name, otm_node, cs_a, cs_b;
+            std::string mixer_name, src_name, otm_node;
             int input_index;
-            ss >> mixer_name >> src_name >> otm_node >> input_index >> cs_a >> cs_b;
+            if (!(ss >> mixer_name >> src_name >> otm_node >> input_index))
+                throw Error("mixer.source: expected mixer, source, fanout and input index");
+            std::string extra;
+            if (ss >> extra) throw Error("mixer.source: per-slot filters were removed; filter the source upstream");
             auto orch = mixerOrchestrator(mixer_name);
-            orch.defineSource(src_name, otm_node, input_index, cs_a, cs_b);
+            orch.defineSource(src_name, otm_node, input_index);
         };
 
         // mixer.routed_source {"mixer":"...","name":"...","router":"...","input_index":0,
-        //                      "route_label_a":"...","route_label_b":"...",
-        //                      "cs_node_a":"...","cs_node_b":"..."}
+        //                      "route_label_a":"...","route_label_b":"..."}
         commands_["mixer.routed_source"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             std::string trimmed = strutils::trim(arg);
-            std::string mixer_name, src_name, router_node, route_label_a, route_label_b, cs_a, cs_b;
+            std::string mixer_name, src_name, router_node, route_label_a, route_label_b;
             int input_index;
             if (!trimmed.empty() && trimmed[0] == '{') {
                 json req = mixerJsonRequest("mixer.routed_source", arg);
@@ -800,17 +801,20 @@ public:
                 input_index = req.at("input_index").get<int>();
                 route_label_a = req.at("route_label_a").get<std::string>();
                 route_label_b = req.at("route_label_b").get<std::string>();
-                cs_a = req.at("cs_node_a").get<std::string>();
-                cs_b = req.at("cs_node_b").get<std::string>();
+                if (req.contains("cs_node_a") || req.contains("cs_node_b"))
+                    throw Error("mixer.routed_source: per-slot filters were removed; filter the source upstream");
             } else {
                 std::stringstream ss(arg);
                 int route_out_a, route_out_b;
-                ss >> mixer_name >> src_name >> router_node >> input_index >> route_out_a >> route_out_b >> cs_a >> cs_b;
+                if (!(ss >> mixer_name >> src_name >> router_node >> input_index >> route_out_a >> route_out_b))
+                    throw Error("mixer.routed_source: expected mixer, source, router, input index and two outputs");
+                std::string extra;
+                if (ss >> extra) throw Error("mixer.routed_source: per-slot filters were removed");
                 route_label_a = std::to_string(route_out_a);
                 route_label_b = std::to_string(route_out_b);
             }
             auto orch = mixerOrchestrator(mixer_name);
-            orch.defineRoutedSource(src_name, router_node, input_index, route_label_a, route_label_b, cs_a, cs_b);
+            orch.defineRoutedSource(src_name, router_node, input_index, route_label_a, route_label_b);
         };
 
         // mixer.scene <mixer_name> <scene_name> <json_definition>
@@ -827,20 +831,13 @@ public:
             if (jdef.contains("width")) def.width = jdef["width"].get<int>();
             if (jdef.contains("height")) def.height = jdef["height"].get<int>();
             if (!jdef.contains("sources") || !jdef["sources"].is_object())
-                throw Error("mixer.scene: sources object required (logical source name -> { graph, dst_x, dst_y, ... })");
+                throw Error("mixer.scene: sources object required (logical source name -> { dst_x, dst_y, ... })");
             for (auto it = jdef["sources"].begin(); it != jdef["sources"].end(); ++it) {
-                SourceLayout sl;
-                const json& inj = it.value();
-                sl.crop_scale_graph = inj.value("graph", std::string(""));
-                Parameters layer = json::object();
-                for (auto jt = inj.begin(); jt != inj.end(); ++jt) {
-                    if (jt.key() != "graph")
-                        layer[jt.key()] = jt.value();
-                }
-                if (layer.empty())
-                    layer = {{"dst_x", 0}, {"dst_y", 0}};
-                sl.layer = std::move(layer);
-                def.sources[it.key()] = std::move(sl);
+                const json& layer = it.value();
+                if (!layer.is_object()) throw Error("mixer.scene: each source layer must be an object");
+                if (layer.contains("graph"))
+                    throw Error("mixer.scene: scene filter graphs were removed; filter the source upstream");
+                def.sources[it.key()] = layer;
             }
             if (jdef.contains("controls")) {
                 if (!jdef["controls"].is_array())
@@ -1025,13 +1022,13 @@ public:
             if (cfg.contains("slot_a")) {
                 auto& sa = cfg["slot_a"];
                 state->slot_a.compositor_name = sa.value("compositor", std::string(""));
-                state->slot_a.norm_ts_name = sa.value("norm_ts", std::string(""));
+                if (sa.contains("norm_ts")) throw Error("mixer.init: norm_ts was removed; slots use clocked compositors");
                 state->slot_a.post_otm_name = sa.value("post_otm", std::string(""));
             }
             if (cfg.contains("slot_b")) {
                 auto& sb = cfg["slot_b"];
                 state->slot_b.compositor_name = sb.value("compositor", std::string(""));
-                state->slot_b.norm_ts_name = sb.value("norm_ts", std::string(""));
+                if (sb.contains("norm_ts")) throw Error("mixer.init: norm_ts was removed; slots use clocked compositors");
                 state->slot_b.post_otm_name = sb.value("post_otm", std::string(""));
             }
             if (cfg.contains("wipe_otm")) state->wipe_otm_name = cfg["wipe_otm"].get<std::string>();

@@ -186,7 +186,6 @@ def test_graph_is_video_only_and_always_preheated():
     assert "preheat_video_router" not in node_types
     assert len(mixer.sources) == 17
     assert not mixer.routed_sources
-    assert all(params["default_graph"] == "" for _, params in mixer.sources)
     assert mixer.parameters["defer_initial_routes"] is True
     assert mixer.parameters["enable_wipe"] is True
     assert not any(
@@ -356,7 +355,6 @@ def test_large_catalogue_keeps_paging_without_geometry_filters():
     assert not _geometry_filters(nodes)
     assert mixer.scenes["fullscreen_64"]["routes"] == {"source_0": 64}
     assert mixer.scenes["grid_16_page_4"]["routes"] == {"source_0": 64}
-    assert all(params["default_graph"] == "" for _, params in mixer.routed_sources)
 
 
 @pytest.mark.parametrize("working_format,storage", [("nv12", "nv12"), ("p010le", "p010le"), ("p210le", "p010le")])

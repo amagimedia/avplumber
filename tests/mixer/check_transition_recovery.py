@@ -16,12 +16,12 @@ import numpy as np
 
 from pyplumber.mixer import MixerGraphBuilder
 from pyplumber import AVPlumber
-from pyplumber.node import DecVideo, Demux, FilterVideo, ForceFPS, InputRec, Realtime, SourceSwitcher
+from pyplumber.node import DecVideo, Demux, FilterVideo, ForceFPS, InputRec, Realtime, SourceSwitcher, PreheatVideoRouter
 from frame_codes import read_code
 
 
 @contextmanager
-def recovery_graph(paths, *, webui=None, port=18779):
+def recovery_graph(paths, *, webui=None, port=18779, routed=False):
     avp = AVPlumber()
     errors = []
     avp.on_exception = lambda name, kind, message: errors.append((name, kind, message))
@@ -48,9 +48,22 @@ def recovery_graph(paths, *, webui=None, port=18779):
     mixer = MixerGraphBuilder(avp, name='recovery', canvas=(640, 360), fps=(60, 1),
                               hwaccel='recovery_gpu', defer_output=True)
     layer = {'dst_w': 640, 'dst_h': 360, 'fit': 'contain'}
+    if routed:
+        avp.addNode(PreheatVideoRouter({
+            'name': 'test_router', 'group': 'inputs', 'src': ['f0', 'target'],
+            'dst': ['route_0_a', 'route_0_b', 'route_1_a', 'route_1_b'],
+            'labels': ['0a', '0b', '1a', '1b'], 'routes': [-1] * 4,
+            'width': 640, 'height': 360, 'pixel_format': 'cuda', 'real_pixel_format': 'nv12',
+            'frame_rate': '60/1', 'timebase': '1/60',
+        }))
     for index, edge in enumerate(('f0', 'target')):
-        mixer.add_source(f'camera{index}', edge, 'inputs', default_graph='')
-        mixer.add_scene(f'full{index}', {f'camera{index}': layer})
+        if routed:
+            mixer.add_routed_source(f'camera{index}', f'route_{index}_a', f'route_{index}_b',
+                'inputs', 'test_router', f'{index}a', f'{index}b')
+        else:
+            mixer.add_source(f'camera{index}', edge, 'inputs')
+        mixer.add_scene(f'full{index}', {f'camera{index}': layer},
+                        routes={f'camera{index}': index} if routed else None)
     mixer.set_initial_scene('full0')
     output_edge = mixer.build()
     avp.addNode(FilterVideo({'name': 'pixel_readback', 'group': 'readback',
@@ -166,9 +179,8 @@ def check_recovery(avp, mixer, output, errors):
     mixer.cut('full0')
     sample(0.5)
 
-    # A bad scene filter fails synchronously after capture, before a worker
-    # is scheduled. It must take the same rollback path as a timeout.
-    mixer.define_scene('invalid', {'camera1': {'graph': 'null'}})
+    # Invalid compositor geometry fails synchronously after interruption. It must take the same rollback path as a timeout.
+    mixer.define_scene('invalid', {'camera1': {'dst_w': 'invalid'}})
     interruptible_cut()
     # executeCommandsFromString reports protocol errors on its output stream;
     # the assertion is recovery of live pixels, not a Python exception.

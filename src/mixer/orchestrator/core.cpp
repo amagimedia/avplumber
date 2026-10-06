@@ -40,19 +40,10 @@ void MixerOrchestrator::publishRuntimeObject(const std::string& node_name,
     }
 }
 
-void MixerOrchestrator::publishCameraOtmOutputs(const std::string& otm_name, uint32_t mask) {
-    publishRuntimeObject(otm_name, "outputs", Parameters(mask));
-}
-
 void MixerOrchestrator::setNodeParam(const std::string& node_name, const std::string& param, const std::string& value) {
     auto node = nodes_->node(node_name);
     auto& params = node->parameters();
     params[param] = value;
-}
-
-void MixerOrchestrator::autoRestartNode(const std::string& node_name) {
-    auto node = nodes_->node(node_name);
-    node->stop(false);
 }
 
 void MixerOrchestrator::startGroup(const std::string& group_name) {
@@ -120,55 +111,6 @@ void MixerOrchestrator::retireWipeChain() {
     setNodeObject(state_->wipe_input_node_name, "stop", Parameters(nullptr));
     setNodeObject(state_->wipe_overlay_name, "active_inputs", Parameters(0u));
     setNodeObject(state_->wipe_overlay_name, "prewarm_inputs", Parameters(0u));
-}
-
-void MixerOrchestrator::flushSlotEdges(bool is_slot_a) {
-    const auto& slot = is_slot_a ? state_->slot_a : state_->slot_b;
-
-    auto clearEdge = [this](const std::string& name) {
-        if (name.empty())
-            return;
-        auto edge = nodes_->edges()->findAny(name);
-        if (edge && edge->occupied() > 0) {
-            // readerwriterqueue is SPSC: clearing from this control thread would
-            // consume the queue concurrently with the node that owns the edge.
-            if (!edge->consumer().expired()) {
-                logstream << "mixer: leaving live slot edge " << name
-                          << " unflushed (" << edge->occupied() << " queued)";
-                return;
-            }
-            logstream << "mixer: flushing stale slot edge " << name
-                      << " (" << edge->occupied() << " queued)";
-            edge->clear();
-        }
-    };
-
-    for (const auto& [_, info] : state_->sources) {
-        const std::string& cs_node = is_slot_a ? info.cs_node_a : info.cs_node_b;
-        auto node = nodes_->node_if_exists(cs_node);
-        if (!node)
-            continue;
-        const auto& params = node->parameters();
-        if (params.count("src")) {
-            for (const auto& edge_name : jsonToStringList(params["src"]))
-                clearEdge(edge_name);
-        }
-        if (params.count("dst")) {
-            for (const auto& edge_name : jsonToStringList(params["dst"]))
-                clearEdge(edge_name);
-        }
-    }
-
-    for (const std::string& node_name : {slot.compositor_name, slot.norm_ts_name, slot.post_otm_name}) {
-        auto node = nodes_->node_if_exists(node_name);
-        if (!node)
-            continue;
-        const auto& params = node->parameters();
-        if (params.count("dst")) {
-            for (const auto& edge_name : jsonToStringList(params["dst"]))
-                clearEdge(edge_name);
-        }
-    }
 }
 
 void MixerOrchestrator::ensureIdle() const {

@@ -23,9 +23,7 @@ class MixerOrchestrator {
     void publishRuntimeObject(const std::string& node_name, const std::string& key,
                               const Parameters& value);
 
-    void publishCameraOtmOutputs(const std::string& otm_name, uint32_t mask);
     void setNodeParam(const std::string& node_name, const std::string& param, const std::string& value);
-    void autoRestartNode(const std::string& node_name);
     void startGroup(const std::string& group_name);
     void stopGroup(const std::string& group_name);
 
@@ -43,16 +41,13 @@ class MixerOrchestrator {
     /// Take the wipe chain off duty: park the resident chain (cached wipes), or stop
     /// the per-take decode group. Caller holds state_->mutex.
     void retireWipeChain();
-    void flushSlotEdges(bool is_slot_a);
 
     void loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name, bool warm_cut = false);
     bool canPrewarmScene(const SceneDefinition& scene) const;
     void applySceneControls(const SceneDefinition& scene);
 
-    /// Rewrite every camera `one_to_many` bitmask for one slot bit from scene + active_inputs.
-    void rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene);
-    void applyRoutedSceneRoutesForSlot(bool is_slot_a, const SceneDefinition& scene);
-    void publishRoutedRoutesForProgramOnly(bool pgm_is_slot_a, const SceneDefinition& scene);
+    /// Publish both slots' source routes, preserving subscriptions and prewarmed inputs.
+    void publishSourceRoutes(const SceneDefinition* scene_a, const SceneDefinition* scene_b);
 
     /// Caller holds state_->mutex. Points the source_switcher at slot A or B, the only setting
     /// visible at the output, before applyPostTransitionRouting flips the rest: the window
@@ -116,13 +111,11 @@ public:
                     int active, int64_t last_ns);
 
 
-    void defineSource(const std::string& name, const std::string& otm_node, int input_index,
-                      const std::string& cs_node_a, const std::string& cs_node_b);
+    void defineSource(const std::string& name, const std::string& otm_node, int input_index);
     void defineRoutedSource(const std::string& name, const std::string& router_node,
                             int input_index,
                             const std::string& route_output_label_a,
-                            const std::string& route_output_label_b,
-                            const std::string& cs_node_a, const std::string& cs_node_b);
+                            const std::string& route_output_label_b);
     void defineScene(const std::string& name, const SceneDefinition& def);
     void initializeRoutedRoutes();
 

@@ -191,10 +191,9 @@ node `cuda_transform`. Applications build its parameters with
 `pyplumber.transform.transform_output` and `transform_params` instead of
 writing the JSON, so the engine changes in one place; keep both signatures and
 the emitted keys stable (`tests/test_transform_params.py` pins them). The demo
-uses it for scaled renditions and for the sources of a large catalogue. One
-library path still scales with a filter: a source registered through
-`add_source` without `default_graph=""` gets a `scale_cuda` graph per slot,
-which the orchestrator rewrites on a scene change; the demos pass `""`.
+uses it for scaled renditions and for the sources of a large catalogue.
+Scene geometry is rendered directly by the two compositors; source filters,
+when needed, are fixed preprocessing before mixer fan-out.
 
 ## Graph
 
@@ -240,12 +239,17 @@ Applications that need immediate transitions must preheat the complete path:
 5. Open the output gate for fresh frames, start the encoder/output group and
    declare the graph ready.
 
-Sources registered with `default_graph=""` feed the compositors directly.
+Sources feed the compositors directly after source normalization.
 Their scene layers use `dst_x`, `dst_y`, `dst_w`, `dst_h`, optional `crop`, and
 `fit` (`contain` or `stretch`). Dimensions and pitch are resolved from each
 frame. Optional `source_canvas: {"w": 1920, "h": 1080}` preserves letterboxing
-into that virtual source canvas without an intermediate GPU frame. Explicit
-FFmpeg preprocessing graphs remain available to existing callers.
+into that virtual source canvas without an intermediate GPU frame. Fixed
+FFmpeg preprocessing graphs remain available in the application’s source configuration.
+The builder’s `default_graph`, per-scene `graph`, native `cs_node_a`/`cs_node_b`
+and `norm_ts` slot hooks have been removed. Scene layers carry explicit input
+indices and omit unused sources; equal-z layers retain input-index order.
+One routing calculation derives A/B source fan-out and router assignments for
+preview, prewarm, completion and recovery.
 
 There is no useful cold fallback for a low-latency production graph. The
 generic demo fails startup when any required preheat stage times out.

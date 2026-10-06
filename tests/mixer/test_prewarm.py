@@ -469,23 +469,26 @@ def test_geometry_is_resolved_by_two_compositors_without_filter_branches(native_
         for i in range(2):
             assert f"mixer_source_{i}_{slot}" in nodes[f"mixer_otm_source_{i}"]["dst"]
     layer = nodes["mixer_comp_a"]["layers"][0]
-    assert layer == {"dst_x": 0, "dst_y": 0, "dst_w": 1080, "dst_h": 1920, "fit": "contain", "source_canvas": {"w": 1920, "h": 1080}}
+    assert layer == {"input": 0, "dst_x": 0, "dst_y": 0, "dst_w": 1080, "dst_h": 1920, "fit": "contain", "source_canvas": {"w": 1920, "h": 1080}}
     commands = [event for event in app.avp.events if event.startswith("mixer.source ")]
     assert commands == [f"mixer.source mixer source_{i} mixer_otm_source_{i} {i}" for i in range(2)]
 
 
-def test_existing_explicit_filter_sources_still_create_slot_filters(native_boundary):
+def test_scene_geometry_is_sparse_and_filter_graphs_are_rejected(native_boundary):
     _, builder = native_boundary
     engine = NativeEngine()
     mixer = builder(engine)
-    graph = "scale_cuda=w=640:h=360"
-    mixer.add_source("camera", "decoded", "input", default_graph=graph)
-    mixer.add_scene("program", {"camera": {"graph": graph, "dst_x": 100}})
+    for i in range(4):
+        mixer.add_source(f"camera{i}", f"decoded{i}", "input")
+    with pytest.raises(ValueError, match="filter the source upstream"):
+        mixer.add_scene("old", {"camera3": {"graph": "scale_cuda=w=640:h=360"}})
+    mixer.add_scene("program", {"camera3": {"dst_x": 100, "dst_w": 640, "dst_h": 360}})
     mixer.set_initial_scene("program")
     mixer.build()
-    for slot in ("a", "b"):
-        assert engine.nodes[f"mixer_cs_camera_{slot}"]["graph"] == graph + ",scale_cuda=format=nv12"
-        assert engine.nodes[f"mixer_comp_{slot}"]["src"] == [f"mixer_camera_scaled_{slot}"]
+    assert engine.nodes["mixer_comp_a"]["layers"] == [
+        {"input": 3, "dst_x": 100, "dst_w": 640, "dst_h": 360}]
+    assert engine.nodes["mixer_comp_b"]["layers"] == []
+    assert not any(name.startswith("mixer_cs_") for name in engine.nodes)
 
 
 def test_startup_failure_is_reported_before_native_cleanup(monkeypatch):

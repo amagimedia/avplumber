@@ -85,7 +85,7 @@ void MixerOrchestrator::warmupWipe(const std::string& wipe_file, int64_t timeout
         // stays on the direct branch so nothing of this reaches the output.
         setNodeObject(state_->wipe_otm_name, "outputs", Parameters(3u));
     }
-    WipeReadyResult ready = waitForWipeOverlayReady(nodes_, overlay_edge_name, overlay_initial_ts, 0,
+    WipeReadyResult ready = waitForWipeOverlayReady(nodes_, overlay_edge_name, overlay_initial_ts,
                                                     state_, generation, timeout_ms);
     {
         std::lock_guard<std::mutex> lock(state_->mutex);
