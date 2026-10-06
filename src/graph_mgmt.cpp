@@ -167,6 +167,35 @@ void NodeWrapper::setObject(const std::string object_name, const Parameters& p) 
     inpobj->setObject(object_name, p);
 }
 
+void NodeWrapper::startRetrying() {
+    while (true) {
+        std::string error;
+        try {
+            start();
+            return;
+        } catch (std::exception &e) {
+            error = e.what();
+        } catch (...) {
+            error = "unknown non-std exception";
+        }
+        logstream << "Node " << name_ << " restart failed: " << error << ", retrying in 1 s";
+        reportException(error);
+        wallclock.sleepms(1000);
+        if (!manager_->shouldWork() || stop_requested_) {
+            logstream << "Node " << name_ << " stopped or instance shutting down, no more restart attempts";
+            return;
+        }
+    }
+}
+
+void NodeWrapper::reportException(const std::string &message) {
+    try {
+        manager_->instanceData().notifyException(name_, type_, message);
+    } catch (std::exception &callback_error) {
+        logstream << "Exception callback failed for node " << name_ << ": " << callback_error.what();
+    }
+}
+
 bool NodeWrapper::stopAndWait() {
     bool r = interrupt(true);
     if (!r) {
@@ -186,6 +215,13 @@ bool NodeWrapper::stop(bool inhibit_actions) {
     std::unique_lock<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
     if (threadWorks()) {
         std::shared_ptr<Node> node = node_;
+        if (!node) {
+            // Processing finished, but the thread may still be destroying its
+            // local node reference. stopAndWait() must join it without retrying.
+            if (inhibit_actions) stop_requested_ = true;
+            dowork_ = false;
+            return false;
+        }
         std::shared_ptr<IStoppable> node_stoppable = std::dynamic_pointer_cast<IStoppable>(node);
         if (node_stoppable) {
             if (inhibit_actions) stop_requested_ = true;
@@ -226,6 +262,8 @@ bool NodeWrapper::stop(bool inhibit_actions) {
         stopNodeAndSinks();
         return true;
     } else {
+        // Also ends startRetrying() on a node whose auto_restart attempts keep failing.
+        if (inhibit_actions) stop_requested_ = true;
         dowork_ = false;
         // node is destroyed in thread function only if it was started, so a special case for not-yet-started nodes
         // and non-blocking nodes is necessary:
@@ -346,21 +384,14 @@ void NodeWrapper::threadFunction() {
         } catch (std::exception &e) {
             logstream << "Node " << name_ << " failed: " << e.what();
             last_error_ = e.what();
-            try {
-                manager_->instanceData().notifyException(name_, type_, last_error_);
-            } catch (std::exception &callback_error) {
-                logstream << "Exception callback failed for node " << name_ << ": " << callback_error.what();
-            }
+            reportException(last_error_);
         } catch (...) {
             last_error_ = "unknown non-std exception";
             logstream << "Node " << name_ << " failed: " << last_error_;
-            try {
-                manager_->instanceData().notifyException(name_, type_, last_error_);
-            } catch (std::exception &callback_error) {
-                logstream << "Exception callback failed for node " << name_ << ": " << callback_error.what();
-            }
+            reportException(last_error_);
         }
         try {
+            std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
             node_ = nullptr;
         } catch (std::exception &e) {
             logstream << "Destroying node " << name_ << " failed: " << e.what();
@@ -446,7 +477,7 @@ std::shared_ptr< NodeWrapper > NodeManager::createNode(Parameters& params, const
                     if (!n) return;
                     logstream << "Node " << n->name() << " finished, restarting";
                     start_thread(std::string("R:") + n->name(), [n]() {
-                        n->start();
+                        n->startRetrying();
                     }).detach();
                 };
             } else if (mode == "group" || mode == "restart_group") {
@@ -455,7 +486,7 @@ std::shared_ptr< NodeWrapper > NodeManager::createNode(Parameters& params, const
                     auto n = weak_nw.lock();
                     if (!n) return;
                     logstream << "Node " << n->name() << " initiated group auto-restart";
-                    n->group()->restartNodes();
+                    n->group()->restartNodesAfterFinish();
                     logstream << "Auto-restart scheduled.";
                 };
             } else if (mode == "panic") {
@@ -608,6 +639,27 @@ std::list<NodeGroup::Item> NodeGroup::sortedNodes() {
 
 ///////////////////////////////////////////////////////////
 ////// NodeGroup
+
+void NodeGroup::goToState(State desired, bool automatic) {
+    std::lock_guard<std::mutex> lock(state_request_mutex_);
+    const State pending = desired_state_.load();
+    if (pending == State::FINISH_THREAD ||
+        (automatic && pending == State::STOPPED)) {
+        return;
+    }
+    if (desired == State::RESTART && pending == State::RESTART) {
+        return; // One pending restart covers all overlapping requests.
+    }
+    desired_state_ = desired;
+    // A newly started node may already have reached EOF or failed. Remember
+    // that restart, but finish starting its peers before stopping the group
+    // again. Dropping the request could leave a finished node unrestarted.
+    // Explicit start/stop/shutdown still invalidate the active transition.
+    if (desired != State::RESTART || !startup_in_progress_) {
+        ++start_id_;
+    }
+    mgmt_thread_wakeup_.signal();
+}
 
 void NodeGroup::reportException(const std::string &message) {
     if (!manager_) {
@@ -842,7 +894,17 @@ NodeGroup::NodeGroup(NodeManager* manager, const std::string name):
             if (!retry) {
                 mgmt_thread_wakeup_.wait();
             }
-            State desired = desired_state_;
+            State desired;
+            {
+                std::lock_guard<std::mutex> lock(state_request_mutex_);
+                desired = desired_state_.load();
+                startup_in_progress_ = desired == State::STARTED || desired == State::RESTART;
+                if (desired == State::RESTART) {
+                    // Consume this request under the same lock as goToState;
+                    // a later request must remain pending, including stop.
+                    desired_state_ = State::STARTED;
+                }
+            }
             State cur = currentState();
             if (cur != desired) {
                 try {
@@ -851,7 +913,6 @@ NodeGroup::NodeGroup(NodeManager* manager, const std::string name):
                     } else if (desired==State::STOPPED) {
                         stopNodesInternal();
                     } else if (desired==State::RESTART) {
-                        desired_state_ = State::STARTED;
                         restartNodesInternal();
                     } else if (desired==State::FINISH_THREAD) {
                         stopNodesInternal();
@@ -879,6 +940,10 @@ NodeGroup::NodeGroup(NodeManager* manager, const std::string name):
             } else if (retry) {
                 logstream << "BUG: currentState() == desired_state_ but retry==true, fixing to avoid infinite loop";
                 retry = false;
+            }
+            {
+                std::lock_guard<std::mutex> lock(state_request_mutex_);
+                startup_in_progress_ = false;
             }
         }
     });

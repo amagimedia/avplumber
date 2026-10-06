@@ -85,7 +85,7 @@ template<> struct FilterMediaSpecific<av::AudioSamples> {
     }
 };
 
-template<typename Child, typename T, AVMediaType media_type> class FilterNode: public NodeMultiInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag, public ITimeBaseSource, public IInputsObjects {
+template<typename Child, typename T, AVMediaType media_type> class FilterNode: public NodeMultiInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag, public IFlushable, public ITimeBaseSource, public IInputsObjects {
     friend struct FilterMediaSpecific<T>;
 protected:
     using MediaSpecific = FilterMediaSpecific<T>;
@@ -303,6 +303,7 @@ protected:
     std::string node_label_ = "<unnamed>";
     bool do_shift_ = true;
     bool defer_preliminary_init_ = false;
+    int threads_ = 0; // AVFilterGraph::nb_threads; 0 lets FFmpeg pick one slice thread per CPU
     std::shared_ptr<HWAccelDevice> hwaccel_;
     std::vector<bool> input_eof_;
 
@@ -416,6 +417,9 @@ protected:
         };
 
         filter_graph_ = avfilter_graph_alloc();
+        if (!filter_graph_) throw Error("avfilter_graph_alloc failed");
+        // Before parsing: FFmpeg starts the slice thread pool when the first filter is allocated.
+        filter_graph_->nb_threads = threads_;
         
         AVFilterInOut* inputs = nullptr;
         AVFilterInOut* outputs = nullptr;
@@ -598,6 +602,19 @@ public:
     virtual ~FilterNode() {
         freeFilterGraph();
     }
+    void flush() override {
+        if (this->finished_) return;
+        // Explicit stop need not arrive behind an EOF marker. Close every
+        // buffersrc before draining frames already accepted by the graph;
+        // queued upstream frames belong to the cancelled run.
+        for (Port &source : sources_) {
+            int ret = source.closeAtEof();
+            if (ret < 0 && ret != AVERROR_EOF) {
+                throw Error("Error closing filter graph source: " + av::error2string(ret));
+            }
+        }
+        drainAndFinish();
+    }
     // Pop EOF markers sitting at the head of any input and close that buffersrc.
     // Returns true once every input has reached EOF.
     bool consumeEofMarkers() {
@@ -776,6 +793,9 @@ public:
         if (params.count("defer_preliminary_init")==1) {
             result->defer_preliminary_init_ = params["defer_preliminary_init"].get<bool>();
         }
+        result->threads_ = params.value("threads", 0);
+        // Assigning nb_threads directly skips the range check of FFmpeg's "threads" option.
+        if (result->threads_ < 0) throw Error("filter node: threads must be 0 (FFmpeg's default) or positive");
         if (params.count("hwaccel")) {
             result->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
         }

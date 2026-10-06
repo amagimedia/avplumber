@@ -61,6 +61,43 @@ avp.shutdown()
 assert stopped.is_set(), "Repeated reads did not stop"
 print("Repeated queue reads shutdown passed", flush=True)
 
+# A panic shuts the graph down under the manager lock while Python keeps looking nodes up (the
+# mixer's aux poll). Lookups must not hold the GIL that stopping the Python worker needs.
+panic = threading.Event()
+
+
+class Trigger(PythonNode):
+    def process(self):
+        if panic.is_set():
+            raise RuntimeError("panic on request")
+        time.sleep(0.01)
+
+
+def poll_until_shut_down():
+    try:
+        while True:
+            avp.node("worker")
+    except Exception:
+        pass  # the node index is cleared once the panic's shutdown finished
+
+
+started.clear()
+stopped.clear()
+avp = AVPlumber()
+avp.addNode(Worker({"name": "worker", "group": "test", "dst": "unused", "data_type": "VideoFrame"}))
+avp.addNode(Trigger({"name": "trigger", "group": "test", "dst": "unused2", "data_type": "VideoFrame",
+                     "auto_restart": "panic"}))
+avp.group("test").startNodes()
+assert started.wait(5), "Python worker did not start"
+poller = threading.Thread(target=poll_until_shut_down, daemon=True)
+poller.start()
+panic.set()
+poller.join(10)
+assert not poller.is_alive(), "node() lookups deadlocked the panic shutdown"
+assert stopped.is_set(), "Python doStop did not finish during the panic shutdown"
+avp.shutdown()
+print("Panic shutdown with concurrent node lookups passed", flush=True)
+
 # deleteNode joins a worker that is sleeping with the GIL released. Repeating
 # creation and deletion also exercises the per-thread Python state cleanup.
 avp = AVPlumber()

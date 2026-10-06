@@ -53,6 +53,7 @@ protected:
     Parameters params_;
     std::recursive_mutex start_stop_mutex_;
     void threadFunction();
+    void reportException(const std::string &message);
     #ifdef PYTHON_MODULE
     // Keep null by default: constructing py::none() may touch refcounts on non-Python threads.
     py::object python_node_object_ {};
@@ -104,6 +105,10 @@ public:
         return true;
     }
     bool start();
+    // auto_restart "on": an exception leaving the restart thread would std::terminate the
+    // instance, so like a group's management thread, report a failed start() and retry it
+    // every second until it succeeds, stop() is requested or the instance shuts down.
+    void startRetrying();
     bool stop(bool inhibit_actions = true);
     bool interrupt(bool optional = false);
     Parameters getObject(const std::string);
@@ -158,12 +163,12 @@ protected:
         FINISH_THREAD
     };
     std::atomic<State> desired_state_ = State::EMPTY;
+    // Never take busy_ in a finish callback: the management thread may be
+    // holding it while joining that callback's worker.
+    std::mutex state_request_mutex_;
+    bool startup_in_progress_ = false;
     Event mgmt_thread_wakeup_;
-    void goToState(State desired) {
-        desired_state_ = desired;
-        start_id_++;
-        mgmt_thread_wakeup_.signal();
-    }
+    void goToState(State desired, bool automatic = false);
     std::thread mgmt_thread_;
     bool is_sorted_ = false;
     std::unique_lock<decltype(busy_)> getLock() {
@@ -196,6 +201,9 @@ public:
     }
     void restartNodes() {
         goToState(State::RESTART);
+    }
+    void restartNodesAfterFinish() {
+        goToState(State::RESTART, true);
     }
     // Returns a copy taken under busy_ so callers may iterate without the
     // lock; the live list is rebuilt by sort() and cleared by add().

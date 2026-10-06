@@ -653,18 +653,34 @@ PYBIND11_MODULE(_avplumber, m) {
         // caller must not hold it across the join.
         .def("deleteNode", &NodeManager::deleteNode,
              py::call_guard<py::gil_scoped_release>())
-        .def("node", &NodeManager::node, py::arg("name"))
-        .def("node_if_exists", &NodeManager::node_if_exists, py::arg("name"))
-        .def("nodes", &NodeManager::nodes, py::arg("type"))
+        // Lookups wait for the manager lock, which a panic's shutdown() holds until every node
+        // has stopped. Same GIL-release rationale as NodeGroup.sortedNodes below; results are
+        // cast to Python after the GIL is reacquired.
+        .def("node", &NodeManager::node, py::arg("name"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("node_if_exists", &NodeManager::node_if_exists, py::arg("name"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("nodes", &NodeManager::nodes, py::arg("type"),
+             py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("edges", [](NodeManager &nm) { return nm.edges(); })
-        .def("group", &NodeManager::group, py::arg("name"))
+        .def("group", &NodeManager::group, py::arg("name"),
+             py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("allNodes", [](NodeManager &nm) {
+            std::unordered_map<std::string, std::shared_ptr<NodeWrapper>> nodes;
+            {
+                py::gil_scoped_release release;
+                nodes = nm.allNodes();
+            }
             py::dict out;
-            for (auto &node: nm.allNodes()) {
+            for (auto &node: nodes) {
                 out[node.first.c_str()] = node.second;
             }
             return out;
         })
+        // False once shutdown() began, including one a panic started on its own thread. An
+        // atomic read: unlike the calls above it never waits for the manager lock, which a
+        // shutdown holds until every node has stopped.
+        .def_property_readonly("shouldWork", &NodeManager::shouldWork)
     ;
 
     py::class_<NodeGroup, std::shared_ptr<NodeGroup>>(m, "NodeGroup")
