@@ -23,7 +23,10 @@ protected:
             return;
         }
 
-        int ret = av_bsf_list_parse_str(filter_string_.c_str(), &ctx_);
+        AVBSFContext* raw_context = nullptr;
+        int ret = av_bsf_list_parse_str(filter_string_.c_str(), &raw_context);
+        const auto free_context = [](AVBSFContext* context) { av_bsf_free(&context); };
+        std::unique_ptr<AVBSFContext, decltype(free_context)> context(raw_context, free_context);
         if (ret < 0) {
             throw Error("Couldn't create BSF context: " + av::error2string(ret));
         }
@@ -32,26 +35,27 @@ protected:
         if (!tbsrc) {
             throw Error("No timebase source above in chain");
         }
-        ctx_->time_base_in = tbsrc->timeBase();
+        context->time_base_in = tbsrc->timeBase();
 
         AVCodecParameters *codecpar = enc->codecParameters();
         ensureNotNull(codecpar, "bsf input codecpar null");
-        ret = avcodec_parameters_copy(ctx_->par_in, codecpar);
+        ret = avcodec_parameters_copy(context->par_in, codecpar);
         if (ret < 0) {
             throw Error("Couldn't copy input parameters to BSF");
         }
 
-        ret = av_bsf_init(ctx_);
+        ret = av_bsf_init(context.get());
         if (ret < 0) {
             throw Error("Couldn't initialize BSF context: " + av::error2string(ret));
         }
 
-        out_codecpar_ = stream.raw()->codecpar;
-        ret = avcodec_parameters_copy(out_codecpar_, ctx_->par_out);
+        ret = avcodec_parameters_copy(stream.raw()->codecpar, context->par_out);
         if (ret < 0) {
             throw Error("Couldn't copy output parameters from BSF");
         }
-        stream.setTimeBase(ctx_->time_base_out);
+        stream.setTimeBase(context->time_base_out);
+        out_codecpar_ = stream.raw()->codecpar;
+        ctx_ = context.release();
     }
 
     void ensureFilterReady() {
@@ -91,7 +95,7 @@ public:
     // BSF init is deferred to openEncoder rather than the constructor: the
     // upstream encoder must finish openEncoder() first so its codecParameters()
     // (especially extradata) are populated; av_bsf_init then copies them into
-    // par_in. process() / flush() / setOutputPostOpen guard with
+    // par_in. process() / setOutputPostOpen guard with
     // ensureFilterReady() and will throw if a packet arrives before openEncoder
     // ran. Don't call av_bsf_init from the ctor or you will get an empty extradata.
     virtual void openEncoder(av::Stream stream = av::Stream()) {
@@ -129,9 +133,11 @@ public:
     }
 
     virtual void flush() {
-        ensureFilterReady();
-        av_bsf_send_packet(ctx_, nullptr);
-        outputPackets();
+        // Shutdown also flushes nodes whose upstream encoder failed to open.
+        if (ctx_) {
+            av_bsf_send_packet(ctx_, nullptr);
+            outputPackets();
+        }
         this->finished_ = true;
     }
 protected:
@@ -164,4 +170,4 @@ public:
     }
 };
 
-DECLNODE(bsf, BitStreamFilterNode);
+DECLNODE(bsf, BitStreamFilterNode)

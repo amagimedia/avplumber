@@ -17,6 +17,12 @@ private:
     int gap_bursts_since_log_ = 0;
     int total_in_ = 0;
     av::Timestamp last_printed_stats_ = NOTS;
+    // center_phase: input timestamps shift by a constant, chosen on the first frame (again after a
+    // discontinuity), that puts that frame exactly on an output tick. Rounding onto the grid then has
+    // half a frame of slack either way, so timestamp deviations below that (e.g. realtime's set_pts
+    // schedule rounded to whole milliseconds) neither duplicate nor drop, whatever the source's phase.
+    bool center_phase_ = false;
+    av::Timestamp phase_ = NOTS;   // in the input time base
 
     void setLast(T &frm, bool unused) {
         if (last_unused_) {
@@ -80,6 +86,11 @@ public:
             }
             
             av::Timestamp in_ts = pkt.pts();
+            if (center_phase_ && in_ts.isValid()) {
+                if (!phase_.isValid() || phase_.timebase() != in_ts.timebase())
+                    phase_ = in_ts - rescaleTS(rescaleTS(in_ts, timebase_), in_ts.timebase());
+                in_ts = av::Timestamp(in_ts.timestamp() - phase_.timestamp(), in_ts.timebase());
+            }
             if ((in_ts.timebase() != timebase_) || (pkt.timeBase() != timebase_)) {
                 pkt.setTimeBase(timebase_);
                 in_ts = rescaleTS(in_ts, timebase_);
@@ -89,6 +100,7 @@ public:
                 bool discontinuity = (delta_from_last.seconds() > frame_delta_.seconds() + 0.5) || (delta_from_last.timestamp() < 0);
                 if (discontinuity) {
                     logstream << "force_fps[" << label_ << "]: Discontinuity " << last_ts_ << " -> " << in_ts;
+                    phase_ = NOTS;   // the next frame picks the new phase
                 }
                 /*if (delta_from_last == frame_delta_) {
                     logstream << "Frame PTS = " << in_ts << " perfectly aligned";
@@ -214,6 +226,7 @@ public:
     void resetInput() override {
         last_ts_ = NOTS;
         next_ts_ = NOTS;
+        phase_ = NOTS;
     }
     static std::shared_ptr<ForceFPS> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
@@ -230,7 +243,9 @@ public:
         if (params.count("timebase")==1) {
             timebase = parseRatio(params["timebase"]);
         }
-        return NodeSISO<T, T>::template createCommon<ForceFPS<T>>(edges, params, fps, timebase, label);
+        auto r = NodeSISO<T, T>::template createCommon<ForceFPS<T>>(edges, params, fps, timebase, label);
+        r->center_phase_ = params.value("center_phase", false);
+        return r;
     }
 };
 

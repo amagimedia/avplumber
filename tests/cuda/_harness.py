@@ -1,5 +1,5 @@
 """Shared scaffolding for the CUDA smokes: AVPlumber setup, the packed-v210
-ingest chain, plane extraction and the frame drain loop."""
+ingest chain, plane extraction, the frame drain loop and condition polling."""
 
 import time
 
@@ -19,18 +19,26 @@ def make_avp(hwaccel, capacity=3):
     return avp, errors
 
 
-def v210_chain(nodes, tag, path, *, width, height, stride, fmt, hwaccel, color, **unpack):
-    """Input(rawvideo gray, stride x height packets) -> Demux -> V210ToCuda; returns the edge.
-    The gray demuxer only frames bytes, which also permits nonstandard row strides."""
-    from pyplumber.node import Demux, Input, V210ToCuda
+def v210_chain(nodes, tag, path, *, width, height, stride, fmt, hwaccel, color,
+               sample_aspect_ratio="1/1"):
+    """Frame packed CPU bytes as gray, then upload and unpack with patched FFmpeg."""
+    from pyplumber.node import DecVideo, Demux, FilterVideo, Input
+    tags = {"range" if key == "color_range" else key: value for key, value in color.items()}
+    graph = [f"hwupload_cuda=v210_width={width}", "settb=1/90000",
+             f"setsar={sample_aspect_ratio}"]
+    if tags:
+        graph.append("setparams=" + ":".join(f"{key}={value}" for key, value in tags.items()))
+    if fmt != "p210le":
+        graph.append(f"scale_cuda=format={fmt}")
     nodes += [
         Input({"name": f"in_{tag}", "url": str(path), "format": "rawvideo", "dst": f"pkt_{tag}",
                "options": {"pixel_format": "gray", "video_size": f"{stride}x{height}",
                            "framerate": "60"}}),
         Demux({"name": f"demux_{tag}", "src": f"pkt_{tag}", "routing": {"v:0": f"packed_{tag}"}}),
-        V210ToCuda({"name": f"unpack_{tag}", "src": f"packed_{tag}", "dst": f"gpu_{tag}",
-                    "hwaccel": hwaccel, "width": width, "height": height, "stride": stride,
-                    "fps": "60/1", "timebase": "1/90000", "format": fmt, **color, **unpack}),
+        DecVideo({"name": f"decode_{tag}", "src": f"packed_{tag}", "dst": f"bytes_{tag}",
+                  "codec": "rawvideo", "pixel_format": "gray"}),
+        FilterVideo({"name": f"unpack_{tag}", "src": f"bytes_{tag}", "dst": f"gpu_{tag}",
+                     "hwaccel": hwaccel, "threads": 1, "graph": ",".join(graph)}),
     ]
     return f"gpu_{tag}"
 
@@ -50,6 +58,13 @@ def frame_planes(frame, fmt):
                  for d, p, w in zip(frame.data[:3], frame.linesize[:3], widths))
 
 
+def nv12_planes(frame):
+    """Downloaded NV12 frame -> (luma, interleaved chroma) as 8-bit arrays."""
+    data, linesize = frame.data, frame.linesize   # each access copies
+    return tuple(np.frombuffer(data[i], np.uint8).reshape(rows, linesize[i])[:, :frame.width]
+                 for i, rows in enumerate((frame.height, frame.height // 2)))
+
+
 def start(avp, nodes, group, edge):
     """Register nodes under one group with auto_restart off, start them, return the edge."""
     for node in nodes:
@@ -58,6 +73,15 @@ def start(avp, nodes, group, edge):
     out = avp.getEdge(edge, "VideoFrame")
     avp.group(group).startNodes()
     return out
+
+
+def wait_for(predicate, label="condition", timeout=10, errors=()):
+    """Poll *predicate* until it holds; fail on the first recorded error or after *timeout* seconds."""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert not errors, errors
+        assert time.monotonic() < deadline, f"{label} timed out"
+        time.sleep(.005)
 
 
 def drain(edge, errors, timeout, limit=None, state=None):
