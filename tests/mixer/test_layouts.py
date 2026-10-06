@@ -1,6 +1,6 @@
 import pytest
 
-from layouts import (
+from pyplumber.mixer.tools.layouts import (
     CANVAS_HEIGHT,
     CANVAS_WIDTH,
     GRID_SHAPES,

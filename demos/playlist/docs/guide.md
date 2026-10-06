@@ -2,7 +2,7 @@
 
 Clip playout on AVPlumber's native mixer engine. Every element is a mixer
 source with its decoder kept resident; each transition is a `mixer.cut`,
-`fade` or `wipe` armed ahead of time at a wallclock `start_pts_ms`, and the
+`fade` or `wipe` issued by the Python worker at its deadline, and the
 switch between two clips is decided inside the engine, frame by frame. The
 program goes out as one video-only H.264 RTP stream to a Janus Streaming
 mountpoint. See [the README](../README.md) for the recording and the short
@@ -88,7 +88,6 @@ python3 demos/playlist/server.py --janus-host 127.0.0.1 --janus-video-port 5004 
 | `--playlist FILE` | five fixtures | JSON list of elements (`url`, `name`, `cue_in`, `cue_out`, `duration`, `speed`, `end`) |
 | `--media-dir` | `test-media/` | where the five fixture names are looked up |
 | `--resume-offset-ms` | 8 | how long after its scheduled cut the incoming chain is resumed |
-| `--switch-margin-ms` | 100 | the mixer's minimum lead for a scheduled cut |
 | `--record FILE.ts` | none | also write the program for `tests/verify_recording.py` |
 | `--webui-url URL` | none | register with an AVPlumber web UI, e.g. `http://127.0.0.1:22222` |
 | `--control-port` | 7778 | AVPlumber control server (the TUI and `regression.py` connect here) |
@@ -113,8 +112,12 @@ ttyd -p 7681 -t fontSize=15 python3 demos/playlist/player.py --port 7778
 
 ## Docker
 
+The base image is the Fedora 44 / CUDA 13.4 mixer image, which needs host driver
+R615 or newer; `docker-compose/mixer/Dockerfile` (Ubuntu 22.04 / CUDA 11.7) builds the
+same layout for an older driver.
+
 ```sh
-docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
+docker build -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:local .
 docker build --build-arg AVP_BASE_IMAGE=avplumber-mixer:local \
     --tag avplumber-playlist:local demos/playlist
 docker run --rm --gpus all --network host avplumber-playlist:local
@@ -174,12 +177,12 @@ pause team and pause node, a realtime sync team, and `h264_cuvid` with
 cue-in frame with the decoder resident; every chain loops between its cue
 points and never reaches EOF.
 
-A scheduled cut is armed 600 ms ahead with `mixer.cut` at a wallclock
-`start_pts_ms`, and the incoming chain is resumed natively (`resume <team>
-at`) 50 ms before the cut, parked so that cue-in is the first frame on air.
-The switch is confirmed from
-`mixer.status` before the outgoing element is parked. Fades and wipes are
-armed the same way and end at the scheduled time.
+The incoming chain is prepared 600 ms ahead and resumed natively (`resume
+<team> at`) 50 ms before the cut. The Python worker issues an immediate take
+at the requested start, then confirms it from `mixer.status` before parking
+the outgoing element. Fades and wipes start their duration before the desired
+end. Deadline dispatch has the worker's polling jitter (up to 20 ms, plus
+execution delays); the mixer no longer accepts frame-accurate future takes.
 
 Native additions made for this demo: `resume <team> at <ms>`, `mixer.interrupt`,
 the pause node's `pass_on_seek` option, and two decoder fixes for exact seeks

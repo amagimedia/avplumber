@@ -63,6 +63,22 @@ def test_tonemap_converts_storage_in_the_same_pass():
         conversion_graph("hlg", "p010le", source_format="rgba")
 
 
+@pytest.mark.parametrize("source", (None, "sdr", "pq"))
+def test_auto_storage_preserves_chroma_without_a_second_conversion(source):
+    graph = conversion_graph("hlg", None, source=source)
+    assert "transfer_in=auto:transfer_out=hlg" in graph
+    assert ":format=" not in graph
+    assert "scale_cuda" not in graph
+    assert graph.count("tonemap_cuda=") == 1
+
+
+@pytest.mark.parametrize("transfer", ("sdr", "hlg", "pq"))
+def test_matching_color_without_requested_storage_keeps_native_frames(transfer):
+    # A 4:2:2 HDR compositor samples native 4:2:0 CUarray inputs itself.
+    # Identity tonemapping would unnecessarily materialize a linear CUDA frame.
+    assert conversion_graph(transfer, None, source=transfer) == Color(transfer).setparams
+
+
 @pytest.mark.parametrize("canvas", ("sdr", "hlg", "pq"))
 def test_output_codec_defaults_have_correct_color(canvas):
     assert rendition_color(canvas, "h264_nvenc") == Color("sdr")
@@ -101,7 +117,7 @@ def builder(monkeypatch):
 
 def test_aliases_share_one_color_conversion_before_all_scene_slots(builder):
     for name in ("cam", "cam#2"):
-        builder.add_source(name, "decoded", "input", default_graph="", color="sdr")
+        builder.add_source(name, "decoded", "input", color="sdr")
     builder.add_scene("full", {"cam": {}, "cam#2": {}})
     builder.set_initial_scene("full")
     builder.build()
@@ -120,7 +136,7 @@ def test_aliases_share_one_color_conversion_before_all_scene_slots(builder):
 @pytest.mark.parametrize("color", (None, "sdr", "hlg", "pq"))
 def test_routed_color_contract_reaches_both_slot_conversions(builder, color):
     builder.add_routed_source("cam", "route_a", "route_b", "input", "router", "a", "b",
-                              default_graph="", color=color)
+                              color=color)
     builder.add_scene("full", {"cam": {}}, routes={"cam": 0})
     builder.set_initial_scene("full")
     builder.build()
@@ -142,8 +158,47 @@ def test_shared_edge_cannot_have_conflicting_contracts(builder):
         builder.build()
 
 
+@pytest.mark.parametrize("transfer,fmt", [("sdr", "nv12"), ("hlg", "p010le"), ("pq", "p210le")])
+def test_tagged_matching_sources_bypass_color_nodes_and_keep_alias_fanout(builder, transfer, fmt):
+    builder.color = Color(transfer)
+    builder.working_format = fmt
+    for name in ("cam", "cam#2"):
+        builder.add_source(name, "uploaded", "input", color=transfer, pixel_format=fmt, color_tagged=True)
+    builder.add_scene("full", {"cam": {}, "cam#2": {}})
+    builder.set_initial_scene("full")
+    builder.build()
+    nodes = {n["name"]: n for n in builder.avp.nodes}
+    assert "mixer_color_cam" not in nodes and "mixer_color_cam#2" not in nodes
+    fanout = nodes["mixer_color_alias_cam"]
+    assert fanout["src"] == "uploaded"
+    for name, edge in zip(("cam", "cam#2"), fanout["dst"]):
+        assert nodes[f"mixer_otm_{name}"]["src"] == edge
+
+
+@pytest.mark.parametrize("color,fmt,tagged", [
+    ("sdr", "nv12", True),       # tone mapping is still required
+    ("hlg", "p210le", True),    # storage conversion is still required
+    ("hlg", None, True),        # storage is unknown
+    ("hlg", "p010le", False),  # a declaration alone does not stamp frames
+])
+def test_color_bypass_requires_both_tagged_frames_and_matching_storage(builder, color, fmt, tagged):
+    builder.add_source("cam", "upstream", "input", color=color, pixel_format=fmt, color_tagged=tagged)
+    builder.add_scene("full", {"cam": {}})
+    builder.set_initial_scene("full")
+    builder.build()
+    nodes = {n["name"]: n for n in builder.avp.nodes}
+    assert nodes["mixer_color_cam"]["graph"] == conversion_graph("hlg", "p010le", source=color, source_format=fmt)
+    assert nodes["mixer_otm_cam"]["src"] == "mixer_cam_color"
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"color": "sdr", "packed_rgb": True}])
+def test_tagged_bypass_requires_a_yuv_contract(builder, kwargs):
+    with pytest.raises(ValueError, match="explicit YUV"):
+        builder.add_source("cam", "upstream", "input", color_tagged=True, **kwargs)
+
+
 def test_rgb_keeps_alpha_and_uses_hdr_compositor(builder):
-    builder.add_source("page", "rgba", "input", default_graph="", packed_rgb=True, color="sdr")
+    builder.add_source("page", "rgba", "input", packed_rgb=True, color="sdr")
     builder.add_scene("full", {"page": {"blend": True}})
     builder.set_initial_scene("full")
     builder.build()
@@ -151,6 +206,32 @@ def test_rgb_keeps_alpha_and_uses_hdr_compositor(builder):
     assert nodes["mixer_color_page"]["graph"] == Color().setparams
     assert nodes["mixer_comp_a"]["color"] == "hlg"
     assert nodes["mixer_comp_a"]["layers"][0]["blend"]
+
+
+def test_premultiplied_rgb_alpha_is_tagged_by_the_colour_node(builder):
+    builder.add_source("page", "rgba", "input", packed_rgb=True, color="sdr",
+                       premultiplied_alpha=True)
+    builder.add_scene("full", {"page": {"blend": True}})
+    builder.set_initial_scene("full")
+    builder.build()
+    nodes = {n["name"]: n for n in builder.avp.nodes}
+    assert nodes["mixer_color_page"]["graph"] == Color().setparams + ":alpha_mode=premultiplied"
+
+
+@pytest.mark.parametrize("transfer", ("hlg", "pq"))
+def test_422_hdr_canvas_retains_native_source_chroma(builder, transfer):
+    builder.working_format = "p210le"
+    builder.color = Color(transfer)
+    builder.add_source("decoded", "nvdec", "input", color="sdr")
+    builder.add_source("raw422", "v210", "input", color=transfer, pixel_format="p210le")
+    builder.add_scene("mixed", {"decoded": {}, "raw422": {}})
+    builder.set_initial_scene("mixed")
+    builder.build()
+    nodes = {n["name"]: n for n in builder.avp.nodes}
+    assert nodes["mixer_color_decoded"]["graph"] == conversion_graph(transfer, None, source="sdr")
+    assert nodes["mixer_color_raw422"]["graph"] == Color(transfer).setparams
+    assert nodes["mixer_comp_a"]["sw_format"] == "p210le"
+    assert not any("scale_cuda" in n.get("graph", "") for n in nodes.values())
 
 
 @pytest.mark.parametrize("wipe_color", (None, "sdr"))
@@ -167,15 +248,16 @@ def test_media_wipe_blends_onto_an_hdr_canvas(monkeypatch, wipe_color):
             pass
     b = graph.MixerGraphBuilder(Avp(), canvas=(1920, 1080), fps=(60, 1), working_format="p210le",
                                 color="hlg", wipe_color=wipe_color, enable_wipe=True, cache_wipes_mb=512)
-    b.add_source("cam", "decoded", "input", default_graph="", color="sdr")
+    b.add_source("cam", "decoded", "input", color="sdr")
     b.add_scene("full", {"cam": {}})
     b.set_initial_scene("full")
     b.build()
     nodes = {n["name"]: n for n in b.avp.nodes}
-    assert nodes["mixer_wipe_fmt"]["graph"] == (Color().setparams + "," if wipe_color else "") + "format=rgba,hwupload"
+    assert nodes["mixer_wipe_fmt"]["graph"] == (Color().setparams + "," if wipe_color else "") + "format=rgba,hwupload_cuda=pinned=1"
     overlay = nodes["mixer_wipe_overlay"]
     assert overlay["sw_format"] == "p210le" and overlay["color"] == "hlg"
-    assert overlay["layers"][1]["blend"] is True and overlay["active_inputs"] == 3
+    # Cached wipes keep a resident chain, parked with no active input until a take arms it.
+    assert overlay["layers"][1]["blend"] is True and overlay["active_inputs"] == 0
     assert nodes["mixer_wipe_cache"]["src"] == "mixer_wipe_rt_out"
     with pytest.raises(ValueError, match="require SDR"):
         graph.MixerGraphBuilder(Avp(), canvas=(1920, 1080), fps=(60, 1), working_format="p210le",

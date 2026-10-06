@@ -80,14 +80,14 @@ class FakeMixer:
     def build(self):
         return "mixer_final_out"
 
-    def cut(self, scene, start_pts_ms=-1):
-        self.log.append(f"mixer.cut {scene} {start_pts_ms}")
+    def cut(self, scene):
+        self.log.append(f"mixer.cut {scene}")
 
-    def fade(self, scene, duration_sec, start_pts_ms=-1):
-        self.log.append(f"mixer.fade {scene} {duration_sec} {start_pts_ms}")
+    def fade(self, scene, duration_sec):
+        self.log.append(f"mixer.fade {scene} {duration_sec}")
 
-    def wipe(self, scene, wipe_file, duration_sec, start_pts_ms=-1):
-        self.log.append(f"mixer.wipe {scene} {wipe_file} {duration_sec} {start_pts_ms}")
+    def wipe(self, scene, wipe_file, duration_sec):
+        self.log.append(f"mixer.wipe {scene} {wipe_file} {duration_sec}")
 
     def initialize_routes(self): self.log.append("init_routes")
     def start_groups(self): self.log.append("start_groups")
@@ -181,7 +181,11 @@ def test_scheduled_cue_primes_and_parks_then_arms_shortly_before_the_cut(built):
     assert e._armed.issued is False
     Clock.now = 129_500                                   # inside arm_lead (600 ms)
     e._tick()
-    assert avp.log[-2:] == ["mixer.cut item_1 130000", "resume pl_item_1_pause at 129960"]
+    assert avp.log[-1] == "resume pl_item_1_pause at 129960"
+    assert not e._armed.issued
+    Clock.now = 130_000
+    e._tick()
+    assert avp.log[-1] == "mixer.cut item_1"
     Clock.now = 130_010
     e._tick()                                             # timer confirmation without a control port
     assert events(e) == []
@@ -195,23 +199,27 @@ def test_immediate_cue_lets_the_mixer_pick_the_start_and_resumes_now(built):
     e, avp = built
     b = clips("b")[0]
     cue(e, b, 1, None)
-    assert avp.log[-2:] == ["mixer.cut item_1 -1", "resume pl_item_1_pause at 100060"]
-    assert (e._armed.start, e._armed.end) == (100_100, 100_100)   # mixer: now + switch margin
+    assert avp.log[-2:] == ["resume pl_item_1_pause at 100000", "mixer.cut item_1"]
+    assert (e._armed.start, e._armed.end) == (100_000, 100_000)
 
 
 def test_fade_starts_early_enough_to_end_on_time_and_wipe_needs_a_file(built):
     e, avp = built
     b, c = clips("b", "c")
     cue(e, b, 1, 100_500, Transition.FADE, 800)          # would have to start in the past ...
-    assert avp.log[-2:] == ["mixer.fade item_1 0.8 -1", "resume pl_item_1_pause at 100060"]
-    assert (e._armed.start, e._armed.end) == (100_100, 100_900)   # ... so it starts at now + margin
+    assert avp.log[-2:] == ["resume pl_item_1_pause at 100000", "mixer.fade item_1 0.8"]
+    assert (e._armed.start, e._armed.end) == (100_000, 100_800)
     Clock.now = 101_000
     e._tick()
     events(e)
     cue(e, c, 2, 105_000, Transition.FADE, 800)
     Clock.now = 103_700
     e._tick()
-    assert avp.log[-2:] == ["mixer.fade item_2 0.8 104200", "resume pl_item_2_pause at 104160"]
+    assert avp.log[-1] == "resume pl_item_2_pause at 104160"
+    assert not e._armed.issued
+    Clock.now = 104_200
+    e._tick()
+    assert avp.log[-1] == "mixer.fade item_2 0.8"
     with pytest.raises(RuntimeError, match="wipe-file"):
         cue(e, clips("d")[0], 3, None, Transition.WIPE, 500)
 

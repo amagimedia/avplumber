@@ -1,7 +1,7 @@
 """GPU color contracts shared by source, canvas and rendition builders.
 
-Input metadata is resolved on every decoded frame by tonemap_cuda. A declared
-contract overrides frame tags explicitly; pixel depth never selects a transfer.
+A declared contract overrides frame tags explicitly; pixel depth never selects
+a transfer. Backends resolve unspecified input metadata on each decoded frame.
 """
 
 from dataclasses import dataclass
@@ -12,7 +12,7 @@ TRANSFER_TAGS = {"sdr": "bt709", "hlg": "arib-std-b67", "pq": "smpte2084"}
 OPERATORS = ("none", "linear", "gamma", "clip", "reinhard", "hable", "mobius")
 COLOR_KEYS = ("color_trc", "color_primaries", "colorspace", "color_range")
 TEN_BIT_FORMATS = ("p010le", "p210le", "yuv420p10le", "yuv422p10le", "yuv444p10le")
-SEMIPLANAR_FORMATS = ("nv12", "nv16", "p010le", "p210le")   # what tonemap_cuda reads and writes
+SEMIPLANAR_FORMATS = ("nv12", "nv16", "p010le", "p210le")
 # HDR10 static metadata for PQ outputs: the mixer masters on BT.2020 primaries with D65 white.
 MASTERING_PRIMARIES = {"bt2020": {"primaries": [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],
                                   "white_point": [0.3127, 0.3290]}}
@@ -86,39 +86,38 @@ def declared_color(obj):
     return Color.parse(fields) if fields else None
 
 
-def conversion_graph(target, pixel_format, *, source=None, source_format=None,
-                     tonemap="clip", sdr_white=203.0, hdr_peak=1000.0, desat=0.0, param=0.0):
-    """Validate and normalize CUDA YUV frames, keeping identity frames zero-copy.
-
-    NVDEC emits NV12/P010. Callers with other CUDA storage must declare it so
-    the required chroma conversion precedes tone mapping. Custom source filters
-    run before this graph: their output frame metadata is authoritative.
-    """
+def validate_conversion(target, pixel_format, *, source_format, tonemap, sdr_white, hdr_peak, desat, param):
+    """Validate color/storage contracts independently of graph construction."""
     target = Color.parse(target)
-    target.validate_format(pixel_format)
+    if pixel_format is not None:
+        target.validate_format(pixel_format)
     if tonemap not in OPERATORS:
         raise ValueError(f"unsupported tone-map operator {tonemap!r}")
     if not all(isfinite(v) for v in (sdr_white, hdr_peak, desat, param)) or not (1 <= sdr_white <= hdr_peak <= 10000 and hdr_peak >= 100 and desat >= 0 and param >= 0):
         raise ValueError("require finite 1 <= sdr_white <= hdr_peak <= 10000, hdr_peak >= 100, desat >= 0 and param >= 0")
     if source_format and source_format not in YUV_FORMATS:
-        raise ValueError(f"unsupported source pixel format {source_format!r}; color conversion requires CUDA YUV")
-    if source is not None and Color.parse(source) == target:
-        # Same contract: stamp it and only change storage, so 4:2:2 (P210) content
-        # never round-trips through the 4:2:0-only tone mapper.
-        parts = [target.setparams]
-        return ",".join(parts if source_format == pixel_format else parts + [f"scale_cuda=format={pixel_format}"])
-    parts = [Color.parse(source).setparams] if source is not None else []
-    if source_format and source_format not in SEMIPLANAR_FORMATS:
-        # tonemap_cuda works on semiplanar storage; planar sources are re-laid out at 10 bits.
-        parts.append("scale_cuda=format=p210le" if "422" in source_format else "scale_cuda=format=p010le")
-    # tonemap_cuda converts color and storage in one pass, 4:2:0 or 4:2:2 in and out.
-    # param is the operator knee in reference-white units (mobius/reinhard; 0 keeps the
-    # filter default 0.3). mobius at 0.9 keeps 0..90% of SDR white linear and folds
-    # everything brighter into the top 10% of the SDR range; 1.0 would be a plain clip.
-    parts.append(f"tonemap_cuda=transfer_in=auto:transfer_out={target.transfer}:format={pixel_format}"
-                 f":tonemap={tonemap}:sdr_white={sdr_white:g}:hdr_peak={hdr_peak:g}:desat={desat:g}"
-                 + (f":param={param:g}" if param else ""))
-    return ",".join(parts)
+        raise ValueError(f"unsupported source pixel format {source_format!r}; color conversion requires YUV storage")
+    return target
+
+
+def conversion_graph(target, pixel_format, *, source=None, source_format=None,
+                     tonemap="clip", sdr_white=203.0, hdr_peak=1000.0, desat=0.0, param=0.0):
+    """Compatibility entry point for the CUDA color-conversion graph."""
+    from .backends.cuda import conversion_graph as cuda_conversion
+    return cuda_conversion(target, pixel_format, source=source, source_format=source_format,
+                           tonemap=tonemap, sdr_white=sdr_white, hdr_peak=hdr_peak, desat=desat, param=param)
+
+
+def default_codec(pixel_format):
+    """The NVENC codec of an output that names none: HEVC for 10-bit storage, else H.264."""
+    return "hevc_nvenc" if pixel_format in TEN_BIT_FORMATS else "h264_nvenc"
+
+
+def rendition_format(canvas_format, codec, color, profile=""):
+    """Keep HEVC's canvas depth unless its SDR output explicitly requests Main8."""
+    ten_bit = Color.parse(color).transfer != "sdr" or (
+        canvas_format in TEN_BIT_FORMATS and "hevc" in codec and profile != "main")
+    return "p010le" if ten_bit else "nv12"
 
 
 def rendition_color(canvas, codec, requested=None, tonemap=""):
