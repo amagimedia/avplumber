@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>DSK ticker</title>
+<!-- Second lower-third layer: a crawl under the name plate. The window is the strip itself.
+     The crawl moves the same whole number of pixels every frame: a time-based CSS animation
+     lands on fractional positions, so each frame moves a slightly different distance and the
+     text edges shimmer. Positions follow the frame clock (the rAF timestamp quantized to the
+     window rate in data-fps), not a count of callbacks, so extra or missed callbacks cannot
+     speed it up or stall it. -->
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  body { font-family: system-ui, sans-serif; color: white; display: flex; }
+  #tag { flex: none; padding: 0 2vh; background: #ff5a1f; font: 700 52vh/100vh system-ui, sans-serif; }
+  #band { flex: 1; overflow: hidden; background: #101c2bdd; }
+  #crawl { display: flex; white-space: nowrap; font-size: 50vh; line-height: 100vh; will-change: transform; }
+  #crawl span { flex: none; }
+</style>
+<div id="tag">LIVE</div>
+<div id="band"><div id="crawl"><span></span><span></span></div></div>
+<script>
+  const items = ["Downstream keyer on air: clean feed stays unkeyed", "Four browser keys, one GPU pass",
+                 "Keys cut on and off at the next program frame", "Scenes and transitions run underneath"];
+  const crawl = document.getElementById("crawl");
+  const copies = crawl.querySelectorAll("span");
+  copies.forEach((span) => { span.textContent = items.map((t) => `${t}   •   `).join(""); });
+  // One copy spans a whole number of pixels, so wrapping by it lands on the same pixel grid.
+  const loop = Math.ceil(copies[0].getBoundingClientRect().width);
+  copies.forEach((span) => { span.style.width = `${loop}px`; });
+  const fps = Number(document.documentElement.dataset.fps) || 25;
+  const step = fps > 30 ? 2 : 4;   // about 100 px/s at 25 fps, 120 px/s at 60 fps
+  const frame = (t) => Math.round(t * fps / 1000);
+  function draw(t) {
+    crawl.style.transform = `translate3d(${-((frame(t) * step) % loop)}px, 0, 0)`;
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+</script>
+</html>

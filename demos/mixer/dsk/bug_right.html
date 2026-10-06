@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>DSK clock bug</title>
+<!-- Top-right bug: blinking on-air dot and a wall clock. The window is twice as wide as high.
+     Only the clock text repaints, once a second. -->
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  body { display: flex; align-items: center; justify-content: flex-end; font-family: system-ui, sans-serif; }
+  #box { display: flex; align-items: center; gap: 6vh; padding: 0 8vh; height: 46%;
+         border-radius: 23vh; background: #101c2bcc; color: white; }
+  #dot { width: 16vh; height: 16vh; border-radius: 50%; background: #ff2b2b; animation: blink 1s steps(1) infinite; }
+  #clock { font: 700 22vh/1 ui-monospace, monospace; }
+  @keyframes blink { 50% { opacity: .25; } }
+</style>
+<div id="box"><div id="dot"></div><div id="clock"></div></div>
+<script>
+  const clock = document.getElementById("clock");
+  const tick = () => { clock.textContent = new Date().toTimeString().slice(0, 8); };
+  tick();
+  setInterval(tick, 1000);
+</script>
+</html>

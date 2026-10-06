@@ -14,14 +14,13 @@ make -j8 \
   HAVE_NVOF_FRUC=1 \
   HAVE_NVCC=1 \
   NVCC=/usr/local/cuda-13.0/bin/nvcc \
-  TENSORRT_ROOT=/opt/tensorrt \
   PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
   CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda-13.0/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' \
   LFLAGS+=' -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib' \
   python_module
 ```
 
-This script runs `make ... python_module` with CUDA/TensorRT-related flags used in this repo.
+This script runs `make ... python_module` with CUDA-related flags used in this repo.
 
 If your environment differs, run `make` manually and keep `python_module` as the target.
 
@@ -38,9 +37,9 @@ From Python you can:
 
 ## 2) Project setup pattern
 
-The minimal framework sample lives in `pyplumber/examples/`. Reusable Python
-neural nodes and their examples are grouped by purpose under
-`src/nodes/neural_net/`. See
+The minimal framework sample lives in `pyplumber/examples/`. The reusable Python
+scene-detection node and its example live under
+`src/nodes/scene_cut/`. See
 [`pyplumber/examples/README.md`](pyplumber/examples/README.md) for the index.
 
 Those scripts add the local package to `sys.path` before importing `pyplumber`:
@@ -151,43 +150,10 @@ So your Python node can compute values and downstream video nodes can visualize 
 
 ---
 
-## 7) PyTorch / TorchVision custom processing
+## 7) Putting Python node into a larger production graph
 
-You can use Pytorch inside avplumber graph
-
-- optional `torch` and `torchvision` imports,
-- model initialization once in `__init__`,
-- per-frame inference in `process()`,
-- writing detection results into metadata and drawing boxes into the frame planes.
-
-Recommended structure:
-
-1. Initialize model once in `__init__`.
-2. Handle missing dependencies gracefully (set status metadata, keep forwarding frames).
-3. Run inference every N frames (`detect_every_n`) to keep throughput reasonable.
-4. Always forward frame unless intentional drop.
-
-Example parameters:
-
-```python
-node = PyTorchNode({
-    "src": "src_node",
-    "dst": "dst_node",
-    "group": "g1",
-    "name": "python-test-node",
-    "detect_every_n": 5,
-    "person_score_threshold": 0.60,
-    "max_person_boxes": 8,
-    "box_thickness": 4,
-})
-```
-
----
-
-## 8) Putting Python node into a larger production graph
-
-`pyplumber/examples/tracker-live.py` shows how to assemble a larger CUDA/TensorRT
-tracking graph from Python:
+A Python node fits into a larger graph assembled from Python
+in the same way:
 
 - upstream writes metadata,
 - Python node enriches metadata or performs custom logic,
@@ -200,7 +166,7 @@ and the usage guide in `pyplumber/examples/README.md`.
 
 ---
 
-## 9) Common pitfalls
+## 8) Common pitfalls
 
 - **No output forwarding:** if you forget `enqueue`, output can stall.
 - **Wrong edge names:** `src`/`dst` must match actual edges in graph.

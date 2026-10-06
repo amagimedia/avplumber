@@ -6,7 +6,7 @@ avplumber is a graph-based real-time processing framework. Graph can be reconfig
 * [🦀 Rust refactor 🚧](https://github.com/amagimedia/avplumber/tree/rust-dev?tab=readme-ov-file#--rust-refactor-in-progress--)
 * High performance [GPU video mixer](demos/mixer/README.md)
 * [VOD player](demos/replay/README.md) with frame-accurate playback control and WebRTC output via Janus. [Rust version](https://github.com/amagimedia/avplumber/blob/rust-dev/demos/replay-rust/README.md) also available
-* [DMA-BUF input from Chromium](demos/dmabuf-browser/README.md)
+* [DMA-BUF input from Chromium](doc/dmabuf.md)
 * [Node+Svelte WebUI](tools/web-ui/README.md) with realtime graph statistics
 
 [All demos](#demos)
@@ -87,12 +87,10 @@ builds, NVIDIA requirements, and a local WebRTC preview.
 
 | Demo | What it demonstrates | Requirements |
 | --- | --- | --- |
-| [Mixer](demos/mixer/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) | Mix video inputs into portrait fullscreen or grid layouts; Preview/Program, Cut, Fade, and transparent media wipes. | NVIDIA decode/encode; patched FFmpeg included in Docker build. |
+| [Mixer](demos/mixer/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) | Mix video and DMA-BUF browser sources with AVP compositors, Preview/Program, transitions, keys and AUX monitors. | NVIDIA decode/encode; patched FFmpeg included in Docker build. |
 | [Playlist](demos/playlist/README.md) | Play, loop, reorder, and edit clips with a terminal UI and generated test media. | NVIDIA + Janus for video; UI-only preview works without a GPU. |
 | [Replay](demos/replay/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4) · [graph](https://amagimedia.github.io/avplumber/demos/replay/docs/replay-graph.png) | Convert a file to seekable replay; seek by frame or time, scrub, change speed, and play in reverse. | NVIDIA + Janus; convert the input first. |
 | [Replay (Rust)](https://github.com/amagimedia/avplumber/blob/rust-dev/demos/replay-rust/README.md) | As above, ported to Rust. | Janus; optional NVIDIA; convert the input first. |
-| [Browser capture](demos/dmabuf-browser/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/) | Capture HTML through DMA-BUF and compose browser sources into a GPU grid with WebRTC preview. | NVIDIA graphics driver + DRM/EGL; Docker stack includes Electron and Janus. |
-| [CUDA overlay validation](demos/cuda-overlay/README.md) · [view demo](https://amagimedia.github.io/avplumber/demos/cuda-overlay/docs/) | Compare up to 16 composited inputs against a CPU reference; inspect images and a pass/fail report. | NVIDIA GPU; Docker generates the fixtures. |
 
 These demos produce video only. For smaller building blocks, see the
 [fixed graph examples](examples/README.md) and
@@ -112,10 +110,10 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_GL=1: enable OpenGL & EGL dependency, required by `drm_prime_to_cuda`, `cuda_to_egl_image`
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
--   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `cuda_infer_rtdetr`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
--   NEURAL_NET=1: enable retained neural drawing, tracking, inference, and reframing nodes. `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` are supported as compatibility aliases when `NEURAL_NET` is not set explicitly.
+-   NEURAL_NET=1: enable retained neural drawing, tracking, and reframing nodes. Model inference nodes and their TensorRT flags are out-of-tree (`EXTRA_NODES_MK`). `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` are supported as compatibility aliases when `NEURAL_NET` is not set explicitly.
+-   HAVE_TENSORRT=1, TENSORRT_ROOT=/path/to/TensorRT: not read by this Makefile. Out-of-tree node fragments included through `EXTRA_NODES_MK` read them to add the TensorRT include and library paths and `-lnvinfer -lnvinfer_plugin`, so builds that include inference nodes must keep passing both.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
--   HAVE_NVCC=1: build CUDA module images used by CUDA processing nodes, including `luma_diff`, `hog_diff`, and TensorRT inference. Requires `nvcc`.
+-   HAVE_NVCC=1: build CUDA module images used by CUDA processing nodes, including `luma_diff` and `hog_diff`. Requires `nvcc`.
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
 
 Feature gates:
@@ -123,7 +121,6 @@ Feature gates:
 -   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
 -   `nvjpeg_enc` builds only when `HAVE_CUDA=1 HAVE_NVJPEG=1`.
 -   `luma_diff` and `hog_diff` build only when `HAVE_CUDA=1 HAVE_NVCC=1`.
--   TensorRT inference nodes build only when `HAVE_CUDA=1 NEURAL_NET=1 HAVE_TENSORRT=1 HAVE_NVCC=1`.
 -   `cuda_camera_motion` builds only when `HAVE_CUDA=1 HAVE_NVOF=1` and the dense NVOF headers are available; `HAVE_NVCC=1` additionally enables its GPU IRLS backend.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
 
@@ -191,7 +188,7 @@ Each node is described by a JSON object consisting of the following fields:
 * `group` (string) - used for grouping together nearby nodes. Example: transcoder that will have separate input and output groups so that when input URL is changed, only demuxer and decoders will be restarted, not encoders and muxer.
 * `auto_restart` (string) - optional:
   * `off` (default) - let the node stop without restarting
-  * `on` - restart single node when it finishes/crashes
+  * `on` - restart single node when it finishes/crashes. A restart that fails (e.g. the node can't be created) is reported like a node error and retried every second until it succeeds, the node is stopped or the instance shuts down
   * `group` - restart the whole group to which the node belongs
   * `panic` - when the node finishes/crashes, shutdown the whole avplumber instance
 * `src` (string for single-input nodes, list of strings for multi-input nodes) - source edge
