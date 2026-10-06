@@ -43,7 +43,7 @@ const combined = combinedCutSample({
 });
 assert.deepEqual(combined.recent.map(entry => entry.id), [4, 5, 6]);
 assert.equal(combined.state, "pending");
-renderCutSample(element, "avplumber", combined);
+renderCutSample(element, "Graph", combined);
 assert.equal(element.textContent, "30 ms", "one median across direct and previewed cuts");
 for (const [direct, previewed, expected] of [
   [history(53), history(), "53 ms"],
@@ -51,14 +51,14 @@ for (const [direct, previewed, expected] of [
   [history(), history(), "—"],
   [history(53), {}, "—"],
 ]) {
-  renderCutSample(element, "avplumber", combinedCutSample({ direct, previewed }));
+  renderCutSample(element, "Graph", combinedCutSample({ direct, previewed }));
   assert.equal(element.textContent, expected);
 }
 assert.equal(combinedCutSample(null), null);
 
 const html = await (await import("node:fs/promises")).readFile(new URL("../index.html", import.meta.url), "utf8");
-assert.match(html, /avplumber latency/);
-assert.match(html, /<span>WebRTC RTT<\/span>/);
+assert.match(html, /aria-label="Graph"[\s\S]*<span>Latency<\/span>/);
+assert.match(html, /aria-label="WebRTC"[\s\S]*<span>RTT<\/span>/);
 assert.equal((html.match(/id="cut-latency"/g) || []).length, 1);
 assert.doesNotMatch(html, /cut-direct|cut-previewed|AVP Direct|AVP Previewed/);
 

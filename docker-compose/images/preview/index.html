@@ -21,7 +21,8 @@
 
     body {
       margin: 0;
-      min-height: 100vh;
+      height: 100dvh;
+      overflow: hidden;
       background: var(--bg);
       color: var(--text);
       font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -29,8 +30,9 @@
 
     main {
       display: grid;
-      grid-template-rows: 1fr auto;
-      min-height: 100vh;
+      grid-template-rows: minmax(0, 1fr) auto;
+      height: 100dvh;
+      min-height: 0;
     }
 
     footer {
@@ -54,7 +56,8 @@
     video {
       width: 100%;
       height: 100%;
-      max-height: calc(100vh - 49px);
+      min-height: 0;
+      max-height: 100%;
       object-fit: contain;
       background: #050607;
     }
@@ -75,8 +78,12 @@
       font-variant-numeric: tabular-nums;
     }
 
-    .metrics { margin-left: auto; gap: 20px; flex-wrap: wrap; }
+    .metrics { flex: 1 1 auto; min-width: 0; gap: 8px 20px; flex-wrap: wrap; }
     .metric-value { min-width: 48px; text-align: right; }
+    /* A labelled group: the heading names the layer the numbers come from. */
+    .metric-group { display: inline-flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; }
+    .metric-group-label { font-size: 11px; font-weight: 700; letter-spacing: .06em;
+      text-transform: uppercase; opacity: .6; }
     .metric-value[data-level="good"] { color: #76c99a; }
     .metric-value[data-level="warn"] { color: #edb264; }
     .metric-value[data-level="bad"] { color: #ef8585; }
@@ -84,6 +91,16 @@
     .error {
       color: var(--danger);
     }
+
+    select {
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 5px 8px;
+      font: inherit;
+    }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
@@ -93,37 +110,116 @@
     </section>
 
     <footer>
+      <label for="codec">Stream</label>
+      <select id="codec">
+        <option value="h264">H.264 / SDR</option>
+        <option value="h265">H.265 / HDR</option>
+      </select>
       <span id="status">Idle</span>
       <span class="metrics">
-        <span class="metric" title="Median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.">
-          <span>avplumber latency</span><span id="cut-latency" class="metric-value" aria-label="avplumber median cut latency unavailable">—</span>
+        <span class="metric-group" role="group" aria-label="Graph">
+          <span class="metric-group-label">Graph</span>
+          <span class="metric" title="Median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.">
+            <span>Latency</span><span id="cut-latency" class="metric-value" aria-label="Graph median cut latency unavailable">—</span>
+          </span>
         </span>
-        <span class="metric rtt" title="WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.">
-          <span>WebRTC RTT</span><span id="rtt-value" class="metric-value" aria-label="WebRTC RTT unavailable">—</span>
+        <span class="metric-group" role="group" aria-label="WebRTC">
+          <span class="metric-group-label">WebRTC</span>
+          <span class="metric rtt" title="WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.">
+            <span>RTT</span><span id="rtt-value" class="metric-value" aria-label="WebRTC RTT unavailable">—</span>
+          </span>
+          <span class="metric" title="Frames this browser decoded per second during the latest sample (receiver side, not the mixer's output rate).">
+            <span>FPS</span><span id="receiver-fps" class="metric-value">—</span>
+          </span>
+          <span class="metric" title="Average receiver jitter-buffer residence during the latest sample; not end-to-end latency.">
+            <span>Buffer</span><span id="receiver-buffer" class="metric-value">—</span>
+          </span>
         </span>
+        <span id="gpu-stats" class="metrics" title="Host GPU totals from nvidia-smi, sampled once per second. Usage: orange ≥95%, red ≥99%. VRAM: orange ≥93.3%, red ≥98.3% of the total.">GPU —</span>
       </span>
     </footer>
   </main>
 
   <script type="module" src="cut-latency.mjs?v=combined"></script>
-  <script>
-    const MOUNTPOINT_ID = 1;
-    const serverUrl = `${location.origin}/janus`;
+  <script type="module">
+    import { createReceiverMonitor } from "./receiver-stats.mjs";
+    import { JanusSocket } from "./janus-socket.mjs";
+    import { playerOutputs } from "./output-selection.mjs";
+    const codecSelect = document.getElementById("codec");
+    function renderGpuStats(gpus) {
+      const level = (value, orange, red) => !Number.isFinite(value) ? "unknown"
+        : value >= red ? "bad" : value >= orange ? "warn" : "good";
+      const metric = (label, value, color) => `<span class="metric"><span>${label}</span><span class="metric-value" data-level="${color}">${value}</span></span>`;
+      document.getElementById("gpu-stats").innerHTML = (gpus || []).map(gpu => {
+        const suffix = gpus.length > 1 ? ` ${gpu.index}` : "";
+        const percent = (label, value) => metric(label + suffix, Number.isFinite(value) ? `${value}%` : "—", level(value, 95, 99));
+        const used = Number.isFinite(gpu.memory_used_mib) ? gpu.memory_used_mib / 1024 : null;
+        const memory = used !== null && Number.isFinite(gpu.memory_total_mib)
+          ? `${used.toFixed(2)} / ${(gpu.memory_total_mib / 1024).toFixed(2)} GiB` : "—";
+        // A missing or zero total leaves the fraction non-finite, so the level is unknown.
+        const full = used === null ? NaN : gpu.memory_used_mib / gpu.memory_total_mib;
+        return percent("GPU", gpu.gpu) + percent("NVDEC", gpu.decoder) + percent("NVENC", gpu.encoder) + metric("VRAM" + suffix, memory, level(full, 0.933, 0.983));
+      }).join("") || "GPU —";
+    }
+    let monitorMixer = true;
+    async function mixerState() {
+      try {
+        const response = await fetch(new URL("mixer-state", location.href), {signal: AbortSignal.timeout(4000)});
+        if (response.status === 404) monitorMixer = false;
+        return response.ok ? await response.json() : null;
+      } catch { return null; }
+    }
+    const initialMixerState = await mixerState();
+    const query = new URL(location.href).searchParams;
+    const auxMountpoint = Number(query.get("mountpoint")) || 0;
+    renderGpuStats(initialMixerState?.gpus);
+    const {choices, selected} = playerOutputs(initialMixerState?.settings, query, monitorMixer);
+    const selectedCodec = selected.codec;
+    codecSelect.replaceChildren(...choices.map(output => new Option(output.label, output.key)));
+    codecSelect.hidden = choices.length < 2;
+    codecSelect.disabled = codecSelect.hidden;
+    document.querySelector('label[for="codec"]').hidden = codecSelect.hidden;
+    let mixerRevision = initialMixerState?.setup_revision;
+    async function watchMixer() {
+      const state = await mixerState();
+      renderGpuStats(state?.gpus);
+      if (state?.settings?.preview_codecs) {
+        if ((!auxMountpoint && JSON.stringify(playerOutputs(state.settings, query, monitorMixer).choices) !== JSON.stringify(choices)) ||
+            (mixerRevision !== undefined && state.setup_revision !== mixerRevision)) {
+          location.reload();
+          return;
+        }
+        mixerRevision = state.setup_revision;
+      }
+      if (monitorMixer) setTimeout(watchMixer, 1000);
+    }
+    if (monitorMixer) setTimeout(watchMixer, 1000);
+    codecSelect.value = selected.key;
+    const MOUNTPOINT_ID = selected.mountpoint;
+    codecSelect.addEventListener("change", () => {
+      const url = new URL(location.href);
+      const output = choices.find(o => o.key === codecSelect.value);
+      url.searchParams.set("codec", output.codec);
+      url.searchParams.set("rendition", output.key);
+      location.assign(url);
+    });
+    // Relative to the page, like its stats and metrics requests, so the player also works under a
+    // reverse proxy prefix such as /preview/ (whose trailing slash this relies on).
+    const serverUrl = new URL("janus", location.href).href;
     const statusEl = document.getElementById("status");
     const preview = document.getElementById("preview");
     const rttValue = document.getElementById("rtt-value");
 
-    let sessionId = null;
+    let janus = null;
     let handleId = null;
     let peer = null;
-    let pollAbort = null;
-    let keepaliveTimer = null;
     let retryTimer = null;
-    let transactionId = 0;
+    let connectionTimer = null;
     let connecting = false;
     let stopping = false;
     let rttTimer = null;
     let rttGeneration = 0;
+    let receiverMonitor = null;
 
     function selectedRttMs(report) {
       // Only the selected connection is relevant; a nominated/checking pair
@@ -148,76 +244,74 @@
       rttGeneration += 1;
       window.clearTimeout(rttTimer);
       rttTimer = null;
+      receiverMonitor?.stop();
+      receiverMonitor = null;
       renderRtt(null);
     }
 
     function startRttMeter(connection) {
       stopRttMeter();
       const generation = rttGeneration;
+      receiverMonitor = createReceiverMonitor(preview);
       async function sample() {
         let ms = null;
+        let report = null;
         try {
           if (connection.connectionState === "connected") {
-            ms = selectedRttMs(await connection.getStats());
+            report = await connection.getStats();
+            ms = selectedRttMs(report);
           }
         } catch (_) { /* Stats failures must not interrupt playback. */ }
         if (generation !== rttGeneration || peer !== connection) return;
         renderRtt(connection.connectionState === "connected" ? ms : null);
+        if (report) receiverMonitor.update(report, ms);
         rttTimer = window.setTimeout(sample, 1000);
       }
       sample();
     }
 
-    function transaction() {
-      transactionId += 1;
-      return `avp-${Date.now()}-${transactionId}`;
-    }
-
     function setStatus(message, isError = false) {
       statusEl.textContent = message;
       statusEl.className = isError ? "error" : "";
+      statusEl.hidden = message === "WebRTC connected" && !isError;
     }
 
-    async function post(path, body) {
-      const response = await fetch(`${serverUrl.replace(/\/$/, "")}${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ transaction: transaction(), ...body }),
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      return response.json();
+    function watchConnection() {
+      window.clearTimeout(connectionTimer);
+      connectionTimer = window.setTimeout(() => recover(new Error("No video received within 12 seconds")), 12000);
     }
 
-    async function createSession() {
-      const response = await post("", { janus: "create" });
-      sessionId = response.data.id;
-      keepaliveTimer = window.setInterval(() => {
-        if (sessionId) {
-          post(`/${sessionId}`, { janus: "keepalive" }).catch(() => {});
-        }
-      }, 25000);
-    }
-
-    async function attachStreamingPlugin() {
-      const response = await post(`/${sessionId}`, {
+    async function attachStreamingPlugin(transport) {
+      const response = await transport.request({
         janus: "attach",
         plugin: "janus.plugin.streaming",
       });
-      handleId = response.data.id;
+      if (janus === transport) handleId = response.data.id;
     }
 
-    async function sendTrickle(candidate) {
-      if (!sessionId || !handleId) return;
+    async function sendTrickle(candidate, transport = janus) {
+      if (!transport || transport !== janus || !handleId) return;
       const body = candidate ? { candidate } : { candidate: { completed: true } };
-      await post(`/${sessionId}/${handleId}`, { janus: "trickle", ...body });
+      await transport.request({ janus: "trickle", handle_id: handleId, ...body });
     }
 
     async function startPeerConnection(offer) {
+      const transport = janus;
       peer = new RTCPeerConnection({ iceServers: [] });
+      const connection = peer;
       peer.ontrack = event => {
+        if (peer !== connection) return;
         const [stream] = event.streams;
+        // Opt-in (?lowlat=1): render frames as soon as they are complete instead of
+        // through the adaptive jitter buffer (9-34 ms measured on a 38 ms RTT path).
+        // Off by default: slow HEVC decoders drop late frames and lose references.
+        if (new URL(location.href).searchParams.get("lowlat") === "1") {
+          try {
+            if ("jitterBufferTarget" in event.receiver) event.receiver.jitterBufferTarget = 0;
+            if ("playoutDelayHint" in event.receiver) event.receiver.playoutDelayHint = 0;
+          } catch (_) {
+          }
+        }
         if (preview.srcObject !== stream) {
           preview.srcObject = stream;
         }
@@ -226,54 +320,51 @@
             setStatus(error.message, true);
           }
         });
+        preview.requestVideoFrameCallback(() => {
+          if (peer === connection) window.clearTimeout(connectionTimer);
+        });
       };
       peer.onicecandidate = event => {
-        sendTrickle(event.candidate).catch(error => setStatus(error.message, true));
+        sendTrickle(event.candidate, transport).catch(error => {
+          if (janus === transport) recover(error);
+        });
       };
       peer.onconnectionstatechange = () => {
+        if (peer !== connection) return;
         setStatus(`WebRTC ${peer.connectionState}`);
         if (peer.connectionState !== "connected") renderRtt(null);
+        if (peer.connectionState === "failed") recover(new Error("WebRTC connection failed"));
+        else if (peer.connectionState === "disconnected") watchConnection();
+        else if (peer.connectionState === "connected" && preview.readyState >= 2)
+          window.clearTimeout(connectionTimer);
       };
       startRttMeter(peer);
-      await peer.setRemoteDescription(offer);
-      const answer = await peer.createAnswer();
-      await peer.setLocalDescription(answer);
-      await post(`/${sessionId}/${handleId}`, {
+      await connection.setRemoteDescription(offer);
+      if (janus !== transport) return;
+      const answer = await connection.createAnswer();
+      if (janus !== transport) return;
+      await connection.setLocalDescription(answer);
+      if (janus !== transport) return;
+      await transport.request({
         janus: "message",
+        handle_id: handleId,
         body: { request: "start" },
-        jsep: peer.localDescription,
+        jsep: connection.localDescription,
       });
     }
 
     async function handleEvent(event) {
+      if (event.plugindata?.data?.error) throw new Error(event.plugindata.data.error);
       if (event.janus === "event" && event.jsep) {
         await startPeerConnection(event.jsep);
       } else if (event.janus === "trickle" && peer) {
-        await peer.addIceCandidate(event.candidate);
+        await peer.addIceCandidate(event.candidate?.completed ? null : event.candidate);
       } else if (event.janus === "webrtcup") {
         setStatus("WebRTC connected");
-      } else if (event.janus === "hangup") {
-        setStatus(event.reason || "WebRTC hung up", true);
+      } else if (event.janus === "hangup" || event.janus === "timeout" || event.janus === "detached") {
+        throw new Error(event.reason || `Janus ${event.janus}`);
       } else if (event.janus === "error") {
         throw new Error(event.error?.reason || "Janus error");
-      }
-    }
-
-    async function pollEvents() {
-      pollAbort = new AbortController();
-      while (!stopping && sessionId) {
-        const rid = Date.now();
-        const url = `${serverUrl.replace(/\/$/, "")}/${sessionId}?rid=${rid}&maxev=1`;
-        const response = await fetch(url, { signal: pollAbort.signal });
-        if (!response.ok) {
-          throw new Error(`Poll HTTP ${response.status}`);
-        }
-        const event = await response.json();
-        if (Array.isArray(event)) {
-          for (const item of event) await handleEvent(item);
-        } else {
-          await handleEvent(event);
-        }
       }
     }
 
@@ -283,56 +374,86 @@
       retryTimer = window.setTimeout(connect, 2000);
     }
 
-    async function recover(error) {
+    function recover(error) {
       if (stopping) return;
       const message = error?.message || "Connection failed";
-      await disconnect(false);
+      disconnect(false);
       scheduleReconnect(message);
     }
 
     async function connect() {
-      if (sessionId || connecting) return;
+      if (janus || connecting) return;
+      const codecs = RTCRtpReceiver.getCapabilities?.("video")?.codecs;
+      if (selectedCodec === "h265" && codecs && !codecs.some(c => c.mimeType.toLowerCase() === "video/h265")) {
+        setStatus("This browser cannot play H.265. Choose H.264 / SDR.", true);
+        return;
+      }
       connecting = true;
       stopping = false;
+      let transport;
       try {
         setStatus("Creating Janus session");
-        await createSession();
-        pollEvents().catch(error => {
-          recover(error);
+        watchConnection();
+        transport = new JanusSocket(serverUrl, {
+          onEvent: event => janus === transport && handleEvent(event),
+          onError: error => { if (janus === transport) recover(error); },
         });
+        janus = transport;
+        await transport.createSession();
+        if (janus !== transport) return;
         setStatus("Attaching streaming plugin");
-        await attachStreamingPlugin();
+        await attachStreamingPlugin(transport);
+        if (janus !== transport) return;
         setStatus("Requesting stream");
-        await post(`/${sessionId}/${handleId}`, {
+        await transport.request({
           janus: "message",
+          handle_id: handleId,
           body: { request: "watch", id: MOUNTPOINT_ID },
         });
       } catch (error) {
-        await recover(error);
+        if (!transport || janus === transport) recover(error);
       } finally {
-        connecting = false;
+        if (!janus || janus === transport) connecting = false;
       }
     }
 
-    async function disconnect(showIdle = true) {
+    function disconnect(showIdle = true) {
       stopping = true;
+      connecting = false;
+      window.clearTimeout(retryTimer);
+      window.clearTimeout(connectionTimer);
       stopRttMeter();
-      if (pollAbort) pollAbort.abort();
-      window.clearInterval(keepaliveTimer);
-      keepaliveTimer = null;
       if (peer) {
         peer.close();
         peer = null;
       }
       preview.srcObject = null;
-      try {
-        if (sessionId) await post(`/${sessionId}`, { janus: "destroy" });
-      } catch (_) {
-      } finally {
-        sessionId = null;
-        handleId = null;
-        if (showIdle) setStatus("Idle");
-      }
+      // Closing the socket is the "destroy": Janus ends the sessions of a closed WebSocket.
+      janus?.close();
+      janus = null;
+      handleId = null;
+      if (showIdle) setStatus("Idle");
+    }
+
+    // A page that embeds the player may clip this footer, so it gets the same numbers about once per
+    // second: only the values the footer shows, parsed from it; "—" becomes null. `search` tells the
+    // embedding page which of its URLs posted, since a frame keeps its window when it navigates.
+    if (window.parent && window.parent !== window) {
+      const shown = id => {
+        const value = Number.parseFloat(document.getElementById(id).textContent);
+        return Number.isFinite(value) ? value : null;
+      };
+      window.setInterval(() => {
+        window.parent.postMessage({
+          type: "avp-preview-stats",
+          search: window.location.search,
+          latency: { ms: shown("cut-latency"), title: document.getElementById("cut-latency").title },
+          rtt_ms: shown("rtt-value"),
+          fps: shown("receiver-fps"),
+          buffer_ms: shown("receiver-buffer"),
+          status: statusEl.textContent,
+        }, "*");
+      }, 1000);
     }
 
     function start() {
@@ -350,8 +471,9 @@
       stopping = true;
       stopRttMeter();
       window.clearTimeout(retryTimer);
-      if (pollAbort) pollAbort.abort();
+      window.clearTimeout(connectionTimer);
       if (peer) peer.close();
+      janus?.close();
     });
   </script>
 </body>

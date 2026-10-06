@@ -129,7 +129,7 @@ export class CutLatencyMeter {
 if (typeof document !== "undefined") {
   const latency = document.getElementById("cut-latency");
   const render = (sample, reason) => {
-    renderCutSample(latency, "avplumber", combinedCutSample(sample), reason);
+    renderCutSample(latency, "Graph", combinedCutSample(sample), reason);
   };
   let meter;
   let stopped = false;
