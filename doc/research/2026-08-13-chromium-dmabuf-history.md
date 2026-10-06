@@ -226,11 +226,11 @@ the shim automatically.
 ### Recompiled Electron: current repository state
 
 The bundled
-[`electron-offscreen-native-handle.patch`](../../demos/dmabuf-browser/chromium/electron-offscreen-native-handle.patch)
+[`electron-offscreen-native-handle.patch`](../../docker-compose/dmabuf/chromium/electron-offscreen-native-handle.patch)
 adds a disabled-by-default Electron feature. When enabled for a
 `useSharedTexture` window, it changes only Electron's OSR consumer from
 `kPreferMappableSharedImage` to `kPreferSharedImageWithNativeHandle`. The
-[`build-electron.sh`](../../demos/dmabuf-browser/chromium/build-electron.sh)
+[`build-electron.sh`](../../docker-compose/dmabuf/chromium/build-electron.sh)
 script intentionally applies that Electron patch while requiring the embedded
 Chromium checkout to remain clean.
 

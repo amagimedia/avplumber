@@ -135,10 +135,10 @@ RUN cd /tmp/ffmpeg \
     && ldconfig \
     && rm -rf /tmp/ffmpeg
 
-# The mixer's GPU paths: CUDA filters (incl. the patched pad_cuda and
-# transition_cuda dip), NVENC H.264/HEVC, NVDEC, and DRM for DMA-BUF.
+# Required mixer filters: color/storage conversion and transitions.
+# Scene, wipe and key composition use AVP nodes.
 RUN ffmpeg="/usr/local/bin/ffmpeg -hide_banner" \
-    && for f in scale_cuda pad_cuda overlay_many_cuda; do $ffmpeg -filters | grep -q " $f " || exit 1; done \
+    && for f in scale_cuda tonemap_cuda; do $ffmpeg -filters | grep -q " $f " || exit 1; done \
     && for e in h264_nvenc hevc_nvenc; do $ffmpeg -encoders | grep -q " $e " || exit 1; done \
     && $ffmpeg -decoders | grep -q ' h264_cuvid ' \
     && $ffmpeg -hwaccels | grep -qx cuda \
@@ -277,8 +277,7 @@ RUN ldconfig \
     && pip3 install --no-cache-dir -r /build/demos/mixer/requirements.txt \
     && ls /build/_avplumber*.so >/dev/null \
     && ! ldd /build/_avplumber*.so /usr/local/bin/ffmpeg | grep 'not found' \
-    && PYTHONPATH=/build python3 -c 'import _avplumber' \
-    && /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda '
+    && PYTHONPATH=/build python3 -c 'import _avplumber'
 
 ENV AVPLUMBER_REVISION=${AVPLUMBER_REVISION}
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video

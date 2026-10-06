@@ -1,412 +1,51 @@
 # Live mixer demo
 
-<table>
-<tr>
-<td width="74%" valign="top"><img src="docs/webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and take buttons — Cut, Fade, one per wipe clip, the Direct toggle and the fade length."></td>
-<td width="26%" valign="top"><img src="docs/program-16box.png" alt="The 1080x1920 program: a sixteen-box grid, two columns of eight, each cell a different source — live browser pages down the left, video clips down the right."></td>
-</tr>
-</table>
+Mix video and browser sources on a CUDA canvas, with Preview/Program,
+Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 
-Mix independent video and browser sources on one GPU canvas.
-A JSON recipe chooses their proportions, the scene count and frame rate.
-The control page places scene buttons beside the live program.
-
-[**Watch it run** (30 s)](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-webui-demo.mp4) ·
-[Demo page](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
-[Configuration reference](docs/config.md) ·
-[Processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer)
-
-The recorded 16-source example on a Tesla T4 costs **17–18% GPU** with the canvas at 30 fps and
-sends **2.86 Mbit/s** from a 2 700 kbit/s WebRTC rendition, with five media
-wipes held decoded in GPU memory.
+[Watch the demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
+[HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
+[Configuration](docs/config.md) · [Run manually](docs/guide.md)
 
 ## Run
 
-Use a Linux NVIDIA host with hardware decode, NVENC and `/dev/dri` browser
-capture support. Follow the [Docker/NVIDIA setup](../README.md#nvidia-host-setup),
-including the recursive submodule checkout. Run from the repository root:
+Use a Linux NVIDIA host with NVDEC/NVENC, Docker Compose, NVIDIA Container
+Toolkit and DRM/EGL/GBM for browser capture. Start from a recursive checkout;
+see [host setup](../README.md#nvidia-host-setup).
 
 ```sh
 docker compose -f demos/mixer/compose.yaml up --build
 ```
 
-The mixer image builds on Fedora 44 with CUDA 13.4 and needs host driver R615 or
-newer; the container runtime refuses an older host at start (`unsatisfied
-condition: cuda>=13.4`). On such a host select the Ubuntu 22.04 / CUDA 11.7 image
-instead, with the same variable on every later `up --build`:
-
-```sh
-MIXER_DOCKERFILE=Dockerfile docker compose -f demos/mixer/compose.yaml up --build
-```
-
-Both are described in the [guide's Docker section](docs/guide.md#docker).
-
-For the measured L4 CUarray build, use the [portable L4 preset](deploy/l4/README.md).
-It selects the pinned FFmpeg 9 patch series, keeps generated HEVC inputs in fixed
-CUarray pools across Setup changes, and packages the player, Janus, browser and proxy.
-
-Open **<http://127.0.0.1:7681/setup/>**, choose orientation, FPS, mode, unique
-sources and scenes, then click **Apply setup**. The instance generates its assets and
-starts the mixer. No JSON editing or downloads are required.
-**8-bit** uses an SDR NV12 canvas with H.264 or H.265 output. **10-bit HDR** offers
-**4:2:2** (P210, default) or **4:2:0** (P010), with a separate SDR output and H.265
-Main10 HDR output; 8-bit 4:2:2 is not offered. Unique
-sources start at the maximum of the mode and frame rate and follow it when either
-or the keys change, unless a lower total is typed: that one stays, within the
-maximum. The sources are always the Balanced mix of that total, shown read-only per
-type: NVDEC, browser and raw uploads in about equal shares, half of each 4:2:0 path
-HLG on a 10-bit canvas, and at most **four** HDR 4:2:2 inputs; a type at its cap
-leaves the rest to the others.
-
-The same page changes an existing instance: it prepares missing assets, restarts
-the mixer, then refreshes the control page and player. Output pauses during the
-restart. Readiness requires encoded program and AUX packets plus running source
-normalization; a live process alone is insufficient. Startup failures are reported
-before native cleanup, and the service attempts to restore the previous show.
-Preparation reports how many assets are ready and reuses cached files on later
-changes. Mount the writable media directory as Compose does; a separate file
-mount for `mixer.demo.json` prevents Setup from atomically replacing the show.
-
-**Restarts.** A stop signals all input groups together. The web UI process stops
-its mixer cleanly on `docker compose stop` or
-`restart` (90 s grace), which releases browser frames instead of forcing a
-browser-worker restart. If the mixer exits on its own (a crash, or a node panic
-that shuts the graph down), the setup page shows the exit and restarts the same
-show after 2, 5, 15, then 60 s; a run of 5 minutes resets that sequence, and
-**Apply setup** restarts at once. Aux bus layouts and slot assignments are saved as they
-change, so a restart shows the same buses. The container log times every phase
-(`Stopping mixer`, `Assets ready`, `Browser workers recovered`, `Graph built`,
-`Inputs ready`, `Mixer ready: … in N s`).
-
-Open **<http://127.0.0.1:7681>** for controls and HDR playback. Choose **SDR**
-in the player if your browser cannot decode HEVC. The standalone player remains
-at <http://127.0.0.1:8080>. **Wall** in the page's header, <http://127.0.0.1:7681/wall>,
-plays every output side by side: each program rendition, the clean feed and every aux bus.
-
-The player also shows host GPU/NVDEC usage and used/total VRAM from `nvidia-smi`,
-sampled once per second. Usage turns orange at 95% and red at 99%; VRAM turns
-orange at 93.3% and red at 98.3% of the total (14 and 14.75 GiB on a 15 GiB T4). These totals include
-other GPU applications.
-
-The mixer header's **POWER** meter reads GPU board watts and the enforced power limit from
-the same sample; the limit is read from the driver, never assumed from the card model.
-Hover or focus it for sources per GPU watt, total encoded megapixels per second,
-encoded megapixels per joule, and USD per input source per hour.
-NVENC throughput sums each session's driver-reported FPS and resolution;
-these are measured, rounded driver averages. Multiple GPUs use their combined draw and
-throughput; missing readings stay unknown. Source counts include keys.
-
-The compact header stays on one row. **VRAM** shows sources per used GiB and free memory;
-**CPU** shows the mixer's occupied logical cores and sources per core; **ENC** shows NVENC
-session count and total FPS. **LAT** shows cut p95 over up to 100 observed successful cuts,
-the sample count, cumulative compositor deadline misses, and cumulative AUX output drops.
-Cut samples are deduplicated and reset with the mixer; they measure command receipt to
-encoded output, not browser display latency. The main LAT value remains the median of
-the probe's last three successful cuts. The output selector scrolls through every AUX;
-Home/End jump to the first/last entry.
-
-To show cost, pass `webui.py --compute-price <path>` or set `MIXER_COMPUTE_PRICE` to a JSON
-file accessible inside the container, for example `/media/compute-price.json`:
-
-```json
-{
-  "hourly_usd": 1.205773326,
-  "label": "Google Cloud g2-standard-16, europe-west4, VM + L4, on demand",
-  "as_of": "2026-10-03",
-  "source_url": "https://cloud.google.com/products/compute/pricing/accelerator-optimized"
-}
-```
-
-This public rate was verified against Google's regional table and USD Cloud Billing Catalog:
-16 vCPUs × $0.026263860 + 64 GiB × $0.003076895 + one L4 × $0.588630286 per hour.
-The GPU is already included in the total. At 192 inputs this is $0.00628/source/hour,
-excluding storage, network, taxes and discounts. Use the running VM's region, not the
-CLI's default region. Deployment supplies the rate and check date at startup; refresh this
-file and restart the UI when prices or the machine change. The UI does not query billing
-or require cloud credentials, and an unconfigured price remains unavailable.
-
-The setup limits unique sources, downstream-key pages included, to what the 16 GiB
-NVIDIA T4 test host carries: **110 at 25 and 30 fps, 82 at 50 and 75 at 60 fps** on
-an SDR canvas and fewer on a 10-bit one, within per-type caps for NVDEC decodes,
-browser windows and raw uploads, and at most **192 scenes on T4 or 256 on L4**;
-[Source limits by mode and frame rate](docs/cookbook/source-limits.html) has every
-mode in one table, and the [capacity measurements](docs/capacity.md) the tested mixes.
-These numbers are the `tesla_t4` profile in `instance_profiles.py`, which Compose selects
-with `--instance-type` (`MIXER_INSTANCE_TYPE`, default `tesla_t4`); another machine needs
-its own measured profile there, not scaled T4 numbers.
-
-The **Extra aux** count under **Outputs** adds that many monitor outputs after the show's own
-aux buses, as many as the profile's [NVENC budget](docs/capacity.md#nvenc-and-extra-aux-outputs)
-leaves beside the other encodes, within 30 total AUX buses. A change to FPS, HDR or presets that
-lowers that maximum automatically lowers the count and shows the adjustment before Apply;
-the server applies the same limit. The L4's overall ceiling is 30 encoded outputs, programs and the
-reserved clean feed included (`nvenc.max_outputs`). A mode's `nvenc_max_outputs` table can lower
-that ceiling at particular rates; faster presets cannot bypass it. SDR is limited to 26 outputs
-at 25/30 fps and 22 at 50/60 fps. The full 256-scene SDR25 sweep saturated NVENC at
-30 outputs; the repeated 26-output sweep completed without missed deadlines or drops.
-The capacity report also retains the first 26-output run's single AUX drop. SDR and HLG v210 sources share
-the profile's 4:2:2 upload limit. Each AUX has
-up to five random layouts of 4 to 16 sources, the same for the same sources, and its RTP port
-pair after the highest in use (5016, 5020, … beside buses on 5008 and 5012). Its Janus
-Streaming mountpoint, whose ID is that port, is created through `webui.py --janus-api` (Compose
-passes the bundled Janus) before the mixer starts, and removed once a smaller setup is on air;
-without the flag the setup offers none. The mountpoints are not permanent: after a Janus
-restart, **Apply setup** creates them again.
-
-An adopted explicit show can carry the recipe's `setup` metadata in `mixer.demo.json`.
-Its `extra_aux` count identifies the trailing managed buses; the preceding instance outputs
-remain fixed. Without that metadata all existing buses remain fixed.
-
-A profile can reserve more encoder margin for a canvas and rate with
-`mode_limits["10:422"]["nvenc_budget_pct"] = {60: 70}`; other rates use the normal budget.
-The initial L4 30-second, six-cut probes held 88 sources with 13 extra AUX in HDR
-4:2:0 and 12 in HDR 4:2:2; 15 extra AUX missed deadlines in both modes. Full-scene
-sweeps exercise more demanding layouts and can lower the admitted output count.
-The [L4 capacity results](docs/capacity.md#nvidia-l4-nvidia_l4) distinguish those
-probes, complete scene sweeps and startup failures. Setup applies both modeled
-encoder budgets and measured output ceilings without changing presets. The final HDR
-4:2:0 / 60 fps full-scene sweep at 18 outputs recorded one missed deadline and zero
-output drops; it did not meet the zero-miss gate.
-
-**Outputs** lists every encoded output: the SDR program, the HEVC HLG program on a 10-bit
-canvas, the clean feed while it is on (counted even while off), each of the instance's own aux
-buses, and one row shared by all extra aux outputs. SDR outputs independently select H.264 or
-H.265; the HDR program uses HEVC Main10. Each has its NVENC preset, p1 (fastest), p3
-or p5 (best quality), and its CBR bitrate, 0.25–20 Mbit/s. **Defaults** (`nvenc.defaults` in the
-profile) sets the programs and the clean feed to p3 at 6 Mbit/s, 8 for HLG, and every aux bus,
-own or extra, to p1 at 4 Mbit/s. Each row shows its share of NVENC, which follows the preset and
-codec and frame rate, not the bitrate ([measured costs](docs/capacity.md#nvenc-and-extra-aux-outputs)); the
-bar below shows the total against the budget and how many more extra outputs fit. Encodes above
-the budget on their own cannot be applied; the page names the output to lower. The saved
-settings keep one `{"codec", "preset", "bitrate_kbps"}` per output id in `encodes` (`sdr`, `hdr`,
-`sdr_clean`, an own bus's id, `extra`). Older settings without `codec` retain H.264 SDR and
-HEVC HDR. Applying a codec change restarts the mixer and updates its Janus mountpoints;
-HEVC playback requires browser support. Settings saved with the former single program bitrate
-give it to the SDR program and its clean copy and scale the HLG program's as before.
-
-Settings persist in `media/demo.json`; later starts restore them and reuse
-`media/assets/` and `media/media_wipes/`. The HTTP server stays running while its
-mixer child restarts, without access to the Docker socket. The generic setup
-includes generated clips and two moving alpha wipes, with no media downloads.
-Custom files and explicit scene geometry remain advanced recipe options below.
-
-On a remote host, prefix the Compose command with `JANUS_HOST_IP=<host>` and
-open `http://<host>:7681`. Allow TCP 7681/8080 and UDP 20000–20100. For large
-grids, apply the [Janus socket-buffer settings](../../docker-compose/README.md#rtp-burst-headroom)
-before starting the stack. Stop it with
-`docker compose -f demos/mixer/compose.yaml down`; the media cache stays on disk.
-
-## Choose a recipe
-
-Start with generic media, then optionally choose a mixed-source preset:
-
-| Preset | Source proportions |
-| --- | --- |
-| [`demo.example.json`](demo.example.json) | Generated SDR/HLG 420/422 sources only, plus generated wipes. No media downloads. |
-| [`demo.equal.json`](demo.equal.json) | Equal weights for generated SDR 420, HLG 420, HLG 422, SDR 422 and browser sources. |
-
-Copy a preset to the media directory, then edit it; no registration or Python changes are needed:
-
-```sh
-mkdir -p media
-cp demos/mixer/demo.equal.json media/demo.json
-```
-
-| Field | Examples |
-| --- | --- |
-| `source_count` | 8, 16, 32, 42, 64, 96 independent input chains |
-| `scene_count` | 16, 32, 64 scene definitions |
-| `canvas.fps` | 25, 30, 50, 60 |
-| `inputs[].weight` | Relative source proportions; zero disables an entry |
-| `layouts` | Relative scene proportions; enable `grid_32` or `grid_64` for larger grids |
-
-Apply edits with `docker compose -f demos/mixer/compose.yaml restart mixer`.
-The mixer prepares missing assets and prints the allocated source counts before
-starting. Edit **`media/demo.json`**; `media/mixer.demo.json` is generated and
-overwritten on startup. Every generated source has its own clip, its ID burned in.
-
-`demo.equal.json` uses steady bars behind transparent overlays. For a run
-without browsers, copy `demo.example.json` instead; it uses synthetic sources
-only. See the [recipe reference](docs/recipe.md) for custom proportions, asset
-URLs and preparation without Compose.
-
-## Faster cuts and latency
-
-Compose already prewarms cuts across the generated scenes. For a standalone
-run with fixed, filter-free scenes, append:
-
-```sh
---prewarm-cut-scene '*' --cut-latency-encoder janus_encoder
-```
-
-Prewarm retains recent decoded source frames for direct cuts, sharing bounded
-queues across scene definitions without rendering every hidden scene. It is
-off by default; repeat `--prewarm-cut-scene SCENE` to select only some scenes.
-The cost is extra queue handling and potentially more retained GPU surfaces.
-
-The demo uses three-slot graph queues; requesting four would round up to seven.
-These queues are separate from the mixer's playout deadline (two frames at 25/30
-fps, three at 50/60) and the decoder's reference buffers. Scene definitions share
-source frames, so adding scenes does not create more decoders. For large source
-counts, use media encoded at the intended input resolution and frame rate: pacing
-a 60 fps file to 30 fps after decoding still decodes all 60 frames per second.
-
-The preview can show **Graph latency** beside **WebRTC RTT**, outside the
-video. The AVP value is the median of the last up to three measured CUTs, from
-command receipt to the first matching encoded frame—not capture-to-browser
-latency. See [measurement setup and prewarm limits](../../doc/mixer_cut_latency.md)
-for the WebUI connection and deployment-local `metrics.json` configuration.
-
-## Control it
-
-The web page puts scene controls on the left and the portrait WebRTC player on
-the right. Drag the divider to resize the panes; the split persists in your
-browser. The player loads from port 8080 on the same host and defaults to
-H.265/HDR; open the control page with `?codec=h264` for SDR. If you change
-`JANUS_PREVIEW_PORT`, pass that port as `?preview_port=8084` on the control page;
-behind a reverse proxy, point the page at a path of its own origin with
-`--preview-base` ([below](#behind-a-reverse-proxy)).
-The standalone preview includes the latency and RTT readouts. Every viewer the
-control page opens, program and multiviews, plays with the same receiver
-playout delay: the browser's adaptive jitter buffer by default, or, with
-`?lowlat=1` on the control page, the player's `?lowlat=1` for all of them, the
-buffer pinned to its minimum (`jitterBufferTarget` and `playoutDelayHint` 0)
-so a cut shows in the program and in the multiview's PVW tile at the same
-instant instead of each stream settling on its own delay. The pin stays opt-in,
-as on the player: it gains 4–5 ms on a clean link and removes the cushion on a
-link that loses packets, and a software HEVC decoder drops late frames while
-the program viewport defaults to H.265 wherever the browser plays it; try it
-with `?codec=h264` first.
-
-Two surfaces speak the same protocol and can run at once. Cut is the default
-transition; explicit show settings and operator choices can select Fade or Wipe.
-
-```sh
-# browser: scene tiles, a button per wipe clip, Cut / Fade / Direct
-python3 demos/mixer/webui.py --host 127.0.0.1 --port 7777 --http-port 7681
-
-# terminal
-python3 -m venv .venv-tui && .venv-tui/bin/python -m pip install -r demos/mixer/requirements.txt
-.venv-tui/bin/python demos/mixer/tui.py --host 127.0.0.1 --port 7777
-```
-
-| Control | Result |
-| --- | --- |
-| A scene tile | Loads Preview; in Direct mode, takes it to Program |
-| Cut / `c` | Immediate take |
-| Fade / `f` | Mix over the chosen duration, or dip through a colour picked beside the fade curve |
-| A wipe button / `w` | Play that transparent clip over the change |
-| Direct / `d` (`t` in the TUI) | Picks go straight to Program |
-| `1`–`9` | Pick one of the first nine scenes |
-
-A new take interrupts a running transition from the current picture. Decoded wipe
-clips are held in GPU memory: the cache budget is 640 MiB by default (the generic
-setup's two wipes take about 0.5 GB) and the web UI's WIPES meter shows its fill.
-`--wipe-cache-mb 0` decodes each take instead. The recipe generates a diagonal
-sweep and sliding panels with moving colour bands at the selected FPS. No
-external wipe files are needed. Custom clips must preserve alpha (for example
-QTRLE/ARGB or ProRes 4444) and cover the canvas at their midpoint to hide the
-scene switch.
-
-## Behind a reverse proxy
-
-The control page on port 7681 and the player on port 8080 are two origins, so a
-proxy that protects both with HTTP basic auth asks for the password twice. Serve
-them from one origin instead: the page at `/` and the preview server under
-`/preview/` with the prefix stripped, and tell the page where the player is:
-
-```nginx
-auth_basic "mixer";
-auth_basic_user_file <htpasswd-file>;
-location /         { proxy_pass http://127.0.0.1:7681; }
-location /preview/ { proxy_pass http://127.0.0.1:8080/; }   # the trailing slash strips the prefix
-```
-
-```sh
-python3 demos/mixer/webui.py --preview-base /preview/      # Compose: MIXER_PREVIEW_BASE=/preview/
-```
-
-Every player the page opens (the program in each codec, the clean output and
-the multiviewers, and the "open in the player" links) then loads from
-`/preview/`, and the player reaches Janus and posts its receiver stats under
-that path (`/preview/janus`, `/preview/receiver-stats`), so one realm covers
-everything. Rewriting the page in the proxy (`sub_filter`) is not needed, and
-forwarding `/janus` or `/receiver-stats` at the root is no longer required. The
-base must end with a slash, which `--preview-base` adds; a URL on another host
-is accepted too, and `?preview_port=` still replaces the port.
-
-## Browser pages as sources
-
-Recipe entries with `kind: "browser"` open their own Chromium windows (Electron 44 /
-Chromium 152) whose DMA-BUFs are imported zero-copy into CUDA. Pages and
-files share every layout and transition; a page that stops painting holds its
-last frame. The included alpha page needs no external website; like a real
-graphic it rests most of the time and animates a third of it.
-
-The stack allows 40 browser windows across five processes, eight per process.
-Set `MIXER_BROWSER_CAPACITY` when starting Compose to change the service capacity.
-The generic setup page caps browser inputs at 40 (`tesla_t4` profile), downstream-key
-pages included. This is browser capacity, not the recipe's total source count. Lower-level
-browser-only setup remains in the [DMA-BUF demo](../dmabuf-browser/README.md).
-
-## Describe a show in one file
-
-`--config mixer.json` replaces `--input` and the built-in layouts with a
-document of sources, scenes, wipes, control defaults and encoded outputs — no
-2/4/8/16-box layout lives in code. Every field is documented in
-**[docs/config.md](docs/config.md)**; [`config.example.json`](config.example.json)
-is a worked example.
-
-The example uses placeholder locations. Supply your own source IDs, URLs, media
-paths and scenes in a deployment configuration kept outside the public checkout.
-The running show's source list is not a mixer default.
-
-```sh
-docker run ... avplumber-mixer:local --config /media/mixer.json --janus-output
-```
-
-`make_config.py` writes the demo's own layouts out in that form:
-
-```sh
-python3 demos/mixer/make_config.py --wipe /media/wipe.mov \
-  cam1=/media/camera-1.mp4 page=https://example.org/page@1920x1080 > mixer.json
-```
-
-## Test sources
-
-Sixteen generated clips with visible frame IDs (needs NumPy and FFmpeg):
-
-```sh
-python3 demos/mixer/tests/frame_codes.py media --sources 16 --width 1920 --height 1080 --fps 60 --seconds 30
-```
-
-Eight colorful SDR patterns (bars, mandelbrot, life, ...) as NVENC clips:
-
-```sh
-python3 demos/mixer/sdr_patterns.py media/assets/patterns --fps 60 --seconds 20
-```
-
-## Under the hood
-
-Janus output limits forced keyframes to one per 150 ms by default (9 frames at
-60 fps). Override with `--keyframe-min-interval-ms 200`; `0` disables the limit.
-The option also applies to Janus renditions loaded with `--config`. Cuts and
-ordinary frames are not delayed: pending cut/RTCP requests coalesce until the
-next eligible frame. Periodic keyframes share the same limit.
-
-<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer"><img src="https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-graph-grouped.png" alt="Grouped mixer graph: inputs, two compositor slots, transitions, media wipe and output. Click for the full ungrouped graph." width="640"></a>
-
-Two compositor slots draw every scene; a transition filter blends them and the
-wipe is one more layer in the same kernel, so nothing round-trips through the
-CPU. Browser frames are converted from RGB to the NV12, P010 or P210 canvas inside the
-draw pass. The program is composited once and each rendition re-times and rescales
-it, so a second output costs an encode, not another composite.
-
-Limits: 192 sources per show (191 with an aux bus that shows the program), no
-runtime source changes. Recipe grids support up to 64 boxes; the legacy
-`--input` layouts support up to 16; see
-[docs/config.md](docs/config.md#known-limitations).
-
-Output files, Janus settings, layouts and tests: [docs/guide.md](docs/guide.md).
-Measured samples and conditions: [runtime-load-1080p.json](docs/runtime-load-1080p.json),
-[latency.md](docs/latency.md).
+The default Fedora/CUDA image requires driver R615 or newer. For the older
+Ubuntu/CUDA image, prefix every build/start with `MIXER_DOCKERFILE=Dockerfile`.
+The [L4 preset](deploy/l4/README.md) supplies a separate measured configuration.
+
+Open <http://127.0.0.1:7681/setup/>, choose sources, canvas and outputs, then
+**Apply setup**. Controls are at `/`, all outputs at `/wall`, and the standalone
+player at <http://127.0.0.1:8080>. Select SDR if HEVC playback is unavailable.
+
+For a remote host set `JANUS_HOST_IP=<host>`; allow TCP 7681/8080 and UDP
+20000–20100. Stop with `docker compose -f demos/mixer/compose.yaml down`.
+
+Setup saves settings and generated assets in `media/`; applying changes pauses
+output while the mixer restarts. Keep that directory writable and mount it
+whole: Setup atomically replaces the generated show. Capacity comes from the
+selected [instance profile](instance_profiles.py), not a universal source limit.
+
+## Controls
+
+- Scene: select Preview, or take immediately in Direct mode.
+- Cut / Fade / Wipe: take the selected scene; a new take interrupts the old one.
+- Keys: toggle browser overlays on the program; clean outputs omit them.
+- AUX: choose layouts, scene slots or source pages independently of Program.
+
+## Configure and extend
+
+- [Show configuration](docs/config.md) and [example](config.example.json): sources, scenes and outputs.
+- [Recipes](docs/recipe.md): generate test media and scene layouts.
+- [Operator guide](docs/guide.md): CLI, TUI, Docker, proxy and tests.
+- [Capacity](docs/capacity.md) and [latency](docs/latency.md): scoped measurements and reproduction.
+- [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ([source](docs/cookbook/index.html)): implementation and tuning notes.
+- [DMA-BUF integration](../../doc/dmabuf.md): shared browser services, shim and Chromium patches.
+- [Mixer base API](../../doc/mixer.md): reuse `pyplumber.mixer.build_application` in other applications; no demo imports required.

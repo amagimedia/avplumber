@@ -353,3 +353,7 @@ The fixed portrait canvas is 1080x1920. The scene set contains one fullscreen
 scene per input plus paged 2-, 4-, 8-, and 16-box layouts. Manual control is
 available through `demos/mixer/tui.py`; output can be a video-only recording or
 a video-only Janus RTP mountpoint.
+
+Browser overlays use the same application API: declare `kind: "browser"` sources
+and configure `MixerOptions.dmabuf_rest` / `dmabuf_socket_dir`.
+[Shared DMA-BUF services and Chromium notes](dmabuf.md) live outside demos.

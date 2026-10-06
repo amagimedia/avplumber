@@ -62,12 +62,11 @@ including the limits of native Fedora support and minimal runtime packages.
 ## Start a WebRTC preview
 
 Playlist and Replay require Janus; Mixer can also write directly to a file or
-stream. Start the public Janus and preview services using the browser demo's
-Compose file:
+stream. Start the public Janus and preview services using the shared
+DMA-BUF service definitions:
 
 ```sh
-docker compose --env-file demos/dmabuf-browser/.env.example \
-  -f demos/dmabuf-browser/compose.yaml up -d --build janus janus-preview
+docker compose -f docker-compose/dmabuf/compose.yaml up -d --build janus janus-preview
 ```
 
 Open <http://127.0.0.1:8080> after starting a player. The included video-only
@@ -82,16 +81,12 @@ Allow the preview and Janus HTTP ports (8080, 8088) and WebRTC UDP ports
 Stop the preview services with:
 
 ```sh
-docker compose --env-file demos/dmabuf-browser/.env.example \
-  -f demos/dmabuf-browser/compose.yaml down
+docker compose -f docker-compose/dmabuf/compose.yaml down
 ```
 
 ## Other starting points
 
 - [Playlist UI preview](playlist/README.md#preview-without-avplumber-cuda-or-janus):
   try the controls without video or GPU setup.
-- [Browser capture](dmabuf-browser/README.md#run): a complete Docker stack with
-  a bundled animated page, Electron, GPU capture, Janus, and browser preview.
-- [CUDA overlay validation](cuda-overlay/README.md#run): run
-  `./demos/cuda-overlay/run.sh` to build, generate fixtures, and compare results.
-
+- [Browser capture and overlays](../doc/dmabuf.md): shared services and mixer base API;
+  use the [mixer demo](mixer/README.md) to run them.

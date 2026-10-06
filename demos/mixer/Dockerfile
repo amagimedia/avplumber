@@ -82,7 +82,7 @@ RUN cd /tmp/ffmpeg \
     && ldconfig \
     && rm -rf /tmp/ffmpeg
 
-RUN /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda ' \
+RUN for f in scale_cuda tonemap_cuda; do /usr/local/bin/ffmpeg -hide_banner -filters | grep -q " $f " || exit 1; done \
     && /usr/local/bin/ffmpeg -hide_banner -h filter=transition_cuda \
        | awk '$1 == "mode" && $3 ~ /T/ { m = 1 } $1 == "dip" { d = 1 } $1 == "color" && $3 ~ /T/ { c = 1 } \
               END { exit !(m && d && c) }'

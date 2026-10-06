@@ -28,7 +28,8 @@ deps/dma-browser/node_modules/
 deps/dma-browser/dist/
 deps/dma-browser/addons/fdpass/build/
 deps/dma-browser/addons/fdpass/node_modules/
-demos/cuda-overlay/artifacts/
+docker-compose/dmabuf/chromium/artifacts/
+docker-compose/dmabuf/chromium/work/
 join_*_pts.csv
 crop_offsets_debug.log
 neural-demo/*.tgz

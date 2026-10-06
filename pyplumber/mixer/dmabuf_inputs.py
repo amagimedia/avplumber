@@ -1,10 +1,8 @@
-"""Browser pages from the DMA-BUF demo as mixer sources.
+"""Shared browser capture for the mixer application API.
 
-One ``dma-browser`` window is one Unix socket delivering DRM PRIME frames.
-``dmabuf_cuda_input_nodes`` turns it into a CUDA edge on the shared monotonic
-clock, snapped to the 1/fps grid. ``demos/dmabuf-browser/graph/dmabuf_browser_common.py``
-keeps an older variant of this chain for that demo, because the demo's runtime image
-has no ``pyplumber.mixer``. The REST helpers open the windows and wait for their sockets.
+One ``dma-browser`` window supplies DRM PRIME frames over a Unix socket.
+The helpers manage windows and import their frames into CUDA on the mixer clock.
+Applications declare browser sources through ``pyplumber.mixer.build_application``.
 """
 
 from __future__ import annotations

@@ -6,7 +6,7 @@ avplumber is a graph-based real-time processing framework. Graph can be reconfig
 * [🦀 Rust refactor 🚧](https://github.com/amagimedia/avplumber/tree/rust-dev?tab=readme-ov-file#--rust-refactor-in-progress--)
 * High performance [GPU video mixer](demos/mixer/README.md)
 * [VOD player](demos/replay/README.md) with frame-accurate playback control and WebRTC output via Janus. [Rust version](https://github.com/amagimedia/avplumber/blob/rust-dev/demos/replay-rust/README.md) also available
-* [DMA-BUF input from Chromium](demos/dmabuf-browser/README.md)
+* [DMA-BUF input from Chromium](doc/dmabuf.md)
 * [Node+Svelte WebUI](tools/web-ui/README.md) with realtime graph statistics
 
 [All demos](#demos)
@@ -87,12 +87,10 @@ builds, NVIDIA requirements, and a local WebRTC preview.
 
 | Demo | What it demonstrates | Requirements |
 | --- | --- | --- |
-| [Mixer](demos/mixer/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) | Mix video inputs into portrait fullscreen or grid layouts; Preview/Program, Cut, Fade, and transparent media wipes. | NVIDIA decode/encode; patched FFmpeg included in Docker build. |
+| [Mixer](demos/mixer/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) | Mix video and DMA-BUF browser sources with AVP compositors, Preview/Program, transitions, keys and AUX monitors. | NVIDIA decode/encode; patched FFmpeg included in Docker build. |
 | [Playlist](demos/playlist/README.md) | Play, loop, reorder, and edit clips with a terminal UI and generated test media. | NVIDIA + Janus for video; UI-only preview works without a GPU. |
 | [Replay](demos/replay/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4) · [graph](https://amagimedia.github.io/avplumber/demos/replay/docs/replay-graph.png) | Convert a file to seekable replay; seek by frame or time, scrub, change speed, and play in reverse. | NVIDIA + Janus; convert the input first. |
 | [Replay (Rust)](https://github.com/amagimedia/avplumber/blob/rust-dev/demos/replay-rust/README.md) | As above, ported to Rust. | Janus; optional NVIDIA; convert the input first. |
-| [Browser capture](demos/dmabuf-browser/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/) | Capture HTML through DMA-BUF and compose browser sources into a GPU grid with WebRTC preview. | NVIDIA graphics driver + DRM/EGL; Docker stack includes Electron and Janus. |
-| [CUDA overlay validation](demos/cuda-overlay/README.md) · [view demo](https://amagimedia.github.io/avplumber/demos/cuda-overlay/docs/) | Compare up to 16 composited inputs against a CPU reference; inspect images and a pass/fail report. | NVIDIA GPU; Docker generates the fixtures. |
 
 These demos produce video only. For smaller building blocks, see the
 [fixed graph examples](examples/README.md) and

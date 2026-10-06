@@ -1,4 +1,4 @@
-name: ${COMPOSE_PROJECT_NAME:-avplumber-dmabuf-demo}
+name: ${COMPOSE_PROJECT_NAME:-avplumber-dmabuf}
 
 services:
   janus:
@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
       args:
         JANUS_REF: ${JANUS_REF:-v1.4.1}
-    image: avplumber-dmabuf-demo-janus:${JANUS_IMAGE_TAG:-v1.4.1}
+    image: avplumber-dmabuf-janus:${JANUS_IMAGE_TAG:-v1.4.1}
     network_mode: host
     restart: unless-stopped
     privileged: true
@@ -35,7 +35,7 @@ services:
     build:
       context: ../../docker-compose/images/preview
       dockerfile: Dockerfile
-    image: avplumber-dmabuf-demo-janus-preview:${JANUS_PREVIEW_IMAGE_TAG:-latest}
+    image: avplumber-dmabuf-janus-preview:${JANUS_PREVIEW_IMAGE_TAG:-latest}
     network_mode: host
     restart: unless-stopped
     depends_on:
@@ -49,7 +49,7 @@ services:
     build:
       context: .
       dockerfile: wayland/Dockerfile
-    image: avplumber-dmabuf-demo-wayland:${WAYLAND_IMAGE_TAG:-latest}
+    image: avplumber-dmabuf-wayland:${WAYLAND_IMAGE_TAG:-latest}
     restart: unless-stopped
     gpus: all
     runtime: nvidia
@@ -85,7 +85,7 @@ services:
     build:
       context: ../..
       dockerfile: docker-compose/images/dma-browser/Dockerfile
-    image: avplumber-dmabuf-demo-browser:${DMA_BROWSER_IMAGE_TAG:-latest}
+    image: avplumber-dmabuf-browser:${DMA_BROWSER_IMAGE_TAG:-latest}
     restart: unless-stopped
     gpus: all
     runtime: nvidia
@@ -107,7 +107,7 @@ services:
       DMA_BROWSER_REST_PORT: "9009"
       DMA_BROWSER_SOCKET_DIR: /tmp/dma-page
       DMA_BROWSER_AUTO_OPEN_ID: overlay
-      DMA_BROWSER_AUTO_OPEN_URL: ${HTML_OVERLAY_URL:-file:///opt/dma-browser/tests/fixtures/smoke.html}
+      DMA_BROWSER_AUTO_OPEN_URL: ${HTML_OVERLAY_URL:-}
       DMA_BROWSER_AUTO_OPEN_WIDTH: ${HTML_OVERLAY_WIDTH:-1280}
       DMA_BROWSER_AUTO_OPEN_HEIGHT: ${HTML_OVERLAY_HEIGHT:-720}
       DMA_BROWSER_AUTO_OPEN_FPS: ${HTML_OVERLAY_FPS:-60}
@@ -120,11 +120,9 @@ services:
     ports:
       - "${DMA_BROWSER_REST_PORT:-9009}:9009"
 
-  avplumber:
-    build:
-      context: ../..
-      dockerfile: demos/dmabuf-browser/consumer/Dockerfile.cuda
-    image: avplumber-dmabuf-demo-consumer:${DMABUF_CONSUMER_IMAGE_TAG:-latest}
+  cuda-consumer:
+    image: ${AVPLUMBER_IMAGE:-avplumber:local}
+    profiles: [consumer]
     network_mode: host
     restart: unless-stopped
     # The periodic queue dump alone is ~0.9 GB/day on a 40-source mixer; 5 x 100 MB
@@ -149,18 +147,8 @@ services:
         condition: service_healthy
     environment:
       NVIDIA_DRIVER_CAPABILITIES: all
-      SOCKET: /tmp/dma-page/overlay.sock
-      WIDTH: ${HTML_OVERLAY_WIDTH:-1280}
-      HEIGHT: ${HTML_OVERLAY_HEIGHT:-720}
-      FPS: ${HTML_OVERLAY_FPS:-60}
-      OUTPUT_MODE: janus
-      JANUS_HOST: 127.0.0.1
-      JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
-      JANUS_VIDEO_RTCP_PORT: ${JANUS_VIDEO_RTCP_PORT:-5005}
     volumes:
       - dma-browser-sockets:/tmp/dma-page
-      - ./graph:/opt/avplumber/dmabuf-browser-graph:ro,z
-    command: ["python3", "/opt/avplumber/dmabuf-browser-graph/dmabuf_browser_to_janus.py"]
 
 volumes:
   wayland-runtime:
