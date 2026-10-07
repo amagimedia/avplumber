@@ -90,7 +90,7 @@ class Rect:
 
 
 # What a raw source's frames are stored as on the GPU; a decoded file's storage is known only per frame.
-RAW_STORAGE = {"v210": "p210le", "nv12": "nv12", "p010": "p010le"}
+RAW_STORAGE = {"v210": "p210le", "mxl": "p210le", "nv12": "nv12", "p010": "p010le"}
 TRANSFORM_FORMATS = ("nv12", "p010le", "p210le")   # the canvases cuda_transform draws a video source on
 
 
@@ -107,8 +107,8 @@ class SourceTransform(NamedTuple):
 @dataclass(frozen=True)
 class Source:
     id: str
-    kind: str                      # "browser" | "video" | "v210" | "nv12" | "p010"
-    location: str                  # browser URL or media path (v210/nv12/p010 are raw files)
+    kind: str                      # "browser" | "video" | "v210" | "mxl" | "nv12" | "p010"
+    location: str                  # browser/mxl URL or media path (v210/nv12/p010 are raw files)
     width: int = 0
     height: int = 0
     fps: int = 0                   # browser paint rate; 0 = canvas fps
@@ -351,6 +351,7 @@ def _rect(obj: Any, where: str) -> Rect:
 
 
 _SOURCE_KEYS = {"browser": ("url", "width", "height"), "video": ("path",),
+                "mxl": ("url", "width", "height"),
                 **{kind: ("path", "width", "height") for kind in ("v210", "nv12", "p010")}}
 
 

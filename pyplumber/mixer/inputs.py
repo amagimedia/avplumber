@@ -193,6 +193,20 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)
 
 
+def _v210_unpack_graph(width: int, color: Optional[dict]) -> str:
+    """``hwupload_cuda=v210_width=...`` plus an optional ``setparams`` color stamp:
+    packed v210 (file or MXL grain) carries no metadata of its own."""
+    graph = f"hwupload_cuda=v210_width={width}"
+    if color:
+        names = {"color_range": "range", "colorspace": "colorspace",
+                 "color_primaries": "color_primaries", "color_trc": "color_trc",
+                 "chroma_location": "chroma_location"}
+        tags = ":".join(f"{target}={color[source]}" for source, target in names.items() if source in color)
+        if tags:
+            graph += ",setparams=" + tags
+    return graph
+
+
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                      fps: int, fps_den: int = 1, hwaccel: str = "@gpu", loop: bool = False,
                      color: Optional[dict] = None, event_loop: Optional[str] = None) -> str:
@@ -214,17 +228,64 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
     }))
     # Gray wraps the packed bytes; the patched uploader performs v210 unpacking
     # on the GPU and publishes P210 frames at the actual picture width.
-    graph = f"hwupload_cuda=v210_width={width}"
-    if color:
-        names = {"color_range": "range", "colorspace": "colorspace",
-                 "color_primaries": "color_primaries", "color_trc": "color_trc",
-                 "chroma_location": "chroma_location"}
-        tags = ":".join(f"{target}={color[source]}" for source, target in names.items() if source in color)
-        if tags:
-            graph += ",setparams=" + tags
     avp.addNode(api.FilterVideo({
         "name": f"unpack_{tag}", "src": decoded, "dst": f"input_{tag}_cuda",
-        "hwaccel": hwaccel, "graph": graph, "threads": 1,
+        "hwaccel": hwaccel, "graph": _v210_unpack_graph(width, color), "threads": 1,
         "group": group, **_raw_file_restart(loop),
+    }))
+    return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)
+
+
+# MXL grains stay valid only until the writer laps that ring slot (zero-copy mode holds no
+# refcount on them), so a zero-copy reader's packet queue must never let one wait behind another.
+MXL_ZERO_COPY_PACKET_CAPACITY = 1
+
+
+def build_mxl_input(avp, api, tag: str, url: str, *, width: int, height: int, group: str,
+                    fps: int, fps_den: int = 1, hwaccel: str = "@gpu",
+                    color: Optional[dict] = None, zero_copy: bool = True,
+                    event_loop: Optional[str] = None) -> str:
+    """MXL shared-memory flow -> GPU v210 unpack (P210, 10-bit 4:2:2) -> paced output edge.
+
+    ``input(format=mxl) -> demux -> dec_video(reinterpreted raw) ->
+    filter(hwupload_cuda=v210_width=...) -> realtime(set_pts) -> force_fps``.
+    MXL is a live, wall-clock-indexed transport with no seek/loop (plain
+    ``input``, not ``input_rec``) and reports a real ``v210`` codec at the
+    actual picture size, so the decoder's packet payload is reinterpreted as
+    raw bytes at the v210 row stride before the same GPU unpack
+    ``build_v210_input`` uses on a packed file. Grains carry no color
+    metadata either, so the contract is supplied and stamped here. See
+    ``demos/mxl/mxl_demo.py``'s ``_build_gpu_unpack`` for the pattern this
+    mirrors.
+    """
+    packets = f"input_{tag}_packets"
+    avp.addNode(api.Input({
+        "name": f"input_{tag}", "url": url, "format": "mxl", "dst": packets,
+        "group": group, "auto_restart": "group", "timeout": -1,
+        "options": {
+            "blocking": "1", "grain_index_init": "head", "on_too_late": "reset",
+            "reset_on_drop": "1", "zero_copy": "1" if zero_copy else "0",
+        },
+    }))
+    vpkt = f"input_{tag}_vpkt"
+    if zero_copy:
+        # Zero-copy packets point straight into the MXL ring buffer with no refcount
+        # held on the grain, valid only until the writer laps that slot: the demuxed
+        # video-packet edge feeding the decoder must never let one wait behind another.
+        avp.edges.planCapacity(vpkt, MXL_ZERO_COPY_PACKET_CAPACITY)
+    avp.addNode(api.Demux({
+        "name": f"demux_{tag}", "src": packets, "routing": {"v:0": vpkt},
+        "group": group, "auto_restart": "off",
+    }))
+    decoded = f"input_{tag}_decoded"
+    avp.addNode(api.DecVideo({
+        "name": f"decode_{tag}", "src": vpkt, "dst": decoded, "codec": "rawvideo",
+        "reinterpret_width": v210_row_stride(width), "reinterpret_pixel_format": "gray",
+        "group": group, "auto_restart": "off",
+    }))
+    avp.addNode(api.FilterVideo({
+        "name": f"unpack_{tag}", "src": decoded, "dst": f"input_{tag}_cuda",
+        "hwaccel": hwaccel, "graph": _v210_unpack_graph(width, color), "threads": 1,
+        "group": group, "auto_restart": "off",
     }))
     return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)

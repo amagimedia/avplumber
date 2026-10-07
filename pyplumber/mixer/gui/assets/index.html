@@ -799,7 +799,7 @@ function renderCounts() {
   // DSK keys are browser sources; the header lists them apart from the browser sources in scenes.
   const keys = new Set((s.dsk_keys || []).map((k) => k.source)).size, hdr = s.hdr_video || 0;
   const kinds = [[c.video - hdr, hdr ? "NVDEC SDR" : "NVDEC"], [hdr, "NVDEC HDR"], [c.browser - keys, "browser"], [c.nv12, "raw 4:2:0"], [c.p010, "raw 10-bit 4:2:0"],
-                 [c.v210, "raw 4:2:2"], [keys, "keys"]].filter(([n]) => n > 0);
+                 [c.v210, "raw 4:2:2"], [c.mxl, "mxl"], [keys, "keys"]].filter(([n]) => n > 0);
   const parts = [[s.source_count ?? "—", " sources"], [scenes.length, " scenes"], ...kinds.map(([n, what]) => ["", `${n} ${what}`])];
   if (s.canvas) parts.push(["", formatText(s.canvas)]);
   if (!changed($("counts"), parts)) return;
@@ -1223,7 +1223,7 @@ function renderPager(v, aux) {
   if (v.pg.textContent !== page) v.pg.textContent = page;   // a live region: rewriting it would re-announce
   v.pg.title = `Sources ${aux.first}–${aux.first + cellsOf(aux, "source").length - 1} of ${aux.total}`;
 }
-const KIND_TAGS = {video: "dec", browser: "web", nv12: "raw", p010: "raw", v210: "raw"};
+const KIND_TAGS = {video: "dec", browser: "web", nv12: "raw", p010: "raw", v210: "raw", mxl: "mxl"};
 // Labels and tally boxes are HTML on top of the video, placed in the canvas pixels the mixer reports.
 function renderOverlay(v, aux, [cw, ch], note) {
   const items = [], status = state?.status || {};

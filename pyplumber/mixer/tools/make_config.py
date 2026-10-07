@@ -7,6 +7,8 @@
 Each positional argument is ``id=path`` for a clip or ``id=url@WxH`` for a
 browser page. A ``:sdr``, ``:hlg`` or ``:pq`` suffix declares the clip's color
 (``id=/media/assets/clip.mp4:hlg``); raw v210 takes its size too (``id=/media/assets/bars.v210@1920x1080:hlg``).
+A live MXL flow takes an ``mxl://`` URL, its size and a required color the same way
+(``id=mxl:///dev/shm/mxl?id=<uuid>@1920x1080:hlg``).
 ``--color hlg`` (or ``pq``) with ``--working-format p210le`` makes an HDR show:
 the program rendition becomes HEVC Main10 and ``--sdr-port`` adds a tone-mapped
 H.264 rendition, so one show feeds an HDR and an SDR mountpoint at once.
@@ -42,9 +44,15 @@ def scene_documents(source_ids, width, height):
 def source_spec(arg: str) -> dict:
     sid, _, rest = arg.partition("=")
     if not sid or not rest:
-        raise SystemExit(f"expected id=path[:color] or id=url@WxH, got {arg!r}")
+        raise SystemExit(f"expected id=path[:color], id=url@WxH, or id=mxl://...@WxH:color, got {arg!r}")
     if "://" in rest and "@" in rest.rsplit("/", 1)[-1]:
         url, size = rest.rsplit("@", 1)
+        if url.startswith("mxl://"):
+            if size.rsplit(":", 1)[-1] not in COLORS:
+                raise SystemExit(f"mxl flows need a :sdr/:hlg/:pq color, got {arg!r}")
+            size, color = size.rsplit(":", 1)
+            w, h = (int(v) for v in size.lower().split("x"))
+            return {"id": sid, "kind": "mxl", "url": url, "width": w, "height": h, "color": color}
         w, h = (int(v) for v in size.lower().split("x"))
         return {"id": sid, "kind": "browser", "url": url, "width": w, "height": h, "color": "sdr"}
     color = None

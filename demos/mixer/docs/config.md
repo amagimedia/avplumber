@@ -56,19 +56,20 @@ One source ID opens one decoder or browser window; scenes and aliases reuse it. 
 | field | applies to | meaning |
 | --- | --- | --- |
 | `id` | both | referenced from scenes; no `#` |
-| `kind` | all | `"video"`, `"browser"`, `"nv12"` (raw SDR 8-bit 4:2:0), `"p010"` (raw 10-bit 4:2:0), or `"v210"` (headerless packed 10-bit 4:2:2, e.g. generated HDR test content) |
+| `kind` | all | `"video"`, `"browser"`, `"nv12"` (raw SDR 8-bit 4:2:0), `"p010"` (raw 10-bit 4:2:0), `"v210"` (headerless packed 10-bit 4:2:2, e.g. generated HDR test content), or `"mxl"` (live SMPTE ST 2110-style flow on the [MXL](https://github.com/dmf-mxl/mxl) shared-memory transport, also packed v210) |
 | `path` | video, v210, nv12, p010 | file or stream |
-| `width`, `height` | v210, nv12, p010 | required: raw bytes carry no header; NV12/P010 dimensions must be positive and even |
-| `color` | browser, v210, nv12, p010 | required color contract (`sdr`, `hlg`, `pq`); browser and NV12 sources must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
+| `url` | mxl | `mxl://<domain-path>?id=<flow-uuid>`, e.g. `mxl:///dev/shm/mxl?id=...` (see [`demos/mxl/README.md`](../../mxl/README.md)) |
+| `width`, `height` | v210, mxl, nv12, p010 | required: raw bytes carry no header; NV12/P010 dimensions must be positive and even |
+| `color` | browser, v210, mxl, nv12, p010 | required color contract (`sdr`, `hlg`, `pq`); browser and NV12 sources must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
 | `url`, `width`, `height` | browser | page and the window it is rendered in (all three required) |
 | `fps` | browser | paint rate; defaults to the canvas rate |
 | `hold_last_frame` | browser | default `true`: while a failed or crashed page reloads, repeat its last frame. `false` shows Chromium's empty error page (transparent or black) instead |
 | `width`, `height` | video | optional; probed with ffprobe at load when absent |
-| `loop` | both | default `true` |
+| `loop` | video, browser, v210, nv12, p010 | default `true`; an `mxl` source is live and always runs until the flow stops or the mixer restarts its chain |
 | `decode_storage` | video | default `cuda`; experimental `cuarray` requires the patched upstream FFmpeg build and compatible array consumers, and selects zero-copy NVDEC without CPU fallback |
 | `extra_hw_frames` | CUarray video | default `3`: fixed application headroom beyond codec and FFmpeg working surfaces; size it for the graph's retained-frame demand |
-| `transform` | video/v210/nv12/p010 | optional geometry applied once before the source filter, color and fan-out: `{"width", "height", "fit", "crop", "sw_format"}`. The frame, or its `crop` `[x, y, w, h]`, is scaled onto a canvas of that even size by `cuda_transform`; `fit` is `contain` (default, black bars) or `stretch`. `sw_format` (`nv12`, `p010le`, `p210le`) is the source's own storage: raw kinds supply it, a `video` source must state it. A frame that already has the size and storage is passed on undrawn; one of lower depth is promoted, one of higher depth is an error |
-| `filter` | video/v210/nv12/p010 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
+| `transform` | video/v210/mxl/nv12/p010 | optional geometry applied once before the source filter, color and fan-out: `{"width", "height", "fit", "crop", "sw_format"}`. The frame, or its `crop` `[x, y, w, h]`, is scaled onto a canvas of that even size by `cuda_transform`; `fit` is `contain` (default, black bars) or `stretch`. `sw_format` (`nv12`, `p010le`, `p210le`) is the source's own storage: raw kinds supply it, a `video` source must state it. A frame that already has the size and storage is passed on undrawn; one of lower depth is promoted, one of higher depth is an error |
+| `filter` | video/v210/mxl/nv12/p010 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
 | `filter_output_format` | custom filters | required CUDA YUV output storage, e.g. `p010le` or `p210le` |
 
 ## wipes

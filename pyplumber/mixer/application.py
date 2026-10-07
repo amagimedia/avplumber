@@ -24,7 +24,7 @@ from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, renditio
 from .config import FEEDS
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .dmabuf_inputs import dmabuf_cuda_input_nodes, open_windows, refresh_windows, wait_for_sockets
-from .inputs import build_input, build_v210_input, build_raw420_input
+from .inputs import build_input, build_v210_input, build_raw420_input, build_mxl_input
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options)
 from ..transform import transform_output, transform_params
@@ -309,6 +309,7 @@ def load_avp_api():
         FilterVideo,
         ForceFPS,
         ForceKeyFrame,
+        Input,
         InputRec,
         IpcDmabufSource,
         MixerCompositor,
@@ -337,6 +338,7 @@ def load_avp_api():
         FilterVideo=FilterVideo,
         ForceFPS=ForceFPS,
         ForceKeyFrame=ForceKeyFrame,
+        Input=Input,
         InputRec=InputRec,
         IpcDmabufSource=IpcDmabufSource,
         MixerCompositor=MixerCompositor,
@@ -607,6 +609,14 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             edge = build_v210_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
+                color=source.color.tags, event_loop=_pacing_loop(index))
+        elif source.kind == "mxl":
+            # A live shared-memory flow, not a file: no loop, and the color
+            # contract is required the same way a packed v210 file needs one.
+            assert source.color is not None
+            edge = build_mxl_input(
+                avp, api, str(index), source.location, width=source.width, height=source.height,
+                group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL,
                 color=source.color.tags, event_loop=_pacing_loop(index))
         elif source.kind in ("nv12", "p010"):
             edge = build_raw420_input(

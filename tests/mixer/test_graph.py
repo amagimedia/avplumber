@@ -160,7 +160,7 @@ def fake_api():
         "AssumeVideoFormat": "assume_video_format", "Bsf": "bsf", "ClipCache": "clip_cache",
         "CudaTransform": "cuda_transform", "DecVideo": "dec_video", "Demux": "demux",
         "DrmPrimeToCuda": "drm_prime_to_cuda", "EncVideo": "enc_video", "FilterVideo": "filter_video",
-        "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input_rec",
+        "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "Input": "input", "InputRec": "input_rec",
         "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer",
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
         "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
@@ -1009,7 +1009,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         "source_count": 2, "browser_ring_size": 6,
         "preview_codecs": [],
         "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
-        "source_counts": {"video": 1, "browser": 1, "v210": 0, "nv12": 0, "p010": 0}, "hdr_video": 0,
+        "source_counts": {"video": 1, "browser": 1, "mxl": 0, "v210": 0, "nv12": 0, "p010": 0}, "hdr_video": 0,
         "direct": False, "fade_seconds": 0.8, "fade_curve": "linear", "fade_color": None, "transition": "cut",
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
@@ -1387,6 +1387,34 @@ def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path):
     assert nodes["scale_sdr"]["graph"].startswith(Color("hlg").setparams + ",tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12")
 
 
+def test_mxl_source_opens_a_live_flow_and_reinterprets_v210_grains(tmp_path):
+    """An MXL flow is live (no loop/seek: ``input``, not ``input_rec``) and reports a real
+    v210 codec at the picture size, so decode reinterprets the packet payload as raw bytes
+    before the same GPU unpack a packed v210 file uses."""
+    from pyplumber.mixer.inputs import v210_row_stride
+    doc = {**CONFIG, "wipes": [], "initial_scene": "full",
+           "sources": [{"id": "cam0", "kind": "mxl", "url": "mxl:///dev/shm/mxl?id=11111111-1111-1111-1111-111111111111",
+                        "width": 1920, "height": 1080, "color": "sdr"}, CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [
+               {"source": "cam0", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}},
+               {"source": "cam", "dst": {"x": 0, "y": 0, "w": 960, "h": 540}}]}],
+           "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "p210le"}}
+    path = tmp_path / "mxl.json"
+    path.write_text(json.dumps(doc))
+    FakeMixer.instances.clear()
+    app = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    sources = dict(FakeMixer.instances[-1].sources)
+    assert nodes["input_0"]["type"] == "input"
+    assert nodes["input_0"]["url"] == doc["sources"][0]["url"] and nodes["input_0"]["format"] == "mxl"
+    assert "loop" not in nodes["input_0"] and nodes["input_0"]["options"]["zero_copy"] == "1"
+    assert ("input_0_vpkt", 1) in app.avp.edges.plans
+    assert nodes["decode_0"]["codec"] == "rawvideo" and nodes["decode_0"]["reinterpret_pixel_format"] == "gray"
+    assert nodes["decode_0"]["reinterpret_width"] == v210_row_stride(1920)
+    assert "hwupload_cuda=v210_width=1920" in nodes["unpack_0"]["graph"]
+    assert sources["cam0"]["pixel_format"] == "p210le" and sources["cam0"]["color"] == Color("sdr")
+
+
 def test_cli_inputs_declare_browser_rgb_and_optional_file_color(tmp_path):
     (tmp_path / "page_00.sock").touch()
     FakeMixer.instances.clear()
@@ -1484,7 +1512,8 @@ def test_generated_hdr_show_has_hdr_and_sdr_renditions():
     import contextlib
     args = ["--canvas", "1920x1080", "--fps", "60", "--color", "hlg", "--working-format", "p210le",
             "--program-port", "5006", "--sdr-port", "5004", "movie=/m/hdr.mp4", "clip=/m/hlg.mp4:hlg", "pat=/f/p.v210@1920x1080:hlg",
-            "bunny=/m/bunny.mp4:sdr", "page=https://example.org/a@1920x1080"]
+            "bunny=/m/bunny.mp4:sdr", "page=https://example.org/a@1920x1080",
+            "cam0=mxl:///dev/shm/mxl?id=11111111-1111-1111-1111-111111111111@1920x1080:hlg"]
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         make_config.main(args)
@@ -1498,10 +1527,13 @@ def test_generated_hdr_show_has_hdr_and_sdr_renditions():
     assert (sdr["codec"], sdr["port"], sdr["tonemap"], sdr["tonemap_param"]) == ("h264_nvenc", 5004, "mobius", 0.9)
     kinds = {s["id"]: (s["kind"], s.get("color")) for s in doc["sources"]}
     assert kinds == {"movie": ("video", None), "clip": ("video", "hlg"), "pat": ("v210", "hlg"),
-                     "bunny": ("video", "sdr"), "page": ("browser", "sdr")}
+                     "bunny": ("video", "sdr"), "page": ("browser", "sdr"), "cam0": ("mxl", "hlg")}
     assert next(s for s in doc["sources"] if s["id"] == "pat")["width"] == 1920
+    assert next(s for s in doc["sources"] if s["id"] == "cam0")["width"] == 1920
     with pytest.raises(SystemExit, match="v210 clips need"):
         make_config.source_spec("raw=/f/p.v210@1920x1080")
+    with pytest.raises(SystemExit, match="mxl flows need"):
+        make_config.source_spec("cam0=mxl:///dev/shm/mxl?id=1@1920x1080")
     with pytest.raises(SystemExit, match="--sdr-port needs"):
         make_config.main(["--sdr-port", "5004", "clip=/m/c.mp4"])
     with pytest.raises(SystemExit, match="distinct RTP/RTCP port pairs"):
