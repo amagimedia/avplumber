@@ -368,7 +368,29 @@ fn playback_status(core: &Instance, rest: &str) -> Result<String, String> {
 fn hwaccel_init(core: &Instance, rest: &str) -> Result<String, String> {
     let params: Value = serde_json::from_str(rest.trim())
         .map_err(|e| format!("hwaccel.init expects a JSON object: {e}"))?;
-    core.services().hwaccels.init(&params)
+    let message = core.services().hwaccels.init(&params)?;
+    #[cfg(feature = "cpp_cuda")]
+    {
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("hwaccel.init needs a \"name\"")?;
+        let device = core.services().hwaccels.get(name)?;
+        let name_c = std::ffi::CString::new(name).map_err(|_| "the device name contains a NUL")?;
+        crate::bind_cpp_instance(core);
+        unsafe {
+            crate::avp_cpp_cuda_init();
+            if crate::avp_cpp_hwaccel_put(
+                core as *const Instance as *mut std::ffi::c_void,
+                name_c.as_ptr(),
+                device.as_ptr() as *mut std::ffi::c_void,
+            ) != 0
+            {
+                return Err(format!("failed to publish hwaccel `{name}` to the C++ nodes"));
+            }
+        }
+    }
+    Ok(message)
 }
 
 #[cfg(not(feature = "ffmpeg"))]

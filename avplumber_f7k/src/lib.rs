@@ -117,7 +117,30 @@ impl Drop for SharedEntry {
 
 #[cfg(feature = "cpp_nodes")]
 unsafe extern "C" {
-    fn avp_cpp_rescale_linked() -> i32;
+    fn avp_cpp_link_rescale_video() -> i32;
+    fn avp_cpp_bind_instance(wrapper: *mut c_void, inner: *mut c_void);
+    fn avp_cpp_instance_drop(inner: *mut c_void);
+}
+
+#[cfg(feature = "cpp_cuda")]
+unsafe extern "C" {
+    fn avp_cpp_link_cuda_transform() -> i32;
+    pub(crate) fn avp_cpp_cuda_init();
+    pub(crate) fn avp_cpp_hwaccel_put(
+        wrapper: *mut c_void,
+        name: *const std::ffi::c_char,
+        device: *mut c_void,
+    ) -> i32;
+}
+
+#[cfg(feature = "cpp_nodes")]
+pub(crate) fn bind_cpp_instance(inst: &Instance) {
+    unsafe {
+        avp_cpp_bind_instance(
+            inst as *const Instance as *mut c_void,
+            Arc::as_ptr(&inst.inner) as *mut c_void,
+        );
+    }
 }
 
 impl Instance {
@@ -145,10 +168,15 @@ impl Instance {
         };
         #[cfg(feature = "cpp_nodes")]
         {
-            // Pulls the rescale_video object file in, so its registrar is linked.
-            // SAFETY: the symbol is defined by that translation unit and returns 1.
-            let linked = unsafe { avp_cpp_rescale_linked() };
+            // Pulls each C++ node object file in, so its registrar is linked.
+            // SAFETY: the symbols are defined by those translation units and return 1.
+            let linked = unsafe { avp_cpp_link_rescale_video() };
             assert_eq!(linked, 1, "rescale_video C++ node was not linked");
+            #[cfg(feature = "cpp_cuda")]
+            {
+                let linked = unsafe { avp_cpp_link_cuda_transform() };
+                assert_eq!(linked, 1, "cuda_transform C++ node was not linked");
+            }
         }
         // SAFETY: `inst` is the unique owner for this call. Replay only locks
         // the factory registry. The pointer is not stored; factories read
@@ -229,6 +257,10 @@ impl Drop for InstanceInner {
             .collect::<Vec<_>>();
         for group in groups {
             group.stop();
+        }
+        #[cfg(feature = "cpp_nodes")]
+        unsafe {
+            avp_cpp_instance_drop(self as *mut InstanceInner as *mut c_void);
         }
     }
 }

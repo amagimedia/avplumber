@@ -9,6 +9,9 @@
 # A custom tree is used only when a source directory is given, as the first
 # non-option argument or as FFMPEG_SRC. There is no default source path.
 # Install prefix defaults to target/ffmpeg. Override with FFMPEG_PREFIX.
+# If the checkout is a known patch base (deps/ffmpeg/8 and deps/ffmpeg/9),
+# the matching series in deps/ffmpeg is applied before configure. A tree that
+# is already patched, or not one of those bases, is left unchanged.
 # Remaining arguments are passed to ./configure:
 #
 #   scripts/build-ffmpeg.sh /path/to/ffmpeg --enable-gpl --enable-libx264
@@ -27,6 +30,28 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+# git am the series only when HEAD is still the unpatched base. apply.sh
+# exits 2 for every other commit, including a tree the series was already
+# applied to.
+apply_ffmpeg_patches() {
+    local src=$1
+    local apply=$ROOT/deps/ffmpeg/apply.sh
+    local head
+    [[ -f $apply ]] || return 0
+    head=$(git -C "$src" rev-parse HEAD 2>/dev/null || true)
+    [[ -n $head ]] || return 0
+    local upstream9 n80 n81
+    upstream9=$(sed -n 's/^upstream_commit=//p' "$ROOT/deps/ffmpeg/9/bases.env")
+    n80=$(sed -n 's/^n80_commit=//p' "$ROOT/deps/ffmpeg/8/bases.env")
+    n81=$(sed -n 's/^n81_commit=//p' "$ROOT/deps/ffmpeg/8/bases.env")
+    if [[ $head != "$upstream9" && $head != "$n80" && $head != "$n81" ]]; then
+        echo "FFmpeg $head is not a patch base; leaving the tree unchanged" >&2
+        return 0
+    fi
+    echo "Applying deps/ffmpeg patches to $head"
+    "$apply" "$src"
+}
 PREFIX=${FFMPEG_PREFIX:-$ROOT/target/ffmpeg}
 BUILD=${FFMPEG_BUILD_DIR:-$ROOT/target/ffmpeg-build}
 
@@ -83,6 +108,8 @@ SRC=$(cd "$SRC" && pwd)
 mkdir -p "$BUILD" "$PREFIX"
 PREFIX=$(cd "$PREFIX" && pwd)
 BUILD=$(cd "$BUILD" && pwd)
+
+apply_ffmpeg_patches "$SRC"
 
 config_id=$(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo no-git)
 config_id+=" ${configure_args[*]-}"

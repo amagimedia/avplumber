@@ -35,6 +35,10 @@ pub extern "C" fn avp_register_node_factory(
         .register_built(&type_name, move |inst_name, params, ctx| {
             let params_c = std::ffi::CString::new(params).map_err(|e| e.to_string())?;
             let core = ctx.instance as *const crate::Instance as *mut AvpCore;
+            // The C++ shared-object map is keyed by this Instance, which is
+            // also where hwaccel.init registered the device.
+            #[cfg(feature = "cpp_nodes")]
+            crate::bind_cpp_instance(ctx.instance);
             let existing = unsafe { &*core }
                 .node_handles
                 .lock()

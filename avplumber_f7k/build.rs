@@ -84,20 +84,25 @@ fn compile_cpp_nodes() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    build
         .cpp(true)
         .std("c++17")
         .pic(true)
         .file(tu.join("nodes/rescale_video.cpp"))
         .file(manifest_dir.join("cpp/stubs.cpp"))
+        .file(manifest_dir.join("cpp/instance_bridge.cpp"))
         .include(manifest_dir.join("cpp/include"))
         .include(manifest_dir.join("include"))
         .include(&avcpp_inc)
         .include(workspace.join("deps/include"))
         .include(workspace.join("src"))
         .include(&ffmpeg_include)
-        .flag("-Wno-unused-function")
-        .compile("avplumber_cpp_nodes");
+        .flag("-Wno-unused-function");
+    if std::env::var_os("CARGO_FEATURE_CPP_CUDA").is_some() {
+        compile_cuda_transform(&mut build, &manifest_dir, &workspace, &tu, &ffmpeg_include);
+    }
+    build.compile("avplumber_cpp_nodes");
 
     println!(
         "cargo:rustc-link-search=native={}",
@@ -121,6 +126,135 @@ fn compile_cpp_nodes() {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
     println!("cargo:rustc-link-lib=pthread");
+    if std::env::var_os("CARGO_FEATURE_CPP_CUDA").is_some() {
+        println!("cargo:rustc-link-lib=dl");
+    }
+}
+
+fn compile_cuda_transform(
+    build: &mut cc::Build,
+    manifest_dir: &Path,
+    workspace: &Path,
+    tu: &Path,
+    ffmpeg_include: &Path,
+) {
+    let nvcc = std::env::var_os("NVCC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/local/cuda/bin/nvcc"));
+    if !nvcc.is_file() {
+        panic!(
+            "cpp_cuda needs nvcc to build the compositor kernels (set NVCC). looked at {}",
+            nvcc.display()
+        );
+    }
+    let hw = workspace.join("src/nodes/hwaccel");
+    let header = workspace.join("objs/src/nodes/hwaccel/cuda_rect_scale.ptx.h");
+    embed_rect_kernel(&nvcc, &hw.join("cuda_rect_scale.cu"), &header);
+    println!("cargo:rerun-if-changed={}", hw.join("cuda_rect_scale.cu").display());
+    println!("cargo:rerun-if-changed={}", hw.join("cuda_rect_table.h").display());
+    println!("cargo:rerun-if-changed={}", hw.join("graphic_color.h").display());
+
+    // cuda_transform.cpp's quoted includes are relative to the file as named.
+    // The symlink lives outside src/nodes, so ../node_common.hpp is the shim.
+    let mirrored = tu.join("nodes/hwaccel");
+    force_symlink(
+        &mirrored.join("cuda_transform.cpp"),
+        &hw.join("cuda_transform.cpp"),
+    );
+    for name in [
+        "cuda_rect_frame.hpp",
+        "cuda_rect_draw.hpp",
+        "cuda_rect_texture.h",
+        "cuda_rect_table.h",
+        "graphic_color.h",
+    ] {
+        force_symlink(&mirrored.join(name), &hw.join(name));
+    }
+    force_symlink(
+        &tu.join("nodes/node_common.hpp"),
+        &manifest_dir.join("cpp/include/node_common.hpp"),
+    );
+    force_symlink(&tu.join("hwaccel.hpp"), &workspace.join("src/hwaccel.hpp"));
+    force_symlink(&tu.join("avbuffer.hpp"), &workspace.join("src/avbuffer.hpp"));
+    let prim = workspace.join("src/mixer/primitives");
+    for name in [
+        "compositor_color.hpp",
+        "compositor_layers.hpp",
+        "compositor_geometry.hpp",
+        "pixel_layout.hpp",
+    ] {
+        force_symlink(&tu.join("mixer/primitives").join(name), &prim.join(name));
+    }
+
+    for path in [
+        hw.join("cuda_transform.cpp"),
+        hw.join("cuda_rect_draw.cpp"),
+        workspace.join("deps/cuda_loader/cuda_drvapi_dynlink.c"),
+        manifest_dir.join("cpp/cuda_loader_init.cpp"),
+    ] {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+
+    build
+        .file(mirrored.join("cuda_transform.cpp"))
+        .file(hw.join("cuda_rect_draw.cpp"))
+        .file(manifest_dir.join("cpp/cuda_loader_init.cpp"))
+        .include(ffmpeg_include)
+        .define("HAVE_CUDA_RECT_SCALE", "1");
+
+    cc::Build::new()
+        .pic(true)
+        .file(workspace.join("deps/cuda_loader/cuda_drvapi_dynlink.c"))
+        .include(workspace.join("deps/cuda_loader"))
+        .include(workspace.join("deps/include"))
+        .compile("avplumber_cuda_loader");
+}
+
+fn embed_rect_kernel(nvcc: &Path, cu: &Path, header: &Path) {
+    let fatbin = header.with_extension("fatbin");
+    if let Some(parent) = fatbin.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    // sm_75 is the T4. The PTX fallback is the newest of these, matching the
+    // Makefile's CUDA_FATBIN_ARCHS / CUDA_FATBIN_PTX_ARCH.
+    let status = Command::new(nvcc)
+        .args([
+            "-fatbin",
+            "-gencode",
+            "arch=compute_75,code=sm_75",
+            "-gencode",
+            "arch=compute_80,code=sm_80",
+            "-gencode",
+            "arch=compute_86,code=sm_86",
+            "-gencode",
+            "arch=compute_89,code=sm_89",
+            "-gencode",
+            "arch=compute_89,code=compute_89",
+            "-o",
+        ])
+        .arg(&fatbin)
+        .arg(cu)
+        .status()
+        .unwrap_or_else(|err| panic!("failed to run {}: {err}", nvcc.display()));
+    if !status.success() {
+        panic!("nvcc failed to build {}", cu.display());
+    }
+    let bytes = std::fs::read(&fatbin).unwrap_or_else(|err| panic!("read {}: {err}", fatbin.display()));
+    if bytes.is_empty() {
+        panic!("{} is empty", fatbin.display());
+    }
+    let mut text = String::from("const unsigned char avpl_rect_scale_ptx[] = {\n");
+    for (i, byte) in bytes.iter().enumerate() {
+        text.push_str(&format!("0x{byte:02x},"));
+        if i % 16 == 15 {
+            text.push('\n');
+        }
+    }
+    text.push_str(&format!(
+        "\n}};\nconst unsigned int avpl_rect_scale_ptx_len = {};\n",
+        bytes.len()
+    ));
+    std::fs::write(header, text).unwrap_or_else(|err| panic!("write {}: {err}", header.display()));
 }
 
 fn force_symlink(link: &Path, target: &Path) {
