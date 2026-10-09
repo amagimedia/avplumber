@@ -3,9 +3,19 @@
 Mix video and browser sources on a CUDA canvas, with Preview/Program,
 Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 
-[Watch the demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
+[![192-input mixer: Program/Preview and dirty Program with four downstream keys](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo-poster.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
+
+[Watch the 10-second demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
+[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo.mp4) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
 [Configuration](docs/config.md) · [Run manually](docs/guide.md)
+
+Recorded 2026-10-09 from the real two-viewer interface on an NVIDIA L4:
+192 inputs (120 NVDEC, 36 browser scene sources, 32 raw NV12 and four browser
+keys), 256 scenes and 26 encoded outputs at 1920×1080p25 SDR. It shows direct
+cuts with all four keys enabled. Setup counts the 188 scene sources separately
+from the keys. This short recording demonstrates the interface; see
+[capacity measurements](docs/capacity.md) for qualification scope.
 
 ## Run
 

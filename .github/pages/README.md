@@ -6,6 +6,7 @@ screenshots and captured reports there; the code branch links to the
 
 Large recordings and graph images are release assets:
 
+- [Current mixer media](https://github.com/amagimedia/avplumber/releases/tag/mixer-demo-media-2026-10)
 - [Replay media](https://github.com/amagimedia/avplumber/releases/tag/replay-demo-media-2026-09)
 - [DMA-BUF media](https://github.com/amagimedia/avplumber/releases/tag/dmabuf-demo-media-2026-09)
 
@@ -19,3 +20,9 @@ GPU correctness tests, capacity measurements and actual deployment state.
 Keep historical measurements attached to their workload and revision; a code
 review or small smoke test does not refresh a capacity benchmark. Publish
 sanitized textual evidence without private host or storage paths.
+
+The October mixer demo is a 10-second recording of the real main UI, with
+Program/Preview and dirty Program viewers, four keys and direct cuts. Its
+`capture-20261009.json` describes the observed 192-input L4 configuration;
+it does not replace historical capacity or latency measurements. September
+mixer graph images and recordings remain historical release assets.
