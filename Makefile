@@ -147,11 +147,16 @@ NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox_labels.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_segmask.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_trail.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/ml_debug.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_bbox.cu,avpl_draw_bbox_ptx,objs/src/nodes/neural_net/draw/draw_bbox.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o objs/src/nodes/neural_net/draw/draw_bbox_labels.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_segmask.cu,avpl_draw_segmask_ptx,objs/src/nodes/neural_net/draw/draw_segmask.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_draw_keypoints_ptx,objs/src/nodes/neural_net/draw/draw_keypoints.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/ml_debug.cu,avpl_ml_debug_ptx,objs/src/nodes/neural_net/draw/ml_debug.o))
+# The draw kernels share their item structs and device functions: a kernel image is rebuilt when either changes.
+$(foreach kernel,draw_bbox draw_text draw_keypoints draw_trail ml_debug,objs/$(SRCDIR)/nodes/neural_net/draw/$(kernel).ptx): \
+	$(SRCDIR)/nodes/neural_net/draw/draw_batch_shared.hpp $(SRCDIR)/nodes/neural_net/draw/draw_primitives.cuh
 endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVCC),11)

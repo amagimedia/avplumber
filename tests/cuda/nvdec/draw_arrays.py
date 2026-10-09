@@ -10,6 +10,9 @@ every frame of both storages. The downloads are the verification boundary.
 | `mixed` | the same chain | boxes, track ids, velocities and a trail under one key |
 | `boxes3` | three draw_bbox, one key each | overlapping boxes in three colours, a viewport rectangle |
 | `boxes1` | one draw_bbox with the three keys | the same |
+| `chain4` | draw_bbox -> draw_bbox_labels -> draw_keypoints -> draw_trail | boxes, labels, a trail, and keypoints over all of them |
+| `ml4` | one ml_debug with those four as layers | the same |
+| `mlboxes` | one ml_debug with three box layers | the metadata of `boxes3` |
 
 Checked:
 - `undrawn` equals `plain` in pixels and timestamps: the picture a chain is drawn on (the copy of
@@ -18,6 +21,9 @@ Checked:
 - every frame of the drawn cases differs from `plain`, so nothing below compares two empty draws;
 - `boxes3` equals `boxes1`: three nodes drawing on one picture give what one node gives that
   draws the same boxes in the same order on its own copy;
+- `ml4` equals `chain4` and `mlboxes` equals `boxes3`: one ml_debug pass gives the frame the chain
+  of draw nodes gives, where boxes, a blended label background, text, dots and a trail overlap; and
+  it visited fewer than half of the frame's tiles to do so (`node.object.get <node> draw`);
 - every case on CUarray input is a linear CUDA frame, byte-identical to the same case on linear
   decode, with the same timestamps and the metadata still attached;
 - the first node of a chain made every picture (`copied` on linear input, `from_array` on
@@ -52,6 +58,7 @@ for the size of the decoded frame the node saw.
 import argparse
 import gc
 import json
+import math
 from pathlib import Path
 import threading
 import time
@@ -59,13 +66,23 @@ import time
 from compositor_decode import EOF, api, make_avp, pixels, shutdown
 
 KEY = "smoke_detections"
+POSE = "smoke_pose"
 BOX_KEYS = ("smoke_a", "smoke_b", "smoke_c")
 COLORS = {"A": "red", "B": "yellow", "C": "cyan"}
-DRAW = {"draw_bbox": api.DrawBBox, "draw_bbox_labels": api.DrawBBoxLabels, "draw_trail": api.DrawTrail}
+DRAW = {"draw_bbox": api.DrawBBox, "draw_bbox_labels": api.DrawBBoxLabels, "draw_trail": api.DrawTrail,
+        "draw_keypoints": api.DrawKeypoints, "ml_debug": getattr(api, "MlDebug", None)}   # no ml_debug in older builds
 # A chain is a list of (node name, node type, parameters).
 MIXED = [(kind, kind, {"metadata_key": KEY}) for kind in ("draw_bbox", "draw_bbox_labels", "draw_trail")]
 BOXES3 = [(f"draw_{key[-1]}", "draw_bbox", {"metadata_key": key, "label_colors": COLORS}) for key in BOX_KEYS]
 BOXES1 = [("draw_all", "draw_bbox", {"metadata_keys": list(BOX_KEYS), "label_colors": COLORS})]
+DOTS = {"metadata_key": POSE, "radius": 3, "color": "green"}
+CHAIN4 = [("draw_bbox", "draw_bbox", {"metadata_key": KEY}), ("draw_bbox_labels", "draw_bbox_labels", {"metadata_key": KEY}),
+          ("draw_keypoints", "draw_keypoints", DOTS), ("draw_trail", "draw_trail", {"metadata_key": KEY})]
+ML4 = [("ml", "ml_debug", {"layers": [
+    {"kind": "boxes", "metadata_key": KEY}, {"kind": "labels", "metadata_key": KEY},
+    {"kind": "keypoints", **DOTS}, {"kind": "trail", "metadata_key": KEY}]})]
+MLBOXES = [("ml", "ml_debug", {"layers": [
+    {"kind": "boxes", "metadata_key": key, "label_colors": COLORS} for key in BOX_KEYS]})]
 
 
 def detections(index, width, height):
@@ -81,6 +98,28 @@ def detections(index, width, height):
         "trail": [[width // 20 * (point + 1) + step, height // 2 + (height // 10 if point % 2 else -height // 10)]
                   for point in range(12)],
     })}
+
+
+def everything(index, width, height):
+    """The boxes, labels and trail of `detections`, a box thinner than its border, a label that
+    flips under its box at the top edge, and 120 keypoints in a ring that crosses boxes, label
+    backgrounds, the trail and the right and bottom edges of the frame."""
+    payload = json.loads(detections(index, width, height)[KEY])
+    step = height // 64 * (index % 16)
+    payload["detections"] += [
+        {"xyxy": [width // 3, 2, width // 3 + 3, height // 5], "conf": 0.8, "cls": 1, "label": "THIN", "track_id": 7,
+         "velocity": [0.0, 0.0]},
+        {"xyxy": [width // 2 + step, 1, width // 2 + step + width // 6, height // 6], "conf": 0.7, "cls": 2,
+         "label": "TOP", "track_id": 8, "velocity": [-2.25, 3.0]}]
+    centre_x, centre_y, radius = width * 0.72 + step, height * 0.68, height * 0.36
+    ring = []
+    for point in range(120):
+        angle = point * 2 * math.pi / 120
+        ring += [centre_x + radius * math.cos(angle) + 0.37 * (point % 3), centre_y + radius * math.sin(angle),
+                 0.2 + 0.8 * (point % 5 != 0)]
+    return {KEY: json.dumps(payload),
+            POSE: json.dumps({"model_width": width, "model_height": height, "num_keypoints": 120,
+                              "poses": [{"keypoints": ring}]})}
 
 
 def boxes(index, width, height):
@@ -164,7 +203,7 @@ def run(args, name, storage, chain=(), payloads=nothing, counters=True):
         if frame.pts.timestamp != EOF:
             formats.add(("drawn", frame.format.name))
 
-    result, pictures, ended = [], {}, False
+    result, pictures, draws, ended = [], {}, {}, False
     output = frame = None
     try:
         for node in nodes:
@@ -182,6 +221,7 @@ def run(args, name, storage, chain=(), payloads=nothing, counters=True):
                 # Every frame has left the chain and no node has seen the end of the stream.
                 if counters:
                     pictures = {node: dict(avp.node(node).getObject("pictures")) for node, _, _ in chain}
+                    draws = {node: dict(avp.node(node).getObject("draw")) for node, kind, _ in chain if kind == "ml_debug"}
                 release.set()
             frame = output.tryGet(10)
             if frame is None:
@@ -214,7 +254,8 @@ def run(args, name, storage, chain=(), payloads=nothing, counters=True):
         if storage == "cuarray":
             assert len(surfaces) < args.frames, "CUarray surface pool did not reuse any array"
         return {"name": name, "storage": storage, "chain": [node for node, _, _ in chain], "frames": args.frames,
-                "unique_surfaces": len(surfaces), "pictures": pictures, "outputs": result}
+                "unique_surfaces": len(surfaces), "pictures": pictures, "draws": draws,
+                "size": sorted(decoded_sizes)[0], "outputs": result}
     finally:
         release.set()
         frame = output = None
@@ -246,14 +287,35 @@ def check_pictures(case):
 def cases(args, storage, plain, counters):
     runs = {name: run(args, name, storage, chain, payloads, counters)
             for name, chain, payloads in (("undrawn", MIXED, nothing), ("mixed", MIXED, detections),
-                                          ("boxes3", BOXES3, boxes), ("boxes1", BOXES1, boxes))}
+                                          ("boxes3", BOXES3, boxes), ("boxes1", BOXES1, boxes),
+                                          ("chain4", CHAIN4, everything))}
     different = differing(runs["undrawn"]["outputs"], plain["outputs"])
     assert not different, f"{storage}: {len(different)} undrawn frames differ from the decode (PTS {different[:8]})"
-    for name in ("mixed", "boxes3", "boxes1"):
+    for name in ("mixed", "boxes3", "boxes1", "chain4"):
         different = differing(runs[name]["outputs"], plain["outputs"])
         assert len(different) == args.frames, f"{storage} {name}: nothing drawn on {args.frames - len(different)} frames"
     different = differing(runs["boxes3"]["outputs"], runs["boxes1"]["outputs"])
     assert not different, f"{storage}: three draw_bbox differ from one on {len(different)} frames (PTS {different[:8]})"
+    if DRAW["ml_debug"] is None:
+        print(f"SKIP {storage}: this build has no ml_debug node", flush=True)
+    else:
+        runs.update({name: run(args, name, storage, chain, payloads, counters)
+                     for name, chain, payloads in (("ml4", ML4, everything), ("mlboxes", MLBOXES, boxes))})
+        for chain, one in (("chain4", "ml4"), ("boxes3", "mlboxes")):
+            different = differing(runs[one]["outputs"], plain["outputs"])
+            assert len(different) == args.frames, f"{storage} {one}: nothing drawn on {args.frames - len(different)} frames"
+            different = differing(runs[chain]["outputs"], runs[one]["outputs"])
+            assert not different, (f"{storage}: one ml_debug ({one}) differs from the chain of draw nodes ({chain}) "
+                                   f"on {len(different)} frames (PTS {different[:8]})")
+        if counters:
+            width, height = runs["ml4"]["size"]
+            tiles = ((width + 15) // 16) * ((height + 15) // 16)
+            for name in ("ml4", "mlboxes"):
+                draw = runs[name]["draws"]["ml"]
+                assert draw["frames"] == args.frames and 0 < draw["tiles"] < tiles // 2, (name, draw, tiles)
+            print(f"PASS {storage}: one ml_debug pass equals the chain of four draw nodes and three draw_bbox; "
+                  f"last frame {json.dumps({name: runs[name]['draws']['ml'] for name in ('ml4', 'mlboxes')})} "
+                  f"of {tiles} tiles", flush=True)
     if counters:
         extra = {name: check_pictures(case) for name, case in runs.items()}
         print(f"PASS {storage} pictures: one per frame by the first node of every chain; made again below it "
@@ -287,12 +349,15 @@ def main():
         for other in json.loads(args.expect.read_text()):
             if other["storage"] != "cuda":
                 continue
+            if other["name"] != "plain" and other["name"] not in linear:
+                continue      # a case this build does not run under that name
             mine = plain if other["name"] == "plain" else linear[other["name"]]
             different = differing(mine["outputs"], other["outputs"])
             assert not different, \
                 f"{other['name']}: {len(different)} frames differ from {args.expect} (PTS {different[:8]})"
             compared += 1
-        assert compared == len(report), f"{args.expect} has {compared} of the {len(report)} linear cases"
+        # An older build's report has the cases that build could run: every one of them must match.
+        assert compared >= 5, f"{args.expect} has only {compared} linear cases"
         print(f"PASS linear cases equal {args.expect}: {compared} cases of {args.frames} frames", flush=True)
     if not args.linear_only:
         arrays = cases(args, "cuarray", plain, counters=True)
