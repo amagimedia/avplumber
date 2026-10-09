@@ -2,34 +2,12 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 
-// Line segment stored as (x0, y0, x1, y1)
-struct LineSegment {
-    int x0, y0, x1, y1;
-};
+#include "draw_batch_shared.hpp"
+#include "draw_primitives.cuh"
+
+using cuda_overlay::LineSegment;
 
 namespace {
-// Squared distance from point (px, py) to line segment (ax, ay)-(bx, by)
-__device__ __forceinline__ float point_segment_dist_sq(int px, int py,
-                                                        int ax, int ay,
-                                                        int bx, int by) {
-    float dx = (float)(bx - ax);
-    float dy = (float)(by - ay);
-    float len_sq = dx * dx + dy * dy;
-    if (len_sq < 1e-6f) {
-        // Degenerate segment (point)
-        float ex = (float)(px - ax);
-        float ey = (float)(py - ay);
-        return ex * ex + ey * ey;
-    }
-    float t = ((float)(px - ax) * dx + (float)(py - ay) * dy) / len_sq;
-    t = fmaxf(0.0f, fminf(1.0f, t));
-    float proj_x = (float)ax + t * dx;
-    float proj_y = (float)ay + t * dy;
-    float ex = (float)px - proj_x;
-    float ey = (float)py - proj_y;
-    return ex * ex + ey * ey;
-}
-
 __device__ __forceinline__ bool on_trail(int px, int py,
                                           const LineSegment* segments, int num_segments,
                                           float thickness_sq) {

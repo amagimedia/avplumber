@@ -117,6 +117,13 @@ int glyphBaseWidth(GlyphPreset preset);
 int glyphBaseHeight(GlyphPreset preset);
 int glyphAdvance(GlyphPreset preset);
 
+// The frame a draw node is reading metadata for: its size and software pixel format.
+struct FrameGeometry {
+    int width = 0;
+    int height = 0;
+    AVPixelFormat sw_format = AV_PIX_FMT_NV12;
+};
+
 struct YoloParseConfig {
     int frame_width = 0;
     int frame_height = 0;
@@ -352,6 +359,31 @@ protected:
         const auto ops = avp::mixer::resolveDrawOps({&frm}, {avp::mixer::LayerSpec{}},
                                                     frm.width(), frm.height(), AV_PIX_FMT_NV12);
         picture_draw_->draw(cuda_dev_ctx_->stream, ops, out.raw(), frm.raw());
+    }
+
+    /// The geometry of the frame being processed, for the nodes' metadata readers.
+    cuda_overlay::FrameGeometry geometry() const {
+        return {input_params_.width, input_params_.height, input_params_.realPixelFormat().get()};
+    }
+
+    /// Loads the module of `ptx_data` if it is not loaded and gives the kernel `name` of it. For a
+    /// node whose module has another set of kernels than one for luma and one for chroma.
+    bool loadKernel(const unsigned char* ptx_data, unsigned int ptx_len, const char* name, CUfunction& kernel) {
+        if (!cu_ctx_) return false;
+        if (CUDA_OVERLAY_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+        if (!draw_module_) {
+            const std::string ptx_str(ptx_data, ptx_data + ptx_len);
+            if (CUDA_OVERLAY_CHECK_CU(cuModuleLoadDataEx(&draw_module_, (const void*)ptx_str.c_str(), 0, nullptr, nullptr))) {
+                draw_module_ = nullptr;
+                logstream << nodeName() << ": failed to load PTX module";
+                return false;
+            }
+        }
+        if (CUDA_OVERLAY_CHECK_CU(cuModuleGetFunction(&kernel, draw_module_, name))) {
+            logstream << nodeName() << ": failed to get kernel " << name;
+            return false;
+        }
+        return true;
     }
 
     // Subclass must return its node type name for log messages.
