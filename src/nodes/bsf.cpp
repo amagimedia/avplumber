@@ -120,16 +120,32 @@ public:
     virtual void process() {
         ensureFilterReady();
         av::Packet* pktp = this->source_->peek();
-        if (pktp!=nullptr) {
-            //logstream << "in: Rescaling PTS " << pktp->pts() << " to tb " << av::Rational(ctx_->time_base_in);
-            pktp->setTimeBase(ctx_->time_base_in);
-            int ret = av_bsf_send_packet(ctx_, pktp->raw());
-            this->source_->pop();
-            if (ret < 0) {
-                throw Error("Couldn't send packet to BSF: " + std::to_string(ret));
-            }
-            outputPackets();
+        if (pktp == nullptr) {
+            return;
         }
+        if (isEofMarker(*pktp)) {
+            // Leave the marker in the queue: consumeEofIfPresent() hands it to
+            // onEofConsumed(), which flushes the filter and forwards the marker.
+            // Pushing the 1-byte marker through the filter wrote a bogus packet
+            // downstream and, after an empty packet, failed with EINVAL.
+            return;
+        }
+        if (pktp->size() == 0 && pktp->raw()->side_data_elems == 0) {
+            // An encoder's flush can end with an empty packet. libavcodec takes an
+            // empty packet as end of stream and refuses every later packet
+            // ("A non-NULL packet sent after an EOF", EINVAL), which panicked the
+            // node at the end of every bounded input. It carries nothing: drop it.
+            this->source_->pop();
+            return;
+        }
+        //logstream << "in: Rescaling PTS " << pktp->pts() << " to tb " << av::Rational(ctx_->time_base_in);
+        pktp->setTimeBase(ctx_->time_base_in);
+        int ret = av_bsf_send_packet(ctx_, pktp->raw());
+        this->source_->pop();
+        if (ret < 0) {
+            throw Error("Couldn't send packet to BSF: " + av::error2string(ret));
+        }
+        outputPackets();
     }
 
     virtual void flush() {
