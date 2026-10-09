@@ -33,6 +33,15 @@ It has the same parameters as the `input` node and some additional
 -   `preseek` (float, seconds, default 0) - how many seconds to preseek back to increase chance of finding a keyframe, when seek to timestamp (`seek` command) is requested
 -   `team` (string, name of instance-shared object) - if specified, seeks on the `input` nodes may be synchronized inside specified team 
 
+Runtime control: `node.object.set <name> request-eof true` interrupts further
+input reads while keeping the producer alive to drain buffered demux/parser
+packets. It then sends one common packet EOF and finishes (respecting
+`stop_delay`), even if looping or ordinary EOF notification was disabled.
+This is irreversible and intended for a running forward input whose live
+publisher has finished but whose relay keeps the connection open. It preserves
+normal downstream backpressure; the caller must keep consumers running and
+enforce a shutdown deadline. `node.stop` remains an immediate abort.
+
 ### `realtime`
 
 Rate limit output packets/frames to wallclock. This way, DTS (in
