@@ -55,6 +55,8 @@ class DownstreamKeyer:
             "subscriptions": ["", *self.edges], "clock_input": 0,
             "fps": f"{self.mixer.fps_num}/{self.mixer.fps_den}",
             "max_layers": len(layers), "layers": layers, "active_inputs": self._mask(self.on),
+            # The keys whose rectangles the keyer may compose alone, by input; the others take the whole canvas.
+            "bounded_keys": [i + 1 for i, k in enumerate(self.keys) if k.bounded],
             # Program frames carry the scene compositor's per-frame layer metadata;
             # a distinct key keeps it from rearranging the keyer's layers.
             "metadata_key": "dsk_layers_v1",

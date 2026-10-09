@@ -3,6 +3,8 @@
 // drawn both ways must give identical canvases (NV12 and P210, scale/blit, NV12->P210 promotion,
 // opaque RGB and blended RGBA, overlapping z-order, partial off-canvas rects),
 // and checks key fades (composite_planes_opacity) against the full-opacity canvas.
+// Keys drawn over a copy of the program through viewports (CudaRectDraw::drawOver) must equal
+// the same layers drawn over the whole canvas.
 // Then times the batched path on a 1080x1920 sixteen-box grid.
 //   nvcc -std=c++17 -O2 tests/cuda/test_rect_composite.cu -lcuda -o /tmp/test_rect_composite
 #include <algorithm>
@@ -20,6 +22,7 @@
 #include <cuda.h>
 #include "../../src/nodes/hwaccel/cuda_rect_scale.cu"
 #include "../../src/nodes/hwaccel/cuda_rect_sampler.h"
+#include "../../src/nodes/hwaccel/cuda_rect_viewport.h"
 #include "legacy_rect_kernels.cuh"
 
 static void check(cudaError_t r, const char *what) {
@@ -213,12 +216,21 @@ static void fillTable(const Fmt &cf, const std::vector<Layer> &layers, std::vect
     }
 }
 
-static void drawBatched(const Fmt &cf, Frame &canvas, const std::vector<AvpRectLayer> &table, AvpRectLayer *dev_table, int transfer) {
+// `view`, when given, is the part of the canvas the launch composes, as CudaRectDraw::launch
+// hands it to the kernel: plane pointers at its origin, its size, and a table relative to it.
+static void drawBatched(const Fmt &cf, Frame &canvas, const std::vector<AvpRectLayer> &whole, AvpRectLayer *dev_table, int transfer,
+                        const avp::mixer::RectViewport *view = nullptr) {
+    const avp::mixer::RectViewport all{0, 0, canvas.w, canvas.h};
+    const avp::mixer::RectViewport v = view ? *view : all;
+    std::vector<AvpRectLayer> table = whole;
+    if (view) for (auto &e : table) e = avp::mixer::viewportLayer(e, v, cf.sub_x, cf.sub_y);
     if (!table.empty())
         check(cudaMemcpyAsync(dev_table, table.data(), table.size() * sizeof(AvpRectLayer), cudaMemcpyHostToDevice, 0), "table");
     int ox, oy, chroma_w = 0, chroma_h = 0;
-    if (cf.planes > 1) { planeRegion(cf, 0, 0, canvas.w, canvas.h, 1, ox, oy, chroma_w, chroma_h); chroma_w /= 2 * cf.bytes; }
-    const dim3 grid((canvas.w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas.h + 7) / 8, cf.planes), block(32, 8);
+    if (cf.planes > 1) { planeRegion(cf, 0, 0, v.w, v.h, 1, ox, oy, chroma_w, chroma_h); chroma_w /= 2 * cf.bytes; }
+    const dim3 grid((v.w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (v.h + 7) / 8, cf.planes), block(32, 8);
+    unsigned char *const plane0 = canvas.y.dev + size_t(v.y) * canvas.y.pitch + size_t(v.x) * cf.lanes0 * cf.bytes;
+    unsigned char *const plane1 = canvas.uv.dev + size_t(v.y >> cf.sub_y) * canvas.uv.pitch + size_t(v.x >> cf.sub_x) * 2 * cf.bytes;
     // The entry CudaRectDraw::draw picks.
     bool any_rgb = false, any_fade = false;
     for (const auto &e : table) {
@@ -228,8 +240,8 @@ static void drawBatched(const Fmt &cf, Frame &canvas, const std::vector<AvpRectL
     const auto kernel = cf.planes == 1 ? composite_planes_packed4 : any_fade ? composite_planes_opacity
                       : any_rgb ? composite_planes : composite_planes_yuv;
     const int clear0 = cf.planes == 1 ? 0 : clearValue(cf, 0);
-    kernel<<<grid, block, (table.size() + 31) / 32 * sizeof(unsigned int)>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
-        canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
+    kernel<<<grid, block, (table.size() + 31) / 32 * sizeof(unsigned int)>>>(dev_table, (int)table.size(), plane0, canvas.y.pitch, plane1, canvas.uv.pitch,
+        v.w, v.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
         clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
     check(cudaGetLastError(), "composite launch");
 }
@@ -272,6 +284,59 @@ static void scenario(const char *name, const Fmt &cf, int cw, int ch, const std:
     if (cf.planes > 1)
         comparePlanes(ref.uv, out.uv, cw * cf.bytes, cf.bytes, cf.shift, (std::string(name) + " chroma").c_str());
     std::cout << "PASS " << name << " (" << layers.size() << " layers, " << cf.name << " " << cw << "x" << ch << ")\n";
+}
+
+// Keys over the program as the keyer draws them (CudaRectDraw::drawOver): the bottom layer is a
+// frame of the canvas's format and size drawn whole and unscaled, so the canvas starts as a copy
+// of it and only the viewports around the other layers are composed. Every sample must equal
+// the whole-canvas launch: inside a viewport because the kernel does the same work there,
+// outside because bilinear sampling at 1:1 returns the program's sample as stored.
+static void overScenario(const char *name, const Fmt &cf, int cw, int ch, const std::vector<Layer> &layers, int transfer,
+                         AvpRectLayer *dev_table, size_t want_views) {
+    const Frame &program = *layers.at(0).yuv;
+    if (layers[0].kind != AVP_RECT_KIND_YUV || program.fmt != &cf || program.w != cw || program.h != ch ||
+        layers[0].dw != cw || layers[0].dh != ch || layers[0].cw != cw || layers[0].ch != ch)
+        throw std::runtime_error(std::string(name) + ": the bottom layer is not the program drawn whole");
+    std::vector<AvpRectLayer> table;
+    fillTable(cf, layers, table);
+    Frame ref(cf, cw, ch, nullptr), out(cf, cw, ch, nullptr);
+    drawBatched(cf, ref, table, dev_table, transfer);
+    check(cudaDeviceSynchronize(), "sync");
+
+    std::vector<avp::mixer::RectViewport> views;
+    for (size_t i = 1; i < layers.size(); ++i) {
+        const auto view = avp::mixer::alignViewport(layers[i].dx, layers[i].dy, layers[i].dw, layers[i].dh, cw, ch);
+        if (!view.empty()) views.push_back(view);
+    }
+    avp::mixer::mergeViewports(views);
+    if (views.size() != want_views)
+        throw std::runtime_error(std::string(name) + ": " + std::to_string(views.size()) + " viewports, expected " + std::to_string(want_views));
+    long long covered = 0;
+    for (size_t i = 0; i < views.size(); ++i) {
+        const auto &v = views[i];
+        covered += (long long)v.w * v.h;
+        if (v.x % AVP_RECT_PX || v.y % 2 || v.x < 0 || v.y < 0 || v.x + v.w > cw || v.y + v.h > ch)
+            throw std::runtime_error(std::string(name) + ": a viewport is off the canvas or off the store grid");
+        for (size_t j = i + 1; j < views.size(); ++j)
+            if (!(v.x >= views[j].x + views[j].w || views[j].x >= v.x + v.w || v.y >= views[j].y + views[j].h || views[j].y >= v.y + v.h))
+                throw std::runtime_error(std::string(name) + ": two viewports overlap");
+    }
+    if (covered >= (long long)cw * ch) throw std::runtime_error(std::string(name) + ": the viewports cover the canvas; the test is vacuous");
+
+    check(cudaMemcpy2D(out.y.dev, out.y.pitch, program.y.dev, program.y.pitch, cw * cf.bytes, out.y.rows, cudaMemcpyDeviceToDevice), "copy luma");
+    check(cudaMemcpy2D(out.uv.dev, out.uv.pitch, program.uv.dev, program.uv.pitch, cw * cf.bytes, out.uv.rows, cudaMemcpyDeviceToDevice), "copy chroma");
+    for (const auto &view : views) drawBatched(cf, out, table, dev_table, transfer, &view);
+    check(cudaDeviceSynchronize(), "sync");
+    comparePlanes(ref.y, out.y, cw * cf.bytes, cf.bytes, cf.shift, (std::string(name) + " plane0").c_str());
+    comparePlanes(ref.uv, out.uv, cw * cf.bytes, cf.bytes, cf.shift, (std::string(name) + " chroma").c_str());
+    // The keys must have changed the program somewhere, or equality proves nothing about them.
+    const auto keyed = ref.y.download(), plain = program.y.download();
+    size_t changed = 0;
+    for (int r = 0; r < ch; ++r)
+        for (int c = 0; c < cw * cf.bytes; ++c) changed += keyed[size_t(r) * ref.y.pitch + c] != plain[size_t(r) * program.y.pitch + c];
+    if (!changed) throw std::runtime_error(std::string(name) + ": the keys change nothing; the test is vacuous");
+    std::cout << "PASS " << name << " (" << layers.size() - 1 << " keys in " << views.size() << " viewports, "
+              << covered * 100 / ((long long)cw * ch) << " % of " << cf.name << " " << cw << "x" << ch << ")\n";
 }
 
 // Key fades (composite_planes_opacity). Opacity scales only a key's coverage, so each sample of the
@@ -435,6 +500,53 @@ int main() {
         }, 0, dev_table);
     }
 
+    // Keys over the program through viewports, against the whole-canvas launch.
+    {
+        Frame pgm(NV12, 1920, 1080, &rng), pgm_odd(NV12, 1082, 606, &rng), pgm10(P010, 1920, 1080, &rng), pgm422(P210, 1920, 1080, &rng);
+        Rgba lower(1016, 172, &rng), ticker(1920, 80, &rng), bug(152, 152, &rng), clock(304, 152, &rng), band(1920, 360, &rng);
+        Rgba premul(1016, 172, &rng); premul.premultiplied = 1;
+        RgbaTex tlower(lower);
+        const Layer base{AVP_RECT_KIND_YUV, &pgm, nullptr, nullptr, 0, 0, 1920, 1080, 0, 0, 1920, 1080};
+        // The news demo's keys, one at a time and together.
+        const Layer k_lower{AVP_RECT_KIND_RGBA, nullptr, &lower, nullptr, 0, 0, 1016, 172, 200, 764, 1016, 172};
+        const Layer k_ticker{AVP_RECT_KIND_RGBA, nullptr, &ticker, nullptr, 0, 0, 1920, 80, 0, 968, 1920, 80};
+        const Layer k_bug{AVP_RECT_KIND_RGBA, nullptr, &bug, nullptr, 0, 0, 152, 152, 32, 784, 152, 152};
+        const Layer k_clock{AVP_RECT_KIND_RGBA, nullptr, &clock, nullptr, 0, 0, 304, 152, 1584, 32, 304, 152};
+        overScenario("over: lower third", NV12, 1920, 1080, {base, k_lower}, 2, dev_table, 1);
+        overScenario("over: ticker", NV12, 1920, 1080, {base, k_ticker}, 2, dev_table, 1);
+        overScenario("over: four keys, apart", NV12, 1920, 1080, {base, k_lower, k_ticker, k_bug, k_clock}, 2, dev_table, 4);
+        // A template zone: the lower third of the canvas from a zone-size window, and a band at the top.
+        overScenario("over: lower-third zone", NV12, 1920, 1080, {base,
+            {AVP_RECT_KIND_RGBA, nullptr, &band, nullptr, 0, 0, 1920, 360, 0, 720, 1920, 360}}, 2, dev_table, 1);
+        overScenario("over: top band zone", NV12, 1920, 1080, {base,
+            {AVP_RECT_KIND_RGBA, nullptr, &band, nullptr, 0, 0, 1920, 360, 0, 0, 1920, 360}}, 2, dev_table, 1);
+        // Keys that overlap share one viewport and keep their order; one off the store grid, scaled,
+        // premultiplied, texture-backed, faded, and partly off the canvas.
+        overScenario("over: overlapping keys", NV12, 1920, 1080, {base, k_lower,
+            {AVP_RECT_KIND_RGBA, nullptr, &bug, nullptr, 0, 0, 152, 152, 1100, 700, 304, 304},
+            {AVP_RECT_KIND_RGB, nullptr, &clock, nullptr, 0, 0, 304, 152, 1150, 900, 304, 152}}, 2, dev_table, 1);
+        overScenario("over: odd origin, scaled", NV12, 1920, 1080, {base,
+            {AVP_RECT_KIND_RGBA, nullptr, &lower, nullptr, 0, 0, 1016, 172, 202, 766, 610, 104}}, 2, dev_table, 1);
+        overScenario("over: premultiplied", NV12, 1920, 1080, {base,
+            {AVP_RECT_KIND_RGBA, nullptr, &premul, nullptr, 0, 0, 1016, 172, 200, 764, 1016, 172}}, 2, dev_table, 1);
+        overScenario("over: texture key", NV12, 1920, 1080, {base,
+            {AVP_RECT_KIND_RGBA_TEX, nullptr, &lower, &tlower, 0, 0, 1016, 172, 200, 764, 1016, 172}}, 2, dev_table, 1);
+        overScenario("over: faded key", NV12, 1920, 1080, {base,
+            {AVP_RECT_KIND_RGBA, nullptr, &lower, nullptr, 0, 0, 1016, 172, 200, 764, 1016, 172, 0.35f}}, 2, dev_table, 1);
+        overScenario("over: off the right and bottom", NV12, 1920, 1080, {base,
+            {AVP_RECT_KIND_RGBA, nullptr, &lower, nullptr, 0, 0, 1016, 172, 1400, 1000, 1016, 172}}, 2, dev_table, 1);
+        overScenario("over: a video box as a key", NV12, 1920, 1080, {base,
+            {AVP_RECT_KIND_YUV, &a, nullptr, nullptr, 0, 0, 640, 360, 1200, 60, 640, 360}}, 2, dev_table, 1);
+        // A canvas whose width is no multiple of four, and deeper canvases (HLG transfer on 10 bit).
+        overScenario("over: odd canvas", NV12, 1082, 606, {
+            {AVP_RECT_KIND_YUV, &pgm_odd, nullptr, nullptr, 0, 0, 1082, 606, 0, 0, 1082, 606},
+            {AVP_RECT_KIND_RGBA, nullptr, &bug, nullptr, 0, 0, 152, 152, 930, 454, 152, 152}}, 2, dev_table, 1);
+        overScenario("over: p010 hlg", P010, 1920, 1080, {
+            {AVP_RECT_KIND_YUV, &pgm10, nullptr, nullptr, 0, 0, 1920, 1080, 0, 0, 1920, 1080}, k_lower, k_clock}, 0, dev_table, 2);
+        overScenario("over: p210", P210, 1920, 1080, {
+            {AVP_RECT_KIND_YUV, &pgm422, nullptr, nullptr, 0, 0, 1920, 1080, 0, 0, 1920, 1080}, k_ticker, k_bug}, 2, dev_table, 2);
+    }
+
     // Timing: grid16 on 1080x1920 NV12, batched path, median of runs.
     {
         std::vector<Layer> grid;
@@ -457,7 +569,7 @@ int main() {
                 float m = 0; cudaEventElapsedTime(&m, t0, t1); ms.push_back(m);
             }
             std::sort(ms.begin(), ms.end());
-            printf("%-28s median %.3f ms  p90 %.3f ms per frame\n", label, ms[ms.size() / 2], ms[ms.size() * 9 / 10]);
+            printf("%-34s median %.3f ms  p90 %.3f ms per frame\n", label, ms[ms.size() / 2], ms[ms.size() * 9 / 10]);
         };
         timeIt([&] { drawBatched(NV12, canvas, table, dev_table, 2); }, "batched yuv (1 launch)");
         std::vector<Layer> mixed = grid;
@@ -465,6 +577,27 @@ int main() {
         std::vector<AvpRectLayer> mixed_table;
         fillTable(NV12, mixed, mixed_table);
         timeIt([&] { drawBatched(NV12, canvas, mixed_table, dev_table, 2); }, "batched full +1 rgba");
+
+        // The keyer on a 1920x1080 program: the whole canvas in one launch, against a copy of the
+        // program and a launch over the key's viewport (CudaRectDraw::drawOver).
+        Frame pgm(NV12, 1920, 1080, &rng), keyed(NV12, 1920, 1080, nullptr);
+        Rgba lower(1016, 172, &rng), band(1920, 360, &rng), page(1920, 1080, &rng);
+        const Layer base{AVP_RECT_KIND_YUV, &pgm, nullptr, nullptr, 0, 0, 1920, 1080, 0, 0, 1920, 1080};
+        struct Key { const char *name; Layer layer; };
+        for (const Key &key : {Key{"key 1016x172", {AVP_RECT_KIND_RGBA, nullptr, &lower, nullptr, 0, 0, 1016, 172, 200, 764, 1016, 172}},
+                               Key{"zone 1920x360", {AVP_RECT_KIND_RGBA, nullptr, &band, nullptr, 0, 0, 1920, 360, 0, 720, 1920, 360}},
+                               Key{"page 1920x1080", {AVP_RECT_KIND_RGBA, nullptr, &page, nullptr, 0, 0, 1920, 1080, 0, 0, 1920, 1080}}}) {
+            std::vector<AvpRectLayer> key_table;
+            fillTable(NV12, {base, key.layer}, key_table);
+            timeIt([&] { drawBatched(NV12, keyed, key_table, dev_table, 2); }, (std::string(key.name) + ", whole canvas").c_str());
+            const auto view = avp::mixer::alignViewport(key.layer.dx, key.layer.dy, key.layer.dw, key.layer.dh, 1920, 1080);
+            if (view.w == 1920 && view.h == 1080) continue;   // drawOver leaves such a key to the whole-canvas launch
+            timeIt([&] {
+                cudaMemcpy2DAsync(keyed.y.dev, keyed.y.pitch, pgm.y.dev, pgm.y.pitch, 1920, keyed.y.rows, cudaMemcpyDeviceToDevice, 0);
+                cudaMemcpy2DAsync(keyed.uv.dev, keyed.uv.pitch, pgm.uv.dev, pgm.uv.pitch, 1920, keyed.uv.rows, cudaMemcpyDeviceToDevice, 0);
+                drawBatched(NV12, keyed, key_table, dev_table, 2, &view);
+            }, (std::string(key.name) + ", copy + viewport").c_str());
+        }
     }
     cudaFree(dev_table);
     std::cout << "ALL PASS\n";
