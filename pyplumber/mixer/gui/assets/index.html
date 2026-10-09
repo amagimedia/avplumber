@@ -1415,6 +1415,11 @@ function observeCuts() {
   for (const p of entries) if (p.id > 0 && p.state === "measured" && Number.isFinite(p.ms)) recentCuts.set(p.id, p.ms);
   for (const id of [...recentCuts.keys()].sort((a, b) => b - a).slice(100)) recentCuts.delete(id);
 }
+// "10 min" once the samples span the window, "3 min" or "40 s" while they do not yet.
+function recentSpan(recent) {
+  const s = Math.min(recent.covered_s, recent.window_s);
+  return s >= 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`;
+}
 function renderLatency() {
   const lat = fresh(cutLatency)?.latency;
   showStat($("lat"), lat?.ms, "ms", true, [LAT_MEANING, typeof lat?.title === "string" && lat.title].filter(Boolean).join("\n"));
@@ -1424,8 +1429,13 @@ function renderLatency() {
   const complete = pgm.length > 0 && aux.length === (settings().aux_buses || []).length;
   setMeterTip($("lat"), "Latency & delivery", [
     [`Cut p95 · ${cuts.length} cuts`, metric(cuts[Math.ceil(cuts.length * .95) - 1], 1, " ms")],
-    ["Deadline misses · total", metric(complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
-    ["AUX output drops · total", metric(complete ? total(aux, "output_drops") : null)]]);
+    // The server counts the last ten minutes, so the misses of a start long past do not stay on
+    // screen; one that does not (state.recent absent) leaves the totals since the mixer started.
+    ...(state?.recent
+      ? [[`Deadline misses · last ${recentSpan(state.recent)}`, metric(state.recent.missed_deadlines)],
+         [`AUX output drops · last ${recentSpan(state.recent)}`, metric(state.recent.output_drops)]]
+      : [["Deadline misses · total", metric(complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
+         ["AUX output drops · total", metric(complete ? total(aux, "output_drops") : null)]])]);
 }
 
 /* ---------- polling ---------- */

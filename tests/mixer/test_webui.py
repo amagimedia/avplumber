@@ -21,7 +21,7 @@ from demos.mixer.webui import parse_args
 from pyplumber.mixer.control import mixer_command
 from pyplumber.mixer.gui.web import (CONFIG_SCRIPT, CriticalNice, GpuStats, HostStats, MixerBridge, normalize_preview_base, page,
                    compute_price, serve)
-from pyplumber.mixer.gui.telemetry import _encoder_snapshot, _encoder_totals
+from pyplumber.mixer.gui.telemetry import RecentCounts, _encoder_snapshot, _encoder_totals, delivery_totals
 
 
 class FakeBridge(MixerBridge):
@@ -471,6 +471,63 @@ def test_state_carries_the_host_sample(client):
     host.values = dict(load1=21.4, vcpus=16, cpu_pct=52, thread_pct=38, thread_name="mixer_comp_a")
     url, _ = client(bridge, host_stats=host)
     assert get(url, "/api/state")[1]["host"] == host.values
+
+
+def test_delivery_counts_cover_the_last_ten_minutes_not_the_time_since_the_start():
+    totals, now = {"missed_deadlines": 59, "output_drops": 3}, [1000.0]
+    recent = RecentCounts(lambda: dict(totals), clock=lambda: now[0])
+    assert recent.values is None                      # nothing sampled: the page keeps its totals
+    recent.sample()
+    # What was counted before the first sample is of unknown age and is left out.
+    assert recent.values == {"window_s": 600, "covered_s": 0, "missed_deadlines": 0, "output_drops": 0}
+    now[0], totals["missed_deadlines"] = 1300.0, 64
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 300, "missed_deadlines": 5, "output_drops": 0}
+    now[0] = 1700.0
+    totals.update(missed_deadlines=66, output_drops=4)
+    recent.sample()
+    # The five misses of 1300 are now the window's start; only what came after it counts.
+    assert recent.values == {"window_s": 600, "covered_s": 400, "missed_deadlines": 2, "output_drops": 1}
+    now[0] = 2400.0
+    recent.sample()
+    assert recent.values["missed_deadlines"] == 0 and recent.values["output_drops"] == 0   # all older than ten minutes
+
+
+def test_a_restarted_mixer_counts_from_zero_and_all_of_it_is_recent():
+    totals, now = {"missed_deadlines": 120, "output_drops": 9}, [50.0]
+    recent = RecentCounts(lambda: None if totals is None else dict(totals), clock=lambda: now[0])
+    recent.sample()
+    now[0], totals = 80.0, {"missed_deadlines": 48, "output_drops": 0}     # fewer than before: it started again
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 0, "missed_deadlines": 48, "output_drops": 0}
+    now[0], totals = 90.0, None                                            # no mixer: the last values stand
+    recent.sample()
+    assert recent.values["missed_deadlines"] == 48
+    now[0], totals = 400.0, {"missed_deadlines": 50, "output_drops": 0}
+    recent.sample()
+    assert recent.values["missed_deadlines"] == 50 and recent.values["covered_s"] == 320   # the start is still inside the window
+    now[0], totals = 800.0, {"missed_deadlines": 51, "output_drops": 0}
+    recent.sample()
+    assert recent.values["missed_deadlines"] == 1 and recent.values["covered_s"] == 400    # the start's misses have aged out
+
+
+def test_delivery_totals_are_the_pages_sums_or_nothing_while_a_bus_is_missing():
+    state = {"status": {"playout": {"A": {"missed_deadlines": 1}, "B": {"missed_deadlines": 0}}},
+             "settings": {"aux_buses": ["aux1", "aux2"]},
+             "aux_buses": [{"playout": {"missed_deadlines": 2}, "output_drops": 1},
+                           {"playout": {"missed_deadlines": 0}, "output_drops": 4}]}
+    assert delivery_totals(state) == {"missed_deadlines": 3, "output_drops": 5}
+    assert delivery_totals({**state, "aux_buses": state["aux_buses"][:1]}) is None       # one bus has not reported
+    assert delivery_totals({**state, "status": {}}) is None
+    assert delivery_totals({"status": state["status"], "settings": {}}) == {"missed_deadlines": 1, "output_drops": 0}
+
+
+def test_state_carries_the_recent_delivery_counts(client):
+    recent = RecentCounts(lambda: {"missed_deadlines": 7, "output_drops": 0})
+    url, _ = client(FakeBridge(STATE_REPLIES), recent=recent)
+    assert get(url, "/api/state")[1]["recent"] is None            # no sample yet
+    recent.sample()
+    assert get(url, "/api/state")[1]["recent"] == {"window_s": 600, "covered_s": 0, "missed_deadlines": 0, "output_drops": 0}
 
 
 STATE_REPLIES = {"mixer.status": '{"pgm_scene":"a"}', "mixer.scenes": '["a","b"]', "mixer.settings": "{}"}
