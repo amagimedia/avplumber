@@ -33,6 +33,9 @@ class MixerKeyer : public CudaRectCompositor {
     std::vector<KeyChange> key_change_;
     std::vector<avp::mixer::KeyFade> key_fade_;
     std::vector<float> key_opacity_;   // per input, for this program frame; the clock input stays 1
+    // Keys whose rectangle may be composed alone, over a copy of the program frame, instead of
+    // with the whole canvas (`bounded_keys`): per input, none unless the node names them.
+    std::vector<bool> bounded_input_;
 
     // One envelope step per key for the program frame at `pts`, under masks_mutex_.
     // A key whose fade target differs from `active` starts the change its latest
@@ -55,7 +58,8 @@ public:
           held_(config.inputs),
           held_valid_(config.inputs),
           key_change_(config.inputs),
-          key_opacity_(config.inputs, 1.f) {}
+          key_opacity_(config.inputs, 1.f),
+          bounded_input_(config.inputs, false) {}
 
     // Each clock-input frame renders at once, at its own PTS, over every key
     // above fade level 0, using its newest frame stamped at or before that tick,
@@ -64,6 +68,9 @@ public:
     // program frame and alternately repeats and skips key frames. Keys are never
     // waited for, so no playout buffer delays the clock input and a late key
     // cannot stall it. With no key visible the frame passes through untouched.
+    // With keys visible the whole canvas is composed, unless every visible key is one of
+    // `bounded_keys`: then the output is a copy of the program frame on which only the
+    // rectangles those keys cover are composed (while they cover less than most of it).
     //
     // Key fades: each key's opacity follows a KeyFade envelope stepped at every
     // program frame's PTS. A fade starts at the first program frame after the
@@ -122,7 +129,7 @@ public:
             av::Timestamp(1, av::Rational(frame_rate_.getDenominator(), 2 * frame_rate_.getNumerator())));
         std::vector<const av::VideoFrame *> sources(source_edges_.size(), nullptr);
         sources[clock] = &frame;
-        bool keyed = false;
+        bool keyed = false, bounded = true;   // bounded: every key drawn on this frame allows it
         for (size_t i = 0; i < sources.size(); ++i) {
             if (i == clock) continue;
             auto &queue = key_queue_[i];
@@ -134,9 +141,10 @@ public:
             if (!held_valid_[i] || !(key_opacity_[i] > 0.f)) continue;
             sources[i] = &held_[i];
             keyed = true;
+            bounded = bounded && bounded_input_[i];
         }
         if (keyed) {
-            this->sink_->put(compose(frame.pts(), sources, &frame, &key_opacity_));
+            this->sink_->put(compose(frame.pts(), sources, &frame, &key_opacity_, bounded ? &frame : nullptr));
         } else {
             ++frame_counter_;
             this->sink_->put(frame);
@@ -191,6 +199,22 @@ std::shared_ptr<MixerKeyer> MixerKeyer::create(NodeCreationInfo &nci) {
         throw Error("mixer_keyer: clock_input out of range");
     node->clock_input_ = size_t(clock);
     node->frame_rate_ = parseRatio(params.at("fps"));
+    // bounded_keys: true for every key, or the inputs of the keys that allow it.
+    if (params.contains("bounded_keys")) {
+        const Parameters &bounded = params.at("bounded_keys");
+        if (bounded.is_boolean()) {
+            node->bounded_input_.assign(node->source_edges_.size(), bounded.get<bool>());
+        } else if (bounded.is_array()) {
+            for (const auto &input : bounded) {
+                if (!input.is_number_integer() || input.get<int>() < 0 || size_t(input.get<int>()) >= node->source_edges_.size() ||
+                    input.get<int>() == clock)
+                    throw Error("mixer_keyer: bounded_keys names the inputs of keys");
+                node->bounded_input_[size_t(input.get<int>())] = true;
+            }
+        } else {
+            throw Error("mixer_keyer: bounded_keys must be a boolean or an array of key inputs");
+        }
+    }
     // Keys configured on come up fully on, as before fades existed.
     for (size_t i = 0; i < node->source_edges_.size(); ++i)
         node->key_fade_.emplace_back(node->active_inputs_.test((int)i));
