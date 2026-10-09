@@ -25,13 +25,18 @@ def capture(url, sent=None):
     avp.executeCommandsFromString("queue.plan_capacity packets 2\n")
     avp.addNode(InputRec({"name": "input", "group": "test", "dst": "packets",
                          "url": url, "format": "mpegts", "timeout": 10,
-                         "options": {"analyzeduration": "250000", "probesize": "32768"}}))
+                         "options": {"analyzeduration": "1000000", "probesize": "4194304"}}))
     eof_count = 0
     requested = False
     before_drain = None
     try:
         avp.group("test").startNodes()
         edge = avp.getEdge("packets", "Packet")
+        deadline = time.monotonic() + 10
+        while not avp.node("input").isWorking:
+            assert not errors, errors
+            assert time.monotonic() < deadline, "Input did not start"
+            time.sleep(0.01)
         # Exercise normal bounded-queue backpressure before releasing consumers.
         time.sleep(0.05)
         deadline = time.monotonic() + 15
