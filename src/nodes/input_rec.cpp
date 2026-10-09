@@ -36,6 +36,7 @@ class RecordingInput: public NodeSingleOutput<av::Packet>, public IStreamsInput,
 protected:
     av::FormatContext ictx_;
     std::atomic_bool should_end_ {false};
+    std::atomic_bool eof_requested_ {false};
     bool input_url_set_ = false;
     AVTS wait_start_;
     AVTS wait_max_ = AV_NOPTS_VALUE;
@@ -92,6 +93,31 @@ protected:
 
     av::Timestamp shift_ = NOTS;
     Parameters streams_object_, programs_object_;
+    av::Packet readPacket() {
+        std::error_code error;
+        av::Packet packet = ictx_.readPacket(error);
+        if (!error) {
+            return packet;
+        }
+        if (!eof_requested_ || error != std::error_code(AVERROR_EXIT, av::ffmpeg_category())) {
+            throw std::system_error(error);
+        }
+        if (packet.isNull()) {
+            // av_read_frame has exhausted its PES and codec-parser buffers.
+            return packet;
+        }
+        // avcpp reports pb->error even when av_read_frame successfully returns
+        // a buffered packet, before setting its time base/completeness. During
+        // explicit EOF drain, retain that packet and finish avcpp's bookkeeping.
+        // This context does not enable avcpp's subtract-start-time option.
+        if (ictx_.raw()->pb && ictx_.raw()->pb->error == AVERROR_EXIT &&
+            packet.streamIndex() >= 0 && size_t(packet.streamIndex()) < ictx_.streamsCount()) {
+            packet.setTimeBase(ictx_.stream(packet.streamIndex()).timeBase());
+            packet.setComplete(true);
+            return packet;
+        }
+        throw std::system_error(error);
+    }
     void closeInput(bool warn = true) {
         try {
             ictx_.close();
@@ -400,6 +426,11 @@ private:
 public:
     RecordingInput(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
         ictx_.setInterruptCallback([this]() -> int {
+            if (eof_requested_) {
+                // Interrupt further reads, not the processing loop: demuxers
+                // can still return their final PES/parser packets after this.
+                return 1;
+            }
             if ( (wait_max_!=AV_NOPTS_VALUE) && ((wallclock.pts() - wait_start_) > wait_max_) ) {
                 logstream << "Timeout " << wait_max_ << " exceeded";
                 this->finished_ = true;
@@ -669,7 +700,7 @@ public:
     virtual void process() {
         if (notify_eof_) {
             this->sink_->put(createEofPacket(video_stream_));
-            if (stop_on_eof_) {
+            if (stop_on_eof_ || eof_requested_) {
                 doStop();
                 eof_sent_ = false;
             }
@@ -768,7 +799,7 @@ public:
             }
         }
         wait_start_ = wallclock.pts();
-        av::Packet pkt = ictx_.readPacket();
+        av::Packet pkt = readPacket();
 
         if (play_direction_ == IPlaybackControl::EPlaybackDirection::pd_Backward) {
             // read only video frames, discard all other frames
@@ -777,11 +808,11 @@ public:
             while (!pkt.isNull() && rep--) {
                 if (pkt.streamIndex() == video_stream_)
                     break;
-                pkt = ictx_.readPacket();
+                pkt = readPacket();
             }
         }
 
-        if (pkt.isNull() && loop_ && (play_direction_ == EPlaybackDirection::pd_Forward)) {
+        if (pkt.isNull() && loop_ && !eof_requested_ && (play_direction_ == EPlaybackDirection::pd_Forward)) {
             loopForward();
             return;
         }
@@ -789,7 +820,7 @@ public:
             if (!eof_sent_) {
                 // we are at the end os recording
                 logstream << "end of video reached";
-                notify_eof_ = send_eof_;
+                notify_eof_ = send_eof_ || eof_requested_;
                 eof_sent_ = true;
             }
             std::this_thread::sleep_for(5ms);
@@ -1234,7 +1265,12 @@ public:
         }
     }
     virtual void setObject(const std::string name, const Parameters& p) {
-        if (name == "stream-limits") {
+        if (name == "request-eof") {
+            if (!p.is_boolean() || !p.get<bool>()) {
+                throw Error("request-eof expects true; EOF cannot be cancelled");
+            }
+            eof_requested_ = true;
+        } else if (name == "stream-limits") {
             if (p.count("start") > 0) {
                 if (p["start"].is_null()) {
                     start_ts_ = StreamTarget();
