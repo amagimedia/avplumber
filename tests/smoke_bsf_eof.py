@@ -32,7 +32,9 @@ def run(path, output):
         # The declaration gives the encoder and the output their time base.
         (n.FakeVideoFormat, {"group": "output", "name": "format", "src": "decoded",
                              "dst": "declared"}),
-        (n.EncVideo, {"group": "output", "name": "encoder", "src": "declared", "dst": "encoded",
+        (n.ForceFPS, {"group": "output", "name": "rate", "src": "declared", "dst": "frames",
+                      "fps": "25/1"}),
+        (n.EncVideo, {"group": "output", "name": "encoder", "src": "frames", "dst": "encoded",
                       "codec": "mpeg2video"}),
         (n.Bsf, {"group": "output", "name": "bsf", "src": "encoded", "dst": "filtered",
                  "bsf": "dump_extra=freq=keyframe"}),
