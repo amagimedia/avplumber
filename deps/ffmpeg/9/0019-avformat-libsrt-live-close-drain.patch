@@ -1,0 +1,107 @@
+From eecb04adc1ed5ff7c2a48844e21626da5864e8f8 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Fri, 9 Oct 2026 14:19:16 +0200
+Subject: [PATCH] avformat/libsrt: drain live publishers before explicit linger
+ close
+
+---
+ doc/protocols.texi   |  8 +++++++
+ libavformat/libsrt.c | 54 +++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 61 insertions(+), 1 deletion(-)
+
+diff --git a/doc/protocols.texi b/doc/protocols.texi
+index dbb1f166c7..26139fe3bd 100644
+--- a/doc/protocols.texi
++++ b/doc/protocols.texi
+@@ -2098,6 +2098,14 @@ Default is -1. -1 means auto (off with 0 seconds in live mode, on with 180
+ seconds in file mode). The range for this option is integers in the
+ 0 - @code{INT_MAX}.
+ 
++For live outputs, a positive value also bounds orderly completion: wait for
++the sender buffer to empty, then keep the connection open for the negotiated
++peer delivery delay plus two measured round-trip times. This lets the peer
++deliver its final buffered packets before shutdown. The entire close drain
++must fit within @var{seconds}; expiration is reported as a timeout. Zero or
++an unset value preserves immediate live close. This changes only stream
++shutdown, not packet delivery latency during transmission.
++
+ @item tsbpd=@var{1|0}
+ When true, use Timestamp-based Packet Delivery mode. The default behavior
+ depends on the transmission type: enabled in live mode, disabled in file
+diff --git a/libavformat/libsrt.c b/libavformat/libsrt.c
+index c1d93b2550..5e72d520b2 100644
+--- a/libavformat/libsrt.c
++++ b/libavformat/libsrt.c
+@@ -608,16 +608,68 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
+     return ret;
+ }
+ 
++/* Positive linger opts a live publisher into a bounded, application-visible
++ * drain. ACKs clear the sender buffer before the peer's TSBPD delivery time;
++ * keep the connection open for its negotiated delay plus two RTTs afterwards.
++ * srt_close() alone is insufficient: SNDSYN is disabled and final cleanup may
++ * destroy asynchronous linger state. See Haivision/srt issue #2760. */
++static int libsrt_drain_live_output(URLContext *h)
++{
++    SRTContext *s = h->priv_data;
++    const int64_t start = av_gettime_relative();
++    const int64_t deadline = start + (int64_t)s->linger * 1000000;
++    int64_t quiet_until = -1;
++    SRT_TRACEBSTATS stats = { 0 };
++    size_t blocks = 0, bytes = 0;
++
++    if (!(h->flags & AVIO_FLAG_WRITE) || s->linger <= 0 ||
++        s->transtype == SRTT_FILE)
++        return 0;
++
++    while (av_gettime_relative() < deadline) {
++        if (ff_check_interrupt(&h->interrupt_callback))
++            return AVERROR_EXIT;
++        if (srt_getsndbuffer(s->fd, &blocks, &bytes) < 0)
++            return libsrt_neterrno(h);
++        if (!blocks) {
++            if (quiet_until < 0) {
++                double quiet_ms;
++                if (srt_bstats(s->fd, &stats, 0) < 0)
++                    return libsrt_neterrno(h);
++                if (!stats.byteSentTotal)
++                    return 0;
++                quiet_ms = FFMAX(stats.msSndTsbPdDelay, 0) +
++                           2.0 * FFMAX(stats.msRTT, 0.0);
++                /* Round up so sub-millisecond RTTs are never truncated. */
++                quiet_until = av_gettime_relative() + (int64_t)(quiet_ms * 1000) + 1000;
++            }
++            if (av_gettime_relative() >= quiet_until) {
++                av_log(h, AV_LOG_VERBOSE, "SRT output drained in %"PRId64" us "
++                       "(peer delay %d ms, RTT %.3f ms)\n",
++                       av_gettime_relative() - start, stats.msSndTsbPdDelay, stats.msRTT);
++                return 0;
++            }
++        } else {
++            quiet_until = -1;
++        }
++        av_usleep(1000);
++    }
++    av_log(h, AV_LOG_ERROR, "SRT output drain exceeded linger=%d seconds "
++           "(%zu blocks, %zu bytes pending)\n", s->linger, blocks, bytes);
++    return AVERROR(ETIMEDOUT);
++}
++
+ static int libsrt_close(URLContext *h)
+ {
+     SRTContext *s = h->priv_data;
++    int ret = libsrt_drain_live_output(h);
+ 
+     srt_epoll_release(s->eid);
+     srt_close(s->fd);
+ 
+     srt_cleanup();
+ 
+-    return 0;
++    return ret;
+ }
+ 
+ static const AVClass libsrt_class = {
+-- 
+2.55.0
+

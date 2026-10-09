@@ -867,6 +867,8 @@ PYBIND11_MODULE(_avplumber, m) {
 
     py::class_<av::Packet, std::shared_ptr<av::Packet>>(m, "Packet")
         .def(py::init<>())
+        .def_static("eof", []() { return createEofPacket(); },
+                    "Create the native packet EOF marker (an empty Packet is not EOF).")
         .def_property_readonly("pts", [](const av::Packet &p) { return p.pts(); })
         .def_property_readonly("dts", [](const av::Packet &p) { return p.dts(); })
         .def_property_readonly("duration", [](const av::Packet &p) { return p.duration(); })
