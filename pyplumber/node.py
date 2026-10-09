@@ -252,6 +252,10 @@ class DrawKeypoints(InternalNode):
     TYPE = "draw_keypoints"
 
 
+class MlDebug(InternalNode):
+    TYPE = "ml_debug"
+
+
 class SmoothTimestamps(InternalNode):
     TYPE = "smooth_timestamps"
 

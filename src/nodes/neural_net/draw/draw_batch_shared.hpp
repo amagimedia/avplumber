@@ -45,6 +45,38 @@ struct BatchedTextLabel {
     int bg_v = 128;
 };
 
+// A keypoint's centre in frame coordinates.
+struct KeypointPos {
+    float x;
+    float y;
+};
+
+// A trail segment from (x0, y0) to (x1, y1) in frame coordinates.
+struct LineSegment {
+    int x0, y0, x1, y1;
+};
+
+// One item of the ml_debug pass. Items are painted in the order they are listed.
+enum MlDebugKind : int { kMlDebugBox = 0, kMlDebugLabel = 1, kMlDebugDot = 2, kMlDebugSegment = 3 };
+
+struct MlDebugItem {
+    int kind = kMlDebugBox;
+    // Box: x1, y1, x2, y2. Segment: x0, y0, x1, y1. Label: a is its index in the label list.
+    int a = 0, b = 0, c = 0, d = 0;
+    // Dot: centre. Others: unused.
+    float fx = 0.f, fy = 0.f;
+    // Box: border thickness. Dot: radius. Segment: thickness.
+    int size = 1;
+    int y_color = 173, u_color = 42, v_color = 26;
+};
+
+// A 16x16-pixel tile that at least one item touches: its top-left pixel and its run of item
+// numbers in the tile index list.
+struct MlDebugTile {
+    int x = 0, y = 0;
+    int first = 0, count = 0;
+};
+
 template <typename T>
 class DeviceBuffer {
 private:

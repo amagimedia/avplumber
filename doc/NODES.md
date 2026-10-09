@@ -924,9 +924,46 @@ Parameters common to all:
     `model_content_offset_y` (number, default `0`: unused)
 -   `debug_log_every_n` (int, default `0`)
 
+### `ml_debug`
+
+Everything a model says about a frame, drawn in one pass: detection boxes,
+their labels, pose or face keypoints and a trail. `layers` (array, required)
+are painted in the order given. A layer has a `kind` and the parameters of the
+draw node of that kind, which reads the frame's metadata for it:
+
+| `kind` | Reads and takes the parameters of |
+|---|---|
+| `boxes` | `draw_bbox` |
+| `labels` | `draw_bbox_labels` |
+| `keypoints` | `draw_keypoints` |
+| `trail` | `draw_trail` |
+
+```json
+{"type": "ml_debug", "src": "detected", "dst": "drawn", "layers": [
+  {"kind": "boxes", "metadata_key": "yolo_players", "label_colors": {"Player": "green"}},
+  {"kind": "labels", "metadata_key": "yolo_players", "label_template": "ID:{track_id}", "font_scale": 1},
+  {"kind": "keypoints", "metadata_key": "yolo_pose", "radius": 3, "color": "green"},
+  {"kind": "trail", "metadata_key": "ball_trail", "thickness": 1, "color": "light_blue"}
+]}
+```
+
+The frame comes out as it would from a chain of those draw nodes in the same
+order, pixel for pixel, and the node handles frames as they do (input and
+output formats, the picture it draws on, the `pictures` object). What differs
+is the work: a metadata key that several layers read is parsed once; the items
+are sorted on the CPU into the 16x16-pixel tiles they touch, and one kernel
+launch visits only those tiles, each thread only the items of its tile; the
+stream is synchronized once. A draw node launches a thread for every pixel of
+the frame and every thread tests every item, so 118 face landmarks on a
+1920x1080 frame are 306 million tests there and some tens of thousands here.
+
+`node.object.get <node> draw` returns the `items` and `tiles` of the last frame
+and the `frames` that had anything drawn on them.
+
 `tests/cuda/nvdec/draw_arrays.py` runs chains on linear and on CUarray decode
 on an NVIDIA GPU: an undrawn chain against the plain decode, three `draw_bbox`
-against one, CUarray against linear, the `pictures` counters, and with
+against one, one `ml_debug` against the chain of four draw nodes and against
+three `draw_bbox`, CUarray against linear, the `pictures` counters, and with
 `--expect` the linear cases against a report of another build.
 `tests/test_draw_picture_frame.py` checks without a GPU which frames count as
 private, which pool a copy comes from, when one call may copy both planes, and

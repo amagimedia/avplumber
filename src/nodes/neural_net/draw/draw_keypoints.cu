@@ -2,11 +2,10 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 
-// Keypoint position in frame coordinates (uploaded from host)
-struct KeypointPos {
-    float x;
-    float y;
-};
+#include "draw_batch_shared.hpp"
+#include "draw_primitives.cuh"
+
+using cuda_overlay::KeypointPos;
 
 extern "C" __global__ void kDrawKeypointsNV12Luma(
     uint8_t* __restrict__ y_plane, size_t pitch_y,
@@ -18,11 +17,8 @@ extern "C" __global__ void kDrawKeypointsNV12Luma(
     const int py = (int)(blockIdx.y * blockDim.y + threadIdx.y);
     if (px >= frame_w || py >= frame_h) return;
 
-    const int r2 = radius * radius;
     for (int i = 0; i < num_points; ++i) {
-        float dx = (float)px - points[i].x;
-        float dy = (float)py - points[i].y;
-        if (dx * dx + dy * dy <= (float)r2) {
+        if (inside_keypoint(px, py, points[i].x, points[i].y, radius)) {
             y_plane[(size_t)py * pitch_y + (size_t)px] = (uint8_t)y_color;
             return;
         }
@@ -44,11 +40,8 @@ extern "C" __global__ void kDrawKeypointsNV12Chroma(
     const int luma_x = (uv_x << 1);
     const int luma_y = (uv_y << 1);
 
-    const int r2 = radius * radius;
     for (int i = 0; i < num_points; ++i) {
-        float dx = (float)luma_x - points[i].x;
-        float dy = (float)luma_y - points[i].y;
-        if (dx * dx + dy * dy <= (float)r2) {
+        if (inside_keypoint(luma_x, luma_y, points[i].x, points[i].y, radius)) {
             uint8_t* row = uv_plane + (size_t)uv_y * pitch_uv;
             row[(size_t)(uv_x << 1) + 0] = (uint8_t)u_color;
             row[(size_t)(uv_x << 1) + 1] = (uint8_t)v_color;
