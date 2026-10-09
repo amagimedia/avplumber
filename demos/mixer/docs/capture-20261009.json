@@ -6,13 +6,22 @@
     "height": 1080,
     "fps": 25,
     "frames": 250,
-    "kind": "Browser recording of the live mixer UI and two WebRTC outputs",
+    "kind": "Existing encoded outputs recorded on the instance before Internet transport; replayed frame by frame in the real UI with recorded state and cut sequence",
     "viewers": [
       "Program preview: PVW, PGM and eight scene slots",
       "Program dirty with four downstream keys"
     ],
     "actions": "Direct cuts only; no fade or media wipe",
-    "source_media": "Generated per-source test patterns and live Chromium graphics"
+    "source_media": "Generated per-source test patterns and live Chromium graphics",
+    "native_program": "mixer-pgm-instance.mp4 (original H.264 bitstream, includes preroll and tail)",
+    "validation": {
+      "native_rtp_frame_interval_ticks": 3600,
+      "rtp_clock_hz": 90000,
+      "rtp_packet_gaps": 0,
+      "ticker_frame_pairs": 249,
+      "ticker_step_px": -4,
+      "new_program_missed_deadlines": 0
+    }
   },
   "configuration": {
     "gpu": "NVIDIA L4",
@@ -47,5 +56,5 @@
     ]
   },
   "scope": "Observed configuration and short UI demonstration; not a new capacity or latency benchmark. Program, preview and key states restored after capture; no setup, service or code changes.",
-  "sha256": "defb7af97f6af6921cbebc092c7f82050172fb4c2a6cd7cbde1d6b853e870235"
+  "sha256": "6b85cdde86a813aa65d5a65ae0ca4bef6caf1b9638a7baeb2466af1da7bb902e"
 }
