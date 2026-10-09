@@ -8,6 +8,21 @@ runs; raw evidence and caveats remain linked below.
 [Source-limit cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/source-limits.html) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
+## Current demo recording: 2026-10-09
+
+The [10-second UI recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
+shows a running `nvidia_l4_cuarray` show on one NVIDIA L4 / 16-vCPU host:
+192 inputs, 256 scenes and 26 outputs at 1920×1080p25 SDR. The input total is
+120 NVDEC + 36 browser scene sources + 32 raw NV12 + four browser keys;
+Setup reports 188 catalogue sources before adding the keys. Outputs are
+Program, clean Program and 24 AUX buses, including the Program/Preview monitor
+and source multiviewer.
+
+The capture uses two WebRTC viewers, four enabled keys and direct cuts through
+several scene types. It is an interface demonstration, not a new capacity,
+latency or soak benchmark. The [capture metadata](https://amagimedia.github.io/avplumber/demos/mixer/docs/capture-20261009.json)
+records its scope; the historical qualification results below remain separate.
+
 ## T4
 
 16 GiB T4, 16 vCPUs, 1080p inputs; totals include four browser keys.
