@@ -123,6 +123,7 @@ Up to four browser keys over the finished program. `feed: "clean"` omits them. K
 | `source` | — | a **browser** source id; its alpha is always kept. Scenes may use the same source |
 | `dst` | whole canvas | `x`, `y`, `w`, `h` on the canvas; the window is scaled into it |
 | `on` | `false` | on air at start |
+| `bounded` | `false` | compose only this key's rectangle instead of the whole canvas, while every key on air is `bounded`; for a key that fills a known part of the picture, such as a lower third |
 
 ## aux_buses
 

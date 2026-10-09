@@ -1113,8 +1113,20 @@ fade level 0, with each key's newest frame stamped at or before that program
 tick. Keys are never waited for; with no key visible the program frame passes
 through untouched.
 
+With keys visible the whole canvas is composed in one pass. Keys named in
+`bounded_keys` may instead be composed alone: when every visible key is one of
+them, the output is a copy of the program frame on which only the rectangles
+those keys cover are composed, so a key on a third of the picture costs a third
+of the compositing. Keys that overlap share a rectangle. This needs the program
+layer to be the program frame unchanged (the canvas's format and size, drawn
+whole and unscaled) and the keys to lie in at most four separate rectangles
+covering at most 60 % of the canvas; otherwise the whole canvas is composed.
+The picture is the same either way.
+
 Parameters, in addition:
 -   `clock_input` (int, required) - the program's index in `src`
+-   `bounded_keys` (array of ints or bool, default none) - the inputs of the
+    keys whose rectangles may be composed alone; `true` names every key
 -   `fps` (ratio string, required) - the program's rate; paces the key
     subscriptions and the fades
 -   `subscriptions` (array of strings, optional) - one shared frame

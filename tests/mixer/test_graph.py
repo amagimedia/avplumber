@@ -1692,6 +1692,14 @@ def test_dsk_keys_the_program_after_the_mixer_with_one_small_program_clocked_pas
     assert nodes["scale_sdr"]["src"] == "program_dirty"
 
 
+def test_dsk_composes_the_whole_canvas_unless_a_key_says_its_rectangle_is_enough(tmp_path, monkeypatch):
+    _, nodes = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    assert nodes["dsk_comp"]["bounded_keys"] == []
+    keys = [{**key, "bounded": i == 1} for i, key in enumerate(DSK_KEYS["keys"])]
+    _, nodes = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}], dsk={**DSK_KEYS, "keys": keys})
+    assert nodes["dsk_comp"]["bounded_keys"] == [2]   # the second key's input; input 0 is the program
+
+
 def test_dsk_clean_and_dirty_renditions_each_keep_sdr_and_hdr(tmp_path, monkeypatch):
     renditions = [{"id": "sdr", "port": 5004, "codec": "h264_nvenc"}, {"id": "hdr", "port": 5006, "codec": "hevc_nvenc"},
                   {"id": "sdr_clean", "port": 5010, "codec": "h264_nvenc", "feed": "clean"},
@@ -1840,6 +1848,7 @@ def test_mixer_fade_rejects_an_unknown_curve():
     ({"keys": [{"id": f"k{i}", "source": "page"} for i in range(5)]}, "at most 4 keys"),
     ({"keys": [{"id": "k", "source": "page"}, {"id": "k", "source": "page"}]}, "duplicate"),
     ({"keys": [{"id": "k", "source": "page", "on": 1}]}, "on must be a boolean"),
+    ({"keys": [{"id": "k", "source": "page", "bounded": "lower"}]}, "bounded must be a boolean"),
     ({"fade_seconds": 11, "keys": []}, "dsk.fade_seconds must be a number of seconds from 0 to 10"),
     ({"fade_seconds": -0.1, "keys": []}, "dsk.fade_seconds"),
     ({"fade_curve": "Linear", "keys": []}, "dsk.fade_curve must be one of"),

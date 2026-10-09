@@ -324,7 +324,8 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
         window_w, window_h = DSK_WINDOWS[page]
         sources.append({"id": f"dsk_{page}", "kind": "browser", "url": page_url(DEMO_DIR / "dsk" / f"{page}.html", fps=fps),
                         "width": window_w, "height": window_h, "color": "sdr"})
-        keys.append({"id": page, "source": f"dsk_{page}", "dst": {"x": x, "y": y, "w": w, "h": h}})
+        # Each window is its graphic and nothing else, so its rectangle is all the keyer needs to compose.
+        keys.append({"id": page, "source": f"dsk_{page}", "dst": {"x": x, "y": y, "w": w, "h": h}, "bounded": True})
     renditions = recipe["renditions"]
     if recipe.get("clean_feed"):
         sdr = next((r for r in renditions if r.get("color") == "sdr" or r.get("id") == "sdr"), renditions[0])

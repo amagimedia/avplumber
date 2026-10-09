@@ -152,8 +152,11 @@ protected:
     /// Draws the output frame stamped `pts` and waits for the GPU. `sources` holds a frame per
     /// input, null where none is drawn; `metadata_src` gives the frame its properties and
     /// per-frame layers; `opacity`, when given, holds a weight per input (see LayerSpec::opacity).
+    /// `base`, when given, is the source the bottom layer draws; where that layer is the frame
+    /// unchanged, only the rectangles of the other layers are composed (CudaRectDraw::drawOver).
     av::VideoFrame compose(av::Timestamp pts, const std::vector<const av::VideoFrame *> &sources,
-                           const av::VideoFrame *metadata_src, const std::vector<float> *opacity = nullptr) {
+                           const av::VideoFrame *metadata_src, const std::vector<float> *opacity = nullptr,
+                           const av::VideoFrame *base = nullptr) {
         draw_.ensureDevice();
         CUstream stream = draw_.stream();
 
@@ -176,8 +179,10 @@ protected:
             }
         }
         setCanvasColor(outf.raw());
-        // Background and every layer in one kernel launch.
-        draw_.draw(stream, ops, outf.raw(), hasCanvasColor() ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr));
+        // Background and every layer in one kernel launch; over a base, only where the other layers are.
+        const AVFrame *color_src = hasCanvasColor() ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr);
+        if (!base || !draw_.drawOver(stream, ops, outf.raw(), color_src, base->raw()))
+            draw_.draw(stream, ops, outf.raw(), color_src);
 
         if (metadata_src && metadata_src->raw())
             avp::mixer::copySourceProps(outf, *metadata_src, type_);

@@ -10,6 +10,7 @@ extern "C" {
 }
 
 #include <cmath>
+#include <sstream>
 #include <string>
 #include <utility>
 #include "cuda_rect_array.hpp"
@@ -115,7 +116,8 @@ void CudaRectDraw::ensureKernels() {
         AVP_CHECK_CU(cuDeviceGetAttribute(&shared_limit, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, device)) ||
         max_layers_ <= 0 || (size_t(max_layers_) + 31) / 32 * sizeof(unsigned int) > size_t(shared_limit))
         throw Error("cuda_rect_overlay: max_layers exceeds the kernel's shared memory capacity");
-    const size_t bytes = sizeof(AvpRectLayer) * max_layers_;
+    // The whole-canvas table, then one table per viewport of drawOver().
+    const size_t bytes = sizeof(AvpRectLayer) * max_layers_ * (1 + kMaxViewports);
     if (AVP_CHECK_CU(cuMemHostAlloc((void **)&table_host_, bytes, 0)) ||
         AVP_CHECK_CU(cuMemAlloc(&table_device_, bytes)))
         throw Error("cuda_rect_overlay: cannot allocate the rect table");
@@ -274,13 +276,10 @@ void CudaRectDraw::waitForProducer(const AVFrame *src, CUstream stream) {
     waited_streams_.push_back(device->stream);
 }
 
-void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src) {
-    ensureKernels();
-    const AVPixelFormat sw_fmt = canvas_.sw_fmt;
+int CudaRectDraw::fillTable(CUstream stream, const std::vector<DrawOp> &ops, const AVFrame *canvas, TableKinds &kinds) {
     waited_streams_.clear();
     if (array_textures_) array_textures_->begin();
     int n = 0;
-    bool any_rgb = false, any_fade = false, any_array = false, any_filter = false, any_wide = false;
     for (const DrawOp &op : ops) {
         if (!op.src || !op.src->raw()) continue;
         if (n >= max_layers_)
@@ -288,17 +287,17 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
         AvpRectLayer &entry = table_host_[n];
         waitForProducer(op.src->raw(), stream);
         fillTableEntry(op, canvas, entry);
-        any_array = any_array || entry.yuv_texture;
-        any_rgb = any_rgb || entry.kind >= AVP_RECT_KIND_RGB;
+        kinds.array = kinds.array || entry.yuv_texture;
+        kinds.rgb = kinds.rgb || entry.kind >= AVP_RECT_KIND_RGB;
         const bool fades = entry.kind >= AVP_RECT_KIND_RGB && entry.mul < 1.f;   // only a blended RGBA mul is below 1
-        any_fade = any_fade || fades;
+        kinds.fade = kinds.fade || fades;
         // Not an error: a key without alpha (or on a packed canvas) still cuts cleanly.
         if (op.layer.opacity < 1.f && !fades && !std::exchange(opacity_warned_, true))
             logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
         // A demoted layer needs the filter entries' code limit whatever its filter.
-        any_filter = any_filter || entry.filter != AVP_RECT_FILTER_BILINEAR || entry.kind == AVP_RECT_KIND_DEMOTE;
+        kinds.filter = kinds.filter || entry.filter != AVP_RECT_FILTER_BILINEAR || entry.kind == AVP_RECT_KIND_DEMOTE;
         // The 4x4 cubic and the 8 samples are compiled into the full filter entry only.
-        any_wide = any_wide || entry.filter == AVP_RECT_FILTER_BICUBIC || entry.filter == AVP_RECT_FILTER_MULTISAMPLE8;
+        kinds.wide = kinds.wide || entry.filter == AVP_RECT_FILTER_BICUBIC || entry.filter == AVP_RECT_FILTER_MULTISAMPLE8;
         // Not an error either; `auto` is not named here, it simply finds nothing to choose.
         const ScaleFilter asked = op.layer.filter.mode;
         if ((asked == ScaleFilter::Bicubic || asked == ScaleFilter::Multisample) &&
@@ -308,45 +307,140 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
         ++n;
     }
     if (array_textures_) array_textures_->prune();
+    return n;
+}
+
+// One launch over `view`, which the kernel takes for its canvas: plane pointers at the viewport's
+// origin, the viewport's size, and a table whose destinations are relative to that origin.
+void CudaRectDraw::launch(CUstream stream, const TableKinds &kinds, CUdeviceptr table, int n, AVFrame *canvas,
+                          const AVFrame *color_src, const RectViewport &view) {
+    const AVPixelFormat sw_fmt = canvas_.sw_fmt;
     const int planes = av_pix_fmt_count_planes(sw_fmt);
     uint16_t clear0 = 0, clear1 = 0;
     if (!planeClearValue(sw_fmt, color_src, 0, clear0) || (planes > 1 && !planeClearValue(sw_fmt, color_src, 1, clear1)))
         throw Error("cuda_rect_overlay: unsupported sw_format for canvas clear");
-    if (n > 0 && AVP_CHECK_CU(cuMemcpyHtoDAsync(table_device_, table_host_, sizeof(AvpRectLayer) * n, stream)))
-        throw Error("cuda_rect_overlay: rect table upload failed");
 
     const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(sw_fmt);
     int dst_sb = sampleBytes(sw_fmt), dst_shift = storageShift(sw_fmt);
-    int canvas_w = canvas_.width, canvas_h = canvas_.height;   // plane 0 in lane groups
+    int canvas_w = view.w, canvas_h = view.h;   // plane 0 in lane groups
     int chroma_w = 0, chroma_h = 0;
     if (planes > 1) {
         int cx, cy;
-        lumaRectToPlaneRegion(sw_fmt, 0, 0, canvas_.width, canvas_.height, 1, cx, cy, chroma_w, chroma_h);
+        lumaRectToPlaneRegion(sw_fmt, 0, 0, view.w, view.h, 1, cx, cy, chroma_w, chroma_h);
         chroma_w /= 2 * dst_sb;
     }
     int dst_scale = 1 << (cd->comp[0].depth - 8), sub_x = cd->log2_chroma_w, sub_y = cd->log2_chroma_h;
     int clear0_i = clear0, clear1_i = clear1;
     int transfer = kernelTransfer(canvas_.transfer);
     float sdr_white = canvas_.sdr_white, hdr_peak = canvas_.hdr_peak;
-    CUdeviceptr table = table_device_, plane0 = (CUdeviceptr)canvas->data[0];
-    CUdeviceptr plane1 = planes > 1 ? (CUdeviceptr)canvas->data[1] : 0;
     int pitch0 = canvas->linesize[0], pitch1 = planes > 1 ? canvas->linesize[1] : 0;
+    CUdeviceptr plane0 = (CUdeviceptr)canvas->data[0] + (CUdeviceptr)view.y * pitch0 +
+                         (CUdeviceptr)view.x * plane0Lanes(sw_fmt) * dst_sb;
+    CUdeviceptr plane1 = planes > 1 ? (CUdeviceptr)canvas->data[1] + (CUdeviceptr)(view.y >> sub_y) * pitch1 +
+                                          (CUdeviceptr)(view.x >> sub_x) * 2 * dst_sb : 0;
     void *args[] = {&table, &n, &plane0, &pitch0, &plane1, &pitch1,
                     &canvas_w, &canvas_h, &chroma_w, &chroma_h,
                     &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y,
                     &clear0_i, &clear1_i, &transfer, &sdr_white, &hdr_peak};
     // A table without a filtered or demoted layer takes the entries it always took.
     const CUfunction kernel = planes == 1 ? composite_packed_kernel_
-        : any_filter ? (any_rgb || any_wide ? composite_filter_kernel_
-                        : any_array ? composite_yuv_array_filter_kernel_ : composite_yuv_filter_kernel_)
-        : any_fade ? (any_array ? composite_opacity_array_kernel_ : composite_opacity_kernel_)
-        : any_rgb ? (any_array ? composite_array_kernel_ : composite_kernel_)
-        : any_array ? composite_yuv_array_kernel_ : composite_yuv_kernel_;
+        : kinds.filter ? (kinds.rgb || kinds.wide ? composite_filter_kernel_
+                          : kinds.array ? composite_yuv_array_filter_kernel_ : composite_yuv_filter_kernel_)
+        : kinds.fade ? (kinds.array ? composite_opacity_array_kernel_ : composite_opacity_kernel_)
+        : kinds.rgb ? (kinds.array ? composite_array_kernel_ : composite_kernel_)
+        : kinds.array ? composite_yuv_array_kernel_ : composite_yuv_kernel_;
     // 128x8 luma tiles per block; gridDim.z spans the planes.
     if (AVP_CHECK_CU(cuLaunchKernel(kernel,
                                     (canvas_w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas_h + 7) / 8,
                                     planes, 32, 8, 1, (unsigned(n) + 31) / 32 * sizeof(unsigned int), stream, args, nullptr)))
         throw Error("cuda_rect_overlay: composite launch failed");
+}
+
+void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src) {
+    ensureKernels();
+    TableKinds kinds;
+    const int n = fillTable(stream, ops, canvas, kinds);
+    if (n > 0 && AVP_CHECK_CU(cuMemcpyHtoDAsync(table_device_, table_host_, sizeof(AvpRectLayer) * n, stream)))
+        throw Error("cuda_rect_overlay: rect table upload failed");
+    launch(stream, kinds, table_device_, n, canvas, color_src, {0, 0, canvas_.width, canvas_.height});
+}
+
+bool CudaRectDraw::baseCoversCanvas(const DrawOp &op, const AVFrame *base) const {
+    if (!op.src || op.src->raw() != base) return false;
+    const LayerSpec &L = op.layer;
+    const bool sized = L.dst_w > 0;
+    const int dstw = sized ? L.dst_w : L.crop_w, dsth = sized ? L.dst_h : L.crop_h;
+    return base->format == AV_PIX_FMT_CUDA && frameSwFormat(*op.src) == canvas_.sw_fmt &&
+           base->width == canvas_.width && base->height == canvas_.height &&
+           L.crop_x == 0 && L.crop_y == 0 && L.crop_w == base->width && L.crop_h == base->height &&
+           L.dst_x == 0 && L.dst_y == 0 && dstw == canvas_.width && dsth == canvas_.height &&
+           tableFilter(L) == AVP_RECT_FILTER_BILINEAR;
+}
+
+bool CudaRectDraw::drawOver(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src,
+                            const AVFrame *base) {
+    const AVPixelFormat sw_fmt = canvas_.sw_fmt;
+    const int planes = av_pix_fmt_count_planes(sw_fmt);
+    if (planes != 2 || !base || !base->data[0] || !base->data[1]) return false;
+    // The base is the bottom layer and is an exact copy of its frame: the same format, the whole
+    // frame on the whole canvas, unscaled. Bilinear sampling at 1:1 returns each sample as stored.
+    std::vector<RectViewport> views;
+    bool first = true;
+    for (const DrawOp &op : ops) {
+        if (!op.src || !op.src->raw()) continue;
+        if (std::exchange(first, false)) {
+            if (!baseCoversCanvas(op, base)) return false;
+            continue;
+        }
+        const LayerSpec &L = op.layer;
+        const bool sized = L.dst_w > 0;
+        const RectViewport view = alignViewport(L.dst_x, L.dst_y, sized ? L.dst_w : L.crop_w, sized ? L.dst_h : L.crop_h,
+                                                canvas_.width, canvas_.height);
+        if (!view.empty()) views.push_back(view);
+    }
+    if (first) return false;
+    mergeViewports(views);
+    long long covered = 0;
+    for (const RectViewport &view : views) covered += (long long)view.w * view.h;
+    // Past this the copy and the extra launches cost what one launch over the canvas does.
+    if (views.size() > kMaxViewports || covered * 100 > (long long)kMaxViewportPercent * canvas_.width * canvas_.height)
+        return false;
+
+    ensureKernels();
+    TableKinds kinds;
+    const int n = fillTable(stream, ops, canvas, kinds);   // also orders this stream after every producer
+    const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(sw_fmt);
+    const int sub_x = cd->log2_chroma_w, sub_y = cd->log2_chroma_h;
+    for (int p = 0; p < planes; ++p) {
+        int bx, by, bytes, rows;
+        lumaRectToPlaneRegion(sw_fmt, 0, 0, canvas_.width, canvas_.height, p, bx, by, bytes, rows);
+        CUDA_MEMCPY2D copy{};
+        copy.srcMemoryType = copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+        copy.srcDevice = (CUdeviceptr)base->data[p];
+        copy.srcPitch = base->linesize[p];
+        copy.dstDevice = (CUdeviceptr)canvas->data[p];
+        copy.dstPitch = canvas->linesize[p];
+        copy.WidthInBytes = bytes;
+        copy.Height = rows;
+        if (AVP_CHECK_CU(cuMemcpy2DAsync(&copy, stream)))
+            throw Error("cuda_rect_overlay: cannot copy the base frame");
+    }
+    for (size_t v = 0; v < views.size(); ++v) {
+        AvpRectLayer *host = table_host_ + size_t(max_layers_) * (v + 1);
+        const CUdeviceptr device = table_device_ + sizeof(AvpRectLayer) * size_t(max_layers_) * (v + 1);
+        for (int i = 0; i < n; ++i) host[i] = viewportLayer(table_host_[i], views[v], sub_x, sub_y);
+        if (AVP_CHECK_CU(cuMemcpyHtoDAsync(device, host, sizeof(AvpRectLayer) * n, stream)))
+            throw Error("cuda_rect_overlay: rect table upload failed");
+        launch(stream, kinds, device, n, canvas, color_src, views[v]);
+    }
+    if (views != over_views_) {
+        over_views_ = views;
+        std::ostringstream text;
+        for (const RectViewport &view : views) text << " " << view.w << "x" << view.h << "+" << view.x << "+" << view.y;
+        logstream << "cuda_rect_overlay: drawing over the base in " << views.size() << " rectangle(s), "
+                  << covered * 100 / ((long long)canvas_.width * canvas_.height) << " % of the canvas:" << text.str();
+    }
+    return true;
 }
 
 }

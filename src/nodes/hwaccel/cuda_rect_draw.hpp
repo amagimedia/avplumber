@@ -6,6 +6,7 @@
 #include "../../hwaccel.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
 #include "cuda_rect_table.h"
+#include "cuda_rect_viewport.h"
 #include "graphic_color.h"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
@@ -67,6 +68,18 @@ public:
     /// tone mapped); a PQ/HLG one on an 8-bit canvas throws unless the canvas allows it.
     void draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src);
 
+    /// As draw(), for a canvas whose bottom layer is `base` unchanged: a frame of the canvas's
+    /// format and size drawn whole, unscaled, over the whole canvas. Copies `base` to the canvas
+    /// and composes only the rectangles the other layers cover, so a key on a third of the
+    /// picture costs a third of the kernel's work. The result is the one draw() gives.
+    /// Returns false, having drawn nothing, when the layers are not of that shape or cover so
+    /// much that one launch over the canvas is as cheap; the caller then calls draw().
+    bool drawOver(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src,
+                  const AVFrame *base);
+    /// drawOver() gives up beyond this many separate rectangles or this share of the canvas.
+    static constexpr size_t kMaxViewports = 4;
+    static constexpr int kMaxViewportPercent = 60;
+
     /// sw_format of a hardware frame, AV_PIX_FMT_NONE when it has no frames context.
     static AVPixelFormat frameSwFormat(const av::VideoFrame &f);
     static bool frameSupported(AVPixelFormat format);
@@ -100,6 +113,16 @@ private:
     CUevent producer_ready_ = nullptr;
     std::vector<CUstream> waited_streams_;
 
+    // Which kernel entry a table needs.
+    struct TableKinds {
+        bool rgb = false, fade = false, array = false, filter = false, wide = false;
+    };
+    std::vector<RectViewport> over_views_;   // drawOver's last rectangles, logged when they change
+
+    int fillTable(CUstream stream, const std::vector<DrawOp> &ops, const AVFrame *canvas, TableKinds &kinds);
+    void launch(CUstream stream, const TableKinds &kinds, CUdeviceptr table, int n, AVFrame *canvas,
+                const AVFrame *color_src, const RectViewport &view);
+    bool baseCoversCanvas(const DrawOp &op, const AVFrame *base) const;
     void fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out);
     void waitForProducer(const AVFrame *src, CUstream stream);
     void validateSourceColor(const av::VideoFrame &src, bool packed_rgb, const AVFrame *canvas) const;

@@ -211,6 +211,7 @@ class DskKey:
     source: str
     dst: Rect
     on: bool = False
+    bounded: bool = False   # compose only this key's rectangle while every visible key allows it
 
 
 @dataclass(frozen=True)
@@ -634,8 +635,11 @@ def _parse_dsk(dsk: Any, sources: Dict[str, Source], canvas_w: int, canvas_h: in
         on = k.get("on", False)
         if not isinstance(on, bool):
             raise ConfigError(f"{where}: on must be a boolean")
+        bounded = k.get("bounded", False)
+        if not isinstance(bounded, bool):
+            raise ConfigError(f"{where}: bounded must be a boolean")
         dst = _rect(k["dst"], where + ".dst") if "dst" in k else Rect(0, 0, canvas_w, canvas_h)
-        keys.append(DskKey(str(k["id"]), source.id, dst, on))
+        keys.append(DskKey(str(k["id"]), source.id, dst, on, bounded))
         _unique(keys, where)
     if len(keys) > MAX_DSK_KEYS:
         raise ConfigError(f"dsk: at most {MAX_DSK_KEYS} keys")
