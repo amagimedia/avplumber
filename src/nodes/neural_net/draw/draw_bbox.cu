@@ -3,17 +3,7 @@
 #include <cuda_runtime.h>
 
 #include "draw_batch_shared.hpp"
-
-namespace {
-__device__ __forceinline__ bool inside_bbox_border(int x, int y,
-                                                   int x1, int y1,
-                                                   int x2, int y2,
-                                                   int thickness) {
-    if (x < x1 || x >= x2 || y < y1 || y >= y2) return false;
-    return x < (x1 + thickness) || x >= (x2 - thickness)
-        || y < (y1 + thickness) || y >= (y2 - thickness);
-}
-}
+#include "draw_primitives.cuh"
 
 extern "C" __global__ void kDrawBBoxNV12Luma(
     uint8_t* __restrict__ y_plane, size_t pitch_y,
