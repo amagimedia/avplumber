@@ -40,6 +40,19 @@ The Compose stack starts the web UI. With a standalone backend:
 python3 -m pyplumber.mixer.gui --host 127.0.0.1 --port 7777 --http-port 7681
 ```
 
+For the [recorded two-viewer layout](https://amagimedia.github.io/avplumber/demos/mixer/docs/),
+select **Viewers 2**, then **Program preview** in one viewer and **Program dirty**
+in the other. The first contains PVW, PGM and eight scene slots; the second
+shows the program with its enabled keys. Viewer selection is local to the
+browser. Scene takes, key buttons, AUX paging and AUX layout controls operate
+the running mixer. In Direct mode, selecting a scene takes it immediately
+using the selected transition; select Cut for the cut-only workflow.
+
+Each viewer must support its output codec. The recorded L4 show uses HEVC for
+Program preview and H.264 for dirty Program; an H.264-capable browser alone
+cannot display both. Setup can change output codecs, but applying Setup
+restarts the mixer. The downloadable demonstration MP4 is H.264.
+
 For the optional terminal UI:
 
 ```sh
@@ -81,7 +94,8 @@ Fedora image); the manual mixer needs no neural models.
 ## Behind a reverse proxy
 
 Serve controls at `/` and the preview server at `/preview/`, stripping that
-prefix. Set `MIXER_PREVIEW_BASE=/preview/` (or `webui.py --preview-base /preview/`).
+prefix. Set `MIXER_PREVIEW_BASE=/preview/` (or pass `--preview-base /preview/`
+to `python3 -m pyplumber.mixer.gui`).
 Forward WebSocket upgrades for the preview's Janus path as well as normal HTTP.
 The [L4 proxy template](../../../docker-compose/mixer/deploy/l4/nginx.conf.template) is a complete example.
 WebRTC also needs the configured UDP range reachable from the viewer.

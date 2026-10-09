@@ -1,6 +1,6 @@
 # Portable L4 mixer
 
-[Quick start](../../../../demos/mixer/README.md) · [Capacity](../../../../demos/mixer/docs/capacity.md#nvidia-l4-nvidia_l4) ·
+[Quick start](../../../../demos/mixer/README.md) · [Capacity](../../../../demos/mixer/docs/capacity.md#nvidia-l4-linear-and-cuarray-profiles) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
 Requires a Linux L4 host with working NVIDIA DRM/GBM/EGL, R615+ driver,
@@ -23,6 +23,12 @@ Open `http://<host>:7681/setup/`, controls at `/`, outputs at `/wall`.
 Allow the public proxy port and `JANUS_RTP_PORT_RANGE` (UDP 20000–20100 by
 default). Set `MIXER_HTPASSWD` or use an authenticated reverse proxy.
 The included proxy forwards HTTP and WebSocket paths.
+
+The [current demo recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
+shows this profile at 192 inputs / 256 scenes / 26 outputs, 1080p25 SDR.
+Its two viewers show Program/Preview and dirty Program with four keys. The
+Program/Preview and Multiviewer outputs in that show use HEVC; use a browser
+with HEVC WebRTC reception support to view them. The recording itself is H.264.
 
 First start seeds [settings.json](settings.json) and generates media. Later
 starts preserve saved settings; change an existing show through Setup.
