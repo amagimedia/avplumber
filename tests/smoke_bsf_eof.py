@@ -29,7 +29,10 @@ def run(path, output):
         (n.Demux, {"group": "input", "name": "demux", "src": "packets",
                    "routing": {"v:0": "selected"}}),
         (n.DecVideo, {"group": "input", "name": "decode", "src": "selected", "dst": "decoded"}),
-        (n.EncVideo, {"group": "output", "name": "encoder", "src": "decoded", "dst": "encoded",
+        # The declaration gives the encoder and the output their time base.
+        (n.FakeVideoFormat, {"group": "output", "name": "format", "src": "decoded",
+                             "dst": "declared"}),
+        (n.EncVideo, {"group": "output", "name": "encoder", "src": "declared", "dst": "encoded",
                       "codec": "mpeg2video"}),
         (n.Bsf, {"group": "output", "name": "bsf", "src": "encoded", "dst": "filtered",
                  "bsf": "dump_extra=freq=keyframe"}),
