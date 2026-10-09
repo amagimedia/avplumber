@@ -22,6 +22,13 @@ to fetch both pinned revisions; the default remains `n8.1`.
 
 ## Development-series differences
 
+Live SRT outputs with explicit positive `linger` drain the sender buffer and
+keep the connection open for the negotiated peer latency plus two measured
+RTTs, within that total linger deadline. This protects the receiver's final
+TSBPD-buffered packets; asynchronous socket linger alone does not. Timeout is
+reported as an error. Unset/zero linger, SRT inputs and file-mode sockets retain
+their previous close behavior. See the upstream [live shutdown discussion](https://github.com/Haivision/srt/issues/2760#issuecomment-1625033028).
+
 All seven custom CUDA filters remain: `convert_cuda`, `crop_cuda`,
 `overlay_many_cuda`, `pad_cuda`, `transition_cuda` (including 10-bit and dip),
 `tonemap_cuda` and `band_blur_cuda`. The RFC 4175, V4L2, optional NDI registration
