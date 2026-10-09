@@ -1,15 +1,18 @@
 """Guard the shared FFmpeg series and its GPU band-blur registration."""
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_shared_ffmpeg_patch_manifest():
-    series = ROOT / "deps/ffmpeg/8"
+@pytest.mark.parametrize("version", ("8", "9"))
+def test_shared_ffmpeg_patch_manifest(version):
+    series = ROOT / "deps/ffmpeg" / version
     manifest = dict(line.split("=", 1) for line in
                     (series / "bases.env").read_text().splitlines() if "=" in line)
     assert len(list(series.glob("*.patch"))) == int(manifest["patch_count"])
-    for base in ("n80", "n81"):
+    for base in (("n80", "n81") if version == "8" else ("upstream",)):
         for suffix in ("commit", "tree"):
             value = manifest[f"{base}_{suffix}"]
             assert len(value) == 40
