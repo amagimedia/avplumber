@@ -29,9 +29,9 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Keeping Vulkan out of the GPU process</h1>
-<p class="note">Reviewed 2026-10-06 against <a href="https://github.com/amagimedia/avplumber/tree/d1dc35fa071c703f145ed989ff98bbf585c563d2">mixer-improv at d1dc35fa</a>. Measurements retain their original workload and validation scope; this review does not certify a running deployment.</p><p class="note"><b>Current scope.</b> The restart result below applies to its recorded browser build and flags. It is not a new qualification of every later Chromium/Electron release.</p>
+<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> The restart result below applies to its recorded browser build and flags. It is not a new qualification of every later Chromium/Electron release.</p>
   <p class="lede">A restart that changes the browser page closes and reopens all 29 browser windows. On Electron 41 that crashed Chromium's GPU process: closing windows left a Vulkan cleanup task pending, and a surviving window's shared-texture copy flush tripped a <code>CHECK</code> on it. Vulkan was in that GL-only process at all because, with the GPU blocklist ignored, Chromium runs WebGPU on Vulkan through GL interop. Two Chromium switches, both on by default in the browser sender, address it: WebGPU on the OpenGL ES adapter, so no Vulkan context exists, and no GPU-process crash limit, so a crash never quits the worker; five window-recreating restarts on Electron 44 then ran with 0 crashes.</p>
-  <span class="pill live">Status: Implemented, deployed on the test host</span>
+  <span class="pill live">Status: Implemented; historical test deployment</span>
 
   <ul class="figures" aria-label="Measured facts">
     <li><b>6 → 0</b><span>GPU-process crashes across 5 restarts that recreate all 29 browser windows</span></li>
@@ -142,9 +142,9 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/deps/dma-browser/src/main/HwAccelConfigurator.ts">deps/dma-browser/src/main/HwAccelConfigurator.ts</a>: <code>--ignore-gpu-blocklist</code>, the comment stating the mechanism, and both switches behind their env flags; <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/deps/dma-browser/src/main/HwAccelConfigurator.ts">source</a> the <code>--disable-vulkan</code> that is not a Chromium switch.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts">deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts</a>: both switches present by default; <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts">source</a> both flags off, and neither switch appears.</li>
-    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/deps/dma-browser/README.md?plain=1">dma-browser README · NVIDIA GPUs</a>: the two switches and how to turn them off.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/deps/dma-browser/src/main/HwAccelConfigurator.ts">deps/dma-browser/src/main/HwAccelConfigurator.ts</a>: <code>--ignore-gpu-blocklist</code>, the comment stating the mechanism, and both switches behind their env flags; <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/deps/dma-browser/src/main/HwAccelConfigurator.ts">source</a> the <code>--disable-vulkan</code> that is not a Chromium switch.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts">deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts</a>: both switches present by default; <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/deps/dma-browser/tests/unit/HwAccelConfigurator.test.ts">source</a> both flags off, and neither switch appears.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/deps/dma-browser/README.md?plain=1">dma-browser README · NVIDIA GPUs</a>: the two switches and how to turn them off.</li>
   </ul>
   <p class="note">Source links are pinned to the reviewed revision.</p>
 

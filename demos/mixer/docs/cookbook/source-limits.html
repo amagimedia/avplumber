@@ -29,11 +29,16 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Source limits by mode and frame rate</h1>
-<p class="note">Reviewed 2026-10-06 against <a href="https://github.com/amagimedia/avplumber/tree/d1dc35fa071c703f145ed989ff98bbf585c563d2">mixer-improv at d1dc35fa</a>. Measurements retain their original workload and validation scope; this review does not certify a running deployment.</p><p class="note"><b>Current scope.</b> Admission lives in instance_profiles.py and is GPU/profile-specific. T4 tables below are historical T4 data, not L4 ceilings. L4 CUarray SDR25 admits 192 total sources including four browser keys (188 catalogue sources), with 120 NVDEC, 32 raw and 40 browser inputs. Current SDR output ceilings are 26 at 25/30 fps and 22 at 50/60 fps. No cap was raised for the latest node reductions.</p>
-  <p class="lede">How many unique 1080p sources the setup page allows on the 16 GiB T4 test host (16 vCPU), for every canvas mode and frame rate, and what each source type may use of it. Downstream-key pages count as sources. A request above a limit is scaled down to it, and switching back to a larger mode restores the total. Every limit here comes from the <code>tesla_t4</code> instance profile; another machine needs its own measured profile.</p>
-  <span class="pill live">Live: setup default</span>
+<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Admission lives in instance_profiles.py and is GPU/profile-specific. T4 tables below are historical T4 data, not L4 ceilings. L4 CUarray SDR25 admits 192 total sources including four browser keys (188 catalogue sources), with 120 NVDEC, 32 raw and 40 browser inputs. Current SDR output ceilings are 26 at 25/30 fps and 22 at 50/60 fps. No cap was raised for the latest node reductions.</p>
+  <p class="lede">Historical admission measurements for unique 1080p sources on the 16 GiB T4 test host (16 vCPU), for every canvas mode and frame rate, and what each source type may use of it. Downstream-key pages count as sources. A request above a limit is scaled down to it, and switching back to a larger mode restores the total. Every limit here comes from the <code>tesla_t4</code> instance profile; another machine needs its own measured profile.</p>
+  <span class="pill">Historical T4 profile</span>
 
-  <h2>Total sources, keys included</h2>
+
+  <h2 id="l4">Current L4 CUarray profile</h2>
+  <p>The <a href="../">2026-10-09 recording</a> observes 192 total inputs at 1080p25 SDR: 120 NVDEC decoders, 32 raw NV12 inputs, 36 browser scene sources and four browser keys. Setup shows 188 catalogue sources; the main interface includes the four keys in its total. The show has 256 scenes and 26 encoded outputs: Program, clean Program and 24 AUX buses.</p>
+  <table><thead><tr><th>SDR rate</th><th>Total inputs, keys included</th><th>Output admission ceiling</th></tr></thead><tbody><tr><td>25 fps</td><td>192</td><td>26</td></tr><tr><td>30 fps</td><td>170</td><td>26</td></tr><tr><td>50 fps</td><td>110</td><td>22</td></tr><tr><td>60 fps</td><td>99</td><td>22</td></tr></tbody></table>
+  <p>These are <code>nvidia_l4_cuarray</code> admission limits, not a new qualification of every combination. Encoder preset, source type and HDR mode also constrain the allowed mix. The <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md">capacity reference</a> separates passing short probes, failed trials and derived limits. The UI recording is not a throughput benchmark.</p>
+  <h2>Historical T4 totals, keys included</h2>
   <div class="measured wide">
     <table>
       <thead><tr><th>Frame rate</th><th>SDR · 8-bit 4:2:0</th><th>HDR · HLG 10-bit 4:2:0</th><th>HDR · HLG 10-bit 4:2:2</th></tr></thead>
@@ -103,14 +108,14 @@
 
   <h2>Conditions</h2>
   <p>NVIDIA T4 16 GiB, 16 vCPU, driver R615, Fedora 44 image with CUDA 13.4, Electron 44 browsers. Portrait 1080×1920 canvas from 1920×1080 sources, program with clean feed and two multiviews, NVENC preset p3. Each limit passed the cut-spam gate (cuts, fades and wipes at 4 per second) with 0 missed program deadlines.</p>
-  <p class="note">An L4 host has its own profiles, <code>nvidia_l4</code> and the opt-in <code>nvidia_l4_cuarray</code>, which admits 192 sources at 25 fps on an SDR canvas. Their source tables, output ceilings and the runs that failed are in <a href="https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/capacity.md#nvidia-l4-linear-and-cuarray-profiles">capacity.md · NVIDIA L4</a>; this page is the T4's table only.</p>
+  <p class="note">An L4 host has its own profiles, <code>nvidia_l4</code> and the opt-in <code>nvidia_l4_cuarray</code>, which admits 192 sources at 25 fps on an SDR canvas. Their source tables, output ceilings and the runs that failed are in <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/capacity.md#nvidia-l4-linear-and-cuarray-profiles">capacity.md · NVIDIA L4</a>; this page is the T4's table only.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">
     <li><code>demos/mixer/instance_profiles.py</code>: <code>INSTANCE_PROFILES[InstanceType.TESLA_T4]</code>, every limit on this page. <code>webui.py --instance-type tesla_t4</code> selects it; Compose passes <code>MIXER_INSTANCE_TYPE</code>, default <code>tesla_t4</code>.</li>
     <li><code>demos/mixer/setup_runtime.py</code>: <code>source_limit</code> and <code>source_counts</code> apply the profile.</li>
     <li><code>demos/mixer/setup.html</code>: the same rules on the setup page, with the profile served in the setup status.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/capacity.md">capacity.md</a>: every measurement behind these numbers.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/capacity.md">capacity.md</a>: every measurement behind these numbers.</li>
   </ul>
 
   <footer><a href="index.html">← All cookbook pages</a></footer>

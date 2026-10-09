@@ -1,9 +1,9 @@
 # Mixer latency
 
-[Quick start](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/README.md) · [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
+[Quick start](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/README.md) · [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
 - **Cut probe:** command receipt to the first matching encoded frame; enable
-  `--cut-latency-encoder janus_encoder`. [Setup and meaning](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/doc/mixer_cut_latency.md).
+  `--cut-latency-encoder janus_encoder`. [Setup and meaning](https://github.com/amagimedia/avplumber/blob/develop/doc/mixer_cut_latency.md).
 - **Browser probe:** mouse click to `requestVideoFrameCallback().expectedDisplayTime`
   for a verified destination frame. It includes playback, but not physical display scan-out.
 - Protocol acknowledgment and settled mixer state measure neither of those.
@@ -24,7 +24,7 @@ and [1080p load samples](https://amagimedia.github.io/avplumber/demos/mixer/docs
 
 ## Reproduce
 
-Generate numbered clips with [frame_codes.py](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/tests/mixer/frame_codes.py). Start the
+Generate numbered clips with [frame_codes.py](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/tests/mixer/frame_codes.py). Start the
 mixer, a ttyd-hosted TUI and Janus player, then enable Chromium remote debugging.
 With Node.js 22+:
 

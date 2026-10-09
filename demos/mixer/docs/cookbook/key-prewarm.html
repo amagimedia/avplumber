@@ -12,7 +12,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Prewarmed DSK keys</h1>
-<p class="note">Reviewed 2026-10-06 against <a href="https://github.com/amagimedia/avplumber/tree/d1dc35fa071c703f145ed989ff98bbf585c563d2">mixer-improv at d1dc35fa</a>. Measurements retain their original workload and validation scope; this review does not certify a running deployment.</p><p class="note"><b>Current scope.</b> Prewarming deliberately keeps key subscriptions alive while keys are off. This trades retained frame references for prompt key activation and differs from disabling off-page AUX subscriptions.</p>
+<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Prewarming deliberately keeps key subscriptions alive while keys are off. This trades retained frame references for prompt key activation and differs from disabling off-page AUX subscriptions.</p>
   <p class="lede">Every downstream key stays subscribed while it is off, so a key cut or fade-in starts on the very next program frame instead of waiting 1–2 frames for the browser page’s next paint.</p>
   <span class="pill live">Status: Implemented</span>
 
@@ -136,11 +136,11 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/nodes/mixer_keyer.cpp">src/nodes/mixer_keyer.cpp</a>: <code>processKeyed</code> and the comment that states the rule.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/nodes/mixer_keyer.cpp">source</a>: every key subscription enabled once (<code>keys_subscribed_</code>, <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/nodes/mixer_keyer.cpp">source</a>).</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/nodes/mixer_keyer.cpp">source</a>: every key’s frames are queued, on or off; <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/nodes/mixer_keyer.cpp">source</a> the frame stamped for the program tick is taken; the queue bound <code>kKeyQueue</code> is at <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/nodes/mixer_keyer.cpp">source</a>.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/nodes/mixer_keyer.cpp">source</a>: a key is drawn only when it has a frame and its level is above 0; <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/nodes/mixer_keyer.cpp">source</a> the pass-through with no key visible.</li>
-    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/config.md#dsk">config.md · dsk</a> (“Off keys keep receiving frames …”).</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/mixer_keyer.cpp">src/nodes/mixer_keyer.cpp</a>: <code>processKeyed</code> and the comment that states the rule.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/mixer_keyer.cpp">source</a>: every key subscription enabled once (<code>keys_subscribed_</code>, <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/mixer_keyer.cpp">source</a>).</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/mixer_keyer.cpp">source</a>: every key’s frames are queued, on or off; <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/mixer_keyer.cpp">source</a> the frame stamped for the program tick is taken; the queue bound <code>kKeyQueue</code> is at <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/mixer_keyer.cpp">source</a>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/mixer_keyer.cpp">source</a>: a key is drawn only when it has a frame and its level is above 0; <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/mixer_keyer.cpp">source</a> the pass-through with no key visible.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/config.md#dsk">config.md · dsk</a> (“Off keys keep receiving frames …”).</li>
   </ul>
   <p class="note">Source links identify the reviewed code, independently of deployment state.</p>
 

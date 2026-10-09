@@ -1,6 +1,6 @@
 # Demo recipes
 
-A recipe generates test media and a [mixer show](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/config.md). Setup handles this
+A recipe generates test media and a [mixer show](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md). Setup handles this
 automatically; for manual preparation on the NVIDIA host:
 
 ```sh
@@ -20,7 +20,7 @@ NumPy and FFmpeg with NVENC. `--runtime-media-dir /media` writes container paths
 | `inputs[].weight` | Relative share of sources; zero disables the entry |
 | `layouts` | Layout names and relative shares of scenes |
 | `seed` | Reproduces scene selection and geometry |
-| `canvas` | Dimensions, rate, format and color; see [config](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/config.md#canvas) |
+| `canvas` | Dimensions, rate, format and color; see [config](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#canvas) |
 | `generation` | `seconds` (default 2), optional source `width` and `height` |
 | `alpha_background` | Allocated video source used behind transparent pages |
 | `renditions`, `clean_rendition`, `aux_buses`, `dsk` | Output/key settings copied into the show |
@@ -29,13 +29,13 @@ NumPy and FFmpeg with NVENC. `--runtime-media-dir /media` writes container paths
 Largest-remainder rounding makes the weighted allocations sum to the total;
 ties follow recipe order. Weights summing to `source_count` give exact counts.
 The graph accepts 193 sources, or 192 with an AUX program pad. Setup also
-applies the selected [instance profile](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/instance_profiles.py).
+applies the selected [instance profile](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/instance_profiles.py).
 
 ## Example presets
 
-- [demo.example.json](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/demo.example.json): generated video, no browsers.
-- [demo.equal.json](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/demo.equal.json): video and browser sources with equal weights.
-- [demo.browser-alpha.json](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/demo.browser-alpha.json): transparent overlay checks.
+- [demo.example.json](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/demo.example.json): generated video, no browsers.
+- [demo.equal.json](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/demo.equal.json): video and browser sources with equal weights.
+- [demo.browser-alpha.json](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/demo.browser-alpha.json): transparent overlay checks.
 
 Copy a preset to `media/demo.json`, edit it, then restart the Compose mixer.
 Disable `alpha_overlay` layouts if there are no browser inputs; remove
@@ -55,7 +55,7 @@ Every entry has an `id`, `kind` and `weight`.
 Generated 4:2:0 media defaults to H.264 for SDR and HEVC for HLG. Set `codec`
 to select encoded storage, or `storage: "nv12"` / `"p010"` for raw uploads.
 Generated 4:2:2 uses v210. Encoded entries may select `decode_storage: "cuarray"`
-and `extra_hw_frames`; see [decoder requirements](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/config.md#sources).
+and `extra_hw_frames`; see [decoder requirements](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#sources).
 
 ## Generated media
 
@@ -81,7 +81,7 @@ for workload rules and implementation notes.
 
 The balanced capacity recipe generates a show at its chosen canvas rate. It
 does not by itself test a mixture of native source rates. Use
-[the mixed-rate smoke](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/tests/cuda/smoke_mixed_fps.py) on an NVIDIA host
+[the mixed-rate smoke](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/tests/cuda/smoke_mixed_fps.py) on an NVIDIA host
 for that check, and keep its small barcoded fixture separate from full-resolution
 capacity results. Generated source counts include reserved browser keys when
 comparing them with profile totals; the 192-source CUarray SDR25 profile has

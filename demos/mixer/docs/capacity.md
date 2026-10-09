@@ -1,12 +1,27 @@
 # Recorded mixer capacity
 
-Setup admission limits live in [instance_profiles.py](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/instance_profiles.py).
+Setup admission limits live in [instance_profiles.py](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/instance_profiles.py).
 They depend on source mix, canvas rate/format, output count and encoder preset.
 Do not scale one GPU's profile to another GPU. This page summarizes historical
 runs; raw evidence and caveats remain linked below.
 
 [Source-limit cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/source-limits.html) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
+
+## Current demo recording: 2026-10-09
+
+The [10-second UI recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
+shows a running `nvidia_l4_cuarray` show on one NVIDIA L4 / 16-vCPU host:
+192 inputs, 256 scenes and 26 outputs at 1920×1080p25 SDR. The input total is
+120 NVDEC + 36 browser scene sources + 32 raw NV12 + four browser keys;
+Setup reports 188 catalogue sources before adding the keys. Outputs are
+Program, clean Program and 24 AUX buses, including the Program/Preview monitor
+and source multiviewer.
+
+The capture uses two WebRTC viewers, four enabled keys and direct cuts through
+several scene types. It is an interface demonstration, not a new capacity,
+latency or soak benchmark. The [capture metadata](https://amagimedia.github.io/avplumber/demos/mixer/docs/capture-20261009.json)
+records its scope; the historical qualification results below remain separate.
 
 ## T4
 
@@ -64,7 +79,7 @@ count of HDR decoders. Short probes do not qualify every scene or a long soak;
 30/50 fps admission values in that update were derived, not newly measured.
 
 The [CUarray cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/nvdec-cuarray.html) explains storage savings and
-fixed-pool sizing. Use the [portable L4 stack](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/docker-compose/mixer/deploy/l4/README.md) for that build.
+fixed-pool sizing. Use the [portable L4 stack](https://github.com/amagimedia/avplumber/blob/develop/docker-compose/mixer/deploy/l4/README.md) for that build.
 After deployment, exercise actual content, every scene and Setup restart; check
 fresh deadline/drop counter deltas, not just encoder FPS.
 
@@ -79,4 +94,4 @@ each rather than 86 nodes each. These are not 184 eliminated threads.
 
 The small mixed-rate GPU smoke verifies cadence, cuts and stall recovery; it
 does not qualify 188-source throughput. No admission cap was raised based on
-these node reductions. See [cadence evidence](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/latency.md#native-input-cadence-check-2026-10-06).
+these node reductions. See [cadence evidence](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/latency.md#native-input-cadence-check-2026-10-06).

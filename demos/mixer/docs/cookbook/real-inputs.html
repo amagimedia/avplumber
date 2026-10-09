@@ -18,12 +18,12 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Real 1080p inputs, no shortcuts</h1>
-<p class="note">Reviewed 2026-10-06 against <a href="https://github.com/amagimedia/avplumber/tree/d1dc35fa071c703f145ed989ff98bbf585c563d2">mixer-improv at d1dc35fa</a>. Measurements retain their original workload and validation scope; this review does not certify a running deployment.</p><p class="note"><b>Current scope.</b> Capacity tests still require independent real-resolution inputs processed at native cadence. The eight small mixed-rate barcoded inputs are a correctness fixture, explicitly not a capacity qualification.</p>
-  <p class="lede">The capacity demo proves what real inputs cost: every source is its own input of at least 1080p25, with its own media, processed on every frame.</p>
+<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Capacity tests still require independent real-resolution inputs processed at native cadence. The eight small mixed-rate barcoded inputs are a correctness fixture, explicitly not a capacity qualification.</p>
+  <p class="lede">The capacity demo proves what real inputs cost: every scene source is its own input of at least 1080p25, with its own media, processed on every frame. The four downstream keys are separate browser inputs at their graphics dimensions; they are included in the 192-input total.</p>
   <span class="pill live">Status: Implemented</span>
 
   <ul class="figures" aria-label="Key facts">
-    <li><b>1920×1080</b><span>every clip, raw file and browser page; the setup page has no 720p option</span></li>
+    <li><b>1920×1080</b><span>every scene clip, raw file and browser page; keys use their graphics dimensions</span></li>
     <li><b>0</b><span>files shared between generated sources</span></li>
     <li><b>≈ 155 MB</b><span>disk and page cache per raw NV12 source (2 s clip at 25 fps)</span></li>
     <li><b>0 frames</b><span>added to program or command-to-screen latency</span></li>
@@ -150,7 +150,7 @@
       <ul>
         <li>Each generated source gets its own media: an NVDEC clip, a raw NV12/P010 file or a browser page. No two sources share a file.</li>
         <li>Its source ID is burned into every frame, on a plate at a spot and orbit phase seeded by that ID. Patterns rotate through a pool by source index.</li>
-        <li>Browser pages render at 1920×1080 and show their ID in the page header.</li>
+        <li>Browser scene pages render at 1920×1080 and show their ID in the page header. Key windows are 1016×172 (lower third), 1920×80 (ticker), 152×152 and 304×152 (corner bugs).</li>
         <li>The setup page is 1080p only; the 720p option is gone.</li>
       </ul></li>
     <li><b>Why</b>
@@ -178,16 +178,16 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/demos/mixer/prepare_demo.py">prepare_demo.py</a>: <code>id_overlay</code> burns the source ID into every frame; the plate position is seeded by the ID</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/demos/mixer/prepare_demo.py">prepare_demo.py</a>: pattern picked per source index</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/demos/mixer/prepare_demo.py">prepare_demo.py</a>: one file per source, named by its ID</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/demos/mixer/prepare_demo.py">prepare_demo.py</a> and <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/demos/mixer/browser_alpha.html">browser_alpha.html L24–26</a>: each browser page carries its own ID</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/demos/mixer/setup_runtime.py">setup_runtime.py</a>: 1080p only, one fixed source size</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/demos/mixer/setup_runtime.py">setup_runtime.py</a>: 1920×1080 generation and browser windows; <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/demos/mixer/demo.example.json">demo.example.json</a> has no shared download inputs</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/demos/mixer/setup.html">setup.html L251</a>: the setup page's fixed source size, no resolution menu</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/inputs.py">pyplumber/mixer/inputs.py</a>: the decoder node, no resize parameter</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/graph.py">pyplumber/mixer/graph.py</a>: the only GPU clip cache holds wipe graphics, never sources, and is off by default</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/recipe.md#generated-media">recipe.md · Generated media</a>: per-source media and storage per format</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/prepare_demo.py">prepare_demo.py</a>: <code>id_overlay</code> burns the source ID into every frame; the plate position is seeded by the ID</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/prepare_demo.py">prepare_demo.py</a>: pattern picked per source index</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/prepare_demo.py">prepare_demo.py</a>: one file per source, named by its ID</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/prepare_demo.py">prepare_demo.py</a> and <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/browser_alpha.html">browser_alpha.html L24–26</a>: each browser page carries its own ID</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/setup_runtime.py">setup_runtime.py</a>: 1080p only, one fixed source size</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/setup_runtime.py">setup_runtime.py</a>: 1920×1080 generation and browser windows; <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/demo.example.json">demo.example.json</a> has no shared download inputs</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/setup.html">setup.html L251</a>: the setup page's fixed source size, no resolution menu</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/inputs.py">pyplumber/mixer/inputs.py</a>: the decoder node, no resize parameter</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/graph.py">pyplumber/mixer/graph.py</a>: the GPU clip cache holds wipe graphics, never sources; configured media wipes are preloaded. The current cut-only recording does not exercise them</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/recipe.md#generated-media">recipe.md · Generated media</a>: per-source media and storage per format</li>
   </ul>
   <p class="note">Source links are pinned to the reviewed revision.</p>
   <p class="note">See also <a href="rejected.html">Ideas we measured and dropped</a>: shared media, 720p, decode-side resize and GPU-held loops.</p>

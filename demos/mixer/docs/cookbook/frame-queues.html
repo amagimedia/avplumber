@@ -18,7 +18,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>One decoded frame in flight per NVDEC source</h1>
-<p class="note">Reviewed 2026-10-06 against <a href="https://github.com/amagimedia/avplumber/tree/d1dc35fa071c703f145ed989ff98bbf585c563d2">mixer-improv at d1dc35fa</a>. Measurements retain their original workload and validation scope; this review does not certify a running deployment.</p><p class="note"><b>Current scope.</b> This queue-shrinking proposal remains unselected. CUarray decode retains three decoded queue slots. Removing a downstream input FPS node is a separate queue reduction and does not shrink that decoder queue.</p>
+<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> This queue-shrinking proposal remains unselected. CUarray decode retains three decoded queue slots. Removing a downstream input FPS node is a separate queue reduction and does not shrink that decoder queue.</p>
   <p class="lede">This earlier proposal was not selected. The implemented <a href="nvdec-cuarray.html">NVDEC CUarray path</a> keeps the decoded queue at three frames and AUX latency at 80 ms, saving 4.88 GiB in the matched 192-input / 20-output comparison.</p>
   <span class="pill">Status: Not selected, not in code</span>
   <p class="note">The original linear-CUDA analysis below is retained as background. Its estimated queue savings were not measured or shipped and do not describe the new fixed array pools.</p>
@@ -151,17 +151,17 @@
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/application.py"><code>pyplumber/mixer/application.py</code></a> — the instance-wide default of&nbsp;3, which every decoded edge uses today.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/application.py"><code>pyplumber/mixer/application.py</code></a> and <a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/application.py"><code>:729</code></a> — the two build paths, where a per-source plan would go.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/pyplumber/mixer/inputs.py"><code>pyplumber/mixer/inputs.py</code></a> — <code>build_input</code>'s decoder writes <code>input_&lt;n&gt;_decoded</code>.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/graph_core.hpp"><code>src/graph_core.hpp</code></a> — edges use a bounded, non-allocating <code>try_enqueue</code>.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/graph_core.hpp"><code>src/graph_core.hpp</code></a> — a planned capacity overrides the default when the edge is created.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/application.py"><code>pyplumber/mixer/application.py</code></a> — the instance-wide default of&nbsp;3, which every decoded edge uses today.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/application.py"><code>pyplumber/mixer/application.py</code></a> and <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/application.py"><code>:729</code></a> — the two build paths, where a per-source plan would go.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/inputs.py"><code>pyplumber/mixer/inputs.py</code></a> — <code>build_input</code>'s decoder writes <code>input_&lt;n&gt;_decoded</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/graph_core.hpp"><code>src/graph_core.hpp</code></a> — edges use a bounded, non-allocating <code>try_enqueue</code>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/graph_core.hpp"><code>src/graph_core.hpp</code></a> — a planned capacity overrides the default when the edge is created.</li>
     <li><a href="https://github.com/cameron314/readerwriterqueue/blob/2dee33ae3edd1e454ac34fea0a27017613355eff/readerwriterqueue.h"><code>deps/readerwriterqueue/readerwriterqueue.h:116</code></a> — the power-of-two rounding.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/d1dc35fa071c703f145ed989ff98bbf585c563d2/src/nodes/realtime.cpp"><code>src/nodes/realtime.cpp</code></a> — <code>realtime</code> peeks at the head frame without taking it.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/realtime.cpp"><code>src/nodes/realtime.cpp</code></a> — <code>realtime</code> peeks at the head frame without taking it.</li>
     <li><a href="https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavcodec/nvdec.c"><code>libavcodec/nvdec.c:315</code></a> (FFmpeg&nbsp;8.1) — the NVDEC output frame pool grows on demand.</li>
   </ul>
   <p class="note">No branch carries this change. Line numbers are from the current mixer branch; they may shift on <code>develop</code>.</p>
-  <p>Related doc: <a href="https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/capacity.md">Mixer demo capacity</a>, the 40-source NVDEC workload this saving is sized for. No Markdown section covers this change yet.</p>
+  <p>Related doc: <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/capacity.md">Mixer demo capacity</a>, the 40-source NVDEC workload this saving is sized for. No Markdown section covers this change yet.</p>
 
   <footer><a href="index.html">← All cookbook pages</a></footer>
 </main>

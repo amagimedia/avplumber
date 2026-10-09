@@ -1,0 +1,51 @@
+{
+  "captured_at": "2026-10-09",
+  "capture": {
+    "duration_seconds": 10,
+    "width": 1920,
+    "height": 1080,
+    "fps": 25,
+    "frames": 250,
+    "kind": "Browser recording of the live mixer UI and two WebRTC outputs",
+    "viewers": [
+      "Program preview: PVW, PGM and eight scene slots",
+      "Program dirty with four downstream keys"
+    ],
+    "actions": "Direct cuts only; no fade or media wipe",
+    "source_media": "Generated per-source test patterns and live Chromium graphics"
+  },
+  "configuration": {
+    "gpu": "NVIDIA L4",
+    "vcpus": 16,
+    "profile": "nvidia_l4_cuarray",
+    "canvas": {
+      "width": 1920,
+      "height": 1080,
+      "fps": 25,
+      "format": "nv12"
+    },
+    "inputs": {
+      "total": 192,
+      "nvdec": 120,
+      "browser_scene_sources": 36,
+      "raw_nv12": 32,
+      "browser_keys": 4,
+      "catalogue_sources": 188
+    },
+    "scenes": 256,
+    "outputs": {
+      "total": 26,
+      "program": 1,
+      "clean": 1,
+      "aux": 24
+    },
+    "dsk": [
+      "lower_third",
+      "ticker",
+      "bug_left",
+      "bug_right"
+    ]
+  },
+  "scope": "Observed configuration and short UI demonstration; not a new capacity or latency benchmark. Program, preview and key states restored after capture; no setup, service or code changes.",
+  "sha256": "defb7af97f6af6921cbebc092c7f82050172fb4c2a6cd7cbde1d6b853e870235"
+}

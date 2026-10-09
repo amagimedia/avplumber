@@ -1,6 +1,6 @@
 # Running the mixer
 
-[Quick start](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/README.md) · [Configuration](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/config.md) ·
+[Quick start](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/README.md) · [Configuration](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
 ## Start the mixer backend
@@ -30,7 +30,7 @@ File inputs retain their native cadence; `--fps` selects the canvas/output rate.
 For encoded files, fractional rates come from their timestamps. The compositor
 selects, repeats or drops source frames as needed, while `realtime` still paces
 input delivery. Browser pacing follows its configured paint rate. See
-[configuration](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/config.md#input-cadence-and-colour-tag-guarantees).
+[configuration](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#input-cadence-and-colour-tag-guarantees).
 
 ## Controls
 
@@ -39,6 +39,19 @@ The Compose stack starts the web UI. With a standalone backend:
 ```sh
 python3 -m pyplumber.mixer.gui --host 127.0.0.1 --port 7777 --http-port 7681
 ```
+
+For the [recorded two-viewer layout](https://amagimedia.github.io/avplumber/demos/mixer/docs/),
+select **Viewers 2**, then **Program preview** in one viewer and **Program dirty**
+in the other. The first contains PVW, PGM and eight scene slots; the second
+shows the program with its enabled keys. Viewer selection is local to the
+browser. Scene takes, key buttons, AUX paging and AUX layout controls operate
+the running mixer. In Direct mode, selecting a scene takes it immediately
+using the selected transition; select Cut for the cut-only workflow.
+
+Each viewer must support its output codec. The recorded L4 show uses HEVC for
+Program preview and H.264 for dirty Program; an H.264-capable browser alone
+cannot display both. Setup can change output codecs, but applying Setup
+restarts the mixer. The downloadable demonstration MP4 is H.264.
 
 For the optional terminal UI:
 
@@ -64,7 +77,7 @@ PLI/FIR feedback requests keyframes, limited by `--keyframe-min-interval-ms`.
 ## Docker
 
 Compose builds the mixer and imports browser/Wayland/Janus service definitions
-from the shared [DMA-BUF stack](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/docker-compose/dmabuf/compose.yaml).
+from the shared [DMA-BUF stack](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/docker-compose/dmabuf/compose.yaml).
 
 ### The two images
 
@@ -73,7 +86,7 @@ from the shared [DMA-BUF stack](https://github.com/amagimedia/avplumber/blob/ad3
 | `Dockerfile.fedora44` (default) | Fedora 44 / CUDA 13.4 / FFmpeg 8.1 | R615+ driver |
 | `Dockerfile` | Ubuntu 22.04 / CUDA 11.7 | Older compatible NVIDIA driver |
 
-Select the second with `MIXER_DOCKERFILE=Dockerfile`. The [L4 preset](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/docker-compose/mixer/deploy/l4/README.md)
+Select the second with `MIXER_DOCKERFILE=Dockerfile`. The [L4 preset](https://github.com/amagimedia/avplumber/blob/develop/docker-compose/mixer/deploy/l4/README.md)
 pins its own FFmpeg build. Keep `media/.nv-cache` to reuse driver-compiled kernels.
 TensorRT is optional (`WITH_TENSORRT=1` and the `tensorrt_url` build secret in the
 Fedora image); the manual mixer needs no neural models.
@@ -81,9 +94,10 @@ Fedora image); the manual mixer needs no neural models.
 ## Behind a reverse proxy
 
 Serve controls at `/` and the preview server at `/preview/`, stripping that
-prefix. Set `MIXER_PREVIEW_BASE=/preview/` (or `webui.py --preview-base /preview/`).
+prefix. Set `MIXER_PREVIEW_BASE=/preview/` (or pass `--preview-base /preview/`
+to `python3 -m pyplumber.mixer.gui`).
 Forward WebSocket upgrades for the preview's Janus path as well as normal HTTP.
-The [L4 proxy template](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/docker-compose/mixer/deploy/l4/nginx.conf.template) is a complete example.
+The [L4 proxy template](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/docker-compose/mixer/deploy/l4/nginx.conf.template) is a complete example.
 WebRTC also needs the configured UDP range reachable from the viewer.
 
 ## Tests
@@ -99,5 +113,5 @@ python3 tests/mixer/smoke_test.py --port 7777 --wipe-file <alpha-clip>
 python3 tests/mixer/cut_spam.py --url http://127.0.0.1:7681
 ```
 
-These change Program. See [latency](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/latency.md) for the cut probe and browser
-measurement, and [capacity](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/capacity.md) for the limits of recorded results.
+These change Program. See [latency](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/latency.md) for the cut probe and browser
+measurement, and [capacity](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md) for the limits of recorded results.

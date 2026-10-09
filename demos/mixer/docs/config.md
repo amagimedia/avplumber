@@ -1,10 +1,10 @@
 # Mixer configuration
 
-[Quick start](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/README.md) · [Example show](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/config.example.json) ·
+[Quick start](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/README.md) · [Example show](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/config.example.json) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
 `--config mixer.json` supplies sources, scenes, canvas and outputs. `canvas`,
-`sources` and `scenes` are required. The [parser](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/pyplumber/mixer/config.py)
+`sources` and `scenes` are required. The [parser](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/config.py)
 is the validation authority; the example is the full editable starting point.
 
 Top-level `initial_scene` defaults to the first scene. `max_compositor_layers`
@@ -38,7 +38,7 @@ The program is composited once. Each rendition adds an encode. With no rendition
 | `bitrate_kbps` | `3000` | CBR target, also the `maxrate` and `bufsize` |
 | `codec` | from canvas depth | `h264_nvenc` for 8-bit or `hevc_nvenc` for 10-bit by default; applies to Janus and file targets |
 | `profile` | from codec/depth | HEVC `main`/`main10`; H.264 `baseline` for Janus, `high` for files. No B-frames |
-| `preset` | `"p7"` | NVENC quality preset. The setup page sets p1, p3 or p5 on every output it generates ([NVENC costs](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/capacity.md#nvenc-and-extra-aux-outputs)) |
+| `preset` | `"p7"` | NVENC quality preset. The setup page sets p1, p3 or p5 on every output it generates ([NVENC costs](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md#nvenc-and-extra-aux-outputs)) |
 | `port` | — | Janus target: overrides the RTP port from the command line |
 | `color` | automatic | `sdr`, `hlg`, or `pq`; H.264 always requires SDR, HEVC otherwise inherits the canvas |
 | `feed` | `"dirty"` | `"clean"` encodes the program without the [downstream keys](#dsk); without keys both are the program |
@@ -51,7 +51,7 @@ The program is composited once. Each rendition adds an encode. With no rendition
 
 ## sources
 
-One source ID opens one decoder or browser window; scenes and aliases reuse it. Repeated locations require `independent: true` on every declaration. Browser import is provided by the [shared DMA-BUF integration](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/doc/dmabuf.md). CUarray requires compatible FFmpeg/consumers and a fixed surface budget; it has no copy fallback or decoder auto-restart. See the [CUarray cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/nvdec-cuarray.html).
+One source ID opens one decoder or browser window; scenes and aliases reuse it. Repeated locations require `independent: true` on every declaration. Browser import is provided by the [shared DMA-BUF integration](https://github.com/amagimedia/avplumber/blob/develop/doc/dmabuf.md). CUarray requires compatible FFmpeg/consumers and a fixed surface budget; it has no copy fallback or decoder auto-restart. See the [CUarray cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/nvdec-cuarray.html).
 
 | field | applies to | meaning |
 | --- | --- | --- |
@@ -126,7 +126,7 @@ Up to four browser keys over the finished program. `feed: "clean"` omits them. K
 
 ## aux_buses
 
-Each bus has an `id`, layouts, scene assignments and Janus renditions (`port`, optional `codec`, `preset`, `bitrate_kbps`). It reuses source frames and drops output rather than blocking Program. SDR only; half canvas rate above 30 fps unless `full_rate`. Commands: `mixer.aux_layout`, `mixer.aux`, `mixer.aux_page`, `mixer.aux_status`. Assignment updates include the current `expected_revision`. Layout changes stage new sources; status exposes `composition_pending` and `composition_error`. See [timing details](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/doc/mixer.md#aux-bus-follower).
+Each bus has an `id`, layouts, scene assignments and Janus renditions (`port`, optional `codec`, `preset`, `bitrate_kbps`). It reuses source frames and drops output rather than blocking Program. SDR only; half canvas rate above 30 fps unless `full_rate`. Commands: `mixer.aux_layout`, `mixer.aux`, `mixer.aux_page`, `mixer.aux_status`. Assignment updates include the current `expected_revision`. Layout changes stage new sources; status exposes `composition_pending` and `composition_error`. See [timing details](https://github.com/amagimedia/avplumber/blob/develop/doc/mixer.md#aux-bus-follower).
 
 | role | draws |
 | --- | --- |
@@ -176,14 +176,14 @@ More than 193 pads and runtime source addition are not supported.
 
 ## Generating one
 
-[make_config.py](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/pyplumber/mixer/tools/make_config.py) emits the built-in layouts as JSON:
+[make_config.py](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/tools/make_config.py) emits the built-in layouts as JSON:
 
 ```sh
 python3 -m pyplumber.mixer.tools.make_config --fps 30 cam0=/media/camera.mp4 > mixer.json
 ```
 
-For generated workloads use a [recipe](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/demos/mixer/docs/recipe.md). Other mixer applications use
-`pyplumber.mixer.build_application` directly; see the [base API](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/doc/mixer.md).
+For generated workloads use a [recipe](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/recipe.md). Other mixer applications use
+`pyplumber.mixer.build_application` directly; see the [base API](https://github.com/amagimedia/avplumber/blob/develop/doc/mixer.md).
 
 ## Input cadence and colour-tag guarantees
 
@@ -204,5 +204,5 @@ that promise. Real colour conversion and alpha processing remain. A source
 `process_source` callback disables automatic eligibility.
 
 The library's `color_tagged` source contract is not a request to infer colour
-from content. See [the mixer API](https://github.com/amagimedia/avplumber/blob/ad371df0145fa9d9f1ed1e10397e1952eb359bfa/doc/mixer.md#pacing-loops-and-redundant-colour-tags)
+from content. See [the mixer API](https://github.com/amagimedia/avplumber/blob/develop/doc/mixer.md#pacing-loops-and-redundant-colour-tags)
 when integrating custom inputs in another repository.
