@@ -21,8 +21,11 @@ Keep historical measurements attached to their workload and revision; a code
 review or small smoke test does not refresh a capacity benchmark. Publish
 sanitized textual evidence without private host or storage paths.
 
-The October mixer demo is a 10-second recording of the real main UI, with
-Program/Preview and dirty Program viewers, four keys and direct cuts. Its
+The October mixer demo replays 10 seconds in the real main UI, with
+Program/Preview and dirty Program viewers, four keys and direct cuts. Record
+both existing encoded outputs on the instance before Internet transport;
+render each frame with the recorded state and cut sequence to preserve cadence.
+The original Program MP4 retains the encoder bitstream. Its
 `capture-20261009.json` describes the observed 192-input L4 configuration;
 it does not replace historical capacity or latency measurements. September
 mixer graph images and recordings remain historical release assets.
