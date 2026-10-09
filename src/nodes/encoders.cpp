@@ -135,7 +135,10 @@ public:
                 pkt = enc_.encode();
                 // TODO honor timestamps_passthrough_
                 logstream << "enc flush out: PTS = " << pkt.pts();
-                if (!(pkt.timeBase().getDenominator() && pkt.timeBase().getNumerator())) {
+                if (!pkt) {
+                    // The encoder signals the end of its flush with an empty packet;
+                    // a consumer (bsf, mux) would take it for end of stream.
+                } else if (!(pkt.timeBase().getDenominator() && pkt.timeBase().getNumerator())) {
                     logstream << "enc flush out: invalid timebase, not outputting! " << pkt.timeBase();
                 } else {
                     emitPacket(pkt);
