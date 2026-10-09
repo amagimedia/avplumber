@@ -18,8 +18,11 @@ Setup reports 188 catalogue sources before adding the keys. Outputs are
 Program, clean Program and 24 AUX buses, including the Program/Preview monitor
 and source multiviewer.
 
-The capture uses two WebRTC viewers, four enabled keys and direct cuts through
-several scene types. It is an interface demonstration, not a new capacity,
+The capture records both encoded outputs on the instance before Internet
+transport, then replays them with recorded UI state and cuts at 25 fps. Four
+keys stay enabled through direct cuts across several scene types. The native
+ticker advances four pixels on each of 249 consecutive frame pairs in the
+10-second excerpt; this checks capture cadence, not long-running capacity. It is an interface demonstration, not a new capacity,
 latency or soak benchmark. The [capture metadata](https://amagimedia.github.io/avplumber/demos/mixer/docs/capture-20261009.json)
 records its scope; the historical qualification results below remain separate.
 

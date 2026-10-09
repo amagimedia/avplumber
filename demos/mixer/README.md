@@ -6,14 +6,17 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 [![192-input mixer: Program/Preview and dirty Program with four downstream keys](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo-poster.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
 [Watch the 10-second demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
-[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo.mp4) ·
+[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo-local.mp4) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
 [Configuration](docs/config.md) · [Run manually](docs/guide.md)
 
-Recorded 2026-10-09 from the real two-viewer interface on an NVIDIA L4:
+Captured 2026-10-09 on an NVIDIA L4 and replayed in the real two-viewer interface:
 192 inputs (120 NVDEC, 36 browser scene sources, 32 raw NV12 and four browser
 keys), 256 scenes and 26 encoded outputs at 1920×1080p25 SDR. It shows direct
-cuts with all four keys enabled. Setup counts the 188 scene sources separately
+cuts with all four keys enabled. Both encoded outputs were recorded on the
+instance before Internet transport, then combined with the recorded UI state
+and cut sequence at 25 fps. [Original Program recording](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-pgm-instance.mp4)
+retains the encoder bitstream, including capture preroll and tail. Setup counts the 188 scene sources separately
 from the keys. This short recording demonstrates the interface; see
 [capacity measurements](docs/capacity.md) for qualification scope.
 
