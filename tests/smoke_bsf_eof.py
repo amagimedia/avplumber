@@ -41,7 +41,9 @@ def run(path, output):
         (n.Mux, {"group": "output", "name": "mux", "src": ["filtered"], "dst": "muxed"}),
         (n.Output, {"group": "output", "name": "out", "src": "muxed", "url": output}),
     ):
-        avp.addNode(cls(params))
+        # Created now, before any start: the output group's nodes walk up through the
+        # decoder for their format and time base, which must not race the input start.
+        avp.addNode(cls(params), early_create=True)
     encoded = avp.getEdge("encoded", "Packet")
     try:
         avp.group("output").startNodes()
