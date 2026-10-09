@@ -1,4 +1,5 @@
 #include "cuda_overlay_base.hpp"
+#include "draw_trail_items.hpp"
 
 extern "C" {
 #include <libavutil/dict.h>
@@ -13,23 +14,8 @@ extern "C" {
 
 using namespace cuda_overlay;
 
-namespace {
-
-struct LineSegment {
-    int x0, y0, x1, y1;
-};
-
-} // namespace
-
 class DrawTrail : public CudaOverlayBase {
-    std::string metadata_key_ = "yolo_detections";
-    DrawColor color_;
-    int thickness_ = 2;
-    double model_content_width_ = 0.0;
-    double model_content_height_ = 0.0;
-    double model_content_offset_x_ = 0.0;
-    double model_content_offset_y_ = 0.0;
-    int debug_log_every_n_ = 0;
+    TrailItems items_;
 
     CUdeviceptr d_segments_ = 0;
     size_t d_segments_capacity_ = 0;
@@ -41,68 +27,6 @@ class DrawTrail : public CudaOverlayBase {
             cuMemFree(d_segments_);
             d_segments_ = 0;
             d_segments_capacity_ = 0;
-        }
-    }
-
-    bool remapCoord(double x, double y, double model_w, double model_h,
-                    double& out_x, double& out_y) const {
-        if (model_content_width_ > 0.0 && model_content_height_ > 0.0) {
-            const double cx = std::max(0.0, std::min(x - model_content_offset_x_, model_content_width_));
-            const double cy = std::max(0.0, std::min(y - model_content_offset_y_, model_content_height_));
-            out_x = cx * ((double)input_params_.width / model_content_width_);
-            out_y = cy * ((double)input_params_.height / model_content_height_);
-            return true;
-        }
-        const double sx = model_w > 0.0 ? (double)input_params_.width / model_w : 1.0;
-        const double sy = model_h > 0.0 ? (double)input_params_.height / model_h : 1.0;
-        out_x = x * sx;
-        out_y = y * sy;
-        return true;
-    }
-
-    bool parseTrail(const av::VideoFrame& frm, std::vector<LineSegment>& segments_out) const {
-        segments_out.clear();
-        const AVFrame* raw = frm.raw();
-        if (!raw || !raw->metadata) return false;
-
-        AVDictionaryEntry* entry = av_dict_get(raw->metadata, metadata_key_.c_str(), nullptr, 0);
-        if (!entry || !entry->value) return false;
-
-        try {
-            Parameters md = Parameters::parse(entry->value);
-            if (!md.contains("trail") || !md["trail"].is_array()) return false;
-
-            const double model_w = md.value("model_width", (double)frm.width());
-            const double model_h = md.value("model_height", (double)frm.height());
-
-            const auto& trail = md["trail"];
-            if (trail.size() < 2) return false;
-
-            double prev_x = 0.0, prev_y = 0.0;
-            bool have_prev = false;
-
-            for (const auto& pt : trail) {
-                if (!pt.is_array() || pt.size() < 2) continue;
-                double mx = pt[0].get<double>();
-                double my = pt[1].get<double>();
-                double fx = 0.0, fy = 0.0;
-                remapCoord(mx, my, model_w, model_h, fx, fy);
-
-                if (have_prev) {
-                    LineSegment seg;
-                    seg.x0 = (int)std::round(prev_x);
-                    seg.y0 = (int)std::round(prev_y);
-                    seg.x1 = (int)std::round(fx);
-                    seg.y1 = (int)std::round(fy);
-                    segments_out.push_back(seg);
-                }
-                prev_x = fx;
-                prev_y = fy;
-                have_prev = true;
-            }
-            return !segments_out.empty();
-        } catch (...) {
-            return false;
         }
     }
 
@@ -129,13 +53,9 @@ class DrawTrail : public CudaOverlayBase {
             throw Error("draw_trail: failed to initialize CUDA kernels");
         }
 
+        FramePayloads payloads(input.raw());
         std::vector<LineSegment> segments;
-        if (!parseTrail(input, segments)) {
-            if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-                logstream << "draw_trail: frame=" << frame_counter_ << " no trail data";
-            }
-            return;
-        }
+        if (!items_.collect(payloads, geometry(), frame_counter_, segments)) return;
 
         if (!uploadSegments(segments)) {
             logstream << "draw_trail: failed to upload segments to GPU";
@@ -159,10 +79,10 @@ class DrawTrail : public CudaOverlayBase {
         int height = output.height();
         CUdeviceptr seg_ptr = d_segments_;
         int num_segments = (int)segments.size();
-        float thickness_sq = (float)(thickness_ * thickness_);
-        int y_color = color_.y;
-        int u_color = color_.u;
-        int v_color = color_.v;
+        float thickness_sq = (float)(items_.thickness() * items_.thickness());
+        int y_color = items_.color().y;
+        int u_color = items_.color().u;
+        int v_color = items_.color().v;
 
         void* y_args[] = {
             (void*)&y_plane, (void*)&pitch_y,
@@ -193,10 +113,6 @@ class DrawTrail : public CudaOverlayBase {
         }
 
         CUDA_OVERLAY_CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream));
-
-        if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-            logstream << "draw_trail: frame=" << frame_counter_ << " segments=" << num_segments;
-        }
     }
 
 public:
@@ -215,19 +131,7 @@ public:
         r->frame_rate_ = info.frame_rate;
         r->timebase_ = info.timebase;
 
-        r->metadata_key_ = params.value("metadata_key", std::string("yolo_detections"));
-        r->thickness_ = params.value("thickness", 2);
-
-        std::string color_name = params.value("color", std::string("red"));
-        if (!tryParseNamedColor(color_name, r->color_)) {
-            r->color_ = DrawColor{81, 90, 240}; // red fallback
-        }
-
-        r->model_content_width_ = params.value("model_content_width", 0.0);
-        r->model_content_height_ = params.value("model_content_height", 0.0);
-        r->model_content_offset_x_ = params.value("model_content_offset_x", 0.0);
-        r->model_content_offset_y_ = params.value("model_content_offset_y", 0.0);
-        r->debug_log_every_n_ = params.value("debug_log_every_n", 0);
+        r->items_ = TrailItems::fromParams(params, "draw_trail");
 
         return r;
     }
