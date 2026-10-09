@@ -143,6 +143,61 @@ def _encoder_totals(output):
     return totals
 
 
+def delivery_totals(state: dict) -> dict | None:
+    """The page's two delivery counters from one mixer state: deadlines missed by the program
+    slots and the AUX buses, and frames the AUX outputs dropped. None while the state lacks a
+    count or a bus its settings name, as the page shows a dash then."""
+    playout = list(((state.get("status") or {}).get("playout") or {}).values())
+    aux = state.get("aux_buses") or []
+    if not playout or len(aux) != len((state.get("settings") or {}).get("aux_buses") or []):
+        return None
+    missed = [(row or {}).get("missed_deadlines") for row in playout + [bus.get("playout") for bus in aux]]
+    drops = [bus.get("output_drops") for bus in aux]
+    if any(isinstance(n, bool) or not isinstance(n, int) for n in missed + drops):
+        return None
+    return {"missed_deadlines": sum(missed), "output_drops": sum(drops)}
+
+
+class RecentCounts:
+    """How far counters that only grow rose in the last `window_s` seconds. The page shows this
+    instead of the totals since the mixer started, which keep the misses of a start or of a
+    disturbance long past on screen for good. `read` returns the totals as a dict, or None while
+    there are none. One thread samples every `period_s`, so the window is full whether or not a
+    page is open. `values` is None until the first sample; `covered_s` is how much of the window
+    the samples span so far. Totals that fall belong to a mixer that started again and counts from
+    zero: everything it counted happened inside the window."""
+
+    def __init__(self, read, window_s: float = 600, period_s: float = 5, clock=time.monotonic):
+        self.read, self.window_s, self.period_s, self.clock = read, window_s, period_s, clock
+        self.values = None
+        self._samples: list[tuple[float, dict]] = []
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True, name="recent-counts").start()
+
+    def _run(self):
+        while True:
+            try:
+                self.sample()
+            except Exception:   # no mixer yet, or one busy starting: the last values stand until it answers
+                pass
+            time.sleep(self.period_s)
+
+    def sample(self):
+        totals = self.read()
+        if totals is None:
+            return
+        now = self.clock()
+        if self._samples and any(totals[key] < count for key, count in self._samples[-1][1].items()):
+            self._samples = [(now, dict.fromkeys(totals, 0))]
+        self._samples.append((now, dict(totals)))
+        while self._samples[0][0] < now - self.window_s:
+            self._samples.pop(0)
+        since, base = self._samples[0]
+        self.values = {"window_s": self.window_s, "covered_s": round(now - since),
+                       **{key: count - base[key] for key, count in totals.items()}}
+
+
 class HostStats:
     """Host load, CPU use and the mixer's busiest thread, sampled once a second on one thread and
     shared by every viewer. Inside the container /proc/loadavg and /proc/stat still describe the

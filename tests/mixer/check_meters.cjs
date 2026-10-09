@@ -45,6 +45,15 @@ const {chromium} = require('playwright');
     assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
     await page.evaluate(() => { observeCuts(); observeCuts(); renderLatency(); });
     assert.match(await page.locator('#lat-tip').textContent(), /3 cuts/, 'repeated samples are not new cuts');
+    // A server that counts the last ten minutes: its figures replace the totals since the start.
+    assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · total/);
+    await page.evaluate(() => { state.recent = {window_s: 600, covered_s: 754, missed_deadlines: 0, output_drops: 2}; renderLatency(); });
+    assert.deepEqual((await values('lat')).slice(1), ['0', '2']);
+    assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · last 10 min.*AUX output drops · last 10 min/s);
+    await page.evaluate(() => { state.recent.covered_s = 40; renderLatency(); });
+    assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · last 40 s/);
+    await page.evaluate(() => { state.recent = null; renderLatency(); });
+    assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
     for (const width of [1920, 1600, 1440, 1280]) {
       await page.setViewportSize({width, height: 1080});
       const box = await page.locator('#top').evaluate(e => ({width: e.clientWidth, scroll: e.scrollWidth, height: e.offsetHeight}));
