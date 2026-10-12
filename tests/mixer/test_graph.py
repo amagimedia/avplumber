@@ -1009,7 +1009,8 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
                              "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}
     assert nodes["input_1_to_cuda"]["max_imports"] == 32
-    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 1000
+    # Ten idle seconds, not one: a page that paints now and then must find its allocations registered.
+    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 10000
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}
     assert mixer.parameters["canvas"] == (1920, 1080)
     assert application.wipe_files == ("/media/swoosh.mov",)

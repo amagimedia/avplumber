@@ -19,6 +19,8 @@ from typing import List, Tuple
 from .config import default_browser_ring_size
 
 SCHEME = "dmabuf://"
+# How long an imported browser allocation stays registered without being used.
+IMPORT_IDLE_MS = 10_000
 
 
 def is_dmabuf_url(url: str) -> bool:
@@ -60,13 +62,16 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         # zero_copy: the compositor samples the mapped DMA-BUF directly; no 8 MB copy per frame.
         # Keep the recycling allocation pool registered, including live frames.
         # The ring bounds outstanding frames, not retired Chromium allocations:
-        # expire idle imports after several ring cycles instead of pinning them
-        # indefinitely. Lookups refresh returning allocations before expiry.
+        # expire idle imports instead of pinning them indefinitely. Lookups refresh
+        # returning allocations before expiry. A page that paints now and then returns
+        # to an allocation seconds later, not ring cycles later: an import dropped in
+        # between is registered again on its next use, and each release takes the CUDA
+        # library's context lock exclusively, stalling every other thread in the context.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group", "zero_copy": True,
                             "max_imports": max(32, browser_ring_size),
-                            "import_ttl_ms": max(1000, (4000 * browser_ring_size + fps - 1) // fps)}),
+                            "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_ring_size + fps - 1) // fps)}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two
