@@ -782,9 +782,16 @@ Parameters:
 -   `socket` (string, required) - path to the UNIX domain socket
 -   `hwaccel` (string, optional) - name of `hwaccel` object; when set, a matching `hw_frames_ctx` is attached for downstream filters/encoders
 -   `fps` (rational string, optional) - publishes the sender's requested frame rate to downstream nodes; frame timestamps use a `1/1000000` time base
+-   `ack_holdback` (integer 0 to 64, optional, default `0`) - release ACKs held back. `0` sends each
+    ACK when the graph lets its frame go. With `N`, an ACK waits until the next frame arrives and one
+    goes per arrival; only beyond `N` waiting ACKs does the oldest go at once. Chromium's capture pool
+    keeps two idle buffers and destroys the rest, so a consumer that lets frames go in bunches makes
+    it destroy and allocate buffers all the time, and every new allocation is a new import (and a
+    released one) downstream. One buffer back per buffer handed out keeps the pool on a fixed set.
+    Held ACKs count against the sender's `ringSize`: open the window with the frames in flight plus `N`.
 
 `node.object.get <node> frame_stats` reports the received-frame count, plus
-released frames, sent ACK messages and pending ACK messages on the current
+released frames, sent ACK messages, pending ACK messages and held ACKs (`ack_held`) on the current
 connection. ACK counters reset on reconnection; the received count does
 not. Lifecycle drain markers also count as sent messages. Pending ACKs distinguish
 frames already released by the graph from frames still referenced downstream.

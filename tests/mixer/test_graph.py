@@ -543,7 +543,8 @@ def test_browser_ring_change_reopens_window_and_requires_support(monkeypatch):
     monkeypatch.setattr(dmabuf_inputs, "rest_request", request)
     dmabuf_inputs.open_browser_windows("http://b", ["page_00"], "http://p", 480, 270, 25, 6)
     assert calls[-2] == ("/window/close", {"id": "page_00"})
-    assert calls[-1] == ("/window/open", {**window, "ringSize": 6})
+    # Six frames in flight and three held acknowledgements (dmabuf_inputs.ACK_HOLDBACK).
+    assert calls[-1] == ("/window/open", {**window, "ringSize": 9})
     monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *_: {"windows": []})
     with pytest.raises(RuntimeError, match="did not apply ringSize"):
         dmabuf_inputs.open_browser_windows("http://b", ["page_00"], "http://p", 480, 270, 25, 6)
@@ -1007,7 +1008,8 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
     assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
-                             "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}
+                             "fps": 60, "audio": False, "ringSize": 9, "holdLastFrame": True}
+    assert nodes["input_1_receive"]["ack_holdback"] == 3
     assert nodes["input_1_to_cuda"]["max_imports"] == 32
     # Ten idle seconds, not one: a page that paints now and then must find its allocations registered.
     assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 10000

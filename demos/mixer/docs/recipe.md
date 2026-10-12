@@ -24,7 +24,7 @@ NumPy and FFmpeg with NVENC. `--runtime-media-dir /media` writes container paths
 | `generation` | `seconds` (default 2), optional source `width` and `height` |
 | `alpha_background` | Allocated video source used behind transparent pages |
 | `renditions`, `clean_rendition`, `aux_buses`, `dsk` | Output/key settings copied into the show |
-| `browser_ring_size` | Outstanding frames per browser: 1–64; default 6 at 25/30 fps, otherwise 9 |
+| `browser_ring_size` | Frames a browser may have out in the mixer at once, not a set of buffers: 1–64; default 6 at 25/30 fps, otherwise 9. The buffers are Chromium's; the mixer returns them one per new frame and opens the window with up to three more for those waiting returns (9 in all) |
 
 Largest-remainder rounding makes the weighted allocations sum to the total;
 ties follow recipe order. Weights summing to `source_count` give exact counts.
