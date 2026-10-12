@@ -44,7 +44,7 @@ protected:
     static constexpr size_t EVENT_INDEX = 1;
     bool connecting_ = false;
     std::atomic<bool> interrupted_{false};
-    size_t ack_holdback_ = 0;
+    size_t return_queue_ = 0;
 
     void closeConnection() {
         if (conn_fd_ >= 0) ack_queue_->retire();
@@ -70,8 +70,8 @@ public:
         interrupted_.store(true);
         std::atomic_load(&ack_queue_)->interrupt();
     }
-    /// Applies to connections made from now on (DmabufReleaseAckQueue's holdback).
-    void setAckHoldback(size_t frames) { ack_holdback_ = frames; }
+    /// Applies to connections made from now on (DmabufReleaseAckQueue's return queue).
+    void setReturnQueue(size_t frames) { return_queue_ = frames; }
     void releaseFrame(uint64_t frame_count) {
         ack_queue_->enqueue(frame_count);
     }
@@ -102,7 +102,7 @@ public:
             close(fd);
             return false;
         }
-        std::atomic_store(&ack_queue_, std::make_shared<DmabufReleaseAckQueue>(fd, ack_holdback_));
+        std::atomic_store(&ack_queue_, std::make_shared<DmabufReleaseAckQueue>(fd, return_queue_));
         conn_fd_ = fd;
         pollfds_[EVENT_INDEX].fd = ack_queue_->wakeFd();
         pollfds_[CONN_INDEX].fd = conn_fd_;
@@ -311,7 +311,7 @@ public:
         if (key != "frame_stats") throw Error("ipc_dmabuf_source: unknown object " + key);
         const auto stats = receiver_.releaseQueue()->stats();
         return {{"received", received_.load()}, {"released", stats.released},
-                {"ack_sent", stats.sent}, {"ack_pending", stats.pending}, {"ack_held", stats.held}};
+                {"ack_sent", stats.sent}, {"ack_pending", stats.pending}, {"returns_queued", stats.queued}};
     }
     virtual void stop() {
         receiver_.interrupt();
@@ -434,9 +434,9 @@ public:
         if (params.count("fps")) {
             r->frame_rate_ = parseRatio(params["fps"]);
         }
-        const int64_t holdback = params.value("ack_holdback", int64_t(0));
-        if (holdback < 0 || holdback > 64) throw Error("ipc_dmabuf_source: ack_holdback must be 0 to 64 frames");
-        r->receiver_.setAckHoldback(static_cast<size_t>(holdback));
+        const int64_t return_queue = params.value("return_queue", int64_t(0));
+        if (return_queue < 0 || return_queue > 64) throw Error("ipc_dmabuf_source: return_queue must be 0 to 64 frames");
+        r->receiver_.setReturnQueue(static_cast<size_t>(return_queue));
         return r;
     }
     ~IPCDMABUFSource() {

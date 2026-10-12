@@ -153,7 +153,7 @@ never released early. `/status` reports `releasedFrameCount` and
 Chromium's capture pool, which keeps at most two idle buffers: when frames come
 back in bunches it destroys the surplus and allocates new buffers later, each a
 new DMA-BUF. A consumer that needs a stable set of allocations returns one frame
-for each frame it receives (avplumber's `ipc_dmabuf_source` `ack_holdback`).
+for each frame it receives (avplumber's `ipc_dmabuf_source` `return_queue`).
 
 ## Layout
 
