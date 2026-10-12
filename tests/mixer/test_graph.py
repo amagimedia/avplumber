@@ -543,8 +543,7 @@ def test_browser_ring_change_reopens_window_and_requires_support(monkeypatch):
     monkeypatch.setattr(dmabuf_inputs, "rest_request", request)
     dmabuf_inputs.open_browser_windows("http://b", ["page_00"], "http://p", 480, 270, 25, 6)
     assert calls[-2] == ("/window/close", {"id": "page_00"})
-    # Six frames in flight and three held acknowledgements (dmabuf_inputs.ACK_HOLDBACK).
-    assert calls[-1] == ("/window/open", {**window, "ringSize": 9})
+    assert calls[-1] == ("/window/open", {**window, "ringSize": 6})
     monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *_: {"windows": []})
     with pytest.raises(RuntimeError, match="did not apply ringSize"):
         dmabuf_inputs.open_browser_windows("http://b", ["page_00"], "http://p", 480, 270, 25, 6)
@@ -568,7 +567,7 @@ def test_browser_failure_precedes_native_initialization(monkeypatch):
     from pyplumber.mixer import application
     monkeypatch.setattr(application, "open_windows", fail)
     monkeypatch.setattr(application, "_init_avp", lambda *args: pytest.fail("native threads started before browser preparation"))
-    cfg = SimpleNamespace(fps=60, latency_ms=None, browser_ring_size=11, max_compositor_layers=256, sources=[SimpleNamespace(
+    cfg = SimpleNamespace(fps=60, latency_ms=None, browser_frame_queue=11, max_compositor_layers=256, sources=[SimpleNamespace(
         kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60, hold_last_frame=True)])
     with pytest.raises(RuntimeError, match="browser unavailable"):
         application._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api(), ExitStack())
@@ -979,7 +978,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     from pyplumber.mixer import dmabuf_inputs
     (tmp_path / "page.sock").touch()
     path = tmp_path / "mixer.json"
-    doc = {**CONFIG, "browser_ring_size": 6, "sources": [{**CONFIG["sources"][0], "filter": source_filter, "filter_output_format": "p210le" if source_filter else ""},
+    doc = {**CONFIG, "browser_frame_queue": 6, "sources": [{**CONFIG["sources"][0], "filter": source_filter, "filter_output_format": "p210le" if source_filter else ""},
                                 *CONFIG["sources"][1:]]}
     path.write_text(_json.dumps(doc))
     opened = []
@@ -1008,8 +1007,9 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
     assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
-                             "fps": 60, "audio": False, "ringSize": 9, "holdLastFrame": True}
-    assert nodes["input_1_receive"]["ack_holdback"] == 3
+                             "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}
+    # Three of the six frames of this show's queue are the return queue.
+    assert nodes["input_1_receive"]["return_queue"] == 3
     assert nodes["input_1_to_cuda"]["max_imports"] == 32
     # Ten idle seconds, not one: a page that paints now and then must find its allocations registered.
     assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 10000
@@ -1023,7 +1023,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     application.start()
     assert ("POST", "/window/refresh", {"id": "page"}) in opened      # static pages repaint into the live chain
     assert json.loads(application.avp.commands_registered["mixer.settings"]("")) == {
-        "source_count": 2, "browser_ring_size": 6,
+        "source_count": 2, "browser_frame_queue": 6,
         "preview_codecs": [],
         "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
         "source_counts": {"video": 1, "browser": 1, "v210": 0, "nv12": 0, "p010": 0}, "hdr_video": 0,

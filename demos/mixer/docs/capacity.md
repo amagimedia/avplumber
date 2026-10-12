@@ -31,7 +31,7 @@ rows are the profile's admission limits. The linear `nvidia_l4` profile (no CUar
 170 sources at 25 and 30 fps.
 
 Use the [portable L4 stack](../../../docker-compose/mixer/deploy/l4/README.md). Browser frames must
-go back to the browser one per new frame ([`ack_holdback`](../../../doc/NODES.md#ipc_dmabuf_source)),
+go back to the browser one per new frame ([`return_queue`](../../../doc/NODES.md#ipc_dmabuf_source)),
 which the mixer sets; without it the browsers keep allocating buffers and the releases stall the show.
 
 ## NVIDIA T4, 16 vCPU: `tesla_t4`

@@ -16,28 +16,24 @@ import urllib.error
 import urllib.request
 from typing import List, Tuple
 
-from .config import default_browser_ring_size
+from .config import default_browser_frame_queue
 
 SCHEME = "dmabuf://"
 # How long an imported browser allocation stays registered without being used.
 IMPORT_IDLE_MS = 10_000
-# Frames a window may have out at once: Chromium's capture pool of 11 less the two idle
-# buffers it keeps.
-BROWSER_POOL_FRAMES = 9
-# Acknowledgements the receiver holds back and sends one per new frame (ipc_dmabuf_source
-# `ack_holdback`), so the browser's pool gets one buffer back for each it hands out and
-# stops destroying and allocating buffers. They count against the window's ring.
-ACK_HOLDBACK = 3
+# The return queue: frames the mixer has finished with wait here and go back to the browser one
+# per new frame (ipc_dmabuf_source `return_queue`), so the browser's pool gets one buffer back for
+# each it hands out and stops destroying and allocating buffers. It is part of the window's frame
+# queue, which the browser service counts as frames not yet returned.
+RETURN_QUEUE = 3
+# Frames of the queue left to the mixer's own pipeline before any go to the return queue.
+MIN_FRAMES_IN_FLIGHT = 3
 
 
-def ack_holdback(ring_size: int) -> int:
-    """Acknowledgements held back beside a ring of *ring_size* frames in flight."""
-    return max(0, min(ACK_HOLDBACK, BROWSER_POOL_FRAMES - ring_size))
-
-
-def window_ring_size(ring_size: int) -> int:
-    """The ring a window is opened with: the frames in flight plus the held acknowledgements."""
-    return ring_size + ack_holdback(ring_size)
+def return_queue(frame_queue: int) -> int:
+    """How much of a window's *frame_queue* is the return queue: three of the default nine, less
+    for a shorter queue, none for one of three frames or fewer."""
+    return max(0, min(RETURN_QUEUE, frame_queue - MIN_FRAMES_IN_FLIGHT))
 
 
 def is_dmabuf_url(url: str) -> bool:
@@ -56,7 +52,7 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
                             width: int | None = None, height: int | None = None, fps: int,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
                             processing_group: str, hold: bool = False,
-                            preserve_alpha: bool = False, browser_ring_size: int | None = None,
+                            preserve_alpha: bool = False, browser_frame_queue: int | None = None,
                             event_loop: str | None = None) -> Tuple[list, str]:
     """Return the node list and the final CUDA edge for one browser socket.
 
@@ -67,15 +63,15 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
     Geometry and format come from each frame, and ``smooth_timestamps`` already stamps
     in 1/*fps*, so the chain has no format or time-base nodes of its own.
     *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted)."""
-    if browser_ring_size is None:
-        browser_ring_size = default_browser_ring_size(fps)
+    if browser_frame_queue is None:
+        browser_frame_queue = default_browser_frame_queue(fps)
     drm_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
               "auto_restart": "group", "fps": f"{fps}/1"}
     if drm_hwaccel:
         source["hwaccel"] = drm_hwaccel
-    if ack_holdback(browser_ring_size):
-        source["ack_holdback"] = ack_holdback(browser_ring_size)
+    if return_queue(browser_frame_queue):
+        source["return_queue"] = return_queue(browser_frame_queue)
     nodes = [
         api.IpcDmabufSource(source),
         # zero_copy: the compositor samples the mapped DMA-BUF directly; no 8 MB copy per frame.
@@ -89,8 +85,8 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group", "zero_copy": True,
-                            "max_imports": max(32, browser_ring_size),
-                            "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_ring_size + fps - 1) // fps)}),
+                            "max_imports": max(32, browser_frame_queue),
+                            "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two
@@ -133,12 +129,12 @@ def rest_request(base_url: str, method: str, path: str, body=None, timeout: floa
 
 
 def open_browser_windows(base_url: str, ids: List[str], page_url: str, width: int, height: int,
-                         fps: int, browser_ring_size: int | None = None) -> None:
+                         fps: int, browser_frame_queue: int | None = None) -> None:
     """Ensure the named windows match the requested page and capture settings."""
-    if browser_ring_size is None:
-        browser_ring_size = default_browser_ring_size(fps)
+    if browser_frame_queue is None:
+        browser_frame_queue = default_browser_frame_queue(fps)
     open_windows(base_url, [{"id": name, "url": page_url, "width": width, "height": height, "fps": fps,
-                            "ringSize": window_ring_size(browser_ring_size), "holdLastFrame": True}
+                            "ringSize": browser_frame_queue, "holdLastFrame": True}
                             for name in ids])
 
 

@@ -23,8 +23,7 @@ from .backend import mixer_backend
 from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, rendition_color, rendition_format
 from .config import FEEDS
 from .dsk import DownstreamKeyer, register_dsk_commands
-from .dmabuf_inputs import (dmabuf_cuda_input_nodes, open_windows, refresh_windows, wait_for_sockets,
-                            window_ring_size)
+from .dmabuf_inputs import dmabuf_cuda_input_nodes, open_windows, refresh_windows, wait_for_sockets
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options)
@@ -86,12 +85,12 @@ class MixerOptions:
     wipe_cache_mb: float = 640.0        # GPU clip cache (two 2 s 540x960 wipes take ~0.5 GB); 0 decodes per take
     dmabuf_socket_dir: str = "/tmp/dma-page"
     dmabuf_rest: str = "http://127.0.0.1:9009"
-    browser_ring_size: int | None = None
+    browser_frame_queue: int | None = None
     max_compositor_layers: int | None = None
 
     def __post_init__(self):
-        if self.browser_ring_size is None:
-            object.__setattr__(self, "browser_ring_size", mixer_config.default_browser_ring_size(self.fps))
+        if self.browser_frame_queue is None:
+            object.__setattr__(self, "browser_frame_queue", mixer_config.default_browser_frame_queue(self.fps))
 
     def validate(self) -> None:
         if self.working_format not in mixer_config.WORKING_FORMATS:
@@ -111,8 +110,8 @@ class MixerOptions:
         if (type(self.keyframe_min_interval_ms) is not int
                 or not 0 <= self.keyframe_min_interval_ms <= 2_147_483_647):
             raise ValueError("keyframe_min_interval_ms must be a non-negative integer")
-        if type(self.browser_ring_size) is not int or not 1 <= self.browser_ring_size <= 64:
-            raise ValueError("--browser-ring-size must be an integer from 1 to 64")
+        if type(self.browser_frame_queue) is not int or not 1 <= self.browser_frame_queue <= mixer_config.BROWSER_FRAME_QUEUE_MAX:
+            raise ValueError(f"--browser-frame-queue must be an integer from 1 to {mixer_config.BROWSER_FRAME_QUEUE_MAX}")
         if self.max_compositor_layers is not None and (type(self.max_compositor_layers) is not int or not 1 <= self.max_compositor_layers <= 2_147_483_647):
             raise ValueError("--max-compositor-layers must be a positive 32-bit integer")
         if self.janus_output:
@@ -574,7 +573,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
                                             "height": s.height, "fps": s.fps or cfg.fps,
-                                            "ringSize": window_ring_size(cfg.browser_ring_size),
+                                            "ringSize": cfg.browser_frame_queue,
                                             "holdLastFrame": s.hold_last_frame} for s in browsers])
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
                          options.preheat_timeout_sec)
@@ -596,7 +595,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
                 fps=cfg.fps, drm_hwaccel=None,
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True,
-                preserve_alpha=source.id in blended_sources, browser_ring_size=cfg.browser_ring_size,
+                preserve_alpha=source.id in blended_sources, browser_frame_queue=cfg.browser_frame_queue,
                 event_loop=_pacing_loop(index))
             for node in nodes:
                 avp.addNode(node)

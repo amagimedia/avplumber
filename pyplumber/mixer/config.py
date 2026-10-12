@@ -77,8 +77,20 @@ def default_latency_ms(fps):
     return (2 if fps < 40 else 3) * 1000 / fps
 
 
-def default_browser_ring_size(fps):
-    return 6 if fps in (25, 30) else 9
+def earlier_browser_ring_size(value):
+    """`browser_ring_size`, the frame queue's earlier name, allowed up to 64: such a value is the queue's maximum."""
+    return min(value, BROWSER_FRAME_QUEUE_MAX) if type(value) is int else value
+
+
+# The most frames one browser window can have out: Chromium's capture pool of eleven less the two
+# idle buffers it keeps.
+BROWSER_FRAME_QUEUE_MAX = 9
+
+
+def default_browser_frame_queue(fps):
+    """Frames one browser window may have out at once, at any rate: all nine. The mixer takes up to
+    three of them to return frames one per new frame (dmabuf_inputs.return_queue)."""
+    return BROWSER_FRAME_QUEUE_MAX
 
 
 @dataclass(frozen=True)
@@ -259,16 +271,16 @@ class MixerConfig:
     dsk_keys: Tuple[DskKey, ...] = ()
     dsk_fade_seconds: float = DEFAULT_DSK_FADE_SECONDS   # what a key change fades over unless the command says; 0 cuts
     dsk_fade_curve: str = DEFAULT_FADE_CURVE
-    browser_ring_size: Optional[int] = None
+    browser_frame_queue: Optional[int] = None
     max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS
 
     def __post_init__(self):
         if type(self.max_compositor_layers) is not int or not 1 <= self.max_compositor_layers <= 2_147_483_647:
             raise ConfigError("max_compositor_layers must be a positive 32-bit integer")
-        if self.browser_ring_size is None:
-            object.__setattr__(self, "browser_ring_size", default_browser_ring_size(self.fps))
-        if type(self.browser_ring_size) is not int or not 1 <= self.browser_ring_size <= 64:
-            raise ConfigError("browser_ring_size must be an integer from 1 to 64")
+        if self.browser_frame_queue is None:
+            object.__setattr__(self, "browser_frame_queue", default_browser_frame_queue(self.fps))
+        if type(self.browser_frame_queue) is not int or not 1 <= self.browser_frame_queue <= BROWSER_FRAME_QUEUE_MAX:
+            raise ConfigError(f"browser_frame_queue must be an integer from 1 to {BROWSER_FRAME_QUEUE_MAX}")
 
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
@@ -305,7 +317,7 @@ class MixerConfig:
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
                       "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps}
                      for b in self.aux_buses for r in b.renditions]
-        return {"source_count": len(self.sources), "browser_ring_size": self.browser_ring_size,
+        return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
                 "preview_codecs": preview_codecs, **({"program_outputs": programs} if programs else {}),
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
                            "working_format": self.working_format},
@@ -610,7 +622,7 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     if wipe_color and wipe_color not in TRANSFER_TAGS:
         raise ConfigError("wipe_color must be sdr, hlg or pq")
     cfg = MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
-                       browser_ring_size=doc.get("browser_ring_size"),
+                       browser_frame_queue=doc.get("browser_frame_queue", earlier_browser_ring_size(doc.get("browser_ring_size"))),
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
                        initial_scene=initial, working_format=working_format, raw_upload=raw_upload, latency_ms=latency_ms, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))

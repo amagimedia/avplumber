@@ -28,8 +28,8 @@ def _in_range(profile, kbps):
 
 def current_settings(profile, settings):
     """Saved *settings* in the current shape, every program encode filled in. Saved before extra
-    aux outputs, they had none; the browser ring size the page no longer sets goes, and the show
-    takes the frame rate's default (config.default_browser_ring_size); one program bitrate_kbps
+    aux outputs, they had none; the browser frames in flight the page no longer sets go, and the show
+    takes the frame rate's default (config.default_browser_frame_queue); one program bitrate_kbps
     sets the SDR program and its clean copy, the HLG program in the defaults' ratio to it."""
     if not isinstance(settings, dict):
         return settings
@@ -45,7 +45,7 @@ def current_settings(profile, settings):
     encodes = {**programs, "extra": dict(defaults["aux"]), **encodes}
     encodes = {o: {"codec": "hevc_nvenc" if o == "hdr" else "h264_nvenc", **e} if isinstance(e, dict) else e
                for o, e in encodes.items()}
-    return {"extra_aux": 0, **{k: v for k, v in settings.items() if k not in ("browser_ring_size", "bitrate_kbps")},
+    return {"extra_aux": 0, **{k: v for k, v in settings.items() if k not in ("browser_frame_queue", "browser_ring_size", "bitrate_kbps")},
             "encodes": encodes}
 
 

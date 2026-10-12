@@ -174,8 +174,10 @@ const { chromium } = require('playwright');
     assert.equal(await page.locator('#count-sdr422').isHidden(), true, 'a kind the mix leaves out has no row');
     await page.locator('#scenes').fill('193');
     assert.equal((await apply()).scene_count, 192);
-    // The browser ring size is not a setup control: the show takes the frame rate's default.
+    // The browser frames in flight are not a setup control: the show takes the default.
+    assert.equal(await page.locator('#browser-frame-queue').count(), 0);
     assert.equal(await page.locator('#browser-ring-size').count(), 0);
+    assert.equal('browser_frame_queue' in await apply(), false);
     assert.equal('browser_ring_size' in await apply(), false);
 
     // Extra aux outputs fill NVENC to the profile's budget beside the program, its HLG copy on a
