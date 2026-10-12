@@ -19,6 +19,25 @@ from typing import List, Tuple
 from .config import default_browser_ring_size
 
 SCHEME = "dmabuf://"
+# How long an imported browser allocation stays registered without being used.
+IMPORT_IDLE_MS = 10_000
+# Frames a window may have out at once: Chromium's capture pool of 11 less the two idle
+# buffers it keeps.
+BROWSER_POOL_FRAMES = 9
+# Acknowledgements the receiver holds back and sends one per new frame (ipc_dmabuf_source
+# `ack_holdback`), so the browser's pool gets one buffer back for each it hands out and
+# stops destroying and allocating buffers. They count against the window's ring.
+ACK_HOLDBACK = 3
+
+
+def ack_holdback(ring_size: int) -> int:
+    """Acknowledgements held back beside a ring of *ring_size* frames in flight."""
+    return max(0, min(ACK_HOLDBACK, BROWSER_POOL_FRAMES - ring_size))
+
+
+def window_ring_size(ring_size: int) -> int:
+    """The ring a window is opened with: the frames in flight plus the held acknowledgements."""
+    return ring_size + ack_holdback(ring_size)
 
 
 def is_dmabuf_url(url: str) -> bool:
@@ -55,18 +74,23 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
               "auto_restart": "group", "fps": f"{fps}/1"}
     if drm_hwaccel:
         source["hwaccel"] = drm_hwaccel
+    if ack_holdback(browser_ring_size):
+        source["ack_holdback"] = ack_holdback(browser_ring_size)
     nodes = [
         api.IpcDmabufSource(source),
         # zero_copy: the compositor samples the mapped DMA-BUF directly; no 8 MB copy per frame.
         # Keep the recycling allocation pool registered, including live frames.
         # The ring bounds outstanding frames, not retired Chromium allocations:
-        # expire idle imports after several ring cycles instead of pinning them
-        # indefinitely. Lookups refresh returning allocations before expiry.
+        # expire idle imports instead of pinning them indefinitely. Lookups refresh
+        # returning allocations before expiry. A page that paints now and then returns
+        # to an allocation seconds later, not ring cycles later: an import dropped in
+        # between is registered again on its next use, and each release takes the CUDA
+        # library's context lock exclusively, stalling every other thread in the context.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group", "zero_copy": True,
                             "max_imports": max(32, browser_ring_size),
-                            "import_ttl_ms": max(1000, (4000 * browser_ring_size + fps - 1) // fps)}),
+                            "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_ring_size + fps - 1) // fps)}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two
@@ -114,7 +138,7 @@ def open_browser_windows(base_url: str, ids: List[str], page_url: str, width: in
     if browser_ring_size is None:
         browser_ring_size = default_browser_ring_size(fps)
     open_windows(base_url, [{"id": name, "url": page_url, "width": width, "height": height, "fps": fps,
-                            "ringSize": browser_ring_size, "holdLastFrame": True}
+                            "ringSize": window_ring_size(browser_ring_size), "holdLastFrame": True}
                             for name in ids])
 
 
