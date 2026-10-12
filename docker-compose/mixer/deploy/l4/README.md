@@ -25,7 +25,7 @@ default). Set `MIXER_HTPASSWD` or use an authenticated reverse proxy.
 The included proxy forwards HTTP and WebSocket paths.
 
 The [current demo recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
-shows this profile at 192 inputs / 256 scenes / 26 outputs, 1080p25 SDR.
+shows this profile at 192 inputs / 256 scenes / 24 outputs, 1080p30 SDR.
 Its two viewers show Program/Preview and dirty Program with four keys. The
 Program/Preview and Multiviewer outputs in that show use HEVC; use a browser
 with HEVC WebRTC reception support to view them. The recording itself is H.264.
