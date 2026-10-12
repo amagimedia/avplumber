@@ -149,6 +149,12 @@ reached, the newest paint is dropped and released; an older in-flight texture is
 never released early. `/status` reports `releasedFrameCount` and
 `retainedFrameCount` for each window.
 
+`ringSize` bounds frames in flight, not allocations. The buffers belong to
+Chromium's capture pool, which keeps at most two idle buffers: when frames come
+back in bunches it destroys the surplus and allocates new buffers later, each a
+new DMA-BUF. A consumer that needs a stable set of allocations returns one frame
+for each frame it receives (avplumber's `ipc_dmabuf_source` `ack_holdback`).
+
 ## Layout
 
 - `src/main/` — Electron main process (TypeScript, service-oriented OOP)
