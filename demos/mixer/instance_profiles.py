@@ -141,7 +141,7 @@ INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["sources"][25] = 192
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["nvdec_decodes"][25] = 120
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["raw_upload_units"][25] = 32
 # 30 fps carries the same 192 sources with fewer decodes and more raw uploads: 105 NVDEC, 40
-# browser and 47 NV12 ran ten minutes at 1080p30 with 24 encodes and no missed deadline or AUX
+# browser and 47 NV12 ran 40 minutes at 1080p30 with 24 encodes and no missed deadline or AUX
 # drop (2026-10-12), once browser frames were returned one per new frame (ack_holdback).
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["sources"][30] = 192
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["nvdec_decodes"][30] = 105
