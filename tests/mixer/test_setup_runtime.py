@@ -217,27 +217,52 @@ def test_settings_saved_with_one_program_bitrate_load_per_output(legacy, kbps):
     assert encodes["extra"] == {**encode("p1", 4000), "codec": "h264_nvenc"}
 
 
-@pytest.mark.parametrize("fps, size", [(25, 6), (30, 6), (50, 9), (60, 9)])
-def test_browser_ring_default_tracks_fps(tmp_path, fps, size):
-    # Settings saved with a ring size load; the setup leaves it to the frame rate's default.
-    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "fps": fps, "browser_ring_size": 11})
-    assert "browser_ring_size" not in recipe
+@pytest.mark.parametrize("fps, size", [(25, 9), (30, 9), (50, 9), (60, 9)])
+def test_browser_frame_queue_default_is_nine_at_every_rate(tmp_path, fps, size):
+    # Settings saved with the value load; the setup leaves it to the default: all nine frames a
+    # window can have out, at every rate, of which the mixer's return queue takes three.
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "fps": fps, "browser_frame_queue": 5})
+    assert "browser_frame_queue" not in recipe
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     from pyplumber.mixer.config import parse
     from pyplumber.mixer.cli import GraphOptions
-    assert show["browser_ring_size"] == size
-    del show["browser_ring_size"]
-    assert parse(show).browser_ring_size == size
-    assert GraphOptions(fps=fps).browser_ring_size == size
+    assert show["browser_frame_queue"] == size
+    del show["browser_frame_queue"]
+    assert parse(show).browser_frame_queue == size
+    assert GraphOptions(fps=fps).browser_frame_queue == size
 
 
-@pytest.mark.parametrize("size", [6, 9, 11])
-def test_browser_ring_limit_reaches_show(tmp_path, size):
-    recipe = {**recipe_for(T4, DEFAULT_SETTINGS), "browser_ring_size": size}   # a hand-written recipe
+def test_browser_ring_size_is_still_read_as_the_earlier_name(tmp_path):
+    recipe = {**recipe_for(T4, DEFAULT_SETTINGS), "browser_ring_size": 7}
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     from pyplumber.mixer.config import parse
-    assert parse(show).browser_ring_size == size
-    assert parse(show).settings()["browser_ring_size"] == size
+    assert show["browser_frame_queue"] == 7 and "browser_ring_size" not in show
+    assert parse({**{k: v for k, v in show.items() if k != "browser_frame_queue"}, "browser_ring_size": 5}).browser_frame_queue == 5
+    assert "browser_ring_size" not in recipe_for(T4, {**DEFAULT_SETTINGS, "browser_ring_size": 11})
+    # The earlier name allowed up to 64; such a value is the queue's maximum.
+    assert prepare_demo.plan({**recipe_for(T4, DEFAULT_SETTINGS), "browser_ring_size": 11}, tmp_path)[0]["browser_frame_queue"] == 9
+    assert parse({**{k: v for k, v in show.items() if k != "browser_frame_queue"}, "browser_ring_size": 64}).browser_frame_queue == 9
+
+
+def test_browser_frame_queue_is_at_most_nine(tmp_path):
+    from pyplumber.mixer.config import ConfigError, parse
+    show, _, _ = prepare_demo.plan(recipe_for(T4, DEFAULT_SETTINGS), tmp_path)
+    with pytest.raises(ConfigError, match="browser_frame_queue must be an integer from 1 to 9"):
+        parse({**show, "browser_frame_queue": 10})
+
+
+def test_return_queue_is_part_of_the_frame_queue():
+    from pyplumber.mixer.dmabuf_inputs import return_queue
+    assert [return_queue(n) for n in (1, 3, 4, 5, 6, 9)] == [0, 0, 1, 2, 3, 3]
+
+
+@pytest.mark.parametrize("size", [4, 6, 9])
+def test_browser_frame_queue_reaches_show(tmp_path, size):
+    recipe = {**recipe_for(T4, DEFAULT_SETTINGS), "browser_frame_queue": size}   # a hand-written recipe
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    from pyplumber.mixer.config import parse
+    assert parse(show).browser_frame_queue == size
+    assert parse(show).settings()["browser_frame_queue"] == size
 
 
 def test_a_setup_saved_with_one_program_bitrate_resumes_with_per_output_encodes(runtime, monkeypatch):

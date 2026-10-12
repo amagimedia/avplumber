@@ -8,7 +8,7 @@
 is the validation authority; the example is the full editable starting point.
 
 Top-level `initial_scene` defaults to the first scene. `max_compositor_layers`
-defaults to 640. `browser_ring_size` is 1–64 (6 at 25/30 fps, otherwise 9).
+defaults to 640. `browser_frame_queue` (formerly `browser_ring_size`, still read) is 1–9, default 9.
 `wipe_color: "sdr"` overrides wipe tags; `--wipe-color` takes precedence.
 
 ## canvas

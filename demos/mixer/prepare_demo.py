@@ -27,7 +27,7 @@ import numpy as np
 from demos.mixer.sdr_patterns import GENERATORS, input_kbps, encoding_options, render
 from demos.mixer.demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic
 from demos.mixer.hdr_patterns import write_hlg
-from pyplumber.mixer.config import MAX_SOURCES, default_browser_ring_size, parse
+from pyplumber.mixer.config import MAX_SOURCES, default_browser_frame_queue, earlier_browser_ring_size, parse
 
 DEMO_DIR = Path(__file__).resolve().parent
 
@@ -336,7 +336,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
             clean["profile"] = "main" if clean.get("codec") == "hevc_nvenc" else "baseline"
         renditions = [*renditions, clean]
     doc = {"canvas": canvas, "sources": sources, "scenes": scene_list,
-           "browser_ring_size": recipe.get("browser_ring_size", default_browser_ring_size(fps)),
+           "browser_frame_queue": recipe.get("browser_frame_queue", earlier_browser_ring_size(recipe.get("browser_ring_size", default_browser_frame_queue(fps)))),
            "initial_scene": scene_list[0]["id"], "renditions": renditions,
            "wipes": wipes,
            "wipe_color": "sdr", "control": {"direct": True, "transition": "cut", "default_wipe": "diagonal"}}
