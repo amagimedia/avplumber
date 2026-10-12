@@ -1,6 +1,6 @@
 # Portable L4 mixer
 
-[Quick start](../../../../demos/mixer/README.md) · [Capacity](../../../../demos/mixer/docs/capacity.md#nvidia-l4-linear-and-cuarray-profiles) ·
+[Quick start](../../../../demos/mixer/README.md) · [Capacity](../../../../demos/mixer/docs/capacity.md#nvidia-l4-16-vcpu-nvidia_l4_cuarray) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
 Requires a Linux L4 host with working NVIDIA DRM/GBM/EGL, R615+ driver,
@@ -44,10 +44,9 @@ HEVC playback requires browser support. Current defaults are in `settings.json`.
 
 ## Fresh-host validation
 
-2026-10-05 deployment checks recorded 60 seconds with zero missed deadlines or
-drops at 88 sources / 256 scenes / 17 outputs (HDR 4:2:2, 60 fps) and
-192 / 256 / 26 (SDR25). These are short checks, not sustained-load guarantees;
-the [capacity report](../../../../demos/mixer/docs/capacity.md) includes less successful sweeps.
+Deployment checks recorded zero missed deadlines and drops at 192 sources / 256 scenes
+at 1080p25 (26 outputs) and 1080p30 (24 outputs), and at 88 sources / 17 outputs in
+HDR 4:2:2 at 60 fps. See the [capacity page](../../../../demos/mixer/docs/capacity.md).
 
 ## Move an instance
 

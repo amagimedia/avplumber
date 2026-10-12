@@ -84,5 +84,5 @@ does not by itself test a mixture of native source rates. Use
 [the mixed-rate smoke](../../../tests/cuda/smoke_mixed_fps.py) on an NVIDIA host
 for that check, and keep its small barcoded fixture separate from full-resolution
 capacity results. Generated source counts include reserved browser keys when
-comparing them with profile totals; the 192-source CUarray SDR25 profile has
+comparing them with profile totals; the 192-source CUarray profile has
 188 catalogue sources plus four keys.
