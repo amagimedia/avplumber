@@ -1,97 +1,53 @@
-# Recorded mixer capacity
+# Mixer capacity
 
-Setup admission limits live in [instance_profiles.py](https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/instance_profiles.py).
-They depend on source mix, canvas rate/format, output count and encoder preset.
-Do not scale one GPU's profile to another GPU. This page summarizes historical
-runs; raw evidence and caveats remain linked below.
+Setup admits what [instance_profiles.py](../instance_profiles.py) allows for the GPU, the canvas
+rate and format, the outputs and their encoder presets. A profile is measured on its own GPU; do
+not scale one GPU's numbers to another. All figures are 1080p inputs and include four browser keys.
 
+[Demo recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
 [Source-limit cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/source-limits.html) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
-## Current demo recording: 2026-10-09
+## NVIDIA L4, 16 vCPU: `nvidia_l4_cuarray`
 
-The [10-second UI recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
-shows a running `nvidia_l4_cuarray` show on one NVIDIA L4 / 16-vCPU host:
-192 inputs, 256 scenes and 26 outputs at 1920×1080p25 SDR. The input total is
-120 NVDEC + 36 browser scene sources + 32 raw NV12 + four browser keys;
-Setup reports 188 catalogue sources before adding the keys. Outputs are
-Program, clean Program and 24 AUX buses, including the Program/Preview monitor
-and source multiviewer.
+25 and 30 fps carry the same 192 sources.
 
-The capture uses two WebRTC viewers, four enabled keys and direct cuts through
-several scene types. It is an interface demonstration, not a new capacity,
-latency or soak benchmark. The [capture metadata](https://amagimedia.github.io/avplumber/demos/mixer/docs/capture-20261009.json)
-records its scope; the historical qualification results below remain separate.
+| Canvas | fps | Sources | NVDEC / browser / raw | Outputs |
+| --- | ---: | ---: | --- | ---: |
+| SDR | 25 | 192 | 120 / 40 / 32 | 26 |
+| SDR | 30 | 192 | 105 / 40 / 47 | 24 |
+| SDR | 50 | 110 | 48 / 40 / 22 | 22 |
+| SDR | 60 | 99 | 40 / 40 / 19 | 22 |
+| HLG 4:2:0 | 25, 30 | 136 | 96 / 40 / 0 | 20 |
+| HLG 4:2:0 | 60 | 88 | 48 / 40 / 0 | 18 |
+| HLG 4:2:2 | 25, 30 | 132 | 88 / 40 / 4 v210 | 20 |
+| HLG 4:2:2 | 60 | 88 | 44 / 40 / 4 v210 | 17 |
 
-## T4
+256 scenes. Outputs are Program, the clean feed and AUX buses, at the default presets. At 1080p30
+the 192-source show ran ten minutes with no missed deadline on Program or on any of its 22 AUX
+buses and no AUX drop (2026-10-12): a draw takes about 3 ms of its 33 ms, the GPU is at 60 %
+and VRAM at 19.5 of 23 GB. The SDR 25 and 30 fps rows are the measured 192-source shows; the other
+rows are the profile's admission limits. The linear `nvidia_l4` profile (no CUarray decode) carries
+170 sources at 25 and 30 fps.
 
-16 GiB T4, 16 vCPUs, 1080p inputs; totals include four browser keys.
-The September 2026 tests used mostly-still browser test pages and raw uploads.
+Use the [portable L4 stack](../../../docker-compose/mixer/deploy/l4/README.md). Browser frames must
+go back to the browser one per new frame ([`ack_holdback`](../../../doc/NODES.md#ipc_dmabuf_source)),
+which the mixer sets; without it the browsers keep allocating buffers and the releases stall the show.
 
-| fps | Sources | Mix: NVDEC / browser including keys / raw |
-| ---: | ---: | --- |
-| 25 | 110 | 40 / 40 / 30 |
-| 30 | 110 | 36 / 40 / 34 |
-| 50 | 82 | 22 / 40 / 20 |
-| 60 | 75 | 18 / 40 / 17 |
+## NVIDIA T4, 16 vCPU: `tesla_t4`
 
-These are tested/declared profile baselines, not decoder-only limits. Short
-50/60 fps cut-spam checks passed; a separate 68-source 60 fps, 19.5-hour soak
-recorded 24 missed deadlines. Browser content can change CPU/GPU demand greatly.
-See [browser cost](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/browser-paint-cost.html), [raw uploads](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html)
-and [CPU pressure](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/cpu-pressure.html) for the measurement context.
+| Canvas | fps | Sources | NVDEC / browser / raw |
+| --- | ---: | ---: | --- |
+| SDR | 25 | 110 | 40 / 40 / 30 |
+| SDR | 30 | 110 | 36 / 40 / 34 |
+| SDR | 50 | 82 | 22 / 40 / 20 |
+| SDR | 60 | 75 | 18 / 40 / 17 |
 
-## NVENC and extra aux outputs
+## Reading the limits
 
-Every rendition, reserved clean feed and AUX consumes encoder capacity.
-Setup applies both modeled NVENC costs and measured output ceilings. Codec,
-preset, resolution and FPS affect admission; lowering bitrate does not raise
-that allowance. AUX normally runs at half rate above 30 fps. Use Setup's
-calculated limit rather than a copied table of extra-output counts.
-
-## NVIDIA L4: linear and CUarray profiles
-
-`nvidia_l4` and `nvidia_l4_cuarray` are distinct profiles. The CUarray SDR25
-profile admits 192 total sources: 120 NVDEC, 32 raw, 36 browser scene sources
-and four browser keys (188 sources in the catalogue). The linear SDR25 profile
-uses 170 total: 83 NVDEC, 47 raw and 40 browser including keys.
-
-Current SDR output ceilings are 26 at 25/30 fps and 22 at 50/60 fps, below the
-hard 30-output encoder ceiling. HLG 4:2:0 uses 20/20/18/18, and HLG 4:2:2 uses
-20/20/17/17 at 25/30/50/60 fps. These are admission rules; not every entry has a
-separate measured qualification. Read the profile comments and trial scope.
-
-The [2026-10-05 raw report](https://amagimedia.github.io/avplumber/demos/mixer/docs/capacity-l4.json) covers 1080p inputs on one L4 /
-16-vCPU host, patched FFmpeg, HEVC CUarray decode, `extra_hw_frames: 12` and
-three-frame decoded queues. Totals include keys; HDR 4:2:2 inputs use v210.
-
-| Show | Sources / scenes / outputs | Observation |
-| --- | --- | --- |
-| SDR25 | 192 / 256 / 26 | First sweep: 1 AUX drop; repeat: 0 missed deadlines / 0 drops |
-| SDR25 | 192 / 256 / 30 | 693 missed deadlines / 856 drops; failed |
-| HLG 4:2:0, 25 fps | 136 / 256 / 20 | 80-second sweep: 0 missed / 0 drops |
-| HLG 4:2:0, 60 fps | 88 / 256 / 18 | 1 missed deadline; failed zero-miss gate |
-| HLG 4:2:2, 60 fps | 88 / 128 / 17 | 30-second cut probe: 0 missed / 0 drops |
-
-The raw report retains all trials, including failed startup/rollback when 96
-HDR decoders exhausted VRAM. A balanced show passing does not qualify the same
-count of HDR decoders. Short probes do not qualify every scene or a long soak;
-30/50 fps admission values in that update were derived, not newly measured.
-
-The [CUarray cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/nvdec-cuarray.html) explains storage savings and
-fixed-pool sizing. Use the [portable L4 stack](https://github.com/amagimedia/avplumber/blob/develop/docker-compose/mixer/deploy/l4/README.md) for that build.
-After deployment, exercise actual content, every scene and Setup restart; check
-fresh deadline/drop counter deltas, not just encoder FPS.
-
-## Node reductions reviewed 2026-10-06
-
-For the captured 188-source catalogue plus four keys, native input pacing
-removes 152 `force_fps` nodes/queues and the guarded raw colour-tag bypass
-removes another 32. Applying those changes alone to the old 1,514-node graph
-would yield 1,330; other routing/wipe changes can affect the deployed total.
-The four pacing shards remain, now with 38 file pacers and ten browser pacers
-each rather than 86 nodes each. These are not 184 eliminated threads.
-
-The small mixed-rate GPU smoke verifies cadence, cuts and stall recovery; it
-does not qualify 188-source throughput. No admission cap was raised based on
-these node reductions. See [cadence evidence](https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/latency.md#native-input-cadence-check-2026-10-06).
+- Every rendition, the clean feed and every AUX bus is an encode. Codec, preset, size and rate
+  count against the NVENC allowance; bitrate does not. AUX runs at half rate above 30 fps.
+- Browser cost depends on what the pages paint; the figures use mostly still pages and four keys.
+- After a deployment, check the show itself: the control page shows deadline misses and AUX drops
+  of the last ten minutes, and `mixer.status` shows how long each bus's draws take
+  ([`playout.timing`](../../../doc/NODES.md#mixer_compositor)).

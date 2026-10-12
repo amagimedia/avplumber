@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="192 independent inputs. 256 scenes. 26 outputs. Watch the AVPlumber GPU mixer on one NVIDIA L4: two live viewers, direct cuts and four downstream graphics.">
+  <meta name="description" content="192 independent inputs. 256 scenes. 24 outputs. Watch the AVPlumber GPU mixer on one NVIDIA L4: two live viewers, direct cuts and four downstream graphics.">
   <meta name="theme-color" content="#0a0e12">
   <meta property="og:title" content="192 inputs. One live canvas. · AVPlumber">
   <meta property="og:description" content="The real mixer interface. Two viewers, direct cuts and downstream graphics, captured from a 192-input NVIDIA L4 show.">
@@ -22,14 +22,14 @@
   <main>
     <section class="hero" aria-labelledby="headline">
       <div><p class="eyebrow"><span class="signal"></span> GPU VIDEO MIXER <span class="slash">/</span> OPEN SOURCE</p><h1 id="headline"><span class="accent">192 inputs.</span><br>One live canvas.</h1></div>
-      <div class="hero-aside"><p>Video, browser pages and raw feeds.<br>Preview it. Cut it. Put graphics on air.<br>All on a single NVIDIA L4.</p><div class="spec"><span>1920 × 1080</span><span>25 FPS</span><span>SDR</span></div></div>
+      <div class="hero-aside"><p>Video, browser pages and raw feeds.<br>Preview it. Cut it. Put graphics on air.<br>All on a single NVIDIA L4.</p><div class="spec"><span>1920 × 1080</span><span>30 FPS</span><span>SDR</span></div></div>
     </section>
     <section class="demo" id="demo" aria-labelledby="demo-title">
-      <div class="demo-top"><h2 id="demo-title"><span class="signal red"></span> THE ACTUAL CONTROL SURFACE</h2><span class="capture-label">INSTANCE CAPTURE · 25 FPS <span class="slash">/</span> 09 OCT 2026</span></div>
-      <div class="screen"><video id="reel" controls muted loop playsinline preload="metadata" poster="mixer-demo-poster.jpg" aria-label="Ten-second mixer demo: two viewers, direct cuts through varied scenes and all four downstream keys enabled" aria-describedby="recording-note"><source src="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo-local.mp4" type="video/mp4"><a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo-local.mp4">Download the mixer demo MP4</a>.</video></div>
+      <div class="demo-top"><h2 id="demo-title"><span class="signal red"></span> THE ACTUAL CONTROL SURFACE</h2><span class="capture-label">INSTANCE CAPTURE · 30 FPS <span class="slash">/</span> 12 OCT 2026</span></div>
+      <div class="screen"><video id="reel" controls muted loop playsinline preload="metadata" poster="mixer-demo-poster.jpg" aria-label="Ten-second mixer demo: two viewers, direct cuts through varied scenes and all four downstream keys enabled" aria-describedby="recording-note"><source src="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo-1080p30.mp4" type="video/mp4"><a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo-1080p30.mp4">Download the mixer demo MP4</a>.</video></div>
       <div class="demo-bottom"><div class="feed-labels"><span><i class="pvw"></i> PREVIEW + PROGRAM</span><span><i class="pgm"></i> DIRTY PROGRAM + 4 DSKs</span></div><button id="replay" type="button">Replay 10s <span aria-hidden="true">↻</span></button></div>
     </section>
-    <p class="recording-note" id="recording-note">Recorded directly on the running instance before Internet transport, then replayed in the real UI with the captured state and cuts. Two outputs, four keys and a continuous 25 fps ticker. <a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo-local.mp4">Download UI demo ↓</a> · <a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-pgm-instance.mp4">Original full-size Program ↓</a></p>
+    <p class="recording-note" id="recording-note">Recorded directly on the running instance before Internet transport, then replayed in the real UI with the captured state and cuts. Two outputs, four keys and a continuous 30 fps ticker. <a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo-1080p30.mp4">Download UI demo ↓</a> · <a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-pgm-instance-1080p30.mp4">Original full-size Program ↓</a></p>
     <section class="scene-section" aria-labelledby="scene-heading">
       <div class="section-label"><h2 id="scene-heading">A different scene. One cut.</h2><span>JUMP INTO THE RECORDING</span></div>
       <div class="scene-strip">
@@ -40,16 +40,16 @@
       </div>
     </section>
     <section class="inside" id="inside" aria-labelledby="inside-title">
-      <div class="section-label"><h2 id="inside-title">Big show. Small footprint.</h2><a href="capture-20261009.json">Captured configuration ↗</a></div>
+      <div class="section-label"><h2 id="inside-title">Big show. Small footprint.</h2><a href="capture-20261012.json">Captured configuration ↗</a></div>
       <div class="numbers">
         <div><strong>192<span>IN</span></strong><p>Independent inputs<br><span>188 scene sources + 4 browser keys</span></p></div>
         <div><strong>256</strong><p>Scenes, ready to take<br><span>Grids, PiP, layers and full screen</span></p></div>
-        <div><strong>26<span>OUT</span></strong><p>Encoded outputs<br><span>Program, clean feed and 24 AUX</span></p></div>
+        <div><strong>24<span>OUT</span></strong><p>Encoded outputs<br><span>Program, clean feed and 22 AUX</span></p></div>
         <div><strong>1<span>GPU</span></strong><p>NVIDIA L4<br><span>16 vCPUs · CUarray decode</span></p></div>
       </div>
-      <div class="source-mix" role="img" aria-label="192 inputs: 120 NVDEC video decoders, 36 browser scene sources, 32 raw NV12 sources and 4 browser keys"><i class="decode"></i><i class="browser"></i><i class="raw"></i><i class="keys"></i></div>
-      <ul class="source-legend"><li><i class="decode"></i><b>120</b> NVDEC video</li><li><i class="browser"></i><b>36</b> Browser pages</li><li><i class="raw"></i><b>32</b> Raw NV12</li><li><i class="keys"></i><b>4</b> Browser keys</li></ul>
-      <p class="scope">This is the recorded 1080p25 SDR configuration. Other formats, frame rates and source mixes have their own limits. <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md">Measurements and workload details ↗</a></p>
+      <div class="source-mix" role="img" aria-label="192 inputs: 105 NVDEC video decoders, 36 browser scene sources, 47 raw NV12 sources and 4 browser keys"><i class="decode"></i><i class="browser"></i><i class="raw"></i><i class="keys"></i></div>
+      <ul class="source-legend"><li><i class="decode"></i><b>105</b> NVDEC video</li><li><i class="browser"></i><b>36</b> Browser pages</li><li><i class="raw"></i><b>47</b> Raw NV12</li><li><i class="keys"></i><b>4</b> Browser keys</li></ul>
+      <p class="scope">This is the recorded 1080p30 SDR configuration. Other formats, frame rates and source mixes have their own limits. <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md">Measurements and workload details ↗</a></p>
     </section>
     <section class="workflow" aria-labelledby="workflow-title">
       <div class="section-label"><h2 id="workflow-title">Keep the next shot in sight.</h2><span>ONE INTERFACE, TWO VIEWS</span></div>
