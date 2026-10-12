@@ -1157,6 +1157,14 @@ output edge; the bus keeps playing and draws again once it has room), `playout`
 one is applied at once or a staged one becomes ready, unchanged when a staged
 one is dropped; empty for one without a revision).
 
+`playout.timing` says where each drawn tick's time went: `period_ms`, `bounds_ms` (the upper
+bounds of all buckets but the last: a quarter, a half, three quarters, one, one and a quarter,
+one and a half, two and three frame periods) and four histograms, each with `counts` per bucket,
+`count`, `mean_ms` and `max_ms` since the node started: `draw` (the whole draw), `issue` (queueing
+it: the node's own work and the CUDA library's locking), `gpu_wait` (waiting for the GPU to finish
+it and the frames it reads) and `downstream` (waiting for room on the output edge). A draw in the
+first four buckets fitted its slot.
+
 ### `mixer_keyer`
 
 The mixer's downstream keyer (DSK): blended key layers over the program.
