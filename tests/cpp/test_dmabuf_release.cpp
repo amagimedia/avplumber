@@ -43,31 +43,31 @@ int main() {
     close(old_pair[1]);
     close(new_pair[1]);
 
-    // With a holdback an acknowledgement waits for the next frame: one goes per arrival,
-    // the oldest goes at once beyond the holdback, and retiring sends what is still held.
+    // With a return queue an acknowledgement waits for the next frame: one goes per arrival,
+    // the oldest goes at once beyond the queue's length, and retiring sends what still waits.
     int held_pair[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, held_pair) == 0);
     auto paced = std::make_shared<DmabufReleaseAckQueue>(held_pair[0], 2);
     paced->enqueue(1);
     paced->enqueue(2);
     assert(paced->flush());
-    assert(paced->stats().released == 2 && paced->stats().held == 2 && paced->stats().sent == 0);
+    assert(paced->stats().released == 2 && paced->stats().queued == 2 && paced->stats().sent == 0);
     assert(recv(held_pair[1], &byte, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
     paced->frameArrived();
     assert(paced->flush());
     expectAck(held_pair[1], DmabufAckKind::Frame, 1);
-    assert(paced->stats().held == 1);
+    assert(paced->stats().queued == 1);
     paced->frameArrived();
-    paced->frameArrived();   // nothing held any more: no acknowledgement is invented
+    paced->frameArrived();   // nothing queued any more: no acknowledgement is invented
     assert(paced->flush());
     expectAck(held_pair[1], DmabufAckKind::Frame, 2);
     assert(recv(held_pair[1], &byte, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
     paced->enqueue(3);
     paced->enqueue(4);
-    paced->enqueue(5);       // a third beyond the holdback of two: the oldest goes at once
+    paced->enqueue(5);       // a third beyond the queue of two: the oldest goes at once
     assert(paced->flush());
     expectAck(held_pair[1], DmabufAckKind::Frame, 3);
-    assert(paced->stats().held == 2);
+    assert(paced->stats().queued == 2);
     paced->retire();
     expectAck(held_pair[1], DmabufAckKind::Frame, 4);
     expectAck(held_pair[1], DmabufAckKind::Frame, 5);

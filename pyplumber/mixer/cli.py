@@ -85,7 +85,7 @@ def _build_input(
             api, prefix=f"input_{index}",
             socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
             fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
-            source_group=group, processing_group=group, hold=True, browser_ring_size=options.browser_ring_size,
+            source_group=group, processing_group=group, hold=True, browser_frame_queue=options.browser_frame_queue,
             event_loop=_pacing_loop(index))
         for node in nodes:
             avp.addNode(node)
@@ -177,7 +177,7 @@ def _build(options: GraphOptions, api, on_error: ExitStack) -> MixerApplication:
         if options.dmabuf_open:
             width, height = options.dmabuf_size
             open_browser_windows(options.dmabuf_rest, dmabuf_ids, options.dmabuf_open,
-                                 width, height, options.fps, options.browser_ring_size)
+                                 width, height, options.fps, options.browser_frame_queue)
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{name}.sock" for name in dmabuf_ids],
                          options.preheat_timeout_sec)
 
@@ -234,8 +234,9 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--dmabuf-open", metavar="URL",
         help="open the dmabuf:// windows with this page through the dma-browser REST API")
     add("--dmabuf-rest", default="http://127.0.0.1:9009")
-    add("--browser-ring-size", type=int,
-        help="maximum outstanding DMA-BUF frames per browser (default 6 at 25/30 fps, 9 otherwise; JSON config owns this in --config mode)")
+    add("--browser-frame-queue", "--browser-ring-size", type=int, dest="browser_frame_queue",
+        help="frames one browser window may have out at once, 1 to 9 (default 9; JSON config owns this in "
+             "--config mode). --browser-ring-size is the option's earlier name")
     add("--janus-output", action="store_true", help="Publish the video-only program to Janus over RTP")
     add("--janus-host", default=JANUS_DEFAULT_HOST)
     add("--janus-video-port", type=int, default=JANUS_DEFAULT_VIDEO_PORT)
