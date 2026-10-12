@@ -1,6 +1,6 @@
 # Portable L4 mixer
 
-[Quick start](../../../../demos/mixer/README.md) · [Capacity](../../../../demos/mixer/docs/capacity.md#nvidia-l4-linear-and-cuarray-profiles) ·
+[Quick start](../../../../demos/mixer/README.md) · [Capacity](../../../../demos/mixer/docs/capacity.md#nvidia-l4-16-vcpu-nvidia_l4_cuarray) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
 Requires a Linux L4 host with working NVIDIA DRM/GBM/EGL, R615+ driver,
@@ -25,7 +25,7 @@ default). Set `MIXER_HTPASSWD` or use an authenticated reverse proxy.
 The included proxy forwards HTTP and WebSocket paths.
 
 The [current demo recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
-shows this profile at 192 inputs / 256 scenes / 26 outputs, 1080p25 SDR.
+shows this profile at 192 inputs / 256 scenes / 24 outputs, 1080p30 SDR.
 Its two viewers show Program/Preview and dirty Program with four keys. The
 Program/Preview and Multiviewer outputs in that show use HEVC; use a browser
 with HEVC WebRTC reception support to view them. The recording itself is H.264.
@@ -44,10 +44,9 @@ HEVC playback requires browser support. Current defaults are in `settings.json`.
 
 ## Fresh-host validation
 
-2026-10-05 deployment checks recorded 60 seconds with zero missed deadlines or
-drops at 88 sources / 256 scenes / 17 outputs (HDR 4:2:2, 60 fps) and
-192 / 256 / 26 (SDR25). These are short checks, not sustained-load guarantees;
-the [capacity report](../../../../demos/mixer/docs/capacity.md) includes less successful sweeps.
+Deployment checks recorded zero missed deadlines and drops at 192 sources / 256 scenes
+at 1080p25 (26 outputs) and 1080p30 (24 outputs), and at 88 sources / 17 outputs in
+HDR 4:2:2 at 60 fps. See the [capacity page](../../../../demos/mixer/docs/capacity.md).
 
 ## Move an instance
 

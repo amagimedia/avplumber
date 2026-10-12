@@ -12,6 +12,8 @@
 #include "cuda_rect_frame.hpp"
 #include "cuda_rect_texture.h"
 
+#include <chrono>
+
 extern "C" {
 #include <libavutil/dict.h>
 #include <libavutil/frame.h>
@@ -68,6 +70,9 @@ protected:
     std::string metadata_key_;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
+    // The last compose(): queueing the draw (our work plus the CUDA library's own locking), then
+    // waiting for the GPU to finish it and the source frames it reads.
+    int64_t issue_ns_ = 0, gpu_wait_ns_ = 0;
 
     std::string last_ops_desc_;
     bool sent_eof_ = false;
@@ -157,6 +162,7 @@ protected:
     av::VideoFrame compose(av::Timestamp pts, const std::vector<const av::VideoFrame *> &sources,
                            const av::VideoFrame *metadata_src, const std::vector<float> *opacity = nullptr,
                            const av::VideoFrame *base = nullptr) {
+        const auto started = std::chrono::steady_clock::now();
         draw_.ensureDevice();
         CUstream stream = draw_.stream();
 
@@ -192,8 +198,12 @@ protected:
                                                AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
         outf.setPts(pts);
 
+        const auto issued = std::chrono::steady_clock::now();
         if (AVP_CHECK_CU(cuStreamSynchronize(stream)))
             throw Error(std::string(type_) + ": cuStreamSynchronize failed");
+        const auto done = std::chrono::steady_clock::now();
+        issue_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(issued - started).count();
+        gpu_wait_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(done - issued).count();
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0)
             logstream << type_ << ": out frame=" << frame_counter_;

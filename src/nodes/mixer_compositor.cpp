@@ -3,6 +3,7 @@
 #include "../mixer/Playout.hpp"
 #include "../mixer/primitives/MixerState.hpp"
 #include "../mixer/primitives/MonotonicClock.hpp"
+#include "../mixer/primitives/TickTimes.hpp"
 
 #include <algorithm>
 #include <array>
@@ -40,6 +41,23 @@ class MixerCompositor : public CudaRectCompositor,
     std::vector<std::array<uint64_t, 3>> playout_stats_published_;   // repeats, discarded, overflow
     uint64_t published_missed_deadlines_ = 0;
     uint64_t published_frames_ = 0;
+    // Where each drawn tick's time went, for the status object: the whole draw; its two halves,
+    // queueing it (our work and the CUDA library's locking) and waiting for the GPU; and the
+    // wait for room downstream. Counted on the output thread, published with the counters above.
+    struct TickTiming {
+        avp::mixer::TickTimes draw, issue, gpu_wait, downstream;
+        explicit TickTiming(int64_t period_ns = 0)
+            : draw(period_ns), issue(period_ns), gpu_wait(period_ns), downstream(period_ns) {}
+    };
+    TickTiming timing_, published_timing_;
+
+    static Parameters timesObject(const avp::mixer::TickTimes &times) {
+        Parameters counts = Parameters::array();
+        for (const auto count : times.counts()) counts.push_back(count);
+        return {{"counts", counts}, {"count", times.count()},
+                {"mean_ms", times.count() ? static_cast<double>(times.sumNs()) / 1e6 / static_cast<double>(times.count()) : 0.0},
+                {"max_ms", static_cast<double>(times.maxNs()) / 1e6}};
+    }
 
     avp::mixer::SourceMask prewarm_inputs_;   // under masks_mutex_
     std::pair<avp::mixer::SourceMask, avp::mixer::SourceMask> inputMasks() const {
@@ -99,6 +117,10 @@ class MixerCompositor : public CudaRectCompositor,
         if (!this->sink_->put(frame, aux_)) ++output_drops_;
         compose_ns_ = composed - started;
         put_ns_ = avp::mixer::monotonicNs() - composed;
+        timing_.draw.add(compose_ns_);
+        timing_.issue.add(issue_ns_);
+        timing_.gpu_wait.add(gpu_wait_ns_);
+        timing_.downstream.add(put_ns_);
     }
 
     void auxInputs(avp::mixer::SourceMask active, avp::mixer::SourceMask preparing = {}) {
@@ -161,6 +183,16 @@ public:
             playout["discarded"] = discarded;
             playout["overflow"] = overflow;
             playout["per_input"] = per_input;
+            // Bucket bounds in milliseconds, then one histogram per part of a tick; the last
+            // bucket of each has no bound.
+            Parameters bounds = Parameters::array();
+            const double period_ms = static_cast<double>(published_timing_.draw.periodNs()) / 1e6;
+            for (const int quarters : avp::mixer::TickTimes::kBoundQuarters) bounds.push_back(period_ms * quarters / 4);
+            playout["timing"] = {{"period_ms", period_ms}, {"bounds_ms", bounds},
+                                 {"draw", timesObject(published_timing_.draw)},
+                                 {"issue", timesObject(published_timing_.issue)},
+                                 {"gpu_wait", timesObject(published_timing_.gpu_wait)},
+                                 {"downstream", timesObject(published_timing_.downstream)}};
             result["playout"] = playout;
         }
         if (aux_) {
@@ -315,6 +347,7 @@ public:
             playout_stats_published_ = std::move(snapshot);
             published_missed_deadlines_ = playout_->missedDeadlines();
             published_frames_ = frame_counter_;
+            published_timing_ = timing_;
         }
         if (debug_log_every_n_ > 0 && frame_counter_ % debug_log_every_n_ == 0) {
             std::ostringstream stats;
@@ -401,6 +434,7 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
     node->playout_ = std::make_unique<avp::mixer::Playout<av::VideoFrame>>(
         config.inputs, avp::mixer::TickGrid(node->frame_rate_), latency_ms, avp::mixer::TimestampMode::Presentation);
     node->input_generation_.store(1);
+    node->timing_ = node->published_timing_ = TickTiming(avp::mixer::TickGrid(node->frame_rate_).time(1));
     logstream << "mixer_compositor: latency_ms=" << static_cast<double>(node->playout_->latencyNs()) / 1e6;
     // A Program preview's last input is the finished program, which arrives one frame after
     // the sources it is made of: match it that many frames back instead of raising the

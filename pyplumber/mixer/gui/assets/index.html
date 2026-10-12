@@ -1420,9 +1420,20 @@ function recentSpan(recent) {
   const s = Math.min(recent.covered_s, recent.window_s);
   return s >= 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`;
 }
+// The median of the last up to three measured cuts in the mixer's own state, newest by id: the
+// figure a player posts, available on every poll whether or not a player is open.
+function polledCutLatency() {
+  const probe = state?.status?.cut_latency;
+  const ms = [probe?.direct, probe?.previewed].filter(Boolean).flatMap((p) => p.recent || [])
+    .filter((p) => p.state === "measured" && Number.isFinite(p.ms))
+    .sort((a, b) => b.id - a.id).slice(0, 3).map((p) => p.ms).sort((a, b) => a - b);
+  if (!ms.length) return null;
+  return ms.length % 2 ? ms[(ms.length - 1) / 2] : (ms[ms.length / 2 - 1] + ms[ms.length / 2]) / 2;
+}
 function renderLatency() {
   const lat = fresh(cutLatency)?.latency;
-  showStat($("lat"), lat?.ms, "ms", true, [LAT_MEANING, typeof lat?.title === "string" && lat.title].filter(Boolean).join("\n"));
+  showStat($("lat"), Number.isFinite(lat?.ms) ? lat.ms : polledCutLatency(), "ms", true,
+           [LAT_MEANING, typeof lat?.title === "string" && lat.title].filter(Boolean).join("\n"));
   const cuts = [...recentCuts.values()].sort((a, b) => a - b);
   const pgm = Object.values(state?.status?.playout || {}), aux = state?.aux_buses || [];
   const total = (rows, key) => rows.every((r) => Number.isFinite(r?.[key])) ? rows.reduce((n, r) => n + r[key], 0) : null;

@@ -43,6 +43,8 @@ const {chromium} = require('playwright');
     assert.deepEqual(await values('gpu-enc'), ['30', '750']);
     assert.deepEqual(await values('cpu'), ['6.00', '32.0']);
     assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
+    // No player is open: the bar shows the median of the mixer's own last three cuts.
+    assert.equal(await page.locator('#lat b').textContent(), '90ms');
     await page.evaluate(() => { observeCuts(); observeCuts(); renderLatency(); });
     assert.match(await page.locator('#lat-tip').textContent(), /3 cuts/, 'repeated samples are not new cuts');
     // A server that counts the last ten minutes: its figures replace the totals since the start.
@@ -96,6 +98,7 @@ const {chromium} = require('playwright');
       observeCuts(); renderLatency();
     });
     assert.equal((await values('lat'))[0], '—', 'restart clears prior cut history');
+    assert.equal(await page.locator('#lat b').textContent(), '—', 'and the bar has no cut to show');
     await page.setViewportSize({width: 390, height: 844});
     await page.locator('#power').focus();
     const tip = await page.locator('#power-tip').boundingBox();

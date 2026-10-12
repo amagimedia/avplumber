@@ -288,6 +288,7 @@ Parameters MixerOrchestrator::status() const {
         auto& counters = node_status["playout"];
         playout[slot] = {{"frames", counters["frames"]}, {"repeats", counters["repeats"]},
                          {"missed_deadlines", counters["missed_deadlines"]}};
+        if (counters.contains("timing")) playout[slot]["timing"] = counters["timing"];
     }
     s["playout"] = playout;
     return s;

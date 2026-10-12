@@ -74,3 +74,7 @@ def test_setup_keeps_cuarray_contract_without_changing_legacy_profiles(fps, dept
     assert all("decode_storage" not in s for s in recipe_for(legacy, settings)["inputs"])
     assert source_limit(optimized, 25) == 192
     assert source_limit(legacy, 25) == 170
+    # 30 fps carries the same total as 25 with fewer decodes: 105 NVDEC, 40 browser, 47 raw.
+    assert source_limit(optimized, 30) == 192
+    assert (optimized["nvdec_decodes"][30], optimized["browser_windows"], optimized["raw_upload_units"][30]) == (105, 40, 47)
+    assert source_limit(legacy, 30) == 170
