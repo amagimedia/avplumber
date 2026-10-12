@@ -24,14 +24,14 @@ not scale one GPU's numbers to another. All figures are 1080p inputs and include
 | HLG 4:2:2 | 60 | 88 | 44 / 40 / 4 v210 | 17 |
 
 256 scenes. Outputs are Program, the clean feed and AUX buses, at the default presets. At 1080p30
-the 192-source show ran ten minutes with no missed deadline on Program or on any of its 22 AUX
+the 192-source show ran 40 minutes with no missed deadline on Program or on any of its 22 AUX
 buses and no AUX drop (2026-10-12): a draw takes about 3 ms of its 33 ms, the GPU is at 60 %
 and VRAM at 19.5 of 23 GB. The SDR 25 and 30 fps rows are the measured 192-source shows; the other
 rows are the profile's admission limits. The linear `nvidia_l4` profile (no CUarray decode) carries
 170 sources at 25 and 30 fps.
 
 Use the [portable L4 stack](../../../docker-compose/mixer/deploy/l4/README.md). Browser frames must
-go back to the browser one per new frame ([`ack_holdback`](../../../doc/NODES.md#ipc_dmabuf_source)),
+go back to the browser one per new frame ([`return_queue`](../../../doc/NODES.md#ipc_dmabuf_source)),
 which the mixer sets; without it the browsers keep allocating buffers and the releases stall the show.
 
 ## NVIDIA T4, 16 vCPU: `tesla_t4`
