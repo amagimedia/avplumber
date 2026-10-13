@@ -8,6 +8,7 @@ mixer needs no HTTP server of its own and the pages need no build step:
     GET  /wall          every output side by side, nothing to control
     GET  /outputs.js    the output list both pages play from
     GET  /api/state     status + scenes + settings in one round trip
+    GET  /api/outputs   the show's settings and the GPU figures alone, for player pages
     GET  /api/status    mixer.status alone, for scripts that poll often
     POST /api/command   {"command": "cut"|"fade"|"wipe"|"preview", "scene": ...}
                         (a fade may carry "curve": "linear"|"ease-in"|"ease-out"|"ease-in-out",
@@ -104,6 +105,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, self.setup_manager.page(), "text/html; charset=utf-8")
         elif path == "/api/setup" and self.setup_manager:
             self._send_json(200, self.setup_manager.status())
+        elif path == "/api/outputs":
+            # A player page needs to know which outputs exist and when the show changed. The whole
+            # state is hundreds of kilobytes and makes the mixer answer for every bus; this is not.
+            try:
+                reply = {"settings": self.bridge.settings(), "gpus": self.gpu.snapshot()}
+                if self.setup_manager:
+                    status = self.setup_manager.status()
+                    if status["phase"] in ("idle", "starting"):
+                        self._send_json(503, {"error": status["message"]})
+                        return
+                    reply["setup_revision"] = status["revision"]
+                self._send_json(200, reply)
+            except Exception as exc:
+                self._send_json(503, {"error": str(exc)})
         elif path in ("/api/state", "/api/status"):
             if self.setup_manager:
                 status = self.setup_manager.status()

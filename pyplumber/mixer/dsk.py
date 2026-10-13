@@ -100,4 +100,4 @@ class DownstreamKeyer:
 
 def register_dsk_commands(avp, keyer):
     avp.registerControlCommand("mixer.dsk", lambda arg: json.dumps(keyer.set(json.loads(arg))) + "\n", True)
-    avp.registerControlCommand("mixer.dsk_status", lambda _arg: json.dumps(keyer.state()) + "\n", True)
+    avp.registerControlCommand("mixer.dsk_status", lambda _arg: json.dumps(keyer.state()) + "\n", True, True)   # polled: not logged

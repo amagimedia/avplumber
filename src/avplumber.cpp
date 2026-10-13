@@ -151,6 +151,8 @@ private:
     using CommandHandler = std::function<void(ClientStream&, std::string&)>;
     std::unordered_map<std::string, CommandHandler> commands_;
     std::unordered_set<std::string> no_lock_commands_;
+    // Queries a page polls several times a second: their runs are not logged, their failures are.
+    std::unordered_set<std::string> quiet_commands_;
     std::mutex cmd_run_lock_;
     std::mutex server_ready_;
     std::list<std::thread> detached_threads_;
@@ -163,7 +165,7 @@ public:
     void registerCommand(
             const std::string& command,
             std::function<std::string(const std::string&)> handler,
-            bool no_lock = false) {
+            bool no_lock = false, bool quiet = false) {
         std::string normalized = command;
         strutils::toLowerInPlace(normalized);
         if (commands_.count(normalized))
@@ -175,6 +177,10 @@ public:
             no_lock_commands_.insert(normalized);
         else
             no_lock_commands_.erase(normalized);
+        if (quiet)
+            quiet_commands_.insert(normalized);
+        else
+            quiet_commands_.erase(normalized);
     }
     void lockOrNot(bool do_lock, std::function<void()> whattodo) {
         if (do_lock) {
@@ -293,7 +299,8 @@ public:
                 out << "400 Unknown command: " << cmd << "\n";
             } else {
                 auto &handler = cmditer->second;
-                logstream << "Executing: " << cmd << " " << arg;
+                const bool quiet = quiet_commands_.count(cmd) != 0;
+                if (!quiet) logstream << "Executing: " << cmd << " " << arg;
                 try {
                     lockOrNot(no_lock_commands_.count(cmd)==0, [&]() {
                         std::ostringstream ss;
@@ -307,7 +314,7 @@ public:
                         } else {
                             out << "201 OK\n" << response << "\n";
                         }
-                        logstream << "Executed successfully " << cmd;
+                        if (!quiet) logstream << "Executed successfully " << cmd;
                     });
                 } catch (std::exception &e) {
                     all_good = false;
@@ -967,6 +974,8 @@ public:
         };
 
         // mixer.status <mixer_name>
+        quiet_commands_.insert("mixer.status");
+        quiet_commands_.insert("mixer.scenes");
         commands_["mixer.status"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
             std::string mixer_name = strutils::trim(arg);
             auto orch = mixerOrchestrator(mixer_name);
@@ -1501,8 +1510,8 @@ void AVPlumber::executeCommandsFromString(const std::string script) {
 void AVPlumber::registerControlCommand(
         const std::string& command,
         std::function<std::string(const std::string&)> handler,
-        bool no_lock) {
-    impl_->registerCommand(command, std::move(handler), no_lock);
+        bool no_lock, bool quiet) {
+    impl_->registerCommand(command, std::move(handler), no_lock, quiet);
 }
 
 void AVPlumber::setLogFile(const std::string path) {

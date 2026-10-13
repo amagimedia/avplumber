@@ -263,6 +263,10 @@ class SetupRuntime:
             # A show started without aux buses has no mixer.aux_status, and so no live state to keep.
             with suppress(AvpProtocolError):
                 live = {b["id"]: b for b in json.loads(self.bridge.command("mixer.aux_status"))}
+                with suppress(Exception):   # the menus a bus offers are no longer part of its polled status
+                    for bus_id, layouts in json.loads(self.bridge.command("mixer.aux_layouts")).items():
+                        if bus_id in live:
+                            live[bus_id].setdefault("layouts", layouts)
         cfg = parse(show)
         scene_ids = {s.id for s in cfg.scenes}
         unpaged = lambda spec: {k: v for k, v in spec.items() if k != "page"}   # pages follow the new sources
