@@ -7,6 +7,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import re
 import selectors
 import subprocess
 import threading
@@ -204,13 +205,15 @@ class HostStats:
     whole host, not the container's share. `values` is None where /proc is missing and until the
     second sample; its mixer fields are None while no mixer process runs."""
 
-    TOP_THREADS = 24   # how many of the mixer's threads are named, busiest first; the page groups them by name
+    THREAD_KINDS = 18    # kinds of thread listed, busiest kind first; the rest are summed as "other"
+    KINDS_WINDOW = 5     # samples a kind's figures span: one thread's second is a tick or two
 
     def __init__(self, mixer_pid=lambda: None, proc=Path("/proc")):
         self.mixer_pid = mixer_pid   # the mixer's pid, or None while none runs
         self.proc = proc
         self.values = None
         self._last = None   # Previous time, host counters, pid, thread counters and process counters.
+        self._thread_history = []   # (time, pid, thread counters) of the last KINDS_WINDOW samples
 
     def start(self):
         threading.Thread(target=self._run, daemon=True, name="host-stats").start()
@@ -242,7 +245,7 @@ class HostStats:
         total, idle = sum(cpu) - sum(last_cpu), cpu[3] + cpu[4] - last_cpu[3] - last_cpu[4]
         values = dict(load1=load1, vcpus=sum(line[3:4].isdigit() for line in lines if line.startswith("cpu")),
                       cpu_pct=round((total - idle) / total * 100) if total > 0 else None,
-                      mixer_cpu_pct=None, thread_pct=None, thread_name=None, threads=None)
+                      mixer_cpu_pct=None, thread_pct=None, thread_name=None, thread_count=None, thread_kinds=None)
         elapsed = at - last_at
         same_process = pid and pid == last_pid and process and last_process and process[1] == last_process[1]
         if same_process and process is not None and last_process is not None and elapsed > 0:
@@ -250,12 +253,17 @@ class HostStats:
             if ticks >= 0:
                 values["mixer_cpu_pct"] = round(ticks * 100 / os.sysconf("SC_CLK_TCK") / elapsed, 1)
         if pid and pid == last_pid and elapsed > 0 and (not process or not last_process or same_process):
-            used = sorted(((ticks - last_threads.get(tid, ("", 0))[1], name) for tid, (name, ticks) in threads.items()),
-                          key=lambda item: -item[0])[:self.TOP_THREADS]
-            if used:
-                pct = lambda ticks: round(ticks * 100 / os.sysconf("SC_CLK_TCK") / elapsed)
-                values.update(thread_pct=pct(used[0][0]), thread_name=used[0][1],
-                              threads=[{"name": name, "pct": pct(ticks)} for ticks, name in used if ticks > 0])
+            hz = os.sysconf("SC_CLK_TCK")
+            name, ticks = max(((name, ticks - last_threads.get(tid, ("", 0))[1]) for tid, (name, ticks) in threads.items()),
+                              key=lambda item: item[1], default=(None, 0))
+            if name is not None:
+                # The kinds over a few seconds, from the oldest sample of this process still kept.
+                self._thread_history = [h for h in self._thread_history if h[1] == pid][-(self.KINDS_WINDOW - 1):]
+                since_at, _, since = self._thread_history[0] if self._thread_history else (last_at, pid, last_threads)
+                self._thread_history.append((last_at, pid, last_threads))
+                used = [(ticks - since.get(tid, ("", 0))[1], name) for tid, (name, ticks) in threads.items()]
+                values.update(thread_pct=round(ticks * 100 / hz / elapsed), thread_name=name, thread_count=len(threads),
+                              thread_kinds=thread_kinds(used, hz * (at - since_at), self.THREAD_KINDS))
         self.values = values   # a fresh dict: HTTP threads read the previous one meanwhile
 
     def _thread_ticks(self, pid):
@@ -271,6 +279,38 @@ class HostStats:
             return _cpu_stat((self.proc / str(pid) / "stat").read_text())[1:]
         except (OSError, ValueError, IndexError):
             return None
+
+
+def thread_kinds(used, tick_seconds, limit):
+    """Threads summed by kind: [{"name", "count", "pct", "max_pct"}], the kind that used most CPU
+    first, at most *limit* kinds and then the rest as "other". *used* holds (ticks, thread name).
+
+    A show has hundreds of threads that each use a fraction of a percent and together a core:
+    one per source for input, decoding, upload, fan-out. Digits in a name become N, so
+    input_12 and input_140 are both input_N."""
+    kinds = {}
+    for ticks, name in used:
+        kind = kinds.setdefault(re.sub(r"\d+", "N", name), {"count": 0, "ticks": 0, "max": 0, "cut": True})
+        kind["count"] += 1
+        kind["ticks"] += ticks
+        kind["max"] = max(kind["max"], ticks)
+        kind["cut"] &= len(name) >= 15
+    # The kernel keeps 15 characters of a name, so aux_aux1_encoder and aux_aux10_encoder arrive
+    # as aux_aux1_encode and aux_aux10_encod: one kind under two spellings.
+    for name in sorted((n for n, k in kinds.items() if k["cut"]), key=len, reverse=True):
+        shorter = next((n for n, k in kinds.items() if n != name and k["cut"] and name.startswith(n)), None)
+        if shorter:
+            longer = kinds.pop(name)
+            kinds[shorter].update(count=kinds[shorter]["count"] + longer["count"], ticks=kinds[shorter]["ticks"] + longer["ticks"],
+                                  max=max(kinds[shorter]["max"], longer["max"]))
+    pct = lambda ticks: round(ticks * 100 / tick_seconds, 1) if tick_seconds > 0 else 0.0
+    ranked = sorted(kinds.items(), key=lambda item: -item[1]["ticks"])
+    rows = [{"name": name, "count": k["count"], "pct": pct(k["ticks"]), "max_pct": pct(k["max"])} for name, k in ranked[:limit]]
+    rest = [k for _, k in ranked[limit:]]
+    if rest:
+        rows.append({"name": "other", "count": sum(k["count"] for k in rest), "pct": pct(sum(k["ticks"] for k in rest)),
+                     "max_pct": pct(max(k["max"] for k in rest))})
+    return rows
 
 
 def _cpu_stat(stat):

@@ -244,16 +244,16 @@ def test_host_stats_sample_load_cpu_and_the_busiest_mixer_thread(tmp_path, monke
                                                                 3: ("mixer (new)", 30, 1)})
     stats.sample()
     assert stats.values == dict(load1=21.4, vcpus=2, cpu_pct=52, mixer_cpu_pct=round(117 * 100 / hz / 2, 1),
-                               thread_pct=round(76 * 100 / hz / 2), thread_name="mixer_comp_a",
-                               # every thread that used CPU, busiest first; a thread first seen now counts from zero
-                               threads=[{"name": "mixer_comp_a", "pct": round(76 * 100 / hz / 2)},
-                                        {"name": "mixer (new)", "pct": round(31 * 100 / hz / 2)},
-                                        {"name": "mixer.py", "pct": round(10 * 100 / hz / 2)}])
+                               thread_pct=round(76 * 100 / hz / 2), thread_name="mixer_comp_a", thread_count=3,
+                               # every thread by kind, busiest first; a thread first seen now counts from zero
+                               thread_kinds=[{"name": "mixer_comp_a", "count": 1, "pct": round(76 * 100 / hz / 2, 1), "max_pct": round(76 * 100 / hz / 2, 1)},
+                                             {"name": "mixer (new)", "count": 1, "pct": round(31 * 100 / hz / 2, 1), "max_pct": round(31 * 100 / hz / 2, 1)},
+                                             {"name": "mixer.py", "count": 1, "pct": round(10 * 100 / hz / 2, 1), "max_pct": round(10 * 100 / hz / 2, 1)}])
     # Without a mixer, or before its first diff after a restart, the thread fields stay unknown.
     pid[0] = None
     now[0] += 1.0
     stats.sample()
-    assert stats.values["thread_pct"] is None and stats.values["thread_name"] is None and stats.values["threads"] is None
+    assert stats.values["thread_pct"] is None and stats.values["thread_name"] is None and stats.values["thread_kinds"] is None
     assert stats.values["mixer_cpu_pct"] is None
     pid[0] = 4243
     now[0] += 1.0
@@ -291,20 +291,35 @@ def test_mixer_cpu_counts_exited_threads_and_detects_pid_reuse(tmp_path, monkeyp
     assert stats.values['mixer_cpu_pct'] is None and stats.values['cpu_pct'] is None
 
 
-def test_host_stats_name_the_busiest_threads(tmp_path, monkeypatch):
+def test_host_stats_sum_the_threads_by_kind(tmp_path, monkeypatch):
+    from pyplumber.mixer.gui.telemetry import thread_kinds
     now = [10.0]
     monkeypatch.setattr("pyplumber.mixer.gui.telemetry.time.monotonic", lambda: now[0])
     hz = os.sysconf("SC_CLK_TCK")
     stats = HostStats(lambda: 4242, proc=tmp_path)
-    names = [f"input_{n}" for n in range(30)]
-    fake_proc(tmp_path, 1, [100, 0, 0, 900, 0, 0, 0, 0], {tid: (name, 0, 0) for tid, name in enumerate(names, 1)})
+    names = [f"input_{n}" for n in range(30)] + ["mixer_comp_a", "aux_aux1_encode", "aux_aux10_encod", "EventLoop", "EventLoop"]
+    threads = lambda ticks: {tid: (name, ticks(tid, name), 0) for tid, name in enumerate(names, 1)}
+    fake_proc(tmp_path, 1, [100, 0, 0, 900, 0, 0, 0, 0], threads(lambda tid, name: 0))
     stats.sample()
-    now[0] += 1.0   # thread n ran n ticks of user time and n of kernel time: the last is the busiest
-    fake_proc(tmp_path, 1, [150, 0, 0, 950, 0, 0, 0, 0], {tid: (name, tid - 1, tid - 1) for tid, name in enumerate(names, 1)})
+    now[0] += 1.0   # each input one tick, the compositor 40, the two encoders 2 and 4, the loops 8 and 6
+    spent = {"mixer_comp_a": 40, "aux_aux1_encode": 2, "aux_aux10_encod": 4}
+    loops = iter((8, 6))
+    fake_proc(tmp_path, 1, [150, 0, 0, 950, 0, 0, 0, 0],
+              threads(lambda tid, name: spent.get(name, next(loops) if name == "EventLoop" else 1)))
     stats.sample()
-    assert len(stats.values["threads"]) == HostStats.TOP_THREADS == 24
-    assert stats.values["threads"] == [{"name": f"input_{n}", "pct": round(2 * n * 100 / hz)} for n in range(29, 5, -1)]
-    assert (stats.values["thread_name"], stats.values["thread_pct"]) == ("input_29", round(58 * 100 / hz))
+    pct = lambda ticks: round(ticks * 100 / hz, 1)
+    assert stats.values["thread_count"] == 35
+    assert stats.values["thread_kinds"] == [
+        {"name": "mixer_comp_a", "count": 1, "pct": pct(40), "max_pct": pct(40)},
+        {"name": "input_N", "count": 30, "pct": pct(30), "max_pct": pct(1)},       # thirty small threads, one line
+        {"name": "EventLoop", "count": 2, "pct": pct(14), "max_pct": pct(8)},
+        {"name": "aux_auxN_encod", "count": 2, "pct": pct(6), "max_pct": pct(4)},  # one kind under two cut-off spellings
+    ]
+    assert (stats.values["thread_name"], stats.values["thread_pct"]) == ("mixer_comp_a", round(40 * 100 / hz))
+    # Beyond the limit the remaining kinds are one "other" row, so the list stays short.
+    rows = thread_kinds([(n, f"kind{chr(97 + n)}") for n in range(1, 8)], 100, 3)
+    assert [(r["name"], r["count"], r["pct"]) for r in rows] == [("kindh", 1, 7.0), ("kindg", 1, 6.0), ("kindf", 1, 5.0), ("other", 4, 10.0)]
+    assert rows[-1]["max_pct"] == 4.0
 
 
 def test_host_stats_thread_hides_the_meters_during_an_error_and_logs_it_once(tmp_path, monkeypatch, caplog):
