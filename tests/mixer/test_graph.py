@@ -261,7 +261,7 @@ def test_input_keeps_native_rate_and_outputs_use_configured_fps():
     nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
 
     assert "fps_0" not in nodes
-    assert nodes["realtime_0"]["tick_period"] == "1/30000"
+    assert nodes["realtime_0"]["time_base"] == "1/120000" and "tick_period" not in nodes["realtime_0"]
     assert nodes["realtime_0"]["negative_time_tolerance"] == .25
     assert nodes["realtime_0"]["discontinuity_threshold"] == 1.0
     assert "center_phase" not in nodes["program_fps"]
