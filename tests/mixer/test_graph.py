@@ -715,12 +715,14 @@ def _raw_420_nodes(tmp_path, kind, color, *, source_options=None, process_source
 
 
 @pytest.mark.parametrize("kind,fmt,color", [("nv12", "nv12", "sdr"), ("p010", "p010le", "hlg")])
-@pytest.mark.parametrize("upload", ["hwupload", "pinned", "direct"])
+@pytest.mark.parametrize("upload", ["hwupload", "pinned", "direct", "resident"])
 def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
     app, nodes, chain = _raw_420_nodes(tmp_path, kind, color, raw_upload=upload)
-    if upload == "direct":
-        # One node reads each picture into page-locked memory and uploads it from there.
+    if upload in ("direct", "resident"):
+        # One node reads each picture into page-locked memory and uploads it from there;
+        # resident, a looped file's pictures stay in that memory.
         assert chain == ["input_0", "realtime_0"]
+        assert nodes["input_0"].pop("resident", False) is (upload == "resident")
         assert nodes["input_0"] == {
             "name": "input_0", "type": "raw_video_file_cuda", "url": str(tmp_path / "pattern.raw"),
             "dst": "input_0_cuda", "hwaccel": "mixer_gpu", "group": nodes["realtime_0"]["group"],
@@ -789,8 +791,13 @@ def test_a_single_pass_raw_file_restarts_its_group_from_the_reading_node(tmp_pat
     assert nodes["input_0"]["auto_restart"] == "group"
 
 
+def test_a_single_pass_raw_file_is_not_kept_in_memory(tmp_path):
+    _, nodes, _ = _raw_420_nodes(tmp_path, "nv12", "sdr", raw_upload="resident", source_options={"loop": False})
+    assert "resident" not in nodes["input_0"]
+
+
 def test_raw_upload_rejects_unknown_modes():
-    with pytest.raises(mixer_config.ConfigError, match="raw_upload must be one of hwupload, pinned, direct"):
+    with pytest.raises(mixer_config.ConfigError, match="raw_upload must be one of hwupload, pinned, direct, resident"):
         mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "raw_upload": "pageable"}})
     assert mixer_config.parse(CONFIG).raw_upload == "hwupload"
 
