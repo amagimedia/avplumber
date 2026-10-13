@@ -795,6 +795,33 @@ def test_raw_upload_rejects_unknown_modes():
     assert mixer_config.parse(CONFIG).raw_upload == "hwupload"
 
 
+def _video_source_nodes(**canvas):
+    """The config-driven chain of one video file (the first CONFIG source), by node name,
+    and the names of its group's nodes in creation order."""
+    doc = {"canvas": {**CONFIG["canvas"], **canvas}, "sources": [CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+    app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4"), api=fake_api())
+    nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+    chain = [name for name in nodes if name.endswith("_0") and nodes[name].get("group") == nodes["input_0"]["group"]]
+    return nodes, chain
+
+
+def test_config_sources_stamp_no_frame_metadata():
+    nodes, _ = _video_source_nodes()
+    assert nodes["input_0"]["frame_metadata"] == []
+
+
+def test_build_input_stamps_every_frame_metadata_key_unless_told():
+    from pyplumber.mixer.inputs import build_input
+    for keys, expected in ((None, {}), (["frame_ts"], {"frame_metadata": ["frame_ts"]})):
+        avp = FakeAvp()
+        build_input(avp, fake_api(), "pl", "clip.mp4", group="pl", fps=30,
+                    **({} if keys is None else {"frame_metadata": keys}))
+        params = {node.parameters["name"]: node.parameters for node in avp.nodes}["input_pl"]
+        assert {key: value for key, value in params.items() if key == "frame_metadata"} == expected
+
+
 @pytest.mark.parametrize("changes", [{"width": 319}, {"height": 0}, {"color": "hlg"}, {"color": ""}])
 def test_raw_nv12_rejects_invalid_geometry_or_color(changes):
     doc = {"canvas": CONFIG["canvas"], "sources": [{"id": "raw", "kind": "nv12",
