@@ -17,11 +17,17 @@ export interface AppliedSwitch {
  * Configures Chromium command-line switches for offscreen DMA-BUF capture on
  * Linux + Electron/Chromium.
  *
- * Reads `DMA_BROWSER_*` env vars. The NVIDIA launcher adds the custom
- * native-handle feature through `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES` only
- * after it detects NVIDIA.
+ * Reads `DMA_BROWSER_*` env vars. The two features only the patched Electron
+ * knows (stock ignores them) have switches of their own, off by default: the
+ * native-handle capture no longer waits for the GPU before `paint` and hands
+ * the consumer an acquire fence instead, which is safe only with a consumer
+ * that waits on it.
  */
 export class HwAccelConfigurator {
+  /** `DMA_BROWSER_NATIVE_HANDLE_CAPTURE`: native-handle textures, no wait, acquire fence. */
+  private static readonly NATIVE_HANDLE_FEATURE = 'RenderableMappableSharedImageForceScanout';
+  /** `DMA_BROWSER_ZERO_COPY_EXPORT`: the zero-copy export of such textures; needs the first. */
+  private static readonly ZERO_COPY_FEATURE = 'AvpZeroCopyOffscreenExport';
   private static readonly DISABLED_FEATURES_BASE: readonly string[] = [
     'CompressionDictionaryTransport',
     'DefaultANGLEVulkan',
@@ -68,9 +74,8 @@ export class HwAccelConfigurator {
       this.appendSwitch('disable-gpu-process-crash-limit');
     }
 
-    const enabled = HwAccelConfigurator.dedupe(
-      envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES'),
-    );
+    const extra = envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES');
+    const enabled = HwAccelConfigurator.dedupe([...this.gatedFeatures(extra), ...extra]);
     if (enabled.length > 0) {
       this.appendSwitch('enable-features', enabled.join(','));
     }
@@ -105,6 +110,36 @@ export class HwAccelConfigurator {
 
   public getApplied(): readonly AppliedSwitch[] {
     return this.appliedSwitches;
+  }
+
+  /** The patched build's features their switches ask for; the free-form list may not name them. */
+  private gatedFeatures(extra: readonly string[]): string[] {
+    const switches: ReadonlyArray<readonly [string, string]> = [
+      [HwAccelConfigurator.NATIVE_HANDLE_FEATURE, 'DMA_BROWSER_NATIVE_HANDLE_CAPTURE'],
+      [HwAccelConfigurator.ZERO_COPY_FEATURE, 'DMA_BROWSER_ZERO_COPY_EXPORT'],
+    ];
+    for (const [feature, variable] of switches) {
+      if (extra.includes(feature)) {
+        throw new Error(
+          `${feature} is requested with ${variable}=1, not through ` +
+            'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: it is safe only with a consumer that waits ' +
+            'on the acquire fence',
+        );
+      }
+    }
+    const zeroCopy = envFlag(this.env, 'DMA_BROWSER_ZERO_COPY_EXPORT', false);
+    // The zero-copy export is a native-handle capture: the second switch implies the first.
+    const nativeHandle = envFlag(this.env, 'DMA_BROWSER_NATIVE_HANDLE_CAPTURE', zeroCopy);
+    if (zeroCopy && !nativeHandle) {
+      throw new Error(
+        'DMA_BROWSER_ZERO_COPY_EXPORT=1 needs DMA_BROWSER_NATIVE_HANDLE_CAPTURE unset or 1: ' +
+          'the zero-copy export is a native-handle capture',
+      );
+    }
+    return [
+      ...(nativeHandle ? [HwAccelConfigurator.NATIVE_HANDLE_FEATURE] : []),
+      ...(zeroCopy ? [HwAccelConfigurator.ZERO_COPY_FEATURE] : []),
+    ];
   }
 
   private appendSwitch(name: string, value?: string): void {

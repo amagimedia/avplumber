@@ -98,9 +98,8 @@ apply_nvidia_runtime() {
   local render_node
   local gl_backend="${DMA_BROWSER_GL_BACKEND:-angle}"
   local angle_backend="${DMA_BROWSER_ANGLE_BACKEND:-gl-egl}"
-  local scanout_feature="RenderableMappableSharedImageForceScanout"
-
-  export DMA_BROWSER_CHROMIUM_EXTRA_FEATURES="${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:+${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES},}${scanout_feature}"
+  # The patched Electron's native-handle capture (no GPU wait, acquire fence instead) is not
+  # requested here: DMA_BROWSER_NATIVE_HANDLE_CAPTURE=1 does, once the consumer waits on the fence.
 
   if wayland_display="$(detect_wayland_display)"; then
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
