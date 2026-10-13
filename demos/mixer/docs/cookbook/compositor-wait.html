@@ -27,7 +27,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>The compositor's wait costs the frames that arrived</h1>
-  <p class="note">Measured on 2026-10-13 on the 16 vCPU L4 host that runs the demo. Source links are pinned to <a href="https://github.com/amagimedia/avplumber/commit/cc716b6f663170413b7de319c073edbc6fb9e93d">commit cc716b6f</a> on branch <code>mixer/epoll-wait</code>, which is not on <code>develop</code> yet. <a href="../">Watch the current 192-input L4 demo.</a></p>
+  <p class="note">Measured on 2026-10-13 on the 16 vCPU L4 host that runs the demo. Source links are pinned to <a href="https://github.com/amagimedia/avplumber/commit/cc716b6f663170413b7de319c073edbc6fb9e93d">commit cc716b6f</a> on branch <code>mixer/epoll-wait</code>, which is not on <code>develop</code> yet; the second commit on that branch is <a href="https://github.com/amagimedia/avplumber/commit/13ea58489f0de028d08375312755ec2d3402f605">13ea5848</a>. <a href="../">Watch the current 192-input L4 demo.</a></p>
   <p class="lede">The busiest thread of the 192-source show is the Program compositor. It sleeps until any source has a new frame, and it did that with <code>poll()</code> over one descriptor per source: 193 descriptors handed to the kernel, hooked, unhooked and scanned on each of about 2,200 wakes a second, to learn that two or three had fired. With <code>epoll</code> the set is registered once and a wake costs the descriptors that fired. The thread fell from 52 to 35&nbsp;% of a core; nothing about when it wakes or what it draws changed.</p>
   <span class="pill optin">Status: Running on the demo host; on a branch</span>
 
@@ -35,7 +35,8 @@
     <li><b>52 → 35&nbsp;%</b><span>of one core, Program compositor A, 192 sources at 1080p30</span></li>
     <li><b>17.4 → 3.0</b><span>points of that which are kernel time</span></li>
     <li><b>81 → 45&nbsp;%</b><span>the 20 AUX compositors together, which wait the same way</span></li>
-    <li><b>84 → 58&nbsp;%</b><span>projected for the same thread at 1080p50, not measured</span></li>
+    <li><b>43 → 32&nbsp;%</b><span>the same thread on one tree with and without the commit, on a second L4</span></li>
+    <li><b>84 → 51&nbsp;%</b><span>projected for that thread at 1080p50 with both commits, not measured</span></li>
     <li><b>0</b><span>missed deadlines in 47 minutes on the new build, after its start-up</span></li>
   </ul>
 
@@ -65,7 +66,7 @@
   <p>More vCPUs help a show whose threads together need more than the machine has. They do not help one thread that needs more than a core. On the 192-source show at 1080p30 the Program compositor read 52&nbsp;% of a core, and its cost is not linear:</p>
   <ul class="where">
     <li>Each source frame wakes the thread, or shares a wake with one or two others: about 2,200 wakes a second for 5,760 source frames.</li>
-    <li>Each wake does work for every source, not only for the ones that fired. So the cost goes with source frames per second times the number of sources: with the square of the source count.</li>
+    <li>Each wake does work for every source, not only for the ones that fired. So the per-wake part of the cost goes with source frames per second times the number of sources: with the square of the source count.</li>
     <li>Three shows fit that: 40&nbsp;% at 192 sources and 25 fps, 50&nbsp;% at 192 and 30 fps, 34&nbsp;% at 99 sources and 60 fps. The last two carry almost the same number of source frames per second.</li>
   </ul>
   <p>Carried to 1080p50 with 192 sources, the fit gave 84&nbsp;% of a core for this one thread, and a full core at about 214 sources. Both Program buses run the loop, and so does every AUX bus.</p>
@@ -125,15 +126,38 @@
     <li>The compositors together gave back about 0.7 of a core (195 to 124 points); the mixer as a whole read 52 points lower.</li>
     <li>The show then ran 47 minutes with no missed deadline and no dropped frame, apart from its start-up.</li>
   </ul>
-  <p class="note"><b>What the comparison is.</b> The earlier build was a trial image of the changes that are now on <code>develop</code>; the later one is <code>develop</code> with this commit. They were not built from one tree, so the table is not an isolated measurement of the commit. A second L4 host running the same show on <code>develop</code> with this commit read 33.1 and 31.3&nbsp;% for the two Program compositors, with 2.7 points of kernel time each. The matching run without the commit on that host was cut short and is still to be done.</p>
+  <h2>Isolated on one tree</h2>
+  <p>The table above compares the trial image the demo host was running with a build of <code>develop</code> plus this commit, so it is not the commit alone. A second L4 host of the same shape ran the same 192-source show from three images built from one tree: <code>develop</code>, <code>develop</code> with the <code>epoll</code> commit, and with the next commit as well, which drops two of the compositor's three passes (see below). Two 20-second readings each; the two agreed within half a point, and the table has their mean.</p>
+  <div class="measured">
+    <table>
+      <thead><tr><th>% of one core</th><th>develop</th><th>+ epoll</th><th>+ direct wait</th></tr></thead>
+      <tbody>
+        <tr><td>Program compositor A</td><td>43.1</td><td>32.1</td><td>30.5</td></tr>
+        <tr><td>&nbsp;&nbsp;of which kernel</td><td>13.5</td><td>2.6</td><td>2.7</td></tr>
+        <tr><td>Program compositor B</td><td>41.9</td><td>31.2</td><td>29.9</td></tr>
+        <tr><td>AUX compositors, all 20</td><td>73.6</td><td>44.2</td><td>32.1</td></tr>
+        <tr><td>&nbsp;&nbsp;of which kernel</td><td>34.4</td><td>6.9</td><td>5.9</td></tr>
+        <tr><td>Pacing loops, all 5 (control)</td><td>110.7</td><td>114.6</td><td>111.6</td></tr>
+        <tr><td>All 1,472 mixer threads</td><td>807</td><td>769</td><td>747</td></tr>
+        <tr><td>Time runnable without a core, all threads</td><td>449</td><td>456</td><td>326</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The <code>epoll</code> commit alone takes 11 points off each Program compositor and 29 off the AUX compositors, all of it kernel time. The absolute figures differ from the demo host's, which was on another build and has viewers attached; the kernel time goes the same way on both.</p>
 
-  <h2>What it does not remove</h2>
-  <p>About 32 of the remaining 35 points are user time. A model fitted to the reading puts roughly 19 of them on the three passes over the 192 edges; that split is fitted, not measured. Two further steps follow from it:</p>
+  <h2>The second step, and what it showed</h2>
+  <p>After taking in every input the compositor called <code>findSourceWithData()</code> to wait. That looked at all 192 edges before sleeping and again after waking, for an index the compositor never used. The next commit makes it sleep on its events directly. A frame that arrives after the pass leaves its event signalled and ends the wait at once; an input that still holds frames beyond the pass's bound of eight skips the wait.</p>
   <ul class="where">
-    <li><b>Drop the two passes whose result is not used.</b> After taking in every input the compositor can sleep on its events directly. This is written (the next commit on the branch) and not measured yet.</li>
-    <li><b>Wake only for the sources on air and for the deadline</b>, and take the prewarmed sources in once per tick. This is the large lever, and the only one that changes when a frame is taken in, so it needs its own check that a cut still starts on the next frame. Not written.</li>
+    <li><b>AUX compositors: 44 to 32&nbsp;%</b> for all 20. They wake often and take in few frames per wake, so the passes were a large share of their work.</li>
+    <li><b>Program compositors: 32.1 to 30.5&nbsp;%.</b> Much less than a model fitted to the first reading had predicted (it put about 19 points on the passes). A pass over 192 edges costs about 10 µs, not 30.</li>
+    <li><b>Threads waiting for a core fell by a quarter</b> (456 to 326 points), more than the CPU saved: shorter work per wake means the compositors are off the cores sooner at the moment every other per-frame thread wants one.</li>
   </ul>
-  <p>The pacing loops' 26&nbsp;% each at 30 fps is a different matter: a timer rounded to whole milliseconds against a frame period of 33.333 ms. It does not occur at 25 or 50 fps and is not part of this change.</p>
+  <p>So what is left of the Program compositor, about 28 points of user time, is not the passes. It works out at about 48 µs for each of the 5,760 source frames a second, and what that time is spent on has not been measured; a sampling profile of the thread is the next step. Until then the projection for 1080p50 with 192 sources is the measured figure scaled by the frame rate: about 51&nbsp;% of a core, down from 84.</p>
+  <p>Two things stay as they were:</p>
+  <ul class="where">
+    <li><b>Every prewarmed source's frame still wakes the Program compositor.</b> Waking only for the sources on air and for the deadline would cut the wakes about eightfold, but it changes when a frame is taken in and needs its own check that a cut still starts on the next frame. Not written.</li>
+    <li><b>The pacing loops' 26&nbsp;% each at 30 fps</b> is a different matter: a timer rounded to whole milliseconds against a frame period of 33.333 ms. It does not occur at 25 or 50 fps and is not part of this change.</li>
+  </ul>
 
   <h2>How it was measured</h2>
   <p>From <code>/proc</code> only, with nothing installed on the host and nothing CPU-bound beside the show:</p>
@@ -146,13 +170,13 @@
 
   <h2>At a glance</h2>
   <ul class="cards">
-    <li><b>What</b>The engine's wait for any of a set of events registers them once with <code>epoll</code>. A wake costs the events that fired, not the size of the set.</li>
+    <li><b>What</b>The engine's wait for any of a set of events registers them once with <code>epoll</code>, so a wake costs the events that fired, not the size of the set. A second commit lets the compositor sleep on those events without two extra passes over its inputs.</li>
     <li><b>Why</b>A compositor with 192 sources paid for 193 descriptors about 2,200 times a second. That was a third of the busiest thread's CPU, and the part of it that grows with the square of the source count.</li>
     <li><b>Latency</b>0 frames added. The thread wakes for the same events at the same moments.</li>
     <li class="flag"><b>Side effects</b>None seen. Every node that waits on several inputs now uses <code>epoll</code>; a producer's signal does a little more work in the kernel when the consumer is awake, because the registration is permanent.</li>
-    <li><b>Cost</b>One epoll descriptor per waiting node. About thirty lines changed in one header, and a unit test.</li>
+    <li><b>Cost</b>One epoll descriptor per waiting node. About thirty lines changed in one header and a unit test; the second commit is a dozen lines in the compositor.</li>
     <li><b>Risk</b>Low. The class's behaviour is pinned by a test: timeouts, every fired event read by one wait, a wake from another thread, an event listed twice. Linux only, as the eventfd-based events already were.</li>
-    <li><b>Switch it off</b>No switch. Revert the commit.</li>
+    <li><b>Switch it off</b>No switch. Revert the commits; they are independent of each other.</li>
   </ul>
 
   <h2>Related pages</h2>
