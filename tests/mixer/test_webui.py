@@ -291,19 +291,20 @@ def test_mixer_cpu_counts_exited_threads_and_detects_pid_reuse(tmp_path, monkeyp
     assert stats.values['mixer_cpu_pct'] is None and stats.values['cpu_pct'] is None
 
 
-def test_host_stats_name_the_eight_busiest_threads(tmp_path, monkeypatch):
+def test_host_stats_name_the_busiest_threads(tmp_path, monkeypatch):
     now = [10.0]
     monkeypatch.setattr("pyplumber.mixer.gui.telemetry.time.monotonic", lambda: now[0])
     hz = os.sysconf("SC_CLK_TCK")
     stats = HostStats(lambda: 4242, proc=tmp_path)
-    names = [f"input_{n}" for n in range(12)]
+    names = [f"input_{n}" for n in range(30)]
     fake_proc(tmp_path, 1, [100, 0, 0, 900, 0, 0, 0, 0], {tid: (name, 0, 0) for tid, name in enumerate(names, 1)})
     stats.sample()
     now[0] += 1.0   # thread n ran n ticks of user time and n of kernel time: the last is the busiest
     fake_proc(tmp_path, 1, [150, 0, 0, 950, 0, 0, 0, 0], {tid: (name, tid - 1, tid - 1) for tid, name in enumerate(names, 1)})
     stats.sample()
-    assert stats.values["threads"] == [{"name": f"input_{n}", "pct": round(2 * n * 100 / hz)} for n in range(11, 3, -1)]
-    assert (stats.values["thread_name"], stats.values["thread_pct"]) == ("input_11", round(22 * 100 / hz))
+    assert len(stats.values["threads"]) == HostStats.TOP_THREADS == 24
+    assert stats.values["threads"] == [{"name": f"input_{n}", "pct": round(2 * n * 100 / hz)} for n in range(29, 5, -1)]
+    assert (stats.values["thread_name"], stats.values["thread_pct"]) == ("input_29", round(58 * 100 / hz))
 
 
 def test_host_stats_thread_hides_the_meters_during_an_error_and_logs_it_once(tmp_path, monkeypatch, caplog):

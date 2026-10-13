@@ -204,7 +204,7 @@ class HostStats:
     whole host, not the container's share. `values` is None where /proc is missing and until the
     second sample; its mixer fields are None while no mixer process runs."""
 
-    TOP_THREADS = 8   # how many of the mixer's threads are named, busiest first
+    TOP_THREADS = 24   # how many of the mixer's threads are named, busiest first; the page groups them by name
 
     def __init__(self, mixer_pid=lambda: None, proc=Path("/proc")):
         self.mixer_pid = mixer_pid   # the mixer's pid, or None while none runs
