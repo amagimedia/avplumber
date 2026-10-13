@@ -735,7 +735,8 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
     assert nodes["input_0"]["format"] == "rawvideo"
     assert nodes["input_0"]["options"] == {"pixel_format": fmt, "video_size": "320x180", "framerate": "60/1"}
     if upload == "hwupload":
-        assert chain == ["input_0", "demux_0", "decode_0", "filter_0", "realtime_0", "upload_0"]
+        assert chain == ["input_0", "decode_0", "filter_0", "realtime_0", "upload_0"]
+        assert nodes["input_0"]["routing"] == {"?v:0": "input_0_video_packets"} and "dst" not in nodes["input_0"]
         assert nodes["input_0"]["loop_continuous_ts"] is False   # setpts counts frames across loops instead
         assert nodes["decode_0"]["codec"] == "rawvideo"
         assert "hwaccel" not in nodes["decode_0"] and "options" not in nodes["decode_0"]
@@ -752,8 +753,8 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
         assert source["pre_otm_edge"] == "input_0_uploaded" and source["pixel_format"] == fmt
     else:
         # Rawvideo wraps the packets; the patched filter uploads on the shared device.
-        assert chain == ["input_0", "demux_0", "decode_0", "upload_0", "realtime_0"]
-        assert nodes["demux_0"]["routing"] == {"v:0": "input_0_packed"}
+        assert chain == ["input_0", "decode_0", "upload_0", "realtime_0"]
+        assert nodes["input_0"]["routing"] == {"v:0": "input_0_packed"} and "dst" not in nodes["input_0"]
         upload = nodes["upload_0"]
         assert nodes["decode_0"]["codec"] == "rawvideo"
         assert nodes["decode_0"]["pixel_format"] == fmt
@@ -810,6 +811,39 @@ def _video_source_nodes(**canvas):
 def test_config_sources_stamp_no_frame_metadata():
     nodes, _ = _video_source_nodes()
     assert nodes["input_0"]["frame_metadata"] == []
+
+
+def test_config_sources_route_the_video_stream_inside_the_reading_node():
+    nodes, chain = _video_source_nodes()
+    assert chain == ["input_0", "decode_0", "realtime_0"]
+    assert nodes["input_0"]["routing"] == {"?v:0": "input_0_video_packets"}
+    assert "dst" not in nodes["input_0"]
+    assert nodes["decode_0"]["src"] == "input_0_video_packets"
+
+
+def test_config_input_routing_demux_keeps_the_demux_hop():
+    nodes, chain = _video_source_nodes(input_routing="demux")
+    assert chain == ["input_0", "demux_0", "decode_0", "realtime_0"]
+    assert nodes["input_0"]["dst"] == "input_0_packets" and "routing" not in nodes["input_0"]
+    assert (nodes["demux_0"]["src"], nodes["demux_0"]["routing"]) == ("input_0_packets", {"?v:0": "input_0_video_packets"})
+    assert nodes["decode_0"]["src"] == "input_0_video_packets"
+
+
+def test_input_routing_rejects_unknown_modes():
+    with pytest.raises(mixer_config.ConfigError, match="input_routing must be one of input, demux"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "input_routing": "splitter"}})
+    assert mixer_config.parse(CONFIG).input_routing == "input"
+
+
+def test_build_input_keeps_the_demux_hop_unless_told():
+    from pyplumber.mixer.inputs import build_input
+    chains = {}
+    for demux in (None, False):
+        avp = FakeAvp()
+        build_input(avp, fake_api(), "pl", "clip.mp4", group="pl", fps=30, **({} if demux is None else {"demux": demux}))
+        chains[demux] = [node.parameters["type"] for node in avp.nodes]
+    assert chains[None] == ["input_rec", "demux", "dec_video", "realtime", "force_fps"]
+    assert chains[False] == ["input_rec", "dec_video", "realtime", "force_fps"]
 
 
 def test_build_input_stamps_every_frame_metadata_key_unless_told():
