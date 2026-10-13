@@ -31,6 +31,7 @@ WORKING_FORMATS = ("nv12", "p010le", "p210le")
 # or one raw_video_file_cuda node that reads each picture into page-locked memory and uploads it
 # from there (opt-in; no staging copy, one thread per source).
 RAW_UPLOADS = ("hwupload", "pinned", "direct", "resident")
+INPUT_ROUTINGS = ("input", "demux")   # which node sends a file's video stream to its decoder
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 193         # mixer_compositor active_inputs is a 193-bit pad mask (SourceMask, kSourceMaskBits)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 640
@@ -269,6 +270,7 @@ class MixerConfig:
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
     raw_upload: str = "hwupload"   # canvas.raw_upload: one of RAW_UPLOADS
+    input_routing: str = "input"   # canvas.input_routing: one of INPUT_ROUTINGS
     latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default default_latency_ms(fps)
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
@@ -548,6 +550,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     raw_upload = canvas.get("raw_upload", "hwupload")
     if raw_upload not in RAW_UPLOADS:
         raise ConfigError(f"canvas.raw_upload must be one of {', '.join(RAW_UPLOADS)}")
+    input_routing = canvas.get("input_routing", "input")
+    if input_routing not in INPUT_ROUTINGS:
+        raise ConfigError(f"canvas.input_routing must be one of {', '.join(INPUT_ROUTINGS)}")
     latency_ms = canvas.get("latency_ms")
     if latency_ms is not None:
         try:
@@ -633,7 +638,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     cfg = MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
                        browser_frame_queue=doc.get("browser_frame_queue", earlier_browser_ring_size(doc.get("browser_ring_size"))),
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
-                       initial_scene=initial, working_format=working_format, raw_upload=raw_upload, latency_ms=latency_ms, out_color=out_color,
+                       initial_scene=initial, working_format=working_format, raw_upload=raw_upload, input_routing=input_routing,
+                       latency_ms=latency_ms, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))

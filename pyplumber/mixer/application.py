@@ -38,6 +38,9 @@ DEFAULT_FPS = 30
 FPS_DEN = 1
 # Instance-owned: a global (@) device survives shutdown until CUDA static teardown.
 HWACCEL = "mixer_gpu"
+# Nothing in a show reads what input_rec stamps on decoded frames (realtime's frame counters serve
+# its teams and the OBS embedding, speed nodes read frame_ts); stamping costs every hop a copy.
+SOURCE_FRAME_METADATA: list = []
 MIXER_NAME = "mixer"
 ROUTER_GROUP = "mixer_preheat_router"
 OUTPUT_GROUP = "output"
@@ -681,6 +684,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     blended_sources = {item.source for scene in cfg.scenes for item in scene.items if item.blend}
     blended_sources |= {key.source for key in cfg.dsk_keys}
     input_edges: list[str] = []
+    demux = cfg.input_routing == "demux"
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
         if source.kind == "browser":
@@ -700,7 +704,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             edge = build_v210_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                color=source.color.tags, event_loop=_pacing_loop(index), native_rate=True)
+                color=source.color.tags, event_loop=_pacing_loop(index), native_rate=True,
+                frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
         elif source.kind in ("nv12", "p010"):
             edge = build_raw420_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
@@ -708,11 +713,13 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
                 event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned",
                 direct=cfg.raw_upload in ("direct", "resident"), resident=cfg.raw_upload == "resident",
-                native_rate=True, color=source.color)
+                native_rate=True, color=source.color,
+                frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
-                               event_loop=_pacing_loop(index), decoder_params=source.decoder_params, native_rate=True)
+                               event_loop=_pacing_loop(index), decoder_params=source.decoder_params, native_rate=True,
+                               frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
         if source.transform:
             transformed_edge = f"input_{index}_transformed"
             # pass_arrays: the color stage and the compositors read arrays, so a frame that already
