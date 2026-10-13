@@ -197,11 +197,12 @@ Per-input `force_fps` is omitted; output/AUX normalization remains. The shared
 input helper's default normalized behavior for other applications is unchanged.
 Browser sources retain their separate timestamp smoothing/repeat chain.
 
-`canvas.raw_upload: "pinned"` uses patched FFmpeg's `hwupload_cuda`; the old
-custom raw uploader nodes are retired. NV12/P010 and v210 builders stamp declared
-YUV tags in the upload graph. The application bypasses a standalone tag-only
-colour filter only when no user filter or processing callback can invalidate
-that promise. Real colour conversion and alpha processing remain. A source
+`canvas.raw_upload: "direct"` reads each NV12/P010 file with one
+`raw_video_file_cuda` node, which uploads from page-locked memory and stamps the
+declared YUV tags itself. `"pinned"` uses patched FFmpeg's `hwupload_cuda`, as the
+v210 builder always does; those two stamp the tags in the upload graph. The
+application bypasses a standalone tag-only colour filter only when no user filter
+or processing callback can invalidate that promise. Real colour conversion and alpha processing remain. A source
 `transform` preserves the tags, while an arbitrary `filter_graph` or
 `process_source` callback disables automatic eligibility.
 
