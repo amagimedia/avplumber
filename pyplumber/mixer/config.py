@@ -26,9 +26,11 @@ TRANSITIONS = ("cut", "fade", "wipe")
 # purpose: the compositor cannot promote 8-bit sources or draw the RGBA wipe
 # onto them, so they only fail later.
 WORKING_FORMATS = ("nv12", "p010le", "p210le")
-# How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (the library default), or
-# patched hwupload_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it).
-RAW_UPLOADS = ("hwupload", "pinned")
+# How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (the library default),
+# patched hwupload_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it),
+# or one raw_video_file_cuda node that reads each picture into page-locked memory and uploads it
+# from there (opt-in; no staging copy, one thread per source).
+RAW_UPLOADS = ("hwupload", "pinned", "direct")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 193         # mixer_compositor active_inputs is a 193-bit pad mask (SourceMask, kSourceMaskBits)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 640
