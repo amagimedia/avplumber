@@ -227,6 +227,14 @@ Each source supplies one CUDA video-frame edge. A source can either fan out to
 the two mixer slots through `one_to_many`, or use `preheat_video_router` outputs
 for a catalogue that exceeds the compositor input limit.
 
+`one_to_many` takes `frame_color`, an object of colour fields it writes on every video frame it
+hands out: `color_trc`, `color_primaries`, `colorspace`, `color_range` and `alpha_mode`
+(`premultiplied` or `straight`), any subset, named as FFmpeg names them. `MixerGraphBuilder` sets it
+for a source whose colour is declared and already matches the canvas, where the colour stage would
+be a `setparams` filter and nothing else: the fan-out the source has anyway tags the frames, and the
+source needs no filter graph and no thread for it. A source that declares no colour, or one that
+needs converting, keeps its `mixer_color_<name>` filter.
+
 ```text
 CUDA source frames
   -> source fanout (or catalogue router)

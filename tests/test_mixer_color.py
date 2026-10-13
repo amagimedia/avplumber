@@ -179,7 +179,7 @@ def test_tagged_matching_sources_bypass_color_nodes_and_keep_alias_fanout(builde
     ("sdr", "nv12", True),       # tone mapping is still required
     ("hlg", "p210le", True),    # storage conversion is still required
     ("hlg", None, True),        # storage is unknown
-    ("hlg", "p010le", False),  # a declaration alone does not stamp frames
+    ("hlg", None, False),       # declared colour, unknown storage: the filter converts when it must
 ])
 def test_color_bypass_requires_both_tagged_frames_and_matching_storage(builder, color, fmt, tagged):
     builder.add_source("cam", "upstream", "input", color=color, pixel_format=fmt, color_tagged=tagged)
@@ -189,6 +189,23 @@ def test_color_bypass_requires_both_tagged_frames_and_matching_storage(builder, 
     nodes = {n["name"]: n for n in builder.avp.nodes}
     assert nodes["mixer_color_cam"]["graph"] == conversion_graph("hlg", "p010le", source=color, source_format=fmt)
     assert nodes["mixer_otm_cam"]["src"] == "mixer_cam_color"
+
+
+def test_a_declared_colour_and_storage_that_match_the_canvas_are_stamped_by_the_fanout(builder):
+    builder.add_source("cam", "upstream", "input", color="hlg", pixel_format="p010le")
+    builder.add_source("still", "shared", "input", color="hlg", pixel_format="p010le")
+    builder.add_source("still#2", "shared", "input", color="hlg", pixel_format="p010le")
+    builder.add_scene("full", {"cam": {}, "still": {}, "still#2": {}})
+    builder.set_initial_scene("full")
+    builder.build()
+    nodes = {n["name"]: n for n in builder.avp.nodes}
+    # No filter graph and no thread for it: the fan-out the source has anyway writes the tags.
+    assert not [name for name in nodes if name.startswith("mixer_color_") and "alias" not in name]
+    assert nodes["mixer_otm_cam"]["src"] == "upstream" and nodes["mixer_otm_cam"]["frame_color"] == Color("hlg").tags
+    # Aliases share one fan-out before their own: that one stamps, once.
+    assert nodes["mixer_color_alias_still"]["src"] == "shared"
+    assert nodes["mixer_color_alias_still"]["frame_color"] == Color("hlg").tags
+    assert "frame_color" not in nodes["mixer_otm_still"] and "frame_color" not in nodes["mixer_otm_still#2"]
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"color": "sdr", "packed_rgb": True}])
@@ -203,19 +220,20 @@ def test_rgb_keeps_alpha_and_uses_hdr_compositor(builder):
     builder.set_initial_scene("full")
     builder.build()
     nodes = {n["name"]: n for n in builder.avp.nodes}
-    assert nodes["mixer_color_page"]["graph"] == Color().setparams
+    assert "mixer_color_page" not in nodes and nodes["mixer_otm_page"]["frame_color"] == Color().tags
     assert nodes["mixer_comp_a"]["color"] == "hlg"
     assert nodes["mixer_comp_a"]["layers"][0]["blend"]
 
 
-def test_premultiplied_rgb_alpha_is_tagged_by_the_colour_node(builder):
+def test_premultiplied_rgb_alpha_is_tagged_by_the_fanout(builder):
     builder.add_source("page", "rgba", "input", packed_rgb=True, color="sdr",
                        premultiplied_alpha=True)
     builder.add_scene("full", {"page": {"blend": True}})
     builder.set_initial_scene("full")
     builder.build()
     nodes = {n["name"]: n for n in builder.avp.nodes}
-    assert nodes["mixer_color_page"]["graph"] == Color().setparams + ":alpha_mode=premultiplied"
+    assert "mixer_color_page" not in nodes
+    assert nodes["mixer_otm_page"]["frame_color"] == {**Color().tags, "alpha_mode": "premultiplied"}
 
 
 @pytest.mark.parametrize("transfer", ("hlg", "pq"))
@@ -229,7 +247,7 @@ def test_422_hdr_canvas_retains_native_source_chroma(builder, transfer):
     builder.build()
     nodes = {n["name"]: n for n in builder.avp.nodes}
     assert nodes["mixer_color_decoded"]["graph"] == conversion_graph(transfer, None, source="sdr")
-    assert nodes["mixer_color_raw422"]["graph"] == Color(transfer).setparams
+    assert "mixer_color_raw422" not in nodes and nodes["mixer_otm_raw422"]["frame_color"] == Color(transfer).tags
     assert nodes["mixer_comp_a"]["sw_format"] == "p210le"
     assert not any("scale_cuda" in n.get("graph", "") for n in nodes.values())
 
