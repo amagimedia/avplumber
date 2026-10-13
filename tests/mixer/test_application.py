@@ -48,6 +48,33 @@ assert not any(name.startswith('demos.') for name in sys.modules)
     subprocess.run([sys.executable, "-I", "-c", script], cwd=tmp_path, check=True, capture_output=True, text=True)
 
 
+def test_a_declared_decoded_format_lets_the_fanout_tag_the_frames(native_boundary):
+    """A decoded source whose colour and storage are declared and match the canvas has no colour
+    filter: the fan-out stamps the tags. Undeclared storage keeps the filter, which converts."""
+    def nodes_of(**source):
+        api = fake_api()
+        api.MixerGraphBuilder = native_boundary[1]   # the real graph builder on the recording engine
+        app = build_application(show(**source), api=api)
+        return {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    # The scene shows the camera twice, so its fan-out is the one that feeds both aliases.
+    undeclared = nodes_of(color="sdr")
+    assert undeclared["mixer_color_cam"]["graph"].endswith("scale_cuda=format=nv12")
+    assert undeclared["mixer_color_alias_cam"]["src"] == undeclared["mixer_color_cam"]["dst"]
+    assert "frame_color" not in undeclared["mixer_color_alias_cam"]
+    declared = nodes_of(color="sdr", decoded_format="nv12")
+    assert "mixer_color_cam" not in declared
+    assert declared["mixer_color_alias_cam"]["src"] == undeclared["mixer_color_cam"]["src"] == "input_0_realtime"
+    assert declared["mixer_color_alias_cam"]["frame_color"] == {
+        "color_trc": "bt709", "color_primaries": "bt709", "colorspace": "bt709", "color_range": "tv"}
+    # Ten-bit frames on this eight-bit canvas still need converting.
+    assert "mixer_color_cam" in nodes_of(color="sdr", decoded_format="p010le")
+    for bad in ({"decoded_format": "yuv420p"}, {"decoded_format": "nv12", "filter": "hflip_cuda", "filter_output_format": "nv12"}):
+        with pytest.raises(config.ConfigError, match="decoded_format"):
+            show(**bad)
+    with pytest.raises(config.ConfigError, match="decoded_format"):
+        config.parse({**CONFIG, "sources": [CONFIG["sources"][0], {**CONFIG["sources"][1], "decoded_format": "nv12"}]})
+
+
 def test_config_renditions_do_not_need_cli_output_flags(tmp_path):
     cfg = show()
     app = build_application(cfg, api=fake_api())
