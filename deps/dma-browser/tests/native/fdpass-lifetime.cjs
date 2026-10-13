@@ -113,9 +113,9 @@ async function scenario(name, run) {
     assert.deepEqual(releases, [], 'a refused broadcast is the caller\'s to release');
     const before = openFds();
     assert.equal((await fdpass.broadcastFd(path, plane, header(2n, true), fence)).sent, 1);
-    const closed = fs.openSync('/dev/null', 'r');
-    fs.closeSync(closed);
-    const failed = await fdpass.broadcastFd(path, plane, header(3n, true), closed);
+    // Not a closed descriptor: the plane's duplicate would take the lowest free number first.
+    const unopened = 2 ** 30;
+    const failed = await fdpass.broadcastFd(path, plane, header(3n, true), unopened);
     assert.equal(failed.sent, 0);
     assert.equal(failed.errors, 1, 'a fence that cannot be duplicated sends nothing');
     await until(() => releases.length === 1);

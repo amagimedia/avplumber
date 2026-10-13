@@ -53,7 +53,7 @@ static void testWait() {
     assert(r.outcome == FenceWaitOutcome::Invalid);
     stats.record(r);
     const int closed = eventfd(0, EFD_CLOEXEC);
-    close(closed);
+    close(closed);   // nothing opens before the wait, so the number stays unused
     assert(waitForFence(closed, 50).outcome == FenceWaitOutcome::Invalid);
 
     // A wake-up ends the wait only when its owner says so; otherwise the wait goes on.

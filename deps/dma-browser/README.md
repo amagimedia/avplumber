@@ -85,9 +85,10 @@ format.
 
 An avplumber that predates the fence rejects every fenced frame (it logs an
 unsupported pixel format) and acknowledges it, so the window shows nothing
-rather than a torn frame; the kernel drops the fence fd it has no room for.
-Update avplumber before turning the switches on. The window log notes the first
-fenced paint.
+rather than a torn frame; but its receive buffer has room for both fds and it
+closes only the plane, so it leaks one descriptor per frame until it runs out.
+Update avplumber before turning the switches on, not after. The window log
+notes the first fenced paint.
 
 ## Process grouping
 

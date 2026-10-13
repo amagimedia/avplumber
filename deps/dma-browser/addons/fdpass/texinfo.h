@@ -12,7 +12,8 @@
 //                         acquire fence, a Linux sync_file fd, follows the plane fd in the same
 //                         SCM_RIGHTS message; the pixels may be read once it has signalled. A
 //                         receiver that predates the flag rejects the pixel format and acknowledges
-//                         the frame, so it forwards nothing it could not have waited for.
+//                         the frame, so it forwards nothing it could not have waited for (it does
+//                         leak the fence fd, which it receives but does not know to close).
 //   16 u64 modifier       DRM format modifier
 //   24 u64 offset         plane offset in bytes
 //   32 u64 timestamp      CLOCK_MONOTONIC nanoseconds of the paint
