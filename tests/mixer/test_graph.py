@@ -158,12 +158,13 @@ class FakeRtcpFeedbackListener:
 def fake_api():
     types = {
         "AssumeVideoFormat": "assume_video_format", "Bsf": "bsf", "ClipCache": "clip_cache",
-        "CudaTransform": "cuda_transform", "DecVideo": "dec_video", "Demux": "demux",
-        "DrmPrimeToCuda": "drm_prime_to_cuda", "EncVideo": "enc_video", "FilterVideo": "filter_video",
+        "CudaTransform": "cuda_transform", "DecAudio": "dec_audio", "DecVideo": "dec_video", "Demux": "demux",
+        "DrmPrimeToCuda": "drm_prime_to_cuda", "EncAudio": "enc_audio", "EncVideo": "enc_video",
+        "FilterVideo": "filter_video",
         "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input_rec",
         "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer",
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
-        "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
+        "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame", "ResampleAudio": "resample_audio",
         "SmoothTimestamps": "smooth_timestamps", "Split": "split",
     }
     return SimpleNamespace(AVPlumber=FakeAvp, MixerGraphBuilder=FakeMixer,

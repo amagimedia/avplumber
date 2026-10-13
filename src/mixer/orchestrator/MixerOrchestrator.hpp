@@ -64,6 +64,11 @@ class MixerOrchestrator {
     void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene,
                                     bool picture_changed = true);
 
+    /// Notify audio_router_node of steady PGM video sources (afv_program).
+    void applyAudioFollowVideo(const SceneDefinition& scene);
+    /// Notify audio_router_node of crossfade progress (afv_crossfade from/to/t).
+    void applyAudioFadeTick(double t);
+
     void ensureIdle() const;
     /// Why a transition being prepared or running is dropped. `Replaced`: by the take that
     /// drops it, whose own switch publishes the next preview change, so the preview shown stays

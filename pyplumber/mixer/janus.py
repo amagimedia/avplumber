@@ -1,4 +1,4 @@
-"""Video-only H.264/HEVC RTP output to a Janus Streaming mountpoint, shared by demos."""
+"""H.264/HEVC + optional Opus RTP output to a Janus Streaming mountpoint, shared by demos."""
 
 from __future__ import annotations
 
@@ -61,6 +61,38 @@ class JanusVideoConfig:
         return (f"udp://{self.host}:{self.video_port}?pkt_size={RTP_PACKET_SIZE}"
                 f"&bitrate={self.bitrate_kbps * 3000}&burst_bits={RTP_PACKET_SIZE * 8 * 4}"
                 "&buffer_size=2097152&fifo_size=8192")
+
+
+@dataclass(frozen=True)
+class JanusAudioConfig:
+    """Opus RTP sender for the `avplumber-program` mountpoint's audio pair --
+    its audio fields (docker-compose/images/janus/config/janus.plugin.streaming.jcfg)
+    are already templated for Opus/payload type 111/stereo, gated by
+    JANUS_AUDIO_ENABLED (default on; docker-compose/images/janus/janus-entrypoint.sh).
+    Default port 5002 matches that template's JANUS_AUDIO_PORT default.
+    """
+
+    host: str = "127.0.0.1"
+    audio_port: int = 5002
+    payload_type: int = 111
+    ssrc: int = 0x41565002
+    bitrate_kbps: int = 128
+
+    def __post_init__(self) -> None:
+        if not self.host:
+            raise ValueError("Janus host is required")
+        if not 1 <= self.audio_port < 65535:
+            raise ValueError("Janus audio port must be valid")
+        if not 0 <= self.payload_type <= 127:
+            raise ValueError("RTP payload type must be between 0 and 127")
+        if not 0 <= self.ssrc <= 0xFFFFFFFF:
+            raise ValueError("RTP SSRC must be a 32-bit unsigned integer")
+        if self.bitrate_kbps <= 0:
+            raise ValueError("Janus audio bitrate must be positive")
+
+    @property
+    def rtp_url(self) -> str:
+        return f"udp://{self.host}:{self.audio_port}?pkt_size={RTP_PACKET_SIZE}"
 
 
 def janus_mountpoint_id(port: int) -> int:
@@ -183,3 +215,35 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
         janus_rtcp_port=janus.rtcp_port_remote, media_ssrc=janus.ssrc,
         on_keyframe_request=lambda _request: avp.executeCommandsFromString(keyframe_command(keyframe_node)),
     )
+
+
+def build_janus_audio_output(avp, api, src_edge: str, janus: JanusAudioConfig, *,
+                             group: str = "output", prefix: str = "janus_audio",
+                             failure_mode: str = "panic") -> None:
+    """Add ``resample(s16) -> enc_audio(libopus) -> rtp mux -> output`` for one audio bus.
+
+    ``src_edge`` must already be fltp (e.g. an audio-router node's output bus). libopus
+    accepts only ``s16`` / ``flt``, not planar ``fltp``, so a short resample sits
+    in front of the encoder. Requires FFmpeg built with ``--enable-libopus`` (see
+    demos/audio_video_mixer/docker/Dockerfile). Unlike :func:`build_janus_output`,
+    this does *not* set ``rtpflags: "skip_rtcp"``: the video RTP output already
+    omits RTCP SR (no shared clock risk flagged separately), so leaving audio's
+    RTCP on is the one lip-sync anchor the WebRTC path has.
+    """
+    node_name = lambda suffix: f"{prefix}_{suffix}"  # noqa: E731
+    pcm_edge = node_name("pcm")
+    specs = [
+        # Audio-router nodes (and mixer input resampling) emit fltp; libopus rejects it.
+        ("ResampleAudio", {"name": node_name("resample"), "src": src_edge, "dst": pcm_edge,
+                           "dst_sample_rate": 48_000, "dst_channel_layout": "stereo",
+                           "dst_sample_format": "s16", "compensation": 0}),
+        ("EncAudio", {"name": node_name("encoder"), "src": pcm_edge, "dst": node_name("encoded"),
+                      "codec": "libopus",
+                      "options": {"b": f"{janus.bitrate_kbps}k", "application": "lowdelay"}}),
+        ("Mux", {"name": node_name("mux"), "src": [node_name("encoded")], "dst": node_name("audio_rtp_mux"),
+                 "ts_sort_wait": 0, "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode}),
+        ("Output", {"name": node_name("rtp_output"), "src": node_name("audio_rtp_mux"), "url": janus.rtp_url,
+                    "format": "rtp", "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode,
+                    "options": {"payload_type": janus.payload_type, "ssrc": janus.ssrc}}),
+    ]
+    add_nodes(avp, api, specs, group=group, auto_restart=failure_mode)

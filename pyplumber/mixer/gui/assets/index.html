@@ -309,6 +309,14 @@
                   border-color: transparent; opacity: 0; transition: opacity .12s; }
   .viewer:hover .open, .viewer .open:focus-visible { opacity: 1; }
   .viewer .open:hover { border-color: var(--muted); }
+  /* Mirrors .open's placement on the opposite corner: outside the click-blocking .screen::after
+     layer, so it stays reachable even though that layer exists specifically to keep the
+     cross-origin player's own <video controls> (mute included) out of reach. */
+  .viewer .mute { position: absolute; left: 8px; bottom: calc(var(--vstats-h) + 8px); z-index: 1; color: var(--text); background: rgb(0 0 0 / .62);
+                  border-color: transparent; opacity: 0; transition: opacity .12s; }
+  .viewer:hover .mute, .viewer .mute:focus-visible { opacity: 1; }
+  .viewer .mute:hover { border-color: var(--muted); }
+  .viewer .mute[aria-pressed="true"] { color: var(--warn); border-color: var(--warn); }
   .screen:focus-visible { outline: none; }
   .screen:focus-visible:not(:fullscreen)::after { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: inherit; }
   /* Full screen keeps the picture's aspect: --fh is its height, the frame and the overlays follow it,
@@ -1128,7 +1136,7 @@ const optionOf = (v, options) => options.find((o) => o.value === v.out) || optio
 const redraw = () => (state ? render() : layoutWall());
 
 function addViewer(out) {
-  const v = {out, el: el("section", "card viewer"), head: el("header"), src: null};
+  const v = {out, el: el("section", "card viewer"), head: el("header"), src: null, muted: true};
   v.dd = dropdown((value) => { v.out = value; saveViewers(); redraw(); });
   v.layouts = dropdown((value) => {
     const aux = auxById(v.aux);
@@ -1154,6 +1162,23 @@ function addViewer(out) {
   v.open.title = "Open in the player: status, errors, all stats";
   v.open.setAttribute("aria-label", "Open this output in the player");
   v.open.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 2h3v3M10 2 5.5 6.5"/></svg>';
+  // The screen's click-blocking layer keeps the player's own <video controls> (mute included) out of
+  // reach on purpose (see .screen::after); this button reaches the muted flag anyway, over postMessage.
+  v.mute = el("button", "mini mute");
+  v.mute.type = "button";
+  const setMuted = (muted) => {
+    v.muted = muted;
+    v.mute.setAttribute("aria-pressed", String(muted));
+    v.mute.title = muted ? "Program audio is muted here — click to unmute" : "Click to mute";
+    v.mute.setAttribute("aria-label", muted ? "Unmute program audio" : "Mute program audio");
+    v.mute.innerHTML = muted
+      ? '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 4.5h2L6 2v8L3 7.5H1z"/><path d="M8 4l3 4M11 4l-3 4"/></svg>'
+      : '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 4.5h2L6 2v8L3 7.5H1z"/><path d="M8 3.3c1.4 1.1 1.4 4.3 0 5.4M9.6 1.8c2.6 2 2.6 6.4 0 8.4"/></svg>';
+    if (v.src) v.frame.contentWindow?.postMessage({type: "avp-preview-mute", muted}, "*");
+  };
+  v.mute.onclick = () => setMuted(!v.muted);
+  v.setMuted = setMuted;
+  setMuted(v.muted);
   v.head.append(el("span", "lbl", "Output"), v.dd.root, v.layouts.root, v.pager, v.close);
   v.screen = el("div", "screen");
   v.frame = el("iframe");
@@ -1177,7 +1202,7 @@ function addViewer(out) {
     v.statsRow.append(m);
     return [key, m];
   }));
-  v.el.append(v.head, v.screen, v.statsRow, v.open);
+  v.el.append(v.head, v.screen, v.statsRow, v.open, v.mute);
   $("wall").append(v.el);
   viewers.push(v);
 }
@@ -1201,10 +1226,16 @@ function refreshViewer(v, options) {
   renderOverlay(v, aux, size, opt.unplayable ? "This browser cannot play H.265" : "");
   // The program plays at once; other outputs wait for the state that names their mountpoints.
   // A viewer hidden for lack of room drops its stream.
+  // The only Janus mountpoint that ever carries audio is "program" (see docker-compose/images/preview);
+  // offering the mute toggle on any other output's viewer would just be a dead button.
+  v.mute.hidden = !isProgramValue(v.out);
   const src = !v.el.hidden && !opt.unplayable && (state || isProgramValue(v.out)) ? opt.url : "";
   if (v.src !== src) {
     v.src = src; v.stats = null; v.frame.src = src || "about:blank"; v.frame.hidden = !src;   // about:blank is white
     renderStream(v);   // a new source drops the previous one's stats
+    // A new src reloads the iframe, resetting the player's <video> to its HTML-default muted="true";
+    // re-send the last choice once that fresh document is up.
+    if (src) v.frame.addEventListener("load", () => v.setMuted(v.muted), {once: true});
   }
   v.open.href = opt.url;
   v.open.hidden = !src;

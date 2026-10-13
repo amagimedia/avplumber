@@ -104,6 +104,7 @@ class MixerGraphBuilder:
         latency_ms: Optional[float] = None,
         defer_output: bool = False,
         keyframe_node: Optional[str] = None,
+        audio_router_node: Optional[str] = None,
         cache_wipes_mb: Optional[float] = None,   # None keeps the decode-per-take chain
         working_format: str = "nv12",   # compositor/transition sw_format
         color="sdr",
@@ -121,6 +122,8 @@ class MixerGraphBuilder:
         # Triggered when a transition reaches the output, so receivers do not wait
         # for the next periodic keyframe to see the new scene.
         self.keyframe_node = keyframe_node
+        # Optional audio-router node; unset keeps AFV routing a no-op.
+        self.audio_router_node = audio_router_node
         # When set, wipe clips are held decoded in GPU memory (pyplumber.mixer.clipcache)
         # and a take replays them instead of opening and decoding the file again.
         self.cache_wipes_mb = cache_wipes_mb
@@ -799,6 +802,7 @@ class MixerGraphBuilder:
             "color": self.color.transfer,   # the canvas a dip colour is converted for
             "source_switcher": self._n("out_sel"),
             **({"keyframe_node": self.keyframe_node} if self.keyframe_node else {}),
+            **({"audio_router_node": self.audio_router_node} if self.audio_router_node else {}),
             "initial_pgm_slot": self._initial_pgm_slot,
             "initial_pgm_scene": self._initial_pgm_scene,
             "wipe_otm": self._n("otm_final"),
@@ -855,6 +859,12 @@ class MixerGraphBuilder:
             self._routes_initialized = True
 
         self.avp.executeCommandsFromString("\n".join(lines))
+
+        if self.audio_router_node:
+            # Initial PGM video is wired at compositor build time, not via
+            # applyPostTransitionRouting — cut emits afv_program for the audio router.
+            self.avp.executeCommandsFromString(
+                f"mixer.cut {json.dumps({'mixer': self.name, 'scene': self._initial_pgm_scene})}")
 
     def _scene_command(self, scene_name: str, scene: MixerScene) -> str:
         scene_def = {"sources": scene.sources}

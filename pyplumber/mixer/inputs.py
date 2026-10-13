@@ -27,8 +27,9 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
                 decoded_filter: str = "", decoded_filter_threads: Optional[int] = None,
                 pause_params: Optional[dict] = None,
                 auto_restart: Optional[str] = "group", event_loop: Optional[str] = None,
-                native_rate: bool = False) -> str:
-    """Add the chain for one source and return its paced output edge.
+                native_rate: bool = False, has_audio: bool = False,
+                audio_sample_rate: int = 48000) -> tuple[str, Optional[str]]:
+    """Add the chain for one source; return its (paced video edge, audio edge or None).
 
     ``native_rate`` preserves source cadence for a clocked compositor; otherwise
     the shared playlist chain still normalizes to ``fps/fps_den``.
@@ -45,6 +46,17 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     before speed, pause and realtime pacing, with ``decoded_filter_threads``
     slice threads when given (FFmpeg's default otherwise).  ``event_loop`` names the event loop that runs the
     pacing nodes (the instance's ``"default"`` loop when omitted).
+
+    ``has_audio`` additionally demuxes/decodes/resamples the source's audio
+    track to ``audio_sample_rate``/fltp, the format an embedded audio-router
+    node typically requires; the source's own channel layout (mono, stereo,
+    5.1, ...) is preserved rather than forced to a fixed one. Deliberately
+    *not* run through ``_pace``/``realtime(set_pts=True)``: such a node is
+    expected to pace itself to wallclock internally, and an upstream
+    `realtime` node was found to pace this exact kind of chain at an
+    inconsistent fraction of real-time. Returns ``None`` for the audio edge
+    when ``has_audio`` is false, which is every existing caller's unchanged
+    behavior.
     """
     edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
     restart = {} if auto_restart is None else {"auto_restart": auto_restart}
@@ -56,9 +68,22 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     }))
     avp.addNode(api.Demux({
         "name": f"demux_{tag}", "src": edge("packets"),
-        "routing": {"?v:0": edge("video_packets")}, "wait_for_keyframe": False,
+        "routing": {"?v:0": edge("video_packets"), **({"?a:0": edge("audio_packets")} if has_audio else {})},
+        "wait_for_keyframe": False,
         "group": group, **restart,
     }))
+    audio_edge = None
+    if has_audio:
+        avp.addNode(api.DecAudio({
+            "name": f"decode_audio_{tag}", "src": edge("audio_packets"), "dst": edge("audio_decoded"),
+            "group": group, **restart,
+        }))
+        avp.addNode(api.ResampleAudioForwardChannels({
+            "name": f"resample_audio_{tag}", "src": edge("audio_decoded"), "dst": edge("audio_resampled"),
+            "dst_sample_rate": audio_sample_rate,
+            "dst_sample_format": "fltp", "compensation": 0, "group": group, **restart,
+        }))
+        audio_edge = edge("audio_resampled")
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": edge("video_packets"), "dst": edge("decoded"),
         # The GPU decodes: a libavcodec frame thread only reserves one more decode surface, 16 of them
@@ -88,8 +113,10 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
             "team": pause_team, "group": group, **sync, **(pause_params or {}),
         }))
         realtime_src = edge("paused")
-    return _pace(avp, api, tag, realtime_src, fps=fps, fps_den=fps_den, group=group,
-                 sync_team=sync_team, realtime_params=realtime_params, event_loop=event_loop, native_rate=native_rate)
+    video_edge = _pace(avp, api, tag, realtime_src, fps=fps, fps_den=fps_den, group=group,
+                       sync_team=sync_team, realtime_params=realtime_params, event_loop=event_loop,
+                       native_rate=native_rate)
+    return video_edge, audio_edge
 
 
 def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
@@ -180,7 +207,7 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
         from .backends.cuda import CudaMixerBackend   # backends load only when used
         # Neither setpts nor hwupload does CPU slice work: one filter thread each.
         threads = CudaMixerBackend.graph_threads
-        edge = build_input(avp, api, tag, path, group=group, fps=fps, fps_den=fps_den,
+        edge, _audio_edge = build_input(avp, api, tag, path, group=group, fps=fps, fps_den=fps_den,
                            hwaccel=None, loop=loop, auto_restart=None if loop else "group",
                            input_params={"format": "rawvideo", "options": {
                                "pixel_format": pixel_format, "video_size": f"{width}x{height}",

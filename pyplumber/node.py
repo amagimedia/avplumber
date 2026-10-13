@@ -317,6 +317,8 @@ class Input(InternalNode):
     TYPE = "input"
 class ResampleAudio(InternalNode):
     TYPE = "resample_audio"
+class ResampleAudioForwardChannels(InternalNode):
+    TYPE = "resample_audio_forward_channels"
 class FilterAudio(InternalNode):
     TYPE = "filter_audio"
 class EncAudio(InternalNode):

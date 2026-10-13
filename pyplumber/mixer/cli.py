@@ -90,7 +90,7 @@ def _build_input(
         for node in nodes:
             avp.addNode(node)
     else:
-        fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
+        fps_edge, _audio_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop, continuous_loop=True,
                                event_loop=_pacing_loop(index), native_rate=True)
     if not normalize:

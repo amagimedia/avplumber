@@ -137,6 +137,7 @@ class Source:
     transform: Optional[SourceTransform] = None   # before the source filter
     decode_storage: str = "cuda"
     extra_hw_frames: int = 3       # CUarray application headroom, beyond codec/working surfaces
+    has_audio: bool = False        # demux/decode an audio track alongside video (kind == "video" only)
 
     @property
     def decoder_params(self):
@@ -415,6 +416,9 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     hold_last_frame = s.get("hold_last_frame", True)
     if not isinstance(hold_last_frame, bool) or "hold_last_frame" in s and kind != "browser":
         raise ConfigError(f"{where}: hold_last_frame must be a boolean on a browser source")
+    has_audio = s.get("has_audio", False)
+    if not isinstance(has_audio, bool) or has_audio and kind != "video":
+        raise ConfigError(f"{where}: has_audio must be a boolean, and only applies to kind video")
     try:
         color = declared_color(s)
         if kind != "video" and color is None:
@@ -432,6 +436,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
+                  has_audio=has_audio,
                   transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,
                   **(color.tags if color else {}))
 

@@ -199,6 +199,11 @@ struct MixerState : public InstanceShared<MixerState> {
     };
     SlotNodes slot_a, slot_b;
     std::string source_switcher_name;  // "out_sel"
+    /// Optional audio-router node (any IInputsObjects impl). Orchestrator only emits semantic
+    /// AFV keys (afv_program / afv_crossfade); the node maps them to its own mix model.
+    std::string audio_router_node_name;
+    /// Scene name whose video sources are the fade "to" set (PVW destination).
+    std::string audio_fade_incoming_scene;
     /// Optional force_keyframe node triggered when a transition reaches the output,
     /// so a WebRTC receiver can decode the new picture immediately instead of
     /// waiting for the next periodic keyframe.

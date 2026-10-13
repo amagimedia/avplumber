@@ -134,6 +134,14 @@ int64_t MixerOrchestrator::switchProgramSelector(bool new_pgm_is_slot_a) {
     return selectorOutputNs();
 }
 
+void MixerOrchestrator::applyAudioFollowVideo(const SceneDefinition& scene) {
+    if (state_->audio_router_node_name.empty()) return;
+    Parameters sources = Parameters::array();
+    for (const auto& kv : scene.sources)
+        sources.push_back(kv.first);
+    setNodeObject(state_->audio_router_node_name, "afv_program", {{"sources", sources}});
+}
+
 void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
                                                    const std::string& new_pgm_scene,
                                                    bool picture_changed) {
@@ -143,8 +151,10 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
 
     const SceneDefinition& scene = scene_it->second;
     const SourceMask active = state_->computeActiveInputsMask(scene);
-    const auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
-    const auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
+    auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
+    auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
+    state_->audio_fade_incoming_scene.clear();
+    applyAudioFollowVideo(scene);
 
     // The encoder must not make the receiver wait for the next periodic keyframe:
     // a cut changes the whole picture, and a P-frame carrying it can exceed what
@@ -181,7 +191,10 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
 
     const auto* pgm = &state_->scenes.at(state_->pgm_scene_name);
     publishSourceRoutes(is_slot_a ? &scene : pgm, is_slot_a ? pgm : &scene);
+    // Remember incoming scene for crossfade audio; cut/completeTake emits afv_program.
+    state_->audio_fade_incoming_scene = scene_name;
     state_->pvw_slot_scene = scene_name;
+    (void)slot;
 }
 
 void MixerOrchestrator::applySceneControls(const SceneDefinition& scene) {
