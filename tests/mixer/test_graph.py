@@ -163,12 +163,23 @@ def fake_api():
         "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input_rec",
         "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer",
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
-        "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
+        "RawVideoFileCuda": "raw_video_file_cuda", "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
         "SmoothTimestamps": "smooth_timestamps", "Split": "split",
     }
     return SimpleNamespace(AVPlumber=FakeAvp, MixerGraphBuilder=FakeMixer,
                            RtcpFeedbackListener=FakeRtcpFeedbackListener,
                            **{name: node_type(kind) for name, kind in types.items()})
+
+
+def test_the_application_offers_every_node_class_its_graph_is_built_from():
+    # The graph tests build with fake_api(); a class named only there fails the real start.
+    try:
+        from pyplumber.mixer.application import load_avp_api
+        real = load_avp_api()
+    except ImportError:
+        pytest.skip("the native module is not built")
+    late = {"ClipCache"}   # imported where it is used
+    assert set(vars(fake_api())) - late <= set(vars(real))
 
 
 def test_graph_is_video_only_and_always_preheated():
@@ -704,9 +715,23 @@ def _raw_420_nodes(tmp_path, kind, color, *, source_options=None, process_source
 
 
 @pytest.mark.parametrize("kind,fmt,color", [("nv12", "nv12", "sdr"), ("p010", "p010le", "hlg")])
-@pytest.mark.parametrize("upload", ["hwupload", "pinned"])
+@pytest.mark.parametrize("upload", ["hwupload", "pinned", "direct"])
 def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
     app, nodes, chain = _raw_420_nodes(tmp_path, kind, color, raw_upload=upload)
+    if upload == "direct":
+        # One node reads each picture into page-locked memory and uploads it from there.
+        assert chain == ["input_0", "realtime_0"]
+        assert nodes["input_0"] == {
+            "name": "input_0", "type": "raw_video_file_cuda", "url": str(tmp_path / "pattern.raw"),
+            "dst": "input_0_cuda", "hwaccel": "mixer_gpu", "group": nodes["realtime_0"]["group"],
+            "pixel_format": fmt, "video_size": "320x180", "framerate": "60/1",
+            "loop": True, "loop_continuous_ts": True, "frame_color": Color(color).tags}
+        assert nodes["realtime_0"]["src"] == "input_0_cuda"
+        assert dict(app.avp.edges.plans)["input_0_cuda"] == 1
+        source = dict(FakeMixer.instances[-1].sources)["raw"]
+        assert source["pre_otm_edge"] == "input_0_realtime" and source["pixel_format"] == fmt
+        assert source["color_tagged"] is True
+        return
     assert nodes["input_0"]["format"] == "rawvideo"
     assert nodes["input_0"]["options"] == {"pixel_format": fmt, "video_size": "320x180", "framerate": "60/1"}
     if upload == "hwupload":
@@ -757,8 +782,15 @@ def test_raw_color_guarantee_survives_only_known_processing(tmp_path, options, h
     assert source["color_tagged"] is tagged
 
 
+def test_a_single_pass_raw_file_restarts_its_group_from_the_reading_node(tmp_path):
+    _, nodes, chain = _raw_420_nodes(tmp_path, "nv12", "sdr", raw_upload="direct", source_options={"loop": False})
+    assert chain == ["input_0", "realtime_0"]
+    assert (nodes["input_0"]["loop"], nodes["input_0"]["loop_continuous_ts"]) == (False, False)
+    assert nodes["input_0"]["auto_restart"] == "group"
+
+
 def test_raw_upload_rejects_unknown_modes():
-    with pytest.raises(mixer_config.ConfigError, match="raw_upload must be one of hwupload, pinned"):
+    with pytest.raises(mixer_config.ConfigError, match="raw_upload must be one of hwupload, pinned, direct"):
         mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "raw_upload": "pageable"}})
     assert mixer_config.parse(CONFIG).raw_upload == "hwupload"
 

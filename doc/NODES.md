@@ -749,6 +749,44 @@ Get video frames from CUDA IPC memory. Frame pointer and parameters are read fro
 -   `hwaccel` (string, name of instance-shared object) - mandatory, name of
     hwaccel previously created with `hwaccel.init`
 
+### `raw_video_file_cuda`
+
+Play a headerless raw NV12 or P010 file as CUDA frames. Each picture is read from the file
+straight into page-locked host memory and the device takes it from there, so the samples are
+copied once on the CPU (page cache to that memory). The chain `input_rec` (`rawvideo`) → `demux`
+→ `dec_video` → `filter_video` (`hwupload_cuda=pinned=1`) copies them twice and runs four
+threads; this node runs one. Nothing is kept between passes: every picture shown is read from
+the file and transferred for that showing.
+
+1 output: `av::VideoFrame` (hardware "pixel format" `cuda`). The node blocks while its output
+queue is full, so the consumer (typically `realtime`) paces the reading; give the queue a
+capacity of 1 to hold one uploaded picture ahead. Timestamps count pictures in a time base of
+one frame period.
+
+Parameters:
+-   `url` (string, required) - path of the file. A trailing part of a picture is not shown.
+-   `pixel_format` (string, required) - `nv12` or `p010le`; rows carry no padding.
+-   `video_size` (string, required) - `WIDTHxHEIGHT`
+-   `framerate` (string, required) - rational, e.g. `30000/1001`
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `loop` (bool, default `false`) - start again after the last picture. Without it the node
+    sends the end-of-file marker (unless `send_eof` is `false`) and finishes, which
+    `auto_restart` acts on.
+-   `loop_continuous_ts` (bool, default `false`) - timestamps count on across passes instead
+    of starting from zero at each one
+-   `frame_color` (object, optional) - colour fields written on every frame, as for
+    `one_to_many`: `color_trc`, `color_primaries`, `colorspace`, `color_range`
+-   `write_combined` (bool, default `false`) - allocate the page-locked memory write-combined.
+    Whether that makes the read cheaper depends on the host; measure before using it.
+
+The read is a blocking local `pread`; there is no read timeout, and a file that ends inside a
+picture after it was opened stops the node with an error. `node.object.get <node> stats`
+returns `frames`, `passes` and the duration of the last read and upload (`read_us`,
+`upload_us`).
+
+The upload half is `src/nodes/hwaccel/CudaPinnedUploader.hpp`, which any source able to write
+its samples where it is told can use.
+
 ### `ipc_audio_source`
 
 Get audio frames from named pipe. See `src/nodes/ipc_audio_source.cpp` for header structure. Header must be followed by interleaved audio samples.
