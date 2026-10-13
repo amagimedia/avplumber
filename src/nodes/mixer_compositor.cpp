@@ -76,6 +76,22 @@ class MixerCompositor : public CudaRectCompositor,
     avp::mixer::SourceMask applied_active_mask_;
     avp::mixer::SourceMask applied_prewarm_mask_;
 
+    // The inputs whose edges may hold frames: all of them until an edge was seen empty, then
+    // the ones whose edge has signalled since. A pass takes frames from these only, so a wake
+    // for one source's frame does not touch every other source's queue.
+    std::vector<char> may_hold_frames_;
+    std::vector<uint32_t> signalled_;
+    bool waited_ = false;   // the last thing the previous pass did was wait for input
+    void noteSignalled() {
+        for (const uint32_t i : signalled_)
+            if (i < may_hold_frames_.size()) may_hold_frames_[i] = 1;
+    }
+    void waitForFrames(int timeout_ms = -1) {
+        this->waitForInput(timeout_ms, signalled_);
+        noteSignalled();
+        waited_ = true;
+    }
+
     // Where the output thread's time went since it took up the previous tick; a skipped tick logs it.
     int64_t taken_up_ns_ = 0;            // when the previous tick's decision was taken
     int64_t compose_ns_ = 0;             // that tick's draw
@@ -273,21 +289,32 @@ public:
             applied_prewarm_mask_ = prewarm;
             warmup_started_pts_ = wallclock.pts();
             sent_eof_ = false;
+            may_hold_frames_.assign(source_edges_.size(), 1);
         }
         if (sent_eof_) return;
         if (!(active | prewarm).any()) {
-            this->waitForInput();
+            waitForFrames();
             return;
+        }
+        if (may_hold_frames_.size() != source_edges_.size()) may_hold_frames_.assign(source_edges_.size(), 1);
+        // A pass that did not come from a wait collects the signals raised meanwhile.
+        if (!std::exchange(waited_, false)) {
+            this->waitForInput(0, signalled_);
+            noteSignalled();
         }
         bool more_queued = false;   // an input still holds frames beyond this pass's bound
         for (size_t i = 0; i < source_edges_.size(); ++i) {
-            if (!(active | prewarm).test((int)i)) continue;
+            if (!may_hold_frames_[i] || !(active | prewarm).test((int)i)) continue;
             // Bound ingestion as well as storage; an unpaced producer must not
             // monopolize the output thread before it reaches its deadline.
             size_t received = 0;
+            bool emptied = false;
             for (; received < 8; ++received) {
                 auto *frame = source_edges_[i]->peek();
-                if (!frame) break;
+                if (!frame) {
+                    emptied = true;
+                    break;
+                }
                 if (isEofMarker(*frame)) {
                     playout_->endInput(i);
                     source_edges_[i]->pop();
@@ -300,6 +327,8 @@ public:
                 source_edges_[i]->pop();
             }
             if (received == 8 && source_edges_[i]->peek()) more_queued = true;
+            // Seen empty: a frame given from here on signals the edge.
+            else if (emptied || received == 8) may_hold_frames_[i] = 0;
         }
         if (staged_composition_) {
             const auto now_ns = avp::mixer::monotonicNs();
@@ -336,7 +365,7 @@ public:
             // a source signals a frame or the next deadline. An event keeps its signal until it
             // is read, so a frame that arrived after the pass ends the wait at once.
             if (!more_queued && !stopping_)
-                this->waitForInput(avp::mixer::waitMilliseconds(playout_->nextDeadline(), waiting));
+                waitForFrames(avp::mixer::waitMilliseconds(playout_->nextDeadline(), waiting));
             longest_input_wait_ns_ = std::max(longest_input_wait_ns_, avp::mixer::monotonicNs() - waiting);
             return;
         }
