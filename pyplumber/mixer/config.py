@@ -136,6 +136,9 @@ class Source:
     filter_output_format: str = ""
     transform: Optional[SourceTransform] = None   # before the source filter
     decode_storage: str = "cuda"
+    # What the decoder is known to yield (NVDEC: nv12 or p010le). Declared, and equal to the canvas
+    # storage with the source's colour matching the canvas, the source needs no colour filter.
+    decoded_format: str = ""
     extra_hw_frames: int = 3       # CUarray application headroom, beyond codec/working surfaces
 
     @property
@@ -412,6 +415,9 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
         raise ConfigError(f"{where}: decode_storage applies to video sources and must be cuda or cuarray")
     if type(extra) is not int or not 0 <= extra <= 32:
         raise ConfigError(f"{where}: extra_hw_frames must be an integer from 0 to 32")
+    decoded_format = s.get("decoded_format", "")
+    if decoded_format not in ("", "nv12", "p010le") or decoded_format and (kind != "video" or source_filter):
+        raise ConfigError(f"{where}: decoded_format is nv12 or p010le, on a video source without a filter")
     hold_last_frame = s.get("hold_last_frame", True)
     if not isinstance(hold_last_frame, bool) or "hold_last_frame" in s and kind != "browser":
         raise ConfigError(f"{where}: hold_last_frame must be a boolean on a browser source")
@@ -432,6 +438,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
+                  decoded_format=decoded_format,
                   transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,
                   **(color.tags if color else {}))
 

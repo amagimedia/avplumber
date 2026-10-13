@@ -276,6 +276,10 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 jobs[path] = writer
                 source.update(kind=raw or ("v210" if chroma == "422" else "video"),
                               path=runtime_path(path), width=asset_width, height=asset_height)
+                if source["kind"] == "video":
+                    # These clips are ours: 8-bit SDR or 10-bit HLG, 4:2:0, which NVDEC hands out as
+                    # NV12 or P010. Saying so lets a source that matches the canvas skip its colour filter.
+                    source["decoded_format"] = "nv12" if color == "sdr" else "p010le"
             elif kind == "browser":
                 if "pattern" in spec:
                     if spec["pattern"] != "alpha" or "url" in spec:
