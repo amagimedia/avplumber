@@ -248,8 +248,8 @@ protected:
             }
         }
     }
-    void waitForInput() {
-        event_wait_->wait();
+    void waitForInput(int timeout_ms = -1) {
+        event_wait_->wait(timeout_ms);
     }
 public:
     virtual void stop() {
