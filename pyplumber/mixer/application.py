@@ -684,6 +684,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     blended_sources = {item.source for scene in cfg.scenes for item in scene.items if item.blend}
     blended_sources |= {key.source for key in cfg.dsk_keys}
     input_edges: list[str] = []
+    demux = cfg.input_routing == "demux"
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
         if source.kind == "browser":
@@ -704,7 +705,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
                 color=source.color.tags, event_loop=_pacing_loop(index), native_rate=True,
-                frame_metadata=SOURCE_FRAME_METADATA)
+                frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
         elif source.kind in ("nv12", "p010"):
             edge = build_raw420_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
@@ -712,12 +713,12 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
                 event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned",
                 direct=cfg.raw_upload == "direct", native_rate=True, color=source.color,
-                frame_metadata=SOURCE_FRAME_METADATA)
+                frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
                                event_loop=_pacing_loop(index), decoder_params=source.decoder_params, native_rate=True,
-                               frame_metadata=SOURCE_FRAME_METADATA)
+                               frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
         if source.transform:
             transformed_edge = f"input_{index}_transformed"
             # pass_arrays: the color stage and the compositors read arrays, so a frame that already

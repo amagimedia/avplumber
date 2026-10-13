@@ -37,6 +37,10 @@ It has the same parameters as the `input` node and some additional
     (`frame_no`, and `frame_ts` from the table, need `seek_table`), `frame_ts` and `sample_rate` on audio frames.
     `realtime` reads `frame_no`, `frame_ts` and `wallclock` for its team and playback info and `speed_video` reads `frame_ts`;
     a graph that reads none of them may pass `[]` and spare every frame the stamping and every hop the dictionary copy
+-   `routing` (dictionary of string => string) and `streams_filter` (string) - as in `demux`: each routed stream goes
+    straight to its own queue, given instead of `dst`. Packets of streams without a route are dropped and the EOF marker
+    goes to every routed queue. Spares the `demux` hop for a file whose streams the node reads anyway; `wait_for_keyframe`
+    stays with `demux`
 
 Runtime control: `node.object.set <name> request-eof true` interrupts further
 input reads while keeping the producer alive to drain buffered demux/parser
@@ -167,6 +171,8 @@ Recommended options for displaying live video:
         the route if stream not found)
 -   `wait_for_keyframe` (bool): default false, discard packets until a
     keyframe appears in any video stream
+
+`input_rec` accepts the same `routing` and `streams_filter` and then needs no `demux`.
 
 ### `dec_video`, `dec_audio`
 

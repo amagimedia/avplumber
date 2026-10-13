@@ -1,4 +1,5 @@
 #include "node_common.hpp"
+#include "stream_routing.hpp"
 #include <mutex>
 #include <iostream>
 #include <fstream>
@@ -111,6 +112,7 @@ protected:
     float preseek_ = 0;
     int video_stream_ = -1;
     unsigned frame_metadata_ = fm_all;
+    StreamRoutingSink *routes_ = nullptr; // the sink when `routing` replaces `dst`
 
     av::Timestamp shift_ = NOTS;
     Parameters streams_object_, programs_object_;
@@ -452,6 +454,7 @@ private:
     }
 public:
     RecordingInput(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
+        routes_ = dynamic_cast<StreamRoutingSink*>(sink_.get());
         ictx_.setInterruptCallback([this]() -> int {
             if (eof_requested_) {
                 // Interrupt further reads, not the processing loop: demuxers
@@ -475,6 +478,13 @@ public:
     }
     av::FormatContext& ctx() {
         return ictx_;
+    }
+    virtual void forEachOutput(std::function<void(Sink<av::Packet>*)> cb) override {
+        if (routes_) {
+            routes_->forEachOutput(cb);
+        } else {
+            NodeSingleOutput<av::Packet>::forEachOutput(cb);
+        }
     }
     virtual void setFrameMetadataTimestamps(av::AudioSamples& frame) override {
         if (frame_metadata_ & fm_frame_ts) {
@@ -1096,8 +1106,16 @@ public:
     static std::shared_ptr<RecordingInput> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
-        std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["dst"]);
-        auto r = std::make_shared<RecordingInput>(make_unique<EdgeSink<av::Packet>>(edge));
+        std::unique_ptr<Sink<av::Packet>> sink;
+        if (params.count("routing") > 0) {
+            if (params.count("dst") > 0) {
+                throw Error("input_rec: routing replaces dst, give one of them");
+            }
+            sink = make_unique<StreamRoutingSink>();
+        } else {
+            sink = make_unique<EdgeSink<av::Packet>>(edges.find<av::Packet>(params["dst"]));
+        }
+        auto r = std::make_shared<RecordingInput>(std::move(sink));
         if (params.count("team")) {
             r->team_ = InstanceSharedObjects<InputSeekTeam>::get(nci.instance, params["team"]);
             r->team_->addSeekTarget(r);
@@ -1112,7 +1130,9 @@ public:
         return r;
     }
     virtual void init(EdgeManager &edges, const Parameters &params) {
-        NodeSingleOutput<av::Packet>::init(edges, params);
+        if (!routes_) {
+            NodeSingleOutput<av::Packet>::init(edges, params);
+        }
         av::InputFormat ifmt;
         if (params.count("format") > 0) {
             ifmt.setFormat(params["format"]);
@@ -1146,11 +1166,11 @@ public:
             }
         }
 
-        std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["dst"]);
-        edge->setProducer(this->shared_from_this());
-
         input_url_set_ = !params["url"].get<std::string>().empty();
         if (!input_url_set_) {
+            if (routes_) {
+                throw Error("input_rec: routing needs an url, the streams to route are read from it");
+            }
             logstream << "Input node started without input url";
             return;
         }
@@ -1207,6 +1227,11 @@ public:
             }
             obj["streams"] = streams;
             programs_object_.push_back(obj);
+        }
+        if (routes_) {
+            connectStreamRoutes(edges, *this, this->shared_from_this(), params, [this](av::Stream stream, std::shared_ptr<Edge<av::Packet>> edge) {
+                routes_->add(stream.index(), edge);
+            });
         }
 
         if (params.count("seek_table") > 0) {

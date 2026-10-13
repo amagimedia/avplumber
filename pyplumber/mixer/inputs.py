@@ -1,6 +1,9 @@
 """Decode chain shared by the mixer and playlist demos.
 
-``input_rec -> demux -> dec_video -> [speed_video] -> realtime(set_pts) -> [force_fps]``
+``input_rec -> [demux ->] dec_video -> [speed_video] -> realtime(set_pts) -> [force_fps]``
+
+``input_rec`` can route its video stream to the decoder's edge itself (``demux=False``); the
+``demux`` node stays for callers that address it by name.
 
 ``realtime(set_pts=True)`` rebases every source onto the host monotonic clock,
 which is the time base the native mixer schedules cuts in. The mixer keeps
@@ -27,7 +30,8 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
                 decoded_filter: str = "", decoded_filter_threads: Optional[int] = None,
                 pause_params: Optional[dict] = None,
                 auto_restart: Optional[str] = "group", event_loop: Optional[str] = None,
-                native_rate: bool = False, frame_metadata: Optional[Sequence[str]] = None) -> str:
+                native_rate: bool = False, frame_metadata: Optional[Sequence[str]] = None,
+                demux: bool = True) -> str:
     """Add the chain for one source and return its paced output edge.
 
     ``native_rate`` preserves source cadence for a clocked compositor; otherwise
@@ -46,21 +50,25 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     slice threads when given (FFmpeg's default otherwise).  ``event_loop`` names the event loop that runs the
     pacing nodes (the instance's ``"default"`` loop when omitted).  ``frame_metadata`` lists the keys
     ``input_rec`` stamps on every decoded frame (all of them when omitted): ``[]`` for a chain in which
-    nothing reads them; ``speed_video`` and a ``realtime`` team read ``frame_ts``.
+    nothing reads them; ``speed_video`` and a ``realtime`` team read ``frame_ts``.  ``demux=False``
+    has ``input_rec`` send the video stream to the decoder's edge itself: no ``demux_<tag>`` node,
+    no ``input_<tag>_packets`` edge, one thread and two hand-offs per packet fewer.
     """
     edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
     restart = {} if auto_restart is None else {"auto_restart": auto_restart}
     sync = {} if sync_team is None else {"sync_team": sync_team}
+    routing = {"?v:0": edge("video_packets")}
     avp.addNode(api.InputRec({
-        "name": f"input_{tag}", "url": url, "dst": edge("packets"), "loop": loop,
+        "name": f"input_{tag}", "url": url, **({"dst": edge("packets")} if demux else {"routing": routing}), "loop": loop,
         "loop_continuous_ts": loop and continuous_loop, "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
         **_frame_metadata(frame_metadata), **(input_params or {}),
     }))
-    avp.addNode(api.Demux({
-        "name": f"demux_{tag}", "src": edge("packets"),
-        "routing": {"?v:0": edge("video_packets")}, "wait_for_keyframe": False,
-        "group": group, **restart,
-    }))
+    if demux:
+        avp.addNode(api.Demux({
+            "name": f"demux_{tag}", "src": edge("packets"),
+            "routing": routing, "wait_for_keyframe": False,
+            "group": group, **restart,
+        }))
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": edge("video_packets"), "dst": edge("decoded"),
         # The GPU decodes: a libavcodec frame thread only reserves one more decode surface, 16 of them
@@ -141,20 +149,22 @@ def _raw_file_restart(loop: bool) -> dict:
 
 def _raw_file_packets(avp, api, tag: str, path: str, *, pixel_format: str, video_size: str,
                       group: str, fps: int, fps_den: int, loop: bool,
-                      frame_metadata: Optional[Sequence[str]] = None) -> str:
-    """``input_rec(rawvideo) -> demux`` head of a headerless raw file source: one
+                      frame_metadata: Optional[Sequence[str]] = None, demux: bool = True) -> str:
+    """``input_rec(rawvideo) -> [demux]`` head of a headerless raw file source: one
     picture per packet, timestamps rising across loop passes. Returns the packet edge."""
     restart = _raw_file_restart(loop)
+    routing = {"v:0": f"input_{tag}_packed"}
     avp.addNode(api.InputRec({
-        "name": f"input_{tag}", "url": path, "dst": f"input_{tag}_packets", "loop": loop,
-        "loop_continuous_ts": loop, "format": "rawvideo", "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
-        "options": {"pixel_format": pixel_format, "video_size": video_size, "framerate": f"{fps}/{fps_den}"},
+        "name": f"input_{tag}", "url": path, **({"dst": f"input_{tag}_packets"} if demux else {"routing": routing}),
+        "loop": loop, "loop_continuous_ts": loop, "format": "rawvideo", "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S,
+        "group": group, "options": {"pixel_format": pixel_format, "video_size": video_size, "framerate": f"{fps}/{fps_den}"},
         **_frame_metadata(frame_metadata),
     }))
-    avp.addNode(api.Demux({
-        "name": f"demux_{tag}", "src": f"input_{tag}_packets", "routing": {"v:0": f"input_{tag}_packed"},
-        "wait_for_keyframe": False, "group": group, **restart,
-    }))
+    if demux:
+        avp.addNode(api.Demux({
+            "name": f"demux_{tag}", "src": f"input_{tag}_packets", "routing": routing,
+            "wait_for_keyframe": False, "group": group, **restart,
+        }))
     return f"input_{tag}_packed"
 
 
@@ -168,7 +178,7 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
                        pixel_format: str, fps: int, fps_den: int = 1,
                        hwaccel: str = "@gpu", loop: bool = False, event_loop: Optional[str] = None,
                        pinned: bool = False, direct: bool = False, native_rate: bool = False, color=None,
-                       frame_metadata: Optional[Sequence[str]] = None) -> str:
+                       frame_metadata: Optional[Sequence[str]] = None, demux: bool = True) -> str:
     """CPU/GPU interop source: raw NV12/P010 file -> CUDA frames -> paced output edge.
 
     Default: ``input_rec -> demux -> dec_video(rawvideo) -> filter(setpts) ->
@@ -188,7 +198,8 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     threads. It also uploads one frame ahead of pacing, and holds no packets in memory
     ahead of that. The node stamps the color tags.
 
-    ``frame_metadata`` is ``build_input``'s: the keys ``input_rec`` stamps on each decoded picture.
+    ``frame_metadata`` and ``demux`` are ``build_input``'s: the keys ``input_rec`` stamps on each
+    decoded picture, and whether a ``demux`` node splits the file's one stream.
     """
     if pixel_format not in ("nv12", "p010le"):
         raise ValueError("raw 4:2:0 upload requires nv12 or p010le")
@@ -220,13 +231,13 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
                            # InputRec seeks back to PTS zero at each loop. Count frames
                            # before pacing; setpts changes metadata only, not pixels.
                            decoded_filter=f"setpts=N*{fps_den}/({fps}*TB)", decoded_filter_threads=threads,
-                           event_loop=event_loop, native_rate=native_rate, frame_metadata=frame_metadata)
+                           event_loop=event_loop, native_rate=native_rate, frame_metadata=frame_metadata, demux=demux)
         output = f"input_{tag}_uploaded"
         avp.addNode(api.FilterVideo({"name": f"upload_{tag}", "src": edge, "dst": output,
                                     "graph": "hwupload" + tags, "hwaccel": hwaccel, "threads": threads, "group": group}))
         return output
     packets = _raw_file_packets(avp, api, tag, path, pixel_format=pixel_format, video_size=f"{width}x{height}",
-                                group=group, fps=fps, fps_den=fps_den, loop=loop, frame_metadata=frame_metadata)
+                                group=group, fps=fps, fps_den=fps_den, loop=loop, frame_metadata=frame_metadata, demux=demux)
     uploaded = f"input_{tag}_cuda"
     # addNode creates the edge, so the plan must come first.
     avp.edges.planCapacity(uploaded, RAW_UPLOADED_CAPACITY)
@@ -247,18 +258,20 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                      fps: int, fps_den: int = 1, hwaccel: str = "@gpu", loop: bool = False,
                      color: Optional[dict] = None, event_loop: Optional[str] = None,
-                     native_rate: bool = False, frame_metadata: Optional[Sequence[str]] = None) -> str:
+                     native_rate: bool = False, frame_metadata: Optional[Sequence[str]] = None,
+                     demux: bool = True) -> str:
     """Headerless packed v210 file -> GPU unpack (P210, 10-bit 4:2:2) -> paced output edge.
 
     ``input_rec -> demux -> dec_video(rawvideo/gray) ->
     filter(hwupload_cuda=v210_width=...) -> realtime(set_pts) -> force_fps``.
     The packed bytes carry no metadata, so the color contract (HLG/BT.2020 for
     the HDR sources) is supplied here and stamped on the CUDA frames.
-    ``frame_metadata`` is ``build_input``'s: the keys ``input_rec`` stamps on each decoded picture.
+    ``frame_metadata`` and ``demux`` are ``build_input``'s: the keys ``input_rec`` stamps on each
+    decoded picture, and whether a ``demux`` node splits the file's one stream.
     """
     stride = v210_row_stride(width)
     packets = _raw_file_packets(avp, api, tag, path, pixel_format="gray", video_size=f"{stride}x{height}",
-                                group=group, fps=fps, fps_den=fps_den, loop=loop, frame_metadata=frame_metadata)
+                                group=group, fps=fps, fps_den=fps_den, loop=loop, frame_metadata=frame_metadata, demux=demux)
     decoded = f"input_{tag}_decoded"
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": packets, "dst": decoded,
