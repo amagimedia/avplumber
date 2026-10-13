@@ -5,7 +5,7 @@ One H.264 clip with an audio track nobody routes is decoded on NVDEC through
 chains must agree on every picture and its timestamp over a single pass ending in EOF, over
 loop passes that restart their timestamps, and over loop passes with continuous timestamps.
 
-Run in the built avplumber environment (needs the `ffmpeg` CLI with libx264 and the native aac encoder):
+Run in the built avplumber environment (needs the `ffmpeg` CLI with h264_nvenc and the native aac encoder):
     python3 tests/cuda/smoke_input_routing.py
 """
 from fractions import Fraction
@@ -24,7 +24,7 @@ HWACCEL = "routing_gpu"
 def make_fixture(path):
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=size=192x108:rate={FPS}",
                     "-f", "lavfi", "-i", "sine=r=48000", "-frames:v", str(FRAMES), "-t", str(FRAMES / FPS),
-                    "-c:v", "libx264", "-preset", "ultrafast", "-g", "8", "-bf", "2", "-pix_fmt", "yuv420p",
+                    "-c:v", "h264_nvenc", "-preset", "p1", "-g", "8", "-bf", "2", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", str(path)], check=True)
 
 
