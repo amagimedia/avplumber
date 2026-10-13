@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   TEX_INFO_HEADER_BYTES,
+  TEX_INFO_PIXEL_FORMAT_ACQUIRE_FENCE,
   TexInfoEncoder,
   type TexInfo,
 } from '../../../src/main/capture/TexInfoEncoder';
@@ -65,5 +66,19 @@ describe('TexInfoEncoder', () => {
         '0000000000000000',
       ].join(''),
     );
+  });
+
+  it('flags an acquire fence in bit 31 of the pixel format word and nowhere else', () => {
+    expect(TEX_INFO_PIXEL_FORMAT_ACQUIRE_FENCE).toBe(0x80000000);
+    const plain = encoder.encode(baseInput);
+    const fenced = encoder.encode({ ...baseInput, acquireFence: true });
+    expect(fenced.length).toBe(TEX_INFO_HEADER_BYTES);
+    expect(fenced.readUInt32LE(12)).toBe(0xc2475241); // 'BGRA' | fence
+    expect(encoder.encode({ ...baseInput, pixelFormat: 'rgba', acquireFence: true }).readUInt32LE(12)).toBe(
+      0xd2474241,
+    ); // 'RGBA' | fence
+    fenced.writeUInt32LE(0x42475241, 12);
+    expect(fenced.equals(plain)).toBe(true);
+    expect(encoder.encode({ ...baseInput, acquireFence: false }).equals(plain)).toBe(true);
   });
 });
