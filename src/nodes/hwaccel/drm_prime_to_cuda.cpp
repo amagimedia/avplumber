@@ -27,7 +27,7 @@ extern "C" {
 #include <libdrm/drm_fourcc.h>
 }
 
-class DRMPrimeToCUDA: public NodeSISO<av::VideoFrame, av::VideoFrame>, public IReturnsObjects {
+class DRMPrimeToCUDA: public NodeSISO<av::VideoFrame, av::VideoFrame>, public IReturnsObjects, public IInputsObjects {
 protected:
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVBufferRef* hw_frames_ctx_ = nullptr;
@@ -153,6 +153,24 @@ protected:
         height_ = h;
         sw_fmt_ = swfmt;
         return true;
+    }
+
+    // `purge_idle`: a caller that knows a burst of allocations is over (a show's start-up, a page
+    // reload) asks for the imports nothing uses and nothing has used for that many milliseconds to
+    // go now, instead of after import_ttl_ms and whenever the next frame happens to arrive.
+    std::atomic<int64_t> purge_idle_request_ms_{-1};
+    void purgeIdle(int64_t now_ms, int64_t idle_ms) {
+        size_t released = 0;
+        for (auto it = imports_.begin(); it != imports_.end();) {
+            if (it->use_count() == 1 && now_ms - (*it)->last_used_ms >= idle_ms) {
+                it = imports_.erase(it); // last release only queues worker cleanup
+                ++released;
+            } else
+                ++it;
+        }
+        expired_imports_ += released;
+        if (released)
+            logstream << "drm2cuda: released " << released << " idle import(s) on request, " << imports_.size() << " kept";
     }
 
     void purgeImports(int64_t now_ms, bool all) {
@@ -372,8 +390,17 @@ public:
         cleanup_->close(import_budget_);
         NodeSingleInput<av::VideoFrame>::stop();
     }
+    void setObject(const std::string key, const Parameters &value) override {
+        if (key != "purge_idle") throw Error("drm_prime_to_cuda: unknown object " + key);
+        const int64_t idle_ms = value.get<int64_t>();
+        if (idle_ms < 0) throw Error("drm_prime_to_cuda: purge_idle is a number of milliseconds");
+        purge_idle_request_ms_.store(idle_ms, std::memory_order_release);
+    }
     virtual void process() {
-        av::VideoFrame in = this->source_->get();
+        // A page that has stopped painting sends nothing: wake a few times a second for a request.
+        av::VideoFrame in = this->source_->get(250);
+        const int64_t purge_idle_ms = purge_idle_request_ms_.exchange(-1, std::memory_order_acq_rel);
+        if (purge_idle_ms >= 0 && cuda_dev_ctx_) purgeIdle(wallclock.pts(), purge_idle_ms);
         if (!in) return;
         if (in.raw()->format != AV_PIX_FMT_DRM_PRIME) {
             // pass through if not DRM PRIME

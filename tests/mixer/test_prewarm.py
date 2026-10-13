@@ -161,6 +161,7 @@ def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boun
         def start(self):
             app.avp.events.append("start aux_test")
     app.aux_buses = Aux()
+    app.avp.nodes["aux_test_comp"] = {"group": "aux_test"}   # the bus's compositor, asked for its counters
     original = app.avp.on_exception
     inspect = app.avp.getEdge
     def get_edge(name, data_type=None):
@@ -176,7 +177,10 @@ def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boun
         assert not app.avp.ready
     else:
         app.start()
-        assert app.avp.events.index("inspect aux_test_encoded") < app.avp.events.index("READY")
+        events = app.avp.events
+        # The bus's output is let go only once it encodes, and before the mixer says it is ready.
+        assert events.index("inspect aux_test_encoded") < events.index("node.object.set aux_test_rtp_output hold false") \
+            < events.index("node.object.set aux_test_comp reset_counters true") < events.index("READY")
     assert app.avp.on_exception == original
 
 

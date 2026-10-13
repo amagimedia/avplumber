@@ -552,6 +552,10 @@ multiple inputs, 1 output: `av::Packet`
 -   `options` (dictionary) - format options that will be passed to libavformat
 -   `seek_table` (string of file name) - if specified, binary file with native endianness with seek table will be written.
 -   `seek_table_text` (string of file name) - if specified, text file with seek table will be written.
+-   `hold` (boolean, optional, default `false`) - start held: packets are taken from the input and not
+    written, so everything before the output runs (an encoder opens on its first frame) while nothing
+    leaves. `node.object.set <name> hold false` releases it; writing then starts at the next key packet,
+    so ask the encoder for one. `hold true` holds it again.
 
 Format of binary seek table: 16-byte records containing:
 * timestamp of the frame in milliseconds: int64_t
@@ -837,6 +841,11 @@ Retired imports are released on a cleanup worker shared by the instance. Incomin
 frames needing a new import are dropped while cleanup is pending or their import
 budget is full; cached imports continue normally. Dropped inputs release their
 browser capture slots.
+
+`node.object.set <node> purge_idle <ms>` releases, within a quarter of a second, every import that
+no frame holds and none has used for that many milliseconds, without waiting for `import_ttl_ms`
+or for the next frame: for a caller that knows a burst of allocations is over, such as a show that
+has finished starting. They count as `expired`.
 
 `node.object.get <node> import_stats` includes an `admission_dropped` frame
 counter and instance-wide cleanup counts. These counters distinguish admission
@@ -1157,6 +1166,10 @@ output edge; the bus keeps playing and draws again once it has room), `playout`
 `composition_revision`, the revision of the composition being drawn (set when
 one is applied at once or a staged one becomes ready, unchanged when a staged
 one is dropped; empty for one without a revision).
+
+`node.object.set <node> reset_counters true` starts `missed_deadlines`, the per-input counters,
+`output_drops` and `playout.timing` again from zero, for a caller that has finished starting the
+show; `frames` keeps counting and the playout is not disturbed.
 
 `playout.timing` says where each drawn tick's time went: `period_ms`, `bounds_ms` (the upper
 bounds of all buckets but the last: a quarter, a half, three quarters, one, one and a quarter,
