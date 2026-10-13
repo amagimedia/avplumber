@@ -172,6 +172,7 @@ endif
 CUDA_ROOT ?= /usr/local/cuda
 ifeq ($(HAVE_CUDA),1)
 NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/raw_video_file_cuda.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_rect_overlay.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_transform.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_rect_draw.cpp
