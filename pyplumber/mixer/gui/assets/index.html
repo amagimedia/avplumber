@@ -926,14 +926,17 @@ function renderWipeCache() {
 }
 // /api/state carries host where the backend reads /proc; its thread fields only while a mixer process runs.
 // LOAD is the 1-minute load average over the vCPUs (the bar clamps, the number does not); THREAD is one core,
-// with the mixer's busiest threads in its tip.
-// Threads of one name share a row (the pacing loops are all "EventLoop"): how many of the listed
-// threads carry it, their mean and their busiest. Rows keep the order of each name's busiest thread.
-function threadRows(threads) {
-  const byName = new Map();
-  for (const t of threads) byName.set(t.name, [...(byName.get(t.name) || []), t.pct]);
-  return [...byName].map(([name, pcts]) => pcts.length === 1 ? [name, `${pcts[0]}%`]
-    : [`${name} ×${pcts.length}`, `${Math.round(pcts.reduce((a, b) => a + b) / pcts.length)}% avg · ${Math.max(...pcts)}% max`]);
+// with all of the mixer's threads summed by kind in its tip.
+// The mixer's threads by kind, the kind that uses most CPU first: a show has hundreds of threads
+// of a fraction of a percent each that together use cores. The first row is the whole mixer; one
+// of a kind shows its share of a core, several show their sum, their mean and their busiest.
+function threadRows(h) {
+  const pct = (n) => n >= 10 ? `${Math.round(n)}%` : `${n.toFixed(1)}%`;
+  const kinds = h.thread_kinds || [{name: h.thread_name, count: 1, pct: h.thread_pct, max_pct: h.thread_pct}];
+  const rows = kinds.map((k) => k.count === 1 ? [k.name, pct(k.pct)]
+    : [`${k.name} ×${k.count}`, `${pct(k.pct)} · avg ${pct(k.pct / k.count)} · max ${pct(k.max_pct)}`]);
+  return Number.isFinite(h.mixer_cpu_pct) && h.thread_count
+    ? [[`All ${h.thread_count} threads`, `${(h.mixer_cpu_pct / 100).toFixed(1)} cores`], ...rows] : rows;
 }
 function renderHost() {
   const h = state.host, g = $("host");
@@ -948,9 +951,8 @@ function renderHost() {
   $("thread").hidden = h.thread_pct == null;
   if (h.thread_pct != null) {
     show($("thread"), h.thread_pct, `${h.thread_pct}%`);
-    // The bar is the busiest thread, the single-thread bottleneck; the tip has the busiest eight names.
-    setMeterTip($("thread"), "Busiest mixer threads · share of one core",
-      threadRows(h.threads || [{name: h.thread_name, pct: h.thread_pct}]).slice(0, 8));
+    // The bar is the busiest thread, the single-thread bottleneck; the tip sums every thread by kind.
+    setMeterTip($("thread"), "Mixer threads by kind · share of one core", threadRows(h));
   }
 }
 
