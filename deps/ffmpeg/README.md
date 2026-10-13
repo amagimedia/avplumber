@@ -68,6 +68,14 @@ and AArch64 patches remain too. Changes from the 8.x series:
   fall back to synchronous decoding. Caller-supplied initialized frame pools
   retain their existing stream, and linear CUDA decoding is unchanged.
 
+- The HEVC decoder does not clear its five per-picture software tables
+  (`horizontal_bs`, `vertical_bs`, `cbf_luma`, `is_pcm`, `tab_slice_address`,
+  about 650 KB for a 1080p picture) when a hwaccel decodes the frame. Only the
+  software CTB decode and its loop filters read them, and with a hwaccel
+  `decode_slice_data()` returns before either runs. On NVDEC HEVC sources the
+  clears were a quarter of the decoder thread's CPU. Software decoding is
+  unchanged.
+
 CUARRAY is a separate opt-in pixel format. Linear `AV_PIX_FMT_CUDA` and CPU
 decoding remain upstream options. The experimental series permits `scale_cuda`
 to forward matching-size, matching-format CUARRAY frames with passthrough enabled.
