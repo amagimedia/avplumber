@@ -165,9 +165,14 @@ class AuxBus:
         per_page, page = len(page_grid(self.cfg)), self.layout["page"]
         return {"page": page, "pages": page_count(self.cfg), "first": page * per_page + 1, "total": len(self.cfg.sources)}
 
+    def _live(self):
+        """What changes while the show runs: the layout on air, its assignments and its pages."""
+        return {"layout": self.layout, "scenes": list(self.scenes), "revision": self.revision, **self._pages()}
+
     def _summary(self):
-        return {"layout": self.layout, "layouts": list(self.bus.layouts), "scenes": list(self.scenes),
-                "revision": self.revision, **self._pages()}
+        """The answer to a change: the live part and the layouts the bus offers, which are the
+        show's and never change while it runs (`mixer.aux_layouts` has them for a poller)."""
+        return {**self._live(), "layouts": list(self.bus.layouts)}
 
     def state(self):
         with self.lock:
@@ -186,7 +191,7 @@ class AuxBus:
                     "max_layers": self.bus.max_layers, "canvas": {"w": self.cfg.canvas_w, "h": self.cfg.canvas_h},
                     "fps": self.fps, "latency_ms": self.latency_ms(), "pvw_align": self.bus.pvw_align,
                     "pgm_delay_frames": self.pgm_delay_frames, "follower": self.follower_status,
-                    "pvw_scene": self.follower_status.get("pvw_scene", ""), **self._summary(), **status,
+                    "pvw_scene": self.follower_status.get("pvw_scene", ""), **self._live(), **status,
                     "running": running, "composition_pending": pending}
 
     def assign(self, request):
@@ -301,4 +306,7 @@ class AuxBuses:
         self.avp.registerControlCommand("mixer.aux", command(AuxBus.assign), True)
         self.avp.registerControlCommand("mixer.aux_layout", command(AuxBus.set_layout), True)
         self.avp.registerControlCommand("mixer.aux_page", command(AuxBus.turn), True)
-        self.avp.registerControlCommand("mixer.aux_status", lambda _arg: json.dumps([b.state() for b in self]) + "\n", True)
+        # Polled several times a second by every open page: quiet, and without what does not change.
+        self.avp.registerControlCommand("mixer.aux_status", lambda _arg: json.dumps([b.state() for b in self]) + "\n", True, True)
+        layouts = json.dumps({b.bus.id: list(b.bus.layouts) for b in self}) + "\n"
+        self.avp.registerControlCommand("mixer.aux_layouts", lambda _arg: layouts, True, True)
