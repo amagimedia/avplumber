@@ -6,6 +6,27 @@
 
 #define CHECK(expr) do { if (!(expr)) throw std::runtime_error(#expr); } while (false)
 
+void reset_counters_starts_them_again_without_moving_the_schedule() {
+    avp::mixer::Playout<int> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)));
+    mix.push(0, 100, 0);
+    auto first = mix.prepare(34000000);   // on time
+    CHECK(first);
+    const auto index = first->index;
+    mix.commit();
+    auto late = mix.prepare(134000000);   // six periods later: the ticks in between were never drawn
+    CHECK(late && late->index > index + 1);
+    const auto late_index = late->index;
+    mix.commit();
+    CHECK(mix.missedDeadlines() == static_cast<uint64_t>(late_index - index - 1));
+    CHECK(mix.stats(0).repeats == 1);     // no new frame: the held one again
+    mix.resetCounters();
+    CHECK(mix.missedDeadlines() == 0 && mix.stats(0).repeats == 0 && mix.stats(0).discarded == 0);
+    auto next = mix.prepare(151000000);   // the schedule continues where it was
+    CHECK(next && next->index == late_index + 1);
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 0 && mix.stats(0).repeats == 1);
+}
+
 void burst_keeps_every_frame() {
     // Two equally paced sources arrive in a burst after a delayed receiver wake.
     // Neither the early source's future frame nor the late source's first frame
@@ -783,6 +804,7 @@ int main(int argc, char **argv) {
         {"scene_reload_discards_prewarm_frames_before_first_visible_frame", scene_reload_discards_prewarm_frames_before_first_visible_frame},
         {"stalled_input_does_not_block_healthy_inputs_or_replay_late_burst", stalled_input_does_not_block_healthy_inputs_or_replay_late_burst},
         {"irregular_first_paints_do_not_shorten_the_playout_delay", irregular_first_paints_do_not_shorten_the_playout_delay},
+        {"reset_counters_starts_them_again_without_moving_the_schedule", reset_counters_starts_them_again_without_moving_the_schedule},
         {"prewarm_waits_for_every_active_slot", prewarm_waits_for_every_active_slot},
         {"inactive_slot_reactivation_does_not_reuse_old_scene", inactive_slot_reactivation_does_not_reuse_old_scene},
         {"eof_drains_future_frames_before_finishing", eof_drains_future_frames_before_finishing},
