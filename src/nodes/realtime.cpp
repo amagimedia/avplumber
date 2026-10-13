@@ -491,7 +491,14 @@ public:
         const Parameters &params = nci.params;
         std::shared_ptr<RealTimeSpeed> r = NodeSISO<T, T>::template createCommon<RealTimeSpeed>(edges, params);
         AVRational timebase = wallclock.timeBase();
-        if (params.count("tick_period")) {
+        if (params.count("time_base")) {
+            // The unit of the node's clock and of the timestamps set_pts stamps. Nothing ticks at it:
+            // without a tick source the node still wakes for a frame and for its release time.
+            if (params.count("tick_period")) throw Error("realtime: give time_base or tick_period, not both");
+            timebase = parseRatio(params["time_base"]);
+            if (timebase.num <= 0 || timebase.den <= 0) throw Error("realtime: time_base must be a positive ratio of seconds");
+            logstream << "timebase " << timebase.num << "/" << timebase.den;
+        } else if (params.count("tick_period")) {
             int tb_den_mult = 4;
             timebase = parseRatio(params["tick_period"]);
             r->tick_period_ = tb_den_mult;

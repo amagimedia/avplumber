@@ -99,13 +99,12 @@ def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
     loop = {} if event_loop is None else {"event_loop": event_loop}
     timing = {}
     if native_rate:
-        # Without tick_source, realtime still follows wallclock. tick_period selects
-        # its internal time base (one quarter of this period): 1/120000 represents
-        # 1001/24000, 1001/30000 and 1001/60000 exactly. Millisecond PTS can cross
-        # the compositor's nearest-tick boundary and cause repeat/drop pairs.
+        # realtime follows the wallclock; time_base is only the unit it counts and stamps in.
+        # 1/120000 represents 1001/24000, 1001/30000 and 1001/60000 exactly. Millisecond PTS
+        # can cross the compositor's nearest-tick boundary and cause repeat/drop pairs.
         # Its built-in thresholds are in milliseconds, so preserve their durations
         # explicitly when choosing the finer time base.
-        timing = {"tick_period": "1/30000", "negative_time_tolerance": .25,
+        timing = {"time_base": "1/120000", "negative_time_tolerance": .25,
                   "discontinuity_threshold": 1.0}
     avp.addNode(api.Realtime({
         "name": f"realtime_{tag}", "src": src, "dst": f"input_{tag}_realtime",

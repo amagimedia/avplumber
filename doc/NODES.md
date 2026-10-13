@@ -65,12 +65,13 @@ This node is non-blocking.
     ~1.0006 are treated as 1.
 -   `tick_period` (string of rational, seconds) - if specified and [`tick_source`](#non-blocking-nodes) is also specified, anti-jitter filter will be enabled, assuming that tick source emits a tick every `tick_period`. Generally should be set to 1/FPS, e.g. `1/60`. The filter maintains its own clock independent of wallclock, but will resync to the wallclock if it drifts too much. Without `tick_source`, pacing still follows wallclock, but a specified
     `tick_period` selects an internal time base of one quarter of that period.
-    For example, `1/30000` gives 1/120000-second timestamps with `set_pts`,
-    preserving common fractional frame periods. If omitted, the normal
-    millisecond wallclock time base is used. When selecting a finer time base,
-    explicitly set `negative_time_tolerance` and `discontinuity_threshold` in
-    seconds to preserve the intended durations; the legacy implicit tick
-    constants assume millisecond precision.
+    To choose only the time base, use `time_base`.
+-   `time_base` (string of rational, seconds, optional) - the unit the node counts in and `set_pts`
+    stamps in. Default: the millisecond wallclock time base. `1/120000` represents 1/30, 1001/30000,
+    1001/60000 and 1001/24000 exactly. Nothing ticks at this rate: the node still wakes for a frame
+    and for its release time. Not together with `tick_period`. With a finer time base, set
+    `negative_time_tolerance` and `discontinuity_threshold` explicitly, in seconds, to keep their
+    durations; the built-in values assume milliseconds.
 -   `set_pts` (bool, default false) - set PTS to wallclock timestamps corresponding to time when packets are outputted (or, more precisely, when they would be outputted if there was no jitter)
 -   `forward_eof` (bool, default false) - pass the end-of-stream marker on to the output, in order behind the last frame and never stamped by `set_pts`. By default the marker is consumed here; a consumer that must tell the end of a file from a stalled producer (`clip_cache`) needs it. Do not enable it in front of a node that finishes on the marker unless that is intended.
 
