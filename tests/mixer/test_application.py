@@ -140,14 +140,19 @@ def test_invalid_processing_edge_shuts_down_partial_engine(edge):
 def test_going_on_air_releases_idle_browser_imports_before_the_outputs():
     from pyplumber.mixer.application import MixerApplication
     commands = []
+    def expired(name):   # what an importer has released after the passes asked of it so far
+        passes = commands.count(f"node.object.set {name} purge_idle 500")
+        return (0, 14, 15, 15)[passes] if name == "input_3_to_cuda" else 0
     avp = SimpleNamespace(executeCommandsFromString=lambda text: commands.extend(text.splitlines()),
-                          node=lambda name: SimpleNamespace(getObject=lambda key: {"instance_cleanup_pending": 0}))
+                          node=lambda name: SimpleNamespace(getObject=lambda key: {
+                              "instance_cleanup_pending": 0, "expired": expired(name)}))
     app = MixerApplication(avp=avp, mixer=None, input_groups=(), input_edges=(), routed_inputs=False,
                            preheat_timeout_sec=1, held_outputs=("janus",),
                            browser_importers=("input_3_to_cuda", "input_7_to_cuda"))
     app._go_on_air()
     purged = [command for command in commands if " purge_idle " in command]
-    assert purged == ["node.object.set input_3_to_cuda purge_idle 500", "node.object.set input_7_to_cuda purge_idle 500"]
+    # Three passes: the first two released buffers (14, then 1), the third found nothing left.
+    assert purged == ["node.object.set input_3_to_cuda purge_idle 500", "node.object.set input_7_to_cuda purge_idle 500"] * 3
     # The releases stall draws: they have to be over while the outputs are still held.
     assert commands.index(purged[-1]) < commands.index("node.object.set janus_rtp_output hold false")
     assert commands[-2:] == ["node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true"]

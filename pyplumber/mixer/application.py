@@ -54,6 +54,7 @@ SETTLE_TIMEOUT_SEC = 10.0
 # A browser buffer nothing has used for this long while the show starts is one the start went
 # through and left behind; a window's working buffers come round within a few frames.
 IMPORT_PURGE_IDLE_MS = 500
+IMPORT_PURGE_PASSES = 4
 
 # Event loops shared by the sources' pacing nodes (realtime, force_fps, smooth_timestamps).
 # One loop's cost grows with the square of the sources it paces: each wake-up rescans
@@ -296,36 +297,46 @@ class MixerApplication:
         frame and the compositors count from zero, so what viewers get and what the counters say
         both begin with the settled show."""
         compositors = [f"{MIXER_NAME}_comp_a", f"{MIXER_NAME}_comp_b", *(f"{bus.prefix}_comp" for bus in self.aux_buses or ())]
-        self._purge_idle_imports(wait=True)
-        settled = self._wait_until_settled(compositors)
+        # A release stalls draws, and buffers still go out of use while the last buses come up:
+        # release, let the show settle, and look again until a pass finds nothing left.
+        for _ in range(IMPORT_PURGE_PASSES):
+            released = self._purge_idle_imports(wait=True)
+            settled = self._wait_until_settled(compositors)
+            if not released:
+                break
         prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
         self.avp.executeCommandsFromString("\n".join(
             [release_commands(prefix) for prefix in prefixes]
             + [f"node.object.set {node} reset_counters true" for node in compositors]))
         log.info("On air: %d outputs released%s", len(prefixes), "" if settled else " before the show settled")
 
-    def _purge_idle_imports(self, wait: bool = False) -> None:
+    def _purge_idle_imports(self, wait: bool = False) -> int:
         """Release the browser buffers the start-up went through and no longer uses.
 
         While a show starts, a browser window goes through two or three times the buffers it
         settles on. The importers keep each registered for seconds after its last use, which holds
         gigabytes of GPU memory at the moment the show needs most, and then release them one by
         one, each release stalling every draw: after the outputs are on air unless it happens here.
-        With *wait*, returns once the releases are done."""
+        With *wait*, returns once the releases are done, with how many there were."""
         if not self.browser_importers:
-            return
+            return 0
+        def stats():
+            importers = (self.avp.node(node) for node in self.browser_importers)
+            return [(importer.getObject("import_stats") if importer is not None else None) or {} for importer in importers]
+        expired = lambda: sum(s.get("expired", 0) for s in stats())
+        before = expired() if wait else 0
         self.avp.executeCommandsFromString("\n".join(
             f"node.object.set {node} purge_idle {IMPORT_PURGE_IDLE_MS}" for node in self.browser_importers))
         if not wait:
-            return
+            return 0
         time.sleep(0.3)   # an importer looks for a request four times a second
-        importer = self.avp.node(self.browser_importers[0])
         deadline = time.monotonic() + SETTLE_TIMEOUT_SEC
-        while importer is not None and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
             self._check_startup()
-            if not (importer.getObject("import_stats") or {}).get("instance_cleanup_pending"):
-                return
+            if not any(s.get("instance_cleanup_pending") for s in stats()[:1]):
+                break
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
+        return expired() - before
 
     def _wait_until_settled(self, compositors) -> bool:
         """True after SETTLE_WINDOW_SEC without a missed deadline or a dropped frame on any
