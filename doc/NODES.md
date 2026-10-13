@@ -69,7 +69,9 @@ This node is non-blocking.
 -   `time_base` (string of rational, seconds, optional) - the unit the node counts in and `set_pts`
     stamps in. Default: the millisecond wallclock time base. `1/120000` represents 1/30, 1001/30000,
     1001/60000 and 1001/24000 exactly. Nothing ticks at this rate: the node still wakes for a frame
-    and for its release time. Not together with `tick_period`. With a finer time base, set
+    and for its release time. The clock it reads counts milliseconds, so a frame whose release time
+    falls inside the current millisecond is released then, up to a millisecond early, and stamped
+    with its exact time. Not together with `tick_period`. With a finer time base, set
     `negative_time_tolerance` and `discontinuity_threshold` explicitly, in seconds, to keep their
     durations; the built-in values assume milliseconds.
 -   `set_pts` (bool, default false) - set PTS to wallclock timestamps corresponding to time when packets are outputted (or, more precisely, when they would be outputted if there was no jitter)

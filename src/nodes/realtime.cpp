@@ -20,6 +20,11 @@ protected:
     AVTS initial_jitter_margin_ = 0;
     AVRational timebase_;
     AVRational tb_to_rescale_ts_;
+    // One step of the wallclock in timebase_ units, at least 1. The clock reads whole milliseconds,
+    // so a release time inside the millisecond it shows is due: with a finer time base, waiting
+    // for the remainder asked the millisecond timer for a time already past, again and again
+    // until the clock turned over.
+    AVTS clock_step_ = 1;
     uint64_t tick_drifted_for_ = 0;
     bool woken_too_late_ = false;
 
@@ -213,7 +218,7 @@ public:
                                 logstream << "input no longer queued, returning to realtime mode.";
                                 no_wait_notified_ = false;
                             }
-                            if (diff > 0) {
+                            if (diff >= clock_step_) {
                                 emit = false;
                                 consume = false;
                                 woken_too_late_ = false;
@@ -511,6 +516,7 @@ public:
         }
         r->timebase_ = timebase;
         r->tb_to_rescale_ts_ = timebase;
+        r->clock_step_ = std::max<AVTS>(1, rescaleTS({1, wallclock.timeBase()}, timebase).timestamp());
         auto secondsToTs = [timebase](float seconds) -> AVTS {
             return seconds*(float)timebase.den / (float)timebase.num + 0.5;
         };
