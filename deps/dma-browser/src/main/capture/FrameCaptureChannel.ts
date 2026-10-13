@@ -22,6 +22,8 @@ interface PaintImageLike {
 
 interface TextureMeta {
   fd: number | null;
+  /** sync_file fd that signals when the frame's GPU work is done; null when the producer waited. */
+  fenceFd: number | null;
   stride: number | null;
   offsetBig: bigint;
   modifierBig: bigint;
@@ -59,6 +61,11 @@ export interface FrameCaptureChannelOptions {
  * is enabled, extracts the dmabuf FD, validates dimensions, encodes a 48-byte
  * TexInfo header, and broadcasts to all clients connected to the per-window
  * Unix socket at `socketPath`.
+ *
+ * A patched Electron that does not wait for the GPU before `paint` exposes the frame's
+ * acquire fence as `nativePixmap.acquireFenceFd`; it goes out with the frame as a second fd
+ * and the header says so. Electron owns both fds until the texture is released, so every
+ * path that does not send still ends in `release()` and nothing is closed here.
  */
 export class FrameCaptureChannel implements ICaptureChannel {
   private readonly opts: FrameCaptureChannelOptions;
@@ -77,6 +84,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
   private readonly retainedFrames = new Map<bigint, RetainedFrame>();
   private readonly retainedFramePoolSize: number;
   private held = false;
+  private fenceSeen = false;
   private nextFrameNumber = 0n;
   private readonly boundHandler = (event: unknown, _dirty: unknown, img: unknown) =>
     this.handlePaint(event as PaintEventLike, img as PaintImageLike);
@@ -255,6 +263,13 @@ export class FrameCaptureChannel implements ICaptureChannel {
         const pixelFormat = this.pixelFormatOf(info);
 
         const frameNumber = this.nextFrameNumber++;
+        const acquireFence = meta.fenceFd !== null;
+        if (acquireFence && !this.fenceSeen) {
+          this.fenceSeen = true;
+          this.opts.log.write(
+            'paint textures carry an acquire fence; consumers wait on it before reading',
+          );
+        }
         const header = this.encoder.encode({
           codedWidth: codedW,
           codedHeight: codedH,
@@ -264,10 +279,11 @@ export class FrameCaptureChannel implements ICaptureChannel {
           offset: meta.offsetBig,
           timestampNs: fdpass.monotonicTimeNs(),
           frameNumber,
+          acquireFence,
         });
 
         retained = this.retainTexture(tex, frameNumber);
-        fdpass.broadcastFd(this.opts.socketPath, meta.fd, header).then(
+        fdpass.broadcastFd(this.opts.socketPath, meta.fd, header, meta.fenceFd ?? undefined).then(
           (result) => {
             if (result.sent > 0) this.stats.txFrameCount++;
             // A partial broadcast is both a delivery and a dropped frame for another client.
@@ -325,11 +341,16 @@ export class FrameCaptureChannel implements ICaptureChannel {
     const strideRaw = firstPlane.stride;
     const offsetRaw = firstPlane.offset;
     const rawModifier = legacyPlanes ? info.modifier : (nativePixmap.modifier ?? info.modifier);
+    // -1 or absent (stock Electron): the producer already waited for the GPU.
+    const fenceRaw = nativePixmap.acquireFenceFd;
 
     const fd = typeof fdRaw === 'number' && Number.isFinite(fdRaw) ? fdRaw : null;
+    const fenceFd =
+      typeof fenceRaw === 'number' && Number.isInteger(fenceRaw) && fenceRaw >= 0 ? fenceRaw : null;
     const stride = typeof strideRaw === 'number' && Number.isFinite(strideRaw) ? strideRaw : null;
     return {
       fd,
+      fenceFd,
       stride,
       offsetBig: this.toUint64BigInt(offsetRaw),
       modifierBig: this.toUint64BigInt(rawModifier),
