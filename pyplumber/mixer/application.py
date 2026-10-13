@@ -745,7 +745,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
                              pixel_format=source.filter_output_format or
                              (source.transform.sw_format if source.transform
-                              else mixer_config.RAW_STORAGE.get(source.kind)))
+                              else source.decoded_format or mixer_config.RAW_STORAGE.get(source.kind)))
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")

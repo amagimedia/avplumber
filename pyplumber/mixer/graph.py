@@ -499,7 +499,12 @@ class MixerGraphBuilder:
                                   s.packed_rgb, s.premultiplied_alpha)
             if any(contract(s) != contract(first) for s in sources):
                 raise ValueError(f"Conflicting color contracts for shared input edge {edge!r}")
-            prepared = self._color_edge(first, edge, first.name)
+            # A source whose colour is declared and already what the canvas wants needs its frames
+            # tagged and nothing else. The fan-out it has anyway does that: no filter graph, and no
+            # thread of its own taking every frame from one queue to put it on the next.
+            graph = self._color_graph(first)
+            tags = self._frame_color(first, graph)
+            prepared = edge if tags is not None else self._color_edge(first, edge, first.name, graph)
             outputs = [prepared]
             if len(sources) > 1:
                 outputs = [self._e(f"{s.name}_color_alias") for s in sources]
@@ -507,26 +512,42 @@ class MixerGraphBuilder:
                 "drop": True,
                     "name": self._n(f"color_alias_{first.name}"), "src": prepared, "dst": outputs,
                     "outputs": (1 << len(outputs)) - 1, "group": first.input_group,
+                    **({"frame_color": tags} if tags else {}),
                 }))
+            else:
+                first.frame_color = tags
             result.update((s.name, output) for s, output in zip(sources, outputs))
         return result
 
-    def _color_edge(self, source, edge, label):
+    def _color_graph(self, source):
+        """The filter graph that brings *source*'s frames to the canvas's colour and storage."""
         if source.packed_rgb:
             if self.working_format not in ("nv12", "p010le", "p210le"):
                 raise ValueError("Packed RGB compositing requires a semiplanar canvas (NV12/P010/P210)")
-            graph = source.color.setparams + (":alpha_mode=premultiplied" if source.premultiplied_alpha else "")
-        else:
-            pixel_format = self.working_format
-            if (pixel_format == "p210le" and self.color.transfer != "sdr" and
-                    source.pixel_format not in ("nv16", "p210le", "yuv422p", "yuv422p10le")):
-                # Resolve chroma from the actual frames. The compositor samples
-                # 4:2:0 directly into the 4:2:2 canvas in its existing scale pass.
-                pixel_format = None
-            graph = self.backend.conversion(self.color, pixel_format,
-                                     source=source.color, source_format=source.pixel_format)
-            if source.color_tagged and graph == source.color.setparams:
-                return edge
+            return source.color.setparams + (":alpha_mode=premultiplied" if source.premultiplied_alpha else "")
+        pixel_format = self.working_format
+        if (pixel_format == "p210le" and self.color.transfer != "sdr" and
+                source.pixel_format not in ("nv16", "p210le", "yuv422p", "yuv422p10le")):
+            # Resolve chroma from the actual frames. The compositor samples
+            # 4:2:0 directly into the 4:2:2 canvas in its existing scale pass.
+            pixel_format = None
+        return self.backend.conversion(self.color, pixel_format,
+                                       source=source.color, source_format=source.pixel_format)
+
+    def _frame_color(self, source, graph):
+        """The tags to stamp on *source*'s frames when *graph*, its colour stage, would only tag
+        them; None when it converts, when the source declares no colour (the stage then reads
+        each frame's own tags) or when the frames arrive tagged already."""
+        if source.color is None or source.color_tagged:
+            return None
+        if source.packed_rgb:
+            return {**source.color.tags, **({"alpha_mode": "premultiplied"} if source.premultiplied_alpha else {})}
+        return dict(source.color.tags) if graph == source.color.setparams else None
+
+    def _color_edge(self, source, edge, label, graph=None):
+        graph = graph or self._color_graph(source)
+        if not source.packed_rgb and source.color_tagged and graph == source.color.setparams:
+            return edge
         output = self._e(f"{label}_color")
         self.avp.addNode(FilterVideo({
             "name": self._n(f"color_{label}"), "src": edge, "dst": output,
@@ -558,6 +579,7 @@ class MixerGraphBuilder:
                     "src": prepared_edges[src.name],
                     "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b"), *aux_edges],
                     **({"subscribed_outputs": {edge: edge for edge in aux_edges}} if aux_edges else {}),
+                    **({"frame_color": src.frame_color} if src.frame_color else {}),
                     "outputs": outputs_init,
 
                     "group": src.input_group,
