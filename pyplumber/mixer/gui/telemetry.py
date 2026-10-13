@@ -199,10 +199,12 @@ class RecentCounts:
 
 
 class HostStats:
-    """Host load, CPU use and the mixer's busiest thread, sampled once a second on one thread and
+    """Host load, CPU use and the mixer's busiest threads, sampled once a second on one thread and
     shared by every viewer. Inside the container /proc/loadavg and /proc/stat still describe the
     whole host, not the container's share. `values` is None where /proc is missing and until the
     second sample; its mixer fields are None while no mixer process runs."""
+
+    TOP_THREADS = 8   # how many of the mixer's threads are named, busiest first
 
     def __init__(self, mixer_pid=lambda: None, proc=Path("/proc")):
         self.mixer_pid = mixer_pid   # the mixer's pid, or None while none runs
@@ -240,7 +242,7 @@ class HostStats:
         total, idle = sum(cpu) - sum(last_cpu), cpu[3] + cpu[4] - last_cpu[3] - last_cpu[4]
         values = dict(load1=load1, vcpus=sum(line[3:4].isdigit() for line in lines if line.startswith("cpu")),
                       cpu_pct=round((total - idle) / total * 100) if total > 0 else None,
-                      mixer_cpu_pct=None, thread_pct=None, thread_name=None)
+                      mixer_cpu_pct=None, thread_pct=None, thread_name=None, threads=None)
         elapsed = at - last_at
         same_process = pid and pid == last_pid and process and last_process and process[1] == last_process[1]
         if same_process and process is not None and last_process is not None and elapsed > 0:
@@ -248,10 +250,12 @@ class HostStats:
             if ticks >= 0:
                 values["mixer_cpu_pct"] = round(ticks * 100 / os.sysconf("SC_CLK_TCK") / elapsed, 1)
         if pid and pid == last_pid and elapsed > 0 and (not process or not last_process or same_process):
-            name, ticks = max(((name, ticks - last_threads.get(tid, ("", 0))[1]) for tid, (name, ticks) in threads.items()),
-                              key=lambda item: item[1], default=(None, 0))
-            if name is not None:
-                values.update(thread_pct=round(ticks * 100 / os.sysconf("SC_CLK_TCK") / elapsed), thread_name=name)
+            used = sorted(((ticks - last_threads.get(tid, ("", 0))[1], name) for tid, (name, ticks) in threads.items()),
+                          key=lambda item: -item[0])[:self.TOP_THREADS]
+            if used:
+                pct = lambda ticks: round(ticks * 100 / os.sysconf("SC_CLK_TCK") / elapsed)
+                values.update(thread_pct=pct(used[0][0]), thread_name=used[0][1],
+                              threads=[{"name": name, "pct": pct(ticks)} for ticks, name in used if ticks > 0])
         self.values = values   # a fresh dict: HTTP threads read the previous one meanwhile
 
     def _thread_ticks(self, pid):

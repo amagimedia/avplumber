@@ -925,7 +925,8 @@ function renderWipeCache() {
   m.title = ["Wipe clips decoded in GPU memory", ...(clips.length ? clips : ["none yet"])].join("\n");
 }
 // /api/state carries host where the backend reads /proc; its thread fields only while a mixer process runs.
-// LOAD is the 1-minute load average over the vCPUs (the bar clamps, the number does not); THREAD is one core.
+// LOAD is the 1-minute load average over the vCPUs (the bar clamps, the number does not); THREAD is one core,
+// with the mixer's busiest threads in its tip.
 function renderHost() {
   const h = state.host, g = $("host");
   g.hidden = !h;
@@ -939,7 +940,9 @@ function renderHost() {
   $("thread").hidden = h.thread_pct == null;
   if (h.thread_pct != null) {
     show($("thread"), h.thread_pct, `${h.thread_pct}%`);
-    $("thread").title = `The mixer's busiest thread (${h.thread_name}): its share of one core, the single-thread bottleneck`;
+    // The bar is the busiest thread, the single-thread bottleneck; the tip names the busiest eight.
+    setMeterTip($("thread"), "Busiest mixer threads · share of one core",
+      (h.threads || [{name: h.thread_name, pct: h.thread_pct}]).map((t) => [t.name, `${t.pct}%`]));
   }
 }
 
