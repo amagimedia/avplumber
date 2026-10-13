@@ -171,6 +171,17 @@ def fake_api():
                            **{name: node_type(kind) for name, kind in types.items()})
 
 
+def test_the_application_offers_every_node_class_its_graph_is_built_from():
+    # The graph tests build with fake_api(); a class named only there fails the real start.
+    try:
+        from pyplumber.mixer.application import load_avp_api
+        real = load_avp_api()
+    except ImportError:
+        pytest.skip("the native module is not built")
+    late = {"ClipCache"}   # imported where it is used
+    assert set(vars(fake_api())) - late <= set(vars(real))
+
+
 def test_graph_is_video_only_and_always_preheated():
     FakeMixer.instances.clear()
     application = build_application(
