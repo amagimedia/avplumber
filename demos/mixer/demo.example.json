@@ -5,7 +5,7 @@
   "canvas": {
     "width": 1920, "height": 1080, "fps": 30,
     "working_format": "p210le", "color": "hlg",
-    "raw_upload": "pinned"
+    "raw_upload": "direct"
   },
   "generation": {"seconds": 2},
   "inputs": [
