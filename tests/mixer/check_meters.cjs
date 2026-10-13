@@ -45,13 +45,15 @@ const {chromium} = require('playwright');
     assert.deepEqual(await values('gpu-vram'), ['10.67', '6.00 GiB']);
     assert.deepEqual(await values('gpu-enc'), ['30', '750']);
     assert.deepEqual(await values('cpu'), ['6.00', '32.0']);
-    // THREAD shows the busiest thread. Its tip sums every thread of the mixer by kind, the kind
-    // that uses most first: the whole mixer, then per kind the sum, and for several their mean and busiest.
+    // THREAD shows the busiest thread. Its tip has every thread of the mixer by kind, the kind
+    // with the busiest thread first: the whole mixer, then per kind the mean, the busiest and the
+    // sum; what the server could not list separately comes last.
     assert.equal(await page.locator('#thread b').textContent(), '40%');
     assert.deepEqual(await page.locator('#thread-tip dt').allTextContents(),
-      ['All 1472 threads', 'input_N ×152', 'upload_N ×47', 'mixer_comp_a', 'EventLoop ×5', 'mixer_color_sdr ×105', 'other ×1161']);
-    assert.deepEqual(await values('thread'), ['6.0 cores', '141% · avg 0.9% · max 3.3%', '135% · avg 2.9% · max 3.3%', '40%',
-      '37% · avg 7.4% · max 8.2%', '17% · avg 0.2% · max 0.4%', '230% · avg 0.2% · max 38%']);
+      ['All 1472 threads', 'mixer_comp_a', 'EventLoop ×5', 'input_N ×152', 'upload_N ×47', 'mixer_color_sdr ×105', 'other ×1161']);
+    assert.deepEqual(await values('thread'), ['6.0 cores', '40%', 'avg 7.4% · max 8.2% · sum 37%',
+      'avg 0.9% · max 3.3% · sum 141%', 'avg 2.9% · max 3.3% · sum 135%', 'avg 0.2% · max 0.4% · sum 17%',
+      'avg 0.2% · max 38% · sum 230%']);
     // A server that names only the busiest thread still gets a tip with that one.
     await page.evaluate(() => { const all = state.host.thread_kinds; state.host.thread_kinds = undefined; renderHost();
       window.oneThread = [...document.querySelectorAll('#thread-tip dt')].map((e) => e.textContent); state.host.thread_kinds = all; renderHost(); });

@@ -927,16 +927,18 @@ function renderWipeCache() {
 // /api/state carries host where the backend reads /proc; its thread fields only while a mixer process runs.
 // LOAD is the 1-minute load average over the vCPUs (the bar clamps, the number does not); THREAD is one core,
 // with all of the mixer's threads summed by kind in its tip.
-// The mixer's threads by kind, the kind that uses most CPU first: a show has hundreds of threads
-// of a fraction of a percent each that together use cores. The first row is the whole mixer; one
-// of a kind shows its share of a core, several show their sum, their mean and their busiest.
+// The mixer's threads by kind, the kind with the busiest thread first: that thread is the
+// bottleneck the bar shows. One of a kind shows its share of a core; several show their mean,
+// their busiest and their sum, since hundreds of threads of a fraction of a percent each use
+// cores together. The first row is the whole mixer; twenty rows at most.
 function threadRows(h) {
   const pct = (n) => n >= 10 ? `${Math.round(n)}%` : `${n.toFixed(1)}%`;
-  const kinds = h.thread_kinds || [{name: h.thread_name, count: 1, pct: h.thread_pct, max_pct: h.thread_pct}];
+  const kinds = [...(h.thread_kinds || [{name: h.thread_name, count: 1, pct: h.thread_pct, max_pct: h.thread_pct}])]
+    .sort((a, b) => (a.name === "other") - (b.name === "other") || b.max_pct - a.max_pct || b.pct - a.pct);
   const rows = kinds.map((k) => k.count === 1 ? [k.name, pct(k.pct)]
-    : [`${k.name} ×${k.count}`, `${pct(k.pct)} · avg ${pct(k.pct / k.count)} · max ${pct(k.max_pct)}`]);
-  return Number.isFinite(h.mixer_cpu_pct) && h.thread_count
-    ? [[`All ${h.thread_count} threads`, `${(h.mixer_cpu_pct / 100).toFixed(1)} cores`], ...rows] : rows;
+    : [`${k.name} ×${k.count}`, `avg ${pct(k.pct / k.count)} · max ${pct(k.max_pct)} · sum ${pct(k.pct)}`]);
+  return (Number.isFinite(h.mixer_cpu_pct) && h.thread_count
+    ? [[`All ${h.thread_count} threads`, `${(h.mixer_cpu_pct / 100).toFixed(1)} cores`], ...rows] : rows).slice(0, 20);
 }
 function renderHost() {
   const h = state.host, g = $("host");
@@ -952,7 +954,7 @@ function renderHost() {
   if (h.thread_pct != null) {
     show($("thread"), h.thread_pct, `${h.thread_pct}%`);
     // The bar is the busiest thread, the single-thread bottleneck; the tip sums every thread by kind.
-    setMeterTip($("thread"), "Mixer threads by kind · share of one core", threadRows(h));
+    setMeterTip($("thread"), "Busiest mixer threads by kind · share of one core", threadRows(h));
   }
 }
 

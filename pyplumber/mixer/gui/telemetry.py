@@ -205,7 +205,7 @@ class HostStats:
     whole host, not the container's share. `values` is None where /proc is missing and until the
     second sample; its mixer fields are None while no mixer process runs."""
 
-    THREAD_KINDS = 18    # kinds of thread listed, busiest kind first; the rest are summed as "other"
+    THREAD_KINDS = 18    # kinds of thread listed, the kind with the busiest thread first; the rest are "other"
     KINDS_WINDOW = 5     # samples a kind's figures span: one thread's second is a tick or two
 
     def __init__(self, mixer_pid=lambda: None, proc=Path("/proc")):
@@ -282,8 +282,9 @@ class HostStats:
 
 
 def thread_kinds(used, tick_seconds, limit):
-    """Threads summed by kind: [{"name", "count", "pct", "max_pct"}], the kind that used most CPU
-    first, at most *limit* kinds and then the rest as "other". *used* holds (ticks, thread name).
+    """Threads summed by kind: [{"name", "count", "pct", "max_pct"}], the kind with the busiest
+    thread first (then the larger sum), at most *limit* kinds and then the rest as "other".
+    *used* holds (ticks, thread name).
 
     A show has hundreds of threads that each use a fraction of a percent and together a core:
     one per source for input, decoding, upload, fan-out. Digits in a name become N, so
@@ -304,7 +305,7 @@ def thread_kinds(used, tick_seconds, limit):
             kinds[shorter].update(count=kinds[shorter]["count"] + longer["count"], ticks=kinds[shorter]["ticks"] + longer["ticks"],
                                   max=max(kinds[shorter]["max"], longer["max"]))
     pct = lambda ticks: round(ticks * 100 / tick_seconds, 1) if tick_seconds > 0 else 0.0
-    ranked = sorted(kinds.items(), key=lambda item: -item[1]["ticks"])
+    ranked = sorted(kinds.items(), key=lambda item: (-item[1]["max"], -item[1]["ticks"]))
     rows = [{"name": name, "count": k["count"], "pct": pct(k["ticks"]), "max_pct": pct(k["max"])} for name, k in ranked[:limit]]
     rest = [k for _, k in ranked[limit:]]
     if rest:
