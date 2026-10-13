@@ -166,6 +166,15 @@ public:
     }
 
     Parameters getObject(const std::string key) override {
+        if (key == "per_input") {
+            // Which input repeats, discards or overflows: a question for a diagnosis, not for a
+            // page that polls the status of every bus several times a second.
+            std::lock_guard<std::mutex> lock(playout_stats_mutex_);
+            Parameters per_input = Parameters::array();
+            for (const auto &st : playout_stats_published_)
+                per_input.push_back({{"repeats", st[0]}, {"discarded", st[1]}, {"overflow", st[2]}});
+            return per_input;
+        }
         if (key != "status") throw Error("mixer_compositor: unknown object " + key);
         Parameters result = {{"output_drops", output_drops_.load()}};
         {
@@ -174,15 +183,12 @@ public:
             playout["frames"] = published_frames_;
             playout["missed_deadlines"] = published_missed_deadlines_;
             uint64_t repeats = 0, discarded = 0, overflow = 0;
-            Parameters per_input = Parameters::array();
             for (const auto &st : playout_stats_published_) {
                 repeats += st[0]; discarded += st[1]; overflow += st[2];
-                per_input.push_back({{"repeats", st[0]}, {"discarded", st[1]}, {"overflow", st[2]}});
             }
             playout["repeats"] = repeats;
             playout["discarded"] = discarded;
             playout["overflow"] = overflow;
-            playout["per_input"] = per_input;
             // Bucket bounds in milliseconds, then one histogram per part of a tick; the last
             // bucket of each has no bound.
             Parameters bounds = Parameters::array();

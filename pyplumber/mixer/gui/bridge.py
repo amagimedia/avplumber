@@ -13,6 +13,9 @@ TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")
 PROGRAM_TAKES = ("cut", "fade", "wipe")
 AUX_COMMANDS = ("aux", "aux_layout", "aux_page")
 STATE_TTL_S = 0.2
+# What a show fixes when it is built (its settings, its scenes, the layouts its AUX buses offer) is
+# asked for this often, not on every poll: a new show is seen within that time of its start.
+STATIC_TTL_S = 5.0
 
 
 class MixerBridge:
@@ -35,6 +38,8 @@ class MixerBridge:
         self._state_lock = threading.Lock()
         self._state: dict | None = None
         self._state_at = self._changed_at = float("-inf")
+        self._static: dict | None = None
+        self._static_at = float("-inf")
         self._takes = threading.Condition()
         self._take_arrivals = 0
         self._take_queue: collections.deque[int] = collections.deque()   # waiting, in arrival order
@@ -79,18 +84,56 @@ class MixerBridge:
                 self._state, self._state_at = self._query_state(timeout), now
             return dict(self._state)   # callers add their own top-level keys
 
-    def _query_state(self, timeout: float | None) -> dict:
-        state: dict = {"mixer": self.mixer}
-        state["status"] = self.status(timeout)
-        state["scenes"] = json.loads(self.command(f"mixer.scenes {self.mixer}", timeout) or "[]")
+    def _query_static(self, timeout: float | None) -> dict:
+        static: dict = {"scenes": json.loads(self.command(f"mixer.scenes {self.mixer}", timeout) or "[]")}
         try:
-            state["settings"] = json.loads(self.command(f"mixer.settings {self.mixer}", timeout) or "{}")
+            static["settings"] = json.loads(self.command(f"mixer.settings {self.mixer}", timeout) or "{}")
         except Exception:
-            state["settings"] = {}   # older mixers, or one started without a config
+            static["settings"] = {}   # older mixers, or one started without a config
+        static["aux_layouts"] = {}
+        if static["settings"].get("aux_buses"):
+            try:
+                static["aux_layouts"] = json.loads(self.command("mixer.aux_layouts", timeout) or "{}")
+            except Exception:
+                pass   # a mixer that still sends each bus's layouts with its status
+        return static
+
+    def _static_part(self, timeout: float | None) -> dict:
+        """The show's fixed part, asked of the mixer every STATIC_TTL_S. Call with _state_lock held."""
+        now = time.monotonic()
+        if self._static is None or now - self._static_at >= STATIC_TTL_S:
+            try:
+                self._static, self._static_at = self._query_static(timeout), now
+            except Exception:
+                self._static = None   # the mixer went away: ask again for the next one
+                raise
+        return self._static
+
+    def settings(self, timeout: float | None = None) -> dict:
+        """The running show's settings alone, for a caller that needs nothing live (a player page)."""
+        with self._state_lock:
+            settings = dict(self._static_part(timeout)["settings"])
+        if self.transition is not None:
+            settings["transition"] = self.transition
+        return settings
+
+    def _query_state(self, timeout: float | None) -> dict:
+        static = self._static_part(timeout)
+        state: dict = {"mixer": self.mixer}
+        try:
+            state["status"] = self.status(timeout)
+        except Exception:
+            self._static = None
+            raise
+        state["scenes"] = static["scenes"]
+        state["settings"] = dict(static["settings"])
         if self.transition is not None:
             state["settings"]["transition"] = self.transition
         if state["settings"].get("aux_buses"):
-            state["aux_buses"] = json.loads(self.command("mixer.aux_status", timeout) or "[]")
+            buses = json.loads(self.command("mixer.aux_status", timeout) or "[]")
+            # The page reads each bus's layouts beside its state; they come from the fixed part.
+            state["aux_buses"] = [{**bus, "layouts": static["aux_layouts"][bus["id"]]}
+                                  if bus.get("id") in static["aux_layouts"] else bus for bus in buses]
         if state["settings"].get("dsk_keys"):
             state["dsk"] = json.loads(self.command("mixer.dsk_status", timeout) or "[]")
         return state

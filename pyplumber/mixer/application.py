@@ -681,7 +681,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             bus.build(options)
         aux.register_commands()
     settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
-    avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
+    avp.registerControlCommand("mixer.settings", lambda _arg: settings, True, True)   # polled: not logged
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False,

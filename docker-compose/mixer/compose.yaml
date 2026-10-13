@@ -15,7 +15,8 @@ services:
   janus-preview:
     extends: {file: ../../docker-compose/dmabuf/compose.yaml, service: janus-preview}
     environment:
-      MIXER_STATE_URL: http://127.0.0.1:${MIXER_HTTP_PORT:-7681}/api/state
+      # The players read the outputs and the GPU figures; /api/state would send them every bus's state.
+      MIXER_STATE_URL: http://127.0.0.1:${MIXER_HTTP_PORT:-7681}/api/outputs
 
   wayland:
     extends: {file: ../../docker-compose/dmabuf/compose.yaml, service: wayland}

@@ -70,7 +70,7 @@ class FakeAvp:
     def getEdge(self, name, data_type=None):
         return self.wipes.getEdge(name)
 
-    def registerControlCommand(self, name, handler, _payload):
+    def registerControlCommand(self, name, handler, _payload, _quiet=False):
         self.commands_registered = getattr(self, "commands_registered", {})
         self.commands_registered[name] = handler
 
