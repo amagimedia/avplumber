@@ -7,6 +7,7 @@
 
 #include "../../../deps/dma-browser/addons/fdpass/texinfo.h"
 #include <cstring>
+#include <initializer_list>
 #include <sys/socket.h>
 #include <unistd.h>
 

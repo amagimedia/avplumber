@@ -21,7 +21,7 @@ static int openFds() {
     return count - 3;   // ".", ".." and the directory stream itself
 }
 
-static void signal(int fd) {
+static void signalFd(int fd) {
     const uint64_t one = 1;
     assert(write(fd, &one, sizeof(one)) == sizeof(one));
 }
@@ -29,14 +29,14 @@ static void signal(int fd) {
 static void testWait() {
     FenceWaitStats stats;
     const int signalled = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    signal(signalled);
+    signalFd(signalled);
     FenceWaitResult r = waitForFence(signalled, 100);
     assert(r.outcome == FenceWaitOutcome::Signalled && !r.blocked);
     stats.record(r);
     close(signalled);
 
     const int late = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    std::thread producer([late] { std::this_thread::sleep_for(std::chrono::milliseconds(30)); signal(late); });
+    std::thread producer([late] { std::this_thread::sleep_for(std::chrono::milliseconds(30)); signalFd(late); });
     r = waitForFence(late, 1000);
     producer.join();
     assert(r.outcome == FenceWaitOutcome::Signalled && r.blocked);
@@ -61,13 +61,13 @@ static void testWait() {
     int wakes = 0;
     auto drain = [&] { uint64_t v; while (read(wake, &v, sizeof(v)) == sizeof(v)) {} return ++wakes >= 2; };
     std::thread waker([wake] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10)); signal(wake);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10)); signal(wake);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); signalFd(wake);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); signalFd(wake);
     });
     r = waitForFence(never, 1000, wake, drain);
     waker.join();
     assert(r.outcome == FenceWaitOutcome::Interrupted && wakes == 2 && r.waited_us < 500000);
-    std::thread spurious([wake] { std::this_thread::sleep_for(std::chrono::milliseconds(5)); signal(wake); });
+    std::thread spurious([wake] { std::this_thread::sleep_for(std::chrono::milliseconds(5)); signalFd(wake); });
     r = waitForFence(never, 40, wake, [&] { uint64_t v; while (read(wake, &v, sizeof(v)) == sizeof(v)) {} return false; });
     spurious.join();
     assert(r.outcome == FenceWaitOutcome::TimedOut && r.waited_us >= 40000);

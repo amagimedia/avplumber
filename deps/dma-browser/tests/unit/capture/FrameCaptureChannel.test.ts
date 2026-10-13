@@ -236,7 +236,7 @@ describe('FrameCaptureChannel acquire fence', () => {
     ['a producer that already waited (-1)', {acquireFenceFd: -1}],
     ['stock Electron (no field)', {}],
     ['a non-number', {acquireFenceFd: '5'}],
-  ])('sends no fence and no flag for %s', async (_label, pixmap) => {
+  ] as const)('sends no fence and no flag for %s', async (_label, pixmap) => {
     const {channel, call} = await paint(pixmap);
     expect(call[3]).toBeUndefined();
     expect(call[2].readUInt32LE(12)).toBe(0x42475241);
