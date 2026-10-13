@@ -18,8 +18,9 @@ const {chromium} = require('playwright');
       playout: {frames: 100, missed_deadlines: i === 29 ? 2 : 0}, output_drops: i === 29 ? 1 : 0}));
     const sample = {setup_revision: 1, gpus: [gpu], host: {load1: 12, vcpus: 16, cpu_pct: 55,
       mixer_cpu_pct: 600, thread_pct: 40, thread_name: 'mixer_comp_a',
-      threads: [['mixer_comp_a', 40], ['mixer_comp_b', 38], ['EventLoop', 27], ['EventLoop', 26], ['aux_mv_comp', 6],
-        ['aux_aux3_comp', 4], ['upload_12', 3], ['input_7', 3]].map(([name, pct]) => ({name, pct}))},
+      threads: [['mixer_comp_a', 40], ['mixer_comp_b', 38], ['EventLoop', 28], ['EventLoop', 27], ['EventLoop', 26],
+        ['EventLoop', 23], ['cuda-EvtHandlr', 12], ['control', 11], ['aux_mv_comp', 6], ['EventLoop', 5],
+        ['aux_mv2_comp', 4], ['upload_12', 3], ['input_7', 3], ['aux_aux3_comp', 3]].map(([name, pct]) => ({name, pct}))},
       status: {pgm_scene: 'a', pvw_scene: 'b', transition: 'idle', cut_latency: {direct: {...cuts[2], recent: cuts}},
         playout: {A: {missed_deadlines: 1}, B: {missed_deadlines: 0}}, wipe_cache: {bytes: 200000000, budget_bytes: 600000000}},
       scenes: ['a', 'b'], aux_buses: aux,
@@ -44,11 +45,12 @@ const {chromium} = require('playwright');
     assert.deepEqual(await values('gpu-vram'), ['10.67', '6.00 GiB']);
     assert.deepEqual(await values('gpu-enc'), ['30', '750']);
     assert.deepEqual(await values('cpu'), ['6.00', '32.0']);
-    // THREAD shows the busiest thread; its tip names the busiest eight, busiest first.
+    // THREAD shows the busiest thread; its tip has eight rows, busiest first. Threads of one name
+    // share a row with their count, mean and busiest, which leaves rows for other threads.
     assert.equal(await page.locator('#thread b').textContent(), '40%');
-    assert.deepEqual(await values('thread'), ['40%', '38%', '27%', '26%', '6%', '4%', '3%', '3%']);
+    assert.deepEqual(await values('thread'), ['40%', '38%', '22% avg · 28% max', '12%', '11%', '6%', '4%', '3%']);
     assert.deepEqual(await page.locator('#thread-tip dt').allTextContents(),
-      ['mixer_comp_a', 'mixer_comp_b', 'EventLoop', 'EventLoop', 'aux_mv_comp', 'aux_aux3_comp', 'upload_12', 'input_7']);
+      ['mixer_comp_a', 'mixer_comp_b', 'EventLoop ×5', 'cuda-EvtHandlr', 'control', 'aux_mv_comp', 'aux_mv2_comp', 'upload_12']);
     // A server that names only the busiest thread still gets a tip with that one.
     await page.evaluate(() => { const all = state.host.threads; state.host.threads = undefined; renderHost();
       window.oneThread = [...document.querySelectorAll('#thread-tip dt')].map((e) => e.textContent); state.host.threads = all; renderHost(); });
