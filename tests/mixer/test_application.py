@@ -181,6 +181,19 @@ def test_startup_waits_for_processed_frames_and_aux_shares_them(native_boundary,
             assert app.avp.ready
             events = app.avp.events
             assert events.index("start input_0") < events.index("inspect processed_cam") < events.index("READY")
+            # Every Janus output is built held and released, with a key frame asked for, only after
+            # the last bus has produced encoded output; the compositors then count from zero.
+            assert app.held_outputs == ()   # this show records its program; only its bus goes to Janus
+            outputs = ["aux_cameras_rtp_output"]
+            assert all(app.avp.nodes[name]["hold"] is True for name in outputs)
+            released = [event for event in events if event.endswith(" hold false")]
+            assert released == [f"node.object.set {name} hold false" for name in outputs]
+            assert [event for event in events if event.endswith("_force_keyframe trigger true")] == [
+                "node.object.set aux_cameras_force_keyframe trigger true"]
+            assert [event.split()[1] for event in events if event.endswith(" reset_counters true")] == [
+                "mixer_comp_a", "mixer_comp_b", "aux_cameras_comp"]
+            last_inspected = max(i for i, event in enumerate(events) if event == "inspect aux_cameras_encoded")
+            assert last_inspected < events.index(released[0]) < events.index("READY")
     finally:
         app.stop()
     assert app.avp.shutdown_complete

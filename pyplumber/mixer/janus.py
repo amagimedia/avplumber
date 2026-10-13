@@ -76,6 +76,11 @@ def keyframe_command(node: str) -> str:
     return f"node.object.set {node} trigger true"
 
 
+def release_commands(prefix: str) -> str:
+    """Let a held Janus output go: it starts writing at the next key packet, asked for here."""
+    return f"node.object.set {prefix}_rtp_output hold false\n" + keyframe_command(f"{prefix}_force_keyframe")
+
+
 class RtcpFeedbackGroup:
     """Manage feedback for multiple independently encoded renditions."""
 
@@ -119,7 +124,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                        group: str = "output", codec: str = "", profile: str = "",
                        preset: str = "p7", enc_format: str = "nv12", color=None,
                        hdr_metadata=None, prefix: str = "janus", failure_mode: str = "panic",
-                       dpb_size: int = 0, edge_capacity: int | None = None):
+                       dpb_size: int = 0, edge_capacity: int | None = None, hold: bool = False):
     """Add ``force_fps -> keyframe -> nvenc -> bsf -> rtp mux -> output``; return the RTCP listener.
 
     Defaults to HEVC (Main/Main10), which current Safari and Chrome negotiate
@@ -129,6 +134,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     ``color`` supplies the VUI so an HLG program signals BT.2020/arib-std-b67.
     ``dpb_size`` sets the encoder's reference DPB (:func:`dpb_options`); 0 leaves it to NVENC.
     ``edge_capacity`` plans the capacity of every edge the chain creates; None keeps the plan for ``*``.
+    ``hold`` starts the output held: the chain runs and nothing is sent until :func:`release_commands`.
     """
     node_name = lambda suffix: f"{prefix}_{suffix}"
     keyframe_node = node_name("force_keyframe")
@@ -171,7 +177,8 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                  "ts_sort_wait": 0, "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode}),
         ("Output", {"name": node_name("rtp_output"), "src": node_name("video_rtp_mux"), "url": janus.rtp_url,
                     "format": "rtp", "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode,
-                    "options": {"payload_type": janus.payload_type, "rtpflags": "skip_rtcp", "ssrc": janus.ssrc}}),
+                    "options": {"payload_type": janus.payload_type, "rtpflags": "skip_rtcp", "ssrc": janus.ssrc},
+                    **({"hold": True} if hold else {})}),
     ]
     if edge_capacity is not None:
         for _, params in specs:

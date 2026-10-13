@@ -552,6 +552,10 @@ multiple inputs, 1 output: `av::Packet`
 -   `options` (dictionary) - format options that will be passed to libavformat
 -   `seek_table` (string of file name) - if specified, binary file with native endianness with seek table will be written.
 -   `seek_table_text` (string of file name) - if specified, text file with seek table will be written.
+-   `hold` (boolean, optional, default `false`) - start held: packets are taken from the input and not
+    written, so everything before the output runs (an encoder opens on its first frame) while nothing
+    leaves. `node.object.set <name> hold false` releases it; writing then starts at the next key packet,
+    so ask the encoder for one. `hold true` holds it again.
 
 Format of binary seek table: 16-byte records containing:
 * timestamp of the frame in milliseconds: int64_t
@@ -1157,6 +1161,10 @@ output edge; the bus keeps playing and draws again once it has room), `playout`
 `composition_revision`, the revision of the composition being drawn (set when
 one is applied at once or a staged one becomes ready, unchanged when a staged
 one is dropped; empty for one without a revision).
+
+`node.object.set <node> reset_counters true` starts `missed_deadlines`, the per-input counters,
+`output_drops` and `playout.timing` again from zero, for a caller that has finished starting the
+show; `frames` keeps counting and the playout is not disturbed.
 
 `playout.timing` says where each drawn tick's time went: `period_ms`, `bounds_ms` (the upper
 bounds of all buckets but the last: a quarter, a half, three quarters, one, one and a quarter,
