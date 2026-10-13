@@ -32,7 +32,7 @@ def check(fmt, upload, native_rate=False, *, composite=False):
         try:
             edge = build_raw420_input(avp, api, "raw", str(path), width=width, height=height, pixel_format=fmt,
                                     fps=fps, group="probe", hwaccel="raw_gpu", loop=True, pinned=upload == "pinned",
-                                    direct=upload == "direct", color=color, native_rate=native_rate)
+                                    direct=upload in ("direct", "resident"), resident=upload == "resident", color=color, native_rate=native_rate)
             if composite:
                 # Upload tags must satisfy the compositor without a separate color node.
                 compositor = api.MixerCompositor({
@@ -113,7 +113,7 @@ def check_v210(width, native_rate=False):
 if __name__ == "__main__":
     for native_rate in (False, True):
         for fmt in ("nv12", "p010le"):
-            for upload in ("hwupload", "pinned", "direct"):
+            for upload in ("hwupload", "pinned", "direct", "resident"):
                 check(fmt, upload, native_rate)
                 if native_rate:
                     check(fmt, upload, native_rate, composite=True)
