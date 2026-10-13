@@ -271,6 +271,12 @@ public:
     }
     size_t queued(size_t input) const { return inputs_.at(input).queue.size(); }
     uint64_t missedDeadlines() const { return missed_deadlines_; }
+    /// Starts the counters again: what was missed, repeated, discarded or overflowed so far
+    /// belongs to a start-up the caller has declared over. Queued frames and the tick grid stay.
+    void resetCounters() {
+        missed_deadlines_ = 0;
+        for (auto &input : inputs_) input.stats = Stats{};
+    }
     /// Ticks the pending decision skips: output frames never composed because prepare() was
     /// reached more than one tick after their deadline. commit() adds them to missedDeadlines().
     int64_t skippedByPending() const {

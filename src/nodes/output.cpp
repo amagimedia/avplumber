@@ -1,4 +1,5 @@
 #include "node_common.hpp"
+#include <atomic>
 #include <fstream>
 
 #pragma pack(push)
@@ -12,9 +13,14 @@ struct SeekTableEntry {
 #define SEEK_TABLE_FILES_COUNT 4
 #define MAX_SEEK_TABLE_ENTRIES 60
 
-class StreamOutput: public NodeSingleInput<av::Packet>, public IFlushable, public ReportsFinishByFlag {
+class StreamOutput: public NodeSingleInput<av::Packet>, public IFlushable, public ReportsFinishByFlag,
+                    public IInputsObjects {
 protected:
     av::FormatContext octx_;
+    // `hold`: packets are taken and not written, so the chain before the output runs (an encoder
+    // opens on its first frame) while nothing leaves. Released, writing starts at a key packet.
+    std::atomic<bool> held_{false};
+    bool wait_for_key_ = false;
     bool write_seek_table_ = false;
     std::ofstream seek_table_text_[SEEK_TABLE_FILES_COUNT];
     std::ofstream seek_table_bin_[SEEK_TABLE_FILES_COUNT];
@@ -69,6 +75,14 @@ public:
             flush();
             return;
         }
+        if (pkt && held_.load(std::memory_order_acquire)) {
+            wait_for_key_ = true;
+            return;
+        }
+        if (pkt && wait_for_key_) {
+            if (!pkt.isKeyPacket()) return;
+            wait_for_key_ = false;
+        }
         if (pkt) {
             try {
                 if (write_seek_table_ && octx_.raw() && octx_.raw()->pb && (pkt.streamIndex() == 0)) {
@@ -109,6 +123,10 @@ public:
                 }
             }
         }
+    }
+    void setObject(const std::string key, const Parameters &value) override {
+        if (key != "hold") throw Error("output: unknown object key: " + key);
+        held_.store(value.get<bool>(), std::memory_order_release);
     }
     virtual void flush() {
         if (should_close_) {
@@ -162,6 +180,7 @@ public:
         
         muxer->initFromFormatContextPostOpen(octx);
 
+        if (params.count("hold")) r->held_.store(params["hold"].get<bool>());
         if (params.count("seek_table")) {
             r->seek_table_url_ = params["seek_table"];
             for (int i = 0; i < SEEK_TABLE_FILES_COUNT; i++) {

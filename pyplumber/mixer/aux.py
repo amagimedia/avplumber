@@ -121,7 +121,8 @@ class AuxBus:
                              rtcp_bind=options.janus_rtcp_bind, rtcp_port=0),
             fps=fps, width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
-            prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1)
+            prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
+            hold=True)   # MixerApplication releases every output together once the show has settled
         self.avp.addNode(_PvwFollowNode({
             "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,
             "fps": str(fps), "latency_ms": latency, "main_latency_ms": self.main_latency_ms(),

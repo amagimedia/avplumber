@@ -35,6 +35,8 @@ class MixerCompositor : public CudaRectCompositor,
     std::string composition_revision_; // of the composition being drawn; protected by layers_mutex_
     bool aux_ = false;
     std::atomic<uint64_t> output_drops_{0};
+    // Set by `reset_counters`; the output thread zeroes its counters before its next tick.
+    std::atomic<bool> reset_counters_{false};
     // Playout counters snapshotted every 60 frames for the status object; the
     // control thread never touches playout_ itself.
     std::mutex playout_stats_mutex_;
@@ -205,6 +207,15 @@ public:
     }
 
     void process() override {
+        if (reset_counters_.exchange(false, std::memory_order_acq_rel) && playout_) {
+            playout_->resetCounters();
+            timing_ = TickTiming(timing_.draw.periodNs());
+            output_drops_ = 0;
+            std::lock_guard<std::mutex> lock(playout_stats_mutex_);
+            for (auto &st : playout_stats_published_) st = {};
+            published_missed_deadlines_ = 0;
+            published_timing_ = timing_;
+        }
         {
             std::optional<Parameters> update;
             {
@@ -343,7 +354,9 @@ public:
                 composite(av::Timestamp(decision->index, av_inv_q(frame_rate_.getValue())), sources, metadata);
         }
         playout_->commit();
-        if (frame_counter_ % 60 == 0) {
+        // Every 60 frames, and at once when a deadline was missed: a reader waiting for the
+        // start-up to settle must not see a two-second-old zero.
+        if (frame_counter_ % 60 == 0 || playout_->missedDeadlines() != published_missed_deadlines_) {
             std::vector<std::array<uint64_t, 3>> snapshot;
             snapshot.reserve(sources.size());
             for (size_t i = 0; i < sources.size(); ++i) {
@@ -394,6 +407,10 @@ public:
                 composition_error_.clear();
             }
             stop_event_.signal();
+        } else if (key == "reset_counters") {
+            // The show's start-up is over: count missed deadlines, repeats and drops from here.
+            reset_counters_.store(true, std::memory_order_release);
+            wakeInputs();
         } else if (key == "active_inputs") {
             setActiveInputs(avp::mixer::parseSourceMask(value));
             wakeInputs();
