@@ -262,11 +262,13 @@ public:
             this->waitForInput();
             return;
         }
+        bool more_queued = false;   // an input still holds frames beyond this pass's bound
         for (size_t i = 0; i < source_edges_.size(); ++i) {
             if (!(active | prewarm).test((int)i)) continue;
             // Bound ingestion as well as storage; an unpaced producer must not
             // monopolize the output thread before it reaches its deadline.
-            for (size_t received = 0; received < 8; ++received) {
+            size_t received = 0;
+            for (; received < 8; ++received) {
                 auto *frame = source_edges_[i]->peek();
                 if (!frame) break;
                 if (isEofMarker(*frame)) {
@@ -280,6 +282,7 @@ public:
                 }
                 source_edges_[i]->pop();
             }
+            if (received == 8 && source_edges_[i]->peek()) more_queued = true;
         }
         if (staged_composition_) {
             const auto now_ns = avp::mixer::monotonicNs();
@@ -312,7 +315,11 @@ public:
         const auto *decision = playout_->prepare(avp::mixer::monotonicNs(), require_all);
         if (!decision) {
             const int64_t waiting = avp::mixer::monotonicNs();
-            this->findSourceWithData(avp::mixer::waitMilliseconds(playout_->nextDeadline(), waiting));
+            // The pass above took in every input, so there is nothing to look for: sleep until
+            // a source signals a frame or the next deadline. An event keeps its signal until it
+            // is read, so a frame that arrived after the pass ends the wait at once.
+            if (!more_queued && !stopping_)
+                this->waitForInput(avp::mixer::waitMilliseconds(playout_->nextDeadline(), waiting));
             longest_input_wait_ns_ = std::max(longest_input_wait_ns_, avp::mixer::monotonicNs() - waiting);
             return;
         }
