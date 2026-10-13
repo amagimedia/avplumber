@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <vector>
 
 extern "C" {
 #include <libavutil/parseutils.h>
@@ -20,6 +21,10 @@ extern "C" {
 // the CPU (page cache to the block) where demuxing, wrapping and a staged upload copy them twice,
 // on one thread where that chain has four. Nothing is kept between passes: every picture shown
 // was read from the file and transferred for that showing.
+//
+// `resident` keeps a looped file's pictures in that memory instead: each is read when it is
+// first shown and only transferred after that, and the file is read again once it has changed.
+// The memory is the size of the file and cannot be swapped out.
 class RawVideoFileCuda: public NodeSingleOutput<av::VideoFrame>, public ReportsFinishByFlag, public IStoppable,
                         public IVideoFormatSource, public IFrameRateSource, public ITimeBaseSource,
                         public IReturnsObjects {
@@ -34,6 +39,7 @@ protected:
     bool loop_continuous_ts_ = false;
     bool send_eof_ = true;
     bool write_combined_ = false;
+    bool resident_ = false;
     FrameColorTags color_;
     std::shared_ptr<HWAccelDevice> hwaccel_;
 
@@ -41,10 +47,24 @@ protected:
     std::unique_ptr<RawFrameIndex> index_;
     std::unique_ptr<CudaPinnedUploader> uploader_;
     uint64_t next_ = 0;   // pictures emitted since start
-    std::atomic<uint64_t> frames_{0}, read_us_{0}, upload_us_{0};
+    std::vector<bool> held_;   // resident: the pictures already in the block
+    struct timespec modified_{};
+    std::atomic<uint64_t> frames_{0}, file_reads_{0}, read_us_{0}, upload_us_{0};
 
-    void readPicture(int64_t offset) {
-        uint8_t *block = uploader_->block();
+    struct stat fileStatus() {
+        struct stat st{};
+        if (fstat(fd_, &st) != 0) throw Error("raw_video_file_cuda: fstat " + path_ + ": " + std::strerror(errno));
+        return st;
+    }
+    // A file written since its pictures were read is read again, picture by picture as shown.
+    void forgetChangedFile() {
+        const struct stat st = fileStatus();
+        if (st.st_mtim.tv_sec == modified_.tv_sec && st.st_mtim.tv_nsec == modified_.tv_nsec) return;
+        modified_ = st.st_mtim;
+        held_.assign(held_.size(), false);
+    }
+    void readPicture(int64_t offset, size_t slot) {
+        uint8_t *block = uploader_->block(slot);
         for (int64_t done = 0; done < index_->frame_size;) {
             const ssize_t r = pread(fd_, block + done, size_t(index_->frame_size - done), offset + done);
             if (r < 0 && errno == EINTR) continue;
@@ -52,6 +72,7 @@ protected:
             if (r == 0) throw Error("raw_video_file_cuda: " + path_ + " ends inside a picture; has it shrunk?");
             done += r;
         }
+        ++file_reads_;
     }
 
 public:
@@ -61,8 +82,8 @@ public:
         NodeSingleOutput::init(edges, params);
         fd_ = open(path_.c_str(), O_RDONLY | O_CLOEXEC);
         if (fd_ < 0) throw Error("raw_video_file_cuda: cannot open " + path_ + ": " + std::strerror(errno));
-        struct stat st{};
-        if (fstat(fd_, &st) != 0) throw Error("raw_video_file_cuda: fstat " + path_ + ": " + std::strerror(errno));
+        const struct stat st = fileStatus();
+        modified_ = st.st_mtim;
         try {
             index_ = std::make_unique<RawFrameIndex>(sw_format_, width_, height_, frame_rate_.getValue(), st.st_size);
         } catch (const std::invalid_argument &e) {
@@ -70,7 +91,9 @@ public:
         }
         if (st.st_size % index_->frame_size)
             logstream << "raw_video_file_cuda: " << path_ << " ends with part of a picture, which is not shown";
-        uploader_ = std::make_unique<CudaPinnedUploader>(hwaccel_, sw_format_, width_, height_, write_combined_);
+        if (resident_) held_.assign(size_t(index_->frames), false);
+        uploader_ = std::make_unique<CudaPinnedUploader>(hwaccel_, sw_format_, width_, height_, write_combined_,
+                                                         resident_ ? held_.size() : 1);
     }
 
     void process() override {
@@ -84,10 +107,15 @@ public:
         const auto microseconds = [](Clock::duration d) {
             return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(d).count());
         };
+        const size_t slot = resident_ ? size_t(offset / index_->frame_size) : 0;
+        if (resident_ && slot == 0 && next_) forgetChangedFile();
         const auto started = Clock::now();
-        readPicture(offset);
+        if (!resident_ || !held_[slot]) {
+            readPicture(offset, slot);
+            if (resident_) held_[slot] = true;
+        }
         const auto was_read = Clock::now();
-        av::VideoFrame frame = uploader_->upload();
+        av::VideoFrame frame = uploader_->upload(slot);
         const auto uploaded = Clock::now();
 
         AVFrame *raw = frame.raw();
@@ -119,7 +147,7 @@ public:
         if (key != "stats") throw Error("raw_video_file_cuda: unknown object " + key);
         const uint64_t frames = frames_.load();
         return {{"frames", frames}, {"passes", index_ ? frames / uint64_t(index_->frames) : 0},
-                {"read_us", read_us_.load()}, {"upload_us", upload_us_.load()}};
+                {"file_reads", file_reads_.load()}, {"read_us", read_us_.load()}, {"upload_us", upload_us_.load()}};
     }
 
     ~RawVideoFileCuda() {
@@ -151,6 +179,7 @@ public:
         r->loop_continuous_ts_ = params.value("loop_continuous_ts", false);
         r->send_eof_ = params.value("send_eof", true);
         r->write_combined_ = params.value("write_combined", false);
+        r->resident_ = r->loop_ && params.value("resident", false);
         if (params.count("frame_color")) r->color_ = FrameColorTags::parse(params["frame_color"]);
         r->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
         if (!r->hwaccel_ || r->hwaccel_->hardwarePixelFormat() != AV_PIX_FMT_CUDA)

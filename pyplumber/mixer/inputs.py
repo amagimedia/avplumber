@@ -158,7 +158,8 @@ RAW_UPLOADED_CAPACITY = 1
 def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                        pixel_format: str, fps: int, fps_den: int = 1,
                        hwaccel: str = "@gpu", loop: bool = False, event_loop: Optional[str] = None,
-                       pinned: bool = False, direct: bool = False, native_rate: bool = False, color=None) -> str:
+                       pinned: bool = False, direct: bool = False, resident: bool = False, native_rate: bool = False,
+                       color=None) -> str:
     """CPU/GPU interop source: raw NV12/P010 file -> CUDA frames -> paced output edge.
 
     Default: ``input_rec -> demux -> dec_video(rawvideo) -> filter(setpts) ->
@@ -176,7 +177,9 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     each picture from the file into page-locked memory and the device takes it from there:
     one CPU copy of the samples and one thread, where ``pinned`` has two copies and four
     threads. It also uploads one frame ahead of pacing, and holds no packets in memory
-    ahead of that. The node stamps the color tags.
+    ahead of that. The node stamps the color tags. With ``resident`` a looped file's pictures
+    stay in that memory after their first showing, so later passes read nothing; the memory is
+    the size of the file.
     """
     if pixel_format not in ("nv12", "p010le"):
         raise ValueError("raw 4:2:0 upload requires nv12 or p010le")
@@ -189,7 +192,7 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
         avp.addNode(api.RawVideoFileCuda({
             "name": f"input_{tag}", "url": path, "dst": uploaded, "hwaccel": hwaccel, "group": group,
             "pixel_format": pixel_format, "video_size": f"{width}x{height}", "framerate": f"{fps}/{fps_den}",
-            "loop": loop, "loop_continuous_ts": loop,
+            "loop": loop, "loop_continuous_ts": loop, **({"resident": True} if resident and loop else {}),
             **({"frame_color": Color.parse(color).tags} if color is not None else {}),
             **_raw_file_restart(loop),
         }))

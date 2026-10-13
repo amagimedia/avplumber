@@ -778,11 +778,16 @@ Parameters:
     `one_to_many`: `color_trc`, `color_primaries`, `colorspace`, `color_range`
 -   `write_combined` (bool, default `false`) - allocate the page-locked memory write-combined.
     Whether that makes the read cheaper depends on the host; measure before using it.
+-   `resident` (bool, default `false`) - with `loop`: keep the file's pictures in the
+    page-locked memory. Each is read when it is first shown and only transferred after that,
+    so a pass after the first reads nothing. Where a pass starts the node compares the file's
+    modification time and reads the pictures again if it has changed. The memory is the size
+    of the file and cannot be swapped out; the node fails to start if it cannot be had.
 
 The read is a blocking local `pread`; there is no read timeout, and a file that ends inside a
 picture after it was opened stops the node with an error. `node.object.get <node> stats`
-returns `frames`, `passes` and the duration of the last read and upload (`read_us`,
-`upload_us`).
+returns `frames`, `passes`, the number of pictures read from the file (`file_reads`) and the
+duration of the last read and upload (`read_us`, `upload_us`).
 
 The upload half is `src/nodes/hwaccel/CudaPinnedUploader.hpp`, which any source able to write
 its samples where it is told can use.
