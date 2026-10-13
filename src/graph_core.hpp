@@ -414,25 +414,21 @@ protected:
         }
     }
 
-    // try_func returns whether item appeared in the queue
+    // try_func returns whether item appeared in the queue and signals the
+    //   other side itself (try_enqueue, try_dequeue), so a hand-off wakes it once
     // wait_func waits and returns false if timeout, true otherwise
     // alt_finish indicates whether we're finishing without giving data
     //   (as ALTernative way of ending the wait)
-    static inline bool waitDo(std::function<bool()> try_func, std::function<bool()> wait_func, std::atomic_bool &alt_finish, Event &signal_event) {
+    static inline bool waitDo(std::function<bool()> try_func, std::function<bool()> wait_func, std::atomic_bool &alt_finish) {
         bool finish = false;
         while (!( try_func() || (finish = alt_finish) )) {
             if (!wait_func()) {
                 return false;
             }
         }
-        if (!finish) {
-            signal_event.signal();
-            return true;
-        } else {
-            // Stop remains latched through final process/flush calls. A newly
-            // connected producer or consumer resets it in setNodePointer().
-            return false;
-        }
+        // Stop remains latched through final process/flush calls. A newly
+        // connected producer or consumer resets it in setNodePointer().
+        return !finish;
     }
 
     bool popInternal() {
@@ -568,6 +564,8 @@ public:
     }
     bool try_enqueue(const T &elem) {
         if (flushing_) {
+            // Dropped; the consumer is woken anyway, as the blocking enqueue always did.
+            produced_.signal();
             return true;
         }
         bool r = queue_.try_enqueue(elem);
@@ -626,7 +624,7 @@ public:
     // lambdas don't support move semantics so generally the above is useless
     bool enqueue(const T &elem) {
         last_ts_ = elem.pts();
-        return waitDo([this, &elem](){ return try_enqueue(elem); }, [this]() { consumed_.wait(); return true; }, finish_producer_, produced_);
+        return waitDo([this, &elem](){ return try_enqueue(elem); }, [this]() { consumed_.wait(); return true; }, finish_producer_);
     }
     T* peek() {
         return queue_.peek();
@@ -654,11 +652,11 @@ public:
     }
     void wait_dequeue(T &elem) {
         maybeFlush();
-        waitDo([this, &elem]() { return try_dequeue(elem); }, [this]() { produced_.wait(); return true; }, finish_consumer_, consumed_);
+        waitDo([this, &elem]() { return try_dequeue(elem); }, [this]() { produced_.wait(); return true; }, finish_consumer_);
     }
     bool wait_dequeue_timed_ms(T &elem, const unsigned int msec) {
         maybeFlush();
-        return waitDo([this, &elem]() { return try_dequeue(elem); }, [this, msec]() { return produced_.wait(msec) > 0; }, finish_consumer_, consumed_);
+        return waitDo([this, &elem]() { return try_dequeue(elem); }, [this, msec]() { return produced_.wait(msec) > 0; }, finish_consumer_);
     }
     virtual void waitEmpty() override {
         while (occupied_.load() > 0) {
