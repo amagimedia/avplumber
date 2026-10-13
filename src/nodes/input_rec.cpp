@@ -31,6 +31,26 @@ enum class ETimestampSource {
     ts_Wallclock
 };
 
+// Keys stamped on the frames the decoders hand back (setFrameMetadataTimestamps);
+// the `frame_metadata` parameter selects a subset of them.
+enum FrameMetadataKey: unsigned {
+    fm_video_ts = 1 << 0,
+    fm_video_pts = 1 << 1,
+    fm_input_ts = 1 << 2,
+    fm_output_ts = 1 << 3,
+    fm_wallclock_ts = 1 << 4,
+    fm_wallclock = 1 << 5,
+    fm_frame_no = 1 << 6,
+    fm_frame_ts = 1 << 7,
+    fm_sample_rate = 1 << 8,
+    fm_all = (1 << 9) - 1
+};
+static const std::unordered_map<std::string, unsigned> frame_metadata_keys = {
+    {"video_ts", fm_video_ts}, {"video_pts", fm_video_pts}, {"input_ts", fm_input_ts},
+    {"output_ts", fm_output_ts}, {"wallclock_ts", fm_wallclock_ts}, {"wallclock", fm_wallclock},
+    {"frame_no", fm_frame_no}, {"frame_ts", fm_frame_ts}, {"sample_rate", fm_sample_rate}
+};
+
 class RecordingInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag, public IPlaybackControl,
                    public IStoppable, public IInterruptible, public IReturnsObjects, public IInputsObjects, public ISeekAt, public ISpeed {
 protected:
@@ -90,6 +110,7 @@ protected:
     Event seek_resume_;
     float preseek_ = 0;
     int video_stream_ = -1;
+    unsigned frame_metadata_ = fm_all;
 
     av::Timestamp shift_ = NOTS;
     Parameters streams_object_, programs_object_;
@@ -407,19 +428,25 @@ private:
             av_dict_set(&frame->metadata, metadata_name, value.c_str(), 0);
         };
 
-        set_ts("video_ts", ts_v);
-        set_ts("video_pts", frm.pts());
-        set_ts("input_ts", ts_in);
-        set_ts("output_ts", ts_out);
-        set_ts("wallclock_ts", ts_wallclock);
-        av_dict_set(&frame->metadata, "wallclock", std::to_string(ts_wallclock.timestamp({1, 1000})).c_str(), 0);
+        if (frame_metadata_ & fm_video_ts) set_ts("video_ts", ts_v);
+        if (frame_metadata_ & fm_video_pts) set_ts("video_pts", frm.pts());
+        if (frame_metadata_ & fm_input_ts) set_ts("input_ts", ts_in);
+        if (frame_metadata_ & fm_output_ts) set_ts("output_ts", ts_out);
+        if (frame_metadata_ & fm_wallclock_ts) set_ts("wallclock_ts", ts_wallclock);
+        if (frame_metadata_ & fm_wallclock) {
+            av_dict_set(&frame->metadata, "wallclock", std::to_string(ts_wallclock.timestamp({1, 1000})).c_str(), 0);
+        }
         if (frame_index >= 0) {
-            av_dict_set(&frame->metadata, "frame_no", std::to_string(frame_index).c_str(), 0);
-            auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
-            if (frame_index < seek_table_.size()) {
-                av_dict_set(&frame->metadata, "frame_ts", std::to_string(seek_table_[frame_index].timestamp_ms).c_str(), 0);
+            if (frame_metadata_ & fm_frame_no) {
+                av_dict_set(&frame->metadata, "frame_no", std::to_string(frame_index).c_str(), 0);
             }
-        } else {
+            if (frame_metadata_ & fm_frame_ts) {
+                auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+                if (frame_index < seek_table_.size()) {
+                    av_dict_set(&frame->metadata, "frame_ts", std::to_string(seek_table_[frame_index].timestamp_ms).c_str(), 0);
+                }
+            }
+        } else if (frame_metadata_ & fm_frame_ts) {
             av_dict_set(&frame->metadata, "frame_ts", std::to_string(frm.pts().timestamp({1, 1000})).c_str(), 0);
         }
     }
@@ -450,10 +477,17 @@ public:
         return ictx_;
     }
     virtual void setFrameMetadataTimestamps(av::AudioSamples& frame) override {
-        av_dict_set(&frame.raw()->metadata, "frame_ts", std::to_string(frame.pts().timestamp({1, 1000})).c_str(), 0);
-        av_dict_set(&frame.raw()->metadata, "sample_rate", std::to_string(frame.raw()->sample_rate).c_str(), 0);
+        if (frame_metadata_ & fm_frame_ts) {
+            av_dict_set(&frame.raw()->metadata, "frame_ts", std::to_string(frame.pts().timestamp({1, 1000})).c_str(), 0);
+        }
+        if (frame_metadata_ & fm_sample_rate) {
+            av_dict_set(&frame.raw()->metadata, "sample_rate", std::to_string(frame.raw()->sample_rate).c_str(), 0);
+        }
     }
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) override {
+        if (frame_metadata_ == 0) {
+            return;
+        }
         av::Timestamp video_ts = frame.pts();
         av::Timestamp input_ts = video_ts;
         av::Timestamp output_ts = video_ts;
@@ -525,7 +559,7 @@ public:
         {
             // get frame index
             int64_t frame_index = -1;
-            {
+            if (frame_metadata_ & (fm_frame_no | fm_frame_ts)) {
                 auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
 
                 if (!seek_table_.empty()) {
@@ -1100,6 +1134,16 @@ public:
 
         if (params.count("preseek")) {
             preseek_ = params["preseek"];
+        }
+        if (params.count("frame_metadata") > 0) {
+            frame_metadata_ = 0;
+            for (const std::string &key: jsonToStringList(params["frame_metadata"])) {
+                auto found = frame_metadata_keys.find(key);
+                if (found == frame_metadata_keys.end()) {
+                    throw Error("Unknown frame_metadata key: " + key);
+                }
+                frame_metadata_ |= found->second;
+            }
         }
 
         std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["dst"]);

@@ -32,6 +32,11 @@ It has the same parameters as the `input` node and some additional
 -   `timestamp_source` (string) - timestamp source used to synchronize multiple videos. Possible values are `wallclock` and `input`. Both values are calculated from the timestamps offsets file (`ts_offsets`)
 -   `preseek` (float, seconds, default 0) - how many seconds to preseek back to increase chance of finding a keyframe, when seek to timestamp (`seek` command) is requested
 -   `team` (string, name of instance-shared object) - if specified, seeks on the `input` nodes may be synchronized inside specified team 
+-   `frame_metadata` (list of strings, default: all of them) - which keys the node stamps on the frames its decoders hand back:
+    `video_ts`, `video_pts`, `input_ts`, `output_ts`, `wallclock_ts`, `wallclock`, `frame_no`, `frame_ts` on video frames
+    (`frame_no`, and `frame_ts` from the table, need `seek_table`), `frame_ts` and `sample_rate` on audio frames.
+    `realtime` reads `frame_no`, `frame_ts` and `wallclock` for its team and playback info and `speed_video` reads `frame_ts`;
+    a graph that reads none of them may pass `[]` and spare every frame the stamping and every hop the dictionary copy
 
 Runtime control: `node.object.set <name> request-eof true` interrupts further
 input reads while keeping the producer alive to drain buffered demux/parser
