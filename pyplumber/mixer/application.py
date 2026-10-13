@@ -405,6 +405,7 @@ def load_avp_api():
         OneToMany,
         Output,
         PreheatVideoRouter,
+        RawVideoFileCuda,
         Realtime,
         RepeatLastFrame,
         SmoothTimestamps,
@@ -433,6 +434,7 @@ def load_avp_api():
         OneToMany=OneToMany,
         Output=Output,
         PreheatVideoRouter=PreheatVideoRouter,
+        RawVideoFileCuda=RawVideoFileCuda,
         Realtime=Realtime,
         RepeatLastFrame=RepeatLastFrame,
         RtcpFeedbackListener=RtcpFeedbackListener,
@@ -704,7 +706,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 pixel_format="p010le" if source.kind == "p010" else "nv12",
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned", native_rate=True, color=source.color)
+                event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned",
+                direct=cfg.raw_upload == "direct", native_rate=True, color=source.color)
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,

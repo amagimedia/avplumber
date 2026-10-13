@@ -158,7 +158,7 @@ RAW_UPLOADED_CAPACITY = 1
 def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                        pixel_format: str, fps: int, fps_den: int = 1,
                        hwaccel: str = "@gpu", loop: bool = False, event_loop: Optional[str] = None,
-                       pinned: bool = False, native_rate: bool = False, color=None) -> str:
+                       pinned: bool = False, direct: bool = False, native_rate: bool = False, color=None) -> str:
     """CPU/GPU interop source: raw NV12/P010 file -> CUDA frames -> paced output edge.
 
     Default: ``input_rec -> demux -> dec_video(rawvideo) -> filter(setpts) ->
@@ -171,9 +171,29 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     stream, using the shared CUDA device. It uploads one frame ahead of pacing
     (RAW_UPLOADED_CAPACITY). Requires the pinned-upload FFmpeg patch.
     When supplied, color tags are stamped in the existing upload graph.
+
+    ``direct``: ``raw_video_file_cuda -> realtime(set_pts) -> force_fps``. One node reads
+    each picture from the file into page-locked memory and the device takes it from there:
+    one CPU copy of the samples and one thread, where ``pinned`` has two copies and four
+    threads. It also uploads one frame ahead of pacing, and holds no packets in memory
+    ahead of that. The node stamps the color tags.
     """
     if pixel_format not in ("nv12", "p010le"):
         raise ValueError("raw 4:2:0 upload requires nv12 or p010le")
+    if pinned and direct:
+        raise ValueError("pinned and direct are two different upload paths")
+    if direct:
+        uploaded = f"input_{tag}_cuda"
+        # addNode creates the edge, so the plan must come first.
+        avp.edges.planCapacity(uploaded, RAW_UPLOADED_CAPACITY)
+        avp.addNode(api.RawVideoFileCuda({
+            "name": f"input_{tag}", "url": path, "dst": uploaded, "hwaccel": hwaccel, "group": group,
+            "pixel_format": pixel_format, "video_size": f"{width}x{height}", "framerate": f"{fps}/{fps_den}",
+            "loop": loop, "loop_continuous_ts": loop,
+            **({"frame_color": Color.parse(color).tags} if color is not None else {}),
+            **_raw_file_restart(loop),
+        }))
+        return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop, native_rate=native_rate)
     tags = "," + Color.parse(color).setparams if color is not None else ""
     if not pinned:
         from .backends.cuda import CudaMixerBackend   # backends load only when used
