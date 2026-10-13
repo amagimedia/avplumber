@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 import pytest
+from types import SimpleNamespace
 
 from pyplumber.mixer import MixerOptions, SourceContext, build_application
 from pyplumber.mixer import config
@@ -134,6 +135,22 @@ def test_invalid_processing_edge_shuts_down_partial_engine(edge):
     with pytest.raises(ValueError, match="process_source for 'cam'.*video edge"):
         build_application(show(), process_source=lambda ctx: edge, api=api)
     assert engine.shut_down
+
+
+def test_going_on_air_releases_idle_browser_imports_before_the_outputs():
+    from pyplumber.mixer.application import MixerApplication
+    commands = []
+    avp = SimpleNamespace(executeCommandsFromString=lambda text: commands.extend(text.splitlines()),
+                          node=lambda name: SimpleNamespace(getObject=lambda key: {"instance_cleanup_pending": 0}))
+    app = MixerApplication(avp=avp, mixer=None, input_groups=(), input_edges=(), routed_inputs=False,
+                           preheat_timeout_sec=1, held_outputs=("janus",),
+                           browser_importers=("input_3_to_cuda", "input_7_to_cuda"))
+    app._go_on_air()
+    purged = [command for command in commands if " purge_idle " in command]
+    assert purged == ["node.object.set input_3_to_cuda purge_idle 500", "node.object.set input_7_to_cuda purge_idle 500"]
+    # The releases stall draws: they have to be over while the outputs are still held.
+    assert commands.index(purged[-1]) < commands.index("node.object.set janus_rtp_output hold false")
+    assert commands[-2:] == ["node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true"]
 
 
 @pytest.mark.parametrize("missing_frame", [False, True])

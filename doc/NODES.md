@@ -842,6 +842,11 @@ frames needing a new import are dropped while cleanup is pending or their import
 budget is full; cached imports continue normally. Dropped inputs release their
 browser capture slots.
 
+`node.object.set <node> purge_idle <ms>` releases, within a quarter of a second, every import that
+no frame holds and none has used for that many milliseconds, without waiting for `import_ttl_ms`
+or for the next frame: for a caller that knows a burst of allocations is over, such as a show that
+has finished starting. They count as `expired`.
+
 `node.object.get <node> import_stats` includes an `admission_dropped` frame
 counter and instance-wide cleanup counts. These counters distinguish admission
 drops from EGL/CUDA import work without per-frame logs.
