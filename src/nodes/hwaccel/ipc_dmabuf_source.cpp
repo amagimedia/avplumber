@@ -19,20 +19,9 @@ extern "C" {
 #include <memory>
 #include <new>
 #include "../../hwaccel.hpp"
+#include "DmabufFenceWait.hpp"
 #include "DmabufReleaseQueue.hpp"
-
-#pragma pack(push, 1)
-struct TexInfo {
-    uint32_t width;
-    uint32_t height;
-    uint32_t stride;
-    uint32_t pixel_format; // DRM FourCC or compatible value
-    uint64_t modifier;
-    uint64_t offset;
-    uint64_t timestamp; // nanoseconds
-    uint64_t frame_count;
-};
-#pragma pack(pop)
+#include "TexInfoMessage.hpp"   // the wire format: TexInfo and its fds, documented in texinfo.h
 
 class UnixFdpassClient {
 protected:
@@ -110,14 +99,17 @@ public:
         pollfds_[CONN_INDEX].events = connecting_ ? (POLLIN | POLLOUT) : POLLIN;
         return true;
     }
-    bool recvTexInfoAndFD(TexInfo &info, int &received_fd) {
-        received_fd = -1;
-        // Prepare to receive payload + a single FD via SCM_RIGHTS
-        char control[CMSG_SPACE(sizeof(int))];
-        struct iovec iov;
-        iov.iov_base = &info;
-        iov.iov_len = sizeof(info);
-        struct msghdr msg;
+    /// Waits for a frame's acquire fence on the connection that delivered it; interrupt() ends
+    /// the wait, as do the queue's own wake-ups when the receiver has been interrupted.
+    FenceWaitResult waitForFence(int fence_fd, int timeout_ms) {
+        const auto queue = std::atomic_load(&ack_queue_);
+        return ::waitForFence(fence_fd, timeout_ms, queue->wakeFd(), [&] {
+            queue->drainWakeFd();
+            return interrupted_.load() || queue->interrupted();
+        });
+    }
+    /// One frame: its header and the fds it came with, owned by the caller on success.
+    bool recvFrame(TexInfoMessage &frame) {
         while (true) {
             if (interrupted_.load()) return false;
             // Ensure we have a connection
@@ -170,36 +162,18 @@ public:
                 continue;
             }
             if (pollfds_[CONN_INDEX].revents & (POLLIN)) {
-                memset(&msg, 0, sizeof(msg));
-                msg.msg_iov = &iov;
-                msg.msg_iovlen = 1;
-                msg.msg_control = control;
-                msg.msg_controllen = sizeof(control);
-                ssize_t r = recvmsg(conn_fd_, &msg, MSG_DONTWAIT);
-                if (r <= 0) {
+                const TexInfoRecvStatus status = recvTexInfoMessage(conn_fd_, frame);
+                if (status == TexInfoRecvStatus::Closed) {
                     // connection reset or EOF: close and wait for next
                     closeConnection();
                     continue;
                 }
-                // Ancillary data
-                for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-                     cmsg != nullptr; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-                    if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-                        int *fds = reinterpret_cast<int*>(CMSG_DATA(cmsg));
-                        // Expect one fd
-                        received_fd = fds[0];
-                        break;
-                    }
-                }
-                if (received_fd < 0) {
-                    logstream << "fdpass: recvmsg without FD";
-                    closeConnection();
-                    return false;
-                }
-                if (static_cast<size_t>(r) < sizeof(TexInfo)) {
-                    logstream << "fdpass: metadata too small (" << r << ")";
-                    close(received_fd);
-                    received_fd = -1;
+                if (status != TexInfoRecvStatus::Ok) {
+                    // A sender this receiver does not understand (or the reverse): nothing of the
+                    // message is kept. A whole header still names the frame, which goes back so
+                    // the sender's buffer is not lost before the connection is dropped.
+                    logstream << "fdpass: " << texInfoRecvStatusText(status) << "; closing the connection";
+                    if (status != TexInfoRecvStatus::Short) ack_queue_->enqueue(frame.info.frame_count);
                     closeConnection();
                     return false;
                 }
@@ -241,13 +215,17 @@ class IPCDMABUFSource: public NodeSingleOutput<av::VideoFrame>,
                        public ITimeBaseSource,
                        public IReturnsObjects {
 protected:
-    static constexpr uint32_t PIX_FMT_RGBA = ('R' << 24 | 'G' << 16 | 'B' << 8 | 'A');
-    static constexpr uint32_t PIX_FMT_BGRA = ('B' << 24 | 'G' << 16 | 'R' << 8 | 'A');
     static constexpr uint32_t BYTES_PER_PIXEL = 4;
     static constexpr uint32_t MAX_DIMENSION = 16384;
+    static constexpr int64_t FENCE_LOG_INTERVAL_US = 1000000;
 
     UnixFdpassClient receiver_;
     std::atomic<uint64_t> received_{0};
+    // A frame whose acquire fence has not signalled after this long is dropped and acknowledged:
+    // generous next to the one or two milliseconds a fence takes, short next to a stalled source.
+    int fence_timeout_ms_ = 100;
+    FenceWaitStats fence_stats_;
+    int64_t last_fence_log_us_ = 0;
     int width_ = 0;
     int height_ = 0;
     av::Rational frame_rate_{0, 1};
@@ -255,19 +233,37 @@ protected:
     AVBufferRef* hw_frames_ctx_ = nullptr;
 
     static AVPixelFormat swFormatFromTexInfo(uint32_t pixel_format) {
-        switch (pixel_format) {
-            case PIX_FMT_RGBA: return AV_PIX_FMT_RGBA;
-            case PIX_FMT_BGRA: return AV_PIX_FMT_BGRA;
+        switch (texinfoPixelFormat(pixel_format)) {
+            case TEXINFO_PIX_FMT_RGBA: return AV_PIX_FMT_RGBA;
+            case TEXINFO_PIX_FMT_BGRA: return AV_PIX_FMT_BGRA;
             default: return AV_PIX_FMT_NONE;
         }
     }
 
     static uint32_t drmFormatFromTexInfo(uint32_t pixel_format) {
-        switch (pixel_format) {
-            case PIX_FMT_RGBA: return DRM_FORMAT_ABGR8888;
-            case PIX_FMT_BGRA: return DRM_FORMAT_ARGB8888;
+        switch (texinfoPixelFormat(pixel_format)) {
+            case TEXINFO_PIX_FMT_RGBA: return DRM_FORMAT_ABGR8888;
+            case TEXINFO_PIX_FMT_BGRA: return DRM_FORMAT_ARGB8888;
             default: return 0;
         }
+    }
+
+    /// False when the frame must not be forwarded: its fence timed out, could not be waited on,
+    /// or the node is stopping. Logged at most once a second; the counters tell the rest.
+    bool fenceSignalled(int fence_fd) {
+        const FenceWaitResult waited = receiver_.waitForFence(fence_fd, fence_timeout_ms_);
+        fence_stats_.record(waited);
+        if (waited.outcome == FenceWaitOutcome::Signalled) return true;
+        const int64_t now_us = fenceMonotonicUs();
+        if (now_us - last_fence_log_us_ >= FENCE_LOG_INTERVAL_US) {
+            last_fence_log_us_ = now_us;
+            logstream << "ipc_dmabuf_source: acquire fence "
+                      << (waited.outcome == FenceWaitOutcome::TimedOut ? "not signalled within " + std::to_string(fence_timeout_ms_) + " ms"
+                          : waited.outcome == FenceWaitOutcome::Invalid ? "cannot be waited on" : "wait interrupted")
+                      << "; frame dropped (timeouts " << fence_stats_.timeouts.load()
+                      << ", invalid " << fence_stats_.invalid.load() << " so far)";
+        }
+        return false;
     }
 
     static bool validateTexInfo(const TexInfo &ti, uint64_t &object_size) {
@@ -311,27 +307,46 @@ public:
         if (key != "frame_stats") throw Error("ipc_dmabuf_source: unknown object " + key);
         const auto stats = receiver_.releaseQueue()->stats();
         return {{"received", received_.load()}, {"released", stats.released},
-                {"ack_sent", stats.sent}, {"ack_pending", stats.pending}, {"returns_queued", stats.queued}};
+                {"ack_sent", stats.sent}, {"ack_pending", stats.pending}, {"returns_queued", stats.queued},
+                {"fenced", fence_stats_.fenced.load()}, {"unfenced", fence_stats_.plain.load()},
+                {"fence_blocked", fence_stats_.blocked.load()}, {"fence_wait_us", fence_stats_.wait_us.load()},
+                {"fence_wait_max_us", fence_stats_.max_wait_us.load()},
+                {"fence_timeouts", fence_stats_.timeouts.load()}, {"fence_invalid", fence_stats_.invalid.load()}};
     }
     virtual void stop() {
         receiver_.interrupt();
         this->finished_ = true;
     }
     virtual void process() {
-        TexInfo ti{};
-        int dmabuf_fd = -1;
-        if (!receiver_.recvTexInfoAndFD(ti, dmabuf_fd)) {
+        TexInfoMessage frame;
+        if (!receiver_.recvFrame(frame)) {
             wallclock.sleepms(5);
             return;
         }
+        const TexInfo &ti = frame.info;
 
         ++received_;
         uint64_t object_size = 0;
         if (!validateTexInfo(ti, object_size)) {
-            close(dmabuf_fd);
+            frame.closeFds();
             receiver_.releaseFrame(ti.frame_count);
             return;
         }
+        // The pixels may be read once the fence has signalled; a frame without one is complete
+        // on arrival. The fence fd is done with either way.
+        if (frame.fence_fd >= 0) {
+            const bool signalled = fenceSignalled(frame.fence_fd);
+            close(frame.fence_fd);
+            frame.fence_fd = -1;
+            if (!signalled) {
+                frame.closeFds();
+                receiver_.releaseFrame(ti.frame_count);
+                return;
+            }
+        } else {
+            fence_stats_.unfenced();
+        }
+        const int dmabuf_fd = frame.plane_fd;
 
         // Ensure/refresh HW frames context for filters
         if (hwaccel_) {
@@ -437,6 +452,9 @@ public:
         const int64_t return_queue = params.value("return_queue", int64_t(0));
         if (return_queue < 0 || return_queue > 64) throw Error("ipc_dmabuf_source: return_queue must be 0 to 64 frames");
         r->receiver_.setReturnQueue(static_cast<size_t>(return_queue));
+        r->fence_timeout_ms_ = params.value("fence_timeout_ms", 100);
+        if (r->fence_timeout_ms_ < 1 || r->fence_timeout_ms_ > 10000)
+            throw Error("ipc_dmabuf_source: fence_timeout_ms must be 1 to 10000");
         return r;
     }
     ~IPCDMABUFSource() {

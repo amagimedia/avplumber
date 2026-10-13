@@ -821,10 +821,29 @@ reclaims outstanding frames on `Drained`, sent after the last reference is freed
 An unclean disconnect quarantines unacknowledged browser textures; see
 [DMA-BUF recovery and counters](../deps/dma-browser/README.md#frame-lifetime-and-transport-counters).
 
+Each frame is one message on the socket: a 48-byte header (`TexInfo`, defined once for both
+sides in [texinfo.h](../deps/dma-browser/addons/fdpass/texinfo.h): width, height, stride, pixel
+format FOURCC `BGRA` or `RGBA`, DRM modifier, plane offset, paint timestamp, frame number) with
+the DMA-BUF fd as `SCM_RIGHTS`. When bit 31 of the pixel format word is set, a second fd follows
+the plane fd in the same message: the frame's acquire fence, a Linux sync_file that becomes
+readable once the GPU work that drew the frame has completed (a dma-browser on a patched
+Electron that no longer waits for the GPU itself). The node waits on that fence before it
+forwards the frame, so nothing downstream reads pixels still being drawn: no busy wait and no
+extra thread, the receive thread polls the fence before it reads the next frame. A frame whose
+fence has not signalled within `fence_timeout_ms` is dropped and acknowledged, never forwarded.
+A header whose fence flag does not match the number of fds in the message is refused: the frame
+is acknowledged, nothing is kept, and the connection is closed and reopened. A receiver that
+predates the flag rejects the pixel format of a fenced frame and acknowledges it, so it forwards
+nothing it could not have waited for; a sender that predates it is received as before.
+
 1 output: `av::VideoFrame` (hardware "pixel format" `DRM_PRIME`)
 
 Parameters:
 -   `socket` (string, required) - path to the UNIX domain socket
+-   `fence_timeout_ms` (integer 1 to 10000, optional, default `100`) - how long a frame's acquire
+    fence may stay unsignalled before the frame is dropped (and acknowledged). A fence signals
+    one or two milliseconds after the paint; the default is generous next to that and short
+    next to a source that has stalled.
 -   `hwaccel` (string, optional) - name of `hwaccel` object; when set, a matching `hw_frames_ctx` is attached for downstream filters/encoders
 -   `fps` (rational string, optional) - publishes the sender's requested frame rate to downstream nodes; frame timestamps use a `1/1000000` time base
 -   `return_queue` (integer 0 to 64, optional, default `0`) - frames that wait to go back to the sender.
@@ -841,6 +860,13 @@ released frames, sent ACK messages, pending ACK messages and frames in the retur
 connection. ACK counters reset on reconnection; the received count does
 not. Lifecycle drain markers also count as sent messages. Pending ACKs distinguish
 frames already released by the graph from frames still referenced downstream.
+The acquire fence counters never reset: `fenced` and `unfenced` frames (their sum is `received`),
+`fence_blocked` waits that found the fence still pending, `fence_wait_us` and `fence_wait_max_us`
+(the total and the longest wait, in microseconds), `fence_timeouts` frames dropped because the
+fence had not signalled within `fence_timeout_ms`, and `fence_invalid` frames dropped because
+the fence could not be waited on. On a stock Electron every frame is `unfenced`; on the patched
+one `fenced` counts them all, and a growing `fence_blocked` with a `fence_wait_max_us` of a few
+thousand shows the wait doing its work.
 
 ### `ipc_socket_audio_source`
 
