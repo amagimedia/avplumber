@@ -51,6 +51,9 @@ PREHEAT_POLL_INTERVAL_SEC = 0.02
 # waiting after the timeout: a show that never settles still starts, with its counters telling.
 SETTLE_WINDOW_SEC = 1.0
 SETTLE_TIMEOUT_SEC = 10.0
+# A browser buffer nothing has used for this long while the show starts is one the start went
+# through and left behind; a window's working buffers come round within a few frames.
+IMPORT_PURGE_IDLE_MS = 500
 
 # Event loops shared by the sources' pacing nodes (realtime, force_fps, smooth_timestamps).
 # One loop's cost grows with the square of the sources it paces: each wake-up rescans
@@ -168,6 +171,7 @@ class MixerApplication:
     cut_latency_encoder: str = ""
     prewarm_cut_scenes: tuple[str, ...] = ()
     held_outputs: tuple[str, ...] = ()      # prefixes of the program's Janus chains, built held
+    browser_importers: tuple[str, ...] = ()  # the drm_prime_to_cuda node of every browser source
     _startup_error: str | None = field(default=None, init=False, repr=False)
 
     def _check_startup(self) -> None:
@@ -236,6 +240,7 @@ class MixerApplication:
             refresh_windows(self.dmabuf_rest, list(self.browser_windows))
         self._wait_for_edges(self.input_edges, "input readiness")
         log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
+        self._purge_idle_imports()   # what the pages allocated before their reload: memory the buses are about to need
         if self.routed_inputs:
             self.avp.group(ROUTER_GROUP).startNodes()
             self._wait_for_node("layout_preheat_router")
@@ -291,12 +296,36 @@ class MixerApplication:
         frame and the compositors count from zero, so what viewers get and what the counters say
         both begin with the settled show."""
         compositors = [f"{MIXER_NAME}_comp_a", f"{MIXER_NAME}_comp_b", *(f"{bus.prefix}_comp" for bus in self.aux_buses or ())]
+        self._purge_idle_imports(wait=True)
         settled = self._wait_until_settled(compositors)
         prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
         self.avp.executeCommandsFromString("\n".join(
             [release_commands(prefix) for prefix in prefixes]
             + [f"node.object.set {node} reset_counters true" for node in compositors]))
         log.info("On air: %d outputs released%s", len(prefixes), "" if settled else " before the show settled")
+
+    def _purge_idle_imports(self, wait: bool = False) -> None:
+        """Release the browser buffers the start-up went through and no longer uses.
+
+        While a show starts, a browser window goes through two or three times the buffers it
+        settles on. The importers keep each registered for seconds after its last use, which holds
+        gigabytes of GPU memory at the moment the show needs most, and then release them one by
+        one, each release stalling every draw: after the outputs are on air unless it happens here.
+        With *wait*, returns once the releases are done."""
+        if not self.browser_importers:
+            return
+        self.avp.executeCommandsFromString("\n".join(
+            f"node.object.set {node} purge_idle {IMPORT_PURGE_IDLE_MS}" for node in self.browser_importers))
+        if not wait:
+            return
+        time.sleep(0.3)   # an importer looks for a request four times a second
+        importer = self.avp.node(self.browser_importers[0])
+        deadline = time.monotonic() + SETTLE_TIMEOUT_SEC
+        while importer is not None and time.monotonic() < deadline:
+            self._check_startup()
+            if not (importer.getObject("import_stats") or {}).get("instance_cleanup_pending"):
+                return
+            time.sleep(PREHEAT_POLL_INTERVAL_SEC)
 
     def _wait_until_settled(self, compositors) -> bool:
         """True after SETTLE_WINDOW_SEC without a missed deadline or a dropped frame on any
@@ -734,9 +763,10 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
     held = []
+    importers = tuple(f"input_{index}_to_cuda" for index, source in enumerate(cfg.sources) if source.kind == "browser")
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend, held=held)
-    return _application(avp, mixer, options, input_edges, listener, routed_inputs=False, held_outputs=tuple(held),
+    return _application(avp, mixer, options, input_edges, listener, routed_inputs=False, held_outputs=tuple(held), browser_importers=importers,
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers), aux_buses=aux)
 
 
