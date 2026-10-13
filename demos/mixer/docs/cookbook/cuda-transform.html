@@ -12,8 +12,8 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>cuda_transform, the shared geometry node</h1>
-<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Source transforms are implemented. GPU smoke checks now cover source normalization and rendition conversion as well as the primitive. No full 188-source performance comparison is claimed.</p>
-  <p class="lede"><code>cuda_transform</code> takes one CUDA frame and gives one frame per output canvas. Each output has its own size, <code>sw_format</code> and layers that crop, scale and place the input, and may take a lower rate. It is the rect compositor's drawing without input matching or a clock. An output that would only repeat the input gets the input frame itself: no draw, no copy. The 88-source show has no stage for it today, and nothing was measured in a show.</p>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Source transforms are implemented. GPU smoke checks now cover source normalization and rendition conversion as well as the primitive. No full 188-source performance comparison is claimed.</p>
+  <p class="lede"><code>cuda_transform</code> takes one CUDA frame and gives one frame per output canvas. Each output has its own size, <code>sw_format</code> and layers that crop, scale and place the input, and may take a lower rate. It is the rect compositor's drawing without input matching or a clock. An output that would only repeat the input gets the input frame itself: no draw, no copy. The 88-source show it was written beside had no stage for it, and nothing was measured in a show.</p>
   <span class="pill impl">Status: Implemented; primitive and mixer integration GPU smokes pass</span>
 
   <figure>
@@ -114,7 +114,7 @@
   </ul>
 
   <h2>Where the mixer can and cannot use it today</h2>
-  <p>The 88-source show has no stage for it. All scaling happens inside the compositors, which draw with the same module, and every output is canvas-size, so its graph holds no <code>cuda_transform</code>. Nothing about the node was measured in a show: no CPU, GPU, VRAM or latency figure exists.</p>
+  <p>The 88-source show had no stage for it. All scaling happens inside the compositors, which draw with the same module, and every output is canvas-size, so its graph holds no <code>cuda_transform</code>. Nothing about the node was measured in a show: no CPU, GPU, VRAM or latency figure exists.</p>
   <ul class="where">
     <li><b>Where the mixer builds it,</b> source normalization and rendition conversion now GPU-smoke-tested:
       <ul>
@@ -132,7 +132,7 @@
     <li><b>Why</b><p>The compositors' geometry (crop, scale, place) existed only inside a compositor. A stage that turns one frame into several canvases had to use FFmpeg filter graphs, a split and one <code>scale_cuda</code> graph per canvas. The node offers the compositors' own draw code for that, in one node.</p></li>
     <li><b>Latency</b><p>Not measured. By construction: one blocking node, so one thread hop per frame, and one stream synchronisation per frame that draws. A passed-on output adds neither a draw nor a synchronisation.</p></li>
     <li class="flag"><b>Side effects</b><p>None in the 88-source show, which builds no such node. In a graph that does, <code>fps</code> selects frames and never fills a gap, and an output without <code>drop</code> waits on a full edge and delays the outputs after it. The mixer sets neither <code>fps</code> nor <code>drop</code>.</p></li>
-    <li><b>Cost</b><p>Per node: 1 thread. Per output: one draw module and one frame pool. VRAM not measured. Code: 222 lines in <code>cuda_transform.cpp</code> and an 88-line header, <code>cuda_rect_frame.hpp</code>, split out of the compositor.</p></li>
+    <li><b>Cost</b><p>Per node: 1 thread. Per output: one draw module and one frame pool. VRAM not measured. Code: 235 lines in <code>cuda_transform.cpp</code> and an 88-line header, <code>cuda_rect_frame.hpp</code>, split out of the compositor.</p></li>
     <li><b>Risk</b><p>Low for the 88-source show: its graph is unchanged. A show with a scaled rendition or more than 32 <code>--input</code> sources now depends on the node, both covered by the mixer integration GPU smoke. The compositor nodes now take their canvas code from the shared header. Pass-through hands a consumer the input's own buffers; with <code>pass_arrays</code> that can be a CUarray, which the consumer must be able to read.</p></li>
     <li><b>Switch it off</b><p>The mixer has no switch: it builds the node for a rendition of another size than the canvas and for more than 32 <code>--input</code> sources, and for configured source transforms. In a graph that uses the node, pass-through follows from the layers: give the output a different size or <code>sw_format</code> and it is drawn. <code>pass_arrays</code> is off unless set.</p></li>
   </ul>

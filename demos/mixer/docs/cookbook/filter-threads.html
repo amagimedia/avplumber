@@ -12,7 +12,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>One thread per GPU filter graph</h1>
-<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Current GPU filter graphs still use threads: 1. Per-slot scale/filter hooks have been removed; geometry belongs to the compositor or an upstream source transform. Pinned uploads now use an FFmpeg filter graph, also single-threaded. Eligible raw tag-only colour graphs are bypassed.</p>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Current GPU filter graphs still use threads: 1. Per-slot scale/filter hooks have been removed; geometry belongs to the compositor or an upstream source transform. The <code>pinned</code> and <code>hwupload</code> raw paths use single-threaded FFmpeg graphs; the setup's <code>direct</code> path has none. A source whose colour stage would only tag has no colour graph: its fan-out stamps the tags (<a href="color-tags.html">Colour tags at the fan-out</a>).</p>
   <p class="lede">The mixer runs filter graphs that only stamp metadata or call CUDA filters on one thread. FFmpeg would otherwise start an idle 16-thread slice pool for each of them.</p>
   <span class="pill live">Status: Implemented</span>
   <p class="note">Decoder <code>options.threads=1</code> is a separate optimization: it avoids extra NVDEC surfaces reserved for frame threads. See <a href="nvdec-cuarray.html#baseline">the decoder baseline and low-DPB demo assets</a>; both savings were already present before the CUarray comparison.</p>
@@ -65,7 +65,7 @@
         </g>
       </svg>
     </div>
-    <figcaption>One graph, before and after. The mixer builds many such graphs: colour, slot scale, transition, aux conversion and rendition conversion graphs.</figcaption>
+    <figcaption>One graph, before and after. The mixer builds many such graphs: colour, transition, aux conversion and rendition conversion graphs.</figcaption>
   </figure>
 
   <figure>
@@ -87,12 +87,12 @@
         </g>
       </svg>
     </div>
-    <figcaption>Bars are to scale. Both names belong to the mixer's per-source colour graphs, cut short by the system's thread-name limit.</figcaption>
+    <figcaption>Bars are to scale. Both names belong to the mixer's per-source colour graphs, cut short by the system's thread-name limit. Measured on the T4 before the change; since 2026-10-13 a source whose colour stage only tagged, every browser source among them, has no such node.</figcaption>
   </figure>
 
   <h2>At a glance</h2>
   <ul class="cards">
-    <li><b>What</b><p>A new node parameter <code>threads</code> on <code>filter_video</code> and <code>filter_audio</code>. It sets the graph's <code>nb_threads</code> before parsing. The default, 0, keeps FFmpeg's choice, so other apps are unchanged. A negative count is rejected when the node is created: the node assigns <code>nb_threads</code> directly, so FFmpeg's own range check for its <code>threads</code> option never runs.</p><p>The mixer's CUDA backend passes <code>threads: 1</code> for its GPU and metadata graphs: colour where needed, transition, aux SDR conversion, rendition conversion (the graph named <code>scale_&lt;id&gt;</code>; a rendition of another size is scaled before it by <code>cuda_transform</code>, which has no filter graph), and the raw-file <code>setpts</code>/<code>hwupload</code> pair (the pinned raw chain also uses an FFmpeg upload filter; the browser <code>settb</code>/<code>setparams</code> graph has since been dropped, and the browser chain has none either).</p></li>
+    <li><b>What</b><p>A new node parameter <code>threads</code> on <code>filter_video</code> and <code>filter_audio</code>. It sets the graph's <code>nb_threads</code> before parsing. The default, 0, keeps FFmpeg's choice, so other apps are unchanged. A negative count is rejected when the node is created: the node assigns <code>nb_threads</code> directly, so FFmpeg's own range check for its <code>threads</code> option never runs.</p><p>The mixer's CUDA backend passes <code>threads: 1</code> for its GPU and metadata graphs: colour where needed, transition, aux SDR conversion, rendition conversion (the graph named <code>scale_&lt;id&gt;</code>; a rendition of another size is scaled before it by <code>cuda_transform</code>, which has no filter graph), and the raw-file <code>setpts</code>/<code>hwupload</code> pair (the pinned raw chain also uses an FFmpeg upload filter, the direct raw chain has no filter graph; the browser <code>settb</code>/<code>setparams</code> graph has since been dropped, and the browser chain has none either).</p></li>
     <li><b>Why</b>FFmpeg starts one slice thread per CPU for every graph (16 on the T4 test host), even when the graph does no CPU pixel work. Measured live: 1,088 threads in <code>mixer_color_sdr</code>, 448 in <code>mixer_color_bro</code>, 3,689 in the mixer process, mostly idle (12 % CPU).</li>
     <li class="flag"><b>Latency</b><p>Program: none, 0 frames.</p><p>Command-to-screen: none, 0 ms.</p><p>These graphs never hand work to the slice pool, so the same thread runs the same filters as before. Expected from the code path, not measured.</p></li>
     <li><b>Side effects</b>None expected. To confirm on the test host, compare CPU per thread group and the thread count before and after. User filter graphs and the CPU wipe format conversion keep FFmpeg's default pool.</li>

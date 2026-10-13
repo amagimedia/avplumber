@@ -12,7 +12,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>One reference frame for monitor encoders</h1>
-<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> AUX rendition defaults use dpb_size: 1, including additional buses. The two-monitor memory example below is historical; it is not the saving for every possible output count. Program and clean-feed settings are separate.</p>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> AUX rendition defaults use dpb_size: 1, including additional buses. The two-monitor memory example below is historical; it is not the saving for every possible output count. Program and clean-feed settings are separate.</p>
   <p class="lede">The two monitor encoders keep one reference frame instead of the several NVENC reserves by default, because without B-frames each frame is predicted from the previous one.</p>
   <span class="pill live">Status: Implemented</span>
 
@@ -77,10 +77,10 @@
           <text x="16" y="24" fill="#a4b4ca" font-weight="600">What viewers see · untouched</text>
           <rect x="16" y="36" width="320" height="52" rx="8" fill="#3a1618" stroke="#e5484d"/>
           <text x="32" y="58" font-weight="600">Program encoder</text>
-          <text x="32" y="76" fill="#a4b4ca">3 Mb/s · dpb_size 0 (NVENC decides)</text>
+          <text x="32" y="76" fill="#a4b4ca">dpb_size 0 (NVENC decides)</text>
           <rect x="16" y="100" width="320" height="52" rx="8" fill="#1b2748" stroke="#6e8bf5"/>
           <text x="32" y="122" font-weight="600">Clean feed encoder</text>
-          <text x="32" y="140" fill="#a4b4ca">3 Mb/s · dpb_size 0 (NVENC decides)</text>
+          <text x="32" y="140" fill="#a4b4ca">dpb_size 0 (NVENC decides)</text>
 
           <text x="364" y="24" fill="#a4b4ca" font-weight="600">Monitors · changed</text>
           <rect x="364" y="36" width="320" height="52" rx="8" fill="#12281f" stroke="#30a46c"/>

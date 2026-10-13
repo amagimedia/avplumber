@@ -140,7 +140,7 @@
     <li><b>Every new buffer is a new import.</b> A new buffer is a new DMA-BUF. The window's <code>drm_prime_to_cuda</code> node registers it with CUDA (<code>cuGraphicsEGLRegisterImage</code>) and later drops the import of a destroyed one (<code>cuGraphicsUnregisterResource</code>) on its release thread. At 30 fps the 40 windows together imported about ten new buffers a second.</li>
     <li><b>The release holds a lock the whole context needs.</b> <code>cuGraphicsUnregisterResource</code> takes a reader-writer lock inside the user-space CUDA library for writing and can sleep while it holds it. Every other call into the context queues behind it: the uploads, the compositors' draws, the encoders' inputs. At 30 fps this tipped into a state where that one thread held the lock most of the time.</li>
   </ol>
-  <p><a href="raw-uploads.html">Raw uploads and the CUDA driver lock</a> inferred a shared lock from stacks on an earlier show; uploads wait on this one too, so it is very likely the same lock, though that show was not measured again. Here the holder was read from the lock itself; see <a href="#found">How the holder was found</a>.</p>
+  <p><a href="raw-uploads.html">Raw frames read straight into the memory the GPU reads</a> has an earlier show whose traces showed upload, import and compositor threads waiting on one another inside the driver; uploads wait on this lock too, so it is very likely the same lock, though that show was not measured again. Here the holder was read from the lock itself; see <a href="#found">How the holder was found</a>.</p>
 
   <h2>The fix</h2>
   <p>The mixer still lets a frame go as soon as nothing uses it. What changed is when the browser hears about it. A finished frame waits in a <b>return queue</b>, and each frame that arrives sends the oldest waiting one back. The pool sees one buffer come back for each one it hands out, however unevenly the mixer finishes with frames, so it never has more than two idle and never runs out.</p>
@@ -226,7 +226,7 @@
 
   <h2>Two changes that came with it</h2>
   <ul class="where">
-    <li><b>Imports stay ten idle seconds.</b> The mixer told each importer to drop a buffer it had not seen for four frame-queue lengths, under a second at 30 fps. A mostly still page paints rarely, so its buffers expired and were imported again. <code>import_ttl_ms</code> is now at least 10 s. It did not stop the stall by itself.</li>
+    <li><b>Imports stay ten idle seconds.</b> The mixer told each importer to drop a buffer it had not seen for four frame-queue lengths, under a second at 30 fps. A mostly still page paints rarely, so its buffers expired and were imported again. <code>import_ttl_ms</code> is now at least 10 s. It did not stop the stall by itself. Since 2026-10-13 the mixer also asks each importer, before it goes on air, to release the buffers the start-up went through and left idle for 500 ms (<code>purge_idle</code>): the start-up peak of GPU memory fell from 22.4 to 19.6 GB, and those releases no longer stall draws once the outputs are on air.</li>
     <li><b>Per-tick timing.</b> <code>playout.timing</code>, as above. Read it after any deployment: it shows how many draws fitted their slot without waiting for a deadline to be missed.</li>
   </ul>
 
@@ -244,8 +244,8 @@
   <h2>Related pages</h2>
   <ul class="where">
     <li><a href="browser-handoff.html">Browser frame hand-off</a>: the socket, the acknowledgements and what happens on reconnect.</li>
-    <li><a href="compositor-wait.html">The compositor's wait costs the frames that arrived</a>: the next limit once the stall was gone, the busiest thread.</li>
-    <li><a href="frame-queues.html">One decoded frame in flight per NVDEC source</a>: a different queue, the decoder's, and a proposal that was not selected.</li>
+    <li><a href="compositor-wait.html">The compositor's wait costs the frames that arrived</a>: the busiest thread once the stall was gone; its wait now uses epoll.</li>
+    <li><a href="rejected.html#decoded-queue">An earlier proposal: shorter decoded frame queues</a>: a different queue, the decoder's, and a proposal that was not selected.</li>
     <li><a href="contexts.html">Unused GPU contexts</a>: the importer that registers each browser buffer.</li>
   </ul>
 

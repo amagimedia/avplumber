@@ -12,7 +12,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Prewarmed DSK keys</h1>
-<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Prewarming deliberately keeps key subscriptions alive while keys are off. This trades retained frame references for prompt key activation and differs from disabling off-page AUX subscriptions.</p>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09); read against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13 and still current. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Prewarming deliberately keeps key subscriptions alive while keys are off. This trades retained frame references for prompt key activation and differs from disabling off-page AUX subscriptions.</p>
   <p class="lede">Every downstream key stays subscribed while it is off, so a key cut or fade-in starts on the very next program frame instead of waiting 1–2 frames for the browser page’s next paint.</p>
   <span class="pill live">Status: Implemented</span>
 

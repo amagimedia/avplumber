@@ -12,7 +12,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>PGM delay instead of a longer aux deadline</h1>
-<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> The 80 ms diagram is specifically the 25 fps example. Canvas latency defaults depend on frame rate; program-pad delay depends on AUX rate. Source pads do not inherit the program pad offset.</p>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09); read against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13 and still current. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> The 80 ms diagram is specifically the 25 fps example. Canvas latency defaults depend on frame rate; program-pad delay depends on AUX rate. Source pads do not inherit the program pad offset.</p>
   <p class="lede">The Program preview aux keeps the normal 80 ms deadline for all its sources and shows only its PGM pad one frame back, because the finished program arrives a frame later than the sources it is made of.</p>
   <span class="pill live">Status: Implemented</span>
 

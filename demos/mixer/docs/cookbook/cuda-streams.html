@@ -12,7 +12,7 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>One main CUDA stream, one per monitor</h1>
-<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> AUX streams isolate stream ordering, not GPU capacity: kernels, memory bandwidth and encoders still compete with program. CUarray decode and pinned uploads also have producer-stream synchronization requirements.</p>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> AUX streams isolate stream ordering, not GPU capacity: kernels, memory bandwidth and encoders still compete with program. CUarray decode and raw uploads (the <code>direct</code> node, the <code>pinned</code> filter and v210) also have producer-stream synchronization requirements.</p>
   <p class="lede">The program runs on one CUDA stream; each aux monitor gets its own non-blocking stream in the same CUDA context, so a slow monitor cannot hold up the program or the other monitor.</p>
   <span class="pill live">Status: Implemented</span>
   <p class="note">The diagram below shows the linear decode layout. Opt-in <a href="nvdec-cuarray.html">NVDEC CUarray output</a> adds a private producer stream per decoder in the same context. Compositors wait on each source's advertised stream before reading its array; program and AUX output streams keep their existing roles.</p>
@@ -42,7 +42,7 @@
           <rect x="588" y="86" width="128" height="28" rx="6" fill="#4a1d22"/><text x="652" y="104" text-anchor="middle">wipe · keyer</text>
           <rect x="44" y="122" width="200" height="28" rx="6" fill="#4a1d22"/><text x="144" y="140" text-anchor="middle">PGM and clean NVENC</text>
         </g>
-        <text x="258" y="140" fill="#a4b4ca" font-size="12">about 800 nodes in all</text>
+        <text x="258" y="140" fill="#a4b4ca" font-size="12">most of the graph's nodes</text>
 
         <!-- event arrows -->
         <line x1="210" y1="164" x2="210" y2="210" stroke="#a4b4ca" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
@@ -71,7 +71,7 @@
 
         <!-- upload streams -->
         <rect x="28" y="334" width="704" height="44" rx="10" fill="#2b2210" stroke="#f5a524"/>
-        <text x="44" y="361" fill="#edf4ff" font-size="13"><tspan font-weight="600">Upload streams</tspan><tspan fill="#a4b4ca"> · one private stream per v210 (or pinned raw) source</tspan></text>
+        <text x="44" y="361" fill="#edf4ff" font-size="13"><tspan font-weight="600">Upload streams</tspan><tspan fill="#a4b4ca"> · one private stream per v210, direct or pinned raw source</tspan></text>
       </svg>
     </div>
     <figcaption>Red runs the show. Green and blue are the two monitors in the demo. Dashed arrows are the only
@@ -130,7 +130,7 @@
     <li><b>Side effects</b><p>Streams isolate waiting, not capacity: every stream shares the same GPU engines and NVENC.
       Any FFmpeg filter fed aux frames inherits the aux stream automatically, because FFmpeg uses the stream of the
       frames' device. Tearing down an aux bus synchronizes and destroys its stream.</p></li>
-    <li><b>Cost</b><p>One CUDA stream and one CUDA event per aux bus (two buses in the demo). No extra nodes, queues or
+    <li><b>Cost</b><p>One CUDA stream and one CUDA event per aux bus (the two monitors in the base demo, 22 buses in the recorded 192-source show). No extra nodes, queues or
       threads. One 33-line header. No extra context VRAM. CPU: each aux frame ends with a
       <code>cuStreamSynchronize</code> on the aux stream only.</p></li>
     <li><b>Risk</b><p>Because nothing is ordered implicitly, an aux reader must wait for its inputs explicitly. The aux
@@ -141,13 +141,14 @@
   </ul>
 
   <h2>Why not a stream per node?</h2>
-  <p>About 800 nodes' GPU work sharing one stream is not the bottleneck by itself. The measured limit at high source
-    counts was CPU-side CUDA submission contention triggered by raw uploads, not stream ordering; see
-    <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/capacity.md#t4">Why uploads limit this mix</a>.</p>
-  <p class="note">Raw uploads are another exception to the single stream. the patched FFmpeg <code>hwupload_cuda</code> v210 path creates a private non-blocking stream per source and
-    synchronizes it before publishing, so consumers get a complete frame. the pinned NV12/P010 filter
-    does the same with <code>canvas.raw_upload: "pinned"</code>, which every show the setup builds uses. With the library
-    default, <code>"hwupload"</code>, NV12 and P010 upload through FFmpeg <code>hwupload</code> on the default stream; see <a href="raw-uploads.html">Raw uploads</a>.</p>
+  <p>Most of the graph's GPU work sharing one stream is not the bottleneck by itself. The limit measured at high source
+    counts was a lock inside the CUDA library, not stream ordering. Uploads queue for it
+    (<a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/capacity.md#t4">Why uploads limit this mix</a>), and at 192 sources its holder was the
+    browser importer's release (<a href="browser-frame-queue.html">Browser frames go back one per new frame</a>).</p>
+  <p class="note">Raw uploads are another exception to the single stream. The patched FFmpeg <code>hwupload_cuda</code> v210 path creates a private non-blocking stream per source and
+    synchronizes it before publishing, so consumers get a complete frame. NV12 and P010 sources do the same on both paths that avoid the stock upload:
+    <code>canvas.raw_upload: "direct"</code>, which every show the setup builds uses and where <code>raw_video_file_cuda</code> does it in <code>CudaPinnedUploader</code>, and <code>"pinned"</code>, the patched filter. With the library
+    default, <code>"hwupload"</code>, NV12 and P010 upload through FFmpeg <code>hwupload</code> on the default stream; see <a href="raw-uploads.html">Raw frames read straight into the memory the GPU reads</a>.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">
@@ -167,6 +168,8 @@
       creates the main device with no stream of its own, so FFmpeg uses the default stream</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/deps/ffmpeg/9/0017-avfilter-hwupload-cuda-pinned.patch"><code>deps/ffmpeg/9/0017-avfilter-hwupload-cuda-pinned.patch:86</code></a>
       private upload stream for pinned raw uploads and v210 unpacking</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/src/nodes/hwaccel/CudaPinnedUploader.hpp"><code>src/nodes/hwaccel/CudaPinnedUploader.hpp</code></a>
+      the same sequence for the <code>direct</code> raw path: a private stream that waits for the device's stream, synchronized before the frame is handed on (pinned to <code>develop</code> at 8fa15c92)</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/hwaccel/cuda_rect_overlay.cpp"><code>src/nodes/hwaccel/cuda_rect_overlay.cpp</code></a>
       the generic <code>cuda_rect_overlay</code> takes <code>output_hwaccel</code> as well: it then draws on a private stream and
       publishes that device, so the branch below it leaves the parent's stream. No mixer graph sets it on that node;

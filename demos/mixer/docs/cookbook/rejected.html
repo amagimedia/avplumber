@@ -23,8 +23,8 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Ideas we measured and dropped</h1>
-<p class="note">Implementation links checked 2026-10-09 against <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a>; mixer code is unchanged from the 2026-10-06 review. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> These are historical decisions under the workloads shown. The replacement FFmpeg pinned uploader preserves the accepted pinned-upload approach; the custom node implementation itself is retired. Input normalization has since been removed from the mixer without skipping native input work.</p>
-  <p class="lede">Every source is a unique, independent 1080p25 input processed every frame; twelve ideas broke that rule, saved almost nothing, or made cuts, pictures or the pipeline slower, so we dropped them.</p>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> These are historical decisions under the workloads shown. The demo now reads raw NV12 and P010 files with one node, <code>raw_video_file_cuda</code>, which uploads from page-locked memory on a private stream as the pinned filter does; the earlier custom uploader nodes are gone. Input normalization has since been removed from the mixer without skipping native input work.</p>
+  <p class="lede">Every source is a unique, independent input of at least 1080p25, processed every frame; twelve ideas broke that rule, saved almost nothing, or made cuts, pictures or the pipeline slower, so we dropped them.</p>
   <span class="pill rejected">Status: Rejected</span>
 
   <h2>The rule, and where each shortcut would cut it</h2>
@@ -167,7 +167,7 @@
     <li><span class="name"><span class="num">11</span>cpuset split between containers</span>
       <p><span class="k">Dropped</span>Cores pinned to one side idle while the other is short: it idles capacity.</p></li>
     <li><span class="name"><span class="num">12</span>FFmpeg <code>hwupload</code> for raw sources at 60 fps</span>
-      <p><span class="k">Dropped</span>69&nbsp;% of program frames missed their deadline at 68 inputs; NVDEC fell from ~85 to ~26&nbsp;% because the pipeline stalled (<a href="raw-uploads.html">Raw uploads</a>).</p></li>
+      <p><span class="k">Dropped</span>69&nbsp;% of program frames missed their deadline at 68 inputs; NVDEC fell from ~85 to ~26&nbsp;% because the pipeline stalled (<a href="raw-uploads.html">Raw frames read straight into the memory the GPU reads</a>).</p></li>
   </ol>
   <h3>The trade was cut latency</h3>
   <ol class="ideas">
@@ -178,7 +178,7 @@
   <h2>At a glance</h2>
   <ul class="cards">
     <li><b>What</b>
-      <p>One rule for capacity numbers: every source is a unique, independent 1080p25 input, processed every frame. Ideas 2–5 and 7 break it. Idea 1 saves nothing. Idea 6 costs cut latency. Ideas 8, 9 and 11 gained nothing; 10 breaks the rule; 12 stalled the pipeline.</p></li>
+      <p>One rule for capacity numbers: every source is a unique, independent input of at least 1080p25, processed every frame. Ideas 2–5 and 7 break it. Idea 1 saves nothing. Idea 6 costs cut latency. Ideas 8, 9 and 11 gained nothing; 10 breaks the rule; 12 stalled the pipeline.</p></li>
     <li><b>Why</b>
       <p>Capacity numbers must describe real shows. A shortcut that works only because test inputs repeat, loop, shrink or go unwatched makes the numbers wrong.</p></li>
     <li class="flag"><b>Latency</b>
@@ -200,11 +200,14 @@
       <p>Headline capacity is lower than a demo with shortcuts would show. That is the point.</p></li>
     <li><b>Switch it off</b>
       <ul>
-        <li>Nothing to switch off: ideas 1, 4, 5, 7–9 and 11 are not in the code; 10 is a browser source's <code>fps</code> field (<a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/config.md#sources">config.md · sources</a>), which the demo leaves at the canvas rate; 12 is the library default, off in setup-built shows.</li>
+        <li>Nothing to switch off: ideas 1, 4, 5, 7–9 and 11 are not in the code; 10 is a browser source's <code>fps</code> field (<a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/config.md#sources">config.md · sources</a>), which the demo leaves at the canvas rate; 12 is the library default, off in setup-built shows, which read raw files with <code>raw_upload: "direct"</code>.</li>
         <li>Repeated files: a repeat is rejected at load; mark both declarations <code>"independent": true</code> for separate chains.</li>
         <li>Cut prewarm: the demo runs with <code>--prewarm-cut-scene '*'</code> (every scene). The mixer's own default is off; naming fewer scenes narrows it.</li>
       </ul></li>
   </ul>
+
+  <h2 id="decoded-queue">An earlier proposal: shorter decoded frame queues</h2>
+  <p>Not one of the twelve: it was never built or measured. The proposal was to plan each NVDEC source's decoded edge at capacity 1 instead of the instance default of 3 when a show runs at 30 fps or below. NVDEC decodes ahead of real time, so that edge is always full, and two fewer parked 1080p frames per source were estimated to free about 255 MB across 40 sources. It was not selected: one frame leaves 33 to 40 ms of slack before a decode hiccup repeats a frame, and the comparison of repeat rates the proposal asked for was not run. The <a href="nvdec-cuarray.html">NVDEC CUarray path</a> then saved 4.88 GiB in the matched 192-input, 20-output comparison while keeping all three decoded queue slots. Every NVDEC source's decoded edge still has the default of 3 (<code>planCapacity("*", 3)</code> in <a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/pyplumber/mixer/application.py">application.py</a>). A browser window's frame queue is a different queue: <a href="browser-frame-queue.html">Browser frames go back one per new frame</a>.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">
