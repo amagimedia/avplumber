@@ -1,6 +1,7 @@
-"""Compare pinned and pageable FFmpeg CPU/GPU upload paths on an NVIDIA host.
+"""Compare CPU/GPU upload paths on an NVIDIA host: FFmpeg's pageable and pinned filter
+uploads, and raw_video_file_cuda reading into page-locked memory (direct).
 
-All modes use the same looped packets, post-upload pacing and CUDA scaler.
+All modes use the same looped file, post-upload pacing and CUDA scaler.
 The scaler exercises output-pool reuse while GPU reads are queued. This is an
 upload microbenchmark, not a full mixer capacity qualification.
 """
@@ -29,17 +30,24 @@ def run(args):
         try:
             for i in range(args.inputs):
                 tag, group = str(i), "probe"
-                packets = _raw_file_packets(avp, api, tag, str(path), pixel_format=args.format,
-                                           video_size=f"{width}x{height}", group=group,
-                                           fps=args.fps, fps_den=1, loop=True)
                 uploaded = f"input_{tag}_cuda"
                 avp.edges.planCapacity(uploaded, 1)
-                common = {"name": f"upload_{tag}", "dst": uploaded, "hwaccel": "upload_bench", "group": group}
-                decoded = f"input_{tag}_decoded"
-                chain = [api.DecVideo({"name": f"decode_{tag}", "src": packets, "dst": decoded,
-                                       "codec": "rawvideo", "pixel_format": args.format, "group": group}),
-                         api.FilterVideo({**common, "src": decoded, "threads": 1,
-                                          "graph": "hwupload_cuda=pinned=1" if args.mode == "filter" else "hwupload"})]
+                if args.mode == "direct":
+                    chain = [api.RawVideoFileCuda({
+                        "name": f"input_{tag}", "url": str(path), "dst": uploaded, "hwaccel": "upload_bench",
+                        "group": group, "pixel_format": args.format, "video_size": f"{width}x{height}",
+                        "framerate": f"{args.fps}/1", "loop": True, "loop_continuous_ts": True,
+                        "write_combined": args.write_combined})]
+                else:
+                    packets = _raw_file_packets(avp, api, tag, str(path), pixel_format=args.format,
+                                               video_size=f"{width}x{height}", group=group,
+                                               fps=args.fps, fps_den=1, loop=True)
+                    common = {"name": f"upload_{tag}", "dst": uploaded, "hwaccel": "upload_bench", "group": group}
+                    decoded = f"input_{tag}_decoded"
+                    chain = [api.DecVideo({"name": f"decode_{tag}", "src": packets, "dst": decoded,
+                                           "codec": "rawvideo", "pixel_format": args.format, "group": group}),
+                             api.FilterVideo({**common, "src": decoded, "threads": 1,
+                                              "graph": "hwupload_cuda=pinned=1" if args.mode == "filter" else "hwupload"})]
                 for node in chain:
                     nodes.append(node)
                     avp.addNode(node)
@@ -64,7 +72,7 @@ def run(args):
             elapsed = time.monotonic() - started
             after = resource.getrusage(resource.RUSAGE_SELF)
             counts = [edge.enqueued_total - initial for edge, initial in zip(outputs, start_counts)]
-            result = dict(mode=args.mode, inputs=args.inputs, format=args.format, width=width, height=height,
+            result = dict(mode=args.mode, write_combined=args.write_combined, inputs=args.inputs, format=args.format, width=width, height=height,
                           target_fps=args.fps, seconds=elapsed, frames=counts,
                           fps=[count / elapsed for count in counts],
                           cpu_seconds=(after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime),
@@ -80,7 +88,8 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("filter", "pageable"), required=True)
+    parser.add_argument("--mode", choices=("filter", "pageable", "direct"), required=True)
+    parser.add_argument("--write-combined", action="store_true", help="direct mode: write-combined page-locked memory")
     parser.add_argument("--inputs", type=int, default=8)
     parser.add_argument("--format", choices=("nv12", "p010le"), default="p010le")
     parser.add_argument("--width", type=int, default=1920)

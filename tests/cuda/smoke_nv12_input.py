@@ -14,7 +14,7 @@ from pyplumber.mixer.inputs import build_raw420_input, build_v210_input
 from v210_fixture import COLOR, sample_planes, write_fixture
 
 
-def check(fmt, pinned, native_rate=False, *, composite=False):
+def check(fmt, upload, native_rate=False, *, composite=False):
     width, height, fps = 96, 64, 30
     color = Color("sdr" if fmt == "nv12" else "hlg")
     dtype, shift = (np.uint8, 0) if fmt == "nv12" else (np.uint16, 6)
@@ -31,8 +31,8 @@ def check(fmt, pinned, native_rate=False, *, composite=False):
         nodes = []
         try:
             edge = build_raw420_input(avp, api, "raw", str(path), width=width, height=height, pixel_format=fmt,
-                                    fps=fps, group="probe", hwaccel="raw_gpu", loop=True, pinned=pinned,
-                                    color=color, native_rate=native_rate)
+                                    fps=fps, group="probe", hwaccel="raw_gpu", loop=True, pinned=upload == "pinned",
+                                    direct=upload == "direct", color=color, native_rate=native_rate)
             if composite:
                 # Upload tags must satisfy the compositor without a separate color node.
                 compositor = api.MixerCompositor({
@@ -64,7 +64,7 @@ def check(fmt, pinned, native_rate=False, *, composite=False):
             assert len(seen) == 24 and len(set(seen)) >= 3, seen
             assert any(b < a for a, b in zip(seen, seen[1:])), "raw clip did not loop"
             assert np.allclose(np.diff(timestamps), 1 / fps, atol=0.001), timestamps
-            print(f"PASS: 24 paced {fmt} frames, looping, byte-exact upload ({'pinned' if pinned else 'hwupload'}, native_rate={native_rate}, composite={composite})", flush=True)
+            print(f"PASS: 24 paced {fmt} frames, looping, byte-exact upload ({upload}, native_rate={native_rate}, composite={composite})", flush=True)
         finally:
             finish(avp, nodes)
 
@@ -113,9 +113,9 @@ def check_v210(width, native_rate=False):
 if __name__ == "__main__":
     for native_rate in (False, True):
         for fmt in ("nv12", "p010le"):
-            for pinned in (False, True):
-                check(fmt, pinned, native_rate)
+            for upload in ("hwupload", "pinned", "direct"):
+                check(fmt, upload, native_rate)
                 if native_rate:
-                    check(fmt, pinned, native_rate, composite=True)
+                    check(fmt, upload, native_rate, composite=True)
         for width in (48, 50, 1920):
             check_v210(width, native_rate)
