@@ -28,7 +28,7 @@
 
   <h1>The compositor's wait costs the frames that arrived</h1>
   <p class="note">Measured on 2026-10-13 on the 16 vCPU L4 host that runs the demo. Source links are pinned to <a href="https://github.com/amagimedia/avplumber/commit/cc716b6f663170413b7de319c073edbc6fb9e93d">commit cc716b6f</a> on branch <code>mixer/epoll-wait</code>, which is not on <code>develop</code> yet; the second commit on that branch is <a href="https://github.com/amagimedia/avplumber/commit/13ea58489f0de028d08375312755ec2d3402f605">13ea5848</a>. <a href="../">Watch the current 192-input L4 demo.</a></p>
-  <p class="lede">The busiest thread of the 192-source show is the Program compositor. It sleeps until any source has a new frame, and it did that with <code>poll()</code> over one descriptor per source: 193 descriptors handed to the kernel, hooked, unhooked and scanned on each of about 2,200 wakes a second, to learn that two or three had fired. With <code>epoll</code> the set is registered once and a wake costs the descriptors that fired. The thread fell from 52 to 35&nbsp;% of a core; nothing about when it wakes or what it draws changed.</p>
+  <p class="lede">The busiest thread of the 192-source show is the Program compositor. It sleeps until any source has a new frame, and it did that with <code>poll()</code> over one descriptor per source: 193 descriptors handed to the kernel, hooked, unhooked and scanned on each of about 2,200 wakes a second, to learn that two or three had fired. With <code>epoll</code> the list of sources is handed to the kernel once, when the compositor is built. After that each sleep is one call that carries no list, and the answer is only the sources that have a new frame. The thread fell from 52 to 35&nbsp;% of a core; nothing about when it wakes or what it draws changed.</p>
   <span class="pill optin">Status: Running on the demo host; on a branch</span>
 
   <ul class="figures" aria-label="Measured facts">
@@ -79,6 +79,15 @@
     <li><b>A third pass</b> when the tick cannot be drawn yet, before sleeping again.</li>
   </ol>
   <p>The Program compositor keeps every scene source subscribed, on air or not, so that a cut starts on the next frame. That is why its list is the whole show. An AUX compositor waits on the same 193 descriptors but subscribes only the 4 to 12 sources it shows, so it wakes about twenty times less often.</p>
+
+  <h2>Event and wait, in plain terms</h2>
+  <ul class="where">
+    <li><b>An event</b> is the signal: every source edge has a small counter in the kernel (an <code>eventfd</code>), and the source's thread writes to it each time it puts a frame on the edge.</li>
+    <li><b>The wait</b> is the call the compositor makes to sleep until any of those events fires. It is the waiting, not the thing waited for.</li>
+    <li><b>With <code>poll()</code></b> the program keeps the list of 193 events and hands all of it to the kernel on every sleep. The kernel attaches the thread to each one, sleeps, detaches from each one, and forgets the list.</li>
+    <li><b>With <code>epoll</code></b> the kernel keeps the list. A sleep is <code>epoll_wait()</code> with no list, and it returns with the events that fired.</li>
+  </ul>
+  <p>It is the difference between reading the whole guest list to the doorman every time you ask whether anyone has arrived, and giving him the list once and asking who is new.</p>
 
   <h2>The change</h2>
   <p><code>MultiEventWait</code>, the engine's wait for any of a set of events, now registers its events with <code>epoll</code> when it is built and calls <code>epoll_wait()</code> to sleep. Everything else is as it was:</p>
