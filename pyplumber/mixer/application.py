@@ -772,7 +772,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             bus.build(options)
         aux.register_commands()
     settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
-    avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
+    avp.registerControlCommand("mixer.settings", lambda _arg: settings, True, True)   # polled: not logged
     held = []
     importers = tuple(f"input_{index}_to_cuda" for index, source in enumerate(cfg.sources) if source.kind == "browser")
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,

@@ -1164,8 +1164,9 @@ Objects (`node.object.set`):
 
 `node.object.get <node> status`: `output_drops` (frames dropped for a full
 output edge; the bus keeps playing and draws again once it has room), `playout`
-(`frames`, `repeats`, `discarded`, `overflow`, `missed_deadlines`,
-`per_input`), with `aux_mode` `composition_pending`, `composition_error` and
+(`frames`, `repeats`, `discarded`, `overflow`, `missed_deadlines`: totals over the inputs; `node.object.get
+<node> per_input` gives `repeats`, `discarded` and `overflow` of each input, for finding the one that
+misbehaves), with `aux_mode` `composition_pending`, `composition_error` and
 `composition_revision`, the revision of the composition being drawn (set when
 one is applied at once or a staged one becomes ready, unchanged when a staged
 one is dropped; empty for one without a revision).

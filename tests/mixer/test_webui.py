@@ -497,7 +497,7 @@ def test_state_is_one_round_trip_of_status_scenes_and_settings(client):
     assert body["scenes"] == ["a", "b"]
     assert body["settings"]["direct"] is True
     assert body["host"] is None   # no host sampler: the page hides its meters
-    assert bridge.sent == ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
+    assert bridge.sent == FIRST_POLL
 
 
 def test_state_carries_the_host_sample(client):
@@ -566,7 +566,10 @@ def test_state_carries_the_recent_delivery_counts(client):
 
 
 STATE_REPLIES = {"mixer.status": '{"pgm_scene":"a"}', "mixer.scenes": '["a","b"]', "mixer.settings": "{}"}
-ONE_POLL = ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
+# What a show fixes (its scenes and settings) is asked for first and then only every few seconds;
+# a poll in between costs the mixer its status alone.
+FIRST_POLL = ["mixer.scenes mixer", "mixer.settings mixer", "mixer.status mixer"]
+ONE_POLL = ["mixer.status mixer"]
 
 
 def test_polls_share_one_state_until_it_expires_or_a_take_lands(monkeypatch):
@@ -576,13 +579,17 @@ def test_polls_share_one_state_until_it_expires_or_a_take_lands(monkeypatch):
     first = bridge.state()
     first["gpus"] = []   # a caller's own keys stay out of the shared reply
     assert "gpus" not in bridge.state()
-    assert bridge.sent == ONE_POLL
+    assert bridge.sent == FIRST_POLL
     now[0] += 0.2
     bridge.state()
-    assert bridge.sent == ONE_POLL * 2
+    assert bridge.sent == FIRST_POLL + ONE_POLL
     bridge.take({"command": "cut", "scene": "b"})
     bridge.state()
-    assert bridge.sent == ONE_POLL * 2 + ['mixer.cut {"scene":"b","mixer":"mixer"}'] + ONE_POLL
+    assert bridge.sent == FIRST_POLL + ONE_POLL + ['mixer.cut {"scene":"b","mixer":"mixer"}'] + ONE_POLL
+    del bridge.sent[:]
+    now[0] += 5.0   # long enough for another show to have started: its fixed part is asked for again
+    bridge.state()
+    assert bridge.sent == FIRST_POLL
 
 
 def test_concurrent_polls_cost_one_set_of_commands():
@@ -594,7 +601,36 @@ def test_concurrent_polls_cost_one_set_of_commands():
     gate.set()
     for poll in polls:
         poll.join(5)
-    assert bridge.sent == ONE_POLL
+    assert bridge.sent == FIRST_POLL
+
+
+def test_aux_layouts_are_asked_for_with_the_fixed_part_and_joined_to_each_bus():
+    replies = {"mixer.status": "{}", "mixer.scenes": "[]", "mixer.settings": '{"aux_buses":["mv","aux0"]}',
+               "mixer.aux_status": '[{"id":"mv","layout":{"preset":"pgm_pvw_grid"}},{"id":"aux0","layout":{"cells":[]}}]',
+               "mixer.aux_layouts": '{"mv":[{"preset":"pgm_pvw_grid"},{"preset":"source_pages"}],"aux0":[]}'}
+    bridge = FakeBridge(replies)
+    buses = bridge.state()["aux_buses"]
+    assert buses[0] == {"id": "mv", "layout": {"preset": "pgm_pvw_grid"},
+                        "layouts": [{"preset": "pgm_pvw_grid"}, {"preset": "source_pages"}]}
+    assert buses[1]["layouts"] == []
+    assert bridge.sent == ["mixer.scenes mixer", "mixer.settings mixer", "mixer.aux_layouts", "mixer.status mixer", "mixer.aux_status"]
+    # A mixer that still sends each bus's menu with its status, and has no such command, is served as it was.
+    older = FakeBridge({**replies, "mixer.aux_status": '[{"id":"mv","layouts":[{"preset":"source_pages"}]}]'},
+                       fail_take="mixer.aux_layouts")
+    assert older.state()["aux_buses"] == [{"id": "mv", "layouts": [{"preset": "source_pages"}]}]
+
+
+def test_outputs_serve_a_player_without_asking_the_mixer_for_its_status(client):
+    bridge = FakeBridge({"mixer.status": '{"pgm_scene":"a"}', "mixer.scenes": '["a"]',
+                         "mixer.settings": '{"preview_outputs":[{"bus":"mv","mountpoint":5008}]}'}, transition="cut")
+    url, _ = client(bridge)
+    status, body = get(url, "/api/outputs")
+    assert status == 200
+    assert body["settings"] == {"preview_outputs": [{"bus": "mv", "mountpoint": 5008}], "transition": "cut"}
+    assert "gpus" in body and "status" not in body and "aux_buses" not in body
+    assert not [line for line in bridge.sent if line.startswith(("mixer.status", "mixer.aux_status"))]
+    get(url, "/api/outputs")
+    assert bridge.sent == ["mixer.scenes mixer", "mixer.settings mixer"]   # the second player costs the mixer nothing
 
 
 def test_a_burst_of_takes_collapses_to_its_newest_in_order():
@@ -660,7 +696,7 @@ def test_transition_override_only_changes_page_settings(client, override, expect
     url, _ = client(bridge)
     settings = get(url, "/api/state")[1]["settings"]
     assert settings == {"transition": expected, "fade_seconds": 0.8}
-    assert bridge.sent == ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
+    assert bridge.sent == FIRST_POLL
 
 
 def test_takes_reach_the_mixer_as_control_commands(client):
