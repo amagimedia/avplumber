@@ -309,11 +309,11 @@ def test_host_stats_sum_the_threads_by_kind(tmp_path, monkeypatch):
     stats.sample()
     pct = lambda ticks: round(ticks * 100 / hz, 1)
     assert stats.values["thread_count"] == 35
-    assert stats.values["thread_kinds"] == [
+    assert stats.values["thread_kinds"] == [   # the kind with the busiest thread first
         {"name": "mixer_comp_a", "count": 1, "pct": pct(40), "max_pct": pct(40)},
-        {"name": "input_N", "count": 30, "pct": pct(30), "max_pct": pct(1)},       # thirty small threads, one line
         {"name": "EventLoop", "count": 2, "pct": pct(14), "max_pct": pct(8)},
         {"name": "aux_auxN_encod", "count": 2, "pct": pct(6), "max_pct": pct(4)},  # one kind under two cut-off spellings
+        {"name": "input_N", "count": 30, "pct": pct(30), "max_pct": pct(1)},       # thirty small threads, one line
     ]
     assert (stats.values["thread_name"], stats.values["thread_pct"]) == ("mixer_comp_a", round(40 * 100 / hz))
     # Beyond the limit the remaining kinds are one "other" row, so the list stays short.
