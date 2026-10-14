@@ -189,6 +189,7 @@ class MixerApplication:
     prewarm_cut_scenes: tuple[str, ...] = ()
     held_outputs: tuple[str, ...] = ()      # prefixes of the program's Janus chains, built held
     browser_importers: tuple[str, ...] = ()  # the drm_prime_to_cuda node of every browser source
+    browser_input_edges: tuple[str, ...] = ()  # in browser_windows order, for initial paint retries
     start_stable_sec: float = START_STABLE_SEC
     start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC
     startup: dict | None = field(default=None, init=False)   # how going on air went; `mixer.startup` answers with it
@@ -215,8 +216,10 @@ class MixerApplication:
                   f"{(time.monotonic() - started) * 1000:.0f} ms", flush=True)
         clipcache.require_cached(self.avp, MIXER_NAME, clips)
 
-    def _wait_for_edges(self, edges: tuple[str, ...], phase: str, data_type: str | None = None) -> None:
+    def _wait_for_edges(self, edges: tuple[str, ...], phase: str, data_type: str | None = None,
+                        *, browser_pages: dict[str, str] | None = None) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
+        next_refresh = time.monotonic() + 1
         while True:
             self._check_startup()
             missing = [edge for edge in edges if self.avp.getEdge(edge, data_type).enqueued_total == 0]
@@ -227,6 +230,11 @@ class MixerApplication:
                     f"mixer preheat timed out during {phase}; "
                     f"{len(missing)}/{len(edges)} edges have no frame, first={missing[0]}"
                 )
+            if browser_pages and time.monotonic() >= next_refresh:
+                # Groups start asynchronously: a static page can finish its only paint
+                # before its receiver connects. Retry only pages still missing a frame.
+                refresh_windows(self.dmabuf_rest, [browser_pages[edge] for edge in missing if edge in browser_pages])
+                next_refresh = time.monotonic() + 1
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
 
     def _wait_for_node(self, name: str) -> None:
@@ -258,7 +266,8 @@ class MixerApplication:
             self.avp.group(group).startNodes()
         if self.browser_windows:
             refresh_windows(self.dmabuf_rest, list(self.browser_windows))
-        self._wait_for_edges(self.input_edges, "input readiness")
+        self._wait_for_edges(self.input_edges, "input readiness",
+                             browser_pages=dict(zip(self.browser_input_edges, self.browser_windows)))
         log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
         self._purge_idle_imports()   # what the pages allocated before their reload: memory the buses are about to need
         if self.routed_inputs:
@@ -872,7 +881,9 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend, held=held)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False, held_outputs=tuple(held), browser_importers=importers,
-                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers), aux_buses=aux)
+                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers),
+                        browser_input_edges=tuple(input_edges[i] for i, s in enumerate(cfg.sources) if s.kind == "browser"),
+                        aux_buses=aux)
 
 
 def _startup_result(error=None):

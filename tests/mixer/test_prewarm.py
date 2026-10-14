@@ -143,6 +143,25 @@ def test_native_startup_error_aborts_without_waiting_for_frames(native_boundary,
     assert not engine.ready
 
 
+def test_static_browser_retries_its_first_paint_until_the_input_is_ready(native_boundary, monkeypatch):
+    app = application(native_boundary)
+    app.browser_windows = ("late", "ready")
+    app.browser_input_edges = app.input_edges
+    app.dmabuf_rest = "http://browser"
+    app.avp.missing.add(app.input_edges[0])
+    now, refreshes = [0.0], []
+    monkeypatch.setattr("pyplumber.mixer.application.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("pyplumber.mixer.application.time.sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    def refresh(url, ids):
+        refreshes.append(list(ids))
+        if len(refreshes) == 2:
+            app.avp.missing.clear()
+    monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", refresh)
+    app.start()
+    assert refreshes == [["late", "ready"], ["late"]]
+    assert app.avp.ready
+
+
 def test_native_error_handler_restored_after_successful_start(native_boundary):
     app = application(native_boundary)
     received = []
