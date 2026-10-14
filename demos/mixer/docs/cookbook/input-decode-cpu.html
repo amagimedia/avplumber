@@ -112,7 +112,7 @@
   </div>
   <p>With the polling builds that followed, each Program compositor fell again, from 12.1 to 7.3&nbsp;%: the two together read 14.6&nbsp;%, against 59.5 that evening and about 98 earlier on 13 October, before <a href="compositor-wait.html">the wait used epoll</a>. At the end of the evening the whole host read about 3.0 vCPUs for the mixer, 1.7 for the browser container and 0.2 for the WebRTC gateway.</p>
 
-  <h2>The changes</h2>
+  <p>Each change, in the order it went into the show:</p>
 
   <h2 id="hevc">HEVC frames skip the software decode tables · on develop</h2>
   <p>A profile of the decoder threads found a quarter of their time in five <code>memset</code> calls in FFmpeg's <code>hevc_frame_start</code>: about 650 KB of per-picture tables cleared for every frame, about 66 of the 260&nbsp;µs a frame cost. Only FFmpeg's software decode and its loop filters read those tables, and with NVDEC doing the decode neither runs. FFmpeg patch 0020 skips the clears when a hardware decoder is in use; software decoding is unchanged. The decoder threads fell from 86 to 62&nbsp;%, the mixer from 502 to 471.</p>

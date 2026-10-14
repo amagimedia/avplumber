@@ -131,7 +131,7 @@
   </ul>
 
   <h2>The patches</h2>
-  <p>A series for Chromium 152.0.7977.130 and Electron 44.5.1, built into the browser image; not yet published in the avplumber repository. Every change sits behind two Chromium features that are off by default, so one binary runs stock or patched.</p>
+  <p>A series for Chromium 152.0.7977.130 and Electron 44.5.1, built into the browser image. The two native-handle capture patches, the first of each list below, are in the avplumber repository under <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1/docker-compose/dmabuf/chromium"><code>docker-compose/dmabuf/chromium</code></a>; the other nine are not yet published. Every change sits behind two Chromium features that are off by default, so one binary runs stock or patched.</p>
   <ul class="where">
     <li>Chromium: (1) capture native-handle SharedImages as textures; (2) skip the black clear when a blit covers the whole destination; (3) carry an acquire fence with texture copy results; (4) zero-copy export of the offscreen root pass, the feature <code>AvpZeroCopyOffscreenExport</code>; (5) rate-limited warnings on every branch that drops a zero-copy frame; (6) log the exported root pass and the device's geometry; (7) never free capture buffers while the display lives, first-in first-out reuse, allocation counters.</li>
     <li>Electron: (1) opt offscreen shared textures into native handles; (2) expose the capturer's acquire fence on the <code>paint</code> event; (3) capture the compositor root frame sink in zero-copy mode; (4) hold the compositor root transparent in zero-copy mode.</li>
