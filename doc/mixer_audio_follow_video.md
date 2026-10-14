@@ -50,14 +50,18 @@ itself, only hands out the edges:
 
 - `Source.has_audio: bool` (default `false`, `kind: "video"` sources only)
   demuxes/decodes/resamples that source's audio track to fltp/48kHz, keeping
-  its own channel layout (mono, stereo, 5.1, ...) rather than forcing one.
+  its own channel layout (mono, stereo, 5.1, ...), then paces it through
+  `realtime(set_pts=True)` on the same `RealTimeTeam` as that source's video
+  (`input_{index}_av_sync` when no caller `sync_team` is supplied). Video is
+  `master=true`, audio `master=false`; both use the same `tick_period` /
+  timebase so `RealTimeTeam::checkTimeBase` accepts them and lip-sync shares
+  one wallclock offset.
 - `MixerApplication.audio_edges: tuple[(source.id, edge_name), ...]` on the
-  built application lists one entry per `has_audio` source, each a decoded
-  edge not yet connected to anything. The caller builds and wires its own
-  audio router/mixer node from these, then passes that node's name as
-  `audio_router_node`.
+  built application lists one entry per `has_audio` source, each a
+  realtime-paced edge not yet connected to anything. The caller builds and
+  wires its own audio router/mixer node from these, then passes that node's
+  name as `audio_router_node`. The router must not re-pace to wallclock;
+  upstream `realtime` is already the audio clock.
 - `pyplumber.mixer.inputs.build_input(..., has_audio=True)` is the lower-level
   helper behind this, for applications building inputs directly. It returns
-  `(video_edge, audio_edge_or_None)` instead of a single edge. The audio chain
-  is deliberately not paced through `realtime`: an audio router node is
-  expected to pace itself to wallclock.
+  `(video_edge, audio_edge_or_None)` instead of a single edge.

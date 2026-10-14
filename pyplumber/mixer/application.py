@@ -636,7 +636,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             edge, audio_edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
                                event_loop=_pacing_loop(index), decoder_params=source.decoder_params, native_rate=True,
-                               has_audio=source.has_audio)
+                               has_audio=source.has_audio,
+                               sync_team=(f"input_{index}_av_sync" if source.has_audio else None))
             if audio_edge:
                 audio_edges.append((source.id, audio_edge))
         if source.transform:
