@@ -135,6 +135,8 @@ class Handler(BaseHTTPRequestHandler):
                 state["host"] = self.host_stats.values if self.host_stats else None
                 # Chromium's CPU from the browser service; None hides the THREAD tip's Chromium part.
                 state["chromium"] = self.browser_cpu.values if self.browser_cpu else None
+                # The browser windows' drops and Chromium's skipped paints over the last ten minutes.
+                state["browser_drops"] = self.browser_cpu.drops.values if self.browser_cpu else None
                 # Deadline misses and AUX drops of the last ten minutes; without a sampler the page shows totals.
                 state["recent"] = self.recent.values if self.recent else None
                 if self.setup_manager:

@@ -385,6 +385,59 @@ def test_browser_cpu_tolerates_an_older_browser_image_and_an_outage():
     assert stats.poll() == 1 and stats.values is None and stats.error.startswith("AttributeError")
 
 
+def browser_status(*windows):
+    """GET /status of the browser service: (id, paints, sent, dropped, reasons[, paintsSkipped]) per window."""
+    def window(wid, paints, sent, dropped, reasons, *skipped):
+        stats = {"paintCount": paints, "txFrameCount": sent, "droppedFrames": dropped, "droppedReasons": reasons,
+                 "releasedFrameCount": 0, "retainedFrameCount": 0, "quarantinedFrameCount": 0, "lastPaintTsMs": None}
+        return {"id": wid, "stats": {**stats, **({"paintsSkipped": skipped[0]} if skipped else {})}}
+    return {"windows": [window(*w) for w in windows], "count": len(windows), "maxWindows": 8}
+
+
+def test_browser_drops_over_the_window_survive_a_window_restart_and_new_windows():
+    from pyplumber.mixer.gui.telemetry import BrowserCpuStats
+    now, status = [0.0], [None]
+    stats = BrowserCpuStats("http://127.0.0.1:9009", fetch=lambda: {"intervalS": None},
+                            fetch_status=lambda: status[0], clock=lambda: now[0])
+    assert stats.drops.values is None
+    status[0] = browser_status(("web_1", 1000, 990, 10, {"no_consumer": 10}, 3), ("web_2", 500, 500, 0, {}, 0))
+    stats.poll_status()   # the baseline: what the windows counted before is not recent
+    assert stats.drops.values == {"window_s": 600, "covered_s": 0, "windows": 2, "paints": 0, "sent": 0, "dropped": 0,
+                                  "reasons": [], "worst": None, "skipped": 0}
+    now[0] = 5.0
+    status[0] = browser_status(("web_1", 1150, 1130, 20, {"no_consumer": 12, "retained_pool_full": 8}, 7),
+                               ("web_2", 650, 646, 4, {"retained_pool_full": 4}, 1))
+    stats.poll_status()
+    assert stats.drops.values == {"window_s": 600, "covered_s": 5, "windows": 2, "paints": 300, "sent": 286, "dropped": 14,
+                                  "reasons": [("retained_pool_full", 12), ("no_consumer", 2)],
+                                  "worst": {"id": "web_1", "dropped": 10}, "skipped": 5}
+    # web_2's worker restarted (its counters fell: they count from zero), web_3 opened, the service hiccuped.
+    now[0] = 10.0
+    status[0] = None
+    stats.poll_status()
+    assert stats.drops.values["dropped"] == 14   # a failed poll leaves the figures standing
+    now[0] = 15.0
+    status[0] = browser_status(("web_1", 1300, 1280, 20, {"no_consumer": 12, "retained_pool_full": 8}, 7),
+                               ("web_2", 100, 94, 6, {"retained_pool_full": 6}, 2), ("web_3", 50, 50, 0, {}, 0))
+    stats.poll_status()
+    values = stats.drops.values
+    assert (values["windows"], values["paints"], values["dropped"], values["skipped"]) == (3, 600, 20, 7)
+    assert values["worst"] == {"id": "web_1", "dropped": 10} and values["reasons"] == [("retained_pool_full", 18), ("no_consumer", 2)]
+    # Ten minutes on, what happened before has left the window.
+    now[0] = 700.0
+    stats.poll_status()
+    assert stats.drops.values["dropped"] == 0 and stats.drops.values["covered_s"] == 685
+
+
+def test_browser_drops_from_an_app_without_skipped_paints_say_none():
+    from pyplumber.mixer.gui.telemetry import browser_drop_summary, window_counters
+    counters = window_counters(browser_status(("web_1", 10, 9, 1, {"no_consumer": 1})))
+    assert ("web_1", "skipped") not in counters
+    assert browser_drop_summary(counters)["skipped"] is None
+    with pytest.raises(ValueError):
+        window_counters(browser_status(("web_1", 10, 9, -1, {})))
+
+
 def test_host_stats_thread_hides_the_meters_during_an_error_and_logs_it_once(tmp_path, monkeypatch, caplog):
     fake_proc(tmp_path, 1.0, [1, 0, 1, 1, 0, 0, 0, 0], {1: ("mixer.py", 1, 0)})
     # A setup change clears setup.process on another thread: two samples in a row see None where a process was.
@@ -578,8 +631,10 @@ def test_state_carries_the_chromium_figures(client):
     assert get(url, "/api/state")[1]["chromium"] is None   # no browser service named: the tip has no Chromium part
     browser = BrowserCpuStats("http://127.0.0.1:9009", fetch=lambda: None)
     browser.values = {"total_pct": 50, "processes": []}
+    browser.drops.values = {"window_s": 600, "covered_s": 30, "dropped": 3}
     url, _ = client(FakeBridge(STATE_REPLIES), browser_cpu=browser)
-    assert get(url, "/api/state")[1]["chromium"] == browser.values
+    body = get(url, "/api/state")[1]
+    assert body["chromium"] == browser.values and body["browser_drops"] == browser.drops.values
 
 
 def test_delivery_counts_cover_the_last_ten_minutes_not_the_time_since_the_start():
