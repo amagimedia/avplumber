@@ -43,6 +43,25 @@ int main() {
     close(old_pair[1]);
     close(new_pair[1]);
 
+    // Without a return queue (the zero-copy export: the browser's queue has no buffer to spare)
+    // every release is acknowledged at once, before any new frame arrives.
+    int zero_pair[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, zero_pair) == 0);
+    auto immediate = std::make_shared<DmabufReleaseAckQueue>(zero_pair[0], 0);
+    immediate->enqueue(21);
+    immediate->enqueue(22);
+    assert(immediate->stats().queued == 0 && immediate->stats().pending == 2);
+    assert(immediate->flush());
+    expectAck(zero_pair[1], DmabufAckKind::Frame, 21);
+    expectAck(zero_pair[1], DmabufAckKind::Frame, 22);
+    immediate->frameArrived();
+    assert(!immediate->hasPending());
+    immediate.reset();
+    expectAck(zero_pair[1], DmabufAckKind::Drain);
+    expectAck(zero_pair[1], DmabufAckKind::Drained);
+    assert(recv(zero_pair[1], &byte, 1, 0) == 0);
+    close(zero_pair[1]);
+
     // With a return queue an acknowledgement waits for the next frame: one goes per arrival,
     // the oldest goes at once beyond the queue's length, and retiring sends what still waits.
     int held_pair[2];

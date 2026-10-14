@@ -6,6 +6,7 @@ the test worker afterwards. Never point this test at a shared production worker.
 import argparse
 import base64
 import gc
+import json
 import subprocess
 import sys
 import time
@@ -34,9 +35,19 @@ def consume(args):
             count += 1
             del frame
         if args.format == "bgra":
-            assert any("texture-backed inputs require RGB-to-YUV" in e[-1] for e in errors), errors
+            # A BGRA canvas is refused: a BGRA buffer as needing RGB-to-YUV, an RGBA one (the
+            # zero-copy export) for its format.
+            assert any("texture-backed inputs require RGB-to-YUV" in e[-1]
+                       or "input hw sw_format mismatch" in e[-1] for e in errors), errors
         else:
             assert count == 30 and not errors, (count, errors)
+        # Every frame carried an acquire fence or did not (a patched Electron that no longer waits
+        # for the GPU sends one; stock Electron sends none). A fence that timed out or could not be
+        # waited on is a dropped frame: none on a healthy host.
+        stats = avp.node("probe_receive").getObject("frame_stats")
+        assert stats["fenced"] + stats["unfenced"] == stats["received"], stats
+        assert stats["fence_timeouts"] == 0 and stats["fence_invalid"] == 0, stats
+        print("FENCE " + json.dumps(stats), flush=True)
         print("READY", flush=True)
         if args.crash:
             time.sleep(60)
@@ -68,6 +79,8 @@ def main():
             stdout=subprocess.PIPE, text=True)
         try:
             for line in child.stdout:
+                if line.startswith("FENCE "):
+                    print(f"{fmt}: {line.strip()}", flush=True)
                 if line.strip() == "READY":
                     if crash:
                         child.kill()
