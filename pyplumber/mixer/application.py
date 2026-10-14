@@ -79,6 +79,7 @@ class MixerOptions:
     bitrate: str = "8M"
     fps: int = DEFAULT_FPS
     mixer_latency_ms: float | None = None
+    mixer_input_poll_ms: int | None = None   # canvas.input_poll_ms; None: compositors wake for every frame
     janus_output: bool = False
     janus_host: str = JANUS_DEFAULT_HOST
     janus_video_port: int = JANUS_DEFAULT_VIDEO_PORT
@@ -487,7 +488,8 @@ def _make_builder(avp, api, options, *, canvas, fps, working_format, color: Colo
     rate and working_format are the only per-path differences)."""
     return api.MixerGraphBuilder(
         avp, name=MIXER_NAME, canvas=canvas, fps=(fps, FPS_DEN),
-        latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
+        latency_ms=options.mixer_latency_ms, input_poll_ms=options.mixer_input_poll_ms,
+        hwaccel=HWACCEL, enable_wipe=True,
         max_compositor_layers=options.max_compositor_layers or mixer_config.DEFAULT_MAX_COMPOSITOR_LAYERS,
         defer_initial_routes=True, defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
@@ -665,6 +667,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     options = replace(options, fps=cfg.fps, max_compositor_layers=cfg.max_compositor_layers)
     if options.mixer_latency_ms is None and cfg.latency_ms is not None:
         options = replace(options, mixer_latency_ms=cfg.latency_ms)
+    if options.mixer_input_poll_ms is None and cfg.input_poll_ms is not None:
+        options = replace(options, mixer_input_poll_ms=cfg.input_poll_ms)
     browsers = [s for s in cfg.sources if s.kind == "browser"]
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,

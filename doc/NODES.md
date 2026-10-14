@@ -1192,6 +1192,13 @@ Parameters, in addition:
     tick its frame is drawn: the inputs' arrival budget
 -   `pgm_delay_frames` (int, optional) - match the last input that many ticks
     back (a Program preview's finished program arrives one frame after its sources)
+-   `input_poll_ms` (int, default `0`) - `0`: the output thread is woken by every
+    frame an input gives. Above `0`: it sleeps until the next deadline or a control
+    change and looks for frames at most this often in between. A tick is drawn at its
+    deadline in both cases; the second spares a compositor with many inputs thousands
+    of wake-ups a second. Each input's queue must hold what arrives within one interval.
+    `node.object.get <node> status` reports the setting and `input_passes`, how often
+    the thread has looked.
 -   `aux_mode` (bool, default `false`) - an AUX bus: a private CUDA stream,
     subscribed inputs, layers from `composition` only (no per-frame metadata
     layers), and frames dropped rather than waited for when the output edge is full

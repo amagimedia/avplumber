@@ -110,6 +110,7 @@ class MixerGraphBuilder:
         wipe_color=None,
         backend=None,
         max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS,
+        input_poll_ms: Optional[int] = None,   # None: the program compositors wake for every source frame
     ):
         self.avp = avp
         self.name = name
@@ -127,6 +128,7 @@ class MixerGraphBuilder:
         self.defer_initial_routes = defer_initial_routes
         self.latency_ms = latency_ms if latency_ms is not None else default_latency_ms(self.fps_num / self.fps_den)
         self.max_compositor_layers = max_compositor_layers
+        self.input_poll_ms = input_poll_ms
         self.working_format = working_format
         self.color = Color.parse(color)
         self.color.validate_format(working_format)
@@ -612,6 +614,7 @@ class MixerGraphBuilder:
                 "max_layers": self.max_compositor_layers,
                 "fps": self._fps_str(),
                 "latency_ms": self.latency_ms,
+                **({} if self.input_poll_ms is None else {"input_poll_ms": self.input_poll_ms}),
                 "layers": [
                     {**self._initial_scene_def().sources[source.name], "input": i}
                     for i, source in enumerate(self._sources)

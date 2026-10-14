@@ -272,6 +272,7 @@ class MixerConfig:
     raw_upload: str = "hwupload"   # canvas.raw_upload: one of RAW_UPLOADS
     input_routing: str = "input"   # canvas.input_routing: one of INPUT_ROUTINGS
     latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default default_latency_ms(fps)
+    input_poll_ms: Optional[int] = None  # canvas.input_poll_ms: how often a program compositor looks for frames
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBusConfig, ...] = ()
@@ -561,6 +562,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             raise ConfigError("canvas.latency_ms must be a number of milliseconds") from None
         if not 0 <= latency_ms < 6000 / fps:
             raise ConfigError(f"canvas.latency_ms must be at least 0 and below six frames ({6000 / fps:.1f} ms at {fps} fps)")
+    input_poll_ms = canvas.get("input_poll_ms")
+    if input_poll_ms is not None and (type(input_poll_ms) is not int or input_poll_ms < 0):
+        raise ConfigError("canvas.input_poll_ms must be a whole number of milliseconds, 0 or more")
     try:
         out_color = declared_color(canvas) or Color()
         out_color.validate_format(working_format)
@@ -639,7 +643,7 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        browser_frame_queue=doc.get("browser_frame_queue", earlier_browser_ring_size(doc.get("browser_ring_size"))),
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
                        initial_scene=initial, working_format=working_format, raw_upload=raw_upload, input_routing=input_routing,
-                       latency_ms=latency_ms, out_color=out_color,
+                       latency_ms=latency_ms, input_poll_ms=input_poll_ms, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))
