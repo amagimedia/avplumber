@@ -12,6 +12,8 @@ import selectors
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import urlsplit
 
 log = logging.getLogger("webui")
@@ -205,7 +207,7 @@ class HostStats:
     whole host, not the container's share. `values` is None where /proc is missing and until the
     second sample; its mixer fields are None while no mixer process runs."""
 
-    THREAD_KINDS = 18    # kinds of thread listed, the kind with the busiest thread first; the rest are "other"
+    THREAD_KINDS = 8     # kinds of thread listed, the largest total first; the rest are "other"
     KINDS_WINDOW = 5     # samples a kind's figures span: one thread's second is a tick or two
 
     def __init__(self, mixer_pid=lambda: None, proc=Path("/proc")):
@@ -282,9 +284,9 @@ class HostStats:
 
 
 def thread_kinds(used, tick_seconds, limit):
-    """Threads summed by kind: [{"name", "count", "pct", "max_pct"}], the kind with the busiest
-    thread first (then the larger sum), at most *limit* kinds and then the rest as "other".
-    *used* holds (ticks, thread name).
+    """Threads summed by kind: [{"name", "count", "pct", "max_pct"}], the kind that used the most
+    CPU in total first (then the one with the busiest thread), at most *limit* kinds and then the
+    rest as "other". *used* holds (ticks, thread name).
 
     A show has hundreds of threads that each use a fraction of a percent and together a core:
     one per source for input, decoding, upload, fan-out. Digits in a name become N, so
@@ -305,13 +307,96 @@ def thread_kinds(used, tick_seconds, limit):
             kinds[shorter].update(count=kinds[shorter]["count"] + longer["count"], ticks=kinds[shorter]["ticks"] + longer["ticks"],
                                   max=max(kinds[shorter]["max"], longer["max"]))
     pct = lambda ticks: round(ticks * 100 / tick_seconds, 1) if tick_seconds > 0 else 0.0
-    ranked = sorted(kinds.items(), key=lambda item: (-item[1]["max"], -item[1]["ticks"]))
+    ranked = sorted(kinds.items(), key=lambda item: (-item[1]["ticks"], -item[1]["max"], item[0]))
     rows = [{"name": name, "count": k["count"], "pct": pct(k["ticks"]), "max_pct": pct(k["max"])} for name, k in ranked[:limit]]
     rest = [k for _, k in ranked[limit:]]
     if rest:
         rows.append({"name": "other", "count": sum(k["count"] for k in rest), "pct": pct(sum(k["ticks"] for k in rest)),
                      "max_pct": pct(max(k["max"] for k in rest))})
     return rows
+
+
+class BrowserCpuStats:
+    """Chromium's CPU use, from the browser service's GET /metrics/cpu (deps/dma-browser): the mixer
+    container cannot see the browser container's processes. Polled once a second on one thread and
+    shared by every viewer. `values` is chromium_summary() of the last answer, or None until the
+    second answer (the first only takes the service's baseline) and while the service is down. A
+    browser image without the endpoint answers 404; it is asked again every `absent_s` seconds."""
+
+    PATH = "/metrics/cpu"
+
+    def __init__(self, base_url: str, period_s: float = 1, absent_s: float = 30, timeout_s: float = 1, fetch=None):
+        self.base_url = base_url.rstrip("/")
+        self.period_s, self.absent_s, self.timeout_s = period_s, absent_s, timeout_s
+        self.fetch = fetch or self._fetch
+        self.values = None
+        self.error = None   # why the last poll has no values, or None
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True, name="browser-cpu").start()
+
+    def _fetch(self):
+        with urllib.request.urlopen(self.base_url + self.PATH, timeout=self.timeout_s) as response:
+            return json.loads(response.read())
+
+    def _run(self):
+        failing = False   # the first failed poll of an outage is logged; a good one ends it
+        while True:
+            wait = self.poll()
+            if self.error and not failing:
+                log.warning("Chromium CPU unavailable from %s%s: %s", self.base_url, self.PATH, self.error)
+            failing = self.error is not None
+            time.sleep(wait)
+
+    def poll(self) -> float:
+        """One request; returns how long to wait before the next."""
+        self.error = None
+        try:
+            self.values = chromium_summary(self.fetch())
+            return self.period_s
+        except urllib.error.HTTPError as exc:
+            self.values, self.error = None, f"HTTP {exc.code}"
+            return self.absent_s if exc.code == 404 else self.period_s
+        except (OSError, ValueError, TypeError, KeyError) as exc:   # down, restarting, or an unexpected answer
+            self.values, self.error = None, f"{type(exc).__name__}: {exc}"
+            return self.period_s
+
+
+CHROMIUM_PROCESS_NAMES = {"browser": "browser", "gpu": "GPU process", "renderer": "renderer",
+                          "utility": "utility", "zygote": "zygote", "other": "other"}
+CHROMIUM_GPU_THREAD_NAMES = {"viz": "viz compositor", "main": "GPU main", "io": "IO", "other": "other"}
+CHROMIUM_BUSIEST_CORES = 4
+
+
+def chromium_summary(raw):
+    """The page's Chromium section from one GET /metrics/cpu answer, or None while the answer has
+    no interval yet. Rows have the THREAD tip's shape, {"name", "count", "pct", "max_pct"}: the
+    process types the largest total first, the GPU process's threads in a fixed order (viz
+    compositor, GPU main, IO, other), and the cores Chromium used most, each with the host's own
+    use of that core."""
+    if raw.get("intervalS") is None:
+        return None
+    number = lambda value: value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+    def rows(items, names):
+        out = []
+        for item in items or []:
+            name, count, pct, max_pct = item.get("type", item.get("name")), item["n"], number(item["pct"]), number(item["maxPct"])
+            if not isinstance(count, int) or isinstance(count, bool) or pct is None or max_pct is None:
+                raise ValueError("malformed Chromium CPU row")
+            out.append({"name": names.get(name, str(name)), "count": count, "pct": pct, "max_pct": max_pct})
+        return out
+
+    processes = sorted(rows(raw.get("processes"), CHROMIUM_PROCESS_NAMES), key=lambda r: (-r["pct"], -r["max_pct"]))
+    order = list(CHROMIUM_GPU_THREAD_NAMES.values())
+    gpu = sorted(rows(raw.get("gpuThreads"), CHROMIUM_GPU_THREAD_NAMES), key=lambda r: order.index(r["name"]) if r["name"] in order else len(order))
+    cores = raw.get("cores") or {}
+    per_core = [{"cpu": c["cpu"], "pct": number(c["chromiumPct"]), "host_pct": number(c.get("hostPct"))}
+                for c in cores.get("perCore") or []]
+    busiest = sorted((c for c in per_core if c["pct"]), key=lambda c: -c["pct"])[:CHROMIUM_BUSIEST_CORES]
+    total = number(raw.get("totalPct"))
+    return {"total_pct": total, "cores_used": round(total / 100, 2) if total is not None else None,
+            "vcpus": cores.get("hostVcpus"), "processes": processes, "gpu_threads": gpu, "busiest_cores": busiest}
 
 
 def _cpu_stat(stat):
