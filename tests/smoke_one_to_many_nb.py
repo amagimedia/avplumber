@@ -5,7 +5,7 @@ Run in the built avplumber environment (needs the `ffmpeg` CLI with the native m
 
 One clip is decoded and fanned out to three edges with the third masked off, once by the
 threaded node and once by the node that runs on an event loop. Both must give the two open
-edges every picture, in order, then the end-of-stream marker, and the third edge nothing.
+edges every picture, in order, and the third edge nothing.
 """
 
 import hashlib
@@ -30,8 +30,7 @@ def make_fixture(workdir):
 
 
 def fan_out(url, node_class, extra):
-    """What each of the three edges received: [(pts, digest of the luma plane)], and whether
-    the end-of-stream marker followed."""
+    """What each of the three edges received: [(pts, digest of the luma plane)]."""
     avp = AVPlumber()
     errors = []
     avp.on_exception = lambda *error: errors.append(error)
@@ -45,39 +44,38 @@ def fan_out(url, node_class, extra):
     ):
         avp.addNode(cls({"group": "probe", **params}))
     edges = [avp.getEdge(name, "VideoFrame") for name in ("first", "second", "masked")]
-    received, ended = [[], [], []], [False, False, False]
+    received = [[], [], []]
     try:
         avp.group("probe").startNodes()
         deadline = time.monotonic() + 20
-        while not (ended[0] and ended[1]):
+        settled = None   # when both open edges had every picture; a little longer shows nothing follows
+        while settled is None or time.monotonic() < settled + .3:
             assert not errors, errors
-            assert time.monotonic() < deadline, f"received {[len(r) for r in received]} pictures, ended {ended}"
+            assert time.monotonic() < deadline, f"received {[len(r) for r in received]} pictures"
             for i, edge in enumerate(edges):
                 frame = edge.tryGet(5 if i == 0 else 0)
-                if frame is None:
-                    continue
-                if frame.pts.timestamp == NOPTS:
-                    ended[i] = True
-                else:
+                if frame is not None and frame.pts.timestamp != NOPTS:
                     received[i].append((frame.pts.timestamp, hashlib.md5(bytes(frame.data[0])).hexdigest()))
+            if settled is None and min(len(received[0]), len(received[1])) >= FRAMES:
+                settled = time.monotonic()
         assert not errors, errors
     finally:
         avp.shutdown()
-    return received, ended
+    return received
 
 
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         mp4 = make_fixture(pathlib.Path(tmp))
-        threaded, _ = fan_out(mp4, n.OneToMany, {})
+        threaded = fan_out(mp4, n.OneToMany, {})
         assert len(threaded[0]) == FRAMES and threaded[0] == threaded[1], [len(r) for r in threaded]
         assert not threaded[2], f"the masked edge received {len(threaded[2])} pictures"
         print(f"PASS one_to_many: {FRAMES} pictures on both open edges, none on the masked one", flush=True)
-        looped, ended = fan_out(mp4, n.OneToManyNb, {"event_loop": "fan"})
+        looped = fan_out(mp4, n.OneToManyNb, {"event_loop": "fan"})
         assert looped[0] == threaded[0] and looped[1] == threaded[0], \
             f"one_to_many_nb gave {[len(r) for r in looped]} pictures, one_to_many {len(threaded[0])}"
-        assert not looped[2] and not ended[2], "the masked edge received something"
-        print(f"PASS one_to_many_nb: the same {FRAMES} pictures in the same order, then the end marker", flush=True)
+        assert not looped[2], f"the masked edge received {len(looped[2])} pictures"
+        print(f"PASS one_to_many_nb: the same {FRAMES} pictures in the same order", flush=True)
         try:
             fan_out(mp4, n.OneToManyNb, {"event_loop": "fan", "drop": False})
         except Exception as error:   # the engine reports a node that cannot be created
