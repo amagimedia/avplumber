@@ -305,6 +305,8 @@ class Output(InternalNode):
 
 class OneToMany(InternalNode):
     TYPE = "one_to_many"
+class OneToManyNb(InternalNode):
+    TYPE = "one_to_many_nb"
 class SourceSwitcher(InternalNode):
     TYPE = "source_switcher"
 class PreheatVideoRouter(InternalNode):
