@@ -7,6 +7,7 @@ The download is a verification boundary; the node itself never reads its picture
 import os
 from pathlib import Path
 import tempfile
+import time
 
 import numpy as np
 
@@ -174,6 +175,31 @@ def check_resident(directory, fmt):
         finish(avp, nodes)
 
 
+def check_pool_bound(directory):
+    """With pool_frames the node has at most that many device frames: while its consumer holds
+    them all it waits, and it goes on as soon as one comes back."""
+    path = Path(directory) / "pool.raw"
+    path.write_bytes(b"".join(picture(32 + 16 * i) for i in range(FRAMES)))
+    avp, errors = make_avp("raw_gpu", capacity=1)
+    nodes = []
+    try:
+        nodes.append(reader(avp, path, loop=True, loop_continuous_ts=True, resident=True, pool_frames=3))
+        output = avp.getEdge("pictures", "VideoFrame")
+        avp.group("probe").startNodes()
+        held = [frame for frame in drain(output, errors, timeout=10, limit=3)]   # three held here
+        time.sleep(.5)
+        stats = avp.node("reader").getObject("stats")
+        assert not errors, errors
+        assert stats["frames_allocated"] == 3, stats
+        assert output.occupied == 0 and stats["frames"] == 3, f"{stats}: the node went on with every frame held"
+        held.pop(0)   # one back to the pool
+        assert len(list(drain(output, errors, timeout=10, limit=1))) == 1
+        assert avp.node("reader").getObject("stats")["frames_allocated"] == 3
+        print("PASS: pool_frames 3 holds the node at three device frames until one comes back", flush=True)
+    finally:
+        finish(avp, nodes)
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as directory:
         check_single_pass(directory)
@@ -183,3 +209,4 @@ if __name__ == "__main__":
             for write_combined in (False, True):
                 check_pixels(directory, fmt, write_combined)
             check_resident(directory, fmt)
+        check_pool_bound(directory)
