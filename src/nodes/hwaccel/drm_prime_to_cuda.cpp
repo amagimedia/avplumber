@@ -8,6 +8,7 @@
 #include "../../../deps/cuda_loader/cuda_drvapi_dynlink_gl.h"
 #include "cuda_rect_sampler.h"
 #include "cuda_rect_texture.h"
+#include "cuda_stream.hpp"
 #include "DeferredRelease.hpp"
 #include "EglDmabufDisplay.hpp"
 
@@ -473,10 +474,16 @@ public:
         if (!params.count("hwaccel")) {
             throw Error("drm_prime_to_cuda requires hwaccel parameter (CUDA device)");
         }
-        r->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
-        if (!r->hwaccel_) {
+        auto shared = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
+        if (!shared) {
             throw Error("drm_prime_to_cuda: failed to get hwaccel");
         }
+        // FFmpeg leaves the shared device's stream at NULL, the legacy default stream. Copying every
+        // window's frames there and synchronizing on it serialized all browser imports on one FIFO, and
+        // the compositor, ordered after its sources' streams, waited behind every other window's copy.
+        // A private non-blocking stream per node keeps each window's copies and the compositor's wait
+        // to that window's own frames.
+        r->hwaccel_ = avp::mixer::makeCudaStreamDevice(shared);
         AVHWDeviceContext* devctx = (AVHWDeviceContext *)(r->hwaccel_->deviceContext()->data);
         r->cuda_dev_ctx_ = (AVCUDADeviceContext*)(devctx->hwctx);
         if (!r->cuda_dev_ctx_) {
