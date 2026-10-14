@@ -159,6 +159,13 @@ reached, the newest paint is dropped and released; an older in-flight texture is
 never released early. `/status` reports `releasedFrameCount` and
 `retainedFrameCount` for each window.
 
+`paintsSkipped` counts paints Chromium numbered but never delivered: the gaps in
+the paint textures' `textureInfo.metadata.frameCount` (the capturer's
+`capture_counter`). In zero-copy export mode that is the export device's "paint
+skipped" (every buffer lent) and a failed lend. The capturer's own "capture
+skipped" (too many frames outstanding) takes no number and is not counted. A
+counter that starts low again (a reload) is a new baseline, not a gap.
+
 `ringSize` bounds frames in flight, not allocations. The buffers belong to
 Chromium's capture pool, which keeps at most two idle buffers: when frames come
 back in bunches it destroys the surplus and allocates new buffers later, each a

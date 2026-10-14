@@ -53,6 +53,36 @@ function image(): { getSize(): { width: number; height: number } } {
   };
 }
 
+describe('FrameCaptureChannel skipped paints', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fdpass.broadcastFd.mockResolvedValue({clients: 1, sent: 1, backpressure: 0, disconnected: 0, errors: 0});
+    fdpass.closeServer.mockReturnValue([]);
+  });
+
+  it('counts gaps in the capture counter, also of paints it then drops', async () => {
+    const channel = new FrameCaptureChannel({
+      socketPath: '/tmp/dma-page/skips.sock',
+      allowedDims: AllowedDims.fromList(['1080x1920']),
+      log: logSink(),
+      retainedFramePoolSize: 1,
+    });
+    const webContents = new EventEmitter() as WebContents & EventEmitter;
+    channel.attach(webContents);
+    await channel.start();
+    for (const [fd, frameCount] of [[0, 5], [1, 6], [2, 9]] as const) {
+      const frame = makeTexture(fd);
+      frame.texture.textureInfo.metadata = { frameCount };
+      webContents.emit('paint', frame, {}, image());
+    }
+    await Promise.resolve();
+    // 7 and 8 never reached the app; 6 and 9 reached it and were dropped at the pool limit.
+    expect(channel.getStats().paintsSkipped).toBe(2);
+    expect(channel.getStats().droppedReasons).toEqual({ retained_pool_full: 2 });
+    await channel.stop();
+  });
+});
+
 describe('FrameCaptureChannel retained frame lifetime', () => {
   beforeEach(() => {
     vi.clearAllMocks();

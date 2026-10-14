@@ -3,6 +3,7 @@ import * as fdpass from 'fdpass';
 import type { WebContents } from 'electron';
 import type { LogSink } from '../support/Logger';
 import type { AllowedDims } from './AllowedDims';
+import { CaptureCounterGaps, paintFrameCount } from './CaptureCounterGaps';
 import type { CaptureStats, ICaptureChannel } from './ICaptureChannel';
 import { TexInfoEncoder, type PixelFormat } from './TexInfoEncoder';
 
@@ -63,6 +64,7 @@ export interface FrameCaptureChannelOptions {
 export class FrameCaptureChannel implements ICaptureChannel {
   private readonly opts: FrameCaptureChannelOptions;
   private readonly encoder = new TexInfoEncoder();
+  private readonly counterGaps = new CaptureCounterGaps();
   private readonly stats: MutableStats = {
     paintCount: 0,
     droppedFrames: 0,
@@ -163,12 +165,23 @@ export class FrameCaptureChannel implements ICaptureChannel {
       retainedFrameCount: this.retainedFrames.size,
       quarantinedFrameCount: quarantinedTextures.get(this.opts.socketPath)?.size ?? 0,
       lastPaintTsMs: this.stats.lastPaintTsMs,
+      paintsSkipped: this.counterGaps.skipped,
     };
+  }
+
+  /** Never throws: a paint whose texture cannot be read is handled by handlePaint. */
+  private countSkippedPaints(event: PaintEventLike): void {
+    try {
+      this.counterGaps.observe(paintFrameCount(event.texture?.textureInfo));
+    } catch {
+      // a texture that throws on access is dropped below
+    }
   }
 
   private handlePaint(event: PaintEventLike, img: PaintImageLike): void {
     this.stats.paintCount++;
     this.stats.lastPaintTsMs = Date.now();
+    this.countSkippedPaints(event);
     let tex: PaintTextureLike | null | undefined;
     let retained: RetainedFrame | null = null;
     try {
