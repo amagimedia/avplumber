@@ -93,6 +93,42 @@ int main() {
         assert(b < q * 1.5 + 1.0);
     }
 
+    // A handler that hands itself back to the loop (a node yielding after each frame) costs the
+    // same whatever number of other threads have handed the loop work and are still alive.
+    {
+        auto usPerYield = [](EventLoop &loop, int yields) {
+            std::atomic<int> left{yields};
+            std::function<void(EventLoop &)> step = [&](EventLoop &evl) {
+                if (--left > 0) evl.execute(step);
+            };
+            const auto start = std::chrono::steady_clock::now();
+            loop.execute(step);
+            while (left.load() > 0) { }
+            return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / yields;
+        };
+        EventLoop quiet, busy;
+        std::vector<std::thread> posters;
+        std::atomic<int> ran{0};
+        std::promise<void> done;
+        std::shared_future<void> released = done.get_future().share();
+        for (int t = 0; t < 400; ++t)
+            posters.emplace_back([&] {
+                busy.execute([&](EventLoop &) { ++ran; });
+                released.wait();
+            });
+        assert(within(2000ms, [&] { return ran.load() == 400; }));
+        usPerYield(quiet, 2000); usPerYield(busy, 2000);   // warm up
+        double q = 1e9, b = 1e9;
+        for (int round = 0; round < 3; ++round) {
+            q = std::min(q, usPerYield(quiet, 50000));
+            b = std::min(b, usPerYield(busy, 50000));
+        }
+        done.set_value();
+        for (auto &p : posters) p.join();
+        std::fprintf(stderr, "us per yield: loop that heard from 1 thread %.3f, from 400 threads %.3f\n", q, b);
+        assert(b < q * 1.5 + 0.1);
+    }
+
     std::puts("event loop work queue: ok");
     return 0;
 }
