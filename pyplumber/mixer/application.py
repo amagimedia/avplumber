@@ -717,7 +717,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
                 event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned",
                 direct=cfg.raw_upload in ("direct", "resident"), resident=cfg.raw_upload == "resident",
-                native_rate=True, color=source.color,
+                pool_frames=cfg.raw_pool_frames, native_rate=True, color=source.color,
                 frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,

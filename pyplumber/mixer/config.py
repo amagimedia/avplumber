@@ -276,6 +276,7 @@ class MixerConfig:
     input_poll_ms: Optional[int] = None  # canvas.input_poll_ms: how often a program compositor looks for frames
     source_fan_out: str = "thread"       # canvas.source_fan_out: one of SOURCE_FAN_OUTS
     decoded_frames_ahead: Optional[int] = None   # canvas.decoded_frames_ahead: decoded frames queued before pacing
+    raw_pool_frames: Optional[int] = None        # canvas.raw_pool_frames: device frames per direct/resident raw source
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBusConfig, ...] = ()
@@ -568,6 +569,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     source_fan_out = canvas.get("source_fan_out", "thread")
     if source_fan_out not in SOURCE_FAN_OUTS:
         raise ConfigError(f"canvas.source_fan_out must be one of {', '.join(SOURCE_FAN_OUTS)}")
+    raw_pool_frames = canvas.get("raw_pool_frames")
+    if raw_pool_frames is not None and (type(raw_pool_frames) is not int or raw_pool_frames < 1):
+        raise ConfigError("canvas.raw_pool_frames must be a whole number of frames, 1 or more")
     decoded_frames_ahead = canvas.get("decoded_frames_ahead")
     if decoded_frames_ahead is not None and (type(decoded_frames_ahead) is not int or decoded_frames_ahead < 1):
         raise ConfigError("canvas.decoded_frames_ahead must be a whole number of frames, 1 or more")
@@ -653,7 +657,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
                        initial_scene=initial, working_format=working_format, raw_upload=raw_upload, input_routing=input_routing,
                        latency_ms=latency_ms, input_poll_ms=input_poll_ms, source_fan_out=source_fan_out,
-                       decoded_frames_ahead=decoded_frames_ahead, out_color=out_color,
+                       decoded_frames_ahead=decoded_frames_ahead,
+                       raw_pool_frames=raw_pool_frames, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))
