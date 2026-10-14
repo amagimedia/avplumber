@@ -569,7 +569,8 @@ def test_invalid_preserved_aux_rejected_before_preparation(runtime, monkeypatch)
     assert runtime.worker is None
 
 
-@pytest.mark.parametrize("bypass", [False, True])
+# What stamps a source's colour: its filter graph, or its fan-out on a thread or on an event loop.
+@pytest.mark.parametrize("bypass", [False, "one_to_many", "one_to_many_nb"])
 @pytest.mark.parametrize("hdr", [False, True])
 @pytest.mark.parametrize("sdr_codec", ["h264", "h265"])
 def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr_codec, bypass):
@@ -586,7 +587,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr
         if command == "nodes.json":
             # An unused source can wait for consumers; readiness must not require its frames.
             return json.dumps([{"name": ("mixer_otm_" if bypass else "mixer_color_") + name,
-                                "type": "one_to_many" if bypass else "filter_video", "working": True}
+                                "type": bypass or "filter_video", "working": True}
                                for name in ("visible", "unused")])
         calls.append(command)
         assert len(calls) <= len(expected)
@@ -599,6 +600,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr
 
 @pytest.mark.parametrize("nodes", [[], [{"name": "mixer_color_hdr", "type": "filter_video", "working": False}],
     [{"name": "mixer_otm_hdr", "type": "one_to_many", "working": False}],
+    [{"name": "mixer_otm_hdr", "type": "one_to_many_nb", "working": False}],
     [{"name": "mixer_color_hdr", "type": "filter_video", "working": False},
      {"name": "mixer_otm_hdr", "type": "one_to_many", "working": True}]])
 def test_start_rejects_missing_or_failed_source_normalization(runtime, monkeypatch, nodes):
