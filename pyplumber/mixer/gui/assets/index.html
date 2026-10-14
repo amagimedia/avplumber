@@ -359,11 +359,12 @@
   <span id="conn" role="status" hidden></span>
   <span id="stats">
     <span class="meter" id="lat">LAT <b class="ms">—</b></span>
-    <span class="group" id="gpu" role="group" aria-label="GPU" title="GPU load from nvidia-smi, refreshed every second" hidden></span>
+    <span class="group" id="gpu" role="group" aria-label="GPU" hidden></span>
     <span id="power" class="meter" role="meter" aria-label="GPU power" aria-valuemin="0" hidden>POWER <i></i><b>—</b></span>
     <span class="meter" id="wipe-cache" hidden>WIPES <i></i><b></b></span>
-    <span class="group" id="host" role="group" aria-label="Host CPU" title="Host CPU from /proc (the whole host, not this container), refreshed every second" hidden>
-      <span class="meter" id="load">LOAD <i></i><b></b></span>
+    <span class="group" id="host" role="group" aria-label="Host CPU" hidden>
+      <!-- A title on a group shows over its meters' own tips: only LOAD, which has no tip, carries one. -->
+      <span class="meter" id="load" title="Host CPU from /proc (the whole host, not this container), refreshed every second">LOAD <i></i><b></b></span>
       <span class="meter" id="cpu">CPU <i></i><b></b></span>
       <span class="meter" id="thread">THREAD <i></i><b></b></span>
     </span>
@@ -892,14 +893,17 @@ function renderMeters() {
     m.firstChild.data = `${many ? `${name} ×${gpus.length}` : name} `;
     fillBar(bar, pct);
     b.textContent = text(top);
-    if (many) m.title = [`${name}: busiest of ${gpus.length} GPUs`, ...gpus.map((g) => `GPU ${g.index}: ${text(g)}`)].join("\n");
-    else m.removeAttribute("title");   // a single GPU's meters show the group's title
+    // One hover per meter: a meter with a tip lists every GPU in it; the others keep a title.
+    const perGpu = many ? gpus.map((g) => [`GPU ${g.index}`, text(g)]) : [];
     if (name === "ENC") setMeterTip(m, "NVENC", [
-      ["Encoders", metric(gpuSum(gpus, "encoder_sessions"))], ["Total FPS", metric(gpuSum(gpus, "encoder_fps"))]]);
-    if (name === "VRAM") {
+      ["Encoders", metric(gpuSum(gpus, "encoder_sessions"))], ["Total FPS", metric(gpuSum(gpus, "encoder_fps"))], ...perGpu]);
+    else if (name === "VRAM") {
       const used = gpuSum(gpus, "memory_used_mib"), total = gpuSum(gpus, "memory_total_mib");
       setMeterTip(m, "VRAM", [["Sources / GiB used", metric(ratio(settings().source_count, used / 1024), 2)],
-        ["Free", metric(used !== null && total !== null ? Math.max(0, total - used) / 1024 : null, 2, " GiB")]]);
+        ["Free", metric(used !== null && total !== null ? Math.max(0, total - used) / 1024 : null, 2, " GiB")], ...perGpu]);
+    } else {
+      m.title = [many ? `${name}: busiest of ${gpus.length} GPUs` : `${name}: nvidia-smi, refreshed every second`,
+                 ...perGpu.map(([gpu, value]) => `${gpu}: ${value}`)].join("\n");
     }
   });
 }
@@ -1408,8 +1412,6 @@ for (const b of $("viewer-count").children) b.onclick = () => {
 // per second, and its viewer shows them under the screen. The cut latency is the program encoder's, the
 // same whichever player measured it, so the top bar shows it once for the pipeline.
 const STREAM_STALE_MS = 3000;
-const LAT_MEANING = "Latency: median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. " +
-                    "Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.";
 const STREAM_MEANING = {
   rtt: "RTT: WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.",
   fps: "FPS: frames this browser decoded per second during the latest sample (receiver side, not the mixer's output rate).",
@@ -1436,7 +1438,8 @@ function showStat(m, value, unit, coloured, title) {
   if (b.textContent !== num + u) b.replaceChildren(num, ...(u ? [el("span", "u", u)] : []));
   // Same thresholds as the player's latency and RTT colours.
   if (coloured) b.dataset.level = n === null ? "" : n <= 200 ? "good" : n <= 400 ? "warn" : "bad";
-  m.title = title;
+  if (title) m.title = title;
+  else m.removeAttribute("title");
 }
 function renderStream(v) {
   const data = fresh(v.stats);
@@ -1486,10 +1489,24 @@ function inputRows(recent) {
     [`Other inputs repeats / discards · ${groups.other?.sources ?? 0}`, pair(groups.other)],
   ];
 }
+// The browser service's side over its own last ten minutes (state.browser_drops): frames its windows
+// dropped before sending, by reason and the worst window, paints against frames sent, and the paints
+// Chromium skipped before the app saw them ("—" from an app that does not count them).
+function browserDropRows(d) {
+  if (!d) return [];
+  const span = recentSpan(d), reasons = (d.reasons || []).map(([reason, n]) => `${reason} ${n}`).join(" · ");
+  return [
+    [`Browser drops · ${d.windows} windows · last ${span}`, metric(d.dropped)],
+    ...(reasons ? [["Drops by reason", reasons]] : []),
+    ["Worst browser window", d.worst ? `${d.worst.id} · ${d.worst.dropped}` : "—"],
+    ["Browser paints / sent", `${metric(d.paints)} / ${metric(d.sent)}`],
+    ["Chromium skipped paints", metric(d.skipped)],
+  ];
+}
 function renderLatency() {
   const lat = fresh(cutLatency)?.latency;
-  showStat($("lat"), Number.isFinite(lat?.ms) ? lat.ms : polledCutLatency(), "ms", true,
-           [LAT_MEANING, typeof lat?.title === "string" && lat.title].filter(Boolean).join("\n"));
+  // No title: LAT has its tip, and a title would show beside it.
+  showStat($("lat"), Number.isFinite(lat?.ms) ? lat.ms : polledCutLatency(), "ms", true);
   const cuts = [...recentCuts.values()].sort((a, b) => a - b);
   const pgm = Object.values(state?.status?.playout || {}), aux = state?.aux_buses || [];
   const total = (rows, key) => rows.every((r) => Number.isFinite(r?.[key])) ? rows.reduce((n, r) => n + r[key], 0) : null;
@@ -1503,7 +1520,8 @@ function renderLatency() {
          [`AUX output drops · last ${recentSpan(state.recent)}`, metric(state.recent.output_drops)],
          ...inputRows(state.recent)]
       : [["Deadline misses · total", metric(complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
-         ["AUX output drops · total", metric(complete ? total(aux, "output_drops") : null)]])]);
+         ["AUX output drops · total", metric(complete ? total(aux, "output_drops") : null)]]),
+    ...browserDropRows(state?.browser_drops)]);
 }
 
 /* ---------- polling ---------- */

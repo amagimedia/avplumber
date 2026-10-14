@@ -169,6 +169,13 @@ the worker's point of the period.
 | POST   | `/workers/recover`  | `{ ids }`                                                         |
 | GET    | `/metrics/cpu`      |                                                                   |
 
+`paintsSkipped` counts paints Chromium numbered but never delivered: the gaps in
+the paint textures' `textureInfo.metadata.frameCount` (the capturer's
+`capture_counter`). In zero-copy export mode that is the export device's "paint
+skipped" (every buffer lent) and a failed lend. The capturer's own "capture
+skipped" (too many frames outstanding) takes no number and is not counted. A
+counter that starts low again (a reload) is a new baseline, not a gap.
+
 `/metrics/cpu` reads `/proc` for this service's own process tree (Linux only; 500 elsewhere) and
 returns the CPU used since the previous call, in percent of one core: by Chromium process type
 (`processes`), the GPU process split into viz compositor, GPU main (the thread whose tid is the

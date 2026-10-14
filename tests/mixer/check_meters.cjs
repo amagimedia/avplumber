@@ -47,6 +47,13 @@ const {chromium} = require('playwright');
     await page.goto('http://mixer.test/');
     await page.waitForFunction(() => document.querySelector('#power b').textContent === '50 / 72 W');
     const values = id => page.locator(`#${id}-tip dd`).allTextContents();
+    // One hover per meter: a meter with its big tip has no title of its own or of a group around it,
+    // which the browser would show stacked over the tip.
+    const titledTips = () => page.evaluate(() => [...document.querySelectorAll('.has-tip')]
+      .filter((m) => m.closest('[title]')).map((m) => m.id));
+    assert.deepEqual(await titledTips(), []);
+    assert.deepEqual(await page.evaluate(() => ['thread', 'lat', 'cpu', 'power', 'gpu-enc', 'gpu-vram']
+      .filter((id) => !document.getElementById(id).classList.contains('has-tip'))), []);
     assert.deepEqual(await values('power'), ['3.84', '1555.2', '31.10', '$0.00625']);
     assert.deepEqual(await values('gpu-vram'), ['10.67', '6.00 GiB']);
     assert.deepEqual(await values('gpu-enc'), ['30', '750']);
@@ -96,6 +103,18 @@ const {chromium} = require('playwright');
     assert.deepEqual((await values('lat')).slice(3), ['120 / 45', 'web_12 · 40 / 2', '5 / 1']);
     await page.evaluate(() => { state.recent.inputs.browser = {sources: 40, repeats: 0, discarded: 0, worst: null}; renderLatency(); });
     assert.deepEqual((await values('lat')).slice(3), ['0 / 0', '—', '5 / 1']);
+    // The browser service's side: its windows' drops by reason, the worst window, paints against
+    // sends, and the paints Chromium skipped; an app that does not count skips shows a dash.
+    await page.evaluate(() => { state.browser_drops = {window_s: 600, covered_s: 600, windows: 40, paints: 72000,
+      sent: 71988, dropped: 12, reasons: [['retained_pool_full', 9], ['no_consumer', 3]],
+      worst: {id: 'web_7', dropped: 7}, skipped: 15}; renderLatency(); });
+    assert.deepEqual((await page.locator('#lat-tip dt').allTextContents()).slice(6), ['Browser drops · 40 windows · last 10 min',
+      'Drops by reason', 'Worst browser window', 'Browser paints / sent', 'Chromium skipped paints']);
+    assert.deepEqual((await values('lat')).slice(6),
+      ['12', 'retained_pool_full 9 · no_consumer 3', 'web_7 · 7', '72000 / 71988', '15']);
+    await page.evaluate(() => { Object.assign(state.browser_drops, {dropped: 0, reasons: [], worst: null, skipped: null}); renderLatency(); });
+    assert.deepEqual((await values('lat')).slice(6), ['0', '—', '72000 / 71988', '—']);
+    await page.evaluate(() => { state.browser_drops = null; renderLatency(); });
     await page.evaluate(() => { state.recent = null; renderLatency(); });
     assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
     for (const width of [1920, 1600, 1440, 1280]) {
@@ -133,6 +152,9 @@ const {chromium} = require('playwright');
       renderMeters(); renderHost();
     });
     assert.deepEqual(await values('power'), ['—', '—', '—', '$0.00625']);
+    // Two GPUs: the meters with a tip list both in it, still without a title.
+    assert.deepEqual(await titledTips(), []);
+    assert.deepEqual((await values('gpu-enc')).slice(2), ['75%', '75%']);
     assert.deepEqual(await values('cpu'), ['—', '—']);
     await page.evaluate(() => {
       state.setup_revision = 2;

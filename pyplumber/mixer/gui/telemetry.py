@@ -2,6 +2,7 @@
 server and of input policy."""
 from __future__ import annotations
 
+import collections
 import csv
 import json
 import logging
@@ -390,28 +391,45 @@ class BrowserCpuStats:
     PATH = "/metrics/cpu"
 
     # Every 5 s: the hover needs no more, and each answer costs the browser service a /proc read.
-    def __init__(self, base_url: str, period_s: float = 5, absent_s: float = 30, timeout_s: float = 1, fetch=None):
+    def __init__(self, base_url: str, period_s: float = 5, absent_s: float = 30, timeout_s: float = 1, fetch=None,
+                 fetch_status=None, clock=time.monotonic):
         self.base_url = base_url.rstrip("/")
         self.period_s, self.absent_s, self.timeout_s = period_s, absent_s, timeout_s
-        self.fetch = fetch or self._fetch
+        self.fetch = fetch or (lambda: self._get(self.PATH))
+        self.fetch_status = fetch_status or (lambda: self._get("/status"))
         self.values = None
         self.error = None   # why the last poll has no values, or None
+        # The windows' drops, paints and sends over the last ten minutes, from GET /status at the
+        # same cadence: browser_drop_summary() of the rises, or None before the first answer.
+        self.drops = RecentIncrements(clock=clock, summary=browser_drop_summary, group=lambda key: key[0])
 
     def start(self):
         threading.Thread(target=self._run, daemon=True, name="browser-cpu").start()
 
-    def _fetch(self):
-        with urllib.request.urlopen(self.base_url + self.PATH, timeout=self.timeout_s) as response:
+    def _get(self, path):
+        with urllib.request.urlopen(self.base_url + path, timeout=self.timeout_s) as response:
             return json.loads(response.read())
 
     def _run(self):
         failing = False   # the first failed poll of an outage is logged; a good one ends it
+        metrics_due = 0.0
         while True:
-            wait = self.poll()
-            if self.error and not failing:
-                log.warning("Chromium CPU unavailable from %s%s: %s", self.base_url, self.PATH, self.error)
-            failing = self.error is not None
-            time.sleep(wait)
+            now = time.monotonic()
+            if now >= metrics_due:   # an image without /metrics/cpu is asked again after absent_s
+                metrics_due = now + self.poll()
+                if self.error and not failing:
+                    log.warning("Chromium CPU unavailable from %s%s: %s", self.base_url, self.PATH, self.error)
+                failing = self.error is not None
+            self.poll_status()
+            time.sleep(self.period_s)
+
+    def poll_status(self):
+        """One GET /status into the drop window. A failed one leaves the last figures standing; the
+        next good one counts what rose meanwhile (or, for a restarted window, since its restart)."""
+        try:
+            self.drops.sample(window_counters(self.fetch_status()))
+        except Exception:   # down or restarting: never end the polling thread
+            pass
 
     def poll(self) -> float:
         """One request; returns how long to wait before the next."""
@@ -425,6 +443,86 @@ class BrowserCpuStats:
         except Exception as exc:   # down, restarting, or an unexpected answer: never end the polling thread
             self.values, self.error = None, f"{type(exc).__name__}: {exc}"
             return self.period_s
+
+
+class RecentIncrements:
+    """How much each counter rose over the last `window_s` seconds, counter by counter: a counter
+    that falls started again (a window's worker restarted) and counts from zero, one that appears
+    (a window opened) counts from zero, one that goes away keeps what it added inside the window.
+    The first sample is the baseline. `values` is {"window_s", "covered_s", **summary(rises)}, or
+    None before the first sample. Unlike RecentCounts, one counter's restart leaves the others; with
+    `group` (key -> group), one fallen counter restarts every counter of its group (a window's)."""
+
+    def __init__(self, window_s: float = 600, clock=time.monotonic, summary=None, group=None):
+        self.window_s, self.clock = window_s, clock
+        self.summary = summary or (lambda rises: rises)
+        self.group = group or (lambda key: key)
+        self.values = None
+        self._last = None   # (time, totals) of the last sample
+        self._steps = collections.deque()   # (start, end, {key: rise}) between successive samples
+
+    def sample(self, totals):
+        now = self.clock()
+        if self._last is not None:
+            since, before = self._last
+            restarted = {self.group(key) for key, value in totals.items() if key in before and value < before[key]}
+            rises = {key: value - before[key] if key in before and self.group(key) not in restarted else value
+                     for key, value in totals.items()}
+            self._steps.append((since, now, rises))
+        while self._steps and self._steps[0][1] < now - self.window_s:
+            self._steps.popleft()
+        self._last = (now, dict(totals))
+        sums = dict.fromkeys(totals, 0)
+        for _, _, rises in self._steps:
+            for key, value in rises.items():
+                sums[key] = sums.get(key, 0) + value
+        start = self._steps[0][0] if self._steps else now
+        self.values = {"window_s": self.window_s, "covered_s": round(now - start), **self.summary(sums)}
+
+
+WINDOW_COUNTERS = {"paints": "paintCount", "sent": "txFrameCount", "dropped": "droppedFrames"}
+
+
+def window_counters(status):
+    """{(window id, counter): total} from the browser service's GET /status: paints, sent and
+    dropped frames, drops by reason as (id, "reason", reason), and (id, "skipped") from an app
+    that counts the paints Chromium skipped (stats.paintsSkipped)."""
+    counters = {}
+    count = lambda value: isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    for window in status.get("windows") or []:
+        wid, stats = window["id"], window["stats"]
+        for key, field in WINDOW_COUNTERS.items():
+            if not count(stats[field]):
+                raise ValueError(f"malformed browser window counter {field}")
+            counters[(wid, key)] = stats[field]
+        for reason, value in (stats.get("droppedReasons") or {}).items():
+            if not count(value):
+                raise ValueError("malformed browser drop reason")
+            counters[(wid, "reason", reason)] = value
+        if "paintsSkipped" in stats:
+            if not count(stats["paintsSkipped"]):
+                raise ValueError("malformed paintsSkipped")
+            counters[(wid, "skipped")] = stats["paintsSkipped"]
+    return counters
+
+
+def browser_drop_summary(rises):
+    """The LAT tip's browser rows from window_counters() rises: windows seen, paints, sent and
+    dropped in all, drops by reason (most first), the window that dropped most (or None), and the
+    paints Chromium skipped, None while no window reports them (an older app)."""
+    ids = {key[0] for key in rises}
+    total = lambda name: sum(value for key, value in rises.items() if key[1:] == (name,))
+    reasons = {}
+    for key, value in rises.items():
+        if len(key) == 3 and value:
+            reasons[key[2]] = reasons.get(key[2], 0) + value
+    dropped = {wid: rises.get((wid, "dropped"), 0) for wid in ids}
+    worst = max(sorted(dropped), key=lambda wid: dropped[wid], default=None)
+    skipped = [value for key, value in rises.items() if key[1:] == ("skipped",)]
+    return {"windows": len(ids), "paints": total("paints"), "sent": total("sent"), "dropped": total("dropped"),
+            "reasons": sorted(reasons.items(), key=lambda item: (-item[1], item[0])),
+            "worst": {"id": worst, "dropped": dropped[worst]} if worst is not None and dropped[worst] else None,
+            "skipped": sum(skipped) if skipped else None}
 
 
 CHROMIUM_PROCESS_NAMES = {"browser": "browser", "gpu": "GPU process", "renderer": "renderer",

@@ -29,6 +29,7 @@ function snapshotFor(cfg: WindowConfig): WindowSnapshot {
       releasedFrameCount: 0,
       retainedFrameCount: 0,
       quarantinedFrameCount: 0,
+      paintsSkipped: 0,
       lastPaintTsMs: null,
     },
   };

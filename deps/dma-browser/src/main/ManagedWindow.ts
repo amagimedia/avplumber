@@ -316,6 +316,7 @@ export class ManagedWindow implements IManagedWindow {
           releasedFrameCount: channelStats.releasedFrameCount,
           retainedFrameCount: channelStats.retainedFrameCount,
           quarantinedFrameCount: channelStats.quarantinedFrameCount,
+          paintsSkipped: channelStats.paintsSkipped,
           lastPaintTsMs: channelStats.lastPaintTsMs,
         }
       : {
@@ -326,6 +327,7 @@ export class ManagedWindow implements IManagedWindow {
           releasedFrameCount: 0,
           retainedFrameCount: 0,
           quarantinedFrameCount: 0,
+          paintsSkipped: 0,
           lastPaintTsMs: null,
         };
     const ring = this.opts.retainedFramePoolSize ?? this.config.ringSize;
