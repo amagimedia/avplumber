@@ -118,6 +118,8 @@ test before deployment.
 
 The fixed-11 build passed the 1920×1080 producer probe: 69 delivered frames,
 11 distinct DMA-BUFs, no bitmap fallback, and successful exhaustion and return
-recovery. The optional `0003` startup-size patch is application-checked but has
-not yet been compiled or GPU-tested. The fixed-11 binary ignores `buffers/N`;
-build once with `0003` before using startup size changes without recompilation.
+recovery. The optional `0003` startup-size patch has also been compiled and
+packaged successfully; the resulting executable reports Electron 44.5.1.
+GPU tests of the selectable sizes are still pending. The earlier fixed-11
+binary ignores `buffers/N`; use a build containing `0003` before changing
+startup sizes without recompilation.
