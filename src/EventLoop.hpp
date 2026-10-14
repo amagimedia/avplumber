@@ -22,6 +22,13 @@ protected:
     std::thread delegated_execution_thread_;
     Event wakeup_;
     std::atomic_bool should_work_ {true};
+    std::atomic<std::thread::id> loop_thread_ {};
+    std::atomic<uint64_t> passes_ {0};
+    // Work, a wait or a timer added by a handler running on the loop's own thread needs no
+    // wake-up: the loop takes its work, its waits and its timers afresh before it sleeps.
+    void wakeUnlessOnLoopThread() {
+        if (std::this_thread::get_id() != loop_thread_.load(std::memory_order_relaxed)) wakeup_.signal();
+    }
     moodycamel::ConcurrentQueue<Callable> todo_;
     std::map<int, Callable> todo_when_fd_readable_;
     std::mutex todo_when_fd_readable_busy_;
@@ -45,7 +52,9 @@ protected:
         return true;
     }
     void threadFunction() {
+        loop_thread_.store(std::this_thread::get_id(), std::memory_order_relaxed);
         while (should_work_) {
+            passes_.fetch_add(1, std::memory_order_relaxed);
             struct pollfd *pfds = nullptr;
             size_t i = 0;
             size_t count = 0;
@@ -159,9 +168,13 @@ public:
             logstream << "still have " << scheduled_.size() << " events scheduled for timed execution when shutting down event loop";
         }
     }
+    /// How many times the loop has gone to wait: a measure of what waking it costs.
+    uint64_t passes() const {
+        return passes_.load(std::memory_order_relaxed);
+    }
     void execute(Callable cb) {
         todo_.enqueue(cb);
-        wakeup_.signal();
+        wakeUnlessOnLoopThread();
     }
     int fastExecute(av::Timestamp time_limit, Callable cb) {
         av::Timestamp deadline = addTS(wallclock.ts(), time_limit);
@@ -187,7 +200,7 @@ public:
         // it should be map of lists
         std::lock_guard<decltype(todo_when_fd_readable_busy_)> lock(todo_when_fd_readable_busy_);
         todo_when_fd_readable_[event.fd()] = cb;
-        wakeup_.signal();
+        wakeUnlessOnLoopThread();
     }
     void schedule(av::Timestamp when, Callable cb) {
         AVTS ts = when.timestamp(wallclock.timeBase());
@@ -209,7 +222,7 @@ public:
         }
         scheduled_.insert(it, std::pair(ts, cb));
         if (is_first) {
-            wakeup_.signal();
+            wakeUnlessOnLoopThread();
         }
     }
     void sleepAndExecute(int ms, Callable cb) {
