@@ -47,8 +47,15 @@ JANUS_DEFAULT_VIDEO_PT = 96
 JANUS_DEFAULT_VIDEO_SSRC = 0x41565001
 JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 4_500
 PREHEAT_POLL_INTERVAL_SEC = 0.02
-# Going on air waits for this long a stretch without a late or dropped frame on any bus, and gives up
-# waiting after the timeout: a show that never settles still starts, with its counters telling.
+# Going on air: the outputs are released after START_STABLE_SEC (MixerOptions.start_stable_sec) in
+# which no compositor missed a deadline or dropped a frame and every bus drew, and after
+# START_STABLE_TIMEOUT_SEC at the latest, with a log line saying what kept counting: a show that
+# never settles still starts, with its counters telling. The first 60 output frames of a bus can
+# pass before its frame count is published (4 s at 15 fps), so a shorter window waits for that.
+START_STABLE_SEC = 10.0
+START_STABLE_TIMEOUT_SEC = 60.0
+SETTLE_POLL_SEC = 0.5
+# Between two passes that release idle browser buffers: a quiet second, a release stalls draws.
 SETTLE_WINDOW_SEC = 1.0
 SETTLE_TIMEOUT_SEC = 10.0
 # A browser buffer nothing has used for this long while the show starts is one the start went
@@ -86,6 +93,8 @@ class MixerOptions:
     janus_rtcp_bind: str = "0.0.0.0"
     janus_rtcp_port: int = 0
     preheat_timeout_sec: float = 60.0
+    start_stable_sec: float = START_STABLE_SEC            # clean stretch every compositor must show before the outputs are released
+    start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC   # release anyway after this long, and log what kept counting
     wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
     wipe_color: str = ""                 # explicit SDR override; empty preserves tags with an SDR fallback
     cut_latency_encoder: str = ""        # opt-in cut-to-output observer on this encoder
@@ -115,6 +124,8 @@ class MixerOptions:
             raise ValueError("janus_rtcp_port must be between 0 and 65535")
         if self.preheat_timeout_sec <= 0:
             raise ValueError("preheat_timeout_sec must be positive")
+        if not 0 <= self.start_stable_sec <= self.start_stable_timeout_sec or self.start_stable_timeout_sec <= 0:
+            raise ValueError("start_stable_sec must be at least 0 and start_stable_timeout_sec positive and not below it")
         if (type(self.keyframe_min_interval_ms) is not int
                 or not 0 <= self.keyframe_min_interval_ms <= 2_147_483_647):
             raise ValueError("keyframe_min_interval_ms must be a non-negative integer")
@@ -173,6 +184,9 @@ class MixerApplication:
     prewarm_cut_scenes: tuple[str, ...] = ()
     held_outputs: tuple[str, ...] = ()      # prefixes of the program's Janus chains, built held
     browser_importers: tuple[str, ...] = ()  # the drm_prime_to_cuda node of every browser source
+    start_stable_sec: float = START_STABLE_SEC
+    start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC
+    startup: dict | None = field(default=None, init=False)   # how going on air went; `mixer.startup` answers with it
     _startup_error: str | None = field(default=None, init=False, repr=False)
 
     def _check_startup(self) -> None:
@@ -284,31 +298,57 @@ class MixerApplication:
             self._wait_for_edges(tuple(f"{bus.prefix}_encoded" for bus in self.aux_buses), "auxiliary output", "packet")
         self._check_startup()
         self._go_on_air()
+        # What the start counted before the outputs were released and how long it took to settle,
+        # for whoever reads the counters that start from zero on air (quiet: not logged).
+        self.avp.registerControlCommand("mixer.startup", lambda _arg: json.dumps(self.startup) + "\n", True, True)
         self.avp.setReady()
         log.info("Generic mixer preheat complete: compositors and transition ready in %.1f s",
                  time.monotonic() - started)
 
     def _go_on_air(self) -> None:
-        """Release the show once it has settled.
+        """Release the show once it has been stable.
 
         Until here every Janus output was held: the buses ran against the clock while the sources,
         the wipes and the encoders came up, each encoder that opened stalling the draws of the
-        buses already running, and none of that was sent. Now the outputs start together on a key
-        frame and the compositors count from zero, so what viewers get and what the counters say
-        both begin with the settled show."""
-        compositors = [f"{MIXER_NAME}_comp_a", f"{MIXER_NAME}_comp_b", *(f"{bus.prefix}_comp" for bus in self.aux_buses or ())]
+        buses already running, and none of that was sent (output `hold` takes the packets and
+        writes nothing). A deadline missed before this point is counted, never seen. The outputs
+        are released only after start_stable_sec in which no compositor missed a deadline or
+        dropped a frame and every bus drew, so the load of starting (decoder opens, CUDA contexts,
+        browser pages, raw files being page-locked) has calmed down before anything goes out; after
+        start_stable_timeout_sec they are released anyway and the log says what kept counting. The
+        compositors count from zero first, then the outputs start together on a key frame: what
+        viewers get and what the counters say both begin with the stable show, and nothing on air
+        is ever reset away. What the start counted is kept in `startup` (`mixer.startup`)."""
+        program = [f"{MIXER_NAME}_comp_a", f"{MIXER_NAME}_comp_b"]
+        buses = [f"{bus.prefix}_comp" for bus in self.aux_buses or ()]
+        compositors = [*program, *buses]
         # A release stalls draws, and buffers still go out of use while the last buses come up:
         # release, let the show settle, and look again until a pass finds nothing left.
         for _ in range(IMPORT_PURGE_PASSES):
-            released = self._purge_idle_imports(wait=True)
-            settled = self._wait_until_settled(compositors)
-            if not released:
+            if not self._purge_idle_imports(wait=True):
                 break
+            self._wait_until_settled(compositors, SETTLE_WINDOW_SEC, SETTLE_TIMEOUT_SEC)
+        # The PVW slot is built with no active input and does not tick until a scene is loaded
+        # into it: one program slot drawing is the program drawing. Every bus must draw.
+        ticking = [tuple(program), *((bus,) for bus in buses)]
+        report = self._wait_until_settled(compositors, self.start_stable_sec, self.start_stable_timeout_sec, ticking)
         prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
         self.avp.executeCommandsFromString("\n".join(
-            [release_commands(prefix) for prefix in prefixes]
-            + [f"node.object.set {node} reset_counters true" for node in compositors]))
-        log.info("On air: %d outputs released%s", len(prefixes), "" if settled else " before the show settled")
+            [f"node.object.set {node} reset_counters true" for node in compositors]
+            + [release_commands(prefix) for prefix in prefixes]))
+        counters = report["counters"].values()
+        warm_up = {key: sum(c[key] for c in counters) for key in ("missed_deadlines", "output_drops")}
+        self.startup = {**report, "outputs": len(prefixes), "warm_up": warm_up, "released_at": time.time(),
+                        "stable_sec": self.start_stable_sec, "timeout_sec": self.start_stable_timeout_sec}
+        if report["settled"]:
+            log.info("On air after %.1f s: %d outputs released; stable for %g s; the start's %d missed deadlines "
+                     "and %d output drops are not counted", report["waited_sec"], len(prefixes), self.start_stable_sec,
+                     warm_up["missed_deadlines"], warm_up["output_drops"])
+        else:
+            log.warning("On air after %.1f s without a stable %g s (%s): %d outputs released; the start's %d missed "
+                        "deadlines and %d output drops are not counted, and the show may keep counting",
+                        report["waited_sec"], self.start_stable_sec, report["reason"], len(prefixes),
+                        warm_up["missed_deadlines"], warm_up["output_drops"])
 
     def _purge_idle_imports(self, wait: bool = False) -> int:
         """Release the browser buffers the start-up went through and no longer uses.
@@ -338,31 +378,56 @@ class MixerApplication:
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
         return expired() - before
 
-    def _wait_until_settled(self, compositors) -> bool:
-        """True after SETTLE_WINDOW_SEC without a missed deadline or a dropped frame on any
-        compositor, False when SETTLE_TIMEOUT_SEC passed first. An engine that reports no playout
-        counters has nothing to wait for."""
-        def late():
-            total, counted = 0, False
-            for node in compositors:
-                compositor = self.avp.node(node)
-                status = (compositor.getObject("status") if compositor is not None else None) or {}
-                if "playout" in status:
-                    counted = True
-                    total += status.get("output_drops", 0) + status["playout"].get("missed_deadlines", 0)
-            return total if counted else None
-        before = late()
-        if before is None:
-            return True
-        deadline = time.monotonic() + SETTLE_TIMEOUT_SEC
-        while time.monotonic() < deadline:
+    def _counters(self, compositors) -> dict | None:
+        """Each compositor's published counters, {node: {missed_deadlines, output_drops, frames}},
+        for those that report playout counters; None when none does (an engine without them has
+        nothing to wait for). `missed_deadlines` is published at once when one is missed,
+        `output_drops` as it happens, `frames` every 60 output frames."""
+        counters = {}
+        for node in compositors:
+            compositor = self.avp.node(node)
+            status = (compositor.getObject("status") if compositor is not None else None) or {}
+            if "playout" in status:
+                counters[node] = {"missed_deadlines": status["playout"].get("missed_deadlines", 0),
+                                  "output_drops": status.get("output_drops", 0),
+                                  "frames": status["playout"].get("frames", 0)}
+        return counters or None
+
+    def _wait_until_settled(self, compositors, window_sec: float, timeout_sec: float, ticking=()) -> dict:
+        """Wait for *window_sec* in which no compositor missed a deadline or dropped a frame, and in
+        which, for every group of names in *ticking*, one of them drew frames. A miss or a drop
+        starts the window again; a group that has not drawn keeps the wait going without restarting
+        it. Gives up *timeout_sec* after it began. Returns ``settled`` (whether the window was
+        seen), ``waited_sec``, ``reason`` (what kept it waiting, "" when settled) and ``counters``
+        (every compositor's, as last read)."""
+        at_start = self._counters(compositors)
+        if at_start is None:
+            return {"settled": True, "waited_sec": 0.0, "reason": "", "counters": {}}
+        started = window_started = time.monotonic()
+        deadline = started + timeout_sec
+        counters, reason = at_start, ""
+        while True:
             self._check_startup()
-            time.sleep(SETTLE_WINDOW_SEC)
-            after = late()
-            if after == before:
-                return True
-            before = after
-        return False
+            time.sleep(SETTLE_POLL_SEC)
+            now = time.monotonic()
+            counters = self._counters(compositors) or counters
+            late = {node: {key: counters[node][key] - at_start[node][key] for key in ("missed_deadlines", "output_drops")}
+                    for node in counters if node in at_start
+                    and (counters[node]["missed_deadlines"] > at_start[node]["missed_deadlines"]
+                         or counters[node]["output_drops"] > at_start[node]["output_drops"])}
+            if late:
+                window_started, at_start = now, counters
+                node, delta = max(late.items(), key=lambda item: sum(item[1].values()))
+                reason = (f"{node} missed {delta['missed_deadlines']} deadlines and dropped {delta['output_drops']} frames"
+                          f"{f' ({len(late)} compositors did)' if len(late) > 1 else ''}")
+            elif now - window_started >= window_sec:
+                drew = lambda node: node in counters and (node not in at_start or counters[node]["frames"] > at_start[node]["frames"])
+                idle = [group for group in ticking if any(node in counters for node in group) and not any(map(drew, group))]
+                if not idle:
+                    return {"settled": True, "waited_sec": now - started, "reason": "", "counters": counters}
+                reason = f"{' or '.join(idle[0])} drew no frame in {now - window_started:.0f} s"
+            if now >= deadline:
+                return {"settled": False, "waited_sec": now - started, "reason": reason, "counters": counters}
 
     def stop(self) -> None:
         started = time.monotonic()
@@ -627,7 +692,8 @@ def _application(avp, mixer, options: MixerOptions, input_edges, listener, **ext
         input_groups=tuple(_input_group(index) for index in range(len(input_edges))),
         rtcp_feedback_listener=listener, preheat_timeout_sec=options.preheat_timeout_sec,
         wipe_file=options.wipe_file, dmabuf_rest=options.dmabuf_rest, wipe_cache_mb=options.wipe_cache_mb,
-        cut_latency_encoder=options.cut_latency_encoder, prewarm_cut_scenes=options.prewarm_cut_scenes, **extra)
+        cut_latency_encoder=options.cut_latency_encoder, prewarm_cut_scenes=options.prewarm_cut_scenes,
+        start_stable_sec=options.start_stable_sec, start_stable_timeout_sec=options.start_stable_timeout_sec, **extra)
 
 
 def build_application(cfg: mixer_config.MixerConfig, options: MixerOptions | None = None, *,

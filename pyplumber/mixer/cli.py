@@ -249,6 +249,12 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="Minimum forced-keyframe spacing for Janus output in media time "
              "(default: 150 ms; 0 disables rate limiting)")
     add("--preheat-timeout", dest="preheat_timeout_sec", type=float, default=60.0)
+    add("--start-stable-sec", dest="start_stable_sec", type=float, default=GraphOptions.start_stable_sec,
+        help="Release the outputs after this many seconds in which no compositor missed a deadline or "
+             f"dropped a frame and every bus drew (default: {GraphOptions.start_stable_sec:g})")
+    add("--start-stable-timeout-sec", dest="start_stable_timeout_sec", type=float, default=GraphOptions.start_stable_timeout_sec,
+        help="Release the outputs anyway after this long, logging what kept counting "
+             f"(default: {GraphOptions.start_stable_timeout_sec:g})")
     add("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
                             "(the TUI still selects the clip for each wipe)")
     add("--wipe-cache-mb", type=float, default=GraphOptions.wipe_cache_mb,

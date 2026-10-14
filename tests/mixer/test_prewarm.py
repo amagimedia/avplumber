@@ -74,6 +74,10 @@ class NativeEngine:
         self.ready = True
         self.events.append("READY")
 
+    def registerControlCommand(self, name, handler, _payload, _quiet=False):
+        self.commands_registered = getattr(self, "commands_registered", {})
+        self.commands_registered[name] = handler
+
     def enableControlServer(self, _port):
         pass
 
@@ -178,9 +182,10 @@ def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boun
     else:
         app.start()
         events = app.avp.events
-        # The bus's output is let go only once it encodes, and before the mixer says it is ready.
-        assert events.index("inspect aux_test_encoded") < events.index("node.object.set aux_test_rtp_output hold false") \
-            < events.index("node.object.set aux_test_comp reset_counters true") < events.index("READY")
+        # The bus's output is let go only once it encodes, after its counters start from zero, and
+        # before the mixer says it is ready.
+        assert events.index("inspect aux_test_encoded") < events.index("node.object.set aux_test_comp reset_counters true") \
+            < events.index("node.object.set aux_test_rtp_output hold false") < events.index("READY")
     assert app.avp.on_exception == original
 
 
