@@ -1584,6 +1584,15 @@ def test_canvas_input_poll_reaches_the_builder(tmp_path, monkeypatch):
     assert FakeMixer.instances[-1].parameters["input_poll_ms"] == 8
 
 
+def test_aux_input_poll_ms_parses_and_validates():
+    assert mixer_config.parse(CONFIG).aux_input_poll_ms is None
+    doc = {**CONFIG, "canvas": {**CONFIG["canvas"], "aux_input_poll_ms": 8}}
+    assert mixer_config.parse(doc).aux_input_poll_ms == 8
+    for bad in (-1, 8.0, "8", True):
+        with pytest.raises(mixer_config.ConfigError):
+            mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "aux_input_poll_ms": bad}})
+
+
 def test_canvas_latency_reaches_the_builder_unless_the_cli_overrides_it(tmp_path, monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
     monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
