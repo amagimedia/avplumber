@@ -208,8 +208,9 @@ def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boun
         def __iter__(self):
             return iter([SimpleNamespace(prefix="aux_test")])
 
-        def start(self):
+        def start(self, ready):
             app.avp.events.append("start aux_test")
+            ready(next(iter(self)))
     app.aux_buses = Aux()
     app.avp.nodes["aux_test_comp"] = {"group": "aux_test"}   # the bus's compositor, asked for its counters
     original = app.avp.on_exception

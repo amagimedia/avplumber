@@ -317,8 +317,11 @@ class MixerApplication:
             scenes = self.mixer.scenes() if self.prewarm_cut_scenes == ("*",) else list(self.prewarm_cut_scenes)
             self.avp.executeCommandsFromString("mixer.prewarm " + json.dumps({"mixer": MIXER_NAME, "scenes": scenes}))
         if self.aux_buses:
-            self.aux_buses.start()
-            self._wait_for_edges(tuple(f"{bus.prefix}_encoded" for bus in self.aux_buses), "auxiliary output", "packet")
+            # Encoder initialization stalls the shared CUDA context. Let each bus
+            # drain its first frames before opening the next one's surface pool.
+            self._purge_idle_imports(wait=True)
+            self.aux_buses.start(lambda bus: self._wait_for_edges(
+                (f"{bus.prefix}_encoded",), "auxiliary output", "packet"))
         self._check_startup()
         self._go_on_air()
         # What the start counted before the outputs were released and how long it took to settle,

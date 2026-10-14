@@ -30,6 +30,28 @@ def pages_json(**kwargs):
     return {"id": "sources", "layout": {"preset": "source_pages"}, "renditions": [{"id": "monitor", "port": 5012}], **kwargs}
 
 
+@pytest.mark.parametrize("failure", [False, True])
+def test_aux_start_waits_for_each_output_and_stops_on_failure(monkeypatch, failure):
+    events = []
+    def bus(name):
+        return SimpleNamespace(bus=SimpleNamespace(id=name), start=lambda: events.append("start " + name))
+    buses = AuxBuses(None, [bus("first"), bus("second")])
+    monkeypatch.setattr(buses, "run", lambda: None)
+    def ready(bus):
+        events.append("ready " + bus.bus.id)
+        if failure:
+            raise RuntimeError("encoder failed")
+    if failure:
+        with pytest.raises(RuntimeError, match="encoder failed"):
+            buses.start(ready)
+        assert events == ["start first", "ready first"]
+        assert buses.thread is None
+    else:
+        buses.start(ready)
+        buses.thread.join()
+        assert events == ["start first", "ready first", "start second", "ready second"]
+
+
 # PGM bottom left, PVW nowhere, three slots: nothing about the grid preset is assumed.
 CELLS = [{"role": "slot", "slot": 2, "x": 0, "y": 0, "w": 540, "h": 480},
          {"role": "slot", "slot": 0, "x": 540, "y": 0, "w": 540, "h": 480},

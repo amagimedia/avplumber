@@ -275,9 +275,11 @@ class AuxBuses:
     def __len__(self):
         return len(self.buses)
 
-    def start(self):
+    def start(self, ready=None):
         for bus in self:
             bus.start()
+            if ready:
+                ready(bus)
         self.thread = threading.Thread(target=self.run, name="aux", daemon=True)
         self.thread.start()
 
