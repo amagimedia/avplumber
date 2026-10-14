@@ -578,7 +578,8 @@ def test_browser_failure_precedes_native_initialization(monkeypatch):
     from pyplumber.mixer import application
     monkeypatch.setattr(application, "open_windows", fail)
     monkeypatch.setattr(application, "_init_avp", lambda *args: pytest.fail("native threads started before browser preparation"))
-    cfg = SimpleNamespace(fps=60, latency_ms=None, input_poll_ms=None, source_fan_out="thread", browser_frame_queue=11, max_compositor_layers=256, sources=[SimpleNamespace(
+    cfg = SimpleNamespace(fps=60, latency_ms=None, input_poll_ms=None, source_fan_out="thread",
+                          decoded_frames_ahead=None, browser_frame_queue=11, max_compositor_layers=256, sources=[SimpleNamespace(
         kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60, hold_last_frame=True)])
     with pytest.raises(RuntimeError, match="browser unavailable"):
         application._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api(), ExitStack())
@@ -813,6 +814,25 @@ def _video_source_nodes(**canvas):
     nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
     chain = [name for name in nodes if name.endswith("_0") and nodes[name].get("group") == nodes["input_0"]["group"]]
     return nodes, chain
+
+
+@pytest.mark.parametrize("ahead", [None, 1, 2])
+def test_canvas_decoded_frames_ahead_bounds_the_queue_in_front_of_pacing(ahead):
+    doc = {"canvas": {**CONFIG["canvas"], **({} if ahead is None else {"decoded_frames_ahead": ahead})},
+           "sources": [CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+    app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4"), api=fake_api())
+    nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+    assert nodes["realtime_0"]["src"] == "input_0_decoded"
+    # Each frame waiting there is a decoder output surface held for nothing but slack.
+    assert dict(app.avp.edges.plans).get("input_0_decoded") == ahead
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "one", True])
+def test_canvas_decoded_frames_ahead_rejects_what_is_not_a_count(bad):
+    with pytest.raises(mixer_config.ConfigError, match="decoded_frames_ahead"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "decoded_frames_ahead": bad}})
 
 
 def test_config_sources_stamp_no_frame_metadata():

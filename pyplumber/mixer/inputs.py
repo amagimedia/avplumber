@@ -31,7 +31,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
                 pause_params: Optional[dict] = None,
                 auto_restart: Optional[str] = "group", event_loop: Optional[str] = None,
                 native_rate: bool = False, frame_metadata: Optional[Sequence[str]] = None,
-                demux: bool = True) -> str:
+                demux: bool = True, decoded_ahead: Optional[int] = None) -> str:
     """Add the chain for one source and return its paced output edge.
 
     ``native_rate`` preserves source cadence for a clocked compositor; otherwise
@@ -53,8 +53,14 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     nothing reads them; ``speed_video`` and a ``realtime`` team read ``frame_ts``.  ``demux=False``
     has ``input_rec`` send the video stream to the decoder's edge itself: no ``demux_<tag>`` node,
     no ``input_<tag>_packets`` edge, one thread and two hand-offs per packet fewer.
+    ``decoded_ahead`` bounds the decoded frames waiting in front of the pacing chain (the
+    engine's default queue size when omitted); with a hardware decoder each is a surface of
+    device memory held for slack alone.
     """
     edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
+    if decoded_ahead is not None:
+        # addNode creates the edge, so the plan must come first.
+        avp.edges.planCapacity(edge("decoded"), decoded_ahead)
     restart = {} if auto_restart is None else {"auto_restart": auto_restart}
     sync = {} if sync_team is None else {"sync_team": sync_team}
     routing = {"?v:0": edge("video_packets")}

@@ -94,11 +94,26 @@ public:
     const RawPictureLayout &layout() const { return layout_; }
 
     /// A picture in the block as a CUDA frame from this uploader's pool, its pixels in place.
-    /// Timestamps and colour are the caller's to set.
+    /// Timestamps and colour are the caller's to set. False, and `out` untouched: the device
+    /// had no memory for a frame just now.
+    bool upload(av::VideoFrame &out, size_t picture = 0) {
+        av::VideoFrame frame;
+        if (const int r = av_hwframe_get_buffer(frames_, frame.raw(), 0); r == AVERROR(ENOMEM))
+            return false;
+        else if (r < 0)
+            throw Error("pinned upload: av_hwframe_get_buffer: " + av::error2string(r));
+        fill(frame, picture);
+        out = std::move(frame);
+        return true;
+    }
     av::VideoFrame upload(size_t picture = 0) {
         av::VideoFrame out;
-        if (const int r = av_hwframe_get_buffer(frames_, out.raw(), 0); r < 0)
-            throw Error("pinned upload: av_hwframe_get_buffer: " + av::error2string(r));
+        if (!upload(out, picture)) throw Error("pinned upload: av_hwframe_get_buffer: " + av::error2string(AVERROR(ENOMEM)));
+        return out;
+    }
+
+private:
+    void fill(av::VideoFrame &out, size_t picture) {
         std::string error;
         if (failed(cuCtxPushCurrent(cuda_->cuda_ctx), "cuCtxPushCurrent", error))
             throw Error("pinned upload: " + error);
@@ -124,6 +139,5 @@ public:
         CUcontext previous;
         cuCtxPopCurrent(&previous);
         if (!error.empty()) throw Error("pinned upload: " + error);
-        return out;
     }
 };

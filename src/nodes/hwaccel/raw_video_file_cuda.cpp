@@ -1,6 +1,7 @@
 #include "../node_common.hpp"
 #include "../../frame_color_tags.hpp"
 #include "CudaPinnedUploader.hpp"
+#include "device_memory_wait.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -9,6 +10,8 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <thread>
+#include <utility>
 #include <vector>
 
 extern "C" {
@@ -48,6 +51,9 @@ protected:
     std::unique_ptr<CudaPinnedUploader> uploader_;
     uint64_t next_ = 0;   // pictures emitted since start
     std::vector<bool> held_;   // resident: the pictures already in the block
+    // How long a picture waits for device memory before the node gives up: long enough for a
+    // large show to finish starting, during which every source allocates at once.
+    static constexpr int kDeviceMemoryWaitMs = 5000;
     struct timespec modified_{};
     std::atomic<uint64_t> frames_{0}, file_reads_{0}, read_us_{0}, upload_us_{0};
 
@@ -115,7 +121,17 @@ public:
             if (resident_) held_[slot] = true;
         }
         const auto was_read = Clock::now();
-        av::VideoFrame frame = uploader_->upload(slot);
+        av::VideoFrame frame;
+        bool waited = false;
+        if (!waitForDeviceMemory([&] { return uploader_->upload(frame, slot); },
+                                 [&](int ms) {
+                                     if (!std::exchange(waited, true))
+                                         logstream << "raw_video_file_cuda: " << path_ << ": no device memory for a picture, waiting";
+                                     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                                 },
+                                 kDeviceMemoryWaitMs, [&] { return bool(this->finished_); }))
+            throw Error("raw_video_file_cuda: " + path_ + ": no device memory for a picture in " +
+                        std::to_string(kDeviceMemoryWaitMs / 1000) + " s");
         const auto uploaded = Clock::now();
 
         AVFrame *raw = frame.raw();
