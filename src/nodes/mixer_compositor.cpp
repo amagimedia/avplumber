@@ -82,15 +82,30 @@ class MixerCompositor : public CudaRectCompositor,
     std::vector<char> may_hold_frames_;
     std::vector<uint32_t> signalled_;
     bool waited_ = false;   // the last thing the previous pass did was wait for input
+    // 0: the output thread is woken by every frame a source gives. Above 0: it sleeps until
+    // the next deadline, a control change, or this many milliseconds, and then takes in
+    // whatever the sources have queued. The playout draws a tick at its deadline and no
+    // sooner, so with many sources the first only wakes the thread to move frames from one
+    // queue to another, thousands of times a second. The edges must hold what arrives
+    // within one interval.
+    int input_poll_ms_ = 0;
+    std::unique_ptr<MultiEventWait> control_wait_;   // stop() and control changes, no source
+    uint64_t input_passes_ = 0, published_input_passes_ = 0;
     void noteSignalled() {
         for (const uint32_t i : signalled_)
             if (i < may_hold_frames_.size()) may_hold_frames_[i] = 1;
     }
     void waitForFrames(int timeout_ms = -1) {
+        if (input_poll_ms_ > 0) {
+            control_wait_->wait(timeout_ms < 0 ? -1 : std::min(timeout_ms, input_poll_ms_));
+            return;
+        }
         this->waitForInput(timeout_ms, signalled_);
         noteSignalled();
         waited_ = true;
     }
+    /// Wakes the output thread to apply a control change, whichever way it waits.
+    void wake() { stop_event_.signal(); }
 
     // Where the output thread's time went since it took up the previous tick; a skipped tick logs it.
     int64_t taken_up_ns_ = 0;            // when the previous tick's decision was taken
@@ -199,6 +214,8 @@ public:
             std::lock_guard<std::mutex> lock(playout_stats_mutex_);
             Parameters playout = Parameters::object();
             playout["frames"] = published_frames_;
+            playout["input_poll_ms"] = input_poll_ms_;
+            playout["input_passes"] = published_input_passes_;
             playout["missed_deadlines"] = published_missed_deadlines_;
             uint64_t repeats = 0, discarded = 0, overflow = 0;
             for (const auto &st : playout_stats_published_) {
@@ -296,9 +313,11 @@ public:
             waitForFrames();
             return;
         }
-        if (may_hold_frames_.size() != source_edges_.size()) may_hold_frames_.assign(source_edges_.size(), 1);
-        // A pass that did not come from a wait collects the signals raised meanwhile.
-        if (!std::exchange(waited_, false)) {
+        ++input_passes_;
+        if (input_poll_ms_ > 0 || may_hold_frames_.size() != source_edges_.size()) {
+            may_hold_frames_.assign(source_edges_.size(), 1);
+        } else if (!std::exchange(waited_, false)) {
+            // A pass that did not come from a wait collects the signals raised meanwhile.
             this->waitForInput(0, signalled_);
             noteSignalled();
         }
@@ -402,6 +421,7 @@ public:
             playout_stats_published_ = std::move(snapshot);
             published_missed_deadlines_ = playout_->missedDeadlines();
             published_frames_ = frame_counter_;
+            published_input_passes_ = input_passes_;
             published_timing_ = timing_;
         }
         if (debug_log_every_n_ > 0 && frame_counter_ % debug_log_every_n_ == 0) {
@@ -422,7 +442,7 @@ public:
         preserve_warm_input_.store(false, std::memory_order_release);
         input_valid_from_ns_.store(avp::mixer::monotonicNs(), std::memory_order_release);
         input_generation_.fetch_add(1, std::memory_order_release);
-        wakeInputs();
+        wake();
     }
 
     void setObject(const std::string key, const Parameters& value) override {
@@ -441,21 +461,21 @@ public:
                 pending_composition_ = value;
                 composition_error_.clear();
             }
-            stop_event_.signal();
+            wake();
         } else if (key == "reset_counters") {
             // The show's start-up is over: count missed deadlines, repeats and drops from here.
             reset_counters_.store(true, std::memory_order_release);
-            wakeInputs();
+            wake();
         } else if (key == "active_inputs") {
             setActiveInputs(avp::mixer::parseSourceMask(value));
-            wakeInputs();
+            wake();
         } else if (key == "prewarm_inputs") {
             if (!playout_) throw Error("mixer_compositor: prewarm_inputs requires clocked playout");
             {
                 std::lock_guard<std::mutex> lock(masks_mutex_);
                 prewarm_inputs_ = avp::mixer::parseSourceMask(value);
             }
-            wakeInputs();
+            wake();
         } else if (key == "warm_reset") {
             if (!playout_) throw Error("mixer_compositor: warm_reset requires clocked playout");
             const auto period = avp::mixer::TickGrid(frame_rate_).time(1);
@@ -463,7 +483,7 @@ public:
                                        std::memory_order_release);
             preserve_warm_input_.store(true, std::memory_order_release);
             input_generation_.fetch_add(1, std::memory_order_release);
-            wakeInputs();
+            wake();
         } else {
             CudaRectCompositor::setObject(key, value);
         }
@@ -490,6 +510,9 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
     node->frame_rate_ = parseRatio(params.at("fps"));
     std::optional<double> latency_ms;
     if (params.contains("latency_ms")) latency_ms = params.at("latency_ms").get<double>();
+    node->input_poll_ms_ = params.value("input_poll_ms", 0);
+    if (node->input_poll_ms_ < 0) throw Error("mixer_compositor: input_poll_ms must not be negative");
+    node->control_wait_ = std::make_unique<MultiEventWait>(std::vector<Event *>{&node->stop_event_});
     node->playout_ = std::make_unique<avp::mixer::Playout<av::VideoFrame>>(
         config.inputs, avp::mixer::TickGrid(node->frame_rate_), latency_ms, avp::mixer::TimestampMode::Presentation);
     node->input_generation_.store(1);
