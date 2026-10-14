@@ -460,7 +460,6 @@ def test_browser_capture_storage_and_release_policy(monkeypatch, copy_on_import)
     from pyplumber.mixer import dmabuf_inputs
 
     monkeypatch.setenv("AVP_BROWSER_COPY_ON_IMPORT", "1" if copy_on_import else "0")
-
     nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
         fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=30, drm_hwaccel=None,
         cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=9)
@@ -468,8 +467,32 @@ def test_browser_capture_storage_and_release_policy(monkeypatch, copy_on_import)
     importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
     assert receive.get("return_queue", 0) == (0 if copy_on_import else 3)
     assert importer["zero_copy"] is (not copy_on_import)
-    assert importer["max_imports"] >= (16 if copy_on_import else 9)
-    assert importer["import_ttl_ms"] == (0 if copy_on_import else dmabuf_inputs.IMPORT_IDLE_MS)
+    assert importer["import_ttl_ms"] == dmabuf_inputs.IMPORT_IDLE_MS
+
+
+@pytest.mark.parametrize("frame_queue", [6, 9])
+def test_fixed_browser_pool_returns_immediately_and_retains_every_import(frame_queue):
+    from pyplumber.mixer import dmabuf_inputs
+    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
+        fake_api(), prefix="input_0", socket="/tmp/page.sock", fps=50, drm_hwaccel=None,
+        cuda_hwaccel="gpu", source_group="g", processing_group="g",
+        browser_frame_queue=frame_queue, fixed_pool_size=11)
+    receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
+    importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
+    assert receive.get("return_queue", 0) == 0
+    assert importer["max_imports"] == 11
+    assert importer["import_ttl_ms"] == 0
+
+
+@pytest.mark.parametrize("reported", [0, 11, None, True, 12, "11"])
+def test_browser_pool_contract_comes_from_the_service(monkeypatch, reported):
+    from pyplumber.mixer import dmabuf_inputs
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *args: {"fixedCapturePoolSize": reported})
+    if type(reported) is int and reported in (0, 11):
+        assert dmabuf_inputs.open_windows("http://b", []) == reported
+    else:
+        with pytest.raises(RuntimeError, match="unsupported fixed capture pool"):
+            dmabuf_inputs.open_windows("http://b", [])
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):

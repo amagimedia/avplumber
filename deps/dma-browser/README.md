@@ -37,8 +37,9 @@ For the optional preallocated Chromium exporter, enable
 on a compatible patched Electron build. Run the mixer with
 `AVP_BROWSER_COPY_ON_IMPORT=1`: it waits for the acquire fence, copies once
 into owned CUDA memory on a private non-blocking stream per source, and returns
-the browser frame before publishing downstream. This mode retains up to 16
-import registrations per source without idle expiry and uses no return queue.
+the browser frame before publishing downstream. The browser distribution must include `resources/avp-capture-pool.json`
+with `{"version":1,"size":11}`. The mixer registers the full pool before
+going on air, retains those registrations, and uses no return queue.
 The ordinary capture path remains the default.
 
 Two switches keep the GPU process stable, both on by default:

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { RestServer } from '../../../src/main/rest/RestServer';
 import { ConfigService } from '../../../src/main/config/ConfigService';
+import * as fixedPool from '../../../src/main/capture/FixedCapturePool';
 import {
   CapacityError,
   ConflictError,
@@ -52,6 +53,16 @@ function buildManager(overrides: Partial<WindowControl> = {}): WindowControl {
 function buildServer(mgr: WindowControl) {
   return new RestServer(mgr, { host: '127.0.0.1', port: 0 }, new ConfigService());
 }
+
+it('advertises the pool contract installed with Electron', async () => {
+  const contract = vi.spyOn(fixedPool, 'fixedCapturePoolSize').mockReturnValue(11);
+  try {
+    const result = await request(buildServer(buildManager()).app).get('/status');
+    expect(result.body.fixedCapturePoolSize).toBe(11);
+  } finally {
+    contract.mockRestore();
+  }
+});
 
 const validBody = {
   id: 'win-1',
