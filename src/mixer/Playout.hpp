@@ -178,6 +178,25 @@ public:
         return &*pending_;
     }
 
+    /// Drops the frames no tick can show any more. A tick shows the newest frame stamped at or
+    /// before it, and the earliest tick still to be drawn is the one due at `now_ns`: a frame
+    /// whose successor is at or before that tick has been superseded for good. Without this a
+    /// playout that cannot tick (an input without a picture yet, as at the start of a show) holds
+    /// kQueueCapacity frames of every other input, each of them a device buffer its source's
+    /// pool then keeps for the life of the show. A cadence can still move queued frames one tick
+    /// later, so there one more is kept. Nothing is dropped while a decision awaits its commit.
+    void discardSuperseded(int64_t now_ns) {
+        if (pending_) return;
+        const int64_t due = rate_.atOrBefore(now_ns - latency_ns_);
+        for (auto &state : inputs_) {
+            const int64_t last_shown = state.cadence ? due - 1 : due;
+            while (state.queue.size() >= 2 && state.queue[1].index <= last_shown) {
+                state.queue.pop_front();
+                ++state.stats.discarded;
+            }
+        }
+    }
+
     void commit() {
         if (!pending_) throw std::logic_error("no mixer decision to commit");
         for (size_t i = 0; i < inputs_.size(); ++i) {
