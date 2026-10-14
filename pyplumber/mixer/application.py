@@ -780,31 +780,26 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 event_loop=_pacing_loop(index))
             for node in nodes:
                 avp.addNode(node)
-        elif source.kind == "v210":
-            # True 10-bit 4:2:2 sources: packed v210 unpacked to P210 on the GPU
-            # and stamped with their declared color contract. NVDEC only yields
-            # 4:2:0, so this is the one path that keeps 4:2:2 through the canvas.
-            assert source.color is not None  # config requires an explicit color contract for v210
-            edge = build_v210_input(
-                avp, api, str(index), source.location, width=source.width, height=source.height,
-                group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                color=source.color.tags, event_loop=_pacing_loop(index), native_rate=True,
-                frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
-        elif source.kind in ("nv12", "p010"):
-            edge = build_raw420_input(
-                avp, api, str(index), source.location, width=source.width, height=source.height,
-                pixel_format="p010le" if source.kind == "p010" else "nv12",
-                group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned",
-                direct=cfg.raw_upload in ("direct", "resident"), resident=cfg.raw_upload == "resident",
-                pool_frames=cfg.raw_pool_frames, native_rate=True, color=source.color,
-                frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
         else:
-            edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
-                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
-                               event_loop=_pacing_loop(index), decoder_params=source.decoder_params, native_rate=True,
-                               frame_metadata=SOURCE_FRAME_METADATA, demux=demux,
-                               decoded_ahead=cfg.decoded_frames_ahead)
+            file_params = dict(group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
+                               event_loop=_pacing_loop(index), native_rate=True,
+                               frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
+            if source.kind == "v210":
+                # Unpack v210 to P210 on the GPU to preserve 10-bit 4:2:2 through the canvas.
+                assert source.color is not None  # config requires an explicit color contract for v210
+                edge = build_v210_input(
+                    avp, api, str(index), source.location, width=source.width, height=source.height,
+                    color=source.color.tags, **file_params)
+            elif source.kind in ("nv12", "p010"):
+                edge = build_raw420_input(
+                    avp, api, str(index), source.location, width=source.width, height=source.height,
+                    pixel_format="p010le" if source.kind == "p010" else "nv12", pinned=cfg.raw_upload == "pinned",
+                    direct=cfg.raw_upload in ("direct", "resident"), resident=cfg.raw_upload == "resident",
+                    pool_frames=cfg.raw_pool_frames, color=source.color, **file_params)
+            else:
+                edge = build_input(avp, api, str(index), source.location, continuous_loop=True,
+                                   decoder_params=source.decoder_params, decoded_ahead=cfg.decoded_frames_ahead,
+                                   **file_params)
         if source.transform:
             transformed_edge = f"input_{index}_transformed"
             # pass_arrays: the color stage and the compositors read arrays, so a frame that already

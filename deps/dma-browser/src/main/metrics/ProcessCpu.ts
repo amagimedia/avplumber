@@ -274,7 +274,10 @@ export function parseStat(text: string): {
 } {
   const close = text.lastIndexOf(')'); // comm may hold spaces and parentheses
   const comm = text.slice(text.indexOf('(') + 1, close);
-  const fields = text.slice(close + 1).trim().split(/\s+/);
+  const fields = text
+    .slice(close + 1)
+    .trim()
+    .split(/\s+/);
   // fields[0] is field 3 (state): field N is fields[N - 3].
   const num = (field: number): number => Number(fields[field - 3]);
   const values = { comm, ppid: num(4), ticks: num(14) + num(15), start: num(22), cpu: num(39) };
@@ -356,15 +359,13 @@ export function readCpuSample(
     list.push(pid);
     children.set(stat.ppid, list);
   }
-  const tree: number[] = [];
-  const queue = stats.has(rootPid) ? [rootPid] : [];
-  const seen = new Set(queue);
-  for (let pid = queue.shift(); pid !== undefined; pid = queue.shift()) {
-    tree.push(pid);
+  const tree = stats.has(rootPid) ? [rootPid] : [];
+  const seen = new Set(tree);
+  for (const pid of tree) {
     for (const child of children.get(pid) ?? []) {
       if (seen.has(child)) continue;
       seen.add(child);
-      queue.push(child);
+      tree.push(child);
     }
   }
 
@@ -414,41 +415,28 @@ export interface CpuMetricsSource {
  * A sample is one synchronous pass, so calls never overlap.
  */
 export class ProcessCpuSampler implements CpuMetricsSource {
-  private readonly procRoot: string;
-  private readonly rootPid: number;
-  private readonly minIntervalMs: number;
-  private readonly now: () => number;
   private readonly kinds = new Map<string, ProcessKind>();
   private last: CpuSample | null = null;
   private result: CpuMetrics | null = null;
 
   constructor(
-    procRoot = '/proc',
-    rootPid: number = process.pid,
-    minIntervalMs = 500,
-    now: () => number = Date.now,
-  ) {
-    this.procRoot = procRoot;
-    this.rootPid = rootPid;
-    this.minIntervalMs = minIntervalMs;
-    this.now = now;
-  }
+    private readonly procRoot = '/proc',
+    private readonly rootPid: number = process.pid,
+    private readonly minIntervalMs = 500,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   public metrics(): Promise<CpuMetrics> {
     try {
-      return Promise.resolve(this.metricsSync());
+      if (this.result && this.last && this.now() - this.last.atMs < this.minIntervalMs) {
+        return Promise.resolve(this.result);
+      }
+      const cur = readCpuSample(this.procRoot, this.rootPid, this.kinds, this.now);
+      this.result = groupCpu(this.last, cur);
+      this.last = cur;
+      return Promise.resolve(this.result);
     } catch (err) {
       return Promise.reject(err instanceof Error ? err : new Error(String(err)));
     }
-  }
-
-  private metricsSync(): CpuMetrics {
-    if (this.result && this.last && this.now() - this.last.atMs < this.minIntervalMs) {
-      return this.result;
-    }
-    const cur = readCpuSample(this.procRoot, this.rootPid, this.kinds, this.now);
-    this.result = groupCpu(this.last, cur);
-    this.last = cur;
-    return this.result;
   }
 }

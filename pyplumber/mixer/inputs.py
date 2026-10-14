@@ -21,6 +21,21 @@ from .color import Color
 INPUT_TIMEOUT_S = 3_942_000_000
 
 
+def _add_packet_input(avp, api, tag: str, params: dict, *, group: str,
+                      routing: dict, demux: bool, restart: dict) -> None:
+    """Route input packets directly or through a separately named demux node."""
+    packets = f"input_{tag}_packets"
+    avp.addNode(api.InputRec({
+        "name": f"input_{tag}", **({"dst": packets} if demux else {"routing": routing}),
+        "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group, **params,
+    }))
+    if demux:
+        avp.addNode(api.Demux({
+            "name": f"demux_{tag}", "src": packets, "routing": routing,
+            "wait_for_keyframe": False, "group": group, **restart,
+        }))
+
+
 def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: int = 1,
                 hwaccel: Optional[str] = "@gpu", loop: bool = False, continuous_loop: bool = False,
                 input_params: Optional[dict] = None,
@@ -63,18 +78,10 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
         avp.edges.planCapacity(edge("decoded"), decoded_ahead)
     restart = {} if auto_restart is None else {"auto_restart": auto_restart}
     sync = {} if sync_team is None else {"sync_team": sync_team}
-    routing = {"?v:0": edge("video_packets")}
-    avp.addNode(api.InputRec({
-        "name": f"input_{tag}", "url": url, **({"dst": edge("packets")} if demux else {"routing": routing}), "loop": loop,
-        "loop_continuous_ts": loop and continuous_loop, "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
+    _add_packet_input(avp, api, tag, {
+        "url": url, "loop": loop, "loop_continuous_ts": loop and continuous_loop,
         **_frame_metadata(frame_metadata), **(input_params or {}),
-    }))
-    if demux:
-        avp.addNode(api.Demux({
-            "name": f"demux_{tag}", "src": edge("packets"),
-            "routing": routing, "wait_for_keyframe": False,
-            "group": group, **restart,
-        }))
+    }, group=group, routing={"?v:0": edge("video_packets")}, demux=demux, restart=restart)
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": edge("video_packets"), "dst": edge("decoded"),
         # The GPU decodes: a libavcodec frame thread only reserves one more decode surface, 16 of them
@@ -158,19 +165,11 @@ def _raw_file_packets(avp, api, tag: str, path: str, *, pixel_format: str, video
                       frame_metadata: Optional[Sequence[str]] = None, demux: bool = True) -> str:
     """``input_rec(rawvideo) -> [demux]`` head of a headerless raw file source: one
     picture per packet, timestamps rising across loop passes. Returns the packet edge."""
-    restart = _raw_file_restart(loop)
-    routing = {"v:0": f"input_{tag}_packed"}
-    avp.addNode(api.InputRec({
-        "name": f"input_{tag}", "url": path, **({"dst": f"input_{tag}_packets"} if demux else {"routing": routing}),
-        "loop": loop, "loop_continuous_ts": loop, "format": "rawvideo", "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S,
-        "group": group, "options": {"pixel_format": pixel_format, "video_size": video_size, "framerate": f"{fps}/{fps_den}"},
+    _add_packet_input(avp, api, tag, {
+        "url": path, "loop": loop, "loop_continuous_ts": loop, "format": "rawvideo",
+        "options": {"pixel_format": pixel_format, "video_size": video_size, "framerate": f"{fps}/{fps_den}"},
         **_frame_metadata(frame_metadata),
-    }))
-    if demux:
-        avp.addNode(api.Demux({
-            "name": f"demux_{tag}", "src": f"input_{tag}_packets", "routing": routing,
-            "wait_for_keyframe": False, "group": group, **restart,
-        }))
+    }, group=group, routing={"v:0": f"input_{tag}_packed"}, demux=demux, restart=_raw_file_restart(loop))
     return f"input_{tag}_packed"
 
 

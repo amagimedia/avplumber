@@ -542,6 +542,13 @@ def _unique(items: List[Any], where: str, label: str = "id") -> None:
         raise ConfigError(f"{where}: duplicate {label} '{items[-1].id}'")
 
 
+def _optional_canvas_count(canvas: dict, key: str, minimum: int, unit: str) -> Optional[int]:
+    value = canvas.get(key)
+    if value is not None and (type(value) is not int or value < minimum):
+        raise ConfigError(f"canvas.{key} must be a whole number of {unit}, {minimum} or more")
+    return value
+
+
 def parse(doc: Dict[str, Any]) -> MixerConfig:
     for key in ("canvas", "sources", "scenes"):
         if key not in doc:
@@ -575,18 +582,10 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     source_fan_out = canvas.get("source_fan_out", "thread")
     if source_fan_out not in SOURCE_FAN_OUTS:
         raise ConfigError(f"canvas.source_fan_out must be one of {', '.join(SOURCE_FAN_OUTS)}")
-    raw_pool_frames = canvas.get("raw_pool_frames")
-    if raw_pool_frames is not None and (type(raw_pool_frames) is not int or raw_pool_frames < 1):
-        raise ConfigError("canvas.raw_pool_frames must be a whole number of frames, 1 or more")
-    decoded_frames_ahead = canvas.get("decoded_frames_ahead")
-    if decoded_frames_ahead is not None and (type(decoded_frames_ahead) is not int or decoded_frames_ahead < 1):
-        raise ConfigError("canvas.decoded_frames_ahead must be a whole number of frames, 1 or more")
-    input_poll_ms = canvas.get("input_poll_ms")
-    if input_poll_ms is not None and (type(input_poll_ms) is not int or input_poll_ms < 0):
-        raise ConfigError("canvas.input_poll_ms must be a whole number of milliseconds, 0 or more")
-    aux_input_poll_ms = canvas.get("aux_input_poll_ms")
-    if aux_input_poll_ms is not None and (type(aux_input_poll_ms) is not int or aux_input_poll_ms < 0):
-        raise ConfigError("canvas.aux_input_poll_ms must be a whole number of milliseconds, 0 or more")
+    raw_pool_frames = _optional_canvas_count(canvas, "raw_pool_frames", 1, "frames")
+    decoded_frames_ahead = _optional_canvas_count(canvas, "decoded_frames_ahead", 1, "frames")
+    input_poll_ms = _optional_canvas_count(canvas, "input_poll_ms", 0, "milliseconds")
+    aux_input_poll_ms = _optional_canvas_count(canvas, "aux_input_poll_ms", 0, "milliseconds")
     try:
         out_color = declared_color(canvas) or Color()
         out_color.validate_format(working_format)
