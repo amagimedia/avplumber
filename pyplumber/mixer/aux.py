@@ -104,6 +104,8 @@ class AuxBus:
             "max_layers": self.bus.max_layers,
             "group": self.group, "auto_restart": "off", "on_error": "off",
             **({"pgm_delay_frames": self.pgm_delay_frames} if self.pgm_delay_frames else {}),
+            # Look for frames every few milliseconds instead of waking for each source's frame.
+            **({} if self.cfg.aux_input_poll_ms is None else {"input_poll_ms": self.cfg.aux_input_poll_ms}),
             **initial["base"],
         }, api=self.api), early_create=True)
         r = self.bus.renditions[0]
