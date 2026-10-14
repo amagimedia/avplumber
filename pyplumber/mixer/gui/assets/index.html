@@ -363,8 +363,8 @@
     <span id="power" class="meter" role="meter" aria-label="GPU power" aria-valuemin="0" hidden>POWER <i></i><b>—</b></span>
     <span class="meter" id="wipe-cache" hidden>WIPES <i></i><b></b></span>
     <span class="group" id="host" role="group" aria-label="Host CPU" hidden>
-      <!-- A title on a group shows over its meters' own tips: only LOAD, which has no tip, carries one. -->
-      <span class="meter" id="load" title="Host CPU from /proc (the whole host, not this container), refreshed every second">LOAD <i></i><b></b></span>
+      <!-- No native titles in this row: they stacked over the meters' own tips. -->
+      <span class="meter" id="load">LOAD <i></i><b></b></span>
       <span class="meter" id="cpu">CPU <i></i><b></b></span>
       <span class="meter" id="thread">THREAD <i></i><b></b></span>
     </span>
