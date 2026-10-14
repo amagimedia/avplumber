@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -37,6 +38,8 @@ protected:
     // Work in todo_, counted after each enqueue: the queue keeps one sub-queue per thread that ever
     // handed the loop work, and finding it empty means looking at all of them, after every pass.
     std::atomic<size_t> todo_count_{0};
+    // Work the loop hands itself (a node yielding after each frame): only its own thread touches it.
+    std::deque<Callable> local_todo_;
     // What to run when a descriptor becomes readable, once: the kernel holds the waits
     // (EPOLLONESHOT), so a pass costs what is ready, not what is waited for.
     int epoll_fd_ = -1;
@@ -60,6 +63,12 @@ protected:
         todo_count_.fetch_add(1, std::memory_order_release);
     }
     bool executeSingleFromToDo() {
+        if (!local_todo_.empty()) {
+            Callable cb = std::move(local_todo_.front());
+            local_todo_.pop_front();
+            run(cb);
+            return true;
+        }
         if (todo_count_.load(std::memory_order_acquire) == 0) return false;
         Callable cb;
         if (!todo_.try_dequeue(cb)) {
@@ -181,7 +190,7 @@ public:
         delegated_execution_thread_.join();
         close(epoll_fd_);
         Callable blackhole;
-        if (todo_.try_dequeue(blackhole)) {
+        if (!local_todo_.empty() || todo_.try_dequeue(blackhole)) {
             logstream << "still have something in todo queue when shutting down event loop";
         }
         if (!todo_when_fd_readable_.empty()) {
@@ -196,6 +205,11 @@ public:
         return passes_.load(std::memory_order_relaxed);
     }
     void execute(Callable cb) {
+        // From the loop's own thread the work runs in this pass, after what is running now.
+        if (std::this_thread::get_id() == loop_thread_.load(std::memory_order_relaxed)) {
+            local_todo_.push_back(std::move(cb));
+            return;
+        }
         enqueueToDo(std::move(cb));
         wakeUnlessOnLoopThread();
     }
