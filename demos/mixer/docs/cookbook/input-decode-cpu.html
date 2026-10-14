@@ -30,7 +30,7 @@
 
   <h1>Input, decode and wake-ups: 502 to 234&nbsp;% of a core</h1>
   <p class="note">Measured on 13 and 14 October 2026 on the 16 vCPU NVIDIA L4 host that runs the demo, one build at a time. The evening builds ran the full show on a second L4 host first; the later ones passed the unit tests and smoke tests, with light GPU smokes on the demo host, before they went into the show. One change, the HEVC table clears, is on <code>develop</code> since 2026-10-13. The others are on avplumber branches that are not merged to <code>develop</code> yet and run in the demo show; each section names its branch, and source links are pinned to the branch commits. <a href="../">Watch the current 192-input L4 demo.</a></p>
-  <p class="lede">On the 192-source show at 1080p30 the mixer process read 502&nbsp;% of one vCPU in 1,186 threads after the raw-upload, colour-tag and compositor changes of 13 October. Ten more changes, aimed at what each source's frames cost on their way from the file to the compositors, took it to about 234&nbsp;% in 889 threads, with no missed deadline and no dropped output at any step. The whole stack then ran seven minutes confined to 8 vCPUs without missing a deadline.</p>
+  <p class="lede">On the 192-source show at 1080p30 the mixer process read 502&nbsp;% of one vCPU in 1,186 threads after the raw-upload, colour-tag and compositor changes of 13 October. Ten more changes, aimed at what each source's frames cost on their way from the file to the compositors, took it to about 234&nbsp;% in 889 threads, with no missed deadline and no dropped output at any step. The whole stack, browser included, then ran fifteen minutes confined to 8 vCPUs without missing a deadline, about half of them busy.</p>
   <span class="pill optin">Status: on branches, running in the demo show; one change on develop</span>
 
   <ul class="figures" aria-label="Measured facts">
@@ -39,7 +39,7 @@
     <li><b>139.7 → 27.3&nbsp;%</b><span>the 152 reading threads, once raw files stay in page-locked memory</span></li>
     <li><b>59.5 → 14.6&nbsp;%</b><span>the two Program compositors together (7.3 each), once the busiest threads of the show</span></li>
     <li><b>108 → 28&nbsp;%</b><span>time the mixer's threads spent runnable without a core, over the evening's builds</span></li>
-    <li><b>0</b><span>missed deadlines and output drops in every reading, and in seven minutes on 8 vCPUs</span></li>
+    <li><b>0</b><span>missed deadlines and output drops in every reading, and in fifteen minutes on 8 vCPUs</span></li>
   </ul>
 
   <figure>
@@ -168,10 +168,12 @@
         <tr><td>Second L4 host</td><td>8</td><td>2.5</td><td>0</td><td>0</td><td>185</td><td>7.2</td></tr>
         <tr><td>Second L4 host</td><td>6</td><td>2.5</td><td>0</td><td>0</td><td>496</td><td>15.2</td></tr>
         <tr><td>Demo host, live</td><td>8</td><td>7</td><td>0</td><td>0</td><td>296</td><td>8.7</td></tr>
+        <tr><td>Demo host, live, final build with the zero-copy browser</td><td>8</td><td>15</td><td>0</td><td>0</td><td>152</td><td>1.7</td></tr>
       </tbody>
     </table>
   </div>
   <ul class="where">
+    <li>The last row: mixer, browser and Janus together used about 4.2 vCPUs of the 8 (mixer about 2.3, browser about 1.5), so 4 vCPUs cannot hold this show.</li>
     <li>The same 8 vCPU confinement on 13 October, before these changes, gave 2 output drops and 1,152&nbsp;% of run-queue time.</li>
     <li>What the confinement does not show: a real 8 vCPU machine also confines the kernel's and the driver's threads, and has 32 GB of memory (the mixer holds about 10 GB with resident sources, the browser 1.9).</li>
   </ul>
