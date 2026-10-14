@@ -207,6 +207,9 @@ def _check_hdr_decodes(profile, count, fps):
 
 
 class SetupRuntime(BaseSetupRuntime):
+    # Synthetic clips use NVENC on the same GPU as the current show.
+    prepare_while_running = False
+
     def __init__(self, media_dir, recipe_path, bridge, instance_type, *args, **kwargs):
         instance_type = InstanceType(instance_type)
         super().__init__(media_dir, recipe_path, bridge, INSTANCE_PROFILES[instance_type], *args,

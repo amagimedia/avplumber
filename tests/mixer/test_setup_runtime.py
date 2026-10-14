@@ -104,10 +104,16 @@ def crash(runtime, code=-11):
     SetupRuntime._watch(runtime, process)
 
 
-def test_prepare_failure_keeps_old_show_and_process(runtime, monkeypatch):
+@pytest.mark.parametrize("prepare_while_running", [False, True])
+def test_prepare_failure_restores_old_show(runtime, monkeypatch, prepare_while_running):
+    runtime.prepare_while_running = prepare_while_running
     config = runtime.media_dir / 'mixer.demo.json'
     config.write_text('{"old": true}')
+    events = []
+    monkeypatch.setattr(runtime, '_stop', lambda **kwargs: events.append('stop'))
+    monkeypatch.setattr(runtime, '_start', lambda _: events.append('restore'))
     def fail(*args, **kwargs):
+        events.append('prepare')
         raise ValueError('disk full')
     monkeypatch.setattr(prepare_demo, 'prepare', fail)
     apply_and_wait(runtime, DEFAULT_SETTINGS)
@@ -115,6 +121,21 @@ def test_prepare_failure_keeps_old_show_and_process(runtime, monkeypatch):
     assert 'disk full' in runtime.status()['message']
     assert json.loads(config.read_text()) == {'old': True}
     assert runtime.process.poll() is None
+    assert events == (['prepare'] if prepare_while_running else ['stop', 'prepare', 'stop', 'restore'])
+
+
+def test_demo_stops_gpu_playback_before_preparing_assets(runtime, monkeypatch):
+    events = []
+    monkeypatch.setattr(runtime, '_stop', lambda **kwargs: events.append('stop'))
+    def prepare(recipe, directory, **kwargs):
+        assert events == ['stop']
+        events.append('prepare')
+        prepare_without_media(recipe, directory, **kwargs)
+    monkeypatch.setattr(prepare_demo, 'prepare', prepare)
+    monkeypatch.setattr(runtime, '_start', lambda _: events.append('start'))
+    apply_and_wait(runtime, DEFAULT_SETTINGS)
+    assert runtime.status()['phase'] == 'running'
+    assert events == ['stop', 'prepare', 'start']
 
 
 def test_failed_start_restores_previous_show(runtime, monkeypatch):

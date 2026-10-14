@@ -107,6 +107,9 @@ def _fits(cfg, spec):
 
 
 class SetupRuntime:
+    # CPU-only asset preparation may overlap playback. GPU producers must opt out.
+    prepare_while_running = True
+
     def __init__(self, media_dir, recipe_path, bridge, profile, mixer_args=(), browser_url="http://127.0.0.1:9009",
                  janus_api=None, *, instance_type="", mixer_command=None, config_name="mixer.json"):
         self.media_dir = Path(media_dir).resolve()
@@ -545,7 +548,9 @@ class SetupRuntime:
         started = time.monotonic()
         try:
             previous = config.read_bytes() if had_previous else None
-            # Complete missing assets while the old mixer continues to run.
+            if not self.prepare_while_running:
+                self._stop()
+                stopped = True
             log.info("Preparing assets")
             self.prepare(recipe, progress=lambda done, total:
                     self._status("preparing", f"Preparing assets… {done}/{total} ready."))
@@ -553,8 +558,9 @@ class SetupRuntime:
             if self.closing.is_set():
                 raise RuntimeError("Setup server is stopping")
             self._status("starting", "Restarting mixer…")
-            self._stop()
-            stopped = True
+            if not stopped:
+                self._stop()
+                stopped = True
             recipe_show = json.loads(config.read_bytes())
             self._mountpoints(recipe_show, wanted, replace=True)
             self._start_recovering(config, json.loads(previous or b"{}"))
