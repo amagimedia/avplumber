@@ -21,8 +21,11 @@ namespace avp::mixer {
 /// repeat, in pairs, for minutes at a time.)
 ///
 /// Schedule: the first copy 1.5 periods after a live frame, then one per period on a
-/// train anchored to that arrival; a live frame always re-anchors both the train and
-/// the numbering, so a real paint takes precedence over the copies around it.
+/// train anchored to that arrival. A live frame passes untouched and re-anchors the
+/// train; the numbering continues from the newest stamp on the output, the live
+/// frame's own unless it sits at or behind the last copy (a paint that reached the
+/// node late; the playout supersedes by slot), in which case the copies go on after
+/// that copy. No copy is ever numbered at or before a stamp already emitted.
 ///
 /// Stall path, a one-slot guard band: a copy whose counted slot lies more than one
 /// period before its emission (the node woken late, or a live frame that reached the
@@ -42,6 +45,7 @@ class HoldNumbering {
     AVRational tb_{0, 1};         // the live frame's time base; copies are stamped in it
     int64_t anchor_pts_ = 0;      // the stamp the copies count from, in tb_
     int64_t copies_ = 0;          // copies emitted since the anchor
+    int64_t last_out_pts_ = 0;    // the newest stamp on the output, in tb_
     int64_t next_repeat_ns_ = 0;
     uint64_t realignments_ = 0;
 
@@ -62,8 +66,12 @@ public:
 
     /// A live frame with stamp `pts` in `tb` passed through at `now_ns`.
     void live(int64_t now_ns, int64_t pts, AVRational tb) {
+        // Count on from the newer of the live stamp and the last copy; a new time base
+        // is a new stream, with nothing emitted before it to stay after.
+        const bool same_stream = armed_ && tb.num == tb_.num && tb.den == tb_.den;
+        anchor_pts_ = same_stream ? std::max(pts, last_out_pts_) : pts;
+        last_out_pts_ = anchor_pts_;
         tb_ = tb;
-        anchor_pts_ = pts;
         copies_ = 0;
         armed_ = true;
         // Only step in after a missed period, never between live frames.
@@ -82,12 +90,14 @@ public:
         if (late_ns > period_ns_) next_repeat_ns_ = now_ns + period_ns_;   // do not burst after a long stall
         if (late_ns <= period_ns_ && behind_ns <= period_ns_) {
             ++copies_;
+            last_out_pts_ = pts;
             return pts;
         }
         // Outside the band: the first slot at or after the emission, but never one already emitted.
         const int64_t slot = av_rescale_q_rnd(now_ns, kNs, frame_, AV_ROUND_UP);
         pts = std::max(pts, av_rescale_q(slot, frame_, tb_));
         anchor_pts_ = pts;
+        last_out_pts_ = pts;
         copies_ = 0;
         ++realignments_;
         return pts;

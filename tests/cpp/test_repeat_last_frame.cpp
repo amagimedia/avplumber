@@ -1,13 +1,30 @@
 // The copies repeat_last_frame emits while a page is idle are numbered one slot after the
-// last stamp on its output; the emission time never enters a stamp. Driven with a fake
+// newest stamp on its output; the emission time never enters a stamp. Driven with a fake
 // clock through HoldNumbering, the policy the node delegates to.
 #include "mixer/primitives/HoldNumbering.hpp"
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
-#define CHECK(expr) do { if (!(expr)) throw std::runtime_error(#expr); } while (false)
+namespace {
+
+// A failed check names its case, the expression and the step the harness was at.
+std::string g_case, g_step;
+
+template<class... A> void step(const A &...a) {
+    std::ostringstream o;
+    (o << ... << a);
+    g_step = o.str();
+}
+
+} // namespace
+
+#define CASE() (g_case = __func__, g_step.clear())
+#define CHECK(expr) do { if (!(expr)) throw std::runtime_error(g_case + ": " #expr " (line " + \
+    std::to_string(__LINE__) + ") at " + g_step); } while (false)
 
 using avp::mixer::HoldNumbering;
 
@@ -31,17 +48,35 @@ int64_t slop(int64_t n) { return ((n * 7919) % 1000) * kUs; }
 struct Node {
     HoldNumbering hold{kFps};
     std::vector<int64_t> out;              // every stamp put on the output, in 1/30
+    std::vector<bool> is_copy;             // which of them are copies
 
     void paint(int64_t now, int64_t pts) {
+        step("paint #", out.size(), " now=", now, " pts=", pts, " (last out ", out.empty() ? -1 : out.back(), ")");
         hold.live(now, pts, kTb);
         out.push_back(pts);                // live frames pass untouched
+        is_copy.push_back(false);
     }
     bool idle(int64_t now) {
+        step("idle #", out.size(), " now=", now, " due=", hold.nextRepeatNs(),
+             " (last out ", out.empty() ? -1 : out.back(), ")");
         if (!hold.due(now)) return false;
         out.push_back(hold.copy(now));
+        is_copy.push_back(true);
+        step(g_step, " -> copy pts=", out.back());
         return true;
     }
     int64_t last() const { return out.back(); }
+
+    /// A copy is never stamped at or before anything emitted before it (live frames pass
+    /// untouched, so a late paint may itself sit behind the last copy).
+    void every_copy_is_after_everything_before_it() const {
+        int64_t newest = out.front();
+        for (size_t i = 1; i < out.size(); ++i) {
+            step("output ", i, " ", is_copy[i] ? "copy" : "live", " pts=", out[i], " newest before=", newest);
+            if (is_copy[i]) CHECK(out[i] > newest);
+            newest = std::max(newest, out[i]);
+        }
+    }
 };
 
 // A slide's last paint: stamped 333 us before tick L, which smooth rounds up to L; it reaches the
@@ -49,13 +84,10 @@ struct Node {
 const int64_t L = 1000;
 const int64_t kArrival = time_of(L) - P / 100;
 
-void every_stamp_follows_the_previous_one(const std::vector<int64_t> &out) {
-    for (size_t i = 1; i < out.size(); ++i) CHECK(out[i] > out[i - 1]);
-}
-
 } // namespace
 
 void a_still_page_at_the_half_slot_phase_gets_one_copy_per_slot_where_rounding_gave_pairs() {
+    CASE();
     Node node;
     node.paint(kArrival, L);
     CHECK(!node.idle(kArrival + P));                     // nothing between live frames
@@ -63,6 +95,7 @@ void a_still_page_at_the_half_slot_phase_gets_one_copy_per_slot_where_rounding_g
     int64_t old_prev = -1;
     for (int64_t n = 0; n < 10000; ++n) {
         const int64_t due = kArrival + P + P / 2 + n * P;   // the train is anchored to the arrival
+        step("n=", n, " due=", due);
         CHECK(node.hold.nextRepeatNs() == due);
         CHECK(!node.idle(due - 1));
         const int64_t now = due + slop(n);               // 0.49 P plus up to 1 ms into the slot
@@ -76,13 +109,15 @@ void a_still_page_at_the_half_slot_phase_gets_one_copy_per_slot_where_rounding_g
         old_prev = old;
     }
     CHECK(node.out.size() == 10001);
-    every_stamp_follows_the_previous_one(node.out);
+    node.every_copy_is_after_everything_before_it();
     CHECK(node.hold.realignments() == 0);
     // The same wake-ups rounded to the nearest slot flip around the half slot: pairs.
+    step("old rounding: dup=", old_dup, " skip=", old_skip);
     CHECK(old_dup > 100 && old_skip > 100);
 }
 
 void a_paint_between_copies_takes_its_own_slot_and_the_next_copy_follows_it() {
+    CASE();
     Node node;
     node.paint(kArrival, L);
     CHECK(node.idle(node.hold.nextRepeatNs() + slop(0)) && node.last() == L + 1);
@@ -116,31 +151,39 @@ void a_paint_between_copies_takes_its_own_slot_and_the_next_copy_follows_it() {
     CHECK(node.hold.realignments() == 1);
     CHECK(node.idle(node.hold.nextRepeatNs() + slop(5)) && node.last() == L + 9);
     CHECK(node.hold.realignments() == 1);
-    every_stamp_follows_the_previous_one(node.out);
+    node.every_copy_is_after_everything_before_it();
 }
 
-void a_paint_that_reached_the_node_long_after_its_stamp_is_re_aligned_once_then_counted() {
+void a_paint_behind_the_last_copy_passes_untouched_and_the_next_copy_is_after_both() {
+    CASE();
     Node node;
-    const int64_t arrival = time_of(L) + 10 * P;         // the import path held the frame for ten periods
-    node.paint(arrival, L);
-    CHECK(node.last() == L);                             // the live frame still passes with its own stamp
-    const int64_t first = node.hold.nextRepeatNs() + slop(0);   // = time(L) + 11.5 P
-    CHECK(node.idle(first));
-    // Counting from L would put every copy ten periods behind the clock, late at the compositor
-    // forever on a page that never paints again; the band takes the next slot instead.
-    CHECK(node.last() == round_up(first) && node.last() == L + 12);
+    node.paint(kArrival, L);
+    CHECK(node.idle(node.hold.nextRepeatNs() + slop(0)) && node.last() == L + 1);
+    CHECK(node.idle(node.hold.nextRepeatNs() + slop(1)) && node.last() == L + 2);
+    // Woken 2.8 periods late, at 0.3 of slot L+6: the copy is re-aligned to L+7, which it
+    // precedes by 0.7 P (the one way a copy comes to sit well ahead of the clock).
+    const int64_t stall = time_of(L + 6) + 3 * P / 10;
+    CHECK(stall - node.hold.nextRepeatNs() > 2 * P);
+    CHECK(node.idle(stall) && node.last() == L + 7);
     CHECK(node.hold.realignments() == 1);
-    for (int64_t n = 1; n <= 100; ++n) {
-        const int64_t now = node.hold.nextRepeatNs() + slop(n);
-        CHECK(node.idle(now));
-        CHECK(node.last() == L + 12 + n);                // counted again from the re-aligned slot
-        CHECK(time_of(node.last()) >= now);              // each copy precedes its slot
-    }
-    CHECK(node.hold.realignments() == 1);                // the band fires once and goes quiet
-    every_stamp_follows_the_previous_one(node.out);
+    // A paint from before the stall, stamped L+6, turns up 1 ms after that copy. It passes with
+    // its own stamp, behind the copy already out; the playout supersedes by slot.
+    const int64_t arrival = stall + 1 * kMs;
+    node.paint(arrival, L + 6);
+    CHECK(node.last() == L + 6);
+    CHECK(node.hold.nextRepeatNs() == arrival + P + P / 2);
+    // The next copy must be after both. Counting on from the paint would repeat L+7, and the
+    // band would not notice: L+7 is only 0.85 P behind the clock at that point.
+    const int64_t now = node.hold.nextRepeatNs() + slop(3);
+    CHECK(now - time_of(L + 7) < P && now - time_of(L + 7) > 8 * P / 10);
+    CHECK(node.idle(now) && node.last() == L + 8);
+    CHECK(node.hold.realignments() == 1);                // counted, not re-aligned
+    CHECK(node.idle(node.hold.nextRepeatNs() + slop(4)) && node.last() == L + 9);
+    node.every_copy_is_after_everything_before_it();
 }
 
 void a_long_stall_emits_no_copy_at_or_before_the_last_emitted_slot() {
+    CASE();
     Node node;
     node.paint(kArrival, L);
     CHECK(node.idle(node.hold.nextRepeatNs() + slop(0)) && node.last() == L + 1);
@@ -162,15 +205,39 @@ void a_long_stall_emits_no_copy_at_or_before_the_last_emitted_slot() {
     CHECK(node.idle(due2 + P / 2) && node.last() == c + 3);
     CHECK(node.hold.nextRepeatNs() == due2 + P);
     CHECK(node.hold.realignments() == 1);
-    every_stamp_follows_the_previous_one(node.out);
+    node.every_copy_is_after_everything_before_it();
+}
+
+void a_paint_that_reached_the_node_long_after_its_stamp_is_re_aligned_once_then_counted() {
+    CASE();
+    Node node;
+    const int64_t arrival = time_of(L) + 10 * P;         // the import path held the frame for ten periods
+    node.paint(arrival, L);
+    CHECK(node.last() == L);                             // the live frame still passes with its own stamp
+    const int64_t first = node.hold.nextRepeatNs() + slop(0);   // = time(L) + 11.5 P
+    CHECK(node.idle(first));
+    // Counting from L would put every copy ten periods behind the clock, late at the compositor
+    // forever on a page that never paints again; the band takes the next slot instead.
+    CHECK(node.last() == round_up(first) && node.last() == L + 12);
+    CHECK(node.hold.realignments() == 1);
+    for (int64_t n = 1; n <= 100; ++n) {
+        const int64_t now = node.hold.nextRepeatNs() + slop(n);
+        CHECK(node.idle(now));
+        CHECK(node.last() == L + 12 + n);                // counted again from the re-aligned slot
+        CHECK(time_of(node.last()) >= now);              // each copy precedes its slot
+    }
+    CHECK(node.hold.realignments() == 1);                // the band fires once and goes quiet
+    node.every_copy_is_after_everything_before_it();
 }
 
 void live_paints_at_the_frame_rate_pass_through_unchanged() {
+    CASE();
     Node node;
     for (int64_t n = 0; n < 300; ++n) {
         // Each paint is stamped a few ms before its tick (round_up gives slot L+n) and arrives 3 ms later.
         const int64_t stamp = time_of(L + n) - 4 * kMs + ((n * 37) % 20) * 100 * kUs;
         const int64_t pts = round_up(stamp);
+        step("n=", n, " stamp=", stamp, " pts=", pts);
         CHECK(pts == L + n);
         const int64_t arrival = stamp + 3 * kMs;
         CHECK(!node.idle(arrival));                      // the 1.5 P schedule never fires between paints
@@ -178,10 +245,14 @@ void live_paints_at_the_frame_rate_pass_through_unchanged() {
         CHECK(node.last() == pts);
     }
     CHECK(node.out.size() == 300);
-    for (size_t i = 0; i < node.out.size(); ++i) CHECK(node.out[i] == L + int64_t(i));
+    for (size_t i = 0; i < node.out.size(); ++i) {
+        step("i=", i, " out=", node.out[i]);
+        CHECK(node.out[i] == L + int64_t(i));
+    }
 }
 
 void copies_in_a_finer_time_base_count_whole_frames_without_accumulating_rounding() {
+    CASE();
     // A stream stamped in microseconds at 30 fps: a frame is 33333.33 us, so the copies must be
     // anchor + n frames, not anchor + n * 33333.
     const AVRational us{1, 1000000};
@@ -190,7 +261,9 @@ void copies_in_a_finer_time_base_count_whole_frames_without_accumulating_roundin
     hold.live(anchor * kUs + 3 * kMs, anchor, us);
     int64_t previous = anchor;
     for (int64_t n = 1; n <= 3000; ++n) {
-        const int64_t pts = hold.copy(hold.nextRepeatNs() + 200 * kUs);
+        const int64_t now = hold.nextRepeatNs() + 200 * kUs;
+        const int64_t pts = hold.copy(now);
+        step("n=", n, " now=", now, " pts=", pts, " previous=", previous);
         CHECK(pts == anchor + av_rescale_q(n, av_inv_q(kFps), us));
         CHECK(pts - previous == 33333 || pts - previous == 33334);
         previous = pts;
@@ -200,11 +273,17 @@ void copies_in_a_finer_time_base_count_whole_frames_without_accumulating_roundin
 }
 
 int main() {
-    a_still_page_at_the_half_slot_phase_gets_one_copy_per_slot_where_rounding_gave_pairs();
-    a_paint_between_copies_takes_its_own_slot_and_the_next_copy_follows_it();
-    a_long_stall_emits_no_copy_at_or_before_the_last_emitted_slot();
-    a_paint_that_reached_the_node_long_after_its_stamp_is_re_aligned_once_then_counted();
-    live_paints_at_the_frame_rate_pass_through_unchanged();
-    copies_in_a_finer_time_base_count_whole_frames_without_accumulating_rounding();
+    try {
+        a_still_page_at_the_half_slot_phase_gets_one_copy_per_slot_where_rounding_gave_pairs();
+        a_paint_between_copies_takes_its_own_slot_and_the_next_copy_follows_it();
+        a_paint_behind_the_last_copy_passes_untouched_and_the_next_copy_is_after_both();
+        a_long_stall_emits_no_copy_at_or_before_the_last_emitted_slot();
+        a_paint_that_reached_the_node_long_after_its_stamp_is_re_aligned_once_then_counted();
+        live_paints_at_the_frame_rate_pass_through_unchanged();
+        copies_in_a_finer_time_base_count_whole_frames_without_accumulating_rounding();
+    } catch (const std::exception &e) {
+        std::cerr << "FAIL " << e.what() << "\n";
+        return 1;
+    }
     std::cout << "repeat_last_frame numbering OK\n";
 }
