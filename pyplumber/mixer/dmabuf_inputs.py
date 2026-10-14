@@ -159,6 +159,10 @@ def open_windows(base_url: str, windows: List[dict]) -> int:
     changed = []
     for spec in windows:
         wanted = {**spec, "audio": False}
+        if fixed_pool_size:
+            # Let Chromium exhaust its fixed pool and skip rendering when full.
+            # A smaller sender limit discards paints while spare buffers keep rendering.
+            wanted["ringSize"] = fixed_pool_size
         current = existing.get(spec["id"])
         if current and current.get("stats", {}).get("quarantinedFrameCount", 0):
             raise RuntimeError(f"Browser {spec['id']} has quarantined DMA-BUF frames; restart its browser worker")

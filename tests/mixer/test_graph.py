@@ -495,6 +495,31 @@ def test_browser_pool_contract_comes_from_the_service(monkeypatch, reported):
             dmabuf_inputs.open_windows("http://b", [])
 
 
+@pytest.mark.parametrize("current_ring", [9, 11])
+def test_fixed_pool_sender_uses_every_producer_buffer(monkeypatch, current_ring):
+    from pyplumber.mixer import dmabuf_inputs
+
+    requested = dict(id="page_00", url="http://p", width=1920, height=1080,
+                     fps=50, ringSize=9, holdLastFrame=True)
+    current = {**requested, "audio": False, "ringSize": current_ring}
+    calls = []
+
+    def request(base, method, path, body=None):
+        calls.append((path, body))
+        if path == "/status":
+            return {"fixedCapturePoolSize": 11, "windows": [current]}
+        return body
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", request)
+    assert dmabuf_inputs.open_windows("http://b", [requested]) == 11
+    assert requested["ringSize"] == 9
+    if current_ring == 11:
+        assert calls == [("/status", None)]
+    else:
+        assert calls[-2:] == [("/window/close", {"id": "page_00"}),
+                             ("/window/open", {**current, "ringSize": 11})]
+
+
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
 
