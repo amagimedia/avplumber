@@ -21,6 +21,7 @@ from pyplumber.mixer.application import (
 )
 from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS
 from pyplumber.mixer import config as mixer_config
+from pyplumber.mixer.dmabuf_inputs import BrowserCaptureMode, browser_capture_mode, zero_copy_chain_edges
 from pyplumber.mixer.dmabuf_inputs import (
     dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows, wait_for_sockets, window_id,
 )
@@ -75,7 +76,7 @@ class GraphOptions(MixerOptions):
 
 def _build_input(
     avp, api, index: int, url: str, *, loop: bool, fps: int, normalize: bool,
-    options: GraphOptions,
+    options: GraphOptions, capture_mode: BrowserCaptureMode = BrowserCaptureMode(),
 ) -> str:
     group = _input_group(index)
     if is_dmabuf_url(url):
@@ -85,10 +86,14 @@ def _build_input(
             api, prefix=f"input_{index}",
             socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
             fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
-            source_group=group, processing_group=group, hold=True, browser_frame_queue=options.browser_frame_queue,
-            event_loop=_pacing_loop(index))
+            source_group=group, processing_group=group, hold=True,
+            browser_frame_queue=capture_mode.frame_queue(options.browser_frame_queue),
+            event_loop=_pacing_loop(index), zero_copy=capture_mode.zero_copy)
         for node in nodes:
             avp.addNode(node)
+        if capture_mode.zero_copy:
+            for chain_edge in zero_copy_chain_edges(f"input_{index}"):
+                avp.edges.planCapacity(chain_edge, 1)
     else:
         fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop, continuous_loop=True,
@@ -110,14 +115,16 @@ def _build_input(
     return normalized_edge
 
 
-def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int, color: str = "") -> bool:
+def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int, color: str = "",
+                      capture_mode: BrowserCaptureMode = BrowserCaptureMode()) -> bool:
     # Keep the legacy --input routing threshold: larger catalogues use a small
     # router selecting the 16 visible positions, without per-layout branches.
     if len(input_edges) <= DIRECT_INPUT_LIMIT:
         for index, (edge, url) in enumerate(zip(input_edges, urls)):
             browser = is_dmabuf_url(url)   # packed RGB, always SDR; decoded files follow --input-color
             mixer.add_source(f"source_{index}", pre_otm_edge=edge, input_group=_input_group(index),
-                             packed_rgb=browser, color="sdr" if browser else color or None)
+                             packed_rgb=browser, color="sdr" if browser else color or None,
+                             queue_limit=capture_mode.playout_queue_limit() if browser else None)
         return False
     labels = [f"slot_{i}_{slot}" for i in range(16) for slot in ("a", "b")]
     edges = [f"route_{label}" for label in labels]
@@ -180,17 +187,19 @@ def _build(options: GraphOptions, api, on_error: ExitStack) -> MixerApplication:
                                  width, height, options.fps, options.browser_frame_queue)
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{name}.sock" for name in dmabuf_ids],
                          options.preheat_timeout_sec)
+    capture_mode = browser_capture_mode(options.dmabuf_rest) if dmabuf_ids else BrowserCaptureMode()
 
     avp = _init_avp(options, api, on_error)
     input_edges = [
         _build_input(avp, api, index, url, loop=options.loop_inputs, fps=options.fps,
-                     normalize=len(options.inputs) > DIRECT_INPUT_LIMIT, options=options)
+                     normalize=len(options.inputs) > DIRECT_INPUT_LIMIT, options=options,
+                     capture_mode=capture_mode)
         for index, url in enumerate(options.inputs)
     ]
     canvas = (CANVAS_WIDTH, CANVAS_HEIGHT)
     mixer = _make_builder(avp, api, options, canvas=canvas, fps=options.fps, working_format=options.working_format)
     routed_inputs = _register_sources(avp, api, mixer, input_edges, options.inputs, fps=options.fps,
-                                      color=options.input_color)
+                                      color=options.input_color, capture_mode=capture_mode)
     _define_scenes(mixer, len(input_edges), routed_inputs)
     mixer.set_initial_scene("fullscreen_0", slot="A")
     listener = _build_renditions(avp, api, options, _flag_renditions(options, *canvas), mixer.build(),
@@ -235,8 +244,9 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="open the dmabuf:// windows with this page through the dma-browser REST API")
     add("--dmabuf-rest", default="http://127.0.0.1:9009")
     add("--browser-frame-queue", "--browser-ring-size", type=int, dest="browser_frame_queue",
-        help="frames one browser window may have out at once, 1 to 9 (default 9; JSON config owns this in "
-             "--config mode). --browser-ring-size is the option's earlier name")
+        help="frames one browser window may have out at once, 1 to 15 (default 9; a zero-copy browser lowers it "
+             "to its queue capacity less one; JSON config owns this in --config mode). --browser-ring-size is "
+             "the option's earlier name")
     add("--janus-output", action="store_true", help="Publish the video-only program to Janus over RTP")
     add("--janus-host", default=JANUS_DEFAULT_HOST)
     add("--janus-video-port", type=int, default=JANUS_DEFAULT_VIDEO_PORT)
@@ -249,6 +259,12 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="Minimum forced-keyframe spacing for Janus output in media time "
              "(default: 150 ms; 0 disables rate limiting)")
     add("--preheat-timeout", dest="preheat_timeout_sec", type=float, default=60.0)
+    add("--start-stable-sec", dest="start_stable_sec", type=float, default=GraphOptions.start_stable_sec,
+        help="Release the outputs after this many seconds in which no compositor missed a deadline or "
+             f"dropped a frame and every bus drew (default: {GraphOptions.start_stable_sec:g})")
+    add("--start-stable-timeout-sec", dest="start_stable_timeout_sec", type=float, default=GraphOptions.start_stable_timeout_sec,
+        help="Release the outputs anyway after this long, logging what kept counting "
+             f"(default: {GraphOptions.start_stable_timeout_sec:g})")
     add("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
                             "(the TUI still selects the clip for each wipe)")
     add("--wipe-cache-mb", type=float, default=GraphOptions.wipe_cache_mb,

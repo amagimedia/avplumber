@@ -60,6 +60,7 @@ from pyplumber.node import (
     Demux,
     DecVideo,
     OneToMany,
+    OneToManyNb,
     Realtime,
     SourceSwitcher,
 )
@@ -110,6 +111,7 @@ class MixerGraphBuilder:
         wipe_color=None,
         backend=None,
         max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS,
+        input_poll_ms: Optional[int] = None,   # None: the program compositors wake for every source frame
     ):
         self.avp = avp
         self.name = name
@@ -127,6 +129,7 @@ class MixerGraphBuilder:
         self.defer_initial_routes = defer_initial_routes
         self.latency_ms = latency_ms if latency_ms is not None else default_latency_ms(self.fps_num / self.fps_den)
         self.max_compositor_layers = max_compositor_layers
+        self.input_poll_ms = input_poll_ms
         self.working_format = working_format
         self.color = Color.parse(color)
         self.color.validate_format(working_format)
@@ -153,6 +156,12 @@ class MixerGraphBuilder:
                                         "sw_format": self.working_format, "color": self.color.transfer,
                                         **params}, keyer=keyer, api=api)
 
+    def queue_limits(self, names=None) -> list:
+        """The compositor's `input_queue_limits` for *names* (default: every registered source in
+        input order): the source's queue_limit, 0 for the playout's default."""
+        sources = self._sources if names is None else [self._sources[self._source_index[name]] for name in names]
+        return [source.queue_limit or 0 for source in sources]
+
     def add_aux_destination(self, source: str, edge: str) -> None:
         """Add an independently subscribed destination before materializing the graph."""
         if self._built or source not in self._source_index:
@@ -169,7 +178,7 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
-        color_tagged=False,
+        color_tagged=False, fan_out_loop=None, queue_limit=None,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -196,6 +205,9 @@ class MixerGraphBuilder:
             one_to_many (typically the force_fps output of the input chain).
         input_group:
             Avplumber group that owns this source's conversion and fan-out nodes.
+        fan_out_loop:
+            Name of an event loop to hand this source's frames out on (one_to_many_nb)
+            instead of a thread of its own; typically the loop that paces the source.
         """
         if self._built:
             raise RuntimeError("Cannot add sources after build()")
@@ -208,10 +220,14 @@ class MixerGraphBuilder:
         if packed_rgb and color != Color():
             raise ValueError(f"Source '{name}': packed RGB requires an explicit SDR color setting")
         idx = len(self._sources)
+        if queue_limit is not None and (type(queue_limit) is not int or not 1 <= queue_limit <= 8):
+            raise ValueError(f"Source '{name}': queue_limit must be 1 to 8 frames")
         self._sources.append(MixerSource(name, pre_otm_edge, input_group,
                                                color=color, color_tagged=color_tagged,
                                                pixel_format=pixel_format, packed_rgb=packed_rgb,
-                                               premultiplied_alpha=premultiplied_alpha))
+                                               premultiplied_alpha=premultiplied_alpha,
+                                               fan_out_loop=fan_out_loop,
+                                               queue_limit=queue_limit))
         self._source_index[name] = idx
         return self
 
@@ -572,9 +588,11 @@ class MixerGraphBuilder:
 
             if src.route_router is None:
                 aux_edges = self._aux_routes.get(src.name, [])
-                self.avp.addNode(OneToMany({
+                # On the source's pacing loop when it names one: no thread wakes for each frame.
+                fan_out = OneToManyNb if src.fan_out_loop else OneToMany
+                self.avp.addNode(fan_out({
                 "drop": True,
-                    "type": "one_to_many",
+                    **({"event_loop": src.fan_out_loop} if src.fan_out_loop else {}),
                     "name": self._n(f"otm_{src.name}"),
                     "src": prepared_edges[src.name],
                     "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b"), *aux_edges],
@@ -612,6 +630,8 @@ class MixerGraphBuilder:
                 "max_layers": self.max_compositor_layers,
                 "fps": self._fps_str(),
                 "latency_ms": self.latency_ms,
+                **({} if self.input_poll_ms is None else {"input_poll_ms": self.input_poll_ms}),
+                **({"input_queue_limits": self.queue_limits()} if any(self.queue_limits()) else {}),
                 "layers": [
                     {**self._initial_scene_def().sources[source.name], "input": i}
                     for i, source in enumerate(self._sources)

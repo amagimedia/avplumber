@@ -106,6 +106,10 @@ class FakeMixer:
         self.keyframe_node = parameters.get("keyframe_node")
         self.instances.append(self)
 
+    def queue_limits(self, names=None):
+        sources = self.sources if names is None else [(n, dict(self.sources)[n]) for n in names]
+        return [params.get("queue_limit") or 0 for _, params in sources]
+
     def add_aux_destination(self, source, edge):
         self.aux_routes.append((source, edge))
 
@@ -455,6 +459,87 @@ def test_a_browser_in_a_large_catalogue_cannot_share_a_declared_hdr_input_color(
             GraphOptions(inputs=inputs, output="p.mp4", input_color=color).validate()
 
 
+def test_zero_copy_browser_acks_every_frame_at_once_within_its_queue(monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+
+    def fake_rest(base_url, method, path, body=None, timeout=60):
+        return {"windows": [{"id": "page_00", "captureMode": "zero-copy", "exportBuffers": 6}],
+                "captureMode": "zero-copy", "exportBuffers": 6}
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_rest)
+    mode = dmabuf_inputs.browser_capture_mode("http://b")
+    assert mode.zero_copy and mode.export_buffers == 6
+    # One buffer of the six stays free for the next paint; a shorter configured queue stands.
+    assert mode.frame_queue(9) == 5 and mode.frame_queue(3) == 3
+    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
+        fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=30, drm_hwaccel=None,
+        cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=mode.frame_queue(9),
+        zero_copy=mode.zero_copy)
+    receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
+    assert "return_queue" not in receive   # every frame goes back as soon as its last user lets go
+    importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
+    # The browser's pool is fixed: an import is kept until the window closes (0 retains); nothing
+    # expires it and nothing purges it, since a release takes the CUDA lock and stalls every draw.
+    assert importer["import_ttl_ms"] == 0 and importer["max_imports"] >= 12
+    assert dmabuf_inputs.zero_copy_chain_edges("input_0") == ["input_0_drm", "input_0_cuda_raw", "input_0_cuda",
+                                                              "input_0_held"]
+    # Nine buffers: two reserved to the browser, four held outside the waiting queue, three waiting.
+    assert dmabuf_inputs.BrowserCaptureMode.minimum_capacity() == 9
+    assert dmabuf_inputs.BrowserCaptureMode(True, 9).playout_queue_limit() == 3
+    assert dmabuf_inputs.BrowserCaptureMode(True, 11).playout_queue_limit() == 5
+    assert dmabuf_inputs.BrowserCaptureMode(True, 6).playout_queue_limit() == 1
+    assert dmabuf_inputs.BrowserCaptureMode().playout_queue_limit() is None
+
+
+def test_zero_copy_show_holds_browser_frames_within_the_browser_budget(tmp_path, monkeypatch):
+    import json as _json
+    from pyplumber.mixer import dmabuf_inputs
+    (tmp_path / "page.sock").touch()
+    path = tmp_path / "mixer.json"
+    path.write_text(_json.dumps(CONFIG))
+
+    def zero_copy_rest(base, method, p, body=None, timeout=60):
+        if p == "/window/open":
+            return body
+        return {"windows": [], "captureMode": "zero-copy", "exportBuffers": 9}
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", zero_copy_rest)
+    FakeMixer.instances.clear()
+    application = build_application(
+        GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)), api=fake_api())
+    nodes = {node.parameters.get("name"): node.parameters for node in application.avp.nodes}
+    mixer = FakeMixer.instances[-1]
+    # No return queue, no import expiry, no start-up purge of this browser's imports.
+    assert "return_queue" not in nodes["input_1_receive"]
+    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 0
+    assert application.browser_importers == ()
+    # The chain's edges hold one frame each; the compositors hold three waiting (nine less two
+    # reserved to the browser, less four held elsewhere); the cameras keep the default.
+    assert {("input_1_drm", 1), ("input_1_cuda_raw", 1), ("input_1_cuda", 1), ("input_1_held", 1)} <= set(application.avp.edges.plans)
+    assert dict(mixer.sources)["page"]["queue_limit"] == 3
+    assert dict(mixer.sources)["cam"].get("queue_limit") is None
+    assert mixer.queue_limits() == [0, 0, 3]
+
+
+def test_stock_or_unreachable_browser_keeps_the_return_queue(monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *a, **k: {"windows": [{"id": "page_00"}]})
+    stock = dmabuf_inputs.browser_capture_mode("http://b")
+    assert not stock.zero_copy and stock.frame_queue(9) == 9
+
+    def unreachable(*a, **k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", unreachable)
+    assert dmabuf_inputs.browser_capture_mode("http://b") == dmabuf_inputs.BrowserCaptureMode()
+    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
+        fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=30, drm_hwaccel=None,
+        cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=9)
+    receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
+    assert receive["return_queue"] == 3
+
+
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
 
@@ -578,7 +663,8 @@ def test_browser_failure_precedes_native_initialization(monkeypatch):
     from pyplumber.mixer import application
     monkeypatch.setattr(application, "open_windows", fail)
     monkeypatch.setattr(application, "_init_avp", lambda *args: pytest.fail("native threads started before browser preparation"))
-    cfg = SimpleNamespace(fps=60, latency_ms=None, browser_frame_queue=11, max_compositor_layers=256, sources=[SimpleNamespace(
+    cfg = SimpleNamespace(fps=60, latency_ms=None, input_poll_ms=None, source_fan_out="thread",
+                          decoded_frames_ahead=None, raw_pool_frames=None, browser_frame_queue=11, max_compositor_layers=256, sources=[SimpleNamespace(
         kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60, hold_last_frame=True)])
     with pytest.raises(RuntimeError, match="browser unavailable"):
         application._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api(), ExitStack())
@@ -715,12 +801,14 @@ def _raw_420_nodes(tmp_path, kind, color, *, source_options=None, process_source
 
 
 @pytest.mark.parametrize("kind,fmt,color", [("nv12", "nv12", "sdr"), ("p010", "p010le", "hlg")])
-@pytest.mark.parametrize("upload", ["hwupload", "pinned", "direct"])
+@pytest.mark.parametrize("upload", ["hwupload", "pinned", "direct", "resident"])
 def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
     app, nodes, chain = _raw_420_nodes(tmp_path, kind, color, raw_upload=upload)
-    if upload == "direct":
-        # One node reads each picture into page-locked memory and uploads it from there.
+    if upload in ("direct", "resident"):
+        # One node reads each picture into page-locked memory and uploads it from there;
+        # resident, a looped file's pictures stay in that memory.
         assert chain == ["input_0", "realtime_0"]
+        assert nodes["input_0"].pop("resident", False) is (upload == "resident")
         assert nodes["input_0"] == {
             "name": "input_0", "type": "raw_video_file_cuda", "url": str(tmp_path / "pattern.raw"),
             "dst": "input_0_cuda", "hwaccel": "mixer_gpu", "group": nodes["realtime_0"]["group"],
@@ -735,7 +823,8 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
     assert nodes["input_0"]["format"] == "rawvideo"
     assert nodes["input_0"]["options"] == {"pixel_format": fmt, "video_size": "320x180", "framerate": "60/1"}
     if upload == "hwupload":
-        assert chain == ["input_0", "demux_0", "decode_0", "filter_0", "realtime_0", "upload_0"]
+        assert chain == ["input_0", "decode_0", "filter_0", "realtime_0", "upload_0"]
+        assert nodes["input_0"]["routing"] == {"?v:0": "input_0_video_packets"} and "dst" not in nodes["input_0"]
         assert nodes["input_0"]["loop_continuous_ts"] is False   # setpts counts frames across loops instead
         assert nodes["decode_0"]["codec"] == "rawvideo"
         assert "hwaccel" not in nodes["decode_0"] and "options" not in nodes["decode_0"]
@@ -752,8 +841,8 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
         assert source["pre_otm_edge"] == "input_0_uploaded" and source["pixel_format"] == fmt
     else:
         # Rawvideo wraps the packets; the patched filter uploads on the shared device.
-        assert chain == ["input_0", "demux_0", "decode_0", "upload_0", "realtime_0"]
-        assert nodes["demux_0"]["routing"] == {"v:0": "input_0_packed"}
+        assert chain == ["input_0", "decode_0", "upload_0", "realtime_0"]
+        assert nodes["input_0"]["routing"] == {"v:0": "input_0_packed"} and "dst" not in nodes["input_0"]
         upload = nodes["upload_0"]
         assert nodes["decode_0"]["codec"] == "rawvideo"
         assert nodes["decode_0"]["pixel_format"] == fmt
@@ -789,10 +878,107 @@ def test_a_single_pass_raw_file_restarts_its_group_from_the_reading_node(tmp_pat
     assert nodes["input_0"]["auto_restart"] == "group"
 
 
+def test_a_single_pass_raw_file_is_not_kept_in_memory(tmp_path):
+    _, nodes, _ = _raw_420_nodes(tmp_path, "nv12", "sdr", raw_upload="resident", source_options={"loop": False})
+    assert "resident" not in nodes["input_0"]
+
+
 def test_raw_upload_rejects_unknown_modes():
-    with pytest.raises(mixer_config.ConfigError, match="raw_upload must be one of hwupload, pinned, direct"):
+    with pytest.raises(mixer_config.ConfigError, match="raw_upload must be one of hwupload, pinned, direct, resident"):
         mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "raw_upload": "pageable"}})
     assert mixer_config.parse(CONFIG).raw_upload == "hwupload"
+
+
+def _video_source_nodes(**canvas):
+    """The config-driven chain of one video file (the first CONFIG source), by node name,
+    and the names of its group's nodes in creation order."""
+    doc = {"canvas": {**CONFIG["canvas"], **canvas}, "sources": [CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+    app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4"), api=fake_api())
+    nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+    chain = [name for name in nodes if name.endswith("_0") and nodes[name].get("group") == nodes["input_0"]["group"]]
+    return nodes, chain
+
+
+@pytest.mark.parametrize("ahead", [None, 1, 2])
+def test_canvas_decoded_frames_ahead_bounds_the_queue_in_front_of_pacing(ahead):
+    doc = {"canvas": {**CONFIG["canvas"], **({} if ahead is None else {"decoded_frames_ahead": ahead})},
+           "sources": [CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+    app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4"), api=fake_api())
+    nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+    assert nodes["realtime_0"]["src"] == "input_0_decoded"
+    # Each frame waiting there is a decoder output surface held for nothing but slack.
+    assert dict(app.avp.edges.plans).get("input_0_decoded") == ahead
+
+
+@pytest.mark.parametrize("frames", [None, 10])
+def test_canvas_raw_pool_frames_bounds_each_raw_source_pool(tmp_path, frames):
+    canvas = {"raw_upload": "resident", **({} if frames is None else {"raw_pool_frames": frames})}
+    _, nodes, _ = _raw_420_nodes(tmp_path, "nv12", "sdr", **canvas)
+    assert nodes["input_0"].get("pool_frames") == frames
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "one", True])
+def test_canvas_raw_pool_frames_rejects_what_is_not_a_count(bad):
+    with pytest.raises(mixer_config.ConfigError, match="raw_pool_frames"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "raw_pool_frames": bad}})
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "one", True])
+def test_canvas_decoded_frames_ahead_rejects_what_is_not_a_count(bad):
+    with pytest.raises(mixer_config.ConfigError, match="decoded_frames_ahead"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "decoded_frames_ahead": bad}})
+
+
+def test_config_sources_stamp_no_frame_metadata():
+    nodes, _ = _video_source_nodes()
+    assert nodes["input_0"]["frame_metadata"] == []
+
+
+def test_config_sources_route_the_video_stream_inside_the_reading_node():
+    nodes, chain = _video_source_nodes()
+    assert chain == ["input_0", "decode_0", "realtime_0"]
+    assert nodes["input_0"]["routing"] == {"?v:0": "input_0_video_packets"}
+    assert "dst" not in nodes["input_0"]
+    assert nodes["decode_0"]["src"] == "input_0_video_packets"
+
+
+def test_config_input_routing_demux_keeps_the_demux_hop():
+    nodes, chain = _video_source_nodes(input_routing="demux")
+    assert chain == ["input_0", "demux_0", "decode_0", "realtime_0"]
+    assert nodes["input_0"]["dst"] == "input_0_packets" and "routing" not in nodes["input_0"]
+    assert (nodes["demux_0"]["src"], nodes["demux_0"]["routing"]) == ("input_0_packets", {"?v:0": "input_0_video_packets"})
+    assert nodes["decode_0"]["src"] == "input_0_video_packets"
+
+
+def test_input_routing_rejects_unknown_modes():
+    with pytest.raises(mixer_config.ConfigError, match="input_routing must be one of input, demux"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "input_routing": "splitter"}})
+    assert mixer_config.parse(CONFIG).input_routing == "input"
+
+
+def test_build_input_keeps_the_demux_hop_unless_told():
+    from pyplumber.mixer.inputs import build_input
+    chains = {}
+    for demux in (None, False):
+        avp = FakeAvp()
+        build_input(avp, fake_api(), "pl", "clip.mp4", group="pl", fps=30, **({} if demux is None else {"demux": demux}))
+        chains[demux] = [node.parameters["type"] for node in avp.nodes]
+    assert chains[None] == ["input_rec", "demux", "dec_video", "realtime", "force_fps"]
+    assert chains[False] == ["input_rec", "dec_video", "realtime", "force_fps"]
+
+
+def test_build_input_stamps_every_frame_metadata_key_unless_told():
+    from pyplumber.mixer.inputs import build_input
+    for keys, expected in ((None, {}), (["frame_ts"], {"frame_metadata": ["frame_ts"]})):
+        avp = FakeAvp()
+        build_input(avp, fake_api(), "pl", "clip.mp4", group="pl", fps=30,
+                    **({} if keys is None else {"frame_metadata": keys}))
+        params = {node.parameters["name"]: node.parameters for node in avp.nodes}["input_pl"]
+        assert {key: value for key, value in params.items() if key == "frame_metadata"} == expected
 
 
 @pytest.mark.parametrize("changes", [{"width": 319}, {"height": 0}, {"color": "hlg"}, {"color": ""}])
@@ -922,7 +1108,8 @@ def test_browser_hold_last_frame_defaults_on_and_reaches_the_window(tmp_path, mo
     (tmp_path / "page.sock").touch()
     opened = []
     monkeypatch.setattr(dmabuf_inputs, "rest_request",
-                        lambda base, method, p, body=None: opened.append(body) or fake_browser_rest(base, method, p, body))
+                        lambda base, method, p, body=None: (opened.append(body) if p == "/window/open" else None)
+                        or fake_browser_rest(base, method, p, body))
     path = tmp_path / "show.json"
     path.write_text(json.dumps({**CONFIG, "sources": [cam, {**page, "hold_last_frame": False}]}))
     build_application(GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)), api=fake_api())
@@ -1038,6 +1225,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert "alias_0" not in nodes  # shared fan-out belongs to the reusable builder
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
     assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
+    opened = [o for o in opened if o[1] == "/window/open"]   # the capture-mode read follows the opens
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
                              "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}
     # Three of the six frames of this show's queue are the return queue.
@@ -1059,11 +1247,15 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         "preview_codecs": [],
         "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
         "source_counts": {"video": 1, "browser": 1, "v210": 0, "nv12": 0, "p010": 0}, "hdr_video": 0,
+        "inputs": [["cam", "video"], ["cam", "video"], ["page", "browser"]],
         "direct": False, "fade_seconds": 0.8, "fade_curve": "linear", "fade_color": None, "transition": "cut",
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
         "wipes": [{"id": "swoosh", "name": "swoosh", "path": "/media/swoosh.mov",
                    "duration_seconds": 0.0}]}
+    # The settings name the compositor's inputs in the order the graph registered them.
+    inputs = json.loads(application.avp.commands_registered["mixer.settings"](""))["inputs"]
+    assert [source for source, _ in inputs] == [name.partition("#")[0] for name, _ in mixer.sources]
     assert nodes["program_format"]["width"] == 1920
     assert nodes["program_fps"]["fps"] == "60/1"      # outputs follow the document's fps, not the CLI default
 
@@ -1564,6 +1756,33 @@ def test_generated_ten_bit_sdr_show_uses_hevc_profile():
     rendition = doc["renditions"][0]
     assert (rendition["codec"], rendition["profile"]) == ("hevc_nvenc", "main10")
     assert mixer_config.parse(doc).out_color == Color("sdr")
+
+
+def test_canvas_input_poll_reaches_the_builder(tmp_path, monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
+    (tmp_path / "page.sock").touch()
+    doc = {**CONFIG, "canvas": {**CONFIG["canvas"], "input_poll_ms": 8}}
+    assert mixer_config.parse(doc).input_poll_ms == 8
+    assert mixer_config.parse(CONFIG).input_poll_ms is None
+    for bad in (-1, 2.5, "often", True):
+        with pytest.raises(mixer_config.ConfigError, match="input_poll_ms"):
+            mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "input_poll_ms": bad}})
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps(doc))
+    FakeMixer.instances.clear()
+    build_application(GraphOptions(config=str(path), janus_output=True, dmabuf_socket_dir=str(tmp_path)),
+                      api=fake_api())
+    assert FakeMixer.instances[-1].parameters["input_poll_ms"] == 8
+
+
+def test_aux_input_poll_ms_parses_and_validates():
+    assert mixer_config.parse(CONFIG).aux_input_poll_ms is None
+    doc = {**CONFIG, "canvas": {**CONFIG["canvas"], "aux_input_poll_ms": 8}}
+    assert mixer_config.parse(doc).aux_input_poll_ms == 8
+    for bad in (-1, 8.0, "8", True):
+        with pytest.raises(mixer_config.ConfigError):
+            mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "aux_input_poll_ms": bad}})
 
 
 def test_canvas_latency_reaches_the_builder_unless_the_cli_overrides_it(tmp_path, monkeypatch):

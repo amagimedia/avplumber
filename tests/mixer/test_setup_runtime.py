@@ -240,15 +240,16 @@ def test_browser_ring_size_is_still_read_as_the_earlier_name(tmp_path):
     assert parse({**{k: v for k, v in show.items() if k != "browser_frame_queue"}, "browser_ring_size": 5}).browser_frame_queue == 5
     assert "browser_ring_size" not in recipe_for(T4, {**DEFAULT_SETTINGS, "browser_ring_size": 11})
     # The earlier name allowed up to 64; such a value is the queue's maximum.
-    assert prepare_demo.plan({**recipe_for(T4, DEFAULT_SETTINGS), "browser_ring_size": 11}, tmp_path)[0]["browser_frame_queue"] == 9
-    assert parse({**{k: v for k, v in show.items() if k != "browser_frame_queue"}, "browser_ring_size": 64}).browser_frame_queue == 9
+    assert prepare_demo.plan({**recipe_for(T4, DEFAULT_SETTINGS), "browser_ring_size": 11}, tmp_path)[0]["browser_frame_queue"] == 11
+    assert parse({**{k: v for k, v in show.items() if k != "browser_frame_queue"}, "browser_ring_size": 64}).browser_frame_queue == 15
 
 
-def test_browser_frame_queue_is_at_most_nine(tmp_path):
+def test_browser_frame_queue_is_at_most_fifteen(tmp_path):
+    # A zero-copy browser of up to 16 buffers lets the mixer hold one less.
     from pyplumber.mixer.config import ConfigError, parse
     show, _, _ = prepare_demo.plan(recipe_for(T4, DEFAULT_SETTINGS), tmp_path)
-    with pytest.raises(ConfigError, match="browser_frame_queue must be an integer from 1 to 9"):
-        parse({**show, "browser_frame_queue": 10})
+    with pytest.raises(ConfigError, match="browser_frame_queue must be an integer from 1 to 15"):
+        parse({**show, "browser_frame_queue": 16})
 
 
 def test_return_queue_is_part_of_the_frame_queue():
@@ -569,7 +570,8 @@ def test_invalid_preserved_aux_rejected_before_preparation(runtime, monkeypatch)
     assert runtime.worker is None
 
 
-@pytest.mark.parametrize("bypass", [False, True])
+# What stamps a source's colour: its filter graph, or its fan-out on a thread or on an event loop.
+@pytest.mark.parametrize("bypass", [False, "one_to_many", "one_to_many_nb"])
 @pytest.mark.parametrize("hdr", [False, True])
 @pytest.mark.parametrize("sdr_codec", ["h264", "h265"])
 def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr_codec, bypass):
@@ -586,7 +588,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr
         if command == "nodes.json":
             # An unused source can wait for consumers; readiness must not require its frames.
             return json.dumps([{"name": ("mixer_otm_" if bypass else "mixer_color_") + name,
-                                "type": "one_to_many" if bypass else "filter_video", "working": True}
+                                "type": bypass or "filter_video", "working": True}
                                for name in ("visible", "unused")])
         calls.append(command)
         assert len(calls) <= len(expected)
@@ -599,6 +601,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr
 
 @pytest.mark.parametrize("nodes", [[], [{"name": "mixer_color_hdr", "type": "filter_video", "working": False}],
     [{"name": "mixer_otm_hdr", "type": "one_to_many", "working": False}],
+    [{"name": "mixer_otm_hdr", "type": "one_to_many_nb", "working": False}],
     [{"name": "mixer_color_hdr", "type": "filter_video", "working": False},
      {"name": "mixer_otm_hdr", "type": "one_to_many", "working": True}]])
 def test_start_rejects_missing_or_failed_source_normalization(runtime, monkeypatch, nodes):

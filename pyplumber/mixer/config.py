@@ -30,7 +30,9 @@ WORKING_FORMATS = ("nv12", "p010le", "p210le")
 # patched hwupload_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it),
 # or one raw_video_file_cuda node that reads each picture into page-locked memory and uploads it
 # from there (opt-in; no staging copy, one thread per source).
-RAW_UPLOADS = ("hwupload", "pinned", "direct")
+RAW_UPLOADS = ("hwupload", "pinned", "direct", "resident")
+INPUT_ROUTINGS = ("input", "demux")   # which node sends a file's video stream to its decoder
+SOURCE_FAN_OUTS = ("thread", "event_loop")   # what hands a source's frames to the compositors
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 193         # mixer_compositor active_inputs is a 193-bit pad mask (SourceMask, kSourceMaskBits)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 640
@@ -84,15 +86,25 @@ def earlier_browser_ring_size(value):
     return min(value, BROWSER_FRAME_QUEUE_MAX) if type(value) is int else value
 
 
-# The most frames one browser window can have out: Chromium's capture pool of eleven less the two
-# idle buffers it keeps.
-BROWSER_FRAME_QUEUE_MAX = 9
+# The most frames one browser window can have out. On the stock copy path nine: Chromium's capture
+# pool of eleven less the two idle buffers it keeps. With the zero-copy export the browser announces
+# its queue's capacity (2 to 16) and the mixer holds one less (browser_frame_queue_for).
+BROWSER_FRAME_QUEUE_DEFAULT = 9
+BROWSER_FRAME_QUEUE_MAX = 15
+
+
+def browser_frame_queue_for(export_buffers):
+    """The frame queue that fits a zero-copy browser whose queue holds *export_buffers*: one less,
+    so one buffer is always free for the next paint (a frame the mixer does not hold is either being
+    painted or on its way). Six gives five; two gives one."""
+    return max(1, min(BROWSER_FRAME_QUEUE_MAX, int(export_buffers) - 1))
 
 
 def default_browser_frame_queue(fps):
-    """Frames one browser window may have out at once, at any rate: all nine. The mixer takes up to
-    three of them to return frames one per new frame (dmabuf_inputs.return_queue)."""
-    return BROWSER_FRAME_QUEUE_MAX
+    """Frames one browser window may have out at once, at any rate: all nine of the stock capture
+    pool. The mixer takes up to three of them to return frames one per new frame
+    (dmabuf_inputs.return_queue). A zero-copy browser lowers it to its capacity less one at start."""
+    return BROWSER_FRAME_QUEUE_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -269,7 +281,13 @@ class MixerConfig:
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
     raw_upload: str = "hwupload"   # canvas.raw_upload: one of RAW_UPLOADS
+    input_routing: str = "input"   # canvas.input_routing: one of INPUT_ROUTINGS
     latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default default_latency_ms(fps)
+    input_poll_ms: Optional[int] = None  # canvas.input_poll_ms: how often a program compositor looks for frames
+    aux_input_poll_ms: Optional[int] = None  # canvas.aux_input_poll_ms: the same for the aux bus compositors
+    source_fan_out: str = "thread"       # canvas.source_fan_out: one of SOURCE_FAN_OUTS
+    decoded_frames_ahead: Optional[int] = None   # canvas.decoded_frames_ahead: decoded frames queued before pacing
+    raw_pool_frames: Optional[int] = None        # canvas.raw_pool_frames: device frames per direct/resident raw source
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBusConfig, ...] = ()
@@ -322,11 +340,15 @@ class MixerConfig:
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
                       "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps}
                      for b in self.aux_buses for r in b.renditions]
+        aliases = self.alias_counts
         return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
                 "preview_codecs": preview_codecs, **({"program_outputs": programs} if programs else {}),
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources) for kind in _SOURCE_KEYS},
+                # [source id, kind] per compositor input, in the order of the inputs: each source once
+                # per alias (application.py builds them so). The web UI names per_input counters by it.
+                "inputs": [[s.id, s.kind] for s in self.sources for _ in range(aliases[s.id])],
                 # Of the "video" inputs, those declared HDR; an undeclared one counts as SDR.
                 "hdr_video": sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"]) for s in self.sources),
                 "direct": self.direct,
@@ -548,6 +570,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     raw_upload = canvas.get("raw_upload", "hwupload")
     if raw_upload not in RAW_UPLOADS:
         raise ConfigError(f"canvas.raw_upload must be one of {', '.join(RAW_UPLOADS)}")
+    input_routing = canvas.get("input_routing", "input")
+    if input_routing not in INPUT_ROUTINGS:
+        raise ConfigError(f"canvas.input_routing must be one of {', '.join(INPUT_ROUTINGS)}")
     latency_ms = canvas.get("latency_ms")
     if latency_ms is not None:
         try:
@@ -556,6 +581,21 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             raise ConfigError("canvas.latency_ms must be a number of milliseconds") from None
         if not 0 <= latency_ms < 6000 / fps:
             raise ConfigError(f"canvas.latency_ms must be at least 0 and below six frames ({6000 / fps:.1f} ms at {fps} fps)")
+    source_fan_out = canvas.get("source_fan_out", "thread")
+    if source_fan_out not in SOURCE_FAN_OUTS:
+        raise ConfigError(f"canvas.source_fan_out must be one of {', '.join(SOURCE_FAN_OUTS)}")
+    raw_pool_frames = canvas.get("raw_pool_frames")
+    if raw_pool_frames is not None and (type(raw_pool_frames) is not int or raw_pool_frames < 1):
+        raise ConfigError("canvas.raw_pool_frames must be a whole number of frames, 1 or more")
+    decoded_frames_ahead = canvas.get("decoded_frames_ahead")
+    if decoded_frames_ahead is not None and (type(decoded_frames_ahead) is not int or decoded_frames_ahead < 1):
+        raise ConfigError("canvas.decoded_frames_ahead must be a whole number of frames, 1 or more")
+    input_poll_ms = canvas.get("input_poll_ms")
+    if input_poll_ms is not None and (type(input_poll_ms) is not int or input_poll_ms < 0):
+        raise ConfigError("canvas.input_poll_ms must be a whole number of milliseconds, 0 or more")
+    aux_input_poll_ms = canvas.get("aux_input_poll_ms")
+    if aux_input_poll_ms is not None and (type(aux_input_poll_ms) is not int or aux_input_poll_ms < 0):
+        raise ConfigError("canvas.aux_input_poll_ms must be a whole number of milliseconds, 0 or more")
     try:
         out_color = declared_color(canvas) or Color()
         out_color.validate_format(working_format)
@@ -633,7 +673,10 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     cfg = MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
                        browser_frame_queue=doc.get("browser_frame_queue", earlier_browser_ring_size(doc.get("browser_ring_size"))),
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
-                       initial_scene=initial, working_format=working_format, raw_upload=raw_upload, latency_ms=latency_ms, out_color=out_color,
+                       initial_scene=initial, working_format=working_format, raw_upload=raw_upload, input_routing=input_routing,
+                       latency_ms=latency_ms, input_poll_ms=input_poll_ms, aux_input_poll_ms=aux_input_poll_ms,
+                       source_fan_out=source_fan_out, decoded_frames_ahead=decoded_frames_ahead,
+                       raw_pool_frames=raw_pool_frames, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))

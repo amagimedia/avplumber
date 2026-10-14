@@ -19,9 +19,14 @@ class MixerSource:
     packed_rgb: bool = False
     premultiplied_alpha: bool = False
     color_tagged: bool = False
+    # Frames of this source a compositor may hold waiting for their tick; None is the playout's
+    # default. A zero-copy browser lends a fixed pool, so its sources are held to fewer.
+    queue_limit: Optional[int] = None
     # Set by the builder: the colour fields this source's fan-out stamps on every frame, when
     # that is all its colour stage would do.
     frame_color: Optional[Dict[str, str]] = None
+    # The event loop this source's fan-out runs on; None: on a thread of its own.
+    fan_out_loop: Optional[str] = None
 
 
 @dataclass
