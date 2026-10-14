@@ -982,7 +982,7 @@ function renderHost() {
   if (h.thread_pct != null) {
     show($("thread"), h.thread_pct, `${h.thread_pct}%`);
     // The bar is the busiest thread, the single-thread bottleneck; the tip sums every thread by kind.
-    setMeterTip($("thread"), "CPU by thread kind · % of one core", threadTip(h, state.chromium), renderThreadTip);
+    setMeterTip($("thread"), "CPU by thread and process · % of one core", threadTip(h, state.chromium), renderThreadTip);
   }
 }
 

@@ -381,6 +381,8 @@ def test_browser_cpu_tolerates_an_older_browser_image_and_an_outage():
     assert stats.values["processes"] == [{"name": "GPU process", "count": 1, "pct": 50, "max_pct": 50}]
     answers.append(ValueError("not JSON"))
     assert stats.poll() == 1 and stats.values is None
+    answers.append([])   # an answer of the wrong shape leaves the section hidden; the thread polls on
+    assert stats.poll() == 1 and stats.values is None and stats.error.startswith("AttributeError")
 
 
 def test_host_stats_thread_hides_the_meters_during_an_error_and_logs_it_once(tmp_path, monkeypatch, caplog):

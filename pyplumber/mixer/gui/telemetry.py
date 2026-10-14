@@ -1,4 +1,5 @@
-"""Reusable NVIDIA/NVENC and host telemetry; independent of HTTP and input policy."""
+"""Reusable NVIDIA/NVENC, host and browser-service CPU telemetry; independent of the web UI's HTTP
+server and of input policy."""
 from __future__ import annotations
 
 import csv
@@ -357,7 +358,7 @@ class BrowserCpuStats:
         except urllib.error.HTTPError as exc:
             self.values, self.error = None, f"HTTP {exc.code}"
             return self.absent_s if exc.code == 404 else self.period_s
-        except (OSError, ValueError, TypeError, KeyError) as exc:   # down, restarting, or an unexpected answer
+        except Exception as exc:   # down, restarting, or an unexpected answer: never end the polling thread
             self.values, self.error = None, f"{type(exc).__name__}: {exc}"
             return self.period_s
 

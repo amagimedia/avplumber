@@ -74,7 +74,7 @@ const {chromium} = require('playwright');
       state.host.thread_kinds = undefined; state.chromium = null; renderHost();
       window.oneThread = [...document.querySelectorAll('#thread-tip table')].map((t) => t.textContent);
       state.host.thread_kinds = all; state.chromium = chromium; renderHost(); });
-    assert.deepEqual(await page.evaluate(() => window.oneThread), ['Mixer threadsntotalavgmaxmixer_comp_a140%40%40%40%']);
+    assert.deepEqual(await page.evaluate(() => window.oneThread), ['Mixer threadsntotalavgmaxmixer_comp_a140%40%40%']);
     assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
     // No player is open: the bar shows the median of the mixer's own last three cuts.
     assert.equal(await page.locator('#lat b').textContent(), '90ms');

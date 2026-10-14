@@ -94,6 +94,8 @@ export interface CpuMetrics {
 }
 
 const round1 = (value: number): number => Math.round(value * 10) / 10;
+/** A pid or tid with its start time: the kernel reuses ids. */
+const idKey = (id: number, start: number): string => `${String(id)}:${String(start)}`;
 
 /** Chromium's --type= switch, or the executable for the process that has none. */
 export function processKind(cmdline: readonly string[]): ProcessKind {
@@ -199,7 +201,7 @@ export function groupCpu(prev: CpuSample | null, cur: CpuSample, hz = USER_HZ): 
   }
   const pctOf = (ticks: number): number => (Math.max(0, ticks) * 100) / hz / elapsedS;
   const prevProcesses = new Map(
-    prev.processes.map((p): [string, ProcessSample] => [`${p.pid}:${p.start}`, p]),
+    prev.processes.map((p): [string, ProcessSample] => [idKey(p.pid, p.start), p]),
   );
 
   const processes = new Map<string, Accumulator>();
@@ -210,17 +212,17 @@ export function groupCpu(prev: CpuSample | null, cur: CpuSample, hz = USER_HZ): 
   let total = 0;
 
   for (const proc of cur.processes) {
-    const before = prevProcesses.get(`${proc.pid}:${proc.start}`);
+    const before = prevProcesses.get(idKey(proc.pid, proc.start));
     const processPct = pctOf(proc.ticks - (before?.ticks ?? 0));
     total += processPct;
     add(processes, proc.kind, processPct);
     const prevThreads = new Map(
-      before?.threads.map((t): [string, number] => [`${t.tid}:${t.start}`, t.ticks]),
+      before?.threads.map((t): [string, number] => [idKey(t.tid, t.start), t.ticks]),
     );
     for (const thread of proc.threads) {
       const ticks = Math.max(
         0,
-        thread.ticks - (prevThreads.get(`${thread.tid}:${thread.start}`) ?? 0),
+        thread.ticks - (prevThreads.get(idKey(thread.tid, thread.start)) ?? 0),
       );
       const pct = pctOf(ticks);
       add(threads, threadGroupName(thread.comm), pct);
@@ -362,7 +364,7 @@ export async function readCpuSample(
     tree.map(async (pid): Promise<ProcessSample | null> => {
       const stat = stats.get(pid);
       if (!stat) return null;
-      const key = `${pid}:${stat.start}`;
+      const key = idKey(pid, stat.start);
       live.add(key);
       let cmdline = cmdlineCache.get(key);
       if (!cmdline) {
