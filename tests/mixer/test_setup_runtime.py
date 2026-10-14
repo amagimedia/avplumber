@@ -244,11 +244,12 @@ def test_browser_ring_size_is_still_read_as_the_earlier_name(tmp_path):
     assert parse({**{k: v for k, v in show.items() if k != "browser_frame_queue"}, "browser_ring_size": 64}).browser_frame_queue == 15
 
 
-def test_browser_frame_queue_is_at_most_nine(tmp_path):
+def test_browser_frame_queue_is_at_most_fifteen(tmp_path):
+    # A zero-copy browser of up to 16 buffers lets the mixer hold one less.
     from pyplumber.mixer.config import ConfigError, parse
     show, _, _ = prepare_demo.plan(recipe_for(T4, DEFAULT_SETTINGS), tmp_path)
-    with pytest.raises(ConfigError, match="browser_frame_queue must be an integer from 1 to 9"):
-        parse({**show, "browser_frame_queue": 10})
+    with pytest.raises(ConfigError, match="browser_frame_queue must be an integer from 1 to 15"):
+        parse({**show, "browser_frame_queue": 16})
 
 
 def test_return_queue_is_part_of_the_frame_queue():
