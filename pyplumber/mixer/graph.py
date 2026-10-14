@@ -60,6 +60,7 @@ from pyplumber.node import (
     Demux,
     DecVideo,
     OneToMany,
+    OneToManyNb,
     Realtime,
     SourceSwitcher,
 )
@@ -171,7 +172,7 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
-        color_tagged=False,
+        color_tagged=False, fan_out_loop=None,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -198,6 +199,9 @@ class MixerGraphBuilder:
             one_to_many (typically the force_fps output of the input chain).
         input_group:
             Avplumber group that owns this source's conversion and fan-out nodes.
+        fan_out_loop:
+            Name of an event loop to hand this source's frames out on (one_to_many_nb)
+            instead of a thread of its own; typically the loop that paces the source.
         """
         if self._built:
             raise RuntimeError("Cannot add sources after build()")
@@ -213,7 +217,8 @@ class MixerGraphBuilder:
         self._sources.append(MixerSource(name, pre_otm_edge, input_group,
                                                color=color, color_tagged=color_tagged,
                                                pixel_format=pixel_format, packed_rgb=packed_rgb,
-                                               premultiplied_alpha=premultiplied_alpha))
+                                               premultiplied_alpha=premultiplied_alpha,
+                                               fan_out_loop=fan_out_loop))
         self._source_index[name] = idx
         return self
 
@@ -574,9 +579,11 @@ class MixerGraphBuilder:
 
             if src.route_router is None:
                 aux_edges = self._aux_routes.get(src.name, [])
-                self.avp.addNode(OneToMany({
+                # On the source's pacing loop when it names one: no thread wakes for each frame.
+                fan_out = OneToManyNb if src.fan_out_loop else OneToMany
+                self.avp.addNode(fan_out({
                 "drop": True,
-                    "type": "one_to_many",
+                    **({"event_loop": src.fan_out_loop} if src.fan_out_loop else {}),
                     "name": self._n(f"otm_{src.name}"),
                     "src": prepared_edges[src.name],
                     "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b"), *aux_edges],

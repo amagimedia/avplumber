@@ -32,6 +32,7 @@ WORKING_FORMATS = ("nv12", "p010le", "p210le")
 # from there (opt-in; no staging copy, one thread per source).
 RAW_UPLOADS = ("hwupload", "pinned", "direct", "resident")
 INPUT_ROUTINGS = ("input", "demux")   # which node sends a file's video stream to its decoder
+SOURCE_FAN_OUTS = ("thread", "event_loop")   # what hands a source's frames to the compositors
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 193         # mixer_compositor active_inputs is a 193-bit pad mask (SourceMask, kSourceMaskBits)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 640
@@ -273,6 +274,7 @@ class MixerConfig:
     input_routing: str = "input"   # canvas.input_routing: one of INPUT_ROUTINGS
     latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default default_latency_ms(fps)
     input_poll_ms: Optional[int] = None  # canvas.input_poll_ms: how often a program compositor looks for frames
+    source_fan_out: str = "thread"       # canvas.source_fan_out: one of SOURCE_FAN_OUTS
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBusConfig, ...] = ()
@@ -562,6 +564,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             raise ConfigError("canvas.latency_ms must be a number of milliseconds") from None
         if not 0 <= latency_ms < 6000 / fps:
             raise ConfigError(f"canvas.latency_ms must be at least 0 and below six frames ({6000 / fps:.1f} ms at {fps} fps)")
+    source_fan_out = canvas.get("source_fan_out", "thread")
+    if source_fan_out not in SOURCE_FAN_OUTS:
+        raise ConfigError(f"canvas.source_fan_out must be one of {', '.join(SOURCE_FAN_OUTS)}")
     input_poll_ms = canvas.get("input_poll_ms")
     if input_poll_ms is not None and (type(input_poll_ms) is not int or input_poll_ms < 0):
         raise ConfigError("canvas.input_poll_ms must be a whole number of milliseconds, 0 or more")
@@ -643,7 +648,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        browser_frame_queue=doc.get("browser_frame_queue", earlier_browser_ring_size(doc.get("browser_ring_size"))),
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
                        initial_scene=initial, working_format=working_format, raw_upload=raw_upload, input_routing=input_routing,
-                       latency_ms=latency_ms, input_poll_ms=input_poll_ms, out_color=out_color,
+                       latency_ms=latency_ms, input_poll_ms=input_poll_ms, source_fan_out=source_fan_out,
+                       out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))

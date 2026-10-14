@@ -430,6 +430,24 @@ input stream changes parameters.
 
 -   `drop` (bool) - drop packets if output queue is full, disabled by default
 
+### `one_to_many`, `one_to_many_nb`
+
+1 input, multi outputs (at most 32): anything. Each frame is handed to the outputs selected by a
+mask that can change while the node runs.
+
+-   `outputs` (int or bit string, default `1`) - the outputs that receive frames, bit *n* for the
+    *n*-th name in `dst`; `node.object.set <node> outputs <mask>` changes it
+-   `drop` (bool, default `false`) - drop a frame for an output whose queue is full instead of
+    waiting for room
+-   `frame_color` (object, optional) - colour fields written on every video frame before it is
+    handed out: `color_trc`, `color_primaries`, `colorspace`, `color_range`
+-   `subscribed_outputs` (object, optional) - output name => frame subscription name: that output
+    receives frames while its subscription is enabled, whatever the mask says, and never waits
+
+`one_to_many` runs on a thread of its own, woken by every frame. `one_to_many_nb` runs on an event
+loop (`event_loop`, as `realtime` does) when its input signals a frame, so a graph with many of them
+has no thread per fan-out; it cannot wait for room in an output, so it requires `drop: true`.
+
 ### `join_metadata`
 
 Join metadata from an auxiliary stream into a primary stream by exact timestamp match.
