@@ -22,7 +22,10 @@ POLL_MS = 8
 
 
 def playout(avp):
-    return avp.node("compose").getObject("status")["playout"]
+    try:
+        return avp.node("compose").getObject("status")["playout"]
+    except RuntimeError:   # the group is still creating its nodes
+        return {"frames": 0}
 
 
 def check(directory, poll_ms):
@@ -52,7 +55,7 @@ def check(directory, poll_ms):
         avp.group("probe").startNodes()
         # Counters are published every 60 ticks; start counting once the sources run.
         wait_for(lambda: playout(avp)["frames"] >= 60, "the first composed ticks", errors=errors, timeout=30)
-        avp.node("compose").setObject("reset_counters", True)
+        avp.executeCommandsFromString("node.object.set compose reset_counters true")
         first = playout(avp)
         started = time.monotonic()
         wait_for(lambda: playout(avp)["frames"] >= first["frames"] + 180, "six seconds of ticks", errors=errors, timeout=30)
