@@ -17,7 +17,7 @@ DEMO_DIR = Path(__file__).resolve().parent
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
-                        encodes={}, dsk=[], clean_feed=False, extra_aux=0)
+                        encodes={}, dsk=[], clean_feed=False, extra_aux=0, browser_motion="static")
 
 
 
@@ -45,7 +45,8 @@ def current_settings(profile, settings):
     encodes = {**programs, "extra": dict(defaults["aux"]), **encodes}
     encodes = {o: {"codec": "hevc_nvenc" if o == "hdr" else "h264_nvenc", **e} if isinstance(e, dict) else e
                for o, e in encodes.items()}
-    return {"extra_aux": 0, **{k: v for k, v in settings.items() if k not in ("browser_frame_queue", "browser_ring_size", "bitrate_kbps")},
+    return {"extra_aux": 0, "browser_motion": "static",
+            **{k: v for k, v in settings.items() if k not in ("browser_frame_queue", "browser_ring_size", "bitrate_kbps")},
             "encodes": encodes}
 
 
@@ -102,6 +103,7 @@ def recipe_for(profile, settings):
                          ("fps", (25, 30, 50, 60)),
                          ("bit_depth", (8, 10)),
                          ("chroma", ("420", "422")),
+                         ("browser_motion", prepare_demo.BROWSER_MOTIONS),
                          ("layout", ("balanced", "grids", "fullscreen"))):
         if settings[key] not in choices or key in ("fps", "bit_depth") and type(settings[key]) is not int:
             raise ValueError(f"Unsupported {key}")
@@ -172,7 +174,7 @@ def recipe_for(profile, settings):
     for source, count in zip(recipe["inputs"], counts):
         source["weight"] = count
         if source["kind"] == "browser":
-            source.update(width=width, height=height)
+            source.update(width=width, height=height, motion=settings["browser_motion"])
     layouts = {"fullscreen": 2}
     mode = settings["layout"]
     if mode != "fullscreen":

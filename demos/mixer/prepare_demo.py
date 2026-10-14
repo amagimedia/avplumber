@@ -30,6 +30,7 @@ from demos.mixer.hdr_patterns import write_hlg
 from pyplumber.mixer.config import MAX_SOURCES, default_browser_frame_queue, earlier_browser_ring_size, parse
 
 DEMO_DIR = Path(__file__).resolve().parent
+BROWSER_MOTIONS = ("static", "dynamic")
 
 # Janus RTP port of the clean SDR program; 5004/5006 carry the keyed program and
 # 5008 the multiview. The clean feed is SDR, with an independent codec.
@@ -284,7 +285,10 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if "pattern" in spec:
                     if spec["pattern"] != "alpha" or "url" in spec:
                         raise ValueError(f"{name}: browser pattern must be alpha, without a url")
-                    url = page_url(DEMO_DIR / "browser_alpha.html", source=source["id"])
+                    motion = spec.get("motion", "static")
+                    if motion not in BROWSER_MOTIONS:
+                        raise ValueError(f"{name}: browser motion must be static or dynamic")
+                    url = page_url(DEMO_DIR / "browser_alpha.html", source=source["id"], motion=motion)
                 else:
                     url = spec["url"]
                 source.update(kind="browser", url=url, width=spec.get("width", width), height=spec.get("height", height), color="sdr")

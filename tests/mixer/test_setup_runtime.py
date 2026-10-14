@@ -38,10 +38,21 @@ def test_generic_setups_expand(tmp_path, count, fps):
 
 @pytest.mark.parametrize('changes', [{'source_count': 0}, {'scene_count': 0}, {'scene_count': 193}, {'fps': 24},
     {'weights': [0] * 5}, {'weights': [True] * 5}, {'resolution': '../../file'}, {'command': 'id'},
-    {'fps': 25.0}, {'bit_depth': 10.0}])
+    {'fps': 25.0}, {'bit_depth': 10.0}, {'browser_motion': 'unknown'}])
 def test_reject_unbounded_settings(changes):
     with pytest.raises(ValueError):
         recipe_for(T4, {**DEFAULT_SETTINGS, **changes})
+
+
+@pytest.mark.parametrize("motion", [None, "static", "dynamic"])
+def test_browser_motion_reaches_recipe_and_saved_settings(motion):
+    settings = {k: v for k, v in DEFAULT_SETTINGS.items() if k != "browser_motion"}
+    if motion is not None:
+        settings["browser_motion"] = motion
+    recipe = recipe_for(T4, settings)
+    expected = motion or "static"
+    assert recipe["setup"]["browser_motion"] == expected
+    assert next(spec for spec in recipe["inputs"] if spec["kind"] == "browser")["motion"] == expected
 
 
 def prepare_without_media(recipe, directory, **kwargs):

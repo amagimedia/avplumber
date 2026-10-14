@@ -49,6 +49,16 @@ const { chromium } = require('playwright');
     const text = id => page.locator(`#${id}`).textContent();
     const sources = page.locator('#sources'), extraAux = page.locator('#extra-aux');
     await reset();
+    const browserMotion = page.locator('#browser-motion');
+    assert.equal(await browserMotion.inputValue(), 'static');
+    await browserMotion.selectOption('dynamic');
+    const movingSettings = await apply();
+    assert.equal(movingSettings.browser_motion, 'dynamic');
+    await reset(movingSettings);
+    assert.equal(await browserMotion.inputValue(), 'dynamic');
+    await browserMotion.selectOption('static');
+    assert.equal((await apply()).browser_motion, 'static');
+    await reset();
     // Unique sources start at the maximum of the default canvas, 10-bit 4:2:2 at 60 fps.
     assert.match(await text('source-limit'), /^Maximum 55 .* measured on tesla_t4\.$/);
     assert.equal(await sources.inputValue(), '55');

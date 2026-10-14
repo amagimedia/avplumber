@@ -8,14 +8,16 @@
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
   body { color: #f4f7fb; font-family: system-ui, sans-serif; }
 
-  /* One translated layer, following a closed path without stepped or reversing endpoints. */
-  #marker { position: absolute; left: 10%; top: calc(38% - 8.5vw);
+  #marker { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
             width: 36vw; height: 17vw; box-sizing: border-box; padding: 2.1vw 2.4vw;
             border: 1px solid #ffffff30; border-radius: 1.5vw;
             background: linear-gradient(135deg, #253448d9, #0d1728b3);
-            box-shadow: 0 1vw 2.4vw #00000030, inset 0 1px #ffffff14;
-            will-change: transform;
-            animation: motion var(--cycle) linear var(--phase) infinite; }
+            box-shadow: 0 1vw 2.4vw #00000030, inset 0 1px #ffffff14; }
+  /* Opt-in motion follows a closed path without stepped or reversing endpoints. */
+  [data-motion="dynamic"] #marker {
+    left: 10%; top: calc(38% - 8.5vw); will-change: transform;
+    animation: motion var(--cycle) linear var(--phase) infinite;
+  }
   @keyframes motion {
     0%, 100% { transform: translate(0, 0); }
     40% { transform: translate(44vw, 0); }
@@ -37,10 +39,10 @@
   footer::before { content: ''; width: 3vw; height: .15vw; border-radius: 1vw;
                    background: linear-gradient(90deg, #8fe4cc, #8fe4cc30); }
 </style>
-<article id="marker" aria-label="Animated browser overlay">
+<article id="marker" aria-label="Browser overlay">
   <div class="eyebrow"><span>BROWSER OVERLAY</span><span class="live">LIVE</span></div>
   <h1>Browser 000</h1>
-  <p>Motion &middot; transparency</p>
+  <p id="mode">Centered &middot; transparency</p>
   <footer id="source">ALPHA OVER VIDEO</footer>
 </article>
 <script>
@@ -48,6 +50,9 @@
   const source = document.documentElement.dataset.source;
   const index = Number(source?.match(/\d+$/)?.[0] ?? 0);
   document.querySelector('h1').textContent = `Browser ${String(index).padStart(3, '0')}`;
+  if (document.documentElement.dataset.motion === 'dynamic') {
+    document.getElementById('mode').textContent = 'Motion · transparency';
+  }
   if (source) document.getElementById('source').textContent = source;
   document.documentElement.style.setProperty('--phase', `-${((index * 0.6180339887) % 1) * 12}s`);
 </script>

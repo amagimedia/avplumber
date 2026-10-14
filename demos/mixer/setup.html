@@ -95,6 +95,8 @@ summary { cursor: pointer; }
 <p class="hint">Always the Balanced mix of the unique sources: NVDEC, browser and raw uploads in about equal shares; on a 10-bit canvas half of each 4:2:0 path is HLG.</p>
 <div id="source-controls"></div><div class="allocation" id="allocation" aria-hidden="true"></div>
 <p class="hint" id="allocation-note"></p>
+<div class="fields"><label>Browser overlay<select id="browser-motion"><option value="static">Centered · static</option><option value="dynamic">Moving · dynamic</option></select></label></div>
+<p class="hint">Both presets keep the transparent background. Static holds the centered card; moving animates it continuously.</p>
 <details><summary>What gets generated?</summary><p>SDR 4:2:0 uses animated test patterns and colour bars, as H.264/NVDEC or as raw NV12 frames uploaded to the GPU. Raw upload uses no decoder engine but increases disk and CPU-to-GPU traffic. HLG uses HDR bars and moving highlights, with HEVC/NVDEC or raw P010 upload. 4:2:2 inputs use packed v210 clips and GPU unpacking; browser sources use the bundled transparent test page.</p><p>Each input is independent, but several inputs may read the same generated file. Increasing the source count does not create that many different movies.</p></details>
 </section>
 <section class="card"><div class="card-title"><h2>Downstream keys</h2></div>
@@ -290,7 +292,8 @@ function update(){
  });
  const portrait=$('orientation').value==='portrait',width=portrait?sourceHeight:sourceWidth,height=portrait?sourceWidth:sourceHeight;
  currentSettings={orientation:$('orientation').value,fps,source_count:sourceCount,scene_count:sceneCount,layout:$('layout').value,
-   bit_depth,chroma,weights:counts,encodes,dsk:dskPages(),clean_feed:clean,extra_aux:extra?integer('extra-aux',0,extraLimit):0};
+   bit_depth,chroma,weights:counts,encodes,dsk:dskPages(),clean_feed:clean,extra_aux:extra?integer('extra-aux',0,extraLimit):0,
+   browser_motion:$('browser-motion').value};
  $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
  $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${nvdecLimit(fps)} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]}/${rawUploadUnits(fps)} units (NV12 = 1, P010 = 2). Capacity depends on codec and content.`;
  $('canvas-label').textContent=`${width} × ${height} · ${fps} fps · ${portrait?'portrait':'landscape'}`;
@@ -332,6 +335,7 @@ async function refresh(){
   if(!loaded&&!['preparing','starting'].includes(status.phase)){
    if(status.settings){
     const s=status.settings,depth=s.bit_depth??10;
+    $('browser-motion').value=s.browser_motion??'static';
     $('mode').value=`${depth}:${s.chroma??(depth===8?'420':'422')}`;
     for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',scenes:'scene_count',layout:'layout'}))if(s[key]!==undefined)$(id).value=s[key];
     encodes=structuredClone(s.encodes??{});extraAux=s.extra_aux??0;

@@ -250,9 +250,12 @@ def test_alpha_overlay_preserves_blend_and_requires_browser(recipe, tmp_path):
         assert cfg.source(scene.items[1].source).kind == "browser"
 
 
-def test_browser_alpha_recipe_covers_sdr_and_hdr_with_an_embedded_page(tmp_path):
+@pytest.mark.parametrize("motion", [None, "static", "dynamic"])
+def test_browser_alpha_recipe_covers_sdr_and_hdr_with_an_embedded_page(tmp_path, motion):
     directory = Path(__file__).resolve().parents[2] / "demos/mixer"
     recipe = json.loads((directory / "demo.browser-alpha.json").read_text())
+    if motion is not None:
+        next(spec for spec in recipe["inputs"] if spec["kind"] == "browser")["motion"] = motion
     doc, _, _ = plan(recipe, tmp_path)
     cfg = parse(doc)
     overlays = [scene for scene in cfg.scenes if scene.id.startswith("alpha_overlay_")]
@@ -261,7 +264,16 @@ def test_browser_alpha_recipe_covers_sdr_and_hdr_with_an_embedded_page(tmp_path)
     prefix, payload = browser.location.split(",", 1)
     assert prefix == "data:text/html;base64"
     page = (directory / "browser_alpha.html").read_bytes()
-    assert base64.b64decode(payload) == page.replace(b"<html", b'<html data-source="overlay_000"', 1)
+    attrs = f'<html data-source="overlay_000" data-motion="{motion or "static"}"'.encode()
+    assert base64.b64decode(payload) == page.replace(b"<html", attrs, 1)
+
+
+def test_browser_alpha_rejects_unknown_motion(tmp_path):
+    directory = Path(__file__).resolve().parents[2] / "demos/mixer"
+    recipe = json.loads((directory / "demo.browser-alpha.json").read_text())
+    next(spec for spec in recipe["inputs"] if spec["kind"] == "browser")["motion"] = "unknown"
+    with pytest.raises(ValueError, match="browser motion"):
+        plan(recipe, tmp_path)
 
 
 def test_equal_recipe_has_five_source_types_and_32_scenes(tmp_path):
