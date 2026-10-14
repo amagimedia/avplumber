@@ -1,4 +1,4 @@
-"""MultiEventWait reports and drains every signalled event, whatever the size of its list."""
+"""MultiEventWait reports and drains every signalled event, whatever the size of its list, and says which fired."""
 import subprocess
 import sys
 
