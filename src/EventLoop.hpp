@@ -34,6 +34,9 @@ protected:
         if (std::this_thread::get_id() != loop_thread_.load(std::memory_order_relaxed)) wakeup_.signal();
     }
     moodycamel::ConcurrentQueue<Callable> todo_;
+    // Work in todo_, counted after each enqueue: the queue keeps one sub-queue per thread that ever
+    // handed the loop work, and finding it empty means looking at all of them, after every pass.
+    std::atomic<size_t> todo_count_{0};
     // What to run when a descriptor becomes readable, once: the kernel holds the waits
     // (EPOLLONESHOT), so a pass costs what is ready, not what is waited for.
     int epoll_fd_ = -1;
@@ -51,12 +54,19 @@ protected:
             logstream << "error in event loop: " << e.what();
         }
     }
+    // Counted after the enqueue: a loop that reads the count before it changes has a wake-up coming.
+    void enqueueToDo(Callable cb) {
+        todo_.enqueue(std::move(cb));
+        todo_count_.fetch_add(1, std::memory_order_release);
+    }
     bool executeSingleFromToDo() {
+        if (todo_count_.load(std::memory_order_acquire) == 0) return false;
         Callable cb;
         if (!todo_.try_dequeue(cb)) {
             //logstream << "todo_ queue empty";
             return false;
         }
+        todo_count_.fetch_sub(1, std::memory_order_relaxed);
         //logstream << "executing something from todo_ queue";
         run(cb);
         return true;
@@ -186,14 +196,14 @@ public:
         return passes_.load(std::memory_order_relaxed);
     }
     void execute(Callable cb) {
-        todo_.enqueue(cb);
+        enqueueToDo(std::move(cb));
         wakeUnlessOnLoopThread();
     }
     int fastExecute(av::Timestamp time_limit, Callable cb) {
         av::Timestamp deadline = addTS(wallclock.ts(), time_limit);
         if (busy_.try_lock()) {
             std::lock_guard<decltype(busy_)> lock(busy_, std::adopt_lock);
-            todo_.enqueue(cb);
+            enqueueToDo(std::move(cb));
             int diff = std::numeric_limits<int>::min();
             while (executeSingleFromToDo()) {
                 diff = addTSSameTB(rescaleTS(wallclock.ts(), {1, 1000}), rescaleTS(negateTS(deadline), {1, 1000}));
