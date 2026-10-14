@@ -2,9 +2,14 @@
 
 ``input_rec -> demux -> dec_video -> [speed_video] -> realtime(set_pts) -> [force_fps]``
 
+With ``has_audio``:
+
+``demux -> dec_audio -> resample -> realtime(set_pts, same RealTimeTeam as video)``
+
 ``realtime(set_pts=True)`` rebases every source onto the host monotonic clock,
 which is the time base the native mixer schedules cuts in. The mixer keeps
 native input cadence; other callers retain rate normalization by default.
+Per-source audio and video share one team so lip-sync keeps a single offset.
 """
 
 from __future__ import annotations
@@ -48,18 +53,22 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     pacing nodes (the instance's ``"default"`` loop when omitted).
 
     ``has_audio`` additionally demuxes/decodes/resamples the source's audio
-    track to ``audio_sample_rate``/fltp, the format an embedded audio-router
-    node typically requires; the source's own channel layout (mono, stereo,
-    5.1, ...) is preserved rather than forced to a fixed one. Deliberately
-    *not* run through ``_pace``/``realtime(set_pts=True)``: such a node is
-    expected to pace itself to wallclock internally, and an upstream
-    `realtime` node was found to pace this exact kind of chain at an
-    inconsistent fraction of real-time. Returns ``None`` for the audio edge
-    when ``has_audio`` is false, which is every existing caller's unchanged
-    behavior.
+    track to ``audio_sample_rate``/fltp, then paces it through
+    ``realtime(set_pts=True)`` on the same ``RealTimeTeam`` as this source's
+    video (``input_{tag}_av_sync`` when ``sync_team`` is omitted). Video is
+    ``master=true``, audio ``master=false``, with identical ``tick_period`` /
+    ``event_loop`` / ``realtime_params`` so lip-sync shares one wallclock
+    offset. The source's own channel layout (mono, stereo, 5.1, ...) is
+    preserved rather than forced to a fixed one. Returns ``None`` for the
+    audio edge when ``has_audio`` is false.
     """
     edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
     restart = {} if auto_restart is None else {"auto_restart": auto_restart}
+    # Per-source A/V lip-sync: audio and video realtime must share one team and
+    # the same timebase (RealTimeTeam::checkTimeBase). Caller-supplied sync_team
+    # (replay seek wiring) is reused; otherwise invent one when audio is present.
+    if has_audio and sync_team is None:
+        sync_team = f"input_{tag}_av_sync"
     sync = {} if sync_team is None else {"sync_team": sync_team}
     avp.addNode(api.InputRec({
         "name": f"input_{tag}", "url": url, "dst": edge("packets"), "loop": loop,
@@ -83,7 +92,9 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
             "dst_sample_rate": audio_sample_rate,
             "dst_sample_format": "fltp", "compensation": 0, "group": group, **restart,
         }))
-        audio_edge = edge("audio_resampled")
+        audio_edge = _pace_audio(
+            avp, api, tag, edge("audio_resampled"), group=group, sync_team=sync_team,
+            realtime_params=realtime_params, event_loop=event_loop, native_rate=native_rate)
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": edge("video_packets"), "dst": edge("decoded"),
         # The GPU decodes: a libavcodec frame thread only reserves one more decode surface, 16 of them
@@ -115,29 +126,50 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
         realtime_src = edge("paused")
     video_edge = _pace(avp, api, tag, realtime_src, fps=fps, fps_den=fps_den, group=group,
                        sync_team=sync_team, realtime_params=realtime_params, event_loop=event_loop,
-                       native_rate=native_rate)
+                       native_rate=native_rate, master=True if has_audio else None)
     return video_edge, audio_edge
+
+
+def _realtime_timing(native_rate: bool) -> dict:
+    """Shared realtime timing so A/V teammates pass RealTimeTeam::checkTimeBase."""
+    if not native_rate:
+        return {}
+    # Without tick_source, realtime still follows wallclock. tick_period selects
+    # its internal time base (one quarter of this period): 1/120000 represents
+    # 1001/24000, 1001/30000 and 1001/60000 exactly. Millisecond PTS can cross
+    # the compositor's nearest-tick boundary and cause repeat/drop pairs.
+    # Its built-in thresholds are in milliseconds, so preserve their durations
+    # explicitly when choosing the finer time base.
+    return {"tick_period": "1/30000", "negative_time_tolerance": .25,
+            "discontinuity_threshold": 1.0}
+
+
+def _pace_audio(avp, api, tag: str, src: str, *, group: str,
+                sync_team: Optional[str] = None, realtime_params: Optional[dict] = None,
+                event_loop: Optional[str] = None, native_rate: bool = False) -> str:
+    """Pace one audio edge onto the same RealTimeTeam / timebase as the video path."""
+    loop = {} if event_loop is None else {"event_loop": event_loop}
+    avp.addNode(api.Realtime({
+        "name": f"realtime_audio_{tag}", "src": src, "dst": f"input_{tag}_audio_realtime",
+        "set_pts": True, "master": False, "group": group, **loop,
+        **({} if sync_team is None else {"team": sync_team}),
+        **_realtime_timing(native_rate), **(realtime_params or {}),
+    }))
+    return f"input_{tag}_audio_realtime"
 
 
 def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
           sync_team: Optional[str] = None, realtime_params: Optional[dict] = None,
-          event_loop: Optional[str] = None, native_rate: bool = False) -> str:
+          event_loop: Optional[str] = None, native_rate: bool = False,
+          master: Optional[bool] = None) -> str:
     """Rebase onto the host clock; optionally normalize cadence for non-clocked consumers."""
     loop = {} if event_loop is None else {"event_loop": event_loop}
-    timing = {}
-    if native_rate:
-        # Without tick_source, realtime still follows wallclock. tick_period selects
-        # its internal time base (one quarter of this period): 1/120000 represents
-        # 1001/24000, 1001/30000 and 1001/60000 exactly. Millisecond PTS can cross
-        # the compositor's nearest-tick boundary and cause repeat/drop pairs.
-        # Its built-in thresholds are in milliseconds, so preserve their durations
-        # explicitly when choosing the finer time base.
-        timing = {"tick_period": "1/30000", "negative_time_tolerance": .25,
-                  "discontinuity_threshold": 1.0}
+    master_param = {} if master is None else {"master": master}
     avp.addNode(api.Realtime({
         "name": f"realtime_{tag}", "src": src, "dst": f"input_{tag}_realtime",
-        "set_pts": True, "group": group, **loop,
-        **({} if sync_team is None else {"team": sync_team}), **timing, **(realtime_params or {}),
+        "set_pts": True, "group": group, **loop, **master_param,
+        **({} if sync_team is None else {"team": sync_team}),
+        **_realtime_timing(native_rate), **(realtime_params or {}),
     }))
     if native_rate:
         return f"input_{tag}_realtime"
