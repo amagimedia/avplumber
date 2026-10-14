@@ -687,16 +687,23 @@ def test_delivery_totals_are_the_pages_sums_or_nothing_while_a_bus_is_missing():
 
 
 class PlayoutBridge:
-    """A bridge with a mixer state and each compositor's per_input reply, recording its commands."""
+    """A bridge with a mixer state, each compositor's per_input reply and the mixer's startup report
+    (None: a mixer without `mixer.startup`, which answers the command with an error), recording
+    its commands."""
 
-    def __init__(self, state, per_input):
+    def __init__(self, state, per_input, startup=None):
         self.mixer, self._state, self.per_input, self.commands = "mixer", state, per_input, []
+        self.startup = startup
 
     def state(self, timeout=None):
         return self._state
 
     def command(self, line, timeout=None):
         self.commands.append(line)
+        if line == "mixer.startup":
+            if self.startup is None:
+                raise RuntimeError("Unknown command: mixer.startup")
+            return json.dumps(self.startup)
         return json.dumps(self.per_input[line.split()[1]])
 
 
@@ -721,13 +728,97 @@ def test_playout_counters_name_each_input_by_the_settings_and_sum_both_slots():
         ("input", "web_1", "browser", "repeats"): 40, ("input", "web_1", "browser", "discarded"): 3,
         ("input", "web_2", "browser", "repeats"): 5, ("input", "web_2", "browser", "discarded"): 5,
         ("input", "clip", "other", "repeats"): 1, ("input", "clip", "other", "discarded"): 1}
-    # Two small commands per sample, which RecentCounts takes every 5 s.
-    assert bridge.commands == ["node.object.get mixer_comp_a per_input", "node.object.get mixer_comp_b per_input"]
-    # A mixer whose settings do not name its inputs: the delivery counters alone, no command.
+    # Three small commands per sample, which RecentCounts takes every 5 s: the startup report (for
+    # the on-air moment; this mixer has none) and both slots' per-input counters.
+    assert bridge.commands == ["mixer.startup", "node.object.get mixer_comp_a per_input", "node.object.get mixer_comp_b per_input"]
+    # A mixer whose settings do not name its inputs: the delivery counters alone.
     older = PlayoutBridge({**PLAYOUT_STATE, "settings": {}}, {})
-    assert playout_counters(older) == {"missed_deadlines": 1, "output_drops": 0} and older.commands == []
+    assert playout_counters(older) == {"missed_deadlines": 1, "output_drops": 0} and older.commands == ["mixer.startup"]
+    # A mixer that reports its start: the on-air moment comes with the counters, as ON_AIR.
+    on_air = PlayoutBridge({**PLAYOUT_STATE, "settings": {}}, {}, startup={"released_at": 1_700_000_018.0, "settled": True})
+    assert playout_counters(on_air) == {"missed_deadlines": 1, "output_drops": 0, "on_air": 1_700_000_018.0}
     with pytest.raises(ValueError):
         playout_counters(PlayoutBridge(PLAYOUT_STATE, {"mixer_comp_a": [row("x", 0)] * 5, "mixer_comp_b": []}))
+
+
+def test_a_new_on_air_moment_starts_the_window_again_with_everything_the_mixer_counted_since():
+    """The mixer resets its counters as it goes on air (mixer.startup `released_at`): a sample from
+    a show that went on air anew counts from zero, even when its totals have already passed the
+    old show's, so nothing of the old show or of the new one's warm-up is in the window."""
+    totals, now = {"missed_deadlines": 3, "output_drops": 0, "on_air": 1000.0}, [0.0]
+    recent = RecentCounts(lambda: dict(totals), clock=lambda: now[0])
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 0, "on_air": 1000.0, "missed_deadlines": 0, "output_drops": 0}
+    now[0], totals["missed_deadlines"] = 100.0, 5
+    recent.sample()
+    assert recent.values["missed_deadlines"] == 2 and recent.values["on_air"] == 1000.0
+    # The mixer restarted and went on air at 1150 with 7 misses since: more than the 5 before, so
+    # no total fell; the on-air moment says it is a new count.
+    now[0], totals = 200.0, {"missed_deadlines": 7, "output_drops": 1, "on_air": 1150.0}
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 0, "on_air": 1150.0, "missed_deadlines": 7, "output_drops": 1}
+    now[0], totals = 205.0, {"missed_deadlines": 8, "output_drops": 1, "on_air": 1150.0}
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 5, "on_air": 1150.0, "missed_deadlines": 8, "output_drops": 1}
+    # An older mixer without the report: the window goes on as before, without the moment.
+    now[0], totals = 210.0, {"missed_deadlines": 9, "output_drops": 1}
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 0, "missed_deadlines": 9, "output_drops": 1}
+
+
+def test_browser_drops_count_from_the_mixers_on_air_moment_not_from_the_pages_load():
+    """The browser windows drop frames while the show is built (no consumer yet) and the web UI polls
+    them all along. When the mixer reports a new on-air moment, with the counters it read from the
+    browser service then (mixer.startup `browser_windows`), the window starts from those: what the
+    pages dropped before on air is not recent, what they dropped since is."""
+    from pyplumber.mixer.gui.telemetry import BrowserCpuStats
+    now, wall, status, report = [0.0], [5000.0], [None], [None]
+    stats = BrowserCpuStats("http://127.0.0.1:9009", fetch=lambda: {"intervalS": None}, fetch_status=lambda: status[0],
+                            clock=lambda: now[0], on_air=lambda: report[0], wall=lambda: wall[0])
+    # Polled while the show is built: the pages load and drop frames with no consumer.
+    status[0] = browser_status(("web_1", 100, 0, 100, {"no_consumer": 100}, 0))
+    stats.poll_status()
+    now[0], wall[0] = 30.0, 5030.0
+    status[0] = browser_status(("web_1", 700, 0, 700, {"no_consumer": 700}, 0))
+    stats.poll_status()
+    assert stats.drops.values["dropped"] == 600 and "since" not in stats.drops.values
+    # The mixer went on air at wall 5033 (3 s ago), reading 760 dropped frames; since then 2 more.
+    now[0], wall[0] = 36.0, 5036.0
+    report[0] = {"released_at": 5033.0, "browser_windows": {"web_1": {"paintCount": 790, "txFrameCount": 30, "droppedFrames": 760,
+                                                                       "droppedReasons": {"no_consumer": 760}}}}
+    status[0] = browser_status(("web_1", 880, 118, 762, {"no_consumer": 760, "retained_pool_full": 2}, 0))
+    stats.poll_status()
+    assert stats.drops.values == {"window_s": 600, "covered_s": 3, "since": 5033.0, "windows": 1, "paints": 90, "sent": 88, "dropped": 2,
+                                  "reasons": [("retained_pool_full", 2)], "worst": {"id": "web_1", "dropped": 2}, "skipped": 0}
+    # The same report again changes nothing; the window goes on from the on-air counters.
+    now[0], wall[0] = 41.0, 5041.0
+    status[0] = browser_status(("web_1", 1030, 265, 765, {"no_consumer": 760, "retained_pool_full": 5}, 0))
+    stats.poll_status()
+    assert (stats.drops.values["covered_s"], stats.drops.values["dropped"], stats.drops.values["since"]) == (8, 5, 5033.0)
+    # A new start whose browser counters the mixer could not read: the window starts again with this
+    # poll as its baseline, so nothing is recent yet.
+    now[0], wall[0] = 100.0, 5100.0
+    report[0] = {"released_at": 5099.0, "browser_windows": None}
+    status[0] = browser_status(("web_1", 2000, 1200, 800, {"no_consumer": 795, "retained_pool_full": 5}, 0))
+    stats.poll_status()
+    assert stats.drops.values == {"window_s": 600, "covered_s": 0, "since": 5099.0, "windows": 1, "paints": 0, "sent": 0, "dropped": 0,
+                                  "reasons": [], "worst": None, "skipped": 0}
+    now[0], wall[0] = 105.0, 5105.0
+    status[0] = browser_status(("web_1", 2150, 1349, 801, {"no_consumer": 795, "retained_pool_full": 6}, 0))
+    stats.poll_status()
+    assert (stats.drops.values["covered_s"], stats.drops.values["dropped"]) == (5, 1)
+    # No report (an older mixer, or none running): the window is left alone.
+    report[0] = None
+    now[0], wall[0] = 110.0, 5110.0
+    stats.poll_status()
+    assert (stats.drops.values["covered_s"], stats.drops.values["dropped"], stats.drops.values["since"]) == (10, 1, 5099.0)
+
+
+def test_the_startup_report_is_read_from_the_mixer_or_is_none():
+    from pyplumber.mixer.gui.telemetry import startup_report
+    assert startup_report(PlayoutBridge({}, {})) is None   # an older mixer: the command fails
+    assert startup_report(PlayoutBridge({}, {}, startup={"released_at": 1.0})) == {"released_at": 1.0}
+    assert startup_report(PlayoutBridge({}, {}, startup=[1, 2])) is None   # not a report
 
 
 def test_recent_input_repeats_cover_the_window_with_the_worst_browser_source():
