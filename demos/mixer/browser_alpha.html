@@ -10,12 +10,14 @@
   .column { flex: 1; position: relative; }
   .swatch { height: 80%; background: linear-gradient(to bottom, white 0% 25%, red 25% 50%, lime 50% 75%, blue 75%); }
   .label { position: absolute; top: 85%; width: 100%; text-align: center; text-shadow: 0 1px 3px black; }
-  /* Like a real graphic, the marker rests 4 s and slides 2 s (a third of the time): Chromium paints
-     only on change, so a resting page costs next to no CPU. Slide with transform, not left, which
-     snaps to whole pixels and lays out on the main thread each frame (judder); 82vw is 5%..87%. */
-  #marker { position: absolute; left: 5%; bottom: 8%; width: 8%; height: 6%; background: #ffffff80;
-            will-change: transform; transition: transform 2s linear; }
-  #marker.right { transform: translateX(82vw); }
+  /* A motion test that never rests: the marker moves exactly 25 px per frame period of the page's
+     own frame clock, so in the output every frame must differ from the last by one step; a held
+     picture or a skipped paint is a 0 or 50 px step. Opaque, high contrast and on top, so it can be
+     measured over any video. The counter is the page's frame index, for reading frames by OCR. */
+  #marker { position: absolute; left: 5%; bottom: 8%; width: 96px; height: 96px; background: #ff00ff;
+            border: 6px solid black; box-sizing: border-box; z-index: 10; will-change: transform; }
+  #counter { position: absolute; right: 5%; top: 5%; padding: .1em .3em; background: black; color: #ffff00;
+             font: bold 6vw ui-monospace, monospace; z-index: 10; }
 </style>
 <header>Browser alpha over video</header>
 <div id="patches"></div>
@@ -36,15 +38,23 @@
     column.append(swatch, label);
     document.querySelector('#patches').append(column);
   }
-  // Slide every 6 s from a point of the cycle set by the id's number (browser_007 is 7): golden
-  // ratio steps spread any count of windows evenly, so they do not all slide, and paint, at once.
-  const CYCLE_MS = 6000;
+  // Each animation frame advances the index by the frame periods elapsed since the last one (1, or
+  // more after a skipped begin-frame) and puts the marker at 25 px per index, out 60 steps and back.
+  const STEP_PX = 25, STEPS = 60, PERIOD_MS = 1000 / 30;
   const marker = document.getElementById('marker');
-  const index = Number(source?.match(/\d+$/)?.[0] ?? 0);
-  setTimeout(() => {
-    const slide = () => marker.classList.toggle('right');
-    slide();
-    setInterval(slide, CYCLE_MS);
-  }, (index * 0.6180339887 % 1) * CYCLE_MS);
+  const counter = document.createElement('div');
+  counter.id = 'counter';
+  document.body.append(counter);
+  const offset = Number(source?.match(/\d+$/)?.[0] ?? 0) * 7;   // windows out of step with each other
+  let frame = 0, last = null;
+  const tick = (now) => {
+    frame += last === null ? 0 : Math.max(1, Math.round((now - last) / PERIOD_MS));
+    last = now;
+    const phase = (frame + offset) % (2 * STEPS);
+    marker.style.transform = `translateX(${(phase < STEPS ? phase : 2 * STEPS - phase) * STEP_PX}px)`;
+    counter.textContent = String(frame).padStart(6, '0');
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 </script>
 </html>
