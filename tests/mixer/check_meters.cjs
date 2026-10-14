@@ -81,37 +81,37 @@ const {chromium} = require('playwright');
       window.oneThread = [...document.querySelectorAll('#thread-tip table')].map((t) => t.textContent);
       state.host.thread_kinds = all; state.chromium = chromium; renderHost(); });
     assert.deepEqual(await page.evaluate(() => window.oneThread), ['Mixer threadsntotalavgmaxmixer_comp_a140%40%40%']);
-    assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
+    // LAT's tip: two short tables, delivery and the browser sources; values are the second column.
+    const lat = () => page.locator('#lat-tip td:nth-child(2)').allTextContents();
+    const latLabels = () => page.locator('#lat-tip td:first-child').allTextContents();
+    const latTitle = () => page.locator('#lat-tip strong').textContent();
+    assert.deepEqual(await lat(), ['106.0 ms', '3', '1']);
     // No player is open: the bar shows the median of the mixer's own last three cuts.
     assert.equal(await page.locator('#lat b').textContent(), '90ms');
     await page.evaluate(() => { observeCuts(); observeCuts(); renderLatency(); });
-    assert.match(await page.locator('#lat-tip').textContent(), /3 cuts/, 'repeated samples are not new cuts');
-    // A server that counts the last ten minutes: its figures replace the totals since the start.
-    assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · total/);
+    assert.deepEqual((await latLabels())[0], 'Cut p95 · 3', 'repeated samples are not new cuts');
+    // Without a server window the totals since the start; with one, its figures and its span.
+    assert.match(await latTitle(), /· total$/);
     await page.evaluate(() => { state.recent = {window_s: 600, covered_s: 754, missed_deadlines: 0, output_drops: 2}; renderLatency(); });
-    assert.deepEqual((await values('lat')).slice(1), ['0', '2']);
-    assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · last 10 min.*AUX output drops · last 10 min/s);
+    assert.deepEqual((await lat()).slice(1), ['0', '2']);
+    assert.match(await latTitle(), /· 10 min$/);
     await page.evaluate(() => { state.recent.covered_s = 40; renderLatency(); });
-    assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · last 40 s/);
-    // The inputs' repeats and discards over the same window: browser sources, their worst, the rest.
+    assert.match(await latTitle(), /· 40 s$/);
+    // The other inputs in delivery; the browser sources in their own table with the worst and the drops.
     await page.evaluate(() => { state.recent.inputs = {
       browser: {sources: 40, repeats: 120, discarded: 45, worst: {source: 'web_12', repeats: 40, discarded: 2}},
-      other: {sources: 152, repeats: 5, discarded: 1}}; renderLatency(); });
-    assert.deepEqual(await page.locator('#lat-tip dt').allTextContents(), ['Cut p95 · 3 cuts',
-      'Deadline misses · last 40 s', 'AUX output drops · last 40 s', 'Browser repeats · last 40 s', 'Other inputs repeats']);
-    assert.deepEqual((await values('lat')).slice(3), ['120 · worst web_12 40', '5']);
-    await page.evaluate(() => { state.recent.inputs = {browser: {sources: 40, repeats: 0, discarded: 0, worst: null},
-      other: {sources: 152, repeats: 0, discarded: 0}}; renderLatency(); });
-    assert.deepEqual((await values('lat')).slice(3), ['0']);
-    // The browser service's side: one row, its drops and the main reason.
-    await page.evaluate(() => { state.browser_drops = {window_s: 600, covered_s: 600, windows: 40, paints: 72000,
-      sent: 71988, dropped: 12, reasons: [['retained_pool_full', 9], ['no_consumer', 3]],
-      worst: {id: 'web_7', dropped: 7}, skipped: 15}; renderLatency(); });
-    assert.deepEqual((await page.locator('#lat-tip dt').allTextContents()).slice(4), ['Browser drops · last 10 min']);
-    assert.deepEqual((await values('lat')).slice(4), ['12 · retained_pool_full 9']);
-    await page.evaluate(() => { state.browser_drops = null; renderLatency(); });
+      other: {sources: 152, repeats: 5, discarded: 1}};
+      state.browser_drops = {window_s: 600, covered_s: 600, windows: 40, dropped: 12,
+        reasons: [['retained_pool_full', 9], ['no_consumer', 3]]}; renderLatency(); });
+    assert.deepEqual(await page.locator('#lat-tip th:first-child').allTextContents(), ['Delivery', 'Browser · 40']);
+    assert.deepEqual(await latLabels(), ['Cut p95 · 3', 'Misses', 'AUX drops', 'Other repeats / discards',
+      'Repeats / discards', 'Worst', 'Drops']);
+    assert.deepEqual((await lat()).slice(3), ['5 / 1', '120 / 45', 'web_12 40 / 2', '12 · retained_pool_full']);
+    await page.evaluate(() => { state.recent.inputs.browser = {sources: 40, repeats: 0, discarded: 0, worst: null};
+      state.browser_drops = null; renderLatency(); });
+    assert.deepEqual((await lat()).slice(4), ['0 / 0', '—', '—']);
     await page.evaluate(() => { state.recent = null; renderLatency(); });
-    assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
+    assert.deepEqual(await lat(), ['106.0 ms', '3', '1']);
     for (const width of [1920, 1600, 1440, 1280]) {
       await page.setViewportSize({width, height: 1080});
       const box = await page.locator('#top').evaluate(e => ({width: e.clientWidth, scroll: e.scrollWidth, height: e.offsetHeight}));
@@ -156,7 +156,7 @@ const {chromium} = require('playwright');
       state.status.cut_latency = {direct: {id: 0, state: 'waiting', recent: []}};
       observeCuts(); renderLatency();
     });
-    assert.equal((await values('lat'))[0], '—', 'restart clears prior cut history');
+    assert.equal((await page.locator('#lat-tip td:nth-child(2)').allTextContents())[0], '—', 'restart clears prior cut history');
     assert.equal(await page.locator('#lat b').textContent(), '—', 'and the bar has no cut to show');
     await page.setViewportSize({width: 390, height: 844});
     await page.locator('#power').focus();

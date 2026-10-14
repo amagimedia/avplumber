@@ -860,6 +860,7 @@ function setMeterTip(anchor, title, rows, render) {
     tip.addEventListener("mouseleave", hide);
   }
   anchor.removeAttribute("title");
+  if (tip.firstElementChild.textContent !== title) tip.firstElementChild.textContent = title;
   if (changed(tip, rows)) {
     const list = () => { const dl = el("dl"); dl.append(...rows.flatMap(([label, value]) => [el("dt", "", label), el("dd", "", value)])); return dl; };
     tip.lastElementChild.replaceChildren(...(render ? render(rows) : [list()]));
@@ -1476,29 +1477,6 @@ function polledCutLatency() {
   if (!ms.length) return null;
   return ms.length % 2 ? ms[(ms.length - 1) / 2] : (ms[ms.length / 2 - 1] + ms[ms.length / 2]) / 2;
 }
-// The inputs' repeats and discards over the same window (state.recent.inputs, from a mixer whose
-// settings name its compositor inputs): browser sources, their worst one, and every other input
-// for contrast. A repeat with a discard is two paints in one tick slot; a repeat alone, no frame.
-function inputRows(recent) {
-  const groups = recent.inputs;
-  if (!groups) return [];
-  const pair = (g) => `${metric(g?.repeats)} / ${metric(g?.discarded)}`, span = recentSpan(recent);
-  const worst = groups.browser?.worst;
-  const other = groups.other?.repeats ? [[`Other inputs repeats`, metric(groups.other.repeats)]] : [];
-  return [
-    [`Browser repeats · last ${span}`, metric(groups.browser?.repeats) + (worst?.repeats ? ` · worst ${worst.source} ${worst.repeats}` : "")],
-    ...other,
-  ];
-}
-// The browser service's side over its own last ten minutes (state.browser_drops): frames its windows
-// dropped before sending, by reason and the worst window, paints against frames sent, and the paints
-// Chromium skipped before the app saw them ("—" from an app that does not count them).
-function browserDropRows(d) {
-  if (!d) return [];
-  const span = recentSpan(d), reasons = (d.reasons || []).map(([reason, n]) => `${reason} ${n}`).join(" · ");
-  const top = (d.reasons || [])[0];
-  return [[`Browser drops · last ${span}`, metric(d.dropped) + (top ? ` · ${top[0]} ${top[1]}` : "")]];
-}
 function renderLatency() {
   const lat = fresh(cutLatency)?.latency;
   // No title: LAT has its tip, and a title would show beside it.
@@ -1507,17 +1485,24 @@ function renderLatency() {
   const pgm = Object.values(state?.status?.playout || {}), aux = state?.aux_buses || [];
   const total = (rows, key) => rows.every((r) => Number.isFinite(r?.[key])) ? rows.reduce((n, r) => n + r[key], 0) : null;
   const complete = pgm.length > 0 && aux.length === (settings().aux_buses || []).length;
-  setMeterTip($("lat"), "Latency & delivery", [
-    [`Cut p95 · ${cuts.length} cuts`, metric(cuts[Math.ceil(cuts.length * .95) - 1], 1, " ms")],
-    // The server counts the last ten minutes, so the misses of a start long past do not stay on
-    // screen; one that does not (state.recent absent) leaves the totals since the mixer started.
-    ...(state?.recent
-      ? [[`Deadline misses · last ${recentSpan(state.recent)}`, metric(state.recent.missed_deadlines)],
-         [`AUX output drops · last ${recentSpan(state.recent)}`, metric(state.recent.output_drops)],
-         ...inputRows(state.recent)]
-      : [["Deadline misses · total", metric(complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
-         ["AUX output drops · total", metric(complete ? total(aux, "output_drops") : null)]]),
-    ...browserDropRows(state?.browser_drops)]);
+  // Two short tables: delivery (cut latency, misses, drops, the other inputs) and the browser sources.
+  const recent = state?.recent, span = recent ? recentSpan(recent) : "total", inputs = recent?.inputs || {};
+  const pair = (g) => g ? `${metric(g.repeats)} / ${metric(g.discarded)}` : "—";
+  const delivery = [
+    [`Cut p95 · ${cuts.length}`, metric(cuts[Math.ceil(cuts.length * .95) - 1], 1, " ms")],
+    ["Misses", metric(recent ? recent.missed_deadlines : complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
+    ["AUX drops", metric(recent ? recent.output_drops : complete ? total(aux, "output_drops") : null)],
+    ...(inputs.other ? [["Other repeats / discards", pair(inputs.other)]] : []),
+  ];
+  const b = inputs.browser, worst = b?.worst, drops = state?.browser_drops, top = (drops?.reasons || [])[0];
+  const browser = b?.sources ? [
+    ["Repeats / discards", pair(b)],
+    ["Worst", worst && (worst.repeats || worst.discarded) ? `${worst.source} ${pair(worst)}` : "—"],
+    ["Drops", drops ? metric(drops.dropped) + (top ? ` · ${top[0]}` : "") : "—"],
+  ] : [];
+  setMeterTip($("lat"), `Latency & delivery · ${span}`, [...delivery, ...browser], () => [
+    tipTable(["Delivery", ""], delivery),
+    ...(browser.length ? [tipTable([`Browser · ${b.sources}`, ""], browser)] : [])]);
 }
 
 /* ---------- polling ---------- */
