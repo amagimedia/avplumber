@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="A patched Chromium paints each offscreen browser window straight into the DMA-BUF buffers the AVPlumber mixer reads, and lends each one with a fence the mixer waits on. In a ten-minute trial on the 192-source show the browser fell from 159 to 148 percent of a core.">
+  <title>Chromium paints into the buffer the mixer reads · Mixer optimization cookbook</title>
+  <link rel="stylesheet" href="cookbook.css">
+  <style>
+    .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 22px 0 0; padding: 0; list-style: none; }
+    .figures li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+    .figures b { display: block; font-size: 23px; font-weight: 650; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; color: #edf4ff; }
+    .figures span { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; line-height: 1.45; }
+    .measured { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 14px 0 0; max-width: 760px; }
+    .measured table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .measured th, .measured td { padding: 8px 14px; border-bottom: 1px solid var(--line); text-align: right; color: var(--body); white-space: nowrap; }
+    .measured tr:last-child td { border-bottom: 0; }
+    .measured th:first-child, .measured td:first-child { text-align: left; }
+    .measured th { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; }
+    .measured td:last-child { color: #edf4ff; }
+    .changes { padding-left: 20px; }
+    .changes li { margin: 10px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Chromium paints into the buffer the mixer reads</h1>
+  <p class="note">Measured on 2026-10-14 on the 16 vCPU NVIDIA L4 host that runs the demo. Not on <code>develop</code>: the Chromium and Electron patches are not yet published, and the mixer side, which waits on each frame's fence, is on the avplumber branch <a href="https://github.com/amagimedia/avplumber/tree/93ab99980ca7fe5af51452702a8dc80c493fcbf1"><code>mixer/browser-acquire-fence</code> at 93ab9998</a>. The demo show has run with the patched browser since the trial below. <a href="../">Watch the current 192-input L4 demo.</a></p>
+  <p class="lede">A browser source is an offscreen Electron window whose frames reach the mixer as DMA-BUFs. Stock Chromium draws the window's picture into a private texture, copies it into a separate capture buffer, and then polls until the copy has finished before it hands the buffer over. With the patches, Chromium's compositor paints the picture straight into a buffer it can export, and lends that buffer to the mixer together with a fence that signals when the drawing is done. The mixer waits on the fence before it reads. No copy, no polling, and the buffer is painted again only after the mixer gives it back.</p>
+  <span class="pill optin">Status: opt-in, patched browser; running in the demo show as a trial</span>
+
+  <ul class="figures" aria-label="Measured facts">
+    <li><b>159 → 148&nbsp;%</b><span>of one vCPU, the browser container with 40 windows, in a ten-minute trial on the 192-source show</span></li>
+    <li><b>31 → 19&nbsp;%</b><span>the GPU-process main thread</span></li>
+    <li><b>170–200 → 36–87</b><span>browser-source frame repeats per 30 s, all of the remaining ones from one source</span></li>
+    <li><b>+0.5 GB</b><span>GPU memory; GPU utilisation unchanged</span></li>
+    <li><b>&lt; 1.5 ms</b><span>every frame's fence wait in the mixer; no timeouts</span></li>
+    <li><b>0</b><span>missed deadlines and output drops in the ten minutes of the trial</span></li>
+  </ul>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 700 280" role="img" aria-labelledby="zc-t zc-d">
+        <title id="zc-t">One browser frame on its way to the mixer, stock and with the zero-copy export</title>
+        <desc id="zc-d">Stock: the compositor draws the window's root pass into a private texture, the capturer copies it into a pool buffer with one draw and two clears, waits for the copy by polling every 2 ms, and the mixer imports the pool buffer. Zero-copy: the compositor paints the root pass into an exported buffer, lends it with an EGL native fence as a sync_file descriptor, the mixer's receive thread waits on the fence in its poll, the compositors read the buffer, and the release returns it to a pool that is reused first in, first out.</desc>
+        <g font-family="system-ui, sans-serif" font-size="10.5">
+          <text x="0" y="16" fill="#edf4ff" font-size="13" font-weight="600">Illustration · one browser frame, from Chromium's compositor to the mixer</text>
+          <text x="0" y="44" fill="#f2878a" font-size="12.5" font-weight="600">Stock Chromium · draw, copy, poll</text>
+          <rect x="0" y="54" width="150" height="54" rx="6" fill="#1c2738" stroke="#3a4a62"/><text x="75" y="71" fill="#edf4ff" text-anchor="middle">compositor draws the</text><text x="75" y="85" fill="#edf4ff" text-anchor="middle">root pass into a</text><text x="75" y="99" fill="#edf4ff" text-anchor="middle">private texture</text>
+          <line x1="150" y1="81" x2="169" y2="81" stroke="#a4b4ca" stroke-width="1.5"/><path d="M168,77 L175,81 L168,85 Z" fill="#a4b4ca"/>
+          <rect x="175" y="54" width="150" height="54" rx="6" fill="#1c2738" stroke="#e5484d"/><text x="250" y="71" fill="#edf4ff" text-anchor="middle">capturer copies it</text><text x="250" y="85" fill="#edf4ff" text-anchor="middle">into a pool buffer:</text><text x="250" y="99" fill="#f2878a" text-anchor="middle">a draw and two clears</text>
+          <line x1="325" y1="81" x2="344" y2="81" stroke="#a4b4ca" stroke-width="1.5"/><path d="M343,77 L350,81 L343,85 Z" fill="#a4b4ca"/>
+          <rect x="350" y="54" width="150" height="54" rx="6" fill="#1c2738" stroke="#f5a524"/><text x="425" y="71" fill="#edf4ff" text-anchor="middle">capturer waits for</text><text x="425" y="85" fill="#edf4ff" text-anchor="middle">the copy to finish,</text><text x="425" y="99" fill="#f5a524" text-anchor="middle">polling every 2 ms</text>
+          <line x1="500" y1="81" x2="519" y2="81" stroke="#a4b4ca" stroke-width="1.5"/><path d="M518,77 L525,81 L518,85 Z" fill="#a4b4ca"/>
+          <rect x="525" y="54" width="150" height="54" rx="6" fill="#262a4d" stroke="#6e8bf5"/><text x="600" y="71" fill="#edf4ff" text-anchor="middle">mixer imports the</text><text x="600" y="85" fill="#edf4ff" text-anchor="middle">pool buffer, once</text><text x="600" y="99" fill="#edf4ff" text-anchor="middle">per physical buffer</text>
+          <text x="0" y="146" fill="#7fd6a8" font-size="12.5" font-weight="600">Zero-copy export · paint, lend, fence</text>
+          <rect x="0" y="156" width="150" height="54" rx="6" fill="#1d3a2c" stroke="#30a46c"/><text x="75" y="173" fill="#edf4ff" text-anchor="middle">compositor paints the</text><text x="75" y="187" fill="#edf4ff" text-anchor="middle">root pass into an</text><text x="75" y="201" fill="#edf4ff" text-anchor="middle">exported buffer</text>
+          <line x1="150" y1="183" x2="169" y2="183" stroke="#a4b4ca" stroke-width="1.5"/><path d="M168,179 L175,183 L168,187 Z" fill="#a4b4ca"/>
+          <rect x="175" y="156" width="150" height="54" rx="6" fill="#1d3a2c" stroke="#30a46c"/><text x="250" y="173" fill="#edf4ff" text-anchor="middle">the buffer is lent with</text><text x="250" y="187" fill="#edf4ff" text-anchor="middle">an EGL native fence</text><text x="250" y="201" fill="#a4b4ca" text-anchor="middle">(a sync_file fd)</text>
+          <line x1="325" y1="183" x2="344" y2="183" stroke="#a4b4ca" stroke-width="1.5"/><path d="M343,179 L350,183 L343,187 Z" fill="#a4b4ca"/>
+          <rect x="350" y="156" width="150" height="54" rx="6" fill="#262a4d" stroke="#6e8bf5"/><text x="425" y="173" fill="#edf4ff" text-anchor="middle">mixer's receive thread</text><text x="425" y="187" fill="#edf4ff" text-anchor="middle">waits on the fence</text><text x="425" y="201" fill="#edf4ff" text-anchor="middle">in its poll()</text>
+          <line x1="500" y1="183" x2="519" y2="183" stroke="#a4b4ca" stroke-width="1.5"/><path d="M518,179 L525,183 L518,187 Z" fill="#a4b4ca"/>
+          <rect x="525" y="156" width="150" height="54" rx="6" fill="#262a4d" stroke="#6e8bf5"/><text x="600" y="173" fill="#edf4ff" text-anchor="middle">compositors read it;</text><text x="600" y="187" fill="#edf4ff" text-anchor="middle">the release returns it</text><text x="600" y="201" fill="#edf4ff" text-anchor="middle">to Chromium's pool</text>
+          <path d="M600,210 L600,236 L75,236 L75,216" fill="none" stroke="#57dbc2" stroke-width="1.5" stroke-dasharray="5 4"/><path d="M71,217 L75,210 L79,217 Z" fill="#57dbc2"/>
+          <text x="337" y="254" fill="#57dbc2" text-anchor="middle">released buffers are painted again in the order they came back; none is freed while the window lives</text>
+          <g fill="#a4b4ca"><rect x="0" y="266" width="10" height="10" fill="#1c2738" stroke="#e5484d"/><text x="15" y="275">CPU and GPU work that goes away</text>
+          <rect x="230" y="266" width="10" height="10" fill="#1c2738" stroke="#f5a524"/><text x="245" y="275">a wait that goes away</text>
+          <rect x="400" y="266" width="10" height="10" fill="#262a4d" stroke="#6e8bf5"/><text x="415" y="275">in the mixer</text></g>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Illustration, not a measurement. The stock path's copy and its 2 ms poll are Chromium 152's offscreen capture as Electron 44.5.1 uses it. With the export the window's root pass is drawn once, into the buffer the mixer then samples.</figcaption>
+  </figure>
+
+  <h2>What changed</h2>
+  <ol class="changes">
+    <li><b>The compositor paints into exportable buffers.</b> An offscreen window's display gets a new output device that allocates its buffers the way the capture pool does for native handles (GBM, renderable and scanout, tiled), and paints the window's root pass into one of them. Buffers come back from the mixer in any order, so the device does not do partial redraws: every frame it lends is complete, whatever the buffer held before.</li>
+    <li><b>Lent, not copied.</b> The capturer still asks for each frame, but with a request that carries no destination. The GPU thread answers it by lending the buffer it has just drawn. That buffer is not drawn into again until the mixer's release comes back. If every buffer is out, the frame is dropped: Chromium never blocks and never paints into a buffer the mixer still holds.</li>
+    <li><b>A fence with every frame.</b> After the draw is flushed, Chromium creates an EGL native fence and exports it as a sync_file descriptor. It travels with the frame: Electron puts it on the <code>paint</code> event, the browser service sends it as the frame's second descriptor on the socket and flags it in the frame header, and the mixer's receive thread waits for it to become readable before the frame goes on. The wait sits in the <code>poll()</code> the thread already makes, so nothing spins. A fence that has not signalled within 100&nbsp;ms (<code>fence_timeout_ms</code>) drops the frame and acknowledges it.</li>
+    <li><b>Why a fence is needed at all.</b> Probes on an L4 with this driver showed that NVIDIA attaches no implicit fence to the DMA-BUF, so without one the mixer could read a buffer the GPU is still drawing; a fence after a draw signalled 1.5 to 2.2&nbsp;ms later. CUDA 13.4 on this platform can neither import a DMA-BUF directly nor wait on a sync_file, so the mixer keeps its existing import (an EGL image registered with CUDA once per physical buffer) and waits on the CPU.</li>
+    <li><b>The capturer targets the compositor's root.</b> The first build delivered nothing and logged nothing: the capturer targeted the page's own surface, so every request landed on a pass that was not the root and was dropped. In this mode Electron captures the compositor's root frame sink, and the page is drawn once, straight into the exported buffer.</li>
+    <li><b>The root stays transparent.</b> The second build lost alpha: an opaque root was drawn under the page. In this mode Electron holds the root, its gutters and the compositor background transparent, so premultiplied alpha arrives as the page drew it.</li>
+    <li><b>A pool that never frees.</b> Buffers are allocated once and never freed while the display lives; a released buffer goes to the back of the free list, so every buffer is reused in turn. Only a size or format change replaces them. Why this matters is the first show trial, below.</li>
+  </ol>
+
+  <h2>The first show trial stalled the whole GPU</h2>
+  <p>Forty patched windows went into the running 192-source show. Within three minutes the whole mixer stalled: the compositors' wait for the GPU went from 2 to 20&nbsp;ms, decoded and raw sources repeated frames as well as browser ones, and in about five minutes there were 8,132 missed deadlines and 65,852 output drops before it was rolled back by hand.</p>
+  <ul class="where">
+    <li><b>The buffers churned.</b> The new device reused its free buffers last in, first out, so the buffers at the bottom of the stack sat idle longer than the mixer's importer keeps an unused import, and were imported again: about 0.3 a second per window. The native-handle capture pool behind it kept only two idle frames and destroyed the rest, so bursty returns destroyed and re-created buffers.</li>
+    <li><b>Imports and releases are process-wide.</b> Every new import and every release goes through NVIDIA driver paths that all GPU work shares. That is consistent with a stall that crossed process boundaries; no driver lock trace was taken. It is the same kind of stall that <a href="browser-frame-queue.html">returning browser frames one per new frame</a> removed for the stock path.</li>
+    <li><b>The fix.</b> Buffers are never freed while the display lives, reuse is first in, first out, and the device logs its allocation counters every 5&nbsp;s. In the second trial each display allocated 10 buffers and freed none.</li>
+  </ul>
+
+  <h2>The second trial</h2>
+  <p>The running show: 192 sources at 1080p30 (105 HEVC files through NVDEC, 40 browser windows, 47 raw NV12 files) and 24 encoded outputs, with the fence-aware mixer in both columns. Ten minutes on the stock browser and ten on the patched one with the export on.</p>
+  <div class="measured">
+    <table>
+      <thead><tr><th>192 sources at 1080p30</th><th>Stock Electron</th><th>Zero-copy export</th></tr></thead>
+      <tbody>
+        <tr><td>Browser container, % of one vCPU</td><td>159</td><td>148</td></tr>
+        <tr><td>GPU-process main thread, % of one vCPU</td><td>31</td><td>19</td></tr>
+        <tr><td>Browser-source frame repeats per 30 s</td><td>about 170–200</td><td>36–87, all from one source</td></tr>
+        <tr><td>GPU memory</td><td>–</td><td>+0.5 GB</td></tr>
+        <tr><td>GPU utilisation</td><td>–</td><td>unchanged</td></tr>
+        <tr><td>Buffers per display: allocated / freed</td><td>–</td><td>10 / 0</td></tr>
+        <tr><td>Missed deadlines, output drops</td><td>0</td><td>0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul class="where">
+    <li>The mixer's own CPU did not move: 236–238&nbsp;% of a core with the stock browser, 238–243&nbsp;% with the export. The fence wait did not show in the mixer total beyond the spread of the readings.</li>
+    <li>A reading about fifteen minutes later, on the next mixer build, put the browser container at 158&nbsp;%. The 159 → 148 is the ten-minute comparison, not yet a steady figure.</li>
+    <li>The patched browser has stayed in the demo show since this trial, as a container of its own beside the regular stack.</li>
+  </ul>
+
+  <h2>What it was checked against</h2>
+  <ul class="where">
+    <li><b>Colour.</b> Pure red and blue windows come out as the exact BT.709 YCbCr values through import and composition.</li>
+    <li><b>Alpha.</b> Premultiplied swatches over P210 black give Y = 64, 284, 504, 720 and 940.</li>
+    <li><b>Lifetime.</b> All four cases pass, including a consumer killed mid-stream: Chromium gets every buffer back or frees it with the window.</li>
+    <li><b>Fences.</b> Every frame carried one; every wait was under 1.5&nbsp;ms, with no timeout.</li>
+  </ul>
+
+  <h2>What did not help</h2>
+  <ul class="where">
+    <li><b>Native-handle capture alone.</b> The patched build can also run the stock copy into a native-handle buffer, without the export. Even after the pool fix it cost the show 13 missed deadlines at 12 windows. That was not explained; the export replaces that mode, and it stays off.</li>
+    <li><b>Turning off Chromium's PartitionAlloc hardening.</b> Tried for the browser's CPU; the difference was within run-to-run noise.</li>
+    <li><b>Trials beside the show at full size.</b> A second browser with 36 windows next to the running show overloads the L4 even with stock Electron, and was stopped after 83 missed deadlines. Isolated tests beside a show are valid only at about 12 windows.</li>
+  </ul>
+
+  <h2>The patches</h2>
+  <p>A series for Chromium 152.0.7977.130 and Electron 44.5.1, built into the browser image; not yet published in the avplumber repository. Every change sits behind two Chromium features that are off by default, so one binary runs stock or patched.</p>
+  <ul class="where">
+    <li>Chromium: (1) capture native-handle SharedImages as textures; (2) skip the black clear when a blit covers the whole destination; (3) carry an acquire fence with texture copy results; (4) zero-copy export of the offscreen root pass, the feature <code>AvpZeroCopyOffscreenExport</code>; (5) rate-limited warnings on every branch that drops a zero-copy frame; (6) log the exported root pass and the device's geometry; (7) never free capture buffers while the display lives, first-in first-out reuse, allocation counters.</li>
+    <li>Electron: (1) opt offscreen shared textures into native handles; (2) expose the capturer's acquire fence on the <code>paint</code> event; (3) capture the compositor root frame sink in zero-copy mode; (4) hold the compositor root transparent in zero-copy mode.</li>
+  </ul>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>Chromium's offscreen compositor paints each window's root pass into exportable DMA-BUF buffers and lends them to the mixer with a sync_file fence; the mixer waits on the fence before it reads and returns the buffer when done.</li>
+    <li><b>Why</b>Stock Chromium drew every frame twice (into a texture, then a copy with two clears into the capture buffer) and polled for the copy every 2&nbsp;ms. The browser was 1.6 cores of the 192-source show.</li>
+    <li><b>Latency</b>0 frames added. The frame is handed over when its fence is created instead of after a polled copy; the mixer's fence waits were under 1.5&nbsp;ms. Cut latency was not re-measured.</li>
+    <li class="flag"><b>Side effects</b>+0.5 GB of GPU memory: each window keeps its buffers for its whole life. Buffers arrive as RGBA rather than BGRA; the mixer imports both.</li>
+    <li><b>Cost</b>A patched Chromium and Electron, eleven commits, rebuilt for every Electron update. In the mixer: one more descriptor per frame and one <code>poll()</code> wait in a thread that already polls.</li>
+    <li class="flag"><b>Risk</b>The first trial stalled the whole GPU through buffer churn; the fix is in, and the second trial ran clean for ten minutes. A patched browser must not reach a host before the fence-aware mixer: an older mixer rejects every fenced frame and leaks one descriptor per frame. Measured on one host and one show.</li>
+    <li><b>Switch it off</b><code>DMA_BROWSER_ZERO_COPY_EXPORT=1</code> in the browser service turns it on (it implies <code>DMA_BROWSER_NATIVE_HANDLE_CAPTURE=1</code>); leave it unset, the default, and restart the browser service for the stock path. Stock Electron ignores both features.</li>
+  </ul>
+
+  <h2>Related pages</h2>
+  <ul class="where">
+    <li><a href="browser-frame-queue.html">Browser frames go back one per new frame</a>: the same driver-path stall, for the stock capture pool.</li>
+    <li><a href="browser-handoff.html">Browser frame hand-off</a>: the socket and the acknowledgements the fence now travels with.</li>
+    <li><a href="browser-paint-cost.html">Browser CPU is per painted frame</a>: where a window's CPU goes in the three Chromium processes.</li>
+    <li><a href="input-decode-cpu.html">Input, decode and wake-ups</a>: the mixer's own CPU on the same show.</li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/93ab99980ca7fe5af51452702a8dc80c493fcbf1/src/nodes/hwaccel/ipc_dmabuf_source.cpp"><code>src/nodes/hwaccel/ipc_dmabuf_source.cpp</code></a>: the wait on a frame's acquire fence before it is forwarded, <code>fence_timeout_ms</code>, and the <code>fence_*</code> counters in the node's statistics.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/93ab99980ca7fe5af51452702a8dc80c493fcbf1/deps/dma-browser/addons/fdpass/texinfo.h"><code>deps/dma-browser/addons/fdpass/texinfo.h</code></a>: the frame header and the flag that says a fence descriptor follows.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/93ab99980ca7fe5af51452702a8dc80c493fcbf1/deps/dma-browser/src/main/HwAccelConfigurator.ts"><code>deps/dma-browser/src/main/HwAccelConfigurator.ts</code></a>: the two switches and the features they ask for, never assumed.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/93ab99980ca7fe5af51452702a8dc80c493fcbf1/deps/dma-browser/README.md"><code>deps/dma-browser/README.md</code></a>: the patched build, the acquire fence and the order to update in.</li>
+  </ul>
+  <p class="note">Source links are pinned to the branch commit that runs in the show. The Chromium and Electron patches are described above by their commit titles.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>

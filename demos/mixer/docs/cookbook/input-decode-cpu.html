@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Ten changes to how the AVPlumber mixer reads, decodes and hands on its 192 sources took the mixer from 502 to about 234 percent of one vCPU and from 1,186 to 889 threads on the 1080p30 show, measured one build at a time on an NVIDIA L4.">
+  <title>Input, decode and wake-ups: 502 to 234 % of a core · Mixer optimization cookbook</title>
+  <link rel="stylesheet" href="cookbook.css">
+  <style>
+    .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 22px 0 0; padding: 0; list-style: none; }
+    .figures li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+    .figures b { display: block; font-size: 23px; font-weight: 650; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; color: #edf4ff; }
+    .figures span { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; line-height: 1.45; }
+    .measured { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 14px 0 0; max-width: 860px; }
+    .measured table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .measured th, .measured td { padding: 8px 14px; border-bottom: 1px solid var(--line); text-align: right; color: var(--body); white-space: nowrap; }
+    .measured tr:last-child td { border-bottom: 0; }
+    .measured th:first-child, .measured td:first-child { text-align: left; }
+    .measured th { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; }
+    .measured td:last-child { color: #edf4ff; }
+    .measured td.l { text-align: left; white-space: normal; min-width: 200px; }
+    .changes { padding-left: 20px; }
+    .changes li { margin: 10px 0; }
+    pre { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; overflow-x: auto; color: #d5e2f2; font-size: 14px; max-width: 760px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>Input, decode and wake-ups: 502 to 234&nbsp;% of a core</h1>
+  <p class="note">Measured on 13 and 14 October 2026 on the 16 vCPU NVIDIA L4 host that runs the demo, one build at a time. The evening builds ran the full show on a second L4 host first; the later ones passed the unit tests and smoke tests, with light GPU smokes on the demo host, before they went into the show. One change, the HEVC table clears, is on <code>develop</code> since 2026-10-13. The others are on avplumber branches that are not merged to <code>develop</code> yet and run in the demo show; each section names its branch, and source links are pinned to the branch commits. <a href="../">Watch the current 192-input L4 demo.</a></p>
+  <p class="lede">On the 192-source show at 1080p30 the mixer process read 502&nbsp;% of one vCPU in 1,186 threads after the raw-upload, colour-tag and compositor changes of 13 October. Ten more changes, aimed at what each source's frames cost on their way from the file to the compositors, took it to about 234&nbsp;% in 889 threads, with no missed deadline and no dropped output at any step. The whole stack then ran seven minutes confined to 8 vCPUs without missing a deadline.</p>
+  <span class="pill optin">Status: on branches, running in the demo show; one change on develop</span>
+
+  <ul class="figures" aria-label="Measured facts">
+    <li><b>502 → 234&nbsp;%</b><span>of one vCPU, the whole mixer process, 192 sources at 1080p30 with 24 encodes</span></li>
+    <li><b>1,186 → 889</b><span>mixer threads: no demux thread per file and no fan-out thread per source</span></li>
+    <li><b>139.7 → 27.3&nbsp;%</b><span>the 152 reading threads, once raw files stay in page-locked memory</span></li>
+    <li><b>59.5 → 14.6&nbsp;%</b><span>the two Program compositors together (7.3 each), once the busiest threads of the show</span></li>
+    <li><b>108 → 28&nbsp;%</b><span>time the mixer's threads spent runnable without a core, over the evening's builds</span></li>
+    <li><b>0</b><span>missed deadlines and output drops in every reading, and in seven minutes on 8 vCPUs</span></li>
+  </ul>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 700 312" role="img" aria-labelledby="steps-t steps-d">
+        <title id="steps-t">The mixer's CPU after each build that went onto the show</title>
+        <desc id="steps-d">Percent of one vCPU for the whole mixer process: baseline 502; HEVC table clears 471; resident raw sources 335; signalled inputs 322; input hops 265; event loop without self wake-ups 263; Program compositors look for frames every 8 ms 250; fan-out on the event loops 247; GPU memory builds 237; coalesced queue signals 239; AUX compositors look every 8 ms 234.</desc>
+        <g font-family="system-ui, sans-serif" font-size="11">
+          <text x="0" y="16" fill="#edf4ff" font-size="13" font-weight="600">Measured · mixer process, % of one vCPU, 192 sources at 1080p30</text>
+          <rect x="430" y="7" width="10" height="10" fill="#30a46c"/><text x="445" y="16" fill="#a4b4ca">on develop</text>
+          <rect x="520" y="7" width="10" height="10" fill="#6e8bf5"/><text x="535" y="16" fill="#a4b4ca">on a branch</text>
+          <text x="272" y="51" fill="#a4b4ca" text-anchor="end">Baseline, 13 October evening</text><rect x="280" y="40" width="380.0" height="15" fill="#3a4a62"/><text x="666" y="51" fill="#edf4ff">502</text>
+          <text x="272" y="73" fill="#a4b4ca" text-anchor="end">HEVC frames skip table clears</text><rect x="280" y="62" width="356.5" height="15" fill="#30a46c"/><text x="642.5" y="73" fill="#edf4ff">471</text>
+          <text x="272" y="95" fill="#a4b4ca" text-anchor="end">Raw files resident in page-locked memory</text><rect x="280" y="84" width="253.6" height="15" fill="#6e8bf5"/><text x="539.6" y="95" fill="#edf4ff">335</text>
+          <text x="272" y="117" fill="#a4b4ca" text-anchor="end">Compositor takes only signalled inputs</text><rect x="280" y="106" width="243.7" height="15" fill="#6e8bf5"/><text x="529.7" y="117" fill="#edf4ff">322</text>
+          <text x="272" y="139" fill="#a4b4ca" text-anchor="end">Input hops: metadata, routing, one signal</text><rect x="280" y="128" width="200.6" height="15" fill="#6e8bf5"/><text x="486.6" y="139" fill="#edf4ff">265</text>
+          <text x="272" y="161" fill="#a4b4ca" text-anchor="end">Event loop does not wake itself</text><rect x="280" y="150" width="199.1" height="15" fill="#6e8bf5"/><text x="485.1" y="161" fill="#edf4ff">263</text>
+          <text x="272" y="183" fill="#a4b4ca" text-anchor="end">Program compositors look every 8 ms</text><rect x="280" y="172" width="189.2" height="15" fill="#6e8bf5"/><text x="475.2" y="183" fill="#edf4ff">250</text>
+          <text x="272" y="205" fill="#a4b4ca" text-anchor="end">Fan-out on the pacing loops</text><rect x="280" y="194" width="187.0" height="15" fill="#6e8bf5"/><text x="473.0" y="205" fill="#edf4ff">247</text>
+          <text x="272" y="227" fill="#a4b4ca" text-anchor="end">GPU memory builds</text><rect x="280" y="216" width="179.4" height="15" fill="#6e8bf5"/><text x="465.4" y="227" fill="#edf4ff">237</text>
+          <text x="272" y="249" fill="#a4b4ca" text-anchor="end">Coalesced queue signals</text><rect x="280" y="238" width="180.9" height="15" fill="#6e8bf5"/><text x="466.9" y="249" fill="#edf4ff">239</text>
+          <text x="272" y="271" fill="#a4b4ca" text-anchor="end">AUX compositors look every 8 ms</text><rect x="280" y="260" width="177.1" height="15" fill="#6e8bf5"/><text x="463.1" y="271" fill="#edf4ff">234</text>
+          <text x="280" y="300" fill="#a4b4ca">each bar is one 20 s reading, three to four minutes after that build started</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Measured. Bars are in the order the builds went onto the show. Readings of one build vary by a few points (236 to 243 for the same mixer later that morning), so steps of two or three points are within the noise; the large steps are not.</figcaption>
+  </figure>
+
+  <h2>Every step</h2>
+  <p>The running show: 192 sources at 1080p30 (105 HEVC files through NVDEC, 40 browser windows, 47 raw NV12 files), 256 scenes and 24 encoded outputs. Every figure is a 20-second reading of the mixer process from <code>/proc</code>, in % of one vCPU, three to four minutes after that build started. Every row: 0 missed deadlines and 0 output drops over its reading.</p>
+  <div class="measured">
+    <table>
+      <thead><tr><th>Change</th><th>Branch</th><th>Mixer</th><th>Threads</th><th>Runnable, no core</th></tr></thead>
+      <tbody>
+        <tr><td>Baseline</td><td>develop, 13 October</td><td>502</td><td>1,186</td><td>108</td></tr>
+        <tr><td>HEVC frames skip five software-only table clears</td><td>develop (FFmpeg patch 0020)</td><td>471</td><td>1,186</td><td>85</td></tr>
+        <tr><td>Raw files resident in page-locked memory</td><td><code>mixer/raw-preload</code></td><td>335</td><td>1,186</td><td>34</td></tr>
+        <tr><td>Compositor takes frames only from signalled inputs</td><td><code>mixer/compositor-signalled-inputs</code></td><td>322</td><td>1,186</td><td>43</td></tr>
+        <tr><td>Input hops: no metadata strings, no demux hop, one signal</td><td><code>mixer/input-hops</code></td><td>265</td><td>1,081</td><td>28</td></tr>
+        <tr><td>Event loop does not wake itself from its own thread</td><td><code>mixer/event-loop-self-wake</code></td><td>263</td><td>1,081</td><td>–</td></tr>
+        <tr><td>Program compositors look for frames every 8 ms</td><td><code>mixer/compositor-poll</code></td><td>250</td><td>1,081</td><td>–</td></tr>
+        <tr><td>Each source's fan-out on its pacing loop</td><td><code>mixer/fan-out-on-loop</code></td><td>247</td><td>889</td><td>–</td></tr>
+        <tr><td>GPU memory builds (<a href="gpu-memory.html">their own page</a>)</td><td><code>mixer/vram</code></td><td>241–248, then 237</td><td>889</td><td>–</td></tr>
+        <tr><td>An edge's events write only when the last write was read</td><td><code>mixer/coalesced-signals</code></td><td>239</td><td>–</td><td>–</td></tr>
+        <tr><td>Plus the fence-aware browser input</td><td><code>mixer/browser-acquire-fence</code></td><td>236–238</td><td>–</td><td>–</td></tr>
+        <tr><td>AUX compositors look for frames every 8 ms</td><td><code>mixer/aux-input-poll</code></td><td>234</td><td>–</td><td>–</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">“–”: not read for that build. Run-queue time was read for the evening's builds only. The <a href="chromium-zero-copy-export.html">zero-copy browser trial</a> ran between the last two rows; the mixer read 238–243 with it.</p>
+
+  <h2>Where it came from, by thread</h2>
+  <p>The evening's builds, before the first and after the input hops (% of one vCPU, all threads of a group together):</p>
+  <div class="measured">
+    <table>
+      <thead><tr><th>Thread group</th><th>Threads</th><th>Before</th><th>After</th><th>What moved it</th></tr></thead>
+      <tbody>
+        <tr><td>Reading threads, 47 raw and 105 compressed</td><td>152</td><td>139.7</td><td>27.3</td><td class="l">resident raw files: the 3.1 MB copy out of the page cache per picture is gone</td></tr>
+        <tr><td>Decoder threads</td><td>106</td><td>86.2</td><td>48.6</td><td class="l">the HEVC table clears (86 → 62), the metadata strings (57 → 49)</td></tr>
+        <tr><td>Program compositors A and B</td><td>2</td><td>59.5</td><td>24.2</td><td class="l">signalled inputs (53 → 39), the input-hop build (39 → 24)</td></tr>
+        <tr><td>AUX compositors</td><td>20</td><td>33.1</td><td>19.6</td><td class="l">the input-hop build (29 → 20)</td></tr>
+        <tr><td>Source fan-outs</td><td>152</td><td>27.2</td><td>19.0</td><td class="l">the input-hop build (25 → 19)</td></tr>
+        <tr><td>Event loops</td><td>5</td><td>32.5</td><td>26.0</td><td class="l">the input-hop build (29 → 26)</td></tr>
+        <tr><td>Demux threads</td><td>105</td><td>9.4</td><td>0</td><td class="l">the node is gone</td></tr>
+        <tr><td>Network senders</td><td>24</td><td>21.9</td><td>20.0</td><td class="l">unchanged</td></tr>
+        <tr><td>CUDA event handler</td><td>1</td><td>10.3</td><td>9.9</td><td class="l">unchanged</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>With the polling builds that followed, each Program compositor fell again, from 12.1 to 7.3&nbsp;%: the two together read 14.6&nbsp;%, against 59.5 that evening and about 98 earlier on 13 October, before <a href="compositor-wait.html">the wait used epoll</a>. At the end of the evening the whole host read about 3.0 vCPUs for the mixer, 1.7 for the browser container and 0.2 for the WebRTC gateway.</p>
+
+  <h2>The changes</h2>
+
+  <h2 id="hevc">HEVC frames skip the software decode tables · on develop</h2>
+  <p>A profile of the decoder threads found a quarter of their time in five <code>memset</code> calls in FFmpeg's <code>hevc_frame_start</code>: about 650 KB of per-picture tables cleared for every frame, about 66 of the 260&nbsp;µs a frame cost. Only FFmpeg's software decode and its loop filters read those tables, and with NVDEC doing the decode neither runs. FFmpeg patch 0020 skips the clears when a hardware decoder is in use; software decoding is unchanged. The decoder threads fell from 86 to 62&nbsp;%, the mixer from 502 to 471.</p>
+
+  <h2 id="resident">Raw files resident in page-locked memory · <code>mixer/raw-preload</code></h2>
+  <p>With <code>canvas.raw_upload: "direct"</code> (<a href="raw-uploads.html">raw frames read straight into page-locked memory</a>) each of the 1,410 raw pictures a second was still copied once by the kernel, out of the page cache. The <code>resident</code> mode keeps a looped file's pictures in one block of page-locked memory the size of the file: each picture is read into its place the first time it is shown, and on every later pass only the transfer to the GPU remains. Where a pass starts the node compares the file's modification time, and reads the file again if it has changed. The reading threads fell from 139.7 to 27.3&nbsp;%, the mixer from 471 to 335, and the time threads spent runnable without a core from 85 to 34.</p>
+  <ul class="where">
+    <li><b>Why not the page cache itself.</b> On this driver <code>cuMemHostRegister</code> refuses a read-only or shared file mapping, so the page cache cannot be what the GPU reads from. A private writable mapping registers, at the price of a copy of the file; the node does the same thing openly.</li>
+    <li><b>The cost.</b> Host memory equal to the files, and it cannot be swapped out: 8.8 GB for the show's 47 two-second clips. With resident sources the mixer process holds about 10 GB of host memory.</li>
+    <li><b>Is it still a real input?</b> Every picture of every source is still transferred to the GPU for every showing, on the source's own clock, so the GPU, the bus and the compositors carry the full load of 47 uncompressed 1080p30 inputs. What is skipped is the copy out of a file, which a capture card that writes into page-locked memory does not make either: for an uncompressed live input this is the honest shape. Keeping frames on the GPU and replaying them stays <a href="rejected.html">rejected</a>.</li>
+  </ul>
+
+  <h2 id="signalled">The compositor takes frames only from inputs that signalled · <code>mixer/compositor-signalled-inputs</code></h2>
+  <p>A Program compositor woke about 2,700 times a second and on every wake looked at all 192 input queues for new frames: 26&nbsp;% of its time was in the queue's <code>peek</code>. The engine's wait for several events, which <a href="compositor-wait.html">already used epoll</a>, now says which events fired, and a pass takes frames only from those sources. The two Program compositors together fell from 53 to 39&nbsp;%.</p>
+
+  <h2 id="hops">Input hops · <code>mixer/input-hops</code></h2>
+  <p>Three changes in one build, measured together (322 → 265&nbsp;%, 1,186 → 1,081 threads):</p>
+  <ul class="where">
+    <li><b>No metadata strings.</b> <code>input_rec</code> stamped eight timestamp keys as formatted strings on every decoded frame, and every hand-off after it copied that dictionary. Nothing in the mixer's path reads them; <code>frame_metadata</code> now selects the keys, and the mixer asks for none. Decoder threads 57 → 49&nbsp;%.</li>
+    <li><b>No demux hop for one-stream files.</b> With <code>routing</code>, <code>input_rec</code> sends the video stream to the decoder's edge itself, and the per-file <code>demux</code> node and its thread are gone: 105 threads. <code>canvas.input_routing</code> is <code>input</code> by default; <code>demux</code> restores the earlier wiring. The node-group ordering rule knew only <code>demux</code> as a routing node, which the AUX smoke test found.</li>
+    <li><b>One signal per hand-off.</b> Putting a frame on an edge signalled the other side twice; the second write woke nobody.</li>
+  </ul>
+
+  <h2 id="poll">Compositors look for frames at an interval · <code>mixer/compositor-poll</code>, <code>mixer/aux-input-poll</code></h2>
+  <p>A compositor's playout only ever draws at a tick's deadline, so waking for every arriving frame only moves frames from one queue to another earlier than needed. With <code>canvas.input_poll_ms</code> a Program compositor sleeps to its next deadline and looks for frames at most that often in between, and at once for a cut. At 8&nbsp;ms each Program compositor fell from 12.1 to 7.3&nbsp;%, and its wakes from 3,400 to 230 a second. <code>canvas.aux_input_poll_ms</code> does the same for the AUX buses: at 8&nbsp;ms the 20 AUX compositors fell from 20.6 to 17.6&nbsp;% (264 to 184 wakes a second each) and the event loops from 31.4 to 28.6&nbsp;%, about 4 points in all. A tick is drawn at its deadline either way; a source's queue of three frames must hold what arrives within one interval, and 8&nbsp;ms suits rates up to 60 fps.</p>
+
+  <h2 id="fan-out">Fan-out on the pacing loops · <code>mixer/fan-out-on-loop</code></h2>
+  <p>Every source had a <code>one_to_many</code> node and thread that woke once per frame to hand the frame to its compositors and AUX buses, 47&nbsp;% of it in the kernel. With <code>canvas.source_fan_out: "event_loop"</code> the fan-out (<code>one_to_many_nb</code>) runs on the event loop that already paces the source: 192 threads fewer (1,081 → 889). It saved no CPU: the 20 points moved onto the event loops (24 → 44&nbsp;%), which then cost about 25&nbsp;µs per handler because the loop rebuilt and polled its whole descriptor list on every pass. The first try failed to start because the setup's readiness check knew only the node type <code>one_to_many</code>; fixed.</p>
+
+  <h2 id="event-loop">The event loop · <code>mixer/event-loop-self-wake</code>, <code>mixer/coalesced-signals</code></h2>
+  <ul class="where">
+    <li><b>No self wake-ups.</b> A handler that registered its next wait from inside the loop woke the loop again; now a wait, work or a timer added from the loop's own thread does not wake it.</li>
+    <li><b>The kernel holds the waits.</b> The loop now keeps its waits in epoll with one-shot registrations instead of rebuilding a <code>poll()</code> list every pass. In a load test of 200 sources a handler cost 16&nbsp;µs against 28, and the test is clean under the thread sanitizer. Its first two starts on the show failed, because every start of the show then ran the GPU out of memory and this time a raw reader took the failed allocation (<a href="gpu-memory.html">GPU memory</a> has the fix). It runs in the builds the show has used since; its share was not read on its own.</li>
+    <li><b>Coalesced signals.</b> Every push and pop on an edge wrote its eventfd whether or not anyone waited. Now a write happens only if the last one was read; each reader (a single wait, the multi-event wait, the event loop) clears the flag after its read and checks its condition again. The Program compositors' writes fell from 5,700 to 61 a second each, the event loops' from 33,274 to 15,051, and with the AUX interval to 10,433. That is about 2 points of CPU, within the noise of the total. A unit test with a mutation check covers lost wake-ups, re-arming by each reader and reused descriptor numbers, clean under the thread sanitizer.</li>
+  </ul>
+
+  <h2>What did not help, and what is left</h2>
+  <ul class="where">
+    <li><b>NVENC <code>delay: 1</code> instead of 0.</b> No change at 1080p30: 1.6 to 2.05&nbsp;% per encoder thread either way. The encoder threads' 600 wakes a second are NVIDIA's own wait inside <code>nvEncLockBitstream</code>. Left at 0.</li>
+    <li><b>The decoder threads.</b> A profile of all 106: C library 23&nbsp;% (two copies of the bitstream, about 8&nbsp;%, and allocation), FFmpeg 19&nbsp;%, NVIDIA's two libraries 28&nbsp;% (including string formatting inside the CUDA driver library), kernel 14&nbsp;% (context switches). Nothing large that is ours to change.</li>
+    <li><b>The network senders</b>, about 20 points: one <code>sendto</code> per RTP packet. Batching or UDP segmentation would be an FFmpeg patch.</li>
+    <li><b>The CUDA event handler</b>, about 10 points: woken about 3,600 times a second, 1,410 of them by the raw readers' stream synchronisation.</li>
+  </ul>
+
+  <h2 id="vcpu">On 8 vCPUs</h2>
+  <p>The stack's containers confined with a cpuset to fewer vCPUs (whole cores, both hyper-threads of each), after the evening's changes; the confinement reverts at the first missed deadline or drop.</p>
+  <div class="measured">
+    <table>
+      <thead><tr><th>Where</th><th>vCPUs</th><th>Minutes</th><th>Missed deadlines</th><th>Output drops</th><th>Runnable, no core</th><th>Program compositor, waiting</th></tr></thead>
+      <tbody>
+        <tr><td>Second L4 host, no viewers</td><td>16</td><td>2.5</td><td>0</td><td>0</td><td>17</td><td>0.6</td></tr>
+        <tr><td>Second L4 host</td><td>12</td><td>2.5</td><td>0</td><td>0</td><td>53</td><td>1.8</td></tr>
+        <tr><td>Second L4 host</td><td>8</td><td>2.5</td><td>0</td><td>0</td><td>185</td><td>7.2</td></tr>
+        <tr><td>Second L4 host</td><td>6</td><td>2.5</td><td>0</td><td>0</td><td>496</td><td>15.2</td></tr>
+        <tr><td>Demo host, live</td><td>8</td><td>7</td><td>0</td><td>0</td><td>296</td><td>8.7</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul class="where">
+    <li>The same 8 vCPU confinement on 13 October, before these changes, gave 2 output drops and 1,152&nbsp;% of run-queue time.</li>
+    <li>What the confinement does not show: a real 8 vCPU machine also confines the kernel's and the driver's threads, and has 32 GB of memory (the mixer holds about 10 GB with resident sources, the browser 1.9).</li>
+  </ul>
+
+  <h2>The settings the show runs</h2>
+<pre>"canvas": {
+  "raw_upload": "resident",
+  "input_poll_ms": 8,
+  "aux_input_poll_ms": 8,
+  "source_fan_out": "event_loop"
+}</pre>
+  <p><code>input_routing</code> is <code>input</code> by default on the branch, and the metadata and signal changes have no setting. Setup builds shows with <code>raw_upload: "direct"</code> and leaves the others unset, which is the earlier behaviour.</p>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b>Raw pictures kept in page-locked memory, one decoder patch, fewer hops and strings per frame, compositors that take only what signalled and look at an interval, fan-outs on the pacing loops, an epoll event loop, and queue signals written only when someone will read them.</li>
+    <li><b>Why</b>At 192 sources the mixer's CPU went on per-frame plumbing: copies out of the page cache, cleared tables, formatted strings, thread hops and wake-ups. None of it touched pixels the viewer sees.</li>
+    <li><b>Latency</b>0 frames added. Ticks are drawn at the same deadlines; with an interval a frame is taken in up to 8&nbsp;ms later, still before its tick, and a cut looks at once.</li>
+    <li class="flag"><b>Side effects</b>Resident raw sources hold their files in unswappable host memory (8.8 GB for 47). The fan-out on the loops moves CPU onto them rather than saving it. An interval needs a source queue that covers it.</li>
+    <li><b>Cost</b>No new nodes or queues; two fewer kinds of thread (demux and fan-out). Four new <code>canvas</code> settings and a <code>raw_upload</code> mode, all off by default except <code>input_routing</code>.</li>
+    <li class="flag"><b>Risk</b>Eight branches not yet merged. The evening builds ran the full show on a second L4 host before the demo host; the later ones went in after the Python suite, the C++ unit tests, CPU smokes and light GPU smokes. Measured on one show at 1080p30; 25, 50 and 60 fps not re-measured.</li>
+    <li><b>Switch it off</b><code>raw_upload: "direct"</code>, <code>input_routing: "demux"</code>, <code>input_poll_ms</code> and <code>aux_input_poll_ms</code> unset or 0, <code>source_fan_out: "thread"</code>. The metadata, signal, event-loop and decoder changes have no switch; revert the commits.</li>
+  </ul>
+
+  <h2>Related pages</h2>
+  <ul class="where">
+    <li><a href="raw-uploads.html">Raw frames read straight into the memory the GPU reads</a>: the <code>direct</code> mode this builds on.</li>
+    <li><a href="compositor-wait.html">The compositor's wait costs the frames that arrived</a> and <a href="event-loops.html">Event-loop sharding</a>: the earlier steps on the same threads, and how the per-thread readings are taken.</li>
+    <li><a href="gpu-memory.html">GPU memory: frames no tick can show any more</a>: the memory changes made on the same nights.</li>
+    <li><a href="chromium-zero-copy-export.html">Chromium paints into the buffer the mixer reads</a>: the browser's side of the same show.</li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/3353d8148ade7ccff9d1647ef3523c9b03aa2e04/deps/ffmpeg/9/0020-avcodec-hevc-hwaccel-frame-start.patch"><code>deps/ffmpeg/9/0020-avcodec-hevc-hwaccel-frame-start.patch</code></a> (develop): the table clears skipped under a hardware decoder.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/6243c93099ce831127ef55783a5d31ab0839356f/src/nodes/hwaccel/raw_video_file_cuda.cpp"><code>src/nodes/hwaccel/raw_video_file_cuda.cpp</code></a> (<code>mixer/raw-preload</code>): <code>resident</code>, the block the size of the file and the check of the file's modification time.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/6b06c59f3841b54d2ac5a4ab722c133dbfb278e2/src/MultiEventWait.hpp"><code>src/MultiEventWait.hpp</code></a> and <a href="https://github.com/amagimedia/avplumber/blob/6b06c59f3841b54d2ac5a4ab722c133dbfb278e2/src/nodes/mixer_compositor.cpp"><code>src/nodes/mixer_compositor.cpp</code></a> (<code>mixer/compositor-signalled-inputs</code>): which events fired, and a pass over those inputs only.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/4056f3728ef4349579be68baaf0266a6df2e8893/src/nodes/input_rec.cpp"><code>src/nodes/input_rec.cpp</code></a> and <a href="https://github.com/amagimedia/avplumber/blob/4056f3728ef4349579be68baaf0266a6df2e8893/src/graph_core.hpp"><code>src/graph_core.hpp</code></a> (<code>mixer/input-hops</code>): <code>frame_metadata</code>, <code>routing</code>, and one signal per hand-off.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/5b3a632024564efe299b1f2ba2afe574ce9ad471/src/nodes/mixer_compositor.cpp"><code>src/nodes/mixer_compositor.cpp</code></a> (<code>mixer/compositor-poll</code>): <code>input_poll_ms</code>; <a href="https://github.com/amagimedia/avplumber/blob/99e18ea2745bba1a0327ee375ac8da9f25d1b21a/pyplumber/mixer/aux.py"><code>pyplumber/mixer/aux.py</code></a> (<code>mixer/aux-input-poll</code>): the same for the AUX buses.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/f5f434414d54d463022eaf3721c8e42ba596c70d/src/nodes/one_to_many_nb.cpp"><code>src/nodes/one_to_many_nb.cpp</code></a> (<code>mixer/fan-out-on-loop</code>): the fan-out on an event loop.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/78976cdb1d31c602557c26e908eca11ae86e4508/src/EventLoop.hpp"><code>src/EventLoop.hpp</code></a> (<code>mixer/event-loop-self-wake</code>): the loop on epoll, and no wake from its own thread.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/0d67e02523a41e82b6398882edf397984aa2169d/src/Event.hpp"><code>src/Event.hpp</code></a> (<code>mixer/coalesced-signals</code>): a queue's event writes its descriptor once per read.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/7310870e214a0924ea6ec850648fa6779a781b0d/demos/mixer/docs/config.md#canvas">config.md · canvas</a> (<code>mixer/vram</code>, which carries the earlier branches): <code>raw_upload</code>, <code>input_routing</code>, <code>input_poll_ms</code>, <code>source_fan_out</code>.</li>
+  </ul>
+  <p class="note">Source links are pinned to the branch commits that run in the show, or to <code>develop</code> where the change has landed.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>
