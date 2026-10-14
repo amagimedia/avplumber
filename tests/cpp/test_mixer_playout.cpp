@@ -1,4 +1,5 @@
 #include "mixer/Playout.hpp"
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <limits>
@@ -206,6 +207,32 @@ void bounded_queue_counts_overflow() {
     for (int id = 0; id < 100; ++id) mix.push(0, id, id * 1000000000LL / 60);
     CHECK(mix.queued(0) <= 8);
     CHECK(mix.stats(0).overflow == 92);
+}
+
+void input_queue_limit_holds_fewer_frames_and_keeps_the_due_one() {
+    // A zero-copy browser lends a fixed pool: its input is held to a limit below the queue's
+    // capacity, the oldest waiting frame goes first, and the frame due at a tick still shows.
+    avp::mixer::Playout<int> mix(2, avp::mixer::TickGrid(av::Rational(60, 1)), 100.0 / 3,
+                                avp::mixer::TimestampMode::Presentation);
+    mix.setInputQueueLimit(0, 3);
+    CHECK(mix.inputQueueLimit(0) == 3 && mix.inputQueueLimit(1) == 8);
+    for (int id = 0; id < 10; ++id) {
+        mix.push(0, id, id * 1000000000LL / 60);
+        mix.push(1, 100 + id, id * 1000000000LL / 60);
+    }
+    CHECK(mix.queued(0) == 3 && mix.queued(1) == 8);
+    CHECK(mix.stats(0).overflow == 7 && mix.stats(1).overflow == 2);
+    // Tick 9 is due at its time plus the two-tick latency: the limited input shows frame 9.
+    const auto *decision = mix.prepare(9 * 1000000000LL / 60 + 100000000 / 3 + 1);
+    CHECK(decision && decision->frames[0] && *decision->frames[0] == 9);
+    mix.commit();
+    CHECK(mix.queued(0) == 0);
+    bool rejected = false;
+    for (size_t bad : {size_t(0), size_t(9)}) {
+        try { mix.setInputQueueLimit(0, bad); } catch (const std::invalid_argument &) { rejected = true; }
+        CHECK(rejected);
+        rejected = false;
+    }
 }
 
 void latency_cannot_exceed_retained_frames() {
@@ -785,6 +812,89 @@ void prewarm_activation_keeps_the_reset_threshold() {
     CHECK(mix.queued(0) == 0 && mix.queued(1) == 0);
 }
 
+void a_playout_that_cannot_tick_keeps_only_what_a_tick_can_still_show() {
+    // The start of a show: one input has no picture yet, so no tick is drawn, while the others
+    // deliver a frame every tick. Each frame kept is a device buffer; once its successor is at
+    // or before the tick that is due, no tick will ever show it.
+    const avp::mixer::TickGrid rate(av::Rational(30, 1));
+    avp::mixer::Playout<int> mix(2, rate, {}, avp::mixer::TimestampMode::Presentation);
+    size_t most = 0;
+    for (int frame = 0; frame < 90; ++frame) {
+        const int64_t now = rate.time(frame) + 1000000;   // each frame arrives 1 ms after its stamp
+        mix.push(0, frame, rate.time(frame));
+        mix.discardSuperseded(now);
+        CHECK(!mix.prepare(now, true));
+        most = std::max(most, mix.queued(0));
+    }
+    // The frames of the ticks not yet due (two of latency), the one on the due tick, the arriving one.
+    CHECK(most <= 4);
+    // The late input's first picture: the tick drawn shows input 0's frame of that same tick.
+    mix.push(1, 1000, rate.time(89));
+    const int64_t deadline = rate.time(89) + mix.latencyNs();
+    const auto first = mix.prepare(deadline, true);
+    CHECK(first && first->index == 89 && *first->frames[0] == 89 && *first->frames[1] == 1000);
+}
+
+void discarding_superseded_frames_never_changes_what_is_drawn() {
+    // Two playouts fed the same frames, one of them discarding what no tick can show any more:
+    // every decision must be the same picture for every input. Inputs: on the tick grid, at
+    // twice the rate, half a tick off phase with jitter, delayed by an offset, and one that
+    // stalls for long stretches; the caller itself wakes late now and then.
+    const avp::mixer::TickGrid rate(av::Rational(30, 1));
+    const int inputs = 5;
+    avp::mixer::Playout<int> plain(inputs, rate, 70.0, avp::mixer::TimestampMode::Presentation);
+    avp::mixer::Playout<int> lean(inputs, rate, 70.0, avp::mixer::TimestampMode::Presentation);
+    plain.setInputOffset(3, 1);
+    lean.setInputOffset(3, 1);
+    uint64_t seed = 12345;
+    const auto random = [&](uint64_t bound) {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        return (seed >> 33) % bound;
+    };
+    const int64_t tick = rate.time(1);
+    int64_t next_stamp[inputs] = {0, 0, tick / 2, 0, 0};
+    const int64_t period[inputs] = {tick, tick / 2, tick, tick, tick};
+    int id = 0, decisions = 0;
+    size_t most_plain = 0, most_lean = 0;
+    for (int64_t now = 0; now < rate.time(4000); now += tick / 4) {
+        for (int i = 0; i < inputs; ++i) {
+            const bool stalled = i == 4 && (now / rate.time(300)) % 2 == 1;   // ten seconds on, ten off
+            while (next_stamp[i] + int64_t(random(3000000)) <= now) {
+                if (!stalled) {
+                    plain.push(i, id, next_stamp[i]);
+                    lean.push(i, id, next_stamp[i]);
+                }
+                ++id;
+                next_stamp[i] += period[i];
+            }
+        }
+        if (random(40) == 0) now += tick * int64_t(random(6));   // the caller wakes late
+        lean.discardSuperseded(now);
+        const bool all = (now / rate.time(700)) % 2 == 0;        // with and without waiting for every input
+        const auto a = plain.prepare(now, all);
+        const auto b = lean.prepare(now, all);
+        CHECK(bool(a) == bool(b));
+        if (a) {
+            CHECK(a->index == b->index);
+            for (int i = 0; i < inputs; ++i) {
+                CHECK(bool(a->frames[i]) == bool(b->frames[i]));
+                CHECK(!a->frames[i] || *a->frames[i] == *b->frames[i]);
+            }
+            plain.commit();
+            lean.commit();
+            ++decisions;
+        }
+        for (int i = 0; i < inputs; ++i) {
+            most_plain = std::max(most_plain, plain.queued(i));
+            most_lean = std::max(most_lean, lean.queued(i));
+        }
+    }
+    CHECK(decisions > 3000);
+    CHECK(plain.missedDeadlines() == lean.missedDeadlines());
+    for (int i = 0; i < inputs; ++i) CHECK(plain.stats(i).repeats == lean.stats(i).repeats);
+    CHECK(most_plain == 8 && most_lean < 8);
+}
+
 int main(int argc, char **argv) {
     const std::pair<const char *, void (*)()> cases[] = {
         {"prewarm_activation_keeps_the_reset_threshold", prewarm_activation_keeps_the_reset_threshold},
@@ -797,6 +907,7 @@ int main(int argc, char **argv) {
         {"rational_source_drift_does_not_amplify", rational_source_drift_does_not_amplify},
         {"sparse_missing_paints_do_not_amplify_into_persistent_losses", sparse_missing_paints_do_not_amplify_into_persistent_losses},
         {"latency_cannot_exceed_retained_frames", latency_cannot_exceed_retained_frames},
+        {"input_queue_limit_holds_fewer_frames_and_keeps_the_due_one", input_queue_limit_holds_fewer_frames_and_keeps_the_due_one},
         {"resumed_source_is_live_after_an_eof_marker", resumed_source_is_live_after_an_eof_marker},
         {"presentation_phase_on_half_tick_keeps_every_frame", presentation_phase_on_half_tick_keeps_every_frame},
         {"route_reset_rejects_old_frames_still_in_upstream_edges", route_reset_rejects_old_frames_still_in_upstream_edges},
@@ -819,6 +930,8 @@ int main(int argc, char **argv) {
         {"missed_deadlines_do_not_catch_up_in_bursts", missed_deadlines_do_not_catch_up_in_bursts},
         {"a_pending_tick_says_what_it_skipped_and_which_input_held_it_back", a_pending_tick_says_what_it_skipped_and_which_input_held_it_back},
         {"idle_and_warm_up_gaps_are_not_missed_deadlines", idle_and_warm_up_gaps_are_not_missed_deadlines},
+        {"a_playout_that_cannot_tick_keeps_only_what_a_tick_can_still_show", a_playout_that_cannot_tick_keeps_only_what_a_tick_can_still_show},
+        {"discarding_superseded_frames_never_changes_what_is_drawn", discarding_superseded_frames_never_changes_what_is_drawn},
     };
     try {
         for (const auto &test : cases) {
