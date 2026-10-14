@@ -15,12 +15,52 @@
 
 #include <avcpp/frame.h>
 
+#include <algorithm>
+#include <atomic>
+
 extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
+#include <libavutil/imgutils.h>
 }
 
 class CudaPinnedUploader {
+    // The frames pool, bounded when asked: FFmpeg's own grows to the most frames ever out at
+    // once and keeps them for its life, so one stall of the consumers sets the device memory
+    // of the source for good. The pool's state lives as long as FFmpeg's pool, which frames
+    // still out keep alive after this uploader has gone.
+    struct Pool {
+        CUcontext context;
+        int limit;   // 0: no limit
+        std::atomic<int> allocated{0};
+    };
+    Pool *pool_ = nullptr;   // owned by frames_' pool: deleted by forget()
+    static void forget(void *opaque) { delete static_cast<Pool *>(opaque); }
+    static AVBufferRef *allocate(void *opaque, size_t size) {
+        auto *pool = static_cast<Pool *>(opaque);
+        if (pool->limit > 0 && pool->allocated.load() >= pool->limit) return nullptr;
+        CUdeviceptr data = 0;
+        if (cuCtxPushCurrent(pool->context) != CUDA_SUCCESS) return nullptr;
+        const bool ok = cuMemAlloc(&data, size) == CUDA_SUCCESS;
+        CUcontext previous;
+        cuCtxPopCurrent(&previous);
+        if (!ok) return nullptr;
+        AVBufferRef *buffer = av_buffer_create(reinterpret_cast<uint8_t *>(data), size, &CudaPinnedUploader::free, pool, 0);
+        if (!buffer) {
+            free(pool, reinterpret_cast<uint8_t *>(data));
+            return nullptr;
+        }
+        ++pool->allocated;
+        return buffer;
+    }
+    static void free(void *opaque, uint8_t *data) {
+        auto *pool = static_cast<Pool *>(opaque);
+        if (cuCtxPushCurrent(pool->context) == CUDA_SUCCESS) {
+            cuMemFree(reinterpret_cast<CUdeviceptr>(data));
+            CUcontext previous;
+            cuCtxPopCurrent(&previous);
+        }
+    }
     std::shared_ptr<HWAccelDevice> device_;
     AVCUDADeviceContext *cuda_ = nullptr;
     RawPictureLayout layout_;
@@ -49,9 +89,10 @@ class CudaPinnedUploader {
 public:
     /// `write_combined`: the block is write-combined memory. Nothing may ever read it on the
     /// CPU then; whether filling it is cheaper depends on who writes it and is to be measured.
-    /// `pictures`: how many pictures the block holds.
+    /// `pictures`: how many pictures the block holds. `pool_frames`: at most that many device
+    /// frames, 0 for as many as are ever out at once.
     CudaPinnedUploader(std::shared_ptr<HWAccelDevice> device, AVPixelFormat sw_format, int width, int height,
-                       bool write_combined = false, size_t pictures = 1):
+                       bool write_combined = false, size_t pictures = 1, int pool_frames = 0):
         device_(std::move(device)), layout_(sw_format, width, height) {
         if (!device_ || device_->hardwarePixelFormat() != AV_PIX_FMT_CUDA)
             throw Error("pinned upload: a CUDA hwaccel is required");
@@ -66,8 +107,20 @@ public:
         frames->sw_format = sw_format;
         frames->width = width;
         frames->height = height;
+        // The size hwcontext_cuda gives each frame of its own pool, which lays the planes out in it.
+        constexpr int kCudaFrameAlignment = 256;
+        const int frame_bytes = av_image_get_buffer_size(sw_format, width, height, kCudaFrameAlignment);
+        pool_ = new Pool{cuda_->cuda_ctx, pool_frames};
+        frames->pool = av_buffer_pool_init2(size_t(std::max(frame_bytes, 0)), pool_, &CudaPinnedUploader::allocate,
+                                            &CudaPinnedUploader::forget);
+        if (!frames->pool) {
+            delete pool_;
+            pool_ = nullptr;
+        }
         std::string error;
-        if (const int r = av_hwframe_ctx_init(frames_); r < 0)
+        if (frame_bytes <= 0 || !frames->pool)
+            error = "cannot lay out a frames pool";
+        else if (const int r = av_hwframe_ctx_init(frames_); r < 0)
             error = "av_hwframe_ctx_init: " + av::error2string(r);
         else if (!failed(cuCtxPushCurrent(cuda_->cuda_ctx), "cuCtxPushCurrent", error)) {
             // The bundled dynamic-loader header omits CU_STREAM_NON_BLOCKING (0x1).
@@ -87,6 +140,9 @@ public:
     CudaPinnedUploader(const CudaPinnedUploader &) = delete;
     CudaPinnedUploader &operator=(const CudaPinnedUploader &) = delete;
     ~CudaPinnedUploader() { release(); }
+
+    /// Device frames the pool has made so far.
+    int framesAllocated() const { return pool_ ? pool_->allocated.load() : 0; }
 
     /// Where a picture goes: `layout().frame_size` bytes, planes at `layout().plane_offset`.
     /// Free to write whenever upload() is not running.

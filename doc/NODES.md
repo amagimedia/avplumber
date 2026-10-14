@@ -807,6 +807,9 @@ Parameters:
     `one_to_many`: `color_trc`, `color_primaries`, `colorspace`, `color_range`
 -   `write_combined` (bool, default `false`) - allocate the page-locked memory write-combined.
     Whether that makes the read cheaper depends on the host; measure before using it.
+-   `pool_frames` (int, default `0`: no bound) - at most this many device frames. FFmpeg's pool
+    grows to the most frames ever out at once and keeps them; bounded, the node waits (up to five
+    seconds, as it does for device memory) until one comes back. `stats` reports `frames_allocated`.
 -   `resident` (bool, default `false`) - with `loop`: keep the file's pictures in the
     page-locked memory. Each is read when it is first shown and only transferred after that,
     so a pass after the first reads nothing. Where a pass starts the node compares the file's

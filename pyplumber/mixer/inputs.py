@@ -184,7 +184,8 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
                        pixel_format: str, fps: int, fps_den: int = 1,
                        hwaccel: str = "@gpu", loop: bool = False, event_loop: Optional[str] = None,
                        pinned: bool = False, direct: bool = False, resident: bool = False, native_rate: bool = False,
-                       color=None, frame_metadata: Optional[Sequence[str]] = None, demux: bool = True) -> str:
+                       color=None, frame_metadata: Optional[Sequence[str]] = None, demux: bool = True,
+                       pool_frames: Optional[int] = None) -> str:
     """CPU/GPU interop source: raw NV12/P010 file -> CUDA frames -> paced output edge.
 
     Default: ``input_rec -> demux -> dec_video(rawvideo) -> filter(setpts) ->
@@ -221,6 +222,7 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
             "name": f"input_{tag}", "url": path, "dst": uploaded, "hwaccel": hwaccel, "group": group,
             "pixel_format": pixel_format, "video_size": f"{width}x{height}", "framerate": f"{fps}/{fps_den}",
             "loop": loop, "loop_continuous_ts": loop, **({"resident": True} if resident and loop else {}),
+            **({} if pool_frames is None else {"pool_frames": pool_frames}),
             **({"frame_color": Color.parse(color).tags} if color is not None else {}),
             **_raw_file_restart(loop),
         }))

@@ -43,6 +43,7 @@ protected:
     bool send_eof_ = true;
     bool write_combined_ = false;
     bool resident_ = false;
+    int pool_frames_ = 0;
     FrameColorTags color_;
     std::shared_ptr<HWAccelDevice> hwaccel_;
 
@@ -99,7 +100,7 @@ public:
             logstream << "raw_video_file_cuda: " << path_ << " ends with part of a picture, which is not shown";
         if (resident_) held_.assign(size_t(index_->frames), false);
         uploader_ = std::make_unique<CudaPinnedUploader>(hwaccel_, sw_format_, width_, height_, write_combined_,
-                                                         resident_ ? held_.size() : 1);
+                                                         resident_ ? held_.size() : 1, pool_frames_);
     }
 
     void process() override {
@@ -126,11 +127,11 @@ public:
         if (!waitForDeviceMemory([&] { return uploader_->upload(frame, slot); },
                                  [&](int ms) {
                                      if (!std::exchange(waited, true))
-                                         logstream << "raw_video_file_cuda: " << path_ << ": no device memory for a picture, waiting";
+                                         logstream << "raw_video_file_cuda: " << path_ << ": no device frame free for a picture, waiting";
                                      std::this_thread::sleep_for(std::chrono::milliseconds(ms));
                                  },
                                  kDeviceMemoryWaitMs, [&] { return bool(this->finished_); }))
-            throw Error("raw_video_file_cuda: " + path_ + ": no device memory for a picture in " +
+            throw Error("raw_video_file_cuda: " + path_ + ": no device frame free for a picture in " +
                         std::to_string(kDeviceMemoryWaitMs / 1000) + " s");
         const auto uploaded = Clock::now();
 
@@ -163,7 +164,7 @@ public:
         if (key != "stats") throw Error("raw_video_file_cuda: unknown object " + key);
         const uint64_t frames = frames_.load();
         return {{"frames", frames}, {"passes", index_ ? frames / uint64_t(index_->frames) : 0},
-                {"file_reads", file_reads_.load()}, {"read_us", read_us_.load()}, {"upload_us", upload_us_.load()}};
+                {"file_reads", file_reads_.load()}, {"frames_allocated", uploader_ ? uploader_->framesAllocated() : 0}, {"read_us", read_us_.load()}, {"upload_us", upload_us_.load()}};
     }
 
     ~RawVideoFileCuda() {
@@ -196,6 +197,8 @@ public:
         r->send_eof_ = params.value("send_eof", true);
         r->write_combined_ = params.value("write_combined", false);
         r->resident_ = r->loop_ && params.value("resident", false);
+        r->pool_frames_ = params.value("pool_frames", 0);
+        if (r->pool_frames_ < 0) throw Error("raw_video_file_cuda: pool_frames must not be negative");
         if (params.count("frame_color")) r->color_ = FrameColorTags::parse(params["frame_color"]);
         r->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
         if (!r->hwaccel_ || r->hwaccel_->hardwarePixelFormat() != AV_PIX_FMT_CUDA)
