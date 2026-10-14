@@ -773,7 +773,8 @@ void NodeGroup::collectGarbage() {
 namespace NodeGroupUtils {
     static std::list<std::string> offers(Parameters& params) {
         std::list<std::string> we_offer;
-        if (params["type"]=="demux") {
+        // A node that gives each stream its own edge (demux, input_rec) names them in `routing`.
+        if (params.count("routing")==1 && params.count("dst")==0) {
             Parameters routing = params["routing"];
             for (Parameters::iterator route = routing.begin(); route != routing.end(); ++route) {
                 we_offer.push_back(route.value());

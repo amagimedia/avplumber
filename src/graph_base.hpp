@@ -251,6 +251,11 @@ protected:
     void waitForInput(int timeout_ms = -1) {
         event_wait_->wait(timeout_ms);
     }
+    // As waitForInput(), and `signalled` receives the indexes of the sources whose edges were
+    // given something since the previous wait; source_edges_.size() stands for stop().
+    void waitForInput(int timeout_ms, std::vector<uint32_t> &signalled) {
+        event_wait_->wait(timeout_ms, &signalled);
+    }
 public:
     virtual void stop() {
         stopping_ = true;
