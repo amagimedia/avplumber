@@ -285,7 +285,7 @@ class HostStats:
 
 
 def thread_kinds(used, tick_seconds, limit):
-    """Threads summed by kind: [{"name", "count", "pct", "max_pct"}], the kind that used the most
+    """Threads summed by kind: [{"name", "count", "pct", "avg_pct", "max_pct"}], the kind that used the most
     CPU in total first (then the one with the busiest thread), at most *limit* kinds and then the
     rest as "other". *used* holds (ticks, thread name).
 
@@ -309,24 +309,26 @@ def thread_kinds(used, tick_seconds, limit):
                                   max=max(kinds[shorter]["max"], longer["max"]))
     pct = lambda ticks: round(ticks * 100 / tick_seconds, 1) if tick_seconds > 0 else 0.0
     ranked = sorted(kinds.items(), key=lambda item: (-item[1]["ticks"], -item[1]["max"], item[0]))
-    rows = [{"name": name, "count": k["count"], "pct": pct(k["ticks"]), "max_pct": pct(k["max"])} for name, k in ranked[:limit]]
+    row = lambda name, count, ticks, most: {"name": name, "count": count, "pct": pct(ticks),
+                                            "avg_pct": pct(ticks / count), "max_pct": pct(most)}
+    rows = [row(name, k["count"], k["ticks"], k["max"]) for name, k in ranked[:limit]]
     rest = [k for _, k in ranked[limit:]]
     if rest:
-        rows.append({"name": "other", "count": sum(k["count"] for k in rest), "pct": pct(sum(k["ticks"] for k in rest)),
-                     "max_pct": pct(max(k["max"] for k in rest))})
+        rows.append(row("other", sum(k["count"] for k in rest), sum(k["ticks"] for k in rest), max(k["max"] for k in rest)))
     return rows
 
 
 class BrowserCpuStats:
     """Chromium's CPU use, from the browser service's GET /metrics/cpu (deps/dma-browser): the mixer
-    container cannot see the browser container's processes. Polled once a second on one thread and
+    container cannot see the browser container's processes. Polled every 5 s on one thread and
     shared by every viewer. `values` is chromium_summary() of the last answer, or None until the
     second answer (the first only takes the service's baseline) and while the service is down. A
     browser image without the endpoint answers 404; it is asked again every `absent_s` seconds."""
 
     PATH = "/metrics/cpu"
 
-    def __init__(self, base_url: str, period_s: float = 1, absent_s: float = 30, timeout_s: float = 1, fetch=None):
+    # Every 5 s: the hover needs no more, and each answer costs the browser service a /proc read.
+    def __init__(self, base_url: str, period_s: float = 5, absent_s: float = 30, timeout_s: float = 1, fetch=None):
         self.base_url = base_url.rstrip("/")
         self.period_s, self.absent_s, self.timeout_s = period_s, absent_s, timeout_s
         self.fetch = fetch or self._fetch
@@ -371,7 +373,7 @@ CHROMIUM_BUSIEST_CORES = 4
 
 def chromium_summary(raw):
     """The page's Chromium section from one GET /metrics/cpu answer, or None while the answer has
-    no interval yet. Rows have the THREAD tip's shape, {"name", "count", "pct", "max_pct"}: the
+    no interval yet. Rows have the THREAD tip's shape, {"name", "count", "pct", "avg_pct", "max_pct"}: the
     process types the largest total first, the GPU process's threads in a fixed order (viz
     compositor, GPU main, IO, other), and the cores Chromium used most, each with the host's own
     use of that core."""
@@ -385,7 +387,8 @@ def chromium_summary(raw):
             name, count, pct, max_pct = item.get("type", item.get("name")), item["n"], number(item["pct"]), number(item["maxPct"])
             if not isinstance(count, int) or isinstance(count, bool) or pct is None or max_pct is None:
                 raise ValueError("malformed Chromium CPU row")
-            out.append({"name": names.get(name, str(name)), "count": count, "pct": pct, "max_pct": max_pct})
+            out.append({"name": names.get(name, str(name)), "count": count, "pct": pct,
+                        "avg_pct": round(pct / count, 1) if count > 0 else 0.0, "max_pct": max_pct})
         return out
 
     processes = sorted(rows(raw.get("processes"), CHROMIUM_PROCESS_NAMES), key=lambda r: (-r["pct"], -r["max_pct"]))

@@ -246,9 +246,9 @@ def test_host_stats_sample_load_cpu_and_the_busiest_mixer_thread(tmp_path, monke
     assert stats.values == dict(load1=21.4, vcpus=2, cpu_pct=52, mixer_cpu_pct=round(117 * 100 / hz / 2, 1),
                                thread_pct=round(76 * 100 / hz / 2), thread_name="mixer_comp_a", thread_count=3,
                                # every thread by kind, busiest first; a thread first seen now counts from zero
-                               thread_kinds=[{"name": "mixer_comp_a", "count": 1, "pct": round(76 * 100 / hz / 2, 1), "max_pct": round(76 * 100 / hz / 2, 1)},
-                                             {"name": "mixer (new)", "count": 1, "pct": round(31 * 100 / hz / 2, 1), "max_pct": round(31 * 100 / hz / 2, 1)},
-                                             {"name": "mixer.py", "count": 1, "pct": round(10 * 100 / hz / 2, 1), "max_pct": round(10 * 100 / hz / 2, 1)}])
+                               thread_kinds=[{"name": "mixer_comp_a", "count": 1, "pct": round(76 * 100 / hz / 2, 1), "avg_pct": round(76 * 100 / hz / 2, 1), "max_pct": round(76 * 100 / hz / 2, 1)},
+                                             {"name": "mixer (new)", "count": 1, "pct": round(31 * 100 / hz / 2, 1), "avg_pct": round(31 * 100 / hz / 2, 1), "max_pct": round(31 * 100 / hz / 2, 1)},
+                                             {"name": "mixer.py", "count": 1, "pct": round(10 * 100 / hz / 2, 1), "avg_pct": round(10 * 100 / hz / 2, 1), "max_pct": round(10 * 100 / hz / 2, 1)}])
     # Without a mixer, or before its first diff after a restart, the thread fields stay unknown.
     pid[0] = None
     now[0] += 1.0
@@ -310,10 +310,10 @@ def test_host_stats_sum_the_threads_by_kind(tmp_path, monkeypatch):
     pct = lambda ticks: round(ticks * 100 / hz, 1)
     assert stats.values["thread_count"] == 35
     assert stats.values["thread_kinds"] == [   # the largest total first
-        {"name": "mixer_comp_a", "count": 1, "pct": pct(40), "max_pct": pct(40)},
-        {"name": "input_N", "count": 30, "pct": pct(30), "max_pct": pct(1)},       # thirty small threads, one line
-        {"name": "EventLoop", "count": 2, "pct": pct(14), "max_pct": pct(8)},
-        {"name": "aux_auxN_encod", "count": 2, "pct": pct(6), "max_pct": pct(4)},  # one kind under two cut-off spellings
+        {"name": "mixer_comp_a", "count": 1, "pct": pct(40), "avg_pct": pct(40), "max_pct": pct(40)},
+        {"name": "input_N", "count": 30, "pct": pct(30), "avg_pct": pct(1), "max_pct": pct(1)},  # thirty small threads, one line
+        {"name": "EventLoop", "count": 2, "pct": pct(14), "avg_pct": pct(7), "max_pct": pct(8)},
+        {"name": "aux_auxN_encod", "count": 2, "pct": pct(6), "avg_pct": pct(3), "max_pct": pct(4)},  # one kind, two cut-off spellings
     ]
     assert (stats.values["thread_name"], stats.values["thread_pct"]) == ("mixer_comp_a", round(40 * 100 / hz))
     # Beyond the limit the remaining kinds are one "other" row, so the list stays short.
@@ -329,10 +329,10 @@ def test_thread_kinds_rank_by_total_and_aux_threads_are_one_row_like_any_kind():
     used = ([(3, f"aux_aux{n}_comp") for n in range(1, 25)] + [(50, "EventLoop"), (10, "EventLoop")]
             + [(1, f"decode_{n}") for n in range(40)] + [(n, f"misc{chr(97 + n)}") for n in range(1, 9)])
     rows = thread_kinds(used, 100, 8)
-    assert [(r["name"], r["count"], r["pct"], r["max_pct"]) for r in rows[:3]] == [
-        ("aux_auxN_comp", 24, 72.0, 3.0), ("EventLoop", 2, 60.0, 50.0), ("decode_N", 40, 40.0, 1.0)]
+    assert [(r["name"], r["count"], r["pct"], r["avg_pct"], r["max_pct"]) for r in rows[:3]] == [   # avg = total / n
+        ("aux_auxN_comp", 24, 72.0, 3.0, 3.0), ("EventLoop", 2, 60.0, 30.0, 50.0), ("decode_N", 40, 40.0, 1.0, 1.0)]
     assert [r["name"] for r in rows[3:]] == ["misci", "misch", "miscg", "miscf", "misce", "other"]
-    assert rows[-1] == {"name": "other", "count": 3, "pct": 6.0, "max_pct": 3.0}   # miscb, miscc and miscd past the eight
+    assert rows[-1] == {"name": "other", "count": 3, "pct": 6.0, "avg_pct": 2.0, "max_pct": 3.0}   # miscb, miscc and miscd past the eight
 
 
 def test_chromium_summary_names_sorts_and_picks_the_busiest_cores():
@@ -350,8 +350,8 @@ def test_chromium_summary_names_sorts_and_picks_the_busiest_cores():
            "threads": []}
     summary = chromium_summary(raw)
     assert (summary["total_pct"], summary["cores_used"], summary["vcpus"]) == (148.2, 1.48, 16)
-    assert [(r["name"], r["count"], r["pct"], r["max_pct"]) for r in summary["processes"]] == [   # the largest total first
-        ("GPU process", 2, 80.4, 52.1), ("renderer", 24, 52, 6.3), ("browser", 2, 12.6, 9), ("utility", 6, 3.2, 1.4)]
+    assert [(r["name"], r["count"], r["pct"], r["avg_pct"], r["max_pct"]) for r in summary["processes"]] == [   # the largest total first
+        ("GPU process", 2, 80.4, 40.2, 52.1), ("renderer", 24, 52, 2.2, 6.3), ("browser", 2, 12.6, 6.3, 9), ("utility", 6, 3.2, 0.5, 1.4)]
     assert [r["name"] for r in summary["gpu_threads"]] == ["viz compositor", "GPU main", "IO", "other"]   # a fixed order
     assert summary["busiest_cores"] == [{"cpu": 2, "pct": 62, "host_pct": 91.5}, {"cpu": 3, "pct": 40.2, "host_pct": None},
                                         {"cpu": 4, "pct": 12, "host_pct": 30}, {"cpu": 5, "pct": 7, "host_pct": 20}]
@@ -369,6 +369,7 @@ def test_browser_cpu_tolerates_an_older_browser_image_and_an_outage():
             raise answer
         return answer
     stats = BrowserCpuStats("http://127.0.0.1:9009/", period_s=1, absent_s=30, fetch=fetch)
+    assert BrowserCpuStats("http://x").period_s == 5   # the default: the hover needs no more
     answers.append(urllib.error.HTTPError("http://127.0.0.1:9009/metrics/cpu", 404, "Not Found", None, None))
     assert stats.poll() == 30 and stats.values is None and stats.error == "HTTP 404"   # no endpoint: ask again later
     answers.append(urllib.error.URLError(ConnectionRefusedError(111, "refused")))
@@ -378,7 +379,7 @@ def test_browser_cpu_tolerates_an_older_browser_image_and_an_outage():
     answers.append({"intervalS": 1, "totalPct": 50, "cores": {"hostVcpus": 4, "perCore": []},
                     "processes": [{"type": "gpu", "n": 1, "pct": 50, "avgPct": 50, "maxPct": 50}], "gpuThreads": []})
     assert stats.poll() == 1
-    assert stats.values["processes"] == [{"name": "GPU process", "count": 1, "pct": 50, "max_pct": 50}]
+    assert stats.values["processes"] == [{"name": "GPU process", "count": 1, "pct": 50, "avg_pct": 50.0, "max_pct": 50}]
     answers.append(ValueError("not JSON"))
     assert stats.poll() == 1 and stats.values is None
     answers.append([])   # an answer of the wrong shape leaves the section hidden; the thread polls on

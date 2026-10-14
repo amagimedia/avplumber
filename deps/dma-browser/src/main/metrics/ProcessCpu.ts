@@ -1,15 +1,18 @@
-import { promises as fs } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 
 // CPU use of this service's own process tree, read from /proc: the supervisor (or the single
 // Electron process), every Electron worker and every Chromium child under them. The mixer
 // container cannot see these processes, so GET /metrics/cpu hands the figures over.
 //
+// Cost: one /proc/<pid>/stat per process (every pid, to find the tree), each command line once
+// per process lifetime, and thread files only for the GPU processes, all synchronous in one
+// pass. With 40 windows (about 70 processes, over 1,000 threads) reading every thread's stat on
+// each call cost the supervisor a quarter of a core at one call a second.
+//
 // Linux only. Tick counts in /proc are in USER_HZ, which the kernel fixes at 100 for user space.
 
 export const USER_HZ = 100;
-/** Thread groups listed in `threads` before the rest become one "other" row. */
-export const THREAD_GROUPS = 8;
 
 export type ProcessKind = 'browser' | 'gpu' | 'renderer' | 'utility' | 'zygote' | 'other';
 export type GpuThreadKind = 'viz' | 'main' | 'io' | 'other';
@@ -31,6 +34,9 @@ export interface ProcessSample {
   readonly kind: ProcessKind;
   /** utime + stime of the process, including threads that have exited. */
   readonly ticks: number;
+  /** The CPU its main thread last ran on. */
+  readonly cpu: number;
+  /** Read for GPU processes only; empty for the rest. */
   readonly threads: readonly ThreadSample[];
 }
 
@@ -55,10 +61,6 @@ export interface ProcessRow extends GroupRow {
   readonly type: ProcessKind;
 }
 
-export interface NamedRow extends GroupRow {
-  readonly name: string;
-}
-
 export interface GpuThreadRow extends GroupRow {
   readonly name: GpuThreadKind;
   /** For "other": its three busiest thread names (digits collapsed to N). */
@@ -67,7 +69,10 @@ export interface GpuThreadRow extends GroupRow {
 
 export interface CoreRow {
   readonly cpu: number;
-  /** Chromium's CPU time charged to the core each thread last ran on: an approximation. */
+  /**
+   * An approximation: a GPU process thread's time is charged to the core it last ran on, any
+   * other process's time to the core its main thread last ran on.
+   */
   readonly chromiumPct: number;
   /** The whole host's use of this core, or null when /proc/stat could not be read. */
   readonly hostPct: number | null;
@@ -89,8 +94,6 @@ export interface CpuMetrics {
   readonly processes: readonly ProcessRow[];
   /** Threads of the GPU process(es): viz compositor, GPU main, IO, the rest. */
   readonly gpuThreads: readonly GpuThreadRow[];
-  /** Every thread of the tree by name (digits as N), the largest total first, then "other". */
-  readonly threads: readonly NamedRow[];
 }
 
 const round1 = (value: number): number => Math.round(value * 10) / 10;
@@ -123,10 +126,14 @@ export function processKind(cmdline: readonly string[]): ProcessKind {
   return 'browser';
 }
 
-/** comm of a GPU process thread; the kernel keeps 15 characters of a name. */
-export function gpuThreadKind(comm: string): GpuThreadKind {
+/**
+ * A GPU process thread by comm (the kernel keeps 15 characters). The main thread is the one whose
+ * tid is the pid: Electron leaves it named after the executable ("electron"), Chrome names it
+ * CrGpuMain.
+ */
+export function gpuThreadKind(comm: string, isMainThread = false): GpuThreadKind {
+  if (isMainThread || comm === 'CrGpuMain') return 'main';
   if (comm.startsWith('VizCompositorTh')) return 'viz';
-  if (comm === 'CrGpuMain') return 'main';
   if (comm.startsWith('Chrome_ChildIOT') || comm.startsWith('Chrome_IOThread')) return 'io';
   return 'other';
 }
@@ -162,26 +169,6 @@ function groupRow(acc: Accumulator): GroupRow {
 const byTotal = <T extends Accumulator>(a: [string, T], b: [string, T]): number =>
   b[1].pct - a[1].pct || b[1].max - a[1].max || a[0].localeCompare(b[0]);
 
-/** Rows sorted by total, at most `limit` and then the rest as one "other" row. */
-export function topGroups(acc: Map<string, Accumulator>, limit: number): NamedRow[] {
-  const ranked = [...acc.entries()].sort(byTotal);
-  const rows: NamedRow[] = ranked
-    .slice(0, limit)
-    .map(([name, value]) => ({ name, ...groupRow(value) }));
-  const rest = ranked.slice(limit).map(([, value]) => value);
-  if (rest.length > 0) {
-    rows.push({
-      name: 'other',
-      ...groupRow({
-        n: rest.reduce((sum, value) => sum + value.n, 0),
-        pct: rest.reduce((sum, value) => sum + value.pct, 0),
-        max: Math.max(...rest.map((value) => value.max)),
-      }),
-    });
-  }
-  return rows;
-}
-
 const GPU_THREAD_ORDER: readonly GpuThreadKind[] = ['viz', 'main', 'io', 'other'];
 
 /** The figures between two samples. A process or thread first seen in `cur` counts from zero. */
@@ -196,7 +183,6 @@ export function groupCpu(prev: CpuSample | null, cur: CpuSample, hz = USER_HZ): 
       cores: { used: null, hostVcpus, perCore: [] },
       processes: [],
       gpuThreads: [],
-      threads: [],
     };
   }
   const pctOf = (ticks: number): number => (Math.max(0, ticks) * 100) / hz / elapsedS;
@@ -207,33 +193,33 @@ export function groupCpu(prev: CpuSample | null, cur: CpuSample, hz = USER_HZ): 
   const processes = new Map<string, Accumulator>();
   const gpu = new Map<string, Accumulator>();
   const gpuOther = new Map<string, Accumulator>();
-  const threads = new Map<string, Accumulator>();
   const perCoreTicks = new Map<number, number>();
+  const charge = (cpu: number, ticks: number): void => {
+    if (cpu >= 0) perCoreTicks.set(cpu, (perCoreTicks.get(cpu) ?? 0) + ticks);
+  };
   let total = 0;
 
   for (const proc of cur.processes) {
     const before = prevProcesses.get(idKey(proc.pid, proc.start));
-    const processPct = pctOf(proc.ticks - (before?.ticks ?? 0));
+    const processTicks = Math.max(0, proc.ticks - (before?.ticks ?? 0));
+    const processPct = pctOf(processTicks);
     total += processPct;
     add(processes, proc.kind, processPct);
+    if (proc.kind !== 'gpu' || proc.threads.length === 0) {
+      charge(proc.cpu, processTicks);
+      continue;
+    }
     const prevThreads = new Map(
       before?.threads.map((t): [string, number] => [idKey(t.tid, t.start), t.ticks]),
     );
     for (const thread of proc.threads) {
-      const ticks = Math.max(
-        0,
-        thread.ticks - (prevThreads.get(idKey(thread.tid, thread.start)) ?? 0),
-      );
+      const prevTicks = prevThreads.get(idKey(thread.tid, thread.start)) ?? 0;
+      const ticks = Math.max(0, thread.ticks - prevTicks);
       const pct = pctOf(ticks);
-      add(threads, threadGroupName(thread.comm), pct);
-      if (thread.cpu >= 0) {
-        perCoreTicks.set(thread.cpu, (perCoreTicks.get(thread.cpu) ?? 0) + ticks);
-      }
-      if (proc.kind === 'gpu') {
-        const kind = gpuThreadKind(thread.comm);
-        add(gpu, kind, pct);
-        if (kind === 'other') add(gpuOther, threadGroupName(thread.comm), pct);
-      }
+      charge(thread.cpu, ticks);
+      const kind = gpuThreadKind(thread.comm, thread.tid === proc.pid);
+      add(gpu, kind, pct);
+      if (kind === 'other') add(gpuOther, threadGroupName(thread.comm), pct);
     }
   }
 
@@ -275,7 +261,6 @@ export function groupCpu(prev: CpuSample | null, cur: CpuSample, hz = USER_HZ): 
       .sort(byTotal)
       .map(([type, acc]) => ({ type: type as ProcessKind, ...groupRow(acc) })),
     gpuThreads,
-    threads: topGroups(threads, THREAD_GROUPS),
   };
 }
 
@@ -313,34 +298,58 @@ export function parseHostCores(text: string): [number, number][] {
   return cores;
 }
 
-async function readText(file: string): Promise<string | null> {
-  try {
-    return await fs.readFile(file, 'utf8');
-  } catch {
-    return null; // the process or thread exited meanwhile
-  }
+/** The file system calls a sample makes; tests count them. Null: the entry is gone. */
+export interface ProcReader {
+  list(dir: string): string[] | null;
+  read(file: string): string | null;
 }
 
-/** Reads `rootPid` and every descendant from a /proc tree. */
-export async function readCpuSample(
+export const fsReader: ProcReader = {
+  list: (dir) => {
+    try {
+      return readdirSync(dir);
+    } catch {
+      return null;
+    }
+  },
+  read: (file) => {
+    try {
+      return readFileSync(file, 'utf8');
+    } catch {
+      return null; // the process or thread exited meanwhile
+    }
+  },
+};
+
+const parseOrNull = (text: string | null): ReturnType<typeof parseStat> | null => {
+  if (text === null) return null;
+  try {
+    return parseStat(text);
+  } catch {
+    return null; // torn or unexpected line: leave it out of this sample
+  }
+};
+
+/**
+ * Reads `rootPid` and every descendant from a /proc tree: one stat per process, the command line
+ * of a process whose type `kindCache` (keyed by pid and start time) lacks, and the threads of
+ * GPU processes only.
+ */
+export function readCpuSample(
   procRoot: string,
   rootPid: number,
-  cmdlineCache = new Map<string, string[]>(),
+  kindCache = new Map<string, ProcessKind>(),
   now: () => number = Date.now,
-): Promise<CpuSample> {
-  const pids = (await fs.readdir(procRoot)).filter((name) => /^\d+$/.test(name));
+  reader: ProcReader = fsReader,
+): CpuSample {
+  const names = reader.list(procRoot);
+  if (names === null) throw new Error(`${procRoot} is not readable`);
   const stats = new Map<number, ReturnType<typeof parseStat>>();
-  await Promise.all(
-    pids.map(async (pid) => {
-      const text = await readText(path.join(procRoot, pid, 'stat'));
-      if (text === null) return;
-      try {
-        stats.set(Number(pid), parseStat(text));
-      } catch {
-        // torn or unexpected line: leave the process out of this sample
-      }
-    }),
-  );
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    const stat = parseOrNull(reader.read(path.join(procRoot, name, 'stat')));
+    if (stat) stats.set(Number(name), stat);
+  }
   const children = new Map<number, number[]>();
   for (const [pid, stat] of stats) {
     const list = children.get(stat.ppid) ?? [];
@@ -360,53 +369,37 @@ export async function readCpuSample(
   }
 
   const live = new Set<string>();
-  const processes = await Promise.all(
-    tree.map(async (pid): Promise<ProcessSample | null> => {
-      const stat = stats.get(pid);
-      if (!stat) return null;
-      const key = idKey(pid, stat.start);
-      live.add(key);
-      let cmdline = cmdlineCache.get(key);
-      if (!cmdline) {
-        const raw = await readText(path.join(procRoot, String(pid), 'cmdline'));
-        if (raw === null) return null;
-        // A zygote child rewrites its title into one string: split on spaces as well.
-        cmdline = raw.split(/[\0 ]+/).filter((arg) => arg.length > 0);
-        cmdlineCache.set(key, cmdline);
-      }
+  const processes: ProcessSample[] = [];
+  for (const pid of tree) {
+    const stat = stats.get(pid);
+    if (!stat) continue;
+    const key = idKey(pid, stat.start);
+    live.add(key);
+    let kind = kindCache.get(key);
+    if (kind === undefined) {
+      const raw = reader.read(path.join(procRoot, String(pid), 'cmdline'));
+      if (raw === null) continue;
+      // A zygote child rewrites its title into one string: split on spaces as well.
+      kind = processKind(raw.split(/[\0 ]+/).filter((arg) => arg.length > 0));
+      kindCache.set(key, kind);
+    }
+    const threads: ThreadSample[] = [];
+    if (kind === 'gpu') {
       const taskDir = path.join(procRoot, String(pid), 'task');
-      let tids: string[];
-      try {
-        tids = await fs.readdir(taskDir);
-      } catch {
-        return null;
+      for (const tid of reader.list(taskDir) ?? []) {
+        const t = parseOrNull(reader.read(path.join(taskDir, tid, 'stat')));
+        if (!t) continue;
+        const { start, comm, ticks, cpu } = t;
+        threads.push({ tid: Number(tid), start, comm, ticks, cpu });
       }
-      const threads = await Promise.all(
-        tids.map(async (tid): Promise<ThreadSample | null> => {
-          const text = await readText(path.join(taskDir, tid, 'stat'));
-          if (text === null) return null;
-          try {
-            const t = parseStat(text);
-            return { tid: Number(tid), start: t.start, comm: t.comm, ticks: t.ticks, cpu: t.cpu };
-          } catch {
-            return null;
-          }
-        }),
-      );
-      return {
-        pid,
-        start: stat.start,
-        kind: processKind(cmdline),
-        ticks: stat.ticks,
-        threads: threads.filter((t): t is ThreadSample => t !== null),
-      };
-    }),
-  );
-  for (const key of cmdlineCache.keys()) if (!live.has(key)) cmdlineCache.delete(key);
-  const hostStat = await readText(path.join(procRoot, 'stat'));
+    }
+    processes.push({ pid, start: stat.start, kind, ticks: stat.ticks, cpu: stat.cpu, threads });
+  }
+  for (const key of kindCache.keys()) if (!live.has(key)) kindCache.delete(key);
+  const hostStat = reader.read(path.join(procRoot, 'stat'));
   return {
     atMs: now(),
-    processes: processes.filter((p): p is ProcessSample => p !== null),
+    processes,
     hostCores: hostStat === null ? [] : parseHostCores(hostStat),
   };
 }
@@ -417,18 +410,17 @@ export interface CpuMetricsSource {
 
 /**
  * Figures between successive calls. A call sooner than `minIntervalMs` after the last sample
- * returns that sample's figures again, so a second viewer never shrinks the window to nothing;
- * concurrent calls share one read.
+ * returns that sample's figures again, so a second viewer never shrinks the window to nothing.
+ * A sample is one synchronous pass, so calls never overlap.
  */
 export class ProcessCpuSampler implements CpuMetricsSource {
   private readonly procRoot: string;
   private readonly rootPid: number;
   private readonly minIntervalMs: number;
   private readonly now: () => number;
-  private readonly cmdlines = new Map<string, string[]>();
+  private readonly kinds = new Map<string, ProcessKind>();
   private last: CpuSample | null = null;
   private result: CpuMetrics | null = null;
-  private pending: Promise<CpuMetrics> | null = null;
 
   constructor(
     procRoot = '/proc',
@@ -443,20 +435,20 @@ export class ProcessCpuSampler implements CpuMetricsSource {
   }
 
   public metrics(): Promise<CpuMetrics> {
-    if (this.result && this.last && this.now() - this.last.atMs < this.minIntervalMs) {
-      return Promise.resolve(this.result);
+    try {
+      return Promise.resolve(this.metricsSync());
+    } catch (err) {
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)));
     }
-    this.pending ??= this.sample().finally(() => {
-      this.pending = null;
-    });
-    return this.pending;
   }
 
-  private async sample(): Promise<CpuMetrics> {
-    const cur = await readCpuSample(this.procRoot, this.rootPid, this.cmdlines, this.now);
-    const result = groupCpu(this.last, cur);
+  private metricsSync(): CpuMetrics {
+    if (this.result && this.last && this.now() - this.last.atMs < this.minIntervalMs) {
+      return this.result;
+    }
+    const cur = readCpuSample(this.procRoot, this.rootPid, this.kinds, this.now);
+    this.result = groupCpu(this.last, cur);
     this.last = cur;
-    this.result = result;
-    return result;
+    return this.result;
   }
 }
