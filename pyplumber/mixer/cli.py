@@ -21,7 +21,7 @@ from pyplumber.mixer.application import (
 )
 from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS
 from pyplumber.mixer import config as mixer_config
-from pyplumber.mixer.dmabuf_inputs import BrowserCaptureMode, browser_capture_mode
+from pyplumber.mixer.dmabuf_inputs import BrowserCaptureMode, browser_capture_mode, zero_copy_chain_edges
 from pyplumber.mixer.dmabuf_inputs import (
     dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows, wait_for_sockets, window_id,
 )
@@ -91,6 +91,9 @@ def _build_input(
             event_loop=_pacing_loop(index), zero_copy=capture_mode.zero_copy)
         for node in nodes:
             avp.addNode(node)
+        if capture_mode.zero_copy:
+            for chain_edge in zero_copy_chain_edges(f"input_{index}"):
+                avp.edges.planCapacity(chain_edge, 1)
     else:
         fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop, continuous_loop=True,
@@ -112,14 +115,16 @@ def _build_input(
     return normalized_edge
 
 
-def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int, color: str = "") -> bool:
+def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int, color: str = "",
+                      capture_mode: BrowserCaptureMode = BrowserCaptureMode()) -> bool:
     # Keep the legacy --input routing threshold: larger catalogues use a small
     # router selecting the 16 visible positions, without per-layout branches.
     if len(input_edges) <= DIRECT_INPUT_LIMIT:
         for index, (edge, url) in enumerate(zip(input_edges, urls)):
             browser = is_dmabuf_url(url)   # packed RGB, always SDR; decoded files follow --input-color
             mixer.add_source(f"source_{index}", pre_otm_edge=edge, input_group=_input_group(index),
-                             packed_rgb=browser, color="sdr" if browser else color or None)
+                             packed_rgb=browser, color="sdr" if browser else color or None,
+                             queue_limit=capture_mode.playout_queue_limit() if browser else None)
         return False
     labels = [f"slot_{i}_{slot}" for i in range(16) for slot in ("a", "b")]
     edges = [f"route_{label}" for label in labels]
@@ -194,7 +199,7 @@ def _build(options: GraphOptions, api, on_error: ExitStack) -> MixerApplication:
     canvas = (CANVAS_WIDTH, CANVAS_HEIGHT)
     mixer = _make_builder(avp, api, options, canvas=canvas, fps=options.fps, working_format=options.working_format)
     routed_inputs = _register_sources(avp, api, mixer, input_edges, options.inputs, fps=options.fps,
-                                      color=options.input_color)
+                                      color=options.input_color, capture_mode=capture_mode)
     _define_scenes(mixer, len(input_edges), routed_inputs)
     mixer.set_initial_scene("fullscreen_0", slot="A")
     listener = _build_renditions(avp, api, options, _flag_renditions(options, *canvas), mixer.build(),

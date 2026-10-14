@@ -52,12 +52,37 @@ class BrowserCaptureMode:
     zero_copy: bool = False
     export_buffers: int | None = None
 
+    # Where a zero-copy frame is held besides a compositor's waiting queue, each at most one
+    # distinct frame at a time: the receiver (its fence wait), the chain's edges and nodes up to
+    # the fan-out (the edges run at capacity 1), the compositors' shown frame, and the release on
+    # its way back. The browser keeps one buffer free to paint into and one may be in delivery.
+    HELD_OUTSIDE_QUEUE = 4
+    BROWSER_RESERVE = 2
+    # The frames a compositor needs waiting at 30 fps with the default two-tick latency: a paint is
+    # stamped for the next tick and drawn two ticks after it, so three wait while the fourth arrives.
+    QUEUE_FOR_DEFAULT_LATENCY = 3
+
     def frame_queue(self, configured: int) -> int:
         """The frames this mixer may hold of a window: *configured*, lowered to the zero-copy
         browser's capacity less one."""
         if self.zero_copy and self.export_buffers:
             return min(configured, browser_frame_queue_for(self.export_buffers))
         return configured
+
+    def playout_queue_limit(self) -> int | None:
+        """How many frames of a zero-copy window a compositor may hold waiting for their tick so
+        that every holder together stays within the browser's capacity less its reserve: the
+        capacity less two, less the four held elsewhere; at least one. None for the stock path.
+        Below QUEUE_FOR_DEFAULT_LATENCY (capacity under nine) the compositor repeats frames."""
+        if not (self.zero_copy and self.export_buffers):
+            return None
+        return max(1, min(8, self.export_buffers - self.BROWSER_RESERVE - self.HELD_OUTSIDE_QUEUE))
+
+    @classmethod
+    def minimum_capacity(cls) -> int:
+        """The smallest browser capacity that lets a compositor keep its default latency without
+        repeating frames: reserve + held elsewhere + the queue the latency needs = 9."""
+        return cls.BROWSER_RESERVE + cls.HELD_OUTSIDE_QUEUE + cls.QUEUE_FOR_DEFAULT_LATENCY
 
 
 def browser_capture_mode(base_url: str) -> BrowserCaptureMode:
@@ -76,7 +101,18 @@ def browser_capture_mode(base_url: str) -> BrowserCaptureMode:
                                 export_buffers=int(buffers) if isinstance(buffers, int) and buffers > 0 else None)
     logging.getLogger(__name__).info("Browser %s captures %s%s", base_url, mode or "copy (stock)",
                                      f" with {result.export_buffers} buffers per window" if result.export_buffers else "")
+    if result.zero_copy and result.export_buffers and result.export_buffers < BrowserCaptureMode.minimum_capacity():
+        logging.getLogger(__name__).warning(
+            "Browser %s: %d buffers per window is below the %d a compositor needs at its default latency; "
+            "browser frames will repeat (set DMA_BROWSER_EXPORT_BUFFERS=%d or more)",
+            base_url, result.export_buffers, BrowserCaptureMode.minimum_capacity(), BrowserCaptureMode.minimum_capacity())
     return result
+
+
+def zero_copy_chain_edges(prefix: str, hold: bool = True) -> List[str]:
+    """The edges of one browser chain (dmabuf_cuda_input_nodes) to run at capacity one when the
+    browser is zero-copy: a frame waiting in an edge is a buffer the browser cannot paint into."""
+    return [f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda", *(("held",) if hold else ()))]
 
 
 def is_dmabuf_url(url: str) -> bool:
@@ -107,7 +143,9 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
     in 1/*fps*, so the chain has no format or time-base nodes of its own.
     *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted).
     With *zero_copy* (BrowserCaptureMode) there is no return queue: each frame goes back as soon as
-    its last user lets go, since Chromium's own queue has no buffer to spare."""
+    its last user lets go, since Chromium's own queue has no buffer to spare; and the importer keeps
+    every import for good (no idle expiry, no purge), since the browser's pool never changes while
+    the window lives. The caller plans zero_copy_chain_edges() at capacity one."""
     if browser_frame_queue is None:
         browser_frame_queue = default_browser_frame_queue(fps)
     drm_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda"))
@@ -130,8 +168,12 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group", "zero_copy": True,
-                            "max_imports": max(32, browser_frame_queue),
-                            "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
+                            "max_imports": max(32, 2 * browser_frame_queue + 2),
+                            # A zero-copy browser's pool is fixed: an import is kept until the window
+                            # closes or its geometry changes (0 retains; a release takes the CUDA
+                            # context lock and stalls every draw).
+                            "import_ttl_ms": 0 if zero_copy else
+                            max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two

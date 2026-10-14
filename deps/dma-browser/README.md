@@ -72,7 +72,7 @@ stock Electron ignores the features:
   the first switch on as well; `DMA_BROWSER_NATIVE_HANDLE_CAPTURE=0` next to it
   is refused at start-up, as is either feature name in
   `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES`.
-- `DMA_BROWSER_EXPORT_BUFFERS=N` (2-16, default 6) is the capacity of a
+- `DMA_BROWSER_EXPORT_BUFFERS=N` (2-16, default 9) is the capacity of a
   window's buffer queue, the whole per-window budget (N x 8.4 MiB at 1080p). It
   is passed to Chromium as `AvpZeroCopyOffscreenExport:buffers/N`: exactly N
   buffers exist per window, the capturer lends at most N, and a frame that
@@ -83,9 +83,13 @@ stock Electron ignores the features:
   app announces the mode in `/status` and in every window snapshot
   (`captureMode: "zero-copy"`, `exportBuffers: N`); avplumber's mixer reads it,
   sets `return_queue` 0 (every frame acknowledged as soon as its last user lets
-  go) and holds at most N-1 frames (`browser_frame_queue`), so one buffer is
-  always free for the next paint. On the stock copy path N is only the default
-  `DMA_BROWSER_DMABUF_POOL_SIZE`.
+  go), keeps every import for the window's life (no idle expiry, no purge) and
+  bounds every hold to N: its chain's edges hold one frame each and each
+  compositor holds at most N-6 frames waiting for their tick (two buffers are
+  the browser's, four are held outside that queue). Nine is the least a 30 fps
+  mixer with its default two-frame latency needs without repeating frames;
+  below it the mixer warns and repeats. On the stock copy path N is only the
+  default `DMA_BROWSER_DMABUF_POOL_SIZE`.
 
 In these modes Chromium's allocation is renderable on NVIDIA as it is, so the
 GBM shim is unnecessary: start without `LD_PRELOAD`, or leave the preload in

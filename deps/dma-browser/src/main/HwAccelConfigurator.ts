@@ -31,9 +31,11 @@ export class HwAccelConfigurator {
   /**
    * `DMA_BROWSER_EXPORT_BUFFERS`: the capacity of a window's buffer queue, passed to the zero-copy
    * feature as its `buffers` parameter. Chromium owns exactly this many buffers per window, lends
-   * at most this many, and does not paint a frame while all are out. 2 to 16, default 6.
+   * at most this many, and does not paint a frame while all are out. 2 to 16, default 9: the
+   * least a 30 fps mixer with its default two-frame playout latency needs without repeating
+   * frames (two for the browser, four held outside the mixer's waiting queue, three waiting).
    */
-  public static readonly EXPORT_BUFFERS_DEFAULT = 6;
+  public static readonly EXPORT_BUFFERS_DEFAULT = 9;
   public static readonly EXPORT_BUFFERS_MIN = 2;
   public static readonly EXPORT_BUFFERS_MAX = 16;
   private static readonly DISABLED_FEATURES_BASE: readonly string[] = [
@@ -151,7 +153,7 @@ export class HwAccelConfigurator {
     ];
   }
 
-  /** `DMA_BROWSER_EXPORT_BUFFERS`, 2-16, default 6. */
+  /** `DMA_BROWSER_EXPORT_BUFFERS`, 2-16, default 9. */
   public static exportBuffers(env: Env): number {
     return envInt(
       env,

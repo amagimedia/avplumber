@@ -118,7 +118,7 @@ describe('HwAccelConfigurator.apply', () => {
   });
 
   const SCANOUT = 'RenderableMappableSharedImageForceScanout';
-  const ZERO_COPY = 'AvpZeroCopyOffscreenExport:buffers/6';
+  const ZERO_COPY = 'AvpZeroCopyOffscreenExport:buffers/9';
   const enabledFeatures = (env: Record<string, string>): string[] => {
     const { cl, calls } = recorder();
     new HwAccelConfigurator(env, cl).apply();
