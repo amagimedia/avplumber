@@ -2,7 +2,9 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 // The engine defines these in avutils.cpp, which needs most of avcpp to link.
 constexpr AVRational Wallclock::time_base;
@@ -43,6 +45,62 @@ int main() {
     assert(runs == signals);
     assert(passes >= uint64_t(signals));
     assert(passes <= uint64_t(signals) + 5);
+
+    // More waits than the loop takes from the kernel in one go, all signalled at once: every
+    // handler runs, once.
+    {
+        const int many = 300;
+        std::vector<Event> events(many);
+        std::vector<std::atomic<int>> ran_each(many);
+        for (int i = 0; i < many; ++i) loop.asyncWaitAndExecute(events[i], [&ran_each, i](EventLoop &) { ++ran_each[i]; });
+        for (auto &e : events) e.signal();
+        assert(within(2000ms, [&] { for (auto &r : ran_each) if (r != 1) return false; return true; }));
+        std::this_thread::sleep_for(20ms);
+        for (auto &r : ran_each) assert(r == 1);
+    }
+
+    // An event signalled before anyone waits for it runs its handler as soon as one does; two
+    // signals before the handler runs are one run, and nothing runs again without a new wait.
+    {
+        Event early;
+        std::atomic<int> early_runs{0};
+        early.signal();
+        early.signal();
+        loop.asyncWaitAndExecute(early, [&](EventLoop &) { ++early_runs; });
+        assert(within(1000ms, [&] { return early_runs == 1; }));
+        early.signal();
+        std::this_thread::sleep_for(20ms);
+        assert(early_runs == 1);
+        loop.asyncWaitAndExecute(early, [&](EventLoop &) { ++early_runs; });
+        assert(within(1000ms, [&] { return early_runs == 2; }));
+    }
+
+    // An event that goes away while waited for leaves nothing behind that a later event, which
+    // may well get the same descriptor, would trip over.
+    for (int round = 0; round < 50; ++round) {
+        std::atomic<bool> reused{false};
+        {
+            Event gone;
+            loop.asyncWaitAndExecute(gone, [](EventLoop &) { assert(!"a handler ran for an event nobody signalled"); });
+        }
+        Event next;
+        loop.asyncWaitAndExecute(next, [&](EventLoop &) { reused = true; });
+        next.signal();
+        assert(within(1000ms, [&] { return reused.load(); }));
+    }
+
+    // Timers fire in the order of their times, those set for the same time in the order set.
+    {
+        std::mutex order_busy;
+        std::vector<int> order;
+        const int delays[] = {40, 10, 30, 10, 20, 40, 10};
+        loop.execute([&](EventLoop &evl) {   // set from one pass of the loop: one common starting time
+            for (int i = 0; i < 7; ++i)
+                evl.sleepAndExecute(delays[i], [&, i](EventLoop &) { std::lock_guard<std::mutex> lock(order_busy); order.push_back(i); });
+        });
+        assert(within(1000ms, [&] { std::lock_guard<std::mutex> lock(order_busy); return order.size() == 7; }));
+        assert((order == std::vector<int>{1, 3, 6, 4, 2, 0, 5}));
+    }
 
     // From another thread a wait still wakes the loop: it may be asleep with no timeout.
     Event other;

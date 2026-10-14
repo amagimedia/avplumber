@@ -5,12 +5,16 @@
 #include "instance_shared.hpp"
 #include <concurrentqueue/concurrentqueue.h>
 #include <atomic>
-#include <deque>
+#include <cerrno>
+#include <cstring>
 #include <limits>
-#include <list>
 #include <map>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+#include <vector>
+#include <sys/epoll.h>
+#include <unistd.h>
 #include <avcpp/timestamp.h>
 
 class EventLoop;
@@ -30,13 +34,23 @@ protected:
         if (std::this_thread::get_id() != loop_thread_.load(std::memory_order_relaxed)) wakeup_.signal();
     }
     moodycamel::ConcurrentQueue<Callable> todo_;
-    std::map<int, Callable> todo_when_fd_readable_;
+    // What to run when a descriptor becomes readable, once: the kernel holds the waits
+    // (EPOLLONESHOT), so a pass costs what is ready, not what is waited for.
+    int epoll_fd_ = -1;
+    std::unordered_map<int, Callable> todo_when_fd_readable_;
     std::mutex todo_when_fd_readable_busy_;
-    std::list<std::pair<AVTS, Callable>> scheduled_;
+    std::multimap<AVTS, Callable> scheduled_;   // by time; equal times keep the order they were set in
     std::mutex scheduled_busy_;
     std::mutex busy_;
     bool debug_timing_ = false;
     AVTS debug_timing_tolerance_ = 2;
+    void run(Callable &cb) {
+        try {
+            cb(*this);
+        } catch (std::exception &e) {
+            logstream << "error in event loop: " << e.what();
+        }
+    }
     bool executeSingleFromToDo() {
         Callable cb;
         if (!todo_.try_dequeue(cb)) {
@@ -44,39 +58,31 @@ protected:
             return false;
         }
         //logstream << "executing something from todo_ queue";
-        try {
-            cb(*this);
-        } catch (std::exception &e) {
-            logstream << "error in event loop: " << e.what();
-        }
+        run(cb);
         return true;
+    }
+    // Readable once more wakes the loop once more. A descriptor closed since its last wait has
+    // left the kernel's set by itself, and its number may be a new event's by now.
+    void arm(int fd) {
+        struct epoll_event wait = {};
+        wait.events = EPOLLIN | EPOLLONESHOT;
+        wait.data.fd = fd;
+        if (epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &wait) == 0) return;
+        if (errno == ENOENT && epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &wait) == 0) return;
+        if (errno == EEXIST && epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &wait) == 0) return;
+        throw Error("event loop: cannot wait for descriptor " + std::to_string(fd) + ": " + strerror(errno));
     }
     void threadFunction() {
         loop_thread_.store(std::this_thread::get_id(), std::memory_order_relaxed);
+        std::vector<struct epoll_event> ready(64);
+        std::vector<Callable> due;
         while (should_work_) {
             passes_.fetch_add(1, std::memory_order_relaxed);
-            struct pollfd *pfds = nullptr;
-            size_t i = 0;
-            size_t count = 0;
-            {
-                std::lock_guard<decltype(todo_when_fd_readable_busy_)> lock(todo_when_fd_readable_busy_);
-                count = todo_when_fd_readable_.size()+1;
-                pfds = new struct pollfd[count];
-                for (auto &kv: todo_when_fd_readable_) {
-                    pfds[i].fd = kv.first;
-                    pfds[i].events = POLLIN;
-                    pfds[i].revents = 0;
-                    i++;
-                }
-            }
-            pfds[i].fd = wakeup_.fd();
-            pfds[i].events = POLLIN;
-            pfds[i].revents = 0;
             int timeout_ms = -1;
             {
                 std::lock_guard<decltype(scheduled_busy_)> lock(scheduled_busy_);
                 if (!scheduled_.empty()) {
-                    timeout_ms = scheduled_.front().first - wallclock.pts();
+                    timeout_ms = scheduled_.begin()->first - wallclock.pts();
                     if (timeout_ms<0) {
                         if (debug_timing_ && (timeout_ms <= -debug_timing_tolerance_)) {
                             logstream << "should wait " << timeout_ms << "ms for scheduled, changing to 0";
@@ -85,59 +91,55 @@ protected:
                     }
                 }
             }
-            AVTS before_poll = wallclock.pts();
-            int ret = poll(pfds, count, timeout_ms);
-            AVTS diff = timeout_ms>=0 ? (wallclock.pts() - before_poll - timeout_ms) : 0;
+            AVTS before_wait = wallclock.pts();
+            int ret = epoll_wait(epoll_fd_, ready.data(), static_cast<int>(ready.size()), timeout_ms);
+            AVTS diff = timeout_ms>=0 ? (wallclock.pts() - before_wait - timeout_ms) : 0;
             if ( debug_timing_ && ( (ret==0 && abs(diff)>=debug_timing_tolerance_) || (diff>=debug_timing_tolerance_) ) ) {
-                logstream << "kernel is cheating on us! poll returned after ms diff " << diff << " timeout_ms " << timeout_ms;
+                logstream << "kernel is cheating on us! epoll_wait returned after ms diff " << diff << " timeout_ms " << timeout_ms;
             }
 
-            //logstream << "poll returned " << ret;
             if (!should_work_) {
-                delete pfds;
                 return;
+            }
+            if (ret<0) {
+                if (errno == EINTR) continue;
+                throw Error("epoll_wait error in event loop thread");
             }
             {
                 std::lock_guard<decltype(scheduled_busy_)> lock(scheduled_busy_);
                 AVTS now = wallclock.pts();
                 while (!scheduled_.empty()) {
-                    if (scheduled_.front().first > now) {
+                    auto first = scheduled_.begin();
+                    if (first->first > now) {
                         break;
                     }
-                    AVTS diff = scheduled_.front().first - now;
+                    AVTS diff = first->first - now;
                     if (debug_timing_ && (diff <= -debug_timing_tolerance_)) {
                         logstream << "got scheduled too late diff " << diff << "ms";
                     }
-                    todo_.enqueue(scheduled_.front().second);
-                    scheduled_.pop_front();
+                    due.push_back(std::move(first->second));
+                    scheduled_.erase(first);
                 }
             }
-            if (ret<0) {
-                delete pfds;
-                throw Error("poll error in event loop thread");
-            } else if (ret>0) {
+            for (int i=0; i<ret; i++) {
+                const int fd = ready[i].data.fd;
                 int64_t blackhole;
-                for (size_t i=0; i<(count-1); i++) {
-                    if (pfds[i].revents & POLLIN) {
-                        std::lock_guard<decltype(todo_when_fd_readable_busy_)> lock(todo_when_fd_readable_busy_);
-                        auto cb_it = todo_when_fd_readable_.find(pfds[i].fd);
-                        if (cb_it != todo_when_fd_readable_.end()) {
-                            todo_.enqueue(cb_it->second);
-                            todo_when_fd_readable_.erase(cb_it);
-                            read(pfds[i].fd, &blackhole, sizeof blackhole);
-                        }
-                        pfds[i].revents = 0;
-                    }
-                }
-                if (pfds[count-1].revents & POLLIN) {
-                    // this is wakeup_
-                    read(pfds[count-1].fd, &blackhole, sizeof blackhole);
-                    pfds[count-1].revents = 0;
+                if (read(fd, &blackhole, sizeof blackhole) < 0 && errno != EAGAIN) continue;   // closed meanwhile
+                if (fd == wakeup_.fd()) continue;
+                std::lock_guard<decltype(todo_when_fd_readable_busy_)> lock(todo_when_fd_readable_busy_);
+                auto cb_it = todo_when_fd_readable_.find(fd);
+                if (cb_it != todo_when_fd_readable_.end()) {
+                    due.push_back(std::move(cb_it->second));
+                    todo_when_fd_readable_.erase(cb_it);
                 }
             }
-            delete pfds;
             {
                 std::lock_guard<decltype(busy_)> lock(busy_);
+                for (Callable &cb: due) {
+                    if (!should_work_) break;
+                    run(cb);
+                }
+                due.clear();
                 while (executeSingleFromToDo() && should_work_) { };
             }
         }
@@ -149,6 +151,15 @@ public:
         if (debug_timing_) {
             debug_timing_tolerance_ = atoi(envstr);
         }
+        epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
+        if (epoll_fd_ < 0) throw Error("event loop: epoll_create1 error");
+        struct epoll_event wake = {};
+        wake.events = EPOLLIN;
+        wake.data.fd = wakeup_.fd();
+        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wakeup_.fd(), &wake) != 0) {
+            close(epoll_fd_);
+            throw Error("event loop: epoll_ctl error");
+        }
         delegated_execution_thread_ = start_thread("EventLoop", [this]() {
             threadFunction();
         });
@@ -157,6 +168,7 @@ public:
         should_work_ = false;
         wakeup_.signal();
         delegated_execution_thread_.join();
+        close(epoll_fd_);
         Callable blackhole;
         if (todo_.try_dequeue(blackhole)) {
             logstream << "still have something in todo queue when shutting down event loop";
@@ -196,31 +208,23 @@ public:
         }
     }
     void asyncWaitAndExecute(Event &event, Callable cb) {
-        // TODO FIXME: this works only by accident!!!
-        // it should be map of lists
+        // One handler per event: a second wait for the same event replaces the first.
+        // The kernel wakes a sleeping loop for a wait added from any thread.
         std::lock_guard<decltype(todo_when_fd_readable_busy_)> lock(todo_when_fd_readable_busy_);
-        todo_when_fd_readable_[event.fd()] = cb;
-        wakeUnlessOnLoopThread();
+        todo_when_fd_readable_[event.fd()] = std::move(cb);
+        arm(event.fd());
     }
     void schedule(av::Timestamp when, Callable cb) {
         AVTS ts = when.timestamp(wallclock.timeBase());
         std::lock_guard<decltype(scheduled_busy_)> lock(scheduled_busy_);
-        auto it = scheduled_.begin();
-        bool is_first = true;
-        while (it != scheduled_.end()) {
-            if (it->first > ts) {
-                break;
-            }
-            is_first = false;
-            it++;
-        }
+        const bool is_first = scheduled_.empty() || scheduled_.begin()->first > ts;
         if (debug_timing_) {
             AVTS diff = ts - wallclock.pts();
             if (diff <= -debug_timing_tolerance_) {
                 logstream << "scheduling event from the past?! " << diff << " ms";
             }
         }
-        scheduled_.insert(it, std::pair(ts, cb));
+        scheduled_.emplace(ts, std::move(cb));
         if (is_first) {
             wakeUnlessOnLoopThread();
         }
