@@ -159,7 +159,7 @@ for _ in range(2):
     const fence = fs.openSync('/dev/null', 'r');
     const plane = fs.openSync('/dev/zero', 'r');
     const fenced = Buffer.alloc(48), plain = Buffer.alloc(48);
-    fenced.writeUInt32LE(0x80000000 | 0x42475241, 12);
+    fenced.writeUInt32LE((0x80000000 | 0x42475241) >>> 0, 12);
     fenced.writeBigUInt64LE(10n, 40);
     plain.writeUInt32LE(0x42475241, 12);
     plain.writeBigUInt64LE(11n, 40);

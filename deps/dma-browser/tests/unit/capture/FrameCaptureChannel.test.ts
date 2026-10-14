@@ -225,7 +225,7 @@ describe('FrameCaptureChannel acquire fence', () => {
     const {channel, frame, call} = await paint({acquireFenceFd: 17}, log);
     expect(call[1]).toBe(40);
     expect(call[3]).toBe(17);
-    expect(call[2].readUInt32LE(12)).toBe(TEX_INFO_PIXEL_FORMAT_ACQUIRE_FENCE | 0x42475241);
+    expect(call[2].readUInt32LE(12)).toBe((TEX_INFO_PIXEL_FORMAT_ACQUIRE_FENCE | 0x42475241) >>> 0);
     expect(call[2].length).toBe(48);
     expect(frame.texture.release).not.toHaveBeenCalled();   // Electron owns the fence until release()
     expect(vi.mocked(log.write).mock.calls.some(([line]) => /acquire fence/.test(String(line)))).toBe(true);
