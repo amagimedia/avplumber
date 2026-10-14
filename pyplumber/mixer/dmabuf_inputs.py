@@ -64,7 +64,7 @@ def browser_capture_mode(base_url: str) -> BrowserCaptureMode:
     """Ask the browser service how it captures. An unreachable or older service (no
     ``captureMode``) is the stock copy path."""
     try:
-        status = rest_request(base_url, "GET", "/status", timeout=10) or {}
+        status = rest_request(base_url, "GET", "/status") or {}
     except (RuntimeError, TimeoutError, OSError) as exc:
         logging.getLogger(__name__).warning("Browser %s: cannot read /status (%s); assuming the stock capture",
                                             base_url, exc)
