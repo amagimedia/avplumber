@@ -72,6 +72,15 @@
   .meter-tip dl { display: grid; grid-template-columns: 1fr auto; gap: 5px 12px; margin: 6px 0 0; }
   .meter-tip dt { color: var(--muted); }
   .meter-tip dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+  /* THREAD: tables of CPU by thread kind and Chromium process; the first column is the name. */
+  #thread-tip { width: min(360px, calc(100vw - 24px)); }
+  .meter-tip table { width: 100%; border-collapse: collapse; margin: 6px 0 0; font-variant-numeric: tabular-nums; }
+  .meter-tip table + table { margin-top: 10px; }
+  .meter-tip th { color: var(--muted); font-weight: 400; text-align: right; padding: 0 0 2px 10px; white-space: nowrap; }
+  .meter-tip th:first-child { color: var(--text); font-weight: 600; text-align: left; padding-left: 0; }
+  .meter-tip td { text-align: right; padding: 1px 0 1px 10px; font-weight: 600; white-space: nowrap; }
+  .meter-tip td:first-child { color: var(--muted); font-weight: 400; text-align: left; padding-left: 0;
+                              max-width: 17ch; overflow: hidden; text-overflow: ellipsis; }
   @media (max-width: 1540px) {
     #top { gap: 6px; }
     #top h1 { font-size: 12px; }
@@ -218,11 +227,12 @@
   }
 
   #scenes { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; display: grid; gap: 8px;
-            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); align-content: start; }
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); align-content: start; }
   .tile { display: flex; align-items: baseline; gap: 8px; text-align: left; cursor: pointer; background: var(--raised);
           border: 1px solid var(--edge); border-radius: 8px; padding: 9px 11px; min-height: 42px; font-family: var(--mono); font-size: 12.5px; }
   .tile .n { color: var(--muted); font-size: 11px; min-width: 1.1em; font-variant-numeric: tabular-nums; font-family: inherit; }
-  .tile .label { overflow-wrap: anywhere; }
+  .tile { min-width: 0; overflow: hidden; }
+  .tile .label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one line inside the box */
   .tile.pgm { border-color: var(--pgm); background: var(--pgm-dim); }
   .tile.pvw { border-color: var(--pvw); background: var(--pvw-dim); }
   #scenes.armed .tile:hover { border-color: var(--accent); }
@@ -350,10 +360,11 @@
   <span id="conn" role="status" hidden></span>
   <span id="stats">
     <span class="meter" id="lat">LAT <b class="ms">—</b></span>
-    <span class="group" id="gpu" role="group" aria-label="GPU" title="GPU load from nvidia-smi, refreshed every second" hidden></span>
+    <span class="group" id="gpu" role="group" aria-label="GPU" hidden></span>
     <span id="power" class="meter" role="meter" aria-label="GPU power" aria-valuemin="0" hidden>POWER <i></i><b>—</b></span>
     <span class="meter" id="wipe-cache" hidden>WIPES <i></i><b></b></span>
-    <span class="group" id="host" role="group" aria-label="Host CPU" title="Host CPU from /proc (the whole host, not this container), refreshed every second" hidden>
+    <span class="group" id="host" role="group" aria-label="Host CPU" hidden>
+      <!-- No native titles in this row: they stacked over the meters' own tips. -->
       <span class="meter" id="load">LOAD <i></i><b></b></span>
       <span class="meter" id="cpu">CPU <i></i><b></b></span>
       <span class="meter" id="thread">THREAD <i></i><b></b></span>
@@ -825,12 +836,13 @@ function placeMeterTip() {
   tip.style.left = `${Math.max(12, Math.min(innerWidth - tip.offsetWidth - 12, box.right - tip.offsetWidth))}px`;
   tip.style.top = `${Math.max(12, Math.min(innerHeight - tip.offsetHeight - 12, box.bottom + 2))}px`;
 }
-function setMeterTip(anchor, title, rows) {
+// `rows` are [label, value] pairs shown as a list, unless `render` turns them into other nodes.
+function setMeterTip(anchor, title, rows, render) {
   let tip = $(anchor.id + "-tip");
   if (!tip) {
     tip = el("div", "meter-tip"); tip.id = anchor.id + "-tip"; tip.hidden = true;
     tip.setAttribute("role", "tooltip");
-    tip.append(el("strong", "", title), el("dl"));
+    tip.append(el("strong", "", title), el("div"));
     document.body.append(tip);
     anchor.classList.add("has-tip"); anchor.tabIndex = 0;
     anchor.setAttribute("aria-describedby", tip.id);
@@ -848,8 +860,11 @@ function setMeterTip(anchor, title, rows) {
     tip.addEventListener("mouseleave", hide);
   }
   anchor.removeAttribute("title");
-  if (changed(tip, rows)) tip.lastElementChild.replaceChildren(...rows.flatMap(([label, value]) =>
-    [el("dt", "", label), el("dd", "", value)]));
+  if (tip.firstElementChild.textContent !== title) tip.firstElementChild.textContent = title;
+  if (changed(tip, rows)) {
+    const list = () => { const dl = el("dl"); dl.append(...rows.flatMap(([label, value]) => [el("dt", "", label), el("dd", "", value)])); return dl; };
+    tip.lastElementChild.replaceChildren(...(render ? render(rows) : [list()]));
+  }
   if (activeTip?.tip === tip) placeMeterTip();
 }
 window.addEventListener("resize", placeMeterTip);
@@ -880,14 +895,17 @@ function renderMeters() {
     m.firstChild.data = `${many ? `${name} ×${gpus.length}` : name} `;
     fillBar(bar, pct);
     b.textContent = text(top);
-    if (many) m.title = [`${name}: busiest of ${gpus.length} GPUs`, ...gpus.map((g) => `GPU ${g.index}: ${text(g)}`)].join("\n");
-    else m.removeAttribute("title");   // a single GPU's meters show the group's title
+    // One hover per meter: a meter with a tip lists every GPU in it; the others keep a title.
+    const perGpu = many ? gpus.map((g) => [`GPU ${g.index}`, text(g)]) : [];
     if (name === "ENC") setMeterTip(m, "NVENC", [
-      ["Encoders", metric(gpuSum(gpus, "encoder_sessions"))], ["Total FPS", metric(gpuSum(gpus, "encoder_fps"))]]);
-    if (name === "VRAM") {
+      ["Encoders", metric(gpuSum(gpus, "encoder_sessions"))], ["Total FPS", metric(gpuSum(gpus, "encoder_fps"))], ...perGpu]);
+    else if (name === "VRAM") {
       const used = gpuSum(gpus, "memory_used_mib"), total = gpuSum(gpus, "memory_total_mib");
       setMeterTip(m, "VRAM", [["Sources / GiB used", metric(ratio(settings().source_count, used / 1024), 2)],
-        ["Free", metric(used !== null && total !== null ? Math.max(0, total - used) / 1024 : null, 2, " GiB")]]);
+        ["Free", metric(used !== null && total !== null ? Math.max(0, total - used) / 1024 : null, 2, " GiB")], ...perGpu]);
+    } else {
+      m.title = [many ? `${name}: busiest of ${gpus.length} GPUs` : `${name}: nvidia-smi, refreshed every second`,
+                 ...perGpu.map(([gpu, value]) => `${gpu}: ${value}`)].join("\n");
     }
   });
 }
@@ -925,20 +943,35 @@ function renderWipeCache() {
   m.title = ["Wipe clips decoded in GPU memory", ...(clips.length ? clips : ["none yet"])].join("\n");
 }
 // /api/state carries host where the backend reads /proc; its thread fields only while a mixer process runs.
-// LOAD is the 1-minute load average over the vCPUs (the bar clamps, the number does not); THREAD is one core,
-// with all of the mixer's threads summed by kind in its tip.
-// The mixer's threads by kind, the kind with the busiest thread first: that thread is the
-// bottleneck the bar shows. One of a kind shows its share of a core; several show their mean,
-// their busiest and their sum, since hundreds of threads of a fraction of a percent each use
-// cores together. The first row is the whole mixer; twenty rows at most.
-function threadRows(h) {
-  const pct = (n) => n >= 10 ? `${Math.round(n)}%` : `${n.toFixed(1)}%`;
-  const kinds = [...(h.thread_kinds || [{name: h.thread_name, count: 1, pct: h.thread_pct, max_pct: h.thread_pct}])]
-    .sort((a, b) => (a.name === "other") - (b.name === "other") || b.max_pct - a.max_pct || b.pct - a.pct);
-  const rows = kinds.map((k) => k.count === 1 ? [k.name, pct(k.pct)]
-    : [`${k.name} ×${k.count}`, `avg ${pct(k.pct / k.count)} · max ${pct(k.max_pct)} · sum ${pct(k.pct)}`]);
-  return (Number.isFinite(h.mixer_cpu_pct) && h.thread_count
-    ? [[`All ${h.thread_count} threads`, `${(h.mixer_cpu_pct / 100).toFixed(1)} cores`], ...rows] : rows).slice(0, 20);
+// LOAD is the 1-minute load average over the vCPUs (the bar clamps, the number does not); THREAD is the
+// busiest mixer thread's share of one core. Its tip has one table of the mixer's threads by kind
+// (names with digits as N), the largest total first: count, total, mean per thread and busiest
+// thread, all in shares of one core, so a kind of hundreds of small threads can pass 100%. Under it,
+// from the browser service (state.chromium, absent with older browser images): the cores Chromium
+// uses in all, its processes by type and the GPU process's threads.
+const cpuPct = (n) => !Number.isFinite(n) ? "—" : n >= 10 ? `${Math.round(n)}%` : `${n.toFixed(1)}%`;
+// avg_pct is total / n from the server; an older server without it gets the same from here.
+const cpuRow = (k) => [k.name, String(k.count), cpuPct(k.pct), cpuPct(k.avg_pct ?? (k.count > 0 ? k.pct / k.count : NaN)), cpuPct(k.max_pct)];
+function threadTip(h, c) {
+  const kinds = h.thread_kinds || [{name: h.thread_name, count: 1, pct: h.thread_pct, max_pct: h.thread_pct}];
+  // "other", the kinds past the server's limit, stays last whatever its total.
+  const mixer = [...kinds].sort((a, b) => (a.name === "other") - (b.name === "other") || b.pct - a.pct).map(cpuRow);
+  return !c ? {mixer} : {mixer, cores: c.cores_used, vcpus: c.vcpus, processes: (c.processes || []).map(cpuRow),
+    gpu: (c.gpu_threads || []).map(cpuRow)};
+}
+function tipTable(head, rows) {
+  const table = el("table"), line = (tag, cells) => { const tr = el("tr"); tr.append(...cells.map((t) => el(tag, "", t))); return tr; };
+  table.append(line("th", head), ...rows.map((cells) => line("td", cells)));
+  return table;
+}
+const CPU_HEAD = ["n", "total", "avg", "max"];
+function renderThreadTip(t) {
+  const tables = [tipTable(["Mixer threads", ...CPU_HEAD], t.mixer)];
+  if (t.processes) {
+    tables.push(tipTable([`Chromium · ${metric(t.cores, 2)}/${t.vcpus ?? "—"} cores`, ...CPU_HEAD], t.processes));
+    if (t.gpu.length) tables.push(tipTable(["GPU process threads", ...CPU_HEAD], t.gpu));
+  }
+  return tables;
 }
 function renderHost() {
   const h = state.host, g = $("host");
@@ -954,7 +987,7 @@ function renderHost() {
   if (h.thread_pct != null) {
     show($("thread"), h.thread_pct, `${h.thread_pct}%`);
     // The bar is the busiest thread, the single-thread bottleneck; the tip sums every thread by kind.
-    setMeterTip($("thread"), "Busiest mixer threads by kind · share of one core", threadRows(h));
+    setMeterTip($("thread"), "CPU by thread and process · % of one core", threadTip(h, state.chromium), renderThreadTip);
   }
 }
 
@@ -1381,8 +1414,6 @@ for (const b of $("viewer-count").children) b.onclick = () => {
 // per second, and its viewer shows them under the screen. The cut latency is the program encoder's, the
 // same whichever player measured it, so the top bar shows it once for the pipeline.
 const STREAM_STALE_MS = 3000;
-const LAT_MEANING = "Latency: median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. " +
-                    "Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.";
 const STREAM_MEANING = {
   rtt: "RTT: WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.",
   fps: "FPS: frames this browser decoded per second during the latest sample (receiver side, not the mixer's output rate).",
@@ -1409,7 +1440,8 @@ function showStat(m, value, unit, coloured, title) {
   if (b.textContent !== num + u) b.replaceChildren(num, ...(u ? [el("span", "u", u)] : []));
   // Same thresholds as the player's latency and RTT colours.
   if (coloured) b.dataset.level = n === null ? "" : n <= 200 ? "good" : n <= 400 ? "warn" : "bad";
-  m.title = title;
+  if (title) m.title = title;
+  else m.removeAttribute("title");
 }
 function renderStream(v) {
   const data = fresh(v.stats);
@@ -1447,21 +1479,31 @@ function polledCutLatency() {
 }
 function renderLatency() {
   const lat = fresh(cutLatency)?.latency;
-  showStat($("lat"), Number.isFinite(lat?.ms) ? lat.ms : polledCutLatency(), "ms", true,
-           [LAT_MEANING, typeof lat?.title === "string" && lat.title].filter(Boolean).join("\n"));
+  // No title: LAT has its tip, and a title would show beside it.
+  showStat($("lat"), Number.isFinite(lat?.ms) ? lat.ms : polledCutLatency(), "ms", true);
   const cuts = [...recentCuts.values()].sort((a, b) => a - b);
   const pgm = Object.values(state?.status?.playout || {}), aux = state?.aux_buses || [];
   const total = (rows, key) => rows.every((r) => Number.isFinite(r?.[key])) ? rows.reduce((n, r) => n + r[key], 0) : null;
   const complete = pgm.length > 0 && aux.length === (settings().aux_buses || []).length;
-  setMeterTip($("lat"), "Latency & delivery", [
-    [`Cut p95 · ${cuts.length} cuts`, metric(cuts[Math.ceil(cuts.length * .95) - 1], 1, " ms")],
-    // The server counts the last ten minutes, so the misses of a start long past do not stay on
-    // screen; one that does not (state.recent absent) leaves the totals since the mixer started.
-    ...(state?.recent
-      ? [[`Deadline misses · last ${recentSpan(state.recent)}`, metric(state.recent.missed_deadlines)],
-         [`AUX output drops · last ${recentSpan(state.recent)}`, metric(state.recent.output_drops)]]
-      : [["Deadline misses · total", metric(complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
-         ["AUX output drops · total", metric(complete ? total(aux, "output_drops") : null)]])]);
+  // Two short tables: delivery (cut latency, misses, drops, the other inputs) and the browser sources.
+  const recent = state?.recent, span = recent ? recentSpan(recent) : "total", inputs = recent?.inputs || {};
+  const pair = (g) => g ? `${metric(g.repeats)} / ${metric(g.discarded)}` : "—";
+  const delivery = [
+    [`Cut p95 · ${cuts.length}`, metric(cuts[Math.ceil(cuts.length * .95) - 1], 1, " ms")],
+    ["Deadline misses", metric(recent ? recent.missed_deadlines : complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
+    ["AUX drops", metric(recent ? recent.output_drops : complete ? total(aux, "output_drops") : null)],
+    ...(inputs.other ? [["Other repeats / discards", pair(inputs.other)]] : []),
+  ];
+  const b = inputs.browser, worst = b?.worst, drops = state?.browser_drops, top = (drops?.reasons || [])[0];
+  const browser = b?.sources ? [
+    ["Repeats / discards", pair(b)],
+    ["Worst", worst && (worst.repeats || worst.discarded) ? `${worst.source} ${pair(worst)}` : "—"],
+    ["Drops", drops ? metric(drops.dropped) : "—"],
+    ["Reason", top ? top[0] : "—"],
+  ] : [];
+  setMeterTip($("lat"), `Latency & delivery · ${span}`, [...delivery, ...browser], () => [
+    tipTable(["Delivery", ""], delivery),
+    ...(browser.length ? [tipTable([`Browser · ${b.sources}`, ""], browser)] : [])]);
 }
 
 /* ---------- polling ---------- */

@@ -1,6 +1,8 @@
-"""Reusable NVIDIA/NVENC and host telemetry; independent of HTTP and input policy."""
+"""Reusable NVIDIA/NVENC, host and browser-service CPU telemetry; independent of the web UI's HTTP
+server and of input policy."""
 from __future__ import annotations
 
+import collections
 import csv
 import json
 import logging
@@ -12,6 +14,8 @@ import selectors
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import urlsplit
 
 log = logging.getLogger("webui")
@@ -159,6 +163,83 @@ def delivery_totals(state: dict) -> dict | None:
     return {"missed_deadlines": sum(missed), "output_drops": sum(drops)}
 
 
+def startup_report(bridge) -> dict | None:
+    """`mixer.startup`: how the running mixer went on air (its `released_at` is the on-air moment,
+    `browser_windows` the browser service's counters then), or None from a mixer without the
+    command or one not answering."""
+    try:
+        report = json.loads(bridge.command("mixer.startup", 3) or "null")
+    except Exception:
+        return None
+    return report if isinstance(report, dict) else None
+
+
+ON_AIR = "on_air"
+
+
+def playout_counters(bridge) -> dict | None:
+    """delivery_totals() and, where the show names its compositor inputs (settings "inputs"), each
+    source's repeats and discards from both program-slot compositors' per_input counters: two small
+    commands per call, which RecentCounts makes every 5 s. A repeat with a discard beside it is two
+    paints in one tick slot (jitter); a repeat alone is a tick no frame arrived for. With the
+    mixer's on-air moment (startup_report) as ON_AIR, so that the window starts again with a show
+    that went on air anew; the counters themselves start from zero then."""
+    state = bridge.state(timeout=3)
+    totals = delivery_totals(state)
+    inputs = (state.get("settings") or {}).get("inputs")
+    if totals is None:
+        return None
+    report = startup_report(bridge)
+    if report and report.get("released_at") is not None:
+        totals[ON_AIR] = report["released_at"]
+    if not inputs:
+        return totals
+    slots = [json.loads(bridge.command(f"node.object.get {bridge.mixer}_comp_{slot} per_input", 3) or "[]")
+             for slot in ("a", "b")]
+    return {**totals, **input_counters(inputs, slots)}
+
+
+def input_counters(inputs, slots):
+    """{("input", source, group, counter): total} from per_input lists in compositor input order;
+    group is "browser" for a browser (dmabuf) source and "other" for the rest. A source scenes
+    use twice has an input per use, all fed the same frames: its first input speaks for it."""
+    counters, seen = {}, set()
+    for index, (source, kind) in enumerate(inputs):
+        if source in seen:
+            continue
+        seen.add(source)
+        group = "browser" if kind == "browser" else "other"
+        for counter in ("repeats", "discarded"):
+            values = [rows[index][counter] for rows in slots if index < len(rows)]
+            if any(isinstance(v, bool) or not isinstance(v, int) for v in values):
+                raise ValueError("malformed per_input counters")
+            counters[("input", source, group, counter)] = sum(values)
+    return counters
+
+
+def playout_summary(rises):
+    """RecentCounts' summary: the plain counters as they are, and the inputs' rises as
+    {"inputs": {"browser": {...}, "other": {...}}}, each with its sources, repeats and discards,
+    the browser group also with its worst source (most repeats, then most discards) or None."""
+    plain = {key: value for key, value in rises.items() if not isinstance(key, tuple)}
+    per_source = {}
+    for (_, source, group, counter), value in ((k, v) for k, v in rises.items() if isinstance(k, tuple)):
+        per_source.setdefault((group, source), {"repeats": 0, "discarded": 0})[counter] = value
+    if not per_source:
+        return plain
+    groups = {}
+    for name in ("browser", "other"):
+        rows = [(source, c) for (group, source), c in per_source.items() if group == name]
+        summary = {"sources": len(rows), "repeats": sum(c["repeats"] for _, c in rows),
+                   "discarded": sum(c["discarded"] for _, c in rows)}
+        if name == "browser":
+            worst = max(rows, key=lambda row: (row[1]["repeats"], row[1]["discarded"]), default=None)
+            summary["worst"] = ({"source": worst[0], **worst[1]}
+                                if worst and (worst[1]["repeats"] or worst[1]["discarded"]) else None)
+        groups[name] = summary
+    return {**plain, "inputs": groups}
+
+
 class RecentCounts:
     """How far counters that only grow rose in the last `window_s` seconds. The page shows this
     instead of the totals since the mixer started, which keep the misses of a start or of a
@@ -166,11 +247,18 @@ class RecentCounts:
     there are none. One thread samples every `period_s`, so the window is full whether or not a
     page is open. `values` is None until the first sample; `covered_s` is how much of the window
     the samples span so far. Totals that fall belong to a mixer that started again and counts from
-    zero: everything it counted happened inside the window."""
+    zero: everything it counted happened inside the window. Counters that appear or go away (another
+    show's inputs) start the window again from the current totals. An ON_AIR key among the totals is
+    not a counter but the mixer's on-air moment: when it changes, the mixer went on air anew with
+    its counters reset, so everything it counted is recent (whether or not every total fell), and
+    `values` carries it. `summary` turns the rises into what the page reads (by default they are
+    the values themselves)."""
 
-    def __init__(self, read, window_s: float = 600, period_s: float = 5, clock=time.monotonic):
+    def __init__(self, read, window_s: float = 600, period_s: float = 5, clock=time.monotonic, summary=None):
         self.read, self.window_s, self.period_s, self.clock = read, window_s, period_s, clock
+        self.summary = summary or (lambda rises: rises)
         self.values = None
+        self.on_air = None
         self._samples: list[tuple[float, dict]] = []
 
     def start(self):
@@ -188,15 +276,22 @@ class RecentCounts:
         totals = self.read()
         if totals is None:
             return
+        totals = dict(totals)
+        on_air = totals.pop(ON_AIR, None)
         now = self.clock()
-        if self._samples and any(totals[key] < count for key, count in self._samples[-1][1].items()):
+        last = self._samples[-1][1] if self._samples else None
+        if last is not None and (on_air != self.on_air or any(totals.get(key, count) < count for key, count in last.items())):
             self._samples = [(now, dict.fromkeys(totals, 0))]
+        elif last is not None and set(totals) != set(last):
+            self._samples = []
+        self.on_air = on_air
         self._samples.append((now, dict(totals)))
         while self._samples[0][0] < now - self.window_s:
             self._samples.pop(0)
         since, base = self._samples[0]
         self.values = {"window_s": self.window_s, "covered_s": round(now - since),
-                       **{key: count - base[key] for key, count in totals.items()}}
+                       **({ON_AIR: on_air} if on_air is not None else {}),
+                       **self.summary({key: count - base[key] for key, count in totals.items()})}
 
 
 class HostStats:
@@ -205,7 +300,7 @@ class HostStats:
     whole host, not the container's share. `values` is None where /proc is missing and until the
     second sample; its mixer fields are None while no mixer process runs."""
 
-    THREAD_KINDS = 18    # kinds of thread listed, the kind with the busiest thread first; the rest are "other"
+    THREAD_KINDS = 8     # kinds of thread listed, the largest total first; the rest are "other"
     KINDS_WINDOW = 5     # samples a kind's figures span: one thread's second is a tick or two
 
     def __init__(self, mixer_pid=lambda: None, proc=Path("/proc")):
@@ -282,9 +377,9 @@ class HostStats:
 
 
 def thread_kinds(used, tick_seconds, limit):
-    """Threads summed by kind: [{"name", "count", "pct", "max_pct"}], the kind with the busiest
-    thread first (then the larger sum), at most *limit* kinds and then the rest as "other".
-    *used* holds (ticks, thread name).
+    """Threads summed by kind: [{"name", "count", "pct", "avg_pct", "max_pct"}], the kind that used the most
+    CPU in total first (then the one with the busiest thread), at most *limit* kinds and then the
+    rest as "other". *used* holds (ticks, thread name).
 
     A show has hundreds of threads that each use a fraction of a percent and together a core:
     one per source for input, decoding, upload, fan-out. Digits in a name become N, so
@@ -305,13 +400,233 @@ def thread_kinds(used, tick_seconds, limit):
             kinds[shorter].update(count=kinds[shorter]["count"] + longer["count"], ticks=kinds[shorter]["ticks"] + longer["ticks"],
                                   max=max(kinds[shorter]["max"], longer["max"]))
     pct = lambda ticks: round(ticks * 100 / tick_seconds, 1) if tick_seconds > 0 else 0.0
-    ranked = sorted(kinds.items(), key=lambda item: (-item[1]["max"], -item[1]["ticks"]))
-    rows = [{"name": name, "count": k["count"], "pct": pct(k["ticks"]), "max_pct": pct(k["max"])} for name, k in ranked[:limit]]
+    ranked = sorted(kinds.items(), key=lambda item: (-item[1]["ticks"], -item[1]["max"], item[0]))
+    row = lambda name, count, ticks, most: {"name": name, "count": count, "pct": pct(ticks),
+                                            "avg_pct": pct(ticks / count), "max_pct": pct(most)}
+    rows = [row(name, k["count"], k["ticks"], k["max"]) for name, k in ranked[:limit]]
     rest = [k for _, k in ranked[limit:]]
     if rest:
-        rows.append({"name": "other", "count": sum(k["count"] for k in rest), "pct": pct(sum(k["ticks"] for k in rest)),
-                     "max_pct": pct(max(k["max"] for k in rest))})
+        rows.append(row("other", sum(k["count"] for k in rest), sum(k["ticks"] for k in rest), max(k["max"] for k in rest)))
     return rows
+
+
+class BrowserCpuStats:
+    """Chromium's CPU use, from the browser service's GET /metrics/cpu (deps/dma-browser): the mixer
+    container cannot see the browser container's processes. Polled every 5 s on one thread and
+    shared by every viewer. `values` is chromium_summary() of the last answer, or None until the
+    second answer (the first only takes the service's baseline) and while the service is down. A
+    browser image without the endpoint answers 404; it is asked again every `absent_s` seconds."""
+
+    PATH = "/metrics/cpu"
+
+    # Every 5 s: the hover needs no more, and each answer costs the browser service a /proc read.
+    def __init__(self, base_url: str, period_s: float = 5, absent_s: float = 30, timeout_s: float = 1, fetch=None,
+                 fetch_status=None, clock=time.monotonic, on_air=None, wall=time.time):
+        self.base_url = base_url.rstrip("/")
+        self.period_s, self.absent_s, self.timeout_s = period_s, absent_s, timeout_s
+        self.fetch = fetch or (lambda: self._get(self.PATH))
+        self.fetch_status = fetch_status or (lambda: self._get("/status"))
+        self.values = None
+        self.error = None   # why the last poll has no values, or None
+        # The windows' drops, paints and sends over the last ten minutes, from GET /status at the
+        # same cadence: browser_drop_summary() of the rises, or None before the first answer.
+        self.drops = RecentIncrements(clock=clock, summary=browser_drop_summary, group=lambda key: key[0])
+        # `on_air` gives the mixer's startup report (telemetry.startup_report) or None. The windows
+        # count from before the mixer exists (their pages load and drop frames while the show is
+        # built), so when the report's on-air moment is new the drop window starts again from the
+        # counters the mixer read at that moment: nothing from the warm-up is recent.
+        self.on_air, self.clock, self.wall = on_air, clock, wall
+        self._on_air_seen = None
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True, name="browser-cpu").start()
+
+    def _get(self, path):
+        with urllib.request.urlopen(self.base_url + path, timeout=self.timeout_s) as response:
+            return json.loads(response.read())
+
+    def _run(self):
+        failing = False   # the first failed poll of an outage is logged; a good one ends it
+        metrics_due = 0.0
+        while True:
+            now = time.monotonic()
+            if now >= metrics_due:   # an image without /metrics/cpu is asked again after absent_s
+                metrics_due = now + self.poll()
+                if self.error and not failing:
+                    log.warning("Chromium CPU unavailable from %s%s: %s", self.base_url, self.PATH, self.error)
+                failing = self.error is not None
+            self.poll_status()
+            time.sleep(self.period_s)
+
+    def poll_status(self):
+        """One GET /status into the drop window, after a new on-air moment has started it again
+        (rebase_on_air). A failed one leaves the last figures standing; the next good one counts
+        what rose meanwhile (or, for a restarted window, since its restart)."""
+        try:
+            self.rebase_on_air()
+        except Exception as exc:   # a report the mixer should not have given: the window goes on as it was
+            log.warning("Browser drop window not rebased on air: %s: %s", type(exc).__name__, exc)
+        try:
+            self.drops.sample(window_counters(self.fetch_status()))
+        except Exception:   # down or restarting: never end the polling thread
+            pass
+
+    def rebase_on_air(self):
+        """Start the drop window again from the mixer's on-air counters when its on-air moment is
+        new. A report without them (the service did not answer the mixer then) starts the window
+        with the next poll instead."""
+        report = self.on_air() if self.on_air else None
+        released_at = report.get("released_at") if report else None
+        if released_at is None or released_at == self._on_air_seen:
+            return
+        self._on_air_seen = released_at
+        windows = report.get("browser_windows")
+        at = self.clock() - max(0.0, self.wall() - released_at)
+        if windows is None:
+            self.drops.restart(at, epoch=released_at)
+            log.warning("Browser drop window restarted at on air without the mixer's browser counters")
+            return
+        counters = window_counters({"windows": [{"id": wid, "stats": stats} for wid, stats in windows.items()]})
+        self.drops.restart(at, epoch=released_at, totals=counters)
+
+    def poll(self) -> float:
+        """One request; returns how long to wait before the next."""
+        self.error = None
+        try:
+            self.values = chromium_summary(self.fetch())
+            return self.period_s
+        except urllib.error.HTTPError as exc:
+            self.values, self.error = None, f"HTTP {exc.code}"
+            return self.absent_s if exc.code == 404 else self.period_s
+        except Exception as exc:   # down, restarting, or an unexpected answer: never end the polling thread
+            self.values, self.error = None, f"{type(exc).__name__}: {exc}"
+            return self.period_s
+
+
+class RecentIncrements:
+    """How much each counter rose over the last `window_s` seconds, counter by counter: a counter
+    that falls started again (a window's worker restarted) and counts from zero, one that appears
+    (a window opened) counts from zero, one that goes away keeps what it added inside the window.
+    The first sample is the baseline. `values` is {"window_s", "covered_s", **summary(rises)}, or
+    None before the first sample. Unlike RecentCounts, one counter's restart leaves the others; with
+    `group` (key -> group), one fallen counter restarts every counter of its group (a window's)."""
+
+    def __init__(self, window_s: float = 600, clock=time.monotonic, summary=None, group=None):
+        self.window_s, self.clock = window_s, clock
+        self.summary = summary or (lambda rises: rises)
+        self.group = group or (lambda key: key)
+        self.values = None
+        self.epoch = None   # what the window counts from (a mixer's on-air moment), in `values` as "since"
+        self._last = None   # (time, totals) of the last sample
+        self._steps = collections.deque()   # (start, end, {key: rise}) between successive samples
+
+    def restart(self, at, *, epoch=None, totals=None):
+        """Forget the window: it counts from *at* (the clock's time) on, as `epoch` names. With
+        *totals*, the counters' values at *at*, the next sample's rise is counted from them; without,
+        the next sample is the baseline and `values` stay as they were until it comes."""
+        self._steps.clear()
+        self._last = (at, dict(totals)) if totals is not None else None
+        self.epoch = epoch
+        if totals is not None:
+            self.values = {"window_s": self.window_s, "covered_s": round(self.clock() - at),
+                           **({"since": epoch} if epoch is not None else {}), **self.summary(dict.fromkeys(totals, 0))}
+
+    def sample(self, totals):
+        now = self.clock()
+        if self._last is not None:
+            since, before = self._last
+            restarted = {self.group(key) for key, value in totals.items() if key in before and value < before[key]}
+            rises = {key: value - before[key] if key in before and self.group(key) not in restarted else value
+                     for key, value in totals.items()}
+            self._steps.append((since, now, rises))
+        while self._steps and self._steps[0][1] < now - self.window_s:
+            self._steps.popleft()
+        self._last = (now, dict(totals))
+        sums = dict.fromkeys(totals, 0)
+        for _, _, rises in self._steps:
+            for key, value in rises.items():
+                sums[key] = sums.get(key, 0) + value
+        start = self._steps[0][0] if self._steps else now
+        self.values = {"window_s": self.window_s, "covered_s": round(now - start),
+                       **({"since": self.epoch} if self.epoch is not None else {}), **self.summary(sums)}
+
+
+WINDOW_COUNTERS = {"paints": "paintCount", "sent": "txFrameCount", "dropped": "droppedFrames"}
+
+
+def window_counters(status):
+    """{(window id, counter): total} from the browser service's GET /status: paints, sent and
+    dropped frames, drops by reason as (id, "reason", reason), and (id, "skipped") from an app
+    that counts the paints Chromium skipped (stats.paintsSkipped)."""
+    counters = {}
+    count = lambda value: isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    for window in status.get("windows") or []:
+        wid, stats = window["id"], window["stats"]
+        for key, field in WINDOW_COUNTERS.items():
+            if not count(stats[field]):
+                raise ValueError(f"malformed browser window counter {field}")
+            counters[(wid, key)] = stats[field]
+        for reason, value in (stats.get("droppedReasons") or {}).items():
+            if not count(value):
+                raise ValueError("malformed browser drop reason")
+            counters[(wid, "reason", reason)] = value
+        if "paintsSkipped" in stats:
+            if not count(stats["paintsSkipped"]):
+                raise ValueError("malformed paintsSkipped")
+            counters[(wid, "skipped")] = stats["paintsSkipped"]
+    return counters
+
+
+def browser_drop_summary(rises):
+    """The LAT tip's browser rows from window_counters() rises: windows seen, paints, sent and
+    dropped in all, drops by reason (most first), the window that dropped most (or None), and the
+    paints Chromium skipped, None while no window reports them (an older app)."""
+    ids = {key[0] for key in rises}
+    total = lambda name: sum(value for key, value in rises.items() if key[1:] == (name,))
+    reasons = {}
+    for key, value in rises.items():
+        if len(key) == 3 and value:
+            reasons[key[2]] = reasons.get(key[2], 0) + value
+    dropped = {wid: rises.get((wid, "dropped"), 0) for wid in ids}
+    worst = max(sorted(dropped), key=lambda wid: dropped[wid], default=None)
+    skipped = [value for key, value in rises.items() if key[1:] == ("skipped",)]
+    return {"windows": len(ids), "paints": total("paints"), "sent": total("sent"), "dropped": total("dropped"),
+            "reasons": sorted(reasons.items(), key=lambda item: (-item[1], item[0])),
+            "worst": {"id": worst, "dropped": dropped[worst]} if worst is not None and dropped[worst] else None,
+            "skipped": sum(skipped) if skipped else None}
+
+
+CHROMIUM_PROCESS_NAMES = {"browser": "browser", "gpu": "GPU process", "renderer": "renderer",
+                          "utility": "utility", "zygote": "zygote", "other": "other"}
+CHROMIUM_GPU_THREAD_NAMES = {"viz": "viz compositor", "main": "GPU main", "io": "IO", "other": "other"}
+
+
+def chromium_summary(raw):
+    """The page's Chromium section from one GET /metrics/cpu answer, or None while the answer has
+    no interval yet. Rows have the THREAD tip's shape, {"name", "count", "pct", "avg_pct", "max_pct"}: the
+    process types the largest total first and the GPU process's threads in a fixed order (viz
+    compositor, GPU main, IO, other), under Chromium's cores' worth in all."""
+    if raw.get("intervalS") is None:
+        return None
+    number = lambda value: value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+    def rows(items, names):
+        out = []
+        for item in items or []:
+            name, count, pct, max_pct = item.get("type", item.get("name")), item["n"], number(item["pct"]), number(item["maxPct"])
+            if not isinstance(count, int) or isinstance(count, bool) or pct is None or max_pct is None:
+                raise ValueError("malformed Chromium CPU row")
+            out.append({"name": names.get(name, str(name)), "count": count, "pct": pct,
+                        "avg_pct": round(pct / count, 1) if count > 0 else 0.0, "max_pct": max_pct})
+        return out
+
+    processes = sorted(rows(raw.get("processes"), CHROMIUM_PROCESS_NAMES), key=lambda r: (-r["pct"], -r["max_pct"]))
+    order = list(CHROMIUM_GPU_THREAD_NAMES.values())
+    gpu = sorted(rows(raw.get("gpuThreads"), CHROMIUM_GPU_THREAD_NAMES), key=lambda r: order.index(r["name"]) if r["name"] in order else len(order))
+    cores = raw.get("cores") or {}
+    total = number(raw.get("totalPct"))
+    return {"total_pct": total, "cores_used": round(total / 100, 2) if total is not None else None,
+            "vcpus": cores.get("hostVcpus"), "processes": processes, "gpu_threads": gpu}
 
 
 def _cpu_stat(stat):

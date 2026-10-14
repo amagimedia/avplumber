@@ -20,7 +20,13 @@ const {chromium} = require('playwright');
       mixer_cpu_pct: 600, thread_pct: 40, thread_name: 'mixer_comp_a',
       thread_count: 1472, thread_kinds: [['input_N', 152, 140.5, 3.3], ['upload_N', 47, 135, 3.3],
         ['mixer_comp_a', 1, 40, 40], ['EventLoop', 5, 37.2, 8.2], ['mixer_color_sdr', 105, 17.2, 0.4],
-        ['other', 1161, 230.1, 38]].map(([name, count, pct, max_pct]) => ({name, count, pct, max_pct}))},
+        ['other', 1161, 230.1, 38]].map(([name, count, pct, max_pct]) =>
+          ({name, count, pct, avg_pct: Math.round(pct / count * 10) / 10, max_pct}))},
+      chromium: {total_pct: 148.2, cores_used: 1.48, vcpus: 16,
+        processes: [['GPU process', 2, 80.4, 52.1], ['renderer', 24, 52, 6.3], ['browser', 2, 12.6, 9]]
+          .map(([name, count, pct, max_pct]) => ({name, count, pct, max_pct})),
+        gpu_threads: [['viz compositor', 2, 38.5, 24], ['GPU main', 2, 30.1, 19.8], ['IO', 2, 6.2, 3.5], ['other', 40, 5.6, 1.1]]
+          .map(([name, count, pct, max_pct]) => ({name, count, pct, max_pct}))},
       status: {pgm_scene: 'a', pvw_scene: 'b', transition: 'idle', cut_latency: {direct: {...cuts[2], recent: cuts}},
         playout: {A: {missed_deadlines: 1}, B: {missed_deadlines: 0}}, wipe_cache: {bytes: 200000000, budget_bytes: 600000000}},
       scenes: ['a', 'b'], aux_buses: aux,
@@ -41,37 +47,71 @@ const {chromium} = require('playwright');
     await page.goto('http://mixer.test/');
     await page.waitForFunction(() => document.querySelector('#power b').textContent === '50 / 72 W');
     const values = id => page.locator(`#${id}-tip dd`).allTextContents();
+    // One hover per meter: a meter with its big tip has no title of its own or of a group around it,
+    // which the browser would show stacked over the tip.
+    const titledTips = () => page.evaluate(() => [...document.querySelectorAll('.has-tip')]
+      .filter((m) => m.closest('[title]')).map((m) => m.id));
+    assert.deepEqual(await titledTips(), []);
+    assert.deepEqual(await page.evaluate(() => ['thread', 'lat', 'cpu', 'power', 'gpu-enc', 'gpu-vram']
+      .filter((id) => !document.getElementById(id).classList.contains('has-tip'))), []);
     assert.deepEqual(await values('power'), ['3.84', '1555.2', '31.10', '$0.00625']);
     assert.deepEqual(await values('gpu-vram'), ['10.67', '6.00 GiB']);
     assert.deepEqual(await values('gpu-enc'), ['30', '750']);
     assert.deepEqual(await values('cpu'), ['6.00', '32.0']);
-    // THREAD shows the busiest thread. Its tip has every thread of the mixer by kind, the kind
-    // with the busiest thread first: the whole mixer, then per kind the mean, the busiest and the
-    // sum; what the server could not list separately comes last.
+    // THREAD shows the busiest thread. Its tip is one table of the mixer's threads by kind, the
+    // largest total first and "other" last: count, total, mean and busiest thread. Under it
+    // Chromium's cores' worth in its header, its processes and its GPU process's threads.
     assert.equal(await page.locator('#thread b').textContent(), '40%');
-    assert.deepEqual(await page.locator('#thread-tip dt').allTextContents(),
-      ['All 1472 threads', 'mixer_comp_a', 'EventLoop ×5', 'input_N ×152', 'upload_N ×47', 'mixer_color_sdr ×105', 'other ×1161']);
-    assert.deepEqual(await values('thread'), ['6.0 cores', '40%', 'avg 7.4% · max 8.2% · sum 37%',
-      'avg 0.9% · max 3.3% · sum 141%', 'avg 2.9% · max 3.3% · sum 135%', 'avg 0.2% · max 0.4% · sum 17%',
-      'avg 0.2% · max 38% · sum 230%']);
-    // A server that names only the busiest thread still gets a tip with that one.
-    await page.evaluate(() => { const all = state.host.thread_kinds; state.host.thread_kinds = undefined; renderHost();
-      window.oneThread = [...document.querySelectorAll('#thread-tip dt')].map((e) => e.textContent); state.host.thread_kinds = all; renderHost(); });
-    assert.deepEqual(await page.evaluate(() => window.oneThread), ['All 1472 threads', 'mixer_comp_a']);
-    assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
+    const tables = () => page.locator('#thread-tip table').evaluateAll((all) => all.map((t) =>
+      [...t.rows].map((r) => [...r.cells].map((c) => c.textContent))));
+    assert.deepEqual(await tables(), [
+      [['Mixer threads', 'n', 'total', 'avg', 'max'],
+        ['input_N', '152', '141%', '0.9%', '3.3%'], ['upload_N', '47', '135%', '2.9%', '3.3%'],
+        ['mixer_comp_a', '1', '40%', '40%', '40%'], ['EventLoop', '5', '37%', '7.4%', '8.2%'],
+        ['mixer_color_sdr', '105', '17%', '0.2%', '0.4%'], ['other', '1161', '230%', '0.2%', '38%']],
+      [['Chromium · 1.48/16 cores', 'n', 'total', 'avg', 'max'],
+        ['GPU process', '2', '80%', '40%', '52%'], ['renderer', '24', '52%', '2.2%', '6.3%'],
+        ['browser', '2', '13%', '6.3%', '9.0%']],
+      [['GPU process threads', 'n', 'total', 'avg', 'max'],
+        ['viz compositor', '2', '39%', '19%', '24%'], ['GPU main', '2', '30%', '15%', '20%'],
+        ['IO', '2', '6.2%', '3.1%', '3.5%'], ['other', '40', '5.6%', '0.1%', '1.1%']]]);
+    // A server that names only the busiest thread, and no browser figures: one table with that thread.
+    await page.evaluate(() => { const {thread_kinds: all} = state.host, chromium = state.chromium;
+      state.host.thread_kinds = undefined; state.chromium = null; renderHost();
+      window.oneThread = [...document.querySelectorAll('#thread-tip table')].map((t) => t.textContent);
+      state.host.thread_kinds = all; state.chromium = chromium; renderHost(); });
+    assert.deepEqual(await page.evaluate(() => window.oneThread), ['Mixer threadsntotalavgmaxmixer_comp_a140%40%40%']);
+    // LAT's tip: two short tables, delivery and the browser sources; values are the second column.
+    const lat = () => page.locator('#lat-tip td:nth-child(2)').allTextContents();
+    const latLabels = () => page.locator('#lat-tip td:first-child').allTextContents();
+    const latTitle = () => page.locator('#lat-tip strong').textContent();
+    assert.deepEqual(await lat(), ['106.0 ms', '3', '1']);
     // No player is open: the bar shows the median of the mixer's own last three cuts.
     assert.equal(await page.locator('#lat b').textContent(), '90ms');
     await page.evaluate(() => { observeCuts(); observeCuts(); renderLatency(); });
-    assert.match(await page.locator('#lat-tip').textContent(), /3 cuts/, 'repeated samples are not new cuts');
-    // A server that counts the last ten minutes: its figures replace the totals since the start.
-    assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · total/);
+    assert.deepEqual((await latLabels())[0], 'Cut p95 · 3', 'repeated samples are not new cuts');
+    // Without a server window the totals since the start; with one, its figures and its span.
+    assert.match(await latTitle(), /· total$/);
     await page.evaluate(() => { state.recent = {window_s: 600, covered_s: 754, missed_deadlines: 0, output_drops: 2}; renderLatency(); });
-    assert.deepEqual((await values('lat')).slice(1), ['0', '2']);
-    assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · last 10 min.*AUX output drops · last 10 min/s);
+    assert.deepEqual((await lat()).slice(1), ['0', '2']);
+    assert.match(await latTitle(), /· 10 min$/);
     await page.evaluate(() => { state.recent.covered_s = 40; renderLatency(); });
-    assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · last 40 s/);
+    assert.match(await latTitle(), /· 40 s$/);
+    // The other inputs in delivery; the browser sources in their own table with the worst and the drops.
+    await page.evaluate(() => { state.recent.inputs = {
+      browser: {sources: 40, repeats: 120, discarded: 45, worst: {source: 'web_12', repeats: 40, discarded: 2}},
+      other: {sources: 152, repeats: 5, discarded: 1}};
+      state.browser_drops = {window_s: 600, covered_s: 600, windows: 40, dropped: 12,
+        reasons: [['retained_pool_full', 9], ['no_consumer', 3]]}; renderLatency(); });
+    assert.deepEqual(await page.locator('#lat-tip th:first-child').allTextContents(), ['Delivery', 'Browser · 40']);
+    assert.deepEqual(await latLabels(), ['Cut p95 · 3', 'Deadline misses', 'AUX drops', 'Other repeats / discards',
+      'Repeats / discards', 'Worst', 'Drops', 'Reason']);
+    assert.deepEqual((await lat()).slice(3), ['5 / 1', '120 / 45', 'web_12 40 / 2', '12', 'retained_pool_full']);
+    await page.evaluate(() => { state.recent.inputs.browser = {sources: 40, repeats: 0, discarded: 0, worst: null};
+      state.browser_drops = null; renderLatency(); });
+    assert.deepEqual((await lat()).slice(4), ['0 / 0', '—', '—', '—']);
     await page.evaluate(() => { state.recent = null; renderLatency(); });
-    assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
+    assert.deepEqual(await lat(), ['106.0 ms', '3', '1']);
     for (const width of [1920, 1600, 1440, 1280]) {
       await page.setViewportSize({width, height: 1080});
       const box = await page.locator('#top').evaluate(e => ({width: e.clientWidth, scroll: e.scrollWidth, height: e.offsetHeight}));
@@ -107,13 +147,16 @@ const {chromium} = require('playwright');
       renderMeters(); renderHost();
     });
     assert.deepEqual(await values('power'), ['—', '—', '—', '$0.00625']);
+    // Two GPUs: the meters with a tip list both in it, still without a title.
+    assert.deepEqual(await titledTips(), []);
+    assert.deepEqual((await values('gpu-enc')).slice(2), ['75%', '75%']);
     assert.deepEqual(await values('cpu'), ['—', '—']);
     await page.evaluate(() => {
       state.setup_revision = 2;
       state.status.cut_latency = {direct: {id: 0, state: 'waiting', recent: []}};
       observeCuts(); renderLatency();
     });
-    assert.equal((await values('lat'))[0], '—', 'restart clears prior cut history');
+    assert.equal((await page.locator('#lat-tip td:nth-child(2)').allTextContents())[0], '—', 'restart clears prior cut history');
     assert.equal(await page.locator('#lat b').textContent(), '—', 'and the bar has no cut to show');
     await page.setViewportSize({width: 390, height: 844});
     await page.locator('#power').focus();
