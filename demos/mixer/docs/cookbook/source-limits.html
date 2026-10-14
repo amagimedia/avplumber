@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="How the AVPlumber mixer setup sizes each source type per frame rate: an NVDEC budget of decoded frames per second, a fifth browser worker and pinned raw uploads fill 110 inputs at 25 and 30 fps.">
+  <meta name="description" content="How many sources the AVPlumber mixer setup admits per GPU profile and frame rate: 192 inputs at 25 and 30 fps on an L4, with the historical T4 profile in brief.">
   <title>Source limits by mode and frame rate · Mixer optimization cookbook</title>
   <link rel="stylesheet" href="cookbook.css">
   <style>
@@ -29,9 +29,9 @@
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Source limits by mode and frame rate</h1>
-<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Admission lives in instance_profiles.py and is GPU/profile-specific. T4 tables below are historical T4 data, not L4 ceilings. L4 CUarray SDR admits 192 total sources including four browser keys (188 catalogue sources) at 25 and at 30 fps: 120 NVDEC, 32 raw and 40 browser inputs at 25 fps, 105 NVDEC, 47 raw and 40 browser at 30. The 30 fps limit was 170 until <a href="browser-frame-queue.html">browser frames went back one per new frame</a>. Current SDR output ceilings are 26 at 25/30 fps and 22 at 50/60 fps. No cap was raised for the latest node reductions.</p>
-  <p class="lede">Historical admission measurements for unique 1080p sources on the 16 GiB T4 test host (16 vCPU), for every canvas mode and frame rate, and what each source type may use of it. Downstream-key pages count as sources. A request above a limit is scaled down to it, and switching back to a larger mode restores the total. Every limit here comes from the <code>tesla_t4</code> instance profile; another machine needs its own measured profile.</p>
-  <span class="pill">Historical T4 profile</span>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Admission lives in instance_profiles.py and is GPU/profile-specific. The T4 section below is historical T4 data, not L4 ceilings. L4 CUarray SDR admits 192 total sources including four browser keys (188 catalogue sources) at 25 and at 30 fps: 120 NVDEC, 32 raw and 40 browser inputs at 25 fps, 105 NVDEC, 47 raw and 40 browser at 30. The 30 fps limit was 170 until <a href="browser-frame-queue.html">browser frames went back one per new frame</a>. Current SDR output ceilings are 26 at 25/30 fps and 22 at 50/60 fps. No cap was raised for the latest node reductions.</p>
+  <p class="lede">How many unique 1080p sources the setup admits, by GPU profile, canvas mode and frame rate. Downstream-key pages count as sources. A request above a limit is scaled down to it, and switching back to a larger mode restores the total. Every limit comes from a measured instance profile; another machine needs its own.</p>
+  <span class="pill live">Profile-specific limits</span>
 
 
   <h2 id="l4">Current L4 CUarray profile</h2>
@@ -52,67 +52,12 @@
   </div>
   <p class="legend">Every limit passed the cut-spam gate on the test host with 0 missed program deadlines, or is covered by a heavier show that did: 25 fps moves fewer frames per second than 30 fps on every engine, and HLG 4:2:2 at 30 fps passed at 90.</p>
 
-  <h2>Per source type</h2>
-  <div class="measured wide types">
-    <table>
-      <thead><tr><th>Frame rate</th><th>NVDEC decodes<small>SDR + HLG</small></th><th>Browser windows<small>keys included</small></th><th>Raw upload units<small>NV12 = 1, P010 = 2</small></th><th>HLG v210 4:2:2</th><th>SDR v210 4:2:2</th></tr></thead>
-      <tbody>
-        <tr><td>25 fps</td><td>40</td><td>40</td><td>30</td><td>4</td><td>no own cap</td></tr>
-        <tr><td>30 fps</td><td>36</td><td>40</td><td>34</td><td>4</td><td>no own cap</td></tr>
-        <tr><td>50 fps</td><td>22</td><td>40</td><td>20</td><td>4</td><td>no own cap</td></tr>
-        <tr><td>60 fps</td><td>18</td><td>40</td><td>17</td><td>4</td><td>no own cap</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <ul class="where">
-    <li><b>NVDEC</b>: about 1100 decoded frames per second, at most 40 streams. That keeps the T4's decoder near 90%.</li>
-    <li><b>Browser windows</b>: five workers of eight windows. The count does not scale with the frame rate; only a sixth worker would raise it.</li>
-    <li><b>Raw upload units</b>: 30 and 34 at 25 and 30 fps with pinned uploads, 1020 frames per second above 30 fps. A P010 frame is twice the bytes of NV12, so it costs two units.</li>
-    <li><b>SDR v210 4:2:2</b>: no cap of its own, only the total. The page's Balanced mix has none.</li>
-    <li><b>Modes</b>: an SDR canvas takes SDR 4:2:0 decodes, browsers and NV12 uploads; HDR 4:2:0 adds HLG decodes and P010 uploads; only HDR 4:2:2 takes v210 inputs.</li>
-  </ul>
-
-  <h2>The Balanced mix at each limit</h2>
-  <p>What the setup page allocates, always the Balanced mix, at the maximum with four key pages. On an HDR canvas half of each 4:2:0 path is HLG.</p>
-  <div class="measured wide">
-    <table>
-      <thead><tr><th>Mode</th><th>Rate</th><th>SDR NVDEC</th><th>HLG NVDEC</th><th>HLG v210</th><th>Browser</th><th>NV12</th><th>P010</th><th>Total with 4 keys</th></tr></thead>
-      <tbody>
-        <tr><td>SDR 4:2:0</td><td>25 fps</td><td>40</td><td>–</td><td>–</td><td>36</td><td>30</td><td>–</td><td>110</td></tr>
-        <tr><td>SDR 4:2:0</td><td>30 fps</td><td>36</td><td>–</td><td>–</td><td>36</td><td>34</td><td>–</td><td>110</td></tr>
-        <tr><td>SDR 4:2:0</td><td>50 fps</td><td>22</td><td>–</td><td>–</td><td>36</td><td>20</td><td>–</td><td>82</td></tr>
-        <tr><td>SDR 4:2:0</td><td>60 fps</td><td>18</td><td>–</td><td>–</td><td>36</td><td>17</td><td>–</td><td>75</td></tr>
-        <tr><td>HDR 4:2:0</td><td>25 fps</td><td>16</td><td>19</td><td>–</td><td>31</td><td>10</td><td>10</td><td>90</td></tr>
-        <tr><td>HDR 4:2:0</td><td>30 fps</td><td>15</td><td>18</td><td>–</td><td>30</td><td>12</td><td>11</td><td>90</td></tr>
-        <tr><td>HDR 4:2:0</td><td>50 fps</td><td>10</td><td>12</td><td>–</td><td>34</td><td>7</td><td>6</td><td>73</td></tr>
-        <tr><td>HDR 4:2:0</td><td>60 fps</td><td>8</td><td>10</td><td>–</td><td>28</td><td>6</td><td>5</td><td>61</td></tr>
-        <tr><td>HDR 4:2:2</td><td>25 fps</td><td>14</td><td>13</td><td>3</td><td>27</td><td>10</td><td>10</td><td>81</td></tr>
-        <tr><td>HDR 4:2:2</td><td>30 fps</td><td>13</td><td>13</td><td>3</td><td>25</td><td>12</td><td>11</td><td>81</td></tr>
-        <tr><td>HDR 4:2:2</td><td>50 fps</td><td>11</td><td>11</td><td>3</td><td>24</td><td>7</td><td>6</td><td>66</td></tr>
-        <tr><td>HDR 4:2:2</td><td>60 fps</td><td>9</td><td>9</td><td>2</td><td>20</td><td>6</td><td>5</td><td>55</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <h2>What runs out first</h2>
-  <ul class="cards">
-    <li><b>SDR at 25 and 30 fps</b><p>NVDEC, at 86–89% with 36 streams at 30 fps. The GPU is near 55% and host CPU 55% idle.</p></li>
-    <li><b>SDR at 60 fps</b><p>Host CPU. At 75, 8.5 of 16 vCPUs are busy and the load average reaches 19 (a one-minute reading; it <a href="browser-frame-stagger.html">is not a capacity gauge here</a>). A browser window costs about 0.10 core, a raw NV12 upload 0.135 (the pinned chain), an NVDEC source 0.025. <a href="cpu-pressure.html">Measuring CPU pressure at 60 Hz</a> has higher figures from the 68-input 60 fps show on the same host; both predate reading raw files straight into page-locked memory. The GPU is at 72%.</p></li>
-    <li><b>HDR at 30 fps</b><p>Every SDR input is converted to HLG on the GPU. With all-SDR inputs that work drives NVDEC to saturation above 90, and at 4:2:2 and 110 the backlog ran out of VRAM. The Balanced HLG mix at 90 leaves headroom.</p></li>
-    <li><b>HDR at 60 fps</b><p>CUDA compute. HLG 4:2:0 at 61 runs at GPU p95 about 91%; 64 and 66 missed deadlines. HLG 4:2:2 costs more per source: 55 keeps the same margin.</p></li>
-    <li class="flag"><b>NVENC at 60 fps HDR</b><p>The program in SDR and HLG plus the SDR clean feed are three 1080p60 encodes on the T4's single NVENC. At preset p5 it saturated and output fell seconds behind; the demo uses p3, which passes at 70–76%.</p></li>
-  </ul>
-
-  <h2>How the limit is computed</h2>
-  <p><code>limit = min(base × share, NVDEC + browser + raw caps)</code>, each term a value of the instance profile. The base is 110 at 25 and 30 fps and 75 at 60; 90 at 50 is the 60 fps total scaled by frame rate. The share is 1 for SDR, 0.82 for HLG 4:2:0 and 0.74 for HLG 4:2:2. The caps' sum equals the measured totals at 25, 30 and 60 fps; at 50 fps it bounds the scaled 90 to 82.</p>
-
-  <h2>Conditions</h2>
-  <p>NVIDIA T4 16 GiB, 16 vCPU, driver R615, Fedora 44 image with CUDA 13.4, Electron 44 browsers. Portrait 1080×1920 canvas from 1920×1080 sources, program with clean feed and two multiviews, NVENC preset p3. Each limit passed the cut-spam gate (cuts, fades and wipes at 4 per second) with 0 missed program deadlines.</p>
-  <p class="note">An L4 host has its own profiles, <code>nvidia_l4</code> and the opt-in <code>nvidia_l4_cuarray</code>, which admits 192 sources at 25 and at 30 fps on an SDR canvas (table above). Their source tables, output ceilings and the runs that failed are in <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/capacity.md#nvidia-l4-linear-and-cuarray-profiles">capacity.md · NVIDIA L4</a>; the other tables on this page are the T4's.</p>
+  <p>How the T4 profile was built, in short. Each limit is <code>min(base × share, NVDEC + browser + raw caps)</code>, each term a value of the profile: a base of 110 at 25 and 30 fps and 75 at 60, a share of 1 for SDR, 0.82 for HLG 4:2:0 and 0.74 for HLG 4:2:2, and caps of about 1,100 decoded frames a second (at most 40 streams), 40 browser windows and 30 to 34 raw upload units at 25 and 30 fps. What ran out first: NVDEC at SDR 25 and 30 fps, host CPU at SDR 60 fps, CUDA compute at HDR 60 fps, and at preset p5 the T4's single NVENC with three 1080p60 HDR encodes (the profile uses p3). The per-type caps, the Balanced mix the setup page allocates at each limit and the runs behind them are in <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/capacity.md">capacity.md</a>. Conditions: T4 16 GiB, 16 vCPU, portrait 1080×1920 canvas from 1920×1080 sources, program with clean feed and two multiviews; each limit passed the cut-spam gate (cuts, fades and wipes at 4 per second) with 0 missed program deadlines.</p>
+  <p class="note">The T4 figures predate every CPU change of 13 and 14 October; nothing on the T4 was measured again.</p>
 
   <h2>Where in the code</h2>
   <ul class="where">
-    <li><code>demos/mixer/instance_profiles.py</code>: <code>INSTANCE_PROFILES[InstanceType.TESLA_T4]</code>, every T4 limit on this page; the L4 table is <code>InstanceType.NVIDIA_L4_CUARRAY</code>. <code>webui.py --instance-type tesla_t4</code> selects it; Compose passes <code>MIXER_INSTANCE_TYPE</code>, default <code>tesla_t4</code>.</li>
+    <li><code>demos/mixer/instance_profiles.py</code>: <code>INSTANCE_PROFILES[InstanceType.TESLA_T4]</code>, the T4 limits; the L4 table is <code>InstanceType.NVIDIA_L4_CUARRAY</code>. <code>webui.py --instance-type tesla_t4</code> selects it; Compose passes <code>MIXER_INSTANCE_TYPE</code>, default <code>tesla_t4</code>.</li>
     <li><code>demos/mixer/setup_runtime.py</code>: <code>source_limit</code> and <code>source_counts</code> apply the profile.</li>
     <li><code>demos/mixer/setup.html</code>: the same rules on the setup page, with the profile served in the setup status.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/demos/mixer/docs/capacity.md">capacity.md</a>: every measurement behind these numbers.</li>

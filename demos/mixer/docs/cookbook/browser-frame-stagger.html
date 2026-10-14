@@ -189,7 +189,7 @@
     <figcaption>Measured, first 60 of the 236 samples of the run before the fix. Red: the kernel's point samples, recovered from successive <code>load1</code> readings by undoing the kernel's one-minute decay, so they carry the rounding of <code>load1</code>'s two decimals (a sample that came out just below zero is drawn at 0). Blue: the mean of the sampler's own readings over the same 5 s. The figures under the plot are over the whole 20 minutes.</figcaption>
   </figure>
 
-  <p><b>What to read instead.</b> The one-minute load average is not a capacity gauge for a frame-locked workload: it is a point sample that beats against the frame clock. Read <code>load15</code>, CPU pressure (PSI, <code>/proc/pressure/cpu</code>), the compositors' missed deadlines, or a runnable count averaged over time. <a href="cpu-pressure.html">Measuring CPU pressure at 60 Hz</a> has the commands.</p>
+  <p><b>What to read instead.</b> The one-minute load average is not a capacity gauge for a frame-locked workload: it is a point sample that beats against the frame clock. Read <code>load15</code>, CPU pressure (PSI, <code>/proc/pressure/cpu</code>), the compositors' missed deadlines, or a runnable count averaged over time. <a href="#measure">How to see it on a host</a> has the commands.</p>
 
   <h2>The cause in Chromium</h2>
   <p>Read from the source of Electron 44.5.1 and Chromium 152; not traced on the host.</p>
@@ -252,12 +252,16 @@
   </div>
   <p>The work is the same and its cost barely moved: 8.18 cores running before, 7.87 after. What fell is the waiting. The compositors also counted fewer repeated input frames with the stagger on: 0.552 per program frame against 0.816 on the program, and 291.9 against 580.7 a minute on the multiviewer, with 444.8 against 981.8 discards a minute there. These are counted, not explained: no run isolated the cause.</p>
 
-  <h2>How to see it on a host</h2>
+  <h2 id="measure">How to see it on a host</h2>
   <ul class="where">
     <li>Fold the runnable count: sample <code>nr_running</code> from <code>/proc/loadavg</code> at random intervals, stamp each sample with <code>CLOCK_MONOTONIC</code>, and bin the stamps modulo 16,666,000 ns. One spike at one phase means the windows share a tick; one bump per worker means they are staggered.</li>
-    <li>Fold on the browsers' period, not on 1/60 s: the spike drifts 40 us a second against 1/60 s and smears. The samples of the run before the fix, folded on 16,666.667 us, peak at 21.9 over a floor of 9.6 and are 5.7 ms wide at half height, against 57.0, 6.2 and 1.7 ms on 16,666 us.</li>
+    <li>Fold on the browsers' period, not on 1/60 s: the spike drifts 40 us a second against 1/60 s and smears. The samples of the run before the fix, folded on 16,666.667 us, peak at 21.9 over a floor of 9.6 and are 5.7 ms wide at half height, against 57.0, 6.2 and 1.7 ms on 16,666 us. An earlier reading of a 68-input 60 fps show on the T4 test host, folded on 1/60 s, showed the same spike smeared into a burst about 8 ms wide, with the load average near 25 at 69&nbsp;% CPU and PSI cpu “some” at 27&nbsp;%.</li>
     <li>Per worker: <code>GET /status</code> of the browser service returns each window's <code>lastPaintTsMs</code>; fold those on 16.666 ms. With the switch on, the five workers painted at 4.3, 11.3, 7.7, 16.1 and 5.9 ms into the period (phases 0, 1/2, 1/4, 3/4 and 1/8).</li>
     <li>Each worker logs its <code>framePhase</code> when it starts (<code>null</code> with the switch off), and <code>frame phase not set</code> or <code>frame phase failed</code> for a window it could not align.</li>
+    <li>CPU pressure: <code>/proc/pressure/cpu</code>, line <code>some</code>: <code>avg10</code> is the share of the last 10 s during which at least one thread waited for a CPU; <code>total</code> is that time in microseconds since boot.</li>
+    <li>Run-queue wait per process: the second field of <code>/proc/&lt;pid&gt;/task/*/schedstat</code> is nanoseconds spent waiting on a run queue. Take it twice, sum the differences per process and divide by the interval: the average number of that process's threads waiting for a CPU.</li>
+    <li>Worst waits per thread: <code>perf sched record -- sleep 2</code>, then <code>perf sched latency --sort max</code>. It traces every context switch while it runs; keep it short.</li>
+    <li>Missed frames: <code>node.object.get &lt;compositor&gt; status</code> returns <code>playout.missed_deadlines</code>, a running total since the show went on air.</li>
   </ul>
 
   <h2>Still open</h2>
@@ -286,7 +290,7 @@
     <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/deps/dma-browser/tests/unit/capture/FramePhase.test.ts">deps/dma-browser/tests/unit/capture/FramePhase.test.ts</a>: the instant, the other rate first, twenty windows aligning at once, late timers, and the phases per worker index.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/docker-compose/mixer/compose.yaml">docker-compose/mixer/compose.yaml</a>: the variable passed through, default <code>0</code>.</li>
     <li>Electron 44.5.1: <code>OffScreenRenderWidgetHostView::SetFrameRate</code> and <code>SetupFrameRate</code> in <code>shell/browser/osr/osr_render_widget_host_view.cc</code>. Chromium 152: <code>ui::Compositor::SetDisplayVSyncParameters</code> and <code>SetLayerTreeFrameSink</code> in <code>ui/compositor/compositor.cc</code>, <code>has_vsync_params_</code> and <code>vsync_interval_</code> in <code>ui/compositor/compositor.h</code>, <code>viz::BeginFrameArgs::DefaultInterval</code> in <code>components/viz/common/frame_sinks/begin_frame_args.h</code>.</li>
-    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/deps/dma-browser/README.md?plain=1">dma-browser README</a> (the switch); <a href="cpu-pressure.html">Measuring CPU pressure at 60 Hz</a> (the counters and commands); <a href="browser-paint-cost.html">Browser CPU is per painted frame</a> (what a tick and a paint cost).</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/deps/dma-browser/README.md?plain=1">dma-browser README</a> (the switch); <a href="#measure">How to see it on a host</a> (the counters and commands); <a href="browser-paint-cost.html">Browser CPU is per painted frame</a> (what a tick and a paint cost).</li>
   </ul>
 
   <p class="note">Measured on the L4 host (one NVIDIA L4, 16 vCPUs; kernel 7.0, <code>CONFIG_HZ</code> = 1000) with the 88-source 60 fps show: 44 NVDEC decodes, 4 raw v210 uploads and 40 browser windows in 5 workers. Two runs of 20 minutes, before and with the switch on.</p>

@@ -153,7 +153,7 @@
     <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/src/nodes/realtime.cpp"><code>src/nodes/realtime.cpp</code></a>: <code>time_base</code>, and <code>clock_step_</code>, the step of the clock inside which a release time is due. <a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/pyplumber/mixer/inputs.py"><code>pyplumber/mixer/inputs.py</code></a>: <code>_pace()</code> passes <code>time_base: "1/120000"</code>. Both links are pinned to <code>develop</code> at 8fa15c92.</li>
     <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/dmabuf_inputs.py"><code>pyplumber/mixer/dmabuf_inputs.py</code></a>: browser sources pass it to <code>smooth_timestamps</code>.</li>
   </ul>
-  <p>Markdown reference: <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/README.md#non-blocking-nodes">README · Non-blocking nodes</a> documents the <code>event_loop</code> field. The mixer API documentation covers native pacing and sharding. <a href="cpu-pressure.html">Measuring CPU pressure at 60 Hz</a> shows what the 60 Hz wake-ups do to the run queues at 68 inputs: ~45k avplumber wake-ups a second, most of them per-source threads outside these loops.</p>
+  <p>Markdown reference: <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/README.md#non-blocking-nodes">README · Non-blocking nodes</a> documents the <code>event_loop</code> field. The mixer API documentation covers native pacing and sharding.</p>
 
   <footer><a href="index.html">← All cookbook pages</a></footer>
 </main>

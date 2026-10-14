@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="The two monitor encoders keep one NVENC reference frame (dpb_size 1) instead of letting NVENC reserve several, because without B-frames each frame is predicted from the previous one.">
+  <meta name="description" content="AUX monitor encoders keep one NVENC reference frame (dpb_size 1) instead of letting NVENC reserve several, because without B-frames each frame is predicted from the previous one: 34 instead of 48 MiB per 1080p encoder, measured on an L4.">
   <title>One reference frame · Mixer optimization cookbook</title>
   <link rel="stylesheet" href="cookbook.css">
 </head>
@@ -13,7 +13,7 @@
 
   <h1>One reference frame for monitor encoders</h1>
 <p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> AUX rendition defaults use dpb_size: 1, including additional buses. The two-monitor memory example below is historical; it is not the saving for every possible output count. Program and clean-feed settings are separate.</p>
-  <p class="lede">The two monitor encoders keep one reference frame instead of the several NVENC reserves by default, because without B-frames each frame is predicted from the previous one.</p>
+  <p class="lede">The monitor encoders, one per AUX bus, keep one reference frame instead of the several NVENC reserves by default, because without B-frames each frame is predicted from the previous one. Measured on an NVIDIA L4 on 2026-10-14: an H.264 1080p p3 encoder with the AUX settings holds about 48 MiB with NVENC's own choice and about 34 MiB with <code>dpb_size</code> 1.</p>
   <span class="pill live">Status: Implemented</span>
 
   <h2>The idea</h2>
@@ -55,7 +55,7 @@
           <text x="10" y="150" fill="#edf4ff" font-weight="600" font-size="14">dpb_size 1</text>
           <text x="10" y="168">monitors only</text>
           <rect x="150" y="140" width="308" height="40" rx="6" fill="#101827" stroke="#30a46c" stroke-dasharray="5 4"/>
-          <text x="304" y="164" text-anchor="middle" fill="#7fd6a8">freed: up to ~40 MB VRAM (estimate)</text>
+          <text x="304" y="164" text-anchor="middle" fill="#7fd6a8">freed: about 14 MiB per encoder (measured)</text>
           <rect x="468" y="140" width="96" height="40" rx="6" fill="#1b2748" stroke="#6e8bf5"/>
           <text x="516" y="164" text-anchor="middle" fill="#edf4ff">N−1</text>
           <rect x="598" y="140" width="92" height="40" rx="6" fill="#0f2a26" stroke="#57dbc2"/>
@@ -66,7 +66,7 @@
         </g>
       </svg>
     </div>
-    <figcaption>Blue is the reference frame N actually uses. Hatched slots are reserved but idle. The slot count under <code>dpb_size</code> 0 is illustrative: NVENC picks it. The ~40 MB saving is an estimate, not yet measured.</figcaption>
+    <figcaption>Blue is the reference frame N actually uses. Hatched slots are reserved but idle. The slot count under <code>dpb_size</code> 0 is illustrative: NVENC picks it. The saving was measured later: about 14 MiB per 1080p H.264 encoder on an L4 (48 against 34 MiB, one encoder fed by one raw source, per-process GPU memory).</figcaption>
   </figure>
 
   <figure>
@@ -103,7 +103,7 @@
     <li><b>Why</b>With no B-frames and no lookahead, each frame references the previous one. The extra DPB slots NVENC reserves under <code>dpb_size</code> 0 hold VRAM for references the monitors do not need.</li>
     <li class="flag"><b>Latency</b><p>Program output: none (0 frames, 0 ms). Its encoder is not changed.</p><p>Monitors and command-to-screen: none. The DPB size changes no encode order and adds no buffering.</p></li>
     <li><b>Side effects</b>The encoder has less choice when content returns after an occlusion, such as a background reappearing after something passes in front of it. At the same bitrate a monitor picture can be marginally softer in such moments. Viewers' streams are not affected.</li>
-    <li><b>Cost</b>0 nodes, 0 queues, 0 threads, no extra GPU or CPU work. About 20 lines (counted in the code): one encoder option, one rendition field with a 0–16 range check, the aux default. VRAM: saves up to ~40 MB (estimate, to be measured).</li>
+    <li><b>Cost</b>0 nodes, 0 queues, 0 threads, no extra GPU or CPU work. About 20 lines (counted in the code): one encoder option, one rendition field with a 0–16 range check, the aux default. VRAM: about 14 MiB per 1080p H.264 AUX encoder (measured on the L4, 2026-10-14); for the 22 AUX buses of the 192-source show about 0.3 GB, if its two HEVC monitors save the same (not measured). The program and clean-feed encoders keep NVENC's choice.</li>
     <li><b>Risk</b>Low. It touches only the monitors, whose pictures operators watch but viewers never receive. The worst case is a slightly softer monitor frame after an occlusion.</li>
     <li><b>Switch it off</b>Set <code>"dpb_size": 0</code> on the monitor's rendition in <code>aux_buses</code>. NVENC then chooses again.</li>
   </ul>
