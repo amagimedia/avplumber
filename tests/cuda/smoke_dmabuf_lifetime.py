@@ -35,7 +35,10 @@ def consume(args):
             count += 1
             del frame
         if args.format == "bgra":
-            assert any("texture-backed inputs require RGB-to-YUV" in e[-1] for e in errors), errors
+            # A BGRA canvas is refused: a BGRA buffer as needing RGB-to-YUV, an RGBA one (the
+            # zero-copy export) for its format.
+            assert any("texture-backed inputs require RGB-to-YUV" in e[-1]
+                       or "input hw sw_format mismatch" in e[-1] for e in errors), errors
         else:
             assert count == 30 and not errors, (count, errors)
         # Every frame carried an acquire fence or did not (a patched Electron that no longer waits
