@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import shutil
 import subprocess
@@ -85,40 +84,25 @@ def earlier_browser_ring_size(value):
     return min(value, BROWSER_FRAME_QUEUE_MAX) if type(value) is int else value
 
 
-# The most frames one browser window can have out: Chromium's capture pool of eleven less the two
-# idle buffers it keeps.
-BROWSER_FRAME_QUEUE_MAX = 9
-
-# Buffers Chromium lends per browser window (dma-browser's DMA_BROWSER_EXPORT_BUFFERS, the
-# zero-copy export's `buffers` parameter). The mixer's frame queue must leave two of them to the
-# browser: the frame being delivered and the one in its paint handler.
-BROWSER_EXPORT_BUFFERS_DEFAULT = 11
-BROWSER_EXPORT_BUFFERS_RESERVED = 2
-
-
-def browser_export_buffers():
-    """`DMA_BROWSER_EXPORT_BUFFERS` as the mixer sees it (the same environment the browser gets in
-    the compose files), 1 to 64, default eleven."""
-    raw = os.environ.get("DMA_BROWSER_EXPORT_BUFFERS", "").strip()
-    try:
-        value = int(raw) if raw else BROWSER_EXPORT_BUFFERS_DEFAULT
-    except ValueError:
-        return BROWSER_EXPORT_BUFFERS_DEFAULT
-    return max(1, min(64, value))
+# The most frames one browser window can have out. On the stock copy path nine: Chromium's capture
+# pool of eleven less the two idle buffers it keeps. With the zero-copy export the browser announces
+# its queue's capacity (2 to 16) and the mixer holds one less (browser_frame_queue_for).
+BROWSER_FRAME_QUEUE_DEFAULT = 9
+BROWSER_FRAME_QUEUE_MAX = 15
 
 
 def browser_frame_queue_for(export_buffers):
-    """The frame queue that fits *export_buffers* lent by Chromium: two less, at least one, at most
-    BROWSER_FRAME_QUEUE_MAX. Eleven gives the nine of the default; five gives three; three gives
-    one frame in flight and no return queue, so a slow mixer tick drops browser frames."""
-    return max(1, min(BROWSER_FRAME_QUEUE_MAX, export_buffers - BROWSER_EXPORT_BUFFERS_RESERVED))
+    """The frame queue that fits a zero-copy browser whose queue holds *export_buffers*: one less,
+    so one buffer is always free for the next paint (a frame the mixer does not hold is either being
+    painted or on its way). Six gives five; two gives one."""
+    return max(1, min(BROWSER_FRAME_QUEUE_MAX, int(export_buffers) - 1))
 
 
 def default_browser_frame_queue(fps):
-    """Frames one browser window may have out at once, at any rate: the queue that fits
-    DMA_BROWSER_EXPORT_BUFFERS (nine for the default eleven). The mixer takes up to three of them
-    to return frames one per new frame (dmabuf_inputs.return_queue)."""
-    return browser_frame_queue_for(browser_export_buffers())
+    """Frames one browser window may have out at once, at any rate: all nine of the stock capture
+    pool. The mixer takes up to three of them to return frames one per new frame
+    (dmabuf_inputs.return_queue). A zero-copy browser lowers it to its capacity less one at start."""
+    return BROWSER_FRAME_QUEUE_DEFAULT
 
 
 @dataclass(frozen=True)

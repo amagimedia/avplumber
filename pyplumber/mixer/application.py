@@ -23,7 +23,7 @@ from .backend import mixer_backend
 from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, rendition_color, rendition_format
 from .config import FEEDS
 from .dsk import DownstreamKeyer, register_dsk_commands
-from .dmabuf_inputs import dmabuf_cuda_input_nodes, open_windows, refresh_windows, wait_for_sockets
+from .dmabuf_inputs import BrowserCaptureMode, browser_capture_mode, dmabuf_cuda_input_nodes, open_windows, refresh_windows, wait_for_sockets
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
@@ -663,6 +663,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     if options.mixer_latency_ms is None and cfg.latency_ms is not None:
         options = replace(options, mixer_latency_ms=cfg.latency_ms)
     browsers = [s for s in cfg.sources if s.kind == "browser"]
+    capture_mode = BrowserCaptureMode()
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
                                             "height": s.height, "fps": s.fps or cfg.fps,
@@ -670,6 +671,10 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                                             "holdLastFrame": s.hold_last_frame} for s in browsers])
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
                          options.preheat_timeout_sec)
+        # A zero-copy browser has one capacity-bounded queue: the mixer holds one less than that
+        # and returns every frame at once.
+        capture_mode = browser_capture_mode(options.dmabuf_rest)
+    browser_frame_queue = capture_mode.frame_queue(cfg.browser_frame_queue)
 
     # Browser REST failures must occur before native control threads exist;
     # otherwise Python can print a traceback yet hang during interpreter exit.
@@ -688,8 +693,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
                 fps=cfg.fps, drm_hwaccel=None,
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True,
-                preserve_alpha=source.id in blended_sources, browser_frame_queue=cfg.browser_frame_queue,
-                event_loop=_pacing_loop(index))
+                preserve_alpha=source.id in blended_sources, browser_frame_queue=browser_frame_queue,
+                event_loop=_pacing_loop(index), zero_copy=capture_mode.zero_copy)
             for node in nodes:
                 avp.addNode(node)
         elif source.kind == "v210":

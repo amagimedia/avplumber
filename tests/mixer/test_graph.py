@@ -455,6 +455,45 @@ def test_a_browser_in_a_large_catalogue_cannot_share_a_declared_hdr_input_color(
             GraphOptions(inputs=inputs, output="p.mp4", input_color=color).validate()
 
 
+def test_zero_copy_browser_acks_every_frame_at_once_within_its_queue(monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+
+    def fake_rest(base_url, method, path, body=None, timeout=60):
+        return {"windows": [{"id": "page_00", "captureMode": "zero-copy", "exportBuffers": 6}],
+                "captureMode": "zero-copy", "exportBuffers": 6}
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_rest)
+    mode = dmabuf_inputs.browser_capture_mode("http://b")
+    assert mode.zero_copy and mode.export_buffers == 6
+    # One buffer of the six stays free for the next paint; a shorter configured queue stands.
+    assert mode.frame_queue(9) == 5 and mode.frame_queue(3) == 3
+    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
+        fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=30, drm_hwaccel=None,
+        cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=mode.frame_queue(9),
+        zero_copy=mode.zero_copy)
+    receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
+    assert "return_queue" not in receive   # every frame goes back as soon as its last user lets go
+
+
+def test_stock_or_unreachable_browser_keeps_the_return_queue(monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *a, **k: {"windows": [{"id": "page_00"}]})
+    stock = dmabuf_inputs.browser_capture_mode("http://b")
+    assert not stock.zero_copy and stock.frame_queue(9) == 9
+
+    def unreachable(*a, **k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", unreachable)
+    assert dmabuf_inputs.browser_capture_mode("http://b") == dmabuf_inputs.BrowserCaptureMode()
+    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
+        fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=30, drm_hwaccel=None,
+        cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=9)
+    receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
+    assert receive["return_queue"] == 3
+
+
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
 

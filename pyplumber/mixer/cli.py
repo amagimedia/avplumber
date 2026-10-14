@@ -21,6 +21,7 @@ from pyplumber.mixer.application import (
 )
 from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS
 from pyplumber.mixer import config as mixer_config
+from pyplumber.mixer.dmabuf_inputs import BrowserCaptureMode, browser_capture_mode
 from pyplumber.mixer.dmabuf_inputs import (
     dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows, wait_for_sockets, window_id,
 )
@@ -75,7 +76,7 @@ class GraphOptions(MixerOptions):
 
 def _build_input(
     avp, api, index: int, url: str, *, loop: bool, fps: int, normalize: bool,
-    options: GraphOptions,
+    options: GraphOptions, capture_mode: BrowserCaptureMode = BrowserCaptureMode(),
 ) -> str:
     group = _input_group(index)
     if is_dmabuf_url(url):
@@ -85,8 +86,9 @@ def _build_input(
             api, prefix=f"input_{index}",
             socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
             fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
-            source_group=group, processing_group=group, hold=True, browser_frame_queue=options.browser_frame_queue,
-            event_loop=_pacing_loop(index))
+            source_group=group, processing_group=group, hold=True,
+            browser_frame_queue=capture_mode.frame_queue(options.browser_frame_queue),
+            event_loop=_pacing_loop(index), zero_copy=capture_mode.zero_copy)
         for node in nodes:
             avp.addNode(node)
     else:
@@ -180,11 +182,13 @@ def _build(options: GraphOptions, api, on_error: ExitStack) -> MixerApplication:
                                  width, height, options.fps, options.browser_frame_queue)
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{name}.sock" for name in dmabuf_ids],
                          options.preheat_timeout_sec)
+    capture_mode = browser_capture_mode(options.dmabuf_rest) if dmabuf_ids else BrowserCaptureMode()
 
     avp = _init_avp(options, api, on_error)
     input_edges = [
         _build_input(avp, api, index, url, loop=options.loop_inputs, fps=options.fps,
-                     normalize=len(options.inputs) > DIRECT_INPUT_LIMIT, options=options)
+                     normalize=len(options.inputs) > DIRECT_INPUT_LIMIT, options=options,
+                     capture_mode=capture_mode)
         for index, url in enumerate(options.inputs)
     ]
     canvas = (CANVAS_WIDTH, CANVAS_HEIGHT)
@@ -235,8 +239,9 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="open the dmabuf:// windows with this page through the dma-browser REST API")
     add("--dmabuf-rest", default="http://127.0.0.1:9009")
     add("--browser-frame-queue", "--browser-ring-size", type=int, dest="browser_frame_queue",
-        help="frames one browser window may have out at once, 1 to 9 (default 9; JSON config owns this in "
-             "--config mode). --browser-ring-size is the option's earlier name")
+        help="frames one browser window may have out at once, 1 to 15 (default 9; a zero-copy browser lowers it "
+             "to its queue capacity less one; JSON config owns this in --config mode). --browser-ring-size is "
+             "the option's earlier name")
     add("--janus-output", action="store_true", help="Publish the video-only program to Janus over RTP")
     add("--janus-host", default=JANUS_DEFAULT_HOST)
     add("--janus-video-port", type=int, default=JANUS_DEFAULT_VIDEO_PORT)
