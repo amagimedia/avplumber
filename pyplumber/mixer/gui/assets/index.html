@@ -944,7 +944,8 @@ function renderWipeCache() {
 // from the browser service (state.chromium, absent with older browser images): Chromium's processes
 // by type, the GPU process's threads, and the cores Chromium used most beside the host's use of them.
 const cpuPct = (n) => !Number.isFinite(n) ? "—" : n >= 10 ? `${Math.round(n)}%` : `${n.toFixed(1)}%`;
-const cpuRow = (k) => [k.name, String(k.count), cpuPct(k.pct), cpuPct(k.count > 0 ? k.pct / k.count : NaN), cpuPct(k.max_pct)];
+// avg_pct is total / n from the server; an older server without it gets the same from here.
+const cpuRow = (k) => [k.name, String(k.count), cpuPct(k.pct), cpuPct(k.avg_pct ?? (k.count > 0 ? k.pct / k.count : NaN)), cpuPct(k.max_pct)];
 function threadTip(h, c) {
   const kinds = h.thread_kinds || [{name: h.thread_name, count: 1, pct: h.thread_pct, max_pct: h.thread_pct}];
   // "other", the kinds past the server's limit, stays last whatever its total.

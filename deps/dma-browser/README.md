@@ -167,10 +167,12 @@ the worker's point of the period.
 
 `/metrics/cpu` reads `/proc` for this service's own process tree (Linux only; 500 elsewhere) and
 returns the CPU used since the previous call, in percent of one core: by Chromium process type
-(`processes`), the GPU process split into viz compositor, GPU main, IO and other threads
-(`gpuThreads`), the busiest thread names (`threads`), and cores' worth used with a per-core split
-that charges each thread's time to the core it last ran on (`cores`, an approximation). The first
-call only takes the baseline; calls within 500 ms of a sample return that sample again.
+(`processes`), the GPU process split into viz compositor, GPU main (the thread whose tid is the
+pid), IO and other threads (`gpuThreads`), and cores' worth used with a per-core split
+(`cores`, an approximation: GPU-process threads are charged to the core each last ran on, other
+processes to their main thread's). To stay cheap it reads one stat file per process, each
+command line once, and thread files only for GPU processes. The first call only takes the
+baseline; calls within 500 ms of a sample return that sample again. The mixer polls every 5 s.
 
 Frames go to `/tmp/dma-page/{id}.sock` (dmabuf FD + 48-byte TexInfo header, plus the
 acquire fence fd when the header flags one; layout in `addons/fdpass/texinfo.h`).

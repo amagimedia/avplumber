@@ -1,9 +1,11 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   ProcessCpuSampler,
+  fsReader,
   groupCpu,
   gpuThreadKind,
   parseHostCores,
@@ -13,6 +15,7 @@ import {
   threadGroupName,
   type CpuSample,
   type ProcessKind,
+  type ProcReader,
   type ThreadSample,
 } from '../../../src/main/metrics/ProcessCpu';
 
@@ -46,9 +49,9 @@ function proc(
   kind: ProcessKind,
   ticks: number,
   threads: ThreadSample[] = [],
-  start = 1,
+  o: { start?: number; cpu?: number } = {},
 ): CpuSample['processes'][number] {
-  return { pid, start, kind, ticks, threads };
+  return { pid, start: o.start ?? 1, kind, ticks, cpu: o.cpu ?? 0, threads };
 }
 
 describe('processKind', () => {
@@ -74,6 +77,11 @@ describe('gpuThreadKind and threadGroupName', () => {
     expect(gpuThreadKind('CrGpuMain')).toBe('main');
     expect(gpuThreadKind('Chrome_ChildIOT')).toBe('io');
     expect(gpuThreadKind('ThreadPoolForeg')).toBe('other');
+  });
+
+  it('takes the thread whose tid is the pid as GPU main, whatever Electron named it', () => {
+    expect(gpuThreadKind('electron', true)).toBe('main');
+    expect(gpuThreadKind('electron')).toBe('other');
   });
 
   it('collapses digits', () => {
@@ -102,6 +110,13 @@ describe('parseStat and parseHostCores', () => {
 });
 
 describe('groupCpu', () => {
+  const gpuThreads = (main: number, viz: number, io: number, pool: number, shader: number) => [
+    thread(20, 'electron', main, 0), // Electron's GPU main thread keeps the executable's name
+    thread(21, 'VizCompositorTh', viz, 1),
+    thread(22, 'Chrome_ChildIOT', io, 1),
+    thread(23, 'ThreadPoolForeg', pool, 0),
+    thread(24, 'CrShaderCache', shader, 0),
+  ];
   const base: CpuSample = {
     atMs: 0,
     hostCores: [
@@ -111,15 +126,9 @@ describe('groupCpu', () => {
     processes: [
       proc(1, 'other', 0),
       proc(10, 'browser', 100),
-      proc(20, 'gpu', 1000, [
-        thread(20, 'CrGpuMain', 500, 0),
-        thread(21, 'VizCompositorTh', 300, 1),
-        thread(22, 'Chrome_ChildIOT', 100, 1),
-        thread(23, 'ThreadPoolForeg', 50, 0),
-        thread(24, 'CrShaderCache', 50, 0),
-      ]),
-      proc(30, 'renderer', 0, [thread(30, 'CrRendererMain', 0, 1)]),
-      proc(31, 'renderer', 0, [thread(31, 'CrRendererMain', 0, 1)]),
+      proc(20, 'gpu', 1000, gpuThreads(500, 300, 100, 50, 50)),
+      proc(30, 'renderer', 0, [], { cpu: 1 }),
+      proc(31, 'renderer', 0, [], { cpu: 1 }),
     ],
   };
 
@@ -143,16 +152,10 @@ describe('groupCpu', () => {
       processes: [
         proc(1, 'other', 0),
         proc(10, 'browser', 120),
-        proc(20, 'gpu', 1160, [
-          thread(20, 'CrGpuMain', 560, 0),
-          thread(21, 'VizCompositorTh', 380, 1),
-          thread(22, 'Chrome_ChildIOT', 110, 1),
-          thread(23, 'ThreadPoolForeg', 54, 0),
-          thread(24, 'CrShaderCache', 56, 0),
-        ]),
-        proc(30, 'renderer', 60, [thread(30, 'CrRendererMain', 60, 1)]),
-        proc(31, 'renderer', 20, [thread(31, 'CrRendererMain', 20, 1)]),
-        proc(40, 'utility', 10, [thread(40, 'AudioThread', 10, 0)]),
+        proc(20, 'gpu', 1160, gpuThreads(560, 380, 110, 54, 56)),
+        proc(30, 'renderer', 60, [], { cpu: 1 }),
+        proc(31, 'renderer', 20, [], { cpu: 1 }),
+        proc(40, 'utility', 10),
       ],
     };
     const m = groupCpu(base, cur);
@@ -182,65 +185,25 @@ describe('groupCpu', () => {
         ],
       },
     ]);
-    // Thread time charged to the core each thread last ran on; the host's own use beside it.
+    // GPU threads are charged to the core each last ran on, other processes to their main
+    // thread's core; the host's own use of each core beside it.
     expect(m.cores.perCore).toEqual([
-      { cpu: 0, chromiumPct: 40, hostPct: 50 }, // 60 + 4 + 6 + 10 ticks
-      { cpu: 1, chromiumPct: 85, hostPct: 25 }, // 80 + 10 + 60 + 20 ticks
+      { cpu: 0, chromiumPct: 50, hostPct: 50 }, // GPU 60 + 4 + 6, browser 20, utility 10
+      { cpu: 1, chromiumPct: 85, hostPct: 25 }, // GPU 80 + 10, renderers 60 + 20
     ]);
-    expect(m.threads[0]).toEqual({
-      name: 'VizCompositorTh',
-      n: 1,
-      pct: 40,
-      avgPct: 40,
-      maxPct: 40,
-    });
-    expect(m.threads.find((row) => row.name === 'CrRendererMain')).toEqual({
-      name: 'CrRendererMain',
-      n: 2,
-      pct: 40,
-      avgPct: 20,
-      maxPct: 30,
-    });
   });
 
   it('treats a reused pid or tid as new and never reports negative time', () => {
     const cur: CpuSample = {
       atMs: 1000,
       hostCores: [],
-      processes: [proc(10, 'browser', 5, [thread(10, 'CrBrowserMain', 5, 0, 77)], 77)],
+      processes: [proc(10, 'browser', 5, [], { start: 77 })],
     };
     const m = groupCpu(base, cur);
     expect(m.processes).toEqual([{ type: 'browser', n: 1, pct: 5, avgPct: 5, maxPct: 5 }]);
     expect(m.cores.perCore).toEqual([{ cpu: 0, chromiumPct: 5, hostPct: null }]);
     const shrunk = groupCpu(base, { ...base, atMs: 1000, processes: [proc(10, 'browser', 50)] });
     expect(shrunk.totalPct).toBe(0);
-  });
-
-  it('keeps the eight largest thread groups and sums the rest as other', () => {
-    const names = Array.from({ length: 11 }, (_, i) => `T${String.fromCharCode(97 + i)}`);
-    const before: CpuSample = {
-      atMs: 0,
-      hostCores: [],
-      processes: [proc(1, 'browser', 0, names.map((n, i) => thread(i + 1, n, 0)))],
-    };
-    const after: CpuSample = {
-      atMs: 1000,
-      hostCores: [],
-      processes: [proc(1, 'browser', 66, names.map((n, i) => thread(i + 1, n, i + 1)))],
-    };
-    const rows = groupCpu(before, after).threads;
-    expect(rows.map((row) => row.name)).toEqual([
-      'Tk',
-      'Tj',
-      'Ti',
-      'Th',
-      'Tg',
-      'Tf',
-      'Te',
-      'Td',
-      'other',
-    ]);
-    expect(rows[8]).toEqual({ name: 'other', n: 3, pct: 6, avgPct: 2, maxPct: 3 });
   });
 });
 
@@ -280,7 +243,28 @@ describe('readCpuSample and ProcessCpuSampler', () => {
     }
   }
 
-  it('reads the root and its descendants only, with types from the command lines', async () => {
+  /** fsReader that counts its calls by kind of file. */
+  function countingReader(): { reader: ProcReader; counts: Record<string, number> } {
+    const counts: Record<string, number> = {};
+    const bump = (kind: string): void => {
+      counts[kind] = (counts[kind] ?? 0) + 1;
+    };
+    return {
+      counts,
+      reader: {
+        list: (dir) => {
+          bump(dir.endsWith('task') ? 'taskList' : 'procList');
+          return fsReader.list(dir);
+        },
+        read: (file) => {
+          bump(file.includes(`${path.sep}task${path.sep}`) ? 'threadStat' : path.basename(file));
+          return fsReader.read(file);
+        },
+      },
+    };
+  }
+
+  it('reads the root and its descendants, and threads of GPU processes only', () => {
     root = mkdtempSync(path.join(tmpdir(), 'proc-'));
     fakeProc([
       { pid: 100, ppid: 1, cmdline: ['node', 'sv.js'], ticks: 3, threads: [[100, 'node', 3, 0]] },
@@ -300,20 +284,113 @@ describe('readCpuSample and ProcessCpuSampler', () => {
         ticks: 9,
         threads: [[400, 'CrRendererMain', 9, 0]],
       },
+      {
+        pid: 500,
+        ppid: 200,
+        cmdline: ['/e/electron', '--type=gpu-process'],
+        ticks: 11,
+        threads: [
+          [500, 'electron', 6, 2],
+          [501, 'VizCompositorTh', 5, 3],
+        ],
+      },
       { pid: 999, ppid: 1, cmdline: ['/usr/bin/other'], ticks: 50, threads: [[999, 'x', 50, 0]] },
     ]);
-    const sample = await readCpuSample(root, 100, new Map(), () => 42);
+    const { reader, counts } = countingReader();
+    const kinds = new Map<string, ProcessKind>();
+    const sample = readCpuSample(root, 100, kinds, () => 42, reader);
     expect(sample.atMs).toBe(42);
     expect(sample.hostCores).toEqual([[10, 100]]);
-    expect(sample.processes.map((p) => [p.pid, p.kind, p.ticks]).sort()).toEqual([
-      [100, 'other', 3],
-      [200, 'browser', 7],
-      [300, 'zygote', 0],
-      [400, 'renderer', 9],
+    expect(sample.processes.map((p) => [p.pid, p.kind, p.ticks, p.threads.length]).sort()).toEqual([
+      [100, 'other', 3, 0],
+      [200, 'browser', 7, 0],
+      [300, 'zygote', 0, 0],
+      [400, 'renderer', 9, 0],
+      [500, 'gpu', 11, 2],
     ]);
-    expect(sample.processes.find((p) => p.pid === 400)?.threads).toEqual([
-      { tid: 400, start: 1, comm: 'CrRendererMain', ticks: 9, cpu: 0 },
+    const gpuThreads = [...(sample.processes.find((p) => p.pid === 500)?.threads ?? [])];
+    expect(gpuThreads.sort((a, b) => a.tid - b.tid)).toEqual([
+      { tid: 500, start: 1, comm: 'electron', ticks: 6, cpu: 2 },
+      { tid: 501, start: 1, comm: 'VizCompositorTh', ticks: 5, cpu: 3 },
     ]);
+    // One stat per pid in /proc, a command line per process of the tree, one GPU task listing.
+    expect(counts).toEqual({ procList: 1, stat: 7, cmdline: 5, taskList: 1, threadStat: 2 });
+    // The next sample knows every process's type: no command line is read again.
+    const again = countingReader();
+    readCpuSample(root, 100, kinds, () => 43, again.reader);
+    expect(again.counts.cmdline).toBeUndefined();
+  });
+
+  it('costs little on a show-sized tree: 70 processes, 1,500 threads, 5 GPU processes', () => {
+    root = mkdtempSync(path.join(tmpdir(), 'proc-'));
+    const processes: FakeProcess[] = [
+      { pid: 2, ppid: 1, cmdline: ['node', 'sv.js'], ticks: 0, threads: [] },
+    ];
+    let tid = 10_000;
+    const threadsOf = (count: number, comm: string): [number, string, number, number][] =>
+      Array.from({ length: count }, (_, i) => [(tid += 1), `${comm}${String(i)}`, i, i % 16]);
+    for (let w = 0; w < 5; w += 1) {
+      const browser = 100 + w * 100;
+      processes.push(
+        { pid: browser, ppid: 2, cmdline: ['/e/electron'], ticks: 0, threads: threadsOf(60, 'B') },
+        {
+          pid: browser + 1,
+          ppid: browser,
+          cmdline: ['/e/electron', '--type=gpu-process'],
+          ticks: 0,
+          threads: threadsOf(30, 'G'),
+        },
+      );
+      for (let r = 0; r < 11; r += 1) {
+        processes.push({
+          pid: browser + 10 + r,
+          ppid: browser,
+          cmdline: ['/e/electron', r < 8 ? '--type=renderer' : '--type=utility'],
+          ticks: 0,
+          threads: threadsOf(22, 'R'),
+        });
+      }
+    }
+    while (processes.length < 70) {
+      const pid = 1000 + processes.length;
+      processes.push({
+        pid,
+        ppid: 100,
+        cmdline: ['/e/electron', '--type=utility'],
+        ticks: 0,
+        threads: threadsOf(12, 'U'),
+      });
+    }
+    fakeProc(processes);
+    const threads = processes.reduce((sum, p) => sum + p.threads.length, 0);
+    expect(processes.length).toBe(70);
+    expect(threads).toBeGreaterThanOrEqual(1500);
+
+    const { reader, counts } = countingReader();
+    const kinds = new Map<string, ProcessKind>();
+    let prev = readCpuSample(root, 2, kinds, Date.now, reader);
+    for (const key of Object.keys(counts)) delete counts[key];
+    const calls = 20;
+    const started = performance.now();
+    for (let i = 0; i < calls; i += 1) {
+      const cur = readCpuSample(root, 2, kinds, () => prev.atMs + 5000, reader);
+      groupCpu(prev, cur);
+      prev = cur;
+    }
+    const msPerCall = (performance.now() - started) / calls;
+    console.log(
+      `/metrics/cpu on ${String(processes.length)} processes, ${String(threads)} threads: ` +
+        `${msPerCall.toFixed(2)} ms per call`,
+    );
+    // Per call: one /proc listing, 70 process stats, the 5 GPU processes' 150 thread stats.
+    expect(counts).toEqual({
+      procList: calls,
+      stat: calls * 71, // 70 processes and /proc/stat
+      taskList: calls * 5,
+      threadStat: calls * 150,
+    });
+    // At one call every 5 s, 25 ms would be 0.5 % of a core.
+    expect(msPerCall).toBeLessThan(25);
   });
 
   it('reports figures between calls and reuses them within the minimum interval', async () => {
@@ -328,7 +405,7 @@ describe('readCpuSample and ProcessCpuSampler', () => {
           ppid: 200,
           cmdline: ['/e/electron', '--type=gpu-process'],
           ticks,
-          threads: [[210, 'CrGpuMain', ticks, 0]],
+          threads: [[210, 'electron', ticks, 0]],
         },
       ]);
     };
@@ -343,5 +420,10 @@ describe('readCpuSample and ProcessCpuSampler', () => {
     now.ms = 1200;
     gpu(400);
     expect(await sampler.metrics()).toBe(second);
+  });
+
+  it('rejects where /proc cannot be read', async () => {
+    const sampler = new ProcessCpuSampler(path.join(tmpdir(), 'no-such-proc-dir'));
+    await expect(sampler.metrics()).rejects.toThrow(/not readable/);
   });
 });

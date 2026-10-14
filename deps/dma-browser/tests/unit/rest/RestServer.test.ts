@@ -209,7 +209,6 @@ describe('GET /metrics/cpu', () => {
       cores: { used: 0.13, hostVcpus: 4, perCore: [] },
       processes: [{ type: 'gpu', n: 1, pct: 12.5, avgPct: 12.5, maxPct: 12.5 }],
       gpuThreads: [],
-      threads: [],
     };
     const cpu = { metrics: vi.fn().mockResolvedValue(metrics) };
     const server = new RestServer(

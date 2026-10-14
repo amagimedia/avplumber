@@ -20,7 +20,8 @@ const {chromium} = require('playwright');
       mixer_cpu_pct: 600, thread_pct: 40, thread_name: 'mixer_comp_a',
       thread_count: 1472, thread_kinds: [['input_N', 152, 140.5, 3.3], ['upload_N', 47, 135, 3.3],
         ['mixer_comp_a', 1, 40, 40], ['EventLoop', 5, 37.2, 8.2], ['mixer_color_sdr', 105, 17.2, 0.4],
-        ['other', 1161, 230.1, 38]].map(([name, count, pct, max_pct]) => ({name, count, pct, max_pct}))},
+        ['other', 1161, 230.1, 38]].map(([name, count, pct, max_pct]) =>
+          ({name, count, pct, avg_pct: Math.round(pct / count * 10) / 10, max_pct}))},
       chromium: {total_pct: 148.2, cores_used: 1.48, vcpus: 16,
         processes: [['GPU process', 2, 80.4, 52.1], ['renderer', 24, 52, 6.3], ['browser', 2, 12.6, 9]]
           .map(([name, count, pct, max_pct]) => ({name, count, pct, max_pct})),
