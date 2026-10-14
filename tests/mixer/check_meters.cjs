@@ -98,22 +98,17 @@ const {chromium} = require('playwright');
       browser: {sources: 40, repeats: 120, discarded: 45, worst: {source: 'web_12', repeats: 40, discarded: 2}},
       other: {sources: 152, repeats: 5, discarded: 1}}; renderLatency(); });
     assert.deepEqual(await page.locator('#lat-tip dt').allTextContents(), ['Cut p95 · 3 cuts',
-      'Deadline misses · last 40 s', 'AUX output drops · last 40 s', 'Browser repeats / discards · 40 · last 40 s',
-      'Worst browser source', 'Other inputs repeats / discards · 152']);
-    assert.deepEqual((await values('lat')).slice(3), ['120 / 45', 'web_12 · 40 / 2', '5 / 1']);
-    await page.evaluate(() => { state.recent.inputs.browser = {sources: 40, repeats: 0, discarded: 0, worst: null}; renderLatency(); });
-    assert.deepEqual((await values('lat')).slice(3), ['0 / 0', '—', '5 / 1']);
-    // The browser service's side: its windows' drops by reason, the worst window, paints against
-    // sends, and the paints Chromium skipped; an app that does not count skips shows a dash.
+      'Deadline misses · last 40 s', 'AUX output drops · last 40 s', 'Browser repeats · last 40 s', 'Other inputs repeats']);
+    assert.deepEqual((await values('lat')).slice(3), ['120 · worst web_12 40', '5']);
+    await page.evaluate(() => { state.recent.inputs = {browser: {sources: 40, repeats: 0, discarded: 0, worst: null},
+      other: {sources: 152, repeats: 0, discarded: 0}}; renderLatency(); });
+    assert.deepEqual((await values('lat')).slice(3), ['0']);
+    // The browser service's side: one row, its drops and the main reason.
     await page.evaluate(() => { state.browser_drops = {window_s: 600, covered_s: 600, windows: 40, paints: 72000,
       sent: 71988, dropped: 12, reasons: [['retained_pool_full', 9], ['no_consumer', 3]],
       worst: {id: 'web_7', dropped: 7}, skipped: 15}; renderLatency(); });
-    assert.deepEqual((await page.locator('#lat-tip dt').allTextContents()).slice(6), ['Browser drops · 40 windows · last 10 min',
-      'Drops by reason', 'Worst browser window', 'Browser paints / sent', 'Chromium skipped paints']);
-    assert.deepEqual((await values('lat')).slice(6),
-      ['12', 'retained_pool_full 9 · no_consumer 3', 'web_7 · 7', '72000 / 71988', '15']);
-    await page.evaluate(() => { Object.assign(state.browser_drops, {dropped: 0, reasons: [], worst: null, skipped: null}); renderLatency(); });
-    assert.deepEqual((await values('lat')).slice(6), ['0', '—', '72000 / 71988', '—']);
+    assert.deepEqual((await page.locator('#lat-tip dt').allTextContents()).slice(4), ['Browser drops · last 10 min']);
+    assert.deepEqual((await values('lat')).slice(4), ['12 · retained_pool_full 9']);
     await page.evaluate(() => { state.browser_drops = null; renderLatency(); });
     await page.evaluate(() => { state.recent = null; renderLatency(); });
     assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);

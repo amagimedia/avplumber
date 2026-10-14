@@ -1484,10 +1484,10 @@ function inputRows(recent) {
   if (!groups) return [];
   const pair = (g) => `${metric(g?.repeats)} / ${metric(g?.discarded)}`, span = recentSpan(recent);
   const worst = groups.browser?.worst;
+  const other = groups.other?.repeats ? [[`Other inputs repeats`, metric(groups.other.repeats)]] : [];
   return [
-    [`Browser repeats / discards · ${groups.browser?.sources ?? 0} · last ${span}`, pair(groups.browser)],
-    ...(groups.browser?.sources ? [["Worst browser source", worst ? `${worst.source} · ${pair(worst)}` : "—"]] : []),
-    [`Other inputs repeats / discards · ${groups.other?.sources ?? 0}`, pair(groups.other)],
+    [`Browser repeats · last ${span}`, metric(groups.browser?.repeats) + (worst?.repeats ? ` · worst ${worst.source} ${worst.repeats}` : "")],
+    ...other,
   ];
 }
 // The browser service's side over its own last ten minutes (state.browser_drops): frames its windows
@@ -1496,13 +1496,8 @@ function inputRows(recent) {
 function browserDropRows(d) {
   if (!d) return [];
   const span = recentSpan(d), reasons = (d.reasons || []).map(([reason, n]) => `${reason} ${n}`).join(" · ");
-  return [
-    [`Browser drops · ${d.windows} windows · last ${span}`, metric(d.dropped)],
-    ...(reasons ? [["Drops by reason", reasons]] : []),
-    ["Worst browser window", d.worst ? `${d.worst.id} · ${d.worst.dropped}` : "—"],
-    ["Browser paints / sent", `${metric(d.paints)} / ${metric(d.sent)}`],
-    ["Chromium skipped paints", metric(d.skipped)],
-  ];
+  const top = (d.reasons || [])[0];
+  return [[`Browser drops · last ${span}`, metric(d.dropped) + (top ? ` · ${top[0]} ${top[1]}` : "")]];
 }
 function renderLatency() {
   const lat = fresh(cutLatency)?.latency;
