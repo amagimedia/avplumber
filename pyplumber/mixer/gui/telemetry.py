@@ -163,15 +163,36 @@ def delivery_totals(state: dict) -> dict | None:
     return {"missed_deadlines": sum(missed), "output_drops": sum(drops)}
 
 
+def startup_report(bridge) -> dict | None:
+    """`mixer.startup`: how the running mixer went on air (its `released_at` is the on-air moment,
+    `browser_windows` the browser service's counters then), or None from a mixer without the
+    command or one not answering."""
+    try:
+        report = json.loads(bridge.command("mixer.startup", 3) or "null")
+    except Exception:
+        return None
+    return report if isinstance(report, dict) else None
+
+
+ON_AIR = "on_air"
+
+
 def playout_counters(bridge) -> dict | None:
     """delivery_totals() and, where the show names its compositor inputs (settings "inputs"), each
     source's repeats and discards from both program-slot compositors' per_input counters: two small
     commands per call, which RecentCounts makes every 5 s. A repeat with a discard beside it is two
-    paints in one tick slot (jitter); a repeat alone is a tick no frame arrived for."""
+    paints in one tick slot (jitter); a repeat alone is a tick no frame arrived for. With the
+    mixer's on-air moment (startup_report) as ON_AIR, so that the window starts again with a show
+    that went on air anew; the counters themselves start from zero then."""
     state = bridge.state(timeout=3)
     totals = delivery_totals(state)
     inputs = (state.get("settings") or {}).get("inputs")
-    if totals is None or not inputs:
+    if totals is None:
+        return None
+    report = startup_report(bridge)
+    if report and report.get("released_at") is not None:
+        totals[ON_AIR] = report["released_at"]
+    if not inputs:
         return totals
     slots = [json.loads(bridge.command(f"node.object.get {bridge.mixer}_comp_{slot} per_input", 3) or "[]")
              for slot in ("a", "b")]
@@ -227,13 +248,17 @@ class RecentCounts:
     page is open. `values` is None until the first sample; `covered_s` is how much of the window
     the samples span so far. Totals that fall belong to a mixer that started again and counts from
     zero: everything it counted happened inside the window. Counters that appear or go away (another
-    show's inputs) start the window again from the current totals. `summary` turns the rises into
-    what the page reads (by default they are the values themselves)."""
+    show's inputs) start the window again from the current totals. An ON_AIR key among the totals is
+    not a counter but the mixer's on-air moment: when it changes, the mixer went on air anew with
+    its counters reset, so everything it counted is recent (whether or not every total fell), and
+    `values` carries it. `summary` turns the rises into what the page reads (by default they are
+    the values themselves)."""
 
     def __init__(self, read, window_s: float = 600, period_s: float = 5, clock=time.monotonic, summary=None):
         self.read, self.window_s, self.period_s, self.clock = read, window_s, period_s, clock
         self.summary = summary or (lambda rises: rises)
         self.values = None
+        self.on_air = None
         self._samples: list[tuple[float, dict]] = []
 
     def start(self):
@@ -251,17 +276,21 @@ class RecentCounts:
         totals = self.read()
         if totals is None:
             return
+        totals = dict(totals)
+        on_air = totals.pop(ON_AIR, None)
         now = self.clock()
         last = self._samples[-1][1] if self._samples else None
-        if last is not None and any(totals.get(key, count) < count for key, count in last.items()):
+        if last is not None and (on_air != self.on_air or any(totals.get(key, count) < count for key, count in last.items())):
             self._samples = [(now, dict.fromkeys(totals, 0))]
         elif last is not None and set(totals) != set(last):
             self._samples = []
+        self.on_air = on_air
         self._samples.append((now, dict(totals)))
         while self._samples[0][0] < now - self.window_s:
             self._samples.pop(0)
         since, base = self._samples[0]
         self.values = {"window_s": self.window_s, "covered_s": round(now - since),
+                       **({ON_AIR: on_air} if on_air is not None else {}),
                        **self.summary({key: count - base[key] for key, count in totals.items()})}
 
 
@@ -392,7 +421,7 @@ class BrowserCpuStats:
 
     # Every 5 s: the hover needs no more, and each answer costs the browser service a /proc read.
     def __init__(self, base_url: str, period_s: float = 5, absent_s: float = 30, timeout_s: float = 1, fetch=None,
-                 fetch_status=None, clock=time.monotonic):
+                 fetch_status=None, clock=time.monotonic, on_air=None, wall=time.time):
         self.base_url = base_url.rstrip("/")
         self.period_s, self.absent_s, self.timeout_s = period_s, absent_s, timeout_s
         self.fetch = fetch or (lambda: self._get(self.PATH))
@@ -402,6 +431,12 @@ class BrowserCpuStats:
         # The windows' drops, paints and sends over the last ten minutes, from GET /status at the
         # same cadence: browser_drop_summary() of the rises, or None before the first answer.
         self.drops = RecentIncrements(clock=clock, summary=browser_drop_summary, group=lambda key: key[0])
+        # `on_air` gives the mixer's startup report (telemetry.startup_report) or None. The windows
+        # count from before the mixer exists (their pages load and drop frames while the show is
+        # built), so when the report's on-air moment is new the drop window starts again from the
+        # counters the mixer read at that moment: nothing from the warm-up is recent.
+        self.on_air, self.clock, self.wall = on_air, clock, wall
+        self._on_air_seen = None
 
     def start(self):
         threading.Thread(target=self._run, daemon=True, name="browser-cpu").start()
@@ -424,12 +459,35 @@ class BrowserCpuStats:
             time.sleep(self.period_s)
 
     def poll_status(self):
-        """One GET /status into the drop window. A failed one leaves the last figures standing; the
-        next good one counts what rose meanwhile (or, for a restarted window, since its restart)."""
+        """One GET /status into the drop window, after a new on-air moment has started it again
+        (rebase_on_air). A failed one leaves the last figures standing; the next good one counts
+        what rose meanwhile (or, for a restarted window, since its restart)."""
+        try:
+            self.rebase_on_air()
+        except Exception as exc:   # a report the mixer should not have given: the window goes on as it was
+            log.warning("Browser drop window not rebased on air: %s: %s", type(exc).__name__, exc)
         try:
             self.drops.sample(window_counters(self.fetch_status()))
         except Exception:   # down or restarting: never end the polling thread
             pass
+
+    def rebase_on_air(self):
+        """Start the drop window again from the mixer's on-air counters when its on-air moment is
+        new. A report without them (the service did not answer the mixer then) starts the window
+        with the next poll instead."""
+        report = self.on_air() if self.on_air else None
+        released_at = report.get("released_at") if report else None
+        if released_at is None or released_at == self._on_air_seen:
+            return
+        self._on_air_seen = released_at
+        windows = report.get("browser_windows")
+        at = self.clock() - max(0.0, self.wall() - released_at)
+        if windows is None:
+            self.drops.restart(at, epoch=released_at)
+            log.warning("Browser drop window restarted at on air without the mixer's browser counters")
+            return
+        counters = window_counters({"windows": [{"id": wid, "stats": stats} for wid, stats in windows.items()]})
+        self.drops.restart(at, epoch=released_at, totals=counters)
 
     def poll(self) -> float:
         """One request; returns how long to wait before the next."""
@@ -458,8 +516,20 @@ class RecentIncrements:
         self.summary = summary or (lambda rises: rises)
         self.group = group or (lambda key: key)
         self.values = None
+        self.epoch = None   # what the window counts from (a mixer's on-air moment), in `values` as "since"
         self._last = None   # (time, totals) of the last sample
         self._steps = collections.deque()   # (start, end, {key: rise}) between successive samples
+
+    def restart(self, at, *, epoch=None, totals=None):
+        """Forget the window: it counts from *at* (the clock's time) on, as `epoch` names. With
+        *totals*, the counters' values at *at*, the next sample's rise is counted from them; without,
+        the next sample is the baseline and `values` stay as they were until it comes."""
+        self._steps.clear()
+        self._last = (at, dict(totals)) if totals is not None else None
+        self.epoch = epoch
+        if totals is not None:
+            self.values = {"window_s": self.window_s, "covered_s": round(self.clock() - at),
+                           **({"since": epoch} if epoch is not None else {}), **self.summary(dict.fromkeys(totals, 0))}
 
     def sample(self, totals):
         now = self.clock()
@@ -477,7 +547,8 @@ class RecentIncrements:
             for key, value in rises.items():
                 sums[key] = sums.get(key, 0) + value
         start = self._steps[0][0] if self._steps else now
-        self.values = {"window_s": self.window_s, "covered_s": round(now - start), **self.summary(sums)}
+        self.values = {"window_s": self.window_s, "covered_s": round(now - start),
+                       **({"since": self.epoch} if self.epoch is not None else {}), **self.summary(sums)}
 
 
 WINDOW_COUNTERS = {"paints": "paintCount", "sent": "txFrameCount", "dropped": "droppedFrames"}
