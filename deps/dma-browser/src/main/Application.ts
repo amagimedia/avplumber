@@ -7,7 +7,6 @@ import { ManagedWindow, type IManagedWindowFactory } from './ManagedWindow';
 import { workerFramePhase } from './capture/FramePhase';
 import { WindowManager } from './WindowManager';
 import { AllowedDims } from './capture/AllowedDims';
-import { DEFAULT_RETAINED_FRAME_POOL_SIZE } from './capture/FrameCaptureChannel';
 import { RestServer } from './rest/RestServer';
 import { envFlag, envInt, envList, envString, type Env } from './support/env';
 import type { WindowConfig } from './config/WindowConfig';
@@ -24,6 +23,8 @@ export interface ApplicationConfig {
   readonly loadWatchdogMs: number;
   readonly allowedDims: AllowedDims;
   readonly dmabufPoolSize: number;
+  /** Buffers Chromium lends per window (`DMA_BROWSER_EXPORT_BUFFERS`); the retained pool's ceiling. */
+  readonly exportBuffers: number;
   readonly framePhase: number | null;
 }
 
@@ -55,8 +56,15 @@ export class Application {
         this.cfg.maxWindows,
       )} allowedDims=${this.cfg.allowedDims.listForLogging()} dmabufPoolSize=${String(
         this.cfg.dmabufPoolSize,
-      )} framePhase=${String(this.cfg.framePhase)}`,
+      )} exportBuffers=${String(this.cfg.exportBuffers)} framePhase=${String(this.cfg.framePhase)}`,
     );
+    if (this.cfg.dmabufPoolSize > this.cfg.exportBuffers) {
+      this.logger.global(
+        `DMA_BROWSER_DMABUF_POOL_SIZE=${String(this.cfg.dmabufPoolSize)} exceeds ` +
+          `DMA_BROWSER_EXPORT_BUFFERS=${String(this.cfg.exportBuffers)}: Chromium lends at most ` +
+          'the latter per window, so the pool cannot fill beyond it',
+      );
+    }
     try {
       this.logger.global(`gpuFeatureStatus=${JSON.stringify(app.getGPUFeatureStatus())}`);
     } catch (err) {
@@ -65,8 +73,15 @@ export class Application {
 
     const logger = this.logger;
     const factory: IManagedWindowFactory = {
-      create: (windowCfg: WindowConfig) =>
-        new ManagedWindow({
+      create: (windowCfg: WindowConfig) => {
+        if (windowCfg.ringSize !== undefined && windowCfg.ringSize > this.cfg.exportBuffers) {
+          logger.global(
+            `window ${windowCfg.id}: ringSize=${String(windowCfg.ringSize)} exceeds ` +
+              `DMA_BROWSER_EXPORT_BUFFERS=${String(this.cfg.exportBuffers)}; at most the latter ` +
+              'can be in flight (the mixer should use browser_frame_queue <= exportBuffers - 2)',
+          );
+        }
+        return new ManagedWindow({
           config: windowCfg,
           socketDir: this.cfg.socketDir,
           preloadPath: this.preloadPath(),
@@ -75,7 +90,8 @@ export class Application {
           loadWatchdogMs: this.cfg.loadWatchdogMs,
           retainedFramePoolSize: windowCfg.ringSize ?? this.cfg.dmabufPoolSize,
           framePhase: this.cfg.framePhase,
-        }),
+        });
+      },
     };
 
     this.windowManager = new WindowManager(factory, { maxWindows: this.cfg.maxWindows });
@@ -121,10 +137,13 @@ export class Application {
     const port = envInt(this.env, 'DMA_BROWSER_REST_PORT', 9009, 1, 65535);
     const maxWindows = envInt(this.env, 'DMA_BROWSER_MAX_WINDOWS', 8, 1, Number.MAX_SAFE_INTEGER);
     const loadWatchdogMs = envInt(this.env, 'DMA_BROWSER_LOAD_WATCHDOG_MS', 30_000, 1000, 600_000);
+    // One number sizes the chain: Chromium's lent cap and pool (through the zero-copy feature's
+    // parameter) and, unless overridden, the retained pool here.
+    const exportBuffers = HwAccelConfigurator.exportBuffers(this.env);
     const dmabufPoolSize = envInt(
       this.env,
       'DMA_BROWSER_DMABUF_POOL_SIZE',
-      DEFAULT_RETAINED_FRAME_POOL_SIZE,
+      exportBuffers,
       1,
       64,
     );
@@ -138,6 +157,7 @@ export class Application {
       loadWatchdogMs,
       allowedDims,
       dmabufPoolSize,
+      exportBuffers,
       framePhase: workerFramePhase(this.env),
     };
   }

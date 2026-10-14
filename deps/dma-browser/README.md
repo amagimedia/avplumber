@@ -72,6 +72,18 @@ stock Electron ignores the features:
   the first switch on as well; `DMA_BROWSER_NATIVE_HANDLE_CAPTURE=0` next to it
   is refused at start-up, as is either feature name in
   `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES`.
+- `DMA_BROWSER_EXPORT_BUFFERS=N` (1-64, default 11) is the one number that sizes
+  a window's buffers end to end. It is passed to Chromium as
+  `AvpZeroCopyOffscreenExport:buffers/N`: the capturer lends at most N frames
+  per window at once and the export device allocates at most N+2 (one being
+  painted, one spare; about 8 MiB each at 1080p), never more, and drops a frame
+  instead of allocating when all are out. It is also the default
+  `DMA_BROWSER_DMABUF_POOL_SIZE`. The mixer's `browser_frame_queue` (its
+  `ringSize` for the window) must be at most N-2: N counts the frame being
+  delivered and the one in the paint handler besides the ones the mixer holds.
+  With N=11 that is the default 9; N=5 gives 3; N=3 gives 1 (one frame in
+  flight, no return queue, more drops under load). On the stock copy path the
+  pool capacity stays 11 and N only sizes the retained pool.
 
 In these modes Chromium's allocation is renderable on NVIDIA as it is, so the
 GBM shim is unnecessary: start without `LD_PRELOAD`, or leave the preload in

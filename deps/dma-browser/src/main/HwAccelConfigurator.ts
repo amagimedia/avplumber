@@ -1,4 +1,4 @@
-import { envFlag, envList, envString, type Env } from './support/env';
+import { envFlag, envInt, envList, envString, type Env } from './support/env';
 
 /**
  * Minimal interface of Electron's `app.commandLine` that we depend on.
@@ -28,6 +28,13 @@ export class HwAccelConfigurator {
   private static readonly NATIVE_HANDLE_FEATURE = 'RenderableMappableSharedImageForceScanout';
   /** `DMA_BROWSER_ZERO_COPY_EXPORT`: the zero-copy export of such textures; needs the first. */
   private static readonly ZERO_COPY_FEATURE = 'AvpZeroCopyOffscreenExport';
+  /**
+   * `DMA_BROWSER_EXPORT_BUFFERS`: buffers one window may have out at once, passed to the
+   * zero-copy feature as its `buffers` parameter (Chromium lends at most this many and keeps a
+   * pool of this + 2). The same number is the default retained pool (Application).
+   */
+  public static readonly EXPORT_BUFFERS_DEFAULT = 11;
+  public static readonly EXPORT_BUFFERS_MAX = 64;
   private static readonly DISABLED_FEATURES_BASE: readonly string[] = [
     'CompressionDictionaryTransport',
     'DefaultANGLEVulkan',
@@ -119,7 +126,7 @@ export class HwAccelConfigurator {
       [HwAccelConfigurator.ZERO_COPY_FEATURE, 'DMA_BROWSER_ZERO_COPY_EXPORT'],
     ];
     for (const [feature, variable] of switches) {
-      if (extra.includes(feature)) {
+      if (extra.some((item) => item === feature || item.startsWith(`${feature}:`))) {
         throw new Error(
           `${feature} is requested with ${variable}=1, not through ` +
             'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: it is safe only with a consumer that waits ' +
@@ -136,10 +143,22 @@ export class HwAccelConfigurator {
           'the zero-copy export is a native-handle capture',
       );
     }
+    const buffers = HwAccelConfigurator.exportBuffers(this.env);
     return [
       ...(nativeHandle ? [HwAccelConfigurator.NATIVE_HANDLE_FEATURE] : []),
-      ...(zeroCopy ? [HwAccelConfigurator.ZERO_COPY_FEATURE] : []),
+      ...(zeroCopy ? [`${HwAccelConfigurator.ZERO_COPY_FEATURE}:buffers/${String(buffers)}`] : []),
     ];
+  }
+
+  /** `DMA_BROWSER_EXPORT_BUFFERS`, 1-64, default 11. */
+  public static exportBuffers(env: Env): number {
+    return envInt(
+      env,
+      'DMA_BROWSER_EXPORT_BUFFERS',
+      HwAccelConfigurator.EXPORT_BUFFERS_DEFAULT,
+      1,
+      HwAccelConfigurator.EXPORT_BUFFERS_MAX,
+    );
   }
 
   private appendSwitch(name: string, value?: string): void {
