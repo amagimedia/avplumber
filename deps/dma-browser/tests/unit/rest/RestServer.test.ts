@@ -41,6 +41,7 @@ function buildManager(overrides: Partial<WindowControl> = {}): WindowControl {
     close: vi.fn(),
     closeAll: vi.fn().mockResolvedValue(undefined),
     refresh: vi.fn(),
+    paint: vi.fn(),
     update: vi.fn(),
     show: vi.fn(),
     status: vi.fn().mockReturnValue({ windows: [], count: 0, maxWindows: 8 }),
@@ -60,6 +61,23 @@ const validBody = {
   fps: 30,
   audio: false,
 };
+
+describe('POST /window/paint', () => {
+  it.each([false, true])('sets painting to %s', async (enabled) => {
+    const paint = vi.fn().mockResolvedValue(snapshotFor(validBody));
+    const res = await request(buildServer(buildManager({ paint })).app)
+      .post('/window/paint').send({ id: 'win-1', enabled });
+    expect(res.status).toBe(200);
+    expect(paint).toHaveBeenCalledWith('win-1', enabled);
+  });
+  it('rejects a non-boolean painting state', async () => {
+    const paint = vi.fn();
+    const res = await request(buildServer(buildManager({ paint })).app)
+      .post('/window/paint').send({ id: 'win-1', enabled: 'false' });
+    expect(res.status).toBe(400);
+    expect(paint).not.toHaveBeenCalled();
+  });
+});
 
 describe('POST /window/open', () => {
   it('200 with snapshot on success', async () => {

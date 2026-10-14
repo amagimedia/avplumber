@@ -119,6 +119,14 @@ export class RestServer {
     );
 
     this.app.post(
+      '/window/paint',
+      route(async (req, res) => {
+        const { id, enabled } = this.cfg.validatePainting(req.body);
+        res.status(200).json(await this.manager.paint(id, enabled));
+      }),
+    );
+
+    this.app.post(
       '/window/update',
       route(async (req, res) => {
         const { id, url } = this.cfg.validateUpdateUrl(req.body);

@@ -86,6 +86,7 @@ export interface IManagedWindow {
   readonly id: string;
   create(): Promise<void>;
   refresh(): void;
+  paint(enabled: boolean): void;
   update(url: string): void;
   show(visible: boolean): void;
   destroy(): Promise<void>;
@@ -254,6 +255,17 @@ export class ManagedWindow implements IManagedWindow {
       this.win.webContents.reloadIgnoringCache();
     } catch {
       // ignore
+    }
+  }
+
+  public paint(enabled: boolean): void {
+    if (!this.win || this.win.isDestroyed()) return;
+    const wc = this.win.webContents;
+    if (enabled) {
+      wc.startPainting();
+      wc.invalidate();
+    } else {
+      wc.stopPainting();
     }
   }
 

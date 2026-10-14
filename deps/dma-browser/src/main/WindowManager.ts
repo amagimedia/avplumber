@@ -67,6 +67,12 @@ export class WindowManager implements WindowControl {
     return win.snapshot();
   }
 
+  public paint(id: string, enabled: boolean): WindowSnapshot {
+    const win = this.requireWindow(id);
+    win.paint(enabled);
+    return win.snapshot();
+  }
+
   public show(id: string, visible: boolean): WindowSnapshot {
     const win = this.requireWindow(id);
     win.show(visible);

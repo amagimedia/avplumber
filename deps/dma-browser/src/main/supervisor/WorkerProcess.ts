@@ -47,6 +47,7 @@ export interface BrowserWorker {
   close(id: string): Promise<void>;
   closeAll(): Promise<void>;
   refresh(id: string): Promise<WindowSnapshot>;
+  paint(id: string, enabled: boolean): Promise<WindowSnapshot>;
   update(id: string, url: string): Promise<WindowSnapshot>;
   show(id: string, visible: boolean): Promise<WindowSnapshot>;
   status(): Promise<StatusReport>;
@@ -213,6 +214,13 @@ export class ElectronWorkerProcess implements BrowserWorker {
     return this.enqueue(async () => {
       await this.start();
       return this.request<WindowSnapshot>('POST', '/window/refresh', { id });
+    });
+  }
+
+  public async paint(id: string, enabled: boolean): Promise<WindowSnapshot> {
+    return this.enqueue(async () => {
+      await this.start();
+      return this.request<WindowSnapshot>('POST', '/window/paint', { id, enabled });
     });
   }
 

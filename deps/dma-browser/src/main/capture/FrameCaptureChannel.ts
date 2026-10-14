@@ -85,10 +85,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
 
   constructor(opts: FrameCaptureChannelOptions) {
     this.opts = opts;
-    this.retainedFramePoolSize =
-      opts.retainedFramePoolSize === undefined
-        ? DEFAULT_RETAINED_FRAME_POOL_SIZE
-        : opts.retainedFramePoolSize;
+    this.retainedFramePoolSize = opts.retainedFramePoolSize ?? DEFAULT_RETAINED_FRAME_POOL_SIZE;
   }
 
   public start(): Promise<void> {

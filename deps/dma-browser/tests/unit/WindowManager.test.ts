@@ -30,6 +30,7 @@ function fakeWindow(config: WindowConfig, overrides: Partial<IManagedWindow> = {
     id: config.id,
     create: vi.fn().mockResolvedValue(undefined),
     refresh: vi.fn(),
+    paint: vi.fn(),
     update: vi.fn(),
     show: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),

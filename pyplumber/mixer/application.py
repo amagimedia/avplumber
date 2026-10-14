@@ -23,7 +23,7 @@ from .backend import mixer_backend
 from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, rendition_color, rendition_format
 from .config import FEEDS
 from .dsk import DownstreamKeyer, register_dsk_commands
-from .dmabuf_inputs import (dmabuf_cuda_input_nodes, open_windows,
+from .dmabuf_inputs import (dmabuf_cuda_input_nodes, open_windows, paint_windows,
                             refresh_windows, rest_request, wait_for_sockets)
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
@@ -278,6 +278,21 @@ class MixerApplication:
                              browser_pages=dict(zip(self.browser_input_edges, self.browser_windows)),
                              browser_before=browser_before)
         log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
+        with ExitStack() as painting:
+            if self.browser_windows:
+                windows = list(self.browser_windows)
+                painting.callback(paint_windows, self.dmabuf_rest, windows, True)
+                paint_windows(self.dmabuf_rest, windows, False)
+            self._warm_outputs()
+        self._go_on_air()
+        # Warm-up counters are retained separately from the on-air measurement baseline.
+        self.avp.registerControlCommand("mixer.startup", lambda _arg: json.dumps(self.startup) + "\n", True, True)
+        self.avp.setReady()
+        log.info("Generic mixer preheat complete: compositors and transition ready in %.1f s",
+                 time.monotonic() - started)
+
+    def _warm_outputs(self) -> None:
+        # Browser inputs repeat their first usable frames while CUDA surface pools open.
         self._purge_idle_imports()   # what the pages allocated before their reload: memory the buses are about to need
         if self.routed_inputs:
             self.avp.group(ROUTER_GROUP).startNodes()
@@ -323,13 +338,6 @@ class MixerApplication:
             self.aux_buses.start(lambda bus: self._wait_for_edges(
                 (f"{bus.prefix}_encoded",), "auxiliary output", "packet"))
         self._check_startup()
-        self._go_on_air()
-        # What the start counted before the outputs were released and how long it took to settle,
-        # for whoever reads the counters that start from zero on air (quiet: not logged).
-        self.avp.registerControlCommand("mixer.startup", lambda _arg: json.dumps(self.startup) + "\n", True, True)
-        self.avp.setReady()
-        log.info("Generic mixer preheat complete: compositors and transition ready in %.1f s",
-                 time.monotonic() - started)
 
     def _go_on_air(self) -> None:
         """Release the show once it has been stable.

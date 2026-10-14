@@ -100,11 +100,17 @@ the worker's point of the period.
 | POST   | `/window/close`     | `{ id }`                                                          |
 | GET    | `/window/close/all` |                                                                   |
 | POST   | `/window/refresh`   | `{ id }`                                                          |
+| POST   | `/window/paint`     | `{ id, enabled }`                                                 |
 | POST   | `/window/update`    | `{ id, url }`                                                     |
 | POST   | `/window/show`      | `{ id, show }`                                                    |
 | GET    | `/status`           |                                                                   |
 | POST   | `/workers/recover`  | `{ ids }`                                                         |
 | GET    | `/metrics/cpu`      |                                                                   |
+
+`/window/paint` pauses or resumes offscreen painting without reloading the page.
+Resuming also requests a fresh paint, including for static pages. A mixer can
+pause after receiving its first usable frame while its output surfaces warm up,
+then resume before releasing output.
 
 `paintsSkipped` counts paints Chromium numbered but never delivered: the gaps in
 the paint textures' `textureInfo.metadata.frameCount` (the capturer's

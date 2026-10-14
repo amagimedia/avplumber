@@ -150,6 +150,7 @@ def test_static_browser_retries_its_first_paint_until_the_input_is_ready(native_
     app.dmabuf_rest = "http://browser"
     app.avp.missing.add(app.input_edges[0])
     monkeypatch.setattr(app, "_browser_snapshot", lambda: {"late": {"txFrameCount": 5}})
+    monkeypatch.setattr("pyplumber.mixer.application.paint_windows", lambda *args: None)
     now, refreshes = [0.0], []
     monkeypatch.setattr("pyplumber.mixer.application.time.monotonic", lambda: now[0])
     monkeypatch.setattr("pyplumber.mixer.application.time.sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
@@ -173,6 +174,7 @@ def test_browser_delivery_waits_for_cuda_without_reloading(native_boundary, monk
     now, sent, refreshes = [0.0], [previous_frames], []
     monkeypatch.setattr("pyplumber.mixer.application.time.monotonic", lambda: now[0])
     monkeypatch.setattr(app, "_browser_snapshot", lambda: {"moving": {"txFrameCount": sent[0]}})
+    monkeypatch.setattr("pyplumber.mixer.application.paint_windows", lambda *args: None)
     def sleep(seconds):
         now[0] += seconds
         if now[0] >= 3:
@@ -199,6 +201,32 @@ def test_native_error_handler_restored_after_successful_start(native_boundary):
     app.avp.on_exception(*failure)
     assert received == [failure]
     assert app._startup_error is None
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_browser_painting_resumes_after_output_warmup_or_failure(native_boundary, monkeypatch, failure):
+    app = application(native_boundary)
+    app.browser_windows = ("web",)
+    monkeypatch.setattr(app, "_browser_snapshot", lambda: {})
+    monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", lambda *args: None)
+    monkeypatch.setattr("pyplumber.mixer.application.paint_windows",
+                        lambda url, ids, enabled: app.avp.events.append(f"paint {enabled}"))
+    inspect = app.avp.getEdge
+    def get_edge(name, data_type=None):
+        if failure and name == "mixer_trans_out":
+            raise RuntimeError("warmup failed")
+        return inspect(name, data_type)
+    monkeypatch.setattr(app.avp, "getEdge", get_edge)
+    if failure:
+        with pytest.raises(RuntimeError, match="warmup failed"):
+            app.start()
+        assert not app.avp.ready
+        assert app.avp.events[-1] == "paint True"
+    else:
+        app.start()
+        events = app.avp.events
+        assert events.index("paint False") < events.index("start output") < events.index("paint True") < events.index("READY")
+    assert app.avp.events.count("paint False") == app.avp.events.count("paint True") == 1
 
 
 @pytest.mark.parametrize("failure", [False, True])

@@ -190,6 +190,12 @@ def refresh_windows(base_url: str, ids: List[str]) -> None:
         rest_request(base_url, "POST", "/window/refresh", {"id": name})
 
 
+def paint_windows(base_url: str, ids: List[str], enabled: bool) -> None:
+    """Pause capture during GPU warm-up; resuming also invalidates static pages."""
+    for name in ids:
+        rest_request(base_url, "POST", "/window/paint", {"id": name, "enabled": enabled})
+
+
 def wait_for_sockets(paths: List[str], timeout_sec: float) -> None:
     deadline = time.monotonic() + timeout_sec
     missing = set(paths)

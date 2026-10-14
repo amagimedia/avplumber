@@ -83,6 +83,10 @@ class FakeWorker implements BrowserWorker {
     return this.require(id);
   }
 
+  public async paint(id: string, _enabled: boolean): Promise<WindowSnapshot> {
+    return this.require(id);
+  }
+
   public async update(id: string, url: string): Promise<WindowSnapshot> {
     const value = { ...this.require(id), url };
     this.windows.set(id, value);
