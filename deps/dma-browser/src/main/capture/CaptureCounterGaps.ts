@@ -3,12 +3,8 @@
  * textures' `textureInfo.metadata.frameCount` (Electron's copy of the capturer's
  * `capture_counter`).
  *
- * In zero-copy export mode a paint the export device skips because every buffer is lent
- * ("paint skipped" / `AvpExport: buffers: ... skipped=N` in the GPU log) fails that frame's
- * capture after it was numbered, so the next delivered frame's number jumps. A failed lend
- * ("cannot lend") does the same. What this cannot see: the capturer's own "capture skipped"
- * (too many frames outstanding, or a capture size unlike the source), which returns before a
- * number is taken.
+ * Captures skipped before a number is assigned (for example, because too many frames
+ * are outstanding) cannot be counted here.
  *
  * A number at or below the last one is a new capturer (a reload or a new window): it starts
  * a new baseline and is not a gap.

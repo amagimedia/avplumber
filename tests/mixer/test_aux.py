@@ -66,7 +66,7 @@ class FakeAvp:
 
 
 def make_bus(cfg, spec, avp=None, latency_ms=None):
-    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, name="mixer", queue_limits=lambda *a: [],
+    mixer = SimpleNamespace(add_aux_destination=lambda *args: None, name="mixer",
                             latency_ms=default_latency_ms(cfg.fps) if latency_ms is None else latency_ms)
     return AuxBus(avp or FakeAvp(), None, mixer, cfg, parse_aux_buses([spec], cfg)[0])
 
@@ -481,7 +481,7 @@ def test_bus_builds_its_nodes_in_one_group(cfg, monkeypatch, codec, profile):
     monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: encoders.append(kw) or "listener")
     avp = SimpleNamespace(addNode=lambda node, **kw: nodes.append(node), edges=SimpleNamespace(planCapacity=lambda *a: None))
     api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
-    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer", queue_limits=lambda *a: [],
+    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
                             canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
                             backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
     options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="")
@@ -574,7 +574,7 @@ def _built_compositor(cfg, monkeypatch):
     monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: "listener")
     avp = SimpleNamespace(addNode=lambda node, **kw: nodes.append(node), edges=SimpleNamespace(planCapacity=lambda *a: None))
     api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
-    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer", queue_limits=lambda *a: [],
+    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
                             canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
                             backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
     options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="")

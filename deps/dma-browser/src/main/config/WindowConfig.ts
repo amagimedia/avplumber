@@ -32,13 +32,7 @@ export interface WindowSnapshot {
   readonly holdLastFrame: boolean;
   readonly visible: boolean;
   readonly stats: WindowStats;
-  /** How frames reach the consumer: `copy` (stock capture pool, `ringSize` retains) or
-   *  `zero-copy` (Chromium's own queue of `exportBuffers` buffers bounds everything). */
-  readonly captureMode?: CaptureMode;
-  readonly exportBuffers?: number;
 }
-
-export type CaptureMode = 'copy' | 'zero-copy';
 
 export interface WindowStats {
   readonly paintCount: number;

@@ -98,8 +98,6 @@ apply_nvidia_runtime() {
   local render_node
   local gl_backend="${DMA_BROWSER_GL_BACKEND:-angle}"
   local angle_backend="${DMA_BROWSER_ANGLE_BACKEND:-gl-egl}"
-  # The patched Electron's native-handle capture (no GPU wait, acquire fence instead) is not
-  # requested here: DMA_BROWSER_NATIVE_HANDLE_CAPTURE=1 does, once the consumer waits on the fence.
 
   if wayland_display="$(detect_wayland_display)"; then
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -133,7 +131,7 @@ if detect_nvidia; then
   apply_nvidia_runtime
 fi
 
-ELECTRON_BIN="${ELECTRON_BIN:-$PROJECT_ROOT/node_modules/.bin/electron}"
+ELECTRON_BIN="$PROJECT_ROOT/node_modules/.bin/electron"
 if [[ ! -x "$ELECTRON_BIN" ]]; then
   echo "dma-browser: electron not installed (run 'npm install' first)" >&2
   exit 1

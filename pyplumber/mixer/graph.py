@@ -156,12 +156,6 @@ class MixerGraphBuilder:
                                         "sw_format": self.working_format, "color": self.color.transfer,
                                         **params}, keyer=keyer, api=api)
 
-    def queue_limits(self, names=None) -> list:
-        """The compositor's `input_queue_limits` for *names* (default: every registered source in
-        input order): the source's queue_limit, 0 for the playout's default."""
-        sources = self._sources if names is None else [self._sources[self._source_index[name]] for name in names]
-        return [source.queue_limit or 0 for source in sources]
-
     def add_aux_destination(self, source: str, edge: str) -> None:
         """Add an independently subscribed destination before materializing the graph."""
         if self._built or source not in self._source_index:
@@ -178,7 +172,7 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
-        color_tagged=False, fan_out_loop=None, queue_limit=None,
+        color_tagged=False, fan_out_loop=None,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -220,14 +214,11 @@ class MixerGraphBuilder:
         if packed_rgb and color != Color():
             raise ValueError(f"Source '{name}': packed RGB requires an explicit SDR color setting")
         idx = len(self._sources)
-        if queue_limit is not None and (type(queue_limit) is not int or not 1 <= queue_limit <= 8):
-            raise ValueError(f"Source '{name}': queue_limit must be 1 to 8 frames")
         self._sources.append(MixerSource(name, pre_otm_edge, input_group,
                                                color=color, color_tagged=color_tagged,
                                                pixel_format=pixel_format, packed_rgb=packed_rgb,
                                                premultiplied_alpha=premultiplied_alpha,
-                                               fan_out_loop=fan_out_loop,
-                                               queue_limit=queue_limit))
+                                               fan_out_loop=fan_out_loop))
         self._source_index[name] = idx
         return self
 
@@ -631,7 +622,6 @@ class MixerGraphBuilder:
                 "fps": self._fps_str(),
                 "latency_ms": self.latency_ms,
                 **({} if self.input_poll_ms is None else {"input_poll_ms": self.input_poll_ms}),
-                **({"input_queue_limits": self.queue_limits()} if any(self.queue_limits()) else {}),
                 "layers": [
                     {**self._initial_scene_def().sources[source.name], "input": i}
                     for i, source in enumerate(self._sources)

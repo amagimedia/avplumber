@@ -1,4 +1,4 @@
-import { envFlag, envInt, envList, envString, type Env } from './support/env';
+import { envFlag, envList, envString, type Env } from './support/env';
 
 /**
  * Minimal interface of Electron's `app.commandLine` that we depend on.
@@ -17,27 +17,9 @@ export interface AppliedSwitch {
  * Configures Chromium command-line switches for offscreen DMA-BUF capture on
  * Linux + Electron/Chromium.
  *
- * Reads `DMA_BROWSER_*` env vars. The two features only the patched Electron
- * knows (stock ignores them) have switches of their own, off by default: the
- * native-handle capture no longer waits for the GPU before `paint` and hands
- * the consumer an acquire fence instead, which is safe only with a consumer
- * that waits on it.
+ * Reads `DMA_BROWSER_*` env vars for stock Electron/Chromium.
  */
 export class HwAccelConfigurator {
-  /** `DMA_BROWSER_NATIVE_HANDLE_CAPTURE`: native-handle textures, no wait, acquire fence. */
-  private static readonly NATIVE_HANDLE_FEATURE = 'RenderableMappableSharedImageForceScanout';
-  /** `DMA_BROWSER_ZERO_COPY_EXPORT`: the zero-copy export of such textures; needs the first. */
-  private static readonly ZERO_COPY_FEATURE = 'AvpZeroCopyOffscreenExport';
-  /**
-   * `DMA_BROWSER_EXPORT_BUFFERS`: the capacity of a window's buffer queue, passed to the zero-copy
-   * feature as its `buffers` parameter. Chromium owns exactly this many buffers per window, lends
-   * at most this many, and does not paint a frame while all are out. 2 to 16, default 9: the
-   * least a 30 fps mixer with its default two-frame playout latency needs without repeating
-   * frames (two for the browser, four held outside the mixer's waiting queue, three waiting).
-   */
-  public static readonly EXPORT_BUFFERS_DEFAULT = 9;
-  public static readonly EXPORT_BUFFERS_MIN = 2;
-  public static readonly EXPORT_BUFFERS_MAX = 16;
   private static readonly DISABLED_FEATURES_BASE: readonly string[] = [
     'CompressionDictionaryTransport',
     'DefaultANGLEVulkan',
@@ -85,7 +67,7 @@ export class HwAccelConfigurator {
     }
 
     const extra = envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES');
-    const enabled = HwAccelConfigurator.dedupe([...this.gatedFeatures(extra), ...extra]);
+    const enabled = HwAccelConfigurator.dedupe(extra);
     if (enabled.length > 0) {
       this.appendSwitch('enable-features', enabled.join(','));
     }
@@ -120,53 +102,6 @@ export class HwAccelConfigurator {
 
   public getApplied(): readonly AppliedSwitch[] {
     return this.appliedSwitches;
-  }
-
-  /** The patched build's features their switches ask for; the free-form list may not name them. */
-  private gatedFeatures(extra: readonly string[]): string[] {
-    const switches: ReadonlyArray<readonly [string, string]> = [
-      [HwAccelConfigurator.NATIVE_HANDLE_FEATURE, 'DMA_BROWSER_NATIVE_HANDLE_CAPTURE'],
-      [HwAccelConfigurator.ZERO_COPY_FEATURE, 'DMA_BROWSER_ZERO_COPY_EXPORT'],
-    ];
-    for (const [feature, variable] of switches) {
-      if (extra.some((item) => item === feature || item.startsWith(`${feature}:`))) {
-        throw new Error(
-          `${feature} is requested with ${variable}=1, not through ` +
-            'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: it is safe only with a consumer that waits ' +
-            'on the acquire fence',
-        );
-      }
-    }
-    const zeroCopy = HwAccelConfigurator.zeroCopy(this.env);
-    // The zero-copy export is a native-handle capture: the second switch implies the first.
-    const nativeHandle = envFlag(this.env, 'DMA_BROWSER_NATIVE_HANDLE_CAPTURE', zeroCopy);
-    if (zeroCopy && !nativeHandle) {
-      throw new Error(
-        'DMA_BROWSER_ZERO_COPY_EXPORT=1 needs DMA_BROWSER_NATIVE_HANDLE_CAPTURE unset or 1: ' +
-          'the zero-copy export is a native-handle capture',
-      );
-    }
-    const buffers = HwAccelConfigurator.exportBuffers(this.env);
-    return [
-      ...(nativeHandle ? [HwAccelConfigurator.NATIVE_HANDLE_FEATURE] : []),
-      ...(zeroCopy ? [`${HwAccelConfigurator.ZERO_COPY_FEATURE}:buffers/${String(buffers)}`] : []),
-    ];
-  }
-
-  /** `DMA_BROWSER_EXPORT_BUFFERS`, 2-16, default 9. */
-  public static exportBuffers(env: Env): number {
-    return envInt(
-      env,
-      'DMA_BROWSER_EXPORT_BUFFERS',
-      HwAccelConfigurator.EXPORT_BUFFERS_DEFAULT,
-      HwAccelConfigurator.EXPORT_BUFFERS_MIN,
-      HwAccelConfigurator.EXPORT_BUFFERS_MAX,
-    );
-  }
-
-  /** `DMA_BROWSER_ZERO_COPY_EXPORT`: the zero-copy export is on (the patched build's queue). */
-  public static zeroCopy(env: Env): boolean {
-    return envFlag(env, 'DMA_BROWSER_ZERO_COPY_EXPORT', false);
   }
 
   private appendSwitch(name: string, value?: string): void {

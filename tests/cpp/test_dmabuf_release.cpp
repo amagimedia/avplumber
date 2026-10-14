@@ -43,7 +43,7 @@ int main() {
     close(old_pair[1]);
     close(new_pair[1]);
 
-    // Without a return queue (the zero-copy export: the browser's queue has no buffer to spare)
+    // Without a return queue
     // every release is acknowledged at once, before any new frame arrives.
     int zero_pair[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, zero_pair) == 0);

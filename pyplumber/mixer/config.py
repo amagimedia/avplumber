@@ -86,24 +86,15 @@ def earlier_browser_ring_size(value):
     return min(value, BROWSER_FRAME_QUEUE_MAX) if type(value) is int else value
 
 
-# The most frames one browser window can have out. On the stock copy path nine: Chromium's capture
-# pool of eleven less the two idle buffers it keeps. With the zero-copy export the browser announces
-# its queue's capacity (2 to 16) and the mixer holds one less (browser_frame_queue_for).
+# The capture pool has eleven buffers; leave two free for capture and delivery.
 BROWSER_FRAME_QUEUE_DEFAULT = 9
-BROWSER_FRAME_QUEUE_MAX = 15
-
-
-def browser_frame_queue_for(export_buffers):
-    """The frame queue that fits a zero-copy browser whose queue holds *export_buffers*: one less,
-    so one buffer is always free for the next paint (a frame the mixer does not hold is either being
-    painted or on its way). Six gives five; two gives one."""
-    return max(1, min(BROWSER_FRAME_QUEUE_MAX, int(export_buffers) - 1))
+BROWSER_FRAME_QUEUE_MAX = 9
 
 
 def default_browser_frame_queue(fps):
     """Frames one browser window may have out at once, at any rate: all nine of the stock capture
     pool. The mixer takes up to three of them to return frames one per new frame
-    (dmabuf_inputs.return_queue). A zero-copy browser lowers it to its capacity less one at start."""
+    (dmabuf_inputs.return_queue)."""
     return BROWSER_FRAME_QUEUE_DEFAULT
 
 

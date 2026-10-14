@@ -6,7 +6,7 @@
 - Set `MixerOptions.dmabuf_rest` and `dmabuf_socket_dir`. The base API opens
   windows, imports frames and preserves alpha for blended scene items/DSK.
   The demo and AI mixer reuse this code; each owns its browser inputs.
-- Shared container services, Wayland image and optional source patches live in
+- Shared container services and the Wayland image live in
   [docker-compose/dmabuf](../docker-compose/dmabuf/compose.yaml), outside demos.
   The browser implementation is the [dma-browser service](../deps/dma-browser).
 - Start browser services from the repository root:
@@ -19,31 +19,18 @@
   Frames travel Electron → DMA-BUF FD → EGL/CUDA import → AVP compositor → NVENC.
   FD transport and acknowledgment keep textures alive until downstream GPU use ends.
 
-## Shim and Chromium patches
+## Vanilla Chromium with the GBM shim
 
-- Default: official Electron plus the [GBM shim](../deps/dma-browser/native/gbm-linear-shim/gbm_linear_shim.c).
-  `LD_PRELOAD` clears `GBM_BO_USE_LINEAR` and adds `SCANOUT | RENDERING`, allowing
-  NVIDIA-renderable buffers. It affects matching GBM allocations in that process;
-  enable it only for the NVIDIA browser. `GBM_LINEAR_SHIM_LOG=1` logs changes.
-- Chromium allocation support: [CL 6681354](https://chromium-review.googlesource.com/c/chromium/src/+/6681354),
-  [commit a531c83a](https://chromium.googlesource.com/chromium/src/+/a531c83a9bbb552fa13ceeaf73d0a19d1203cc12).
-- Chromium texture-capture fix: [CL 8220427](https://chromium-review.googlesource.com/c/chromium/src/+/8220427),
-  [commit 9522ea8a](https://chromium.googlesource.com/chromium/src/+/9522ea8ad0bed3c3fd1b4f570ed9792dec8176d5),
-  merged 2026-09-15 (verified 2026-10-06).
-- The pinned [Electron 44.5.1 consumer](https://github.com/electron/electron/blob/v44.5.1/shell/browser/osr/osr_video_consumer.cc)
-  still requests mappable textures. The Chromium fix alone does not remove the shim.
-- Optional [source-build script and patches](../docker-compose/dmabuf/chromium/build-electron.sh)
-  select native-handle capture with `RenderableMappableSharedImageForceScanout`.
-  This is a local feature, not a stock Chrome flag. Patches target older Electron;
-  do not reapply the Chromium patch to a revision already containing the fix.
-- A build on that path does not wait for the GPU before `paint`; it hands the consumer the
-  frame's acquire fence, which dma-browser sends as the frame's second fd and
-  `ipc_dmabuf_source` waits on before forwarding ([NODES.md](NODES.md#ipc_dmabuf_source)).
-  dma-browser requests the feature only with `DMA_BROWSER_NATIVE_HANDLE_CAPTURE=1`, and the
-  build's zero-copy export (`AvpZeroCopyOffscreenExport`) with `DMA_BROWSER_ZERO_COPY_EXPORT=1`;
-  both off by default, neither needs the shim ([README](../deps/dma-browser/README.md#patched-electron-native-handle-capture-and-the-acquire-fence)).
-- Keep this route on ARGB/BGRA/RGBA; do not assume NV12/RGBAF16 native-handle capture
-  works. Preserve DRM modifiers and texture-release acknowledgments.
+Use official Electron with its bundled Chromium and the
+[GBM shim](../deps/dma-browser/native/gbm-linear-shim/gbm_linear_shim.c).
+`LD_PRELOAD` clears `GBM_BO_USE_LINEAR` and adds `SCANOUT | RENDERING`, allowing
+NVIDIA-renderable capture buffers. It affects matching GBM allocations in that process;
+enable it only for the NVIDIA browser. `GBM_LINEAR_SHIM_LOG=1` logs changes.
+The Docker image and NVIDIA launcher enable the shim automatically.
+
+Chromium copies into its capture pool and waits for GPU completion before delivering
+`paint`. The browser then retains the texture until the mixer acknowledges its release.
+Keep DRM modifiers and texture-release acknowledgements intact.
 
 [Runnable mixer](../demos/mixer/README.md) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)

@@ -6,17 +6,7 @@ export interface SendResult {
   disconnected: number;
   errors: number;
 }
-/**
- * Sends `fd` (the DMA-BUF plane) and, when `fenceFd` is a non-negative number, that sync_file fd
- * as the second fd of the same message. `texInfoBuffer` must flag the fence (TexInfoEncoder) exactly
- * when one is given, or the call rejects without sending. The caller keeps both fds.
- */
-export function broadcastFd(
-  socketPath: string,
-  fd: number,
-  texInfoBuffer: Buffer,
-  fenceFd?: number,
-): Promise<SendResult>;
+export function broadcastFd(socketPath: string, fd: number, texInfoBuffer: Buffer): Promise<SendResult>;
 export function closeServer(socketPath: string): bigint[];
 export function setServerLogger(socketPath: string, callback: (line: string) => void): void;
 export function setReleaseCallback(

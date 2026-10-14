@@ -23,8 +23,8 @@ from .backend import mixer_backend
 from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, rendition_color, rendition_format
 from .config import FEEDS
 from .dsk import DownstreamKeyer, register_dsk_commands
-from .dmabuf_inputs import (BrowserCaptureMode, browser_capture_mode, dmabuf_cuda_input_nodes, open_windows,
-                            refresh_windows, rest_request, wait_for_sockets, zero_copy_chain_edges)
+from .dmabuf_inputs import (dmabuf_cuda_input_nodes, open_windows,
+                            refresh_windows, rest_request, wait_for_sockets)
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
@@ -750,7 +750,6 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     if options.mixer_input_poll_ms is None and cfg.input_poll_ms is not None:
         options = replace(options, mixer_input_poll_ms=cfg.input_poll_ms)
     browsers = [s for s in cfg.sources if s.kind == "browser"]
-    capture_mode = BrowserCaptureMode()
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
                                             "height": s.height, "fps": s.fps or cfg.fps,
@@ -758,10 +757,6 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                                             "holdLastFrame": s.hold_last_frame} for s in browsers])
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
                          options.preheat_timeout_sec)
-        # A zero-copy browser has one capacity-bounded queue: the mixer holds one less than that
-        # and returns every frame at once.
-        capture_mode = browser_capture_mode(options.dmabuf_rest)
-    browser_frame_queue = capture_mode.frame_queue(cfg.browser_frame_queue)
 
     # Browser REST failures must occur before native control threads exist;
     # otherwise Python can print a traceback yet hang during interpreter exit.
@@ -781,13 +776,10 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
                 fps=cfg.fps, drm_hwaccel=None,
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True,
-                preserve_alpha=source.id in blended_sources, browser_frame_queue=browser_frame_queue,
-                event_loop=_pacing_loop(index), zero_copy=capture_mode.zero_copy)
+                preserve_alpha=source.id in blended_sources, browser_frame_queue=cfg.browser_frame_queue,
+                event_loop=_pacing_loop(index))
             for node in nodes:
                 avp.addNode(node)
-            if capture_mode.zero_copy:
-                for chain_edge in zero_copy_chain_edges(f"input_{index}"):
-                    avp.edges.planCapacity(chain_edge, 1)
         elif source.kind == "v210":
             # True 10-bit 4:2:2 sources: packed v210 unpacked to P210 on the GPU
             # and stamped with their declared color contract. NVDEC only yields
@@ -848,7 +840,6 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                                            not source.filter_graph and process_source is None),
                              packed_rgb=source.kind == "browser",
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
-                             queue_limit=capture_mode.playout_queue_limit() if source.kind == "browser" else None,
                              pixel_format=source.filter_output_format or
                              (source.transform.sw_format if source.transform
                               else source.decoded_format or mixer_config.RAW_STORAGE.get(source.kind)))
@@ -880,9 +871,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True, True)   # polled: not logged
     held = []
-    # Idle-import purges are for the stock capture pool's start-up churn; a zero-copy browser's pool
-    # never changes, and a purge would only re-import (and stall) later.
-    importers = () if capture_mode.zero_copy else tuple(
+    # Purge idle imports left by the capture pool's start-up churn.
+    importers = tuple(
         f"input_{index}_to_cuda" for index, source in enumerate(cfg.sources) if source.kind == "browser")
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend, held=held)

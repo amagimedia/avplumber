@@ -2,7 +2,7 @@
 
 Opens --windows animated pages on an isolated browser worker, feeds each through the mixer's browser
 input chain into one MixerCompositor (NV12 1080p30, every window a tile), runs --seconds, and prints
-the compositor's draw / issue / gpu_wait times and, per chain, fresh imports and fence statistics.
+the compositor's draw / issue / gpu_wait times and, per chain, fresh imports.
 A diagnosis tool, not a pass/fail smoke. Never point it at a shared production worker.
 """
 import argparse
@@ -66,7 +66,6 @@ def main():
         count = sum(1 for _ in drain(output, errors, args.seconds))
         status = avp.node("compose").getObject("status")
         after = {i: avp.node(f"w{i}_to_cuda").getObject("import_stats") for i in range(args.windows)}
-        fences = [avp.node(f"w{i}_receive").getObject("frame_stats") for i in range(args.windows)]
         timing = status["playout"]["timing"]
         out = {"frames": count, "errors": errors[:3], "output_drops": status.get("output_drops"),
                "repeats": status["playout"].get("repeats"), "missed": status["playout"].get("missed_deadlines")}
@@ -76,9 +75,6 @@ def main():
         out["fresh_imports"] = {"sum": sum(imports), "max_per_window": max(imports), "per_s": round(sum(imports) / args.seconds, 2),
                                 "expired": sum(after[i]["expired"] - before[i]["expired"] for i in range(args.windows)),
                                 "evicted": sum(after[i]["evicted"] - before[i]["evicted"] for i in range(args.windows))}
-        out["fence_wait_max_us"] = max(f.get("fence_wait_max_us", 0) for f in fences)
-        out["fenced"] = sum(f.get("fenced", 0) for f in fences); out["unfenced"] = sum(f.get("unfenced", 0) for f in fences)
-        out["fence_timeouts"] = sum(f.get("fence_timeouts", 0) for f in fences)
         print("RESULT " + json.dumps(out), flush=True)
         status = rest_request(args.rest, "GET", "/status")
         reasons = {}

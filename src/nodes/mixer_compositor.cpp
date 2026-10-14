@@ -532,23 +532,6 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
             throw Error(std::string("mixer_compositor: pgm_delay_frames: ") + e.what());
         }
     }
-    // `input_queue_limits`: per input (in `src` order), how many frames may wait for their tick;
-    // 0 or a shorter list keeps the default. A zero-copy browser's frames are a fixed pool lent
-    // by the browser: holding fewer here keeps them within its budget.
-    if (params.contains("input_queue_limits")) {
-        const auto &limits = params.at("input_queue_limits");
-        if (!limits.is_array() || limits.size() > config.inputs)
-            throw Error("mixer_compositor: input_queue_limits must list at most one limit per input");
-        for (size_t i = 0; i < limits.size(); ++i) {
-            const int64_t limit = limits[i].get<int64_t>();
-            if (limit == 0) continue;
-            try {
-                node->playout_->setInputQueueLimit(i, static_cast<size_t>(limit));
-            } catch (const std::invalid_argument &e) {
-                throw Error(std::string("mixer_compositor: input_queue_limits: ") + e.what());
-            }
-        }
-    }
     if (aux) {
         if (params.contains("mixer")) {
             const auto state = InstanceSharedObjects<avp::mixer::MixerState>::get(nci.instance, params.at("mixer"));

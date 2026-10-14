@@ -46,11 +46,6 @@ private:
         bool active = true;
         bool prewarm = false;
         int64_t offset_ticks = 0;   // configuration: survives resetInput
-        // How many frames may wait for their tick (configuration: survives resetInput). The
-        // default is the queue's capacity; a source whose buffers are a fixed pool lent by the
-        // producer (a zero-copy browser) is held to fewer, so that its frames stay within the
-        // producer's budget and the oldest waiting one goes before the producer runs dry.
-        size_t queue_limit = kQueueCapacity;
         Stats stats;
     };
     TickGrid rate_;
@@ -99,15 +94,6 @@ public:
         inputs_.at(input).offset_ticks = ticks;
     }
 
-    /// At most `frames` frames of `input` wait for their tick, 1 to kQueueCapacity; beyond it the
-    /// oldest waiting frame is discarded (counted as overflow) when a new one arrives.
-    void setInputQueueLimit(size_t input, size_t frames) {
-        if (frames < 1 || frames > kQueueCapacity)
-            throw std::invalid_argument("mixer input queue limit must be 1 to " + std::to_string(kQueueCapacity) + " frames");
-        inputs_.at(input).queue_limit = frames;
-    }
-    size_t inputQueueLimit(size_t input) const { return inputs_.at(input).queue_limit; }
-
     void push(size_t input, Frame frame, int64_t timestamp_ns) {
         if (pending_) throw std::logic_error("commit mixer decision before pushing");
         auto &state = inputs_.at(input);
@@ -149,7 +135,7 @@ public:
             slot = *index_;
             ++state.stats.phase_corrections;
         }
-        while (state.queue.size() >= state.queue_limit) {
+        while (state.queue.size() >= kQueueCapacity) {
             state.queue.pop_front();
             ++state.stats.overflow;
             ++state.stats.discarded;
