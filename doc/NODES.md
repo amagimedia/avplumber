@@ -585,8 +585,10 @@ multiple inputs, 1 output: `av::Packet`
 -   `seek_table` (string of file name) - if specified, binary file with native endianness with seek table will be written.
 -   `seek_table_text` (string of file name) - if specified, text file with seek table will be written.
 -   `hold` (boolean, optional, default `false`) - start held: packets are taken from the input and not
-    written, so everything before the output runs (an encoder opens on its first frame) while nothing
-    leaves. `node.object.set <name> hold false` releases it; writing then starts at the next key packet,
+    written, so everything before the output runs while nothing leaves. (An encoder's session opens
+    when its chain's output is created, as the muxer initialises it, not on its first frame: to put
+    that off, keep the chain's group unstarted, as the mixer does behind a `one_to_many` gate.)
+    `node.object.set <name> hold false` releases it; writing then starts at the next key packet,
     so ask the encoder for one. `hold true` holds it again.
 
 Format of binary seek table: 16-byte records containing:
