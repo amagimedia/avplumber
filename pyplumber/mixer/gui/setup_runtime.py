@@ -498,7 +498,7 @@ class SetupRuntime:
                 defined = {n["name"] for n in nodes}
                 working = {n["name"] for n in nodes if n["type"] == "filter_video" and n["working"]}
                 working.update("mixer_color_" + n["name"][len("mixer_otm_"):]
-                               for n in nodes if n["type"] == "one_to_many" and n["working"]
+                               for n in nodes if n["type"] in ("one_to_many", "one_to_many_nb") and n["working"]
                                and n["name"].startswith("mixer_otm_")
                                and "mixer_color_" + n["name"][len("mixer_otm_"):] not in defined)
                 failed = source_nodes - working
