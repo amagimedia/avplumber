@@ -32,6 +32,15 @@ DMA_BROWSER_FORCE_NVIDIA=1 npm start
 The shim is native to the host CPU architecture. `bin/run.sh` applies the
 Wayland, EGL/GBM, and DRM settings; hardware video decoding stays disabled.
 
+For the optional preallocated Chromium exporter, enable
+`DMA_BROWSER_CHROMIUM_EXTRA_FEATURES=AvpZeroCopyOffscreenExport:buffers/11,RenderableMappableSharedImageForceScanout`
+on a compatible patched Electron build. Run the mixer with
+`AVP_BROWSER_COPY_ON_IMPORT=1`: it waits for the acquire fence, copies once
+into owned CUDA memory on a private non-blocking stream per source, and returns
+the browser frame before publishing downstream. This mode retains up to 16
+import registrations per source without idle expiry and uses no return queue.
+The ordinary capture path remains the default.
+
 Two switches keep the GPU process stable, both on by default:
 
 - `DMA_BROWSER_WEBGPU_OPENGLES=0` turns off `--use-webgpu-adapter=opengles`.

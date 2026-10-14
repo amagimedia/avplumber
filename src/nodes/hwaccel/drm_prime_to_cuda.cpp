@@ -440,6 +440,9 @@ public:
             out.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);
         }
         out.setComplete(true);
+        // The copy has completed; returning the Chrome lease must not wait for a full
+        // downstream queue. A directly mapped output retains its own input reference.
+        in = av::VideoFrame();
         this->sink_->put(out);
     }
     DRMPrimeToCUDA(std::unique_ptr<typename NodeSISO<av::VideoFrame,av::VideoFrame>::SourceType> &&source,

@@ -455,17 +455,21 @@ def test_a_browser_in_a_large_catalogue_cannot_share_a_declared_hdr_input_color(
             GraphOptions(inputs=inputs, output="p.mp4", input_color=color).validate()
 
 
-def test_browser_keeps_the_return_queue_and_expires_idle_imports():
+@pytest.mark.parametrize("copy_on_import", [False, True])
+def test_browser_capture_storage_and_release_policy(monkeypatch, copy_on_import):
     from pyplumber.mixer import dmabuf_inputs
+
+    monkeypatch.setenv("AVP_BROWSER_COPY_ON_IMPORT", "1" if copy_on_import else "0")
 
     nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
         fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=30, drm_hwaccel=None,
         cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=9)
     receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
     importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
-    assert receive["return_queue"] == 3
-    assert importer["zero_copy"] is True  # DMA-BUF import stays GPU-native.
-    assert importer["import_ttl_ms"] == dmabuf_inputs.IMPORT_IDLE_MS
+    assert receive.get("return_queue", 0) == (0 if copy_on_import else 3)
+    assert importer["zero_copy"] is (not copy_on_import)
+    assert importer["max_imports"] >= (16 if copy_on_import else 9)
+    assert importer["import_ttl_ms"] == (0 if copy_on_import else dmabuf_inputs.IMPORT_IDLE_MS)
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):

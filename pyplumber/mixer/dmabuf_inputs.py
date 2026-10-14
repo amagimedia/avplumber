@@ -69,12 +69,15 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
     """
     if browser_frame_queue is None:
         browser_frame_queue = default_browser_frame_queue(fps)
+    # Optional fixed-pool exporter: copy once into AVP-owned CUDA storage, then return the
+    # browser frame immediately. Retain registrations for all supported export pool sizes.
+    copy_on_import = os.environ.get("AVP_BROWSER_COPY_ON_IMPORT") == "1"
     drm_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
               "auto_restart": "group", "fps": f"{fps}/1"}
     if drm_hwaccel:
         source["hwaccel"] = drm_hwaccel
-    if return_queue(browser_frame_queue):
+    if not copy_on_import and return_queue(browser_frame_queue):
         source["return_queue"] = return_queue(browser_frame_queue)
     nodes = [
         api.IpcDmabufSource(source),
@@ -90,9 +93,10 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         # retired full-resolution allocations per page during startup.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
-                            "auto_restart": "group", "zero_copy": True,
-                            "max_imports": browser_frame_queue + 3,
-                            "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
+                            "auto_restart": "group", "zero_copy": not copy_on_import,
+                            "max_imports": max(16, browser_frame_queue + 3) if copy_on_import else browser_frame_queue + 3,
+                            "import_ttl_ms": 0 if copy_on_import else
+                                max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two
