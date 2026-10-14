@@ -1,46 +1,54 @@
 <!doctype html>
 <html lang="en">
 <meta charset="utf-8">
-<title>Mixer alpha test</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mixer browser overlay</title>
 <style>
+  :root { --phase: 0s; --cycle: 12s; }
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
-  body { color: white; font: 2.5vw system-ui, sans-serif; }
-  header { position: absolute; top: 5%; left: 5%; padding: .4em .7em; background: #172536cc; }
-  #patches { position: absolute; left: 5%; top: 30%; width: 90%; height: 40%; display: flex; gap: 2%; }
-  .column { flex: 1; position: relative; }
-  .swatch { height: 80%; background: linear-gradient(to bottom, white 0% 25%, red 25% 50%, lime 50% 75%, blue 75%); }
-  .label { position: absolute; top: 85%; width: 100%; text-align: center; text-shadow: 0 1px 3px black; }
-  /* A motion test that never rests: the marker steps exactly 25 px per frame (60 steps of 1/30 s,
-     out and back), so in the output every frame must differ from the last by one step; a held
-     picture or a skipped paint is a 0 or 50 px step. A transform animation runs on Chromium's
-     compositor alone: no script and no repaint per frame, so 40 moving windows stay cheap.
-     Opaque, high contrast and on top, so it can be measured over any video. */
-  #marker { position: absolute; left: 5%; bottom: 8%; width: 96px; height: 96px; background: #ff00ff;
-            border: 6px solid black; box-sizing: border-box; z-index: 10; will-change: transform;
-            animation: avp-step 2s steps(60, end) infinite alternate; }
-  @keyframes avp-step { from { transform: translateX(0); } to { transform: translateX(1500px); } }
-</style>
-<header>Browser alpha over video</header>
-<div id="patches"></div>
-<div id="marker"></div>
-<script>
-  // prepare_demo embeds the browser source's id as data-source; name the window by it.
-  const source = document.documentElement.dataset.source;
-  if (source) document.querySelector('header').textContent = `${source} · alpha over video`;
-  for (const alpha of [0, 0.25, 0.5, 0.75, 1]) {
-    const column = document.createElement('div');
-    column.className = 'column';
-    const swatch = document.createElement('div');
-    swatch.className = 'swatch';
-    swatch.style.opacity = alpha;
-    const label = document.createElement('div');
-    label.className = 'label';
-    label.textContent = `${alpha * 100}%`;
-    column.append(swatch, label);
-    document.querySelector('#patches').append(column);
+  body { color: #f4f7fb; font-family: system-ui, sans-serif; }
+
+  /* One translated layer, following a closed path without stepped or reversing endpoints. */
+  #marker { position: absolute; left: 10%; top: calc(38% - 8.5vw);
+            width: 36vw; height: 17vw; box-sizing: border-box; padding: 2.1vw 2.4vw;
+            border: 1px solid #ffffff30; border-radius: 1.5vw;
+            background: linear-gradient(135deg, #253448d9, #0d1728b3);
+            box-shadow: 0 1vw 2.4vw #00000030, inset 0 1px #ffffff14;
+            will-change: transform;
+            animation: motion var(--cycle) linear var(--phase) infinite; }
+  @keyframes motion {
+    0%, 100% { transform: translate(0, 0); }
+    40% { transform: translate(44vw, 0); }
+    50% { transform: translate(44vw, 24vh); }
+    90% { transform: translate(0, 24vh); }
   }
-  // Windows out of step with each other: each starts at its own point of the 4 s cycle.
+
+  .eyebrow { display: flex; align-items: center; justify-content: space-between;
+             color: #b8c8dc; font-size: .8vw; font-weight: 600; letter-spacing: .17em; }
+  .live { display: flex; align-items: center; gap: .5vw; color: #a4ebda;
+          padding: .35vw .65vw; border: 1px solid #a4ebda33; border-radius: 10vw;
+          background: #75d6be0d; font-size: .65vw; letter-spacing: .12em; }
+  .live::before { content: ''; width: .35vw; height: .35vw; border-radius: 50%; background: #8fe4cc; }
+  h1 { margin: 1.1vw 0 .35vw; font-size: 3.1vw; font-weight: 550; line-height: 1.15;
+       letter-spacing: -.045em; }
+  p { margin: 0; color: #c4d0e0; font-size: 1vw; letter-spacing: .025em; }
+  footer { display: flex; align-items: center; gap: .8vw; margin-top: 1.65vw;
+           color: #9aadc5; font-size: .7vw; letter-spacing: .08em; }
+  footer::before { content: ''; width: 3vw; height: .15vw; border-radius: 1vw;
+                   background: linear-gradient(90deg, #8fe4cc, #8fe4cc30); }
+</style>
+<article id="marker" aria-label="Animated browser overlay">
+  <div class="eyebrow"><span>BROWSER OVERLAY</span><span class="live">LIVE</span></div>
+  <h1>Browser 000</h1>
+  <p>Motion &middot; transparency</p>
+  <footer id="source">ALPHA OVER VIDEO</footer>
+</article>
+<script>
+  // prepare_demo embeds the source id; stagger windows along the same continuous path.
+  const source = document.documentElement.dataset.source;
   const index = Number(source?.match(/\d+$/)?.[0] ?? 0);
-  document.getElementById('marker').style.animationDelay = `-${((index * 0.6180339887) % 1) * 4}s`;
+  document.querySelector('h1').textContent = `Browser ${String(index).padStart(3, '0')}`;
+  if (source) document.getElementById('source').textContent = source;
+  document.documentElement.style.setProperty('--phase', `-${((index * 0.6180339887) % 1) * 12}s`);
 </script>
 </html>
