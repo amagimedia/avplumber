@@ -1,9 +1,11 @@
-import type { WindowConfig, WindowSnapshot } from './config/WindowConfig';
+import type { CaptureMode, WindowConfig, WindowSnapshot } from './config/WindowConfig';
 
 export interface StatusReport {
   readonly windows: readonly WindowSnapshot[];
   readonly count: number;
   readonly maxWindows: number;
+  readonly captureMode?: CaptureMode;
+  readonly exportBuffers?: number;
 }
 
 export interface WindowControl {

@@ -9,8 +9,8 @@ function createServer(socketPath) {
   return addon.createServer(socketPath);
 }
 
-async function broadcastFd(socketPath, fd, texInfoBuffer) {
-  return addon.broadcastFd(socketPath, fd, texInfoBuffer);
+async function broadcastFd(socketPath, fd, texInfoBuffer, fenceFd) {
+  return addon.broadcastFd(socketPath, fd, texInfoBuffer, fenceFd);
 }
 
 function closeServer(socketPath) {

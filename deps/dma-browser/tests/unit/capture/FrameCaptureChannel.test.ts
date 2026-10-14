@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WebContents } from 'electron';
 import { AllowedDims } from '../../../src/main/capture/AllowedDims';
 import { FrameCaptureChannel } from '../../../src/main/capture/FrameCaptureChannel';
+import { TEX_INFO_PIXEL_FORMAT_ACQUIRE_FENCE } from '../../../src/main/capture/TexInfoEncoder';
 import type { LogSink } from '../../../src/main/support/Logger';
 import type { SendResult } from 'fdpass';
 
@@ -24,7 +25,7 @@ function logSink(): LogSink {
   };
 }
 
-function makeTexture(fd: number): {
+function makeTexture(fd: number, pixmap: Record<string, unknown> = {}): {
   texture: {
     textureInfo: Record<string, unknown>;
     release: ReturnType<typeof vi.fn>;
@@ -39,6 +40,7 @@ function makeTexture(fd: number): {
           nativePixmap: {
             modifier: 0,
             planes: [{ fd, stride: 1080 * 4, offset: 0 }],
+            ...pixmap,
           },
         },
       },
@@ -53,11 +55,73 @@ function image(): { getSize(): { width: number; height: number } } {
   };
 }
 
+describe('FrameCaptureChannel skipped paints', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fdpass.broadcastFd.mockResolvedValue({clients: 1, sent: 1, backpressure: 0, disconnected: 0, errors: 0});
+    fdpass.closeServer.mockReturnValue([]);
+  });
+
+  it('counts gaps in the capture counter, also of paints it then drops', async () => {
+    const channel = new FrameCaptureChannel({
+      socketPath: '/tmp/dma-page/skips.sock',
+      allowedDims: AllowedDims.fromList(['1080x1920']),
+      log: logSink(),
+      retainedFramePoolSize: 1,
+    });
+    const webContents = new EventEmitter() as WebContents & EventEmitter;
+    channel.attach(webContents);
+    await channel.start();
+    for (const [fd, frameCount] of [[0, 5], [1, 6], [2, 9]] as const) {
+      const frame = makeTexture(fd);
+      frame.texture.textureInfo.metadata = { frameCount };
+      webContents.emit('paint', frame, {}, image());
+    }
+    await Promise.resolve();
+    // 7 and 8 never reached the app; 6 and 9 reached it and were dropped at the pool limit.
+    expect(channel.getStats().paintsSkipped).toBe(2);
+    expect(channel.getStats().droppedReasons).toEqual({ retained_pool_full: 2 });
+    await channel.stop();
+  });
+});
+
 describe('FrameCaptureChannel retained frame lifetime', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     fdpass.broadcastFd.mockResolvedValue({clients: 1, sent: 1, backpressure: 0, disconnected: 0, errors: 0});
     fdpass.closeServer.mockReturnValue([]);
+  });
+
+  it('keeps no pool of its own in zero-copy mode: every paint is sent and held until its ACK', async () => {
+    const channel = new FrameCaptureChannel({
+      socketPath: '/tmp/dma-page/overlay.sock',
+      allowedDims: AllowedDims.fromList(['1080x1920']),
+      log: logSink(),
+      retainedFramePoolSize: null,
+    });
+    const webContents = new EventEmitter() as WebContents & EventEmitter;
+    channel.attach(webContents);
+    await channel.start();
+    const releaseFrame = fdpass.setReleaseCallback.mock.calls[0]![1] as (
+      frameNumber: bigint, reusable: boolean,
+    ) => void;
+
+    const frames = [0, 1, 2, 3, 4].map((fd) => makeTexture(fd));
+    for (const frame of frames) {
+      webContents.emit('paint', frame, {}, image());
+    }
+    await Promise.resolve();
+
+    // Chromium's queue is the bound: nothing is dropped here, nothing released early.
+    expect(fdpass.broadcastFd).toHaveBeenCalledTimes(5);
+    expect(channel.getStats().retainedFrameCount).toBe(5);
+    expect(channel.getStats().droppedReasons).toEqual({});
+    for (const frame of frames) expect(frame.texture.release).not.toHaveBeenCalled();
+
+    releaseFrame(2n, true);
+    expect(frames[2]!.texture.release).toHaveBeenCalledTimes(1);
+    expect(channel.getStats().retainedFrameCount).toBe(4);
+    await channel.stop();
   });
 
   it('holds transmitted textures until ACK and drops new frames at the in-flight limit', async () => {
@@ -195,5 +259,58 @@ describe('FrameCaptureChannel retained frame lifetime', () => {
     expect(frame.texture.release).not.toHaveBeenCalled();
     expect(channel.getStats().quarantinedFrameCount).toBe(1);
     await expect(new FrameCaptureChannel(options).start()).rejects.toThrow('restart this browser worker');
+  });
+});
+
+describe('FrameCaptureChannel acquire fence', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fdpass.broadcastFd.mockResolvedValue({clients: 1, sent: 1, backpressure: 0, disconnected: 0, errors: 0});
+    fdpass.closeServer.mockReturnValue([]);
+  });
+
+  async function paint(pixmap?: Record<string, unknown>, log = logSink()) {
+    const channel = new FrameCaptureChannel({socketPath: '/tmp/dma-page/fence.sock',
+      allowedDims: AllowedDims.fromList(['1080x1920']), log});
+    const contents = new EventEmitter() as WebContents & EventEmitter;
+    channel.attach(contents);
+    await channel.start();
+    const frame = makeTexture(40, pixmap);
+    contents.emit('paint', frame, {}, image());
+    await Promise.resolve();
+    const call = fdpass.broadcastFd.mock.calls[0] as unknown as [string, number, Buffer, number | undefined];
+    return {channel, frame, call};
+  }
+
+  it('passes the sync_file fd as the second fd and flags it in the header', async () => {
+    const log = logSink();
+    const {channel, frame, call} = await paint({acquireFenceFd: 17}, log);
+    expect(call[1]).toBe(40);
+    expect(call[3]).toBe(17);
+    expect(call[2].readUInt32LE(12)).toBe((TEX_INFO_PIXEL_FORMAT_ACQUIRE_FENCE | 0x42475241) >>> 0);
+    expect(call[2].length).toBe(48);
+    expect(frame.texture.release).not.toHaveBeenCalled();   // Electron owns the fence until release()
+    expect(vi.mocked(log.write).mock.calls.some(([line]) => /acquire fence/.test(String(line)))).toBe(true);
+    await channel.stop();
+  });
+
+  it.each([
+    ['a producer that already waited (-1)', {acquireFenceFd: -1}],
+    ['stock Electron (no field)', {}],
+    ['a non-number', {acquireFenceFd: '5'}],
+  ] as const)('sends no fence and no flag for %s', async (_label, pixmap) => {
+    const {channel, call} = await paint(pixmap);
+    expect(call[3]).toBeUndefined();
+    expect(call[2].readUInt32LE(12)).toBe(0x42475241);
+    await channel.stop();
+  });
+
+  it('releases the texture (and with it the fence) when the broadcast fails', async () => {
+    fdpass.broadcastFd.mockRejectedValue(new Error('header says fence but no fence fd'));
+    const {channel, frame} = await paint({acquireFenceFd: 17});
+    await Promise.resolve();
+    expect(frame.texture.release).toHaveBeenCalledTimes(1);
+    expect(channel.getStats().droppedReasons).toEqual({fdpass_error: 1});
+    await channel.stop();
   });
 });

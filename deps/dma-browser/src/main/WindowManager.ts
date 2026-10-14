@@ -1,20 +1,26 @@
 import type { IManagedWindow, IManagedWindowFactory } from './ManagedWindow';
-import type { WindowConfig, WindowSnapshot } from './config/WindowConfig';
+import type { CaptureMode, WindowConfig, WindowSnapshot } from './config/WindowConfig';
 import { CapacityError, ConflictError, NotFoundError } from './rest/errors';
 import type { StatusReport, WindowControl } from './WindowControl';
 
 export interface WindowManagerOptions {
   readonly maxWindows: number;
+  readonly captureMode?: CaptureMode;
+  readonly exportBuffers?: number;
 }
 
 export class WindowManager implements WindowControl {
   private readonly factory: IManagedWindowFactory;
   private readonly maxWindows: number;
+  private readonly captureMode: CaptureMode | undefined;
+  private readonly exportBuffers: number | undefined;
   private readonly windows = new Map<string, IManagedWindow>();
 
   constructor(factory: IManagedWindowFactory, opts: WindowManagerOptions) {
     this.factory = factory;
     this.maxWindows = opts.maxWindows;
+    this.captureMode = opts.captureMode;
+    this.exportBuffers = opts.exportBuffers;
   }
 
   public async open(config: WindowConfig): Promise<WindowSnapshot> {
@@ -78,6 +84,8 @@ export class WindowManager implements WindowControl {
       windows: Array.from(this.windows.values()).map((w) => w.snapshot()),
       count: this.windows.size,
       maxWindows: this.maxWindows,
+      ...(this.captureMode === undefined ? {} : { captureMode: this.captureMode }),
+      ...(this.exportBuffers === undefined ? {} : { exportBuffers: this.exportBuffers }),
     };
   }
 
