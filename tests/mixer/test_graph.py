@@ -815,6 +815,25 @@ def _video_source_nodes(**canvas):
     return nodes, chain
 
 
+@pytest.mark.parametrize("ahead", [None, 1, 2])
+def test_canvas_decoded_frames_ahead_bounds_the_queue_in_front_of_pacing(ahead):
+    doc = {"canvas": {**CONFIG["canvas"], **({} if ahead is None else {"decoded_frames_ahead": ahead})},
+           "sources": [CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+    app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4"), api=fake_api())
+    nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+    assert nodes["realtime_0"]["src"] == "input_0_decoded"
+    # Each frame waiting there is a decoder output surface held for nothing but slack.
+    assert dict(app.avp.edges.plans).get("input_0_decoded") == ahead
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "one", True])
+def test_canvas_decoded_frames_ahead_rejects_what_is_not_a_count(bad):
+    with pytest.raises(mixer_config.ConfigError, match="decoded_frames_ahead"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "decoded_frames_ahead": bad}})
+
+
 def test_config_sources_stamp_no_frame_metadata():
     nodes, _ = _video_source_nodes()
     assert nodes["input_0"]["frame_metadata"] == []
