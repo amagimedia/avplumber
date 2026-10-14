@@ -452,7 +452,7 @@ def test_browser_measurement_baseline_is_saved_at_output_release(monkeypatch, ca
     app, engine, _ = go_on_air(monkeypatch, {}, browser_windows=("web_1",), dmabuf_rest="http://browser:9009")
     assert app.startup["browser_windows"] is None
     assert engine.at(" hold false") == [0.0, 0.0]
-    assert "Browser counters at on air unavailable" in caplog.text
+    assert "Browser counters unavailable" in caplog.text
 
     requests.clear()
     app, _, _ = go_on_air(monkeypatch, {})

@@ -217,7 +217,8 @@ class MixerApplication:
         clipcache.require_cached(self.avp, MIXER_NAME, clips)
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str, data_type: str | None = None,
-                        *, browser_pages: dict[str, str] | None = None) -> None:
+                        *, browser_pages: dict[str, str] | None = None,
+                        browser_before: dict | None = None) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
         next_refresh = time.monotonic() + 1
         while True:
@@ -232,8 +233,14 @@ class MixerApplication:
                 )
             if browser_pages and time.monotonic() >= next_refresh:
                 # Groups start asynchronously: a static page can finish its only paint
-                # before its receiver connects. Retry only pages still missing a frame.
-                refresh_windows(self.dmabuf_rest, [browser_pages[edge] for edge in missing if edge in browser_pages])
+                # before its receiver connects. Once delivery starts, wait for CUDA:
+                # reloading a page already sending frames churns its allocation pool.
+                browser_now = self._browser_snapshot()
+                retry = [browser_pages[edge] for edge in missing if edge in browser_pages]
+                if browser_before is not None and browser_now is not None:
+                    retry = [name for name in retry if browser_now.get(name, {}).get("txFrameCount", 0)
+                             <= browser_before.get(name, {}).get("txFrameCount", 0)]
+                refresh_windows(self.dmabuf_rest, retry)
                 next_refresh = time.monotonic() + 1
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
 
@@ -262,12 +269,14 @@ class MixerApplication:
 
     def _start(self) -> None:
         started = time.monotonic()
+        browser_before = self._browser_snapshot() if self.browser_windows else None
         for group in self.input_groups:
             self.avp.group(group).startNodes()
         if self.browser_windows:
             refresh_windows(self.dmabuf_rest, list(self.browser_windows))
         self._wait_for_edges(self.input_edges, "input readiness",
-                             browser_pages=dict(zip(self.browser_input_edges, self.browser_windows)))
+                             browser_pages=dict(zip(self.browser_input_edges, self.browser_windows)),
+                             browser_before=browser_before)
         log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
         self._purge_idle_imports()   # what the pages allocated before their reload: memory the buses are about to need
         if self.routed_inputs:
@@ -367,14 +376,14 @@ class MixerApplication:
                         warm_up["missed_deadlines"], warm_up["output_drops"])
 
     def _browser_snapshot(self) -> dict | None:
-        """Keep the browser counters at output release as this run's measurement baseline."""
+        """Browser counters for startup delivery and the on-air measurement baseline."""
         if not (self.browser_windows and self.dmabuf_rest):
             return None
         try:
             status = rest_request(self.dmabuf_rest, "GET", "/status", timeout=5) or {}
             return {window["id"]: window.get("stats") or {} for window in status.get("windows") or []}
         except Exception as exc:
-            log.warning("Browser counters at on air unavailable (%s): measurement starts at the next poll", exc)
+            log.warning("Browser counters unavailable (%s)", exc)
             return None
 
     def _purge_idle_imports(self, wait: bool = False) -> int:

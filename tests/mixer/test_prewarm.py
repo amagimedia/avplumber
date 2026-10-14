@@ -149,6 +149,7 @@ def test_static_browser_retries_its_first_paint_until_the_input_is_ready(native_
     app.browser_input_edges = app.input_edges
     app.dmabuf_rest = "http://browser"
     app.avp.missing.add(app.input_edges[0])
+    monkeypatch.setattr(app, "_browser_snapshot", lambda: {"late": {"txFrameCount": 5}})
     now, refreshes = [0.0], []
     monkeypatch.setattr("pyplumber.mixer.application.time.monotonic", lambda: now[0])
     monkeypatch.setattr("pyplumber.mixer.application.time.sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
@@ -159,6 +160,32 @@ def test_static_browser_retries_its_first_paint_until_the_input_is_ready(native_
     monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", refresh)
     app.start()
     assert refreshes == [["late", "ready"], ["late"]]
+    assert app.avp.ready
+
+
+@pytest.mark.parametrize("previous_frames", [0, 20])
+def test_browser_delivery_waits_for_cuda_without_reloading(native_boundary, monkeypatch, previous_frames):
+    app = application(native_boundary)
+    app.browser_windows = ("moving",)
+    app.browser_input_edges = (app.input_edges[0],)
+    app.dmabuf_rest = "http://browser"
+    app.avp.missing.add(app.input_edges[0])
+    now, sent, refreshes = [0.0], [previous_frames], []
+    monkeypatch.setattr("pyplumber.mixer.application.time.monotonic", lambda: now[0])
+    monkeypatch.setattr(app, "_browser_snapshot", lambda: {"moving": {"txFrameCount": sent[0]}})
+    def sleep(seconds):
+        now[0] += seconds
+        if now[0] >= 3:
+            app.avp.missing.clear()
+    def refresh(url, ids):
+        if ids:
+            refreshes.append(list(ids))
+            sent[0] += 1
+    monkeypatch.setattr("pyplumber.mixer.application.time.sleep", sleep)
+    monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", refresh)
+    app.start()
+    assert refreshes == [["moving"]]
+    assert now[0] >= 3
     assert app.avp.ready
 
 
