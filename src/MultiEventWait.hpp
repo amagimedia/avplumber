@@ -45,6 +45,7 @@ public:
         int64_t blackhole;
         for (int i=0; i<ret; i++) {
             read(ready_[i].data.fd, &blackhole, sizeof blackhole);
+            Event::consumed(ready_[i].data.fd);
         }
         return ret>0;
     }

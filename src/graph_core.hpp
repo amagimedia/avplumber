@@ -251,8 +251,9 @@ protected:
     std::list<std::shared_ptr<EdgeMetadata>> metadata_;
     std::weak_ptr<Node> producer_;
     std::weak_ptr<Node> consumer_;
-    Event produced_;
-    Event consumed_;
+    // Signalled on every push and pop; written only when the other side has read the last write.
+    Event produced_{Event::coalesce};
+    Event consumed_{Event::coalesce};
     std::atomic_bool finish_producer_{false};
     std::atomic_bool finish_consumer_{false};
     av::Timestamp last_ts_ = NOTS;
