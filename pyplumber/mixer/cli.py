@@ -265,6 +265,9 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--start-stable-timeout-sec", dest="start_stable_timeout_sec", type=float, default=GraphOptions.start_stable_timeout_sec,
         help="Release the outputs anyway after this long, logging what kept counting "
              f"(default: {GraphOptions.start_stable_timeout_sec:g})")
+    add("--start-encoder-settle-sec", dest="start_encoder_settle_sec", type=float, default=GraphOptions.start_encoder_settle_sec,
+        help="After the encoders open, this many clean seconds before the outputs are released and the "
+             f"counters start (default: {GraphOptions.start_encoder_settle_sec:g})")
     add("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
                             "(the TUI still selects the clip for each wipe)")
     add("--wipe-cache-mb", type=float, default=GraphOptions.wipe_cache_mb,

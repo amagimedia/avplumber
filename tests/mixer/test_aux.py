@@ -489,10 +489,13 @@ def test_bus_builds_its_nodes_in_one_group(cfg, monkeypatch, codec, profile):
     bus = AuxBus(avp, api, mixer, cfg, parse_aux_buses([spec], cfg)[0])
     bus.build(options)
     assert (encoders[0]["codec"], encoders[0]["profile"], encoders[0]["enc_format"]) == (codec, profile, "nv12")
+    # Built held: the chain waits behind a closed gate in its own group for the application to start.
+    assert encoders[0]["hold"] is True and encoders[0]["group"] == "aux_multiview" and bus.converted_edge == "aux_multiview_sdr"
     preview = replace(cfg, aux_buses=parse_aux_buses([spec], cfg)).settings()["preview_outputs"][0]
     assert preview["codec"] == ("h265" if codec == "hevc_nvenc" else "h264")
     compositor, converted, follower = (n.parameters for n in nodes)
     assert {p["group"] for p in (compositor, converted, follower)} == {"aux_multiview"}
+    assert converted["dst"] == bus.converted_edge
     assert compositor["src"] == compositor["subscriptions"] == [*bus.edges, "aux_multiview_pgm"]
     assert (compositor["max_layers"], compositor["pgm_delay_frames"]) == (640, 1)
     assert compositor["layers"] == follower["layout"]["base"]["layers"]

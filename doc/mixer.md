@@ -265,31 +265,55 @@ input decode, output encoding/muxing, startup order, and shutdown.
 
 Applications that need immediate transitions must preheat the complete path:
 
-1. Start and pace all input groups; wait for input frames.
+1. Start and pace the input groups in stages, each with its first frames
+   before the next starts: the browser chains (their imports register the
+   windows' buffers with CUDA while nothing else uses the device; the pages
+   paint already, opened before the engine), then the raw readers (page-locking
+   their files), then the decoders. One `Inputs ready` log line per stage.
 2. Start the catalogue router if used, then publish initial scene routes.
 3. Start both compositors with the scaling kernel loaded and fixed output pools.
 4. Temporarily feed both compositor outputs to `transition_cuda`, wait for a
    transition output frame, then restore steady routing.
-5. Open the output gate for fresh frames, start the encoder/output group, wait
-   for the show to be stable, release the held outputs and declare the graph
-   ready.
+5. Open the output gate for fresh frames, start the output group and the AUX
+   buses up to their gates, cache the wipes and prewarm the scenes; wait for
+   the show to be stable; start the encoders; wait for it to be stable again;
+   release the held outputs and declare the graph ready.
 
-Going on air: every Janus output is built held (`output` `hold`): its chain
-runs, so the encoder opens, and nothing is sent, so a deadline missed while the
-show comes up is counted and never seen. Once the last bus encodes, the
-application waits for `start_stable_sec` (`MixerOptions`, default 10;
-`--start-stable-sec`) in which no compositor missed a deadline or dropped a
-frame and every bus and one program slot drew frames (a bus publishes its frame
-count every 60 frames, so a shorter window waits for that); a miss or a drop
-starts the window again. After `start_stable_timeout_sec` (default 60;
-`--start-stable-timeout-sec`) it releases anyway and the `On air` log line, a
-warning then, names the compositor that kept counting or drew nothing. It then
-resets every compositor's counters and releases all outputs together on a key
-frame, in that order, so what the counters say on air starts from zero and
-nothing on air is reset away. `mixer.startup` answers with how it went:
-`settled`, `waited_sec`, `reason`, each compositor's `counters` at the release
-and the `warm_up` totals the reset discarded. Setup waits up to 180 s for the
-mixer's startup: the preheat and this wait share that budget.
+Going on air: no NVENC session opens until the show is stable. Every Janus
+chain is built behind a closed gate (`<prefix>_gate`, a `one_to_many` handing
+frames to no one) with its encoder's group, `<prefix>_encode`, unstarted and its
+output held (`output` `hold`), so the buses run against the clock while the
+sources, the wipes and the prewarms come up, and a deadline missed then is
+counted and never seen. The application waits for `start_stable_sec`
+(`MixerOptions`, default 10; `--start-stable-sec`) in which no compositor missed
+a deadline or dropped a frame and every bus and one program slot drew frames (a
+bus publishes its frame count every 60 frames, so a shorter window waits for
+that); a miss or a drop starts the window again. After
+`start_stable_timeout_sec` (default 60; `--start-stable-timeout-sec`) it goes on
+anyway, with a warning naming the compositor that kept counting or drew
+nothing. It then starts the encoders one after another, each NVENC session
+opening alone: the group starts, the gate opens once the encoder runs, and the
+chain's first packet (a key frame) is waited for (`Encoders open` log line).
+Each open stalls the draws of the buses already running, so it waits for
+`start_encoder_settle_sec` (default 3; `--start-encoder-settle-sec`) clean
+seconds again, 20 s at the most. Then it resets every compositor's counters,
+reads the browser service's window counters, and releases all outputs together
+on a key frame, in that order: the `On air` log line, and what the counters say
+on air starts from zero while nothing on air is reset away. The RTCP listeners
+and the cut-latency probe start after that, on running chains. A recorded
+program (a file rendition) is not held: it encodes from the output group's
+start. `mixer.startup` answers with how it went: `settled`, `waited_sec` and
+`reason` of the first window, each compositor's `counters` at its end,
+`encoders` (`count`, `opened_sec`, each chain's `first_packet_ms`, and the
+second window's `settled`, `waited_sec`, `reason` and `counters`), `on_air_sec`
+from the first window's start to the release, `released_at` (wall clock), the
+`warm_up` totals the reset discarded (`missed_deadlines`, `output_drops`,
+`repeats`, `discarded`, and `browser_dropped` from the browser service) and
+`browser_windows`, each window's counters at the release, from which the web
+UI's browser drop window counts (`pyplumber/mixer/gui/telemetry.py`
+`BrowserCpuStats`), as its delivery and input windows start again at every new
+`released_at`. Setup waits up to 180 s for the mixer's startup: the preheat,
+both windows and the encoder opens share that budget.
 
 Sources feed the compositors directly after source normalization.
 Their scene layers use `dst_x`, `dst_y`, `dst_w`, `dst_h`, optional `crop`, and

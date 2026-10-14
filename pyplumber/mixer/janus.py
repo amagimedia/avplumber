@@ -81,6 +81,17 @@ def release_commands(prefix: str) -> str:
     return f"node.object.set {prefix}_rtp_output hold false\n" + keyframe_command(f"{prefix}_force_keyframe")
 
 
+def encode_group(prefix: str) -> str:
+    """The group of a held chain's encoder, from ``force_fps`` to the output: started by the
+    application once the show is stable, which is when the NVENC session opens."""
+    return f"{prefix}_encode"
+
+
+def gate_commands(prefix: str) -> str:
+    """Open a held chain's gate: frames reach its encoder from now on."""
+    return f"node.object.set {prefix}_gate outputs 1"
+
+
 class RtcpFeedbackGroup:
     """Manage feedback for multiple independently encoded renditions."""
 
@@ -134,7 +145,13 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     ``color`` supplies the VUI so an HLG program signals BT.2020/arib-std-b67.
     ``dpb_size`` sets the encoder's reference DPB (:func:`dpb_options`); 0 leaves it to NVENC.
     ``edge_capacity`` plans the capacity of every edge the chain creates; None keeps the plan for ``*``.
-    ``hold`` starts the output held: the chain runs and nothing is sent until :func:`release_commands`.
+    ``hold`` builds the chain for a start the application times: a closed gate (``<prefix>_gate``, a
+    ``one_to_many`` in *group* that takes every frame and hands it on to no one) in front of the chain,
+    the chain itself in its own group, :func:`encode_group`, which nothing starts here, so no NVENC
+    session opens until the application starts it, and the output held. The application starts
+    the group, opens the gate (:func:`gate_commands`) and, once every encoder runs, releases the
+    outputs (:func:`release_commands`). An open gate passes frames as the plain edge did: a chain
+    that falls behind holds its source up, as before, instead of dropping unseen.
     """
     node_name = lambda suffix: f"{prefix}_{suffix}"
     keyframe_node = node_name("force_keyframe")
@@ -143,8 +160,10 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     codec = codec or default_codec(enc_format)   # HEVC only when the input is 10-bit
     if not profile:
         profile = ("main10" if ten_bit else "main") if "hevc" in codec else "baseline"
+    gate = [("OneToMany", {"name": node_name("gate"), "src": src_edge, "dst": [node_name("gated")],
+                           "outputs": 0, "group": group})] if hold else []
     specs = [
-        ("ForceFPS", {"name": node_name("fps"), "src": src_edge, "dst": node_name("fps"),
+        ("ForceFPS", {"name": node_name("fps"), "src": node_name("gated") if hold else src_edge, "dst": node_name("fps"),
                       "fps": f"{fps}/{fps_den}"}),
         ("ForceKeyFrame", {"name": keyframe_node, "src": node_name("fps"), "dst": node_name("keyframed"),
                            "interval_sec": f"{janus.keyframe_interval_sec}/1",
@@ -181,10 +200,12 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                     **({"hold": True} if hold else {})}),
     ]
     if edge_capacity is not None:
-        for _, params in specs:
-            if "dst" in params:   # planned before addNode creates the edge
-                avp.edges.planCapacity(params["dst"], edge_capacity)
-    add_nodes(avp, api, specs, group=group, auto_restart=failure_mode)
+        for _, params in gate + specs:
+            dst = params.get("dst", [])   # the output has none; planned before addNode creates the edge
+            for edge in ([dst] if isinstance(dst, str) else dst):
+                avp.edges.planCapacity(edge, edge_capacity)
+    add_nodes(avp, api, gate, auto_restart=failure_mode)
+    add_nodes(avp, api, specs, group=encode_group(prefix) if hold else group, auto_restart=failure_mode)
     return api.RtcpFeedbackListener(
         bind_host=janus.rtcp_bind, bind_port=janus.rtcp_port, janus_host=janus.host,
         janus_rtcp_port=janus.rtcp_port_remote, media_ssrc=janus.ssrc,

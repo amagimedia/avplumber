@@ -160,12 +160,16 @@ def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boun
     app = application(native_boundary)
     class Aux:
         def __iter__(self):
-            return iter([SimpleNamespace(prefix="aux_test")])
+            return iter([SimpleNamespace(prefix="aux_test", converted_edge="aux_test_sdr")])
 
         def start(self):
             app.avp.events.append("start aux_test")
+
+        def start_listeners(self):
+            app.avp.events.append("listen aux_test")
     app.aux_buses = Aux()
     app.avp.nodes["aux_test_comp"] = {"group": "aux_test"}   # the bus's compositor, asked for its counters
+    app.avp.nodes["aux_test_encoder"] = {"group": "aux_test_encode"}   # its encoder, in the group the start waits for
     original = app.avp.on_exception
     inspect = app.avp.getEdge
     def get_edge(name, data_type=None):
@@ -182,10 +186,13 @@ def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boun
     else:
         app.start()
         events = app.avp.events
-        # The bus's output is let go only once it encodes, after its counters start from zero, and
-        # before the mixer says it is ready.
-        assert events.index("inspect aux_test_encoded") < events.index("node.object.set aux_test_comp reset_counters true") \
-            < events.index("node.object.set aux_test_rtp_output hold false") < events.index("READY")
+        # The bus runs up to its gate first; its encoder's group starts once the show is stable and
+        # the gate opens; the bus's output is let go only once it encodes, after its counters start
+        # from zero; its RTCP listener starts then, before the mixer says it is ready.
+        assert events.index("start aux_test") < events.index("inspect aux_test_sdr") < events.index("start aux_test_encode") \
+            < events.index("node.object.set aux_test_gate outputs 1") < events.index("inspect aux_test_encoded") \
+            < events.index("node.object.set aux_test_comp reset_counters true") \
+            < events.index("node.object.set aux_test_rtp_output hold false") < events.index("listen aux_test") < events.index("READY")
     assert app.avp.on_exception == original
 
 

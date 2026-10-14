@@ -166,15 +166,17 @@ def test_invalid_processing_edge_shuts_down_partial_engine(edge):
     assert engine.shut_down
 
 
-def test_going_on_air_releases_idle_browser_imports_before_the_outputs():
+def test_going_on_air_releases_idle_browser_imports_before_the_encoders_and_the_outputs():
     from pyplumber.mixer.application import MixerApplication
     commands = []
     def expired(name):   # what an importer has released after the passes asked of it so far
         passes = commands.count(f"node.object.set {name} purge_idle 500")
         return (0, 14, 15, 15)[passes] if name == "input_3_to_cuda" else 0
     avp = SimpleNamespace(executeCommandsFromString=lambda text: commands.extend(text.splitlines()),
-                          node=lambda name: SimpleNamespace(getObject=lambda key: {
-                              "instance_cleanup_pending": 0, "expired": expired(name)}))
+                          node=lambda name: SimpleNamespace(isWorking=True, getObject=lambda key: {
+                              "instance_cleanup_pending": 0, "expired": expired(name)}),
+                          group=lambda name: SimpleNamespace(startNodes=lambda: commands.append("start " + name)),
+                          getEdge=lambda name, data_type=None: SimpleNamespace(enqueued_total=1))
     app = MixerApplication(avp=avp, mixer=None, input_groups=(), input_edges=(), routed_inputs=False,
                            preheat_timeout_sec=1, held_outputs=("janus",),
                            browser_importers=("input_3_to_cuda", "input_7_to_cuda"))
@@ -182,10 +184,12 @@ def test_going_on_air_releases_idle_browser_imports_before_the_outputs():
     purged = [command for command in commands if " purge_idle " in command]
     # Three passes: the first two released buffers (14, then 1), the third found nothing left.
     assert purged == ["node.object.set input_3_to_cuda purge_idle 500", "node.object.set input_7_to_cuda purge_idle 500"] * 3
-    # The releases stall draws: they have to be over while the outputs are still held.
-    assert commands.index(purged[-1]) < commands.index("node.object.set janus_rtp_output hold false")
-    # The counters start from zero before the output is let go: nothing on air is reset away.
-    assert commands[-4:] == ["node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true",
+    # The releases stall draws: they have to be over before the encoder opens, let alone the output goes.
+    assert commands.index(purged[-1]) < commands.index("start janus_encode")
+    # The encoder's group starts and its gate opens; the counters start from zero before the output
+    # is let go: nothing on air is reset away.
+    assert commands[-6:] == ["start janus_encode", "node.object.set janus_gate outputs 1",
+                             "node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true",
                              "node.object.set janus_rtp_output hold false", "node.object.set janus_force_keyframe trigger true"]
 
 
@@ -234,19 +238,28 @@ def test_startup_waits_for_processed_frames_and_aux_shares_them(native_boundary,
             assert app.avp.ready
             events = app.avp.events
             assert events.index("start input_0") < events.index("inspect processed_cam") < events.index("READY")
-            # Every Janus output is built held and released, with a key frame asked for, only after
-            # the last bus has produced encoded output; the compositors then count from zero.
+            # Every Janus chain is built behind a closed gate with its encoder's group unstarted and
+            # its output held. The bus starts without its encoder and is waited for up to the gate;
+            # the encoder's group starts and the gate opens once the show is stable; the output is
+            # released, with a key frame asked for, after the chain's first packet and the
+            # compositors counting from zero.
             assert app.held_outputs == ()   # this show records its program; only its bus goes to Janus
-            outputs = ["aux_cameras_rtp_output"]
-            assert all(app.avp.nodes[name]["hold"] is True for name in outputs)
-            released = [event for event in events if event.endswith(" hold false")]
-            assert released == [f"node.object.set {name} hold false" for name in outputs]
-            assert [event for event in events if event.endswith("_force_keyframe trigger true")] == [
-                "node.object.set aux_cameras_force_keyframe trigger true"]
-            assert [event.split()[1] for event in events if event.endswith(" reset_counters true")] == [
-                "mixer_comp_a", "mixer_comp_b", "aux_cameras_comp"]
-            last_inspected = max(i for i, event in enumerate(events) if event == "inspect aux_cameras_encoded")
-            assert last_inspected < events.index(released[0]) < events.index("READY")
+            nodes = app.avp.nodes
+            assert nodes["aux_cameras_rtp_output"]["hold"] is True
+            assert (nodes["aux_cameras_gate"]["type"], nodes["aux_cameras_gate"]["outputs"], nodes["aux_cameras_gate"]["group"]) \
+                == ("one_to_many", 0, "aux_cameras")
+            assert nodes["aux_cameras_gate"]["src"] == nodes["aux_cameras_sdr"]["dst"] == "aux_cameras_sdr"
+            assert nodes["aux_cameras_fps"]["src"] == nodes["aux_cameras_gate"]["dst"][0] == "aux_cameras_gated"
+            assert {nodes[f"aux_cameras_{n}"]["group"] for n in ("fps", "force_keyframe", "format", "encoder", "repeat_headers", "mux", "rtp_output")} \
+                == {"aux_cameras_encode"}
+            assert nodes["record_encoder"]["group"] == "output"   # a recorded program is not held: it encodes from the start
+            order = ["start aux_cameras", "inspect aux_cameras_sdr", "start aux_cameras_encode",
+                     "node.object.set aux_cameras_gate outputs 1", "inspect aux_cameras_encoded",
+                     "node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true",
+                     "node.object.set aux_cameras_comp reset_counters true", "node.object.set aux_cameras_rtp_output hold false",
+                     "node.object.set aux_cameras_force_keyframe trigger true", "READY"]
+            assert [event for event in events if event in order] == order
+            assert "inspect aux_cameras_encoded" not in events[:events.index("start aux_cameras_encode")]
     finally:
         app.stop()
     assert app.avp.shutdown_complete
@@ -288,15 +301,29 @@ class Clock:
 class CountingEngine:
     """An engine whose compositors publish counters: *counters* maps a node to a function of the
     clock giving (frames, missed_deadlines, output_drops), as node.object.get status would after
-    the frame count's publication every 60 frames. Every command is recorded with the time."""
+    the frame count's publication every 60 frames. Every command is recorded with the time, and so
+    is a group start, as "start <group>". An encoder runs as soon as its group has started and its
+    chain has a packet at once."""
 
     def __init__(self, clock, counters):
-        self.clock, self.counters, self.commands = clock, counters, []
+        self.clock, self.counters, self.commands, self.inspected = clock, counters, [], []
 
     def executeCommandsFromString(self, text):
         self.commands.extend((self.clock.now, line) for line in text.splitlines())
 
+    def group(self, name):
+        return SimpleNamespace(startNodes=lambda: self.commands.append((self.clock.now, "start " + name)))
+
+    def getEdge(self, name, data_type=None):
+        assert data_type == "packet" and name.endswith("_encoded")
+        assert any(line == f"start {name[:-len('_encoded')]}_encode" for _, line in self.commands), "waited for a packet before the group started"
+        self.inspected.append((self.clock.now, name))
+        return SimpleNamespace(enqueued_total=1)
+
     def node(self, name):
+        if name.endswith("_encoder"):
+            started = any(line == f"start {name[:-len('_encoder')]}_encode" for _, line in self.commands)
+            return SimpleNamespace(isWorking=started)
         if name not in self.counters:
             return None
         def status(key):
@@ -333,7 +360,7 @@ def go_on_air(monkeypatch, counters, buses=("aux_1",), **options):
     return app, engine, clock
 
 
-def test_outputs_are_released_after_a_stable_window_with_the_counters_reset_first(monkeypatch, caplog):
+def test_encoders_start_after_a_stable_window_and_the_outputs_are_released_after_another_with_the_counters_reset_first(monkeypatch, caplog):
     caplog.set_level(logging.INFO, logger="mixer")
     program = published(30)
     bus = published(15)
@@ -342,25 +369,39 @@ def test_outputs_are_released_after_a_stable_window_with_the_counters_reset_firs
         "mixer_comp_b": idle,                                                  # the PVW slot: no scene loaded, never ticks
         "aux_1_comp": lambda now: (bus(now), (now >= 2) + (now >= 5), 0),      # late twice while the show comes up
     })
-    # The default window is ten seconds; the last miss was at 5 s, so nothing was let go before 15 s.
-    assert engine.at(" hold false") == [15.0, 15.0]
-    assert clock.now == 15.0
+    # The default window is ten seconds; the last miss was at 5 s, so no encoder started before 15 s.
+    # Each encoder's group starts and its gate opens once it runs, one after another; the outputs
+    # are let go after the default 3 s more without a miss, the counters reset first, on a key frame.
+    assert engine.at("_encode") == [15.0, 15.0] and engine.at(" hold false") == [18.0, 18.0]
+    assert clock.now == 18.0
     lines = [line for _, line in engine.commands]
-    # The counters start from zero before the outputs are let go, which start on a key frame.
-    assert lines == ["node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true",
+    assert lines == ["start janus_encode", "node.object.set janus_gate outputs 1",
+                     "start aux_1_encode", "node.object.set aux_1_gate outputs 1",
+                     "node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true",
                      "node.object.set aux_1_comp reset_counters true",
                      "node.object.set janus_rtp_output hold false", "node.object.set janus_force_keyframe trigger true",
                      "node.object.set aux_1_rtp_output hold false", "node.object.set aux_1_force_keyframe trigger true"]
+    assert engine.inspected == [(15.0, "janus_encoded"), (15.0, "aux_1_encoded")]   # each chain's first packet, before the next starts
     # What `mixer.startup` answers with: the start's misses, kept apart from the counters on air.
     assert app.startup["settled"] is True and app.startup["reason"] == ""
-    assert app.startup["waited_sec"] == 15.0 and app.startup["outputs"] == 2
-    assert app.startup["warm_up"] == {"missed_deadlines": 2, "output_drops": 0}
-    assert app.startup["counters"]["aux_1_comp"] == {"missed_deadlines": 2, "output_drops": 0, "frames": 180}
-    assert app.startup["stable_sec"] == 10.0 and app.startup["released_at"] == 1_700_000_015.0
+    assert app.startup["waited_sec"] == 15.0 and app.startup["outputs"] == 2 and app.startup["on_air_sec"] == 18.0
+    assert app.startup["warm_up"] == {"missed_deadlines": 2, "output_drops": 0, "repeats": 0, "discarded": 0, "browser_dropped": None}
+    assert app.startup["counters"]["aux_1_comp"] == {"missed_deadlines": 2, "output_drops": 0, "frames": 180, "repeats": 0, "discarded": 0}
+    assert app.startup["encoders"] == {"count": 2, "opened_sec": 0.0, "first_packet_ms": {"janus": 0, "aux_1": 0},
+                                       "settled": True, "waited_sec": 3.0, "reason": "",
+                                       "counters": {"mixer_comp_a": {"missed_deadlines": 0, "output_drops": 0, "frames": 540, "repeats": 0, "discarded": 0},
+                                                    "mixer_comp_b": {"missed_deadlines": 0, "output_drops": 0, "frames": 0, "repeats": 0, "discarded": 0},
+                                                    "aux_1_comp": {"missed_deadlines": 2, "output_drops": 0, "frames": 240, "repeats": 0, "discarded": 0}}}
+    assert app.startup["stable_sec"] == 10.0 and app.startup["encoder_settle_sec"] == 3.0
+    assert app.startup["released_at"] == 1_700_000_018.0 and app.startup["browser_windows"] is None
     assert json.loads(json.dumps(app.startup)) == app.startup
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert "Stable for 10 s, 15.0 s after the compositors started: starting 2 encoders" in messages
+    assert "Encoders open: 2 in 0.0 s, first packets 0-0 ms after each start; settling for 3 s" in messages
     on_air = [r for r in caplog.records if r.getMessage().startswith("On air")]
     assert len(on_air) == 1 and on_air[0].levelno == logging.INFO
-    assert "after 15.0 s: 2 outputs released; stable for 10 s; the start's 2 missed deadlines" in on_air[0].getMessage()
+    assert on_air[0].getMessage() == ("On air after 18.0 s: 2 outputs released 3.0 s after their encoders opened, stable for 10 s "
+                                      "before and 3 s after; the start's 2 missed deadlines, 0 output drops, 0 repeats and 0 discards are not counted")
 
 
 def test_a_show_that_never_settles_is_released_at_the_timeout_and_the_log_says_which_bus(monkeypatch, caplog):
@@ -371,16 +412,20 @@ def test_a_show_that_never_settles_is_released_at_the_timeout_and_the_log_says_w
         "aux_1_comp": lambda now: (published(15)(now), 0, 0),
         "aux_2_comp": lambda now: (published(15)(now), int(now), int(now) // 2),   # a miss a second, a drop every other
     }, buses=("aux_1", "aux_2"), start_stable_sec=5, start_stable_timeout_sec=20)
-    assert engine.at(" hold false") == [20.0, 20.0, 20.0]     # released anyway, after the timeout
+    # The encoders start anyway after the timeout; the window after them never comes either, and
+    # its own timeout (20 s) releases the outputs.
+    assert engine.at("_encode") == [20.0, 20.0, 20.0] and engine.at(" hold false") == [40.0, 40.0, 40.0]
     assert app.startup["settled"] is False and app.startup["waited_sec"] == 20.0
     # What the bus counted since the window last began, at 19 s: the miss of 20 s and the drop of 20 s.
     assert app.startup["reason"] == "aux_2_comp missed 1 deadlines and dropped 1 frames"
-    assert app.startup["warm_up"] == {"missed_deadlines": 20, "output_drops": 10}
-    warning = next(r for r in caplog.records if r.getMessage().startswith("On air"))
-    assert warning.levelno == logging.WARNING
-    assert "after 20.0 s without a stable 5 s (aux_2_comp missed 1 deadlines and dropped 1 frames): 3 outputs released" \
-        in warning.getMessage()
-    assert "the show may keep counting" in warning.getMessage()
+    assert app.startup["encoders"]["settled"] is False and app.startup["encoders"]["waited_sec"] == 20.0
+    assert app.startup["warm_up"] == {"missed_deadlines": 40, "output_drops": 20, "repeats": 0, "discarded": 0, "browser_dropped": None}
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "Not stable for 5 s in 20.0 s (aux_2_comp missed 1 deadlines and dropped 1 frames): starting 3 encoders anyway" in warnings
+    on_air = next(message for message in warnings if message.startswith("On air"))
+    assert "after 40.0 s without a stable 5 s before the encoders opened (aux_2_comp missed 1 deadlines and dropped 1 frames): " \
+        "3 outputs released" in on_air
+    assert "the start's 40 missed deadlines, 20 output drops, 0 repeats and 0 discards are not counted, and the show may keep counting" in on_air
 
 
 @pytest.mark.parametrize("stuck", ["program", "bus"])
@@ -391,9 +436,10 @@ def test_a_compositor_that_draws_nothing_holds_the_outputs_until_the_timeout(mon
         "aux_1_comp": idle if stuck == "bus" else lambda now: (published(15)(now), 0, 0),
     }
     app, engine, clock = go_on_air(monkeypatch, counters, start_stable_sec=3, start_stable_timeout_sec=12)
-    # No miss anywhere (a compositor that cannot tick misses nothing), yet nothing drew: not stable.
-    assert engine.at(" hold false") == [12.0, 12.0]
-    assert app.startup["settled"] is False
+    # No miss anywhere (a compositor that cannot tick misses nothing), yet nothing drew: not stable,
+    # before the encoders (12 s) or after them (20 s more).
+    assert engine.at("_encode") == [12.0, 12.0] and engine.at(" hold false") == [32.0, 32.0]
+    assert app.startup["settled"] is False and app.startup["encoders"]["settled"] is False
     assert app.startup["reason"] == {"program": "mixer_comp_a or mixer_comp_b drew no frame in 12 s",
                                      "bus": "aux_1_comp drew no frame in 12 s"}[stuck]
 
@@ -406,8 +452,10 @@ def test_a_window_shorter_than_a_frame_count_publication_waits_for_the_count_not
         "mixer_comp_b": idle,
         "aux_1_comp": lambda now: (published(15)(now), 0, 0),
     }, start_stable_sec=2, start_stable_timeout_sec=60)
-    assert engine.at(" hold false") == [4.0, 4.0]
+    assert engine.at("_encode") == [4.0, 4.0]
     assert app.startup["settled"] is True and app.startup["waited_sec"] == 4.0
+    # The same after the encoders: the 3 s window is up at 7 s, the bus's next count comes at 8 s.
+    assert engine.at(" hold false") == [8.0, 8.0] and app.startup["encoders"]["waited_sec"] == 4.0
 
 
 def test_a_miss_restarts_the_window_from_the_poll_that_saw_it(monkeypatch):
@@ -418,21 +466,102 @@ def test_a_miss_restarts_the_window_from_the_poll_that_saw_it(monkeypatch):
         "mixer_comp_b": idle,
         "aux_1_comp": lambda now: (published(15)(now), 0, int(now >= 5)),
     }, start_stable_sec=6, start_stable_timeout_sec=60)
-    assert engine.at(" hold false") == [11.0, 11.0]
-    assert app.startup["warm_up"] == {"missed_deadlines": 1, "output_drops": 1}
+    assert engine.at("_encode") == [11.0, 11.0] and engine.at(" hold false") == [14.0, 14.0]
+    assert app.startup["warm_up"] == {"missed_deadlines": 1, "output_drops": 1, "repeats": 0, "discarded": 0, "browser_dropped": None}
 
 
 def test_an_engine_without_playout_counters_has_nothing_to_wait_for(monkeypatch):
     # The fakes of the other tests report no `playout`: the gate releases at once, as before.
     app, engine, clock = go_on_air(monkeypatch, {})
-    assert engine.at(" hold false") == [0.0, 0.0]
+    assert engine.at("_encode") == [0.0, 0.0] and engine.at(" hold false") == [0.0, 0.0]
     assert app.startup["settled"] is True and app.startup["counters"] == {}
-    assert app.startup["warm_up"] == {"missed_deadlines": 0, "output_drops": 0}
+    assert app.startup["warm_up"] == {"missed_deadlines": 0, "output_drops": 0, "repeats": 0, "discarded": 0, "browser_dropped": None}
+
+
+def test_a_short_encoder_window_is_the_first_quiet_poll_and_the_option_reaches_the_application(monkeypatch):
+    app, engine, clock = go_on_air(monkeypatch, {
+        "mixer_comp_a": lambda now: (published(30)(now), int(now >= 1), 0),
+        "mixer_comp_b": idle,
+        "aux_1_comp": lambda now: (published(15)(now), 0, 0),
+    }, start_stable_sec=4, start_stable_timeout_sec=60, encoder_settle_sec=0)
+    # The miss at 1 s: stable from 5 s. With no window asked after the encoders, the first poll
+    # without a miss and with a frame drawn since (the bus's next count, 8 s) lets the outputs go.
+    assert engine.at("_encode") == [5.0, 5.0] and engine.at(" hold false") == [8.0, 8.0]
+    assert app.startup["encoder_settle_sec"] == 0 and app.startup["encoders"]["settled"] is True
+    assert build_application(show(), MixerOptions(start_encoder_settle_sec=1.5), api=fake_api()).encoder_settle_sec == 1.5
+    for bad in ({"start_encoder_settle_sec": -1}, {"start_encoder_settle_sec": 21}):
+        with pytest.raises(ValueError, match="start_encoder_settle_sec"):
+            MixerOptions(**bad).validate()
+
+
+def test_the_browser_counters_are_read_as_the_show_goes_on_air(monkeypatch, caplog):
+    """The browser service counts from before the mixer exists; the web UI's drop window starts
+    from what it counted at this moment (telemetry.BrowserCpuStats), as the compositors' counters
+    start from zero. A service that does not answer leaves None, logged, and the start goes on."""
+    caplog.set_level(logging.INFO, logger="mixer")
+    status = {"windows": [{"id": "web_1", "stats": {"paintCount": 900, "txFrameCount": 880, "droppedFrames": 20,
+                                                   "droppedReasons": {"no_consumer": 20}}},
+                          {"id": "web_2", "stats": {"paintCount": 300, "txFrameCount": 299, "droppedFrames": 1, "droppedReasons": {}}}]}
+    requests = []
+    def rest(base_url, method, path, body=None, timeout=60):
+        requests.append((base_url, method, path, timeout))
+        if isinstance(status, Exception):
+            raise status
+        return status
+    monkeypatch.setattr(mixer_application, "rest_request", rest)
+    app, engine, clock = go_on_air(monkeypatch, {}, browser_windows=("web_1", "web_2"), dmabuf_rest="http://browser:9009")
+    assert requests == [("http://browser:9009", "GET", "/status", 5)]
+    assert app.startup["browser_windows"] == {"web_1": status["windows"][0]["stats"], "web_2": status["windows"][1]["stats"]}
+    assert app.startup["warm_up"]["browser_dropped"] == 21
+    status = ConnectionRefusedError(111, "refused")
+    app, engine, clock = go_on_air(monkeypatch, {}, browser_windows=("web_1",), dmabuf_rest="http://browser:9009")
+    assert app.startup["browser_windows"] is None and app.startup["warm_up"]["browser_dropped"] is None
+    assert engine.at(" hold false") == [0.0, 0.0]   # the start went on
+    assert any(r.levelno == logging.WARNING and r.getMessage().startswith("Browser counters at on air unavailable")
+               for r in caplog.records)
+    # A show without browsers asks nothing.
+    requests.clear()
+    go_on_air(monkeypatch, {}, dmabuf_rest="http://browser:9009")
+    assert requests == []
+
+
+def test_inputs_start_in_stages_browsers_first_then_raw_readers_then_decoders(monkeypatch, caplog):
+    """Each stage has its frames before the next starts: the browser imports register buffers with
+    CUDA while nothing else uses the device, the raw readers page-lock their files, the decoders
+    open last. A show from --input alone is all decoders: one stage, as before."""
+    from pyplumber.mixer.application import MixerApplication
+    caplog.set_level(logging.INFO, logger="mixer")
+    events = []
+    refreshed = []
+    monkeypatch.setattr(mixer_application, "refresh_windows", lambda rest, ids: refreshed.append((rest, ids, list(events))))
+    avp = SimpleNamespace(group=lambda name: SimpleNamespace(startNodes=lambda: events.append("start " + name)),
+                          getEdge=lambda name, data_type=None: events.append("inspect " + name) or SimpleNamespace(enqueued_total=1))
+    kinds = ("video", "browser", "nv12", "video", "browser", "v210", "p010")
+    app = MixerApplication(avp=avp, mixer=None, routed_inputs=False, preheat_timeout_sec=1,
+                           input_groups=tuple(f"input_{i}" for i in range(7)), input_edges=tuple(f"edge_{i}" for i in range(7)),
+                           input_kinds=kinds, browser_windows=("web_1", "web_2"), dmabuf_rest="http://browser:9009")
+    app._start_inputs()
+    assert events == ["start input_1", "start input_4", "inspect edge_1", "inspect edge_4",
+                      "start input_2", "start input_5", "start input_6", "inspect edge_2", "inspect edge_5", "inspect edge_6",
+                      "start input_0", "start input_3", "inspect edge_0", "inspect edge_3"]
+    # The pages are reloaded once their chains are connected, before their frames are waited for.
+    assert refreshed == [("http://browser:9009", ["web_1", "web_2"], ["start input_1", "start input_4"])]
+    messages = [r.getMessage() for r in caplog.records]
+    assert [m.split(" in ")[0] for m in messages] == ["Inputs ready: 2 browser", "Inputs ready: 3 raw", "Inputs ready: 2 decoded", "Inputs ready: 7"]
+    # Without kinds (a --input show), everything is one stage of decoders.
+    events.clear()
+    MixerApplication(avp=avp, mixer=None, routed_inputs=False, preheat_timeout_sec=1,
+                     input_groups=("input_0", "input_1"), input_edges=("edge_0", "edge_1"))._start_inputs()
+    assert events == ["start input_0", "start input_1", "inspect edge_0", "inspect edge_1"]
+    # A built show names its kinds in source order.
+    cfg = show()
+    assert build_application(cfg, api=fake_api()).input_kinds == tuple(s.kind for s in cfg.sources) == ("video", "video")
 
 
 def test_start_stable_options_default_validate_and_reach_the_application():
     from pyplumber.mixer.cli import GraphOptions, parse_args
     assert (MixerOptions().start_stable_sec, MixerOptions().start_stable_timeout_sec) == (10.0, 60.0)
+    assert MixerOptions().start_encoder_settle_sec == 3.0
     assert build_application(show(), api=fake_api()).start_stable_sec == 10.0
     app = build_application(show(), MixerOptions(start_stable_sec=3, start_stable_timeout_sec=30), api=fake_api())
     assert (app.start_stable_sec, app.start_stable_timeout_sec) == (3, 30)
@@ -441,8 +570,10 @@ def test_start_stable_options_default_validate_and_reach_the_application():
         with pytest.raises(ValueError, match="start_stable"):
             MixerOptions(**bad).validate()
     MixerOptions(start_stable_sec=0, start_stable_timeout_sec=1).validate()   # 0: no clean stretch asked, only a frame drawn
-    parsed = parse_args(["--input", "a.mp4", "--output", "p.ts", "--start-stable-sec", "3", "--start-stable-timeout-sec", "30"])
+    parsed = parse_args(["--input", "a.mp4", "--output", "p.ts", "--start-stable-sec", "3", "--start-stable-timeout-sec", "30",
+                         "--start-encoder-settle-sec", "2"])
     assert isinstance(parsed, GraphOptions) and (parsed.start_stable_sec, parsed.start_stable_timeout_sec) == (3.0, 30.0)
+    assert parsed.start_encoder_settle_sec == 2.0
     assert parse_args(["--input", "a.mp4", "--output", "p.ts"]).start_stable_sec == 10.0
 
 
@@ -452,6 +583,6 @@ def test_the_startup_report_is_a_control_command_once_the_show_is_on_air(native_
     app.start()
     report = json.loads(app.avp.commands_registered["mixer.startup"](""))
     # This show records its program and has no bus: nothing held, nothing counted, released at once.
-    assert report["settled"] is True and report["outputs"] == 0
-    assert report["warm_up"] == {"missed_deadlines": 0, "output_drops": 0}
-    assert report["stable_sec"] == 10.0 and report["timeout_sec"] == 60.0
+    assert report["settled"] is True and report["outputs"] == 0 and report["encoders"]["count"] == 0
+    assert report["warm_up"] == {"missed_deadlines": 0, "output_drops": 0, "repeats": 0, "discarded": 0, "browser_dropped": None}
+    assert report["stable_sec"] == 10.0 and report["timeout_sec"] == 60.0 and report["encoder_settle_sec"] == 3.0

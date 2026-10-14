@@ -44,6 +44,7 @@ class AuxBus:
         self.pgm_edge = f"{self.prefix}_pgm" if draws_program(cfg, bus.layouts) else None
         self.pgm_delay_frames = bus.pgm_delay_frames if self.pgm_edge else 0
         self.output_edge = f"{self.prefix}_out"
+        self.converted_edge = f"{self.prefix}_sdr"   # the bus's picture as the encoder takes it, before the gate
         self.lock = threading.Lock()
         self.listener, self.error, self.follower_status = None, "", {}
         self.layout, self.scenes = bus.layout, list(bus.scenes)
@@ -94,7 +95,7 @@ class AuxBus:
         inputs = self.inputs()
         # A zero-copy browser's frames are held to its budget on this bus too; the program last.
         limits = self.mixer.queue_limits([source.id for source in self.cfg.sources]) + ([0] if self.pgm_edge else [])
-        converted = f"{self.prefix}_sdr"
+        converted = self.converted_edge
         for edge in [*inputs, self.output_edge, converted]:
             self.avp.edges.planCapacity(edge, 1)
         initial = self.layout_object()
@@ -127,7 +128,9 @@ class AuxBus:
             fps=fps, width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
-            hold=True)   # MixerApplication releases every output together once the show has settled
+            # MixerApplication starts the encoder (janus.encode_group) once the show has settled and
+            # releases every output together once every encoder runs.
+            hold=True)
         self.avp.addNode(_PvwFollowNode({
             "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,
             "fps": str(fps), "latency_ms": latency, "main_latency_ms": self.main_latency_ms(),
@@ -136,7 +139,12 @@ class AuxBus:
         }))
 
     def start(self):
+        """Start the bus: its compositor, follower and conversion. The encoder's group is the
+        application's to start (janus.encode_group), and the listener's keyframe requests have
+        nowhere to go before that: start_listener() then."""
         self.avp.group(self.group).startNodes()
+
+    def start_listener(self):
         self.listener.start()
 
     def stop(self):
@@ -283,6 +291,11 @@ class AuxBuses:
             bus.start()
         self.thread = threading.Thread(target=self.run, name="aux", daemon=True)
         self.thread.start()
+
+    def start_listeners(self):
+        """Once every bus encodes: its RTCP listener, whose keyframe requests reach a running chain."""
+        for bus in self:
+            bus.start_listener()
 
     def tick(self):
         """Every bus's pass; the seconds until the next, from 50 ms to one second."""

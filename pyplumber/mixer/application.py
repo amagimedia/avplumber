@@ -24,10 +24,11 @@ from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, renditio
 from .config import FEEDS
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .dmabuf_inputs import (BrowserCaptureMode, browser_capture_mode, dmabuf_cuda_input_nodes, open_windows,
-                            refresh_windows, wait_for_sockets, zero_copy_chain_edges)
+                            refresh_windows, rest_request, wait_for_sockets, zero_copy_chain_edges)
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
-                    RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
+                    RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, encode_group, gate_commands,
+                    release_commands)
 from ..transform import transform_output, transform_params
 
 
@@ -59,6 +60,19 @@ PREHEAT_POLL_INTERVAL_SEC = 0.02
 START_STABLE_SEC = 10.0
 START_STABLE_TIMEOUT_SEC = 60.0
 SETTLE_POLL_SEC = 0.5
+# The encoders open only once the show has been stable (every Janus chain is built behind a closed
+# gate, janus.build_janus_output, its NVENC session opening when the application starts its group),
+# and each open stalls the draws of the buses already running: ENCODER_SETTLE_SEC
+# (MixerOptions.start_encoder_settle_sec) clean seconds pass after the last one before the outputs
+# are released and the counters start, ENCODER_SETTLE_TIMEOUT_SEC at the latest.
+ENCODER_SETTLE_SEC = 3.0
+ENCODER_SETTLE_TIMEOUT_SEC = 20.0
+# Input groups start in stages, each with its frames before the next starts: the browser chains
+# first (each import registers a window's buffers with CUDA under the context lock, and the pages
+# paint already), the raw readers next (page-locking their files is host work), the decoders last
+# (a hundred NVDEC opens on a large show). Nothing composes yet, so a stage costs start time only.
+INPUT_STAGES = (("browser", ("browser",)), ("raw", ("v210", "nv12", "p010")))
+LAST_INPUT_STAGE = "decoded"
 # Between two passes that release idle browser buffers: a quiet second, a release stalls draws.
 SETTLE_WINDOW_SEC = 1.0
 SETTLE_TIMEOUT_SEC = 10.0
@@ -100,6 +114,7 @@ class MixerOptions:
     preheat_timeout_sec: float = 60.0
     start_stable_sec: float = START_STABLE_SEC            # clean stretch every compositor must show before the outputs are released
     start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC   # release anyway after this long, and log what kept counting
+    start_encoder_settle_sec: float = ENCODER_SETTLE_SEC    # clean stretch after the encoders open, before the outputs are released
     wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
     wipe_color: str = ""                 # explicit SDR override; empty preserves tags with an SDR fallback
     cut_latency_encoder: str = ""        # opt-in cut-to-output observer on this encoder
@@ -131,6 +146,8 @@ class MixerOptions:
             raise ValueError("preheat_timeout_sec must be positive")
         if not 0 <= self.start_stable_sec <= self.start_stable_timeout_sec or self.start_stable_timeout_sec <= 0:
             raise ValueError("start_stable_sec must be at least 0 and start_stable_timeout_sec positive and not below it")
+        if not 0 <= self.start_encoder_settle_sec <= ENCODER_SETTLE_TIMEOUT_SEC:
+            raise ValueError(f"start_encoder_settle_sec must be between 0 and {ENCODER_SETTLE_TIMEOUT_SEC:g}")
         if (type(self.keyframe_min_interval_ms) is not int
                 or not 0 <= self.keyframe_min_interval_ms <= 2_147_483_647):
             raise ValueError("keyframe_min_interval_ms must be a non-negative integer")
@@ -178,6 +195,7 @@ class MixerApplication:
     input_edges: tuple[str, ...]
     routed_inputs: bool
     preheat_timeout_sec: float
+    input_kinds: tuple[str, ...] = ()   # each input's config kind (browser, v210, nv12, p010, video), for the start order
     rtcp_feedback_listener: Any = None
     wipe_file: str | None = None
     wipe_files: tuple[str, ...] = ()
@@ -191,6 +209,7 @@ class MixerApplication:
     browser_importers: tuple[str, ...] = ()  # the drm_prime_to_cuda node of every browser source
     start_stable_sec: float = START_STABLE_SEC
     start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC
+    encoder_settle_sec: float = ENCODER_SETTLE_SEC
     startup: dict | None = field(default=None, init=False)   # how going on air went; `mixer.startup` answers with it
     _startup_error: str | None = field(default=None, init=False, repr=False)
 
@@ -252,14 +271,32 @@ class MixerApplication:
         finally:
             self.avp.on_exception = original
 
+    def _input_stages(self):
+        """(stage, groups, edges) in start order (INPUT_STAGES, then every other kind as
+        LAST_INPUT_STAGE), for the stages this show has inputs of."""
+        kinds = list(self.input_kinds) + [LAST_INPUT_STAGE] * (len(self.input_groups) - len(self.input_kinds))
+        staged = set()
+        for stage, members in (*INPUT_STAGES, (LAST_INPUT_STAGE, None)):
+            picked = [i for i, kind in enumerate(kinds) if (kind in members if members else i not in staged)]
+            staged.update(picked)
+            if picked:
+                yield stage, [self.input_groups[i] for i in picked], tuple(self.input_edges[i] for i in picked)
+
+    def _start_inputs(self) -> None:
+        started = time.monotonic()
+        for stage, groups, edges in self._input_stages():
+            at = time.monotonic()
+            for group in groups:
+                self.avp.group(group).startNodes()
+            if stage == "browser" and self.browser_windows:
+                refresh_windows(self.dmabuf_rest, list(self.browser_windows))   # static pages paint only on load
+            self._wait_for_edges(edges, f"{stage} input readiness")
+            log.info("Inputs ready: %d %s in %.1f s", len(edges), stage, time.monotonic() - at)
+        log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
+
     def _start(self) -> None:
         started = time.monotonic()
-        for group in self.input_groups:
-            self.avp.group(group).startNodes()
-        if self.browser_windows:
-            refresh_windows(self.dmabuf_rest, list(self.browser_windows))
-        self._wait_for_edges(self.input_edges, "input readiness")
-        log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
+        self._start_inputs()
         self._purge_idle_imports()   # what the pages allocated before their reload: memory the buses are about to need
         if self.routed_inputs:
             self.avp.group(ROUTER_GROUP).startNodes()
@@ -288,21 +325,25 @@ class MixerApplication:
             for wipe_file in dict.fromkeys((self.wipe_file, *self.wipe_files)):
                 if wipe_file:
                     self.mixer.warmup_wipe(wipe_file)
-        if self.rtcp_feedback_listener is not None:
-            self.rtcp_feedback_listener.start()
-        if self.cut_latency_encoder:
-            self._wait_for_node(self.cut_latency_encoder)
-            self.avp.executeCommandsFromString("mixer.measurements " + json.dumps({
-                "mixer": MIXER_NAME, "encoder": self.cut_latency_encoder,
-            }))
         if self.prewarm_cut_scenes:
             scenes = self.mixer.scenes() if self.prewarm_cut_scenes == ("*",) else list(self.prewarm_cut_scenes)
             self.avp.executeCommandsFromString("mixer.prewarm " + json.dumps({"mixer": MIXER_NAME, "scenes": scenes}))
         if self.aux_buses:
             self.aux_buses.start()
-            self._wait_for_edges(tuple(f"{bus.prefix}_encoded" for bus in self.aux_buses), "auxiliary output", "packet")
+            # Each bus draws and converts up to its closed gate; its encoder starts in _go_on_air.
+            self._wait_for_edges(tuple(bus.converted_edge for bus in self.aux_buses), "auxiliary conversion")
         self._check_startup()
         self._go_on_air()
+        # The encoders run from here: keyframe requests have somewhere to go, and the cut probe its encoder.
+        if self.rtcp_feedback_listener is not None:
+            self.rtcp_feedback_listener.start()
+        if self.aux_buses:
+            self.aux_buses.start_listeners()
+        if self.cut_latency_encoder:
+            self._wait_for_node(self.cut_latency_encoder)
+            self.avp.executeCommandsFromString("mixer.measurements " + json.dumps({
+                "mixer": MIXER_NAME, "encoder": self.cut_latency_encoder,
+            }))
         # What the start counted before the outputs were released and how long it took to settle,
         # for whoever reads the counters that start from zero on air (quiet: not logged).
         self.avp.registerControlCommand("mixer.startup", lambda _arg: json.dumps(self.startup) + "\n", True, True)
@@ -311,19 +352,22 @@ class MixerApplication:
                  time.monotonic() - started)
 
     def _go_on_air(self) -> None:
-        """Release the show once it has been stable.
+        """Start the encoders once the show is stable, and release it once they are.
 
-        Until here every Janus output was held: the buses ran against the clock while the sources,
-        the wipes and the encoders came up, each encoder that opened stalling the draws of the
-        buses already running, and none of that was sent (output `hold` takes the packets and
-        writes nothing). A deadline missed before this point is counted, never seen. The outputs
-        are released only after start_stable_sec in which no compositor missed a deadline or
-        dropped a frame and every bus drew, so the load of starting (decoder opens, CUDA contexts,
-        browser pages, raw files being page-locked) has calmed down before anything goes out; after
-        start_stable_timeout_sec they are released anyway and the log says what kept counting. The
-        compositors count from zero first, then the outputs start together on a key frame: what
-        viewers get and what the counters say both begin with the stable show, and nothing on air
-        is ever reset away. What the start counted is kept in `startup` (`mixer.startup`)."""
+        Until here nothing encodes: every Janus chain is built behind a closed gate with its
+        encoder's group unstarted (janus.build_janus_output), so the buses ran against the clock
+        while the sources, the wipes and the prewarms came up, with no NVENC session open. A
+        deadline missed before this point is counted, never seen. Once start_stable_sec has passed
+        in which no compositor missed a deadline or dropped a frame and every bus drew (after
+        start_stable_timeout_sec at the latest, with the log saying what kept counting), the
+        encoders start one after another, each NVENC session opening alone and its gate opening
+        once it runs, and each chain's first packet (a key frame) is waited for. Each open stalls
+        the draws of the buses already running, so encoder_settle_sec clean seconds pass again,
+        ENCODER_SETTLE_TIMEOUT_SEC at the latest. Then the compositors count from zero, the browser
+        service's counters are read, and the outputs start together on a key frame: what viewers
+        get and what the counters say both begin with the stable show, and nothing on air is ever
+        reset away. What the start counted is kept in `startup` (`mixer.startup`)."""
+        began = time.monotonic()
         program = [f"{MIXER_NAME}_comp_a", f"{MIXER_NAME}_comp_b"]
         buses = [f"{bus.prefix}_comp" for bus in self.aux_buses or ()]
         compositors = [*program, *buses]
@@ -338,22 +382,76 @@ class MixerApplication:
         ticking = [tuple(program), *((bus,) for bus in buses)]
         report = self._wait_until_settled(compositors, self.start_stable_sec, self.start_stable_timeout_sec, ticking)
         prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
+        if report["settled"]:
+            log.info("Stable for %g s, %.1f s after the compositors started: starting %d encoders",
+                     self.start_stable_sec, report["waited_sec"], len(prefixes))
+        else:
+            log.warning("Not stable for %g s in %.1f s (%s): starting %d encoders anyway",
+                        self.start_stable_sec, report["waited_sec"], report["reason"], len(prefixes))
+        encoders = self._start_encoders(prefixes)
+        settle = self._wait_until_settled(compositors, self.encoder_settle_sec, ENCODER_SETTLE_TIMEOUT_SEC, ticking)
+        browser = self._browser_snapshot()
         self.avp.executeCommandsFromString("\n".join(
             [f"node.object.set {node} reset_counters true" for node in compositors]
             + [release_commands(prefix) for prefix in prefixes]))
-        counters = report["counters"].values()
-        warm_up = {key: sum(c[key] for c in counters) for key in ("missed_deadlines", "output_drops")}
-        self.startup = {**report, "outputs": len(prefixes), "warm_up": warm_up, "released_at": time.time(),
-                        "stable_sec": self.start_stable_sec, "timeout_sec": self.start_stable_timeout_sec}
-        if report["settled"]:
-            log.info("On air after %.1f s: %d outputs released; stable for %g s; the start's %d missed deadlines "
-                     "and %d output drops are not counted", report["waited_sec"], len(prefixes), self.start_stable_sec,
-                     warm_up["missed_deadlines"], warm_up["output_drops"])
+        counters = settle["counters"].values()   # the totals the reset discards
+        warm_up = {key: sum(c.get(key, 0) for c in counters)
+                   for key in ("missed_deadlines", "output_drops", "repeats", "discarded")}
+        warm_up["browser_dropped"] = sum(w.get("droppedFrames", 0) for w in browser.values()) if browser else None
+        on_air_sec = time.monotonic() - began
+        self.startup = {**report, "encoders": {**encoders, **{key: settle[key] for key in ("settled", "waited_sec", "reason", "counters")}},
+                        "outputs": len(prefixes), "warm_up": warm_up, "released_at": time.time(), "on_air_sec": on_air_sec,
+                        "browser_windows": browser, "stable_sec": self.start_stable_sec,
+                        "timeout_sec": self.start_stable_timeout_sec, "encoder_settle_sec": self.encoder_settle_sec}
+        counted = ("the start's %d missed deadlines, %d output drops, %d repeats and %d discards are not counted"
+                   % tuple(warm_up[key] for key in ("missed_deadlines", "output_drops", "repeats", "discarded")))
+        if report["settled"] and settle["settled"]:
+            log.info("On air after %.1f s: %d outputs released %.1f s after their encoders opened, stable for %g s "
+                     "before and %g s after; %s", on_air_sec, len(prefixes), settle["waited_sec"], self.start_stable_sec,
+                     self.encoder_settle_sec, counted)
         else:
-            log.warning("On air after %.1f s without a stable %g s (%s): %d outputs released; the start's %d missed "
-                        "deadlines and %d output drops are not counted, and the show may keep counting",
-                        report["waited_sec"], self.start_stable_sec, report["reason"], len(prefixes),
-                        warm_up["missed_deadlines"], warm_up["output_drops"])
+            reason = report["reason"] if not report["settled"] else settle["reason"]
+            log.warning("On air after %.1f s without a stable %g s %s the encoders opened (%s): %d outputs released; "
+                        "%s, and the show may keep counting", on_air_sec,
+                        self.start_stable_sec if not report["settled"] else self.encoder_settle_sec,
+                        "before" if not report["settled"] else "after", reason, len(prefixes), counted)
+
+    def _start_encoders(self, prefixes) -> dict:
+        """Start every held chain's encoder group one after another, so each NVENC session opens
+        alone: start the group, wait for the encoder to run, open the gate and wait for the chain's
+        first packet (an encoder's first frame is a key frame). Returns the count, how long all of
+        it took and each chain's milliseconds from its start to its first packet."""
+        started = time.monotonic()
+        first_packet = {}
+        for prefix in prefixes:
+            at = time.monotonic()
+            self.avp.group(encode_group(prefix)).startNodes()
+            self._wait_for_node(f"{prefix}_encoder")
+            self.avp.executeCommandsFromString(gate_commands(prefix))
+            self._wait_for_edges((f"{prefix}_encoded",), f"encoder {prefix}", "packet")
+            first_packet[prefix] = round((time.monotonic() - at) * 1000)
+            log.debug("Encoder %s open: first packet %d ms after its start", prefix, first_packet[prefix])
+        opened_sec = time.monotonic() - started
+        if prefixes:
+            log.info("Encoders open: %d in %.1f s, first packets %d-%d ms after each start; settling for %g s",
+                     len(prefixes), opened_sec, min(first_packet.values()), max(first_packet.values()),
+                     self.encoder_settle_sec)
+        return {"count": len(prefixes), "opened_sec": opened_sec, "first_packet_ms": first_packet}
+
+    def _browser_snapshot(self) -> dict | None:
+        """Every browser window's counters as the browser service reports them (GET /status, each
+        window's `stats`: paints, frames sent and dropped, drops by reason) at the moment the show
+        goes on air: the web UI's browser drop window starts from these, as the compositors' counters
+        start from zero. None for a show without browsers, or when the service did not answer."""
+        if not (self.browser_windows and self.dmabuf_rest):
+            return None
+        try:
+            status = rest_request(self.dmabuf_rest, "GET", "/status", timeout=5) or {}
+            return {window["id"]: window.get("stats") or {} for window in status.get("windows") or []}
+        except Exception as exc:
+            log.warning("Browser counters at on air unavailable (%s): the page's browser drop window starts "
+                        "with its next poll instead", exc)
+            return None
 
     def _purge_idle_imports(self, wait: bool = False) -> int:
         """Release the browser buffers the start-up went through and no longer uses.
@@ -384,10 +482,11 @@ class MixerApplication:
         return expired() - before
 
     def _counters(self, compositors) -> dict | None:
-        """Each compositor's published counters, {node: {missed_deadlines, output_drops, frames}},
-        for those that report playout counters; None when none does (an engine without them has
-        nothing to wait for). `missed_deadlines` is published at once when one is missed,
-        `output_drops` as it happens, `frames` every 60 output frames."""
+        """Each compositor's published counters, {node: {missed_deadlines, output_drops, frames,
+        repeats, discarded}}, for those that report playout counters; None when none does (an
+        engine without them has nothing to wait for). `missed_deadlines` is published at once when
+        one is missed, `output_drops` as it happens, the rest every 60 output frames; `repeats` and
+        `discarded` are the compositor's inputs' together (browser pages among them)."""
         counters = {}
         for node in compositors:
             compositor = self.avp.node(node)
@@ -395,7 +494,9 @@ class MixerApplication:
             if "playout" in status:
                 counters[node] = {"missed_deadlines": status["playout"].get("missed_deadlines", 0),
                                   "output_drops": status.get("output_drops", 0),
-                                  "frames": status["playout"].get("frames", 0)}
+                                  "frames": status["playout"].get("frames", 0),
+                                  "repeats": status["playout"].get("repeats", 0),
+                                  "discarded": status["playout"].get("discarded", 0)}
         return counters or None
 
     def _wait_until_settled(self, compositors, window_sec: float, timeout_sec: float, ticking=()) -> dict:
@@ -447,7 +548,9 @@ class MixerApplication:
             # shutdown() stops one group after another, so a large show took minutes; stopNodes()
             # only signals the group's own thread. Asking every input and aux group first leaves
             # shutdown() joining groups that stop concurrently (its group order was never defined).
-            for group in (*self.input_groups, *(bus.group for bus in self.aux_buses or ())):
+            prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
+            for group in (*self.input_groups, *(bus.group for bus in self.aux_buses or ()),
+                          *(encode_group(prefix) for prefix in prefixes)):
                 self.avp.group(group).stopNodes()
         self.avp.shutdown()
         log.info("Graph stopped in %.1f s", time.monotonic() - started)
@@ -622,8 +725,9 @@ def _build_renditions(avp, api, options: MixerOptions, renditions, feeds, *,
     rendition then converts color and storage in its own filter, after the scaling,
     so a smaller output converts fewer pixels; force_fps in its encoder chain makes
     the constant rate. *feeds* maps a rendition feed (dirty/clean) to its program
-    edge; a plain edge serves every feed. With a list as *held*, the Janus outputs are built held and
-    their prefixes appended to it, for the application to release when the show has settled.
+    edge; a plain edge serves every feed. With a list as *held*, the Janus chains are built behind
+    closed gates with their encoders unstarted and their outputs held, and their prefixes appended
+    to it, for the application to start when the show has settled and release once they encode.
     """
     backend = mixer_backend(backend)
     if isinstance(feeds, str):
@@ -699,7 +803,8 @@ def _application(avp, mixer, options: MixerOptions, input_edges, listener, **ext
         rtcp_feedback_listener=listener, preheat_timeout_sec=options.preheat_timeout_sec,
         wipe_file=options.wipe_file, dmabuf_rest=options.dmabuf_rest, wipe_cache_mb=options.wipe_cache_mb,
         cut_latency_encoder=options.cut_latency_encoder, prewarm_cut_scenes=options.prewarm_cut_scenes,
-        start_stable_sec=options.start_stable_sec, start_stable_timeout_sec=options.start_stable_timeout_sec, **extra)
+        start_stable_sec=options.start_stable_sec, start_stable_timeout_sec=options.start_stable_timeout_sec,
+        encoder_settle_sec=options.start_encoder_settle_sec, **extra)
 
 
 def build_application(cfg: mixer_config.MixerConfig, options: MixerOptions | None = None, *,
@@ -875,6 +980,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend, held=held)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False, held_outputs=tuple(held), browser_importers=importers,
+                        input_kinds=tuple(s.kind for s in cfg.sources),
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers), aux_buses=aux)
 
 
