@@ -1062,7 +1062,8 @@ def test_browser_hold_last_frame_defaults_on_and_reaches_the_window(tmp_path, mo
     (tmp_path / "page.sock").touch()
     opened = []
     monkeypatch.setattr(dmabuf_inputs, "rest_request",
-                        lambda base, method, p, body=None: opened.append(body) or fake_browser_rest(base, method, p, body))
+                        lambda base, method, p, body=None: (opened.append(body) if p == "/window/open" else None)
+                        or fake_browser_rest(base, method, p, body))
     path = tmp_path / "show.json"
     path.write_text(json.dumps({**CONFIG, "sources": [cam, {**page, "hold_last_frame": False}]}))
     build_application(GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)), api=fake_api())
@@ -1178,6 +1179,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert "alias_0" not in nodes  # shared fan-out belongs to the reusable builder
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
     assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
+    opened = [o for o in opened if o[1] == "/window/open"]   # the capture-mode read follows the opens
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
                              "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}
     # Three of the six frames of this show's queue are the return queue.
