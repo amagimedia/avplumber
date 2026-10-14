@@ -38,7 +38,7 @@ from pathlib import Path
 from .bridge import AUX_COMMANDS, MixerBridge
 from .contracts import GpuTelemetry, SetupController
 from .priority import CRITICAL_NICE_PERIOD_S, CriticalNice
-from .telemetry import GpuStats, HostStats, RecentCounts, compute_price, delivery_totals
+from .telemetry import BrowserCpuStats, GpuStats, HostStats, RecentCounts, compute_price, delivery_totals
 
 PAGE = Path(__file__).with_name("assets") / "index.html"
 WALL = PAGE.with_name("wall.html")
@@ -70,12 +70,13 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "avplumber-mixer-webui"
 
     def __init__(self, bridge: MixerBridge, *args, setup: SetupController | None = None, gpu: GpuTelemetry | None = None, host_stats=None, config=None,
-                 recent=None, **kwargs):
+                 recent=None, browser_cpu=None, **kwargs):
         self.bridge = bridge
         self.setup_manager = setup
         self.gpu = gpu if gpu is not None else GpuStats()
         self.host_stats = host_stats
         self.recent = recent
+        self.browser_cpu = browser_cpu
         self.config = config or {}
         super().__init__(*args, **kwargs)
 
@@ -132,6 +133,8 @@ class Handler(BaseHTTPRequestHandler):
                 state = self.bridge.state()
                 state["gpus"] = self.gpu.snapshot()
                 state["host"] = self.host_stats.values if self.host_stats else None
+                # Chromium's CPU from the browser service; None hides the THREAD tip's Chromium part.
+                state["chromium"] = self.browser_cpu.values if self.browser_cpu else None
                 # Deadline misses and AUX drops of the last ten minutes; without a sampler the page shows totals.
                 state["recent"] = self.recent.values if self.recent else None
                 if self.setup_manager:
@@ -189,11 +192,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(bridge: MixerBridge, bind: str, port: int, setup: SetupController | None = None, host_stats: HostStats | None = None,
           preview_base: str | None = None, price: dict | None = None, *, gpu: GpuTelemetry | None = None,
-          recent: RecentCounts | None = None) -> ThreadingHTTPServer:
+          recent: RecentCounts | None = None, browser_cpu: BrowserCpuStats | None = None) -> ThreadingHTTPServer:
     """`preview_base`: where the page's players load from, when not port 8080 of the page's host.
     Normalized here, so every caller's page carries a base the player resolves its files against.
     `setup` owns application-specific input/settings policy. `gpu` may be shared
-    with another server; when omitted, this server creates one cached sampler."""
+    with another server; when omitted, this server creates one cached sampler. `browser_cpu` polls
+    the browser service's CPU figures for the page."""
     preview_base = normalize_preview_base(preview_base or "")
     config: dict = {"preview_base": preview_base} if preview_base else {}
     if setup:
@@ -201,7 +205,7 @@ def serve(bridge: MixerBridge, bind: str, port: int, setup: SetupController | No
     if price:
         config["compute_price"] = price
     server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=gpu if gpu is not None else GpuStats(), host_stats=host_stats,
-                                                        config=config, recent=recent))
+                                                        config=config, recent=recent, browser_cpu=browser_cpu))
     server.daemon_threads = True
     return server
 
@@ -252,10 +256,15 @@ def main(argv: list[str] | None = None, *, configure=None, setup_factory=None) -
     host_stats.start()
     recent = RecentCounts(lambda: delivery_totals(bridge.state(timeout=3)))
     recent.start()
+    # Only an application that names the browser service (--dmabuf-rest) shows Chromium's CPU.
+    browser_url = getattr(args, "dmabuf_rest", None)
+    browser_cpu = BrowserCpuStats(browser_url) if browser_url else None
+    if browser_cpu:
+        browser_cpu.start()
     if args.critical_nice:
         CriticalNice(mixer_pid, args.critical_nice).start()
     server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats,
-                   preview_base=args.preview_base, price=price, recent=recent)
+                   preview_base=args.preview_base, price=price, recent=recent, browser_cpu=browser_cpu)
     print(f"mixer web UI on http://{args.bind}:{args.http_port} "
           f"controlling {args.mixer} at {args.host}:{args.port}", flush=True)
     def stop(_signum, _frame):

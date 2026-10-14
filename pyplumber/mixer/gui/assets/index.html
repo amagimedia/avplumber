@@ -72,6 +72,15 @@
   .meter-tip dl { display: grid; grid-template-columns: 1fr auto; gap: 5px 12px; margin: 6px 0 0; }
   .meter-tip dt { color: var(--muted); }
   .meter-tip dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+  /* THREAD: tables of CPU by thread kind and Chromium process; the first column is the name. */
+  #thread-tip { width: min(360px, calc(100vw - 24px)); }
+  .meter-tip table { width: 100%; border-collapse: collapse; margin: 6px 0 0; font-variant-numeric: tabular-nums; }
+  .meter-tip table + table { margin-top: 10px; }
+  .meter-tip th { color: var(--muted); font-weight: 400; text-align: right; padding: 0 0 2px 10px; white-space: nowrap; }
+  .meter-tip th:first-child { color: var(--text); font-weight: 600; text-align: left; padding-left: 0; }
+  .meter-tip td { text-align: right; padding: 1px 0 1px 10px; font-weight: 600; white-space: nowrap; }
+  .meter-tip td:first-child { color: var(--muted); font-weight: 400; text-align: left; padding-left: 0;
+                              max-width: 17ch; overflow: hidden; text-overflow: ellipsis; }
   @media (max-width: 1540px) {
     #top { gap: 6px; }
     #top h1 { font-size: 12px; }
@@ -825,12 +834,13 @@ function placeMeterTip() {
   tip.style.left = `${Math.max(12, Math.min(innerWidth - tip.offsetWidth - 12, box.right - tip.offsetWidth))}px`;
   tip.style.top = `${Math.max(12, Math.min(innerHeight - tip.offsetHeight - 12, box.bottom + 2))}px`;
 }
-function setMeterTip(anchor, title, rows) {
+// `rows` are [label, value] pairs shown as a list, unless `render` turns them into other nodes.
+function setMeterTip(anchor, title, rows, render) {
   let tip = $(anchor.id + "-tip");
   if (!tip) {
     tip = el("div", "meter-tip"); tip.id = anchor.id + "-tip"; tip.hidden = true;
     tip.setAttribute("role", "tooltip");
-    tip.append(el("strong", "", title), el("dl"));
+    tip.append(el("strong", "", title), el("div"));
     document.body.append(tip);
     anchor.classList.add("has-tip"); anchor.tabIndex = 0;
     anchor.setAttribute("aria-describedby", tip.id);
@@ -848,8 +858,10 @@ function setMeterTip(anchor, title, rows) {
     tip.addEventListener("mouseleave", hide);
   }
   anchor.removeAttribute("title");
-  if (changed(tip, rows)) tip.lastElementChild.replaceChildren(...rows.flatMap(([label, value]) =>
-    [el("dt", "", label), el("dd", "", value)]));
+  if (changed(tip, rows)) {
+    const list = () => { const dl = el("dl"); dl.append(...rows.flatMap(([label, value]) => [el("dt", "", label), el("dd", "", value)])); return dl; };
+    tip.lastElementChild.replaceChildren(...(render ? render(rows) : [list()]));
+  }
   if (activeTip?.tip === tip) placeMeterTip();
 }
 window.addEventListener("resize", placeMeterTip);
@@ -925,20 +937,36 @@ function renderWipeCache() {
   m.title = ["Wipe clips decoded in GPU memory", ...(clips.length ? clips : ["none yet"])].join("\n");
 }
 // /api/state carries host where the backend reads /proc; its thread fields only while a mixer process runs.
-// LOAD is the 1-minute load average over the vCPUs (the bar clamps, the number does not); THREAD is one core,
-// with all of the mixer's threads summed by kind in its tip.
-// The mixer's threads by kind, the kind with the busiest thread first: that thread is the
-// bottleneck the bar shows. One of a kind shows its share of a core; several show their mean,
-// their busiest and their sum, since hundreds of threads of a fraction of a percent each use
-// cores together. The first row is the whole mixer; twenty rows at most.
-function threadRows(h) {
-  const pct = (n) => n >= 10 ? `${Math.round(n)}%` : `${n.toFixed(1)}%`;
-  const kinds = [...(h.thread_kinds || [{name: h.thread_name, count: 1, pct: h.thread_pct, max_pct: h.thread_pct}])]
-    .sort((a, b) => (a.name === "other") - (b.name === "other") || b.max_pct - a.max_pct || b.pct - a.pct);
-  const rows = kinds.map((k) => k.count === 1 ? [k.name, pct(k.pct)]
-    : [`${k.name} ×${k.count}`, `avg ${pct(k.pct / k.count)} · max ${pct(k.max_pct)} · sum ${pct(k.pct)}`]);
-  return (Number.isFinite(h.mixer_cpu_pct) && h.thread_count
-    ? [[`All ${h.thread_count} threads`, `${(h.mixer_cpu_pct / 100).toFixed(1)} cores`], ...rows] : rows).slice(0, 20);
+// LOAD is the 1-minute load average over the vCPUs (the bar clamps, the number does not); THREAD is the
+// busiest mixer thread's share of one core. Its tip has one table of the mixer's threads by kind
+// (names with digits as N), the largest total first: count, total, mean per thread and busiest
+// thread, all in shares of one core, so a kind of hundreds of small threads can pass 100%. Under it,
+// from the browser service (state.chromium, absent with older browser images): Chromium's processes
+// by type, the GPU process's threads, and the cores Chromium used most beside the host's use of them.
+const cpuPct = (n) => !Number.isFinite(n) ? "—" : n >= 10 ? `${Math.round(n)}%` : `${n.toFixed(1)}%`;
+const cpuRow = (k) => [k.name, String(k.count), cpuPct(k.pct), cpuPct(k.count > 0 ? k.pct / k.count : NaN), cpuPct(k.max_pct)];
+function threadTip(h, c) {
+  const kinds = h.thread_kinds || [{name: h.thread_name, count: 1, pct: h.thread_pct, max_pct: h.thread_pct}];
+  // "other", the kinds past the server's limit, stays last whatever its total.
+  const mixer = [...kinds].sort((a, b) => (a.name === "other") - (b.name === "other") || b.pct - a.pct).map(cpuRow);
+  return !c ? {mixer} : {mixer, cores: c.cores_used, vcpus: c.vcpus, processes: (c.processes || []).map(cpuRow),
+    gpu: (c.gpu_threads || []).map(cpuRow),
+    busiest: (c.busiest_cores || []).map((k) => [`cpu${k.cpu}`, cpuPct(k.pct), cpuPct(k.host_pct)])};
+}
+function tipTable(head, rows) {
+  const table = el("table"), line = (tag, cells) => { const tr = el("tr"); tr.append(...cells.map((t) => el(tag, "", t))); return tr; };
+  table.append(line("th", head), ...rows.map((cells) => line("td", cells)));
+  return table;
+}
+const CPU_HEAD = ["n", "total", "avg", "max"];
+function renderThreadTip(t) {
+  const tables = [tipTable(["Mixer threads", ...CPU_HEAD], t.mixer)];
+  if (t.processes) {
+    tables.push(tipTable([`Chromium · ${metric(t.cores, 2)}/${t.vcpus ?? "—"} cores`, ...CPU_HEAD], t.processes));
+    if (t.gpu.length) tables.push(tipTable(["GPU process threads", ...CPU_HEAD], t.gpu));
+    if (t.busiest.length) tables.push(tipTable(["Chromium's busiest cores", "Chromium", "host"], t.busiest));
+  }
+  return tables;
 }
 function renderHost() {
   const h = state.host, g = $("host");
@@ -954,7 +982,7 @@ function renderHost() {
   if (h.thread_pct != null) {
     show($("thread"), h.thread_pct, `${h.thread_pct}%`);
     // The bar is the busiest thread, the single-thread bottleneck; the tip sums every thread by kind.
-    setMeterTip($("thread"), "Busiest mixer threads by kind · share of one core", threadRows(h));
+    setMeterTip($("thread"), "CPU by thread and process · % of one core", threadTip(h, state.chromium), renderThreadTip);
   }
 }
 
