@@ -1,6 +1,7 @@
 """Application API usable from another repository, without importing demo code."""
 from dataclasses import replace
 import json
+import logging
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ import pytest
 from types import SimpleNamespace
 
 from pyplumber.mixer import MixerOptions, SourceContext, build_application
+from pyplumber.mixer import application as mixer_application
 from pyplumber.mixer import config
 from pyplumber.mixer.janus import JANUS_KEYFRAME_NODE
 from test_graph import CONFIG, FakeAvp, fake_api
@@ -182,7 +184,9 @@ def test_going_on_air_releases_idle_browser_imports_before_the_outputs():
     assert purged == ["node.object.set input_3_to_cuda purge_idle 500", "node.object.set input_7_to_cuda purge_idle 500"] * 3
     # The releases stall draws: they have to be over while the outputs are still held.
     assert commands.index(purged[-1]) < commands.index("node.object.set janus_rtp_output hold false")
-    assert commands[-2:] == ["node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true"]
+    # The counters start from zero before the output is let go: nothing on air is reset away.
+    assert commands[-4:] == ["node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true",
+                             "node.object.set janus_rtp_output hold false", "node.object.set janus_force_keyframe trigger true"]
 
 
 @pytest.mark.parametrize("missing_frame", [False, True])
@@ -260,3 +264,194 @@ def test_shared_setup_accepts_an_explicit_show_and_custom_command(tmp_path, monk
     assert json.loads(runtime.config_path.read_text()) == doc
     assert runtime.mixer_command[-1] == "ai_mixer"
     runtime.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# Going on air: the outputs stay held until the show has been stable (no missed deadline, no
+# output drop, every bus drawing) for start_stable_sec. The clock below is the only time these
+# tests know: sleep() advances it, so a wait of a minute takes none.
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def time(self):
+        return 1_700_000_000.0 + self.now
+
+
+class CountingEngine:
+    """An engine whose compositors publish counters: *counters* maps a node to a function of the
+    clock giving (frames, missed_deadlines, output_drops), as node.object.get status would after
+    the frame count's publication every 60 frames. Every command is recorded with the time."""
+
+    def __init__(self, clock, counters):
+        self.clock, self.counters, self.commands = clock, counters, []
+
+    def executeCommandsFromString(self, text):
+        self.commands.extend((self.clock.now, line) for line in text.splitlines())
+
+    def node(self, name):
+        if name not in self.counters:
+            return None
+        def status(key):
+            assert key == "status"
+            frames, missed, drops = self.counters[name](self.clock.now)
+            return {"output_drops": drops, "playout": {"frames": frames, "missed_deadlines": missed}}
+        return SimpleNamespace(getObject=status)
+
+    def registerControlCommand(self, name, handler, _payload, _quiet=False):
+        pass
+
+    def at(self, suffix):
+        """When the commands ending in *suffix* were given."""
+        return [when for when, line in self.commands if line.endswith(suffix)]
+
+
+def published(fps, every=60):
+    """A compositor's frame count as it is published: every 60 frames drawn at *fps*."""
+    return lambda now: int(now * fps) // every * every
+
+
+def idle(_now):
+    return 0, 0, 0
+
+
+def go_on_air(monkeypatch, counters, buses=("aux_1",), **options):
+    clock = Clock()
+    monkeypatch.setattr(mixer_application, "time", clock)
+    engine = CountingEngine(clock, counters)
+    app = mixer_application.MixerApplication(
+        avp=engine, mixer=None, input_groups=(), input_edges=(), routed_inputs=False, preheat_timeout_sec=1,
+        held_outputs=("janus",), aux_buses=[SimpleNamespace(prefix=prefix) for prefix in buses], **options)
+    app._go_on_air()
+    return app, engine, clock
+
+
+def test_outputs_are_released_after_a_stable_window_with_the_counters_reset_first(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="mixer")
+    program = published(30)
+    bus = published(15)
+    app, engine, clock = go_on_air(monkeypatch, {
+        "mixer_comp_a": lambda now: (program(now), 0, 0),
+        "mixer_comp_b": idle,                                                  # the PVW slot: no scene loaded, never ticks
+        "aux_1_comp": lambda now: (bus(now), (now >= 2) + (now >= 5), 0),      # late twice while the show comes up
+    })
+    # The default window is ten seconds; the last miss was at 5 s, so nothing was let go before 15 s.
+    assert engine.at(" hold false") == [15.0, 15.0]
+    assert clock.now == 15.0
+    lines = [line for _, line in engine.commands]
+    # The counters start from zero before the outputs are let go, which start on a key frame.
+    assert lines == ["node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true",
+                     "node.object.set aux_1_comp reset_counters true",
+                     "node.object.set janus_rtp_output hold false", "node.object.set janus_force_keyframe trigger true",
+                     "node.object.set aux_1_rtp_output hold false", "node.object.set aux_1_force_keyframe trigger true"]
+    # What `mixer.startup` answers with: the start's misses, kept apart from the counters on air.
+    assert app.startup["settled"] is True and app.startup["reason"] == ""
+    assert app.startup["waited_sec"] == 15.0 and app.startup["outputs"] == 2
+    assert app.startup["warm_up"] == {"missed_deadlines": 2, "output_drops": 0}
+    assert app.startup["counters"]["aux_1_comp"] == {"missed_deadlines": 2, "output_drops": 0, "frames": 180}
+    assert app.startup["stable_sec"] == 10.0 and app.startup["released_at"] == 1_700_000_015.0
+    assert json.loads(json.dumps(app.startup)) == app.startup
+    on_air = [r for r in caplog.records if r.getMessage().startswith("On air")]
+    assert len(on_air) == 1 and on_air[0].levelno == logging.INFO
+    assert "after 15.0 s: 2 outputs released; stable for 10 s; the start's 2 missed deadlines" in on_air[0].getMessage()
+
+
+def test_a_show_that_never_settles_is_released_at_the_timeout_and_the_log_says_which_bus(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="mixer")
+    app, engine, clock = go_on_air(monkeypatch, {
+        "mixer_comp_a": lambda now: (published(30)(now), 0, 0),
+        "mixer_comp_b": idle,
+        "aux_1_comp": lambda now: (published(15)(now), 0, 0),
+        "aux_2_comp": lambda now: (published(15)(now), int(now), int(now) // 2),   # a miss a second, a drop every other
+    }, buses=("aux_1", "aux_2"), start_stable_sec=5, start_stable_timeout_sec=20)
+    assert engine.at(" hold false") == [20.0, 20.0, 20.0]     # released anyway, after the timeout
+    assert app.startup["settled"] is False and app.startup["waited_sec"] == 20.0
+    # What the bus counted since the window last began, at 19 s: the miss of 20 s and the drop of 20 s.
+    assert app.startup["reason"] == "aux_2_comp missed 1 deadlines and dropped 1 frames"
+    assert app.startup["warm_up"] == {"missed_deadlines": 20, "output_drops": 10}
+    warning = next(r for r in caplog.records if r.getMessage().startswith("On air"))
+    assert warning.levelno == logging.WARNING
+    assert "after 20.0 s without a stable 5 s (aux_2_comp missed 1 deadlines and dropped 1 frames): 3 outputs released" \
+        in warning.getMessage()
+    assert "the show may keep counting" in warning.getMessage()
+
+
+@pytest.mark.parametrize("stuck", ["program", "bus"])
+def test_a_compositor_that_draws_nothing_holds_the_outputs_until_the_timeout(monkeypatch, stuck):
+    counters = {
+        "mixer_comp_a": idle if stuck == "program" else lambda now: (published(30)(now), 0, 0),
+        "mixer_comp_b": idle,
+        "aux_1_comp": idle if stuck == "bus" else lambda now: (published(15)(now), 0, 0),
+    }
+    app, engine, clock = go_on_air(monkeypatch, counters, start_stable_sec=3, start_stable_timeout_sec=12)
+    # No miss anywhere (a compositor that cannot tick misses nothing), yet nothing drew: not stable.
+    assert engine.at(" hold false") == [12.0, 12.0]
+    assert app.startup["settled"] is False
+    assert app.startup["reason"] == {"program": "mixer_comp_a or mixer_comp_b drew no frame in 12 s",
+                                     "bus": "aux_1_comp drew no frame in 12 s"}[stuck]
+
+
+def test_a_window_shorter_than_a_frame_count_publication_waits_for_the_count_not_the_timeout(monkeypatch):
+    # A half-rate bus publishes its frame count every 60 frames, 4 s at 15 fps. With a 2 s window
+    # the bus has drawn nothing the gate can see at 2 s; the first publication lets the show go.
+    app, engine, clock = go_on_air(monkeypatch, {
+        "mixer_comp_a": lambda now: (published(30)(now), 0, 0),
+        "mixer_comp_b": idle,
+        "aux_1_comp": lambda now: (published(15)(now), 0, 0),
+    }, start_stable_sec=2, start_stable_timeout_sec=60)
+    assert engine.at(" hold false") == [4.0, 4.0]
+    assert app.startup["settled"] is True and app.startup["waited_sec"] == 4.0
+
+
+def test_a_miss_restarts_the_window_from_the_poll_that_saw_it(monkeypatch):
+    # A program miss at 1 s and a bus drop at 5 s: the window that began at 1 s is cut short at
+    # 5 s, and the one from 5 s ends at 11 s; a drop counts the same as a missed deadline.
+    app, engine, clock = go_on_air(monkeypatch, {
+        "mixer_comp_a": lambda now: (published(30)(now), int(now >= 1), 0),
+        "mixer_comp_b": idle,
+        "aux_1_comp": lambda now: (published(15)(now), 0, int(now >= 5)),
+    }, start_stable_sec=6, start_stable_timeout_sec=60)
+    assert engine.at(" hold false") == [11.0, 11.0]
+    assert app.startup["warm_up"] == {"missed_deadlines": 1, "output_drops": 1}
+
+
+def test_an_engine_without_playout_counters_has_nothing_to_wait_for(monkeypatch):
+    # The fakes of the other tests report no `playout`: the gate releases at once, as before.
+    app, engine, clock = go_on_air(monkeypatch, {})
+    assert engine.at(" hold false") == [0.0, 0.0]
+    assert app.startup["settled"] is True and app.startup["counters"] == {}
+    assert app.startup["warm_up"] == {"missed_deadlines": 0, "output_drops": 0}
+
+
+def test_start_stable_options_default_validate_and_reach_the_application():
+    from pyplumber.mixer.cli import GraphOptions, parse_args
+    assert (MixerOptions().start_stable_sec, MixerOptions().start_stable_timeout_sec) == (10.0, 60.0)
+    assert build_application(show(), api=fake_api()).start_stable_sec == 10.0
+    app = build_application(show(), MixerOptions(start_stable_sec=3, start_stable_timeout_sec=30), api=fake_api())
+    assert (app.start_stable_sec, app.start_stable_timeout_sec) == (3, 30)
+    for bad in ({"start_stable_sec": -1}, {"start_stable_sec": 5, "start_stable_timeout_sec": 4},
+                {"start_stable_sec": 0, "start_stable_timeout_sec": 0}):
+        with pytest.raises(ValueError, match="start_stable"):
+            MixerOptions(**bad).validate()
+    MixerOptions(start_stable_sec=0, start_stable_timeout_sec=1).validate()   # 0: no clean stretch asked, only a frame drawn
+    parsed = parse_args(["--input", "a.mp4", "--output", "p.ts", "--start-stable-sec", "3", "--start-stable-timeout-sec", "30"])
+    assert isinstance(parsed, GraphOptions) and (parsed.start_stable_sec, parsed.start_stable_timeout_sec) == (3.0, 30.0)
+    assert parse_args(["--input", "a.mp4", "--output", "p.ts"]).start_stable_sec == 10.0
+
+
+def test_the_startup_report_is_a_control_command_once_the_show_is_on_air(native_boundary):
+    from test_prewarm import application
+    app = application(native_boundary)
+    app.start()
+    report = json.loads(app.avp.commands_registered["mixer.startup"](""))
+    # This show records its program and has no bus: nothing held, nothing counted, released at once.
+    assert report["settled"] is True and report["outputs"] == 0
+    assert report["warm_up"] == {"missed_deadlines": 0, "output_drops": 0}
+    assert report["stable_sec"] == 10.0 and report["timeout_sec"] == 60.0
