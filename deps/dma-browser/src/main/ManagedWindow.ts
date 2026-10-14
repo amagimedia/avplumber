@@ -262,9 +262,10 @@ export class ManagedWindow implements IManagedWindow {
     if (!this.win || this.win.isDestroyed()) return;
     const wc = this.win.webContents;
     if (enabled) {
-      wc.startPainting();
+      // Starting an active capturer replaces its buffer pool in Electron.
+      if (!wc.isPainting()) wc.startPainting();
       wc.invalidate();
-    } else {
+    } else if (wc.isPainting()) {
       wc.stopPainting();
     }
   }
