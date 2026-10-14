@@ -100,7 +100,7 @@ async function scenario(name, run) {
     const FENCE = 0x80000000;
     const header = (frame, fenced) => {
       const bytes = Buffer.alloc(48);
-      bytes.writeUInt32LE((fenced ? FENCE : 0) | 0x42475241, 12);
+      bytes.writeUInt32LE(((fenced ? FENCE : 0) | 0x42475241) >>> 0, 12);   // | yields a signed 32-bit number
       bytes.writeBigUInt64LE(frame, 40);
       return bytes;
     };
