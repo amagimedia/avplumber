@@ -24,7 +24,7 @@ from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, renditio
 from .config import FEEDS
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .dmabuf_inputs import (BrowserCaptureMode, browser_capture_mode, dmabuf_cuda_input_nodes, open_windows,
-                            refresh_windows, wait_for_sockets, zero_copy_chain_edges)
+                            refresh_windows, rest_request, wait_for_sockets, zero_copy_chain_edges)
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
@@ -338,13 +338,15 @@ class MixerApplication:
         ticking = [tuple(program), *((bus,) for bus in buses)]
         report = self._wait_until_settled(compositors, self.start_stable_sec, self.start_stable_timeout_sec, ticking)
         prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
+        browser = self._browser_snapshot()
         self.avp.executeCommandsFromString("\n".join(
             [f"node.object.set {node} reset_counters true" for node in compositors]
             + [release_commands(prefix) for prefix in prefixes]))
         counters = report["counters"].values()
         warm_up = {key: sum(c[key] for c in counters) for key in ("missed_deadlines", "output_drops")}
         self.startup = {**report, "outputs": len(prefixes), "warm_up": warm_up, "released_at": time.time(),
-                        "stable_sec": self.start_stable_sec, "timeout_sec": self.start_stable_timeout_sec}
+                        "browser_windows": browser, "stable_sec": self.start_stable_sec,
+                        "timeout_sec": self.start_stable_timeout_sec}
         if report["settled"]:
             log.info("On air after %.1f s: %d outputs released; stable for %g s; the start's %d missed deadlines "
                      "and %d output drops are not counted", report["waited_sec"], len(prefixes), self.start_stable_sec,
@@ -354,6 +356,17 @@ class MixerApplication:
                         "deadlines and %d output drops are not counted, and the show may keep counting",
                         report["waited_sec"], self.start_stable_sec, report["reason"], len(prefixes),
                         warm_up["missed_deadlines"], warm_up["output_drops"])
+
+    def _browser_snapshot(self) -> dict | None:
+        """Keep the browser counters at output release as this run's measurement baseline."""
+        if not (self.browser_windows and self.dmabuf_rest):
+            return None
+        try:
+            status = rest_request(self.dmabuf_rest, "GET", "/status", timeout=5) or {}
+            return {window["id"]: window.get("stats") or {} for window in status.get("windows") or []}
+        except Exception as exc:
+            log.warning("Browser counters at on air unavailable (%s): measurement starts at the next poll", exc)
+            return None
 
     def _purge_idle_imports(self, wait: bool = False) -> int:
         """Release the browser buffers the start-up went through and no longer uses.

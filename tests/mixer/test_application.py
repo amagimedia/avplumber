@@ -430,6 +430,35 @@ def test_an_engine_without_playout_counters_has_nothing_to_wait_for(monkeypatch)
     assert app.startup["warm_up"] == {"missed_deadlines": 0, "output_drops": 0}
 
 
+def test_browser_measurement_baseline_is_saved_at_output_release(monkeypatch, caplog):
+    status = {"windows": [{"id": "web_1", "stats": {
+        "paintCount": 900, "txFrameCount": 880, "droppedFrames": 20,
+        "droppedReasons": {"no_consumer": 20}}}]}
+    requests = []
+
+    def rest(base_url, method, path, body=None, timeout=60):
+        requests.append((base_url, method, path, timeout))
+        if isinstance(status, Exception):
+            raise status
+        return status
+
+    monkeypatch.setattr(mixer_application, "rest_request", rest)
+    app, engine, _ = go_on_air(monkeypatch, {}, browser_windows=("web_1",), dmabuf_rest="http://browser:9009")
+    assert requests == [("http://browser:9009", "GET", "/status", 5)]
+    assert app.startup["browser_windows"] == {"web_1": status["windows"][0]["stats"]}
+    assert engine.at(" hold false") == [0.0, 0.0]
+
+    status = ConnectionRefusedError(111, "refused")
+    app, engine, _ = go_on_air(monkeypatch, {}, browser_windows=("web_1",), dmabuf_rest="http://browser:9009")
+    assert app.startup["browser_windows"] is None
+    assert engine.at(" hold false") == [0.0, 0.0]
+    assert "Browser counters at on air unavailable" in caplog.text
+
+    requests.clear()
+    app, _, _ = go_on_air(monkeypatch, {})
+    assert requests == [] and app.startup["browser_windows"] is None
+
+
 def test_start_stable_options_default_validate_and_reach_the_application():
     from pyplumber.mixer.cli import GraphOptions, parse_args
     assert (MixerOptions().start_stable_sec, MixerOptions().start_stable_timeout_sec) == (10.0, 60.0)
