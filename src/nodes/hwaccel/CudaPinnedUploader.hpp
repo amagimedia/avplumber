@@ -107,9 +107,17 @@ public:
         frames->sw_format = sw_format;
         frames->width = width;
         frames->height = height;
-        // The size hwcontext_cuda gives each frame of its own pool, which lays the planes out in it.
-        constexpr int kCudaFrameAlignment = 256;
-        const int frame_bytes = av_image_get_buffer_size(sw_format, width, height, kCudaFrameAlignment);
+        // hwcontext_cuda lays the planes out in each pool buffer with the device's texture alignment,
+        // doubled for YUV420P; a buffer laid out with twice that alignment is large enough either way.
+        int alignment = 0;
+        if (cuCtxPushCurrent(cuda_->cuda_ctx) == CUDA_SUCCESS) {
+            CUdevice device;
+            if (cuCtxGetDevice(&device) == CUDA_SUCCESS)
+                cuDeviceGetAttribute(&alignment, CU_DEVICE_ATTRIBUTE_TEXTURE_ALIGNMENT, device);
+            CUcontext previous;
+            cuCtxPopCurrent(&previous);
+        }
+        const int frame_bytes = alignment > 0 ? av_image_get_buffer_size(sw_format, width, height, 2 * alignment) : -1;
         pool_ = new Pool{cuda_->cuda_ctx, pool_frames};
         frames->pool = av_buffer_pool_init2(size_t(std::max(frame_bytes, 0)), pool_, &CudaPinnedUploader::allocate,
                                             &CudaPinnedUploader::forget);
