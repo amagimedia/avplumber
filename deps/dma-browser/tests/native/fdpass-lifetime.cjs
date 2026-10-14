@@ -5,12 +5,12 @@ const net = require('node:net');
 const fdpass = require('../../addons/fdpass');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function until(predicate) {
+async function until(predicate, what = 'transport') {
   for (let i = 0; i < 200; i++) {
     if (predicate()) return;
     await wait(5);
   }
-  assert.fail('timed out waiting for transport');
+  assert.fail(`timed out waiting for ${what}`);
 }
 
 function ack(kind, frame = 0n) {
@@ -152,26 +152,35 @@ for _ in range(2):
         os.close(fd)
 `;
     const child = spawn('python3', ['-c', script, path], {stdio: ['ignore', 'pipe', 'inherit']});
+    // The child exits as soon as it has acknowledged the second frame, while this side is still
+    // polling for its output: watch for the exit from the start, or the event is missed.
+    let exited = null;
+    child.once('exit', code => { exited = code; });
     const lines = [];
     child.stdout.on('data', chunk => lines.push(...String(chunk).split('\n').filter(Boolean)));
-    await until(() => lines.includes('connected'));
-    await wait(20);
     const fence = fs.openSync('/dev/null', 'r');
     const plane = fs.openSync('/dev/zero', 'r');
-    const fenced = Buffer.alloc(48), plain = Buffer.alloc(48);
-    fenced.writeUInt32LE((0x80000000 | 0x42475241) >>> 0, 12);
-    fenced.writeBigUInt64LE(10n, 40);
-    plain.writeUInt32LE(0x42475241, 12);
-    plain.writeBigUInt64LE(11n, 40);
-    assert.equal((await fdpass.broadcastFd(path, plane, fenced, fence)).sent, 1);
-    assert.equal((await fdpass.broadcastFd(path, plane, plain)).sent, 1);
-    await until(() => lines.length >= 3);
-    assert.deepEqual(lines.slice(1), ['msg 48 2 1 0', 'msg 48 1 0 0']);
-    await until(() => releases.length === 2);
-    assert.deepEqual(releases, [[10n, true], [11n, true]]);
-    fs.closeSync(fence);
-    fs.closeSync(plane);
-    await new Promise(resolve => child.once('exit', resolve));
+    try {
+      await until(() => lines.includes('connected'), 'the python client to connect');
+      await wait(20);
+      const fenced = Buffer.alloc(48), plain = Buffer.alloc(48);
+      fenced.writeUInt32LE((0x80000000 | 0x42475241) >>> 0, 12);
+      fenced.writeBigUInt64LE(10n, 40);
+      plain.writeUInt32LE(0x42475241, 12);
+      plain.writeBigUInt64LE(11n, 40);
+      assert.equal((await fdpass.broadcastFd(path, plane, fenced, fence)).sent, 1);
+      assert.equal((await fdpass.broadcastFd(path, plane, plain)).sent, 1);
+      await until(() => lines.length >= 3 || exited !== null, 'the python client to report two messages');
+      assert.deepEqual(lines.slice(1), ['msg 48 2 1 0', 'msg 48 1 0 0']);
+      await until(() => releases.length === 2, 'both acknowledgements');
+      assert.deepEqual(releases, [[10n, true], [11n, true]]);
+      await until(() => exited !== null, 'the python client to exit');
+      assert.equal(exited, 0);
+    } finally {
+      fs.closeSync(fence);
+      fs.closeSync(plane);
+      if (exited === null) child.kill();
+    }
   });
   await scenario('backpressure', async ({send, connect}) => {
     await connect(false);
