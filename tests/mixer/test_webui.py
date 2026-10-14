@@ -335,7 +335,7 @@ def test_thread_kinds_rank_by_total_and_aux_threads_are_one_row_like_any_kind():
     assert rows[-1] == {"name": "other", "count": 3, "pct": 6.0, "avg_pct": 2.0, "max_pct": 3.0}   # miscb, miscc and miscd past the eight
 
 
-def test_chromium_summary_names_sorts_and_picks_the_busiest_cores():
+def test_chromium_summary_names_and_sorts_the_rows():
     from pyplumber.mixer.gui.telemetry import chromium_summary
     assert chromium_summary({"intervalS": None, "processes": []}) is None   # the service's first answer is a baseline
     row = lambda name, n, pct, max_pct, key="type": {key: name, "n": n, "pct": pct, "avgPct": pct / n, "maxPct": max_pct}
@@ -353,8 +353,7 @@ def test_chromium_summary_names_sorts_and_picks_the_busiest_cores():
     assert [(r["name"], r["count"], r["pct"], r["avg_pct"], r["max_pct"]) for r in summary["processes"]] == [   # the largest total first
         ("GPU process", 2, 80.4, 40.2, 52.1), ("renderer", 24, 52, 2.2, 6.3), ("browser", 2, 12.6, 6.3, 9), ("utility", 6, 3.2, 0.5, 1.4)]
     assert [r["name"] for r in summary["gpu_threads"]] == ["viz compositor", "GPU main", "IO", "other"]   # a fixed order
-    assert summary["busiest_cores"] == [{"cpu": 2, "pct": 62, "host_pct": 91.5}, {"cpu": 3, "pct": 40.2, "host_pct": None},
-                                        {"cpu": 4, "pct": 12, "host_pct": 30}, {"cpu": 5, "pct": 7, "host_pct": 20}]
+    assert "busiest_cores" not in summary   # the hover keeps the cores' worth in all, not a per-core table
     raw["processes"][0]["pct"] = "12"
     with pytest.raises(ValueError):
         chromium_summary(raw)
@@ -630,6 +629,73 @@ def test_delivery_totals_are_the_pages_sums_or_nothing_while_a_bus_is_missing():
     assert delivery_totals({**state, "aux_buses": state["aux_buses"][:1]}) is None       # one bus has not reported
     assert delivery_totals({**state, "status": {}}) is None
     assert delivery_totals({"status": state["status"], "settings": {}}) == {"missed_deadlines": 1, "output_drops": 0}
+
+
+class PlayoutBridge:
+    """A bridge with a mixer state and each compositor's per_input reply, recording its commands."""
+
+    def __init__(self, state, per_input):
+        self.mixer, self._state, self.per_input, self.commands = "mixer", state, per_input, []
+
+    def state(self, timeout=None):
+        return self._state
+
+    def command(self, line, timeout=None):
+        self.commands.append(line)
+        return json.dumps(self.per_input[line.split()[1]])
+
+
+PLAYOUT_STATE = {"status": {"playout": {"A": {"missed_deadlines": 1}, "B": {"missed_deadlines": 0}}}, "settings": {
+    # Compositor inputs in order; "cam" is used twice in a scene, so it has two inputs.
+    "inputs": [["cam", "video"], ["cam", "video"], ["web_1", "browser"], ["web_2", "browser"], ["clip", "nv12"]]}}
+
+
+def row(repeats, discarded, overflow=0):
+    return {"repeats": repeats, "discarded": discarded, "overflow": overflow}
+
+
+def test_playout_counters_name_each_input_by_the_settings_and_sum_both_slots():
+    from pyplumber.mixer.gui.telemetry import playout_counters
+    bridge = PlayoutBridge(PLAYOUT_STATE, {
+        "mixer_comp_a": [row(4, 1), row(9, 9), row(30, 2), row(5, 5), row(1, 0)],
+        "mixer_comp_b": [row(1, 0), row(0, 0), row(10, 1), row(0, 0), row(0, 1)]})
+    assert playout_counters(bridge) == {
+        "missed_deadlines": 1, "output_drops": 0,
+        # The first of a source's inputs speaks for it: its aliases see the same frames.
+        ("input", "cam", "other", "repeats"): 5, ("input", "cam", "other", "discarded"): 1,
+        ("input", "web_1", "browser", "repeats"): 40, ("input", "web_1", "browser", "discarded"): 3,
+        ("input", "web_2", "browser", "repeats"): 5, ("input", "web_2", "browser", "discarded"): 5,
+        ("input", "clip", "other", "repeats"): 1, ("input", "clip", "other", "discarded"): 1}
+    # Two small commands per sample, which RecentCounts takes every 5 s.
+    assert bridge.commands == ["node.object.get mixer_comp_a per_input", "node.object.get mixer_comp_b per_input"]
+    # A mixer whose settings do not name its inputs: the delivery counters alone, no command.
+    older = PlayoutBridge({**PLAYOUT_STATE, "settings": {}}, {})
+    assert playout_counters(older) == {"missed_deadlines": 1, "output_drops": 0} and older.commands == []
+    with pytest.raises(ValueError):
+        playout_counters(PlayoutBridge(PLAYOUT_STATE, {"mixer_comp_a": [row("x", 0)] * 5, "mixer_comp_b": []}))
+
+
+def test_recent_input_repeats_cover_the_window_with_the_worst_browser_source():
+    from pyplumber.mixer.gui.telemetry import input_counters, playout_summary
+    inputs = PLAYOUT_STATE["settings"]["inputs"]
+    slots, now = [[row(0, 0)] * 5], [0.0]
+    recent = RecentCounts(lambda: {"missed_deadlines": 0, "output_drops": 0, **input_counters(inputs, slots)},
+                          clock=lambda: now[0], summary=playout_summary)
+    recent.sample()
+    assert recent.values["inputs"]["browser"] == {"sources": 2, "repeats": 0, "discarded": 0, "worst": None}
+    now[0], slots[0] = 5.0, [row(3, 3), row(3, 3), row(12, 1), row(20, 20), row(2, 0)]
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 5, "missed_deadlines": 0, "output_drops": 0, "inputs": {
+        # web_2 repeats most, each with a discard beside it: jitter. web_1's repeats are ticks without a frame.
+        "browser": {"sources": 2, "repeats": 32, "discarded": 21, "worst": {"source": "web_2", "repeats": 20, "discarded": 20}},
+        "other": {"sources": 2, "repeats": 5, "discarded": 3}}}
+    # Another show's inputs: the window starts again from its current totals.
+    inputs, now[0] = [["page", "browser"]], 10.0
+    slots[0] = [row(7, 0)]
+    recent.sample()
+    assert recent.values["covered_s"] == 0
+    assert recent.values["inputs"]["browser"] == {"sources": 1, "repeats": 0, "discarded": 0, "worst": None}
+    assert recent.values["inputs"]["other"] == {"sources": 0, "repeats": 0, "discarded": 0}
 
 
 def test_state_carries_the_recent_delivery_counts(client):

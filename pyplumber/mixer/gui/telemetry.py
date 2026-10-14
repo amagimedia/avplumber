@@ -162,6 +162,62 @@ def delivery_totals(state: dict) -> dict | None:
     return {"missed_deadlines": sum(missed), "output_drops": sum(drops)}
 
 
+def playout_counters(bridge) -> dict | None:
+    """delivery_totals() and, where the show names its compositor inputs (settings "inputs"), each
+    source's repeats and discards from both program-slot compositors' per_input counters: two small
+    commands per call, which RecentCounts makes every 5 s. A repeat with a discard beside it is two
+    paints in one tick slot (jitter); a repeat alone is a tick no frame arrived for."""
+    state = bridge.state(timeout=3)
+    totals = delivery_totals(state)
+    inputs = (state.get("settings") or {}).get("inputs")
+    if totals is None or not inputs:
+        return totals
+    slots = [json.loads(bridge.command(f"node.object.get {bridge.mixer}_comp_{slot} per_input", 3) or "[]")
+             for slot in ("a", "b")]
+    return {**totals, **input_counters(inputs, slots)}
+
+
+def input_counters(inputs, slots):
+    """{("input", source, group, counter): total} from per_input lists in compositor input order;
+    group is "browser" for a browser (dmabuf) source and "other" for the rest. A source scenes
+    use twice has an input per use, all fed the same frames: its first input speaks for it."""
+    counters, seen = {}, set()
+    for index, (source, kind) in enumerate(inputs):
+        if source in seen:
+            continue
+        seen.add(source)
+        group = "browser" if kind == "browser" else "other"
+        for counter in ("repeats", "discarded"):
+            values = [rows[index][counter] for rows in slots if index < len(rows)]
+            if any(isinstance(v, bool) or not isinstance(v, int) for v in values):
+                raise ValueError("malformed per_input counters")
+            counters[("input", source, group, counter)] = sum(values)
+    return counters
+
+
+def playout_summary(rises):
+    """RecentCounts' summary: the plain counters as they are, and the inputs' rises as
+    {"inputs": {"browser": {...}, "other": {...}}}, each with its sources, repeats and discards,
+    the browser group also with its worst source (most repeats, then most discards) or None."""
+    plain = {key: value for key, value in rises.items() if not isinstance(key, tuple)}
+    per_source = {}
+    for (_, source, group, counter), value in ((k, v) for k, v in rises.items() if isinstance(k, tuple)):
+        per_source.setdefault((group, source), {"repeats": 0, "discarded": 0})[counter] = value
+    if not per_source:
+        return plain
+    groups = {}
+    for name in ("browser", "other"):
+        rows = [(source, c) for (group, source), c in per_source.items() if group == name]
+        summary = {"sources": len(rows), "repeats": sum(c["repeats"] for _, c in rows),
+                   "discarded": sum(c["discarded"] for _, c in rows)}
+        if name == "browser":
+            worst = max(rows, key=lambda row: (row[1]["repeats"], row[1]["discarded"]), default=None)
+            summary["worst"] = ({"source": worst[0], **worst[1]}
+                                if worst and (worst[1]["repeats"] or worst[1]["discarded"]) else None)
+        groups[name] = summary
+    return {**plain, "inputs": groups}
+
+
 class RecentCounts:
     """How far counters that only grow rose in the last `window_s` seconds. The page shows this
     instead of the totals since the mixer started, which keep the misses of a start or of a
@@ -169,10 +225,13 @@ class RecentCounts:
     there are none. One thread samples every `period_s`, so the window is full whether or not a
     page is open. `values` is None until the first sample; `covered_s` is how much of the window
     the samples span so far. Totals that fall belong to a mixer that started again and counts from
-    zero: everything it counted happened inside the window."""
+    zero: everything it counted happened inside the window. Counters that appear or go away (another
+    show's inputs) start the window again from the current totals. `summary` turns the rises into
+    what the page reads (by default they are the values themselves)."""
 
-    def __init__(self, read, window_s: float = 600, period_s: float = 5, clock=time.monotonic):
+    def __init__(self, read, window_s: float = 600, period_s: float = 5, clock=time.monotonic, summary=None):
         self.read, self.window_s, self.period_s, self.clock = read, window_s, period_s, clock
+        self.summary = summary or (lambda rises: rises)
         self.values = None
         self._samples: list[tuple[float, dict]] = []
 
@@ -192,14 +251,17 @@ class RecentCounts:
         if totals is None:
             return
         now = self.clock()
-        if self._samples and any(totals[key] < count for key, count in self._samples[-1][1].items()):
+        last = self._samples[-1][1] if self._samples else None
+        if last is not None and any(totals.get(key, count) < count for key, count in last.items()):
             self._samples = [(now, dict.fromkeys(totals, 0))]
+        elif last is not None and set(totals) != set(last):
+            self._samples = []
         self._samples.append((now, dict(totals)))
         while self._samples[0][0] < now - self.window_s:
             self._samples.pop(0)
         since, base = self._samples[0]
         self.values = {"window_s": self.window_s, "covered_s": round(now - since),
-                       **{key: count - base[key] for key, count in totals.items()}}
+                       **self.summary({key: count - base[key] for key, count in totals.items()})}
 
 
 class HostStats:
@@ -368,15 +430,13 @@ class BrowserCpuStats:
 CHROMIUM_PROCESS_NAMES = {"browser": "browser", "gpu": "GPU process", "renderer": "renderer",
                           "utility": "utility", "zygote": "zygote", "other": "other"}
 CHROMIUM_GPU_THREAD_NAMES = {"viz": "viz compositor", "main": "GPU main", "io": "IO", "other": "other"}
-CHROMIUM_BUSIEST_CORES = 4
 
 
 def chromium_summary(raw):
     """The page's Chromium section from one GET /metrics/cpu answer, or None while the answer has
     no interval yet. Rows have the THREAD tip's shape, {"name", "count", "pct", "avg_pct", "max_pct"}: the
-    process types the largest total first, the GPU process's threads in a fixed order (viz
-    compositor, GPU main, IO, other), and the cores Chromium used most, each with the host's own
-    use of that core."""
+    process types the largest total first and the GPU process's threads in a fixed order (viz
+    compositor, GPU main, IO, other), under Chromium's cores' worth in all."""
     if raw.get("intervalS") is None:
         return None
     number = lambda value: value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
@@ -395,12 +455,9 @@ def chromium_summary(raw):
     order = list(CHROMIUM_GPU_THREAD_NAMES.values())
     gpu = sorted(rows(raw.get("gpuThreads"), CHROMIUM_GPU_THREAD_NAMES), key=lambda r: order.index(r["name"]) if r["name"] in order else len(order))
     cores = raw.get("cores") or {}
-    per_core = [{"cpu": c["cpu"], "pct": number(c["chromiumPct"]), "host_pct": number(c.get("hostPct"))}
-                for c in cores.get("perCore") or []]
-    busiest = sorted((c for c in per_core if c["pct"]), key=lambda c: -c["pct"])[:CHROMIUM_BUSIEST_CORES]
     total = number(raw.get("totalPct"))
     return {"total_pct": total, "cores_used": round(total / 100, 2) if total is not None else None,
-            "vcpus": cores.get("hostVcpus"), "processes": processes, "gpu_threads": gpu, "busiest_cores": busiest}
+            "vcpus": cores.get("hostVcpus"), "processes": processes, "gpu_threads": gpu}
 
 
 def _cpu_stat(stat):

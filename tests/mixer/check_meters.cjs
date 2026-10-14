@@ -26,8 +26,7 @@ const {chromium} = require('playwright');
         processes: [['GPU process', 2, 80.4, 52.1], ['renderer', 24, 52, 6.3], ['browser', 2, 12.6, 9]]
           .map(([name, count, pct, max_pct]) => ({name, count, pct, max_pct})),
         gpu_threads: [['viz compositor', 2, 38.5, 24], ['GPU main', 2, 30.1, 19.8], ['IO', 2, 6.2, 3.5], ['other', 40, 5.6, 1.1]]
-          .map(([name, count, pct, max_pct]) => ({name, count, pct, max_pct})),
-        busiest_cores: [{cpu: 3, pct: 62, host_pct: 91.5}, {cpu: 7, pct: 40.2, host_pct: 70}]},
+          .map(([name, count, pct, max_pct]) => ({name, count, pct, max_pct}))},
       status: {pgm_scene: 'a', pvw_scene: 'b', transition: 'idle', cut_latency: {direct: {...cuts[2], recent: cuts}},
         playout: {A: {missed_deadlines: 1}, B: {missed_deadlines: 0}}, wipe_cache: {bytes: 200000000, budget_bytes: 600000000}},
       scenes: ['a', 'b'], aux_buses: aux,
@@ -54,7 +53,7 @@ const {chromium} = require('playwright');
     assert.deepEqual(await values('cpu'), ['6.00', '32.0']);
     // THREAD shows the busiest thread. Its tip is one table of the mixer's threads by kind, the
     // largest total first and "other" last: count, total, mean and busiest thread. Under it
-    // Chromium's processes, its GPU process's threads and its busiest cores.
+    // Chromium's cores' worth in its header, its processes and its GPU process's threads.
     assert.equal(await page.locator('#thread b').textContent(), '40%');
     const tables = () => page.locator('#thread-tip table').evaluateAll((all) => all.map((t) =>
       [...t.rows].map((r) => [...r.cells].map((c) => c.textContent))));
@@ -68,8 +67,7 @@ const {chromium} = require('playwright');
         ['browser', '2', '13%', '6.3%', '9.0%']],
       [['GPU process threads', 'n', 'total', 'avg', 'max'],
         ['viz compositor', '2', '39%', '19%', '24%'], ['GPU main', '2', '30%', '15%', '20%'],
-        ['IO', '2', '6.2%', '3.1%', '3.5%'], ['other', '40', '5.6%', '0.1%', '1.1%']],
-      [["Chromium's busiest cores", 'Chromium', 'host'], ['cpu3', '62%', '92%'], ['cpu7', '40%', '70%']]]);
+        ['IO', '2', '6.2%', '3.1%', '3.5%'], ['other', '40', '5.6%', '0.1%', '1.1%']]]);
     // A server that names only the busiest thread, and no browser figures: one table with that thread.
     await page.evaluate(() => { const {thread_kinds: all} = state.host, chromium = state.chromium;
       state.host.thread_kinds = undefined; state.chromium = null; renderHost();
@@ -88,6 +86,16 @@ const {chromium} = require('playwright');
     assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · last 10 min.*AUX output drops · last 10 min/s);
     await page.evaluate(() => { state.recent.covered_s = 40; renderLatency(); });
     assert.match(await page.locator('#lat-tip').textContent(), /Deadline misses · last 40 s/);
+    // The inputs' repeats and discards over the same window: browser sources, their worst, the rest.
+    await page.evaluate(() => { state.recent.inputs = {
+      browser: {sources: 40, repeats: 120, discarded: 45, worst: {source: 'web_12', repeats: 40, discarded: 2}},
+      other: {sources: 152, repeats: 5, discarded: 1}}; renderLatency(); });
+    assert.deepEqual(await page.locator('#lat-tip dt').allTextContents(), ['Cut p95 · 3 cuts',
+      'Deadline misses · last 40 s', 'AUX output drops · last 40 s', 'Browser repeats / discards · 40 · last 40 s',
+      'Worst browser source', 'Other inputs repeats / discards · 152']);
+    assert.deepEqual((await values('lat')).slice(3), ['120 / 45', 'web_12 · 40 / 2', '5 / 1']);
+    await page.evaluate(() => { state.recent.inputs.browser = {sources: 40, repeats: 0, discarded: 0, worst: null}; renderLatency(); });
+    assert.deepEqual((await values('lat')).slice(3), ['0 / 0', '—', '5 / 1']);
     await page.evaluate(() => { state.recent = null; renderLatency(); });
     assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
     for (const width of [1920, 1600, 1440, 1280]) {
