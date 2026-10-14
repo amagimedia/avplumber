@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import { ConfigService } from '../config/ConfigService';
+import { ProcessCpuSampler, type CpuMetricsSource } from '../metrics/ProcessCpu';
 import type { WindowControl } from '../WindowControl';
 import { toErrorResponse } from './errors';
 
@@ -22,6 +23,7 @@ export class RestServer {
   private readonly manager: WindowControl;
   private readonly cfg: ConfigService;
   private readonly opts: RestServerOptions;
+  private readonly cpu: CpuMetricsSource;
   public readonly app: Express;
   private server: Server | null = null;
 
@@ -29,10 +31,12 @@ export class RestServer {
     manager: WindowControl,
     opts: RestServerOptions,
     cfg: ConfigService = new ConfigService(),
+    cpu: CpuMetricsSource = new ProcessCpuSampler(),
   ) {
     this.manager = manager;
     this.opts = opts;
     this.cfg = cfg;
+    this.cpu = cpu;
     this.app = express();
     this.app.disable('x-powered-by');
     this.app.use(express.json({ limit: '1mb' }));
@@ -136,6 +140,15 @@ export class RestServer {
       '/status',
       route(async (_req, res) => {
         res.status(200).json(await this.manager.status());
+      }),
+    );
+
+    // CPU of this service's process tree (supervisor, Electron workers, Chromium children) since
+    // the previous call, grouped by process type and GPU-process thread. The mixer polls it.
+    this.app.get(
+      '/metrics/cpu',
+      route(async (_req, res) => {
+        res.status(200).json(await this.cpu.metrics());
       }),
     );
 
