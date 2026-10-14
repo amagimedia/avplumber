@@ -240,8 +240,8 @@ def test_browser_ring_size_is_still_read_as_the_earlier_name(tmp_path):
     assert parse({**{k: v for k, v in show.items() if k != "browser_frame_queue"}, "browser_ring_size": 5}).browser_frame_queue == 5
     assert "browser_ring_size" not in recipe_for(T4, {**DEFAULT_SETTINGS, "browser_ring_size": 11})
     # The earlier name allowed up to 64; such a value is the queue's maximum.
-    assert prepare_demo.plan({**recipe_for(T4, DEFAULT_SETTINGS), "browser_ring_size": 11}, tmp_path)[0]["browser_frame_queue"] == 9
-    assert parse({**{k: v for k, v in show.items() if k != "browser_frame_queue"}, "browser_ring_size": 64}).browser_frame_queue == 9
+    assert prepare_demo.plan({**recipe_for(T4, DEFAULT_SETTINGS), "browser_ring_size": 11}, tmp_path)[0]["browser_frame_queue"] == 11
+    assert parse({**{k: v for k, v in show.items() if k != "browser_frame_queue"}, "browser_ring_size": 64}).browser_frame_queue == 15
 
 
 def test_browser_frame_queue_is_at_most_nine(tmp_path):

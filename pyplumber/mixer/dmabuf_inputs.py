@@ -8,6 +8,7 @@ Applications declare browser sources through ``pyplumber.mixer.build_application
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ import urllib.error
 import urllib.request
 from typing import List, Tuple
 
-from .config import default_browser_frame_queue
+from .config import browser_frame_queue_for, default_browser_frame_queue
 
 SCHEME = "dmabuf://"
 # How long an imported browser allocation stays registered without being used.
@@ -24,7 +25,10 @@ IMPORT_IDLE_MS = 10_000
 # The return queue: frames the mixer has finished with wait here and go back to the browser one
 # per new frame (ipc_dmabuf_source `return_queue`), so the browser's pool gets one buffer back for
 # each it hands out and stops destroying and allocating buffers. It is part of the window's frame
-# queue, which the browser service counts as frames not yet returned.
+# queue, which the browser service counts as frames not yet returned (its `ringSize`), and which
+# must be at most DMA_BROWSER_EXPORT_BUFFERS - 2 (config.browser_frame_queue_for): Chromium lends
+# that many buffers per window and the browser needs two of them for the frame being delivered
+# and the one in its paint handler.
 RETURN_QUEUE = 3
 # Frames of the queue left to the mixer's own pipeline before any go to the return queue.
 MIN_FRAMES_IN_FLIGHT = 3
@@ -32,8 +36,47 @@ MIN_FRAMES_IN_FLIGHT = 3
 
 def return_queue(frame_queue: int) -> int:
     """How much of a window's *frame_queue* is the return queue: three of the default nine, less
-    for a shorter queue, none for one of three frames or fewer."""
+    for a shorter queue, none for one of three frames or fewer. A zero-copy browser needs none
+    (BrowserCaptureMode)."""
     return max(0, min(RETURN_QUEUE, frame_queue - MIN_FRAMES_IN_FLIGHT))
+
+
+@dataclass(frozen=True)
+class BrowserCaptureMode:
+    """How the browser service hands frames out, as it announces in ``/status`` (``captureMode``,
+    ``exportBuffers``, on the service and on every window). The stock copy path keeps a retained
+    pool per window and the mixer paces returns through a return queue. The zero-copy export is one
+    capacity-bounded queue in Chromium: *export_buffers* buffers per window, a frame lent until the
+    consumer acknowledges it, no paint while all are out. The mixer then acknowledges each frame as
+    soon as its last user lets go (no return queue) and holds at most capacity less one."""
+    zero_copy: bool = False
+    export_buffers: int | None = None
+
+    def frame_queue(self, configured: int) -> int:
+        """The frames this mixer may hold of a window: *configured*, lowered to the zero-copy
+        browser's capacity less one."""
+        if self.zero_copy and self.export_buffers:
+            return min(configured, browser_frame_queue_for(self.export_buffers))
+        return configured
+
+
+def browser_capture_mode(base_url: str) -> BrowserCaptureMode:
+    """Ask the browser service how it captures. An unreachable or older service (no
+    ``captureMode``) is the stock copy path."""
+    try:
+        status = rest_request(base_url, "GET", "/status", timeout=10) or {}
+    except (RuntimeError, TimeoutError, OSError) as exc:
+        logging.getLogger(__name__).warning("Browser %s: cannot read /status (%s); assuming the stock capture",
+                                            base_url, exc)
+        return BrowserCaptureMode()
+    sources = [status, *status.get("windows", [])]
+    mode = next((s.get("captureMode") for s in sources if s.get("captureMode")), None)
+    buffers = next((s.get("exportBuffers") for s in sources if s.get("exportBuffers")), None)
+    result = BrowserCaptureMode(zero_copy=mode == "zero-copy",
+                                export_buffers=int(buffers) if isinstance(buffers, int) and buffers > 0 else None)
+    logging.getLogger(__name__).info("Browser %s captures %s%s", base_url, mode or "copy (stock)",
+                                     f" with {result.export_buffers} buffers per window" if result.export_buffers else "")
+    return result
 
 
 def is_dmabuf_url(url: str) -> bool:
@@ -53,7 +96,7 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
                             processing_group: str, hold: bool = False,
                             preserve_alpha: bool = False, browser_frame_queue: int | None = None,
-                            event_loop: str | None = None) -> Tuple[list, str]:
+                            event_loop: str | None = None, zero_copy: bool = False) -> Tuple[list, str]:
     """Return the node list and the final CUDA edge for one browser socket.
 
     With *hold*, a ``repeat_last_frame`` node re-emits the last frame at *fps*
@@ -62,7 +105,9 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
     alpha is premultiplied; the consumer tags it (the mixer does in its colour node).
     Geometry and format come from each frame, and ``smooth_timestamps`` already stamps
     in 1/*fps*, so the chain has no format or time-base nodes of its own.
-    *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted)."""
+    *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted).
+    With *zero_copy* (BrowserCaptureMode) there is no return queue: each frame goes back as soon as
+    its last user lets go, since Chromium's own queue has no buffer to spare."""
     if browser_frame_queue is None:
         browser_frame_queue = default_browser_frame_queue(fps)
     drm_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda"))
@@ -70,7 +115,7 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
               "auto_restart": "group", "fps": f"{fps}/1"}
     if drm_hwaccel:
         source["hwaccel"] = drm_hwaccel
-    if return_queue(browser_frame_queue):
+    if return_queue(browser_frame_queue) and not zero_copy:
         source["return_queue"] = return_queue(browser_frame_queue)
     nodes = [
         api.IpcDmabufSource(source),

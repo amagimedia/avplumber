@@ -72,6 +72,20 @@ stock Electron ignores the features:
   the first switch on as well; `DMA_BROWSER_NATIVE_HANDLE_CAPTURE=0` next to it
   is refused at start-up, as is either feature name in
   `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES`.
+- `DMA_BROWSER_EXPORT_BUFFERS=N` (2-16, default 6) is the capacity of a
+  window's buffer queue, the whole per-window budget (N x 8.4 MiB at 1080p). It
+  is passed to Chromium as `AvpZeroCopyOffscreenExport:buffers/N`: exactly N
+  buffers exist per window, the capturer lends at most N, and a frame that
+  finds no free buffer is not painted (counted as `skipped` in the GPU log),
+  never blocking and never allocating more. In zero-copy mode the app keeps no
+  retained pool of its own: a frame is lent until the consumer acknowledges it
+  and Chromium's N is the only bound (`ringSize` is echoed, not enforced). The
+  app announces the mode in `/status` and in every window snapshot
+  (`captureMode: "zero-copy"`, `exportBuffers: N`); avplumber's mixer reads it,
+  sets `return_queue` 0 (every frame acknowledged as soon as its last user lets
+  go) and holds at most N-1 frames (`browser_frame_queue`), so one buffer is
+  always free for the next paint. On the stock copy path N is only the default
+  `DMA_BROWSER_DMABUF_POOL_SIZE`.
 
 In these modes Chromium's allocation is renderable on NVIDIA as it is, so the
 GBM shim is unnecessary: start without `LD_PRELOAD`, or leave the preload in
@@ -184,18 +198,23 @@ increments both counters. `fdpass_backpressure`, `fdpass_disconnected`, and
 `fdpass_errors` in `droppedReasons` count failed deliveries per consumer.
 
 The DMA-BUF socket is bidirectional. The browser retains every transmitted
-shared texture until the consumer acknowledges its frame number. The maximum
-sent-but-unacknowledged count is the window's `ringSize`, else
-`DMA_BROWSER_DMABUF_POOL_SIZE` (default 11; both range 1–64). If that limit is
-reached, the newest paint is dropped and released; an older in-flight texture is
-never released early. `/status` reports `releasedFrameCount` and
+shared texture until the consumer acknowledges its frame number. On the stock
+copy path the maximum sent-but-unacknowledged count is the window's `ringSize`,
+else `DMA_BROWSER_DMABUF_POOL_SIZE` (default `DMA_BROWSER_EXPORT_BUFFERS`; both
+range 1–64): if that limit is reached, the newest paint is dropped and released
+(`retained_pool_full`); an older in-flight texture is never released early. In
+zero-copy mode there is no such limit here: Chromium's queue of
+`DMA_BROWSER_EXPORT_BUFFERS` buffers bounds the frames out, and a consumer that
+disconnects or crashes still has every lent texture released or quarantined by
+the same release path. `/status` reports `releasedFrameCount` and
 `retainedFrameCount` for each window.
 
-`ringSize` bounds frames in flight, not allocations. The buffers belong to
-Chromium's capture pool, which keeps at most two idle buffers: when frames come
-back in bunches it destroys the surplus and allocates new buffers later, each a
-new DMA-BUF. A consumer that needs a stable set of allocations returns one frame
-for each frame it receives (avplumber's `ipc_dmabuf_source` `return_queue`).
+`ringSize` bounds frames in flight, not allocations. On the stock copy path the
+buffers belong to Chromium's capture pool; the patched build keeps its idle
+buffers, unpatched Electron keeps at most two and destroys the surplus when
+frames come back in bunches, allocating new DMA-BUFs later. A consumer that
+needs a stable set of allocations from unpatched Electron returns one frame for
+each frame it receives (avplumber's `ipc_dmabuf_source` `return_queue`).
 
 ## Layout
 

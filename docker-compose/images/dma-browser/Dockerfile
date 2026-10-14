@@ -83,7 +83,8 @@ ENV LD_PRELOAD=/opt/dma-browser/native/gbm-linear-shim/libgbm_linear_shim.so
 ENV GBM_LINEAR_SHIM=1
 ENV GBM_LINEAR_SHIM_ADD_SCANOUT=1
 ENV DMA_BROWSER_ALLOWED_DIMS=1080x1920,1920x1080,1280x720
-ENV DMA_BROWSER_DMABUF_POOL_SIZE=11
+ENV DMA_BROWSER_EXPORT_BUFFERS=6
+ENV DMA_BROWSER_DMABUF_POOL_SIZE=6
 
 HEALTHCHECK --interval=5s --timeout=5s --start-period=20s --retries=12 \
   CMD curl -fsS "http://127.0.0.1:${DMA_BROWSER_REST_PORT}/status" >/dev/null || exit 1
