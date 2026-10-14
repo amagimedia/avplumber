@@ -104,12 +104,12 @@ const {chromium} = require('playwright');
       state.browser_drops = {window_s: 600, covered_s: 600, windows: 40, dropped: 12,
         reasons: [['retained_pool_full', 9], ['no_consumer', 3]]}; renderLatency(); });
     assert.deepEqual(await page.locator('#lat-tip th:first-child').allTextContents(), ['Delivery', 'Browser · 40']);
-    assert.deepEqual(await latLabels(), ['Cut p95 · 3', 'Misses', 'AUX drops', 'Other repeats / discards',
-      'Repeats / discards', 'Worst', 'Drops']);
-    assert.deepEqual((await lat()).slice(3), ['5 / 1', '120 / 45', 'web_12 40 / 2', '12 · retained_pool_full']);
+    assert.deepEqual(await latLabels(), ['Cut p95 · 3', 'Deadline misses', 'AUX drops', 'Other repeats / discards',
+      'Repeats / discards', 'Worst', 'Drops', 'Reason']);
+    assert.deepEqual((await lat()).slice(3), ['5 / 1', '120 / 45', 'web_12 40 / 2', '12', 'retained_pool_full']);
     await page.evaluate(() => { state.recent.inputs.browser = {sources: 40, repeats: 0, discarded: 0, worst: null};
       state.browser_drops = null; renderLatency(); });
-    assert.deepEqual((await lat()).slice(4), ['0 / 0', '—', '—']);
+    assert.deepEqual((await lat()).slice(4), ['0 / 0', '—', '—', '—']);
     await page.evaluate(() => { state.recent = null; renderLatency(); });
     assert.deepEqual(await lat(), ['106.0 ms', '3', '1']);
     for (const width of [1920, 1600, 1440, 1280]) {

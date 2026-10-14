@@ -1490,7 +1490,7 @@ function renderLatency() {
   const pair = (g) => g ? `${metric(g.repeats)} / ${metric(g.discarded)}` : "—";
   const delivery = [
     [`Cut p95 · ${cuts.length}`, metric(cuts[Math.ceil(cuts.length * .95) - 1], 1, " ms")],
-    ["Misses", metric(recent ? recent.missed_deadlines : complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
+    ["Deadline misses", metric(recent ? recent.missed_deadlines : complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
     ["AUX drops", metric(recent ? recent.output_drops : complete ? total(aux, "output_drops") : null)],
     ...(inputs.other ? [["Other repeats / discards", pair(inputs.other)]] : []),
   ];
@@ -1498,7 +1498,8 @@ function renderLatency() {
   const browser = b?.sources ? [
     ["Repeats / discards", pair(b)],
     ["Worst", worst && (worst.repeats || worst.discarded) ? `${worst.source} ${pair(worst)}` : "—"],
-    ["Drops", drops ? metric(drops.dropped) + (top ? ` · ${top[0]}` : "") : "—"],
+    ["Drops", drops ? metric(drops.dropped) : "—"],
+    ["Reason", top ? top[0] : "—"],
   ] : [];
   setMeterTip($("lat"), `Latency & delivery · ${span}`, [...delivery, ...browser], () => [
     tipTable(["Delivery", ""], delivery),
