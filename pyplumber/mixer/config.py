@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -88,11 +89,36 @@ def earlier_browser_ring_size(value):
 # idle buffers it keeps.
 BROWSER_FRAME_QUEUE_MAX = 9
 
+# Buffers Chromium lends per browser window (dma-browser's DMA_BROWSER_EXPORT_BUFFERS, the
+# zero-copy export's `buffers` parameter). The mixer's frame queue must leave two of them to the
+# browser: the frame being delivered and the one in its paint handler.
+BROWSER_EXPORT_BUFFERS_DEFAULT = 11
+BROWSER_EXPORT_BUFFERS_RESERVED = 2
+
+
+def browser_export_buffers():
+    """`DMA_BROWSER_EXPORT_BUFFERS` as the mixer sees it (the same environment the browser gets in
+    the compose files), 1 to 64, default eleven."""
+    raw = os.environ.get("DMA_BROWSER_EXPORT_BUFFERS", "").strip()
+    try:
+        value = int(raw) if raw else BROWSER_EXPORT_BUFFERS_DEFAULT
+    except ValueError:
+        return BROWSER_EXPORT_BUFFERS_DEFAULT
+    return max(1, min(64, value))
+
+
+def browser_frame_queue_for(export_buffers):
+    """The frame queue that fits *export_buffers* lent by Chromium: two less, at least one, at most
+    BROWSER_FRAME_QUEUE_MAX. Eleven gives the nine of the default; five gives three; three gives
+    one frame in flight and no return queue, so a slow mixer tick drops browser frames."""
+    return max(1, min(BROWSER_FRAME_QUEUE_MAX, export_buffers - BROWSER_EXPORT_BUFFERS_RESERVED))
+
 
 def default_browser_frame_queue(fps):
-    """Frames one browser window may have out at once, at any rate: all nine. The mixer takes up to
-    three of them to return frames one per new frame (dmabuf_inputs.return_queue)."""
-    return BROWSER_FRAME_QUEUE_MAX
+    """Frames one browser window may have out at once, at any rate: the queue that fits
+    DMA_BROWSER_EXPORT_BUFFERS (nine for the default eleven). The mixer takes up to three of them
+    to return frames one per new frame (dmabuf_inputs.return_queue)."""
+    return browser_frame_queue_for(browser_export_buffers())
 
 
 @dataclass(frozen=True)

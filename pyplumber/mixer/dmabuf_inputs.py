@@ -24,7 +24,10 @@ IMPORT_IDLE_MS = 10_000
 # The return queue: frames the mixer has finished with wait here and go back to the browser one
 # per new frame (ipc_dmabuf_source `return_queue`), so the browser's pool gets one buffer back for
 # each it hands out and stops destroying and allocating buffers. It is part of the window's frame
-# queue, which the browser service counts as frames not yet returned.
+# queue, which the browser service counts as frames not yet returned (its `ringSize`), and which
+# must be at most DMA_BROWSER_EXPORT_BUFFERS - 2 (config.browser_frame_queue_for): Chromium lends
+# that many buffers per window and the browser needs two of them for the frame being delivered
+# and the one in its paint handler.
 RETURN_QUEUE = 3
 # Frames of the queue left to the mixer's own pipeline before any go to the return queue.
 MIN_FRAMES_IN_FLIGHT = 3
