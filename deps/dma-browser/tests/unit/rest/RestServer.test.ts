@@ -199,3 +199,38 @@ describe('POST /workers/recover', () => {
     expect((await request(buildServer(manager).app).post('/workers/recover').send({ ids: ['win-1'] })).status).toBe(500);
   });
 });
+
+describe('GET /metrics/cpu', () => {
+  it('returns the sampler figures', async () => {
+    const metrics = {
+      intervalS: 1,
+      hz: 100,
+      totalPct: 12.5,
+      cores: { used: 0.13, hostVcpus: 4, perCore: [] },
+      processes: [{ type: 'gpu', n: 1, pct: 12.5, avgPct: 12.5, maxPct: 12.5 }],
+      gpuThreads: [],
+      threads: [],
+    };
+    const cpu = { metrics: vi.fn().mockResolvedValue(metrics) };
+    const server = new RestServer(
+      buildManager(),
+      { host: '127.0.0.1', port: 0 },
+      new ConfigService(),
+      cpu,
+    );
+    const res = await request(server.app).get('/metrics/cpu');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(metrics);
+  });
+
+  it('answers 500 where /proc cannot be read', async () => {
+    const cpu = { metrics: vi.fn().mockRejectedValue(new Error('ENOENT: /proc')) };
+    const server = new RestServer(
+      buildManager(),
+      { host: '127.0.0.1', port: 0 },
+      new ConfigService(),
+      cpu,
+    );
+    expect((await request(server.app).get('/metrics/cpu')).status).toBe(500);
+  });
+});
