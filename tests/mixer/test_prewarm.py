@@ -470,6 +470,47 @@ def test_pad_masks_above_64_travel_as_bit_strings(native_boundary, tmp_path, cou
     assert len(app.avp.nodes["mixer_comp_a"]["src"]) == count
 
 
+@pytest.mark.parametrize("fan_out, node_type", [(None, "one_to_many"), ("thread", "one_to_many"),
+                                                ("event_loop", "one_to_many_nb")])
+def test_a_source_is_fanned_out_by_a_thread_unless_the_canvas_names_the_event_loop(native_boundary, tmp_path,
+                                                                                    fan_out, node_type):
+    doc = {
+        "canvas": {"width": 320, "height": 180, "fps": 60, **({"source_fan_out": fan_out} if fan_out else {})},
+        "sources": [{"id": f"s{i}", "kind": "video", "path": f"/m/{i}.mp4", "width": 320, "height": 180}
+                    for i in range(6)],
+        "scenes": [{"id": "wide", "items": [{"source": "s0", "dst": {"x": 0, "y": 0, "w": 320, "h": 180}}]}],
+        "initial_scene": "wide",
+    }
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps(doc))
+    class ConfigEngine(NativeEngine):
+        def registerControlCommand(self, *args, **kwargs):
+            pass
+
+    nodes, builder = native_boundary
+    api = SimpleNamespace(**{name: getattr(nodes, name) for name in (
+        "AssumeVideoFormat", "Bsf", "DecVideo", "Demux", "EncVideo", "FilterVideo", "ForceFPS",
+        "ForceKeyFrame", "InputRec", "Mux", "Output", "PreheatVideoRouter", "Realtime", "Split")},
+        AVPlumber=ConfigEngine, MixerGraphBuilder=builder)
+    engine = build_application(GraphOptions(config=str(path), output="program.ts"), api=api).avp.nodes
+    for i in range(6):
+        fan = engine[f"mixer_otm_s{i}"]
+        assert fan["type"] == node_type
+        # The loop that paces the source also hands its frames out: no thread wakes in between.
+        assert fan.get("event_loop") == (engine[f"realtime_{i}"]["event_loop"] if node_type == "one_to_many_nb" else None)
+        assert fan["drop"] is True
+
+
+def test_source_fan_out_rejects_unknown_modes():
+    from pyplumber.mixer import config as mixer_config
+    doc = {"canvas": {"width": 320, "height": 180, "fps": 60, "source_fan_out": "fibre"},
+           "sources": [{"id": "s0", "kind": "video", "path": "/m/0.mp4", "width": 320, "height": 180}],
+           "scenes": [{"id": "wide", "items": [{"source": "s0", "dst": {"x": 0, "y": 0, "w": 320, "h": 180}}]}],
+           "initial_scene": "wide"}
+    with pytest.raises(mixer_config.ConfigError, match="source_fan_out must be one of thread, event_loop"):
+        mixer_config.parse(doc)
+
+
 def test_geometry_is_resolved_by_two_compositors_without_filter_branches(native_boundary):
     app = application(native_boundary)
     nodes = app.avp.nodes
