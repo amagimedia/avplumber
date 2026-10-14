@@ -208,6 +208,15 @@
 
   <h2 id="decoded-queue">An earlier proposal: shorter decoded frame queues</h2>
   <p>Not one of the twelve: it was never built or measured. The proposal was to plan each NVDEC source's decoded edge at capacity 1 instead of the instance default of 3 when a show runs at 30 fps or below. NVDEC decodes ahead of real time, so that edge is always full, and two fewer parked 1080p frames per source were estimated to free about 255 MB across 40 sources. It was not selected: one frame leaves 33 to 40 ms of slack before a decode hiccup repeats a frame, and the comparison of repeat rates the proposal asked for was not run. The <a href="nvdec-cuarray.html">NVDEC CUarray path</a> then saved 4.88 GiB in the matched 192-input, 20-output comparison while keeping all three decoded queue slots. Every NVDEC source's decoded edge still has the default of 3 (<code>planCapacity("*", 3)</code> in <a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/pyplumber/mixer/application.py">application.py</a>). A browser window's frame queue is a different queue: <a href="browser-frame-queue.html">Browser frames go back one per new frame</a>.</p>
+  <p>Since 14 October the proposal exists as an option on an avplumber branch, <code>canvas.decoded_frames_ahead</code>. Run at 1 on the 192-source show it did not lower GPU memory (20.1 GB, within the previous build's 19.3 to 20.1): on the CUDA array path a waiting frame is a reference to one of the decoder's fixed arrays, not a buffer of its own. The comparison of repeat rates has still not been run (<a href="gpu-memory.html">GPU memory: frames no tick can show any more</a>).</p>
+
+  <h2>Measured on 13 and 14 October, with no gain</h2>
+  <ul class="where">
+    <li><b>NVENC <code>delay: 1</code> instead of 0.</b> No change at 1080p30, 1.6 to 2.05&nbsp;% per encoder thread either way; the encoder threads' wakes are NVIDIA's own wait. Left at 0 (<a href="input-decode-cpu.html">Input, decode and wake-ups</a>).</li>
+    <li><b>Native-handle browser capture without the zero-copy export.</b> Still cost the show 13 missed deadlines at 12 windows after its pool was fixed; not explained, and the export replaces it (<a href="chromium-zero-copy-export.html">Chromium paints into the buffer the mixer reads</a>).</li>
+    <li><b>Six spare decoder arrays instead of twelve.</b> 16.21 against 18.76 GB of GPU memory, but the first start attempt failed twice with <code>No decoder surfaces left</code>; the show stays at 12 (<a href="gpu-memory.html">GPU memory</a>).</li>
+    <li><b>Fan-out on the event loops as a CPU saving.</b> It removed 192 threads and is kept for that, but the CPU moved onto the loops: no saving by itself.</li>
+  </ul>
 
   <h2>Where in the code</h2>
   <ul class="where">

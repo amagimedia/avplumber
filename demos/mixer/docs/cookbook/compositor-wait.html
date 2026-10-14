@@ -161,10 +161,10 @@
     <li><b>Program compositors: 32.1 to 30.5&nbsp;%.</b> Much less than a model fitted to the first reading had predicted (it put about 19 points on the passes). A pass over 192 edges costs about 10 µs, not 30.</li>
     <li><b>Threads waiting for a core fell by a quarter</b> (456 to 326 points), more than the CPU saved: shorter work per wake means the compositors are off the cores sooner at the moment every other per-frame thread wants one.</li>
   </ul>
-  <p>So what is left of the Program compositor, about 28 points of user time, is not the passes. It works out at about 48 µs for each of the 5,760 source frames a second, and what that time is spent on has not been measured; a sampling profile of the thread is the next step. Until then the projection for 1080p50 with 192 sources is the measured figure scaled by the frame rate: about 51&nbsp;% of a core, down from 84.</p>
-  <p>One thing stays as it was, and one has since been fixed:</p>
+  <p>So what is left of the Program compositor, about 28 points of user time, is not the passes. It works out at about 48 µs for each of the 5,760 source frames a second, and what that time is spent on was not measured here. A later profile found 26&nbsp;% of the thread in looking at all 192 input queues on every wake; see below. Until then the projection for 1080p50 with 192 sources is the measured figure scaled by the frame rate: about 51&nbsp;% of a core, down from 84.</p>
+  <p>Two things that were open have since been addressed:</p>
   <ul class="where">
-    <li><b>Every prewarmed source's frame still wakes the Program compositor.</b> Waking only for the sources on air and for the deadline would cut the wakes about eightfold, but it changes when a frame is taken in and needs its own check that a cut still starts on the next frame. Not written.</li>
+    <li><b>Every prewarmed source's frame woke the Program compositor.</b> On a branch since 14 October, <code>canvas.input_poll_ms</code> lets it sleep to its deadline and look for frames at most every few milliseconds, and at once for a cut: at 8&nbsp;ms each Program compositor fell from 12.1 to 7.3&nbsp;% and its wakes from 3,400 to 230 a second (<a href="input-decode-cpu.html#poll">Input, decode and wake-ups</a>).</li>
     <li><b>The pacing loops' 26&nbsp;% each at 30 fps</b> was a separate fault and is fixed. <code>realtime</code> counted in 1/120000 s against a clock that reads whole milliseconds, and asked the millisecond timer again and again for a release time already inside the current millisecond. Such a time now counts as due, and each loop reads about 8&nbsp;% (<a href="event-loops.html">Event-loop sharding</a>). It did not occur at 25 or 50 fps and was not part of this change.</li>
   </ul>
 
@@ -172,6 +172,7 @@
   <ul class="where">
     <li><b>The start is clean.</b> The 47 minutes above leave out the start-up. The mixer now holds its outputs until the buses have settled and zeroes the compositors' counters when it goes on air: a start shows 0 missed deadlines and 0 dropped frames from the first frame on air.</li>
     <li><b>The totals in both tables are those of the builds they name.</b> Three later changes on <code>develop</code> moved them, on the same show and host on 2026-10-13: <code>realtime</code> stopped spinning on a time base finer than the clock (each pacing loop 26–30&nbsp;% to about 8&nbsp;%, the whole mixer 791 to 715&nbsp;%; <a href="event-loops.html">Event-loop sharding</a>), colour tags moved to the fan-out (1,472 to 1,327 threads; <a href="color-tags.html">Colour tags at the fan-out</a>), and raw files are read straight into page-locked memory (679 to 510&nbsp;% of a core, 1,327 to 1,186 threads; <a href="raw-uploads.html">Raw frames read straight into the memory the GPU reads</a>). On the build with all three the mixer reads 510&nbsp;% of a core in 1,186 threads, and each Program compositor about 30&nbsp;%.</li>
+    <li><b>On branches since 14 October</b> the wait also says which events fired, so a pass takes frames only from those sources, and the compositors look for frames at an interval. With the input changes of the same night the two Program compositors together went from 59.5 to 14.6&nbsp;% and the mixer from 502 to about 234&nbsp;% (<a href="input-decode-cpu.html">Input, decode and wake-ups</a>).</li>
   </ul>
 
   <h2>How it was measured</h2>

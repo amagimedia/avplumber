@@ -171,6 +171,9 @@
   <h2>For a live uncompressed input</h2>
   <p>The upload half is its own class, <code>CudaPinnedUploader</code>: the page-locked block, the stream, the ordering event, the transfers and the frame pool. A source that can write its samples where it is told uses it the same way: a capture SDK given the block as its buffer, or a packet reassembler that assembles rows into it. For such a source the remaining copy does not exist either; the file read is what stands in for it here.</p>
 
+  <h2>Since this measurement</h2>
+  <p>A fourth mode, <code>"resident"</code>, keeps a looped file's pictures in one page-locked block the size of the file: each picture is read the first time it is shown, and later passes only transfer it to the GPU. On the same show on 13 October the 152 reading threads fell from 139.7 to 27.3&nbsp;% of a core and the mixer from 471 to 335&nbsp;%, at the price of 8.8 GB of host memory that cannot be swapped out. It is on an avplumber branch, not yet on <code>develop</code>; the demo show runs it, while Setup still builds shows with <code>direct</code>. Every picture is still transferred for every showing. <a href="input-decode-cpu.html#resident">Input, decode and wake-ups</a> has the measurement and why it still stands in for a live input.</p>
+
   <h2>At a glance</h2>
   <ul class="cards">
     <li><b>What</b>One node per raw NV12 or P010 file source reads each frame straight into page-locked memory and has the GPU fetch it from there. It replaces four nodes and the staging copy between them.</li>
@@ -179,7 +182,7 @@
     <li class="flag"><b>Side effects</b>No packets queued in RAM ahead of pacing, so a slow read is no longer absorbed. No read timeout.</li>
     <li><b>Cost</b>One page-locked frame per source (3.1 MB for 1080p NV12), which the staging buffer already cost. No FFmpeg patch.</li>
     <li><b>Risk</b>Low for files in the page cache. Tests cover byte-exact NV12 and P010, loop timestamps, end of file, and a frame rewritten in the file while it loops, which must show up on a later pass.</li>
-    <li><b>Switch it off</b><code>"canvas": {"raw_upload": "pinned"}</code> restores the filter chain; <code>"hwupload"</code> the stock one.</li>
+    <li><b>Switch it off</b><code>"canvas": {"raw_upload": "pinned"}</code> restores the filter chain; <code>"hwupload"</code> the stock one. <code>"resident"</code>, on a branch, goes one step further (above).</li>
   </ul>
 
   <h2>Related pages</h2>

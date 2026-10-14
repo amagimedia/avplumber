@@ -247,6 +247,7 @@
     <li><a href="compositor-wait.html">The compositor's wait costs the frames that arrived</a>: the busiest thread once the stall was gone; its wait now uses epoll.</li>
     <li><a href="rejected.html#decoded-queue">An earlier proposal: shorter decoded frame queues</a>: a different queue, the decoder's, and a proposal that was not selected.</li>
     <li><a href="contexts.html">Unused GPU contexts</a>: the importer that registers each browser buffer.</li>
+    <li><a href="chromium-zero-copy-export.html">Chromium paints into the buffer the mixer reads</a>: a patched browser whose own buffer pool, reused last in first out, brought a stall of the same kind back, and the pool that never frees.</li>
   </ul>
 
   <h2>Where in the code</h2>

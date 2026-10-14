@@ -168,6 +168,7 @@
         <li>0 new nodes, 0 new queues, 0 new threads.</li>
         <li>Disk and page cache grow with the source count: a raw 1080p NV12 clip at 25 fps is ≈ 155 MB per 2 s, one per raw source.</li>
         <li>VRAM: nothing held for looped clips.</li>
+        <li>Host memory, with <code>raw_upload: "resident"</code> (on a branch; the demo show runs it): each raw file is held in page-locked memory after its first pass, 8.8 GB for 47 two-second clips. Every picture is still transferred to the GPU for every showing, as from a capture card that writes into page-locked memory (<a href="input-decode-cpu.html#resident">Input, decode and wake-ups</a>).</li>
         <li>GPU and CPU: full 1080p decode, upload or import on every frame, for every source. This is the honest load.</li>
       </ul></li>
     <li><b>Risk</b>

@@ -143,6 +143,9 @@
     <li><b>Switch it off</b>Set <code>PACING_LOOPS = 1</code>. All sources then share <code>pacing_0</code>. That is not the old layout exactly: output, aux and wipe pacing still keep <code>default</code> to themselves.</li>
   </ul>
 
+  <h2>Since 14 October</h2>
+  <p>On avplumber branches, not yet on <code>develop</code>, and running in the demo show: the loop no longer wakes itself when a handler registers its next wait from inside it; it keeps its waits in epoll with one-shot registrations instead of rebuilding a <code>poll()</code> list on every pass (16 against 28&nbsp;µs per handler in a load test of 200 sources); a queue's eventfd is written only when the last write was read (the loops' writes fell from 33,274 to 15,051 a second); and each source's fan-out can run on the source's pacing loop, which removed 192 threads but moved their 20 points of CPU onto the loops rather than saving them. The four shards stay. <a href="input-decode-cpu.html#event-loop">Input, decode and wake-ups</a> has the measurements.</p>
+
   <h2>Where in the code</h2>
   <ul class="where">
     <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/EventLoop.hpp"><code>src/EventLoop.hpp</code></a>: each wake-up rebuilds the <code>pollfd</code> array for every watched fd.</li>
