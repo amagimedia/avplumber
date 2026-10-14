@@ -1,0 +1,293 @@
+diff --git a/docs/api/structures/shared-texture-handle.md b/docs/api/structures/shared-texture-handle.md
+index 6bcfe322d6..2e20e79961 100644
+--- a/docs/api/structures/shared-texture-handle.md
++++ b/docs/api/structures/shared-texture-handle.md
+@@ -10,3 +10,4 @@
+     * `fd` number - File descriptor for the underlying memory object (usually dmabuf).
+   * `modifier` string _Linux_ - The modifier is retrieved from GBM library and passed to EGL driver.
+   * `supportsZeroCopyWebGpuImport` boolean _Linux_ - Indicates whether supports zero copy import to WebGPU.
++  * `acquireFenceFd` number _Linux_ - A sync_file file descriptor that becomes readable when the GPU has finished writing this frame, or `-1` when the frame is already complete on delivery (or no fence is available). When it is not `-1`, wait for it (poll for readability, or import it as a GPU semaphore) before reading the planes. The descriptor is owned by the texture and is closed by `release()`; duplicate it if it must outlive the texture.
+diff --git a/shell/browser/osr/osr_paint_event.cc b/shell/browser/osr/osr_paint_event.cc
+index 505650f467..501ae9008e 100644
+--- a/shell/browser/osr/osr_paint_event.cc
++++ b/shell/browser/osr/osr_paint_event.cc
+@@ -19,9 +19,12 @@ OffscreenNativePixmapPlaneInfo::OffscreenNativePixmapPlaneInfo(uint32_t stride,
+ OffscreenReleaserHolder::~OffscreenReleaserHolder() = default;
+ OffscreenReleaserHolder::OffscreenReleaserHolder(
+     gfx::GpuMemoryBufferHandle gmb_handle,
++    gfx::GpuFenceHandle acquire_fence,
+     mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
+         releaser)
+-    : gmb_handle(std::move(gmb_handle)), releaser(std::move(releaser)) {}
++    : gmb_handle(std::move(gmb_handle)),
++      acquire_fence(std::move(acquire_fence)),
++      releaser(std::move(releaser)) {}
+
+ OffscreenSharedTextureValue::OffscreenSharedTextureValue() = default;
+ OffscreenSharedTextureValue::~OffscreenSharedTextureValue() = default;
+diff --git a/shell/browser/osr/osr_paint_event.h b/shell/browser/osr/osr_paint_event.h
+index b3e37a6a16..2b12e613d7 100644
+--- a/shell/browser/osr/osr_paint_event.h
++++ b/shell/browser/osr/osr_paint_event.h
+@@ -13,6 +13,7 @@
+ #include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom.h"
+ #include "third_party/skia/include/core/SkCanvas.h"
+ #include "ui/gfx/canvas.h"
++#include "ui/gfx/gpu_fence_handle.h"
+ #include "ui/gfx/native_ui_types.h"
+
+ #include <cstdint>
+@@ -44,12 +45,17 @@ struct OffscreenReleaserHolder {
+   ~OffscreenReleaserHolder();
+   OffscreenReleaserHolder(
+       gfx::GpuMemoryBufferHandle gmb_handle,
++      gfx::GpuFenceHandle acquire_fence,
+       mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
+           releaser);
+
+   // GpuMemoryBufferHandle, keep the scoped handle alive
+   gfx::GpuMemoryBufferHandle gmb_handle;
+
++  // avplumber: the capturer's acquire fence (sync_file fd on Linux), owned
++  // here so that the fd exposed on the paint event stays valid until release.
++  gfx::GpuFenceHandle acquire_fence;
++
+   // Releaser, hold this to prevent FrameSinkVideoCapturer recycle frame
+   mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
+       releaser;
+@@ -103,6 +109,9 @@ struct OffscreenSharedTextureValue {
+   std::vector<OffscreenNativePixmapPlaneInfo> planes;
+   uint64_t modifier;
+   bool supports_zero_copy_webgpu_import;
++  // avplumber: sync_file fd that signals when the GPU finished writing the
++  // frame, or -1. Owned by `releaser_holder`; valid until release().
++  int acquire_fence_fd = -1;
+ #endif
+ };
+
+diff --git a/shell/browser/osr/osr_render_widget_host_view.cc b/shell/browser/osr/osr_render_widget_host_view.cc
+index c9e1f9d371..5cc19473c1 100644
+--- a/shell/browser/osr/osr_render_widget_host_view.cc
++++ b/shell/browser/osr/osr_render_widget_host_view.cc
+@@ -18,6 +18,7 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/time.h"
+ #include "components/input/cursor_manager.h"
++#include "base/feature_list.h"
+ #include "components/viz/common/features.h"
+ #include "components/viz/common/frame_sinks/begin_frame_args.h"
+ #include "components/viz/common/frame_sinks/copy_output_request.h"
+@@ -117,6 +118,9 @@ class ElectronDelegatedFrameHostClient
+   }
+
+   [[nodiscard]] SkColor DelegatedFrameHostGetGutterColor() const override {
++    if (view_->ShouldForceTransparentRoot()) {
++      return SK_ColorTRANSPARENT;
++    }
+     if (view_->render_widget_host()->delegate() &&
+         view_->render_widget_host()->delegate()->IsFullscreen()) {
+       return SK_ColorWHITE;
+@@ -613,6 +617,11 @@ bool OffScreenRenderWidgetHostView::InstallTransparency() {
+   return false;
+ }
+
++bool OffScreenRenderWidgetHostView::ShouldForceTransparentRoot() const {
++  return transparent_ && offscreen_use_shared_texture_ &&
++         base::FeatureList::IsEnabled(features::kAvpZeroCopyOffscreenExport);
++}
++
+ #if BUILDFLAG(IS_MAC)
+ bool OffScreenRenderWidgetHostView::UpdateNSViewAndDisplay() {
+   return false;
+@@ -960,6 +969,12 @@ void OffScreenRenderWidgetHostView::ResizeRootLayer(bool force) {
+       old_screen_info == new_screen_info)
+     return;
+
++  if (ShouldForceTransparentRoot() && compositor_) {
++    // Re-assert on every resize: cc fills the screen with the compositor
++    // background colour behind the layers whenever it is not transparent.
++    compositor_->SetBackgroundColor(SK_ColorTRANSPARENT);
++  }
++
+   root_layer()->SetBounds(gfx::Rect(size));
+
+   auto sf = GetDeviceScaleFactor();
+@@ -1001,7 +1016,11 @@ void OffScreenRenderWidgetHostView::UpdateBackgroundColorFromRenderer(
+     return;
+   background_color_ = color;
+
+-  root_layer()->SetColor(SkColor4f::FromColor(color));
++  // The root layer shows the page surface; its colour is the surface's
++  // default/gutter colour and decides whether the layer is treated as opaque.
++  // When the root pass is exported it must stay transparent.
++  root_layer()->SetColor(SkColor4f::FromColor(
++      ShouldForceTransparentRoot() ? SK_ColorTRANSPARENT : color));
+ }
+
+ void OffScreenRenderWidgetHostView::NotifyHostAndDelegateOnWasShown(
+diff --git a/shell/browser/osr/osr_render_widget_host_view.h b/shell/browser/osr/osr_render_widget_host_view.h
+index 485eeff3a3..8466c43c9b 100644
+--- a/shell/browser/osr/osr_render_widget_host_view.h
++++ b/shell/browser/osr/osr_render_widget_host_view.h
+@@ -195,6 +195,13 @@ class OffScreenRenderWidgetHostView
+
+   bool InstallTransparency();
+
++  // avplumber: true when this transparent view's compositor root is exported
++  // directly (AvpZeroCopyOffscreenExport). The root pass is then what the
++  // consumer sees, so nothing in it may be opaque behind the page: the root
++  // layer colour, the surface's gutter colour and the compositor background
++  // are held transparent whatever colour the renderer reports.
++  bool ShouldForceTransparentRoot() const;
++
+   void CancelWidget();
+   void AddGuestHostView(OffScreenRenderWidgetHostView* guest_host);
+   void RemoveGuestHostView(OffScreenRenderWidgetHostView* guest_host);
+diff --git a/shell/browser/osr/osr_video_consumer.cc b/shell/browser/osr/osr_video_consumer.cc
+index cf1afd92f4..def5ae2b91 100644
+--- a/shell/browser/osr/osr_video_consumer.cc
++++ b/shell/browser/osr/osr_video_consumer.cc
+@@ -6,6 +6,10 @@
+
+ #include <utility>
+
++#include "base/feature_list.h"
++#include "components/viz/common/avp_log.h"
++#include "components/viz/common/features.h"
++#include "components/viz/common/surfaces/video_capture_target.h"
+ #include "media/base/limits.h"
+ #include "media/base/video_frame_metadata.h"
+ #include "media/capture/mojom/video_capture_buffer.mojom.h"
+@@ -13,13 +17,18 @@
+ #include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom-shared.h"
+ #include "shell/browser/osr/osr_render_widget_host_view.h"
+ #include "third_party/skia/include/core/SkImageInfo.h"
++#include "ui/compositor/compositor.h"
+ #include "third_party/skia/include/core/SkRegion.h"
+ #include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/gpu_fence_handle.h"
+ #include "ui/gfx/gpu_memory_buffer_handle.h"
+ #include "ui/gfx/skbitmap_operations.h"
+
+ namespace {
+
++BASE_FEATURE(kRenderableMappableSharedImageForceScanout,
++             base::FEATURE_DISABLED_BY_DEFAULT);
++
+ media::VideoPixelFormat GetTargetPixelFormatFromOption(
+     const std::string& pixel_format_option) {
+   if (pixel_format_option == "argb") {
+@@ -95,6 +104,29 @@ OffScreenVideoConsumer::OffScreenVideoConsumer(
+       gfx::Size(media::limits::kMaxDimension, media::limits::kMaxDimension),
+       false);
+
++  // avplumber: CreateVideoCapturer() targets the view's own frame sink, i.e.
++  // the renderer's surface embedded in this view's compositor. The surface
++  // aggregator gives a captured embedded surface its own render pass, so the
++  // copy request never lands on the root pass and the zero-copy export device
++  // cannot lend its buffer. In zero-copy mode capture the compositor's root
++  // frame sink instead: its root pass is the whole window (background colour
++  // layer plus the embedded page), which is what the export device paints.
++  if (view_->offscreen_use_shared_texture() &&
++      base::FeatureList::IsEnabled(features::kAvpZeroCopyOffscreenExport)) {
++    ui::Compositor* compositor = view_->GetCompositor();
++    if (compositor && compositor->frame_sink_id().is_valid()) {
++      video_capturer_->ChangeTarget(
++          viz::VideoCaptureTarget(compositor->frame_sink_id()),
++          /*sub_capture_target_version=*/0);
++      LOG(INFO) << "AvpExport: offscreen capturer targets the compositor root "
++                   "frame sink "
++                << compositor->frame_sink_id().ToString();
++    } else {
++      LOG(WARNING) << "AvpExport: no compositor frame sink to target; "
++                      "zero-copy export will not deliver frames";
++    }
++  }
++
+   SetFrameRate(view_->frame_rate());
+ }
+
+@@ -102,11 +134,18 @@ OffScreenVideoConsumer::~OffScreenVideoConsumer() = default;
+
+ void OffScreenVideoConsumer::SetActive(bool active) {
+   if (active) {
+-    video_capturer_->Start(
+-        this,
+-        view_->offscreen_use_shared_texture()
+-            ? viz::mojom::BufferFormatPreference::kPreferMappableSharedImage
+-            : viz::mojom::BufferFormatPreference::kDefault);
++    auto buffer_format_preference =
++        viz::mojom::BufferFormatPreference::kDefault;
++    if (view_->offscreen_use_shared_texture()) {
++      buffer_format_preference =
++          base::FeatureList::IsEnabled(
++              kRenderableMappableSharedImageForceScanout)
++              ? viz::mojom::BufferFormatPreference::
++                    kPreferSharedImageWithNativeHandle
++              : viz::mojom::BufferFormatPreference::
++                    kPreferMappableSharedImage;
++    }
++    video_capturer_->Start(this, buffer_format_preference);
+   } else {
+     video_capturer_->Stop();
+   }
+@@ -128,18 +167,29 @@ void OffScreenVideoConsumer::OnFrameCaptured(
+
+   // Offscreen using GPU shared texture
+   if (view_->offscreen_use_shared_texture()) {
+-    if (!data->is_gpu_memory_buffer_handle() ||
+-        !IsSupportedSharedTextureFormat(info->pixel_format)) {
++    if (!data->is_gpu_memory_buffer_handle()) {
++      AVP_LOG_WARNING_RATE_LIMITED(
++          "paint dropped: frame is not a GPU memory buffer handle");
++      return;
++    }
++    if (!IsSupportedSharedTextureFormat(info->pixel_format)) {
++      AVP_LOG_WARNING_RATE_LIMITED("paint dropped: unsupported pixel format "
++                                   << static_cast<int>(info->pixel_format));
+       return;
+     }
+
+     auto& orig_handle = data->get_gpu_memory_buffer_handle();
+     if (!IsPlatformSharedTextureHandle(orig_handle)) {
++      AVP_LOG_WARNING_RATE_LIMITED("paint dropped: handle type "
++                                   << static_cast<int>(orig_handle.type)
++                                   << " is not the platform's native type");
+       return;
+     }
+
+     // Clone the handle to support keep the handle alive after the callback
+     auto gmb_handle = orig_handle.Clone();
++    // avplumber: take the capturer's acquire fence; the holder owns it.
++    gfx::GpuFenceHandle acquire_fence = std::move(info->acquire_fence);
+
+     OffscreenSharedTextureValue texture;
+     texture.pixel_format = info->pixel_format;
+@@ -169,11 +219,13 @@ void OffScreenVideoConsumer::OnFrameCaptured(
+       texture.planes.emplace_back(plane.stride, plane.offset, plane.size,
+                                   plane.fd.get());
+     }
++    texture.acquire_fence_fd =
++        acquire_fence.is_null() ? -1 : acquire_fence.Peek();
+ #endif
+
+     // The release holder will be released from JS side when `release` called
+-    texture.releaser_holder = new OffscreenReleaserHolder(std::move(gmb_handle),
+-                                                          std::move(callbacks));
++    texture.releaser_holder = new OffscreenReleaserHolder(
++        std::move(gmb_handle), std::move(acquire_fence), std::move(callbacks));
+
+     callback_.Run(content_rect, {}, std::move(texture));
+     return;
+diff --git a/shell/common/gin_converters/osr_converter.cc b/shell/common/gin_converters/osr_converter.cc
+index c9d87d05e1..4457014d0e 100644
+--- a/shell/common/gin_converters/osr_converter.cc
++++ b/shell/common/gin_converters/osr_converter.cc
+@@ -145,5 +145,7 @@ v8::Local<v8::Value> Converter<electron::OffscreenSharedTextureValue>::ToV8(
+   nativePixmap.Set("modifier", base::NumberToString(val.modifier));
+   nativePixmap.Set("supportsZeroCopyWebGpuImport",
+                    val.supports_zero_copy_webgpu_import);
++  // avplumber: -1 when the producer waited for the GPU (or has no fence).
++  nativePixmap.Set("acquireFenceFd", val.acquire_fence_fd);
+   sharedTexture.Set("nativePixmap", ConvertToV8(isolate, nativePixmap));
+ #endif

@@ -67,6 +67,10 @@ Two switches keep the GPU process stable, both on by default:
 The [shared Docker stack](../../docker-compose/dmabuf/compose.yaml) builds and enables
 the shim automatically.
 
+An opt-in [zero-copy export patch series](patches/zero-copy/README.md) preserves
+the alternative Chromium path with a preallocated pool (11 buffers by default). Its build,
+fence protocol and consumer warm-up requirements are separate from this default.
+
 ## Process grouping
 
 The default keeps up to eight windows in one Electron process. For 20 windows,
