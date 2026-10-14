@@ -140,6 +140,11 @@ class Handler(BaseHTTPRequestHandler):
                 state["browser_drops"] = self.browser_cpu.drops.values if self.browser_cpu else None
                 # Deadline misses and AUX drops of the last ten minutes; without a sampler the page shows totals.
                 state["recent"] = self.recent.values if self.recent else None
+                # The samplers rebase independently after startup. Do not display the previous
+                # show's browser drops beside this show's delivery counts while one catches up.
+                on_air = (state["recent"] or {}).get("on_air")
+                if on_air is not None and (state["browser_drops"] or {}).get("since") != on_air:
+                    state["browser_drops"] = None
                 if self.setup_manager:
                     state["setup_revision"] = self.setup_manager.status()["revision"]
                 self._send_json(200, state)

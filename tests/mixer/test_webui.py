@@ -852,6 +852,18 @@ def test_state_carries_the_recent_delivery_counts(client):
     assert get(url, "/api/state")[1]["recent"] == {"window_s": 600, "covered_s": 0, "missed_deadlines": 0, "output_drops": 0}
 
 
+@pytest.mark.parametrize("previous_epoch", [None, 100])
+def test_state_waits_for_browser_counts_from_the_same_show(client, previous_epoch):
+    recent = SimpleNamespace(values={"on_air": 200, "missed_deadlines": 0, "output_drops": 0})
+    drops = SimpleNamespace(values={"since": previous_epoch, "dropped": 250000})
+    browser = SimpleNamespace(values=None, drops=drops)
+    url, _ = client(FakeBridge(STATE_REPLIES), recent=recent, browser_cpu=browser)
+    assert get(url, "/api/state")[1]["browser_drops"] is None
+    assert drops.values["dropped"] == 250000  # serving the page never changes measured counters
+    drops.values = {"since": 200, "dropped": 3}
+    assert get(url, "/api/state")[1]["browser_drops"] == drops.values
+
+
 STATE_REPLIES = {"mixer.status": '{"pgm_scene":"a"}', "mixer.scenes": '["a","b"]', "mixer.settings": "{}"}
 # What a show fixes (its scenes and settings) is asked for first and then only every few seconds;
 # a poll in between costs the mixer its status alone.
