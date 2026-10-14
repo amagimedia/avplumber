@@ -36,6 +36,12 @@
   select native-handle capture with `RenderableMappableSharedImageForceScanout`.
   This is a local feature, not a stock Chrome flag. Patches target older Electron;
   do not reapply the Chromium patch to a revision already containing the fix.
+- A build on that path does not wait for the GPU before `paint`; it hands the consumer the
+  frame's acquire fence, which dma-browser sends as the frame's second fd and
+  `ipc_dmabuf_source` waits on before forwarding ([NODES.md](NODES.md#ipc_dmabuf_source)).
+  dma-browser requests the feature only with `DMA_BROWSER_NATIVE_HANDLE_CAPTURE=1`, and the
+  build's zero-copy export (`AvpZeroCopyOffscreenExport`) with `DMA_BROWSER_ZERO_COPY_EXPORT=1`;
+  both off by default, neither needs the shim ([README](../deps/dma-browser/README.md#patched-electron-native-handle-capture-and-the-acquire-fence)).
 - Keep this route on ARGB/BGRA/RGBA; do not assume NV12/RGBAF16 native-handle capture
   works. Preserve DRM modifiers and texture-release acknowledgments.
 
