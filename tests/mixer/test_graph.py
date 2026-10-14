@@ -1566,6 +1566,24 @@ def test_generated_ten_bit_sdr_show_uses_hevc_profile():
     assert mixer_config.parse(doc).out_color == Color("sdr")
 
 
+def test_canvas_input_poll_reaches_the_builder(tmp_path, monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
+    (tmp_path / "page.sock").touch()
+    doc = {**CONFIG, "canvas": {**CONFIG["canvas"], "input_poll_ms": 8}}
+    assert mixer_config.parse(doc).input_poll_ms == 8
+    assert mixer_config.parse(CONFIG).input_poll_ms is None
+    for bad in (-1, 2.5, "often", True):
+        with pytest.raises(mixer_config.ConfigError, match="input_poll_ms"):
+            mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "input_poll_ms": bad}})
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps(doc))
+    FakeMixer.instances.clear()
+    build_application(GraphOptions(config=str(path), janus_output=True, dmabuf_socket_dir=str(tmp_path)),
+                      api=fake_api())
+    assert FakeMixer.instances[-1].parameters["input_poll_ms"] == 8
+
+
 def test_canvas_latency_reaches_the_builder_unless_the_cli_overrides_it(tmp_path, monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
     monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)

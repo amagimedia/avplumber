@@ -251,6 +251,14 @@ def test_both_slots_share_rate_and_delay_without_second_resampler(native_boundar
     assert output["slot"] == -1
 
 
+def test_compositors_wake_for_every_frame_unless_told_how_often_to_look(native_boundary):
+    nodes = application(native_boundary).avp.nodes
+    assert all("input_poll_ms" not in nodes[f"mixer_comp_{slot}"] for slot in "ab")
+    nodes = application(native_boundary, mixer_input_poll_ms=8).avp.nodes
+    assert [nodes[f"mixer_comp_{slot}"]["input_poll_ms"] for slot in "ab"] == [8, 8]
+    assert "input_poll_ms" not in nodes["mixer_wipe_overlay"]   # two inputs: nothing to save
+
+
 def test_prewarm_does_not_rebuild_graph_or_change_requested_program(native_boundary):
     app = application(native_boundary)
     app.mixer.initialize_routes()
