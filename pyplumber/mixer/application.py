@@ -769,7 +769,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 fps=cfg.fps, drm_hwaccel=None,
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True,
                 preserve_alpha=source.id in blended_sources, browser_frame_queue=browser_frame_queue,
-                event_loop=_pacing_loop(index), zero_copy=capture_mode.zero_copy)
+                event_loop=_pacing_loop(index), zero_copy=capture_mode.zero_copy,
+                import_copy=cfg.browser_import_copy)
             for node in nodes:
                 avp.addNode(node)
             if capture_mode.zero_copy:

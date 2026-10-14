@@ -285,6 +285,7 @@ class MixerConfig:
     latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default default_latency_ms(fps)
     input_poll_ms: Optional[int] = None  # canvas.input_poll_ms: how often a program compositor looks for frames
     aux_input_poll_ms: Optional[int] = None  # canvas.aux_input_poll_ms: the same for the aux bus compositors
+    browser_import_copy: bool = False  # canvas.browser_import_copy: copy each browser frame on import
     source_fan_out: str = "thread"       # canvas.source_fan_out: one of SOURCE_FAN_OUTS
     decoded_frames_ahead: Optional[int] = None   # canvas.decoded_frames_ahead: decoded frames queued before pacing
     raw_pool_frames: Optional[int] = None        # canvas.raw_pool_frames: device frames per direct/resident raw source
@@ -593,6 +594,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     input_poll_ms = canvas.get("input_poll_ms")
     if input_poll_ms is not None and (type(input_poll_ms) is not int or input_poll_ms < 0):
         raise ConfigError("canvas.input_poll_ms must be a whole number of milliseconds, 0 or more")
+    browser_import_copy = canvas.get("browser_import_copy", False)
+    if type(browser_import_copy) is not bool:
+        raise ConfigError("canvas.browser_import_copy must be true or false")
     aux_input_poll_ms = canvas.get("aux_input_poll_ms")
     if aux_input_poll_ms is not None and (type(aux_input_poll_ms) is not int or aux_input_poll_ms < 0):
         raise ConfigError("canvas.aux_input_poll_ms must be a whole number of milliseconds, 0 or more")
@@ -674,7 +678,7 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        browser_frame_queue=doc.get("browser_frame_queue", earlier_browser_ring_size(doc.get("browser_ring_size"))),
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
                        initial_scene=initial, working_format=working_format, raw_upload=raw_upload, input_routing=input_routing,
-                       latency_ms=latency_ms, input_poll_ms=input_poll_ms, aux_input_poll_ms=aux_input_poll_ms,
+                       latency_ms=latency_ms, input_poll_ms=input_poll_ms, aux_input_poll_ms=aux_input_poll_ms, browser_import_copy=browser_import_copy,
                        source_fan_out=source_fan_out, decoded_frames_ahead=decoded_frames_ahead,
                        raw_pool_frames=raw_pool_frames, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))

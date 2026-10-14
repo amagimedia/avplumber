@@ -132,7 +132,8 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
                             processing_group: str, hold: bool = False,
                             preserve_alpha: bool = False, browser_frame_queue: int | None = None,
-                            event_loop: str | None = None, zero_copy: bool = False) -> Tuple[list, str]:
+                            event_loop: str | None = None, zero_copy: bool = False,
+                            import_copy: bool = False) -> Tuple[list, str]:
     """Return the node list and the final CUDA edge for one browser socket.
 
     With *hold*, a ``repeat_last_frame`` node re-emits the last frame at *fps*
@@ -167,7 +168,10 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         # library's context lock exclusively, stalling every other thread in the context.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
-                            "auto_restart": "group", "zero_copy": True,
+                            "auto_restart": "group",
+                            # import_copy: the frame is copied into the mixer's own buffer on import, so the
+                            # compositors never read memory the browser's GPU context is still using.
+                            "zero_copy": not import_copy,
                             "max_imports": max(32, 2 * browser_frame_queue + 2),
                             # A zero-copy browser's pool is fixed: an import is kept until the window
                             # closes or its geometry changes (0 retains; a release takes the CUDA
