@@ -579,7 +579,7 @@ def test_browser_failure_precedes_native_initialization(monkeypatch):
     monkeypatch.setattr(application, "open_windows", fail)
     monkeypatch.setattr(application, "_init_avp", lambda *args: pytest.fail("native threads started before browser preparation"))
     cfg = SimpleNamespace(fps=60, latency_ms=None, input_poll_ms=None, source_fan_out="thread",
-                          decoded_frames_ahead=None, browser_frame_queue=11, max_compositor_layers=256, sources=[SimpleNamespace(
+                          decoded_frames_ahead=None, raw_pool_frames=None, browser_frame_queue=11, max_compositor_layers=256, sources=[SimpleNamespace(
         kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60, hold_last_frame=True)])
     with pytest.raises(RuntimeError, match="browser unavailable"):
         application._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api(), ExitStack())
@@ -827,6 +827,19 @@ def test_canvas_decoded_frames_ahead_bounds_the_queue_in_front_of_pacing(ahead):
     assert nodes["realtime_0"]["src"] == "input_0_decoded"
     # Each frame waiting there is a decoder output surface held for nothing but slack.
     assert dict(app.avp.edges.plans).get("input_0_decoded") == ahead
+
+
+@pytest.mark.parametrize("frames", [None, 10])
+def test_canvas_raw_pool_frames_bounds_each_raw_source_pool(tmp_path, frames):
+    canvas = {"raw_upload": "resident", **({} if frames is None else {"raw_pool_frames": frames})}
+    _, nodes, _ = _raw_420_nodes(tmp_path, "nv12", "sdr", **canvas)
+    assert nodes["input_0"].get("pool_frames") == frames
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "one", True])
+def test_canvas_raw_pool_frames_rejects_what_is_not_a_count(bad):
+    with pytest.raises(mixer_config.ConfigError, match="raw_pool_frames"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "raw_pool_frames": bad}})
 
 
 @pytest.mark.parametrize("bad", [0, -1, 1.5, "one", True])
