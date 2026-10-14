@@ -723,7 +723,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
                                event_loop=_pacing_loop(index), decoder_params=source.decoder_params, native_rate=True,
-                               frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
+                               frame_metadata=SOURCE_FRAME_METADATA, demux=demux,
+                               decoded_ahead=cfg.decoded_frames_ahead)
         if source.transform:
             transformed_edge = f"input_{index}_transformed"
             # pass_arrays: the color stage and the compositors read arrays, so a frame that already
