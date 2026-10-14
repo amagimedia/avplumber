@@ -377,6 +377,10 @@ public:
         }
         const bool require_all = (!aux_ || !frame_counter_) &&
             (warmup_timeout_ms_ <= 0 || wallclock.pts() - warmup_started_pts_ < warmup_timeout_ms_);
+        // What no tick can show any more goes back to its source's pool now, not when the next
+        // tick is drawn: a compositor waiting for its last input would otherwise hold a full
+        // queue of every other input.
+        playout_->discardSuperseded(avp::mixer::monotonicNs());
         const auto *decision = playout_->prepare(avp::mixer::monotonicNs(), require_all);
         if (!decision) {
             const int64_t waiting = avp::mixer::monotonicNs();
