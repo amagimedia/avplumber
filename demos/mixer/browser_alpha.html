@@ -10,14 +10,15 @@
   .column { flex: 1; position: relative; }
   .swatch { height: 80%; background: linear-gradient(to bottom, white 0% 25%, red 25% 50%, lime 50% 75%, blue 75%); }
   .label { position: absolute; top: 85%; width: 100%; text-align: center; text-shadow: 0 1px 3px black; }
-  /* A motion test that never rests: the marker moves exactly 25 px per frame period of the page's
-     own frame clock, so in the output every frame must differ from the last by one step; a held
-     picture or a skipped paint is a 0 or 50 px step. Opaque, high contrast and on top, so it can be
-     measured over any video. The counter is the page's frame index, for reading frames by OCR. */
+  /* A motion test that never rests: the marker steps exactly 25 px per frame (60 steps of 1/30 s,
+     out and back), so in the output every frame must differ from the last by one step; a held
+     picture or a skipped paint is a 0 or 50 px step. A transform animation runs on Chromium's
+     compositor alone: no script and no repaint per frame, so 40 moving windows stay cheap.
+     Opaque, high contrast and on top, so it can be measured over any video. */
   #marker { position: absolute; left: 5%; bottom: 8%; width: 96px; height: 96px; background: #ff00ff;
-            border: 6px solid black; box-sizing: border-box; z-index: 10; will-change: transform; }
-  #counter { position: absolute; right: 5%; top: 5%; padding: .1em .3em; background: black; color: #ffff00;
-             font: bold 6vw ui-monospace, monospace; z-index: 10; }
+            border: 6px solid black; box-sizing: border-box; z-index: 10; will-change: transform;
+            animation: avp-step 2s steps(60, end) infinite alternate; }
+  @keyframes avp-step { from { transform: translateX(0); } to { transform: translateX(1500px); } }
 </style>
 <header>Browser alpha over video</header>
 <div id="patches"></div>
@@ -38,23 +39,8 @@
     column.append(swatch, label);
     document.querySelector('#patches').append(column);
   }
-  // Each animation frame advances the index by the frame periods elapsed since the last one (1, or
-  // more after a skipped begin-frame) and puts the marker at 25 px per index, out 60 steps and back.
-  const STEP_PX = 25, STEPS = 60, PERIOD_MS = 1000 / 30;
-  const marker = document.getElementById('marker');
-  const counter = document.createElement('div');
-  counter.id = 'counter';
-  document.body.append(counter);
-  const offset = Number(source?.match(/\d+$/)?.[0] ?? 0) * 7;   // windows out of step with each other
-  let frame = 0, last = null;
-  const tick = (now) => {
-    frame += last === null ? 0 : Math.max(1, Math.round((now - last) / PERIOD_MS));
-    last = now;
-    const phase = (frame + offset) % (2 * STEPS);
-    marker.style.transform = `translateX(${(phase < STEPS ? phase : 2 * STEPS - phase) * STEP_PX}px)`;
-    counter.textContent = String(frame).padStart(6, '0');
-    requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
+  // Windows out of step with each other: each starts at its own point of the 4 s cycle.
+  const index = Number(source?.match(/\d+$/)?.[0] ?? 0);
+  document.getElementById('marker').style.animationDelay = `-${((index * 0.6180339887) % 1) * 4}s`;
 </script>
 </html>
