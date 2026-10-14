@@ -7,7 +7,7 @@ import type { AllowedDims } from './capture/AllowedDims';
 import { LoadWatchdog } from './LoadWatchdog';
 import { isPageLoadFailure, PageReloader } from './PageReloader';
 import type { Logger } from './support/Logger';
-import type { WindowConfig, WindowSnapshot, WindowStats } from './config/WindowConfig';
+import type { CaptureMode, WindowConfig, WindowSnapshot, WindowStats } from './config/WindowConfig';
 
 const FULLSCREEN_CSS = `
 html, body, #root, #app {
@@ -76,7 +76,11 @@ export interface ManagedWindowOptions {
   readonly logger: Logger;
   readonly allowedDims: AllowedDims;
   readonly loadWatchdogMs: number;
-  readonly retainedFramePoolSize: number;
+  /** Sent-but-unacknowledged frames kept before new paints are dropped; null in zero-copy mode,
+   *  where Chromium's own queue of `exportBuffers` buffers is the only bound. */
+  readonly retainedFramePoolSize: number | null;
+  readonly captureMode: CaptureMode;
+  readonly exportBuffers: number;
   /** Where in the frame period this window's frames start (0 to 1); null keeps Chromium's timing. */
   readonly framePhase: number | null;
 }
@@ -324,6 +328,7 @@ export class ManagedWindow implements IManagedWindow {
           quarantinedFrameCount: 0,
           lastPaintTsMs: null,
         };
+    const ring = this.opts.retainedFramePoolSize ?? this.config.ringSize;
     return {
       id: this.id,
       url: this.config.url,
@@ -331,10 +336,14 @@ export class ManagedWindow implements IManagedWindow {
       height: this.config.height,
       fps: this.config.fps,
       audio: this.config.audio,
-      ringSize: this.opts.retainedFramePoolSize,
+      // In zero-copy mode the requested ring is echoed for older mixers' comparison; it is not
+      // enforced here, Chromium's queue is.
+      ...(ring === undefined ? {} : { ringSize: ring }),
       holdLastFrame: this.config.holdLastFrame ?? true,
       visible: this.visible,
       stats,
+      captureMode: this.opts.captureMode,
+      exportBuffers: this.opts.exportBuffers,
     };
   }
 

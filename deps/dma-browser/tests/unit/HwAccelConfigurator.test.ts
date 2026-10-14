@@ -118,7 +118,7 @@ describe('HwAccelConfigurator.apply', () => {
   });
 
   const SCANOUT = 'RenderableMappableSharedImageForceScanout';
-  const ZERO_COPY = 'AvpZeroCopyOffscreenExport:buffers/11';
+  const ZERO_COPY = 'AvpZeroCopyOffscreenExport:buffers/6';
   const enabledFeatures = (env: Record<string, string>): string[] => {
     const { cl, calls } = recorder();
     new HwAccelConfigurator(env, cl).apply();
@@ -139,19 +139,21 @@ describe('HwAccelConfigurator.apply', () => {
     expect(enabledFeatures({ DMA_BROWSER_ZERO_COPY_EXPORT: '0' })).toEqual([]);
   });
 
-  it('DMA_BROWSER_EXPORT_BUFFERS sizes the zero-copy feature parameter, clamped to 1-64', () => {
+  it('DMA_BROWSER_EXPORT_BUFFERS sizes the zero-copy feature parameter, clamped to 2-16', () => {
     expect(enabledFeatures({ DMA_BROWSER_ZERO_COPY_EXPORT: '1', DMA_BROWSER_EXPORT_BUFFERS: '5' })).toEqual([
       SCANOUT,
       'AvpZeroCopyOffscreenExport:buffers/5',
     ]);
     expect(enabledFeatures({ DMA_BROWSER_ZERO_COPY_EXPORT: '1', DMA_BROWSER_EXPORT_BUFFERS: '0' })).toEqual([
       SCANOUT,
-      'AvpZeroCopyOffscreenExport:buffers/1',
+      'AvpZeroCopyOffscreenExport:buffers/2',
     ]);
     expect(enabledFeatures({ DMA_BROWSER_ZERO_COPY_EXPORT: '1', DMA_BROWSER_EXPORT_BUFFERS: '99' })).toEqual([
       SCANOUT,
-      'AvpZeroCopyOffscreenExport:buffers/64',
+      'AvpZeroCopyOffscreenExport:buffers/16',
     ]);
+    expect(HwAccelConfigurator.zeroCopy({ DMA_BROWSER_ZERO_COPY_EXPORT: '1' })).toBe(true);
+    expect(HwAccelConfigurator.zeroCopy({})).toBe(false);
   });
 
   it('refuses zero-copy export with the native-handle capture switched off', () => {

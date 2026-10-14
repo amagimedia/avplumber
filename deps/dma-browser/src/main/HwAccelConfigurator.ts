@@ -29,12 +29,13 @@ export class HwAccelConfigurator {
   /** `DMA_BROWSER_ZERO_COPY_EXPORT`: the zero-copy export of such textures; needs the first. */
   private static readonly ZERO_COPY_FEATURE = 'AvpZeroCopyOffscreenExport';
   /**
-   * `DMA_BROWSER_EXPORT_BUFFERS`: buffers one window may have out at once, passed to the
-   * zero-copy feature as its `buffers` parameter (Chromium lends at most this many and keeps a
-   * pool of this + 2). The same number is the default retained pool (Application).
+   * `DMA_BROWSER_EXPORT_BUFFERS`: the capacity of a window's buffer queue, passed to the zero-copy
+   * feature as its `buffers` parameter. Chromium owns exactly this many buffers per window, lends
+   * at most this many, and does not paint a frame while all are out. 2 to 16, default 6.
    */
-  public static readonly EXPORT_BUFFERS_DEFAULT = 11;
-  public static readonly EXPORT_BUFFERS_MAX = 64;
+  public static readonly EXPORT_BUFFERS_DEFAULT = 6;
+  public static readonly EXPORT_BUFFERS_MIN = 2;
+  public static readonly EXPORT_BUFFERS_MAX = 16;
   private static readonly DISABLED_FEATURES_BASE: readonly string[] = [
     'CompressionDictionaryTransport',
     'DefaultANGLEVulkan',
@@ -134,7 +135,7 @@ export class HwAccelConfigurator {
         );
       }
     }
-    const zeroCopy = envFlag(this.env, 'DMA_BROWSER_ZERO_COPY_EXPORT', false);
+    const zeroCopy = HwAccelConfigurator.zeroCopy(this.env);
     // The zero-copy export is a native-handle capture: the second switch implies the first.
     const nativeHandle = envFlag(this.env, 'DMA_BROWSER_NATIVE_HANDLE_CAPTURE', zeroCopy);
     if (zeroCopy && !nativeHandle) {
@@ -150,15 +151,20 @@ export class HwAccelConfigurator {
     ];
   }
 
-  /** `DMA_BROWSER_EXPORT_BUFFERS`, 1-64, default 11. */
+  /** `DMA_BROWSER_EXPORT_BUFFERS`, 2-16, default 6. */
   public static exportBuffers(env: Env): number {
     return envInt(
       env,
       'DMA_BROWSER_EXPORT_BUFFERS',
       HwAccelConfigurator.EXPORT_BUFFERS_DEFAULT,
-      1,
+      HwAccelConfigurator.EXPORT_BUFFERS_MIN,
       HwAccelConfigurator.EXPORT_BUFFERS_MAX,
     );
+  }
+
+  /** `DMA_BROWSER_ZERO_COPY_EXPORT`: the zero-copy export is on (the patched build's queue). */
+  public static zeroCopy(env: Env): boolean {
+    return envFlag(env, 'DMA_BROWSER_ZERO_COPY_EXPORT', false);
   }
 
   private appendSwitch(name: string, value?: string): void {
