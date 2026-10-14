@@ -436,7 +436,7 @@ public:
         bool ok = import_to_cuda(desc, w, h, swfmt, in, out);
         if (!ok) return;
 
-        if (hw_frames_ctx_) {
+        if (hw_frames_ctx_ && !out.raw()->hw_frames_ctx) {
             out.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);
         }
         out.setComplete(true);
