@@ -322,11 +322,15 @@ class MixerConfig:
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
                       "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps}
                      for b in self.aux_buses for r in b.renditions]
+        aliases = self.alias_counts
         return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
                 "preview_codecs": preview_codecs, **({"program_outputs": programs} if programs else {}),
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources) for kind in _SOURCE_KEYS},
+                # [source id, kind] per compositor input, in the order of the inputs: each source once
+                # per alias (application.py builds them so). The web UI names per_input counters by it.
+                "inputs": [[s.id, s.kind] for s in self.sources for _ in range(aliases[s.id])],
                 # Of the "video" inputs, those declared HDR; an undeclared one counts as SDR.
                 "hdr_video": sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"]) for s in self.sources),
                 "direct": self.direct,

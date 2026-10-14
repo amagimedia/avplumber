@@ -38,7 +38,7 @@ from pathlib import Path
 from .bridge import AUX_COMMANDS, MixerBridge
 from .contracts import GpuTelemetry, SetupController
 from .priority import CRITICAL_NICE_PERIOD_S, CriticalNice
-from .telemetry import BrowserCpuStats, GpuStats, HostStats, RecentCounts, compute_price, delivery_totals
+from .telemetry import BrowserCpuStats, GpuStats, HostStats, RecentCounts, compute_price, playout_counters, playout_summary
 
 PAGE = Path(__file__).with_name("assets") / "index.html"
 WALL = PAGE.with_name("wall.html")
@@ -254,7 +254,8 @@ def main(argv: list[str] | None = None, *, configure=None, setup_factory=None) -
         return process.pid if process else None
     host_stats = HostStats(mixer_pid)
     host_stats.start()
-    recent = RecentCounts(lambda: delivery_totals(bridge.state(timeout=3)))
+    # Deadline misses, AUX drops and the inputs' repeats and discards, every 5 s.
+    recent = RecentCounts(lambda: playout_counters(bridge), summary=playout_summary)
     recent.start()
     # Only an application that names the browser service (--dmabuf-rest) shows Chromium's CPU.
     browser_url = getattr(args, "dmabuf_rest", None)

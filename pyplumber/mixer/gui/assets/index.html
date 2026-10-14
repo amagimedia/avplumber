@@ -941,8 +941,8 @@ function renderWipeCache() {
 // busiest mixer thread's share of one core. Its tip has one table of the mixer's threads by kind
 // (names with digits as N), the largest total first: count, total, mean per thread and busiest
 // thread, all in shares of one core, so a kind of hundreds of small threads can pass 100%. Under it,
-// from the browser service (state.chromium, absent with older browser images): Chromium's processes
-// by type, the GPU process's threads, and the cores Chromium used most beside the host's use of them.
+// from the browser service (state.chromium, absent with older browser images): the cores Chromium
+// uses in all, its processes by type and the GPU process's threads.
 const cpuPct = (n) => !Number.isFinite(n) ? "—" : n >= 10 ? `${Math.round(n)}%` : `${n.toFixed(1)}%`;
 // avg_pct is total / n from the server; an older server without it gets the same from here.
 const cpuRow = (k) => [k.name, String(k.count), cpuPct(k.pct), cpuPct(k.avg_pct ?? (k.count > 0 ? k.pct / k.count : NaN)), cpuPct(k.max_pct)];
@@ -951,8 +951,7 @@ function threadTip(h, c) {
   // "other", the kinds past the server's limit, stays last whatever its total.
   const mixer = [...kinds].sort((a, b) => (a.name === "other") - (b.name === "other") || b.pct - a.pct).map(cpuRow);
   return !c ? {mixer} : {mixer, cores: c.cores_used, vcpus: c.vcpus, processes: (c.processes || []).map(cpuRow),
-    gpu: (c.gpu_threads || []).map(cpuRow),
-    busiest: (c.busiest_cores || []).map((k) => [`cpu${k.cpu}`, cpuPct(k.pct), cpuPct(k.host_pct)])};
+    gpu: (c.gpu_threads || []).map(cpuRow)};
 }
 function tipTable(head, rows) {
   const table = el("table"), line = (tag, cells) => { const tr = el("tr"); tr.append(...cells.map((t) => el(tag, "", t))); return tr; };
@@ -965,7 +964,6 @@ function renderThreadTip(t) {
   if (t.processes) {
     tables.push(tipTable([`Chromium · ${metric(t.cores, 2)}/${t.vcpus ?? "—"} cores`, ...CPU_HEAD], t.processes));
     if (t.gpu.length) tables.push(tipTable(["GPU process threads", ...CPU_HEAD], t.gpu));
-    if (t.busiest.length) tables.push(tipTable(["Chromium's busiest cores", "Chromium", "host"], t.busiest));
   }
   return tables;
 }
@@ -1474,6 +1472,20 @@ function polledCutLatency() {
   if (!ms.length) return null;
   return ms.length % 2 ? ms[(ms.length - 1) / 2] : (ms[ms.length / 2 - 1] + ms[ms.length / 2]) / 2;
 }
+// The inputs' repeats and discards over the same window (state.recent.inputs, from a mixer whose
+// settings name its compositor inputs): browser sources, their worst one, and every other input
+// for contrast. A repeat with a discard is two paints in one tick slot; a repeat alone, no frame.
+function inputRows(recent) {
+  const groups = recent.inputs;
+  if (!groups) return [];
+  const pair = (g) => `${metric(g?.repeats)} / ${metric(g?.discarded)}`, span = recentSpan(recent);
+  const worst = groups.browser?.worst;
+  return [
+    [`Browser repeats / discards · ${groups.browser?.sources ?? 0} · last ${span}`, pair(groups.browser)],
+    ...(groups.browser?.sources ? [["Worst browser source", worst ? `${worst.source} · ${pair(worst)}` : "—"]] : []),
+    [`Other inputs repeats / discards · ${groups.other?.sources ?? 0}`, pair(groups.other)],
+  ];
+}
 function renderLatency() {
   const lat = fresh(cutLatency)?.latency;
   showStat($("lat"), Number.isFinite(lat?.ms) ? lat.ms : polledCutLatency(), "ms", true,
@@ -1488,7 +1500,8 @@ function renderLatency() {
     // screen; one that does not (state.recent absent) leaves the totals since the mixer started.
     ...(state?.recent
       ? [[`Deadline misses · last ${recentSpan(state.recent)}`, metric(state.recent.missed_deadlines)],
-         [`AUX output drops · last ${recentSpan(state.recent)}`, metric(state.recent.output_drops)]]
+         [`AUX output drops · last ${recentSpan(state.recent)}`, metric(state.recent.output_drops)],
+         ...inputRows(state.recent)]
       : [["Deadline misses · total", metric(complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
          ["AUX output drops · total", metric(complete ? total(aux, "output_drops") : null)]])]);
 }
