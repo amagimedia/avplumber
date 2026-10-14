@@ -92,6 +92,8 @@ class AuxBus:
                               f"latency_ms ({self.main_latency_ms():g}) by a program frame ({floor:.1f} ms) at least, "
                               f"for the program frame to reach the bus in time")
         inputs = self.inputs()
+        # A zero-copy browser's frames are held to its budget on this bus too; the program last.
+        limits = self.mixer.queue_limits([source.id for source in self.cfg.sources]) + ([0] if self.pgm_edge else [])
         converted = f"{self.prefix}_sdr"
         for edge in [*inputs, self.output_edge, converted]:
             self.avp.edges.planCapacity(edge, 1)
@@ -104,6 +106,7 @@ class AuxBus:
             "max_layers": self.bus.max_layers,
             "group": self.group, "auto_restart": "off", "on_error": "off",
             **({"pgm_delay_frames": self.pgm_delay_frames} if self.pgm_delay_frames else {}),
+            **({"input_queue_limits": limits} if any(limits) else {}),
             **initial["base"],
         }, api=self.api), early_create=True)
         r = self.bus.renditions[0]

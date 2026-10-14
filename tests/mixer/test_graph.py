@@ -106,6 +106,10 @@ class FakeMixer:
         self.keyframe_node = parameters.get("keyframe_node")
         self.instances.append(self)
 
+    def queue_limits(self, names=None):
+        sources = self.sources if names is None else [(n, dict(self.sources)[n]) for n in names]
+        return [params.get("queue_limit") or 0 for _, params in sources]
+
     def add_aux_destination(self, source, edge):
         self.aux_routes.append((source, edge))
 
@@ -473,6 +477,48 @@ def test_zero_copy_browser_acks_every_frame_at_once_within_its_queue(monkeypatch
         zero_copy=mode.zero_copy)
     receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
     assert "return_queue" not in receive   # every frame goes back as soon as its last user lets go
+    importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
+    # The browser's pool is fixed: an import is kept until the window closes (0 retains); nothing
+    # expires it and nothing purges it, since a release takes the CUDA lock and stalls every draw.
+    assert importer["import_ttl_ms"] == 0 and importer["max_imports"] >= 12
+    assert dmabuf_inputs.zero_copy_chain_edges("input_0") == ["input_0_drm", "input_0_cuda_raw", "input_0_cuda",
+                                                              "input_0_held"]
+    # Nine buffers: two reserved to the browser, four held outside the waiting queue, three waiting.
+    assert dmabuf_inputs.BrowserCaptureMode.minimum_capacity() == 9
+    assert dmabuf_inputs.BrowserCaptureMode(True, 9).playout_queue_limit() == 3
+    assert dmabuf_inputs.BrowserCaptureMode(True, 11).playout_queue_limit() == 5
+    assert dmabuf_inputs.BrowserCaptureMode(True, 6).playout_queue_limit() == 1
+    assert dmabuf_inputs.BrowserCaptureMode().playout_queue_limit() is None
+
+
+def test_zero_copy_show_holds_browser_frames_within_the_browser_budget(tmp_path, monkeypatch):
+    import json as _json
+    from pyplumber.mixer import dmabuf_inputs
+    (tmp_path / "page.sock").touch()
+    path = tmp_path / "mixer.json"
+    path.write_text(_json.dumps(CONFIG))
+
+    def zero_copy_rest(base, method, p, body=None, timeout=60):
+        if p == "/window/open":
+            return body
+        return {"windows": [], "captureMode": "zero-copy", "exportBuffers": 9}
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", zero_copy_rest)
+    FakeMixer.instances.clear()
+    application = build_application(
+        GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)), api=fake_api())
+    nodes = {node.parameters.get("name"): node.parameters for node in application.avp.nodes}
+    mixer = FakeMixer.instances[-1]
+    # No return queue, no import expiry, no start-up purge of this browser's imports.
+    assert "return_queue" not in nodes["input_1_receive"]
+    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 0
+    assert application.browser_importers == ()
+    # The chain's edges hold one frame each; the compositors hold three waiting (nine less two
+    # reserved to the browser, less four held elsewhere); the cameras keep the default.
+    assert {("input_1_drm", 1), ("input_1_cuda_raw", 1), ("input_1_cuda", 1), ("input_1_held", 1)} <= set(application.avp.edges.plans)
+    assert dict(mixer.sources)["page"]["queue_limit"] == 3
+    assert dict(mixer.sources)["cam"].get("queue_limit") is None
+    assert mixer.queue_limits() == [0, 0, 3]
 
 
 def test_stock_or_unreachable_browser_keeps_the_return_queue(monkeypatch):
