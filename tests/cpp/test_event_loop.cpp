@@ -4,6 +4,10 @@
 #include <chrono>
 #include <thread>
 
+// The engine defines these in avutils.cpp, which needs most of avcpp to link.
+constexpr AVRational Wallclock::time_base;
+Wallclock wallclock;
+
 static bool within(std::chrono::milliseconds limit, const std::function<bool()> &condition) {
     const auto deadline = std::chrono::steady_clock::now() + limit;
     while (!condition()) {
