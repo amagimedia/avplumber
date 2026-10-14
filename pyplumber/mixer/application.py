@@ -52,9 +52,8 @@ JANUS_DEFAULT_VIDEO_SSRC = 0x41565001
 JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 4_500
 PREHEAT_POLL_INTERVAL_SEC = 0.02
 # Going on air: the outputs are released after START_STABLE_SEC (MixerOptions.start_stable_sec) in
-# which no compositor missed a deadline or dropped a frame and every bus drew, and after
-# START_STABLE_TIMEOUT_SEC at the latest, with a log line saying what kept counting: a show that
-# never settles still starts, with its counters telling. The first 60 output frames of a bus can
+# which no compositor missed a deadline or dropped a frame and every bus drew. Startup fails
+# after START_STABLE_TIMEOUT_SEC if it cannot settle. The first 60 output frames of a bus can
 # pass before its frame count is published (4 s at 15 fps), so a shorter window waits for that.
 START_STABLE_SEC = 10.0
 START_STABLE_TIMEOUT_SEC = 60.0
@@ -99,7 +98,7 @@ class MixerOptions:
     janus_rtcp_port: int = 0
     preheat_timeout_sec: float = 60.0
     start_stable_sec: float = START_STABLE_SEC            # clean stretch every compositor must show before the outputs are released
-    start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC   # release anyway after this long, and log what kept counting
+    start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC   # fail startup if the show cannot settle
     wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
     wipe_color: str = ""                 # explicit SDR override; empty preserves tags with an SDR fallback
     cut_latency_encoder: str = ""        # opt-in cut-to-output observer on this encoder
@@ -218,12 +217,19 @@ class MixerApplication:
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str, data_type: str | None = None,
                         *, browser_pages: dict[str, str] | None = None,
-                        browser_before: dict | None = None) -> None:
+                        browser_before: dict | None = None,
+                        on_ready: Callable[[tuple[str, ...]], None] | None = None) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
         next_refresh = time.monotonic() + 1
+        waiting = set(edges)
         while True:
             self._check_startup()
             missing = [edge for edge in edges if self.avp.getEdge(edge, data_type).enqueued_total == 0]
+            if on_ready:
+                ready = waiting.difference(missing)
+                if ready:
+                    on_ready(tuple(edge for edge in edges if edge in ready))
+                    waiting.difference_update(ready)
             if not missing:
                 return
             if time.monotonic() >= deadline:
@@ -270,20 +276,33 @@ class MixerApplication:
     def _start(self) -> None:
         started = time.monotonic()
         browser_before = self._browser_snapshot() if self.browser_windows else None
-        for group in self.input_groups:
-            self.avp.group(group).startNodes()
-        if self.browser_windows:
-            refresh_windows(self.dmabuf_rest, list(self.browser_windows))
-        self._wait_for_edges(self.input_edges, "input readiness",
-                             browser_pages=dict(zip(self.browser_input_edges, self.browser_windows)),
-                             browser_before=browser_before)
-        log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
         with ExitStack() as painting:
+            windows = list(self.browser_windows)
+            pages = dict(zip(self.browser_input_edges, windows))
+            paused = set()
+            def pause_ready(edges):
+                ids = [pages[edge] for edge in edges if edge in pages]
+                if ids:
+                    paint_windows(self.dmabuf_rest, ids, False)
+                    paused.update(ids)
             if self.browser_windows:
-                windows = list(self.browser_windows)
                 painting.callback(paint_windows, self.dmabuf_rest, windows, True)
-                paint_windows(self.dmabuf_rest, windows, False)
+            for group in self.input_groups:
+                self.avp.group(group).startNodes()
+            if windows:
+                refresh_windows(self.dmabuf_rest, windows)
+            # Freeze each page once its own first frame is usable; waiting for the
+            # slowest decoder lets early pages churn through entire capture pools.
+            self._wait_for_edges(self.input_edges, "input readiness", browser_pages=pages,
+                                 browser_before=browser_before, on_ready=pause_ready if windows else None)
+            log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
+            remaining = [name for name in windows if name not in paused]
+            if remaining:
+                paint_windows(self.dmabuf_rest, remaining, False)
             self._warm_outputs()
+            # Painting is still paused: retire every unused startup allocation before
+            # capture can refill the pool, including buffers released by the last AUX.
+            self._purge_idle_imports(wait=True, idle_ms=0)
         self._go_on_air()
         # Warm-up counters are retained separately from the on-air measurement baseline.
         self.avp.registerControlCommand("mixer.startup", lambda _arg: json.dumps(self.startup) + "\n", True, True)
@@ -293,7 +312,7 @@ class MixerApplication:
 
     def _warm_outputs(self) -> None:
         # Browser inputs repeat their first usable frames while CUDA surface pools open.
-        self._purge_idle_imports()   # what the pages allocated before their reload: memory the buses are about to need
+        self._purge_idle_imports(wait=True, idle_ms=0)
         if self.routed_inputs:
             self.avp.group(ROUTER_GROUP).startNodes()
             self._wait_for_node("layout_preheat_router")
@@ -334,7 +353,7 @@ class MixerApplication:
         if self.aux_buses:
             # Encoder initialization stalls the shared CUDA context. Let each bus
             # drain its first frames before opening the next one's surface pool.
-            self._purge_idle_imports(wait=True)
+            self._purge_idle_imports(wait=True, idle_ms=0)
             self.aux_buses.start(lambda bus: self._wait_for_edges(
                 (f"{bus.prefix}_encoded",), "auxiliary output", "packet"))
         self._check_startup()
@@ -349,7 +368,7 @@ class MixerApplication:
         are released only after start_stable_sec in which no compositor missed a deadline or
         dropped a frame and every bus drew, so the load of starting (decoder opens, CUDA contexts,
         browser pages, raw files being page-locked) has calmed down before anything goes out; after
-        start_stable_timeout_sec they are released anyway and the log says what kept counting. The
+        start_stable_timeout_sec startup fails with the bus that could not settle. The
         compositors count from zero first, then the outputs start together on a key frame: what
         viewers get and what the counters say both begin with the stable show, and nothing on air
         is ever reset away. What the start counted is kept in `startup` (`mixer.startup`)."""
@@ -366,6 +385,8 @@ class MixerApplication:
         # into it: one program slot drawing is the program drawing. Every bus must draw.
         ticking = [tuple(program), *((bus,) for bus in buses)]
         report = self._wait_until_settled(compositors, self.start_stable_sec, self.start_stable_timeout_sec, ticking)
+        if not report["settled"]:
+            raise RuntimeError(f"Mixer startup did not settle after {report['waited_sec']:.1f} s: {report['reason']}")
         prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
         browser = self._browser_snapshot()
         self.avp.executeCommandsFromString("\n".join(
@@ -376,15 +397,9 @@ class MixerApplication:
         self.startup = {**report, "outputs": len(prefixes), "warm_up": warm_up, "released_at": time.time(),
                         "browser_windows": browser, "stable_sec": self.start_stable_sec,
                         "timeout_sec": self.start_stable_timeout_sec}
-        if report["settled"]:
-            log.info("On air after %.1f s: %d outputs released; stable for %g s; the start's %d missed deadlines "
-                     "and %d output drops are not counted", report["waited_sec"], len(prefixes), self.start_stable_sec,
-                     warm_up["missed_deadlines"], warm_up["output_drops"])
-        else:
-            log.warning("On air after %.1f s without a stable %g s (%s): %d outputs released; the start's %d missed "
-                        "deadlines and %d output drops are not counted, and the show may keep counting",
-                        report["waited_sec"], self.start_stable_sec, report["reason"], len(prefixes),
-                        warm_up["missed_deadlines"], warm_up["output_drops"])
+        log.info("On air after %.1f s: %d outputs released; stable for %g s; the start's %d missed deadlines "
+                 "and %d output drops are not counted", report["waited_sec"], len(prefixes), self.start_stable_sec,
+                 warm_up["missed_deadlines"], warm_up["output_drops"])
 
     def _browser_snapshot(self) -> dict | None:
         """Browser counters for startup delivery and the on-air measurement baseline."""
@@ -397,7 +412,7 @@ class MixerApplication:
             log.warning("Browser counters unavailable (%s)", exc)
             return None
 
-    def _purge_idle_imports(self, wait: bool = False) -> int:
+    def _purge_idle_imports(self, wait: bool = False, *, idle_ms: int = IMPORT_PURGE_IDLE_MS) -> int:
         """Release the browser buffers the start-up went through and no longer uses.
 
         While a show starts, a browser window goes through two or three times the buffers it
@@ -413,7 +428,7 @@ class MixerApplication:
         expired = lambda: sum(s.get("expired", 0) for s in stats())
         before = expired() if wait else 0
         self.avp.executeCommandsFromString("\n".join(
-            f"node.object.set {node} purge_idle {IMPORT_PURGE_IDLE_MS}" for node in self.browser_importers))
+            f"node.object.set {node} purge_idle {idle_ms}" for node in self.browser_importers))
         if not wait:
             return 0
         time.sleep(0.3)   # an importer looks for a request four times a second

@@ -86,10 +86,12 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         # to an allocation seconds later, not ring cycles later: an import dropped in
         # between is registered again on its next use, and each release takes the CUDA
         # library's context lock exclusively, stalling every other thread in the context.
+        # Three spare registrations cover pool rotation without retaining dozens of
+        # retired full-resolution allocations per page during startup.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group", "zero_copy": True,
-                            "max_imports": max(32, 2 * browser_frame_queue + 2),
+                            "max_imports": browser_frame_queue + 3,
                             "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding

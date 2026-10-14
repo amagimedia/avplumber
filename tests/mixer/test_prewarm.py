@@ -211,6 +211,8 @@ def test_browser_painting_resumes_after_output_warmup_or_failure(native_boundary
     monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", lambda *args: None)
     monkeypatch.setattr("pyplumber.mixer.application.paint_windows",
                         lambda url, ids, enabled: app.avp.events.append(f"paint {enabled}"))
+    monkeypatch.setattr(app, "_purge_idle_imports",
+                        lambda wait=False, **kwargs: app.avp.events.append(f"purge {kwargs.get('idle_ms', 500)}") or 0)
     inspect = app.avp.getEdge
     def get_edge(name, data_type=None):
         if failure and name == "mixer_trans_out":
@@ -226,7 +228,33 @@ def test_browser_painting_resumes_after_output_warmup_or_failure(native_boundary
         app.start()
         events = app.avp.events
         assert events.index("paint False") < events.index("start output") < events.index("paint True") < events.index("READY")
+        paused = events[events.index("paint False") + 1:events.index("paint True")]
+        assert paused[0] == paused[-1] == "purge 0"
     assert app.avp.events.count("paint False") == app.avp.events.count("paint True") == 1
+
+
+def test_browser_pauses_while_another_input_is_still_starting(native_boundary, monkeypatch):
+    app = application(native_boundary)
+    app.browser_windows = ("early",)
+    app.browser_input_edges = (app.input_edges[0],)
+    late = app.input_edges[1]
+    app.avp.missing.add(late)
+    now, paints = [0.0], []
+    monkeypatch.setattr(app, "_browser_snapshot", lambda: {})
+    monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", lambda *args: None)
+    monkeypatch.setattr("pyplumber.mixer.application.paint_windows",
+                        lambda url, ids, enabled: paints.append((list(ids), enabled, now[0], late in app.avp.missing)))
+    monkeypatch.setattr("pyplumber.mixer.application.time.monotonic", lambda: now[0])
+    def sleep(seconds):
+        now[0] += seconds
+        if now[0] >= 2:
+            app.avp.missing.clear()
+    monkeypatch.setattr("pyplumber.mixer.application.time.sleep", sleep)
+    app.start()
+    assert paints[0] == (["early"], False, 0.0, True)
+    assert paints[1][0:2] == (["early"], True)
+    assert paints[1][2] >= 2 and paints[1][3] is False
+    assert len(paints) == 2 and app.avp.ready
 
 
 @pytest.mark.parametrize("failure", [False, True])

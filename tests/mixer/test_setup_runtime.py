@@ -1487,6 +1487,23 @@ def test_cuarray_profile_only_changes_encoded_generated_inputs():
         assert all("decode_storage" not in source for source in recipe_for(INSTANCE_PROFILES[instance], DEFAULT_SETTINGS)["inputs"])
 
 
+@pytest.mark.parametrize("fps", [25, 30, 50, 60])
+@pytest.mark.parametrize("depth,chroma", [(8, "420"), (10, "420"), (10, "422")])
+def test_setup_keeps_capacity_profile_runtime_bounds(tmp_path, fps, depth, chroma):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]
+    settings = {**DEFAULT_SETTINGS, "fps": fps, "bit_depth": depth, "chroma": chroma,
+                "weights": [8, 0, 0, 0, 2, 0, 0]}
+    show, _, _ = prepare_demo.plan(recipe_for(profile, settings), tmp_path)
+    cfg = parse(show)
+    assert cfg.decoded_frames_ahead == 1
+    assert cfg.raw_pool_frames == 10
+    assert cfg.raw_upload == "resident"
+    assert cfg.source_fan_out == "event_loop"
+    assert cfg.input_poll_ms == cfg.aux_input_poll_ms == 8
+    assert cfg.fps == fps
+    assert cfg.working_format == ("nv12" if depth == 8 else "p010le" if chroma == "420" else "p210le")
+
+
 def test_first_resume_keeps_declared_outputs_and_applies_shared_aux_codec(runtime, monkeypatch):
     runtime.process = None
     runtime.janus_api = "http://127.0.0.1:8088/janus"

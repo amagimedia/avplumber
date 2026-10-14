@@ -1158,7 +1158,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
                              "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}
     # Three of the six frames of this show's queue are the return queue.
     assert nodes["input_1_receive"]["return_queue"] == 3
-    assert nodes["input_1_to_cuda"]["max_imports"] == 32
+    assert nodes["input_1_to_cuda"]["max_imports"] == 9
     # Ten idle seconds, not one: a page that paints now and then must find its allocations registered.
     assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 10000
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}

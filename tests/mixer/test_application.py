@@ -322,14 +322,15 @@ def idle(_now):
     return 0, 0, 0
 
 
-def go_on_air(monkeypatch, counters, buses=("aux_1",), **options):
+def go_on_air(monkeypatch, counters, buses=("aux_1",), *, start=True, **options):
     clock = Clock()
     monkeypatch.setattr(mixer_application, "time", clock)
     engine = CountingEngine(clock, counters)
     app = mixer_application.MixerApplication(
         avp=engine, mixer=None, input_groups=(), input_edges=(), routed_inputs=False, preheat_timeout_sec=1,
         held_outputs=("janus",), aux_buses=[SimpleNamespace(prefix=prefix) for prefix in buses], **options)
-    app._go_on_air()
+    if start:
+        app._go_on_air()
     return app, engine, clock
 
 
@@ -363,24 +364,17 @@ def test_outputs_are_released_after_a_stable_window_with_the_counters_reset_firs
     assert "after 15.0 s: 2 outputs released; stable for 10 s; the start's 2 missed deadlines" in on_air[0].getMessage()
 
 
-def test_a_show_that_never_settles_is_released_at_the_timeout_and_the_log_says_which_bus(monkeypatch, caplog):
-    caplog.set_level(logging.INFO, logger="mixer")
+def test_a_show_that_never_settles_fails_without_releasing_outputs(monkeypatch):
     app, engine, clock = go_on_air(monkeypatch, {
         "mixer_comp_a": lambda now: (published(30)(now), 0, 0),
         "mixer_comp_b": idle,
         "aux_1_comp": lambda now: (published(15)(now), 0, 0),
         "aux_2_comp": lambda now: (published(15)(now), int(now), int(now) // 2),   # a miss a second, a drop every other
-    }, buses=("aux_1", "aux_2"), start_stable_sec=5, start_stable_timeout_sec=20)
-    assert engine.at(" hold false") == [20.0, 20.0, 20.0]     # released anyway, after the timeout
-    assert app.startup["settled"] is False and app.startup["waited_sec"] == 20.0
-    # What the bus counted since the window last began, at 19 s: the miss of 20 s and the drop of 20 s.
-    assert app.startup["reason"] == "aux_2_comp missed 1 deadlines and dropped 1 frames"
-    assert app.startup["warm_up"] == {"missed_deadlines": 20, "output_drops": 10}
-    warning = next(r for r in caplog.records if r.getMessage().startswith("On air"))
-    assert warning.levelno == logging.WARNING
-    assert "after 20.0 s without a stable 5 s (aux_2_comp missed 1 deadlines and dropped 1 frames): 3 outputs released" \
-        in warning.getMessage()
-    assert "the show may keep counting" in warning.getMessage()
+    }, buses=("aux_1", "aux_2"), start=False, start_stable_sec=5, start_stable_timeout_sec=20)
+    with pytest.raises(RuntimeError, match="after 20.0 s: aux_2_comp missed 1 deadlines and dropped 1 frames"):
+        app._go_on_air()
+    assert engine.at(" hold false") == []
+    assert not any("reset_counters" in line for _, line in engine.commands)
 
 
 @pytest.mark.parametrize("stuck", ["program", "bus"])
@@ -390,12 +384,13 @@ def test_a_compositor_that_draws_nothing_holds_the_outputs_until_the_timeout(mon
         "mixer_comp_b": idle,
         "aux_1_comp": idle if stuck == "bus" else lambda now: (published(15)(now), 0, 0),
     }
-    app, engine, clock = go_on_air(monkeypatch, counters, start_stable_sec=3, start_stable_timeout_sec=12)
+    app, engine, clock = go_on_air(monkeypatch, counters, start=False, start_stable_sec=3, start_stable_timeout_sec=12)
     # No miss anywhere (a compositor that cannot tick misses nothing), yet nothing drew: not stable.
-    assert engine.at(" hold false") == [12.0, 12.0]
-    assert app.startup["settled"] is False
-    assert app.startup["reason"] == {"program": "mixer_comp_a or mixer_comp_b drew no frame in 12 s",
-                                     "bus": "aux_1_comp drew no frame in 12 s"}[stuck]
+    reason = {"program": "mixer_comp_a or mixer_comp_b drew no frame in 12 s",
+              "bus": "aux_1_comp drew no frame in 12 s"}[stuck]
+    with pytest.raises(RuntimeError, match=reason):
+        app._go_on_air()
+    assert engine.at(" hold false") == []
 
 
 def test_a_window_shorter_than_a_frame_count_publication_waits_for_the_count_not_the_timeout(monkeypatch):

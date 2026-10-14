@@ -149,6 +149,7 @@ def recipe_for(profile, settings):
     _check_hdr_decodes(profile, counts[1], settings["fps"])
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
+    recipe["canvas"].update(profile.get("canvas", {}))
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
     def program_encode(output):
         encode = settings["encodes"][output]

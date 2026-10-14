@@ -274,6 +274,12 @@ Applications that need immediate transitions must preheat the complete path:
    for the show to be stable, release the held outputs and declare the graph
    ready.
 
+Browser pages pause painting after their individual first usable frames arrive.
+The mixer repeats those frames while output pools and encoders warm up, retires
+unused imports, then resumes painting before checking stability. This bounds
+capture churn while other inputs are still starting. Painting also resumes if
+startup fails.
+
 Going on air: every Janus output is built held (`output` `hold`): its chain
 runs, so the encoder opens, and nothing is sent, so a deadline missed while the
 show comes up is counted and never seen. Once the last bus encodes, the
@@ -282,9 +288,9 @@ application waits for `start_stable_sec` (`MixerOptions`, default 10;
 frame and every bus and one program slot drew frames (a bus publishes its frame
 count every 60 frames, so a shorter window waits for that); a miss or a drop
 starts the window again. After `start_stable_timeout_sec` (default 60;
-`--start-stable-timeout-sec`) it releases anyway and the `On air` log line, a
-warning then, names the compositor that kept counting or drew nothing. It then
-resets every compositor's counters and releases all outputs together on a key
+`--start-stable-timeout-sec`) startup fails, naming the compositor that kept
+counting or drew nothing; outputs remain held. Once stable, it resets every
+compositor's counters and releases all outputs together on a key
 frame, in that order, so what the counters say on air starts from zero and
 nothing on air is reset away. `mixer.startup` answers with how it went:
 `settled`, `waited_sec`, `reason`, each compositor's `counters` at the release
