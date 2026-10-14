@@ -125,6 +125,7 @@ protected:
                 const int fd = ready[i].data.fd;
                 int64_t blackhole;
                 if (read(fd, &blackhole, sizeof blackhole) < 0 && errno != EAGAIN) continue;   // closed meanwhile
+                Event::consumed(fd);
                 if (fd == wakeup_.fd()) continue;
                 std::lock_guard<decltype(todo_when_fd_readable_busy_)> lock(todo_when_fd_readable_busy_);
                 auto cb_it = todo_when_fd_readable_.find(fd);

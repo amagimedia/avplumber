@@ -52,6 +52,7 @@ public:
         int64_t blackhole;
         for (int i=0; i<ret; i++) {
             read(fds_[ready_[i].data.u32], &blackhole, sizeof blackhole);
+            Event::consumed(fds_[ready_[i].data.u32]);
             if (signalled) signalled->push_back(ready_[i].data.u32);
         }
         return ret>0;
