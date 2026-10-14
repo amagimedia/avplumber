@@ -208,6 +208,32 @@ void bounded_queue_counts_overflow() {
     CHECK(mix.stats(0).overflow == 92);
 }
 
+void input_queue_limit_holds_fewer_frames_and_keeps_the_due_one() {
+    // A zero-copy browser lends a fixed pool: its input is held to a limit below the queue's
+    // capacity, the oldest waiting frame goes first, and the frame due at a tick still shows.
+    avp::mixer::Playout<int> mix(2, avp::mixer::TickGrid(av::Rational(60, 1)), 100.0 / 3,
+                                avp::mixer::TimestampMode::Presentation);
+    mix.setInputQueueLimit(0, 3);
+    CHECK(mix.inputQueueLimit(0) == 3 && mix.inputQueueLimit(1) == 8);
+    for (int id = 0; id < 10; ++id) {
+        mix.push(0, id, id * 1000000000LL / 60);
+        mix.push(1, 100 + id, id * 1000000000LL / 60);
+    }
+    CHECK(mix.queued(0) == 3 && mix.queued(1) == 8);
+    CHECK(mix.stats(0).overflow == 7 && mix.stats(1).overflow == 2);
+    // Tick 9 is due at its time plus the two-tick latency: the limited input shows frame 9.
+    const auto *decision = mix.prepare(9 * 1000000000LL / 60 + 100000000 / 3 + 1);
+    CHECK(decision && decision->frames[0] && *decision->frames[0] == 9);
+    mix.commit();
+    CHECK(mix.queued(0) == 0);
+    bool rejected = false;
+    for (size_t bad : {size_t(0), size_t(9)}) {
+        try { mix.setInputQueueLimit(0, bad); } catch (const std::invalid_argument &) { rejected = true; }
+        CHECK(rejected);
+        rejected = false;
+    }
+}
+
 void latency_cannot_exceed_retained_frames() {
     bool rejected = false;
     try { avp::mixer::Playout<int> unsupported(1, avp::mixer::TickGrid(av::Rational(60, 1)), 200.0); }
@@ -797,6 +823,7 @@ int main(int argc, char **argv) {
         {"rational_source_drift_does_not_amplify", rational_source_drift_does_not_amplify},
         {"sparse_missing_paints_do_not_amplify_into_persistent_losses", sparse_missing_paints_do_not_amplify_into_persistent_losses},
         {"latency_cannot_exceed_retained_frames", latency_cannot_exceed_retained_frames},
+        {"input_queue_limit_holds_fewer_frames_and_keeps_the_due_one", input_queue_limit_holds_fewer_frames_and_keeps_the_due_one},
         {"resumed_source_is_live_after_an_eof_marker", resumed_source_is_live_after_an_eof_marker},
         {"presentation_phase_on_half_tick_keeps_every_frame", presentation_phase_on_half_tick_keeps_every_frame},
         {"route_reset_rejects_old_frames_still_in_upstream_edges", route_reset_rejects_old_frames_still_in_upstream_edges},
