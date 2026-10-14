@@ -398,17 +398,21 @@ def test_dmabuf_input_builds_browser_chain_next_to_files(tmp_path):
     assert receive["socket"] == str(tmp_path / "page_00.sock")
     assert receive["fps"] == "60/1" and receive["group"] == "input_1"
     assert nodes["input_1_to_cuda"]["type"] == "drm_prime_to_cuda"
+    # The hold runs ahead of the numbering: one count for paints and copies, no step at a pause or resume.
+    hold = nodes["input_1_hold"]
+    assert (hold["type"], hold["src"], hold["dst"], hold["fps"]) == ("repeat_last_frame", "input_1_cuda_raw", "input_1_held", "60/1")
     smooth = nodes["input_1_smooth"]
-    assert (smooth["type"], smooth["src"], smooth["dst"]) == ("smooth_timestamps", "input_1_cuda_raw", "input_1_cuda")
+    assert (smooth["type"], smooth["src"], smooth["dst"]) == ("smooth_timestamps", "input_1_held", "input_1_cuda")
     assert smooth["fps"] == "60/1" and smooth["discontinuity_threshold"] == 0.1
+    # The count is checked against the compositors' playout deadline (three frames at 60 fps) with a
+    # guard for the edge and the compositor's wake-up.
+    assert smooth["latency_ms"] == 50.0 and smooth["guard_ms"] == 10.0
     # Frames carry their own geometry and smooth_timestamps stamps in 1/fps: no format or time-base nodes.
     assert nodes["input_1_to_cuda"]["src"] == "input_1_drm" and "input_1_timestamp" not in nodes
-    hold = nodes["input_1_hold"]
-    assert (hold["type"], hold["src"], hold["dst"], hold["fps"]) == ("repeat_last_frame", "input_1_cuda", "input_1_held", "60/1")
     assert "decode_1" not in nodes and "decode_0" in nodes
     assert nodes["decode_0"]["options"] == {"threads": 1}   # NVDEC decodes; a frame thread only reserves a surface
     sources = dict(FakeMixer.instances[-1].sources)
-    assert sources["source_1"]["pre_otm_edge"] == "input_1_held"
+    assert sources["source_1"]["pre_otm_edge"] == "input_1_cuda"
     assert sources["source_0"]["pre_otm_edge"] == "input_0_realtime"
 
 
@@ -441,7 +445,7 @@ def test_a_browser_in_a_large_catalogue_is_normalized_like_a_file(tmp_path):
     nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
     browser = nodes[f"normalize_{DIRECT_INPUT_LIMIT}"]
     # The transform reads the zero-copy browser frame and writes the canvas's YUV storage.
-    assert (browser["type"], browser["src"]) == ("cuda_transform", f"input_{DIRECT_INPUT_LIMIT}_held")
+    assert (browser["type"], browser["src"]) == ("cuda_transform", f"input_{DIRECT_INPUT_LIMIT}_cuda")
     assert browser["outputs"] == [{**nodes["normalize_0"]["outputs"][0],
                                    "dst": f"input_{DIRECT_INPUT_LIMIT}_normalized"}]
     assert app.routed_inputs and app.browser_windows == ("page_00",)
@@ -1224,7 +1228,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         assert "source_filter_0" not in nodes
     assert "alias_0" not in nodes  # shared fan-out belongs to the reusable builder
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
-    assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
+    assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_cuda"
     opened = [o for o in opened if o[1] == "/window/open"]   # the capture-mode read follows the opens
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
                              "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}

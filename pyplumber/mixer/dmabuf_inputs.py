@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 from typing import List, Tuple
 
-from .config import browser_frame_queue_for, default_browser_frame_queue
+from .config import browser_frame_queue_for, default_browser_frame_queue, default_latency_ms
 
 SCHEME = "dmabuf://"
 # How long an imported browser allocation stays registered without being used.
@@ -133,16 +133,23 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
                             processing_group: str, hold: bool = False,
                             preserve_alpha: bool = False, browser_frame_queue: int | None = None,
                             event_loop: str | None = None, zero_copy: bool = False,
-                            import_copy: bool = False) -> Tuple[list, str]:
+                            import_copy: bool = False, latency_ms: float | None = None,
+                            stamping_guard_ms: float = 10.0) -> Tuple[list, str]:
     """Return the node list and the final CUDA edge for one browser socket.
 
     With *hold*, a ``repeat_last_frame`` node re-emits the last frame at *fps*
-    while the page is not painting, so static pages keep feeding the mixer.
+    while the page is not painting, so static pages keep feeding the mixer. It runs ahead
+    of ``smooth_timestamps``, which numbers paints and copies with one count, so a page that
+    pauses and resumes never puts two frames in one slot or none in the next.
     *preserve_alpha* retains alpha-bearing DRM formats for blended scene items. Chromium's
     alpha is premultiplied; the consumer tags it (the mixer does in its colour node).
     Geometry and format come from each frame, and ``smooth_timestamps`` already stamps
     in 1/*fps*, so the chain has no format or time-base nodes of its own.
     *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted).
+    *latency_ms* is the compositors' playout latency (``canvas.latency_ms``, default
+    ``default_latency_ms``): slot k is drawn ``latency_ms`` after its time, and a frame reaching
+    the stamping with less than *stamping_guard_ms* to spare moves the numbering one slot later;
+    the guard covers what follows the stamping (the edge, the compositor's input poll and its wake).
     With *zero_copy* (BrowserCaptureMode) there is no return queue: each frame goes back as soon as
     its last user lets go, since Chromium's own queue has no buffer to spare; and the importer keeps
     every import for good (no idle expiry, no purge), since the browser's pool never changes while
@@ -178,28 +185,38 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
                             # context lock and stalls every draw).
                             "import_ttl_ms": 0 if zero_copy else
                             max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
-        # Number paints on the canvas grid instead of rounding each arrival time to it.
-        # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
-        # an arrival near the middle of a slot flipped between two slots, putting two
-        # paints in one tick and none in the next (one discard plus one repeat, up to
-        # 4 per second on an unlucky browser). smooth_timestamps gives each paint the
-        # previous slot plus one and resyncs only when the average drift passes 20 ms.
-        # A paint gap longer than 100 ms (a page that stopped painting) resyncs at once,
-        # so the next paint is not stamped late and discarded as stale.
-        # round_up: number the first paint (and any resync) to the next canvas tick,
-        # not the nearest, so a paint always precedes the tick it is shown at.
-        api.SmoothTimestamps({
-            "fps": f"{fps}/1", "discontinuity_threshold": 0.1, "round_up": True,
-            "src": raw_edge, "dst": cuda_edge, "group": processing_group,
-            "name": f"{prefix}_smooth", "auto_restart": "panic",
-            **({} if event_loop is None else {"event_loop": event_loop})}),
     ]
+    stamped_edge = raw_edge
     if hold:
+        # Ahead of the numbering: a copy is stamped with its emission time (microseconds, exact)
+        # and numbered like a paint, so the pause and the resume are ordinary +1 steps.
         held_edge = f"{prefix}_held"
-        nodes.append(api.RepeatLastFrame({"src": cuda_edge, "dst": held_edge, "fps": f"{fps}/1",
+        nodes.append(api.RepeatLastFrame({"src": raw_edge, "dst": held_edge, "fps": f"{fps}/1",
                                           "group": processing_group, "name": f"{prefix}_hold",
                                           "auto_restart": "group"}))
-        return nodes, held_edge
+        stamped_edge = held_edge
+    # Number paints on the canvas grid instead of rounding each arrival time to it.
+    # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
+    # an arrival near the middle of a slot flipped between two slots, putting two
+    # paints in one tick and none in the next (one discard plus one repeat, up to
+    # 4 per second on an unlucky browser). smooth_timestamps gives each frame the
+    # previous slot plus one. latency_ms: the count is checked against the compositor's
+    # deadline for the slot (time(slot) + latency on the monotonic clock the paints are
+    # stamped on): a frame that would reach it with less than guard_ms in hand moves the
+    # numbering one slot later, once (one repeat, which is what a missing paint is), and a
+    # count more than 1.5 slots ahead of the clock for a second moves back one (one discard).
+    # Without it the count only followed the mean drift over 300 frames and paints that
+    # came slower than the slot rate fell behind their deadlines a slot at a time, each a
+    # repeat and a discard. A paint gap longer than 100 ms with no hold ahead re-aligns the
+    # count to the paint. round_up: the first frame (and any re-alignment) takes the next
+    # canvas tick, not the nearest, so a paint always precedes the tick it is shown at.
+    nodes.append(api.SmoothTimestamps({
+        "fps": f"{fps}/1", "discontinuity_threshold": 0.1, "round_up": True,
+        "latency_ms": default_latency_ms(fps) if latency_ms is None else latency_ms,
+        "guard_ms": stamping_guard_ms,
+        "src": stamped_edge, "dst": cuda_edge, "group": processing_group,
+        "name": f"{prefix}_smooth", "auto_restart": "panic",
+        **({} if event_loop is None else {"event_loop": event_loop})}))
     return nodes, cuda_edge
 
 

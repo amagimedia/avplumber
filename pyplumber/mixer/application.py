@@ -770,7 +770,11 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True,
                 preserve_alpha=source.id in blended_sources, browser_frame_queue=browser_frame_queue,
                 event_loop=_pacing_loop(index), zero_copy=capture_mode.zero_copy,
-                import_copy=cfg.browser_import_copy)
+                import_copy=cfg.browser_import_copy,
+                # The stamping's deadline is the program compositors' playout; its guard covers the
+                # compositor's input poll (canvas.input_poll_ms) and wake-up.
+                latency_ms=options.mixer_latency_ms,
+                stamping_guard_ms=max(10.0, float((options.mixer_input_poll_ms or 0) + 4)))
             for node in nodes:
                 avp.addNode(node)
             if capture_mode.zero_copy:

@@ -1,5 +1,11 @@
 #include "node_common.hpp"
+#include "../mixer/primitives/MonotonicClock.hpp"
+#include "../mixer/primitives/PaintStamping.hpp"
+#include <cmath>
 #include <deque>
+#include <iomanip>
+#include <optional>
+#include <sstream>
 
 // smooth_timestamps:
 // - overwrites PTS with a "smoothed" monotonic timeline built from previous PTS + duration
@@ -8,6 +14,11 @@
 // Video:
 // - duration is user-controlled (as rational seconds), typically 1/FPS
 // - output timebase == duration, and PTS increments by 1 each frame
+// - with `latency_ms` (a source whose consumer draws slot k at time(k) + latency on the monotonic
+//   clock the stamps are on, e.g. the mixer's browser chain): the count is corrected against that
+//   deadline instead of the mean drift (PaintStamping): a frame within `guard_ms` of missing its
+//   tick moves the numbering one slot later, once; a numbering more than `early_slots` ahead of the
+//   clock for `early_frames` frames moves one slot back. `stamping` (node.object.get) counts them.
 //
 // Audio:
 // - duration is derived from frame sample count and sample rate
@@ -18,9 +29,14 @@ class SmoothTimestamps : public NodeSISO<T, T>,
                          public NonBlockingNode<SmoothTimestamps<T>>,
                          public IInputReset,
                          public ITimeBaseSource,
-                         public IFrameRateSource {
+                         public IFrameRateSource,
+                         public IReturnsObjects {
 protected:
     bool started_ = false;
+    // Video with `latency_ms`: the numbering against the playout deadline, instead of the
+    // counted timeline and mean-drift resync below.
+    std::optional<avp::mixer::PaintStamping> paint_;
+    uint64_t shift_events_ = 0;      // frames whose numbering was moved; the first and every 100th are logged
     // PTS to use for the next output frame (in current output timebase).
     // This makes the first emitted frame equal to (rescaled) first input PTS (or 0).
     av::Timestamp next_out_pts_ = NOTS;
@@ -92,6 +108,42 @@ protected:
         last_in_pts_ = NOTS;
         drift_window_sec_.clear();
         drift_sum_sec_ = 0.0;
+        if (paint_) paint_->reset();
+    }
+
+    /// Video with `latency_ms`: number the frame against the deadline and hand it on. False when
+    /// the sink has no room; the numbering is then left as it was, for the retry with the same frame.
+    bool stampByDeadline(T &frame, const av::Timestamp in_pts, const bool in_pts_valid, const av::Rational out_tb) {
+        const int64_t now_ns = avp::mixer::monotonicNs();
+        const int64_t in_ns = in_pts_valid
+            ? av_rescale_q(in_pts.timestamp(), in_pts.timebase().getValue(), AVRational{1, 1000000000}) : 0;
+        const avp::mixer::PaintStamping saved = *paint_;
+        const auto stamped = paint_->stamp(in_pts_valid, in_ns, now_ns);
+        const av::Timestamp orig_pts = frame.pts();
+        frame.setTimeBase(av::Rational());
+        frame.setPts(av::Timestamp(stamped.slot, out_tb));
+        if (!this->sink_->put(frame, true)) {
+            frame.setTimeBase(av::Rational());
+            frame.setPts(orig_pts);
+            *paint_ = saved;
+            return false;
+        }
+        if (stamped.shifted && (++shift_events_ == 1 || shift_events_ % 100 == 0)) {
+            const auto &st = paint_->stats();
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(1) << "smooth_timestamps: ";
+            if (stamped.shifted > 0)
+                line << "a frame within the guard of its slot's deadline: numbering moved " << stamped.shifted
+                     << " slot(s) later";
+            else
+                line << "frames running more than " << paint_->config().early_ns / 1e6
+                     << " ms ahead of their slots: numbering moved one slot back";
+            line << " (slot " << stamped.slot << ", margin now " << paint_->marginNs(stamped.slot, now_ns) / 1e6
+                 << " ms; " << shift_events_ << " frame(s) moved so far, " << st.shifts_later << " slot(s) later, "
+                 << st.shifts_back << " back)";
+            logstream << line.str();
+        }
+        return true;
     }
 
 public:
@@ -99,6 +151,25 @@ public:
 
     void resetInput() override {
         resetState();
+    }
+
+    Parameters getObject(const std::string key) override {
+        if (key != "stamping") throw Error("smooth_timestamps: unknown object " + key);
+        Parameters result = {{"mode", paint_ ? "deadline" : "drift"}};
+        if (paint_) {
+            const auto &st = paint_->stats();
+            const auto &cfg = paint_->config();
+            result["shifts_later"] = st.shifts_later;
+            result["shifts_back"] = st.shifts_back;
+            result["realignments"] = st.realignments;
+            result["shift_events"] = shift_events_;
+            result["next_slot"] = paint_->nextSlot();
+            result["latency_ms"] = cfg.latency_ns / 1e6;
+            result["guard_ms"] = cfg.guard_ns / 1e6;
+            result["early_ms"] = cfg.early_ns / 1e6;
+            result["early_frames"] = cfg.early_frames;
+        }
+        return result;
     }
 
     av::Rational timeBase() override {
@@ -162,6 +233,18 @@ public:
             if constexpr (IsVideo) {
                 if (out_tb.getNumerator() == 0 || out_tb.getDenominator() == 0) {
                     throw Error("smooth_timestamps: video requires valid 'duration' or 'fps' parameter");
+                }
+                if (paint_) {
+                    if (!stampByDeadline(frame, in_pts, in_pts_valid, out_tb)) {
+                        if (!ticks) {
+                            this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+                        }
+                        return;
+                    }
+                    this->source_->pop();
+                    if (!ticks) this->yieldAndProcess();
+                    else process_next = true;
+                    continue;
                 }
             }
 
@@ -295,6 +378,26 @@ public:
         }
         if (r->discontinuity_sec_ < 0.0) {
             throw Error("smooth_timestamps: discontinuity_threshold must be >= 0");
+        }
+
+        if (params.count("latency_ms")) {
+            if constexpr (!IsVideo) throw Error("smooth_timestamps: latency_ms applies to video only");
+            const double latency_ms = params.at("latency_ms").get<double>();
+            const double guard_ms = params.value("guard_ms", 10.0);
+            const double early_slots = params.value("early_slots", 1.5);
+            const int early_frames = params.value("early_frames", 30);
+            if (!(latency_ms > 0.0) || !(guard_ms >= 0.0) || !(guard_ms < latency_ms) || !(early_slots > 0.0) || early_frames < 1)
+                throw Error("smooth_timestamps: latency_ms must be above 0, guard_ms from 0 to below latency_ms, "
+                            "early_slots above 0 and early_frames at least 1");
+            const double period_ms = 1000.0 * r->video_duration_tb_.getNumerator() / r->video_duration_tb_.getDenominator();
+            avp::mixer::PaintStamping::Config cfg;
+            cfg.fps = r->frameRate().getValue();
+            cfg.latency_ns = std::llround(latency_ms * 1e6);
+            cfg.guard_ns = std::llround(guard_ms * 1e6);
+            cfg.early_ns = std::llround(early_slots * period_ms * 1e6);
+            cfg.early_frames = early_frames;
+            cfg.discontinuity_ns = std::llround(r->discontinuity_sec_ * 1e9);
+            r->paint_.emplace(cfg);
         }
 
         return r;
