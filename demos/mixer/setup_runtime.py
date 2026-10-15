@@ -54,13 +54,17 @@ def extra_aux_limit(profile, cfg, encodes):
     return output_limit(profile, cfg, encodes, reserve_clean=True)
 
 
+def browser_limit(profile, fps):
+    return profile.get("browser_windows_by_fps", {}).get(fps, profile["browser_windows"])
+
+
 def source_limit(profile, fps, bit_depth=8, chroma="420"):
     """The instance's per-rate total scaled by the canvas's share, never above what the NVDEC,
     browser and upload caps carry together (v210 inputs only on a 4:2:2 canvas). An unsupported
     pair (8-bit 4:2:2) is refused by the mode checks in recipe_for."""
     profile = for_mode(profile, bit_depth, chroma)
     total = int(profile["sources"][fps] * profile["mode_share"].get(f"{bit_depth}:{chroma}", 1.0))
-    return min(total, profile["nvdec_decodes"][fps] + profile["browser_windows"] + profile["raw_upload_units"][fps]
+    return min(total, profile["nvdec_decodes"][fps] + browser_limit(profile, fps) + profile["raw_upload_units"][fps]
                + (profile["hlg_v210"] if chroma == "422" else 0))
 
 
@@ -71,7 +75,7 @@ def source_counts(profile, total, weights, fps=25, reserved_browsers=0):
     # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
     for indices, costs, limit, name in (
             ((2, 3), (1, 1), profile["hlg_v210"], "4:2:2 upload"),
-            ((4,), (1,), profile["browser_windows"] - reserved_browsers, "Browser"),
+            ((4,), (1,), browser_limit(profile, fps) - reserved_browsers, "Browser"),
             ((0, 1), (1, 1), profile["nvdec_decodes"][fps], "Combined NVDEC"),
             ((5, 6), (1, 2), profile["raw_upload_units"][fps], "Raw 4:2:0 upload units")):
         group = [(i, cost) for i, cost in zip(indices, costs) if i < len(weights)]

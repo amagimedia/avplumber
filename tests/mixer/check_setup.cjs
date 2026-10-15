@@ -311,6 +311,17 @@ const { chromium } = require('playwright');
     const v210Error=await page.evaluate(()=>{try{sourceCounts(5,[0,0,0,1,0,0,0]);return '';}catch(error){return error.message;}});
     assert.match(v210Error, /4:2:2 upload is limited to 4/);
     assert.deepEqual(await page.evaluate(()=>sourceCounts(4,[0,0,1,1,0,0,0])), [0,0,2,2,0,0,0]);
+    instanceType = 'nvidia_l4_cuarray';
+    await reset();
+    await page.locator('#mode').selectOption('10:420');
+    for (const input of await page.locator('#dsk-pages input').all()) await input.check();
+    for (const [fps, count] of [['25',40], ['30',40], ['50',40], ['60',30], ['50',40]]) {
+      await page.locator('#fps').selectOption(fps);
+      const setup = await apply();
+      assert.equal(setup.weights[4] + setup.dsk.length, count, `browser allocation at ${fps} fps`);
+      assert.match(await text('browser-max'), new RegExp(`maximum ${count}$`));
+      for (const id of ['mv', 'mv2', 'extra']) assert.equal(setup.encodes[id].preset, 'p1');
+    }
     assert.deepEqual(errors, []);
     console.log('PASS: Balanced source counts, the maximum total, per-output encodes, NVENC budget and extra aux outputs');
   } finally {

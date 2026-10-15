@@ -137,6 +137,9 @@ INSTANCE_PROFILES = {
 # Opt-in measured HEVC fixtures and fixed CUarray pools; the FFmpeg 8.1/linear
 # profiles retain their decoder contracts and capacities.
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY] = deepcopy(INSTANCE_PROFILES[InstanceType.NVIDIA_L4])
+# Moving 1080p windows, including cropped DSKs, in workers of at most ten.
+# Short transition checks with the fixed nine-buffer exporter and CUDA queues 32/8.
+INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["browser_windows_by_fps"] = {25: 40, 30: 40, 50: 40, 60: 30}
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["sources"][25] = 192
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["nvdec_decodes"][25] = 120
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["raw_upload_units"][25] = 32

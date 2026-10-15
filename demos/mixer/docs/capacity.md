@@ -1,5 +1,11 @@
 # Mixer capacity
 
+The L4 CUarray Setup profile now caps browser windows (DSKs included) at
+40/40/40/30 for 25/30/50/60 fps; the initial deployment and new AUX outputs use
+`p1`. Saved explicit encode choices remain until edited or reset with Defaults.
+The moving-browser measurements below require the optional fixed-pool exporter
+and copy-on-import configuration; a browser count alone does not enable it.
+
 Setup admits what [instance_profiles.py](../instance_profiles.py) allows for the GPU, the canvas
 rate and format, the outputs and their encoder presets. A profile is measured on its own GPU; do
 not scale one GPU's numbers to another. All figures are 1080p inputs and include four browser keys.

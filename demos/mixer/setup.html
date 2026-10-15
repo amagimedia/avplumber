@@ -167,7 +167,8 @@ const encodeRows=new Map();
 let extraAux=0, typedSources=null, atDefaults=true;
 // setup_runtime.for_mode: the profile with the limits measured apart on the chosen canvas.
 const limits=()=>({...profile,...profile.mode_limits?.[$('mode').value]});
-const browserLimit=()=>limits().browser_windows, nvdecLimit=fps=>limits().nvdec_decodes[fps], rawUploadUnits=fps=>limits().raw_upload_units[fps];
+const browserLimit=()=>limits().browser_windows_by_fps?.[Number($('fps').value)]??limits().browser_windows;
+const nvdecLimit=fps=>limits().nvdec_decodes[fps], rawUploadUnits=fps=>limits().raw_upload_units[fps];
 const sourceBudgets=()=>[
  [[2,3],[1,1],limits().hlg_v210,'4:2:2 upload'],[[4],[1],browserLimit()-dskPages().length,'Browser'],
  [[0,1],[1,1],nvdecLimit(Number($('fps').value)),'Combined NVDEC'],

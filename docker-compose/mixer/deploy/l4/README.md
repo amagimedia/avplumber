@@ -27,6 +27,10 @@ requires recreating the mixer container. These settings do not change the browse
 capture pool or the mixer's frame deadline.
 
 Browser workers hold up to ten windows each, with frame staggering enabled.
+Setup caps browser windows at 40 for 25/30/50 fps and 30 for 60 fps, including
+DSKs. Changing the frame rate recalculates the allocation on the page and server.
+All AUX outputs default to `p1`, including the initial deployment settings;
+explicit saved encode choices remain editable and can be reset with Defaults.
 Override `DMA_BROWSER_WINDOWS_PER_PROCESS` and `DMA_BROWSER_STAGGER_FRAMES` in
 `.env` for other workloads. For the optional patched exporter, `.env.example`
 also shows how to select a fixed nine-buffer pool and a single asynchronous

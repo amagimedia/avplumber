@@ -22,11 +22,12 @@ def test_seed_generates_portable_recipe_and_preserves_edits(tmp_path):
     path = tmp_path / "demo.json"
     recipe = json.loads(path.read_text())
     show = plan(recipe, tmp_path)[0]
-    assert len(show["sources"]) == 88
+    assert len(show["sources"]) == 78
     assert len(show["scenes"]) == 256
     assert [bus["id"] for bus in show["aux_buses"][:2]] == ["mv", "mv2"]
     assert len(show["aux_buses"]) == 14
     assert len(show["renditions"]) == 3
+    assert all(b["renditions"][0]["preset"] == "p1" for b in show["aux_buses"])
     assert not (tmp_path / "mixer.demo.json").exists(), "only preparation publishes the generated show"
     videos = [s for s in show["sources"] if s["kind"] == "video"]
     assert len(videos) == 44
@@ -49,7 +50,7 @@ def test_seed_does_not_replace_an_adopted_show(tmp_path):
 def test_seed_accepts_low_bandwidth_hevc_monitors_and_scales_extra_count(tmp_path):
     settings = json.loads((PACKAGE / "settings.json").read_text())
     for output in ("mv", "mv2", "extra"):
-        settings["encodes"][output].update(codec="hevc_nvenc", bitrate_kbps=500)
+        settings["encodes"][output].update(codec="hevc_nvenc", preset="p3", bitrate_kbps=500)
     path = tmp_path / "initial.json"
     path.write_text(json.dumps(settings))
     media = tmp_path / "media"
@@ -78,3 +79,15 @@ def test_setup_keeps_cuarray_contract_without_changing_legacy_profiles(fps, dept
     assert source_limit(optimized, 30) == 192
     assert (optimized["nvdec_decodes"][30], optimized["browser_windows"], optimized["raw_upload_units"][30]) == (105, 40, 47)
     assert source_limit(legacy, 30) == 170
+
+
+@pytest.mark.parametrize("fps,browsers", [(25, 40), (30, 40), (50, 40), (60, 30)])
+def test_setup_browser_limit_includes_keys_and_clamps_saved_mix(fps, browsers):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]
+    settings = json.loads((PACKAGE / "settings.json").read_text())
+    # A saved larger mix must follow the new rate's limits on Apply.
+    settings.update(fps=fps, source_count=180, weights=[22, 22, 4, 0, 36, 0, 0])
+    recipe = recipe_for(profile, settings)
+    show = plan(recipe, Path("/tmp/mixer-test"))[0]
+    assert sum(s["kind"] == "browser" for s in show["sources"]) == browsers
+    assert len(show["sources"]) <= source_limit(profile, fps, 10, "422")
