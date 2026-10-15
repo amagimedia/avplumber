@@ -40,6 +40,10 @@ services:
 
   dma-browser:
     image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-browser:${MIXER_RELEASE}
+    # Chromium raises its GPU processes to nice -8, and under CPU contention the browser's GL
+    # work then outranks the mixer's deadline threads on the same host. A lower CPU weight for
+    # the whole browser container keeps the mixer first (measured 2026-10-15 on the L4 show).
+    cpu_shares: 512
     environment:
       DMA_BROWSER_WINDOWS_PER_PROCESS: ${DMA_BROWSER_WINDOWS_PER_PROCESS:-10}
       DMA_BROWSER_STAGGER_FRAMES: ${DMA_BROWSER_STAGGER_FRAMES:-1}
