@@ -20,8 +20,8 @@
 
 /// The mixer's clocked compositor: the scene slots, the wipe overlay and, with `aux_mode`, the
 /// AUX buses. Live, monotonic-PTS inputs go through a shared Playout, which picks each input's
-/// frame for every `fps` output tick; prewarm, warm resets and an AUX bus's staged
-/// `composition` are controlled here.
+/// frame for every `fps` output tick; prewarm, warm resets and staged compositions (an AUX
+/// bus's, and a scene slot's while it is drawing) are controlled here.
 class MixerCompositor : public CudaRectCompositor,
                         public IInputReset,
                         public IReturnsObjects,
@@ -29,6 +29,8 @@ class MixerCompositor : public CudaRectCompositor,
     std::optional<Parameters> pending_composition_;
     std::optional<Parameters> staged_composition_; // render thread only; latest request replaces it
     avp::mixer::SourceMask staged_mask_;
+    // A drawing scene slot warms its staged composition's inputs beside the drawn ones (render thread).
+    avp::mixer::SourceMask staging_inputs_;
     int64_t staged_deadline_ns_ = 0;
     std::atomic<bool> composition_preparing_{false};
     std::string composition_error_; // protected by layers_mutex_
@@ -182,6 +184,33 @@ class MixerCompositor : public CudaRectCompositor,
         composition_revision_ = value.value("revision", std::string());
     }
 
+    /// A scene slot draws `value` from the next tick. `warm`: its inputs were warmed beside
+    /// the previous layout and keep their frames; otherwise they restart (warm or cold reset).
+    void applySlotComposition(const Parameters &value, bool staged_warm) {
+        const auto mask = avp::mixer::parseSourceMask(value.at("active_inputs"));
+        {
+            std::lock_guard<std::mutex> lock(layers_mutex_);
+            default_layers_ = avp::mixer::parseLayersArray(value.at("layers"));
+            composition_revision_ = value.at("revision").get<std::string>();
+        }
+        if (staged_warm) {
+            // Promote the warmed inputs without discarding their eligible frames, as auxInputs does.
+            const auto prewarm = inputMasks().second;
+            for (size_t i = 0; i < source_edges_.size(); ++i) {
+                playout_->setPrewarm(i, (mask | prewarm).test((int)i));
+                playout_->setActive(i, mask.test((int)i));
+                playout_->setPrewarm(i, prewarm.test((int)i));
+            }
+            setActiveInputs(mask);
+            applied_active_mask_ = mask;
+            applied_prewarm_mask_ = prewarm;
+        } else {
+            setActiveInputs(mask);
+            if (value.value("warm", false)) setObject("warm_reset", true);
+            else resetInput();
+        }
+    }
+
 public:
     explicit MixerCompositor(const Config &config) : CudaRectCompositor("mixer_compositor", config) {}
 
@@ -261,16 +290,22 @@ public:
                 std::lock_guard<std::mutex> lock(layers_mutex_);
                 update.swap(pending_composition_);
             }
-            if (update && !aux_) {
-                const auto layers = avp::mixer::parseLayersArray(update->at("layers"));
-                {
-                    std::lock_guard<std::mutex> lock(layers_mutex_);
-                    default_layers_ = layers;
-                    composition_revision_ = update->at("revision").get<std::string>();
-                }
-                setActiveInputs(avp::mixer::parseSourceMask(update->at("active_inputs")));
-                if (update->value("warm", false)) setObject("warm_reset", true);
-                else resetInput();
+            if (update && !aux_ && frame_counter_ && applied_active_mask_.any() && !update->value("warm", false)) {
+                // A drawing slot (program, or the incoming side of a transition) keeps drawing its
+                // current layout and revision while the new layout's inputs warm up, then switches
+                // at one tick, as a switcher's crosspoint does; an input reset would leave the
+                // slot, and a transition reading it, without frames for the warm-up.
+                staged_mask_ = avp::mixer::parseSourceMask(update->at("active_inputs"));
+                staging_inputs_ = staged_mask_ & ~applied_active_mask_;
+                staged_deadline_ns_ = avp::mixer::monotonicNs() +
+                    std::max<int64_t>(250000000, 2 * playout_->latencyNs());
+                staged_composition_ = std::move(update);
+                composition_preparing_ = true;
+            } else if (update && !aux_) {
+                staged_composition_.reset();
+                staging_inputs_.reset();
+                composition_preparing_ = false;
+                applySlotComposition(*update, false);
             } else if (update) {
                 const auto mask = avp::mixer::parseSourceMask(update->at("active_inputs"));
                 staged_composition_.reset();
@@ -290,6 +325,7 @@ public:
         }
         const int64_t now = avp::mixer::monotonicNs();
         auto [active, prewarm] = inputMasks();
+        prewarm |= staging_inputs_;
         const auto generation = input_generation_.load(std::memory_order_acquire);
         if (generation != applied_generation_ || active != applied_active_mask_ || prewarm != applied_prewarm_mask_) {
             for (size_t i = 0; i < source_edges_.size(); ++i) {
@@ -349,12 +385,26 @@ public:
             // Seen empty: a frame given from here on signals the edge.
             else if (emptied || received == 8) may_hold_frames_[i] = 0;
         }
+        if (staged_composition_ && !aux_ && active.none()) {
+            // The slot was taken off duty meanwhile (a dropped transition); whoever needs it
+            // next loads it again.
+            staged_composition_.reset();
+            staging_inputs_.reset();
+            composition_preparing_ = false;
+        }
         if (staged_composition_) {
             const auto now_ns = avp::mixer::monotonicNs();
             bool ready = true;
             for (size_t i = 0; i < source_edges_.size(); ++i)
                 if (staged_mask_.test(i) && !playout_->readyAtNextTick(i, now_ns)) ready = false;
-            if (ready || now_ns >= staged_deadline_ns_) {
+            if (!aux_ && (ready || now_ns >= staged_deadline_ns_)) {
+                // Inputs that never warmed restart like a load into an idle slot.
+                staging_inputs_.reset();
+                applySlotComposition(*staged_composition_, ready);
+                if (ready) active = staged_mask_;
+                staged_composition_.reset();
+                composition_preparing_ = false;
+            } else if (ready || now_ns >= staged_deadline_ns_) {
                 if (ready) {
                     applyAuxComposition(*staged_composition_, staged_mask_);
                     active = staged_mask_;

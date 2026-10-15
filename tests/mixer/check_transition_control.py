@@ -90,6 +90,7 @@ class Recorder:
 
 
 def check(avp, mixer, rec, errors, control_port, wipe_file, wipe_seconds, spam_seed):
+    avp.setReady()   # the control server greets clients only once the graph is ready
     channel = socket.create_connection(('127.0.0.1', control_port), timeout=5).makefile('rwb', buffering=0)
     assert channel.readline().startswith(b'100 ')
 
@@ -146,6 +147,17 @@ def check(avp, mixer, rec, errors, control_port, wipe_file, wipe_seconds, spam_s
     def assert_absent(frames, scene, what):
         shown = [f[0] for f in frames if f[1] == scene]
         assert not shown, (f'{what}: {scene} returned after the command', len(shown))
+
+    def wait_idle(scene, timeout=1.0):
+        """The take completes at the transition's last frame, a little after the picture reads as
+        the destination."""
+        deadline = time.monotonic() + timeout
+        while True:
+            s = status()
+            if s['transition'] == 'idle' and s['pgm_scene'] == scene and not s['transition_paused']:
+                return s
+            assert time.monotonic() < deadline, ('take did not complete', s)
+            time.sleep(0.02)
 
     endpoints = {}
 
@@ -222,8 +234,7 @@ def check(avp, mixer, rec, errors, control_port, wipe_file, wipe_seconds, spam_s
     assert_moving(held, 'paused fade')
     t_resume = take('fade', 'full1')
     latency = landed(rec, 'full1', t_resume, FADE + LANDING_S)
-    s = status()
-    assert s['transition'] == 'idle' and not s['transition_paused'] and s['pgm_scene'] == 'full1', s
+    wait_idle('full1')
     case('auto_pauses_and_resumes_fade', paused_frames=len(held), resumed_landed_ms=round(latency * 1000))
 
     # 4. CUT while paused completes.
