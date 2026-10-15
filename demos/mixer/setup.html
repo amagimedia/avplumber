@@ -95,8 +95,10 @@ summary { cursor: pointer; }
 <p class="hint">Always the Balanced mix of the unique sources: NVDEC, browser and raw uploads in about equal shares; on a 10-bit canvas half of each 4:2:0 path is HLG.</p>
 <div id="source-controls"></div><div class="allocation" id="allocation" aria-hidden="true"></div>
 <p class="hint" id="allocation-note"></p>
+<div id="browser-overlay-controls">
 <div class="fields"><label>Browser overlay<select id="browser-motion"><option value="static">Centered · static</option><option value="dynamic">Moving · dynamic</option><option value="half">Half dynamic · 6 s moving / 6 s still</option></select></label></div>
-<p class="hint">Both presets keep the transparent background. Static holds the centered card; moving animates it continuously.</p>
+<p class="hint">All presets keep the transparent background. Static holds the centered card; dynamic moves continuously; half dynamic alternates six seconds moving and six seconds still.</p>
+</div>
 <details><summary>What gets generated?</summary><p>SDR 4:2:0 uses animated test patterns and colour bars, as H.264/NVDEC or as raw NV12 frames uploaded to the GPU. Raw upload uses no decoder engine but increases disk and CPU-to-GPU traffic. HLG uses HDR bars and moving highlights, with HEVC/NVDEC or raw P010 upload. 4:2:2 inputs use packed v210 clips and GPU unpacking; browser sources use the bundled transparent test page.</p><p>Each input is independent, but several inputs may read the same generated file. Increasing the source count does not create that many different movies.</p></details>
 </section>
 <section class="card"><div class="card-title"><h2>Downstream keys</h2></div>
@@ -209,6 +211,7 @@ const groups=sourceGroups.map(([name,indices])=>{
   row.innerHTML=`<div><b><span class="dot" style="background:${t.color}"></span>${t.name}</b><small>${t.detail}</small></div><b id="count-${t.id}" aria-label="${t.name} sources"></b>`;
   group.append(row);
  });
+ if(indices.includes(4))group.append($('browser-overlay-controls'));
  $('source-controls').append(group);return group;
 });
 function allocate(total,values){
