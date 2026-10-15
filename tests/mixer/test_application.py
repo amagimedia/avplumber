@@ -520,3 +520,8 @@ def test_program_delivery_and_explicit_static_cadence():
     doc["sources"][1]["capture_cadence"] = "guess"
     with pytest.raises(config.ConfigError, match="capture_cadence"):
         config.parse(doc)
+
+
+def test_production_api_exposes_program_delivery_node(native_boundary):
+    from pyplumber.mixer.application import load_avp_api
+    assert load_avp_api().MixerDelivery.TYPE == "mixer_delivery"
