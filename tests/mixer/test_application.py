@@ -189,50 +189,6 @@ def test_going_on_air_releases_idle_browser_imports_before_the_outputs():
                              "node.object.set janus_rtp_output hold false", "node.object.set janus_force_keyframe trigger true"]
 
 
-@pytest.mark.parametrize("stuck", [False, True])
-def test_fixed_browser_pool_warms_static_pages_and_keeps_registrations(monkeypatch, stuck):
-    from pyplumber.mixer.application import MixerApplication
-    now, paints = [0.0], []
-    monkeypatch.setattr(mixer_application.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(mixer_application.time, "sleep", lambda duration: now.__setitem__(0, now[0] + duration))
-    monkeypatch.setattr(mixer_application, "paint_windows", lambda rest, ids, enabled: paints.append((ids, enabled)))
-    avp = SimpleNamespace(node=lambda name: SimpleNamespace(getObject=lambda key: {
-        "imports": 11 if name == "ready" or (not stuck and paints) else 10,
-        "hits": len(paints) * 11, "expired": 0, "evicted": 0}))
-    app = MixerApplication(avp=avp, mixer=None, input_groups=(), input_edges=(), routed_inputs=False,
-                           preheat_timeout_sec=1, browser_fixed_pool_size=11,
-                           browser_windows=("page_a", "page_b"), browser_importers=("ready", "waiting"))
-    app._startup_error = None
-    # The mock has no control-command method: no idle purge may be sent at all.
-    assert app._purge_idle_imports(wait=True, idle_ms=0) == 0
-    if stuck:
-        with pytest.raises(RuntimeError, match="warm-up timed out: page_b"):
-            app._warm_browser_pool()
-    else:
-        app._warm_browser_pool()
-    # Even a full cache must visit a complete rotation after capture resumes.
-    assert paints[0] == (["page_a", "page_b"], True)
-    assert all(call == (["page_b"], True) for call in paints[1:])
-
-
-def test_fixed_pool_requires_rotation_after_last_registration_change(monkeypatch):
-    from pyplumber.mixer.application import MixerApplication
-    now, paints = [0.0], []
-    monkeypatch.setattr(mixer_application.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(mixer_application.time, "sleep", lambda dt: now.__setitem__(0, now[0] + dt))
-    monkeypatch.setattr(mixer_application, "paint_windows", lambda *args: paints.append(args))
-    def stats(key):
-        replacements = min(len(paints), 3)
-        return {"imports": 6 + replacements, "evicted": replacements, "hits": len(paints) * 10}
-    app = MixerApplication(avp=SimpleNamespace(node=lambda name: SimpleNamespace(getObject=stats)),
-                           mixer=None, input_groups=(), input_edges=(), routed_inputs=False,
-                           preheat_timeout_sec=5, browser_fixed_pool_size=6,
-                           browser_windows=("page",), browser_importers=("importer",))
-    app._startup_error = None
-    app._warm_browser_pool()
-    assert len(paints) == 4  # A full cache alone is not proof that its registrations settled.
-
-
 @pytest.mark.parametrize("missing_frame", [False, True])
 def test_startup_waits_for_processed_frames_and_aux_shares_them(native_boundary, monkeypatch, missing_frame):
     class Engine(NativeEngine):

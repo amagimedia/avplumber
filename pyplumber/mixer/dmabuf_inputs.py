@@ -56,7 +56,7 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
                             processing_group: str, hold: bool = False,
                             preserve_alpha: bool = False, browser_frame_queue: int | None = None,
-                            event_loop: str | None = None, fixed_pool_size: int = 0) -> Tuple[list, str]:
+                            event_loop: str | None = None) -> Tuple[list, str]:
     """Return the node list and the final CUDA edge for one browser socket.
 
     With *hold*, a ``repeat_last_frame`` node re-emits the last frame at *fps*
@@ -69,17 +69,12 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
     """
     if browser_frame_queue is None:
         browser_frame_queue = default_browser_frame_queue(fps)
-    # A fixed export pool lends Chromium's own buffers: copy each frame once and return it,
-    # rather than holding a lease while the compositor samples it. Unset or empty follows
-    # the pool; "0" or "1" overrides.
-    copy_on_import = (os.environ.get("AVP_BROWSER_COPY_ON_IMPORT")
-                      or ("1" if fixed_pool_size else "0")) == "1"
     drm_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
               "auto_restart": "group", "fps": f"{fps}/1"}
     if drm_hwaccel:
         source["hwaccel"] = drm_hwaccel
-    if not copy_on_import and not fixed_pool_size and return_queue(browser_frame_queue):
+    if return_queue(browser_frame_queue):
         source["return_queue"] = return_queue(browser_frame_queue)
     nodes = [
         api.IpcDmabufSource(source),
@@ -95,9 +90,9 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         # retired full-resolution allocations per page during startup.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
-                            "auto_restart": "group", "zero_copy": not copy_on_import,
-                            "max_imports": fixed_pool_size or browser_frame_queue + 3,
-                            "import_ttl_ms": 0 if fixed_pool_size else max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
+                            "auto_restart": "group", "zero_copy": True,
+                            "max_imports": browser_frame_queue + 3,
+                            "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two
@@ -149,24 +144,21 @@ def open_browser_windows(base_url: str, ids: List[str], page_url: str, width: in
                             for name in ids])
 
 
-def open_windows(base_url: str, windows: List[dict]) -> int:
+def open_windows(base_url: str, windows: List[dict]) -> None:
     """Reuse matching windows; recreate only pages whose capture settings changed.
 
     Each open waits for its page load and a browser worker process opens one page at a time,
     so the changed pages open concurrently with one request in flight per worker."""
     started = time.monotonic()
     status = rest_request(base_url, "GET", "/status") or {}
-    fixed_pool_size = status.get("fixedCapturePoolSize", 0)
-    if type(fixed_pool_size) is not int or not (fixed_pool_size == 0 or 2 <= fixed_pool_size <= 16):
-        raise RuntimeError("Browser service reports an unsupported fixed capture pool")
+    # Only a browser image with the removed zero-copy export Electron reports a fixed pool.
+    if status.get("fixedCapturePoolSize"):
+        raise RuntimeError("Browser service reports a fixed capture pool: zero-copy export is not supported; "
+                           "run Chromium's ordinary capture (update the dma-browser image)")
     existing = {w["id"]: w for w in status.get("windows", [])}
     changed = []
     for spec in windows:
         wanted = {**spec, "audio": False}
-        if fixed_pool_size:
-            # Let Chromium exhaust its fixed pool and skip rendering when full.
-            # A smaller sender limit discards paints while spare buffers keep rendering.
-            wanted["ringSize"] = fixed_pool_size
         current = existing.get(spec["id"])
         if current and current.get("stats", {}).get("quarantinedFrameCount", 0):
             raise RuntimeError(f"Browser {spec['id']} has quarantined DMA-BUF frames; restart its browser worker")
@@ -196,7 +188,6 @@ def open_windows(base_url: str, windows: List[dict]) -> int:
             opening.result()
     logging.getLogger(__name__).info("Browser windows ready: %d of %d opened in %.1f s",
                                      len(changed), len(windows), time.monotonic() - started)
-    return fixed_pool_size
 
 
 def refresh_windows(base_url: str, ids: List[str]) -> None:
