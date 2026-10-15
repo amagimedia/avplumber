@@ -91,6 +91,8 @@
   #lat-tip table { table-layout: fixed; }
   #lat-tip th:first-child { width: 45%; }
   #lat-tip th, #lat-tip td { white-space: normal; overflow-wrap: anywhere; }
+  #hint-tip dl { grid-template-columns: 65px minmax(0, 1fr); }
+  #hint-tip dd { text-align: left; }
   @media (max-width: 1540px) {
     #top { gap: 6px; }
     #top h1 { font-size: 12px; }
@@ -423,7 +425,7 @@
       <label class="field" id="wipe-custom" hidden><input id="wipe-file" type="text" placeholder="wipe clip path on the mixer host" aria-label="Wipe clip path on the mixer host"></label>
       <span class="vsep"></span>
       <button class="btn" id="direct" type="button" aria-pressed="false" title="Picks take to program (D)" aria-keyshortcuts="D">Direct: off</button>
-      <span id="hint" aria-hidden="true"><kbd>1–9</kbd><span class="w"> scene</span> · <kbd>C</kbd><span class="w"> cut</span> · <kbd>F</kbd><span class="w"> fade</span> · <kbd>W</kbd><span class="w"> wipe</span> · <kbd>D</kbd><span class="w"> direct</span><span id="hint-pages" hidden> · <kbd>[ ]</kbd><span class="w"> pages</span></span></span>
+      <span id="hint" aria-label="Keyboard shortcuts"><kbd>1–9</kbd><span class="w"> scene</span> · <kbd>C</kbd><span class="w"> cut</span> · <kbd>F</kbd><span class="w"> fade</span> · <kbd>W</kbd><span class="w"> wipe</span> · <kbd>D</kbd><span class="w"> direct</span><span id="hint-pages" hidden> · <kbd>[ ]</kbd><span class="w"> pages</span></span></span>
       <div id="error" role="alert"></div>
     </footer>
   </section>
@@ -844,7 +846,8 @@ function placeMeterTip() {
   const {anchor, tip} = activeTip, box = anchor.getBoundingClientRect();
   if (!anchor.offsetWidth) { tip.hidden = true; activeTip = null; return; }
   tip.style.left = `${Math.max(12, Math.min(innerWidth - tip.offsetWidth - 12, box.right - tip.offsetWidth))}px`;
-  tip.style.top = `${Math.max(12, Math.min(innerHeight - tip.offsetHeight - 12, box.bottom + 2))}px`;
+  const top = box.bottom + tip.offsetHeight + 14 <= innerHeight ? box.bottom + 2 : box.top - tip.offsetHeight - 2;
+  tip.style.top = `${Math.max(12, Math.min(innerHeight - tip.offsetHeight - 12, top))}px`;
 }
 // `rows` are [label, value] pairs shown as a list, unless `render` turns them into other nodes.
 function setMeterTip(anchor, title, rows, render) {
@@ -1539,8 +1542,13 @@ function render() {
   renderCounts(); renderMeters(); renderHost(); renderWipeCache(); renderBuses(); renderKeys(); renderSlots(); renderChips(); renderScenes();
   observeCuts(); renderLatency(); placeMeterTip();
   $("hint-pages").hidden = !pagesBus();
-  $("hint").title = ["1–9 scene · C cut · F fade · W wipe · D direct", pagesBus() && "[ ] page",
-                     gridAux() && `⇧1–${Math.min(slotsOf(gridAux()).length, 9)} slot`].filter(Boolean).join(" · ");
+  setMeterTip($("hint"), "Keyboard shortcuts", [
+    ["1–9", "Pick visible scene"], ["C", "Cut to selected scene"],
+    ["F", "Fade to selected scene"], ["W", "Wipe to selected scene"],
+    ["D", "Toggle direct-to-Program picks"],
+    ["[ / ]", "Previous / next multiview page"],
+    ...(gridAux() ? [[`Shift+1–${Math.min(slotsOf(gridAux()).length, 9)}`, "Assign selected scene to slot"]] : []),
+  ]);
   trimTakebar();
   renderGraph();
 }
