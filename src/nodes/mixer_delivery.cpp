@@ -1,6 +1,7 @@
 #include "node_common.hpp"
 #include "../mixer/primitives/SourceDelivery.hpp"
 #include "../mixer/primitives/TickGrid.hpp"
+#include <deque>
 
 // Observe the published, keyed program. Slot prewarm and off-air sources never reach this node.
 class MixerDelivery : public NodeSISO<av::VideoFrame, av::VideoFrame>,
@@ -11,6 +12,8 @@ class MixerDelivery : public NodeSISO<av::VideoFrame, av::VideoFrame>,
     int64_t period_ns_ = 0;
     bool enabled_ = false;
     std::set<std::string> on_change_;
+    std::string trace_source_;
+    std::deque<Parameters> trace_;
 public:
     using NodeSISO::NodeSISO;
     av::Rational frameRate() override { return fps_; }
@@ -25,13 +28,22 @@ public:
             if (frame->isValid() && frame->pts().isValid()) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (enabled_) delivery_.observe(frame->pts().timestamp({1, 1000000000}), period_ns_, lineage);
+                if (!trace_source_.empty()) {
+                    Parameters ids = Parameters::array();
+                    if (auto found = lineage.find(trace_source_); found != lineage.end())
+                        for (const auto& capture : found->second) ids.push_back(capture.encode());
+                    trace_.push_back({{"pts_ns", frame->pts().timestamp({1, 1000000000})},
+                                      {"captures", std::move(ids)}});
+                    if (trace_.size() > 256) trace_.pop_front();
+                }
             }
             this->source_->pop();
         } else this->edgeSink()->edge()->consumedEvent().wait(2);
     }
     Parameters getObject(const std::string key) override {
-        if (key != "per_source") throw Error("mixer_delivery: unknown object " + key);
         std::lock_guard<std::mutex> lock(mutex_);
+        if (key == "trace") return Parameters(trace_);
+        if (key != "per_source") throw Error("mixer_delivery: unknown object " + key);
         Parameters result = Parameters::object();
         for (const auto& [name, count] : delivery_.counts())
             result[name] = {{"frames", count.frames}, {"repeats", count.repeats},
@@ -39,8 +51,13 @@ public:
         return result;
     }
     void setObject(const std::string key, const Parameters& value) override {
-        if (key != "enabled") throw Error("mixer_delivery: unknown object " + key);
         std::lock_guard<std::mutex> lock(mutex_);
+        if (key == "trace_source") {
+            trace_source_ = value.get<std::string>();
+            trace_.clear();
+            return;
+        }
+        if (key != "enabled") throw Error("mixer_delivery: unknown object " + key);
         const bool enable = value.get<bool>();
         if (enable && !enabled_) delivery_.reset();
         enabled_ = enable;

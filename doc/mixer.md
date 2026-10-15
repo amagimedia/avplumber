@@ -386,6 +386,10 @@ allowance count; capture IDs alone cannot distinguish losses within that allowan
 from intentional sampling. Matching capture and output rates have no such allowance.
 The UI uses these counters, never the compositors' queue diagnostics. They measure
 source selection before encoding, not packet loss or playback at a remote viewer.
+For frame-by-frame diagnosis, set `mixer_delivery`'s `trace_source` object to a
+source ID, then read `trace`. It retains the last 256 program timestamps and
+capture identities for that source, without retaining pixel buffers. Set
+`trace_source` to an empty string to disable tracing and clear the history.
 
 Browser sources default to `capture_cadence: "continuous"`. Declare
 `"on_change"` for intentional static pages: reused captures then appear only as
