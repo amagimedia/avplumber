@@ -58,6 +58,12 @@ starts preserve saved settings; change an existing show through Setup.
 Keep the writable media directory, including `.nv-cache`, across restarts.
 Do not mount the generated show file separately: Setup replaces it atomically.
 
+The image carries FFmpeg's CUDA filters as machine code for sm_75/80/86/89, so an
+L4 or T4 host starts without JIT-compiling them; `.nv-cache` then only serves GPUs
+newer than sm_89. The `dma-browser-cache` volume keeps each browser worker's
+compiled shader programs across container recreation. Keep GPU persistence mode on
+(`sudo systemctl enable --now nvidia-persistenced`); `stack.sh up` warns when it is off.
+
 ## Output codecs and bitrates
 
 Setup selects codec, preset and bitrate per program/own AUX, with one shared
