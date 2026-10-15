@@ -450,14 +450,14 @@ def test_a_window_shorter_than_a_frame_count_publication_waits_for_the_count_not
 
 
 def test_a_miss_restarts_the_window_from_the_poll_that_saw_it(monkeypatch):
-    # A program miss at 1 s and a bus drop at 5 s: the window that began at 1 s is cut short at
-    # 5 s, and the one from 5 s ends at 11 s; a drop counts the same as a missed deadline.
+    # A program miss at 1 s and a bus drop at 5 s: the window starts again at 1 s and ends at 7 s.
+    # The drop is counted but does not restart it (a GPU time-sharing episode drops on every bus).
     app, engine, clock = go_on_air(monkeypatch, {
         "mixer_comp_a": lambda now: (published(30)(now), int(now >= 1), 0),
         "mixer_comp_b": idle,
         "aux_1_comp": lambda now: (published(15)(now), 0, int(now >= 5)),
     }, start_stable_sec=6, start_stable_timeout_sec=60)
-    assert engine.at(" hold false") == [11.0, 11.0]
+    assert engine.at(" hold false") == [7.0, 7.0]
     assert app.startup["warm_up"] == {"missed_deadlines": 1, "output_drops": 1}
 
 
