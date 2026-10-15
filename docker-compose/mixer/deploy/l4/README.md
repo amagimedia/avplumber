@@ -84,13 +84,14 @@ four of ten (two clean starts failed).
 
 A long compute time-slice on the GPU (`nvidia-smi compute-policy --set-timeslice=3`, per boot; a
 oneshot systemd unit on the measured host) changes the kind of failure, measured 2026-10-15
-17:18-18:13 UTC: with it the collapse no longer persists. With the browser at 3.5 CPUs (28 fps per
+17:18-18:13 UTC: with it the collapse no longer persists. With the browser unthrottled (28 fps per
 window) a 12-cycle soak of the fade and DSK cases had one 12 s stall (all compositors drawing
 50-90 ms at once, 390 missed deadlines, 3950 AUX drops) that ended on its own, where the same
-browser load without the long slice collapsed within seconds and stayed collapsed. The 1.5-CPU
-cap passed the same soak with no missed deadline, so both layers stay in place. The default
-slice lets Chromium's GL contexts interleave the mixer's many short dependent kernels; the long
-slice lets the mixer's context drain its queue before yielding.
+browser load without the long slice collapsed within seconds and stayed collapsed. Capping the
+browser at 1.5 CPUs removes the stalls but starves the windows to 14-16 fps, which is visibly
+choppy on air, so the stack runs the browser unthrottled with the long slice and a watchdog, and
+the stall's cause (GPU time-sharing against Chromium's GL contexts or the 72 W power cap) is
+still being attributed with 1 s loggers of GPU clock, power, throttle reason and per-process use.
 
 Operating rules that follow: keep the browser container's CPU weight below the mixer's
 (`cpu_shares: 512` above; Chromium raises its GPU processes to nice -8 on its own), avoid
