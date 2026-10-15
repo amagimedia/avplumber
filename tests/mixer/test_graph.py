@@ -1914,6 +1914,8 @@ def test_dsk_keys_the_program_after_the_mixer_with_one_small_program_clocked_pas
     assert keyer["type"] == "mixer_keyer"
     assert keyer["src"] == ["mixer_final_out", "dsk_key_bug", "dsk_key_strap"]
     assert keyer["subscriptions"] == ["", "dsk_key_bug", "dsk_key_strap"]
+    assert [(edge, size) for edge, size in app.avp.edges.plans if edge.startswith("dsk_key_")] == [
+        ("dsk_key_bug", 2), ("dsk_key_strap", 2)]
     assert keyer["clock_input"] == 0 and "latency_ms" not in keyer
     assert keyer["max_layers"] == 3 and keyer["metadata_key"] == "dsk_layers_v1"
     assert keyer["layers"][0] == {"dst_x": 0, "dst_y": 0, "dst_w": 1920, "dst_h": 1080}

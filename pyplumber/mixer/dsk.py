@@ -45,7 +45,9 @@ class DownstreamKeyer:
             self.avp.addNode(self.api.Split({"name": "split_clean", "src": program, "dst": [feeds["clean"], keyed],
                                              "group": self.group, "on_error": "panic"}))
         for edge in self.edges:
-            self.avp.edges.planCapacity(edge, 1)
+            # A real paint can supersede a held copy at the same timestamp.
+            # Retain both until the keyer drains them and selects the newest.
+            self.avp.edges.planCapacity(edge, 2)
         w, h = self.cfg.canvas_w, self.cfg.canvas_h
         layers = [{"dst_x": 0, "dst_y": 0, "dst_w": w, "dst_h": h}]
         layers += [{"input": i + 1, "dst_x": k.dst.x, "dst_y": k.dst.y, "dst_w": k.dst.w, "dst_h": k.dst.h,

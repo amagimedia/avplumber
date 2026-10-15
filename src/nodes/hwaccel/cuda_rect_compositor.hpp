@@ -240,8 +240,9 @@ protected:
     }
 
     /// Subscribes each input to the shared source `subscriptions` names in `src` order, paced at
-    /// `fps`. With `allow_unsubscribed`, an empty name leaves that input an ordinary edge.
-    void subscribe(NodeCreationInfo &nci, av::Rational fps, bool allow_unsubscribed) {
+    /// `fps` unless `rate_limit` is false. With `allow_unsubscribed`, an empty name leaves
+    /// that input an ordinary edge.
+    void subscribe(NodeCreationInfo &nci, av::Rational fps, bool allow_unsubscribed, bool rate_limit = true) {
         const auto names = jsonToStringList(nci.params.at("subscriptions"));
         if (names.size() != source_edges_.size())
             throw Error(std::string(type_) + ": subscriptions must match inputs");
@@ -251,7 +252,7 @@ protected:
                 continue;
             }
             auto subscription = InstanceSharedObjects<avp::mixer::FrameSubscription>::get(nci.instance, name);
-            subscription->configure(fps);
+            subscription->configure(fps, rate_limit);
             subscriptions_.push_back(subscription);
         }
     }

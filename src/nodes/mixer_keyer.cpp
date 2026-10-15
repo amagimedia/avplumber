@@ -14,7 +14,7 @@
 /// `fade_inputs`.
 class MixerKeyer : public CudaRectCompositor {
     size_t clock_input_ = 0;
-    av::Rational frame_rate_{0, 1};   // the clock input's; paces the key subscriptions
+    av::Rational frame_rate_{0, 1};   // the clock input's grid for key timestamps and fades
     // Key frames waiting for the program tick they are stamped for. They arrive
     // about one playout latency ahead of that program frame; the bound stops a key
     // on an unrelated clock from retaining its producer's frames indefinitely.
@@ -190,7 +190,7 @@ std::shared_ptr<MixerKeyer> MixerKeyer::create(NodeCreationInfo &nci) {
     const Parameters &params = nci.params;
     auto node = std::make_shared<MixerKeyer>(parseConfig(nci, "mixer_keyer"));
     node->connect(nci);
-    // fps is the clock input's rate: it paces key subscriptions, not a playout.
+    // fps is the clock input's rate for timestamp matching, not a separate playout.
     if (!params.contains("clock_input") || !params.contains("fps") || params.value("aux_mode", false) ||
         params.contains("latency_ms") || params.contains("pgm_delay_frames"))
         throw Error("mixer_keyer: clock_input and fps are required; aux_mode, latency_ms and pgm_delay_frames are not keyer parameters");
@@ -219,8 +219,11 @@ std::shared_ptr<MixerKeyer> MixerKeyer::create(NodeCreationInfo &nci) {
     for (size_t i = 0; i < node->source_edges_.size(); ++i)
         node->key_fade_.emplace_back(node->active_inputs_.test((int)i));
     // The clock input is an ordinary edge: its empty name subscribes nothing.
+    // A held copy can arrive before the live paint for the same timestamp. Let
+    // the keyer's timestamp queue replace it; first-arrival rate limiting would
+    // discard that live paint even when it precedes the program's render deadline.
     if (params.contains("subscriptions"))
-        node->subscribe(nci, node->frame_rate_, true);
+        node->subscribe(nci, node->frame_rate_, true, false);
 
     return node;
 }
