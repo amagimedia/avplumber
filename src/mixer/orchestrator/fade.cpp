@@ -66,6 +66,12 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
             }
             return blend;
         }
+        // The start tick was routed before blend inputs were enabled. Its
+        // program picture is the zero-progress endpoint, even if it arrives
+        // after the destination tick. Discarding it forces a duplicate downstream.
+        const int program = state_->pgmSourceSwitcherIndex();
+        if (pts(program) > last_ns && pts(program) <= state_->take_start_ns)
+            return program;
         return -1; // wait for the prepared blend, without letting direct frames overtake it
     } else if (mode == MixerState::TransitionMode::Wipe &&
                state_->take_phase == MixerState::TakePhase::Wipe && !state_->wipe_switched &&
