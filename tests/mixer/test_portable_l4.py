@@ -91,3 +91,22 @@ def test_setup_browser_limit_includes_keys_and_clamps_saved_mix(fps, browsers):
     show = plan(recipe, Path("/tmp/mixer-test"))[0]
     assert sum(s["kind"] == "browser" for s in show["sources"]) == browsers
     assert len(show["sources"]) <= source_limit(profile, fps, 10, "422")
+
+
+@pytest.mark.parametrize("counts", [
+    [105, 0, 0, 0, 10, 47, 0],  # reduced browsers, unchanged decoder/upload counts
+    [105, 0, 0, 0, 10, 0, 0],
+    [105, 0, 0, 0, 0, 0, 0],   # NVDEC only, at its budget
+    [0, 0, 0, 0, 10, 0, 0],
+    [0, 0, 0, 0, 0, 47, 0],
+])
+def test_manual_source_counts_reach_generated_show_unchanged(tmp_path, counts):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]
+    recipe = recipe_for(profile, {**DEFAULT_SETTINGS, "fps": 30, "bit_depth": 8, "chroma": "420",
+                                  "source_count": sum(counts), "weights": counts})
+    assert [s["weight"] for s in recipe["inputs"]] == counts
+    show = plan(recipe, tmp_path)[0]
+    assert len(show["sources"]) == sum(counts)
+    assert sum(s["kind"] == "browser" for s in show["sources"]) == counts[4]
+    assert sum(s["kind"] == "video" for s in show["sources"]) == counts[0]
+    assert sum(s["kind"] == "nv12" for s in show["sources"]) == counts[5]

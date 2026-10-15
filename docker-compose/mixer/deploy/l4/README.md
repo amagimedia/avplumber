@@ -38,6 +38,11 @@ CUDA copy on import. That option requires the version-2 browser build described
 in the [browser configuration](../../../../deps/dma-browser/README.md).
 
 Open `http://<host>:7681/setup/`, controls at `/`, outputs at `/wall`.
+Each source count is editable, including zero. Count edits recalculate the total
+without refilling other types; editing **Unique sources** restores the balanced
+proportions. Per-type controls enforce the remaining total, shared NVDEC, HDR
+surface, browser/DSK and weighted upload budgets. Rate or format changes reduce
+custom counts where necessary, keeping disabled types at zero.
 Allow the public proxy port and `JANUS_RTP_PORT_RANGE` (UDP 20000–20100 by
 default). Set `MIXER_HTPASSWD` or use an authenticated reverse proxy.
 The included proxy forwards HTTP and WebSocket paths.

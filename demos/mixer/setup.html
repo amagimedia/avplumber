@@ -92,7 +92,7 @@ summary { cursor: pointer; }
 <p class="hint">Unique sources are independent input chains. Scene count is the number of compositions you can switch between; scenes reuse those sources.</p>
 </section>
 <section class="card"><div class="card-title"><h2>Sources</h2></div>
-<p class="hint">Always the Balanced mix of the unique sources: NVDEC, browser and raw uploads in about equal shares; on a 10-bit canvas half of each 4:2:0 path is HLG.</p>
+<p class="hint">Set each source count within its budget; zero disables that type. Editing Unique sources restores the default balanced proportions.</p>
 <div id="source-controls"></div><div class="allocation" id="allocation" aria-hidden="true"></div>
 <p class="hint" id="allocation-note"></p>
 <div id="browser-overlay-controls">
@@ -150,7 +150,7 @@ const types = [
 ];
 // Presentation order is independent of the saved recipe's weight indices.
 const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]]];
-// The Balanced mix, the only one the page sets, is the measured one (docs/capacity.md): NVDEC, browser
+// The default Balanced mix (docs/capacity.md): NVDEC, browser
 // and raw uploads in about equal shares, half of each 4:2:0 path HLG on a 10-bit canvas (an SDR canvas
 // folds HLG into SDR).
 const BALANCED=[18,18,4,0,36,17,17];
@@ -166,7 +166,7 @@ const defaultEncode=id=>({codec:id==='hdr'?'hevc_nvenc':'h264_nvenc',...(profile
 const encodeRows=new Map();
 // The extra aux count as typed or loaded; a lower maximum lowers it. A total of unique sources
 // typed below the maximum stays, within the maximum; null follows the maximum.
-let extraAux=0, typedSources=null, atDefaults=true;
+let extraAux=0, typedSources=null, manualCounts=null, atDefaults=true;
 // setup_runtime.for_mode: the profile with the limits measured apart on the chosen canvas.
 const limits=()=>({...profile,...profile.mode_limits?.[$('mode').value]});
 const browserLimit=()=>limits().browser_windows_by_fps?.[Number($('fps').value)]??limits().browser_windows;
@@ -208,7 +208,12 @@ const groups=sourceGroups.map(([name,indices])=>{
  const heading=document.createElement('h2');heading.textContent=name;group.append(heading);
  indices.forEach(i=>{
   const t=types[i],row=document.createElement('div');row.className='source';
-  row.innerHTML=`<div><b><span class="dot" style="background:${t.color}"></span>${t.name}</b><small>${t.detail}</small></div><b id="count-${t.id}" aria-label="${t.name} sources"></b>`;
+  row.innerHTML=`<div><b><span class="dot" style="background:${t.color}"></span>${t.name}</b><small>${t.detail}</small></div><input id="count-${t.id}" type="number" min="0" step="1" aria-label="${t.name} sources">`;
+  row.querySelector('input').addEventListener('input',()=>{
+   manualCounts=types.map(t=>$(`count-${t.id}`).valueAsNumber);
+   if(manualCounts.every(n=>Number.isInteger(n)&&n>=0))manualCounts[i]=Math.min(manualCounts[i],sourceTypeMax(i,manualCounts));
+   update();
+  });
   group.append(row);
  });
  if(indices.includes(4))group.append($('browser-overlay-controls'));
@@ -222,16 +227,53 @@ function allocate(total,values){
  for(let n=total-counts.reduce((a,b)=>a+b,0),i=0;i<n;i++)counts[order[i]]++;
  return counts;
 }
+function cappedAllocation(total,values,costs,limit){
+ for(let size=Math.min(total,limit);size>=0;size--){
+  const counts=size?allocate(size,values):values.map(()=>0);
+  if(counts.reduce((n,v,k)=>n+v*costs[k],0)<=limit)return counts;
+ }
+}
 function sourceCounts(total,values){
  let counts=allocate(total,values);
  for(const [indices,costs,limit,name] of sourceBudgets()){
   if(indices.reduce((n,i,k)=>n+counts[i]*costs[k],0)<=limit)continue;
-  let size=Math.min(limit,indices.reduce((n,i)=>n+counts[i],0)),capped;
-  do{capped=allocate(size,indices.map(i=>values[i]));if(capped.reduce((n,v,k)=>n+v*costs[k],0)<=limit)break;size--;}while(size>=0);
+  const capped=cappedAllocation(indices.reduce((n,i)=>n+counts[i],0),indices.map(i=>values[i]),costs,limit);
+  const size=capped.reduce((a,b)=>a+b,0);
   const remaining=values.map((w,i)=>indices.includes(i)?0:w);
   if(!remaining.some(Boolean))throw Error(`${name} is limited to ${limit}; enable another source type.`);
   counts=sourceCounts(total-size,remaining);indices.forEach((index,i)=>counts[index]=capped[i]);break;
  }
+ return counts;
+}
+// Count edits consume only their own remaining budget; a mode/rate change can reduce
+// existing counts, but never fills a type the operator set to zero.
+function sourceAvailable(i){
+ const {bit_depth,chroma}=outputMode(),fps=Number($('fps').value);
+ if(i===0||i===1)return nvdecLimit(fps)>0&&(i===0||bit_depth===10);
+ if(i===2||i===3)return chroma==='422'&&limits().hlg_v210>0;
+ if(i===4)return browserLimit()>dskPages().length;
+ return rawUploadUnits(fps)>0&&(i===5||bit_depth===10);
+}
+function sourceTypeMax(i,counts){
+ if(!sourceAvailable(i))return 0;
+ let max=sourceLimit()-counts.reduce((n,v,k)=>n+(k===i?0:v),0);
+ for(const [indices,costs,limit] of sourceBudgets()){
+  const k=indices.indexOf(i);if(k<0)continue;
+  const used=indices.reduce((n,j,p)=>n+(j===i?0:counts[j]*costs[p]),0);
+  max=Math.min(max,Math.floor((limit-used)/costs[k]));
+ }
+ if(i===1)max=Math.min(max,limits().nvdec_hdr_decodes?.[Number($('fps').value)]??Infinity);
+ return Math.max(0,max);
+}
+function fitManualCounts(values){
+ let counts=values.map((n,i)=>sourceAvailable(i)?n:0);
+ counts[1]=Math.min(counts[1],limits().nvdec_hdr_decodes?.[Number($('fps').value)]??Infinity);
+ for(const [indices,costs,limit] of sourceBudgets()){
+  if(indices.reduce((n,i,k)=>n+counts[i]*costs[k],0)<=limit)continue;
+  const capped=cappedAllocation(indices.reduce((n,i)=>n+counts[i],0),indices.map(i=>counts[i]),costs,limit);
+  indices.forEach((i,k)=>counts[i]=capped[k]);
+ }
+ if(counts.reduce((a,b)=>a+b,0)>sourceLimit())counts=allocate(sourceLimit(),counts);
  return counts;
 }
 const FIELD_NAMES={sources:'Unique sources',scenes:'Scenes','extra-aux':'Extra aux outputs'};
@@ -241,7 +283,23 @@ function update(){
  try{
  const fps=Number($('fps').value),limit=sourceLimit(),{bit_depth,chroma}=outputMode(),tenBit=bit_depth===10;
  $('sources').max=limit;
- if(typedSources===null||Number.isInteger(typedSources)&&typedSources>0)$('sources').value=Math.min(typedSources??limit,limit);
+ let counts;
+ if(manualCounts){
+  if(!manualCounts.every(n=>Number.isInteger(n)&&n>=0))throw Error('Source counts must be whole numbers of zero or more.');
+  counts=manualCounts=fitManualCounts(manualCounts);
+  $('sources').value=typedSources=counts.reduce((a,b)=>a+b,0);
+ }else{
+  if(typedSources===null||Number.isInteger(typedSources)&&typedSources>0)$('sources').value=Math.min(typedSources??limit,limit);
+  counts=sourceCounts(integer('sources',1,limit),foldForMode([...BALANCED]));
+ }
+ sourceGroups.forEach(([,indices],k)=>{
+  indices.forEach(i=>{
+   const field=$(`count-${types[i].id}`);field.value=counts[i];field.max=sourceTypeMax(i,counts);
+   field.parentElement.hidden=!sourceAvailable(i);
+  });
+  groups[k].hidden=indices.every(i=>!sourceAvailable(i));
+ });
+ $('source-total').textContent=counts.reduce((a,b)=>a+b,0);
  $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps${tenBit?` on a 10-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas (estimated)`:''}. Limits measured on ${instanceType}.`;
  $('browser-max').textContent=` · maximum ${browserLimit()}`;
  $('count-sdr420').parentElement.querySelector('small').textContent=`${profile.generated_decode?.codec==='hevc'?'HEVC':'H.264'} patterns · NVDEC`;
@@ -288,12 +346,8 @@ function update(){
  $('scenes').max=maxScenes;
  if(Number($('scenes').value)>maxScenes)$('scenes').value=maxScenes;
  const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,maxScenes);
- const counts=sourceCounts(sourceCount,foldForMode([...BALANCED])),[sourceWidth,sourceHeight]=[1920,1080];
+ const [sourceWidth,sourceHeight]=[1920,1080];
  if(counts[1]>(limits().nvdec_hdr_decodes?.[fps]??Infinity))throw Error(`HDR NVDEC inputs are limited to ${limits().nvdec_hdr_decodes[fps]} at ${fps} fps to reserve VRAM.`);
- sourceGroups.forEach(([,indices],k)=>{
-  indices.forEach(i=>{const count=$(`count-${types[i].id}`);count.textContent=counts[i];count.parentElement.hidden=!counts[i];});
-  groups[k].hidden=indices.every(i=>!counts[i]);
- });
  const portrait=$('orientation').value==='portrait',width=portrait?sourceHeight:sourceWidth,height=portrait?sourceWidth:sourceHeight;
  currentSettings={orientation:$('orientation').value,fps,source_count:sourceCount,scene_count:sceneCount,layout:$('layout').value,
    bit_depth,chroma,weights:counts,encodes,dsk:dskPages(),clean_feed:clean,extra_aux:extra?integer('extra-aux',0,extraLimit):0,
@@ -317,7 +371,7 @@ function update(){
 }
 function setBusy(value){
  busy=value||submitting;
- document.querySelectorAll('.fields input,.fields select,.toggles input,#encodes select,#encodes input').forEach(el=>el.disabled=busy);
+ document.querySelectorAll('.fields input,.fields select,.toggles input,.source input,#encodes select,#encodes input').forEach(el=>el.disabled=busy);
  if($('extra-aux'))$('extra-aux').disabled=busy||!extraLimit;
  encodeRows.get('hdr')?.querySelector('.codec').setAttribute('disabled','');
  $('output-defaults').disabled=busy||atDefaults;
@@ -345,6 +399,11 @@ async function refresh(){
     encodes=structuredClone(s.encodes??{});extraAux=s.extra_aux??0;
     document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;
     typedSources=s.source_count<sourceLimit()?s.source_count:null;
+    if(Array.isArray(s.weights)&&s.weights.length===types.length&&s.weights.every(n=>Number.isInteger(n)&&n>=0)&&
+       s.weights.reduce((a,b)=>a+b,0)===s.source_count){
+     const balanced=sourceCounts(Math.min(s.source_count,sourceLimit()),foldForMode([...BALANCED]));
+     if(s.weights.some((n,i)=>n!==balanced[i]))manualCounts=[...s.weights];
+    }
    }
    loaded=true;update();
   }
@@ -380,7 +439,7 @@ $('apply').onclick=async()=>{
 };
 document.querySelectorAll('.fields input,.fields select,.toggles input').forEach(input=>input.addEventListener('input',update));
 // Before update(): a total typed below the maximum stays; the maximum or more follows it.
-$('sources').addEventListener('input',()=>{const n=Number($('sources').value);typedSources=n<sourceLimit()?n:null;},{capture:true});
+$('sources').addEventListener('input',()=>{manualCounts=null;const n=Number($('sources').value);typedSources=n<sourceLimit()?n:null;},{capture:true});
 setBusy(true);refresh();
 </script>
 </html>

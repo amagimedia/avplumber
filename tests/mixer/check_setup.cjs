@@ -169,9 +169,9 @@ const { chromium } = require('playwright');
     const eight = await apply();
     assert.deepEqual([eight.source_count, eight.weights.reduce((a, b) => a + b, 0)], [8, 8], 'typing a replacement restores a valid setup');
 
-    // The source mix is always Balanced: read-only counts, the docs' table with four key pages
+    // Editing the global total restores Balanced counts, the docs' table with four key pages
     // (docs/cookbook/source-limits.html: SDR NVDEC, HLG NVDEC, HLG v210, browser, NV12, P010).
-    assert.equal(await page.locator('#source-controls input, [data-preset]').count(), 0);
+    assert.equal(await page.locator('#source-controls input[type=number]').count(), 7);
     const balanced = {'8:420': [[40, 0, 0, 36, 30, 0], [36, 0, 0, 36, 34, 0], [22, 0, 0, 36, 20, 0], [18, 0, 0, 36, 17, 0]],
       '10:420': [[16, 19, 0, 31, 10, 10], [15, 18, 0, 30, 12, 11], [10, 12, 0, 34, 7, 6], [8, 10, 0, 28, 6, 5]],
       '10:422': [[14, 13, 3, 27, 10, 10], [13, 13, 3, 25, 12, 11], [11, 11, 3, 24, 7, 6], [9, 9, 2, 20, 6, 5]]};
@@ -183,10 +183,10 @@ const { chromium } = require('playwright');
         const {weights: [sdr, hlg, v210, sdr422, browser, nv12, p010], source_count} = await apply();
         assert.deepEqual([sdr, hlg, v210, browser, nv12, p010], mixes[i], `${mode} at ${fps} fps`);
         assert.equal(sdr422 + sdr + hlg + v210 + browser + nv12 + p010, source_count);
-        assert.equal(await page.locator('#count-browser').textContent(), String(browser));
+        assert.equal(await page.locator('#count-browser').inputValue(), String(browser));
       }
     }
-    assert.equal(await page.locator('#count-sdr422').isHidden(), true, 'a kind the mix leaves out has no row');
+    assert.equal(await page.locator('#count-sdr422').isVisible(), true, 'supported zero-count types remain editable');
     await page.locator('#scenes').fill('193');
     assert.equal((await apply()).scene_count, 192);
     // The browser frames in flight are not a setup control: the show takes the default.
@@ -327,6 +327,72 @@ const { chromium } = require('playwright');
       assert.match(await text('browser-max'), new RegExp(`maximum ${count}$`));
       for (const id of ['mv', 'mv2', 'extra']) assert.equal(setup.encodes[id].preset, 'p1');
     }
+    // Manual edits change only that type and recalculate the total, including zero.
+    await reset();
+    await page.locator('#mode').selectOption('8:420');
+    await page.locator('#fps').selectOption('30');
+    const count = id => page.locator(`#count-${id}`);
+    assert.equal(await sources.inputValue(), '192');
+    await count('browser').fill('10');
+    assert.equal(await sources.inputValue(), '162');
+    assert.equal(await count('sdr420').inputValue(), '105');
+    assert.equal(await count('sdr420_raw').inputValue(), '47');
+    const reducedBrowsers=await apply();
+    await reset(reducedBrowsers);
+    assert.equal(await count('browser').inputValue(), '10', 'custom counts survive reload');
+    await count('sdr420_raw').fill('0');
+    assert.equal(await sources.inputValue(), '115');
+    await count('browser').fill('0');
+    assert.deepEqual((await apply()).weights, [105,0,0,0,0,0,0]);
+    assert.equal(await count('browser').isVisible(),true);
+    assert.equal(await count('sdr420_raw').isVisible(),true);
+    await count('sdr420').fill('999');
+    assert.equal(await count('sdr420').inputValue(), '105', 'NVDEC cannot exceed its pool');
+    await page.locator('#fps').selectOption('60');
+    assert.deepEqual((await apply()).weights,[40,0,0,0,0,0,0], 'rate changes reduce counts without filling disabled types');
+    await page.locator('#fps').selectOption('30');
+    await sources.fill('192');
+    assert.deepEqual((await apply()).weights,[105,0,0,0,40,47,0], 'global total restores the default mix');
+    await count('browser').fill('999');
+    assert.equal(await count('browser').inputValue(),'40');
+    for(const input of await page.locator('#dsk-pages input').all())await input.check();
+    assert.equal(await count('browser').inputValue(),'36', 'keys reserve browser and total capacity');
+    assert.equal(await sources.inputValue(),'188');
+    await count('sdr420').fill('');
+    assert.equal(await page.locator('#apply').isDisabled(),true);
+    await count('sdr420').fill('105');
+    assert.equal(await page.locator('#apply').isDisabled(),false);
+
+    // Shared HDR decode and upload budgets apply even with all other types disabled.
+    instanceType='tesla_t4';
+    await reset();
+    await page.locator('#mode').selectOption('10:420');
+    await page.locator('#fps').selectOption('25');
+    for(const id of ['sdr420','hlg420','browser','sdr420_raw','hlg420_raw'])await count(id).fill('0');
+    assert.equal(await sources.inputValue(),'0');
+    assert.equal(await page.locator('#apply').isDisabled(),true,'at least one source is required');
+    await count('hlg420_raw').fill('999');
+    assert.equal(await count('hlg420_raw').inputValue(),'15','P010 costs two upload units');
+    await count('sdr420_raw').fill('999');
+    assert.equal(await count('sdr420_raw').inputValue(),'0','NV12 shares the upload budget');
+    await count('hlg420_raw').fill('5');
+    await count('sdr420_raw').fill('999');
+    assert.equal(await count('sdr420_raw').inputValue(),'20');
+    await count('hlg420').fill('30');
+    await count('sdr420').fill('999');
+    assert.equal(await count('sdr420').inputValue(),'10','SDR and HDR share NVDEC capacity');
+    await count('browser').fill('999');
+    assert.equal(await sources.inputValue(),await sources.getAttribute('max'),'total cap binds before the remaining browser capacity');
+    const bounded=await apply();
+    assert.equal(bounded.weights.reduce((a,b)=>a+b,0),bounded.source_count);
+
+    instanceType='nvidia_l4_cuarray';
+    await reset();
+    await page.locator('#mode').selectOption('10:420');
+    await page.locator('#fps').selectOption('30');
+    await count('sdr420').fill('0');
+    await count('hlg420').fill('999');
+    assert.equal(await count('hlg420').inputValue(),'53','HDR surface budget is separate from total NVDEC');
     assert.deepEqual(errors, []);
     console.log('PASS: Balanced source counts, the maximum total, per-output encodes, NVENC budget and extra aux outputs');
   } finally {
