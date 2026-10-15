@@ -536,7 +536,9 @@ function fieldSeconds(id, empty, message) {
   showError(message);
   return null;
 }
-function take(kind, scene = selected, wipe = currentWipe) {
+// Without a scene, a take acts on the Preview the mixer shows, as Space does: after a take the
+// preview is the scene that left program, not the one picked last.
+function take(kind, scene = state?.status?.pvw_scene || selected, wipe = currentWipe) {
   const payload = {command: kind, scene};
   if (kind === "fade") {
     payload.duration_sec = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
@@ -710,7 +712,8 @@ function renderScenes() {
       const tile = el("button", "tile");
       tile.dataset.scene = scene.id;
       tile.append(el("span", "n", i < 9 ? String(i + 1) : ""), el("span", "label", scene.id));
-      tile.onclick = () => pick(scene.id);
+      // Give the focus back: a focused tile would take Space as another click on itself.
+      tile.onclick = () => { pick(scene.id); restFocus(); };
       return tile;
     }));
   }
@@ -1637,7 +1640,7 @@ for (const field of document.querySelectorAll("#deck input"))
   field.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "Escape") restFocus(); });
 addEventListener("keydown", (e) => {
   if (e.defaultPrevented || e.target.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), .dd-menu') || e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === " " && e.target.closest?.('button, a, [role="button"]')) return;
+  if (e.key === " " && e.target.closest?.('button, a, [role="button"]') && !e.target.closest?.("#scenes")) return;
   if (e.repeat && (e.key === " " || e.key.toLowerCase() === "k")) { e.preventDefault(); return; }
   const shifted = Number(e.code.replace("Digit", ""));
   if (e.shiftKey && shifted >= 1 && shifted <= slotsOf(gridAux()).length) { e.preventDefault(); assignSlot(shifted - 1, selected || null); return; }
