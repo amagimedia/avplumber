@@ -158,9 +158,11 @@ class FakeRtcpFeedbackListener:
 def fake_api():
     types = {
         "AssumeVideoFormat": "assume_video_format", "Bsf": "bsf", "ClipCache": "clip_cache",
+        "AudioMixer": "audio_mixer",
         "CudaTransform": "cuda_transform", "DecAudio": "dec_audio", "DecVideo": "dec_video", "Demux": "demux",
         "DrmPrimeToCuda": "drm_prime_to_cuda", "EncAudio": "enc_audio", "EncVideo": "enc_video",
         "FilterVideo": "filter_video",
+        "ResampleAudioForwardChannels": "resample_audio_forward_channels",
         "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input_rec",
         "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer",
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",

@@ -391,6 +391,20 @@ FPS** (see `force_fps` node)
 -   `flags` (list of strings) - list of possible flags:
     <https://www.ffmpeg.org/doxygen/3.2/swscale_8h_source.html#l00057>
 
+### `audio_mixer`
+
+Multi-input AFV consumer for the mixer’s `transition_ended` /
+`transition_progress` events (`doc/mixer_audio_follow_video.md`). Sums
+`av::AudioSamples` (fltp) with per-bus gains scheduled at event `pts`.
+
+-   `src` (list of edges) and `source_ids` (same length; logical mixer source ids)
+-   `outputs` (object: bus id → output edge), e.g. `{"program": "audio_mixer_program"}`
+-   `dst_channel_layout` (string, default `stereo`), `dst_sample_rate` (default 48000),
+    `frame_samples` (default 960; 20 ms at 48 kHz for Opus)
+
+Wire via `pyplumber.mixer.audio_mixer.wire_audio_mixer` /
+`MixerOptions.audio_router_node`.
+
 ### `resample_audio`
 
 Dynamic audio resampler, maintains continuity of output stream even if

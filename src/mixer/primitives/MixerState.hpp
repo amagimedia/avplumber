@@ -201,7 +201,10 @@ struct MixerState : public InstanceShared<MixerState> {
     SlotNodes slot_a, slot_b;
     std::string source_switcher_name;  // "out_sel"
     /// Optional audio-router node (any IInputsObjects impl). Orchestrator and AUX followers
-    /// emit transition_ended / transition_progress; the node maps them to its own mix model.
+    /// emit transition_ended / transition_progress to this single name; the node maps them to
+    /// its own mix model (e.g. multi-bus audio_mixer). To fan out to several consumers or drop
+    /// some outputs, point this at a thin IInputsObjects forwarder — see
+    /// doc/mixer_audio_follow_video.md.
     std::string audio_router_node_name;
     /// Scene name whose video sources are the fade "to" set (PVW destination).
     std::string audio_fade_incoming_scene;

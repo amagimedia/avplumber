@@ -9,9 +9,6 @@ output and how a timed take is progressing. That node — any
 actual routing and gain policy. The mixer never touches an audio matrix
 directly.
 
-Consumer checklist for **dyremix_mixer** (avplumber-nodes): see
-[dyremix_mixer_transition_events.md](dyremix_mixer_transition_events.md).
-
 ## Enabling it
 
 `mixer.init` accepts an optional `audio_router_node`: the name of the node to
@@ -102,3 +99,31 @@ itself, only hands out the edges:
 - `pyplumber.mixer.inputs.build_input(..., has_audio=True)` is the lower-level
   helper behind this, for applications building inputs directly. It returns
   `(video_edge, audio_edge_or_None)` instead of a single edge.
+
+## Open-source consumer: `audio_mixer`
+
+In-tree node `audio_mixer` (`src/nodes/audio_mixer.cpp`) implements this
+protocol: multi-input fltp sum, multi-bus keyed by `output`, hard-sync gain at
+`pts`. With `MixerOptions.audio_router_node` set and `has_audio` sources,
+`build_application` wires it via `pyplumber.mixer.audio_mixer.wire_audio_mixer`
+and can send the program bus to Janus Opus (`build_janus_audio_output`).
+
+## One `audio_router_node` vs several consumers
+
+The mixer notifies **one** node name. That is enough when a single node keeps a
+mix/bus per `output` (as `audio_mixer` does).
+
+To use different consumers per output without changing the orchestrator — e.g.
+`audio_mixer` for `program`, another AFV consumer for one AUX, and no audio for
+others — register a thin fan-out node as `audio_router_node`. It implements
+`IInputsObjects::setObject`, reads `params.output`, and forwards (or drops) to
+the chosen node.
+
+Conditions when mixing consumers:
+
+- Each consumer must receive the show’s `audio_edges` it needs (shared wiring or
+  separate splits).
+- An AUX `sources` list may contain the sentinel `"program"`. That consumer must
+  hear the **program audio bus** (a tap of `audio_mixer`’s program output, or an
+  equivalent bus in the other consumer) — not an expanded list of camera ids.
+  The orchestrator does not wire that tap.

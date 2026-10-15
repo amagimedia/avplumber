@@ -24,8 +24,8 @@ def _api(nodes, builder):
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
     return SimpleNamespace(**{
         name: getattr(nodes, name) for name in (
-            "AssumeVideoFormat", "Bsf", "DecAudio", "DecVideo", "Demux", "EncAudio", "EncVideo",
-            "FilterVideo", "ForceFPS", "ForceKeyFrame", "InputRec", "Mux",
+            "AssumeVideoFormat", "AudioMixer", "Bsf", "DecAudio", "DecVideo", "Demux", "EncAudio",
+            "EncVideo", "FilterVideo", "ForceFPS", "ForceKeyFrame", "InputRec", "Mux",
             "Output", "PreheatVideoRouter", "Realtime", "ResampleAudio",
             "ResampleAudioForwardChannels", "Split",
         )
@@ -92,3 +92,16 @@ def test_video_only_show_is_unaffected(native_boundary):
     assert app.audio_edges == ()
     assert not [e for e in app.avp.events if e.startswith("mixer.cut ")]
     assert not any("audio" in name for name in app.avp.nodes)
+
+
+def test_audio_mixer_is_wired_when_router_and_has_audio(native_boundary):
+    nodes, builder = native_boundary
+    app = build_application(_audio_show(), MixerOptions(audio_router_node="audio_mixer"),
+                            api=_api(nodes, builder))
+    assert app.audio_edges
+    # NativeEngine.addNode stores parameters by name.
+    params = app.avp.nodes.get("audio_mixer")
+    assert params is not None
+    assert params["type"] == "audio_mixer"
+    assert params["source_ids"]
+    assert "program" in params["outputs"]

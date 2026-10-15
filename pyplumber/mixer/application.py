@@ -87,8 +87,10 @@ class MixerOptions:
     dmabuf_rest: str = "http://127.0.0.1:9009"
     browser_frame_queue: int | None = None
     max_compositor_layers: int | None = None
-    # Optional audio-router node name (any IInputsObjects impl, e.g. an embedded audio mixer).
-    # Mixer emits transition_ended / transition_progress; "" disables it.
+    # Optional audio-router node name (any IInputsObjects impl, e.g. audio_mixer).
+    # Mixer emits transition_ended / transition_progress to this single name; "" disables it.
+    # One name only: to split outputs across several consumers / none, use a fan-out
+    # IInputsObjects as this name (see doc/mixer_audio_follow_video.md).
     audio_router_node: str = ""
 
     def __post_init__(self):
@@ -310,6 +312,7 @@ def load_avp_api():
         AssumeVideoFormat,
         Bsf,
         CudaTransform,
+        AudioMixer,
         DecAudio,
         DecVideo,
         Demux,
@@ -342,6 +345,7 @@ def load_avp_api():
         AssumeVideoFormat=AssumeVideoFormat,
         Bsf=Bsf,
         CudaTransform=CudaTransform,
+        AudioMixer=AudioMixer,
         DecAudio=DecAudio,
         DecVideo=DecVideo,
         Demux=Demux,
@@ -680,6 +684,16 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
+    program_audio_edge = None
+    if options.audio_router_node and audio_edges:
+        from .audio_mixer import wire_audio_mixer
+        wire_audio_mixer(avp, api, audio_edges, name=options.audio_router_node,
+                         outputs={"program": f"{options.audio_router_node}_program"},
+                         group=OUTPUT_GROUP)
+        program_audio_edge = f"{options.audio_router_node}_program"
+    elif options.audio_router_node and not audio_edges:
+        log.warning("audio_router_node=%r set but no has_audio sources; AFV will fire with nothing to mix",
+                    options.audio_router_node)
     from pyplumber.mixer.aux import AuxBus, AuxBuses
     aux = AuxBuses(avp, [AuxBus(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses]) if cfg.aux_buses else None
     keyer = DownstreamKeyer(avp, api, mixer, cfg, group=OUTPUT_GROUP) if cfg.dsk_keys else None
@@ -706,6 +720,12 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend)
+    if program_audio_edge and options.janus_output:
+        from .janus import JanusAudioConfig, build_janus_audio_output
+        build_janus_audio_output(
+            avp, api, program_audio_edge,
+            JanusAudioConfig(host=options.janus_host),
+            group=OUTPUT_GROUP, prefix="janus_audio")
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False,
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers),
                         aux_buses=aux, audio_edges=tuple(audio_edges))

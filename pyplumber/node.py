@@ -323,6 +323,8 @@ class FilterAudio(InternalNode):
     TYPE = "filter_audio"
 class EncAudio(InternalNode):
     TYPE = "enc_audio"
+class AudioMixer(InternalNode):
+    TYPE = "audio_mixer"
 class WriteAudioEnvelope(InternalNode):
     TYPE = "write_audio_envelope"
 
