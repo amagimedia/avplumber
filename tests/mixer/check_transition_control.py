@@ -264,6 +264,9 @@ def check(avp, mixer, rec, errors, control_port, wipe_file, wipe_seconds, spam_s
     t_start = take('fade', 'full1')
     time.sleep(0.4)
     take('preview', 'split')
+    # The shown Preview follows the replaced preset, so a CUT sent for it acts on the new scene.
+    shown = status()['pvw_scene']
+    assert shown == 'split', ('Preview still shows the replaced scene', shown)
     latency = landed(rec, 'split', t_start, FADE + 0.6)
     case('preview_during_fade_replaces_preset', landed_from_first_ms=round(latency * 1000))
 

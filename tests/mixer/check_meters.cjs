@@ -187,6 +187,24 @@ const {chromium} = require('playwright');
     assert.equal(commands[0].scene, 'a', 'Space takes Preview even when selection differs');
     assert.equal(commands[0].duration_sec, 0.5);
     commands.length = 0;
+    // Choosing a transition only prepares Auto (a switcher's transition type); Cut and Auto take
+    // the Preview the mixer shows, not the last pick.
+    await page.evaluate(() => { currentTransition = 'cut'; selected = 'b'; restFocus(); });
+    await page.keyboard.press('f');
+    assert.equal(await page.evaluate(() => currentTransition), 'fade', 'F selects fade');
+    assert.deepEqual(commands, [], 'F does not take');
+    assert.equal(await page.locator('#auto').textContent(), 'Auto · fade', 'Auto shows what it will run');
+    // Clicking the selector must not leave Space to it: Space after a click is Auto, not a second selection.
+    await page.locator('#fade').click();
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('Space')]);
+    assert.deepEqual(commands.splice(0).map(c => c.command), ['fade'], 'Space after clicking Fade runs Auto');
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('c')]);
+    assert.deepEqual(commands.splice(0).map(c => [c.command, c.scene]), [['cut', 'a']], 'C cuts the Preview');
+    await page.evaluate(() => { setDirect(true); restFocus(); });
+    assert.equal(await page.locator('#direct').textContent(), 'Direct cut: on');
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('2')]);
+    assert.equal(commands.splice(0)[0].command, 'cut', 'a Direct pick cuts whatever Auto is set to');
+    await page.evaluate(() => { setDirect(false); restFocus(); });
     sample.dsk = [{id: 'logo', on: true}, {id: 'title', on: false}];
     await page.evaluate(async () => { await refresh(); restFocus(); });
     await page.waitForFunction(() => state.dsk?.length === 2);
@@ -196,7 +214,7 @@ const {chromium} = require('playwright');
     commands.length = 0;
     await page.keyboard.press('k');
     await page.waitForFunction(() => !keysPending && state.dsk.every(key => key.on));
-    assert.deepEqual(commands.map(c => [c.key, c.on]), [['logo', true], ['title', true]], 'off keys all go on');
+    assert.deepEqual(commands.map(c => [c.key, c.on]).sort(), [['logo', true], ['title', true]], 'off keys all go on');
     assert(commands.every(c => c.fade_seconds === 0 && c.curve), 'key shortcuts use the key transition');
     commands.length = 0;
     await page.evaluate(() => {
@@ -210,7 +228,7 @@ const {chromium} = require('playwright');
     assert.deepEqual(commands, [], 'typing and held take/key shortcuts never send commands');
     await page.locator('#hint').hover();
     assert.match(await page.locator('#hint-tip').innerText(), /Browse Preview only/);
-    assert.match(await page.locator('#hint-tip').innerText(), /Take Preview · fade/);
+    assert.match(await page.locator('#hint-tip').innerText(), /Auto: fade to Preview/);
     const shortcutTip = await page.locator('#hint-tip').boundingBox();
     assert(shortcutTip.y >= 0 && shortcutTip.y + shortcutTip.height <= 1080, 'shortcut hover fits above the bottom bar');
     await page.setViewportSize({width: 390, height: 844});

@@ -91,6 +91,9 @@ void MixerOrchestrator::replacePreset(const std::string& scene_name) {
     // through the take deadline like any unready destination.
     state_->destination_ready = false;
     state_->take_deadline_ns = monotonicNs() + kTakeReadyTimeoutMs * 1000000;
+    // The Preview shown is what the transition goes to: a CUT or AUTO sent for the shown
+    // Preview then acts on this scene, not on the one it replaced.
+    state_->publishPreview(scene_name, 0);
     logstream << "mixer: preset replaced under the " << state_->takeKind() << " on air by " << scene_name;
 }
 

@@ -417,15 +417,17 @@
     </section>
 
     <footer class="card" id="takebar">
-      <button class="btn" id="cut" type="button" title="Cut (C)" aria-keyshortcuts="C">Cut</button>
-      <button class="btn" id="fade" type="button" title="Fade (F)" aria-keyshortcuts="F">Fade</button>
+      <button class="btn" id="cut" type="button" title="Cut Preview to Program (C)" aria-keyshortcuts="C">Cut</button>
+      <button class="btn" id="auto" type="button" title="Auto: run the selected transition to Preview (Space)" aria-keyshortcuts="Space">Auto</button>
+      <span class="vsep"></span>
+      <button class="btn" id="fade" type="button" aria-pressed="false" title="Select fade for Auto (F)" aria-keyshortcuts="F">Fade</button>
       <span class="fade-ctl" id="fade-ctl"><label class="field"><input id="fade-s" type="number" min="0.1" step="0.1" value="0.5" aria-label="Fade duration in seconds"><span>s</span></label></span>
       <span class="vsep"></span>
       <span id="wipes"></span>
       <label class="field" id="wipe-custom" hidden><input id="wipe-file" type="text" placeholder="wipe clip path on the mixer host" aria-label="Wipe clip path on the mixer host"></label>
       <span class="vsep"></span>
-      <button class="btn" id="direct" type="button" aria-pressed="false" title="Picks take to program (D)" aria-keyshortcuts="D">Direct: off</button>
-      <span id="hint" aria-label="Keyboard shortcuts"><kbd>1–9</kbd><span class="w"> scene</span> · <kbd>C</kbd><span class="w"> cut</span> · <kbd>F</kbd><span class="w"> fade</span> · <kbd>W</kbd><span class="w"> wipe</span> · <kbd>D</kbd><span class="w"> direct</span><span id="hint-pages" hidden> · <kbd>[ ]</kbd><span class="w"> pages</span></span></span>
+      <button class="btn" id="direct" type="button" aria-pressed="false" title="Picks cut straight to Program (D)" aria-keyshortcuts="D">Direct cut: off</button>
+      <span id="hint" aria-label="Keyboard shortcuts"><kbd>1–9</kbd><span class="w"> scene</span> · <kbd>Space</kbd><span class="w"> auto</span> · <kbd>C</kbd><span class="w"> cut</span> · <kbd>F</kbd><span class="w"> fade</span> · <kbd>W</kbd><span class="w"> wipe</span> · <kbd>D</kbd><span class="w"> direct</span><span id="hint-pages" hidden> · <kbd>[ ]</kbd><span class="w"> pages</span></span></span>
       <div id="error" role="alert"></div>
     </footer>
   </section>
@@ -551,14 +553,32 @@ function take(kind, scene = state?.status?.pvw_scene || selected, wipe = current
     if (!payload.wipe_file) return showError("Enter a wipe clip path on the mixer host");
     if (wipe?.duration_seconds) payload.duration_sec = wipe.duration_seconds;
   }
-  if (kind !== "preview") { currentTransition = kind; tookTransition = true; }
-  if (kind === "wipe") currentWipe = wipe || currentWipe;
   return command(payload);
 }
 function pick(scene) {
   if (armedSlot !== null && gridAux()) return assignSlot(armedSlot, scene);
   selected = scene;
-  return take(direct ? currentTransition : "preview", scene);
+  return take(direct ? "cut" : "preview", scene);
+}
+// As on a vision switcher, choosing the transition only prepares Auto; Cut and Auto take.
+function selectTransition(kind, clip) {
+  currentTransition = kind;
+  tookTransition = true;
+  if (clip) currentWipe = clip;
+  renderTransition();
+  restFocus();
+}
+function transitionLabel() {
+  if (currentTransition === "fade") return fadeColor.hex() ? "dip" : "fade";
+  if (currentTransition === "wipe") return currentWipe?.name || "wipe";
+  return "cut";
+}
+function renderTransition() {
+  $("fade").setAttribute("aria-pressed", String(currentTransition === "fade"));
+  for (const button of $("wipes").children)
+    button.setAttribute("aria-pressed", String(currentTransition === "wipe" && button.dataset.clip === (currentWipe?.id ?? "")));
+  $("auto").textContent = `Auto · ${transitionLabel()}`;
+  renderBuses();
 }
 function stepPreview(step) {
   if (!visible.length) return;
@@ -569,7 +589,7 @@ function stepPreview(step) {
 function setDirect(on) {
   direct = on;
   $("direct").setAttribute("aria-pressed", String(on));
-  $("direct").textContent = `Direct: ${on ? "on" : "off"}`;
+  $("direct").textContent = `Direct cut: ${on ? "on" : "off"}`;
   renderBuses();
 }
 // One button per clip: during a live show a wipe must be one click away.
@@ -580,8 +600,10 @@ function renderWipes(library) {
   $("wipe-custom").hidden = library.length > 0;
   $("wipes").replaceChildren(...(library.length ? library : [null]).map((clip) => {
     const button = el("button", "btn wipe", library.length > 1 ? clip.name || clip.id : "Media wipe");
-    if (clip) button.title = `${clip.path}${clip.duration_seconds ? ` · ${clip.duration_seconds} s` : ""}`;
-    button.onclick = () => take("wipe", undefined, clip);
+    if (clip) button.title = `Select for Auto: ${clip.path}${clip.duration_seconds ? ` · ${clip.duration_seconds} s` : ""}`;
+    button.dataset.clip = clip ? clip.id : "";
+    button.setAttribute("aria-pressed", "false");
+    button.onclick = () => selectTransition("wipe", clip);
     return button;
   }));
 }
@@ -595,6 +617,7 @@ function applySettings(s) {
   if (s.dsk_fade_curve && !touched.keyCurve) curves.key.set(s.dsk_fade_curve);
   if (s.transition && !tookTransition) currentTransition = s.transition;
   if (s.wipe_file && !touched.wipe && !wipes.length) $("wipe-file").value = s.wipe_file;
+  renderTransition();
 }
 
 /* ---------- deck ---------- */
@@ -606,7 +629,7 @@ function renderBuses() {
   // A second take of the same scene pauses a fade (Space again resumes it); C completes it.
   const paused = status.transition_paused ? " · paused" : "";
   $("pgm-state").textContent = transition === "idle" ? "on air" : `on air · ${transition}${paused}`;
-  $("pvw-state").textContent = direct ? `picks take to program with ${currentTransition}` : "ready";
+  $("pvw-state").textContent = direct ? "picks cut to program" : `Auto · ${transitionLabel()}`;
 }
 function keyTransition() {
   const fade_seconds = fieldSeconds("key-fade-s", 0, "Enter the key fade in seconds, or leave it empty to cut");
@@ -622,15 +645,21 @@ async function toggleAllKeys() {
   keysPending = true;
   try {
     showError("");
-    for (const key of keys.filter(key => key.on !== on))
-      await api("/api/command", {command: "dsk", key: key.id, on, ...transition});
+    keys.forEach((key, i) => { if (key.on !== on) $("keys").children[i]?.setAttribute("aria-pressed", String(on)); });
+    // Together, not one round trip after another: over a long link the last key lagged the first by seconds.
+    await Promise.all(keys.filter(key => key.on !== on)
+      .map(key => api("/api/command", {command: "dsk", key: key.id, on, ...transition})));
   } catch (exc) { showError(exc.message); }
   finally { await refresh(); keysPending = false; }
 }
 function renderKeys() {
   const keys = state.dsk || [];
   $("keys-card").hidden = !keys.length;
-  if (!changed($("keys"), keys)) return;
+  if (!changed($("keys"), keys)) {
+    // Undo a state shown at a click that the mixer did not take.
+    keys.forEach((key, i) => $("keys").children[i]?.setAttribute("aria-pressed", String(key.on)));
+    return;
+  }
   rebuild($("keys"), keys.map((key) => {
     const name = key.id.replaceAll("_", " "), label = name[0].toUpperCase() + name.slice(1);
     const button = el("button", "key");
@@ -641,7 +670,10 @@ function renderKeys() {
     // An empty field cuts, even when the config fades by default.
     button.onclick = () => {
       const transition = keyTransition();
-      if (transition) command({command: "dsk", key: key.id, on: !key.on, ...transition});
+      if (!transition) return;
+      // Show the requested state at once: the round trip to the mixer and the next poll come later.
+      button.setAttribute("aria-pressed", String(!key.on));
+      command({command: "dsk", key: key.id, on: !key.on, ...transition});
     };
     return button;
   }));
@@ -1574,9 +1606,9 @@ function render() {
   $("hint-pages").hidden = !pagesBus();
   setMeterTip($("hint"), "Keyboard shortcuts", [
     ["1–9", "Pick visible scene"], ["← / →", "Browse Preview only"],
-    ["Space", `Take Preview · ${currentTransition} (again: pause / resume)`], ["C", "Cut to selected scene (completes a running transition)"],
-    ["F", "Fade to selected scene"], ["W", "Wipe to selected scene"],
-    ["D", "Toggle direct-to-Program picks"],
+    ["Space", `Auto: ${transitionLabel()} to Preview (again on a fade: pause / resume)`], ["C", "Cut Preview to Program (completes a running transition)"],
+    ["F", "Select fade for Auto"], ["W", "Select wipe for Auto"],
+    ["D", "Toggle direct cut: picks cut straight to Program"],
     ["[ / ]", "Previous / next multiview page"],
     ["K", "All keys off if any are on; otherwise all on"],
     ...(gridAux() ? [[`Shift+1–${Math.min(slotsOf(gridAux()).length, 9)}`, "Assign selected scene to slot"]] : []),
@@ -1625,7 +1657,8 @@ async function refresh() {
 
 /* ---------- controls ---------- */
 $("cut").onclick = () => take("cut");
-$("fade").onclick = () => take("fade");
+$("auto").onclick = () => take(currentTransition);
+$("fade").onclick = () => selectTransition("fade");
 $("direct").onclick = () => { directTouched = true; setDirect(!direct); };
 $("fade-s").oninput = () => { touched.fade = true; };
 $("key-fade-s").oninput = () => { touched.keyFade = true; };
@@ -1640,7 +1673,8 @@ for (const field of document.querySelectorAll("#deck input"))
   field.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "Escape") restFocus(); });
 addEventListener("keydown", (e) => {
   if (e.defaultPrevented || e.target.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), .dd-menu') || e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === " " && e.target.closest?.('button, a, [role="button"]') && !e.target.closest?.("#scenes")) return;
+  // On the scene tiles and the take bar Space is Auto, never a second click on the focused control.
+  if (e.key === " " && e.target.closest?.('button, a, [role="button"]') && !e.target.closest?.("#scenes, #takebar")) return;
   if (e.repeat && (e.key === " " || e.key.toLowerCase() === "k")) { e.preventDefault(); return; }
   const shifted = Number(e.code.replace("Digit", ""));
   if (e.shiftKey && shifted >= 1 && shifted <= slotsOf(gridAux()).length) { e.preventDefault(); assignSlot(shifted - 1, selected || null); return; }
@@ -1648,14 +1682,11 @@ addEventListener("keydown", (e) => {
   if (digit >= 1 && digit <= 9 && visible[digit - 1]) { e.preventDefault(); pick(visible[digit - 1]); return; }
   const k = e.key.toLowerCase(), bus = pagesBus();
   if (e.key === "ArrowLeft" || e.key === "ArrowRight") stepPreview(e.key === "ArrowLeft" ? -1 : 1);
-  else if (e.key === " ") {
-    const preview = state?.status?.pvw_scene;
-    if (preview) take(currentTransition, preview);
-  }
+  else if (e.key === " ") take(currentTransition);
   else if (k === "k") toggleAllKeys();
   else if (k === "c") take("cut");
-  else if (k === "f") take("fade");
-  else if (k === "w") take("wipe");
+  else if (k === "f") selectTransition("fade");
+  else if (k === "w") selectTransition("wipe");
   else if (k === "d") $("direct").click();
   else if (bus && e.key === "[") pageCommand(bus, {step: -1});
   else if (bus && e.key === "]") pageCommand(bus, {step: 1});
