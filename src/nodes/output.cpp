@@ -1,3 +1,4 @@
+#include <chrono>
 #include "node_common.hpp"
 #include <atomic>
 #include <fstream>
@@ -31,6 +32,7 @@ protected:
     int current_seek_table_index_ = 0;
     bool should_close_ = false;
     int errors_ = 0;
+    std::chrono::steady_clock::time_point first_error_{};
     void commitPendingSeekEntries() {
         if (seek_table_entries_.empty()) {
             return;
@@ -117,8 +119,14 @@ public:
                 errors_ = 0;
             } catch (std::exception &e) {
                 logstream << "writePacket failed: " << e.what();
+                // A burst of packets after a stall can fail for a few hundred milliseconds at once
+                // (2026-10-15: 21 consecutive UDP writes failed within 100 ms on both program outputs
+                // and the panic policy stopped the whole show). Give up only when the failures have
+                // persisted for a while, not after a packet count that one burst exceeds.
+                const auto now = std::chrono::steady_clock::now();
+                if (errors_ == 0) first_error_ = now;
                 errors_++;
-                if (errors_>20) {
+                if (errors_ > 20 && now - first_error_ > std::chrono::seconds(3)) {
                     throw;
                 }
             }
