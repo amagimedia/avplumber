@@ -86,9 +86,14 @@ Operating rules that follow: keep the browser container's CPU weight below the m
 (`cpu_shares: 512` above; Chromium raises its GPU processes to nice -8 on its own), avoid
 CPU-bound work on the host while the show runs, and if an operator-side watchdog is used,
 have it act only in the setup's `running` phase, because a freeze during the 60 s
-clean-start window makes that start fail. The clean-start gate restarts its window on
-output drops as well as missed deadlines; in the collapsed state every bus drops about
-15 frames a minute, so a start can loop until the setup manager gives up.
+clean-start window makes that start fail. The clean-start gate restarts its 10 s window on
+missed deadlines; output drops are reported but do not restart it, because in the collapsed
+state every bus drops about 15 frames a minute and a start would loop until the setup manager
+gave up. A start that begins inside the collapsed state still needs the GL side paused once
+before its window (an operator-side watchdog that freezes Electron's GPU processes for 2.5 s
+about 25 s after a new mixer process appears made every such start settle on 2026-10-15).
+An output node now gives up only after its writes have failed for 3 s; a burst of failed UDP
+writes after a stall used to stop the whole show through the program outputs' panic policy.
 
 ## Output codecs and bitrates
 

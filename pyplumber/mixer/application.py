@@ -515,8 +515,11 @@ class MixerApplication:
             counters = self._counters(compositors) or counters
             late = {node: {key: counters[node][key] - at_start[node][key] for key in ("missed_deadlines", "output_drops")}
                     for node in counters if node in at_start
-                    and (counters[node]["missed_deadlines"] > at_start[node]["missed_deadlines"]
-                         or counters[node]["output_drops"] > at_start[node]["output_drops"])}
+                    and counters[node]["missed_deadlines"] > at_start[node]["missed_deadlines"]}
+                    # Output drops are reported in the reason but do not restart the window: a start
+                    # inside a GPU time-sharing episode dropped about 15 output frames a minute on every
+                    # bus with no missed deadline, no start could settle and the setup manager gave up
+                    # with no mixer running (2026-10-15). Misses still gate the start.
             if late:
                 window_started, at_start = now, counters
                 node, delta = max(late.items(), key=lambda item: sum(item[1].values()))
