@@ -1,7 +1,10 @@
-"""Shared scaffolding for the standalone C++ unit tests under tests/cpp/."""
+"""Shared scaffolding for the standalone C++ unit tests under tests/cpp/ and the native-module
+scripts under tests/."""
+import os
 import pathlib
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -29,3 +32,15 @@ def cpp_binary(tmp_path):
                         "-o", str(binary), *flags], check=True)
         return binary
     return build
+
+
+@pytest.fixture
+def run_script():
+    """Run a test file as a script in a fresh interpreter that imports this checkout's pyplumber and
+    native module, as the pytest process does: a bare `python script.py` puts only the script's
+    directory on sys.path."""
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (str(ROOT), os.environ.get("PYTHONPATH"))))}
+    def run(script, *args, timeout):
+        return subprocess.run([sys.executable, str(script), *map(str, args)],
+                              capture_output=True, text=True, timeout=timeout, env=env)
+    return run

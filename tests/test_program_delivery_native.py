@@ -7,11 +7,10 @@ from pathlib import Path
 import pytest
 
 
-def test_rate_conversion_holds_reach_delivery_counter(tmp_path):
+def test_rate_conversion_holds_reach_delivery_counter(tmp_path, run_script):
     if importlib.util.find_spec("_avplumber") is None:
         pytest.skip("requires the native extension")
-    result = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(tmp_path)],
-                            capture_output=True, text=True, timeout=30)
+    result = run_script(Path(__file__).resolve(), tmp_path, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
 
 

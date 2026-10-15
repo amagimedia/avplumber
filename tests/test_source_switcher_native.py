@@ -8,11 +8,10 @@ import pytest
 
 
 @pytest.mark.parametrize("selector_type", ["source_switcher", "mixer_selector"])
-def test_selector_keeps_unexamined_arrivals(tmp_path, selector_type):
+def test_selector_keeps_unexamined_arrivals(tmp_path, selector_type, run_script):
     if importlib.util.find_spec("_avplumber") is None:
         pytest.skip("requires the native extension")
-    result = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(tmp_path), selector_type],
-                            capture_output=True, text=True, timeout=30)
+    result = run_script(Path(__file__).resolve(), tmp_path, selector_type, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
