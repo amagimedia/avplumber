@@ -1,10 +1,11 @@
 <!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Stock Chromium plus the allocation shim remains the default. The optional exporter can keep a fixed prewarmed pool while AVP owns its downstream frames."><title>6. Bound browser allocations and release leases after one copy · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
+<meta name="description" content="The Docker image defaults to a fixed prewarmed export pool of nine. AVP copies once into owned CUDA storage and returns each Chromium lease early."><title>6. Bound browser allocations and release leases after one copy · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
 <body><main><p class="site"><a href="index.html">AVPlumber · Mixer cookbook</a></p>
-<h1>6. Bound browser allocations and release leases after one copy</h1><p class="lede">Stock Chromium plus the allocation shim remains the default. The optional exporter can keep a fixed prewarmed pool while AVP owns its downstream frames.</p>
+<h1>6. Bound browser allocations and release leases after one copy</h1><p class="lede">The Docker image defaults to a fixed prewarmed export pool of nine. AVP copies once into owned CUDA storage and returns each Chromium lease early.</p>
 <p class="note review">Reviewed 15 October 2026 against <a href="https://github.com/amagimedia/avplumber/tree/e72ff8b4ce3374918d85658d73e25cd6a5d36d39"><code>e72ff8b4</code></a>. These pages describe that code and named workload settings; they do not assert what every deployment runs.</p>
+<p class="note">Docker/export defaults updated at <a href="https://github.com/amagimedia/avplumber/tree/48451ef0cd083e83e1d82bef4444bfbd91d5b3a4"><code>48451ef0</code></a>; the measurements below retain their stated scope.</p>
 
 <h2>Two supported paths, different retention rules</h2><table><thead><tr><th>Path</th>
 <th>Allocation and return policy</th>
@@ -12,20 +13,20 @@
 </thead><tbody><tr><td>Stock Electron/Chromium + shim</td>
 <td><code>ringSize</code> bounds sent-but-unacknowledged frames, not Chromium allocations. Return pacing avoids bursts that churn Chromium's idle-buffer cache.</td>
 </tr>
-<tr><td>Optional fixed-pool exporter + AVP copy</td>
+<tr><td>Docker fixed-pool exporter + AVP copy</td>
 <td>Producer allocations are fixed. AVP prewarms and retains all imports, copies each frame into owned CUDA memory, and returns the Chrome lease after the copy. No extra return queue.</td>
 </tr>
 </tbody></table>
-<p>The default install downloads stock Electron. Setting a ring size alone does not turn its capture allocation pool into a fixed pool. The optional build needs the exporter patches and a compatible <code>resources/avp-capture-pool.json</code> manifest.</p>
-<h2>Nine is the tested starting point for the optional build</h2><pre><code>DMA_BROWSER_CHROMIUM_EXTRA_FEATURES=AvpZeroCopyOffscreenExport:buffers/9,RenderableMappableSharedImageForceScanout
-AVP_BROWSER_COPY_ON_IMPORT=1</code></pre><p>Only a version-2 manifest with the startup-size patch supports a chosen size from 2 to 16. Version 1 describes the hardcoded eleven-buffer binary. The service advertises the effective size; sender retention, per-source import cache and warm-up follow it. Restart both browser workers and mixer to change it. The active pool never grows or shrinks.</p>
+<p>A direct <code>npm install</code> downloads stock Electron. The Docker build replaces it with the pinned patched release and its version-2 <code>resources/avp-capture-pool.json</code> manifest. Build with <code>ELECTRON_ARCHIVE_URL=</code> to retain stock Electron. Setting a ring size alone does not turn stock capture into a fixed allocation pool.</p>
+<h2>Nine is the Docker default and tested starting point</h2><pre><code>DMA_BROWSER_CHROMIUM_EXTRA_FEATURES=AvpZeroCopyOffscreenExport:buffers/9,RenderableMappableSharedImageForceScanout
+AVP_BROWSER_COPY_ON_IMPORT=1</code></pre><p>The image enables the exporter flags by default. An unset or empty <code>AVP_BROWSER_COPY_ON_IMPORT</code> selects one copy automatically for a reported fixed pool; <code>0</code> explicitly samples the imported buffer in place. Only a version-2 manifest with the startup-size patch supports a chosen size from 2 to 16. Version 1 describes the hardcoded eleven-buffer binary. The service advertises the effective size; sender retention, per-source import cache and warm-up follow it. Restart both browser workers and mixer to change it. The active pool never grows or shrinks.</p>
 <p>Warm-up registers the complete pool before going on air. The cache must retain at least that pool, with no expiry/eviction churn during the show. This is per source; a buffer from one window is not reusable as another window's allocation.</p>
 <h2>One copy shortens Chromium ownership</h2><p>The importer waits for the acquire fence, submits one device copy on a private nonblocking CUDA stream, waits for that copy to finish, then returns the browser frame before publishing downstream. Mixer consumers hold AVP-owned storage, so they cannot pin the Chrome lease through an entire transition. The importer thread can wait on its own stream; “nonblocking stream” does not promise a wait-free CPU path.</p>
 <p>Ring size is not compositor latency. A fixed allocation count also does not guarantee no source repeats: an exhausted producer can miss a capture without allocating anything new. Keep both import-churn and on-air delivery counters.</p>
 <h2>Measured limit</h2><p>In the matched 30-window/60-fps transition check, six buffers saved about 1 GiB but increased browser repeats from three to 223; neither pool churned. Nine is the current starting point. The 40-window/50-fps result additionally required four workers of ten and the CUDA queue settings. <a href="source-limits.html">Measured workload and scope</a>.</p>
 
-<h2>Implementation at the reviewed revision</h2><ul class="where"><li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/deps/dma-browser/README.md">deps/dma-browser/README.md</a></li>
-<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/pyplumber/mixer/dmabuf_inputs.py">pyplumber/mixer/dmabuf_inputs.py</a></li>
+<h2>Implementation at the reviewed revision</h2><ul class="where"><li><a href="https://github.com/amagimedia/avplumber/blob/48451ef0cd083e83e1d82bef4444bfbd91d5b3a4/deps/dma-browser/README.md">deps/dma-browser/README.md</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/48451ef0cd083e83e1d82bef4444bfbd91d5b3a4/pyplumber/mixer/dmabuf_inputs.py">pyplumber/mixer/dmabuf_inputs.py</a></li>
 <li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/nodes/hwaccel/drm_prime_to_cuda.cpp">src/nodes/hwaccel/drm_prime_to_cuda.cpp</a></li>
 <li><a href="https://github.com/amagimedia/avplumber/blob/74e3392f406eabf648dc34c1acdb8423bc8330dd/demos/mixer/docs/capacity.md">demos/mixer/docs/capacity.md</a></li>
 </ul>
