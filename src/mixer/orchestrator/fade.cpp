@@ -19,7 +19,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     }
 }
 
-void MixerOrchestrator::applyAudioFadeTick(double t) {
+void MixerOrchestrator::emitTransitionProgress(const char* kind, double t, int64_t pts_ns) {
     if (state_->audio_router_node_name.empty()) return;
     const auto pgm_it = state_->scenes.find(state_->pgm_scene_name);
     if (pgm_it == state_->scenes.end()) return;
@@ -33,8 +33,9 @@ void MixerOrchestrator::applyAudioFadeTick(double t) {
     Parameters to = Parameters::array();
     for (const auto& kv : outgoing.sources) from.push_back(kv.first);
     for (const auto& kv : incoming.sources) to.push_back(kv.first);
-    setNodeObject(state_->audio_router_node_name, "afv_crossfade",
-                  {{"from", from}, {"to", to}, {"t", t}});
+    setNodeObject(state_->audio_router_node_name, "transition_progress",
+                  {{"output", "program"}, {"kind", kind}, {"from", from}, {"to", to},
+                   {"t", t}, {"pts", pts_ns}});
 }
 
 int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& frames, int active, int64_t last_ns) {
@@ -82,10 +83,10 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
             // short ramp, not a duration-based one), so it's ticked here instead: this
             // already runs once per output video frame for the whole span of the fade,
             // same cadence fadeCurveAt samples the *video* blend's progress at host side
-            // (key_fade.hpp).
+            // (key_fade.hpp). kind is "dip" when take_dip is set, else "fade".
             const double x = state_->take_duration_ns > 0
                 ? double(blend_pts - state_->take_start_ns) / double(state_->take_duration_ns) : 1.0;
-            applyAudioFadeTick(fadeCurveAt(state_->take_curve, x));
+            emitTransitionProgress(state_->takeKind(), fadeCurveAt(state_->take_curve, x), blend_pts);
         }
         if (blend_pts > last_ns && blend_pts >= state_->take_start_ns) {
             if (blend_pts >= state_->take_start_ns + state_->take_duration_ns) {

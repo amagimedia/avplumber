@@ -91,7 +91,7 @@ struct MixerState : public InstanceShared<MixerState> {
         int64_t published_ns = 0;  // when it was published (monotonic ns)
         int64_t received_ns = 0;   // when the take that ended in it was received (monotonic ns;
                                    // 0: not a take), for the followers' latency from the command
-        std::string kind;          // the take: "cut", "fade", "wipe"; "" for a preview or a clear
+        std::string kind;          // the take: "cut", "fade", "dip", "wipe"; "" for a preview or a clear
     };
     std::mutex preview_mutex;
     PreviewChange preview;
@@ -165,11 +165,12 @@ struct MixerState : public InstanceShared<MixerState> {
 
     enum class TransitionMode { Idle, Cut, Crossfade, Wipe };
     std::atomic<TransitionMode> transition_mode{TransitionMode::Idle};
-    /// The running take's kind as the followers report it; "" while idle.
+    /// The running take's kind as the followers and transition events report it; "" while idle.
+    /// Crossfade with take_dip is "dip", otherwise "fade".
     const char* takeKind() const {
         switch (transition_mode.load()) {
             case TransitionMode::Cut: return "cut";
-            case TransitionMode::Crossfade: return "fade";
+            case TransitionMode::Crossfade: return take_dip ? "dip" : "fade";
             case TransitionMode::Wipe: return "wipe";
             default: return "";
         }
@@ -199,8 +200,8 @@ struct MixerState : public InstanceShared<MixerState> {
     };
     SlotNodes slot_a, slot_b;
     std::string source_switcher_name;  // "out_sel"
-    /// Optional audio-router node (any IInputsObjects impl). Orchestrator only emits semantic
-    /// AFV keys (afv_program / afv_crossfade); the node maps them to its own mix model.
+    /// Optional audio-router node (any IInputsObjects impl). Orchestrator and AUX followers
+    /// emit transition_ended / transition_progress; the node maps them to its own mix model.
     std::string audio_router_node_name;
     /// Scene name whose video sources are the fade "to" set (PVW destination).
     std::string audio_fade_incoming_scene;

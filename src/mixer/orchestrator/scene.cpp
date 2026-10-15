@@ -134,17 +134,22 @@ int64_t MixerOrchestrator::switchProgramSelector(bool new_pgm_is_slot_a) {
     return selectorOutputNs();
 }
 
-void MixerOrchestrator::applyAudioFollowVideo(const SceneDefinition& scene) {
+void MixerOrchestrator::emitTransitionEnded(const SceneDefinition& scene, int64_t pts_ns) {
     if (state_->audio_router_node_name.empty()) return;
     Parameters sources = Parameters::array();
     for (const auto& kv : scene.sources)
         sources.push_back(kv.first);
-    setNodeObject(state_->audio_router_node_name, "afv_program", {{"sources", sources}});
+    const char* kind = state_->takeKind();
+    setNodeObject(state_->audio_router_node_name, "transition_ended",
+                  {{"output", "program"},
+                   {"kind", kind && *kind ? kind : "cut"},
+                   {"sources", sources},
+                   {"pts", pts_ns}});
 }
 
 void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
                                                    const std::string& new_pgm_scene,
-                                                   bool picture_changed) {
+                                                   bool picture_changed, int64_t pts_ns) {
     const auto scene_it = state_->scenes.find(new_pgm_scene);
     if (scene_it == state_->scenes.end())
         return;
@@ -154,7 +159,7 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
     auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
     auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
     state_->audio_fade_incoming_scene.clear();
-    applyAudioFollowVideo(scene);
+    emitTransitionEnded(scene, pts_ns);
 
     // The encoder must not make the receiver wait for the next periodic keyframe:
     // a cut changes the whole picture, and a P-frame carrying it can exceed what
@@ -191,7 +196,7 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
 
     const auto* pgm = &state_->scenes.at(state_->pgm_scene_name);
     publishSourceRoutes(is_slot_a ? &scene : pgm, is_slot_a ? pgm : &scene);
-    // Remember incoming scene for crossfade audio; cut/completeTake emits afv_program.
+    // Remember incoming scene for fade/dip/wipe progress; completeTake emits transition_ended.
     state_->audio_fade_incoming_scene = scene_name;
     state_->pvw_slot_scene = scene_name;
     (void)slot;

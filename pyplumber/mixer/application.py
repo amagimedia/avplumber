@@ -88,7 +88,7 @@ class MixerOptions:
     browser_frame_queue: int | None = None
     max_compositor_layers: int | None = None
     # Optional audio-router node name (any IInputsObjects impl, e.g. an embedded audio mixer).
-    # Orchestrator emits semantic AFV only (afv_program / afv_crossfade); "" disables it.
+    # Mixer emits transition_ended / transition_progress; "" disables it.
     audio_router_node: str = ""
 
     def __post_init__(self):

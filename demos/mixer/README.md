@@ -62,4 +62,5 @@ selected [instance profile](instance_profiles.py), not a universal source limit.
 - [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/): implementation and tuning notes.
 - [DMA-BUF integration](../../doc/dmabuf.md): shared browser services, shim and Chromium patches.
 - [Mixer base API](../../doc/mixer.md): reuse `pyplumber.mixer.build_application` in other applications; no demo imports required.
-- [Audio-follow-video](../../doc/mixer_audio_follow_video.md): the `audio_router_node` signal and `afv_program`/`afv_crossfade` protocol for an external audio mixer/router.
+- [Audio-follow-video](../../doc/mixer_audio_follow_video.md): the `audio_router_node` signal and `transition_ended`/`transition_progress` protocol for an external audio mixer/router.
+- [dyremix_mixer adaptation](../../doc/dyremix_mixer_transition_events.md): checklist for avplumber-nodes against the new events (`pts`, `kind`, `output`).

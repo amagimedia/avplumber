@@ -1,18 +1,21 @@
-# Audio-follow-video (AFV)
+# Output transition events (AFV)
 
 The mixer's own data path still carries video frames only (see
 [Mixer base API](mixer.md)); it has no audio routing, mixing or output of its
-own. What it does have is a semantic signal: as the program and preview
-change, the orchestrator tells one named external node which sources should
-be audible and how a crossfade between them should progress. That node — any
-audio mixer/router implementing `IInputsObjects::setObject` — owns the actual
-routing and gain policy. The orchestrator never touches an audio matrix or
-mixer state directly.
+own. What it does have is a semantic signal: as program and AUX compositions
+change, the mixer tells one named external node which sources apply to each
+output and how a timed take is progressing. That node — any
+`IInputsObjects::setObject` impl, typically an audio mixer/router — owns the
+actual routing and gain policy. The mixer never touches an audio matrix
+directly.
+
+Consumer checklist for **dyremix_mixer** (avplumber-nodes): see
+[dyremix_mixer_transition_events.md](dyremix_mixer_transition_events.md).
 
 ## Enabling it
 
 `mixer.init` accepts an optional `audio_router_node`: the name of the node to
-notify. Leaving it unset (the default) makes every AFV call below a no-op, so
+notify. Leaving it unset (the default) makes every event below a no-op, so
 existing video-only setups are unaffected.
 
 ```text
@@ -23,24 +26,58 @@ From Python, `MixerOptions.audio_router_node` (default `""`) flows through
 `build_application` to `MixerGraphBuilder`; passing it to `MixerGraphBuilder`
 directly works the same way for applications that build the graph by hand.
 
-## What the orchestrator sends
+## Events
 
-Both calls are `setObject(audio_router_node_name, <key>, <params>)`:
+Both are `setObject(audio_router_node_name, <key>, <params>)`:
 
-- **`afv_program`** — sent on every cut and on completion of every take (cut,
-  crossfade or wipe alike), including interrupted/aborted ones that restore
-  the previous program. Params: `{"sources": [<ids of the new PGM scene's
-  sources>]}`.
-- **`afv_crossfade`** — sent once per output video frame for the duration of
-  an active crossfade, at the same progress fraction (post-curve) the video
-  blend uses. Params: `{"from": [<outgoing scene's sources>], "to": [<incoming
-  scene's sources>], "t": <0..1>}`. Not sent during a cut or a wipe — those
-  have no gradual video blend for audio to track.
+### `transition_ended`
 
-The node maps `sources`/`from`/`to` (logical source ids, the same ones used in
-scene definitions) onto its own channels and decides how to ramp gain; the
-orchestrator has no opinion on gain curves beyond the crossfade progress it
-reports.
+Steady sources for one output after a change has committed.
+
+Sent when:
+
+- a program take completes (cut, fade, dip or wipe), including interrupted or
+  aborted takes that restore the previous program;
+- an AUX bus applies a new composition (layout, slot assignment, page, or a
+  preview follow tied to a program take).
+
+Params: `{"output": <id>, "kind": <kind>, "sources": [<ids>], "pts": <ns>}`.
+
+### `transition_progress`
+
+Sent once per program output video frame while a timed program take is
+running (fade, dip or wipe). Not sent for cuts. Not sent for AUX.
+
+Params: `{"output": "program", "kind": <kind>, "from": [<ids>], "to": [<ids>],
+"t": <0..1>, "pts": <ns>}`.
+
+- For fade/dip, `t` is post-curve progress (`fadeCurveAt` on elapsed/duration),
+  matching the video blend's easing. The curve is only tempo; it does not
+  distinguish dip from mix.
+- For wipe, `t` is linear over the wipe duration (`take_duration_ns`).
+
+## Fields
+
+- **`output`**: `"program"` for the main program path; an AUX bus id
+  (`aux_buses[].id`) for that bus.
+- **`kind`**: `"cut"` | `"fade"` | `"dip"` | `"wipe"`.
+  - `"fade"` — mix A↔B (`Crossfade` without a dip colour).
+  - `"dip"` — fade through colour (`Crossfade` with `take_dip` /
+    `fade_color`); audio typically outs then ins, not a crossfade.
+  - Dip is not a separate `TransitionMode`; it is reported as its own `kind`.
+  - The same `kind` is published on `PreviewChange` (and thus AUX follow /
+    `pvw_latency`) so followers agree with these events.
+- **`sources` / `from` / `to`**: ids for channel selection on the audio router:
+  - **Program:** logical `Source.id` values from the scene (same strings as
+    scene items and `MixerApplication.audio_edges`).
+  - **AUX:** `Source.id` from `slot` / `source` / `pvw` cells; a **`pgm` cell
+    contributes the single sentinel `"program"`** (not the expanded list of
+    sources on air). The router treats `"program"` as the program mix/bus.
+- **`pts`**: media time in nanoseconds on the same clock as `realtime(set_pts=True)`
+  / compositor frame PTS (host monotonic after rebase). The video state described
+  by the event applies at this time. `0` means “as soon as the router can”
+  (e.g. interrupted restore with no future frame). Routers that can change gain
+  mid-buffer should **schedule** the change at `pts`, not at `setObject` arrival.
 
 ## Feeding the node its audio
 

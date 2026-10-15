@@ -1,7 +1,7 @@
 """mixer.init carries the audio_router_node field MixerOrchestrator's C++ side
 consumes (src/avplumber.cpp's mixer.init handler,
-src/mixer/orchestrator/{scene,fade}.cpp's applyAudioFollowVideo/
-applyAudioFadeTick) -- those can't run here (no native engine on this
+src/mixer/orchestrator/{scene,fade,wipe}.cpp's emitTransitionEnded/
+emitTransitionProgress) -- those can't run here (no native engine on this
 machine), so this is the boundary: everything on the Python side that
 produces the commands the C++ side is contracted to understand.
 """

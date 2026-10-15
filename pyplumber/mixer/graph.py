@@ -862,7 +862,7 @@ class MixerGraphBuilder:
 
         if self.audio_router_node:
             # Initial PGM video is wired at compositor build time, not via
-            # applyPostTransitionRouting — cut emits afv_program for the audio router.
+            # applyPostTransitionRouting — cut emits transition_ended for the audio router.
             self.avp.executeCommandsFromString(
                 f"mixer.cut {json.dumps({'mixer': self.name, 'scene': self._initial_pgm_scene})}")
 
