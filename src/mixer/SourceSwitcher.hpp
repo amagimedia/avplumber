@@ -36,7 +36,7 @@ protected:
 public:
     using NodeSingleOutput<T>::NodeSingleOutput;
 
-    bool putIfMonotonic(int input_index, T* data, bool fallback) {
+    bool putIfMonotonic(int input_index, const T* data, bool fallback) {
         av::Timestamp pts = data->pts();
         if (drop_non_monotonic_ && last_output_pts_.isValid() && pts.isValid() && pts < last_output_pts_) {
             dropped_non_monotonic_++;
@@ -101,9 +101,17 @@ public:
             !this->source_edges_[reference_active]->peek())
             this->source_edges_[reference_active]->wait_peek(fallback_wait_ms_);
 
+        std::vector<const T*> frames;
+        for (auto& edge : this->source_edges_) frames.push_back(edge->peek());
+        processHeads(frames, reference_active);
+    }
+
+    // Publish and consume the same heads that selection examined. A producer may
+    // enqueue into an empty input during selection or a blocked output write.
+    void processHeads(const std::vector<const T*>& frames, int reference_active) {
         int output_count = 0;
         for (int i = 0; i < (int)this->source_edges_.size(); i++) {
-            T* data = this->source_edges_[i]->peek();
+            const T* data = frames[i];
             if (!data) continue;
             int active = reference_active;
             if (i == active) {
@@ -117,15 +125,14 @@ public:
             fallback_input_ < (int)this->source_edges_.size() &&
             fallback_input_ != reference_active &&
             (fallback_when_active_missing_ || reference_active == fallback_input_)) {
-            T* data = this->source_edges_[fallback_input_]->peek();
+            const T* data = frames[fallback_input_];
             if (data) {
                 putIfMonotonic(fallback_input_, data, true);
             }
         }
 
         for (int i = 0; i < (int)this->source_edges_.size(); i++) {
-            T* data = this->source_edges_[i]->peek();
-            if (data) {
+            if (frames[i]) {
                 this->source_edges_[i]->pop();
             }
         }

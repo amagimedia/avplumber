@@ -31,14 +31,16 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
     if (destinationReady(frames[target])) state_->destination_ready = true;
     if (mode == MixerState::TransitionMode::Cut) {
         if (destinationReady(frames[target])) {
-            if (target_pts <= last_ns) return -1;
+            if (target_pts <= last_ns) return state_->pgmSourceSwitcherIndex();
             completeTake(target_pts);
             return target;
         }
     } else if (mode == MixerState::TransitionMode::Crossfade) {
         if (state_->take_phase == MixerState::TakePhase::Ready) {
-            if (!destinationReady(frames[target])) return active;
-            if (target_pts <= last_ns) return -1;
+            // Preview can arrive behind program. Keep selecting the live program
+            // until a fresh destination tick can arm the blend.
+            if (!destinationReady(frames[target]) || target_pts <= last_ns)
+                return state_->pgmSourceSwitcherIndex();
             auto snapshot = outputSnapshot();
             {
                 std::lock_guard<std::mutex> lock(snapshot->mutex);
