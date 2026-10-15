@@ -1,23 +1,23 @@
 <!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Ten current recipes for lowering CPU and GPU overhead while preserving real input cadence, colour and visible delivery."><title>Mixer optimization cookbook · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
+<meta name="description" content="Changes with demonstrated CPU, GPU or VRAM impact, plus clearly identified mechanisms that reduce work."><title>Mixer optimization cookbook · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
 <body><main><p class="site"><a href="index.html">AVPlumber · Mixer cookbook</a></p>
-<h1>Mixer optimization cookbook</h1><p class="lede">Ten current recipes for lowering CPU and GPU overhead while preserving real input cadence, colour and visible delivery.</p>
+<h1>Mixer optimization cookbook</h1><p class="lede">Changes with demonstrated CPU, GPU or VRAM impact, plus clearly identified mechanisms that reduce work.</p>
 <p class="note review">Reviewed 15 October 2026 against <a href="https://github.com/amagimedia/avplumber/tree/e72ff8b4ce3374918d85658d73e25cd6a5d36d39"><code>e72ff8b4</code></a>. Setup defaults and capacity notes updated at <a href="https://github.com/amagimedia/avplumber/tree/74e3392f406eabf648dc34c1acdb8423bc8330dd"><code>74e3392f</code></a>. These describe code and named workload settings, not the live state of every deployment.</p>
 
-<p>The order prioritizes the current browser-heavy L4 investigation and the recent CPU work. It is not a universal ranking by percentage saved. Implementation descriptions are checked against the revision above; measurements retain their original workload and date.</p>
-<h2 id="top-10">Top ten to preserve</h2><ol class="recipes"><li><a href="cuda-streams.html"><b>1. CUDA work queues: 32 compute / 8 copy</b><span>Reduce unintended serialization between independent streams; separate this setting from buffer counts.</span></a></li>
-<li><a href="input-decode-cpu.html"><b>2. Direct input routing and optional metadata</b><span>Remove demux hand-offs, unused timestamp strings and redundant per-input resampling.</span></a></li>
-<li><a href="event-loops.html"><b>3. Shared pacing loops and coalesced signals</b><span>Remove per-source fan-out threads, redundant event writes and self wake-ups.</span></a></li>
-<li><a href="compositor-wait.html"><b>4. Ready-input handling and bounded polling</b><span>Inspect useful queues and keep superseded frames out of the hot path.</span></a></li>
-<li><a href="nvdec-cuarray.html"><b>5. GPU-native decode with bounded lookahead</b><span>Skip software HEVC table clears, avoid staging copies and retain enough decoder surfaces.</span></a></li>
-<li><a href="raw-uploads.html"><b>6. Pinned direct and resident raw inputs</b><span>Remove CPU copies and upload threads; account explicitly for pinned RAM.</span></a></li>
-<li><a href="browser-frame-queue.html"><b>7. Fixed browser pools and early lease release</b><span>Optional exporter: prewarm nine allocations, copy once into AVP ownership and avoid on-air import churn.</span></a></li>
-<li><a href="color-tags.html"><b>8. Colour tags at the source fan-out</b><span>Avoid tag-only filters and their threads while preserving real conversions.</span></a></li>
-<li><a href="dsk-fades.html"><b>9. Cropped keys and transparent-pixel fast paths</b><span>Keep full detail where the overlay exists and avoid work on invisible pixels.</span></a></li>
-<li><a href="delivery-counters.html"><b>10. On-air capture identity and lean status</b><span>Verify visible source delivery after output pacing; exclude setup and intentional static holds.</span></a></li>
+<p>Ranked for the current browser-heavy L4 workload and the size of the supported benefit. CPU percentages below mean percent of one core; 100% is one full core. Historical before/after steps share baselines and are not additive. Each entry labels whether its evidence is a measurement or an implementation mechanism.</p>
+<h2 id="top-10">Performance changes worth preserving</h2><ol class="recipes">
+<li><a href="cuda-streams.html"><b>1. CUDA work queues: 32 compute / 8 copy</b><span class="impact">GPU scheduling · short matched transition check</span><span>At 36 browsers/50 fps, acquire-fence waits averaged ~14 → 1.7 ms and repeats went from thousands to zero. Reduced queue serialization is the likely mechanism; this adds no GPU engines.</span></a></li>
+<li><a href="raw-uploads.html"><b>2. Pinned direct and resident raw inputs</b><span class="impact">CPU · historical 192-source measurements</span><span>Direct uploads removed CPU copies and 141 threads; mixer CPU fell 679 → 510% of one core. Later resident files reduced the input-reading group 139.7 → 27.3%, at ~8.8 GB pinned host RAM.</span></a></li>
+<li><a href="input-decode-cpu.html"><b>3. Direct input routing and optional metadata</b><span class="impact">CPU · historical combined-change measurement</span><span>The routing/metadata/signalling build reduced mixer CPU 322 → 265% of one core and removed 105 demux threads. It preserves independent decoding and realtime pacing; individual changes were not measured separately.</span></a></li>
+<li><a href="nvdec-cuarray.html"><b>4. CUarray decode and hardware-only HEVC work</b><span class="impact">VRAM and CPU · two historical comparisons</span><span>CUarray storage saved 4.88 GiB at 192 inputs/20 outputs. Skipping software-only HEVC table clears reduced decoder CPU ~86 → 62% of one core. Arrays are a storage/copy optimization, not universally faster textures.</span></a></li>
+<li><a href="compositor-wait.html"><b>5. Ready-input waits and bounded polling</b><span class="impact">CPU · historical compositor measurements</span><span>Epoll reduced the busiest compositor 51.8 → 34.7% of one core. In later builds, 8 ms input polling reduced each Program compositor 12.1 → 7.3%. These are separate comparisons; keep deadline and delivery checks.</span></a></li>
+<li><a href="browser-frame-queue.html"><b>6. Fixed browser pools and early lease release</b><span class="impact">GPU allocation stability · current transition evidence</span><span>The tested nine-buffer exporter pool had zero new imports during transitions. One CUDA copy frees Chromium ownership before downstream composition. Six saved ~1 GiB but raised repeats 3 → 223; fixed allocation alone does not ensure good cadence.</span></a></li>
+<li><a href="event-loops.html"><b>7. Shared fan-out loops and coalesced signals</b><span class="impact">CPU scheduling and thread count · historical evidence</span><span>Event-loop fan-out removed 192 threads (1,081 → 889). Its CPU mostly moved onto shared loops; persistent waits and coalesced signals reduce wake overhead. Thread reduction is measured; an isolated large CPU saving is not claimed.</span></a></li>
+<li><a href="dsk-fades.html"><b>8. Cropped DSKs and transparent-pixel fast paths</b><span class="impact">GPU pixel work · implementation mechanism</span><span>Cropped keys reduce capture and composition pixels; alpha-zero samples skip RGB/HDR conversion. Full-size scene pages keep true 1080p capture. This avoids known work, but there is no isolated percentage-speedup measurement.</span></a></li>
 </ol>
+<p>Supporting guides: <a href="color-tags.html">source colour tags and conversion</a> · <a href="delivery-counters.html">on-air repeats, skips and lean diagnostics</a>.</p>
 <h2>Start with the right defaults</h2><table><thead><tr><th>Layer</th>
 <th>What the reviewed configuration selects</th>
 </tr>
@@ -52,4 +52,4 @@
 </ul>
 
 
-<footer><a href="index.html#top-10">← Current top ten</a> · <a href="source-limits.html">Measured scope and limits</a> · <a href="history.html">Historical evidence</a></footer></main></body></html>
+<footer><a href="index.html#top-10">← Performance recipes</a> · <a href="source-limits.html">Measured scope and limits</a> · <a href="history.html">Historical evidence</a></footer></main></body></html>

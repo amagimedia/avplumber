@@ -68,3 +68,5 @@ th { color: #edf4ff; background: var(--panel); }
 .flow { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 24px 0; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; text-align: center; }
 .flow span { border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
 .flow strong, .flow .wide { grid-column: 1 / -1; }
+
+.recipes .impact { color: var(--accent); font-size: 13px; line-height: 1.45; }

@@ -1,9 +1,9 @@
 <!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Route packets directly to their decoder, keep native cadence, and avoid allocating per-frame strings that this mixer never reads."><title>2. Remove input hand-offs and unused metadata · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
+<meta name="description" content="Route packets directly to their decoder, keep native cadence, and avoid allocating per-frame strings that this mixer never reads."><title>3. Remove input hand-offs and unused metadata · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
 <body><main><p class="site"><a href="index.html">AVPlumber · Mixer cookbook</a></p>
-<h1>2. Remove input hand-offs and unused metadata</h1><p class="lede">Route packets directly to their decoder, keep native cadence, and avoid allocating per-frame strings that this mixer never reads.</p>
+<h1>3. Remove input hand-offs and unused metadata</h1><p class="lede">Route packets directly to their decoder, keep native cadence, and avoid allocating per-frame strings that this mixer never reads.</p>
 <p class="note review">Reviewed 15 October 2026 against <a href="https://github.com/amagimedia/avplumber/tree/e72ff8b4ce3374918d85658d73e25cd6a5d36d39"><code>e72ff8b4</code></a>. These pages describe that code and named workload settings; they do not assert what every deployment runs.</p>
 
 <h2>Keep the graph small</h2><p>The mixer defaults to <code>canvas.input_routing: "input"</code>. <code>input_rec</code> routes selected streams directly to decoder edges, removing the per-file demux node and thread. The shared input-building helper retains its older demux default for other callers; this is not a blanket framework change. Use <code>"demux"</code> for a controlled mixer comparison.</p>
@@ -20,4 +20,4 @@
 <li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/nodes/decoders.cpp">src/nodes/decoders.cpp</a></li>
 <li><a href="https://github.com/amagimedia/avplumber/blob/6d644b6ca61d8e475fec465df645064948caa9f8/demos/mixer/docs/config.md">demos/mixer/docs/config.md</a></li>
 </ul>
-<footer><a href="index.html#top-10">← Current top ten</a> · <a href="source-limits.html">Measured scope and limits</a> · <a href="history.html">Historical evidence</a></footer></main></body></html>
+<footer><a href="index.html#top-10">← Performance recipes</a> · <a href="source-limits.html">Measured scope and limits</a> · <a href="history.html">Historical evidence</a></footer></main></body></html>
