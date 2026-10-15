@@ -5,7 +5,7 @@
 <body><main><p class="site"><a href="index.html">AVPlumber · Mixer cookbook</a></p>
 <h1>Mixer optimization cookbook</h1><p class="lede">Changes with demonstrated CPU, GPU or VRAM impact, plus clearly identified mechanisms that reduce work.</p>
 <p class="note review">Reviewed 15 October 2026 against <a href="https://github.com/amagimedia/avplumber/tree/e72ff8b4ce3374918d85658d73e25cd6a5d36d39"><code>e72ff8b4</code></a>. Setup defaults and capacity notes updated at <a href="https://github.com/amagimedia/avplumber/tree/74e3392f406eabf648dc34c1acdb8423bc8330dd"><code>74e3392f</code></a>. These describe code and named workload settings, not the live state of every deployment.</p>
-<p class="note">Docker/export defaults updated at <a href="https://github.com/amagimedia/avplumber/tree/48451ef0cd083e83e1d82bef4444bfbd91d5b3a4"><code>48451ef0</code></a>; the measurements below retain their stated scope.</p>
+<p class="note">The fixed-pool export Electron and the mixer's copy on import were removed at <a href="https://github.com/amagimedia/avplumber/tree/159d0182"><code>159d0182</code></a>: browsers run stock Electron with Chromium's ordinary capture, sampled in place. Measurements below that name a fixed pool or a copy on import describe the removed path.</p>
 
 <p>Ranked for the current browser-heavy L4 workload and the size of the supported benefit. CPU percentages below mean percent of one core; 100% is one full core. Historical before/after steps share baselines and are not additive. Each entry labels whether its evidence is a measurement or an implementation mechanism.</p>
 <h2 id="top-10">Performance changes worth preserving</h2><ol class="recipes">
@@ -14,7 +14,7 @@
 <li><a href="input-decode-cpu.html"><b>3. Direct input routing and optional metadata</b><span class="impact">CPU · historical combined-change measurement</span><span>The routing/metadata/signalling build reduced mixer CPU 322 → 265% of one core and removed 105 demux threads. It preserves independent decoding and realtime pacing; individual changes were not measured separately.</span></a></li>
 <li><a href="nvdec-cuarray.html"><b>4. CUarray decode and hardware-only HEVC work</b><span class="impact">VRAM and CPU · two historical comparisons</span><span>CUarray storage saved 4.88 GiB at 192 inputs/20 outputs. Skipping software-only HEVC table clears reduced decoder CPU ~86 → 62% of one core. Arrays are a storage/copy optimization, not universally faster textures.</span></a></li>
 <li><a href="compositor-wait.html"><b>5. Ready-input waits and bounded polling</b><span class="impact">CPU · historical compositor measurements</span><span>Epoll reduced the busiest compositor 51.8 → 34.7% of one core. In later builds, 8 ms input polling reduced each Program compositor 12.1 → 7.3%. These are separate comparisons; keep deadline and delivery checks.</span></a></li>
-<li><a href="browser-frame-queue.html"><b>6. Fixed browser pools and early lease release</b><span class="impact">GPU allocation stability · current transition evidence</span><span>The tested nine-buffer exporter pool had zero new imports during transitions. One CUDA copy frees Chromium ownership before downstream composition. Six saved ~1 GiB but raised repeats 3 → 223; fixed allocation alone does not ensure good cadence.</span></a></li>
+<li><a href="browser-frame-queue.html"><b>6. Browser frames go back one per new frame</b><span class="impact">GPU allocation stability · 192-input L4 show</span><span>Chromium's ordinary capture, sampled in place, with a return queue of three in a frame queue of nine. A copy on import on top of it stalled the whole GPU within a minute under 40 moving windows.</span></a></li>
 <li><a href="event-loops.html"><b>7. Shared fan-out loops and coalesced signals</b><span class="impact">CPU scheduling and thread count · historical evidence</span><span>Event-loop fan-out removed 192 threads (1,081 → 889). Its CPU mostly moved onto shared loops; persistent waits and coalesced signals reduce wake overhead. Thread reduction is measured; an isolated large CPU saving is not claimed.</span></a></li>
 <li><a href="dsk-fades.html"><b>8. Cropped DSKs and transparent-pixel fast paths</b><span class="impact">GPU pixel work · implementation mechanism</span><span>Cropped keys reduce capture and composition pixels; alpha-zero samples skip RGB/HDR conversion. Full-size scene pages keep true 1080p capture. This avoids known work, but there is no isolated percentage-speedup measurement.</span></a></li>
 </ol>
@@ -35,19 +35,19 @@
 <td>HEVC, CUarray storage, twelve extra decode surfaces</td>
 </tr>
 <tr><td>Browser installation</td>
-<td>Docker defaults to the patched Electron exporter plus shim, with a fixed pool of nine; direct npm installs remain stock Electron</td>
+<td>Stock Electron plus shim, in Docker and direct npm installs; the browser refuses the zero-copy export feature</td>
 </tr>
 <tr><td>Moving-browser experiment</td>
-<td>Fixed prewarmed pool nine, AVP copy on import, 4 × 10 windows at 50 fps; 3 × 10 at 60 fps with AUX p1</td>
+<td>Removed path: fixed prewarmed pool nine, AVP copy on import, 4 × 10 windows at 50 fps; 3 × 10 at 60 fps with AUX p1</td>
 </tr>
 </tbody></table>
 <p>Generic library defaults differ. Each recipe names which settings belong to a profile, deployment override or optional build. Neither a browser ring nor CUDA queue count sets the compositor deadline.</p>
-<p>Setup Apply and Defaults use those rate-dependent browser limits when allocating sources. Explicit saved encoder choices remain editable and preserved; Defaults restores AUX p1. The Docker image supplies the compatible exporter and fixed-pool flags; AVP copies on import automatically when the browser reports a fixed pool. <a href="source-limits.html#setup-defaults">Fresh seed and saved-configuration behavior</a>.</p>
+<p>Setup Apply and Defaults use those rate-dependent browser limits when allocating sources. Explicit saved encoder choices remain editable and preserved; Defaults restores AUX p1. The mixer samples Chromium's capture buffers in place and refuses a browser that reports a fixed capture pool. <a href="source-limits.html#setup-defaults">Fresh seed and saved-configuration behavior</a>.</p>
 <h2>What was actually demonstrated</h2><p><a href="source-limits.html">Read the current workload and limits</a> before choosing a count: 40 moving windows at 25/30/50 fps and 30 at 60 fps were short checks with 32-layer transitions, with isolated repeats in some runs. They are not a claim of flawless sustained output or 40 windows at 60 fps.</p>
 <p><a href="https://amagimedia.github.io/avplumber/demos/mixer/docs/">The recorded mixer UI</a> is a separate demonstration. Older CPU, memory and capacity experiments remain in <a href="history.html">historical evidence</a>; obsolete browser, stream and branch-state advice has been removed from this recommendation list.</p>
 <h2>Maintained references</h2><ul><li><a href="https://github.com/amagimedia/avplumber/blob/6d644b6ca61d8e475fec465df645064948caa9f8/demos/mixer/docs/config.md">Mixer configuration</a></li>
 <li><a href="https://github.com/amagimedia/avplumber/blob/74e3392f406eabf648dc34c1acdb8423bc8330dd/demos/mixer/docs/capacity.md">Capacity and validation scope</a></li>
-<li><a href="https://github.com/amagimedia/avplumber/blob/48451ef0cd083e83e1d82bef4444bfbd91d5b3a4/deps/dma-browser/README.md">Browser service and fixed-pool exporter</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/159d0182/deps/dma-browser/README.md">Browser service</a></li>
 <li><a href="https://github.com/amagimedia/avplumber/blob/74e3392f406eabf648dc34c1acdb8423bc8330dd/docker-compose/mixer/deploy/l4/README.md">Portable L4 deployment</a></li>
 <li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/doc/NODES.md">Node reference</a></li>
 </ul>

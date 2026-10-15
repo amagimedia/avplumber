@@ -14,7 +14,11 @@ if (process.platform !== 'linux') {
 
 const application = new Application();
 // Chromium switches must be applied before app is ready.
-application.applyHwAccelSwitches();
+try {
+  application.applyHwAccelSwitches();
+} catch (err) {
+  fail(err instanceof Error ? err.message : String(err));
+}
 
 app.on('render-process-gone', (_event, _wc, details) => {
   console.error('render-process-gone:', details);

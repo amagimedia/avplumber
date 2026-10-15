@@ -4,7 +4,6 @@ export interface StatusReport {
   readonly windows: readonly WindowSnapshot[];
   readonly count: number;
   readonly maxWindows: number;
-  readonly fixedCapturePoolSize?: number;
 }
 
 export interface WindowControl {

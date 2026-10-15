@@ -24,7 +24,7 @@ NumPy and FFmpeg with NVENC. `--runtime-media-dir /media` writes container paths
 | `generation` | `seconds` (default 2), optional source `width` and `height` |
 | `alpha_background` | Allocated video source used behind transparent pages |
 | `renditions`, `clean_rendition`, `aux_buses`, `dsk` | Output/key settings copied into the show |
-| `browser_frame_queue` | Ordinary capture's outstanding-frame limit: 1–9, default 9. The optional fixed-pool exporter overrides it with its advertised pool size and synchronizes sender retention, import caching and prewarm. Formerly `browser_ring_size`, still read. See [configuration](config.md) |
+| `browser_frame_queue` | Ordinary capture's outstanding-frame limit: 1–9, default 9. Formerly `browser_ring_size`, still read. See [configuration](config.md) |
 
 Largest-remainder rounding makes the weighted allocations sum to the total;
 ties follow recipe order. Weights summing to `source_count` give exact counts.

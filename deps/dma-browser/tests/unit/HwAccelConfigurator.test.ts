@@ -100,6 +100,28 @@ describe('HwAccelConfigurator.apply', () => {
     expect(disabled.filter((f) => f === 'Vulkan')).toHaveLength(1);
   });
 
+  it.each([
+    ['DMA_BROWSER_CHROMIUM_EXTRA_FEATURES', 'AvpZeroCopyOffscreenExport:buffers/9,Other'],
+    ['DMA_BROWSER_CHROMIUM_EXTRA_FEATURES', 'Other, *AvpZeroCopyOffscreenExport'],
+    ['DMA_BROWSER_CHROMIUM_EXTRA_FEATURES', 'AvpZeroCopyOffscreenExport<Trial'],
+    ['DMA_BROWSER_CHROMIUM_DISABLE_FEATURES', 'AvpZeroCopyOffscreenExport'],
+  ])('refuses the zero-copy export feature in %s=%s', (variable, value) => {
+    const { cl, calls } = recorder();
+    expect(() => new HwAccelConfigurator({ [variable]: value }, cl).apply()).toThrow(
+      `${variable} names AvpZeroCopyOffscreenExport: zero-copy export is not supported`,
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it('accepts features that only share the prefix', () => {
+    const { cl, calls } = recorder();
+    new HwAccelConfigurator(
+      { DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: 'AvpZeroCopyOffscreenExportProbe' },
+      cl,
+    ).apply();
+    expect(findSwitch(calls, 'enable-features')?.value).toBe('AvpZeroCopyOffscreenExportProbe');
+  });
+
   it('emits verbose logging switches when DMA_BROWSER_CHROMIUM_VLOG=1', () => {
     const { cl, calls } = recorder();
     new HwAccelConfigurator({ DMA_BROWSER_CHROMIUM_VLOG: '1' }, cl).apply();
@@ -116,5 +138,4 @@ describe('HwAccelConfigurator.apply', () => {
     expect(findSwitch(calls, 'enable-logging')).toBeUndefined();
     expect(findSwitch(calls, 'v')).toBeUndefined();
   });
-
 });

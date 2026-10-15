@@ -80,4 +80,16 @@ describe('readSupervisorConfig', () => {
       ),
     ).toThrow('overlaps');
   });
+
+  it('refuses to start with the zero-copy export feature', () => {
+    expect(() =>
+      readSupervisorConfig(
+        {
+          DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:
+            'AvpZeroCopyOffscreenExport:buffers/9,RenderableMappableSharedImageForceScanout',
+        },
+        '/app',
+      ),
+    ).toThrow("zero-copy export is not supported; remove it to run Chromium's ordinary capture");
+  });
 });

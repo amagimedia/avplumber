@@ -105,38 +105,6 @@ describe('FrameCaptureChannel retained frame lifetime', () => {
     fdpass.closeServer.mockReturnValue([]);
   });
 
-  it('keeps no pool of its own in zero-copy mode: every paint is sent and held until its ACK', async () => {
-    const channel = new FrameCaptureChannel({
-      socketPath: '/tmp/dma-page/overlay.sock',
-      allowedDims: AllowedDims.fromList(['1080x1920']),
-      log: logSink(),
-      retainedFramePoolSize: null,
-    });
-    const webContents = new EventEmitter() as WebContents & EventEmitter;
-    channel.attach(webContents);
-    await channel.start();
-    const releaseFrame = fdpass.setReleaseCallback.mock.calls[0]![1] as (
-      frameNumber: bigint, reusable: boolean,
-    ) => void;
-
-    const frames = [0, 1, 2, 3, 4].map((fd) => makeTexture(fd));
-    for (const frame of frames) {
-      webContents.emit('paint', frame, {}, image());
-    }
-    await Promise.resolve();
-
-    // Chromium's queue is the bound: nothing is dropped here, nothing released early.
-    expect(fdpass.broadcastFd).toHaveBeenCalledTimes(5);
-    expect(channel.getStats().retainedFrameCount).toBe(5);
-    expect(channel.getStats().droppedReasons).toEqual({});
-    for (const frame of frames) expect(frame.texture.release).not.toHaveBeenCalled();
-
-    releaseFrame(2n, true);
-    expect(frames[2]!.texture.release).toHaveBeenCalledTimes(1);
-    expect(channel.getStats().retainedFrameCount).toBe(4);
-    await channel.stop();
-  });
-
   it('holds transmitted textures until ACK and drops new frames at the in-flight limit', async () => {
     const channel = new FrameCaptureChannel({
       socketPath: '/tmp/dma-page/overlay.sock',

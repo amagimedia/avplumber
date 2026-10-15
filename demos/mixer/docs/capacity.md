@@ -3,8 +3,6 @@
 The L4 CUarray Setup profile now caps browser windows (DSKs included) at
 40/40/40/30 for 25/30/50/60 fps; the initial deployment and new AUX outputs use
 `p1`. Saved explicit encode choices remain until edited or reset with Defaults.
-The moving-browser measurements below require the optional fixed-pool exporter
-and copy-on-import configuration; a browser count alone does not enable it.
 
 Setup admits what [instance_profiles.py](../instance_profiles.py) allows for the GPU, the canvas
 rate and format, the outputs and their encoder presets. A profile is measured on its own GPU; do
@@ -36,17 +34,17 @@ and VRAM at 19.5 of 23 GB. The SDR 25 and 30 fps rows are the measured 192-sourc
 rows are the profile's admission limits. The linear `nvidia_l4` profile (no CUarray decode) carries
 170 sources at 25 and 30 fps.
 
-Use the [portable L4 stack](../../../docker-compose/mixer/deploy/l4/README.md). The historical
-ordinary-capture/direct-import runs used paced browser returns
-([`return_queue`](../../../doc/NODES.md#ipc_dmabuf_source)) to prevent allocation churn.
-The optional fixed-pool/copy-on-import path below instead releases each browser frame
-after its CUDA copy and retains the full prewarmed import cache; it uses no return queue.
+Use the [portable L4 stack](../../../docker-compose/mixer/deploy/l4/README.md). Browser frames must
+go back to the browser one per new frame ([`return_queue`](../../../doc/NODES.md#ipc_dmabuf_source)),
+which the mixer sets; without it the browsers keep allocating buffers and the releases stall the show.
 
 ### Moving pages and transitions
 
 Short transition checks on a 12-vCPU L4 (2026-10-15) used a 1080p HLG 4:2:0
 canvas, 57 video sources, 18 outputs and a fixed, fully prewarmed nine-buffer
-browser pool with a single CUDA copy on import. Browser counts include four
+browser pool with a single CUDA copy on import; that browser build and the mixer
+copy have since been removed, so the rows below are not a measurement of Chromium's
+ordinary capture sampled in place. Browser counts include four
 cropped keys; every other page was animated at 1920×1080 and the canvas rate.
 One-second fades and cuts between two 32-layer grids were spaced six seconds
 apart. These checks do not establish capacity for 64-layer transitions.
@@ -70,19 +68,11 @@ repeats/skips and no key issues. These are short smoke results, not zero-drop
 guarantees; `p1` trades AUX encoding quality for throughput.
 
 At 60 fps, 32 windows repeated hundreds of frames; 36 and 40 collapsed into
-persistent repeats. Increasing the 32-window pool to eleven did not rescue it,
-nor did reducing the main SDR preset to `p3` sustain 40 windows.
+persistent repeats. Reducing the main SDR preset to `p3` did not sustain 40 windows.
 
 Use the L4 stack's 32 compute queues, eight copy queues and frame staggering for
 this workload. Three larger browser groups failed the 40-window/50-fps test;
-the grouping is part of the tested configuration. The optional fixed-pool build
-and startup flags are described in the [browser configuration](../../../deps/dma-browser/README.md).
-Its advertised pool size synchronizes sender retention, import caching and prewarm;
-it is independent of the number of CUDA work queues.
-
-In a matched 30-window/60-fps transition test with AUX `p1`, reducing the pool
-from nine to six saved about 1 GiB but increased browser repeats from 3 to 223.
-Neither pool churned. Keep nine unless the smaller pool passes the actual show.
+the grouping is part of the tested configuration.
 
 ## NVIDIA T4, 16 vCPU: `tesla_t4`
 

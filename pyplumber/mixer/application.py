@@ -191,7 +191,6 @@ class MixerApplication:
     browser_importers: tuple[str, ...] = ()  # the drm_prime_to_cuda node of every browser source
     browser_input_edges: tuple[str, ...] = ()  # in browser_windows order, for initial paint retries
     delivery_monitor: bool = False
-    browser_fixed_pool_size: int = 0  # advertised by the installed capture producer
     start_stable_sec: float = START_STABLE_SEC
     start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC
     startup: dict | None = field(default=None, init=False)   # how going on air went; `mixer.startup` answers with it
@@ -378,7 +377,6 @@ class MixerApplication:
         program = [f"{MIXER_NAME}_comp_a", f"{MIXER_NAME}_comp_b"]
         buses = [f"{bus.prefix}_comp" for bus in self.aux_buses or ()]
         compositors = [*program, *buses]
-        self._warm_browser_pool()
         # A release stalls draws, and buffers still go out of use while the last buses come up:
         # release, let the show settle, and look again until a pass finds nothing left.
         for _ in range(IMPORT_PURGE_PASSES):
@@ -425,7 +423,7 @@ class MixerApplication:
         gigabytes of GPU memory at the moment the show needs most, and then release them one by
         one, each release stalling every draw: after the outputs are on air unless it happens here.
         With *wait*, returns once the releases are done, with how many there were."""
-        if not self.browser_importers or self.browser_fixed_pool_size:
+        if not self.browser_importers:
             return 0
         def stats():
             importers = (self.avp.node(node) for node in self.browser_importers)
@@ -444,42 +442,6 @@ class MixerApplication:
                 break
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
         return expired() - before
-
-    def _warm_browser_pool(self) -> None:
-        """Register every fixed producer buffer before releasing any output."""
-        if not self.browser_fixed_pool_size:
-            return
-        if not self.browser_windows or len(self.browser_windows) != len(self.browser_importers):
-            raise RuntimeError("Fixed browser pool warm-up requires one importer per window")
-        deadline = time.monotonic() + self.preheat_timeout_sec
-        rotations = {}
-        while True:
-            self._check_startup()
-            missing = []
-            for window, node in zip(self.browser_windows, self.browser_importers):
-                stats = self.avp.node(node).getObject("import_stats") or {}
-                retained = stats.get("imports", 0) - stats.get("expired", 0) - stats.get("evicted", 0)
-                frames = stats.get("imports", 0) + stats.get("hits", 0)
-                # Resuming capture can replace the startup pool. Require a full
-                # FIFO rotation after the last registration change, not merely
-                # N paints while old cached entries are still being replaced.
-                generation = tuple(stats.get(key, 0) for key in ("imports", "expired", "evicted"))
-                previous, first_frame = rotations.get(node, (None, frames))
-                if previous != generation or retained != self.browser_fixed_pool_size:
-                    first_frame = frames
-                rotations[node] = (generation, first_frame)
-                seen = frames - first_frame
-                if retained != self.browser_fixed_pool_size or seen < self.browser_fixed_pool_size:
-                    missing.append(window)
-            if not missing:
-                log.info("Browser pools ready: %d windows, %d registered buffers each",
-                         len(self.browser_windows), self.browser_fixed_pool_size)
-                return
-            if time.monotonic() >= deadline:
-                raise RuntimeError("Fixed browser pool warm-up timed out: " + ", ".join(missing))
-            # Invalidate static pages too; this reuses their pool without reloading.
-            paint_windows(self.dmabuf_rest, missing, True)
-            time.sleep(PREHEAT_POLL_INTERVAL_SEC)
 
     def _counters(self, compositors) -> dict | None:
         """Each compositor's published counters, {node: {missed_deadlines, output_drops, frames}},
@@ -840,12 +802,11 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     if options.mixer_input_poll_ms is None and cfg.input_poll_ms is not None:
         options = replace(options, mixer_input_poll_ms=cfg.input_poll_ms)
     browsers = [s for s in cfg.sources if s.kind == "browser"]
-    fixed_pool_size = 0
     if browsers:
-        fixed_pool_size = open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
+        open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
                                             "height": s.height, "fps": s.fps or cfg.fps,
                                             "ringSize": cfg.browser_frame_queue,
-                                            "holdLastFrame": s.hold_last_frame} for s in browsers]) or 0
+                                            "holdLastFrame": s.hold_last_frame} for s in browsers])
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
                          options.preheat_timeout_sec)
 
@@ -868,7 +829,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 fps=cfg.fps, drm_hwaccel=None,
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True,
                 preserve_alpha=source.id in blended_sources, browser_frame_queue=cfg.browser_frame_queue,
-                event_loop=_pacing_loop(index), fixed_pool_size=fixed_pool_size)
+                event_loop=_pacing_loop(index))
             for node in nodes:
                 avp.addNode(node)
         else:
@@ -979,7 +940,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False, held_outputs=tuple(held), browser_importers=importers,
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers),
                         browser_input_edges=tuple(input_edges[i] for i, s in enumerate(cfg.sources) if s.kind == "browser"),
-                        browser_fixed_pool_size=fixed_pool_size, delivery_monitor=True,
+                        delivery_monitor=True,
                         aux_buses=aux)
 
 

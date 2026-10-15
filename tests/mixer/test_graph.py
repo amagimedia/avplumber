@@ -455,100 +455,33 @@ def test_a_browser_in_a_large_catalogue_cannot_share_a_declared_hdr_input_color(
             GraphOptions(inputs=inputs, output="p.mp4", input_color=color).validate()
 
 
-@pytest.mark.parametrize("copy_on_import", [False, True])
-def test_browser_capture_storage_and_release_policy(monkeypatch, copy_on_import):
+@pytest.mark.parametrize("stale_copy_setting", [None, "1"])
+def test_browser_keeps_the_return_queue_and_expires_idle_imports(monkeypatch, stale_copy_setting):
     from pyplumber.mixer import dmabuf_inputs
 
-    monkeypatch.setenv("AVP_BROWSER_COPY_ON_IMPORT", "1" if copy_on_import else "0")
+    # A deployment environment left from the removed copy on import must not bring the copy back.
+    if stale_copy_setting is not None:
+        monkeypatch.setenv("AVP_BROWSER_COPY_ON_IMPORT", stale_copy_setting)
     nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
         fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=30, drm_hwaccel=None,
         cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=9)
     receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
     importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
-    assert receive.get("return_queue", 0) == (0 if copy_on_import else 3)
-    assert importer["zero_copy"] is (not copy_on_import)
+    assert receive["return_queue"] == 3
+    assert importer["zero_copy"] is True  # The compositor samples Chromium's capture buffer in place.
+    assert importer["max_imports"] == 12
     assert importer["import_ttl_ms"] == dmabuf_inputs.IMPORT_IDLE_MS
 
 
-@pytest.mark.parametrize("frame_queue", [6, 9])
-@pytest.mark.parametrize("pool_size", [6, 9, 11])
-def test_fixed_browser_pool_returns_immediately_and_retains_every_import(monkeypatch, frame_queue,
-                                                                        pool_size):
-    from pyplumber.mixer import dmabuf_inputs
-    monkeypatch.delenv("AVP_BROWSER_COPY_ON_IMPORT", raising=False)
-    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
-        fake_api(), prefix="input_0", socket="/tmp/page.sock", fps=50, drm_hwaccel=None,
-        cuda_hwaccel="gpu", source_group="g", processing_group="g",
-        browser_frame_queue=frame_queue, fixed_pool_size=pool_size)
-    receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
-    importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
-    assert receive.get("return_queue", 0) == 0
-    assert importer["max_imports"] == pool_size
-    assert importer["import_ttl_ms"] == 0
-    # The pool's buffers are copied and returned unless the environment says otherwise.
-    assert importer["zero_copy"] is False
-
-
-@pytest.mark.parametrize("setting, zero_copy", [(None, True), ("", True), ("0", True), ("1", False)])
-def test_ordinary_capture_copies_only_when_asked(monkeypatch, setting, zero_copy):
-    from pyplumber.mixer import dmabuf_inputs
-    if setting is None:
-        monkeypatch.delenv("AVP_BROWSER_COPY_ON_IMPORT", raising=False)
-    else:
-        monkeypatch.setenv("AVP_BROWSER_COPY_ON_IMPORT", setting)
-    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
-        fake_api(), prefix="input_0", socket="/tmp/page.sock", fps=50, drm_hwaccel=None,
-        cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=9)
-    importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
-    assert importer["zero_copy"] is zero_copy
-
-
-def test_fixed_browser_pool_can_still_be_sampled_in_place(monkeypatch):
-    from pyplumber.mixer import dmabuf_inputs
-    monkeypatch.setenv("AVP_BROWSER_COPY_ON_IMPORT", "0")
-    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
-        fake_api(), prefix="input_0", socket="/tmp/page.sock", fps=50, drm_hwaccel=None,
-        cuda_hwaccel="gpu", source_group="g", processing_group="g",
-        browser_frame_queue=9, fixed_pool_size=9)
-    importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
-    assert importer["zero_copy"] is True
-
-
-@pytest.mark.parametrize("reported", [0, 2, 6, 9, 11, 16, None, True, 1, 17, "11"])
-def test_browser_pool_contract_comes_from_the_service(monkeypatch, reported):
-    from pyplumber.mixer import dmabuf_inputs
-    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *args: {"fixedCapturePoolSize": reported})
-    if type(reported) is int and (reported == 0 or 2 <= reported <= 16):
-        assert dmabuf_inputs.open_windows("http://b", []) == reported
-    else:
-        with pytest.raises(RuntimeError, match="unsupported fixed capture pool"):
-            dmabuf_inputs.open_windows("http://b", [])
-
-
-@pytest.mark.parametrize("current_ring", [6, 9, 11])
-@pytest.mark.parametrize("pool_size", [6, 9, 11])
-def test_fixed_pool_sender_uses_every_producer_buffer(monkeypatch, current_ring, pool_size):
+def test_a_browser_reporting_a_fixed_capture_pool_is_refused(monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
 
-    requested = dict(id="page_00", url="http://p", width=1920, height=1080,
-                     fps=50, ringSize=9, holdLastFrame=True)
-    current = {**requested, "audio": False, "ringSize": current_ring}
-    calls = []
-
-    def request(base, method, path, body=None):
-        calls.append((path, body))
-        if path == "/status":
-            return {"fixedCapturePoolSize": pool_size, "windows": [current]}
-        return body
-
-    monkeypatch.setattr(dmabuf_inputs, "rest_request", request)
-    assert dmabuf_inputs.open_windows("http://b", [requested]) == pool_size
-    assert requested["ringSize"] == 9
-    if current_ring == pool_size:
-        assert calls == [("/status", None)]
-    else:
-        assert calls[-2:] == [("/window/close", {"id": "page_00"}),
-                             ("/window/open", {**current, "ringSize": pool_size})]
+    status = {"windows": []}
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *args: status)
+    dmabuf_inputs.open_windows("http://b", [])
+    status["fixedCapturePoolSize"] = 9   # an image with the removed zero-copy export Electron
+    with pytest.raises(RuntimeError, match="zero-copy export is not supported; run Chromium's ordinary capture"):
+        dmabuf_inputs.open_windows("http://b", [])
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
