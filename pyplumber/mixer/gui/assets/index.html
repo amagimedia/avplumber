@@ -69,9 +69,10 @@
                width: min(290px, calc(100vw - 24px)); padding: 10px 12px; border: 1px solid var(--edge);
                border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px #0008;
                color: var(--text); white-space: normal; font-size: 11px; line-height: 1.5; }
-  .meter-tip dl { display: grid; grid-template-columns: 1fr auto; gap: 5px 12px; margin: 6px 0 0; }
+  .meter-tip dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 5px 12px; margin: 6px 0 0; }
+  .meter-tip dt, .meter-tip dd { min-width: 0; overflow-wrap: anywhere; }
   .meter-tip dt { color: var(--muted); }
-  .meter-tip dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .meter-tip dd { margin: 0; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
   /* THREAD: tables of CPU by thread kind and Chromium process; the first column is the name. */
   #thread-tip { width: min(360px, calc(100vw - 24px)); }
   .meter-tip table { width: 100%; border-collapse: collapse; margin: 6px 0 0; font-variant-numeric: tabular-nums; }
@@ -81,6 +82,9 @@
   .meter-tip td { text-align: right; padding: 1px 0 1px 10px; font-weight: 600; white-space: nowrap; }
   .meter-tip td:first-child { color: var(--muted); font-weight: 400; text-align: left; padding-left: 0;
                               max-width: 17ch; overflow: hidden; text-overflow: ellipsis; }
+  #lat-tip table { table-layout: fixed; }
+  #lat-tip th:first-child { width: 45%; }
+  #lat-tip th, #lat-tip td { white-space: normal; overflow-wrap: anywhere; }
   @media (max-width: 1540px) {
     #top { gap: 6px; }
     #top h1 { font-size: 12px; }

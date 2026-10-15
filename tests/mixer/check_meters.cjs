@@ -99,19 +99,22 @@ const {chromium} = require('playwright');
     assert.match(await latTitle(), /· 40 s$/);
     // The other inputs in delivery; the browser sources in their own table with the worst and the drops.
     await page.evaluate(() => { state.recent.inputs = {
-      browser: {sources: 40, repeats: 120, discarded: 45, worst: {source: 'web_12', repeats: 40, discarded: 2}},
-      other: {sources: 152, repeats: 5, discarded: 1}};
+      browser: {sources: 40, repeats: 120, dropped: 45, worst: {source: 'web_12', repeats: 40, dropped: 2}},
+      other: {sources: 152, repeats: 5, dropped: 1}};
       state.browser_drops = {window_s: 600, covered_s: 600, windows: 40, dropped: 12,
         reasons: [['retained_pool_full', 9], ['no_consumer', 3]]}; renderLatency(); });
-    assert.deepEqual(await page.locator('#lat-tip th:first-child').allTextContents(), ['Delivery', 'Browser · 40']);
-    assert.deepEqual(await latLabels(), ['Cut p95 · 3', 'Deadline misses', 'AUX drops', 'Other repeats / discards',
-      'Repeats / discards', 'Worst', 'Drops', 'Reason']);
-    assert.deepEqual((await lat()).slice(3), ['5 / 1', '120 / 45', 'web_12 40 / 2', '12', 'retained_pool_full']);
-    await page.evaluate(() => { state.recent.inputs.browser = {sources: 40, repeats: 0, discarded: 0, worst: null};
+    assert.deepEqual(await page.locator('#lat-tip th:first-child').allTextContents(), ['Delivery', 'Browser sources · 40']);
+    assert.deepEqual(await latLabels(), ['Cut p95 · 3', 'Deadline misses', 'AUX drops', 'PGM video repeats / skips',
+      'PGM repeats / skips', 'Worst', 'Scope']);
+    assert.deepEqual((await lat()).slice(3), ['5 / 1', '120 / 45', 'web_12 40 / 2', 'Program · excludes prewarm / static holds']);
+    await page.evaluate(() => { state.recent.inputs.browser = {sources: 40, repeats: 0, dropped: 0, worst: null};
       state.browser_drops = null; renderLatency(); });
-    assert.deepEqual((await lat()).slice(4), ['0 / 0', '—', '—', '—']);
+    assert.deepEqual((await lat()).slice(4), ['0 / 0', '—', 'Program · excludes prewarm / static holds']);
     await page.evaluate(() => { state.recent = null; renderLatency(); });
     assert.deepEqual(await lat(), ['106.0 ms', '3', '1']);
+    sample.recent = {window_s: 600, covered_s: 40, inputs: {browser: {sources: 40,
+      repeats: 13, dropped: 13, worst: {source: 'browser_009', repeats: 2, dropped: 2}}}};
+    await page.evaluate(recent => { state.recent = recent; renderLatency(); }, sample.recent);
     for (const width of [1920, 1600, 1440, 1280]) {
       await page.setViewportSize({width, height: 1080});
       const box = await page.locator('#top').evaluate(e => ({width: e.clientWidth, scroll: e.scrollWidth, height: e.offsetHeight}));
@@ -122,6 +125,10 @@ const {chromium} = require('playwright');
         await page.locator(`#${id}`).hover();
         const tip = await page.locator(`#${id}-tip`).boundingBox();
         assert(tip && tip.x >= 0 && tip.x + tip.width <= width, `${id} tooltip must fit`);
+        if (id === "lat") {
+          assert(await page.locator("#lat-tip").evaluate(t => t.scrollWidth <= t.clientWidth), "delivery text must stay inside tooltip");
+          if (process.env.METER_SCREENSHOTS) await page.screenshot({path: path.join(process.env.METER_SCREENSHOTS, `lat-hover-${width}.png`)});
+        }
       }
     }
     await page.setViewportSize({width: 1920, height: 1080});
