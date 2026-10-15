@@ -382,6 +382,8 @@ retiming, held copies, snapshots, compositing and both sides of a fade. `repeats
 counts reuse beyond the source's native frame period; `dropped` counts capture
 IDs skipped while continuously on air. Aliases count once. Prewarm, off-air gaps
 and queue cleanup do not count. A producer restart establishes a new baseline.
+Browser wire IDs preserve known Chromium capture gaps and locally discarded paints,
+including those rejected by the sender's in-flight limit.
 For a source faster than the output, only skips beyond the normal rate-conversion
 allowance count; capture IDs alone cannot distinguish losses within that allowance
 from intentional sampling. Matching capture and output rates have no such allowance.

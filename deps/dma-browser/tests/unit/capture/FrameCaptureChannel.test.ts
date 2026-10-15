@@ -81,6 +81,19 @@ describe('FrameCaptureChannel skipped paints', () => {
     // 7 and 8 never reached the app; 6 and 9 reached it and were dropped at the pool limit.
     expect(channel.getStats().paintsSkipped).toBe(2);
     expect(channel.getStats().droppedReasons).toEqual({ retained_pool_full: 2 });
+    const releaseFrame = fdpass.setReleaseCallback.mock.calls[0]![1] as (
+      frameNumber: bigint, reusable: boolean,
+    ) => void;
+    releaseFrame(0n, true);
+    const resumed = makeTexture(3);
+    resumed.texture.textureInfo.metadata = { frameCount: 10 };
+    webContents.emit('paint', resumed, {}, image());
+    const ids = fdpass.broadcastFd.mock.calls.map(call =>
+      (call as unknown as [string, number, Buffer])[2].readBigUInt64LE(40));
+    // The four missing captures are observable at the consumer, too.
+    expect(ids).toEqual([0n, 5n]);
+    releaseFrame(5n, true);
+    expect(resumed.texture.release).toHaveBeenCalledTimes(1);
     await channel.stop();
   });
 });

@@ -192,7 +192,12 @@ export class FrameCaptureChannel implements ICaptureChannel {
   private handlePaint(event: PaintEventLike, img: PaintImageLike): void {
     this.stats.paintCount++;
     this.stats.lastPaintTsMs = Date.now();
+    const skippedBefore = this.counterGaps.skipped;
     this.countSkippedPaints(event);
+    // Keep missing Chromium captures and locally discarded paints visible in the
+    // wire sequence. Numbering only successful sends hides those losses downstream.
+    this.nextFrameNumber += BigInt(this.counterGaps.skipped - skippedBefore);
+    const frameNumber = this.nextFrameNumber++;
     let tex: PaintTextureLike | null | undefined;
     let retained: RetainedFrame | null = null;
     try {
@@ -281,7 +286,6 @@ export class FrameCaptureChannel implements ICaptureChannel {
         const stride = meta.stride && meta.stride >= minStride ? meta.stride : minStride;
         const pixelFormat = this.pixelFormatOf(info);
 
-        const frameNumber = this.nextFrameNumber++;
         const acquireFence = meta.fenceFd !== null;
         if (acquireFence && !this.fenceSeen) {
           this.fenceSeen = true;
@@ -312,7 +316,8 @@ export class FrameCaptureChannel implements ICaptureChannel {
               for (const reason of ['backpressure', 'disconnected', 'errors'] as const) {
                 if (result[reason]) {
                   const key = `fdpass_${reason}`;
-                  this.stats.droppedReasons[key] = (this.stats.droppedReasons[key] ?? 0) + result[reason];
+                  this.stats.droppedReasons[key] =
+                    (this.stats.droppedReasons[key] ?? 0) + result[reason];
                 }
               }
             }
@@ -458,7 +463,9 @@ export class FrameCaptureChannel implements ICaptureChannel {
       } catch (err) {
         this.opts.log.write(`stopPainting failed: ${String(err)}`);
       }
-      this.opts.log.write('DMA-BUF consumer disconnected with outstanding frames; source paused, restart this browser worker');
+      this.opts.log.write(
+        'DMA-BUF consumer disconnected with outstanding frames; source paused, restart this browser worker',
+      );
     }
     textures.add(frame.texture);
   }
