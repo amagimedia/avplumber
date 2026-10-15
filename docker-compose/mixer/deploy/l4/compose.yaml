@@ -3,6 +3,10 @@ name: avplumber-mixer-l4
 services:
   mixer:
     image: &mixer-image ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-mixer:${MIXER_RELEASE}
+    environment:
+      CUDA_DEVICE_MAX_CONNECTIONS: ${CUDA_DEVICE_MAX_CONNECTIONS:-32}
+      CUDA_DEVICE_MAX_COPY_CONNECTIONS: ${CUDA_DEVICE_MAX_COPY_CONNECTIONS:-8}
+      AVP_BROWSER_COPY_ON_IMPORT: ${AVP_BROWSER_COPY_ON_IMPORT:-0}
     build:
       dockerfile: docker-compose/mixer/Dockerfile.fedora44
       args:
@@ -36,6 +40,10 @@ services:
 
   dma-browser:
     image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-browser:${MIXER_RELEASE}
+    environment:
+      DMA_BROWSER_WINDOWS_PER_PROCESS: ${DMA_BROWSER_WINDOWS_PER_PROCESS:-10}
+      DMA_BROWSER_STAGGER_FRAMES: ${DMA_BROWSER_STAGGER_FRAMES:-1}
+      DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: ${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:-}
 
   wayland:
     image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-wayland:${MIXER_RELEASE}

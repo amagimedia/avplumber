@@ -45,6 +45,11 @@ pool at worker startup. The service reports the selected size, and the mixer
 uses it for sender retention, import caching, and warm-up. Changing the size
 requires restarting the browser workers and mixer; an active pool never grows
 or shrinks. Only mark a distribution version 2 if that patch is in its binary.
+For the version-2 build, start with `buffers/9`. Six buffers use less memory
+but leave less room for capture and consumer timing variation; check moving
+pages during transitions before reducing the pool. Setting the mixer's
+`browser_frame_queue` alone does not change this fixed pool.
+The pool bounds capture allocations; it does not set the compositor's frame deadline.
 The mixer registers the full pool before
 going on air, retains those registrations, and uses no return queue.
 The ordinary capture path remains the default.

@@ -19,6 +19,20 @@ docker-compose/mixer/deploy/l4/stack.sh logs -f mixer
 and selects `nvidia_l4_cuarray`. Browser services come from the shared
 [DMA-BUF integration](../../../../doc/dmabuf.md); no other demo is required.
 
+The mixer uses 32 CUDA compute work queues and eight copy work queues on L4.
+This reduces serialization between independent source and compositor streams under
+moving-browser load. Override `CUDA_DEVICE_MAX_CONNECTIONS` or
+`CUDA_DEVICE_MAX_COPY_CONNECTIONS` in `.env` to compare workloads; changing them
+requires recreating the mixer container. These settings do not change the browser
+capture pool or the mixer's frame deadline.
+
+Browser workers hold up to ten windows each, with frame staggering enabled.
+Override `DMA_BROWSER_WINDOWS_PER_PROCESS` and `DMA_BROWSER_STAGGER_FRAMES` in
+`.env` for other workloads. For the optional patched exporter, `.env.example`
+also shows how to select a fixed nine-buffer pool and a single asynchronous
+CUDA copy on import. That option requires the version-2 browser build described
+in the [browser configuration](../../../../deps/dma-browser/README.md).
+
 Open `http://<host>:7681/setup/`, controls at `/`, outputs at `/wall`.
 Allow the public proxy port and `JANUS_RTP_PORT_RANGE` (UDP 20000–20100 by
 default). Set `MIXER_HTPASSWD` or use an authenticated reverse proxy.
