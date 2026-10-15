@@ -1,9 +1,18 @@
-# Alternative: zero-copy export with a fixed, preallocated pool
+# Zero-copy export with a fixed, preallocated pool
 
-This is an opt-in Chromium/Electron alternative to copy capture. It is not
-enabled by the browser service's defaults. Chromium renders into exportable
-buffers; AVP may still copy each incoming frame into its own CUDA storage.
-That consumer choice is independent of Chromium's capture mode.
+These Chromium/Electron patches build the Electron that the
+[dma-browser image](../../../../docker-compose/images/dma-browser/Dockerfile) uses by
+default, in place of stock Electron and its copy capture. Chromium renders into
+exportable buffers; the mixer copies each incoming frame once into its own CUDA
+storage and returns the buffer. That consumer choice is independent of Chromium's
+capture mode.
+
+The build that the image installs is published as the
+[`dma-browser-electron-v44.5.1-avp-zero-copy-1`](https://github.com/amagimedia/avplumber/releases/tag/dma-browser-electron-v44.5.1-avp-zero-copy-1)
+release: `electron-v44.5.1-linux-x64.zip`, sha256
+`06491fff01fd4ae1c59d55b62efad7e32a91512d36488fefcb135fd9be5464bf`, with all five
+patches below, including the optional `0003`. A new build needs a new release and an
+updated `ELECTRON_ARCHIVE_URL`/`ELECTRON_ARCHIVE_SHA256` in that Dockerfile.
 
 The `0001` patches preserve the last exporter implementation, including native
 handles, acquire fences, transparent root capture, bounded leases, FIFO reuse,
@@ -61,7 +70,7 @@ autoninja -C out/Release electron electron:electron_dist_zip
 The Electron refresh patch requests a fresh shared-texture capture without
 restarting the capturer, allowing static pages to cycle the complete FIFO.
 Enable `AvpZeroCopyOffscreenExport` and
-`RenderableMappableSharedImageForceScanout` only in the alternative build.
+`RenderableMappableSharedImageForceScanout` only with this build.
 The exporter requires Linux/Ozone with Ganesh GL and working native-pixmap
 allocation. Retain the NVIDIA GBM shim where the runtime requires it.
 Set the content size explicitly after creating an offscreen window and verify
@@ -86,15 +95,14 @@ Drop the input reference before a potentially blocking output-queue write.
 Enqueuing the copy is not completion. This shortens the producer lease without
 reducing the fixed pool size.
 
-The default copy-capture service no longer forwards
-this fence protocol: installing this archive alone does not make that service
-a compatible zero-copy consumer. Do not advertise fixed-pool readiness
-until capture-mode selection, fence handling and the readiness gate
-are wired to this alternative.
+The browser service forwards each frame's fence with its DMA-BUF and reports the
+fixed pool size only when `resources/avp-capture-pool.json` certifies the binary;
+`ipc_dmabuf_source` waits for the fence, and the mixer registers the full pool
+before going on air.
 
 ## Validation
 
-Run `fixed-pool-probe.cjs` with the alternative Electron on the Linux GPU host:
+Run `fixed-pool-probe.cjs` with this Electron on the Linux GPU host:
 
 ```sh
 <electron-dist>/electron --no-sandbox <patch-dir>/fixed-pool-probe.cjs
@@ -120,6 +128,8 @@ The fixed-11 build passed the 1920×1080 producer probe: 69 delivered frames,
 11 distinct DMA-BUFs, no bitmap fallback, and successful exhaustion and return
 recovery. The optional `0003` startup-size patch has also been compiled and
 packaged successfully; the resulting executable reports Electron 44.5.1.
-GPU tests of the selectable sizes are still pending. The earlier fixed-11
-binary ignores `buffers/N`; use a build containing `0003` before changing
-startup sizes without recompilation.
+On the L4 the published build ran the mixer with 40 browser windows at 25, 30
+and 50 fps on `buffers/9`; `buffers/6` saved about 1 GiB of VRAM but repeated
+far more frames in the matched transition test (223 against 3). The earlier
+fixed-11 binary ignores `buffers/N`; use a build containing `0003` before
+changing startup sizes without recompilation.

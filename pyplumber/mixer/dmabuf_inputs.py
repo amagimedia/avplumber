@@ -69,7 +69,11 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
     """
     if browser_frame_queue is None:
         browser_frame_queue = default_browser_frame_queue(fps)
-    copy_on_import = os.environ.get("AVP_BROWSER_COPY_ON_IMPORT") == "1"
+    # A fixed export pool lends Chromium's own buffers: copy each frame once and return it,
+    # rather than holding a lease while the compositor samples it. Unset or empty follows
+    # the pool; "0" or "1" overrides.
+    copy_on_import = (os.environ.get("AVP_BROWSER_COPY_ON_IMPORT")
+                      or ("1" if fixed_pool_size else "0")) == "1"
     drm_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
               "auto_restart": "group", "fps": f"{fps}/1"}

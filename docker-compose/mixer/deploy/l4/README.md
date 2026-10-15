@@ -32,10 +32,12 @@ DSKs. Changing the frame rate recalculates the allocation on the page and server
 All AUX outputs default to `p1`, including the initial deployment settings;
 explicit saved encode choices remain editable and can be reset with Defaults.
 Override `DMA_BROWSER_WINDOWS_PER_PROCESS` and `DMA_BROWSER_STAGGER_FRAMES` in
-`.env` for other workloads. For the optional patched exporter, `.env.example`
-also shows how to select a fixed nine-buffer pool and a single asynchronous
-CUDA copy on import. That option requires the version-2 browser build described
-in the [browser configuration](../../../../deps/dma-browser/README.md).
+`.env` for other workloads. The browser image runs the patched Electron with a
+fixed, prewarmed pool of nine export buffers per window, and the mixer copies each
+frame once on import and returns it at once (see the
+[browser configuration](../../../../deps/dma-browser/README.md)). Set
+`DMA_BROWSER_CHROMIUM_EXTRA_FEATURES` to change the pool size; changing it, or
+`AVP_BROWSER_COPY_ON_IMPORT`, requires recreating the browser and mixer containers.
 
 Open `http://<host>:7681/setup/`, controls at `/`, outputs at `/wall`.
 Each source count is editable, including zero. Count edits recalculate the total
