@@ -105,11 +105,11 @@ const {chromium} = require('playwright');
         reasons: [['retained_pool_full', 9], ['no_consumer', 3]]}; renderLatency(); });
     assert.deepEqual(await page.locator('#lat-tip th:first-child').allTextContents(), ['Delivery', 'Browser sources · 40']);
     assert.deepEqual(await latLabels(), ['Cut p95 · 3', 'Deadline misses', 'AUX drops', 'PGM video repeats / skips',
-      'PGM repeats / skips', 'Worst', 'Scope']);
-    assert.deepEqual((await lat()).slice(3), ['5 / 1', '120 / 45', 'web_12 40 / 2', 'Program · excludes prewarm / static holds']);
+      'PGM repeats / skips', 'Worst']);
+    assert.deepEqual((await lat()).slice(3), ['5 / 1', '120 / 45', 'web_12 40 / 2']);
     await page.evaluate(() => { state.recent.inputs.browser = {sources: 40, repeats: 0, dropped: 0, worst: null};
       state.browser_drops = null; renderLatency(); });
-    assert.deepEqual((await lat()).slice(4), ['0 / 0', '—', 'Program · excludes prewarm / static holds']);
+    assert.deepEqual((await lat()).slice(4), ['0 / 0', '—']);
     await page.evaluate(() => { state.recent = null; renderLatency(); });
     assert.deepEqual(await lat(), ['106.0 ms', '3', '1']);
     sample.recent = {window_s: 600, covered_s: 40, inputs: {browser: {sources: 40,

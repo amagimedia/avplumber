@@ -1522,7 +1522,6 @@ function renderLatency() {
   const browser = b?.sources ? [
     ["PGM repeats / skips", pair(b)],
     ["Worst", worst && (worst.repeats || worst.dropped) ? `${worst.source} ${pair(worst)}` : "—"],
-    ["Scope", "Program · excludes prewarm / static holds"],
   ] : [];
   setMeterTip($("lat"), `Latency & delivery · ${span}`, [...delivery, ...browser], () => [
     tipTable(["Delivery", ""], delivery),
