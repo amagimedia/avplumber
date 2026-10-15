@@ -82,6 +82,14 @@ What did not matter: viewer PLIs (blocked for 60 s, no change), the fade impleme
 source kind on program, DSK keys. Two GPU processes of 20 windows each were worse than
 four of ten (two clean starts failed).
 
+What addresses the contention itself, measured 2026-10-15 17:18-17:25 UTC: a long compute
+time-slice on the GPU (`nvidia-smi compute-policy --set-timeslice=3`, per boot; a oneshot
+systemd unit on the measured host). With it the browser ran unthrottled at 28 fps per window
+through the fade and DSK stress passes with no missed deadline, where a 2-CPU cap on the
+browser (23 fps per window) had collapsed within seconds. The default slice lets Chromium's
+GL contexts interleave the mixer's many short dependent kernels; the long slice lets the
+mixer's context drain its queue before yielding.
+
 Operating rules that follow: keep the browser container's CPU weight below the mixer's
 (`cpu_shares: 512` above; Chromium raises its GPU processes to nice -8 on its own), avoid
 CPU-bound work on the host while the show runs, and if an operator-side watchdog is used,

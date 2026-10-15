@@ -45,10 +45,10 @@ services:
     # work then outranks the mixer's deadline threads on the same host. A lower CPU weight for
     # the whole browser container keeps the mixer first (measured 2026-10-15 on the L4 show).
     cpu_shares: 512
-    # Hard cap, measured 2026-10-15: with the browser above ~2 CPUs (about 23 fps per window on 40 moving
-    # windows) the GPU time-sharing regime returns within seconds of a restart; at 1.5 CPUs (16-19 fps per
-    # window) program and AUX run with no missed deadline. Raise it once browser GL load is cut at the source.
-    cpus: "1.5"
+    # Measured 2026-10-15: without a long GPU compute time-slice (see README) the browser above ~2 CPUs
+    # re-enters the GPU time-sharing regime within seconds; with the long slice it runs unthrottled.
+    # Kept as a safety ceiling well above its normal ~2.8 CPUs.
+    cpus: "4"
     environment:
       DMA_BROWSER_WINDOWS_PER_PROCESS: ${DMA_BROWSER_WINDOWS_PER_PROCESS:-10}
       DMA_BROWSER_STAGGER_FRAMES: ${DMA_BROWSER_STAGGER_FRAMES:-1}
