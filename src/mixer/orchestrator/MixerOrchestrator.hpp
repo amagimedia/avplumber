@@ -89,8 +89,21 @@ class MixerOrchestrator {
     // and no frozen picture is on air: the caller then finishes the snapshot, which
     // replaces a frozen picture with the live program.
     void restoreProgramRouting(MixerState::TransitionMode dropped);
+    /// Caller holds state_->mutex: program routing restored, the wipe chain parked, nothing of
+    /// the dropped transition left in the state. Cleanup failures are logged, never thrown.
+    void dropTransition(MixerState::TransitionMode dropped);
     void abortTransition(uint64_t generation) noexcept;
     void beginTake(const std::string& scene_name, MixerState::TransitionMode mode);
+    /// A take pressed while a transition is on air acts on that transition, as a vision
+    /// switcher's buttons do (Grass Valley Kayenne): CUT completes it at the next frame
+    /// boundary; AUTO for its scene pauses or resumes a crossfade (a wipe ignores it); another
+    /// scene first replaces the preset picture under the running transition. Returns false,
+    /// doing nothing, when no transition is on air. Caller holds state_->mutex.
+    bool actOnTransitionOnAir(const std::string& scene_name, MixerState::TransitionMode pressed);
+    /// Load `scene_name` into the preset slot under the transition on air, like a preset-bus
+    /// selection: the incoming picture changes as soon as the slot renders it.
+    void replacePreset(const std::string& scene_name);
+    void toggleCrossfadePause();
     void prepareScene(const std::string& scene_name);
     bool destinationReady(const av::VideoFrame* frame) const;
     void completeTake(int64_t pts_ns);

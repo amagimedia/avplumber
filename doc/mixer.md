@@ -194,7 +194,7 @@ thread priority), and `gui.web` (HTTP and CLI). Existing public imports from
 | `src/mixer/primitives/` | headers with no graph or CUDA dependency: `TickGrid`, `Cadence`, `MonotonicClock`, `CutLatency`, `CutLatencyProbe`, `Snapshot`, `OutputSnapshot`, `MixerState`, `TransitionGuard`, `PreviewFollow` (unit-tested where they carry logic), plus the compositor geometry headers below |
 | `src/nodes/mixer_compositor.cpp`, `mixer_keyer.cpp` | mixer-owned compositor nodes: the clocked playout of the scene slots, wipe and AUX buses (`mixer_compositor`); the DSK (`mixer_keyer`) |
 | `src/nodes/hwaccel/cuda_rect_compositor.hpp`, `cuda_rect_overlay.cpp` | the compositors' shared base (canvas, layers, control, drawing one frame); the generic unclocked `cuda_rect_overlay` |
-| `src/nodes/mixer_snapshot.cpp`, `mixer_pvw_follow.cpp` | mixer-owned nodes: the output hold and slot substitution; an AUX bus's composition writer, which draws its PVW cells on the bus frame the bus's `pvw_align` picks ([AUX bus follower](#aux-bus-follower)) |
+| `src/nodes/mixer_snapshot.cpp`, `mixer_pvw_follow.cpp` | mixer-owned nodes: the output hold and slot substitution (no longer armed by transitions, which capture nothing); an AUX bus's composition writer, which draws its PVW cells on the bus frame the bus's `pvw_align` picks ([AUX bus follower](#aux-bus-follower)) |
 | `src/nodes/hwaccel/cuda_rect_draw.{hpp,cpp}`, `cuda_rect_scale.cu` | kernel module, canvas clear, per-layer draw |
 | `src/mixer/primitives/compositor_layers.hpp`, `pixel_layout.hpp`, `compositor_geometry.hpp` | layer parsing and draw-op resolution, format geometry, placement (pure; geometry and layout unit-tested) |
 
@@ -365,9 +365,24 @@ compositor idle between wipes, and a take arms them in place (`play` on the
 creates, starts or stops nothing. A `load` on the `clip_cache` node ends on the
 decode chain's end-of-stream marker (`realtime` `forward_eof`), never on
 silence; its `status` names the clip still `loading`, and `forget` drops one.
-A new take can interrupt an ongoing
-transition using the current output picture; interrupting a wipe parks the
-chain the same way.
+
+There is one transition, and a take pressed while it is on air acts on it, as
+the CUT and AUTO buttons of a vision switcher's M/E do (Grass Valley Kayenne
+behaviour); nothing is captured or frozen:
+
+| Take while a transition is on air | Result |
+|---|---|
+| `mixer.cut` | completes it at the next frame boundary: the preset's next ready frame goes to program |
+| `mixer.fade` (or `mixer.wipe`) for the scene of a crossfade on air | pauses it at its position, both sources moving; the next one resumes it from there |
+| `mixer.fade` for the scene of a wipe on air | ignored; the wipe runs to its end |
+| any take, or `mixer.preview`, with another scene | replaces the preset picture under the running transition (as a preset-bus selection does), which then ends on that scene; a cut completes at once |
+| `mixer.interrupt` | cuts back to the program as it was before the transition |
+
+A take while a cut or transition is only being prepared, nothing of it on air
+yet, replaces it. `mixer.status` reports `transition_on_air` and
+`transition_paused`. Pausing re-sends only the filter's alpha with a clamped
+clock, so it costs nothing on the GPU. A replaced preset that never renders
+ends the transition through the take deadline, back to the program.
 
 A fade with `"color"` (opaque RGB such as `"#000000"`, in libavutil colour
 syntax) is a dip: program fades to that colour over the first half and the
@@ -382,8 +397,8 @@ Y 16 and white Y 235 (8-bit SDR), and on HLG white is graphics white (203 nits,
 only the picture still visible (none during the hold), so a dip costs no more
 than a crossfade: two launches per frame, no extra buffers or passes, and
 nothing while no transition runs. Readiness, timing, interruption and cleanup
-are the crossfade's; an interrupted dip keeps the picture it had reached,
-which at the midpoint is the solid colour.
+are the crossfade's; a paused dip holds the picture it had reached, which at
+the midpoint is the solid colour.
 
 After a completed take the preview is the scene that left program (OBS's
 "Swap Preview/Program Scenes After Transitioning", always on; a failed take,

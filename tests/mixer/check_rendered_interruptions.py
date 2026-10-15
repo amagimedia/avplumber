@@ -14,14 +14,6 @@ import numpy as np
 from frame_codes import read_code
 
 
-def assert_frozen(reference, frames):
-    if len(frames) < 8:
-        raise AssertionError("fewer than eight retained output frames")
-    for index, image in enumerate(frames):
-        if not np.array_equal(image, reference):
-            raise AssertionError(f"retained picture differs at frame {index}")
-
-
 def check_graph(avp, mixer, output, errors, wipe_file, wipe_seconds):
     last_pts = None
     def receive(timeout=50):
@@ -150,18 +142,16 @@ def check_graph(avp, mixer, output, errors, wipe_file, wipe_seconds):
                           'command_ms': (acknowledged - started) * 1000}
                 results.append(result)
                 print(json.dumps(result), flush=True)
-    # An explicit interruption retains a blended picture until a replacement
-    # arrives. Check pixels, then prove that the replacement restores motion.
+    # An explicit interruption cuts back to the live program; nothing is retained.
     mixer.fade('full1', duration_sec=1.2)
     collect(0.55)
     avp.executeCommandsFromString('mixer.interrupt {"mixer":"recovery"}')
-    retained = collect(0.5)
-    assert_frozen(retained[-12][1], [image for _, image in retained[-12:]])
+    live_scene(0)
     for index in range(20):
         mixer.cut(f'full{index % 2}')
     collect(0.5)
     live_scene(1)
-    results.append({'explicit_interrupt': 'retained blend', 'burst_cuts': 20, 'final_scene': 'full1'})
+    results.append({'explicit_interrupt': 'back to program', 'burst_cuts': 20, 'final_scene': 'full1'})
     return results
 
 

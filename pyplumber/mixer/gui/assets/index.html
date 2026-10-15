@@ -601,7 +601,9 @@ function renderBuses() {
   $("pgm").textContent = status.pgm_scene || "—";
   $("pvw").textContent = status.pvw_scene || "—";
   const transition = status.transition || "idle";
-  $("pgm-state").textContent = transition === "idle" ? "on air" : `on air · ${transition}`;
+  // A second take of the same scene pauses a fade (Space again resumes it); C completes it.
+  const paused = status.transition_paused ? " · paused" : "";
+  $("pgm-state").textContent = transition === "idle" ? "on air" : `on air · ${transition}${paused}`;
   $("pvw-state").textContent = direct ? `picks take to program with ${currentTransition}` : "ready";
 }
 function keyTransition() {
@@ -1569,7 +1571,7 @@ function render() {
   $("hint-pages").hidden = !pagesBus();
   setMeterTip($("hint"), "Keyboard shortcuts", [
     ["1–9", "Pick visible scene"], ["← / →", "Browse Preview only"],
-    ["Space", `Take Preview · ${currentTransition}`], ["C", "Cut to selected scene"],
+    ["Space", `Take Preview · ${currentTransition} (again: pause / resume)`], ["C", "Cut to selected scene (completes a running transition)"],
     ["F", "Fade to selected scene"], ["W", "Wipe to selected scene"],
     ["D", "Toggle direct-to-Program picks"],
     ["[ / ]", "Previous / next multiview page"],

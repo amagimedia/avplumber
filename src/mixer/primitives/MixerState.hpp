@@ -189,6 +189,17 @@ struct MixerState : public InstanceShared<MixerState> {
     bool destination_ready = false;
     FadeCurve take_curve = FadeCurve::Linear;
     std::optional<std::array<uint8_t, 3>> take_dip;
+    // What program shows besides a slot's direct picture: the crossfade compositor (program
+    // selector on input 2) or the wipe overlay (wipe selector on input 1). While one is on air
+    // a take acts on that transition, as a switcher's CUT and AUTO do, and never starts another.
+    bool blend_on_air = false;
+    bool wipe_on_air = false;
+    // The crossfade on air, kept to re-send its alpha when AUTO pauses or resumes it.
+    std::optional<FadeRequest> take_request;
+    // Paused by AUTO pressed again: the mix holds at the program time `take_hold_ns` and both
+    // sources keep moving; nothing is captured.
+    bool take_paused = false;
+    int64_t take_hold_ns = 0;
     uint64_t scene_revision = 0;
 
 

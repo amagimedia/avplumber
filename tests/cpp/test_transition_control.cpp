@@ -1,15 +1,31 @@
 #include "mixer/transition_control.hpp"
 #include "mixer/backends/cuda/transition_control.hpp"
 #include <cassert>
+#include <cmath>
 #include <string>
 #include <utility>
 #include <vector>
 
 void print_stack_trace() {}
 
+extern "C" {
+#include <libavutil/eval.h>
+}
+
 namespace {
 Parameters filterCommand(const std::string& command, const std::string& argument) {
     return {{"target", "transition_cuda"}, {"command", command}, {"argument", argument}};
+}
+
+// The filter's value of an alpha expression at frame time `t` (seconds).
+double alphaAt(const std::string& expression, double t) {
+    const char* names[] = {"t", nullptr};
+    const double values[] = {t};
+    double result = NAN;
+    const int ret = av_expr_parse_and_eval(&result, expression.c_str(), names, values,
+                                           nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr);
+    assert(ret >= 0);
+    return result;
 }
 }
 
@@ -59,6 +75,28 @@ int main() {
     assert(eased[2].value.at("argument") ==
            "(st(1," + clip + ");if(lt(ld(1),0.5),0.5*((st(0,ld(1)/0.5);ld(0)*ld(0))),"
            "if(lt(ld(1),0.5),0.5,0.5+0.5*((st(0,(ld(1)-0.5)/0.5);ld(0)*ld(0))))))");
+    // Pause: the clock stops at the ceiling, so the mix holds there while frames keep coming.
+    // Resume: a later start shifted by the pause, clamped from below at the resume time.
+    {
+        avp::mixer::FadeRequest held{12345, 0.75, false};
+        held.time_ceiling_ms = 12600;
+        const std::string paused = control(held).back().value.at("argument");
+        assert(paused == "clip((min(t,12.600000)-12.345000)/0.750000,0,1)");
+        assert(std::fabs(alphaAt(paused, 12.5) - 0.155 / 0.75) < 1e-9);    // before the hold: running
+        assert(std::fabs(alphaAt(paused, 12.6) - 0.255 / 0.75) < 1e-9);
+        assert(std::fabs(alphaAt(paused, 30.0) - 0.255 / 0.75) < 1e-9);    // long after: held
+        // Resumed 2 s later: start shifted by 2 s, continuing from the held position.
+        avp::mixer::FadeRequest resumed{14345, 0.75, false};
+        resumed.time_floor_ms = 14600;
+        const std::string running = control(resumed).back().value.at("argument");
+        assert(running == "clip((max(t,14.600000)-14.345000)/0.750000,0,1)");
+        assert(std::fabs(alphaAt(running, 14.6) - alphaAt(paused, 12.6)) < 1e-9);  // no jump
+        assert(std::fabs(alphaAt(running, 14.0) - alphaAt(paused, 12.6)) < 1e-9);  // late frames too
+        assert(alphaAt(running, 15.2) == 1.0);                                      // ends after the remainder
+        // Toward slot A the same clock is mirrored.
+        resumed.destination_is_a = true;
+        assert(control(resumed).back().value.at("argument") == "1-" + running);
+    }
     bool rejected = false;
     try { avp::mixer::transitionControl("vulkan"); }
     catch (const std::exception&) { rejected = true; }

@@ -21,13 +21,15 @@ from frame_codes import read_code
 
 
 @contextmanager
-def recovery_graph(paths, *, webui=None, port=18779, routed=False):
+def recovery_graph(paths, *, webui=None, port=18779, routed=False, control=False):
     avp = AVPlumber()
     errors = []
     avp.on_exception = lambda name, kind, message: errors.append((name, kind, message))
     avp.executeCommandsFromString('hwaccel.init {"name":"recovery_gpu","type":"cuda"}')
-    if webui:
+    if webui or control:
+        # `control`: commands with replies (mixer.status) over the control port.
         avp.enableControlServer(port)
+    if webui:
         avp.registerWithWebUI(webui, "immediate-transition-test", "")
     avp.edges.planCapacity('*', 3)
     for index, path in enumerate(paths):
@@ -199,15 +201,18 @@ def check_recovery(avp, mixer, output, errors):
         command('node.object.set target_gate active 0')
         results.append({'failure': 'missing_wipe', 'moving_program_frames': moving_program(0)})
 
-    # A fade replacing a running fade retains the blended still on the program slot;
-    # the replacement must still arm and finish instead of waiting out the timeout.
+    # A second AUTO for the scene of the fade on air pauses it (both sources keep moving) and
+    # a third resumes it to its endpoint, as on a Grass Valley switcher; neither waits out the
+    # take deadline.
     command('node.object.set target_gate active 0')
     sample(0.3)
     mixer.fade('full1', duration_sec=0.5)
     sample(0.15)
     mixer.fade('full1', duration_sec=0.5)
     sample(1.0)
-    results.append({'failure': 'replaced_fade', 'moving_program_frames': moving_program(1)})
+    mixer.fade('full1', duration_sec=0.5)
+    sample(1.0)
+    results.append({'failure': 'paused_and_resumed_fade', 'moving_program_frames': moving_program(1)})
     mixer.cut('full0')
     sample(0.5)
 

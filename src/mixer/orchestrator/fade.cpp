@@ -7,6 +7,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid fade duration");
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
+    if (actOnTransitionOnAir(scene_name, MixerState::TransitionMode::Crossfade)) return;
     try {
         beginTake(scene_name, MixerState::TransitionMode::Crossfade);
         state_->take_received_ns = monotonicNs(received);
@@ -29,47 +30,46 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
     const int64_t target_pts = pts(target);
     const auto mode = state_->transition_mode.load();
     if (destinationReady(frames[target])) state_->destination_ready = true;
+    // What program shows while a take waits: the transition on air, else the program slot.
+    const auto on_air = [&] {
+        if (state_->blend_on_air) return MixerState::transSourceSwitcherIndex();
+        if (state_->wipe_on_air && state_->wipe_switched) return target;
+        return state_->pgmSourceSwitcherIndex();
+    };
+    // A destination frame of the tick program has already shown completes a take without being
+    // emitted (-1): the program slot's frame of a tick can reach the selector first on every
+    // tick, so waiting for a strictly newer destination frame might never end.
     if (mode == MixerState::TransitionMode::Cut) {
-        if (destinationReady(frames[target])) {
-            if (target_pts < last_ns) return state_->pgmSourceSwitcherIndex();
-            completeTake(target_pts);
-            // A cut that interrupted a crossfade emits the retained still, stamped at the tick
-            // boundary, before the destination frame of the same tick arrives. Waiting for a
-            // strictly newer destination then never ends when that order repeats every tick
-            // (seen with slot B as the destination under load). The take is complete; the
-            // next tick selects the new program directly, so this tick is not emitted twice.
-            return target_pts == last_ns ? -1 : target;
-        }
+        if (!destinationReady(frames[target]) || target_pts < last_ns) return on_air();
+        completeTake(target_pts);
+        return target_pts == last_ns ? -1 : target;
     } else if (mode == MixerState::TransitionMode::Crossfade) {
         if (state_->take_phase == MixerState::TakePhase::Ready) {
             // Preview can arrive behind program. Keep selecting the live program
-            // until a destination tick no older than the last output can arm the blend:
-            // after an interrupted fade the program slot's still is stamped at the tick
-            // boundary and always precedes the destination frame of the same tick, so
-            // requiring a strictly newer destination never completes.
+            // until a destination tick no older than the last output can arm the blend.
             if (!destinationReady(frames[target]) || target_pts < last_ns)
                 return state_->pgmSourceSwitcherIndex();
-            auto snapshot = outputSnapshot();
-            {
-                std::lock_guard<std::mutex> lock(snapshot->mutex);
-                if (snapshot->frames.holding()) return active;
-            }
             const double duration = double(state_->take_duration_ns) / 1000000000;
             const double hold = av_q2d({state_->fps_den, state_->fps_num}) / duration;
             state_->take_start_ns = target_pts;
-            for (const auto& command : state_->transition_control({target_pts / 1000000, duration,
-                    !state_->pgm_is_slot_a, state_->take_curve, state_->take_dip, hold, state_->canvas_transfer}))
+            state_->take_request = FadeRequest{target_pts / 1000000, duration,
+                    !state_->pgm_is_slot_a, state_->take_curve, state_->take_dip, hold, state_->canvas_transfer};
+            state_->take_paused = false;
+            for (const auto& command : state_->transition_control(*state_->take_request))
                 setNodeObject(state_->source_switcher_name + "_transition", command.key, command.value);
             // Keep direct frames available throughout the fade. One selector owns
             // the visible change; routing cleanup follows its endpoint frame.
             setNodeObject(state_->slot_a.post_otm_name, "outputs", Parameters(3u));
             setNodeObject(state_->slot_b.post_otm_name, "outputs", Parameters(3u));
             state_->take_phase = MixerState::TakePhase::Fade;
+            state_->blend_on_air = true;
         }
         const int blend = MixerState::transSourceSwitcherIndex();
         const auto blend_pts = pts(blend);
         if (blend_pts > last_ns && blend_pts >= state_->take_start_ns) {
-            if (blend_pts >= state_->take_start_ns + state_->take_duration_ns) {
+            // A paused mix holds; a replaced preset completes only once its picture is there.
+            if (!state_->take_paused && state_->destination_ready &&
+                blend_pts >= state_->take_start_ns + state_->take_duration_ns) {
                 completeTake(blend_pts);
                 // Emit this endpoint (already entirely the destination). The next
                 // invocation selects the new program's direct input.
@@ -85,11 +85,12 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
         return -1; // wait for the prepared blend, without letting direct frames overtake it
     } else if (mode == MixerState::TransitionMode::Wipe &&
                state_->take_phase == MixerState::TakePhase::Wipe && !state_->wipe_switched &&
-               destinationReady(frames[target]) &&
+               destinationReady(frames[target]) && target_pts >= last_ns &&
                target_pts >= state_->take_start_ns + state_->take_duration_ns / 2) {
-        if (target_pts <= last_ns) return -1;
         state_->wipe_switched = true;
         applySceneControls(state_->scenes.at(state_->transition_scene_name));
+        return target_pts == last_ns ? -1 : target;
+    } else if (mode == MixerState::TransitionMode::Wipe && state_->wipe_switched) {
         return target;
     }
     return active;
@@ -111,7 +112,9 @@ int MixerOrchestrator::selectFrame(bool wipe, const std::vector<const av::VideoF
             selected >= 0 && size_t(selected) < frames.size() && frames[selected] &&
             frames[selected]->pts().isValid()) {
             const auto pts = frames[selected]->pts().timestamp({1, 1000000000});
-            if (pts > last_ns && ((mode == MixerState::TransitionMode::Crossfade && selected == 2) ||
+            // A blend whose replaced preset never renders does not keep the take alive.
+            if (pts > last_ns && state_->destination_ready &&
+                ((mode == MixerState::TransitionMode::Crossfade && selected == 2) ||
                                  (mode == MixerState::TransitionMode::Wipe && wipe && selected == 1)))
                 state_->take_deadline_ns = monotonicNs() + kTakeReadyTimeoutMs * 1000000;
         }

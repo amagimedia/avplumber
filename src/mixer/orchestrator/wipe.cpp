@@ -9,6 +9,7 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
     if (state_->wipe_otm_name.empty() || state_->wipe_selector_name.empty() ||
         state_->wipe_group_name.empty() || state_->wipe_input_node_name.empty())
         throw Error("mixer: wipe requires the wipe subgraph");
+    if (actOnTransitionOnAir(scene_name, MixerState::TransitionMode::Wipe)) return;
     try {
         beginTake(scene_name, MixerState::TransitionMode::Wipe);
         state_->take_received_ns = monotonicNs();
@@ -34,7 +35,8 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
 }
 
 int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& frames, int active, int64_t last_ns) {
-    if (state_->transition_mode != MixerState::TransitionMode::Wipe) return 0;
+    // A cut pressed during the wipe keeps the overlay on air until the cut lands (completeTake).
+    if (state_->transition_mode != MixerState::TransitionMode::Wipe) return state_->wipe_on_air ? active : 0;
     const auto pts = [&](int input) {
         const auto* frame = frames.at(input);
         return frame && frame->isValid() && frame->pts().isValid()
@@ -45,16 +47,15 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
         if (state_->destination_ready && overlay > 0 && overlay >= state_->wipe_first_ns) {
             state_->take_start_ns = overlay;
             state_->take_phase = MixerState::TakePhase::Wipe;
+            state_->wipe_on_air = true;
             return 1;
         }
         return 0;
     }
     const auto direct = pts(0);
-    if (state_->wipe_switched && direct > last_ns &&
+    if (state_->wipe_switched && state_->destination_ready && direct > last_ns &&
         direct >= state_->take_start_ns + state_->take_duration_ns) {
-        completeTake(direct);
-        setNodeObject(state_->wipe_otm_name, "outputs", Parameters(1u));
-        retireWipeChain();
+        completeTake(direct);   // retires the overlay
         return 0;
     }
     return active;
