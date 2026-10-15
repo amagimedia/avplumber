@@ -161,7 +161,7 @@ def fake_api():
         "CudaTransform": "cuda_transform", "DecVideo": "dec_video", "Demux": "demux",
         "DrmPrimeToCuda": "drm_prime_to_cuda", "EncVideo": "enc_video", "FilterVideo": "filter_video",
         "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input_rec",
-        "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer",
+        "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer", "MixerDelivery": "mixer_delivery",
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
         "RawVideoFileCuda": "raw_video_file_cuda", "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
         "SmoothTimestamps": "smooth_timestamps", "Split": "split",
@@ -1454,7 +1454,7 @@ def test_renditions_of_one_size_share_one_draw_and_replace_the_split(tmp_path):
     # Every rendition is scaled, so the transform is the feed's only reader: no split.
     assert "split_renditions" not in nodes
     transform = nodes["transform_renditions"]
-    assert transform["src"] == "mixer_final_out"
+    assert transform["src"] == "program_measured"
     assert [(o["dst"], o["width"], o["height"]) for o in transform["outputs"]] == [
         (["program_sized_low", "program_sized_file"], 1280, 720), (["program_sized_tiny"], 640, 360)]
     assert all("fps" not in o and "drop" not in o for o in transform["outputs"])
@@ -1468,7 +1468,7 @@ def test_renditions_of_one_size_share_one_draw_and_replace_the_split(tmp_path):
 def test_a_single_scaled_rendition_reads_the_feed_through_the_transform(tmp_path):
     nodes = _rendition_nodes(tmp_path, [{"id": "low", "port": 5004, "width": 1280, "height": 720}])
     assert "split_renditions" not in nodes
-    assert nodes["transform_renditions"]["src"] == "mixer_final_out"
+    assert nodes["transform_renditions"]["src"] == "program_measured"
     assert nodes["scale_low"]["src"] == "program_sized_low"
     assert nodes["janus_format"]["width"] == 1280 and nodes["janus_format"]["height"] == 720
 
@@ -1923,7 +1923,7 @@ def test_dsk_keys_the_program_after_the_mixer_with_one_small_program_clocked_pas
     assert nodes["input_1_to_cuda"]["drop_alpha"] is False
     # No clean rendition: no split, the only encoder reads the keyed program.
     assert "split_clean" not in nodes
-    assert nodes["scale_sdr"]["src"] == "program_dirty"
+    assert nodes["scale_sdr"]["src"] == "program_measured"
 
 
 def test_dsk_composes_the_whole_canvas_unless_a_key_says_its_rectangle_is_enough(tmp_path, monkeypatch):
@@ -1943,7 +1943,7 @@ def test_dsk_clean_and_dirty_renditions_each_keep_sdr_and_hdr(tmp_path, monkeypa
     assert nodes["split_clean"]["src"] == "mixer_final_out"
     assert nodes["split_clean"]["dst"] == ["program_clean", "dsk_program"]
     assert nodes["dsk_comp"]["src"][0] == "dsk_program"
-    assert nodes["split_renditions"]["src"] == "program_dirty"
+    assert nodes["split_renditions"]["src"] == "program_measured"
     assert nodes["split_renditions_clean"]["src"] == "program_clean"
     assert nodes["scale_hdr_clean"]["src"] == "program_rendition_hdr_clean"
     settings = json.loads(app.avp.commands_registered["mixer.settings"](""))

@@ -145,6 +145,7 @@ class Source:
     # storage with the source's colour matching the canvas, the source needs no colour filter.
     decoded_format: str = ""
     extra_hw_frames: int = 3       # CUarray application headroom, beyond codec/working surfaces
+    capture_cadence: str = "continuous"  # browser: "on_change" permits intentional static holds
 
     @property
     def decoder_params(self):
@@ -338,7 +339,7 @@ class MixerConfig:
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources) for kind in _SOURCE_KEYS},
                 # [source id, kind] per compositor input, in the order of the inputs: each source once
-                # per alias (application.py builds them so). The web UI names per_input counters by it.
+                # per alias (application.py builds them so); telemetry deduplicates physical source IDs.
                 "inputs": [[s.id, s.kind] for s in self.sources for _ in range(aliases[s.id])],
                 # Of the "video" inputs, those declared HDR; an undeclared one counts as SDR.
                 "hdr_video": sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"]) for s in self.sources),
@@ -433,6 +434,9 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     decoded_format = s.get("decoded_format", "")
     if decoded_format not in ("", "nv12", "p010le") or decoded_format and (kind != "video" or source_filter):
         raise ConfigError(f"{where}: decoded_format is nv12 or p010le, on a video source without a filter")
+    cadence = s.get("capture_cadence", "continuous")
+    if cadence not in ("continuous", "on_change") or "capture_cadence" in s and kind != "browser":
+        raise ConfigError(f"{where}: capture_cadence must be continuous or on_change on a browser source")
     hold_last_frame = s.get("hold_last_frame", True)
     if not isinstance(hold_last_frame, bool) or "hold_last_frame" in s and kind != "browser":
         raise ConfigError(f"{where}: hold_last_frame must be a boolean on a browser source")
@@ -451,7 +455,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
         raise ConfigError(f"{where}: {e}") from e
     return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)),
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
-                  loop=bool(s.get("loop", True)), hold_last_frame=hold_last_frame, filter_graph=source_filter,
+                  loop=bool(s.get("loop", True)), capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
                   decoded_format=decoded_format,
                   transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,

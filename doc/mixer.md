@@ -375,6 +375,23 @@ names a `wipe_cache_store`, `wipe_cache` holds that clip cache's `bytes`,
 `budget_bytes` and `clips` (`path`, `frames`, `bytes`, `complete`).
 `mixer.scenes <name>` lists registered scenes.
 
+The application exposes `node.object.get mixer_delivery per_source` for source
+quality on the **keyed program output**. It follows capture identities through
+retiming, held copies, snapshots, compositing and both sides of a fade. `repeats`
+counts reuse beyond the source's native frame period; `dropped` counts capture
+IDs skipped while continuously on air. Aliases count once. Prewarm, off-air gaps
+and queue cleanup do not count. A producer restart establishes a new baseline.
+The UI uses these counters, never the compositors' queue diagnostics. They measure
+source selection before encoding, not packet loss or playback at a remote viewer.
+
+Browser sources default to `capture_cadence: "continuous"`. Declare
+`"on_change"` for intentional static pages: reused captures then appear only as
+`static_holds`, while skipped new captures still count. The mixer never infers a
+static page from a stopped producer. The demo generator declares its static
+preset automatically. The CUDA transition filter needs the source-metadata
+patch in the bundled FFmpeg series to preserve both inputs' identities.
+
+
 The alpha media path decodes the wipe in software and uploads it to the mixer
 CUDA device. This is separate from the GPU-native program video path.
 

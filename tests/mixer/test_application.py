@@ -505,3 +505,18 @@ def test_the_startup_report_is_a_control_command_once_the_show_is_on_air(native_
     assert report["settled"] is True and report["outputs"] == 0
     assert report["warm_up"] == {"missed_deadlines": 0, "output_drops": 0}
     assert report["stable_sec"] == 10.0 and report["timeout_sec"] == 60.0
+
+
+def test_program_delivery_and_explicit_static_cadence():
+    cfg = show()
+    app = build_application(cfg, api=fake_api())
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    assert app.delivery_monitor
+    assert nodes["mixer_delivery"]["on_change_sources"] == []
+    assert nodes["mixer_delivery"]["src"] == "mixer_final_out"
+    assert nodes["scale_record"]["src"] == "program_measured"
+    doc = {**CONFIG, "sources": [CONFIG["sources"][0], {**CONFIG["sources"][1], "capture_cadence": "on_change"}]}
+    assert config.parse(doc).sources[1].capture_cadence == "on_change"
+    doc["sources"][1]["capture_cadence"] = "guess"
+    with pytest.raises(config.ConfigError, match="capture_cadence"):
+        config.parse(doc)

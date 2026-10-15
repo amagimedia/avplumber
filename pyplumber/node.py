@@ -317,6 +317,8 @@ class CudaTransform(InternalNode):
     TYPE = "cuda_transform"
 class MixerCompositor(InternalNode):
     TYPE = "mixer_compositor"
+class MixerDelivery(InternalNode):
+    TYPE = "mixer_delivery"
 class MixerKeyer(InternalNode):
     TYPE = "mixer_keyer"
 class Input(InternalNode):

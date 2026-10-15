@@ -2,10 +2,30 @@
 #include "../instance_shared.hpp"
 #include "../EventLoop.hpp"
 #include "../RealTimeTeam.hpp"
+#include "../mixer/primitives/SourceDelivery.hpp"
+#include "../mixer/primitives/MonotonicClock.hpp"
 
 template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset, public IFrameNumber, public IFrameTimestamp, public IInputsObjects, public IReturnsObjects {
 protected:
     bool ready_ = false;
+    bool capture_identity_ = false;
+    uint64_t capture_epoch_ = avp::mixer::monotonicNs(), capture_number_ = 0;
+    av::Rational capture_rate_{0, 1};
+    void stampCapture(T& frame) {
+        if constexpr (std::is_same_v<T, av::VideoFrame>) {
+            if (!capture_identity_ || !frame.isValid() || !frame.pts().isValid() ||
+                av_dict_get(frame.raw()->metadata, avp::mixer::captureKey, nullptr, 0)) return;
+            if (capture_rate_.getNumerator() <= 0) {
+                const auto rate = this->edgeSource()->edge()->template findNodeUp<IFrameRateSource>();
+                if (!rate) return;
+                capture_rate_ = rate->frameRate();
+            }
+            if (capture_rate_.getNumerator() <= 0) return;
+            const auto period = av_rescale_q(1, av_inv_q(capture_rate_.getValue()), AVRational{1, 1000000000});
+            avp::mixer::setFrameTag(frame.raw(), avp::mixer::captureKey,
+                avp::mixer::SourceFrame{capture_epoch_, capture_number_++, uint64_t(period)}.encode());
+        }
+    }
     
     bool no_wait_notified_ = false;
     AVTS max_no_wait_period_ = INT64_MAX;
@@ -140,6 +160,7 @@ public:
             AVTS peeked = wallclock.pts();
 
             T &data = *dataptr;
+            stampCapture(data);
 
             AVTS now_ts = now_ts_;
             AVTS new_pts = now_ts;
@@ -495,6 +516,7 @@ public:
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
         std::shared_ptr<RealTimeSpeed> r = NodeSISO<T, T>::template createCommon<RealTimeSpeed>(edges, params);
+        r->capture_identity_ = params.value("capture_identity", false);
         AVRational timebase = wallclock.timeBase();
         if (params.count("time_base")) {
             // The unit of the node's clock and of the timestamps set_pts stamps. Nothing ticks at it:

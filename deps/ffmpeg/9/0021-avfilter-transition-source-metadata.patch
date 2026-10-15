@@ -1,0 +1,102 @@
+From d911ecb639ffda70a351773797785539e383b16d Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Thu, 15 Oct 2026 02:12:25 +0200
+Subject: [PATCH] avfilter/transition_cuda: propagate visible source metadata
+
+---
+ libavfilter/vf_transition_cuda.c | 51 ++++++++++++++++++++++++++++++++
+ 1 file changed, 51 insertions(+)
+
+diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
+index 2ba563bb69..3b88e54f74 100644
+--- a/libavfilter/vf_transition_cuda.c
++++ b/libavfilter/vf_transition_cuda.c
+@@ -31,6 +31,7 @@
+ #include "libavutil/hwcontext_cuda_internal.h"
+ #include "libavutil/cuda_check.h"
+ #include "libavutil/eval.h"
++#include "libavutil/avstring.h"
+ 
+ #include "avfilter.h"
+ #include "framesync.h"
+@@ -141,6 +142,7 @@ typedef struct TransitionCUDAContext {
+     int transition_mode;
+     float alpha_coef;
+     char *dip_color_str;
++    char *metadata_prefix;
+     float dip_color[3];     ///< Y, Cb, Cr as 8-bit limited-range codes
+ 
+     double var_values[VAR_VARS_NB];
+@@ -341,6 +343,48 @@ static int transition_cuda_call_kernel_word(
+ 
+ #include "vf_transition_cuda_array.h"
+ 
++/* Propagate selected per-source metadata from the frames framesync actually sampled.
++ * At a fade endpoint (or the solid midpoint of a dip) an invisible input must not
++ * claim to have been presented. Conflicting values describe two visible captures. */
++static int transition_metadata(TransitionCUDAContext *ctx, AVFrame *main, const AVFrame *overlay)
++{
++    const AVDictionaryEntry *entry = NULL;
++    AVDictionary *metadata = NULL;
++    const int dip = ctx->transition_mode == TRANSITION_MODE_DIP;
++    const int show_main = dip ? ctx->alpha_coef < 0.5f : ctx->alpha_coef < 1.f;
++    const int show_overlay = dip ? ctx->alpha_coef > 0.5f : ctx->alpha_coef > 0.f;
++    int ret = 0;
++    if (!ctx->metadata_prefix || !*ctx->metadata_prefix)
++        return 0;
++    if (show_main) {
++        while ((entry = av_dict_get(main->metadata, ctx->metadata_prefix, entry, AV_DICT_IGNORE_SUFFIX))) {
++            ret = av_dict_set(&metadata, entry->key, entry->value, 0);
++            if (ret < 0) goto done;
++        }
++    }
++    if (show_overlay) {
++        entry = NULL;
++        while ((entry = av_dict_get(overlay->metadata, ctx->metadata_prefix, entry, AV_DICT_IGNORE_SUFFIX))) {
++            const AVDictionaryEntry *old = av_dict_get(metadata, entry->key, NULL, 0);
++            if (old && !strcmp(old->value, entry->value)) continue;
++            if (old) {
++                char *both = av_asprintf("%s;%s", old->value, entry->value);
++                if (!both) { ret = AVERROR(ENOMEM); goto done; }
++                ret = av_dict_set(&metadata, entry->key, both, AV_DICT_DONT_STRDUP_VAL);
++            } else {
++                ret = av_dict_set(&metadata, entry->key, entry->value, 0);
++            }
++            if (ret < 0) goto done;
++        }
++    }
++    while ((entry = av_dict_get(main->metadata, ctx->metadata_prefix, NULL, AV_DICT_IGNORE_SUFFIX)))
++        av_dict_set(&main->metadata, entry->key, NULL, 0);
++    ret = av_dict_copy(&main->metadata, metadata, 0);
++done:
++    av_dict_free(&metadata);
++    return ret;
++}
++
+ /**
+  * Perform blend overlay picture over main picture
+  */
+@@ -401,6 +445,12 @@ static int transition_cuda_blend(FFFrameSync *fs)
+                ctx->alpha_coef);
+     }
+ 
++    ret = transition_metadata(ctx, input_main, input_overlay);
++    if (ret < 0) {
++        av_frame_free(&input_main);
++        return ret;
++    }
++
+     if (input_main->format == AV_PIX_FMT_CUARRAY || input_overlay->format == AV_PIX_FMT_CUARRAY)
+         return transition_cuda_array(avctx, input_main, input_overlay);
+ 
+@@ -797,6 +847,7 @@ static int transition_cuda_process_command(AVFilterContext *avctx,
+ #define RUNTIME_FLAGS (FLAGS | AV_OPT_FLAG_RUNTIME_PARAM)
+ 
+ static const AVOption transition_cuda_options[] = {
++    { "metadata_prefix", "merge visible input metadata with this prefix (semicolon-separated on conflict)", OFFSET(metadata_prefix), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
+     { "alpha", "set the alpha expression of overlay in range [0.0-1.0] (default is 1.0)", OFFSET(alpha_expr), AV_OPT_TYPE_STRING, { .str = "1.0" }, 0, 0, RUNTIME_FLAGS },
+     { "mode", "set the CUDA transition mode", OFFSET(transition_mode), AV_OPT_TYPE_INT, { .i64 = TRANSITION_MODE_FADE }, 0, TRANSITION_MODE_NB - 1, RUNTIME_FLAGS, "mode" },
+         { "fade",       "crossfade",             0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_FADE },       .flags = RUNTIME_FLAGS, .unit = "mode" },
+-- 
+2.55.0
+

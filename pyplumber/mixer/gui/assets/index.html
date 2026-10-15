@@ -1487,23 +1487,22 @@ function renderLatency() {
   const complete = pgm.length > 0 && aux.length === (settings().aux_buses || []).length;
   // Two short tables: delivery (cut latency, misses, drops, the other inputs) and the browser sources.
   const recent = state?.recent, span = recent ? recentSpan(recent) : "total", inputs = recent?.inputs || {};
-  const pair = (g) => g ? `${metric(g.repeats)} / ${metric(g.discarded)}` : "—";
+  const pair = (g) => g ? `${metric(g.repeats)} / ${metric(g.dropped)}` : "—";
   const delivery = [
     [`Cut p95 · ${cuts.length}`, metric(cuts[Math.ceil(cuts.length * .95) - 1], 1, " ms")],
     ["Deadline misses", metric(recent ? recent.missed_deadlines : complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
     ["AUX drops", metric(recent ? recent.output_drops : complete ? total(aux, "output_drops") : null)],
-    ...(inputs.other ? [["Other repeats / discards", pair(inputs.other)]] : []),
+    ...(inputs.other ? [["PGM video repeats / skips", pair(inputs.other)]] : []),
   ];
-  const b = inputs.browser, worst = b?.worst, drops = state?.browser_drops, top = (drops?.reasons || [])[0];
+  const b = inputs.browser, worst = b?.worst;
   const browser = b?.sources ? [
-    ["Repeats / discards", pair(b)],
-    ["Worst", worst && (worst.repeats || worst.discarded) ? `${worst.source} ${pair(worst)}` : "—"],
-    ["Drops", drops ? metric(drops.dropped) : "—"],
-    ["Reason", top ? top[0] : "—"],
+    ["PGM repeats / skips", pair(b)],
+    ["Worst", worst && (worst.repeats || worst.dropped) ? `${worst.source} ${pair(worst)}` : "—"],
+    ["Scope", "Program · excludes prewarm / static holds"],
   ] : [];
   setMeterTip($("lat"), `Latency & delivery · ${span}`, [...delivery, ...browser], () => [
     tipTable(["Delivery", ""], delivery),
-    ...(browser.length ? [tipTable([`Browser · ${b.sources}`, ""], browser)] : [])]);
+    ...(browser.length ? [tipTable([`Browser sources · ${b.sources}`, ""], browser)] : [])]);
 }
 
 /* ---------- polling ---------- */

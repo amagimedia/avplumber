@@ -178,12 +178,11 @@ ON_AIR = "on_air"
 
 
 def playout_counters(bridge) -> dict | None:
-    """delivery_totals() and, where the show names its compositor inputs (settings "inputs"), each
-    source's repeats and discards from both program-slot compositors' per_input counters: two small
-    commands per call, which RecentCounts makes every 5 s. A repeat with a discard beside it is two
-    paints in one tick slot (jitter); a repeat alone is a tick no frame arrived for. With the
-    mixer's on-air moment (startup_report) as ON_AIR, so that the window starts again with a show
-    that went on air anew; the counters themselves start from zero then."""
+    """Delivery deadlines and capture identities observed at the keyed program output.
+
+    The compositor's per_input counters are queue diagnostics: they include prewarm and
+    scene cleanup and must never be used as a substitute for output source quality.
+    """
     state = bridge.state(timeout=3)
     totals = delivery_totals(state)
     inputs = (state.get("settings") or {}).get("inputs")
@@ -194,48 +193,53 @@ def playout_counters(bridge) -> dict | None:
         totals[ON_AIR] = report["released_at"]
     if not inputs:
         return totals
-    slots = [json.loads(bridge.command(f"node.object.get {bridge.mixer}_comp_{slot} per_input", 3) or "[]")
-             for slot in ("a", "b")]
-    return {**totals, **input_counters(inputs, slots)}
+    try:
+        sources = json.loads(bridge.command(f"node.object.get {bridge.mixer}_delivery per_source", 3) or "null")
+    except Exception:
+        return totals  # Older mixer: unavailable, never substitute misleading queue counts.
+    if not isinstance(sources, dict):
+        return totals
+    return {**totals, **input_counters(inputs, sources)}
 
 
-def input_counters(inputs, slots):
-    """{("input", source, group, counter): total} from per_input lists in compositor input order;
-    group is "browser" for a browser (dmabuf) source and "other" for the rest. A source scenes
-    use twice has an input per use, all fed the same frames: its first input speaks for it."""
-    counters, seen = {}, set()
-    for index, (source, kind) in enumerate(inputs):
-        if source in seen:
-            continue
-        seen.add(source)
-        group = "browser" if kind == "browser" else "other"
-        for counter in ("repeats", "discarded"):
-            values = [rows[index][counter] for rows in slots if index < len(rows)]
-            if any(isinstance(v, bool) or not isinstance(v, int) for v in values):
-                raise ValueError("malformed per_input counters")
-            counters[("input", source, group, counter)] = sum(values)
+def input_counters(inputs, sources):
+    """Configured physical sources, counting only program observations; aliases count once.
+
+    Drops are capture IDs skipped between displayed frames. Repeats reuse a capture beyond
+    its native frame period, including copies with rewritten presentation timestamps.
+    """
+    kinds = dict(inputs)
+    counters = {}
+    for source in kinds:
+        row = sources.get(source, {"repeats": 0, "dropped": 0})
+        group = "browser" if kinds[source] == "browser" else "other"
+        for counter in ("repeats", "dropped"):
+            value = row.get(counter)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("malformed per_source counters")
+            counters[("input", source, group, counter)] = value
     return counters
 
 
 def playout_summary(rises):
     """RecentCounts' summary: the plain counters as they are, and the inputs' rises as
-    {"inputs": {"browser": {...}, "other": {...}}}, each with its sources, repeats and discards,
-    the browser group also with its worst source (most repeats, then most discards) or None."""
+    {"inputs": {"browser": {...}, "other": {...}}}, each with its sources, repeats and drops,
+    the browser group also with its worst source (most repeats, then most drops) or None."""
     plain = {key: value for key, value in rises.items() if not isinstance(key, tuple)}
     per_source = {}
     for (_, source, group, counter), value in ((k, v) for k, v in rises.items() if isinstance(k, tuple)):
-        per_source.setdefault((group, source), {"repeats": 0, "discarded": 0})[counter] = value
+        per_source.setdefault((group, source), {"repeats": 0, "dropped": 0})[counter] = value
     if not per_source:
         return plain
     groups = {}
     for name in ("browser", "other"):
         rows = [(source, c) for (group, source), c in per_source.items() if group == name]
         summary = {"sources": len(rows), "repeats": sum(c["repeats"] for _, c in rows),
-                   "discarded": sum(c["discarded"] for _, c in rows)}
+                   "dropped": sum(c["dropped"] for _, c in rows)}
         if name == "browser":
-            worst = max(rows, key=lambda row: (row[1]["repeats"], row[1]["discarded"]), default=None)
+            worst = max(rows, key=lambda row: (row[1]["repeats"], row[1]["dropped"]), default=None)
             summary["worst"] = ({"source": worst[0], **worst[1]}
-                                if worst and (worst[1]["repeats"] or worst[1]["discarded"]) else None)
+                                if worst and (worst[1]["repeats"] or worst[1]["dropped"]) else None)
         groups[name] = summary
     return {**plain, "inputs": groups}
 

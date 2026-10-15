@@ -519,6 +519,7 @@ class MixerGraphBuilder:
                 "drop": True,
                     "name": self._n(f"color_alias_{first.name}"), "src": prepared, "dst": outputs,
                     "outputs": (1 << len(outputs)) - 1, "group": first.input_group,
+                    "source_identity": first.name,
                     **({"frame_color": tags} if tags else {}),
                 }))
             else:
@@ -590,6 +591,8 @@ class MixerGraphBuilder:
                     **({"subscribed_outputs": {edge: edge for edge in aux_edges}} if aux_edges else {}),
                     **({"frame_color": src.frame_color} if src.frame_color else {}),
                     "outputs": outputs_init,
+                    **({"source_identity": src.name} if prepared_edges[src.name] == src.pre_otm_edge or
+                       sum(s.pre_otm_edge == src.pre_otm_edge for s in self._sources) == 1 else {}),
 
                     "group": src.input_group,
                 }))

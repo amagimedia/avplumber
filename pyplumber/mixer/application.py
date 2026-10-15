@@ -189,6 +189,7 @@ class MixerApplication:
     held_outputs: tuple[str, ...] = ()      # prefixes of the program's Janus chains, built held
     browser_importers: tuple[str, ...] = ()  # the drm_prime_to_cuda node of every browser source
     browser_input_edges: tuple[str, ...] = ()  # in browser_windows order, for initial paint retries
+    delivery_monitor: bool = False
     browser_fixed_pool_size: int = 0  # advertised by the installed capture producer
     start_stable_sec: float = START_STABLE_SEC
     start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC
@@ -393,7 +394,8 @@ class MixerApplication:
         browser = self._browser_snapshot()
         self.avp.executeCommandsFromString("\n".join(
             [f"node.object.set {node} reset_counters true" for node in compositors]
-            + [release_commands(prefix) for prefix in prefixes]))
+            + [release_commands(prefix) for prefix in prefixes]
+            + (["node.object.set mixer_delivery enabled true"] if self.delivery_monitor else [])))
         counters = report["counters"].values()
         warm_up = {key: sum(c[key] for c in counters) for key in ("missed_deadlines", "output_drops")}
         self.startup = {**report, "outputs": len(prefixes), "warm_up": warm_up, "released_at": time.time(),
@@ -927,6 +929,13 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     if keyer:
         feeds = {**feeds, **keyer.build(program, clean=any(r.feed == "clean" for r in renditions))}
         register_dsk_commands(avp, keyer)
+    monitored = "program_measured"
+    avp.addNode(api.MixerDelivery({
+        "name": "mixer_delivery", "src": feeds["dirty"], "dst": monitored,
+        "fps": f"{cfg.fps}/1", "group": OUTPUT_GROUP,
+        "on_change_sources": [s.id for s in cfg.sources if s.capture_cadence == "on_change"],
+    }))
+    feeds = {name: monitored if edge == feeds["dirty"] else edge for name, edge in feeds.items()}
     pgm_taps = [b.pgm_edge for b in aux or () if b.pgm_edge]
     if pgm_taps:
         # An aux pgm cell shows what goes to air: the keyed program.
@@ -951,7 +960,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False, held_outputs=tuple(held), browser_importers=importers,
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers),
                         browser_input_edges=tuple(input_edges[i] for i, s in enumerate(cfg.sources) if s.kind == "browser"),
-                        browser_fixed_pool_size=fixed_pool_size,
+                        browser_fixed_pool_size=fixed_pool_size, delivery_monitor=True,
                         aux_buses=aux)
 
 

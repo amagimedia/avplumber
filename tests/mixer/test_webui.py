@@ -716,29 +716,25 @@ def row(repeats, discarded, overflow=0):
     return {"repeats": repeats, "discarded": discarded, "overflow": overflow}
 
 
-def test_playout_counters_name_each_input_by_the_settings_and_sum_both_slots():
+def test_playout_counters_use_published_program_source_ids_only():
     from pyplumber.mixer.gui.telemetry import playout_counters
-    bridge = PlayoutBridge(PLAYOUT_STATE, {
-        "mixer_comp_a": [row(4, 1), row(9, 9), row(30, 2), row(5, 5), row(1, 0)],
-        "mixer_comp_b": [row(1, 0), row(0, 0), row(10, 1), row(0, 0), row(0, 1)]})
+    bridge = PlayoutBridge(PLAYOUT_STATE, {"mixer_delivery": {
+        "cam": {"repeats": 5, "dropped": 1},
+        "web_1": {"repeats": 7, "dropped": 2}}})
     assert playout_counters(bridge) == {
         "missed_deadlines": 1, "output_drops": 0,
-        # The first of a source's inputs speaks for it: its aliases see the same frames.
-        ("input", "cam", "other", "repeats"): 5, ("input", "cam", "other", "discarded"): 1,
-        ("input", "web_1", "browser", "repeats"): 40, ("input", "web_1", "browser", "discarded"): 3,
-        ("input", "web_2", "browser", "repeats"): 5, ("input", "web_2", "browser", "discarded"): 5,
-        ("input", "clip", "other", "repeats"): 1, ("input", "clip", "other", "discarded"): 1}
-    # Three small commands per sample, which RecentCounts takes every 5 s: the startup report (for
-    # the on-air moment; this mixer has none) and both slots' per-input counters.
-    assert bridge.commands == ["mixer.startup", "node.object.get mixer_comp_a per_input", "node.object.get mixer_comp_b per_input"]
-    # A mixer whose settings do not name its inputs: the delivery counters alone.
-    older = PlayoutBridge({**PLAYOUT_STATE, "settings": {}}, {})
-    assert playout_counters(older) == {"missed_deadlines": 1, "output_drops": 0} and older.commands == ["mixer.startup"]
-    # A mixer that reports its start: the on-air moment comes with the counters, as ON_AIR.
-    on_air = PlayoutBridge({**PLAYOUT_STATE, "settings": {}}, {}, startup={"released_at": 1_700_000_018.0, "settled": True})
+        ("input", "cam", "other", "repeats"): 5, ("input", "cam", "other", "dropped"): 1,
+        ("input", "web_1", "browser", "repeats"): 7, ("input", "web_1", "browser", "dropped"): 2,
+        ("input", "web_2", "browser", "repeats"): 0, ("input", "web_2", "browser", "dropped"): 0,
+        ("input", "clip", "other", "repeats"): 0, ("input", "clip", "other", "dropped"): 0}
+    assert bridge.commands == ["mixer.startup", "node.object.get mixer_delivery per_source"]
+    # Off-air web_2 and duplicate cam aliases add nothing. Older binaries have no quality data.
+    older = PlayoutBridge(PLAYOUT_STATE, {"mixer_comp_a": [row(99999, 99999)] * 5})
+    assert playout_counters(older) == {"missed_deadlines": 1, "output_drops": 0}
+    on_air = PlayoutBridge({**PLAYOUT_STATE, "settings": {}}, {}, startup={"released_at": 1_700_000_018.0})
     assert playout_counters(on_air) == {"missed_deadlines": 1, "output_drops": 0, "on_air": 1_700_000_018.0}
     with pytest.raises(ValueError):
-        playout_counters(PlayoutBridge(PLAYOUT_STATE, {"mixer_comp_a": [row("x", 0)] * 5, "mixer_comp_b": []}))
+        playout_counters(PlayoutBridge(PLAYOUT_STATE, {"mixer_delivery": {"web_1": {"repeats": "x", "dropped": 0}}}))
 
 
 def test_a_new_on_air_moment_starts_the_window_again_with_everything_the_mixer_counted_since():
@@ -824,24 +820,26 @@ def test_the_startup_report_is_read_from_the_mixer_or_is_none():
 def test_recent_input_repeats_cover_the_window_with_the_worst_browser_source():
     from pyplumber.mixer.gui.telemetry import input_counters, playout_summary
     inputs = PLAYOUT_STATE["settings"]["inputs"]
-    slots, now = [[row(0, 0)] * 5], [0.0]
-    recent = RecentCounts(lambda: {"missed_deadlines": 0, "output_drops": 0, **input_counters(inputs, slots)},
+    sources, now = {}, [0.0]
+    recent = RecentCounts(lambda: {"missed_deadlines": 0, "output_drops": 0, **input_counters(inputs, sources)},
                           clock=lambda: now[0], summary=playout_summary)
     recent.sample()
-    assert recent.values["inputs"]["browser"] == {"sources": 2, "repeats": 0, "discarded": 0, "worst": None}
-    now[0], slots[0] = 5.0, [row(3, 3), row(3, 3), row(12, 1), row(20, 20), row(2, 0)]
+    assert recent.values["inputs"]["browser"] == {"sources": 2, "repeats": 0, "dropped": 0, "worst": None}
+    now[0] = 5.0
+    sources.update({name: {"repeats": repeat, "dropped": drop} for name, repeat, drop in
+                    [("cam", 3, 3), ("web_1", 12, 1), ("web_2", 20, 20), ("clip", 2, 0)]})
     recent.sample()
     assert recent.values == {"window_s": 600, "covered_s": 5, "missed_deadlines": 0, "output_drops": 0, "inputs": {
-        # web_2 repeats most, each with a discard beside it: jitter. web_1's repeats are ticks without a frame.
-        "browser": {"sources": 2, "repeats": 32, "discarded": 21, "worst": {"source": "web_2", "repeats": 20, "discarded": 20}},
-        "other": {"sources": 2, "repeats": 5, "discarded": 3}}}
+        # Output identities count a source once, even if both transition slots draw it.
+        "browser": {"sources": 2, "repeats": 32, "dropped": 21, "worst": {"source": "web_2", "repeats": 20, "dropped": 20}},
+        "other": {"sources": 2, "repeats": 5, "dropped": 3}}}
     # Another show's inputs: the window starts again from its current totals.
     inputs, now[0] = [["page", "browser"]], 10.0
-    slots[0] = [row(7, 0)]
+    sources = {"page": {"repeats": 7, "dropped": 0}}
     recent.sample()
     assert recent.values["covered_s"] == 0
-    assert recent.values["inputs"]["browser"] == {"sources": 1, "repeats": 0, "discarded": 0, "worst": None}
-    assert recent.values["inputs"]["other"] == {"sources": 0, "repeats": 0, "discarded": 0}
+    assert recent.values["inputs"]["browser"] == {"sources": 1, "repeats": 0, "dropped": 0, "worst": None}
+    assert recent.values["inputs"]["other"] == {"sources": 0, "repeats": 0, "dropped": 0}
 
 
 def test_state_carries_the_recent_delivery_counts(client):

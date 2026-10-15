@@ -289,6 +289,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                     if motion not in BROWSER_MOTIONS:
                         raise ValueError(f"{name}: browser motion must be static or dynamic")
                     url = page_url(DEMO_DIR / "browser_alpha.html", source=source["id"], motion=motion)
+                    source["capture_cadence"] = "continuous" if motion == "dynamic" else "on_change"
                 else:
                     url = spec["url"]
                 source.update(kind="browser", url=url, width=spec.get("width", width), height=spec.get("height", height), color="sdr")

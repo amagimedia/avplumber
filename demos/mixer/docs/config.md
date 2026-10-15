@@ -67,6 +67,7 @@ One source ID opens one decoder or browser window; scenes and aliases reuse it. 
 | `color` | browser, v210, nv12, p010 | required color contract (`sdr`, `hlg`, `pq`); browser and NV12 sources must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
 | `url`, `width`, `height` | browser | page and the window it is rendered in (all three required) |
 | `fps` | browser | paint rate; defaults to the canvas rate |
+| `capture_cadence` | browser | `continuous` (default) checks repeated captures on program; `on_change` records intentional static holds separately. Does not alter capture or pacing |
 | `hold_last_frame` | browser | default `true`: while a failed or crashed page reloads, repeat its last frame. `false` shows Chromium's empty error page (transparent or black) instead |
 | `width`, `height` | video | optional; probed with ffprobe at load when absent |
 | `loop` | both | default `true` |

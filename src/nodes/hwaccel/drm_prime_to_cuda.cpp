@@ -430,6 +430,9 @@ public:
         out.raw()->pts = in.raw()->pts;
         out.raw()->color_range = in.raw()->color_range;
         out.raw()->colorspace = in.raw()->colorspace;
+        // Preserve capture identity across the private CUDA copy without copying storage ownership.
+        if (av_dict_copy(&out.raw()->metadata, in.raw()->metadata, 0) < 0)
+            throw Error("drm_prime_to_cuda: cannot copy frame metadata");
 
         int w = in.width();
         int h = in.height();

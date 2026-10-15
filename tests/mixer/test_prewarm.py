@@ -92,7 +92,7 @@ def application(native_boundary, **kwargs):
         name: getattr(nodes, name) for name in (
             "AssumeVideoFormat", "Bsf", "DecVideo", "Demux", "EncVideo",
             "FilterVideo", "ForceFPS", "ForceKeyFrame", "InputRec", "Mux",
-            "Output", "PreheatVideoRouter", "Realtime", "Split",
+            "Output", "PreheatVideoRouter", "Realtime", "Split", "MixerDelivery",
         )
     }, AVPlumber=NativeEngine, MixerGraphBuilder=builder)
     return build_application(GraphOptions(
@@ -565,7 +565,7 @@ def test_pad_masks_above_64_travel_as_bit_strings(native_boundary, tmp_path, cou
     nodes, builder = native_boundary
     api = SimpleNamespace(**{name: getattr(nodes, name) for name in (
         "AssumeVideoFormat", "Bsf", "DecVideo", "Demux", "EncVideo", "FilterVideo", "ForceFPS",
-        "ForceKeyFrame", "InputRec", "Mux", "Output", "PreheatVideoRouter", "Realtime", "Split")},
+        "ForceKeyFrame", "InputRec", "Mux", "Output", "PreheatVideoRouter", "Realtime", "Split", "MixerDelivery")},
         AVPlumber=ConfigEngine, MixerGraphBuilder=builder)
     app = build_application(GraphOptions(config=str(path), output="program.ts"), api=api)
 
@@ -598,7 +598,7 @@ def test_a_source_is_fanned_out_by_a_thread_unless_the_canvas_names_the_event_lo
     nodes, builder = native_boundary
     api = SimpleNamespace(**{name: getattr(nodes, name) for name in (
         "AssumeVideoFormat", "Bsf", "DecVideo", "Demux", "EncVideo", "FilterVideo", "ForceFPS",
-        "ForceKeyFrame", "InputRec", "Mux", "Output", "PreheatVideoRouter", "Realtime", "Split")},
+        "ForceKeyFrame", "InputRec", "Mux", "Output", "PreheatVideoRouter", "Realtime", "Split", "MixerDelivery")},
         AVPlumber=ConfigEngine, MixerGraphBuilder=builder)
     engine = build_application(GraphOptions(config=str(path), output="program.ts"), api=api).avp.nodes
     for i in range(6):

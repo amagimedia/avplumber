@@ -137,6 +137,7 @@ def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
     avp.addNode(api.Realtime({
         "name": f"realtime_{tag}", "src": src, "dst": f"input_{tag}_realtime",
         "set_pts": True, "group": group, **loop,
+        **({"capture_identity": True} if native_rate else {}),
         **({} if sync_team is None else {"team": sync_team}), **timing, **(realtime_params or {}),
     }))
     if native_rate:
