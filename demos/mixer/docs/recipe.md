@@ -24,7 +24,7 @@ NumPy and FFmpeg with NVENC. `--runtime-media-dir /media` writes container paths
 | `generation` | `seconds` (default 2), optional source `width` and `height` |
 | `alpha_background` | Allocated video source used behind transparent pages |
 | `renditions`, `clean_rendition`, `aux_buses`, `dsk` | Output/key settings copied into the show |
-| `browser_frame_queue` | Frames one browser window may have out at once: 1–9, default 9, the most Chromium's capture pool gives out. Not a set of buffers: those are Chromium's. The mixer uses up to three of the queue to return frames one per new frame, which keeps Chromium on a fixed set of buffers. Formerly `browser_ring_size`, still read |
+| `browser_frame_queue` | Ordinary capture's outstanding-frame limit: 1–9, default 9. The optional fixed-pool exporter overrides it with its advertised pool size and synchronizes sender retention, import caching and prewarm. Formerly `browser_ring_size`, still read. See [configuration](config.md) |
 
 Largest-remainder rounding makes the weighted allocations sum to the total;
 ties follow recipe order. Weights summing to `source_count` give exact counts.
@@ -62,7 +62,9 @@ and `extra_hw_frames`; see [decoder requirements](config.md#sources).
 Each generated source has a separate file with its ID burned into moving frames.
 Assets and two alpha wipes are cached under `media/`. Scene-only changes reuse
 assets; changing dimensions, rate or storage generates new ones. Unused assets
-are not pruned. Raw loops consume disk/cache space and upload bandwidth every frame.
+are not pruned. Raw loops consume disk/cache space and upload bandwidth every frame;
+`resident` additionally retains each loop in page-locked host memory to avoid
+repeated file reads after the first pass.
 
 ## Scene compositions
 

@@ -32,5 +32,23 @@ Chromium copies into its capture pool and waits for GPU completion before delive
 `paint`. The browser then retains the texture until the mixer acknowledges its release.
 Keep DRM modifiers and texture-release acknowledgements intact.
 
+## Optional fixed-pool exporter
+
+The alternative patched browser supports a fully prewarmed capture pool. Its
+version-2 build selects the size at startup; nine buffers are the current tested
+starting point. The advertised size also controls sender retention and AVP's
+import cache. See the [browser configuration](../deps/dma-browser/README.md) for
+build requirements and flags; changing the mixer's `browser_frame_queue` alone
+does not resize this pool.
+
+With `AVP_BROWSER_COPY_ON_IMPORT=1`, AVP waits for the acquire fence, copies into
+owned CUDA memory on a private nonblocking stream, then waits for that copy before
+returning the browser lease and publishing the frame. The compositor holds the
+owned copy. The import thread can wait; a nonblocking CUDA stream describes GPU
+stream ordering, not a guarantee that the CPU thread never blocks. This path
+retains all pool registrations and uses no paced return queue. Its moving-page
+[capacity checks](../demos/mixer/docs/capacity.md#moving-pages-and-transitions)
+are separate from historical ordinary-capture benchmarks.
+
 [Runnable mixer](../demos/mixer/README.md) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)

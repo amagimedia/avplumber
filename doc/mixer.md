@@ -71,11 +71,42 @@ callback. The upload graph stamps tags without adding a node. Configured
 geometry transforms preserve frame properties. Other integrations must uphold
 the promise themselves; the default is `color_tagged=False`.
 
-The captured 188-source show (plus four browser keys) had 152 file pacers and
-32 eligible raw colour filters. These two changes remove 184 nodes and queues
+The captured 188-source show (plus four browser keys) had 152 per-input rate-normalization
+nodes and 32 eligible raw colour filters. These two changes remove 184 nodes and queues
 from that configuration. This is a derived count, not a newly measured deployed
 graph or a throughput claim. See the [cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 for revision-specific evidence and the ranked optimization list.
+
+## Input CPU and scheduling
+
+The config-driven mixer defaults to `canvas.input_routing: "input"`: `input_rec`
+routes packets straight to decoder edges, eliminating a separate demux node,
+thread and intermediate packet queue per source. It requests `frame_metadata: []`
+because its input chain does not consume those dictionary entries. Shared input
+helpers keep the older metadata and demux defaults for other applications;
+speed control and synchronized replay consumers may still require `frame_ts`.
+This selects `input_rec` dictionary entries, not colour tags, HDR side data or
+the capture identities used to count source delivery.
+
+NVDEC input chains set libavcodec `threads=1` to avoid automatic frame-thread pools. The pinned
+FFmpeg 9 series also skips HEVC software-table clears when hardware decoding;
+that patch leaves software decoding unchanged. `decoded_frames_ahead` bounds the
+queue before pacing, while `extra_hw_frames` supplies decoder surface headroom.
+They are separate limits: reducing the latter too far can exhaust decode surfaces.
+
+The `nvidia_l4_cuarray` profile selects `source_fan_out: "event_loop"`,
+`decoded_frames_ahead: 1`, and 8 ms Program/AUX input polling. Fan-out then runs
+on the source's pacing loop instead of a dedicated thread. Its nonblocking node
+requires `drop: true`: a full destination loses that destination's frame rather
+than blocking the shared loop. Coalesced edge signals and event-loop registrations
+reduce redundant wake-ups; compositor polling reduces scans between deadlines.
+These changes do not remove decoder threads or relax frame deadlines. Generic
+configuration still defaults to threaded fan-out and event-driven input waits.
+
+For raw loops the L4 profile selects `resident` uploads and ten device frames per
+source. Resident mode avoids repeated host reads, retains page-locked host memory,
+and still uploads every displayed frame. Treat these as workload settings:
+qualify transitions, source repeats/skips and GPU waits alongside CPU savings.
 
 ## Shared GUI and setup
 

@@ -30,9 +30,11 @@ and VRAM at 19.5 of 23 GB. The SDR 25 and 30 fps rows are the measured 192-sourc
 rows are the profile's admission limits. The linear `nvidia_l4` profile (no CUarray decode) carries
 170 sources at 25 and 30 fps.
 
-Use the [portable L4 stack](../../../docker-compose/mixer/deploy/l4/README.md). Browser frames must
-go back to the browser one per new frame ([`return_queue`](../../../doc/NODES.md#ipc_dmabuf_source)),
-which the mixer sets; without it the browsers keep allocating buffers and the releases stall the show.
+Use the [portable L4 stack](../../../docker-compose/mixer/deploy/l4/README.md). The historical
+ordinary-capture/direct-import runs used paced browser returns
+([`return_queue`](../../../doc/NODES.md#ipc_dmabuf_source)) to prevent allocation churn.
+The optional fixed-pool/copy-on-import path below instead releases each browser frame
+after its CUDA copy and retains the full prewarmed import cache; it uses no return queue.
 
 ### Moving pages and transitions
 
