@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Original measurements remain useful when their workload and revision stay attached."><title>Historical evidence and superseded recipes · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
+<body><main><p class="site"><a href="index.html">AVPlumber · Mixer cookbook</a></p>
+<h1>Historical evidence and superseded recipes</h1><p class="lede">Original measurements remain useful when their workload and revision stay attached.</p>
+<p class="note review">Reviewed 15 October 2026 against <a href="https://github.com/amagimedia/avplumber/tree/e72ff8b4ce3374918d85658d73e25cd6a5d36d39"><code>e72ff8b4</code></a>. These pages describe that code and named workload settings; they do not assert what every deployment runs.</p>
+<p>These pages retain original diagrams, source revisions and workload evidence. Their deployment labels, defaults and recommendations have not been requalified. Use the current performance recipes for the reviewed implementation.</p><h2>Previous versions of rewritten recipes</h2><ul><li><a href="history/browser-frame-queue.html">Browser frames go back one per new frame</a></li>
+<li><a href="history/color-tags.html">Colour tags at the fan-out</a></li>
+<li><a href="history/compositor-wait.html">The compositor's wait costs the frames that arrived</a></li>
+<li><a href="history/cuda-streams.html">One main CUDA stream, one per monitor</a></li>
+<li><a href="history/dsk-fades.html">DSK fades in one pass</a></li>
+<li><a href="history/event-loops.html">Event-loop sharding</a></li>
+<li><a href="history/input-decode-cpu.html">Input, decode and wake-ups: 502 to 234&nbsp;% of a core</a></li>
+<li><a href="history/nvdec-cuarray.html">NVDEC arrays without a staging copy</a></li>
+<li><a href="history/raw-uploads.html">Raw frames read straight into the memory the GPU reads</a></li>
+<li><a href="history/source-limits.html">Source limits by mode and frame rate</a></li>
+</ul><h2>Earlier experiments and focused recipes</h2><ul><li><a href="browser-frame-stagger.html">Browser frame ticks staggered at 60 fps</a></li>
+<li><a href="browser-handoff.html">Browser frame hand-off</a></li>
+<li><a href="browser-paint-cost.html">Browser CPU is per painted frame</a></li>
+<li><a href="chromium-zero-copy-export.html">Chromium paints into the buffer the mixer reads</a></li>
+<li><a href="contexts.html">Unused GPU contexts</a></li>
+<li><a href="cuda-transform.html">cuda_transform, the shared geometry node</a></li>
+<li><a href="filter-threads.html">One thread per GPU filter graph</a></li>
+<li><a href="force-fps-center-phase.html">Native input cadence without force_fps</a></li>
+<li><a href="gpu-memory.html">GPU memory: frames no tick can show any more</a></li>
+<li><a href="gpu-process-crash.html">Keeping Vulkan out of the GPU process</a></li>
+<li><a href="key-prewarm.html">Prewarmed DSK keys</a></li>
+<li><a href="loop-continuous-timestamps.html">Looped clips keep counting across the wrap</a></li>
+<li><a href="multiviewer.html">Multiviewer: 192 sources, 12 at a time</a></li>
+<li><a href="nvenc-dpb.html">One reference frame for monitor encoders</a></li>
+<li><a href="pgm-delay.html">PGM delay instead of a longer aux deadline</a></li>
+<li><a href="real-inputs.html">Real 1080p inputs, no shortcuts</a></li>
+<li><a href="rejected.html">Ideas we measured and dropped</a></li>
+<li><a href="wipe-preload.html">A wipe clip is cached whole or the start fails</a></li>
+</ul>
+
+<footer><a href="index.html#top-10">← Performance recipes</a> · <a href="source-limits.html">Measured scope and limits</a> · <a href="history.html">Historical evidence</a></footer></main></body></html>

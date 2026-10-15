@@ -1,0 +1,287 @@
+{
+  "input_force_fps_nodes": [],
+  "mode": "native",
+  "errors": [],
+  "steady_begin": 63993.442546016,
+  "steady_end": 64113.823758914,
+  "events": [
+    {
+      "time": 64113.824039533,
+      "cut": "rotate"
+    },
+    {
+      "time": 64114.324388361,
+      "cut": "grid"
+    },
+    {
+      "time": 64114.824719162,
+      "cut": "rotate"
+    },
+    {
+      "time": 64115.325064786,
+      "cut": "grid"
+    },
+    {
+      "time": 64115.825181139,
+      "stall": 0
+    },
+    {
+      "time": 64116.825378033,
+      "resume": 0
+    }
+  ],
+  "streams": {
+    "aux_mv_sdr": {
+      "output_age_p95_ms": 52.124895571614616,
+      "frames": 7223,
+      "seconds": 120.3666666666686,
+      "tick_gaps": {
+        "1": 7222
+      },
+      "sources": [
+        {
+          "rate": "25",
+          "observed_source_fps": 24.99861534201012,
+          "repeats": 4213,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 36.66666667152185,
+          "advance_histogram": {
+            "0": 4213,
+            "1": 3009
+          }
+        },
+        {
+          "rate": "30",
+          "observed_source_fps": 29.999999999999517,
+          "repeats": 3611,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 16.666666673465613,
+          "advance_histogram": {
+            "0": 3611,
+            "1": 3611
+          }
+        },
+        {
+          "rate": "30000/1001",
+          "observed_source_fps": 29.975076156188937,
+          "repeats": 3614,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 33.33333334012423,
+          "advance_histogram": {
+            "0": 3614,
+            "1": 3608
+          }
+        },
+        {
+          "rate": "469/20",
+          "observed_source_fps": 23.445029077817402,
+          "repeats": 4400,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 42.6083866392164,
+          "advance_histogram": {
+            "0": 4400,
+            "1": 2822
+          }
+        },
+        {
+          "rate": "50",
+          "observed_source_fps": 49.99723068402024,
+          "repeats": 1204,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 16.666666671520503,
+          "advance_histogram": {
+            "0": 1204,
+            "1": 6018
+          }
+        },
+        {
+          "rate": "24000/1001",
+          "observed_source_fps": 23.976737745776408,
+          "repeats": 4336,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 41.666666672975694,
+          "advance_histogram": {
+            "0": 4336,
+            "1": 2886
+          }
+        },
+        {
+          "rate": "60000/1001",
+          "observed_source_fps": 59.94184436444102,
+          "repeats": 7,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 16.666666673458508,
+          "advance_histogram": {
+            "0": 7,
+            "1": 7215
+          }
+        },
+        {
+          "rate": "120",
+          "observed_source_fps": 119.99999999999807,
+          "repeats": 0,
+          "backwards": 0,
+          "max_advance": 2,
+          "phase_range_ms": 6.799893981224159e-09,
+          "advance_histogram": {
+            "2": 7222
+          }
+        }
+      ]
+    },
+    "scale_pgm": {
+      "output_age_p95_ms": 52.268873503635405,
+      "frames": 7223,
+      "seconds": 120.3666666666686,
+      "tick_gaps": {
+        "1": 7222
+      },
+      "sources": [
+        {
+          "rate": "25",
+          "observed_source_fps": 24.99861534201012,
+          "repeats": 4213,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 36.66666667152185,
+          "advance_histogram": {
+            "0": 4213,
+            "1": 3009
+          }
+        },
+        {
+          "rate": "30",
+          "observed_source_fps": 29.999999999999517,
+          "repeats": 3611,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 16.666666673465613,
+          "advance_histogram": {
+            "0": 3611,
+            "1": 3611
+          }
+        },
+        {
+          "rate": "30000/1001",
+          "observed_source_fps": 29.975076156188937,
+          "repeats": 3614,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 33.33333334012423,
+          "advance_histogram": {
+            "0": 3614,
+            "1": 3608
+          }
+        },
+        {
+          "rate": "469/20",
+          "observed_source_fps": 23.445029077817402,
+          "repeats": 4400,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 42.6083866392164,
+          "advance_histogram": {
+            "0": 4400,
+            "1": 2822
+          }
+        },
+        {
+          "rate": "50",
+          "observed_source_fps": 49.99723068402024,
+          "repeats": 1204,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 16.666666671520503,
+          "advance_histogram": {
+            "0": 1204,
+            "1": 6018
+          }
+        },
+        {
+          "rate": "24000/1001",
+          "observed_source_fps": 23.976737745776408,
+          "repeats": 4336,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 41.666666672975694,
+          "advance_histogram": {
+            "0": 4336,
+            "1": 2886
+          }
+        },
+        {
+          "rate": "60000/1001",
+          "observed_source_fps": 59.94184436444102,
+          "repeats": 7,
+          "backwards": 0,
+          "max_advance": 1,
+          "phase_range_ms": 16.666666673458508,
+          "advance_histogram": {
+            "0": 7,
+            "1": 7215
+          }
+        },
+        {
+          "rate": "120",
+          "observed_source_fps": 119.99999999999807,
+          "repeats": 0,
+          "backwards": 0,
+          "max_advance": 2,
+          "phase_range_ms": 6.799893981224159e-09,
+          "advance_histogram": {
+            "2": 7222
+          }
+        }
+      ]
+    }
+  },
+  "checks": {
+    "aux_mv_sdr/steady_ticks": true,
+    "aux_mv_sdr/output_age": true,
+    "aux_mv_sdr/25": true,
+    "aux_mv_sdr/30": true,
+    "aux_mv_sdr/30000/1001": true,
+    "aux_mv_sdr/469/20": true,
+    "aux_mv_sdr/50": true,
+    "aux_mv_sdr/24000/1001": true,
+    "aux_mv_sdr/60000/1001": true,
+    "aux_mv_sdr/120": true,
+    "scale_pgm/steady_ticks": true,
+    "scale_pgm/output_age": true,
+    "scale_pgm/25": true,
+    "scale_pgm/30": true,
+    "scale_pgm/30000/1001": true,
+    "scale_pgm/469/20": true,
+    "scale_pgm/50": true,
+    "scale_pgm/24000/1001": true,
+    "scale_pgm/60000/1001": true,
+    "scale_pgm/120": true,
+    "bounded_queues": true,
+    "cut_0": true,
+    "cut_1": true,
+    "cut_2": true,
+    "cut_3": true,
+    "aux_mv_sdr/4": true,
+    "scale_pgm/4": true,
+    "aux_mv_sdr/5": true,
+    "scale_pgm/5": true
+  },
+  "documentation_scope": {
+    "date": "2026-10-06",
+    "native_revision": "9f940e44",
+    "python_pacing_revision": "d577a12d",
+    "purpose": "Small mixed-rate cadence correctness fixture, not capacity qualification",
+    "later_changes_not_qualified": [
+      "source routing cleanup",
+      "colour-tag bypass"
+    ],
+    "age_metric": "Output PTS to diagnostic observation, including download; not source-to-output latency"
+  }
+}

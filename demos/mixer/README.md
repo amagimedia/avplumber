@@ -7,7 +7,7 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 
 [Watch the 10-second demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
 [MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo-1080p30.mp4) ·
-[HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
+[HTML cookbook](docs/cookbook/index.html) ·
 [Configuration](docs/config.md) · [Run manually](docs/guide.md)
 
 Captured 2026-10-12 on an NVIDIA L4 and replayed in the real two-viewer interface:
@@ -61,6 +61,6 @@ selected [instance profile](instance_profiles.py), not a universal source limit.
 - [Recipes](docs/recipe.md): generate test media and scene layouts.
 - [Operator guide](docs/guide.md): CLI, TUI, Docker, proxy and tests.
 - [Capacity](docs/capacity.md) and [latency](docs/latency.md): scoped measurements and reproduction.
-- [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/): implementation and tuning notes.
+- [HTML cookbook](docs/cookbook/index.html): implementation and tuning notes.
 - [DMA-BUF integration](../../doc/dmabuf.md): shared browser capture and the GBM shim.
 - [Mixer base API](../../doc/mixer.md): reuse `pyplumber.mixer.build_application` in other applications; no demo imports required.

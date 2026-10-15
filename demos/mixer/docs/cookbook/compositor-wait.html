@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Avoid scanning every source on every arrival. Bound housekeeping without changing the output tick or treating late output as a success."><title>5. Inspect ready inputs and wait for the next useful tick · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
+<body><main><p class="site"><a href="index.html">AVPlumber · Mixer cookbook</a></p>
+<h1>5. Inspect ready inputs and wait for the next useful tick</h1><p class="lede">Avoid scanning every source on every arrival. Bound housekeeping without changing the output tick or treating late output as a success.</p>
+<p class="note review">Reviewed 15 October 2026 against <a href="https://github.com/amagimedia/avplumber/tree/e72ff8b4ce3374918d85658d73e25cd6a5d36d39"><code>e72ff8b4</code></a>. These pages describe that code and named workload settings; they do not assert what every deployment runs.</p>
+
+<h2>Readiness, then bounded polling</h2><p>Multi-event waits report which inputs signalled, so the compositor drains those inputs instead of peeking every queue on every wake. Linux epoll avoids rebuilding a large descriptor scan. Optional <code>canvas.input_poll_ms</code> and <code>canvas.aux_input_poll_ms</code> batch input housekeeping between tick deadlines; the L4 profile sets both to <b>8 ms</b>.</p>
+<p>The generic parser leaves these options unset. Eight milliseconds is a workload setting, not the frame deadline and not a universal optimum. Scene commands must still wake the relevant path promptly. Keep the input queues large enough for arrivals between checks.</p>
+<h2>Bound frames that can still be displayed</h2><p>Compositor playout releases superseded frames even when it is not ready to draw the next tick. Decoder lookahead can be bounded upstream so hidden queue depth does not pin extra decode surfaces. These bounds control retained work; they cannot make an expensive transition fit into a tick.</p>
+<p>At 50 fps output ticks are 20 ms apart. Playout latency, input polling, GPU draw duration and output cadence are different quantities. A single late tick can recover; sustained work above available throughput cannot. Downstream frame-rate normalization may repeat output even when compositor miss counters remain zero.</p>
+<h2>Measured CPU savings, with their original scope</h2><p>On the historical 192-source 30 fps show, epoll reduced the busiest compositor from 51.8 to 34.7% of one core. Later signalled-input and polling changes reduced each Program compositor from 12.1 to 7.3%. These are sequential historical readings, not additive independent savings. <a href="history/compositor-wait.html">Original wait measurements</a> · <a href="history/input-decode-cpu.html">later input/polling sequence</a>.</p>
+<h2>Acceptance</h2><p>Exercise cuts and fades into the heaviest supported scenes. Inspect actual on-air delivery after output pacing as well as draw times, queue depths and CPU. Preserve a GPU/output budget; do not increase polling intervals simply to make CPU usage look smaller.</p>
+
+<h2>Implementation at the reviewed revision</h2><ul class="where"><li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/nodes/mixer_compositor.cpp">src/nodes/mixer_compositor.cpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/MultiEventWait.hpp">src/MultiEventWait.hpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/mixer/Playout.hpp">src/mixer/Playout.hpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/demos/mixer/instance_profiles.py">demos/mixer/instance_profiles.py</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/nodes/mixer_delivery.cpp">src/nodes/mixer_delivery.cpp</a></li>
+</ul>
+<footer><a href="index.html#top-10">← Performance recipes</a> · <a href="source-limits.html">Measured scope and limits</a> · <a href="history.html">Historical evidence</a></footer></main></body></html>

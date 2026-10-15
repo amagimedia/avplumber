@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Why the mixer runs its GPU and metadata-only FFmpeg filter graphs on one thread instead of a 16-thread slice pool per graph.">
+  <title>One thread per GPU filter graph · Mixer optimization cookbook</title>
+  <link rel="stylesheet" href="cookbook.css">
+</head>
+<body>
+<main>
+<p class="archive-note"><b>Historical recipe — not current setup guidance.</b> Measurements and implementation links below belong to their original workload and revision. Deployment labels and defaults may be obsolete. <a href="index.html">Use the reviewed performance recipes</a>; <a href="history.html">browse historical evidence</a>.</p>
+  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+
+  <h1>One thread per GPU filter graph</h1>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="https://amagimedia.github.io/avplumber/demos/mixer/docs/">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Current GPU filter graphs still use threads: 1. Per-slot scale/filter hooks have been removed; geometry belongs to the compositor or an upstream source transform. The <code>pinned</code> and <code>hwupload</code> raw paths use single-threaded FFmpeg graphs; the setup's <code>direct</code> path has none. A source whose colour stage would only tag has no colour graph: its fan-out stamps the tags (<a href="color-tags.html">Colour tags at the fan-out</a>).</p>
+  <p class="lede">The mixer runs filter graphs that only stamp metadata or call CUDA filters on one thread. FFmpeg would otherwise start an idle 16-thread slice pool for each of them.</p>
+  <span class="pill live">Status: Implemented</span>
+  <p class="note">Decoder <code>options.threads=1</code> is a separate optimization: it avoids extra NVDEC surfaces reserved for frame threads. See <a href="history/nvdec-cuarray.html#baseline">the decoder baseline and low-DPB demo assets</a>; both savings were already present before the CUarray comparison.</p>
+
+  <h2>The idea</h2>
+  <p>Each <code>filter_video</code> node builds an FFmpeg filter graph. By default FFmpeg gives every graph a slice-thread pool with one thread per CPU: 16 on the T4 test host. A graph of <code>setparams</code> or <code>scale_cuda</code> never uses that pool. The GPU does the pixel work, and the node's own thread calls the filters.</p>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 700 290" role="img" aria-labelledby="t1">
+        <title id="t1">Left: with the default, each graph gets 16 idle slice threads. Right: with threads 1, the node thread runs the same graph and no pool starts.</title>
+        <g font-family="system-ui, sans-serif" font-size="13" fill="#edf4ff">
+          <rect x="8" y="8" width="334" height="274" rx="10" fill="#0c1320" stroke="#26354a"/>
+          <rect x="358" y="8" width="334" height="274" rx="10" fill="#0c1320" stroke="#26354a"/>
+          <text x="175" y="34" text-anchor="middle" font-weight="600">Default: threads 0</text>
+          <text x="525" y="34" text-anchor="middle" font-weight="600">Mixer GPU graphs: threads 1</text>
+
+          <rect x="28" y="50" width="294" height="38" rx="8" fill="#182236" stroke="#57dbc2"/>
+          <text x="175" y="74" text-anchor="middle">filter_video node thread</text>
+          <rect x="378" y="50" width="294" height="38" rx="8" fill="#182236" stroke="#57dbc2"/>
+          <text x="525" y="74" text-anchor="middle">filter_video node thread</text>
+
+          <rect x="171" y="88" width="8" height="18" fill="#57dbc2"/>
+          <rect x="521" y="88" width="8" height="18" fill="#57dbc2"/>
+
+          <rect x="28" y="106" width="294" height="50" rx="8" fill="#141f38" stroke="#6e8bf5"/>
+          <text x="175" y="127" text-anchor="middle">graph: setparams, scale_cuda</text>
+          <text x="175" y="145" text-anchor="middle" fill="#a4b4ca">pixel work runs on the GPU</text>
+          <rect x="378" y="106" width="294" height="50" rx="8" fill="#141f38" stroke="#6e8bf5"/>
+          <text x="525" y="127" text-anchor="middle">graph: setparams, scale_cuda</text>
+          <text x="525" y="145" text-anchor="middle" fill="#a4b4ca">pixel work runs on the GPU</text>
+
+          <rect x="28" y="176" width="294" height="90" rx="8" fill="#2a1d0c" stroke="#f5a524" stroke-dasharray="5 4"/>
+          <g fill="#26354a" stroke="#a4b4ca">
+            <rect x="44" y="190" width="14" height="14" rx="3"/><rect x="61" y="190" width="14" height="14" rx="3"/>
+            <rect x="78" y="190" width="14" height="14" rx="3"/><rect x="95" y="190" width="14" height="14" rx="3"/>
+            <rect x="112" y="190" width="14" height="14" rx="3"/><rect x="129" y="190" width="14" height="14" rx="3"/>
+            <rect x="146" y="190" width="14" height="14" rx="3"/><rect x="163" y="190" width="14" height="14" rx="3"/>
+            <rect x="180" y="190" width="14" height="14" rx="3"/><rect x="197" y="190" width="14" height="14" rx="3"/>
+            <rect x="214" y="190" width="14" height="14" rx="3"/><rect x="231" y="190" width="14" height="14" rx="3"/>
+            <rect x="248" y="190" width="14" height="14" rx="3"/><rect x="265" y="190" width="14" height="14" rx="3"/>
+            <rect x="282" y="190" width="14" height="14" rx="3"/><rect x="299" y="190" width="14" height="14" rx="3"/>
+          </g>
+          <text x="175" y="228" text-anchor="middle" fill="#f5a524">slice pool: 16 threads (1 per CPU)</text>
+          <text x="175" y="248" text-anchor="middle" fill="#a4b4ca">started per graph, never given work</text>
+
+          <rect x="378" y="176" width="294" height="90" rx="8" fill="#12281f" stroke="#30a46c"/>
+          <text x="525" y="212" text-anchor="middle" fill="#7fd6a8">no slice pool</text>
+          <text x="525" y="234" text-anchor="middle" fill="#a4b4ca">same filters, same calls, same thread</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>One graph, before and after. The mixer builds many such graphs: colour, transition, aux conversion and rendition conversion graphs.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 700 180" role="img" aria-labelledby="t2">
+        <title id="t2">Measured live threads: 3,689 in the mixer process, of which 1,088 named mixer_color_sdr and 448 named mixer_color_bro.</title>
+        <g font-family="system-ui, sans-serif" font-size="13" fill="#edf4ff">
+          <text x="12" y="26" font-weight="600">Threads measured live in the mixer process (default threads)</text>
+          <text x="12" y="62">whole process</text>
+          <rect x="170" y="48" width="440" height="22" rx="4" fill="#6e8bf5"/>
+          <text x="618" y="64">3,689</text>
+          <text x="12" y="102">mixer_color_sdr</text>
+          <rect x="170" y="88" width="130" height="22" rx="4" fill="#f5a524"/>
+          <text x="308" y="104">1,088</text>
+          <text x="12" y="142">mixer_color_bro</text>
+          <rect x="170" y="128" width="53" height="22" rx="4" fill="#f5a524"/>
+          <text x="231" y="144">448</text>
+          <text x="12" y="172" fill="#a4b4ca">Mostly idle (12 % CPU). The change removes about 1,600 idle threads.</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Bars are to scale. Both names belong to the mixer's per-source colour graphs, cut short by the system's thread-name limit. Measured on the T4 before the change; since 2026-10-13 a source whose colour stage only tagged, every browser source among them, has no such node.</figcaption>
+  </figure>
+
+  <h2>At a glance</h2>
+  <ul class="cards">
+    <li><b>What</b><p>A new node parameter <code>threads</code> on <code>filter_video</code> and <code>filter_audio</code>. It sets the graph's <code>nb_threads</code> before parsing. The default, 0, keeps FFmpeg's choice, so other apps are unchanged. A negative count is rejected when the node is created: the node assigns <code>nb_threads</code> directly, so FFmpeg's own range check for its <code>threads</code> option never runs.</p><p>The mixer's CUDA backend passes <code>threads: 1</code> for its GPU and metadata graphs: colour where needed, transition, aux SDR conversion, rendition conversion (the graph named <code>scale_&lt;id&gt;</code>; a rendition of another size is scaled before it by <code>cuda_transform</code>, which has no filter graph), and the raw-file <code>setpts</code>/<code>hwupload</code> pair (the pinned raw chain also uses an FFmpeg upload filter, the direct raw chain has no filter graph; the browser <code>settb</code>/<code>setparams</code> graph has since been dropped, and the browser chain has none either).</p></li>
+    <li><b>Why</b>FFmpeg starts one slice thread per CPU for every graph (16 on the T4 test host), even when the graph does no CPU pixel work. Measured live: 1,088 threads in <code>mixer_color_sdr</code>, 448 in <code>mixer_color_bro</code>, 3,689 in the mixer process, mostly idle (12 % CPU).</li>
+    <li class="flag"><b>Latency</b><p>Program: none, 0 frames.</p><p>Command-to-screen: none, 0 ms.</p><p>These graphs never hand work to the slice pool, so the same thread runs the same filters as before. Expected from the code path, not measured.</p></li>
+    <li><b>Side effects</b>None expected. To confirm on the test host, compare CPU per thread group and the thread count before and after. User filter graphs and the CPU wipe format conversion keep FFmpeg's default pool.</li>
+    <li><b>Cost</b>1 node parameter and a few lines of code. 0 nodes, 0 queues, 0 VRAM. Threads: about 1,600 idle threads gone.</li>
+    <li><b>Risk</b>A CPU filter placed in one of these graphs would run on one thread and could get slower. Per-slot filter hooks have been removed; upstream source filters must respect their processing budget. Apps that don't set <code>threads</code> see no change.</li>
+    <li><b>Switch it off</b>Drop the <code>threads</code> parameter. For the whole mixer, set <code>CudaMixerBackend.graph_threads = 0</code>, which is FFmpeg's default.</li>
+  </ul>
+
+  <h2>Where in the code</h2>
+  <ul class="where">
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/filters.cpp">src/nodes/filters.cpp</a>: reads <code>threads</code> (default 0); <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/filters.cpp">source</a> reject a negative count; <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/filters.cpp">source</a> set <code>nb_threads</code> before parsing, because FFmpeg starts the pool when it allocates the first filter; <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/src/nodes/filters.cpp">source</a> is the member.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/backends/cuda.py">pyplumber/mixer/backends/cuda.py</a>: <code>graph_threads = 1</code>; <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/backends/cuda.py">source</a> the transition graph. Contract: <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/backend.py">pyplumber/mixer/backend.py</a>.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/graph.py">pyplumber/mixer/graph.py</a>: colour graphs; <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/graph.py">source</a> source colour routing; <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/graph.py">source</a> source contracts.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/aux.py">pyplumber/mixer/aux.py</a>: aux SDR conversion.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/application.py">pyplumber/mixer/application.py</a>: rendition conversion. The source normalisation of a large catalogue was a filter graph here too; it is a <code>cuda_transform</code> now (<a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/application.py">source</a>) and has no graph.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/dmabuf_inputs.py">pyplumber/mixer/dmabuf_inputs.py</a>: the browser <code>settb</code>/<code>setparams</code> graph has since been dropped; the browser chain has no filter graph of its own.</li>
+    <li><a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/inputs.py">pyplumber/mixer/inputs.py</a>: raw-file <code>setpts</code> and <code>hwupload</code>.</li>
+    <li>Kept at FFmpeg's default: the wipe format conversion, <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/pyplumber/mixer/graph.py">pyplumber/mixer/graph.py</a>.</li>
+    <li>Tests: <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/tests/mixer/test_backend.py">tests/mixer/test_backend.py</a>, <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/tests/mixer/test_graph.py">tests/mixer/test_graph.py</a>.</li>
+    <li>Docs: <a href="https://github.com/amagimedia/avplumber/blob/c20464a5006ea331f816a03874103173f3f234e1/doc/NODES.md#filter_video-filter_audio">NODES.md · filter_video, filter_audio</a> (the <code>threads</code> parameter, an int &gt;= 0).</li>
+  </ul>
+  <p class="note">Source links identify the reviewed code, independently of deployment state.</p>
+
+  <footer><a href="index.html">← All cookbook pages</a></footer>
+</main>
+</body>
+</html>

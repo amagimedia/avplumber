@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="The L4 profile runs source fan-out on four pacing loops, with persistent event waits and fewer redundant signals."><title>7. Share pacing loops and coalesce wake-ups · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
+<body><main><p class="site"><a href="index.html">AVPlumber · Mixer cookbook</a></p>
+<h1>7. Share pacing loops and coalesce wake-ups</h1><p class="lede">The L4 profile runs source fan-out on four pacing loops, with persistent event waits and fewer redundant signals.</p>
+<p class="note review">Reviewed 15 October 2026 against <a href="https://github.com/amagimedia/avplumber/tree/e72ff8b4ce3374918d85658d73e25cd6a5d36d39"><code>e72ff8b4</code></a>. These pages describe that code and named workload settings; they do not assert what every deployment runs.</p>
+
+<h2>Replace one fan-out thread per source</h2><p><code>canvas.source_fan_out: "event_loop"</code> uses <code>one_to_many_nb</code> on the same four <code>pacing_*</code> loops that distribute source pacing and timestamp callbacks. The generic mixer parser still defaults to <code>"thread"</code>; the L4 profile opts into event-loop fan-out.</p>
+<p>The nonblocking fan-out requires <code>drop=true</code> and processes at most eight queued frames per turn so a busy source cannot monopolize the loop. It is suitable for the mixer's bounded, dropping graph; it is not a lossless backpressure substitute for arbitrary pipelines.</p>
+<h2>Do less work on each wake</h2><p>The event loop uses epoll on Linux and does not wake itself when a callback on its own thread registers work. Queue events coalesce notifications until the previous notification has been consumed; they still preserve readiness. The pending-task count avoids unnecessary queue checks. These are existing framework-wide implementation changes, not per-show toggles.</p>
+<p>Realtime pacing must round waits to the clock's effective precision. A time base finer than the clock previously caused repeated near-zero waits. Sharding limits the work per loop; it does not remove realtime pacing or give each source a dedicated CPU.</p>
+<h2>Evidence and limits</h2><p>The historical 192-source workload lost 192 fan-out threads (1,081 → 889). Fan-out CPU mostly moved onto the shared loops rather than disappearing. Later event-wait changes reduced overhead; tiny CPU differences between successive readings were within measurement noise. <a href="history/input-decode-cpu.html">Original combined CPU measurements</a> and <a href="history/event-loops.html">earlier pacing measurements</a>.</p>
+<p>Check timer lateness, starvation, sustained queue pressure and output repeats during transitions. Thread count alone is not a throughput or latency measurement. The <code>"thread"</code> fan-out mode remains available for comparison.</p>
+
+<h2>Implementation at the reviewed revision</h2><ul class="where"><li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/pyplumber/mixer/application.py">pyplumber/mixer/application.py</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/nodes/split.cpp">src/nodes/split.cpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/EventLoop.cpp">src/EventLoop.cpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/EventLoop.hpp">src/EventLoop.hpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/Event.hpp">src/Event.hpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/MultiEventWait.hpp">src/MultiEventWait.hpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/demos/mixer/instance_profiles.py">demos/mixer/instance_profiles.py</a></li>
+</ul>
+<footer><a href="index.html#top-10">← Performance recipes</a> · <a href="source-limits.html">Measured scope and limits</a> · <a href="history.html">Historical evidence</a></footer></main></body></html>
