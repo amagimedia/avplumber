@@ -315,10 +315,12 @@ Going on air: every Janus output is built held (`output` `hold`): its chain
 runs, so the encoder opens, and nothing is sent, so a deadline missed while the
 show comes up is counted and never seen. Once the last bus encodes, the
 application waits for `start_stable_sec` (`MixerOptions`, default 10;
-`--start-stable-sec`) in which no compositor missed a deadline or dropped a
-frame and every bus and one program slot drew frames (a bus publishes its frame
-count every 60 frames, so a shorter window waits for that); a miss or a drop
-starts the window again. After `start_stable_timeout_sec` (default 60;
+`--start-stable-sec`) in which no compositor missed a deadline and every bus
+and one program slot drew frames (a bus publishes its frame count every 60
+frames, so a shorter window waits for that); a miss starts the window again.
+Output drops are counted but do not restart it: while the GPU is time-shared
+with the browser every bus drops a few frames a minute, and no start would
+settle. After `start_stable_timeout_sec` (default 60;
 `--start-stable-timeout-sec`) startup fails, naming the compositor that kept
 counting or drew nothing; outputs remain held. Once stable, it resets every
 compositor's counters and releases all outputs together on a key
