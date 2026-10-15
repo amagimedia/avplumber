@@ -38,7 +38,14 @@ on a compatible patched Electron build. Run the mixer with
 `AVP_BROWSER_COPY_ON_IMPORT=1`: it waits for the acquire fence, copies once
 into owned CUDA memory on a private non-blocking stream per source, and returns
 the browser frame before publishing downstream. The browser distribution must include `resources/avp-capture-pool.json`
-with `{"version":1,"size":11}`. The mixer registers the full pool before
+with `{"version":1,"size":11}` for the hardcoded-11 binary. A binary built
+with the optional startup-size patch uses `{"version":2,"size":11}` instead;
+then `buffers/6`, `buffers/9`, or another integer from 2 to 16 selects the fixed
+pool at worker startup. The service reports the selected size, and the mixer
+uses it for sender retention, import caching, and warm-up. Changing the size
+requires restarting the browser workers and mixer; an active pool never grows
+or shrinks. Only mark a distribution version 2 if that patch is in its binary.
+The mixer registers the full pool before
 going on air, retains those registrations, and uses no return queue.
 The ordinary capture path remains the default.
 

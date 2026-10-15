@@ -153,7 +153,7 @@ def open_windows(base_url: str, windows: List[dict]) -> int:
     started = time.monotonic()
     status = rest_request(base_url, "GET", "/status") or {}
     fixed_pool_size = status.get("fixedCapturePoolSize", 0)
-    if type(fixed_pool_size) is not int or fixed_pool_size not in (0, 11):
+    if type(fixed_pool_size) is not int or not (fixed_pool_size == 0 or 2 <= fixed_pool_size <= 16):
         raise RuntimeError("Browser service reports an unsupported fixed capture pool")
     existing = {w["id"]: w for w in status.get("windows", [])}
     changed = []

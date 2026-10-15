@@ -471,32 +471,34 @@ def test_browser_capture_storage_and_release_policy(monkeypatch, copy_on_import)
 
 
 @pytest.mark.parametrize("frame_queue", [6, 9])
-def test_fixed_browser_pool_returns_immediately_and_retains_every_import(frame_queue):
+@pytest.mark.parametrize("pool_size", [6, 9, 11])
+def test_fixed_browser_pool_returns_immediately_and_retains_every_import(frame_queue, pool_size):
     from pyplumber.mixer import dmabuf_inputs
     nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
         fake_api(), prefix="input_0", socket="/tmp/page.sock", fps=50, drm_hwaccel=None,
         cuda_hwaccel="gpu", source_group="g", processing_group="g",
-        browser_frame_queue=frame_queue, fixed_pool_size=11)
+        browser_frame_queue=frame_queue, fixed_pool_size=pool_size)
     receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
     importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
     assert receive.get("return_queue", 0) == 0
-    assert importer["max_imports"] == 11
+    assert importer["max_imports"] == pool_size
     assert importer["import_ttl_ms"] == 0
 
 
-@pytest.mark.parametrize("reported", [0, 11, None, True, 12, "11"])
+@pytest.mark.parametrize("reported", [0, 2, 6, 9, 11, 16, None, True, 1, 17, "11"])
 def test_browser_pool_contract_comes_from_the_service(monkeypatch, reported):
     from pyplumber.mixer import dmabuf_inputs
     monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *args: {"fixedCapturePoolSize": reported})
-    if type(reported) is int and reported in (0, 11):
+    if type(reported) is int and (reported == 0 or 2 <= reported <= 16):
         assert dmabuf_inputs.open_windows("http://b", []) == reported
     else:
         with pytest.raises(RuntimeError, match="unsupported fixed capture pool"):
             dmabuf_inputs.open_windows("http://b", [])
 
 
-@pytest.mark.parametrize("current_ring", [9, 11])
-def test_fixed_pool_sender_uses_every_producer_buffer(monkeypatch, current_ring):
+@pytest.mark.parametrize("current_ring", [6, 9, 11])
+@pytest.mark.parametrize("pool_size", [6, 9, 11])
+def test_fixed_pool_sender_uses_every_producer_buffer(monkeypatch, current_ring, pool_size):
     from pyplumber.mixer import dmabuf_inputs
 
     requested = dict(id="page_00", url="http://p", width=1920, height=1080,
@@ -507,17 +509,17 @@ def test_fixed_pool_sender_uses_every_producer_buffer(monkeypatch, current_ring)
     def request(base, method, path, body=None):
         calls.append((path, body))
         if path == "/status":
-            return {"fixedCapturePoolSize": 11, "windows": [current]}
+            return {"fixedCapturePoolSize": pool_size, "windows": [current]}
         return body
 
     monkeypatch.setattr(dmabuf_inputs, "rest_request", request)
-    assert dmabuf_inputs.open_windows("http://b", [requested]) == 11
+    assert dmabuf_inputs.open_windows("http://b", [requested]) == pool_size
     assert requested["ringSize"] == 9
-    if current_ring == 11:
+    if current_ring == pool_size:
         assert calls == [("/status", None)]
     else:
         assert calls[-2:] == [("/window/close", {"id": "page_00"}),
-                             ("/window/open", {**current, "ringSize": 11})]
+                             ("/window/open", {**current, "ringSize": pool_size})]
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
