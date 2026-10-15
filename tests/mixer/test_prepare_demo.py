@@ -250,7 +250,7 @@ def test_alpha_overlay_preserves_blend_and_requires_browser(recipe, tmp_path):
         assert cfg.source(scene.items[1].source).kind == "browser"
 
 
-@pytest.mark.parametrize("motion", [None, "static", "dynamic"])
+@pytest.mark.parametrize("motion", [None, "static", "dynamic", "half"])
 def test_browser_alpha_recipe_covers_sdr_and_hdr_with_an_embedded_page(tmp_path, motion):
     directory = Path(__file__).resolve().parents[2] / "demos/mixer"
     recipe = json.loads((directory / "demo.browser-alpha.json").read_text())
@@ -261,6 +261,7 @@ def test_browser_alpha_recipe_covers_sdr_and_hdr_with_an_embedded_page(tmp_path,
     overlays = [scene for scene in cfg.scenes if scene.id.startswith("alpha_overlay_")]
     assert {cfg.source(scene.items[0].source).color.transfer for scene in overlays} == {"sdr", "hlg"}
     browser = next(source for source in cfg.sources if source.kind == "browser")
+    assert browser.capture_cadence == ("continuous" if motion == "dynamic" else "on_change")
     prefix, payload = browser.location.split(",", 1)
     assert prefix == "data:text/html;base64"
     page = (directory / "browser_alpha.html").read_bytes()

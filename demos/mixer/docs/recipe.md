@@ -48,7 +48,7 @@ Every entry has an `id`, `kind` and `weight`.
 | Kind | Fields |
 | --- | --- |
 | `generated` | `color`: `sdr`/`hlg`; `chroma`: `420`/`422`; optional `pattern` or `patterns` |
-| `browser` | `url` or `pattern: "alpha"`; optional `width`, `height`. The alpha pattern defaults to a centered static transparent card; `motion: "dynamic"` enables the moving preset (`"static"` restores the default). |
+| `browser` | `url` or `pattern: "alpha"`; optional `width`, `height`. The alpha pattern defaults to a centered static transparent card; `motion: "dynamic"` enables the moving preset (`"static"` restores the default). `motion: "half"` alternates six seconds moving and six seconds paused, resuming at the held position. Intentional holds use `on_change` delivery accounting. |
 | `file` | `path` relative to media directory; optional `color` |
 | `download` | Direct media-file `url`; optional `color` |
 

@@ -14,7 +14,7 @@
             background: linear-gradient(135deg, #253448d9, #0d1728b3);
             box-shadow: 0 1vw 2.4vw #00000030, inset 0 1px #ffffff14; }
   /* Opt-in motion follows a closed path without stepped or reversing endpoints. */
-  [data-motion="dynamic"] #marker {
+  [data-motion="dynamic"] #marker, [data-motion="half"] #marker {
     left: 10%; top: calc(38% - 8.5vw); will-change: transform;
     animation: motion var(--cycle) linear var(--phase) infinite;
   }
@@ -50,8 +50,18 @@
   const source = document.documentElement.dataset.source;
   const index = Number(source?.match(/\d+$/)?.[0] ?? 0);
   document.querySelector('h1').textContent = `Browser ${String(index).padStart(3, '0')}`;
-  if (document.documentElement.dataset.motion === 'dynamic') {
+  const motion = document.documentElement.dataset.motion;
+  if (motion === 'dynamic' || motion === 'half') {
     document.getElementById('mode').textContent = 'Motion · transparency';
+  }
+  if (motion === 'half') {
+    document.getElementById('mode').textContent = '6 s moving / 6 s still · transparency';
+    const marker = document.getElementById('marker');
+    let moving = true;
+    setInterval(() => {
+      moving = !moving;
+      marker.style.animationPlayState = moving ? 'running' : 'paused';
+    }, 6000);
   }
   if (source) document.getElementById('source').textContent = source;
   document.documentElement.style.setProperty('--phase', `-${((index * 0.6180339887) % 1) * 12}s`);

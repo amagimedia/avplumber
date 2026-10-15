@@ -44,7 +44,7 @@ def test_reject_unbounded_settings(changes):
         recipe_for(T4, {**DEFAULT_SETTINGS, **changes})
 
 
-@pytest.mark.parametrize("motion", [None, "static", "dynamic"])
+@pytest.mark.parametrize("motion", [None, "static", "dynamic", "half"])
 def test_browser_motion_reaches_recipe_and_saved_settings(motion):
     settings = {k: v for k, v in DEFAULT_SETTINGS.items() if k != "browser_motion"}
     if motion is not None:
