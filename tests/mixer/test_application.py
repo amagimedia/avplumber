@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 import pytest
+from types import SimpleNamespace
 
 from pyplumber.mixer import MixerOptions, SourceContext, build_application
 from pyplumber.mixer import config
@@ -46,6 +47,33 @@ assert not {{'_avplumber', 'pyplumber.core', 'pyplumber.node', 'mixer', 'layouts
 assert not any(name.startswith('demos.') for name in sys.modules)
 """
     subprocess.run([sys.executable, "-I", "-c", script], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+
+def test_a_declared_decoded_format_lets_the_fanout_tag_the_frames(native_boundary):
+    """A decoded source whose colour and storage are declared and match the canvas has no colour
+    filter: the fan-out stamps the tags. Undeclared storage keeps the filter, which converts."""
+    def nodes_of(**source):
+        api = fake_api()
+        api.MixerGraphBuilder = native_boundary[1]   # the real graph builder on the recording engine
+        app = build_application(show(**source), api=api)
+        return {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    # The scene shows the camera twice, so its fan-out is the one that feeds both aliases.
+    undeclared = nodes_of(color="sdr")
+    assert undeclared["mixer_color_cam"]["graph"].endswith("scale_cuda=format=nv12")
+    assert undeclared["mixer_color_alias_cam"]["src"] == undeclared["mixer_color_cam"]["dst"]
+    assert "frame_color" not in undeclared["mixer_color_alias_cam"]
+    declared = nodes_of(color="sdr", decoded_format="nv12")
+    assert "mixer_color_cam" not in declared
+    assert declared["mixer_color_alias_cam"]["src"] == undeclared["mixer_color_cam"]["src"] == "input_0_realtime"
+    assert declared["mixer_color_alias_cam"]["frame_color"] == {
+        "color_trc": "bt709", "color_primaries": "bt709", "colorspace": "bt709", "color_range": "tv"}
+    # Ten-bit frames on this eight-bit canvas still need converting.
+    assert "mixer_color_cam" in nodes_of(color="sdr", decoded_format="p010le")
+    for bad in ({"decoded_format": "yuv420p"}, {"decoded_format": "nv12", "filter": "hflip_cuda", "filter_output_format": "nv12"}):
+        with pytest.raises(config.ConfigError, match="decoded_format"):
+            show(**bad)
+    with pytest.raises(config.ConfigError, match="decoded_format"):
+        config.parse({**CONFIG, "sources": [CONFIG["sources"][0], {**CONFIG["sources"][1], "decoded_format": "nv12"}]})
 
 
 def test_config_renditions_do_not_need_cli_output_flags(tmp_path):
@@ -136,6 +164,27 @@ def test_invalid_processing_edge_shuts_down_partial_engine(edge):
     assert engine.shut_down
 
 
+def test_going_on_air_releases_idle_browser_imports_before_the_outputs():
+    from pyplumber.mixer.application import MixerApplication
+    commands = []
+    def expired(name):   # what an importer has released after the passes asked of it so far
+        passes = commands.count(f"node.object.set {name} purge_idle 500")
+        return (0, 14, 15, 15)[passes] if name == "input_3_to_cuda" else 0
+    avp = SimpleNamespace(executeCommandsFromString=lambda text: commands.extend(text.splitlines()),
+                          node=lambda name: SimpleNamespace(getObject=lambda key: {
+                              "instance_cleanup_pending": 0, "expired": expired(name)}))
+    app = MixerApplication(avp=avp, mixer=None, input_groups=(), input_edges=(), routed_inputs=False,
+                           preheat_timeout_sec=1, held_outputs=("janus",),
+                           browser_importers=("input_3_to_cuda", "input_7_to_cuda"))
+    app._go_on_air()
+    purged = [command for command in commands if " purge_idle " in command]
+    # Three passes: the first two released buffers (14, then 1), the third found nothing left.
+    assert purged == ["node.object.set input_3_to_cuda purge_idle 500", "node.object.set input_7_to_cuda purge_idle 500"] * 3
+    # The releases stall draws: they have to be over while the outputs are still held.
+    assert commands.index(purged[-1]) < commands.index("node.object.set janus_rtp_output hold false")
+    assert commands[-2:] == ["node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true"]
+
+
 @pytest.mark.parametrize("missing_frame", [False, True])
 def test_startup_waits_for_processed_frames_and_aux_shares_them(native_boundary, monkeypatch, missing_frame):
     class Engine(NativeEngine):
@@ -181,6 +230,19 @@ def test_startup_waits_for_processed_frames_and_aux_shares_them(native_boundary,
             assert app.avp.ready
             events = app.avp.events
             assert events.index("start input_0") < events.index("inspect processed_cam") < events.index("READY")
+            # Every Janus output is built held and released, with a key frame asked for, only after
+            # the last bus has produced encoded output; the compositors then count from zero.
+            assert app.held_outputs == ()   # this show records its program; only its bus goes to Janus
+            outputs = ["aux_cameras_rtp_output"]
+            assert all(app.avp.nodes[name]["hold"] is True for name in outputs)
+            released = [event for event in events if event.endswith(" hold false")]
+            assert released == [f"node.object.set {name} hold false" for name in outputs]
+            assert [event for event in events if event.endswith("_force_keyframe trigger true")] == [
+                "node.object.set aux_cameras_force_keyframe trigger true"]
+            assert [event.split()[1] for event in events if event.endswith(" reset_counters true")] == [
+                "mixer_comp_a", "mixer_comp_b", "aux_cameras_comp"]
+            last_inspected = max(i for i, event in enumerate(events) if event == "inspect aux_cameras_encoded")
+            assert last_inspected < events.index(released[0]) < events.index("READY")
     finally:
         app.stop()
     assert app.avp.shutdown_complete

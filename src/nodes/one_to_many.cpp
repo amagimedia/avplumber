@@ -2,8 +2,13 @@
 #include "../output_mask.hpp"
 #include "../output_subscriptions.hpp"
 #include "../mixer/primitives/frame_subscription.hpp"
+#include "../frame_color_tags.hpp"
 
 static uint32_t parseOutputsMask(const Parameters& value) { return parseBitmask(value); }
+
+// `frame_color` applies to video frames; any other data passes as it is.
+template <typename T> static void stampFrameColor(T&, const FrameColorTags&) {}
+static void stampFrameColor(av::VideoFrame& frame, const FrameColorTags& tags) { tags.apply(frame.raw()); }
 
 template <typename T>
 class OneToMany : public NodeSingleInput<T>, public NodeMultiOutput<T>,
@@ -12,6 +17,7 @@ class OneToMany : public NodeSingleInput<T>, public NodeMultiOutput<T>,
     std::atomic<uint32_t> outputs_mask_{1};
     bool drop_ = false;
     std::atomic<int64_t> enable_from_ms_{0};
+    FrameColorTags frame_color_;   // written on every frame before it is handed out
     std::vector<std::shared_ptr<avp::mixer::FrameSubscription>> subscriptions_;
     std::vector<std::string> output_names_;
 
@@ -28,6 +34,7 @@ public:
     virtual void process() override {
         T* data = this->source_->peek();
         if (!data) return;
+        if (frame_color_.any()) stampFrameColor(*data, frame_color_);
 
         uint32_t mask = outputs_mask_.load(std::memory_order_relaxed);
         const auto from = enable_from_ms_.load(std::memory_order_acquire);
@@ -85,6 +92,8 @@ public:
             r->outputs_mask_.store(parseOutputsMask(params["outputs"]), std::memory_order_relaxed);
         if (params.count("drop"))
             r->drop_ = params["drop"].get<bool>();
+        if (params.count("frame_color"))
+            r->frame_color_ = FrameColorTags::parse(params["frame_color"]);
         return r;
     }
 };

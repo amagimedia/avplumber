@@ -58,7 +58,7 @@ class FakeAvp:
             raise Exception(f"Node {name} doesn't exist.")
         return SimpleNamespace(getObject=lambda _key: dict(self.statuses[name]))
 
-    def registerControlCommand(self, name, handler, _payload):
+    def registerControlCommand(self, name, handler, _payload, _quiet=False):
         self.handlers[name] = handler
 
     def command(self, name, **request):
@@ -414,7 +414,7 @@ def test_commands_route_any_number_of_buses_by_id(cfg):
     for bus in buses:
         reachable(avp, bus)
     buses.register_commands()
-    assert set(avp.handlers) == {"mixer.aux", "mixer.aux_layout", "mixer.aux_page", "mixer.aux_status"}
+    assert set(avp.handlers) == {"mixer.aux", "mixer.aux_layout", "mixer.aux_page", "mixer.aux_status", "mixer.aux_layouts"}
     assert avp.command("mixer.aux_layout", bus="bus2", layout={"preset": "source_pages"})["page"] == 0
     assert avp.command("mixer.aux_page", bus="bus2", page=3)["layout"]["page"] == 3
     with pytest.raises(ConfigError, match="no source pages"):
@@ -425,7 +425,12 @@ def test_commands_route_any_number_of_buses_by_id(cfg):
     assert [b["id"] for b in status] == ["bus0", "bus1", "bus2"]
     grid, _, pages = status
     assert (grid["layout"], [c["role"] for c in grid["cells"]][:2]) == ({"preset": "pgm_pvw_grid"}, ["pvw", "pgm"])
-    assert [l.get("preset") for l in grid["layouts"]] == ["pgm_pvw_grid", "source_pages"]
+    # The menus are the show's and do not change while it runs: a poller asks for them once,
+    # not with every bus's state several times a second.
+    assert all("layouts" not in bus for bus in status)
+    menus = json.loads(avp.handlers["mixer.aux_layouts"](""))
+    assert list(menus) == ["bus0", "bus1", "bus2"]
+    assert [l.get("preset") for l in menus["bus0"]] == ["pgm_pvw_grid", "source_pages"]
     assert (pages["page"], pages["pages"], pages["first"], pages["total"]) == (3, 6, 37, 64)
     assert pages["cells"][0] == {"role": "source", "source": 36, "id": "s36", "kind": "video", **page_grid(cfg)[0]}
     assert (grid["fps"], grid["latency_ms"], grid["pvw_align"], grid["pgm_delay_frames"], grid["max_layers"]) == (30, 50, "program", 1, 640)

@@ -26,7 +26,7 @@ from .dsk import DownstreamKeyer, register_dsk_commands
 from .dmabuf_inputs import dmabuf_cuda_input_nodes, open_windows, refresh_windows, wait_for_sockets
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
-                    RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options)
+                    RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
 from ..transform import transform_output, transform_params
 
 
@@ -47,6 +47,14 @@ JANUS_DEFAULT_VIDEO_PT = 96
 JANUS_DEFAULT_VIDEO_SSRC = 0x41565001
 JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 4_500
 PREHEAT_POLL_INTERVAL_SEC = 0.02
+# Going on air waits for this long a stretch without a late or dropped frame on any bus, and gives up
+# waiting after the timeout: a show that never settles still starts, with its counters telling.
+SETTLE_WINDOW_SEC = 1.0
+SETTLE_TIMEOUT_SEC = 10.0
+# A browser buffer nothing has used for this long while the show starts is one the start went
+# through and left behind; a window's working buffers come round within a few frames.
+IMPORT_PURGE_IDLE_MS = 500
+IMPORT_PURGE_PASSES = 4
 
 # Event loops shared by the sources' pacing nodes (realtime, force_fps, smooth_timestamps).
 # One loop's cost grows with the square of the sources it paces: each wake-up rescans
@@ -173,6 +181,8 @@ class MixerApplication:
     # that wants audio) builds and wires its own audio-router node from these;
     # a plain video-only demo (e.g. this repo's own demos/mixer) just never has any.
     audio_edges: tuple[tuple[str, str], ...] = ()
+    held_outputs: tuple[str, ...] = ()      # prefixes of the program's Janus chains, built held
+    browser_importers: tuple[str, ...] = ()  # the drm_prime_to_cuda node of every browser source
     _startup_error: str | None = field(default=None, init=False, repr=False)
 
     def _check_startup(self) -> None:
@@ -241,6 +251,7 @@ class MixerApplication:
             refresh_windows(self.dmabuf_rest, list(self.browser_windows))
         self._wait_for_edges(self.input_edges, "input readiness")
         log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
+        self._purge_idle_imports()   # what the pages allocated before their reload: memory the buses are about to need
         if self.routed_inputs:
             self.avp.group(ROUTER_GROUP).startNodes()
             self._wait_for_node("layout_preheat_router")
@@ -282,9 +293,86 @@ class MixerApplication:
             self.aux_buses.start()
             self._wait_for_edges(tuple(f"{bus.prefix}_encoded" for bus in self.aux_buses), "auxiliary output", "packet")
         self._check_startup()
+        self._go_on_air()
         self.avp.setReady()
         log.info("Generic mixer preheat complete: compositors and transition ready in %.1f s",
                  time.monotonic() - started)
+
+    def _go_on_air(self) -> None:
+        """Release the show once it has settled.
+
+        Until here every Janus output was held: the buses ran against the clock while the sources,
+        the wipes and the encoders came up, each encoder that opened stalling the draws of the
+        buses already running, and none of that was sent. Now the outputs start together on a key
+        frame and the compositors count from zero, so what viewers get and what the counters say
+        both begin with the settled show."""
+        compositors = [f"{MIXER_NAME}_comp_a", f"{MIXER_NAME}_comp_b", *(f"{bus.prefix}_comp" for bus in self.aux_buses or ())]
+        # A release stalls draws, and buffers still go out of use while the last buses come up:
+        # release, let the show settle, and look again until a pass finds nothing left.
+        for _ in range(IMPORT_PURGE_PASSES):
+            released = self._purge_idle_imports(wait=True)
+            settled = self._wait_until_settled(compositors)
+            if not released:
+                break
+        prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
+        self.avp.executeCommandsFromString("\n".join(
+            [release_commands(prefix) for prefix in prefixes]
+            + [f"node.object.set {node} reset_counters true" for node in compositors]))
+        log.info("On air: %d outputs released%s", len(prefixes), "" if settled else " before the show settled")
+
+    def _purge_idle_imports(self, wait: bool = False) -> int:
+        """Release the browser buffers the start-up went through and no longer uses.
+
+        While a show starts, a browser window goes through two or three times the buffers it
+        settles on. The importers keep each registered for seconds after its last use, which holds
+        gigabytes of GPU memory at the moment the show needs most, and then release them one by
+        one, each release stalling every draw: after the outputs are on air unless it happens here.
+        With *wait*, returns once the releases are done, with how many there were."""
+        if not self.browser_importers:
+            return 0
+        def stats():
+            importers = (self.avp.node(node) for node in self.browser_importers)
+            return [(importer.getObject("import_stats") if importer is not None else None) or {} for importer in importers]
+        expired = lambda: sum(s.get("expired", 0) for s in stats())
+        before = expired() if wait else 0
+        self.avp.executeCommandsFromString("\n".join(
+            f"node.object.set {node} purge_idle {IMPORT_PURGE_IDLE_MS}" for node in self.browser_importers))
+        if not wait:
+            return 0
+        time.sleep(0.3)   # an importer looks for a request four times a second
+        deadline = time.monotonic() + SETTLE_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            self._check_startup()
+            if not any(s.get("instance_cleanup_pending") for s in stats()[:1]):
+                break
+            time.sleep(PREHEAT_POLL_INTERVAL_SEC)
+        return expired() - before
+
+    def _wait_until_settled(self, compositors) -> bool:
+        """True after SETTLE_WINDOW_SEC without a missed deadline or a dropped frame on any
+        compositor, False when SETTLE_TIMEOUT_SEC passed first. An engine that reports no playout
+        counters has nothing to wait for."""
+        def late():
+            total, counted = 0, False
+            for node in compositors:
+                compositor = self.avp.node(node)
+                status = (compositor.getObject("status") if compositor is not None else None) or {}
+                if "playout" in status:
+                    counted = True
+                    total += status.get("output_drops", 0) + status["playout"].get("missed_deadlines", 0)
+            return total if counted else None
+        before = late()
+        if before is None:
+            return True
+        deadline = time.monotonic() + SETTLE_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            self._check_startup()
+            time.sleep(SETTLE_WINDOW_SEC)
+            after = late()
+            if after == before:
+                return True
+            before = after
+        return False
 
     def stop(self) -> None:
         started = time.monotonic()
@@ -330,6 +418,7 @@ def load_avp_api():
         OneToMany,
         Output,
         PreheatVideoRouter,
+        RawVideoFileCuda,
         Realtime,
         RepeatLastFrame,
         ResampleAudio,
@@ -363,6 +452,7 @@ def load_avp_api():
         OneToMany=OneToMany,
         Output=Output,
         PreheatVideoRouter=PreheatVideoRouter,
+        RawVideoFileCuda=RawVideoFileCuda,
         Realtime=Realtime,
         RepeatLastFrame=RepeatLastFrame,
         ResampleAudio=ResampleAudio,
@@ -473,7 +563,7 @@ def _rendition_target(r, working_format, color):
 
 
 def _build_renditions(avp, api, options: MixerOptions, renditions, feeds, *,
-                      canvas, working_format: str, color: Color | str = "sdr", backend=None):
+                      canvas, working_format: str, color: Color | str = "sdr", backend=None, held=None):
     """One encoder per rendition, all fed from the single composited program.
 
     The compositor renders once at the canvas rate, so an extra rendition costs an
@@ -482,7 +572,8 @@ def _build_renditions(avp, api, options: MixerOptions, renditions, feeds, *,
     rendition then converts color and storage in its own filter, after the scaling,
     so a smaller output converts fewer pixels; force_fps in its encoder chain makes
     the constant rate. *feeds* maps a rendition feed (dirty/clean) to its program
-    edge; a plain edge serves every feed.
+    edge; a plain edge serves every feed. With a list as *held*, the Janus outputs are built held and
+    their prefixes appended to it, for the application to release when the show has settled.
     """
     backend = mixer_backend(backend)
     if isinstance(feeds, str):
@@ -545,7 +636,9 @@ def _build_renditions(avp, api, options: MixerOptions, renditions, feeds, *,
             fps=r.fps, fps_den=FPS_DEN, width=r.width, height=r.height, hwaccel=HWACCEL, group=OUTPUT_GROUP,
             codec=codec, profile=r.profile, preset=r.preset, enc_format=enc_format, color=target.tags,
             hdr_metadata=_hdr_metadata(r, target), prefix="janus" if not listeners else f"janus_{r.id}",
-            dpb_size=r.dpb_size))
+            dpb_size=r.dpb_size, hold=held is not None))
+        if held is not None:
+            held.append("janus" if len(listeners) == 1 else f"janus_{r.id}")
     return RtcpFeedbackGroup(listeners) if len(listeners) > 1 else next(iter(listeners), None)
 
 
@@ -635,7 +728,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 pixel_format="p010le" if source.kind == "p010" else "nv12",
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned", native_rate=True, color=source.color)
+                event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned",
+                direct=cfg.raw_upload == "direct", native_rate=True, color=source.color)
         else:
             edge, audio_edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
@@ -680,7 +774,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
                              pixel_format=source.filter_output_format or
                              (source.transform.sw_format if source.transform
-                              else mixer_config.RAW_STORAGE.get(source.kind)))
+                              else source.decoded_format or mixer_config.RAW_STORAGE.get(source.kind)))
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
@@ -717,9 +811,11 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             bus.build(options)
         aux.register_commands()
     settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
-    avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
+    avp.registerControlCommand("mixer.settings", lambda _arg: settings, True, True)   # polled: not logged
+    held = []
+    importers = tuple(f"input_{index}_to_cuda" for index, source in enumerate(cfg.sources) if source.kind == "browser")
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
-                                 working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend)
+                                 working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend, held=held)
     if program_audio_edge and options.janus_output:
         from .janus import JanusAudioConfig, build_janus_audio_output
         build_janus_audio_output(
@@ -727,6 +823,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             JanusAudioConfig(host=options.janus_host),
             group=OUTPUT_GROUP, prefix="janus_audio")
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False,
+                        held_outputs=tuple(held), browser_importers=importers,
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers),
                         aux_buses=aux, audio_edges=tuple(audio_edges))
 

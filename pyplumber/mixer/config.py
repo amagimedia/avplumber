@@ -26,9 +26,11 @@ TRANSITIONS = ("cut", "fade", "wipe")
 # purpose: the compositor cannot promote 8-bit sources or draw the RGBA wipe
 # onto them, so they only fail later.
 WORKING_FORMATS = ("nv12", "p010le", "p210le")
-# How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (the library default), or
-# patched hwupload_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it).
-RAW_UPLOADS = ("hwupload", "pinned")
+# How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (the library default),
+# patched hwupload_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it),
+# or one raw_video_file_cuda node that reads each picture into page-locked memory and uploads it
+# from there (opt-in; no staging copy, one thread per source).
+RAW_UPLOADS = ("hwupload", "pinned", "direct")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 193         # mixer_compositor active_inputs is a 193-bit pad mask (SourceMask, kSourceMaskBits)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 640
@@ -136,6 +138,9 @@ class Source:
     filter_output_format: str = ""
     transform: Optional[SourceTransform] = None   # before the source filter
     decode_storage: str = "cuda"
+    # What the decoder is known to yield (NVDEC: nv12 or p010le). Declared, and equal to the canvas
+    # storage with the source's colour matching the canvas, the source needs no colour filter.
+    decoded_format: str = ""
     extra_hw_frames: int = 3       # CUarray application headroom, beyond codec/working surfaces
     has_audio: bool = False        # demux/decode an audio track alongside video (kind == "video" only)
 
@@ -413,6 +418,9 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
         raise ConfigError(f"{where}: decode_storage applies to video sources and must be cuda or cuarray")
     if type(extra) is not int or not 0 <= extra <= 32:
         raise ConfigError(f"{where}: extra_hw_frames must be an integer from 0 to 32")
+    decoded_format = s.get("decoded_format", "")
+    if decoded_format not in ("", "nv12", "p010le") or decoded_format and (kind != "video" or source_filter):
+        raise ConfigError(f"{where}: decoded_format is nv12 or p010le, on a video source without a filter")
     hold_last_frame = s.get("hold_last_frame", True)
     if not isinstance(hold_last_frame, bool) or "hold_last_frame" in s and kind != "browser":
         raise ConfigError(f"{where}: hold_last_frame must be a boolean on a browser source")
@@ -437,6 +445,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
                   loop=bool(s.get("loop", True)), hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
                   has_audio=has_audio,
+                  decoded_format=decoded_format,
                   transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,
                   **(color.tags if color else {}))
 

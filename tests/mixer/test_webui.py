@@ -244,12 +244,16 @@ def test_host_stats_sample_load_cpu_and_the_busiest_mixer_thread(tmp_path, monke
                                                                 3: ("mixer (new)", 30, 1)})
     stats.sample()
     assert stats.values == dict(load1=21.4, vcpus=2, cpu_pct=52, mixer_cpu_pct=round(117 * 100 / hz / 2, 1),
-                               thread_pct=round(76 * 100 / hz / 2), thread_name="mixer_comp_a")
+                               thread_pct=round(76 * 100 / hz / 2), thread_name="mixer_comp_a", thread_count=3,
+                               # every thread by kind, busiest first; a thread first seen now counts from zero
+                               thread_kinds=[{"name": "mixer_comp_a", "count": 1, "pct": round(76 * 100 / hz / 2, 1), "max_pct": round(76 * 100 / hz / 2, 1)},
+                                             {"name": "mixer (new)", "count": 1, "pct": round(31 * 100 / hz / 2, 1), "max_pct": round(31 * 100 / hz / 2, 1)},
+                                             {"name": "mixer.py", "count": 1, "pct": round(10 * 100 / hz / 2, 1), "max_pct": round(10 * 100 / hz / 2, 1)}])
     # Without a mixer, or before its first diff after a restart, the thread fields stay unknown.
     pid[0] = None
     now[0] += 1.0
     stats.sample()
-    assert stats.values["thread_pct"] is None and stats.values["thread_name"] is None
+    assert stats.values["thread_pct"] is None and stats.values["thread_name"] is None and stats.values["thread_kinds"] is None
     assert stats.values["mixer_cpu_pct"] is None
     pid[0] = 4243
     now[0] += 1.0
@@ -285,6 +289,37 @@ def test_mixer_cpu_counts_exited_threads_and_detects_pid_reuse(tmp_path, monkeyp
     (tmp_path / '4242' / 'stat').write_text('truncated')
     stats.sample()
     assert stats.values['mixer_cpu_pct'] is None and stats.values['cpu_pct'] is None
+
+
+def test_host_stats_sum_the_threads_by_kind(tmp_path, monkeypatch):
+    from pyplumber.mixer.gui.telemetry import thread_kinds
+    now = [10.0]
+    monkeypatch.setattr("pyplumber.mixer.gui.telemetry.time.monotonic", lambda: now[0])
+    hz = os.sysconf("SC_CLK_TCK")
+    stats = HostStats(lambda: 4242, proc=tmp_path)
+    names = [f"input_{n}" for n in range(30)] + ["mixer_comp_a", "aux_aux1_encode", "aux_aux10_encod", "EventLoop", "EventLoop"]
+    threads = lambda ticks: {tid: (name, ticks(tid, name), 0) for tid, name in enumerate(names, 1)}
+    fake_proc(tmp_path, 1, [100, 0, 0, 900, 0, 0, 0, 0], threads(lambda tid, name: 0))
+    stats.sample()
+    now[0] += 1.0   # each input one tick, the compositor 40, the two encoders 2 and 4, the loops 8 and 6
+    spent = {"mixer_comp_a": 40, "aux_aux1_encode": 2, "aux_aux10_encod": 4}
+    loops = iter((8, 6))
+    fake_proc(tmp_path, 1, [150, 0, 0, 950, 0, 0, 0, 0],
+              threads(lambda tid, name: spent.get(name, next(loops) if name == "EventLoop" else 1)))
+    stats.sample()
+    pct = lambda ticks: round(ticks * 100 / hz, 1)
+    assert stats.values["thread_count"] == 35
+    assert stats.values["thread_kinds"] == [   # the kind with the busiest thread first
+        {"name": "mixer_comp_a", "count": 1, "pct": pct(40), "max_pct": pct(40)},
+        {"name": "EventLoop", "count": 2, "pct": pct(14), "max_pct": pct(8)},
+        {"name": "aux_auxN_encod", "count": 2, "pct": pct(6), "max_pct": pct(4)},  # one kind under two cut-off spellings
+        {"name": "input_N", "count": 30, "pct": pct(30), "max_pct": pct(1)},       # thirty small threads, one line
+    ]
+    assert (stats.values["thread_name"], stats.values["thread_pct"]) == ("mixer_comp_a", round(40 * 100 / hz))
+    # Beyond the limit the remaining kinds are one "other" row, so the list stays short.
+    rows = thread_kinds([(n, f"kind{chr(97 + n)}") for n in range(1, 8)], 100, 3)
+    assert [(r["name"], r["count"], r["pct"]) for r in rows] == [("kindh", 1, 7.0), ("kindg", 1, 6.0), ("kindf", 1, 5.0), ("other", 4, 10.0)]
+    assert rows[-1]["max_pct"] == 4.0
 
 
 def test_host_stats_thread_hides_the_meters_during_an_error_and_logs_it_once(tmp_path, monkeypatch, caplog):
@@ -462,7 +497,7 @@ def test_state_is_one_round_trip_of_status_scenes_and_settings(client):
     assert body["scenes"] == ["a", "b"]
     assert body["settings"]["direct"] is True
     assert body["host"] is None   # no host sampler: the page hides its meters
-    assert bridge.sent == ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
+    assert bridge.sent == FIRST_POLL
 
 
 def test_state_carries_the_host_sample(client):
@@ -531,7 +566,10 @@ def test_state_carries_the_recent_delivery_counts(client):
 
 
 STATE_REPLIES = {"mixer.status": '{"pgm_scene":"a"}', "mixer.scenes": '["a","b"]', "mixer.settings": "{}"}
-ONE_POLL = ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
+# What a show fixes (its scenes and settings) is asked for first and then only every few seconds;
+# a poll in between costs the mixer its status alone.
+FIRST_POLL = ["mixer.scenes mixer", "mixer.settings mixer", "mixer.status mixer"]
+ONE_POLL = ["mixer.status mixer"]
 
 
 def test_polls_share_one_state_until_it_expires_or_a_take_lands(monkeypatch):
@@ -541,13 +579,17 @@ def test_polls_share_one_state_until_it_expires_or_a_take_lands(monkeypatch):
     first = bridge.state()
     first["gpus"] = []   # a caller's own keys stay out of the shared reply
     assert "gpus" not in bridge.state()
-    assert bridge.sent == ONE_POLL
+    assert bridge.sent == FIRST_POLL
     now[0] += 0.2
     bridge.state()
-    assert bridge.sent == ONE_POLL * 2
+    assert bridge.sent == FIRST_POLL + ONE_POLL
     bridge.take({"command": "cut", "scene": "b"})
     bridge.state()
-    assert bridge.sent == ONE_POLL * 2 + ['mixer.cut {"scene":"b","mixer":"mixer"}'] + ONE_POLL
+    assert bridge.sent == FIRST_POLL + ONE_POLL + ['mixer.cut {"scene":"b","mixer":"mixer"}'] + ONE_POLL
+    del bridge.sent[:]
+    now[0] += 5.0   # long enough for another show to have started: its fixed part is asked for again
+    bridge.state()
+    assert bridge.sent == FIRST_POLL
 
 
 def test_concurrent_polls_cost_one_set_of_commands():
@@ -559,7 +601,36 @@ def test_concurrent_polls_cost_one_set_of_commands():
     gate.set()
     for poll in polls:
         poll.join(5)
-    assert bridge.sent == ONE_POLL
+    assert bridge.sent == FIRST_POLL
+
+
+def test_aux_layouts_are_asked_for_with_the_fixed_part_and_joined_to_each_bus():
+    replies = {"mixer.status": "{}", "mixer.scenes": "[]", "mixer.settings": '{"aux_buses":["mv","aux0"]}',
+               "mixer.aux_status": '[{"id":"mv","layout":{"preset":"pgm_pvw_grid"}},{"id":"aux0","layout":{"cells":[]}}]',
+               "mixer.aux_layouts": '{"mv":[{"preset":"pgm_pvw_grid"},{"preset":"source_pages"}],"aux0":[]}'}
+    bridge = FakeBridge(replies)
+    buses = bridge.state()["aux_buses"]
+    assert buses[0] == {"id": "mv", "layout": {"preset": "pgm_pvw_grid"},
+                        "layouts": [{"preset": "pgm_pvw_grid"}, {"preset": "source_pages"}]}
+    assert buses[1]["layouts"] == []
+    assert bridge.sent == ["mixer.scenes mixer", "mixer.settings mixer", "mixer.aux_layouts", "mixer.status mixer", "mixer.aux_status"]
+    # A mixer that still sends each bus's menu with its status, and has no such command, is served as it was.
+    older = FakeBridge({**replies, "mixer.aux_status": '[{"id":"mv","layouts":[{"preset":"source_pages"}]}]'},
+                       fail_take="mixer.aux_layouts")
+    assert older.state()["aux_buses"] == [{"id": "mv", "layouts": [{"preset": "source_pages"}]}]
+
+
+def test_outputs_serve_a_player_without_asking_the_mixer_for_its_status(client):
+    bridge = FakeBridge({"mixer.status": '{"pgm_scene":"a"}', "mixer.scenes": '["a"]',
+                         "mixer.settings": '{"preview_outputs":[{"bus":"mv","mountpoint":5008}]}'}, transition="cut")
+    url, _ = client(bridge)
+    status, body = get(url, "/api/outputs")
+    assert status == 200
+    assert body["settings"] == {"preview_outputs": [{"bus": "mv", "mountpoint": 5008}], "transition": "cut"}
+    assert "gpus" in body and "status" not in body and "aux_buses" not in body
+    assert not [line for line in bridge.sent if line.startswith(("mixer.status", "mixer.aux_status"))]
+    get(url, "/api/outputs")
+    assert bridge.sent == ["mixer.scenes mixer", "mixer.settings mixer"]   # the second player costs the mixer nothing
 
 
 def test_a_burst_of_takes_collapses_to_its_newest_in_order():
@@ -625,7 +696,7 @@ def test_transition_override_only_changes_page_settings(client, override, expect
     url, _ = client(bridge)
     settings = get(url, "/api/state")[1]["settings"]
     assert settings == {"transition": expected, "fade_seconds": 0.8}
-    assert bridge.sent == ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
+    assert bridge.sent == FIRST_POLL
 
 
 def test_takes_reach_the_mixer_as_control_commands(client):

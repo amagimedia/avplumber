@@ -566,7 +566,7 @@ PYBIND11_MODULE(_avplumber, m) {
              py::call_guard<py::gil_scoped_release>())
         .def("executeCommandsFromFile", &AVPlumber::executeCommandsFromFile,
              py::call_guard<py::gil_scoped_release>())
-        .def("registerControlCommand", [](AVPlumber &avp, const std::string &command, py::function callback, bool no_lock) {
+        .def("registerControlCommand", [](AVPlumber &avp, const std::string &command, py::function callback, bool no_lock, bool quiet) {
             avp.registerControlCommand(command, [callback](const std::string &arg) -> std::string {
                 py::gil_scoped_acquire acquire;
                 try {
@@ -578,8 +578,8 @@ PYBIND11_MODULE(_avplumber, m) {
                 } catch (py::error_already_set &e) {
                     throw std::runtime_error(e.what());
                 }
-            }, no_lock);
-        }, py::arg("command"), py::arg("callback"), py::arg("no_lock") = false)
+            }, no_lock, quiet);
+        }, py::arg("command"), py::arg("callback"), py::arg("no_lock") = false, py::arg("quiet") = false)
         .def("setLogFile", &AVPlumber::setLogFile)
         .def("setLogCallback", [](AVPlumber &avp, py::function callback) {
             avp.setLogCallback([callback](const std::string &s) {

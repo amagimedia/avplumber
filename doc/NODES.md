@@ -65,12 +65,15 @@ This node is non-blocking.
     ~1.0006 are treated as 1.
 -   `tick_period` (string of rational, seconds) - if specified and [`tick_source`](#non-blocking-nodes) is also specified, anti-jitter filter will be enabled, assuming that tick source emits a tick every `tick_period`. Generally should be set to 1/FPS, e.g. `1/60`. The filter maintains its own clock independent of wallclock, but will resync to the wallclock if it drifts too much. Without `tick_source`, pacing still follows wallclock, but a specified
     `tick_period` selects an internal time base of one quarter of that period.
-    For example, `1/30000` gives 1/120000-second timestamps with `set_pts`,
-    preserving common fractional frame periods. If omitted, the normal
-    millisecond wallclock time base is used. When selecting a finer time base,
-    explicitly set `negative_time_tolerance` and `discontinuity_threshold` in
-    seconds to preserve the intended durations; the legacy implicit tick
-    constants assume millisecond precision.
+    To choose only the time base, use `time_base`.
+-   `time_base` (string of rational, seconds, optional) - the unit the node counts in and `set_pts`
+    stamps in. Default: the millisecond wallclock time base. `1/120000` represents 1/30, 1001/30000,
+    1001/60000 and 1001/24000 exactly. Nothing ticks at this rate: the node still wakes for a frame
+    and for its release time. The clock it reads counts milliseconds, so a frame whose release time
+    falls inside the current millisecond is released then, up to a millisecond early, and stamped
+    with its exact time. Not together with `tick_period`. With a finer time base, set
+    `negative_time_tolerance` and `discontinuity_threshold` explicitly, in seconds, to keep their
+    durations; the built-in values assume milliseconds.
 -   `set_pts` (bool, default false) - set PTS to wallclock timestamps corresponding to time when packets are outputted (or, more precisely, when they would be outputted if there was no jitter)
 -   `forward_eof` (bool, default false) - pass the end-of-stream marker on to the output, in order behind the last frame and never stamped by `set_pts`. By default the marker is consumed here; a consumer that must tell the end of a file from a stalled producer (`clip_cache`) needs it. Do not enable it in front of a node that finishes on the marker unless that is intended.
 
@@ -566,6 +569,10 @@ multiple inputs, 1 output: `av::Packet`
 -   `options` (dictionary) - format options that will be passed to libavformat
 -   `seek_table` (string of file name) - if specified, binary file with native endianness with seek table will be written.
 -   `seek_table_text` (string of file name) - if specified, text file with seek table will be written.
+-   `hold` (boolean, optional, default `false`) - start held: packets are taken from the input and not
+    written, so everything before the output runs (an encoder opens on its first frame) while nothing
+    leaves. `node.object.set <name> hold false` releases it; writing then starts at the next key packet,
+    so ask the encoder for one. `hold true` holds it again.
 
 Format of binary seek table: 16-byte records containing:
 * timestamp of the frame in milliseconds: int64_t
@@ -756,6 +763,44 @@ Get video frames from CUDA IPC memory. Frame pointer and parameters are read fro
 -   `hwaccel` (string, name of instance-shared object) - mandatory, name of
     hwaccel previously created with `hwaccel.init`
 
+### `raw_video_file_cuda`
+
+Play a headerless raw NV12 or P010 file as CUDA frames. Each picture is read from the file
+straight into page-locked host memory and the device takes it from there, so the samples are
+copied once on the CPU (page cache to that memory). The chain `input_rec` (`rawvideo`) → `demux`
+→ `dec_video` → `filter_video` (`hwupload_cuda=pinned=1`) copies them twice and runs four
+threads; this node runs one. Nothing is kept between passes: every picture shown is read from
+the file and transferred for that showing.
+
+1 output: `av::VideoFrame` (hardware "pixel format" `cuda`). The node blocks while its output
+queue is full, so the consumer (typically `realtime`) paces the reading; give the queue a
+capacity of 1 to hold one uploaded picture ahead. Timestamps count pictures in a time base of
+one frame period.
+
+Parameters:
+-   `url` (string, required) - path of the file. A trailing part of a picture is not shown.
+-   `pixel_format` (string, required) - `nv12` or `p010le`; rows carry no padding.
+-   `video_size` (string, required) - `WIDTHxHEIGHT`
+-   `framerate` (string, required) - rational, e.g. `30000/1001`
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `loop` (bool, default `false`) - start again after the last picture. Without it the node
+    sends the end-of-file marker (unless `send_eof` is `false`) and finishes, which
+    `auto_restart` acts on.
+-   `loop_continuous_ts` (bool, default `false`) - timestamps count on across passes instead
+    of starting from zero at each one
+-   `frame_color` (object, optional) - colour fields written on every frame, as for
+    `one_to_many`: `color_trc`, `color_primaries`, `colorspace`, `color_range`
+-   `write_combined` (bool, default `false`) - allocate the page-locked memory write-combined.
+    Whether that makes the read cheaper depends on the host; measure before using it.
+
+The read is a blocking local `pread`; there is no read timeout, and a file that ends inside a
+picture after it was opened stops the node with an error. `node.object.get <node> stats`
+returns `frames`, `passes` and the duration of the last read and upload (`read_us`,
+`upload_us`).
+
+The upload half is `src/nodes/hwaccel/CudaPinnedUploader.hpp`, which any source able to write
+its samples where it is told can use.
+
 ### `ipc_audio_source`
 
 Get audio frames from named pipe. See `src/nodes/ipc_audio_source.cpp` for header structure. Header must be followed by interleaved audio samples.
@@ -851,6 +896,11 @@ Retired imports are released on a cleanup worker shared by the instance. Incomin
 frames needing a new import are dropped while cleanup is pending or their import
 budget is full; cached imports continue normally. Dropped inputs release their
 browser capture slots.
+
+`node.object.set <node> purge_idle <ms>` releases, within a quarter of a second, every import that
+no frame holds and none has used for that many milliseconds, without waiting for `import_ttl_ms`
+or for the next frame: for a caller that knows a burst of allocations is over, such as a show that
+has finished starting. They count as `expired`.
 
 `node.object.get <node> import_stats` includes an `admission_dropped` frame
 counter and instance-wide cleanup counts. These counters distinguish admission
@@ -1166,11 +1216,16 @@ Objects (`node.object.set`):
 
 `node.object.get <node> status`: `output_drops` (frames dropped for a full
 output edge; the bus keeps playing and draws again once it has room), `playout`
-(`frames`, `repeats`, `discarded`, `overflow`, `missed_deadlines`,
-`per_input`), with `aux_mode` `composition_pending`, `composition_error` and
+(`frames`, `repeats`, `discarded`, `overflow`, `missed_deadlines`: totals over the inputs; `node.object.get
+<node> per_input` gives `repeats`, `discarded` and `overflow` of each input, for finding the one that
+misbehaves), with `aux_mode` `composition_pending`, `composition_error` and
 `composition_revision`, the revision of the composition being drawn (set when
 one is applied at once or a staged one becomes ready, unchanged when a staged
 one is dropped; empty for one without a revision).
+
+`node.object.set <node> reset_counters true` starts `missed_deadlines`, the per-input counters,
+`output_drops` and `playout.timing` again from zero, for a caller that has finished starting the
+show; `frames` keeps counting and the playout is not disturbed.
 
 `playout.timing` says where each drawn tick's time went: `period_ms`, `bounds_ms` (the upper
 bounds of all buckets but the last: a quarter, a half, three quarters, one, one and a quarter,

@@ -1,0 +1,42 @@
+From 4c85b08b19a4c673927917cca21dc6c27324ec48 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Tue, 13 Oct 2026 21:43:47 +0200
+Subject: [PATCH] avcodec/hevc: do not clear software decode tables for hwaccel
+ frames
+
+hevc_frame_start() cleared five per-picture tables (about 650 KB for 1080p)
+on every frame. Only the software CTB decode and its loop filters read them,
+and with a hwaccel decode_slice_data() returns before either runs. Skip the
+clears then; software decoding is unchanged.
+---
+ libavcodec/hevc/hevcdec.c | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/libavcodec/hevc/hevcdec.c b/libavcodec/hevc/hevcdec.c
+index b6234a6c34..aacd2e7c27 100644
+--- a/libavcodec/hevc/hevcdec.c
++++ b/libavcodec/hevc/hevcdec.c
+@@ -3316,11 +3316,15 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
+         }
+     }
+ 
+-    memset(l->horizontal_bs, 0, l->bs_width * l->bs_height);
+-    memset(l->vertical_bs,   0, l->bs_width * l->bs_height);
+-    memset(l->cbf_luma,      0, sps->min_tb_width * sps->min_tb_height);
+-    memset(l->is_pcm,        0, (sps->min_pu_width + 1) * (sps->min_pu_height + 1));
+-    memset(l->tab_slice_address, -1, pic_size_in_ctb * sizeof(*l->tab_slice_address));
++    /* Only the software CTB decode and its loop filters read these tables;
++     * a hwaccel returns from decode_slice_data() before either runs. */
++    if (!s->avctx->hwaccel) {
++        memset(l->horizontal_bs, 0, l->bs_width * l->bs_height);
++        memset(l->vertical_bs,   0, l->bs_width * l->bs_height);
++        memset(l->cbf_luma,      0, sps->min_tb_width * sps->min_tb_height);
++        memset(l->is_pcm,        0, (sps->min_pu_width + 1) * (sps->min_pu_height + 1));
++        memset(l->tab_slice_address, -1, pic_size_in_ctb * sizeof(*l->tab_slice_address));
++    }
+ 
+     if (IS_IDR(s))
+         ff_hevc_clear_refs(l);
+-- 
+2.55.0
+

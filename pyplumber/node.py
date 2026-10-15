@@ -188,6 +188,10 @@ class DrmPrimeToCuda(InternalNode):
     TYPE = "drm_prime_to_cuda"
 
 
+class RawVideoFileCuda(InternalNode):
+    TYPE = "raw_video_file_cuda"
+
+
 class DrmPrimeToEglImage(InternalNode):
     TYPE = "drm_prime_to_egl_image"
 

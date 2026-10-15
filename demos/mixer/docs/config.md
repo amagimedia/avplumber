@@ -20,7 +20,7 @@ HLG/PQ require 10-bit storage. Browser graphics are SDR; the compositor converts
 | `width`, `height` | — | the program raster the compositor draws into |
 | `fps` | `30` | **how often the compositor renders**, and the clock the whole mixer runs on: inputs are re-timed to it and browser pages are asked to paint at it |
 | `working_format` | `nv12` | compositor and transition pixel storage: `nv12` (8-bit 4:2:0), `p010le` (10-bit 4:2:0) or `p210le` (10-bit 4:2:2). 8-bit sources are promoted onto a 10-bit canvas; `p210le` keeps 4:2:2 through conversion and compositing. Renditions are 4:2:0 for NVENC, subsampled once |
-| `raw_upload` | `hwupload` | `hwupload` or `pinned` (`hwupload_cuda=pinned=1`, requires the FFmpeg patch); Setup uses pinned staging. [Details](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html) |
+| `raw_upload` | `hwupload` | `hwupload`, `pinned` (`hwupload_cuda=pinned=1`, requires the FFmpeg patch) or `direct` (one `raw_video_file_cuda` node per source: the file is read into page-locked memory and uploaded from there, no staging copy); Setup uses `direct`. [Details](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html) |
 | `color` | `sdr` | canvas color contract: `sdr` (BT.709), `hlg` or `pq` (BT.2020). HLG/PQ need a 10-bit `working_format`. Every source is converted to it on the GPU; renditions convert from it |
 | `latency_ms` | 2 frames up to 30 fps, 3 at 50/60 | playout buffer between a source frame's arrival and its tick (80 ms at 25 fps, 50 ms at 60). A frame later than that is skipped and the previous one repeated, so set it just above the worst source jitter; must stay below six frames. `--mixer-latency-ms` on the command line overrides it |
 
@@ -66,6 +66,7 @@ One source ID opens one decoder or browser window; scenes and aliases reuse it. 
 | `width`, `height` | video | optional; probed with ffprobe at load when absent |
 | `loop` | both | default `true` |
 | `decode_storage` | video | default `cuda`; experimental `cuarray` requires the patched upstream FFmpeg build and compatible array consumers, and selects zero-copy NVDEC without CPU fallback |
+| `decoded_format` | video | optional `nv12` or `p010le`: what the decoder is known to yield (8-bit or 10-bit 4:2:0 from NVDEC). With a declared `color` that matches the canvas and this equal to the canvas storage, the source's frames are tagged by its fan-out and it needs no colour filter and no thread for one. Leave it out for media of unknown depth: the colour filter then converts when it must. Not with `filter` |
 | `extra_hw_frames` | CUarray video | default `3`: fixed application headroom beyond codec and FFmpeg working surfaces; size it for the graph's retained-frame demand |
 | `transform` | video/v210/nv12/p010 | optional geometry applied once before the source filter, color and fan-out: `{"width", "height", "fit", "crop", "sw_format"}`. The frame, or its `crop` `[x, y, w, h]`, is scaled onto a canvas of that even size by `cuda_transform`; `fit` is `contain` (default, black bars) or `stretch`. `sw_format` (`nv12`, `p010le`, `p210le`) is the source's own storage: raw kinds supply it, a `video` source must state it. A frame that already has the size and storage is passed on undrawn; one of lower depth is promoted, one of higher depth is an error |
 | `filter` | video/v210/nv12/p010 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
@@ -196,11 +197,12 @@ Per-input `force_fps` is omitted; output/AUX normalization remains. The shared
 input helper's default normalized behavior for other applications is unchanged.
 Browser sources retain their separate timestamp smoothing/repeat chain.
 
-`canvas.raw_upload: "pinned"` uses patched FFmpeg's `hwupload_cuda`; the old
-custom raw uploader nodes are retired. NV12/P010 and v210 builders stamp declared
-YUV tags in the upload graph. The application bypasses a standalone tag-only
-colour filter only when no user filter or processing callback can invalidate
-that promise. Real colour conversion and alpha processing remain. A source
+`canvas.raw_upload: "direct"` reads each NV12/P010 file with one
+`raw_video_file_cuda` node, which uploads from page-locked memory and stamps the
+declared YUV tags itself. `"pinned"` uses patched FFmpeg's `hwupload_cuda`, as the
+v210 builder always does; those two stamp the tags in the upload graph. The
+application bypasses a standalone tag-only colour filter only when no user filter
+or processing callback can invalidate that promise. Real colour conversion and alpha processing remain. A source
 `transform` preserves the tags, while an arbitrary `filter_graph` or
 `process_source` callback disables automatic eligibility.
 

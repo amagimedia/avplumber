@@ -17,7 +17,10 @@ const {chromium} = require('playwright');
       layouts: [], cells: [], canvas: {w: 1920, h: 1080}, fps: 25, running: true,
       playout: {frames: 100, missed_deadlines: i === 29 ? 2 : 0}, output_drops: i === 29 ? 1 : 0}));
     const sample = {setup_revision: 1, gpus: [gpu], host: {load1: 12, vcpus: 16, cpu_pct: 55,
-      mixer_cpu_pct: 600, thread_pct: 40, thread_name: 'mixer_comp_a'},
+      mixer_cpu_pct: 600, thread_pct: 40, thread_name: 'mixer_comp_a',
+      thread_count: 1472, thread_kinds: [['input_N', 152, 140.5, 3.3], ['upload_N', 47, 135, 3.3],
+        ['mixer_comp_a', 1, 40, 40], ['EventLoop', 5, 37.2, 8.2], ['mixer_color_sdr', 105, 17.2, 0.4],
+        ['other', 1161, 230.1, 38]].map(([name, count, pct, max_pct]) => ({name, count, pct, max_pct}))},
       status: {pgm_scene: 'a', pvw_scene: 'b', transition: 'idle', cut_latency: {direct: {...cuts[2], recent: cuts}},
         playout: {A: {missed_deadlines: 1}, B: {missed_deadlines: 0}}, wipe_cache: {bytes: 200000000, budget_bytes: 600000000}},
       scenes: ['a', 'b'], aux_buses: aux,
@@ -42,6 +45,19 @@ const {chromium} = require('playwright');
     assert.deepEqual(await values('gpu-vram'), ['10.67', '6.00 GiB']);
     assert.deepEqual(await values('gpu-enc'), ['30', '750']);
     assert.deepEqual(await values('cpu'), ['6.00', '32.0']);
+    // THREAD shows the busiest thread. Its tip has every thread of the mixer by kind, the kind
+    // with the busiest thread first: the whole mixer, then per kind the mean, the busiest and the
+    // sum; what the server could not list separately comes last.
+    assert.equal(await page.locator('#thread b').textContent(), '40%');
+    assert.deepEqual(await page.locator('#thread-tip dt').allTextContents(),
+      ['All 1472 threads', 'mixer_comp_a', 'EventLoop ×5', 'input_N ×152', 'upload_N ×47', 'mixer_color_sdr ×105', 'other ×1161']);
+    assert.deepEqual(await values('thread'), ['6.0 cores', '40%', 'avg 7.4% · max 8.2% · sum 37%',
+      'avg 0.9% · max 3.3% · sum 141%', 'avg 2.9% · max 3.3% · sum 135%', 'avg 0.2% · max 0.4% · sum 17%',
+      'avg 0.2% · max 38% · sum 230%']);
+    // A server that names only the busiest thread still gets a tip with that one.
+    await page.evaluate(() => { const all = state.host.thread_kinds; state.host.thread_kinds = undefined; renderHost();
+      window.oneThread = [...document.querySelectorAll('#thread-tip dt')].map((e) => e.textContent); state.host.thread_kinds = all; renderHost(); });
+    assert.deepEqual(await page.evaluate(() => window.oneThread), ['All 1472 threads', 'mixer_comp_a']);
     assert.deepEqual(await values('lat'), ['106.0 ms', '3', '1']);
     // No player is open: the bar shows the median of the mixer's own last three cuts.
     assert.equal(await page.locator('#lat b').textContent(), '90ms');
@@ -62,7 +78,7 @@ const {chromium} = require('playwright');
       assert(box.height < 35, `header must be one row at ${width}px`);
       assert(box.scroll <= box.width + 1, `header must fit ${width}px: ${JSON.stringify(box)}`);
       if (process.env.METER_SCREENSHOTS) await page.screenshot({path: path.join(process.env.METER_SCREENSHOTS, `meters-${width}.png`)});
-      for (const id of ['power', 'gpu-vram', 'gpu-enc', 'cpu', 'lat']) {
+      for (const id of ['power', 'gpu-vram', 'gpu-enc', 'cpu', 'thread', 'lat']) {
         await page.locator(`#${id}`).hover();
         const tip = await page.locator(`#${id}-tip`).boundingBox();
         assert(tip && tip.x >= 0 && tip.x + tip.width <= width, `${id} tooltip must fit`);
