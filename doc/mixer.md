@@ -381,6 +381,9 @@ retiming, held copies, snapshots, compositing and both sides of a fade. `repeats
 counts reuse beyond the source's native frame period; `dropped` counts capture
 IDs skipped while continuously on air. Aliases count once. Prewarm, off-air gaps
 and queue cleanup do not count. A producer restart establishes a new baseline.
+For a source faster than the output, only skips beyond the normal rate-conversion
+allowance count; capture IDs alone cannot distinguish losses within that allowance
+from intentional sampling. Matching capture and output rates have no such allowance.
 The UI uses these counters, never the compositors' queue diagnostics. They measure
 source selection before encoding, not packet loss or playback at a remote viewer.
 

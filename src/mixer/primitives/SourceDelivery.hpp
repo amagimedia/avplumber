@@ -112,9 +112,11 @@ public:
             if (newest.number > s.high) {
                 const auto seen = std::distance(numbers.upper_bound(s.high), numbers.end());
                 const uint64_t gap = newest.number - s.high - seen;
-                // A faster source intentionally skips pictures when sampled at the output rate.
+                // A faster source intentionally skips pictures. Fractional conversion
+                // alternates floor/ceil advances (50 -> 30 advances by one or two).
+                // Without the sampling phase, only gaps above the ceil are provable losses.
                 const uint64_t conversion = newest.period_ns && output_period_ns > int64_t(newest.period_ns)
-                    ? (pts_ns - s.fresh_ns) / newest.period_ns - 1 : 0;
+                    ? (std::max<int64_t>(1, pts_ns - s.fresh_ns) + newest.period_ns - 1) / newest.period_ns - 1 : 0;
                 s.counts.dropped += gap > conversion ? gap - conversion : 0;
                 s.high = newest.number;
                 s.fresh_ns = s.repeat_ns = pts_ns;

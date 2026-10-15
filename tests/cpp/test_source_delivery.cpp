@@ -35,6 +35,14 @@ int main() {
     assert(d.counts().at("static").static_holds == 1);
     d.observe(2 * period, period, {{"static", {{1, 2, 0}}}});
     assert(d.counts().at("static").dropped == 1); // Static pages can still lose real changes.
+    d.reset();
+    const int64_t output_period = 33333333;
+    for (uint64_t tick = 0; tick < 30; ++tick)
+        d.observe(tick * output_period, output_period,
+                  {{"fast", {{1, (tick * 5 + 2) / 3, period}}}});
+    assert(d.counts().at("fast").dropped == 0); // 50 -> 30, including two-frame advances.
+    d.observe(30 * output_period, output_period, {{"fast", {{1, 53, period}}}});
+    assert(d.counts().at("fast").dropped == 2); // Advance by four; at most two are expected.
     AVFrame* a = av_frame_alloc();
     AVFrame* b = av_frame_alloc();
     AVFrame* out = av_frame_alloc();
