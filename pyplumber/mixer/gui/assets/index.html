@@ -989,7 +989,7 @@ function renderThreadTip(t) {
     chromium.append(tipTable(["Process type", ...CPU_HEAD], t.processes));
     if (t.gpu.length) {
       const gpu = tipTable(["Thread kind", ...CPU_HEAD], t.gpu);
-      gpu.prepend(el("caption", "", "Chromium GPU-process threads"));
+      gpu.prepend(el("caption", "", "GPU-process threads"));
       chromium.append(gpu);
     }
     sections.push(chromium);
