@@ -966,7 +966,8 @@ function threadTip(h, c) {
   const kinds = h.thread_kinds || [{name: h.thread_name, count: 1, pct: h.thread_pct, max_pct: h.thread_pct}];
   // "other", the kinds past the server's limit, stays last whatever its total.
   const mixer = [...kinds].sort((a, b) => (a.name === "other") - (b.name === "other") || b.pct - a.pct).map(cpuRow);
-  return !c ? {mixer} : {mixer, cores: c.cores_used, vcpus: c.vcpus, processes: (c.processes || []).map(cpuRow),
+  const summary = {mixer, mixerCores: Number.isFinite(h.mixer_cpu_pct) ? h.mixer_cpu_pct / 100 : null, mixerVcpus: h.vcpus};
+  return !c ? summary : {...summary, cores: c.cores_used, vcpus: c.vcpus, processes: (c.processes || []).map(cpuRow),
     gpu: (c.gpu_threads || []).map(cpuRow)};
 }
 function tipTable(head, rows) {
@@ -981,7 +982,7 @@ function renderThreadTip(t) {
     if (detail) title.append(el("small", "", detail));
     section.append(title); return section;
   };
-  const mixer = group("Mixer");
+  const mixer = group("Mixer", `${metric(t.mixerCores, 2)}/${t.mixerVcpus ?? "—"} cores`);
   mixer.append(tipTable(["Thread kind", ...CPU_HEAD], t.mixer));
   const sections = [mixer];
   if (t.processes) {
