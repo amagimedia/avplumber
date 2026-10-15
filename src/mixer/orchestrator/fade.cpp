@@ -31,9 +31,14 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
     if (destinationReady(frames[target])) state_->destination_ready = true;
     if (mode == MixerState::TransitionMode::Cut) {
         if (destinationReady(frames[target])) {
-            if (target_pts <= last_ns) return state_->pgmSourceSwitcherIndex();
+            if (target_pts < last_ns) return state_->pgmSourceSwitcherIndex();
             completeTake(target_pts);
-            return target;
+            // A cut that interrupted a crossfade emits the retained still, stamped at the tick
+            // boundary, before the destination frame of the same tick arrives. Waiting for a
+            // strictly newer destination then never ends when that order repeats every tick
+            // (seen with slot B as the destination under load). The take is complete; the
+            // next tick selects the new program directly, so this tick is not emitted twice.
+            return target_pts == last_ns ? -1 : target;
         }
     } else if (mode == MixerState::TransitionMode::Crossfade) {
         if (state_->take_phase == MixerState::TakePhase::Ready) {

@@ -211,6 +211,15 @@ def check_recovery(avp, mixer, output, errors):
     mixer.cut('full0')
     sample(0.5)
 
+    # A cut replacing a running fade must land whichever slot is its destination, even when
+    # the destination frame of a tick arrives after the retained still of that tick.
+    for scene, identity in (('full1', 1), ('full0', 0)):
+        mixer.fade(scene, duration_sec=0.5)
+        sample(0.15)
+        mixer.cut(scene)
+        sample(1.0)
+        results.append({'failure': 'cut_replaced_fade_' + scene, 'moving_program_frames': moving_program(identity)})
+
     # Cancelling a failed preparation must not let its old poll undo a take.
     command('node.object.set target_gate active 1')
     sample(0.3)
