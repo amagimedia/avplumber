@@ -52,9 +52,10 @@ JANUS_DEFAULT_VIDEO_SSRC = 0x41565001
 JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 4_500
 PREHEAT_POLL_INTERVAL_SEC = 0.02
 # Going on air: the outputs are released after START_STABLE_SEC (MixerOptions.start_stable_sec) in
-# which no compositor missed a deadline or dropped a frame and every bus drew. Startup fails
-# after START_STABLE_TIMEOUT_SEC if it cannot settle. The first 60 output frames of a bus can
-# pass before its frame count is published (4 s at 15 fps), so a shorter window waits for that.
+# which no compositor missed a deadline and every bus drew; output drops are counted, not gated
+# on. Startup fails after START_STABLE_TIMEOUT_SEC if it cannot settle. The first 60 output
+# frames of a bus can pass before its frame count is published (4 s at 15 fps), so a shorter
+# window waits for that.
 START_STABLE_SEC = 10.0
 START_STABLE_TIMEOUT_SEC = 60.0
 SETTLE_POLL_SEC = 0.5
@@ -367,9 +368,9 @@ class MixerApplication:
         the wipes and the encoders came up, each encoder that opened stalling the draws of the
         buses already running, and none of that was sent (output `hold` takes the packets and
         writes nothing). A deadline missed before this point is counted, never seen. The outputs
-        are released only after start_stable_sec in which no compositor missed a deadline or
-        dropped a frame and every bus drew, so the load of starting (decoder opens, CUDA contexts,
-        browser pages, raw files being page-locked) has calmed down before anything goes out; after
+        are released only after start_stable_sec in which no compositor missed a deadline and
+        every bus drew, so the load of starting (decoder opens, CUDA contexts, browser pages, raw
+        files being page-locked) has calmed down before anything goes out; after
         start_stable_timeout_sec startup fails with the bus that could not settle. The
         compositors count from zero first, then the outputs start together on a key frame: what
         viewers get and what the counters say both begin with the stable show, and nothing on air
@@ -496,9 +497,9 @@ class MixerApplication:
         return counters or None
 
     def _wait_until_settled(self, compositors, window_sec: float, timeout_sec: float, ticking=()) -> dict:
-        """Wait for *window_sec* in which no compositor missed a deadline or dropped a frame, and in
-        which, for every group of names in *ticking*, one of them drew frames. A miss or a drop
-        starts the window again; a group that has not drawn keeps the wait going without restarting
+        """Wait for *window_sec* in which no compositor missed a deadline, and in which, for every
+        group of names in *ticking*, one of them drew frames. A miss starts the window again, an
+        output drop does not; a group that has not drawn keeps the wait going without restarting
         it. Gives up *timeout_sec* after it began. Returns ``settled`` (whether the window was
         seen), ``waited_sec``, ``reason`` (what kept it waiting, "" when settled) and ``counters``
         (every compositor's, as last read)."""
