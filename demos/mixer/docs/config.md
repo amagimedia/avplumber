@@ -9,11 +9,6 @@ is the validation authority; the example is the full editable starting point.
 
 Top-level `initial_scene` defaults to the first scene. `max_compositor_layers`
 defaults to 640. `browser_frame_queue` (formerly `browser_ring_size`, still read) is 1–9, default 9.
-With the optional fixed-pool Chromium exporter, the browser's advertised pool size
-overrides this queue limit and also sets import retention and prewarm. Select that
-pool at browser startup with `AvpZeroCopyOffscreenExport:buffers/N`; see the
-[browser configuration](../../../deps/dma-browser/README.md). Changing only
-`browser_frame_queue` does not resize a fixed capture pool.
 `wipe_color: "sdr"` overrides wipe tags; `--wipe-color` takes precedence.
 
 ## canvas

@@ -19,9 +19,7 @@ npm start                # on NVIDIA, use the setup below before launching
 
 ### NVIDIA GPUs
 
-`npm install` downloads stock Electron from its official releases; the
-[Docker image](../../docker-compose/images/dma-browser/Dockerfile) replaces it with the
-patched build described below.
+The default install downloads stock Electron from its official releases.
 Build and enable the supplied GBM shim on the NVIDIA host:
 
 ```bash
@@ -34,34 +32,10 @@ DMA_BROWSER_FORCE_NVIDIA=1 npm start
 The shim is native to the host CPU architecture. `bin/run.sh` applies the
 Wayland, EGL/GBM, and DRM settings; hardware video decoding stays disabled.
 
-The Docker image uses Electron 44.5.1 built with the
-[zero-copy export patches](patches/zero-copy/README.md), published as the
-[`dma-browser-electron-v44.5.1-avp-zero-copy-1`](https://github.com/amagimedia/avplumber/releases/tag/dma-browser-electron-v44.5.1-avp-zero-copy-1)
-release and pinned by sha256 in the image. Chromium renders into a fixed pool of
-exportable buffers, allocated before the first paint, and sends each frame with
-its acquire fence. The image enables
-`DMA_BROWSER_CHROMIUM_EXTRA_FEATURES=AvpZeroCopyOffscreenExport:buffers/9,RenderableMappableSharedImageForceScanout`
-and ships `resources/avp-capture-pool.json` as `{"version":2,"size":11}`: version 2
-certifies that the binary takes the pool size from `buffers/N` (2 to 16, default 11).
-Only mark a distribution version 2 if the startup-size patch is in its binary; the
-hardcoded-11 binary uses `{"version":1,"size":11}`.
-
-The service reports the selected size, and the mixer uses it for sender retention,
-import caching and warm-up: it registers the full pool before going on air, retains
-those registrations and uses no return queue. With a fixed pool the mixer waits for
-each frame's acquire fence, copies it once into owned CUDA memory on a private
-non-blocking stream per source and returns the browser frame before publishing
-downstream (`AVP_BROWSER_COPY_ON_IMPORT=0` samples the lent buffer in place instead).
-Changing the size requires restarting the browser workers and mixer; an active pool
-never grows or shrinks. Nine buffers are the measured choice on the L4; six use less
-memory but leave less room for capture and consumer timing variation, so check moving
-pages during transitions before reducing the pool. Setting the mixer's
-`browser_frame_queue` alone does not change this fixed pool, and the pool bounds
-capture allocations; it does not set the compositor's frame deadline.
-
-Build the image with `--build-arg ELECTRON_ARCHIVE_URL=` for stock Electron and
-ordinary copy capture; set `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES=` to run the patched
-binary without the fixed pool.
+The service refuses to start when `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES` or
+`DMA_BROWSER_CHROMIUM_DISABLE_FEATURES` names `AvpZeroCopyOffscreenExport`, the
+feature of a removed zero-copy export Electron build: the mixer supports only
+Chromium's ordinary capture, whose buffers it samples in place.
 
 Two switches keep the GPU process stable, both on by default:
 
@@ -75,9 +49,6 @@ Two switches keep the GPU process stable, both on by default:
   within five minutes of the last makes Chromium quit the worker.
 The [shared Docker stack](../../docker-compose/dmabuf/compose.yaml) builds and enables
 the shim automatically.
-
-The [zero-copy export patch series](patches/zero-copy/README.md) documents how to
-rebuild that Electron, its fence protocol and the consumer warm-up it requires.
 
 ## Process grouping
 
