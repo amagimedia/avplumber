@@ -2,7 +2,6 @@
 
 import importlib.util
 from pathlib import Path
-import subprocess
 import sys
 import threading
 import time
@@ -11,13 +10,10 @@ import pytest
 
 
 @pytest.mark.parametrize("case", ["overlap", "stop", "shutdown"])
-def test_group_restart(case):
+def test_group_restart(case, run_script):
     if importlib.util.find_spec("_avplumber") is None:
         pytest.skip("requires the native avplumber extension")
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), case],
-        capture_output=True, text=True, timeout=15,
-    )
+    result = run_script(Path(__file__).resolve(), case, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"PASS {case}" in result.stdout
 
