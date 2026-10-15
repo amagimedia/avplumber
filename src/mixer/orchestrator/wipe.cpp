@@ -53,10 +53,13 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
         return 0;
     }
     const auto direct = pts(0);
-    if (state_->wipe_switched && state_->destination_ready && direct > last_ns &&
+    // The overlay's frame of a tick can reach this selector before the direct frame of that tick
+    // on every tick (2026-10-15 on the L4 show: wipes completed 3 to 8 s late, when timing jitter
+    // let a direct frame through first). The equal tick completes the take without being emitted.
+    if (state_->wipe_switched && state_->destination_ready && direct >= last_ns && direct > 0 &&
         direct >= state_->take_start_ns + state_->take_duration_ns) {
         completeTake(direct);   // retires the overlay
-        return 0;
+        return direct == last_ns ? -1 : 0;
     }
     return active;
 }
