@@ -65,14 +65,14 @@ const {chromium} = require('playwright');
     const tables = () => page.locator('#thread-tip table').evaluateAll((all) => all.map((t) =>
       [...t.rows].map((r) => [...r.cells].map((c) => c.textContent))));
     assert.deepEqual(await tables(), [
-      [['Mixer threads', 'n', 'total', 'avg', 'max'],
+      [['Thread kind', 'n', 'total', 'avg', 'max'],
         ['input_N', '152', '141%', '0.9%', '3.3%'], ['upload_N', '47', '135%', '2.9%', '3.3%'],
         ['mixer_comp_a', '1', '40%', '40%', '40%'], ['EventLoop', '5', '37%', '7.4%', '8.2%'],
         ['mixer_color_sdr', '105', '17%', '0.2%', '0.4%'], ['other', '1161', '230%', '0.2%', '38%']],
-      [['Chromium · 1.48/16 cores', 'n', 'total', 'avg', 'max'],
+      [['Process type', 'n', 'total', 'avg', 'max'],
         ['GPU process', '2', '80%', '40%', '52%'], ['renderer', '24', '52%', '2.2%', '6.3%'],
         ['browser', '2', '13%', '6.3%', '9.0%']],
-      [['GPU process threads', 'n', 'total', 'avg', 'max'],
+      [['Thread kind', 'n', 'total', 'avg', 'max'],
         ['viz compositor', '2', '39%', '19%', '24%'], ['GPU main', '2', '30%', '15%', '20%'],
         ['IO', '2', '6.2%', '3.1%', '3.5%'], ['other', '40', '5.6%', '0.1%', '1.1%']]]);
     // A server that names only the busiest thread, and no browser figures: one table with that thread.
@@ -80,7 +80,7 @@ const {chromium} = require('playwright');
       state.host.thread_kinds = undefined; state.chromium = null; renderHost();
       window.oneThread = [...document.querySelectorAll('#thread-tip table')].map((t) => t.textContent);
       state.host.thread_kinds = all; state.chromium = chromium; renderHost(); });
-    assert.deepEqual(await page.evaluate(() => window.oneThread), ['Mixer threadsntotalavgmaxmixer_comp_a140%40%40%']);
+    assert.deepEqual(await page.evaluate(() => window.oneThread), ['Thread kindntotalavgmaxmixer_comp_a140%40%40%']);
     // LAT's tip: two short tables, delivery and the browser sources; values are the second column.
     const lat = () => page.locator('#lat-tip td:nth-child(2)').allTextContents();
     const latLabels = () => page.locator('#lat-tip td:first-child').allTextContents();
@@ -125,6 +125,7 @@ const {chromium} = require('playwright');
         await page.locator(`#${id}`).hover();
         const tip = await page.locator(`#${id}-tip`).boundingBox();
         assert(tip && tip.x >= 0 && tip.x + tip.width <= width, `${id} tooltip must fit`);
+        if (id === "thread" && process.env.METER_SCREENSHOTS) await page.screenshot({path: path.join(process.env.METER_SCREENSHOTS, `thread-hover-${width}.png`)});
         if (id === "lat") {
           assert(await page.locator("#lat-tip").evaluate(t => t.scrollWidth <= t.clientWidth), "delivery text must stay inside tooltip");
           if (process.env.METER_SCREENSHOTS) await page.screenshot({path: path.join(process.env.METER_SCREENSHOTS, `lat-hover-${width}.png`)});

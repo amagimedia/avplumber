@@ -74,7 +74,13 @@
   .meter-tip dt { color: var(--muted); }
   .meter-tip dd { margin: 0; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
   /* THREAD: tables of CPU by thread kind and Chromium process; the first column is the name. */
-  #thread-tip { width: min(360px, calc(100vw - 24px)); }
+  #thread-tip { width: min(360px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto; }
+  .cpu-group { margin-top: 10px; }
+  .cpu-group + .cpu-group { margin-top: 14px; padding-top: 12px; border-top: 2px solid var(--edge); }
+  .cpu-group h3 { display: flex; justify-content: space-between; gap: 8px; margin: 0;
+                  color: var(--accent); font-size: 12px; }
+  .cpu-group h3 small { color: var(--muted); font-size: 11px; font-weight: 400; }
+  .cpu-group caption { padding-top: 10px; text-align: left; font-weight: 600; }
   .meter-tip table { width: 100%; border-collapse: collapse; margin: 6px 0 0; font-variant-numeric: tabular-nums; }
   .meter-tip table + table { margin-top: 10px; }
   .meter-tip th { color: var(--muted); font-weight: 400; text-align: right; padding: 0 0 2px 10px; white-space: nowrap; }
@@ -970,12 +976,25 @@ function tipTable(head, rows) {
 }
 const CPU_HEAD = ["n", "total", "avg", "max"];
 function renderThreadTip(t) {
-  const tables = [tipTable(["Mixer threads", ...CPU_HEAD], t.mixer)];
+  const group = (name, detail = "") => {
+    const section = el("section", "cpu-group"), title = el("h3", "", name);
+    if (detail) title.append(el("small", "", detail));
+    section.append(title); return section;
+  };
+  const mixer = group("Mixer");
+  mixer.append(tipTable(["Thread kind", ...CPU_HEAD], t.mixer));
+  const sections = [mixer];
   if (t.processes) {
-    tables.push(tipTable([`Chromium · ${metric(t.cores, 2)}/${t.vcpus ?? "—"} cores`, ...CPU_HEAD], t.processes));
-    if (t.gpu.length) tables.push(tipTable(["GPU process threads", ...CPU_HEAD], t.gpu));
+    const chromium = group("Chromium", `${metric(t.cores, 2)}/${t.vcpus ?? "—"} cores`);
+    chromium.append(tipTable(["Process type", ...CPU_HEAD], t.processes));
+    if (t.gpu.length) {
+      const gpu = tipTable(["Thread kind", ...CPU_HEAD], t.gpu);
+      gpu.prepend(el("caption", "", "Chromium GPU-process threads"));
+      chromium.append(gpu);
+    }
+    sections.push(chromium);
   }
-  return tables;
+  return sections;
 }
 function renderHost() {
   const h = state.host, g = $("host");
