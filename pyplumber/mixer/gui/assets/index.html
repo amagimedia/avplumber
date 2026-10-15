@@ -558,6 +558,12 @@ function pick(scene) {
   selected = scene;
   return take(direct ? currentTransition : "preview", scene);
 }
+function stepPreview(step) {
+  if (!visible.length) return;
+  const at = visible.indexOf(selected);
+  selected = visible[at < 0 ? (step > 0 ? 0 : visible.length - 1) : (at + step + visible.length) % visible.length];
+  return take("preview", selected);
+}
 function setDirect(on) {
   direct = on;
   $("direct").setAttribute("aria-pressed", String(on));
@@ -598,6 +604,25 @@ function renderBuses() {
   $("pgm-state").textContent = transition === "idle" ? "on air" : `on air · ${transition}`;
   $("pvw-state").textContent = direct ? `picks take to program with ${currentTransition}` : "ready";
 }
+function keyTransition() {
+  const fade_seconds = fieldSeconds("key-fade-s", 0, "Enter the key fade in seconds, or leave it empty to cut");
+  return fade_seconds === null ? null : {fade_seconds, curve: curves.key.value};
+}
+let keysPending = false;
+async function toggleAllKeys() {
+  const keys = state?.dsk || [];
+  if (keysPending || !keys.length) return;
+  const transition = keyTransition();
+  if (!transition) return;
+  const on = !keys.some(key => key.on);
+  keysPending = true;
+  try {
+    showError("");
+    for (const key of keys.filter(key => key.on !== on))
+      await api("/api/command", {command: "dsk", key: key.id, on, ...transition});
+  } catch (exc) { showError(exc.message); }
+  finally { await refresh(); keysPending = false; }
+}
 function renderKeys() {
   const keys = state.dsk || [];
   $("keys-card").hidden = !keys.length;
@@ -611,8 +636,8 @@ function renderKeys() {
     button.title = `${label} · ${key.on ? "take off" : "put on"} air · dirty feeds only`;
     // An empty field cuts, even when the config fades by default.
     button.onclick = () => {
-      const fade_seconds = fieldSeconds("key-fade-s", 0, "Enter the key fade in seconds, or leave it empty to cut");
-      if (fade_seconds !== null) command({command: "dsk", key: key.id, on: !key.on, fade_seconds, curve: curves.key.value});
+      const transition = keyTransition();
+      if (transition) command({command: "dsk", key: key.id, on: !key.on, ...transition});
     };
     return button;
   }));
@@ -1543,10 +1568,12 @@ function render() {
   observeCuts(); renderLatency(); placeMeterTip();
   $("hint-pages").hidden = !pagesBus();
   setMeterTip($("hint"), "Keyboard shortcuts", [
-    ["1–9", "Pick visible scene"], ["C", "Cut to selected scene"],
+    ["1–9", "Pick visible scene"], ["← / →", "Browse Preview only"],
+    ["Space", `Take Preview · ${currentTransition}`], ["C", "Cut to selected scene"],
     ["F", "Fade to selected scene"], ["W", "Wipe to selected scene"],
     ["D", "Toggle direct-to-Program picks"],
     ["[ / ]", "Previous / next multiview page"],
+    ["K", "All keys off if any are on; otherwise all on"],
     ...(gridAux() ? [[`Shift+1–${Math.min(slotsOf(gridAux()).length, 9)}`, "Assign selected scene to slot"]] : []),
   ]);
   trimTakebar();
@@ -1607,13 +1634,21 @@ function restFocus() { $("scenes").focus({preventScroll: true}); }
 for (const field of document.querySelectorAll("#deck input"))
   field.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "Escape") restFocus(); });
 addEventListener("keydown", (e) => {
-  if (e.target.closest?.("input, .dd-menu") || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.defaultPrevented || e.target.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), .dd-menu') || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === " " && e.target.closest?.('button, a, [role="button"]')) return;
+  if (e.repeat && (e.key === " " || e.key.toLowerCase() === "k")) { e.preventDefault(); return; }
   const shifted = Number(e.code.replace("Digit", ""));
   if (e.shiftKey && shifted >= 1 && shifted <= slotsOf(gridAux()).length) { e.preventDefault(); assignSlot(shifted - 1, selected || null); return; }
   const digit = Number(e.key);
   if (digit >= 1 && digit <= 9 && visible[digit - 1]) { e.preventDefault(); pick(visible[digit - 1]); return; }
   const k = e.key.toLowerCase(), bus = pagesBus();
-  if (k === "c") take("cut");
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") stepPreview(e.key === "ArrowLeft" ? -1 : 1);
+  else if (e.key === " ") {
+    const preview = state?.status?.pvw_scene;
+    if (preview) take(currentTransition, preview);
+  }
+  else if (k === "k") toggleAllKeys();
+  else if (k === "c") take("cut");
   else if (k === "f") take("fade");
   else if (k === "w") take("wipe");
   else if (k === "d") $("direct").click();

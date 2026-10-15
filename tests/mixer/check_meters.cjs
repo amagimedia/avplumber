@@ -34,10 +34,17 @@ const {chromium} = require('playwright');
         canvas: {width: 1920, height: 1080, fps: 25, working_format: 'nv12'}, preview_codecs: ['h264'],
         aux_buses: aux.map(a => a.id), preview_outputs: aux.map((a, i) => ({bus: a.id, label: a.label,
           codec: 'h264', mountpoint: 5000 + 4 * i, fps: 25}))}};
-    const root = path.join(__dirname, '../../pyplumber/mixer/gui/assets');
+    const root = path.join(__dirname, '../../pyplumber/mixer/gui/assets'), commands = [];
     await page.route('**/*', route => {
       const url = new URL(route.request().url());
       if (url.pathname === '/api/state') return route.fulfill({json: sample});
+      if (url.pathname === '/api/command') {
+        const command = route.request().postDataJSON();
+        commands.push(command);
+        if (command.command === 'preview') sample.status.pvw_scene = command.scene;
+        if (command.command === 'dsk') sample.dsk.find(key => key.id === command.key).on = command.on;
+        return route.fulfill({json: {ok: true}});
+      }
       if (url.pathname === '/outputs.js') return route.fulfill({contentType: 'text/javascript', body: fs.readFileSync(path.join(root, 'outputs.js'), 'utf8')});
       if (url.pathname === '/') return route.fulfill({contentType: 'text/html', body: fs.readFileSync(path.join(root, 'index.html'), 'utf8')
         .replace('<script id="config" type="application/json">{}</script>',
@@ -166,6 +173,46 @@ const {chromium} = require('playwright');
     });
     assert.equal((await page.locator('#lat-tip td:nth-child(2)').allTextContents())[0], '—', 'restart clears prior cut history');
     assert.equal(await page.locator('#lat b').textContent(), '—', 'and the bar has no cut to show');
+    // On-air shortcuts are checked only against this mocked mixer.
+    await page.evaluate(() => { selected = 'a'; setDirect(true); armedSlot = 0; restFocus(); });
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('ArrowRight')]);
+    assert.deepEqual(commands.splice(0), [{command: 'preview', scene: 'b'}], 'arrows bypass Direct and slot assignment');
+    await page.keyboard.press('ArrowRight');
+    await page.waitForFunction(() => state.status.pvw_scene === 'a');
+    assert.deepEqual(commands.splice(0), [{command: 'preview', scene: 'a'}], 'arrows wrap visible scenes');
+    await page.evaluate(() => { selected = 'b'; currentTransition = 'fade'; tookTransition = true; armedSlot = null; });
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('Space')]);
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].command, 'fade');
+    assert.equal(commands[0].scene, 'a', 'Space takes Preview even when selection differs');
+    assert.equal(commands[0].duration_sec, 0.5);
+    commands.length = 0;
+    sample.dsk = [{id: 'logo', on: true}, {id: 'title', on: false}];
+    await page.evaluate(async () => { await refresh(); restFocus(); });
+    await page.waitForFunction(() => state.dsk?.length === 2);
+    await page.keyboard.press('k');
+    await page.waitForFunction(() => !keysPending && state.dsk.every(key => !key.on));
+    assert.deepEqual(commands.map(c => [c.key, c.on]), [['logo', false]], 'mixed keys all go off');
+    commands.length = 0;
+    await page.keyboard.press('k');
+    await page.waitForFunction(() => !keysPending && state.dsk.every(key => key.on));
+    assert.deepEqual(commands.map(c => [c.key, c.on]), [['logo', true], ['title', true]], 'off keys all go on');
+    assert(commands.every(c => c.fade_seconds === 0 && c.curve), 'key shortcuts use the key transition');
+    commands.length = 0;
+    await page.evaluate(() => {
+      for (const key of [' ', 'k']) window.dispatchEvent(new KeyboardEvent('keydown', {key, repeat: true}));
+    });
+    await page.locator('#fade-s').focus();
+    await page.keyboard.press('k');
+    await page.keyboard.press('Space');
+    await page.keyboard.press('ArrowRight');
+    await page.evaluate(() => refresh());
+    assert.deepEqual(commands, [], 'typing and held take/key shortcuts never send commands');
+    await page.locator('#hint').hover();
+    assert.match(await page.locator('#hint-tip').innerText(), /Browse Preview only/);
+    assert.match(await page.locator('#hint-tip').innerText(), /Take Preview · fade/);
+    const shortcutTip = await page.locator('#hint-tip').boundingBox();
+    assert(shortcutTip.y >= 0 && shortcutTip.y + shortcutTip.height <= 1080, 'shortcut hover fits above the bottom bar');
     await page.setViewportSize({width: 390, height: 844});
     await page.locator('#power').focus();
     const tip = await page.locator('#power-tip').boundingBox();
