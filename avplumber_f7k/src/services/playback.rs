@@ -5,8 +5,9 @@
 //!
 //! Nothing here touches media or runs on an executor. A source asks
 //! [`Playback::plan_read`] before each read and [`Playback::plan_tail`] at the
-//! end of its container; a pacing node calls [`Playback::report_release`] and
-//! [`Playback::report_flush_stop`]; the control layer calls the verbs. The
+//! end of its container; a pacing node calls [`Playback::report_release`],
+//! [`Playback::report_flush_stop`] and, for a file with no seek index,
+//! [`Playback::report_drain`]; the control layer calls the verbs. The
 //! service owns every decision, the nodes own the `AVFormatContext` and the
 //! release timing.
 
@@ -802,17 +803,35 @@ impl Playback {
     /// Asked by the source at the end of its container (or, reversing, at its
     /// start). The source idles: the viewer still has the pipeline's worth of
     /// frames to see, and the loop, if any, fires when it has seen them
-    /// ([`Self::report_release`]) or when it resumes there ([`Self::resume`]).
+    /// ([`Self::report_release`] with an index, [`Self::report_drain`] without
+    /// one) or when it resumes there ([`Self::resume`]).
     pub fn plan_tail(&self, source: SourceId, _last_pos: Option<u64>) -> ReadPlan {
         if let Some(reposition) = self.take_request(source) {
             return ReadPlan::Reposition(reposition);
         }
         self.tail_reached.store(true, Ordering::Release);
-        if self.index().is_none() {
-            // Nothing tells where the viewer is relative to the end.
-            self.at_end.store(true, Ordering::Release);
-        }
         ReadPlan::Idle
+    }
+
+    /// From the pacing stage: `Drain` has gone out, so a decoder holding the
+    /// tail of this pass has emitted it. A file with no seek index has no last
+    /// frame to name, and the length of the pass does not matter: three frames
+    /// loop the same way as three hours. An indexed file ignores this and
+    /// loops from [`Self::report_release`] of its last entry.
+    pub fn report_drain(&self) {
+        if self.index().is_some() || !self.tail_reached.load(Ordering::Acquire) {
+            return;
+        }
+        // A second drain of the same pass (the one already noted, or a paused
+        // viewer sitting on it) must not ask for another seek.
+        if self
+            .at_end
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        self.maybe_loop();
     }
 
     /// The `playback.status` document.
@@ -1233,6 +1252,76 @@ mod tests {
             "the scheduled seek was issued"
         );
         b.playback.clear_scheduled();
+    }
+
+    #[test]
+    fn a_file_without_an_index_loops_when_the_pass_drains() {
+        // Three frames at 25 fps last 0.12 s. That is past the mixer's late-drop
+        // window and short of the 0.25 s re-anchor tolerance, so a lateness
+        // guess would throw the next pass away. The loop is the drain of the
+        // pass, and the seek is back to media time 0 however short the file was.
+        let playback = Arc::new(Playback::new("clip", Arc::new(WallClock::new())));
+        let wakes = Arc::new(AtomicU64::new(0));
+        let counter = wakes.clone();
+        let source = playback.bind_source(
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }),
+            None,
+            true,
+            1000,
+        );
+        assert_eq!(playback.plan_tail(source, None), ReadPlan::Idle);
+        assert!(
+            !playback.is_at_end(),
+            "the reader is done; the viewer still has the pass"
+        );
+        playback.report_release(0);
+        playback.report_release(40);
+        playback.report_release(80);
+        assert!(
+            !playback.has_request(source),
+            "releasing the frames does not loop a file with no index"
+        );
+        playback.report_drain();
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            playback.plan_read(source, None),
+            ReadPlan::Reposition(Reposition {
+                to: SeekTo::Time { media_ms: 0, .. },
+                discontinuity: true,
+            })
+        ));
+        assert_eq!(playback.clock().snapshot().origin_src_us, 0);
+        assert!(!playback.is_at_end(), "the loop seek cleared the end");
+    }
+
+    #[test]
+    fn drain_does_not_loop_an_indexed_file_or_a_paused_one_until_resume() {
+        let indexed = bound(true);
+        let last = Some(index().entry(99).byte_offset);
+        assert_eq!(
+            indexed.playback.plan_tail(indexed.source, last),
+            ReadPlan::Idle
+        );
+        indexed.playback.report_drain();
+        assert!(
+            !indexed.playback.has_request(indexed.source),
+            "an index loops from the last frame, not from drain"
+        );
+
+        let playback = Arc::new(Playback::new("clip", Arc::new(WallClock::new())));
+        let source = playback.bind_source(Arc::new(|| {}), None, true, 1000);
+        playback.pause();
+        playback.plan_tail(source, None);
+        playback.report_drain();
+        assert!(playback.is_at_end());
+        assert!(
+            !playback.has_request(source),
+            "paused: the last frame stays"
+        );
+        playback.resume();
+        assert!(playback.has_request(source), "resume at the end loops");
     }
 
     #[test]

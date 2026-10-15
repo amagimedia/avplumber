@@ -373,7 +373,9 @@ impl SentinelVideo {
             return self.finish_eof(output, state, ctx);
         }
         let timeout = Duration::from_secs_f64(self.params.timeout.max(0.0));
-        let deadline = *state.stall_deadline.get_or_insert_with(|| Instant::now() + timeout);
+        let deadline = *state
+            .stall_deadline
+            .get_or_insert_with(|| Instant::now() + timeout);
         if Instant::now() < deadline {
             ctx.wait_readable(input.clone());
             ctx.wait_deadline(deadline);
@@ -541,7 +543,8 @@ impl SentinelVideo {
             return;
         }
         let ms = if pts.is_valid() {
-            pts.rescale(avplumber_f7k::graph::timebase::MILLISECONDS).ticks()
+            pts.rescale(avplumber_f7k::graph::timebase::MILLISECONDS)
+                .ticks()
         } else {
             0
         };

@@ -114,7 +114,7 @@ class InternalNode(NodeBase):
 
 
 class InputRec(InternalNode):
-    TYPE = "input_rec"
+    TYPE = "input"
 
 
 class Demux(InternalNode):

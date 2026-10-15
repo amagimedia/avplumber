@@ -15,6 +15,16 @@ ffmpeg7_1 = ["ffmpeg", "avplumber_f7k/ffmpeg7_1", "rsmpeg/ffmpeg7_1", "rusty_ffm
 ffmpeg8 = ["ffmpeg", "avplumber_f7k/ffmpeg8", "rsmpeg/ffmpeg8", "rusty_ffmpeg/ffmpeg8"]
 ffmpeg9 = ["ffmpeg", "avplumber_f7k/ffmpeg9", "rsmpeg/ffmpeg9", "rusty_ffmpeg/ffmpeg9"]
 async = ["avplumber_f7k/async"]
+# C++ nodes compiled into this crate. Implies `ffmpeg` and `async` but not an
+# ABI selector: pass `ffmpeg9` (or whichever matches the FFmpeg you linked).
+cpp_nodes = ["ffmpeg", "async"]
+# cuda_transform and its compositor kernels. Needs nvcc (NVCC) and a CUDA
+# FFmpeg. Implies cpp_nodes.
+cpp_cuda = ["cpp_nodes"]
+# Hard-cut mixer: one_to_many (via cpp_nodes), mixer_snapshot, mixer_selector,
+# mixer_compositor, and mixer.init/source/scene/cut/status/scenes.
+# Needs nvcc and a CUDA FFmpeg, same as cpp_cuda.
+cpp_mixer = ["cpp_cuda"]
 
 # The executable: runs scripts and serves the control protocol. Needs the
 # media nodes, hence the features.
@@ -22,6 +32,29 @@ async = ["avplumber_f7k/async"]
 name = "avplumber"
 path = "src/bin/avplumber.rs"
 required-features = ["ffmpeg", "async"]
+
+[build-dependencies]
+cc = "1"
+
+[[test]]
+name = "cpp_rescale"
+path = "tests/cpp_rescale.rs"
+required-features = ["cpp_nodes"]
+
+[[test]]
+name = "cpp_cuda_transform"
+path = "tests/cpp_cuda_transform.rs"
+required-features = ["cpp_cuda"]
+
+[[test]]
+name = "cpp_one_to_many"
+path = "tests/cpp_one_to_many.rs"
+required-features = ["cpp_nodes"]
+
+[[test]]
+name = "cpp_mixer_cut"
+path = "tests/cpp_mixer_cut.rs"
+required-features = ["cpp_mixer"]
 
 [dependencies]
 avplumber_f7k = { path = "../avplumber_f7k" }

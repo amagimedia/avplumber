@@ -65,6 +65,11 @@ PLI/FIR feedback requests keyframes, limited by `--keyframe-min-interval-ms`.
 
 Compose builds the mixer and imports browser/Wayland/Janus service definitions
 from the shared [DMA-BUF stack](../../../docker-compose/dmabuf/compose.yaml).
+The mixer image builds the Rust `avplumber` binary. Each show starts that
+process on `127.0.0.1:22422` and then the Python controller. `--janus-output`
+sends RTP to Janus on `udp://127.0.0.1:5004`; the player is the preview
+service on port 8080. libavcodec 62 selects the `ffmpeg8` feature and 63
+(the L4 pin) selects `ffmpeg9`.
 
 ### The two images
 

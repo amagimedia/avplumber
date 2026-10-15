@@ -238,7 +238,9 @@ impl ResampleAudio {
         state.drained_stall = false;
         let in_ts = frame_ts(&frame);
         if !in_ts.is_valid() {
-            return Err(self.io.error(NodePhase::Process, "audio frame has no timestamp"));
+            return Err(self
+                .io
+                .error(NodePhase::Process, "audio frame has no timestamp"));
         }
         self.ensure_engine(&mut state, &frame)?;
         self.ensure_configured(&mut state, in_ts.timebase())?;
@@ -280,17 +282,12 @@ impl ResampleAudio {
             TsDelta::zero(tb)
         };
         let decision = group
-            .propose(
-                &self.io.name,
-                Ts::new(input_ticks, tb),
-                next,
-                duration,
-                dt,
-            )
+            .propose(&self.io.name, Ts::new(input_ticks, tb), next, duration, dt)
             .map_err(|e| self.io.error(NodePhase::Process, e))?;
         if state.last_shift != Some(decision.local_shift) {
             state.last_shift = Some(decision.local_shift);
-            self.reporter.shift_changed(decision.next_ts, decision.local_shift, state.start);
+            self.reporter
+                .shift_changed(decision.next_ts, decision.local_shift, state.start);
         }
         state.next = Some(decision.next_ts);
         state.last_input = Some(input_ticks);
@@ -372,7 +369,11 @@ impl ResampleAudio {
         self.io.push_from(input, output, Grain::Audio(out))
     }
 
-    fn on_stall(&self, input: &Arc<dyn Edge>, output: &Arc<dyn Edge>) -> Result<Processed, NodeError> {
+    fn on_stall(
+        &self,
+        input: &Arc<dyn Edge>,
+        output: &Arc<dyn Edge>,
+    ) -> Result<Processed, NodeError> {
         let Some(group) = &self.group else {
             return Ok(Processed::Again);
         };
@@ -430,7 +431,9 @@ impl ResampleAudio {
                 silence.push(frame);
             }
         }
-        state.next = group.member_cursor(&self.io.name).map(|cursor| cursor.next_ts);
+        state.next = group
+            .member_cursor(&self.io.name)
+            .map(|cursor| cursor.next_ts);
         drop(state);
         for (frame, _) in drained {
             self.io.push_from(input, output, Grain::Audio(frame))?;
@@ -441,7 +444,11 @@ impl ResampleAudio {
         Ok(Processed::Again)
     }
 
-    fn ensure_configured(&self, state: &mut AudioState, frame_tb: AvpRational) -> Result<(), NodeError> {
+    fn ensure_configured(
+        &self,
+        state: &mut AudioState,
+        frame_tb: AvpRational,
+    ) -> Result<(), NodeError> {
         if state.configured {
             return Ok(());
         }
@@ -472,9 +479,7 @@ impl ResampleAudio {
             None => in_fmt,
         };
         let out_layout = match &self.out_layout {
-            Some(name) => {
-                channel_layout(name).map_err(|e| self.io.error(NodePhase::Process, e))?
-            }
+            Some(name) => channel_layout(name).map_err(|e| self.io.error(NodePhase::Process, e))?,
             None => copy_layout(&frame.ch_layout),
         };
         let in_layout = copy_layout(&frame.ch_layout);
@@ -684,10 +689,8 @@ impl Engine {
         frame.set_format(self.out_fmt);
         frame.set_sample_rate(self.out_rate);
         unsafe {
-            let ret = ffi::av_channel_layout_copy(
-                &mut (*frame.as_mut_ptr()).ch_layout,
-                &self.out_layout,
-            );
+            let ret =
+                ffi::av_channel_layout_copy(&mut (*frame.as_mut_ptr()).ch_layout, &self.out_layout);
             if ret < 0 {
                 return Err(NodeError::new(
                     "resample_audio",
@@ -854,7 +857,9 @@ mod tests {
         );
         node.push(audio(0, 960));
         let out = node.step();
-        let Grain::Audio(frame) = &out else { panic!("audio") };
+        let Grain::Audio(frame) = &out else {
+            panic!("audio")
+        };
         assert_eq!(frame.nb_samples, 960);
         assert_eq!(pts_of(&out), 0);
     }
@@ -887,7 +892,9 @@ mod tests {
         node.push(audio(200, 960));
         let out = node.step();
         assert_eq!(pts_of(&out), 20);
-        let Grain::Audio(frame) = &out else { panic!("audio") };
+        let Grain::Audio(frame) = &out else {
+            panic!("audio")
+        };
         assert_ne!(
             frame.nb_samples, 960,
             "swr compensation did not change the packet length"
@@ -908,14 +915,31 @@ mod tests {
         );
         node.push(audio(0, 960));
         node.step();
-        let shift = node.node.0.group.as_ref().unwrap().group_shift().unwrap().ticks();
+        let shift = node
+            .node
+            .0
+            .group
+            .as_ref()
+            .unwrap()
+            .group_shift()
+            .unwrap()
+            .ticks();
         node.node.0.clock.as_ref().unwrap().reset(5_000, MS);
         let out = node.step();
         assert_eq!(pts_of(&out), 20);
-        let Grain::Audio(frame) = &out else { panic!("audio") };
+        let Grain::Audio(frame) = &out else {
+            panic!("audio")
+        };
         assert!(frame.nb_samples > 0);
         assert_eq!(
-            node.node.0.group.as_ref().unwrap().group_shift().unwrap().ticks(),
+            node.node
+                .0
+                .group
+                .as_ref()
+                .unwrap()
+                .group_shift()
+                .unwrap()
+                .ticks(),
             shift
         );
     }

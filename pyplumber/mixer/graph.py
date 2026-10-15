@@ -1,14 +1,15 @@
-"""Reusable AVPlumber video mixer graph builder.
+"""Reusable video mixer graph builder.
 
-Supports cuts, crossfades, and optional transparent media wipes.
+Supports cuts, crossfades, and optional transparent media wipes. ``avp`` is a
+connection to a separate avplumber process (``pyplumber.mixer.remote``).
 
 Typical usage
 -------------
-    from pyplumber import AVPlumber
+    from pyplumber.mixer.remote import RemoteAvplumber
     from pyplumber.mixer import MixerGraphBuilder
     from pyplumber.node import InputRec, Demux, DecVideo, Realtime, ForceFPS
 
-    avp = AVPlumber()
+    avp = RemoteAvplumber.connect("127.0.0.1", 22422)
     avp.executeCommandsFromString('hwaccel.init { "name": "mixer_gpu", "type": "cuda" }')
     avp.edges.planCapacity("*", 3)
 
@@ -411,22 +412,25 @@ class MixerGraphBuilder:
         cmd = {"mixer": self.name, "wipe_file": wipe_file, "timeout_ms": timeout_ms}
         self.avp.executeCommandsFromString(f"mixer.wipe.warmup {json.dumps(cmd)}")
 
+    def started_groups(self) -> list[str]:
+        """Groups :meth:`start_groups` starts, in that order."""
+        groups = [f"{self.name}_a", f"{self.name}_b", self.name]
+        if self.enable_wipe and self.cache_wipes_mb is not None:
+            # The resident clip player and wipe compositor, parked until a take arms them.
+            groups.append(f"{self.name}_wipe")
+        return groups
+
     def start_groups(self) -> None:
         """Start the mixer's internal compositor and output groups.
 
         Input groups (which host per-source OTMs and crop-scale chains) are
-        NOT started here; the caller is responsible for those because they
-        share a lifecycle with the input decode chains.
+        the caller's: they share a lifecycle with the input decode chains.
         """
         if not self._routes_initialized:
             raise RuntimeError(
                 "initial mixer routes must be initialized before starting groups"
             )
-        groups = [f"{self.name}_a", f"{self.name}_b", self.name]
-        if self.enable_wipe and self.cache_wipes_mb is not None:
-            # The resident clip player and wipe compositor, parked until a take arms them.
-            groups.append(f"{self.name}_wipe")
-        for g in groups:
+        for g in self.started_groups():
             self.avp.group(g).startNodes()
 
     def initialize_routes(self) -> None:

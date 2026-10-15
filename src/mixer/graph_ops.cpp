@@ -1,24 +1,129 @@
-#include "graph_ops.hpp"
+#include "NodeManagerGraph.hpp"
 #include "../graph_interfaces.hpp"
 #include <algorithm>
 #include <cctype>
-#include <chrono>
 #include <iterator>
-#include <thread>
+#include <vector>
 
-namespace avp::mixer::graph {
+namespace avp::mixer {
 
-void resetInputIf(const std::shared_ptr<MixerGraph>& nodes, const std::string& name) {
-    if (name.empty())
-        return;
-    auto w = nodes->node_if_exists(name);
-    if (!w || !w->node())
-        return;
-    if (auto r = std::dynamic_pointer_cast<IInputReset>(w->node()))
-        r->resetInput();
+NodeManagerMixerGraph::NodeManagerMixerGraph(const std::shared_ptr<NodeManager>& manager)
+    : edges_(manager->edges()), manager_(manager), instance_(manager->instanceData()) {
+    for (const auto& [name, node] : manager->allNodes()) {
+        nodes_.emplace(name, node);
+        if (node->parameters().contains("group"))
+            groups_[node->parameters().at("group").get<std::string>()] = node->group();
+    }
 }
 
-static bool nodeConsumesEdge(const std::shared_ptr<NodeWrapper>& node, const std::string& edge_name) {
+std::shared_ptr<NodeWrapper> NodeManagerMixerGraph::node_if_exists(const std::string& name) const {
+    auto it = nodes_.find(name);
+    return it == nodes_.end() ? nullptr : it->second.lock();
+}
+
+std::shared_ptr<NodeWrapper> NodeManagerMixerGraph::node(const std::string& name) const {
+    auto result = node_if_exists(name);
+    if (!result) throw Error("Mixer node no longer exists: " + name);
+    return result;
+}
+
+std::shared_ptr<NodeGroup> NodeManagerMixerGraph::group(const std::string& name) const {
+    auto it = groups_.find(name);
+    auto result = it == groups_.end() ? nullptr : it->second.lock();
+    if (!result) throw Error("Mixer group no longer exists: " + name);
+    return result;
+}
+
+bool NodeManagerMixerGraph::shouldWork() const {
+    auto manager = manager_.lock();
+    return manager && manager->shouldWork();
+}
+
+bool NodeManagerMixerGraph::nodeExists(const std::string& name) const {
+    return node_if_exists(name) != nullptr;
+}
+
+std::string NodeManagerMixerGraph::nodeType(const std::string& name) const {
+    return node(name)->parameters().value("type", std::string());
+}
+
+bool NodeManagerMixerGraph::hasCreatedParam(const std::string& name, const std::string& key) const {
+    auto live = node(name);
+    return live->node() && live->parameters().contains(key);
+}
+
+void NodeManagerMixerGraph::setObject(const std::string& name, const std::string& key, const Parameters& value) {
+    auto control = std::dynamic_pointer_cast<IInputsObjects>(node(name)->node());
+    if (!control) throw Error("node has no runtime controls");
+    control->setObject(key, value);
+}
+
+bool NodeManagerMixerGraph::setObjectIfCreated(const std::string& name, const std::string& key,
+                                               const Parameters& value) {
+    auto wrapper = node_if_exists(name);
+    if (!wrapper)
+        throw Error("Node " + name + " doesn't exist.");
+
+    wrapper->parameters()[key] = value;
+    if (!wrapper->node())
+        return false;
+
+    try {
+        auto control = std::dynamic_pointer_cast<IInputsObjects>(wrapper->node());
+        if (!control) throw Error("Node has no runtime controls: " + name);
+        control->setObject(key, value);
+        return true;
+    } catch (const std::exception& e) {
+        if (std::string(e.what()) == "Node not created")
+            return false;
+        throw;
+    }
+}
+
+Parameters NodeManagerMixerGraph::getObject(const std::string& name, const std::string& key) const {
+    return node(name)->getObject(key);
+}
+
+bool NodeManagerMixerGraph::tryGetObject(const std::string& name, const std::string& key, Parameters& out) const {
+    auto wrapper = node_if_exists(name);
+    if (!wrapper)
+        return false;
+    return wrapper->getObjectTry(key, out);
+}
+
+void NodeManagerMixerGraph::setParam(const std::string& name, const std::string& key, const std::string& value) {
+    node(name)->parameters()[key] = value;
+}
+
+void NodeManagerMixerGraph::startGroup(const std::string& name) {
+    group(name)->startNodes();
+}
+
+void NodeManagerMixerGraph::stopGroup(const std::string& name) {
+    group(name)->stopNodes();
+}
+
+void NodeManagerMixerGraph::stopGroupAndWait(const std::string& name) {
+    group(name)->stopNodesAndWait();
+}
+
+void NodeManagerMixerGraph::stopNode(const std::string& name, bool inhibit) {
+    node(name)->stop(inhibit);
+}
+
+void NodeManagerMixerGraph::resetInput(const std::string& name) {
+    if (name.empty())
+        return;
+    auto wrapper = node_if_exists(name);
+    if (!wrapper || !wrapper->node())
+        return;
+    if (auto reset = std::dynamic_pointer_cast<IInputReset>(wrapper->node()))
+        reset->resetInput();
+}
+
+namespace {
+
+bool nodeConsumesEdge(const std::shared_ptr<NodeWrapper>& node, const std::string& edge_name) {
     if (!node)
         return false;
     const auto& params = node->parameters();
@@ -31,58 +136,63 @@ static bool nodeConsumesEdge(const std::shared_ptr<NodeWrapper>& node, const std
     return false;
 }
 
-std::shared_ptr<NodeWrapper> workingConsumerForEdge(const std::shared_ptr<MixerGraph>& nodes,
-                                                    const std::string& edge_name) {
-    for (const auto& [_, node] : nodes->allNodes()) {
+} // namespace
+
+std::shared_ptr<NodeWrapper> NodeManagerMixerGraph::workingConsumerForEdge(const std::string& edge_name) const {
+    for (const auto& [name, weak] : nodes_) {
+        auto node = weak.lock();
         if (node && node->isWorking() && nodeConsumesEdge(node, edge_name))
             return node;
     }
     return nullptr;
 }
 
-bool setNodeObjectIfCreated(const std::shared_ptr<MixerGraph>& nodes,
-                            const std::string& node_name,
-                            const std::string& key,
-                            const Parameters& value) {
-    auto wrapper = nodes->node_if_exists(node_name);
-    if (!wrapper)
-        throw Error("Node " + node_name + " doesn't exist.");
+void NodeManagerMixerGraph::clearEdgeIfIdle(const std::string& name) {
+    auto edge = edges_->findAny(name);
+    if (!edge)
+        return;
 
-    wrapper->parameters()[key] = value;
-    if (!wrapper->node())
-        return false;
+    int occupied = edge->occupied();
+    if (occupied <= 0)
+        return;
 
-    try {
-        auto control = std::dynamic_pointer_cast<IInputsObjects>(wrapper->node());
-        if (!control) throw Error("Node has no runtime controls: " + node_name);
-        control->setObject(key, value);
-        return true;
-    } catch (const std::exception& e) {
-        if (std::string(e.what()) == "Node not created")
-            return false;
-        throw;
+    auto active_consumer = workingConsumerForEdge(name);
+    if (active_consumer) {
+        logstream << "mixer: leaving active wipe edge " << name
+                  << " unflushed (" << occupied << " queued, consumer="
+                  << active_consumer->name() << ")";
+        return;
     }
+
+    logstream << "mixer: flushing stale wipe edge " << name
+              << " (" << occupied << " queued)";
+    edge->clear();
 }
 
-std::string firstDstEdgeName(const std::shared_ptr<MixerGraph>& nodes, const std::string& node_name) {
-    auto node = nodes->node_if_exists(node_name);
-    if (!node)
+av::Timestamp NodeManagerMixerGraph::edgeLastTimestamp(const std::string& name) const {
+    if (name.empty())
+        return NOTS;
+    auto edge = edges_->findAny(name);
+    return edge ? edge->lastTS() : NOTS;
+}
+
+std::string NodeManagerMixerGraph::firstDstEdgeName(const std::string& node_name) const {
+    auto live = node_if_exists(node_name);
+    if (!live)
         return "";
-    const auto& params = node->parameters();
+    const auto& params = live->parameters();
     if (!params.count("dst"))
         return "";
     auto names = jsonToStringList(params["dst"]);
     return names.empty() ? "" : names.front();
 }
 
-std::string edgeNameAt(const std::shared_ptr<MixerGraph>& nodes,
-                       const std::string& node_name,
-                       const std::string& param_name,
-                       size_t index) {
-    auto node = nodes->node_if_exists(node_name);
-    if (!node)
+std::string NodeManagerMixerGraph::edgeNameAt(const std::string& node_name, const std::string& param_name,
+                                              size_t index) const {
+    auto live = node_if_exists(node_name);
+    if (!live)
         return "";
-    const auto& params = node->parameters();
+    const auto& params = live->parameters();
     if (!params.count(param_name))
         return "";
     auto names = jsonToStringList(params[param_name]);
@@ -93,44 +203,21 @@ std::string edgeNameAt(const std::shared_ptr<MixerGraph>& nodes,
     return *it;
 }
 
-av::Timestamp edgeLastTsIfExists(const std::shared_ptr<MixerGraph>& nodes, const std::string& name) {
-    if (name.empty())
-        return NOTS;
-    auto e = nodes->edges()->findAny(name);
-    return e ? e->lastTS() : NOTS;
-}
-
-WipeReadyResult waitForWipeOverlayReady(const std::shared_ptr<MixerGraph>& nodes,
-                                        const std::string& edge_name,
-                                        av::Timestamp initial_ts,
-                                        const std::shared_ptr<MixerState>& state, uint64_t generation,
-                                        int64_t timeout_ms) {
-    WipeReadyResult result;
-    while (result.waited_ms < timeout_ms) {
-        if (state->transition_generation.load() != generation) return result;
-        av::Timestamp ts = edgeLastTsIfExists(nodes, edge_name);
-        const bool frame_ready = ts.isValid() && (!initial_ts.isValid() || ts > initial_ts);
-        if (frame_ready) {
-            result.ready = true;
-            return result;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
-        result.waited_ms += kPollMs;
-    }
-    return result;
-}
-
-static std::shared_ptr<NodeWrapper> requireNodeWrapper(const std::shared_ptr<MixerGraph>& nodes,
-                                                const std::string& node_name,
-                                                const std::string& context) {
-    auto wrapper = nodes->node_if_exists(node_name);
+int NodeManagerMixerGraph::routerOutputCount(const std::string& router_name) const {
+    auto wrapper = node_if_exists(router_name);
     if (!wrapper)
-        throw Error(context + ": node " + node_name + " doesn't exist");
-    return wrapper;
+        throw Error("mixer.init_routes: node " + router_name + " doesn't exist");
+    const auto& params = wrapper->parameters();
+    if (!params.count("dst"))
+        throw Error("mixer.init_routes: router " + router_name + " has no dst parameter");
+    return static_cast<int>(jsonToStringList(params["dst"]).size());
 }
 
-static std::vector<std::string> routerLabels(const std::shared_ptr<MixerGraph>& nodes, const std::string& router_name) {
-    auto wrapper = requireNodeWrapper(nodes, router_name, "mixer.routed_source");
+int NodeManagerMixerGraph::routerOutputIndexFromLabel(const std::string& router_name,
+                                                      const std::string& label) const {
+    auto wrapper = node_if_exists(router_name);
+    if (!wrapper)
+        throw Error("mixer.routed_source: node " + router_name + " doesn't exist");
     const auto& params = wrapper->parameters();
     if (!params.count("dst"))
         throw Error("mixer.routed_source: router " + router_name + " has no dst parameter");
@@ -145,21 +232,6 @@ static std::vector<std::string> routerLabels(const std::shared_ptr<MixerGraph>& 
                     std::to_string(labels.size()) + " does not match dst size " +
                     std::to_string(dst.size()));
     }
-    return labels;
-}
-
-int routerOutputCount(const std::shared_ptr<MixerGraph>& nodes, const std::string& router_name) {
-    auto wrapper = requireNodeWrapper(nodes, router_name, "mixer.init_routes");
-    const auto& params = wrapper->parameters();
-    if (!params.count("dst"))
-        throw Error("mixer.init_routes: router " + router_name + " has no dst parameter");
-    return static_cast<int>(jsonToStringList(params["dst"]).size());
-}
-
-int routerOutputIndexFromLabel(const std::shared_ptr<MixerGraph>& nodes,
-                               const std::string& router_name,
-                               const std::string& label) {
-    auto labels = routerLabels(nodes, router_name);
     if (!label.empty() && std::all_of(label.begin(), label.end(), [](unsigned char ch) { return std::isdigit(ch); })) {
         int output_index = std::stoi(label);
         if (output_index < 0 || output_index >= (int)labels.size()) {
@@ -176,4 +248,8 @@ int routerOutputIndexFromLabel(const std::shared_ptr<MixerGraph>& nodes,
     return static_cast<int>(std::distance(labels.begin(), it));
 }
 
+std::shared_ptr<CutLatencyObserver> NodeManagerMixerGraph::cutLatencyObserver(const std::string& name) const {
+    return std::dynamic_pointer_cast<CutLatencyObserver>(node(name)->node());
 }
+
+} // namespace avp::mixer

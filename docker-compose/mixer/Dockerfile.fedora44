@@ -4,6 +4,10 @@
 # entrypoint, ports and environment for a host whose driver is older than
 # R615; compose.yaml selects it with MIXER_DOCKERFILE=Dockerfile (docs/guide.md).
 #
+# The graph is the Rust avplumber binary (cpp_mixer). The entrypoint starts it
+# on 127.0.0.1:22422 and then runs the Python controller. libavcodec 62 selects
+# the ffmpeg8 feature and 63 selects ffmpeg9, from the FFmpeg this file built.
+#
 # Build from the repository root:
 #   docker build -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44 .
 #   TENSORRT_URL=<url of your tensorrt-minimal tgz> docker build \
@@ -182,50 +186,34 @@ RUN --mount=type=secret,id=tensorrt_url \
 
 FROM tensorrt-${WITH_TENSORRT} AS builder
 
-ARG WITH_TENSORRT
-ARG AVPLUMBER_REVISION=workspace
 ARG BUILD_JOBS=4
+
+# clang-devel provides the libclang.so symlink bindgen needs. The toolchain
+# stays in this stage; the runtime image copies only the avplumber binary.
+RUN dnf -y install --setopt=install_weak_deps=False clang clang-devel curl \
+    && dnf clean all \
+    && curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 
-COPY deps /build/deps
-COPY Makefile generate_node_list /build/
+COPY Cargo.toml Cargo.lock /build/
+COPY build_support /build/build_support
+COPY avplumber_f7k /build/avplumber_f7k
+COPY avplumber_nodes /build/avplumber_nodes
 COPY src /build/src
-COPY pyplumber /build/pyplumber
-COPY demos/mixer /build/demos/mixer
-COPY docker-compose/mixer/deploy/l4/seed.py /build/docker-compose/mixer/deploy/l4/seed.py
+COPY deps/avcpp /build/deps/avcpp
+COPY deps/rusty_ffmpeg /build/deps/rusty_ffmpeg
+COPY deps/rsmpeg /build/deps/rsmpeg
+COPY deps/include /build/deps/include
+COPY deps/json /build/deps/json
+COPY deps/cuda_loader /build/deps/cuda_loader
+COPY docker-compose/mixer/build-avplumber.sh /tmp/build-avplumber.sh
 
-RUN git init --quiet /build \
-    && git -C /build -c user.name=builder -c user.email=builder@local \
-        commit --quiet --allow-empty -m "workspace ${AVPLUMBER_REVISION}"
-
-# CUDA kernels take the Makefile default image format: fatbin with SASS for
-# sm_75 to sm_89 plus PTX, so the driver never JIT-compiles avplumber's own
-# kernels. NEURAL_NET and HAVE_TENSORRT follow WITH_TENSORRT; the Makefile
-# ignores TENSORRT_ROOT when they are off.
-RUN make -j"${BUILD_JOBS}" python_module \
-        BUILD_TYPE=Release \
-        HAVE_CUDA=1 \
-        HAVE_DRM=1 \
-        HAVE_GL=1 \
-        HAVE_NVOF_FRUC=0 \
-        HAVE_NVCC=1 \
-        HAVE_NVJPEG=0 \
-        HAVE_TENSORRT="${WITH_TENSORRT}" \
-        NEURAL_NET="${WITH_TENSORRT}" \
-        TENSORRT_ROOT=/opt/tensorrt \
-        PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
-        CXXFLAGS+=" ${HARDENING_FLAGS}" \
-        LFLAGS+=' -Wl,--disable-new-dtags'
-
-RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
-    && ldd /build/_avplumber"$(python3-config --extension-suffix)" \
-       | grep -q '/usr/local/lib/libavfilter' \
-    && for node in ipc_dmabuf_source drm_prime_to_egl_image drm_prime_to_cuda \
-                   egl_image_cuda_overlay; do \
-           grep -q "\"${node}\"" /build/graph_factory.generated.cpp || exit 1; \
-       done \
-    && PYTHONPATH=/build python3 -c 'import _avplumber'
+# nvcc embeds the compositor kernels. CXXFLAGS carries the same hardening the
+# FFmpeg stage compiled with; the cc crate and avcpp's cmake both read it.
+RUN CXXFLAGS="${HARDENING_FLAGS}" BUILD_JOBS="${BUILD_JOBS}" bash /tmp/build-avplumber.sh
 
 FROM fedora:44 AS runtime
 
@@ -241,6 +229,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         libglvnd-egl \
         libglvnd-gles \
         libglvnd-glx \
+        libstdc++ \
         openssl-libs \
         python3 \
         python3-numpy \
@@ -263,32 +252,29 @@ ENV __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
 WORKDIR /build
 
 COPY --from=builder /etc/ld.so.conf.d/avplumber.conf /etc/ld.so.conf.d/
-COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
+COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/avplumber /usr/local/bin/
 COPY --from=builder /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/libpostproc.so* /usr/local/lib/
 COPY --from=builder /opt/tensorrt /opt/tensorrt
-COPY --from=builder /build/_avplumber*.so /build/
-COPY --from=builder /build/pyplumber /build/pyplumber
+COPY pyplumber /build/pyplumber
 COPY demos/mixer /build/demos/mixer
 COPY docker-compose/mixer/deploy/l4/seed.py /build/docker-compose/mixer/deploy/l4/seed.py
+COPY docker-compose/mixer/avplumber-mixer.sh /usr/local/bin/avplumber-mixer
 
-# CUDA is loaded through the driver at run time (deps/cuda_loader, ffnvcodec),
-# so nothing here may link a CUDA toolkit library: "not found" means a build
-# flag drifted (HAVE_NVJPEG, libnpp).
-# import _avplumber loads the native module (import pyplumber is lazy), so
-# unresolved symbols fail here rather than at the first mixer start.
-RUN ldconfig \
+# CUDA is loaded through the driver at run time, so avplumber must not link a
+# CUDA toolkit library: "not found" means a build flag drifted.
+RUN chmod 755 /usr/local/bin/avplumber-mixer \
+    && ldconfig \
     && pip3 install --no-cache-dir -r /build/pyplumber/mixer/gui/requirements.txt \
-    && ls /build/_avplumber*.so >/dev/null \
-    && ! ldd /build/_avplumber*.so /usr/local/bin/ffmpeg | grep 'not found' \
-    && PYTHONPATH=/build python3 -c 'import _avplumber'
+    && ! ldd /usr/local/bin/avplumber /usr/local/bin/ffmpeg | grep 'not found'
 
 ENV AVPLUMBER_REVISION=${AVPLUMBER_REVISION}
+ENV AVPLUMBER_MIXER_COMMAND=/usr/local/bin/avplumber-mixer
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 ENV NVIDIA_REQUIRE_CUDA="cuda>=13.4"
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV PYTHONPATH=/build
 ENV PYTHONUNBUFFERED=1
 
-EXPOSE 7777/tcp
+EXPOSE 7777/tcp 22422/tcp
 
-ENTRYPOINT ["python3", "-m", "pyplumber.mixer"]
+ENTRYPOINT ["/usr/local/bin/avplumber-mixer"]

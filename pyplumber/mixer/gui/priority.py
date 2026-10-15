@@ -22,7 +22,7 @@ log = logging.getLogger("webui")
 # (janus_hdr_encoder arrives as "janus_hdr_encod", hence "_encod", not "encoder") and
 # aux_<bus>_encoder, which the cut hides when the bus id is longer than five characters.
 # The pass-through nodes between these stages (OneToMany mixer_otm_*, SourceSwitcher
-# mixer_out_sel/mixer_wipe_sel, Split split_clean, janus_force_keyframe, janus_format,
+# mixer_out_sel/mixer_wipe_sel, Split split_clean, janus_force_keyframe,
 # janus_repeat_headers, janus_mux, janus_rtp_output) are left at nice 0: each runs for
 # microseconds per frame and sleeps otherwise, which CFS already wakes promptly. Widen the set
 # only after measuring that it moves the missed-deadline counter.

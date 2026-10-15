@@ -426,9 +426,7 @@ impl PollNode for StreamMuxer {
                     input.idle_since = None;
                     input.warned = false;
                     candidates += 1;
-                    if least
-                        .is_none_or(|(_, best)| ts < best)
-                    {
+                    if least.is_none_or(|(_, best)| ts < best) {
                         least = Some((i, ts));
                     }
                 }

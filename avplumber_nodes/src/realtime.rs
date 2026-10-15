@@ -118,6 +118,13 @@ struct State {
     anchored: bool,
     /// The last output PTS, so the stamped timeline never steps back.
     last_out: Option<i64>,
+    /// `Drain` has arrived for this pass. The loop waits until the frame held
+    /// across that event has been released: the drain sits at the head of the
+    /// edge while that frame is still waiting for its time.
+    pass_drained: bool,
+    /// The held frame was parked until its wall time. Coming back a little
+    /// late is the scheduler, not a frame that arrived late.
+    waited: bool,
 }
 
 pub struct Realtime {
@@ -187,6 +194,7 @@ impl PollNode for Realtime {
                 Some(frame) => frame,
                 None => match input.try_take() {
                     None => {
+                        self.finish_pass(&mut state, &output);
                         if input.is_closed() {
                             return Ok(Polled::Done);
                         }
@@ -240,11 +248,13 @@ impl PollNode for Realtime {
                 }
                 Due::Later(wall_us) => {
                     state.held = Some(frame);
+                    state.waited = true;
                     ctx.wait_flush(input.clone());
                     ctx.wait_deadline(instant_at(wall_us));
                     return Ok(Polled::Idle);
                 }
                 Due::Late => {
+                    state.waited = false;
                     self.dropped.fetch_add(1, Ordering::Relaxed);
                     log::debug!(
                         "{}: dropping late media {}/{}",
@@ -293,9 +303,14 @@ impl PollNode for Realtime {
                 }
             }
             state.release_one = false;
+            // A paused seek releases its landing frame without re-anchoring:
+            // the seek already placed the clock, and the frame after it is
+            // paced from there. Playing through a flush re-anchors above.
+            state.anchored = true;
             self.released.fetch_add(1, Ordering::Relaxed);
             self.playback
                 .report_release(media.rescale(MILLISECONDS).ticks());
+            self.finish_pass(&mut state, &output);
             return Ok(Polled::Again);
         }
     }
@@ -336,6 +351,12 @@ impl Realtime {
         match event {
             EdgeEvent::FlushStart => {
                 // Whatever was waiting is from before the discontinuity.
+                // The clock was reset when the seek was requested, a pipeline
+                // delay before the next frame exists, so that frame anchors
+                // itself instead of arriving late.
+                state.pass_drained = false;
+                state.anchored = false;
+                state.waited = false;
                 if state.held.take().is_some() {
                     self.dropped.fetch_add(1, Ordering::Relaxed);
                 }
@@ -347,9 +368,21 @@ impl Realtime {
                 output.push_event(EdgeEvent::FlushStop { resume_at });
             }
             EdgeEvent::Spec(spec) => output.push_event(EdgeEvent::Spec(self.restamped_spec(spec))),
-            // Nothing here is held inside a codec, so a drain only travels on.
-            EdgeEvent::Drain => output.push_event(EdgeEvent::Drain),
+            // Forwarded from `finish_pass`, after the frame this event jumped
+            // ahead of has been released.
+            EdgeEvent::Drain => state.pass_drained = true,
             EdgeEvent::Eof => output.push_event(EdgeEvent::Eof),
+        }
+    }
+
+    /// A drained pass with nothing left held is over. `Drain` follows the
+    /// frame it arrived ahead of, and only then does the group loop, so the
+    /// seek's flush cannot drop that frame.
+    fn finish_pass(&self, state: &mut State, output: &Arc<dyn avplumber_f7k::graph::edge::Edge>) {
+        if state.pass_drained && state.held.is_none() {
+            state.pass_drained = false;
+            output.push_event(EdgeEvent::Drain);
+            self.playback.report_drain();
         }
     }
 
@@ -416,7 +449,16 @@ impl Realtime {
         }
         let behind = -ahead;
         if behind > self.tolerance_us {
+            state.waited = false;
             return Due::Reanchor;
+        }
+        // A frame parked until its time is released when that time comes,
+        // even if the wake missed the discard window. The mixer tick is the
+        // PTS grid (1/30000 is 33 µs); two ticks is shorter than a scheduling
+        // delay, and dropping here would show one frame per pass.
+        if state.waited {
+            state.waited = false;
+            return Due::Now;
         }
         if behind > self.discard_us {
             return Due::Late;
@@ -459,6 +501,7 @@ mod tests {
     use avplumber_f7k::graph::pad::NodePads;
     use avplumber_f7k::graph::spec::{ChannelLayout, PacketSpec};
     use avplumber_f7k::services::clock::ClockSnapshot;
+    use avplumber_f7k::services::playback::ReadPlan;
     use avplumber_f7k::{
         EdgeKind, Instance, NodeRequest, NodeSpec, register_factory, register_spec,
     };
@@ -605,6 +648,117 @@ mod tests {
             }
             out
         }
+    }
+
+    #[test]
+    fn a_three_frame_loop_shows_the_last_frame_before_seeking_back() {
+        // 3 × 40 ms is 0.12 s: late enough to drop, too short to re-anchor.
+        // The loop seek's flush arrives the moment playback is told the pass
+        // drained, which is while the last frame is still held. Showing that
+        // frame has to happen before the seek.
+        let mut h = harness(serde_json::json!({"tick_period": "1/25"}));
+        let input = h.input.clone();
+        let source = h.playback.bind_source(
+            Arc::new(move || {
+                input.push_event(EdgeEvent::FlushStart);
+            }),
+            None,
+            true,
+            0,
+        );
+        assert_eq!(h.playback.plan_tail(source, None), ReadPlan::Idle);
+        h.clock.set_now_ms(0);
+        h.push_ms(&[0, 40, 80]);
+        h.input.push_event(EdgeEvent::Drain);
+
+        let mut shown = Vec::new();
+        h.step_until_idle();
+        shown.extend(h.released());
+        h.clock.set_now_ms(40);
+        h.step_until_idle();
+        shown.extend(h.released());
+        assert!(
+            !h.playback.has_request(source),
+            "the pass is still on screen"
+        );
+        h.clock.set_now_ms(80);
+        // One step releases the held frame and only then asks for the loop.
+        // Drain follows that frame: it must not announce the end of the pass
+        // while the frame is still waiting.
+        h.ctx.clear_park();
+        assert_eq!(h.node.poll(&mut h.ctx).expect("step"), Polled::Again);
+        let mut tail = Vec::new();
+        while let Some(item) = h.output.try_take() {
+            tail.push(match item {
+                EdgeItem::Buffer(media) => {
+                    format!("frame {}", media.ts().rescale(h.node.timebase).ticks())
+                }
+                EdgeItem::Event(EdgeEvent::Drain) => "drain".to_string(),
+                EdgeItem::Event(other) => format!("{other:?}"),
+            });
+        }
+        assert_eq!(tail, vec!["frame 2".to_string(), "drain".to_string()]);
+        assert_eq!(shown, vec![0, 1]);
+        assert!(
+            h.playback.has_request(source),
+            "the drained pass seeks back to the start"
+        );
+    }
+
+    /// The mixer tick is a PTS grid, not a frame period. Two ticks of it is
+    /// 67 µs, and a wake is later than that.
+    #[test]
+    fn a_frame_we_waited_for_is_released_when_the_wake_is_late() {
+        let mut h = harness(serde_json::json!({"tick_period": "1/30000"}));
+        h.clock.set_now_ms(0);
+        h.push_ms(&[0, 33]);
+        h.step_until_idle();
+        assert_eq!(h.released().len(), 1, "the anchor frame");
+        h.step_until_idle();
+        assert!(h.released().is_empty(), "33 ms ahead is held");
+        // 2 ms past the deadline: inside the 0.25 s tolerance, far outside two ticks.
+        h.clock.set_now_ms(35);
+        h.step_until_idle();
+        assert_eq!(h.released().len(), 1, "a late wake still shows the frame");
+        assert_eq!(
+            h.node.get_object("info").unwrap()["dropped"],
+            serde_json::json!(0)
+        );
+    }
+
+    /// The loop resets the clock when it asks for the seek. The first frame of
+    /// the new pass arrives a decode later, so it anchors itself.
+    #[test]
+    fn the_frame_after_a_flush_reanchors_instead_of_arriving_late() {
+        let mut h = harness(serde_json::json!({"tick_period": "1/30000"}));
+        h.clock.set_now_ms(0);
+        h.push_ms(&[0]);
+        h.step_until_idle();
+        assert_eq!(h.released().len(), 1);
+        h.clock.set_now_ms(50);
+        h.playback
+            .seek(avplumber_f7k::services::playback::Target::MediaMs(0))
+            .unwrap();
+        // The seek reset media 0 to wall 50 ms. The frame shows up at 70 ms.
+        h.clock.set_now_ms(70);
+        h.input.push_event(EdgeEvent::FlushStart);
+        h.input.push_event(EdgeEvent::FlushStop { resume_at: None });
+        h.push_ms(&[0, 33]);
+        h.step_until_idle();
+        assert_eq!(
+            h.released().len(),
+            1,
+            "the first frame of the new pass is shown"
+        );
+        assert_eq!(
+            h.node.get_object("info").unwrap()["dropped"],
+            serde_json::json!(0)
+        );
+        h.step_until_idle();
+        assert!(
+            h.released().is_empty(),
+            "the next frame is paced from that anchor"
+        );
     }
 
     #[test]

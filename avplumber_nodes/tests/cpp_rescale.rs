@@ -1,7 +1,7 @@
 //! Software `AVFrame` through the C++ `rescale_video` node on the Rust graph.
 //!
 //! `cpp_nodes` implies `ffmpeg` and `async`. The ABI selector is separate:
-//! `cargo test -p avplumber_f7k --features cpp_nodes,ffmpeg9 --test cpp_rescale`
+//! `cargo test -p avplumber_nodes --features cpp_nodes,ffmpeg9 --test cpp_rescale`
 //! with `FFMPEG_PREFIX` pointing at the same FFmpeg `libavcpp.a` was built against.
 
 use std::ffi::CString;
@@ -230,6 +230,7 @@ impl Drop for StopGroup<'_> {
 #[test]
 fn rescale_video_scales_a_software_frame() {
     let inst = Instance::new();
+    avplumber_nodes::register_media_nodes(&inst);
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen_factory = seen.clone();
     register_factory(&inst, "frame_source", |name, _params| {

@@ -122,7 +122,11 @@ impl Reporter {
         log::info!(
             "wallclock drift, offset {new_offset} ms (reporting only, timestamps unchanged)"
         );
-        let at_ms = if first { 0 } else { to_ms(output) - to_ms(start) };
+        let at_ms = if first {
+            0
+        } else {
+            to_ms(output) - to_ms(start)
+        };
         self.write(at_ms, 0, new_offset, to_ms(start));
     }
 
@@ -140,9 +144,20 @@ impl Reporter {
         true
     }
 
-    fn write(&self, changed_at: i64, input_pts_offset: i64, wallclock_offset: i64, output_pts_offset: i64) {
+    fn write(
+        &self,
+        changed_at: i64,
+        input_pts_offset: i64,
+        wallclock_offset: i64,
+        output_pts_offset: i64,
+    ) {
         if let Some(file) = self.history.lock().unwrap().as_mut() {
-            for value in [changed_at, input_pts_offset, wallclock_offset, output_pts_offset] {
+            for value in [
+                changed_at,
+                input_pts_offset,
+                wallclock_offset,
+                output_pts_offset,
+            ] {
                 let _ = file.write_all(&value.to_ne_bytes());
             }
             let _ = file.flush();

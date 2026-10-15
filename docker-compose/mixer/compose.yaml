@@ -53,6 +53,10 @@ services:
       # The driver compiles FFmpeg's CUDA filter kernels on first use and keeps them here. On the
       # media volume a new container finds them compiled (default: ~/.nv/ComputeCache, lost with it).
       CUDA_CACHE_PATH: /media/.nv-cache
+    # webui.py stays PID 1 and restarts the show. The image's
+    # AVPLUMBER_MIXER_COMMAND starts avplumber on 127.0.0.1:22422 for each
+    # show, then the Python controller. Janus is the service above; RTP from
+    # --janus-output goes to udp://127.0.0.1:5004 on this host network.
     entrypoint: [python3, -m, demos.mixer.webui]
     volumes:
       - ../../media:/media:rw,z

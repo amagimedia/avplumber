@@ -80,8 +80,7 @@ void MixerOrchestrator::prewarmCuts(const std::vector<std::string>& scenes) {
         mask |= state_->computeActiveInputsMask(scene->second);
     }
     for (const auto& slot : {state_->slot_a, state_->slot_b}) {
-        const auto node = nodes_->node(slot.compositor_name);
-        if (!node->node() || !node->parameters().contains("fps"))
+        if (!nodes_->hasCreatedParam(slot.compositor_name, "fps"))
             throw Error("mixer.prewarm: requires created clocked compositors");
     }
     for (const auto& slot : {state_->slot_a, state_->slot_b})

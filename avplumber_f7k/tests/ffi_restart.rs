@@ -175,6 +175,8 @@ static VTABLE: AvpNodeVtable = AvpNodeVtable {
     poll: None,
     query_interface: None,
     direct_consumer_is_infallible: 0,
+    set_object: None,
+    get_object: None,
 };
 
 extern "C" fn push_process(_handle: *mut c_void) -> i32 {
@@ -191,6 +193,8 @@ static PUSH_VTABLE: AvpNodeVtable = AvpNodeVtable {
     poll: None,
     query_interface: None,
     direct_consumer_is_infallible: 0,
+    set_object: None,
+    get_object: None,
 };
 
 extern "C" fn helper_process(_handle: *mut c_void) -> i32 {
@@ -206,6 +210,8 @@ static HELPER_VTABLE: AvpNodeVtable = AvpNodeVtable {
     poll: None,
     query_interface: None,
     direct_consumer_is_infallible: 0,
+    set_object: None,
+    get_object: None,
 };
 
 extern "C" fn error_process(_handle: *mut c_void) -> i32 {
@@ -220,6 +226,8 @@ static ERROR_VTABLE: AvpNodeVtable = AvpNodeVtable {
     poll: None,
     query_interface: None,
     direct_consumer_is_infallible: 0,
+    set_object: None,
+    get_object: None,
 };
 
 extern "C" fn push_factory(

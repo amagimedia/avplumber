@@ -1,10 +1,12 @@
 """Decode chain shared by the mixer and playlist demos.
 
-``input_rec -> demux -> dec_video -> [speed_video] -> realtime(set_pts) -> [force_fps]``
+``input -> demux -> dec_video -> [speed_video] -> realtime(set_pts) -> [force_fps]``
 
 ``realtime(set_pts=True)`` rebases every source onto the host monotonic clock,
 which is the time base the native mixer schedules cuts in. The mixer keeps
 native input cadence; other callers retain rate normalization by default.
+A looping file shares that ``sync_group`` with its ``input``: the reader seeks
+back to the file's own timestamps, and ``realtime`` stamps the release time.
 """
 
 from __future__ import annotations
@@ -35,9 +37,9 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
 
     ``auto_restart="group"`` restarts the chain when a live source drops; pass
     ``None`` for file playback that is looped or seeked instead.  ``continuous_loop``
-    keeps timestamps rising across loop passes, so the decoder and ``realtime`` see
-    no jump back at each wrap; only for free-running loops, since seeks then land on
-    the shifted timeline.  ``pause_team``
+    is accepted and ignored: packet timestamps stay the file's own, and the
+    shared ``sync_group`` resets its clock when the pass has been shown.
+    ``pause_team``
     adds a ``pause`` node before ``realtime`` and ``sync_team`` names the
     realtime team, so ``pause/resume <pause_team>`` holds the picture and
     ``seek <sync_team> now <ts>`` re-cues the input (the replay demo's wiring).
@@ -46,12 +48,15 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     slice threads when given (FFmpeg's default otherwise).  ``event_loop`` names the event loop that runs the
     pacing nodes (the instance's ``"default"`` loop when omitted).
     """
+    del continuous_loop  # the pacing node restamps; the reader does not
     edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
     restart = {} if auto_restart is None else {"auto_restart": auto_restart}
     sync = {} if sync_team is None else {"sync_team": sync_team}
+    # Seekable only while looping. A finite file stays a plain reader and ends.
+    clock = {"sync_group": group} if loop else {}
     avp.addNode(api.InputRec({
         "name": f"input_{tag}", "url": url, "dst": edge("packets"), "loop": loop,
-        "loop_continuous_ts": loop and continuous_loop, "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
+        "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group, **clock,
         **(input_params or {}),
     }))
     avp.addNode(api.Demux({
@@ -111,6 +116,7 @@ def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
         "name": f"realtime_{tag}", "src": src, "dst": f"input_{tag}_realtime",
         "set_pts": True, "group": group, **loop,
         **({} if sync_team is None else {"team": sync_team}), **timing, **(realtime_params or {}),
+        "sync_group": group,
     }))
     if native_rate:
         return f"input_{tag}_realtime"
@@ -135,12 +141,13 @@ def _raw_file_restart(loop: bool) -> dict:
 
 def _raw_file_packets(avp, api, tag: str, path: str, *, pixel_format: str, video_size: str,
                       group: str, fps: int, fps_den: int, loop: bool) -> str:
-    """``input_rec(rawvideo) -> demux`` head of a headerless raw file source: one
-    picture per packet, timestamps rising across loop passes. Returns the packet edge."""
+    """``input(rawvideo) -> demux`` head of a headerless raw file source: one
+    picture per packet. A loop seeks back to the file's own timestamps. Returns the packet edge."""
     restart = _raw_file_restart(loop)
+    clock = {"sync_group": group} if loop else {}
     avp.addNode(api.InputRec({
         "name": f"input_{tag}", "url": path, "dst": f"input_{tag}_packets", "loop": loop,
-        "loop_continuous_ts": loop, "format": "rawvideo", "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group,
+        "format": "rawvideo", "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group, **clock,
         "options": {"pixel_format": pixel_format, "video_size": video_size, "framerate": f"{fps}/{fps_den}"},
     }))
     avp.addNode(api.Demux({
@@ -162,11 +169,11 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
                        pinned: bool = False, native_rate: bool = False, color=None) -> str:
     """CPU/GPU interop source: raw NV12/P010 file -> CUDA frames -> paced output edge.
 
-    Default: ``input_rec -> demux -> dec_video(rawvideo) -> filter(setpts) ->
+    Default: ``input -> demux -> dec_video(rawvideo) -> filter(setpts) ->
     realtime(set_pts) -> force_fps -> filter(hwupload)``. Pacing before upload bounds
     transfer work to the requested frame rate; rawvideo only wraps the existing bytes.
 
-    ``pinned``: ``input_rec -> demux -> dec_video(rawvideo) ->
+    ``pinned``: ``input -> demux -> dec_video(rawvideo) ->
     filter(hwupload_cuda=pinned=1) -> realtime(set_pts) -> force_fps``.
     The patched filter copies decoded planes through pinned staging on its own
     stream, using the shared CUDA device. It uploads one frame ahead of pacing
@@ -219,7 +226,7 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
                      native_rate: bool = False) -> str:
     """Headerless packed v210 file -> GPU unpack (P210, 10-bit 4:2:2) -> paced output edge.
 
-    ``input_rec -> demux -> dec_video(rawvideo/gray) ->
+    ``input -> demux -> dec_video(rawvideo/gray) ->
     filter(hwupload_cuda=v210_width=...) -> realtime(set_pts) -> force_fps``.
     The packed bytes carry no metadata, so the color contract (HLG/BT.2020 for
     the HDR sources) is supplied here and stamped on the CUDA frames.

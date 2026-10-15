@@ -56,5 +56,5 @@ pub use io::{EdgeSlot, Io, flush_at_head};
 pub use objects::NodeObjects;
 pub use poll::{PollNode, Polling};
 pub use poll_input::{DrainPending, PollInput, PollIo};
-pub use single_input::{EofAction, InputHandler, Reaction, SingleInput, react};
+pub use single_input::{DrainAction, EofAction, InputHandler, Reaction, SingleInput, react};
 pub use siso::{SisoAdapter, SisoAsyncAdapter, SisoNode, SisoPollAdapter};

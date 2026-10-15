@@ -40,6 +40,8 @@ static C_FACTORY_VTABLE: AvpNodeVtable = AvpNodeVtable {
     poll: None,
     query_interface: None,
     direct_consumer_is_infallible: 0,
+    set_object: None,
+    get_object: None,
 };
 
 extern "C" fn c_factory(

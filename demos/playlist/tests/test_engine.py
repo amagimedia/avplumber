@@ -108,7 +108,7 @@ class Listener:
 
 def api():
     from types import SimpleNamespace
-    names = {"InputRec": "input_rec", "Demux": "demux", "DecVideo": "dec_video", "Split": "split",
+    names = {"InputRec": "input", "Demux": "demux", "DecVideo": "dec_video", "Split": "split",
              "SpeedVideo": "speed_video", "Pause": "pause", "Realtime": "realtime", "ForceFPS": "force_fps",
              "ForceKeyFrame": "force_key_frame", "AssumeVideoFormat": "assume_video_format",
              "EncVideo": "enc_video", "Bsf": "bsf", "Mux": "mux", "Output": "output"}
@@ -148,6 +148,8 @@ def test_build_registers_sixteen_fullscreen_scenes_and_the_replay_style_chain(bu
     chain = [n["name"] for n in avp.nodes if n["name"].endswith("_pl0")]
     assert chain == ["input_pl0", "demux_pl0", "decode_pl0", "speed_pl0", "pause_pl0", "realtime_pl0", "fps_pl0"]
     assert by_name["input_pl0"]["pause_team"] == slot_pause_team(0) and by_name["input_pl0"]["loop"] is True
+    assert by_name["input_pl0"]["sync_group"] == by_name["realtime_pl0"]["sync_group"] == "pl_item_0"
+    assert "loop_continuous_ts" not in by_name["input_pl0"]
     assert by_name["input_pl0"]["start_ts"] == "00:00:00.000" and "auto_restart" not in by_name["decode_pl0"]
     assert by_name["decode_pl0"]["flush_magic"] is True and by_name["decode_pl0"]["codec_map"] == {"h264": "h264_cuvid"}
     assert by_name["pause_pl0"] == {"type": "pause", "name": "pause_pl0", "src": "input_pl0_speeded",

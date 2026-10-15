@@ -25,30 +25,12 @@ ffmpeg7_1 = ["ffmpeg", "rsmpeg/ffmpeg7_1", "rusty_ffmpeg/ffmpeg7_1"]
 ffmpeg8 = ["ffmpeg", "rsmpeg/ffmpeg8", "rusty_ffmpeg/ffmpeg8"]
 ffmpeg9 = ["ffmpeg", "rsmpeg/ffmpeg9", "rusty_ffmpeg/ffmpeg9"]
 async = ["dep:tokio"]
-# Recompiles src/nodes/rescale_video.cpp against cpp/include/node_common.hpp and
-# links deps/avcpp. Implies `ffmpeg` but not an ABI selector: pass `ffmpeg9`
-# (or whichever matches the FFmpeg you linked), same as the `ffmpeg` feature.
-cpp_nodes = ["ffmpeg", "async"]
-# cuda_transform and its compositor kernels. Needs nvcc (NVCC) and a CUDA
-# FFmpeg. Implies cpp_nodes, still not an ABI selector.
-cpp_cuda = ["cpp_nodes"]
 # Compiles `graph::media::test_media` for dependents' unit tests. Only ever
 # enabled through a dev-dependency, so it costs a release build nothing.
 testing = []
 
 [build-dependencies]
 cbindgen = "0.29"
-cc = "1"
-
-[[test]]
-name = "cpp_rescale"
-path = "tests/cpp_rescale.rs"
-required-features = ["cpp_nodes"]
-
-[[test]]
-name = "cpp_cuda_transform"
-path = "tests/cpp_cuda_transform.rs"
-required-features = ["cpp_cuda"]
 
 [dependencies]
 petgraph = "0.8.3"

@@ -1,8 +1,8 @@
 """The mixer library: graph construction, show configuration, control client, color contracts
-and Janus output, on top of the pyplumber engine API.
+and Janus output.
 
-``MixerGraphBuilder`` needs the native ``_avplumber`` module; it is imported lazily so that
-``pyplumber.mixer.control`` and the other pure-Python helpers work without it.
+The show runs in a separate ``avplumber`` process. This package connects to it
+and sends the control protocol; it does not embed the engine.
 """
 
 from .models import MixerScene, MixerSource

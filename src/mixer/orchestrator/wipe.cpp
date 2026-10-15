@@ -20,7 +20,7 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
             const auto tick = armWipeChain(wipe_file);
             state_->wipe_first_ns = av::Timestamp(tick, {state_->fps_den, state_->fps_num}).timestamp({1, 1000000000});
         } else {
-            nodes_->group(state_->wipe_group_name)->stopNodesAndWait();
+            nodes_->stopGroupAndWait(state_->wipe_group_name);
             const auto previous = edgeLastTsIfExists(nodes_, edgeNameAt(nodes_, state_->wipe_selector_name, "src", 1));
             state_->wipe_first_ns = previous.isValid() ? previous.timestamp({1, 1000000000}) + 1 : 0;
             startWipeDecode(wipe_file);
@@ -78,7 +78,7 @@ void MixerOrchestrator::warmupWipe(const std::string& wipe_file, int64_t timeout
         generation = state_->transition_generation.load();
         overlay_edge_name = edgeNameAt(nodes_, state_->wipe_selector_name, "src", 1);
         overlay_initial_ts = edgeLastTsIfExists(nodes_, overlay_edge_name);
-        nodes_->group(state_->wipe_group_name)->stopNodesAndWait();
+        nodes_->stopGroupAndWait(state_->wipe_group_name);
         resetInputIf(nodes_, state_->wipe_base_fps_name);
         startWipeDecode(wipe_file);
         // Feed the overlay's program input as a real wipe would; the selector

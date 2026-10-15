@@ -2,6 +2,8 @@
 
 pub mod control;
 pub mod convert;
+pub mod cpp_bridge;
+pub mod mixer_port;
 pub mod edge_ops;
 pub mod ffi_node;
 pub mod graph_mgmt;

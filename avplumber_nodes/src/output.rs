@@ -469,7 +469,8 @@ impl StreamOutput {
                 let offset = unsafe { ffi::avio_seek(pb, 0, SEEK_CUR) };
                 let stamp = if dts.is_valid() { dts } else { pts };
                 if offset >= 0 && stamp.is_valid() {
-                    if let Err(error) = table.record(stamp.rescale(MILLISECONDS).ticks(), offset as u64)
+                    if let Err(error) =
+                        table.record(stamp.rescale(MILLISECONDS).ticks(), offset as u64)
                     {
                         return Err(self.io.error(
                             NodePhase::Process,

@@ -1,8 +1,9 @@
 """Config-driven mixer application, output assembly and startup/shutdown.
 
-Importing this module does not load the native engine. Applications supply show
-configuration and optionally extend each physical input before the mixer fans it
-out to scenes and auxiliary buses.
+The graph runs in a separate ``avplumber`` process (``MixerOptions.avplumber``).
+This module sends the control protocol; it does not load an in-process engine.
+Applications supply show configuration and optionally extend each physical input
+before the mixer fans it out to scenes and auxiliary buses.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from .dmabuf_inputs import dmabuf_cuda_input_nodes, open_windows, refresh_window
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options)
+from .remote import RemoteAvplumber, parse_endpoint
 from ..transform import transform_output, transform_params
 
 
@@ -63,6 +65,8 @@ class MixerOptions:
     output: str | None = None
     output_format: str | None = None
     remote_control_port: int = 7777
+    # The avplumber process that owns the graph. HOST:PORT, already listening.
+    avplumber: str = "127.0.0.1:22422"
     codec: str = "h264_nvenc"
     working_format: str = "nv12"   # compositor/transition sw_format; p210le keeps 10-bit 4:2:2
     bitrate: str = "8M"
@@ -103,6 +107,7 @@ class MixerOptions:
             raise ValueError("--fps must be between 1 and 240")
         if not 0 <= self.remote_control_port <= 65535:
             raise ValueError("remote_control_port must be between 0 and 65535")
+        parse_endpoint(self.avplumber)
         if not 0 <= self.janus_rtcp_port <= 65535:
             raise ValueError("janus_rtcp_port must be between 0 and 65535")
         if self.preheat_timeout_sec <= 0:
@@ -176,7 +181,9 @@ class MixerApplication:
         (mixer.start_groups); a take arms it to replay what this left behind.
         A clip that is not cached whole, or that a later clip evicted, fails the start.
         """
-        self._wait_for_node(f"{MIXER_NAME}_{clipcache.CACHE_NODE}")   # its group starts asynchronously with the mixer's
+        # The wipe group is started with the mixer. The stand-in engine used by
+        # tests reports the cache node directly; the remote process reports the group.
+        self._wait_for_node(f"{MIXER_NAME}_{clipcache.CACHE_NODE}")
         clips = tuple(dict.fromkeys(c for c in (self.wipe_file, *self.wipe_files) if c))
         for clip in clips:
             started = time.monotonic()
@@ -187,6 +194,9 @@ class MixerApplication:
         clipcache.require_cached(self.avp, MIXER_NAME, clips)
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str, data_type: str | None = None) -> None:
+        if isinstance(self.avp, RemoteAvplumber):
+            self._wait_running(self._groups_for_edges(edges), phase)
+            return
         deadline = time.monotonic() + self.preheat_timeout_sec
         while True:
             self._check_startup()
@@ -201,6 +211,17 @@ class MixerApplication:
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
 
     def _wait_for_node(self, name: str) -> None:
+        if isinstance(self.avp, RemoteAvplumber):
+            if name == "layout_preheat_router":
+                groups = (ROUTER_GROUP,)
+            elif name == f"{MIXER_NAME}_{clipcache.CACHE_NODE}":
+                groups = (f"{MIXER_NAME}_wipe",)
+            elif name == self.cut_latency_encoder:
+                groups = (OUTPUT_GROUP,)
+            else:
+                groups = tuple(self.mixer.started_groups())
+            self._wait_running(groups, name)
+            return
         deadline = time.monotonic() + self.preheat_timeout_sec
         while not self.avp.node(name).isWorking:
             self._check_startup()
@@ -208,9 +229,38 @@ class MixerApplication:
                 raise RuntimeError(f"mixer preheat timed out starting node {name}")
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
 
+    def _groups_for_edges(self, edges: tuple[str, ...]) -> tuple[str, ...]:
+        if edges == ("mixer_trans_out",):
+            return (MIXER_NAME,)
+        if edges == ("mixer_final_out",):
+            return (OUTPUT_GROUP,)
+        if edges and all(edge.endswith("_encoded") for edge in edges):
+            return tuple(bus.group for bus in self.aux_buses or ())
+        return tuple(self.input_groups)
+
+    def _wait_running(self, groups: tuple[str, ...], phase: str) -> None:
+        """Wait until each group reports ``running``.
+
+        ``group.start`` blocks until the process has started the group. The
+        control protocol has no queue depth, so a failed group status is what
+        aborts preheat.
+        """
+        deadline = time.monotonic() + self.preheat_timeout_sec
+        while True:
+            self.avp.poll()
+            self._check_startup()
+            waiting = [name for name in groups if not self.avp.group(name).is_running()]
+            if not waiting:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"mixer preheat timed out during {phase}; group {waiting[0]} is not running"
+                )
+            time.sleep(PREHEAT_POLL_INTERVAL_SEC)
+
     def start(self) -> None:
         # Control requests wait for setReady(), so Setup cannot inspect failed nodes
-        # while preheating. Abort here on the native error instead of waiting for frames.
+        # while preheating. Abort here when a group reports a failure.
         original = self.avp.on_exception
         self._startup_error = None
         def failed(name, kind, message):
@@ -283,8 +333,9 @@ class MixerApplication:
             self.aux_buses.stop()
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.stop()
-        # After a panic the graph is already shutting down under the manager lock and its groups
-        # are stopping; group() would only wait for that. shutdown() below waits for it anyway.
+        # Stop the groups we started. The avplumber process stays up; a later show
+        # needs a fresh process because these node names are still registered until
+        # it exits. shutdown() closes our connection either way.
         if self.avp.manager.shouldWork:
             # shutdown() stops one group after another, so a large show took minutes; stopNodes()
             # only signals the group's own thread. Asking every input and aux group first leaves
@@ -296,7 +347,6 @@ class MixerApplication:
 
 
 def load_avp_api():
-    from pyplumber import AVPlumber
     from pyplumber.mixer import MixerGraphBuilder
     from pyplumber.node import (
         AssumeVideoFormat,
@@ -325,7 +375,6 @@ def load_avp_api():
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
 
     return SimpleNamespace(
-        AVPlumber=AVPlumber,
         MixerGraphBuilder=MixerGraphBuilder,
         AssumeVideoFormat=AssumeVideoFormat,
         Bsf=Bsf,
@@ -377,9 +426,20 @@ def _pacing_loop(index: int) -> str:
 
 
 def _init_avp(avp_options, api, on_error: ExitStack):
-    """AVPlumber instance + control server + CUDA hwaccel — shared by both the
-    --input and --config build paths. A failed or interrupted build shuts it down."""
-    avp = api.AVPlumber()
+    """Connection to the avplumber process, the TUI port, and CUDA hwaccel.
+
+    Shared by the --input and --config build paths. A failed or interrupted
+    build shuts the connection down. ``api`` is unused; node classes are loaded
+    by the callers that add nodes.
+    """
+    # Tests pass a recorder as ``api.AVPlumber``. The process session is what
+    # the mixer uses when that recorder is absent.
+    factory = getattr(api, "AVPlumber", None)
+    if factory is None:
+        host, port = parse_endpoint(avp_options.avplumber)
+        avp = RemoteAvplumber.connect(host, port)
+    else:
+        avp = factory()
     on_error.callback(avp.shutdown)
     if avp_options.remote_control_port:
         avp.enableControlServer(avp_options.remote_control_port)
@@ -708,6 +768,11 @@ def run_application(application: MixerApplication, *, webui_url: str = "") -> No
         _startup_result()
         while application.avp.manager.shouldWork:
             time.sleep(1)
+            # The remote session learns about a failed group by asking. A test
+            # recorder flips shouldWork itself and has nothing to poll.
+            poll = getattr(application.avp, "poll", None)
+            if poll is not None:
+                poll()
             if webui_url:
                 application.avp.heartbeat()
         sys.exit("Mixer graph shut down after a node failure (auto_restart panic); exiting")

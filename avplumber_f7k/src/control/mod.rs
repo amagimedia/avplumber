@@ -1,6 +1,7 @@
 //! Line-based control language (script-compatible); [`tcp`] serves it on a
 //! socket in the C++ wire format.
 
+pub mod commands;
 pub mod tcp;
 
 use std::path::Path;
@@ -81,7 +82,8 @@ pub fn exec_line(core: &Instance, line: &str) -> Result<String, String> {
         "hwaccel.init" => hwaccel_init(core, rest),
         "hello" | "version" => Ok("ok".into()),
         "bye" => Ok("bye".into()),
-        _ => Err(format!("unknown command {cmd}")),
+        _ => commands::dispatch(core, cmd, rest)
+            .unwrap_or_else(|| Err(format!("unknown command {cmd}"))),
     }
 }
 
@@ -369,26 +371,17 @@ fn hwaccel_init(core: &Instance, rest: &str) -> Result<String, String> {
     let params: Value = serde_json::from_str(rest.trim())
         .map_err(|e| format!("hwaccel.init expects a JSON object: {e}"))?;
     let message = core.services().hwaccels.init(&params)?;
-    #[cfg(feature = "cpp_cuda")]
-    {
+    if crate::abi::cpp_bridge::publishes_hwaccel() {
         let name = params
             .get("name")
             .and_then(Value::as_str)
             .ok_or("hwaccel.init needs a \"name\"")?;
         let device = core.services().hwaccels.get(name)?;
-        let name_c = std::ffi::CString::new(name).map_err(|_| "the device name contains a NUL")?;
-        crate::bind_cpp_instance(core);
-        unsafe {
-            crate::avp_cpp_cuda_init();
-            if crate::avp_cpp_hwaccel_put(
-                core as *const Instance as *mut std::ffi::c_void,
-                name_c.as_ptr(),
-                device.as_ptr() as *mut std::ffi::c_void,
-            ) != 0
-            {
-                return Err(format!("failed to publish hwaccel `{name}` to the C++ nodes"));
-            }
-        }
+        crate::abi::cpp_bridge::publish_hwaccel(
+            core,
+            name,
+            device.as_ptr() as *mut std::ffi::c_void,
+        )?;
     }
     Ok(message)
 }

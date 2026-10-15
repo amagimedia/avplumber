@@ -1,6 +1,6 @@
 //! C node vtable wrapped as a native `Node`.
 
-use std::ffi::c_void;
+use std::ffi::{CStr, CString, c_char, c_void};
 
 use crate::graph::capability::AvpInterfaceId;
 use crate::graph::error::{NodeError, NodePhase};
@@ -21,6 +21,16 @@ pub struct AvpNodeVtable {
     pub poll: Option<extern "C" fn(*mut c_void) -> i32>,
     pub query_interface: Option<extern "C" fn(*mut c_void, u32) -> *const c_void>,
     pub direct_consumer_is_infallible: i32,
+    /// NULL when the node has no `node.object.set`. Nonzero is failure; `err`
+    /// is a `malloc` string the caller frees with `free`.
+    pub set_object: Option<
+        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *mut *mut c_char) -> i32,
+    >,
+    /// NULL when the node has no `node.object.get`. On success `json` is a
+    /// `malloc` JSON string.
+    pub get_object: Option<
+        unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char, *mut *mut c_char) -> i32,
+    >,
 }
 
 pub struct FfiNode {
@@ -141,6 +151,63 @@ impl Node for FfiNode {
         let p = f(self.self_ptr, iface as u32);
         if p.is_null() { None } else { Some(p) }
     }
+
+    fn set_object(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {
+        let Some(set_object) = self.vtable.set_object else {
+            return Err(format!("{} has no object `{key}` to set", self.name()));
+        };
+        let key = CString::new(key).map_err(|e| e.to_string())?;
+        let json = CString::new(serde_json::to_string(value).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        let mut err = std::ptr::null_mut();
+        let rc = unsafe { set_object(self.self_ptr, key.as_ptr(), json.as_ptr(), &mut err) };
+        let text = take_malloc_string(err);
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(if text.is_empty() {
+                format!("{} failed to set object", self.name())
+            } else {
+                text
+            })
+        }
+    }
+
+    fn get_object(&self, key: &str) -> Result<serde_json::Value, String> {
+        let Some(get_object) = self.vtable.get_object else {
+            return Err(format!("{} has no object `{key}` to get", self.name()));
+        };
+        let key = CString::new(key).map_err(|e| e.to_string())?;
+        let mut json = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let rc = unsafe { get_object(self.self_ptr, key.as_ptr(), &mut json, &mut err) };
+        let text = take_malloc_string(json);
+        let error = take_malloc_string(err);
+        if rc != 0 {
+            return Err(if error.is_empty() {
+                format!("{} failed to get object", self.name())
+            } else {
+                error
+            });
+        }
+        if text.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    }
+}
+
+fn take_malloc_string(ptr: *mut c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let text = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+    unsafe { free(ptr.cast()) };
+    text
+}
+
+unsafe extern "C" {
+    fn free(ptr: *mut c_void);
 }
 
 pub type VtableNode = FfiNode;

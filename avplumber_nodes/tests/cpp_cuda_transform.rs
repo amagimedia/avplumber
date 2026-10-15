@@ -5,7 +5,7 @@
 //! opened; the canvas is 32×32, so the compositor kernel has to run. A 1:1
 //! canvas would pass the input frame through undrawn.
 //!
-//! `cargo test -p avplumber_f7k --features cpp_cuda,ffmpeg9 --test cpp_cuda_transform`
+//! `cargo test -p avplumber_nodes --features cpp_cuda,ffmpeg9 --test cpp_cuda_transform`
 //! with `FFMPEG_PREFIX` pointing at a CUDA build of the patched FFmpeg, and
 //! `libavcpp.a` built against that same tree. `NVCC` builds the kernel image.
 
@@ -251,6 +251,7 @@ impl Drop for StopGroup<'_> {
 #[test]
 fn cuda_transform_scales_a_cuda_frame() {
     let inst = Instance::new();
+    avplumber_nodes::register_media_nodes(&inst);
     control::exec_line(
         &inst,
         r#"hwaccel.init {"name":"gpu","type":"cuda"}"#,

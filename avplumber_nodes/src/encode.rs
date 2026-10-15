@@ -405,10 +405,7 @@ impl Encoder {
         let mut buffer = buffer;
         let time_base = state.time_base;
         let ts = buffer.ts();
-        if state.prev_pts.is_valid()
-            && ts.is_valid()
-            && ts < state.prev_pts
-        {
+        if state.prev_pts.is_valid() && ts.is_valid() && ts < state.prev_pts {
             log::warn!(
                 "{}: input PTS went backwards {} -> {}, discarding frame",
                 self.io.name,

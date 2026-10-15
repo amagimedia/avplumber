@@ -1,6 +1,8 @@
 #include "node_common.hpp"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 extern "C" {
 #include <libavutil/parseutils.h>
@@ -8,6 +10,26 @@ extern "C" {
 
 extern "C" void avpshim_destroy(void* self) {
     delete static_cast<avpshim::Holder*>(self);
+}
+
+char* avpshim_dup(const char* text) {
+    if (!text) {
+        return nullptr;
+    }
+    const size_t bytes = std::strlen(text) + 1;
+    char* buf = static_cast<char*>(std::malloc(bytes));
+    if (buf) {
+        std::memcpy(buf, text, bytes);
+    }
+    return buf;
+}
+
+extern "C" int avpshim_set_object(void* self, const char* key, const char* json, char** err) {
+    return static_cast<avpshim::Holder*>(self)->set_object(key, json, err);
+}
+
+extern "C" int avpshim_get_object(void* self, const char* key, char** json, char** err) {
+    return static_cast<avpshim::Holder*>(self)->get_object(key, json, err);
 }
 
 extern "C" AvpFlow avpshim_process(void* self) {

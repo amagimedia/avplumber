@@ -160,7 +160,7 @@ def fake_api():
         "AssumeVideoFormat": "assume_video_format", "Bsf": "bsf", "ClipCache": "clip_cache",
         "CudaTransform": "cuda_transform", "DecVideo": "dec_video", "Demux": "demux",
         "DrmPrimeToCuda": "drm_prime_to_cuda", "EncVideo": "enc_video", "FilterVideo": "filter_video",
-        "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input_rec",
+        "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input",
         "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer",
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
         "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
@@ -264,6 +264,9 @@ def test_input_keeps_native_rate_and_outputs_use_configured_fps():
     assert nodes["realtime_0"]["tick_period"] == "1/30000"
     assert nodes["realtime_0"]["negative_time_tolerance"] == .25
     assert nodes["realtime_0"]["discontinuity_threshold"] == 1.0
+    assert nodes["input_0"]["type"] == "input"
+    assert "sync_group" not in nodes["input_0"]   # not looping: the file ends
+    assert nodes["realtime_0"]["sync_group"] == nodes["input_0"]["group"]
     assert "center_phase" not in nodes["program_fps"]
     assert "normalize_0" not in nodes
     assert nodes["program_fps"]["fps"] == "60/1"
@@ -709,9 +712,10 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
     app, nodes, chain = _raw_420_nodes(tmp_path, kind, color, raw_upload=upload)
     assert nodes["input_0"]["format"] == "rawvideo"
     assert nodes["input_0"]["options"] == {"pixel_format": fmt, "video_size": "320x180", "framerate": "60/1"}
+    assert "loop_continuous_ts" not in nodes["input_0"]
+    assert nodes["input_0"]["sync_group"] == nodes["realtime_0"]["sync_group"] == nodes["input_0"]["group"]
     if upload == "hwupload":
         assert chain == ["input_0", "demux_0", "decode_0", "filter_0", "realtime_0", "upload_0"]
-        assert nodes["input_0"]["loop_continuous_ts"] is False   # setpts counts frames across loops instead
         assert nodes["decode_0"]["codec"] == "rawvideo"
         assert "hwaccel" not in nodes["decode_0"] and "options" not in nodes["decode_0"]
         assert nodes["filter_0"]["src"] == "input_0_decoded"
@@ -1263,7 +1267,8 @@ def test_a_single_scaled_rendition_reads_the_feed_through_the_transform(tmp_path
     assert "split_renditions" not in nodes
     assert nodes["transform_renditions"]["src"] == "mixer_final_out"
     assert nodes["scale_low"]["src"] == "program_sized_low"
-    assert nodes["janus_format"]["width"] == 1280 and nodes["janus_format"]["height"] == 720
+    assert "janus_format" not in nodes
+    assert nodes["janus_encoder"]["src"] == "janus_keyframed"
 
 
 def test_canvas_size_renditions_build_no_transform(tmp_path):
@@ -1291,7 +1296,8 @@ def test_a_scaled_rendition_converts_color_after_the_transform(tmp_path):
     assert sdr["graph"].startswith(Color("hlg").setparams + ",tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12")
     # Storage changes are colour-path work and stay in the filter.
     assert nodes["scale_hdr"]["graph"] == Color("hlg").setparams + ",scale_cuda=format=p010le"
-    assert nodes["janus_sdr_format"]["width"] == 1280 and nodes["janus_sdr_format"]["real_pixel_format"] == "nv12"
+    assert "janus_sdr_format" not in nodes
+    assert nodes["janus_sdr_encoder"]["src"] == "janus_sdr_keyframed"
     assert not _geometry_filters(nodes)
 
 
@@ -1354,7 +1360,8 @@ def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path, sdr_co
     assert [(o["rendition"], o["color"], o["mountpoint"]) for o in settings["program_outputs"]] == [
         ("hdr", "hdr", 2), ("sdr", "sdr", 1)]
     assert nodes["janus_sdr_encoder"]["options"]["color_trc"] == "bt709"
-    assert nodes["janus_sdr_format"]["real_pixel_format"] == "nv12"
+    assert "janus_sdr_format" not in nodes
+    assert nodes["janus_sdr_encoder"]["src"] == "janus_sdr_keyframed"
     assert "tonemap_cuda=transfer_in=auto:transfer_out=sdr" in nodes["scale_sdr"]["graph"]
     assert ":tonemap=mobius:sdr_white=203:hdr_peak=1000:desat=0:param=0.9" in nodes["scale_sdr"]["graph"]
     assert ":5006?" in nodes["janus_rtp_output"]["url"]
@@ -1397,7 +1404,8 @@ def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path):
     assert sources["cam"]["pixel_format"] is None and sources["cam"]["color"] is None   # NVDEC, tags from the frames
     # HDR out: one chroma subsample to P010 for NVENC, no tone-map pass.
     assert nodes["scale_hdr"]["graph"] == Color("hlg").setparams + ",scale_cuda=format=p010le"
-    assert nodes["janus_format"]["real_pixel_format"] == "p010le"
+    assert "janus_format" not in nodes
+    assert nodes["janus_encoder"]["src"] == "janus_keyframed"
     assert nodes["scale_sdr"]["graph"].startswith(Color("hlg").setparams + ",tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12")
 
 

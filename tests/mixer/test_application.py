@@ -198,3 +198,11 @@ def test_shared_setup_accepts_an_explicit_show_and_custom_command(tmp_path, monk
     assert json.loads(runtime.config_path.read_text()) == doc
     assert runtime.mixer_command[-1] == "ai_mixer"
     runtime.close()
+
+
+def test_setup_uses_the_image_mixer_command(tmp_path, monkeypatch):
+    from pyplumber.mixer.gui.setup_runtime import SetupRuntime
+    monkeypatch.setenv("AVPLUMBER_MIXER_COMMAND", "/usr/local/bin/avplumber-mixer")
+    runtime = SetupRuntime(tmp_path, tmp_path / "settings.json", None, {})
+    assert runtime.mixer_command == ("/usr/local/bin/avplumber-mixer",)
+    runtime.close()

@@ -130,6 +130,8 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     ``dpb_size`` sets the encoder's reference DPB (:func:`dpb_options`); 0 leaves it to NVENC.
     ``edge_capacity`` plans the capacity of every edge the chain creates; None keeps the plan for ``*``.
     """
+    # The encoder reads width, height and pixel format from the edge spec.
+    del width, height
     node_name = lambda suffix: f"{prefix}_{suffix}"
     keyframe_node = node_name("force_keyframe")
     bitrate = f"{janus.bitrate_kbps}k"
@@ -143,11 +145,8 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
         ("ForceKeyFrame", {"name": keyframe_node, "src": node_name("fps"), "dst": node_name("keyframed"),
                            "interval_sec": f"{janus.keyframe_interval_sec}/1",
                            "min_interval_ms": janus.keyframe_min_interval_ms}),
-        ("AssumeVideoFormat", {"name": node_name("format"), "src": node_name("keyframed"), "dst": node_name("video"),
-                               "width": width, "height": height, "pixel_format": "cuda",
-                               "real_pixel_format": enc_format}),
         ("EncVideo", {
-            "name": node_name("encoder"), "src": node_name("video"), "dst": node_name("encoded"),
+            "name": node_name("encoder"), "src": node_name("keyframed"), "dst": node_name("encoded"),
             "codec": codec, "hwaccel": hwaccel,
             **({"hdr_metadata": hdr_metadata} if hdr_metadata else {}),
             "options": {

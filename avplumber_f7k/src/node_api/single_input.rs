@@ -55,10 +55,15 @@ pub trait InputHandler: Send + Sync + 'static {
     fn on_flush_stop(&self, _resume_at: Option<Ts>) {}
 
     /// [`EdgeEvent::Drain`]: give up what the node is holding *inside a codec*,
-    /// without ending anything. The event is forwarded once this returns, so a
-    /// node that holds nothing of the kind can ignore it. Whatever the node
-    /// produces goes out the usual way, from `before_take`.
-    fn on_drain(&self) {}
+    /// without ending anything. [`DrainAction::Forward`] (the default) sends
+    /// the event on now, which is right when the node holds nothing. A codec
+    /// that still has frames to emit returns [`DrainAction::Later`] and
+    /// forwards `Drain` itself once those frames are out: the marker has to
+    /// stay behind them, or a downstream loop treats the pass as finished
+    /// while the last frame is still inside the codec.
+    fn on_drain(&self) -> DrainAction {
+        DrainAction::Forward
+    }
 
     /// The input ended. [`EofAction::Done`] finishes the node after `Eof` is
     /// forwarded. A codec that has to drain over several steps returns
@@ -72,6 +77,15 @@ pub trait InputHandler: Send + Sync + 'static {
     /// The input came back empty: the edge is closed, or a stop interrupted the
     /// wait. The node is finished; this is the place for a final log line.
     fn on_closed(&self) {}
+}
+
+/// What [`InputHandler::on_drain`] decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrainAction {
+    /// Forward `Drain` now. The node is not holding output behind it.
+    Forward,
+    /// Do not forward. The node emits what it holds and then forwards `Drain`.
+    Later,
 }
 
 /// What [`InputHandler::on_eof`] decided.
@@ -126,8 +140,9 @@ pub fn react<H: InputHandler + ?Sized>(
             Ok(Reaction::Again)
         }
         EdgeItem::Event(EdgeEvent::Drain) => {
-            handler.on_drain();
-            forward(EdgeEvent::Drain);
+            if handler.on_drain() == DrainAction::Forward {
+                forward(EdgeEvent::Drain);
+            }
             Ok(Reaction::Again)
         }
         EdgeItem::Event(EdgeEvent::FlushStop { resume_at }) => {
@@ -259,7 +274,7 @@ impl<N: SingleInput> BlockingNode for N {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
     use super::*;
     use crate::graph::BufferedEdge;
@@ -491,5 +506,55 @@ mod tests {
         input.push_event(EdgeEvent::Eof);
         assert_eq!(node.process().unwrap(), Processed::Again);
         assert_eq!(node.process().unwrap(), Processed::Done);
+    }
+
+    #[test]
+    fn a_codec_forwards_drain_only_after_the_frame_it_was_holding() {
+        struct Codec {
+            io: BlockingIo,
+            holding: AtomicBool,
+        }
+        impl InputHandler for Codec {
+            fn on_spec(&self, _: Spec) -> Result<Option<Spec>, NodeError> {
+                Ok(None)
+            }
+            fn on_buffer(&self, _: Grain) -> Result<Vec<Grain>, NodeError> {
+                Ok(Vec::new())
+            }
+            fn on_drain(&self) -> DrainAction {
+                self.holding.store(true, Ordering::SeqCst);
+                DrainAction::Later
+            }
+        }
+        impl SingleInput for Codec {
+            fn io(&self) -> &BlockingIo {
+                &self.io
+            }
+            fn before_take(&self) -> Result<Option<Processed>, NodeError> {
+                if self.holding.swap(false, Ordering::SeqCst) {
+                    let out = self.io.output()?;
+                    out.push(test_media(AvpMediaType::VIDEO, 0));
+                    out.push_event(EdgeEvent::Drain);
+                    return Ok(Some(Processed::Again));
+                }
+                Ok(None)
+            }
+        }
+        let node = Blocking(Codec {
+            io: BlockingIo::new("codec"),
+            holding: AtomicBool::new(false),
+        });
+        let input: Arc<dyn Edge> = Arc::new(BufferedEdge::new(2));
+        let output: Arc<dyn Edge> = Arc::new(BufferedEdge::new(2));
+        node.bind_source("in", input.clone());
+        node.bind_sink("out", output.clone());
+        input.push_event(EdgeEvent::Drain);
+        assert_eq!(node.process().unwrap(), Processed::Again);
+        assert!(
+            events(&*output).is_empty(),
+            "drain stays here while the codec still holds its frame"
+        );
+        assert_eq!(node.process().unwrap(), Processed::Again);
+        assert_eq!(events(&*output), vec!["buffer", "drain"]);
     }
 }

@@ -43,7 +43,7 @@ use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::pump::{Progress, Pump, PumpKind};
 use avplumber_f7k::node_api::{
-    Blocking, BlockingIo, EofAction, InputHandler, PARK_TIMEOUT_MS, SingleInput,
+    Blocking, BlockingIo, DrainAction, EofAction, InputHandler, PARK_TIMEOUT_MS, SingleInput,
 };
 use avplumber_f7k::services::hwaccel::HwDevice;
 
@@ -392,16 +392,19 @@ impl InputHandler for Decoder {
     /// packet arrives, and a paused seek to the end of a recording is exactly
     /// the case where no next packet exists. The codec is flushed once it is
     /// empty, in `before_take`, so it can decode again.
-    fn on_drain(&self) {
+    fn on_drain(&self) -> DrainAction {
         let state = &mut *self.state.lock().unwrap();
         if state.eof || state.draining {
-            return;
+            // The pass is already finishing. A second marker would jump ahead
+            // of the frames this one is still emitting.
+            return DrainAction::Later;
         }
         let Some(ctx) = state.ctx.as_mut() else {
-            return;
+            return DrainAction::Forward;
         };
         state.pump.flush(ctx);
         state.draining = true;
+        DrainAction::Later
     }
 
     fn on_closed(&self) {
@@ -464,6 +467,9 @@ impl SingleInput for Decoder {
             state.pump.rearm();
             state.draining = false;
             log::debug!("{}: drained, ready for packets again", self.io.name);
+            // Behind the frames this drain pushed out, so a pacing node looping
+            // on it cannot seek back until those frames have left.
+            out.push_event(EdgeEvent::Drain);
         }
         if state.pump.is_loaded() {
             return Ok(Some(match self.drive(state)? {
@@ -546,10 +552,7 @@ impl Decoder {
         if let Grain::Video(frame) | Grain::Audio(frame) = &mut buffer {
             let ts = Ts::new(frame.pts, state.time_base);
             frame.set_ts(ts);
-            if !state.last_key
-                && state.last_pts.is_valid()
-                && ts.is_valid()
-                && ts < state.last_pts
+            if !state.last_key && state.last_pts.is_valid() && ts.is_valid() && ts < state.last_pts
             {
                 log::warn!(
                     "{}: got an out of order frame from the decoder: {} -> {}",

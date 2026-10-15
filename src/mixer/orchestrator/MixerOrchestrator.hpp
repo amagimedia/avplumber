@@ -1,7 +1,6 @@
 #pragma once
 #include "../primitives/MixerState.hpp"
 #include "../MixerGraph.hpp"
-#include "../../graph_mgmt.hpp"
 #include "../../instance_shared.hpp"
 #include <array>
 #include <cstdint>
@@ -10,6 +9,8 @@
 #include <optional>
 #include <string>
 #include <vector>
+
+class NodeManager;
 
 namespace avp::mixer {
 

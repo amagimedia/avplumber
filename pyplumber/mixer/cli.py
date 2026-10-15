@@ -226,7 +226,11 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--max-compositor-layers", type=int, help="Layer budget per compositor; overrides JSON max_compositor_layers "
         f"(default: {mixer_config.DEFAULT_MAX_COMPOSITOR_LAYERS})")
     add("--loop-inputs", action="store_true")
-    add("--remote-control-port", type=int, default=7777)
+    add("--remote-control-port", type=int, default=7777,
+        help="Port this process serves for the TUI. Graph commands are forwarded "
+             "to --avplumber; mixer.aux, mixer.dsk and mixer.settings are handled here")
+    add("--avplumber", default="127.0.0.1:22422", metavar="HOST:PORT",
+        help="avplumber process that owns the graph (default: 127.0.0.1:22422)")
     add("--dmabuf-socket-dir", default="/tmp/dma-page",
         help="dma-browser socket directory for dmabuf://<window-id> inputs")
     add("--dmabuf-size", default="1920x1080", metavar="WxH",

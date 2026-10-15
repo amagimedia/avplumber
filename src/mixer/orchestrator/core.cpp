@@ -2,7 +2,11 @@
 // interruption and abort, and status. Scene loading and takes live in the
 // sibling scene/cut/fade/wipe.cpp files.
 #include "internal.hpp"
+#ifndef AVP_RUST_MIXER
+#include "../../graph_mgmt.hpp"
+#include "../NodeManagerGraph.hpp"
 #include "../../nodes/clip_cache/ClipCache.hpp"
+#endif
 
 namespace avp::mixer {
 
@@ -14,18 +18,17 @@ int64_t releaseAfter(int64_t emitted_ns) {
 }
 }
 
+#ifndef AVP_RUST_MIXER
 MixerOrchestrator::MixerOrchestrator(std::shared_ptr<NodeManager> nodes, std::shared_ptr<MixerState> state)
-    : MixerOrchestrator(std::make_shared<MixerGraph>(nodes), std::move(state)) {}
+    : MixerOrchestrator(std::make_shared<NodeManagerMixerGraph>(nodes), std::move(state)) {}
+#endif
 
 MixerOrchestrator::MixerOrchestrator(std::shared_ptr<MixerGraph> nodes, std::shared_ptr<MixerState> state)
     : nodes_(std::move(nodes)), state_(std::move(state)) {}
 
 void MixerOrchestrator::setNodeObject(const std::string& node_name, const std::string& key, const Parameters& value) {
     try {
-        auto node = nodes_->node(node_name)->node();
-        auto control = std::dynamic_pointer_cast<IInputsObjects>(node);
-        if (!control) throw Error("node has no runtime controls");
-        control->setObject(key, value);
+        nodes_->setObject(node_name, key, value);
     } catch (const std::exception& e) {
         throw Error("mixer: set " + node_name + "." + key + " failed: " + e.what());
     }
@@ -41,41 +44,20 @@ void MixerOrchestrator::publishRuntimeObject(const std::string& node_name,
 }
 
 void MixerOrchestrator::setNodeParam(const std::string& node_name, const std::string& param, const std::string& value) {
-    auto node = nodes_->node(node_name);
-    auto& params = node->parameters();
-    params[param] = value;
+    nodes_->setParam(node_name, param, value);
 }
 
 void MixerOrchestrator::startGroup(const std::string& group_name) {
-    nodes_->group(group_name)->startNodes();
+    nodes_->startGroup(group_name);
 }
 
 void MixerOrchestrator::stopGroup(const std::string& group_name) {
-    nodes_->group(group_name)->stopNodes();
+    nodes_->stopGroup(group_name);
 }
 
 void MixerOrchestrator::flushWipeEdges() {
-    for (const auto& name : state_->wipe_flush_edges) {
-        auto edge = nodes_->edges()->findAny(name);
-        if (!edge)
-            continue;
-
-        int occupied = edge->occupied();
-        if (occupied <= 0)
-            continue;
-
-        auto active_consumer = workingConsumerForEdge(nodes_, name);
-        if (active_consumer) {
-            logstream << "mixer: leaving active wipe edge " << name
-                      << " unflushed (" << occupied << " queued, consumer="
-                      << active_consumer->name() << ")";
-            continue;
-        }
-
-        logstream << "mixer: flushing stale wipe edge " << name
-                  << " (" << occupied << " queued)";
-        edge->clear();
-    }
+    for (const auto& name : state_->wipe_flush_edges)
+        nodes_->clearEdgeIfIdle(name);
 }
 
 int64_t MixerOrchestrator::armWipeChain(const std::string& wipe_file) {
@@ -91,11 +73,11 @@ int64_t MixerOrchestrator::armWipeChain(const std::string& wipe_file) {
     resetInputIf(nodes_, state_->wipe_overlay_name);
     setNodeObject(state_->wipe_overlay_name, "active_inputs", Parameters(3u));
     setNodeObject(state_->wipe_input_node_name, "play", Parameters(wipe_file));
-    return nodes_->node(state_->wipe_input_node_name)->getObject("status").at("start_tick").get<int64_t>();
+    return nodes_->getObject(state_->wipe_input_node_name, "status").at("start_tick").get<int64_t>();
 }
 
 void MixerOrchestrator::startWipeDecode(const std::string& wipe_file) {
-    nodes_->node(state_->wipe_input_node_name)->stop(true);
+    nodes_->stopNode(state_->wipe_input_node_name, true);
     setNodeParam(state_->wipe_input_node_name, "url", wipe_file);
     flushWipeEdges();
     startGroup(state_->wipe_group_name);
@@ -277,14 +259,15 @@ Parameters MixerOrchestrator::status() const {
     lock.unlock();
     // Read from the shared store, not the clip_cache node: the store lives for the
     // life of the instance whether or not the player group has been started.
+#ifndef AVP_RUST_MIXER
     if (!wipe_cache_store.empty())
         s["wipe_cache"] = InstanceSharedObjects<avp::clipcache::ClipCache>::get(
             nodes_->instanceData(), wipe_cache_store)->status();
+#endif
     Parameters playout = Parameters::object();
     for (const auto& [slot, name] : slots) {
         Parameters node_status;
-        const auto node = nodes_->node_if_exists(name);
-        if (!node || !node->getObjectTry("status", node_status) || !node_status.contains("playout")) continue;
+        if (!nodes_->tryGetObject(name, "status", node_status) || !node_status.contains("playout")) continue;
         auto& counters = node_status["playout"];
         playout[slot] = {{"frames", counters["frames"]}, {"repeats", counters["repeats"]},
                          {"missed_deadlines", counters["missed_deadlines"]}};
@@ -295,9 +278,9 @@ Parameters MixerOrchestrator::status() const {
 
 void MixerOrchestrator::enableCutMeasurements(const std::string& mixer_name, const std::string& encoder_name) {
     std::lock_guard<std::mutex> lock(state_->mutex);
-    auto selector = std::dynamic_pointer_cast<avp::mixer::CutLatencyObserver>(nodes_->node(state_->source_switcher_name)->node());
-    auto encoder = std::dynamic_pointer_cast<avp::mixer::CutLatencyObserver>(nodes_->node(encoder_name)->node());
-    if (!selector || !encoder || nodes_->node(encoder_name)->parameters().value("type", std::string()) != "enc_video")
+    auto selector = nodes_->cutLatencyObserver(state_->source_switcher_name);
+    auto encoder = nodes_->cutLatencyObserver(encoder_name);
+    if (!selector || !encoder || nodes_->nodeType(encoder_name) != "enc_video")
         throw Error("mixer.measurements requires created source_switcher and enc_video nodes");
     if (state_->cut_latency) {
         if (state_->cut_latency->encoder_name != encoder_name)

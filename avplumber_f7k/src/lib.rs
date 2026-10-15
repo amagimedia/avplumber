@@ -115,34 +115,6 @@ impl Drop for SharedEntry {
     }
 }
 
-#[cfg(feature = "cpp_nodes")]
-unsafe extern "C" {
-    fn avp_cpp_link_rescale_video() -> i32;
-    fn avp_cpp_bind_instance(wrapper: *mut c_void, inner: *mut c_void);
-    fn avp_cpp_instance_drop(inner: *mut c_void);
-}
-
-#[cfg(feature = "cpp_cuda")]
-unsafe extern "C" {
-    fn avp_cpp_link_cuda_transform() -> i32;
-    pub(crate) fn avp_cpp_cuda_init();
-    pub(crate) fn avp_cpp_hwaccel_put(
-        wrapper: *mut c_void,
-        name: *const std::ffi::c_char,
-        device: *mut c_void,
-    ) -> i32;
-}
-
-#[cfg(feature = "cpp_nodes")]
-pub(crate) fn bind_cpp_instance(inst: &Instance) {
-    unsafe {
-        avp_cpp_bind_instance(
-            inst as *const Instance as *mut c_void,
-            Arc::as_ptr(&inst.inner) as *mut c_void,
-        );
-    }
-}
-
 impl Instance {
     pub fn new() -> Self {
         let graph = Arc::new(Mutex::new(Graph::new()));
@@ -166,18 +138,6 @@ impl Instance {
                 supervisor_action_hook: Mutex::new(None),
             }),
         };
-        #[cfg(feature = "cpp_nodes")]
-        {
-            // Pulls each C++ node object file in, so its registrar is linked.
-            // SAFETY: the symbols are defined by those translation units and return 1.
-            let linked = unsafe { avp_cpp_link_rescale_video() };
-            assert_eq!(linked, 1, "rescale_video C++ node was not linked");
-            #[cfg(feature = "cpp_cuda")]
-            {
-                let linked = unsafe { avp_cpp_link_cuda_transform() };
-                assert_eq!(linked, 1, "cuda_transform C++ node was not linked");
-            }
-        }
         // SAFETY: `inst` is the unique owner for this call. Replay only locks
         // the factory registry. The pointer is not stored; factories read
         // `BuildCtx` later, after this wrapper has a stable address.
@@ -185,6 +145,17 @@ impl Instance {
             crate::abi::registry::replay_module_inits(&inst as *const Instance as *mut Instance);
         }
         inst
+    }
+
+    /// Replays C++ registrars queued after [`Self::new`].
+    ///
+    /// `avplumber_nodes` calls this once it has linked the node objects. The
+    /// queue is not consumed, so a later instance still receives them.
+    #[doc(hidden)]
+    pub fn replay_module_inits(&self) {
+        unsafe {
+            crate::abi::registry::replay_module_inits(self as *const Instance as *mut Instance);
+        }
     }
 
     pub(crate) fn from_inner(inner: Arc<InstanceInner>) -> Self {
@@ -258,10 +229,7 @@ impl Drop for InstanceInner {
         for group in groups {
             group.stop();
         }
-        #[cfg(feature = "cpp_nodes")]
-        unsafe {
-            avp_cpp_instance_drop(self as *mut InstanceInner as *mut c_void);
-        }
+        crate::abi::cpp_bridge::drop_instance(self as *mut InstanceInner as *mut c_void);
     }
 }
 

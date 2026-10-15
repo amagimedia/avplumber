@@ -241,6 +241,37 @@ pub extern "C" fn avp_edge_occupied(edge: *mut AvpEdge) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn avp_edge_is_full(edge: *mut AvpEdge) -> i32 {
+    if edge.is_null() {
+        return 0;
+    }
+    i32::from(unsafe { (*edge).edge.is_full() })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn avp_edge_wait_writable(edge: *mut AvpEdge, timeout_ms: i32) -> i32 {
+    if edge.is_null() {
+        return 0;
+    }
+    let edge = unsafe { &*edge };
+    let start = std::time::Instant::now();
+    loop {
+        if !edge.edge.is_full() || edge.edge.is_closed() {
+            return 1;
+        }
+        if timeout_ms == 0 {
+            return 0;
+        }
+        if timeout_ms > 0
+            && start.elapsed() >= std::time::Duration::from_millis(timeout_ms as u64)
+        {
+            return 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn avp_edge_current_spec(edge: *mut AvpEdge, out: *mut AvpSpec) -> i32 {
     match unsafe { (*edge).edge.current_spec() } {
         Some(s) => {

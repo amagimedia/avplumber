@@ -143,6 +143,9 @@ void avp_edge_peek_release(AvpPeek*);
 int  avp_edge_peek_consume(AvpPeek*, AvpGrain* out /* nullable */);
 void avp_edge_pop(AvpEdge*);
 int  avp_edge_occupied(AvpEdge*);
+/* 1 when the producer would be refused. Wait returns 1 if space appeared. */
+int  avp_edge_is_full(AvpEdge*);
+int  avp_edge_wait_writable(AvpEdge*, int timeout_ms);
 
 /* Current latched SPEC of this edge. Normally a node just receives a SPEC
  * item as the head of its stream and need not call this; provided so a late
@@ -196,6 +199,12 @@ typedef struct {
     /* Nonzero opts a poll node into Direct-edge input and promises poll()
      * cannot return AVP_FLOW_ERROR. Keep zero for fallible consumers. */
     int direct_consumer_is_infallible;
+
+    /* NULL means the node has no runtime objects. 0 is success. Nonzero: *err
+     * is malloc'd text (nullable). get_object stores malloc'd JSON in *json.
+     * The core frees both with free(), not avp_string_free. */
+    int (*set_object)(void* self, const char* key, const char* json, char** err);
+    int (*get_object)(void* self, const char* key, char** json, char** err);
 } AvpNodeVtable;
 
 /* The core calls this to attach the C++/Rust object + vtable to the AvpNode.
@@ -310,6 +319,21 @@ void     avp_core_destroy(AvpCore*);
 /* Control protocol. Line parser lives in control/; TCP is not implemented. */
 int  avp_core_exec_command(AvpCore*, const char* line, char** out_reply);
 int  avp_core_serve_tcp(AvpCore*, uint16_t port);
+
+/* Extra commands. Builtins (node.add, group.start, …) stay in the core match
+ * and cannot be replaced. `reply` is malloc'd by the handler (or NULL); the
+ * core frees it with free(). Return 0 on success. avp_register_command
+ * returns 0, or -1 if the name is empty, already registered, or a builtin. */
+typedef int (*AvpCommandFn)(AvpCore* core, const char* args, char** reply);
+int avp_register_command(const char* name, AvpCommandFn fn);
+
+/* Named graph operations for a MixerGraph that is not a NodeManager.
+ * err/json are Rust strings: free them with avp_string_free. 0 is success. */
+int avp_node_object_set(AvpCore*, const char* node, const char* key, const char* json, char** err);
+int avp_node_object_get(AvpCore*, const char* node, const char* key, char** json, char** err);
+int avp_node_exists(AvpCore*, const char* node);
+int avp_group_start_named(AvpCore*, const char* group, char** err);
+int avp_group_stop_named(AvpCore*, const char* group, char** err);
 
 #ifdef __cplusplus
 } /* extern "C" */

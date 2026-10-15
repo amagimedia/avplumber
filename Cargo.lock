@@ -76,7 +76,6 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "cbindgen",
- "cc",
  "jiff",
  "log",
  "petgraph",
@@ -92,6 +91,7 @@ name = "avplumber_nodes"
 version = "0.1.0"
 dependencies = [
  "avplumber_f7k",
+ "cc",
  "log",
  "rsmpeg",
  "rusty_ffmpeg",

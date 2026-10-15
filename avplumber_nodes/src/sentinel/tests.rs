@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use avplumber_f7k::Instance;
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffered_edge::BufferedEdge;
 use avplumber_f7k::graph::edge::{Edge, EdgeItem, Wakeup};
@@ -17,7 +18,6 @@ use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::timestamp::{Ts, TsDelta};
 use avplumber_f7k::node_api::Polling;
 use avplumber_f7k::services::correction::{Action, MemberKind};
-use avplumber_f7k::Instance;
 
 use super::{SentinelSpec, SentinelVideo};
 
@@ -307,7 +307,10 @@ fn broken_then_good_slew_follow_through_the_video_node() {
                 .min_by_key(|o| (o.output_pts - frame.output_pts).abs())
                 .is_some_and(|audio| (audio.content - frame.content).abs() > 20)
     });
-    assert!(skewed, "broken window never separated audio and video content");
+    assert!(
+        skewed,
+        "broken window never separated audio and video content"
+    );
     assert_tail(&video, &audio, 5000);
     assert_timeout_backups(&mut node, video.last().unwrap().content);
 }
@@ -339,12 +342,7 @@ fn assert_timeout_backups(node: &mut Harness, last_content: i64) {
         Polled::Idle
     ));
     assert!(node.out.try_take().is_none());
-    node.node
-        .0
-        .clock
-        .as_ref()
-        .unwrap()
-        .reset(cursor + 200, MS);
+    node.node.0.clock.as_ref().unwrap().reset(cursor + 200, MS);
     thread::sleep(Duration::from_millis(150));
     let mut backups = Vec::new();
     for _ in 0..5 {
@@ -359,7 +357,11 @@ fn assert_timeout_backups(node: &mut Harness, last_content: i64) {
     }
     let pts: Vec<i64> = backups.iter().map(|grain| grain.ts().ticks()).collect();
     assert_eq!(pts, (0..5).map(|i| cursor + i * 40).collect::<Vec<_>>());
-    assert!(backups.iter().all(|grain| content_of(grain) == last_content));
+    assert!(
+        backups
+            .iter()
+            .all(|grain| content_of(grain) == last_content)
+    );
     assert_eq!(node.node.0.group.group_shift().unwrap().ticks(), shift);
     let status = node.node.get_object("card_status").unwrap();
     assert_eq!(status["card"], json!(true));
@@ -394,12 +396,7 @@ fn stall_emits_at_most_five_frozen_frames_and_raises_the_card() {
     let real = node.pump();
     assert_eq!(real.len(), 1);
     assert_eq!(content_of(&real[0]), 7);
-    node.node
-        .0
-        .clock
-        .as_ref()
-        .unwrap()
-        .reset(5_000, MS);
+    node.node.0.clock.as_ref().unwrap().reset(5_000, MS);
     // The empty poll inside `pump` armed the anti-spin deadline.
     thread::sleep(Duration::from_millis(30));
     let mut backups = Vec::new();

@@ -463,8 +463,7 @@ impl BlockingNode for StreamInput {
             )
         })?;
         let (pts, dts) = (packet.pts, packet.dts);
-        packet.set_ts_dts(Ts::new(pts, time_base), Ts::new(dts, time_base),
-        );
+        packet.set_ts_dts(Ts::new(pts, time_base), Ts::new(dts, time_base));
 
         if let Some(seekable) = &self.seekable
             && index == seekable.video_stream

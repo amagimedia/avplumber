@@ -106,6 +106,16 @@ def _fits(cfg, spec):
         return False
 
 
+def _default_mixer_command():
+    """The mixer image sets ``AVPLUMBER_MIXER_COMMAND`` to the wrapper that starts
+    avplumber and then this module. A checkout without that variable runs the module,
+    which connects to an avplumber process that is already listening."""
+    command = os.environ.get("AVPLUMBER_MIXER_COMMAND", "").strip()
+    if command:
+        return tuple(command.split())
+    return (sys.executable, "-u", "-m", "pyplumber.mixer")
+
+
 class SetupRuntime:
     def __init__(self, media_dir, recipe_path, bridge, profile, mixer_args=(), browser_url="http://127.0.0.1:9009",
                  janus_api=None, *, instance_type="", mixer_command=None, config_name="mixer.json"):
@@ -119,7 +129,7 @@ class SetupRuntime:
         self.instance_type = instance_type
         self.profile = profile
         self.config_path = self.media_dir / config_name
-        self.mixer_command = tuple(mixer_command or (sys.executable, "-u", "-m", "pyplumber.mixer"))
+        self.mixer_command = tuple(mixer_command or _default_mixer_command())
         self.mixer_args = list(mixer_args)
         self.browser_url = browser_url
         # Extra aux outputs need a Janus mountpoint each, made through its HTTP API; none without it.
