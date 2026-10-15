@@ -331,8 +331,10 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     for page in pages:
         x, y, w, h = rects[page]
         window_w, window_h = DSK_WINDOWS[page]
+        # The clock and lower third hold still between updates; only the ticker and left bug animate continuously.
         sources.append({"id": f"dsk_{page}", "kind": "browser", "url": page_url(DEMO_DIR / "dsk" / f"{page}.html", fps=fps),
-                        "width": window_w, "height": window_h, "color": "sdr"})
+                        "width": window_w, "height": window_h, "color": "sdr",
+                        "capture_cadence": "on_change" if page in ("lower_third", "bug_right") else "continuous"})
         # Each window is its graphic and nothing else, so its rectangle is all the keyer needs to compose.
         keys.append({"id": page, "source": f"dsk_{page}", "dst": {"x": x, "y": y, "w": w, "h": h}, "bounded": True})
     renditions = recipe["renditions"]
