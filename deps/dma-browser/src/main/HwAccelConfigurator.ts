@@ -13,6 +13,28 @@ export interface AppliedSwitch {
   readonly value?: string;
 }
 
+const FEATURE_VARIABLES = [
+  'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES',
+  'DMA_BROWSER_CHROMIUM_DISABLE_FEATURES',
+] as const;
+/** A feature list entry may carry a `*` default-state prefix, `:params` or a `<trial` group. */
+const ZERO_COPY_EXPORT_ENTRY = /^\*?AvpZeroCopyOffscreenExport(?:[:<]|$)/;
+
+/**
+ * Refuses the feature of the removed zero-copy export Electron patches: the mixer supports
+ * only Chromium's ordinary capture, whose buffers it samples in place.
+ */
+export function rejectZeroCopyExport(env: Env): void {
+  for (const variable of FEATURE_VARIABLES) {
+    if (envList(env, variable).some((entry) => ZERO_COPY_EXPORT_ENTRY.test(entry))) {
+      throw new Error(
+        `${variable} names AvpZeroCopyOffscreenExport: zero-copy export is not supported; ` +
+          "remove it to run Chromium's ordinary capture",
+      );
+    }
+  }
+}
+
 /**
  * Configures Chromium command-line switches for offscreen DMA-BUF capture on
  * Linux + Electron/Chromium.
@@ -39,6 +61,7 @@ export class HwAccelConfigurator {
   }
 
   public apply(): readonly AppliedSwitch[] {
+    rejectZeroCopyExport(this.env);
     this.appendSwitch('enable-gpu');
     this.appendSwitch('no-sandbox');
     this.appendSwitch('run-all-compositor-stages-before-draw');

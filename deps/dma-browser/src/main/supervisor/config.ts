@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { envFlag, envInt, envString, type Env } from '../support/env';
 import type { WindowConfig } from '../config/WindowConfig';
 import { ConfigService } from '../config/ConfigService';
+import { rejectZeroCopyExport } from '../HwAccelConfigurator';
 
 export interface SupervisorConfig {
   readonly publicHost: string;
@@ -21,6 +22,8 @@ export interface SupervisorConfig {
 }
 
 export function readSupervisorConfig(env: Env, projectRoot: string): SupervisorConfig {
+  // Workers start on demand; refuse here so the service never comes up with the feature.
+  rejectZeroCopyExport(env);
   const publicHost = envString(env, 'DMA_BROWSER_REST_HOST', '127.0.0.1');
   const publicPort = envInt(env, 'DMA_BROWSER_REST_PORT', 9009, 1, 65535);
   const workerHost = envString(env, 'DMA_BROWSER_WORKER_HOST', '127.0.0.1');

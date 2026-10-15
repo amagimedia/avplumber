@@ -1,7 +1,6 @@
 import type { Server } from 'node:http';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import { ConfigService } from '../config/ConfigService';
-import { fixedCapturePoolSize } from '../capture/FixedCapturePool';
 import { ProcessCpuSampler, type CpuMetricsSource } from '../metrics/ProcessCpu';
 import type { WindowControl } from '../WindowControl';
 import { toErrorResponse } from './errors';
@@ -25,7 +24,6 @@ export class RestServer {
   private readonly cfg: ConfigService;
   private readonly opts: RestServerOptions;
   private readonly cpu: CpuMetricsSource;
-  private readonly capturePoolSize = fixedCapturePoolSize();
   public readonly app: Express;
   private server: Server | null = null;
 
@@ -149,10 +147,7 @@ export class RestServer {
     this.app.get(
       '/status',
       route(async (_req, res) => {
-        res.status(200).json({
-          ...(await this.manager.status()),
-          ...(this.capturePoolSize ? { fixedCapturePoolSize: this.capturePoolSize } : {}),
-        });
+        res.status(200).json(await this.manager.status());
       }),
     );
 

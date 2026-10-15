@@ -53,9 +53,8 @@ export interface FrameCaptureChannelOptions {
   readonly allowedDims: AllowedDims;
   readonly log: LogSink;
   readonly paintDiag?: boolean;
-  /** Maximum frames sent but not yet released by consumer acknowledgement; null for no limit
-   *  (zero-copy mode: Chromium's buffer queue bounds the frames out, this map only tracks). */
-  readonly retainedFramePoolSize?: number | null;
+  /** Maximum frames sent but not yet released by consumer acknowledgement. */
+  readonly retainedFramePoolSize?: number;
 }
 
 /**
@@ -85,7 +84,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
   private socketMonitor: NodeJS.Timeout | null = null;
   private boundContents: WebContents | null = null;
   private readonly retainedFrames = new Map<bigint, RetainedFrame>();
-  private readonly retainedFramePoolSize: number | null;
+  private readonly retainedFramePoolSize: number;
   private held = false;
   private fenceSeen = false;
   private nextFrameNumber = 0n;
@@ -94,10 +93,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
 
   constructor(opts: FrameCaptureChannelOptions) {
     this.opts = opts;
-    this.retainedFramePoolSize =
-      opts.retainedFramePoolSize === undefined
-        ? DEFAULT_RETAINED_FRAME_POOL_SIZE
-        : opts.retainedFramePoolSize;
+    this.retainedFramePoolSize = opts.retainedFramePoolSize ?? DEFAULT_RETAINED_FRAME_POOL_SIZE;
   }
 
   public start(): Promise<void> {
@@ -216,10 +212,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
           this.dropFrame('transport_quarantined');
           return;
         }
-        if (
-          this.retainedFramePoolSize !== null &&
-          this.retainedFrames.size >= this.retainedFramePoolSize
-        ) {
+        if (this.retainedFrames.size >= this.retainedFramePoolSize) {
           this.dropFrame('retained_pool_full');
           return;
         }
