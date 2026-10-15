@@ -376,7 +376,8 @@ names a `wipe_cache_store`, `wipe_cache` holds that clip cache's `bytes`,
 `mixer.scenes <name>` lists registered scenes.
 
 The application exposes `node.object.get mixer_delivery per_source` for source
-quality on the **keyed program output**. It follows capture identities through
+quality on the **keyed program output**, after normalization to the canvas frame
+rate so inserted repeats count too. It follows capture identities through
 retiming, held copies, snapshots, compositing and both sides of a fade. `repeats`
 counts reuse beyond the source's native frame period; `dropped` counts capture
 IDs skipped while continuously on air. Aliases count once. Prewarm, off-air gaps

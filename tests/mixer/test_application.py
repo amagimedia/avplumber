@@ -215,6 +215,24 @@ def test_fixed_browser_pool_warms_static_pages_and_keeps_registrations(monkeypat
     assert all(call == (["page_b"], True) for call in paints[1:])
 
 
+def test_fixed_pool_requires_rotation_after_last_registration_change(monkeypatch):
+    from pyplumber.mixer.application import MixerApplication
+    now, paints = [0.0], []
+    monkeypatch.setattr(mixer_application.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(mixer_application.time, "sleep", lambda dt: now.__setitem__(0, now[0] + dt))
+    monkeypatch.setattr(mixer_application, "paint_windows", lambda *args: paints.append(args))
+    def stats(key):
+        replacements = min(len(paints), 3)
+        return {"imports": 6 + replacements, "evicted": replacements, "hits": len(paints) * 10}
+    app = MixerApplication(avp=SimpleNamespace(node=lambda name: SimpleNamespace(getObject=stats)),
+                           mixer=None, input_groups=(), input_edges=(), routed_inputs=False,
+                           preheat_timeout_sec=5, browser_fixed_pool_size=6,
+                           browser_windows=("page",), browser_importers=("importer",))
+    app._startup_error = None
+    app._warm_browser_pool()
+    assert len(paints) == 4  # A full cache alone is not proof that its registrations settled.
+
+
 @pytest.mark.parametrize("missing_frame", [False, True])
 def test_startup_waits_for_processed_frames_and_aux_shares_them(native_boundary, monkeypatch, missing_frame):
     class Engine(NativeEngine):
@@ -513,7 +531,8 @@ def test_program_delivery_and_explicit_static_cadence():
     nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
     assert app.delivery_monitor
     assert nodes["mixer_delivery"]["on_change_sources"] == []
-    assert nodes["mixer_delivery"]["src"] == "mixer_final_out"
+    assert nodes["program_fps"]["src"] == "mixer_final_out"
+    assert nodes["program_fps"]["dst"] == nodes["mixer_delivery"]["src"] == "program_clocked"
     assert nodes["scale_record"]["src"] == "program_measured"
     doc = {**CONFIG, "sources": [CONFIG["sources"][0], {**CONFIG["sources"][1], "capture_cadence": "on_change"}]}
     assert config.parse(doc).sources[1].capture_cadence == "on_change"

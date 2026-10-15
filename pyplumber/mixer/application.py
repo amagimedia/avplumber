@@ -451,7 +451,7 @@ class MixerApplication:
         if not self.browser_windows or len(self.browser_windows) != len(self.browser_importers):
             raise RuntimeError("Fixed browser pool warm-up requires one importer per window")
         deadline = time.monotonic() + self.preheat_timeout_sec
-        first_frames = {}
+        rotations = {}
         while True:
             self._check_startup()
             missing = []
@@ -459,9 +459,15 @@ class MixerApplication:
                 stats = self.avp.node(node).getObject("import_stats") or {}
                 retained = stats.get("imports", 0) - stats.get("expired", 0) - stats.get("evicted", 0)
                 frames = stats.get("imports", 0) + stats.get("hits", 0)
-                # Resuming capture can replace the startup pool. Visit a full
-                # FIFO rotation so old cached entries cannot satisfy warm-up.
-                seen = frames - first_frames.setdefault(node, frames)
+                # Resuming capture can replace the startup pool. Require a full
+                # FIFO rotation after the last registration change, not merely
+                # N paints while old cached entries are still being replaced.
+                generation = tuple(stats.get(key, 0) for key in ("imports", "expired", "evicted"))
+                previous, first_frame = rotations.get(node, (None, frames))
+                if previous != generation or retained != self.browser_fixed_pool_size:
+                    first_frame = frames
+                rotations[node] = (generation, first_frame)
+                seen = frames - first_frame
                 if retained != self.browser_fixed_pool_size or seen < self.browser_fixed_pool_size:
                     missing.append(window)
             if not missing:
@@ -932,8 +938,15 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         feeds = {**feeds, **keyer.build(program, clean=any(r.feed == "clean" for r in renditions))}
         register_dsk_commands(avp, keyer)
     monitored = "program_measured"
+    # Count the holds that output rate normalization inserts, too. Keeping that
+    # normalization before the observer also gives matching-rate renditions the
+    # same program cadence when the keyer or output pipeline falls behind.
+    avp.addNode(api.ForceFPS({
+        "name": "program_fps", "src": feeds["dirty"], "dst": "program_clocked",
+        "fps": f"{cfg.fps}/1", "group": OUTPUT_GROUP,
+    }))
     avp.addNode(api.MixerDelivery({
-        "name": "mixer_delivery", "src": feeds["dirty"], "dst": monitored,
+        "name": "mixer_delivery", "src": "program_clocked", "dst": monitored,
         "fps": f"{cfg.fps}/1", "group": OUTPUT_GROUP,
         "on_change_sources": [s.id for s in cfg.sources if s.capture_cadence == "on_change"],
     }))
