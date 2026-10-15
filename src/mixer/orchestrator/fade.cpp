@@ -38,8 +38,11 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
     } else if (mode == MixerState::TransitionMode::Crossfade) {
         if (state_->take_phase == MixerState::TakePhase::Ready) {
             // Preview can arrive behind program. Keep selecting the live program
-            // until a fresh destination tick can arm the blend.
-            if (!destinationReady(frames[target]) || target_pts <= last_ns)
+            // until a destination tick no older than the last output can arm the blend:
+            // after an interrupted fade the program slot's still is stamped at the tick
+            // boundary and always precedes the destination frame of the same tick, so
+            // requiring a strictly newer destination never completes.
+            if (!destinationReady(frames[target]) || target_pts < last_ns)
                 return state_->pgmSourceSwitcherIndex();
             auto snapshot = outputSnapshot();
             {

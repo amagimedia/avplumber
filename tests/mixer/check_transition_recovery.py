@@ -199,6 +199,18 @@ def check_recovery(avp, mixer, output, errors):
         command('node.object.set target_gate active 0')
         results.append({'failure': 'missing_wipe', 'moving_program_frames': moving_program(0)})
 
+    # A fade replacing a running fade retains the blended still on the program slot;
+    # the replacement must still arm and finish instead of waiting out the timeout.
+    command('node.object.set target_gate active 0')
+    sample(0.3)
+    mixer.fade('full1', duration_sec=0.5)
+    sample(0.15)
+    mixer.fade('full1', duration_sec=0.5)
+    sample(1.0)
+    results.append({'failure': 'replaced_fade', 'moving_program_frames': moving_program(1)})
+    mixer.cut('full0')
+    sample(0.5)
+
     # Cancelling a failed preparation must not let its old poll undo a take.
     command('node.object.set target_gate active 1')
     sample(0.3)
