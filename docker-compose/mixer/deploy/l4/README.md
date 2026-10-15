@@ -64,6 +64,30 @@ newer than sm_89. The `dma-browser-cache` volume keeps each browser worker's
 compiled shader programs across container recreation. Keep GPU persistence mode on
 (`sudo systemctl enable --now nvidia-persistenced`); `stack.sh up` warns when it is off.
 
+## GPU time-sharing collapse (measured 2026-10-15)
+
+With 40 moving browser windows the show can tip into a state where every compositor's
+GPU wait rises from 2 ms to 33-66 ms while no engine is saturated (SM about 60 %, NVDEC
+about 75 %, NVENC about 40 %) and the host has idle CPU. Program and AUX then miss a
+third of their deadlines and NVENC's average latency goes from 8 ms to about 45 ms. The
+state is entered under perturbation (fade bursts, browser worker restarts, heavy host
+activity such as Docker log scans) and does not leave on its own: the mixer's CUDA
+context and Chromium's GL contexts time-share the GPU and the CUDA backlog never drains.
+
+What resets it, measured: stopping Chromium's GPU processes (`electron --type=gpu-process`)
+for 2-3 seconds with SIGSTOP/SIGCONT; misses fall to zero within seconds and stay there.
+What did not matter: viewer PLIs (blocked for 60 s, no change), the fade implementation,
+source kind on program, DSK keys. Two GPU processes of 20 windows each were worse than
+four of ten (two clean starts failed).
+
+Operating rules that follow: keep the browser container's CPU weight below the mixer's
+(`cpu_shares: 512` above; Chromium raises its GPU processes to nice -8 on its own), avoid
+CPU-bound work on the host while the show runs, and if an operator-side watchdog is used,
+have it act only in the setup's `running` phase, because a freeze during the 60 s
+clean-start window makes that start fail. The clean-start gate restarts its window on
+output drops as well as missed deadlines; in the collapsed state every bus drops about
+15 frames a minute, so a start can loop until the setup manager gives up.
+
 ## Output codecs and bitrates
 
 Setup selects codec, preset and bitrate per program/own AUX, with one shared
