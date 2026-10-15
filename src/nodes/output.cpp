@@ -33,6 +33,8 @@ protected:
     bool should_close_ = false;
     int errors_ = 0;
     std::chrono::steady_clock::time_point first_error_{};
+    uint64_t queue_full_drops_ = 0;   // since the last line about them
+    std::chrono::steady_clock::time_point queue_full_logged_{};
     void commitPendingSeekEntries() {
         if (seek_table_entries_.empty()) {
             return;
@@ -118,6 +120,22 @@ public:
                 octx_.writePacket(pkt);
                 errors_ = 0;
             } catch (std::exception &e) {
+                // FFmpeg's paced UDP sender (bitrate=, fifo_size=) reports its full send queue as
+                // ENOMEM. An encoder catching up after a stall overfills it for a moment; that
+                // packet is lost like any on the network (receivers ask for a keyframe), and the
+                // output goes on. 2026-10-15: these drops reached the panic policy and restarted
+                // the whole show four times.
+                const auto *code = dynamic_cast<const std::system_error *>(&e);
+                if (code && code->code().value() == AVERROR(ENOMEM)) {
+                    ++queue_full_drops_;
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - queue_full_logged_ >= std::chrono::seconds(1)) {
+                        logstream << "output: send queue full, " << queue_full_drops_ << " packet(s) dropped";
+                        queue_full_drops_ = 0;
+                        queue_full_logged_ = now;
+                    }
+                    return;
+                }
                 logstream << "writePacket failed: " << e.what();
                 // A burst of packets after a stall can fail for a few hundred milliseconds at once
                 // (2026-10-15: 21 consecutive UDP writes failed within 100 ms on both program outputs
