@@ -994,6 +994,7 @@ public:
 
         // mixer.status <mixer_name>
         quiet_commands_.insert("mixer.status");
+        quiet_commands_.insert("mixer.lever");   // a fader streams positions; failures are still logged
         quiet_commands_.insert("mixer.scenes");
         commands_["mixer.status"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
             std::string mixer_name = strutils::trim(arg);

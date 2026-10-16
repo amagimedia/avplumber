@@ -8,6 +8,9 @@ mixer needs no HTTP server of its own and the pages need no build step:
     GET  /wall          every output side by side, nothing to control
     GET  /outputs.js    the output list both pages play from
     GET  /api/state     status + scenes + settings in one round trip
+    GET  /api/lever     a WebSocket for the lever: text messages {"position": 0..1, "duration_sec"?, "curve"?,
+                        "color"?}, one per position, applied as POST /api/command "lever" is; one connection
+                        keeps a fader's positions in order and off the page's other requests
     GET  /api/keys      small cached rendered-key and fade-to-black tally, sampled separately from show telemetry
     GET  /api/banks     the source banks: {"banks": [[scene|null, ...x9], x3] | null}, shared by every controller
     POST /api/banks     {"banks": [[...], [...], [...]]}: replaces them (kept with the show's settings)
@@ -38,6 +41,8 @@ a burst of program takes (keyboard auto-repeat) collapses to its newest one.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -138,8 +143,56 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, payload: dict) -> None:
         self._send(code, json.dumps(payload).encode("utf-8"), "application/json")
 
+    def _lever_socket(self) -> None:
+        """Serves one WebSocket (RFC 6455) of lever positions until the client closes it. Only what a
+        browser sends is handled: masked text frames of one fragment, ping and close."""
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key or self.headers.get("Upgrade", "").lower() != "websocket":
+            self._send_json(400, {"error": "expected a WebSocket upgrade"})
+            return
+        accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC11B85").encode()).digest()).decode()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        self.wfile.flush()
+        self.close_connection = True
+
+        def frame(opcode: int, payload: bytes = b"") -> None:
+            self.wfile.write(bytes([0x80 | opcode, len(payload)]) + payload)   # control frames: < 126 bytes
+            self.wfile.flush()
+
+        while True:
+            head = self.rfile.read(2)
+            if len(head) < 2:
+                return
+            opcode, length = head[0] & 0x0F, head[1] & 0x7F
+            if length == 126:
+                length = int.from_bytes(self.rfile.read(2), "big")
+            elif length == 127:
+                length = int.from_bytes(self.rfile.read(8), "big")
+            if length > 4096:
+                frame(0x8)
+                return
+            mask = self.rfile.read(4) if head[1] & 0x80 else bytes(4)
+            data = bytes(b ^ mask[i % 4] for i, b in enumerate(self.rfile.read(length)))
+            if opcode == 0x8:
+                frame(0x8)
+                return
+            if opcode == 0x9:
+                frame(0xA, data[:125])
+            elif opcode == 0x1:
+                try:
+                    self.bridge.lever({**json.loads(data), "command": "lever"})
+                except Exception as exc:   # one bad position must not close a fader's channel
+                    logging.getLogger(__name__).warning("lever: %s", exc)
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
         path = self.path.partition("?")[0]
+        if path == "/api/lever":
+            self._lever_socket()
+            return
         if path in ("/", "/index.html"):
             self._send(200, page(self.config), "text/html; charset=utf-8")
         elif path in ("/wall", "/wall/"):

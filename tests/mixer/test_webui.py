@@ -1158,6 +1158,33 @@ def test_lever_positions_never_queue_behind_a_slow_mixer():
     assert all("seq" not in line and "client" not in line for line in bridge.sent)
 
 
+def test_lever_websocket_streams_positions_in_order(client):
+    import base64, socket
+    bridge = FakeBridge()
+    base, server = client(bridge)
+    sock = socket.create_connection(("127.0.0.1", server.server_port), timeout=5)
+    key = base64.b64encode(os.urandom(16)).decode()
+    sock.sendall((f"GET /api/lever HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                  f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+    reply = b""
+    while b"\r\n\r\n" not in reply:
+        reply += sock.recv(1024)
+    assert reply.startswith(b"HTTP/1.1 101") and b"Sec-WebSocket-Accept" in reply
+
+    def send(opcode, payload):
+        mask = os.urandom(4)
+        sock.sendall(bytes([0x80 | opcode, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+    for position in (0.25, 0.5, 2.0, 0.75):   # an invalid one is skipped; the channel stays open
+        send(0x1, json.dumps({"position": position, "duration_sec": 1}).encode())
+    send(0x9, b"hi")
+    assert sock.recv(16) == bytes([0x8A, 2]) + b"hi"
+    send(0x8, b"")
+    assert sock.recv(16)[:1] == bytes([0x88])
+    sock.close()
+    assert [json.loads(line.split(" ", 1)[1])["position"] for line in bridge.sent] == [0.25, 0.5, 0.75]
+
+
 def test_source_banks_are_shared_and_kept_by_the_setup_manager(client, tmp_path):
     class Setup:
         saved = None
