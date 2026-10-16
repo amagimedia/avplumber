@@ -64,10 +64,16 @@ void MixerOrchestrator::lever(double position, double duration_sec, FadeCurve cu
 
 void MixerOrchestrator::holdCrossfade(double progress) {
     if (!state_->take_request) return;
-    FadeRequest request = *state_->take_request;
-    const int64_t at_ms = (state_->take_start_ns + int64_t(progress * double(state_->take_duration_ns))) / 1000000;
-    request.time_floor_ms = request.time_ceiling_ms = at_ms;
-    state_->take_hold_ns = at_ms * 1000000;
+    // From mixChangeNs() the mix moves to the lever's position over the time since the previous one
+    // arrived: one frame when positions stream in, at most 100 ms when they come seldom.
+    const int64_t period_ns = av_rescale(1000000000, state_->fps_den, state_->fps_num);
+    const int64_t from_ns = mixChangeNs();
+    const int64_t now_ns = monotonicNs();
+    const int64_t span_ns = state_->lever_at_ns
+        ? std::clamp<int64_t>(now_ns - state_->lever_at_ns, period_ns, 100000000) : period_ns;
+    state_->lever_at_ns = now_ns;
+    const FadeRequest request = rampTo(*state_->take_request, progress, from_ns / 1000000, (from_ns + span_ns) / 1000000);
+    state_->take_hold_ns = *request.time_ceiling_ms * 1000000;
     state_->take_paused = true;
     state_->take_request = request;
     sendAlpha(request);
@@ -89,6 +95,7 @@ void MixerOrchestrator::clampTakeClock() {
     if (clock.end != TakeClock::End::Running || !state_->take_request) return;
     const auto& request = *state_->take_request;
     clock.start_ns = request.start_ms * 1000000;
+    clock.duration_ns = int64_t(request.duration_sec * 1e9);
     clock.floor_ns = request.time_floor_ms ? *request.time_floor_ms * 1000000 : std::numeric_limits<int64_t>::min();
     clock.ceiling_ns = request.time_ceiling_ms ? *request.time_ceiling_ms * 1000000 : std::numeric_limits<int64_t>::max();
     state_->publishClock(clock);

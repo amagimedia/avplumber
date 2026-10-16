@@ -23,7 +23,7 @@ struct TakeClock {
     };
     uint64_t generation = 0;   // 0: no take yet
     int64_t start_ns = 0;
-    int64_t duration_ns = 0;   // 0: a cut, whole from start_ns
+    int64_t duration_ns = 0;   // 0: a cut, whole from start_ns; negative: the lever moving back
     int64_t floor_ns = std::numeric_limits<int64_t>::min();
     int64_t ceiling_ns = std::numeric_limits<int64_t>::max();
     FadeCurve curve = FadeCurve::Linear;
@@ -32,7 +32,7 @@ struct TakeClock {
     Ending previous;
 
     double progress(int64_t pts_ns) const {
-        if (duration_ns <= 0) return pts_ns >= start_ns ? 1.0 : 0.0;
+        if (duration_ns == 0) return pts_ns >= start_ns ? 1.0 : 0.0;
         const int64_t t = std::min(std::max(pts_ns, floor_ns), ceiling_ns);
         return fadeCurveAt(curve, std::clamp(double(t - start_ns) / double(duration_ns), 0.0, 1.0));
     }

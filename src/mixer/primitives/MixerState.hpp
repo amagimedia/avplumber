@@ -210,6 +210,7 @@ struct MixerState : public InstanceShared<MixerState> {
     bool take_manual = false;
     double take_lever = 0;
     bool take_lever_done = false;
+    int64_t lever_at_ns = 0;    // monotonic time of the last lever position, for the ramp to the next
     double take_progress = 0;   // the background transition's progress at the newest program frame
     // The background transition's clock for the downstream keyer's Next Transition keys. Replaced,
     // never edited, so the keyer's render thread reads it without this mutex.

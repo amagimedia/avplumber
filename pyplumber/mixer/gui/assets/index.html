@@ -408,19 +408,6 @@
       </section>
     </div>
 
-    <section class="card" id="scenes-card">
-      <header>
-        <span class="seg" role="group" aria-label="Deck view">
-          <button type="button" id="tab-scenes" aria-pressed="true">Scenes</button><button type="button" id="tab-graph" aria-pressed="false">Signal flow</button>
-        </span>
-        <div id="chips" role="group" aria-label="Scene filter"></div>
-        <a class="newtab" id="graph-open" target="_blank" rel="noopener" hidden>Open full graph in new tab
-          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 2h3v3M10 2 5.5 6.5"/></svg></a>
-      </header>
-      <div id="scenes" tabindex="-1"></div>
-      <div id="graph" hidden></div>
-    </section>
-
     <footer class="card" id="takebar">
       <button class="btn" id="cut" type="button" title="Cut Preview to Program (C)" aria-keyshortcuts="C">Cut</button>
       <button class="btn" id="auto" type="button" title="Auto: run the selected transition to Preview (Space)" aria-keyshortcuts="Space">Auto</button>
@@ -437,6 +424,20 @@
       <span id="hint" aria-label="Keyboard shortcuts"><kbd>1–9</kbd><span class="w"> scene</span> · <kbd>Space</kbd><span class="w"> auto</span> · <kbd>C</kbd><span class="w"> cut</span> · <kbd>F</kbd><span class="w"> fade</span> · <kbd>W</kbd><span class="w"> wipe</span> · <kbd>D</kbd><span class="w"> direct</span><span id="hint-pages" hidden> · <kbd>[ ]</kbd><span class="w"> pages</span></span></span>
       <div id="error" role="alert"></div>
     </footer>
+
+    <section class="card" id="scenes-card">
+      <header>
+        <span class="seg" role="group" aria-label="Deck view">
+          <button type="button" id="tab-scenes" aria-pressed="true">Scenes</button><button type="button" id="tab-graph" aria-pressed="false">Signal flow</button>
+        </span>
+        <div id="chips" role="group" aria-label="Scene filter"></div>
+        <a class="newtab" id="graph-open" target="_blank" rel="noopener" hidden>Open full graph in new tab
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 2h3v3M10 2 5.5 6.5"/></svg></a>
+      </header>
+      <div id="scenes" tabindex="-1"></div>
+      <div id="graph" hidden></div>
+    </section>
+
   </section>
 
   <div id="split" role="separator" aria-orientation="vertical" aria-label="Resize controls and monitors" tabindex="0"
@@ -644,6 +645,9 @@ function renderBuses() {
 let progressSample = {at: 0, progress: 0};
 function transitionProgress() {
   const status = state?.status || {};
+  // Under the lever the bar is the lever's own progress, not a poll a second old.
+  if (status.transition_manual || performance.now() - leverMovedAt < 1000)
+    return Math.min(1, Math.abs(Number($("lever").value) / 1000 - (status.lever?.origin ?? 0)));
   if (status.transition !== "crossfade") return 0;
   const running = status.transition_on_air && !status.transition_paused && !status.transition_manual;
   const elapsed = running && status.transition_duration_ms ? (performance.now() - progressSample.at) / status.transition_duration_ms : 0;
@@ -656,24 +660,28 @@ function renderLever() {
   if (state?.status?.transition === "crossfade") renderLever();
   requestAnimationFrame(animateProgress);
 })();
-// The lever sends its position as it moves, one request at a time, the newest position next.
-let leverNext = null, leverSending = false;
-async function sendLever() {
-  if (leverSending) return;
-  leverSending = true;
-  try {
-    while (leverNext !== null) {
-      const position = leverNext;
-      leverNext = null;
-      const duration_sec = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
-      if (duration_sec === null) return;
-      await api("/api/command", {command: "lever", position, duration_sec, curve: curves.fade.value,
-                                 color: fadeColor.hex() || null});
-    }
-  } catch (exc) { showError(exc.message); }
-  finally { leverSending = false; }
+// The lever streams its position at most once per display frame and never waits for an answer:
+// over a long link one position per round trip would move the picture in steps. Positions are
+// numbered per page, and the server drops one that arrives after a newer one.
+const leverClient = Math.random().toString(36).slice(2);
+let leverSeq = 0, leverQueued = false, leverMovedAt = 0;
+function sendLever() {
+  leverMovedAt = performance.now();
+  renderLever();
+  if (leverQueued) return;
+  leverQueued = true;
+  requestAnimationFrame(() => {
+    leverQueued = false;
+    const duration_sec = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
+    if (duration_sec === null) return;
+    fetch("/api/command", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+      command: "lever", position: Number($("lever").value) / 1000, seq: ++leverSeq, client: leverClient,
+      duration_sec, curve: curves.fade.value, color: fadeColor.hex() || null})})
+      .then(async (r) => { if (!r.ok) showError((await r.json().catch(() => ({}))).error || r.statusText); })
+      .catch((exc) => showError(exc.message));
+  });
 }
-$("lever").oninput = () => { leverNext = Number($("lever").value) / 1000; sendLever(); };
+$("lever").oninput = sendLever;
 function keyTransition() {
   const fade_seconds = fieldSeconds("key-fade-s", 0, "Enter the key fade in seconds, or leave it empty to cut");
   return fade_seconds === null ? null : {fade_seconds, curve: curves.key.value};

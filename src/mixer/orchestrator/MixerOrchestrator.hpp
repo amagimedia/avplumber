@@ -71,6 +71,9 @@ class MixerOrchestrator {
     void interruptTransition(Interruption why);
     /// pts (ns) of the newest frame the selector has emitted, 0 before its first.
     int64_t selectorOutputNs() const;
+    /// Two ticks past the newest program frame: where a change of the mix's progress starts, so
+    /// frames the compositor drew meanwhile keep the progress they were drawn with.
+    int64_t mixChangeNs() const;
     /// Caller holds state_->mutex. Ends a transition: program on `new_pgm_scene`, the preview
     /// swapped or cleared (MixerState::completeTransition) from the program frame at
     /// `effective_ns` (0: now).

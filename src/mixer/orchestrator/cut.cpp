@@ -18,6 +18,7 @@ void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::Tra
     state_->take_phase = MixerState::TakePhase::Ready;
     state_->take_start_ns = 0;
     state_->take_progress = 0;
+    state_->lever_at_ns = 0;
     state_->wipe_switched = false;
     state_->destination_ready = false;
     state_->take_deadline_ns = monotonicNs() + kTakeReadyTimeoutMs * 1000000;
@@ -103,17 +104,28 @@ void MixerOrchestrator::replacePreset(const std::string& scene_name) {
 
 void MixerOrchestrator::toggleCrossfadePause() {
     if (!state_->take_request) return;
-    // AUTO on the lever's mix runs it on from the lever's progress; the lever is picked up
-    // again only at one of its ends.
+    // AUTO on the lever's mix runs it on from where the lever has it, at AUTO's rate; the lever
+    // is picked up again only at one of its ends.
     if (state_->take_manual) {
         state_->take_manual = state_->take_lever_done = false;
         state_->lever.release();
+        const int64_t at_ns = mixChangeNs();
+        FadeRequest request = *state_->take_request;
+        const double x = requestProgress(request, at_ns / 1000000);
+        state_->take_start_ns = at_ns - int64_t(x * double(state_->take_duration_ns));
+        request.duration_sec = double(state_->take_duration_ns) / 1e9;
+        request.start_ms = state_->take_start_ns / 1000000;
+        request.time_floor_ms = at_ns / 1000000;
+        request.time_ceiling_ms.reset();
+        state_->take_paused = false;
+        state_->take_request = request;
+        sendAlpha(request);
+        clampTakeClock();
+        logstream << "mixer: AUTO runs the lever's mix to " << state_->transition_scene_name << " on from " << x;
+        return;
     }
-    // Two ticks past the newest program frame: frames the compositor rendered meanwhile keep
-    // the progress they were drawn with, so the held mix never steps back.
-    const int64_t period_ns = av_rescale(1000000000, state_->fps_den, state_->fps_num);
-    const int64_t shown_ns = selectorOutputNs();
-    const int64_t at_ns = (shown_ns ? shown_ns : monotonicNs()) + 2 * period_ns;
+    // The held mix never steps back: see mixChangeNs().
+    const int64_t at_ns = mixChangeNs();
     FadeRequest request = *state_->take_request;
     if (!state_->take_paused) {
         request.time_ceiling_ms = at_ns / 1000000;

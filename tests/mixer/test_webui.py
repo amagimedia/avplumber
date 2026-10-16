@@ -1148,6 +1148,14 @@ def test_lever_positions_never_queue_behind_a_slow_mixer():
     assert [json.loads(line.split(" ", 1)[1])["position"] for line in bridge.sent] == [0.1, 0.4]
     with pytest.raises(ValueError):
         bridge.take({"command": "lever", "position": 1.5})
+    # Streamed positions arrive out of order sometimes: per page, an older one is dropped.
+    bridge.gates.clear()
+    bridge.sent.clear()
+    for seq, position in ((5, 0.5), (4, 0.45), (6, 0.6)):
+        bridge.take({"command": "lever", "position": position, "seq": seq, "client": "page-a"})
+    bridge.take({"command": "lever", "position": 0.1, "seq": 1, "client": "page-b"})
+    assert [json.loads(line.split(" ", 1)[1])["position"] for line in bridge.sent] == [0.5, 0.6, 0.1]
+    assert all("seq" not in line and "client" not in line for line in bridge.sent)
 
 
 def test_source_banks_are_shared_and_kept_by_the_setup_manager(client, tmp_path):

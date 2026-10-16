@@ -51,6 +51,7 @@ class MixerBridge:
         self._lever_lock = threading.Lock()
         self._lever_next: str | None = None
         self._lever_sending = False
+        self._lever_seq: dict[str, int] = {}   # newest position number per controller
 
     def keys(self, timeout: float | None = None) -> dict:
         """Small, shared poll for frame-derived key and fade-to-black tally, independent of the large show state."""
@@ -68,8 +69,16 @@ class MixerBridge:
         position = request.get("position")
         if isinstance(position, bool) or not isinstance(position, (int, float)) or not 0 <= position <= 1:
             raise ValueError("lever needs a position from 0 to 1")
-        line = mixer_command("lever", self.mixer, **{k: v for k, v in request.items() if k not in ("command", "mixer")})
+        # A page streams positions without waiting for answers; numbered per controller, one that
+        # arrives after a newer one is dropped.
+        client, seq = request.get("client"), request.get("seq")
+        line = mixer_command("lever", self.mixer, **{k: v for k, v in request.items()
+                                                     if k not in ("command", "mixer", "client", "seq")})
         with self._lever_lock:
+            if isinstance(client, str) and isinstance(seq, int):
+                if seq <= self._lever_seq.get(client, -1):
+                    return True
+                self._lever_seq[client] = seq
             self._lever_next = line
             if self._lever_sending:
                 return True

@@ -29,7 +29,32 @@ double alphaAt(const std::string& expression, double t) {
 }
 }
 
+// The lever's ramp: from where the mix is to the lever's new position, both ways, as the filter
+// evaluates it, then held there.
+void leverRamp() {
+    using avp::mixer::rampTo;
+    using avp::mixer::requestProgress;
+    const auto control = avp::mixer::transitionControl("cuda");
+    avp::mixer::FadeRequest held{1000, 1.0, false};
+    held.time_floor_ms = held.time_ceiling_ms = 1300;   // held at 0.3
+    // The ramp's start is whole milliseconds: progress may be off by 0.5 ms of the ramp, under 0.5 % here.
+    const auto near = [](double a, double b) { return std::fabs(a - b) < 5e-3; };
+    const auto up = rampTo(held, 0.5, 2000, 2033);
+    assert(near(requestProgress(up, 1900), 0.3) && near(requestProgress(up, 2000), 0.3));
+    assert(near(requestProgress(up, 2016), 0.4) && near(requestProgress(up, 2033), 0.5) && near(requestProgress(up, 9000), 0.5));
+    const auto down = rampTo(up, 0.2, 3000, 3050);
+    assert(down.duration_sec < 0);
+    assert(near(requestProgress(down, 3000), 0.5) && near(requestProgress(down, 3025), 0.35) && near(requestProgress(down, 4000), 0.2));
+    for (const double t : {2.9, 3.0, 3.025, 3.05, 4.0}) {
+        const double alpha = alphaAt(control(down).back().value.at("argument"), t);
+        assert(near(alpha, requestProgress(down, int64_t(std::llround(t * 1000)))));
+    }
+    const auto still = rampTo(down, 0.2, 5000, 5033);   // the same position again: held, no ramp
+    assert(near(requestProgress(still, 5000), 0.2) && near(requestProgress(still, 6000), 0.2));
+}
+
 int main() {
+    leverRamp();
     const auto control = avp::mixer::transitionControl("cuda");
     const std::string clip = "clip((t-12.345000)/0.750000,0,1)";
     // Every crossfade names its mode first: the filter keeps a dip's mode until told otherwise.

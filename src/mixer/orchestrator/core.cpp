@@ -184,6 +184,11 @@ void MixerOrchestrator::finishTransition(bool new_pgm_is_slot_a, std::string new
               << " from pts_ns=" << effective_ns;
 }
 
+int64_t MixerOrchestrator::mixChangeNs() const {
+    const int64_t shown_ns = selectorOutputNs();
+    return (shown_ns ? shown_ns : monotonicNs()) + 2 * av_rescale(1000000000, state_->fps_den, state_->fps_num);
+}
+
 int64_t MixerOrchestrator::selectorOutputNs() const {
     const auto emitted = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->source_switcher_name));
     return emitted.isValid() ? emitted.timestamp({1, 1000000000}) : 0;
