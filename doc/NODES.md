@@ -398,7 +398,9 @@ FPS** (see `force_fps` node)
 
 Multi-input AFV consumer for the mixer’s `transition_ended` /
 `transition_progress` events (`doc/mixer_audio_follow_video.md`). Sums
-`av::AudioSamples` (fltp) with per-bus gains scheduled at event `pts`.
+`av::AudioSamples` (fltp) with per-bus gains scheduled at event `pts`. The
+floating-point output is not clipped; consumers converting it to an integer
+sample format should apply their required limiter first.
 
 -   `src` (list of edges) and `source_ids` (same length; logical mixer source ids)
 -   `outputs` (object: bus id → output edge), e.g. `{"program": "audio_mixer_program"}`

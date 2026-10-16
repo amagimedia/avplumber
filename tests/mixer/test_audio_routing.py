@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from pyplumber.mixer import config as mixer_config
 from pyplumber.mixer.application import MixerOptions, build_application
-from test_graph import CONFIG
+from test_graph import CONFIG, fake_api
 from test_prewarm import NativeEngine
 
 
@@ -25,7 +25,7 @@ def _api(nodes, builder):
     return SimpleNamespace(**{
         name: getattr(nodes, name) for name in (
             "AssumeVideoFormat", "AudioMixer", "Bsf", "DecAudio", "DecVideo", "Demux", "EncAudio",
-            "EncVideo", "FilterVideo", "ForceFPS", "ForceKeyFrame", "InputRec", "Mux",
+            "EncVideo", "FilterAudio", "FilterVideo", "ForceFPS", "ForceKeyFrame", "InputRec", "Mux",
             "Output", "PreheatVideoRouter", "Realtime", "ResampleAudio",
             "ResampleAudioForwardChannels", "Split",
         )
@@ -105,3 +105,28 @@ def test_audio_mixer_is_wired_when_router_and_has_audio(native_boundary):
     assert params["type"] == "audio_mixer"
     assert params["source_ids"]
     assert "program" in params["outputs"]
+
+
+def test_janus_audio_limits_float_mix_before_s16_conversion():
+    from pyplumber.mixer.janus import JanusAudioConfig, build_janus_audio_output
+
+    nodes = []
+    avp = SimpleNamespace(addNode=nodes.append)
+    build_janus_audio_output(avp, fake_api(), "mixed", JanusAudioConfig())
+    params = {node.parameters["name"]: node.parameters for node in nodes}
+    assert params["janus_audio_limiter"]["src"] == "mixed"
+    assert params["janus_audio_limiter"]["dst"] == "janus_audio_limited"
+    assert params["janus_audio_limiter"]["graph"].startswith("alimiter=")
+    assert params["janus_audio_resample"]["src"] == "janus_audio_limited"
+    assert params["janus_audio_resample"]["dst_sample_format"] == "s16"
+
+
+def test_janus_audio_limiter_can_be_disabled():
+    from pyplumber.mixer.janus import JanusAudioConfig, build_janus_audio_output
+
+    nodes = []
+    avp = SimpleNamespace(addNode=nodes.append)
+    build_janus_audio_output(avp, fake_api(), "mixed", JanusAudioConfig(limiter=False))
+    params = {node.parameters["name"]: node.parameters for node in nodes}
+    assert "janus_audio_limiter" not in params
+    assert params["janus_audio_resample"]["src"] == "mixed"

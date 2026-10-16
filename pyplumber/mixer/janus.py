@@ -77,6 +77,7 @@ class JanusAudioConfig:
     payload_type: int = 111
     ssrc: int = 0x41565002
     bitrate_kbps: int = 128
+    limiter: bool = True
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -89,6 +90,8 @@ class JanusAudioConfig:
             raise ValueError("RTP SSRC must be a 32-bit unsigned integer")
         if self.bitrate_kbps <= 0:
             raise ValueError("Janus audio bitrate must be positive")
+        if type(self.limiter) is not bool:
+            raise ValueError("Janus audio limiter must be a boolean")
 
     @property
     def rtp_url(self) -> str:
@@ -227,19 +230,33 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
 def build_janus_audio_output(avp, api, src_edge: str, janus: JanusAudioConfig, *,
                              group: str = "output", prefix: str = "janus_audio",
                              failure_mode: str = "panic") -> None:
-    """Add ``resample(s16) -> enc_audio(libopus) -> rtp mux -> output`` for one audio bus.
+    """Add ``limiter -> resample(s16) -> enc_audio(libopus) -> rtp mux -> output``.
 
     ``src_edge`` must already be fltp (e.g. an audio-router node's output bus). libopus
     accepts only ``s16`` / ``flt``, not planar ``fltp``, so a short resample sits
-    in front of the encoder. Requires FFmpeg built with ``--enable-libopus`` (see
+    in front of the encoder. The limiter is enabled by default at this float-to-integer
+    boundary and can be disabled in ``JanusAudioConfig``. Requires FFmpeg built with
+    ``--enable-libopus`` (see
     demos/audio_video_mixer/docker/Dockerfile). Unlike :func:`build_janus_output`,
     this does *not* set ``rtpflags: "skip_rtcp"``: the video RTP output already
     omits RTCP SR (no shared clock risk flagged separately), so leaving audio's
     RTCP on is the one lip-sync anchor the WebRTC path has.
     """
     node_name = lambda suffix: f"{prefix}_{suffix}"  # noqa: E731
+    limited_edge = node_name("limited")
     pcm_edge = node_name("pcm")
-    specs = [
+    specs = []
+    if janus.limiter:
+        specs.append(
+            ("FilterAudio", {
+                "name": node_name("limiter"), "src": src_edge, "dst": limited_edge,
+                "graph": "alimiter=limit=1:attack=5:release=50:level=false:latency=true",
+                "dst_sample_rate": 48_000, "dst_channel_layout": "stereo",
+                "dst_sample_format": "fltp",
+            })
+        )
+        src_edge = limited_edge
+    specs += [
         # Audio-router nodes (and mixer input resampling) emit fltp; libopus rejects it.
         ("ResampleAudio", {"name": node_name("resample"), "src": src_edge, "dst": pcm_edge,
                            "dst_sample_rate": 48_000, "dst_channel_layout": "stereo",

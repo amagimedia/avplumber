@@ -1,4 +1,5 @@
 #include "node_common.hpp"
+#include "audio_mixer_core.hpp"
 #include "../audio_parameters.hpp"
 #include "../avutils.hpp"
 #include <avcpp/audioresampler.h>
@@ -35,41 +36,6 @@ struct GainEvent {
     std::vector<float> gains;
     float program_gain = 0.f;
 };
-
-float softClip(float x) {
-    if (x > 1.f) return 1.f;
-    if (x < -1.f) return -1.f;
-    return x;
-}
-
-void gainsForProgress(const std::string& kind, double t,
-                      const std::vector<int>& from_idx, const std::vector<int>& to_idx,
-                      size_t n_sources, std::vector<float>& gains, float& program_gain,
-                      bool from_has_program, bool to_has_program) {
-    gains.assign(n_sources, 0.f);
-    program_gain = 0.f;
-    t = std::clamp(t, 0.0, 1.0);
-    auto set_many = [&](const std::vector<int>& idx, float g) {
-        for (int i : idx) {
-            if (i >= 0 && size_t(i) < n_sources)
-                gains[size_t(i)] = std::max(gains[size_t(i)], g);
-        }
-    };
-    if (kind == "dip") {
-        if (t < 0.5) {
-            set_many(from_idx, float(1.0 - 2.0 * t));
-            if (from_has_program) program_gain = float(1.0 - 2.0 * t);
-        } else {
-            set_many(to_idx, float(2.0 * t - 1.0));
-            if (to_has_program) program_gain = float(2.0 * t - 1.0);
-        }
-        return;
-    }
-    set_many(from_idx, float(1.0 - t));
-    set_many(to_idx, float(t));
-    if (from_has_program) program_gain = std::max(program_gain, float(1.0 - t));
-    if (to_has_program) program_gain = std::max(program_gain, float(t));
-}
 
 }  // namespace
 
@@ -295,29 +261,47 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
                 float* dp = reinterpret_cast<float*>(out.data(ch));
                 std::fill(dp, dp + frame_samples_, 0.f);
             }
-            for (size_t s = 0; s < frame_samples_; ++s) {
-                const int64_t pts_ns = have_media_pts
-                    ? block_start_ns + sampleToPts(int64_t(s), sample_rate_)
-                    : sampleToPts(frame_start + int64_t(s), sample_rate_);
-                applyEvents(bus, pts_ns);
+
+            const auto ptsAt = [&](size_t sample) {
+                return have_media_pts
+                    ? block_start_ns + sampleToPts(int64_t(sample), sample_rate_)
+                    : sampleToPts(frame_start + int64_t(sample), sample_rate_);
+            };
+            size_t begin = 0;
+            while (begin < frame_samples_) {
+                applyEvents(bus, ptsAt(begin));
+                size_t end = frame_samples_;
+                if (!bus.pending.empty() && bus.pending.front().pts_ns != 0)
+                    end = avp::audio_mixer::eventSampleOffset(
+                        bus.pending.front().pts_ns, block_start_ns, frame_start,
+                        sample_rate_, frame_samples_, have_media_pts);
+                // Rounding at a timestamp boundary must not leave the mixer on
+                // the same segment forever.
+                if (end <= begin) end = begin + 1;
+
                 for (size_t si = 0; si < sources_.size(); ++si) {
                     const float g = bus.gains[si];
                     if (g < kGainEpsilon) continue;
                     for (int ch = 0; ch < channels_; ++ch) {
                         float* dp = reinterpret_cast<float*>(out.data(ch));
-                        dp[s] = softClip(dp[s] + blocks[si][size_t(ch)][s] * g);
+                        const float* sp = blocks[si][size_t(ch)].data();
+                        avp::audio_mixer::addSamples(dp, sp, begin, end, g);
                     }
                 }
                 if (!is_program && bus.program_gain >= kGainEpsilon) {
                     for (int ch = 0; ch < channels_; ++ch) {
                         float* dp = reinterpret_cast<float*>(out.data(ch));
-                        dp[s] = softClip(dp[s] + program_frame_[size_t(ch)][s] * bus.program_gain);
+                        const float* sp = program_frame_[size_t(ch)].data();
+                        avp::audio_mixer::addSamples(dp, sp, begin, end, bus.program_gain);
                     }
                 }
                 if (is_program) {
-                    for (int ch = 0; ch < channels_; ++ch)
-                        program_frame_[size_t(ch)][s] = reinterpret_cast<const float*>(out.data(ch))[s];
+                    for (int ch = 0; ch < channels_; ++ch) {
+                        const float* sp = reinterpret_cast<const float*>(out.data(ch));
+                        std::copy(sp + begin, sp + end, program_frame_[size_t(ch)].begin() + begin);
+                    }
                 }
+                begin = end;
             }
             return out;
         };
@@ -375,8 +359,9 @@ public:
             auto from_idx = mapIds(params.value("from", Parameters::array()), from_prog);
             auto to_idx = mapIds(params.value("to", Parameters::array()), to_prog);
             const double t = params.value("t", 0.0);
-            gainsForProgress(kind, t, from_idx, to_idx, sources_.size(), ev.gains, ev.program_gain,
-                             from_prog, to_prog);
+            avp::audio_mixer::gainsForProgress(
+                kind, t, from_idx, to_idx, sources_.size(), ev.gains, ev.program_gain,
+                from_prog, to_prog);
         }
         insertEvent(bus, std::move(ev));
     }
