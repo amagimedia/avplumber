@@ -104,6 +104,7 @@ class FakeMixer:
         (self.canvas_w, self.canvas_h), self.working_format = parameters["canvas"], parameters["working_format"]
         self.color = Color.parse(parameters["color"])
         self.keyframe_node = parameters.get("keyframe_node")
+        self.audio_router_node = parameters.get("audio_router_node")
         self.instances.append(self)
 
     def add_aux_destination(self, source, edge):

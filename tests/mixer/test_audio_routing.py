@@ -62,13 +62,21 @@ def test_mixer_scene_carries_no_audio_fields(native_boundary):
     assert "audio_follow" not in scene_events[0]
 
 
-def test_initial_scene_gets_a_startup_cut_when_audio_router_set(native_boundary):
+def test_no_cut_before_nodes_exist_then_a_startup_cut_after_start(native_boundary):
     nodes, builder = native_boundary
     app = build_application(_audio_show(), MixerOptions(audio_router_node="audio_mixer"),
                             api=_api(nodes, builder))
+    # Regression guard: build() alone must never fire the cut -- live, it always
+    # raced ahead of mixer_comp_a/b and audio_mixer construction and failed with
+    # "node has no runtime controls", leaving AudioMixer's gains at their
+    # all-zero default forever.
+    assert not [e for e in app.avp.events if e.startswith("mixer.cut ")]
+    app.start()
     cut_events = [e for e in app.avp.events if e.startswith("mixer.cut ")]
     assert len(cut_events) == 1
     assert '"scene": "full"' in cut_events[0]
+    # Only after the audio router node's owning group ("output") has started.
+    assert app.avp.events.index("start output") < app.avp.events.index(cut_events[0])
 
 
 def test_no_audio_router_means_no_startup_cut_and_no_audio_fields(native_boundary):

@@ -357,6 +357,18 @@ class MixerGraphBuilder:
         self.avp.executeCommandsFromString(f"mixer.cut {json.dumps(cmd)}")
         self._current_pgm = scene
 
+    def raise_initial_audio_gains(self) -> None:
+        """Re-run the initial-scene cut so audio_router_node (e.g. AudioMixer)
+        receives transition_ended and raises its PGM gains off their all-zero
+        construction default.
+
+        No-op without an audio_router_node. Call only once the compositor and
+        audio_router_node nodes actually exist (both are created lazily when
+        their owning groups start) — see MixerApplication._start().
+        """
+        if self.audio_router_node:
+            self.cut(self._initial_pgm_scene)
+
     def preview(self, scene: str) -> None:
         """Preload *scene* into the hidden PVW slot without taking it to program."""
         cmd = {"mixer": self.name, "scene": scene}
@@ -882,11 +894,14 @@ class MixerGraphBuilder:
 
         self.avp.executeCommandsFromString("\n".join(lines))
 
-        if self.audio_router_node:
-            # Initial PGM video is wired at compositor build time, not via
-            # applyPostTransitionRouting — cut emits transition_ended for the audio router.
-            self.avp.executeCommandsFromString(
-                f"mixer.cut {json.dumps({'mixer': self.name, 'scene': self._initial_pgm_scene})}")
+        # Initial PGM video is wired above (slot/compositor active_inputs), not via
+        # applyPostTransitionRouting. An audio_router_node still needs one
+        # transition_ended to raise its PGM gains off their all-zero construction
+        # default, but the compositor and audio-router nodes a cut touches are
+        # created lazily when their groups start — strictly after build() returns.
+        # A cut fired here always races ahead of that and fails with "node has no
+        # runtime controls". raise_initial_audio_gains() does this instead, once
+        # a caller (see MixerApplication._start()) knows those nodes exist.
 
     def _scene_command(self, scene_name: str, scene: MixerScene) -> str:
         scene_def = {"sources": scene.sources}

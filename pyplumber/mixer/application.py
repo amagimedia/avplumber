@@ -272,6 +272,9 @@ class MixerApplication:
             self.mixer.finish_transition_preheat()
         self.mixer.start_output()
         self.avp.group(OUTPUT_GROUP).startNodes()
+        if self.mixer.audio_router_node:
+            self._wait_for_node(self.mixer.audio_router_node)
+            self.mixer.raise_initial_audio_gains()
         self._wait_for_edges(("mixer_final_out",), "program output")
         if self.wipe_cache_mb:
             self._preload_wipes()
