@@ -1133,16 +1133,56 @@ def test_shared_setup_widgets_and_application_page(client, http_server):
     assert get_page(f"http://127.0.0.1:{server.server_port}", "/setup") == "AI mixer setup"
 
 
+def test_lever_positions_never_queue_behind_a_slow_mixer():
+    bridge = FakeBridge()
+    bridge.gates["mixer.lever"] = gate = threading.Event()
+    first = threading.Thread(target=bridge.take, args=({"command": "lever", "position": 0.1, "duration_sec": 1},))
+    first.start()
+    while not bridge.sent:
+        time.sleep(0.01)
+    # While the first position is with the mixer, newer ones only replace each other.
+    for position in (0.2, 0.3, 0.4):
+        assert bridge.take({"command": "lever", "position": position, "duration_sec": 1}) is True
+    gate.set()
+    first.join(5)
+    assert [json.loads(line.split(" ", 1)[1])["position"] for line in bridge.sent] == [0.1, 0.4]
+    with pytest.raises(ValueError):
+        bridge.take({"command": "lever", "position": 1.5})
+
+
+def test_source_banks_are_shared_and_kept_by_the_setup_manager(client, tmp_path):
+    class Setup:
+        saved = None
+        def source_banks(self): return self.saved
+        def remember_banks(self, banks): Setup.saved = banks
+        def status(self): return {"phase": "running", "message": "", "revision": 1}
+    base, _ = client(FakeBridge(), setup=Setup())
+    def call(method, body=None):
+        request = urllib.request.Request(base + "/api/banks", method=method,
+                                         data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(request) as response:
+            return json.load(response)
+    assert call("GET") == {"banks": None}
+    banks = [["a", "b"], [], ["c", None]]
+    assert call("POST", {"banks": banks}) == {"banks": banks}
+    assert Setup.saved == banks and call("GET") == {"banks": banks}
+    with pytest.raises(urllib.error.HTTPError) as rejected:
+        call("POST", {"banks": [["a"]]})
+    assert rejected.value.code == 400
+
+
 def test_key_tally_poll_is_small_cached_and_invalidated_by_commands(client):
-    bridge = FakeBridge(replies={"mixer.dsk_status": '[{"id":"logo","on":false,"on_air":true,"phase":"fading-out"}]'})
+    bridge = FakeBridge(replies={"mixer.dsk_status": '[{"id":"logo","on":false,"on_air":true,"phase":"fading-out"}]',
+                                 "mixer.ftb_status": '{"on":false,"on_air":false,"phase":"off"}'})
     base, _ = client(bridge)
     def get():
         with urllib.request.urlopen(base + '/api/keys') as response:
             return json.load(response)
     first = get()
     assert first['dsk'][0]['phase'] == 'fading-out'
+    assert first['ftb']['phase'] == 'off'
     assert get() == first
-    assert bridge.sent == ['mixer.dsk_status']
+    assert bridge.sent == ['mixer.dsk_status', 'mixer.ftb_status']
     bridge.take({'command': 'dsk', 'keys': ['logo'], 'on': False, 'fade_seconds': 0})
     assert get()['dsk_sampled_at'] > first['dsk_sampled_at']
-    assert bridge.sent[-1] == 'mixer.dsk_status'
+    assert bridge.sent[-2:] == ['mixer.dsk_status', 'mixer.ftb_status']

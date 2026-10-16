@@ -1859,12 +1859,15 @@ def test_dsk_keys_the_program_after_the_mixer_with_one_small_program_clocked_pas
     app, nodes = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     keyer = nodes["dsk_comp"]
     assert keyer["type"] == "mixer_keyer"
-    assert keyer["src"] == ["mixer_final_out", "dsk_key_bug", "dsk_key_strap"]
-    assert keyer["subscriptions"] == ["", "dsk_key_bug", "dsk_key_strap"]
+    # The last input is the fade to black: nothing feeds it; the keyer holds a black frame there.
+    assert keyer["src"] == ["mixer_final_out", "dsk_key_bug", "dsk_key_strap", "dsk_ftb"]
+    assert keyer["subscriptions"] == ["", "dsk_key_bug", "dsk_key_strap", ""]
+    assert keyer["ftb_input"] == 3 and keyer["mixer"] == "mixer"
     assert [(edge, size) for edge, size in app.avp.edges.plans if edge.startswith("dsk_key_")] == [
         ("dsk_key_bug", 2), ("dsk_key_strap", 2)]
     assert keyer["clock_input"] == 0 and "latency_ms" not in keyer
-    assert keyer["max_layers"] == 3 and keyer["metadata_key"] == "dsk_layers_v1"
+    assert keyer["max_layers"] == 4 and keyer["metadata_key"] == "dsk_layers_v1"
+    assert keyer["layers"][3] == {"input": 3, "dst_x": 0, "dst_y": 0, "dst_w": 1920, "dst_h": 1080, "z": 3, "blend": True}
     assert keyer["layers"][0] == {"dst_x": 0, "dst_y": 0, "dst_w": 1920, "dst_h": 1080}
     assert keyer["layers"][1] == {"input": 1, "dst_x": 1700, "dst_y": 40, "dst_w": 160, "dst_h": 90, "z": 1, "blend": True}
     assert keyer["layers"][2]["dst_w"] == 1920 and keyer["layers"][2]["blend"] is True
@@ -1973,6 +1976,24 @@ def test_dsk_command_the_keyer_rejects_switches_nothing(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         app.avp.commands_registered["mixer.dsk"](json.dumps({"key": "strap", "on": True, "fade_seconds": 1}))
     assert [row["on"] for row in json.loads(app.avp.commands_registered["mixer.dsk_status"](""))] == [True, False]
+
+
+def test_ftb_fades_the_keyed_program_and_keeps_the_keys(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    ftb = app.avp.commands_registered["mixer.ftb"]
+    ftb(json.dumps({"on": True, "fade_seconds": 1}))
+    # Only the fade-to-black input changes; the mask it carries keeps the key that is on (bit 1).
+    assert app.avp.commands[-1] == ('node.object.set dsk_comp key_changes '
+                                    '{"inputs": 8, "active_inputs": 11, "duration_ms": 1000, "curve": "linear"}')
+    # A key command meanwhile keeps the fade to black in its mask.
+    app.avp.commands_registered["mixer.dsk"](json.dumps({"key": "strap", "on": True, "fade_seconds": 0}))
+    assert app.avp.commands[-2] == "node.object.set dsk_comp active_inputs 15"
+    ftb(json.dumps({"toggle": True, "fade_seconds": 0}))
+    assert app.avp.commands[-2:] == ['node.object.set dsk_comp key_changes '
+                                     '{"inputs": 8, "active_inputs": 7, "duration_ms": 0, "curve": "linear"}', KEYFRAME]
+    assert json.loads(app.avp.commands_registered["mixer.ftb_status"](""))["on"] is False
+    with pytest.raises(mixer_config.ConfigError):
+        ftb(json.dumps({"fade_seconds": 1}))
 
 
 def test_dsk_config_fade_is_the_command_default(tmp_path, monkeypatch):
@@ -2106,8 +2127,9 @@ def test_dsk_group_is_one_native_command_and_preparation_does_not_change_targets
     handler(json.dumps({"keys": ["bug", "strap"], "on": False, "fade_seconds": 1}))
     assert app.avp.commands[start:] == [
         'node.object.set dsk_comp key_changes {"inputs": 6, "duration_ms": 1000, "curve": "linear", "active_inputs": 1, "toggle": false}']
-    handler(json.dumps({"keys": ["strap"], "prepare": True, "fade_seconds": .48}))
-    assert app.avp.commands[-1] == 'node.object.set dsk_comp prepare_inputs {"inputs": 4, "duration_ms": 480, "curve": "linear"}'
+    # Next Transition keys switch at the background transition's rate: a key rate does not apply.
+    handler(json.dumps({"keys": ["strap"], "prepare": True}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp prepare_inputs {"inputs": 4}'
     rows = json.loads(app.avp.commands_registered["mixer.dsk_status"](""))
     assert not any(row["on"] for row in rows)
     handler(json.dumps({"keys": [], "prepare": True}))  # clear next-take selection

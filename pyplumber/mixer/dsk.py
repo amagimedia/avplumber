@@ -5,8 +5,10 @@ scene and M/E transition and only the keys are missing. It is one compositor
 pass clocked by the program (``clock_input``): each program frame renders at
 once over every key's frame stamped for that tick, so keying adds no playout
 latency and a late browser paint never stalls the program. A key cuts or fades
-on and off, each on its own; with none visible, the program frame passes through
-without any GPU work.
+on and off, each on its own, or with the background transition (Next Transition);
+with none visible, the program frame passes through without any GPU work. The
+keyer also fades the keyed program to black (FTB): an internal key holding one
+black frame over the whole canvas. The clean feed is never faded.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ class DownstreamKeyer:
         self.keys = cfg.dsk_keys
         self.edges = [f"dsk_key_{k.id}" for k in self.keys]
         self.on = {k.id: k.on for k in self.keys}
+        self.ftb_input, self.ftb_edge, self.ftb_on = len(self.keys) + 1, "dsk_ftb", False   # nothing feeds the edge
         self.lock = threading.Lock()
         for key, edge in zip(self.keys, self.edges):
             # Keys subscribe to the shared source like an aux bus: the source
@@ -34,7 +37,8 @@ class DownstreamKeyer:
             mixer.add_aux_destination(key.source, edge)
 
     def _mask(self, on: dict):
-        return source_mask_param(1 | sum(1 << (i + 1) for i, k in enumerate(self.keys) if on[k.id]))
+        return source_mask_param(1 | sum(1 << (i + 1) for i, k in enumerate(self.keys) if on[k.id])
+                                 | (1 << self.ftb_input if self.ftb_on else 0))
 
     def build(self, program: str, *, clean: bool) -> dict:
         """Key *program*; return the edge of each feed. A clean edge exists only when asked for."""
@@ -52,10 +56,13 @@ class DownstreamKeyer:
         layers = [{"dst_x": 0, "dst_y": 0, "dst_w": w, "dst_h": h}]
         layers += [{"input": i + 1, "dst_x": k.dst.x, "dst_y": k.dst.y, "dst_w": k.dst.w, "dst_h": k.dst.h,
                     "z": i + 1, "blend": True} for i, k in enumerate(self.keys)]
+        # The fade to black covers everything, the keys included.
+        layers.append({"input": self.ftb_input, "dst_x": 0, "dst_y": 0, "dst_w": w, "dst_h": h,
+                       "z": self.ftb_input, "blend": True})
         self.avp.addNode(self.mixer.canvas_compositor({
-            "name": self.node_name, "src": [keyed, *self.edges], "dst": feeds["dirty"],
-            "mixer": self.mixer.name,
-            "subscriptions": ["", *self.edges], "clock_input": 0,
+            "name": self.node_name, "src": [keyed, *self.edges, self.ftb_edge], "dst": feeds["dirty"],
+            "mixer": self.mixer.name, "ftb_input": self.ftb_input,
+            "subscriptions": ["", *self.edges, ""], "clock_input": 0,
             "fps": f"{self.mixer.fps_num}/{self.mixer.fps_den}",
             "max_layers": len(layers), "layers": layers, "active_inputs": self._mask(self.on),
             # The keys whose rectangles the keyer may compose alone, by input; the others take the whole canvas.
@@ -74,8 +81,8 @@ class DownstreamKeyer:
         running fade finish. The group form, keys=[...], changes all named keys on one
         program frame; its explicit cuts also finish running envelopes. toggle=True
         resolves against native targets, not a controller's potentially stale copy.
-        prepare=True selects keys to toggle with each subsequent background take,
-        without changing their current targets (an empty list clears the selection)."""
+        prepare=True selects the keys that switch with each following background take, on its
+        clock (an empty list clears the selection); fade_seconds and curve do not apply to it."""
         key, on = request.get("key"), request.get("on")
         keys = request.get("keys", [key])
         prepare = request.get("prepare", False)
@@ -94,9 +101,8 @@ class DownstreamKeyer:
             if "keys" in request or prepare or toggle:
                 affected = source_mask_param(sum(1 << (i + 1) for i, k in enumerate(self.keys) if k.id in keys))
                 targets = {**self.on, **{k: not self.on[k] if toggle else on for k in keys}}
-                value = {"inputs": affected, "duration_ms": duration_ms, "curve": curve}
-                if not prepare:
-                    value.update(active_inputs=self._mask(targets), toggle=toggle)
+                value = {"inputs": affected} if prepare else {"inputs": affected, "duration_ms": duration_ms, "curve": curve,
+                                                              "active_inputs": self._mask(targets), "toggle": toggle}
                 self.avp.executeCommandsFromString(f"node.object.set {self.node_name} " +
                     ("prepare_inputs " if prepare else "key_changes ") + json.dumps(value))
                 if not prepare:
@@ -119,11 +125,42 @@ class DownstreamKeyer:
             self.on[key] = on
             return self.state()
 
-    def state(self) -> list:
+    def ftb(self, request) -> dict:
+        """Fade the keyed program to black or back: on, or toggle=True; fade_seconds (0 cuts)
+        and curve default to the config's fade ones."""
+        on, toggle = request.get("on"), request.get("toggle", False)
+        if not isinstance(toggle, bool) or (not toggle and not isinstance(on, bool)):
+            raise ConfigError("ftb needs a boolean on, or toggle")
+        seconds = key_fade_seconds(request.get("fade_seconds", self.cfg.fade_seconds), "ftb fade_seconds")
+        curve = fade_curve(request.get("curve", "linear"), "ftb curve")
+        with self.lock:
+            self._rendered()
+            self.ftb_on = not self.ftb_on if toggle else on
+            self.avp.executeCommandsFromString(f"node.object.set {self.node_name} key_changes " + json.dumps(
+                {"inputs": source_mask_param(1 << self.ftb_input), "active_inputs": self._mask(self.on),
+                 "duration_ms": round(seconds * 1000), "curve": curve}))
+            if not seconds:
+                self._keyframe()
+            return self.ftb_status()
+
+    def _rendered(self) -> dict:
         try:
-            rendered = {row["input"]: row for row in self.avp.node(self.node_name).getObject("keys")}
+            rows = {row["input"]: row for row in self.avp.node(self.node_name).getObject("keys")}
         except Exception:
-            rendered = {}  # startup/older module: visibility is unknown, never infer it from the target
+            return {}  # startup/older module: visibility is unknown, never infer it from the target
+        if "on" in rows.get(self.ftb_input, {}):
+            self.ftb_on = rows[self.ftb_input]["on"]
+        return rows
+
+    def ftb_status(self) -> dict:
+        """The fade to black as the last program frame rendered it."""
+        ftb = dict(self._rendered().get(self.ftb_input, {}))
+        ftb.pop("input", None)
+        ftb.pop("next_take", None)
+        return {"on": self.ftb_on, **ftb}
+
+    def state(self) -> list:
+        rendered = self._rendered()
         rows = []
         for i, k in enumerate(self.keys):
             native = dict(rendered.get(i + 1, {}))
@@ -144,4 +181,6 @@ class DownstreamKeyer:
 
 def register_dsk_commands(avp, keyer):
     avp.registerControlCommand("mixer.dsk", lambda arg: json.dumps(keyer.set(json.loads(arg))) + "\n", True)
+    avp.registerControlCommand("mixer.ftb", lambda arg: json.dumps(keyer.ftb(json.loads(arg))) + "\n", True)
     avp.registerControlCommand("mixer.dsk_status", lambda _arg: json.dumps(keyer.state()) + "\n", True, True)   # polled: not logged
+    avp.registerControlCommand("mixer.ftb_status", lambda _arg: json.dumps(keyer.ftb_status()) + "\n", True, True)

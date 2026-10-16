@@ -327,6 +327,15 @@ class SetupRuntime:
                     bus.update(fields)
                     write_atomic(path, json.dumps(doc, indent=2) + "\n")
 
+    # Beside the show's settings, not in them: an Apply rewrites the show file.
+    def source_banks(self):
+        path = self.media_dir / "source_banks.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def remember_banks(self, banks):
+        """Keep the operator's source banks across restarts and Apply."""
+        write_atomic(self.media_dir / "source_banks.json", json.dumps(banks) + "\n")
+
     def _stop(self, timeout=STOP_TIMEOUT_SEC):
         with self.stop_lock:
             process = self.process

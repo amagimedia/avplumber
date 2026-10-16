@@ -8,7 +8,9 @@ mixer needs no HTTP server of its own and the pages need no build step:
     GET  /wall          every output side by side, nothing to control
     GET  /outputs.js    the output list both pages play from
     GET  /api/state     status + scenes + settings in one round trip
-    GET  /api/keys      small cached rendered-key tally, sampled separately from show telemetry
+    GET  /api/keys      small cached rendered-key and fade-to-black tally, sampled separately from show telemetry
+    GET  /api/banks     the source banks: {"banks": [[scene|null, ...x9], x3] | null}, shared by every controller
+    POST /api/banks     {"banks": [[...], [...], [...]]}: replaces them (kept with the show's settings)
     GET  /api/outputs   the show's settings and the GPU figures alone, for player pages
     GET  /api/status    mixer.status alone, for scripts that poll often
     POST /api/command   {"command": "cut"|"fade"|"wipe"|"preview", "scene": ...}
@@ -16,7 +18,14 @@ mixer needs no HTTP server of its own and the pages need no build step:
                         and "color": "#RRGGBB" to dip through that colour instead of mixing)
                         {"command": "dsk", "key": ..., "on": true|false, "fade_seconds"?: s, "curve"?: ...}
                         {"command": "dsk", "keys": [...], "on": true|false | "toggle": true, ...}
-                        {"command": "dsk", "keys": [...], "prepare": true, "fade_seconds"?: s, "curve"?: ...}
+                        {"command": "dsk", "keys": [...], "prepare": true}: the keys that switch with the
+                        next background transitions (Next Transition), on the transition's own clock
+                        {"command": "ftb", "on": true|false | "toggle": true, "fade_seconds"?: s, "curve"?: ...}
+                        fades the keyed program (not the clean feed) to black and back
+                        {"command": "lever", "position": 0..1, "duration_sec"?: s, "curve"?: ..., "color"?: ...}
+                        the lever arm (T-bar) for a panel, a MIDI fader or this page: from the end it rests
+                        at it mixes to Preview, the other end completes, its start cancels; positions sent
+                        faster than the mixer takes them collapse to the newest
                         A cut, fade or wipe superseded by a newer one before it reached
                         the mixer answers {"ok": true, "superseded": true}.
 
@@ -33,6 +42,7 @@ import json
 import logging
 import os
 import signal
+import threading
 from urllib.parse import urlsplit
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -69,13 +79,43 @@ def normalize_preview_base(value: str) -> str:
     return value + "/" if value and not value.endswith("/") else value
 
 
+class SourceBanks:
+    """The scenes on the nine buttons of the Program and Preset rows, in three banks, shared by every
+    controller of the show and persisted by the setup manager when there is one."""
+    BANKS, BUTTONS = 3, 9
+
+    def __init__(self, setup: SetupController | None = None):
+        # A setup controller of an embedding application may predate source banks: they then
+        # live only as long as this server.
+        self.setup = setup if callable(getattr(setup, "source_banks", None)) else None
+        self.lock, self.banks, self.loaded = threading.Lock(), None, self.setup is None
+
+    def get(self):
+        with self.lock:
+            if not self.loaded:
+                self.banks, self.loaded = self.setup.source_banks(), True
+            return self.banks
+
+    def set(self, banks):
+        if (not isinstance(banks, list) or len(banks) != self.BANKS
+                or any(not isinstance(b, list) or len(b) > self.BUTTONS for b in banks)
+                or any(s is not None and not isinstance(s, str) for b in banks for s in b)):
+            raise ValueError(f"banks must be {self.BANKS} lists of at most {self.BUTTONS} scene ids or nulls")
+        with self.lock:
+            self.banks, self.loaded = [list(b) for b in banks], True
+            if self.setup:
+                self.setup.remember_banks(self.banks)
+        return self.banks
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "avplumber-mixer-webui"
 
     def __init__(self, bridge: MixerBridge, *args, setup: SetupController | None = None, gpu: GpuTelemetry | None = None, host_stats=None, config=None,
-                 recent=None, browser_cpu=None, **kwargs):
+                 recent=None, browser_cpu=None, banks: SourceBanks | None = None, **kwargs):
         self.bridge = bridge
+        self.banks = banks or SourceBanks(setup)
         self.setup_manager = setup
         self.gpu = gpu if gpu is not None else GpuStats()
         self.host_stats = host_stats
@@ -129,6 +169,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, self.bridge.keys())
             except Exception as exc:
                 self._send_json(503, {"error": str(exc)})
+        elif path == "/api/banks":
+            self._send_json(200, {"banks": self.banks.get()})
         elif path in ("/api/state", "/api/status"):
             if self.setup_manager:
                 status = self.setup_manager.status()
@@ -141,6 +183,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 state = self.bridge.state()
                 state["gpus"] = self.gpu.snapshot()
+                state["source_banks"] = self.banks.get()
                 state["host"] = self.host_stats.values if self.host_stats else None
                 # Chromium's CPU from the browser service; None hides the THREAD tip's Chromium part.
                 state["chromium"] = self.browser_cpu.values if self.browser_cpu else None
@@ -185,6 +228,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
+        if self.path.partition("?")[0] == "/api/banks":
+            try:
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+                self._send_json(200, {"banks": self.banks.set(json.loads(body or b"{}").get("banks"))})
+            except (ValueError, AttributeError) as exc:
+                self._send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
         if self.path.partition("?")[0] != "/api/command":
             self._send_json(404, {"error": "not found"})
             return
@@ -221,7 +273,8 @@ def serve(bridge: MixerBridge, bind: str, port: int, setup: SetupController | No
     if price:
         config["compute_price"] = price
     server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=gpu if gpu is not None else GpuStats(), host_stats=host_stats,
-                                                        config=config, recent=recent, browser_cpu=browser_cpu))
+                                                        config=config, recent=recent, browser_cpu=browser_cpu,
+                                                        banks=SourceBanks(setup)))
     server.daemon_threads = True
     return server
 

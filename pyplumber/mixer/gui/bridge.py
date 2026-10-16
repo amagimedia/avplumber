@@ -47,16 +47,46 @@ class MixerBridge:
         self._take_running = False
         self._keys_lock = threading.Lock()
         self._keys_at = float("-inf")
-        self._keys = []
+        self._keys = {"dsk": [], "ftb": {}}
+        self._lever_lock = threading.Lock()
+        self._lever_next: str | None = None
+        self._lever_sending = False
 
     def keys(self, timeout: float | None = None) -> dict:
-        """Small, shared poll for frame-derived key tally, independent of the large show state."""
+        """Small, shared poll for frame-derived key and fade-to-black tally, independent of the large show state."""
         with self._keys_lock:
             now = time.monotonic()
             if now - self._keys_at >= STATE_TTL_S or self._keys_at <= self._changed_at:
-                self._keys = json.loads(self.command("mixer.dsk_status", timeout) or "[]")
+                self._keys = {"dsk": json.loads(self.command("mixer.dsk_status", timeout) or "[]"),
+                              "ftb": json.loads(self.command("mixer.ftb_status", timeout) or "{}")}
                 self._keys_at = now
-            return {"dsk": self._keys, "dsk_sampled_at": self._keys_at}
+            return {**self._keys, "dsk_sampled_at": self._keys_at}
+
+    def lever(self, request: dict) -> bool:
+        """The lever arm. A fader reports positions faster than they matter: the newest waits while
+        one is being sent and replaces any older one waiting, so positions never queue up."""
+        position = request.get("position")
+        if isinstance(position, bool) or not isinstance(position, (int, float)) or not 0 <= position <= 1:
+            raise ValueError("lever needs a position from 0 to 1")
+        line = mixer_command("lever", self.mixer, **{k: v for k, v in request.items() if k not in ("command", "mixer")})
+        with self._lever_lock:
+            self._lever_next = line
+            if self._lever_sending:
+                return True
+            self._lever_sending = True
+        try:
+            while True:
+                with self._lever_lock:
+                    line, self._lever_next = self._lever_next, None
+                    if line is None:
+                        self._lever_sending = False
+                        return True
+                self.command(line)
+                self._changed_at = time.monotonic()
+        except BaseException:
+            with self._lever_lock:
+                self._lever_next, self._lever_sending = None, False
+            raise
 
     def _run(self, coro, timeout: float | None = None):
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -154,7 +184,9 @@ class MixerBridge:
         """Returns the mixer's answer to an aux, aux_layout, aux_page or dsk command; for a take, whether it was sent
         (False when a newer program take superseded it unsent)."""
         command = request.get("command")
-        if command in ("dsk", *AUX_COMMANDS):
+        if command == "lever":
+            return self.lever(request)
+        if command in ("dsk", "ftb", *AUX_COMMANDS):
             payload = {k: v for k, v in request.items() if k != "command"}
             try:
                 result = json.loads(self.command(f"mixer.{command} " + json.dumps(payload)) or "{}")

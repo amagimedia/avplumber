@@ -28,3 +28,11 @@ class SetupController(Protocol):
     def remember_aux(self, bus_id: str | None, fields: dict[str, Any]) -> None:
         """Persist an accepted AUX change, or do nothing if persistence is unneeded."""
         ...
+
+    def source_banks(self) -> list[list[str | None]] | None:
+        """The persisted source banks, None before any were saved."""
+        ...
+
+    def remember_banks(self, banks: list[list[str | None]]) -> None:
+        """Persist the source banks with the show's settings."""
+        ...

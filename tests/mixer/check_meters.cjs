@@ -37,7 +37,11 @@ const {chromium} = require('playwright');
     const root = path.join(__dirname, '../../pyplumber/mixer/gui/assets'), commands = [];
     await page.route('**/*', route => {
       const url = new URL(route.request().url());
-      if (url.pathname === '/api/keys') return route.fulfill({json: {dsk: sample.dsk || []}});
+      if (url.pathname === '/api/keys') return route.fulfill({json: {dsk: sample.dsk || [], ftb: sample.ftb}});
+      if (url.pathname === '/api/banks') {
+        sample.source_banks = route.request().postDataJSON().banks;
+        return route.fulfill({json: {banks: sample.source_banks}});
+      }
       if (url.pathname === '/api/state') return route.fulfill({json: sample});
       if (url.pathname === '/api/command') {
         const command = route.request().postDataJSON();
@@ -180,9 +184,9 @@ const {chromium} = require('playwright');
     assert.equal((await page.locator('#lat-tip td:nth-child(2)').allTextContents())[0], '—', 'restart clears prior cut history');
     assert.equal(await page.locator('#lat b').textContent(), '—', 'and the bar has no cut to show');
     // On-air shortcuts are checked only against this mocked mixer.
-    await page.evaluate(() => { selected = 'a'; setDirect(true); armedSlot = {bus: 'aux0', slot: 0}; restFocus(); });
+    await page.evaluate(() => { selected = 'a'; armedSlot = {bus: 'aux0', slot: 0}; restFocus(); });
     await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('ArrowRight')]);
-    assert.deepEqual(commands.splice(0), [{command: 'preview', scene: 'b'}], 'arrows bypass Direct and slot assignment');
+    assert.deepEqual(commands.splice(0), [{command: 'preview', scene: 'b'}], 'arrows bypass slot assignment');
     await page.keyboard.press('ArrowRight');
     await page.waitForFunction(() => state.status.pvw_scene === 'a');
     assert.deepEqual(commands.splice(0), [{command: 'preview', scene: 'a'}], 'arrows wrap visible scenes');
@@ -191,7 +195,7 @@ const {chromium} = require('playwright');
     assert.equal(commands.length, 1);
     assert.equal(commands[0].command, 'fade');
     assert.equal(commands[0].scene, 'a', 'Space takes Preview even when selection differs');
-    assert.equal(commands[0].duration_sec, 0.5);
+    assert.equal(commands[0].duration_sec, 15 / 25, 'the mix rate is in frames at the canvas rate');
     commands.length = 0;
     // Choosing a transition only prepares Auto (a switcher's transition type); Cut and Auto take
     // the Preview the mixer shows, not the last pick.
@@ -199,18 +203,19 @@ const {chromium} = require('playwright');
     await page.keyboard.press('f');
     assert.equal(await page.evaluate(() => currentTransition), 'fade', 'F selects fade');
     assert.deepEqual(commands, [], 'F does not take');
-    assert.equal(await page.locator('#auto').textContent(), 'Auto · fade', 'Auto shows what it will run');
+    assert.equal(await page.locator('#auto').textContent(), 'Auto · Mix 15f', 'Auto shows what it will run, at what rate');
     // Clicking the selector must not leave Space to it: Space after a click is Auto, not a second selection.
     await page.locator('#fade').click();
     await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('Space')]);
     assert.deepEqual(commands.splice(0).map(c => c.command), ['fade'], 'Space after clicking Fade runs Auto');
     await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('c')]);
     assert.deepEqual(commands.splice(0).map(c => [c.command, c.scene]), [['cut', 'a']], 'C cuts the Preview');
-    await page.evaluate(() => { setDirect(true); restFocus(); });
-    assert.equal(await page.locator('#direct').textContent(), 'Direct cut: on');
-    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('2')]);
-    assert.equal(commands.splice(0)[0].command, 'cut', 'a Direct pick cuts whatever Auto is set to');
-    await page.evaluate(() => { setDirect(false); restFocus(); });
+    // The Program row cuts its scene to air; the Preset row only selects.
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.locator('#pgm-row button').nth(1).click()]);
+    assert.deepEqual(commands.splice(0).map(c => [c.command, c.scene]), [['cut', 'b']], 'a Program row button cuts');
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.locator('#pst-row button').nth(1).click()]);
+    assert.deepEqual(commands.splice(0).map(c => [c.command, c.scene]), [['preview', 'b']], 'a Preset row button presets');
+    assert.equal(await page.locator('#direct').count(), 0, 'no hidden direct-cut mode');
     sample.dsk = [{id: 'logo', on: true}, {id: 'title', on: false}];
     await page.evaluate(async () => { await refresh(); restFocus(); });
     await page.waitForFunction(() => state.dsk?.length === 2);
@@ -233,10 +238,11 @@ const {chromium} = require('playwright');
     await page.evaluate(() => refresh());
     assert.deepEqual(commands, [], 'typing and held take/key shortcuts never send commands');
     await page.locator('#hint').hover();
-    assert.match(await page.locator('#hint-tip').innerText(), /Browse Preview only/);
-    assert.match(await page.locator('#hint-tip').innerText(), /Auto: fade to Preview/);
+    assert.match(await page.locator('#hint-tip').innerText(), /Browse Preset only/);
+    assert.match(await page.locator('#hint-tip').innerText(), /Auto: Mix 15f to Preset/);
     const shortcutTip = await page.locator('#hint-tip').boundingBox();
     assert(shortcutTip.y >= 0 && shortcutTip.y + shortcutTip.height <= 1080, 'shortcut hover fits above the bottom bar');
+    await page.mouse.move(0, 0);   // close the tip: it covers the take bar's buttons
     // Tally follows rendered video even when the requested endpoint is already off.
     sample.dsk[0] = {...sample.dsk[0], on: false, on_air: true, phase: 'fading-out', opacity: .6};
     await page.evaluate(() => refresh());
@@ -245,16 +251,18 @@ const {chromium} = require('playwright');
     await page.locator('#keys .key-controls').first().getByRole('button', {name: 'Cut', exact: true}).click();
     await page.waitForFunction(() => !keysPending);
     assert.deepEqual(commands.splice(0).map(c => [c.keys, c.toggle, c.fade_seconds]), [[['logo'], true, 0]]);
-    await page.locator('#keys input[type=checkbox]').first().check();
+    // Next Transition: a lit key button joins the background's next transition, at its rate.
+    await page.locator('#next-keys button').first().click();
     await page.waitForFunction(() => !keysPending);
-    assert.deepEqual(commands.splice(0).map(c => [c.prepare, c.keys]), [[true, ['logo']]]);
+    assert.deepEqual(commands.splice(0), [{command: 'dsk', keys: ['logo'], prepare: true}]);
 
     // Normal takes must never fall back to stale selection when Preview is empty.
     sample.status.pvw_scene = '';
     await page.evaluate(async () => { await refresh(); selected = 'b'; restFocus(); });
     await page.keyboard.press('c');
     assert.deepEqual(commands, []);
-    assert.match(await page.locator('#error').textContent(), /Select a Scene Preview/);
+    assert.match(await page.locator('#error').textContent(), /Select a Preset/);
+    await page.mouse.move(0, 0);   // the error re-flows the take bar, which can put the shortcut tip under the pointer
     sample.status.pvw_scene = 'a';
     await page.evaluate(() => refresh());
     await page.selectOption('#fade-time-unit', 'frames');
@@ -271,16 +279,16 @@ const {chromium} = require('playwright');
     await page.evaluate(async () => { await refresh(); filter = 'grid'; renderChips(); renderScenes(); restFocus(); });
     await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('1')]);
     assert.deepEqual(commands.splice(0).map(c => c.scene), ['a']);
-    await page.selectOption('#bank', {value: '1'});
+    await page.locator('#bank-buttons button').nth(1).click();
     assert.equal(await page.evaluate(() => sourceBank), 1);
-    assert.equal(await page.locator('#bank').inputValue(), '1');
-    await page.locator('#bank-save').click();
+    assert.equal(await page.locator('#bank-buttons button').nth(1).getAttribute('aria-pressed'), 'true');
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/banks')), page.locator('#bank-store').click()]);
     await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('1')]);
     assert.deepEqual(commands.splice(0).map(c => c.scene), ['grid_64']);
     await page.reload();
     await page.waitForFunction(() => state?.scenes?.includes('grid_64'));
-    assert.match(await page.locator('#bank-buttons button').first().textContent(), /grid_64/);
-    assert.equal(await page.evaluate(() => sourceBank), 1, 'selected bank persists');
+    assert.match(await page.locator('#pst-row button').first().textContent(), /grid_64/, 'banks are the show\'s, not the page\'s');
+    assert.equal(await page.evaluate(() => sourceBank), 1, 'the bank shown persists per page');
 
     // Monitoring another bus while a slot is armed cannot redirect the edit.
     for (const bus of sample.aux_buses.slice(0, 2)) {
@@ -291,11 +299,11 @@ const {chromium} = require('playwright');
     await page.selectOption('#edit-bus', 'aux0');
     await page.locator('#slots .assign').first().click();
     await page.evaluate(() => { viewers[0].grid = 'aux1'; renderSlots(); });
-    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.locator('#bank-buttons button').first().click()]);
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.locator('#pst-row button').first().click()]);
     const edit = commands.splice(0)[0];
     assert.equal(edit.bus, 'aux0');
     assert.deepEqual(edit.scenes, ['grid_64']);
-    assert.match(await page.locator('.bus.pvw h2').textContent(), /Scene Preview/);
+    assert.match(await page.locator('.bus.pvw h2').textContent(), /Preset/);
     await page.screenshot({path: '/tmp/operator-controls.png', fullPage: true});
     await page.setViewportSize({width: 390, height: 844});
     await page.locator('#power').focus();

@@ -204,9 +204,26 @@
   .key-controls .key { flex: 1 0 100%; }
 
   .key-status, .next-key { font-size: 11px; color: var(--muted); }
-  #source-banks { padding: 8px; border-bottom: 1px solid var(--edge); }
-  #bank-buttons { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
-  #bank-buttons button { flex: 1 1 90px; }
+  /* Program and Preset rows: a switcher's crosspoint buttons, nine per bank, lit by tally. */
+  #xpt-card { padding: 8px; display: grid; gap: 5px; }
+  .xpt-banks, .xpt-row { display: flex; align-items: center; gap: 5px; }
+  .xpt-row > div { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 5px; flex: 1; }
+  .xpt-label { font-size: 11px; letter-spacing: .08em; color: var(--muted); width: 3.2em; flex: none; }
+  .pgm-row .xpt-label { color: var(--pgm); }
+  .pst-row .xpt-label { color: var(--pvw); }
+  .xpt { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: left; }
+  .xpt .n { color: var(--muted); font-size: 11px; margin-right: 6px; }
+  .pgm-row .xpt.lit { border-color: var(--pgm); background: var(--pgm-dim); }
+  .pst-row .xpt.lit { border-color: var(--pvw); background: var(--pvw-dim); }
+  .next-trans { display: inline-flex; align-items: center; gap: 4px; }
+  .next-trans .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .lever-ctl { display: inline-flex; flex-direction: column; gap: 3px; width: 130px; }
+  #lever { width: 100%; accent-color: var(--accent); }
+  .tprog { height: 4px; border-radius: 2px; background: var(--edge); overflow: hidden; }
+  .tprog i { display: block; height: 100%; width: 0; background: var(--pgm); }
+  .ftb-ctl { display: inline-flex; align-items: center; gap: 4px; }
+  #ftb[data-black="true"] { border-color: var(--pgm); color: var(--pgm); }
+  .key-rate { width: 3.6em; }
   select { background: var(--raised); color: var(--text); border: 1px solid var(--edge); border-radius: 4px; }
   .key { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid var(--edge); border-radius: 7px;
          background: var(--raised); cursor: pointer; font-size: 13px; text-align: left; }
@@ -285,7 +302,7 @@
   .vsep { width: 1px; align-self: stretch; background: var(--edge); margin-inline: 2px; }
   /* Right-aligned in the space the controls' last row leaves, never on a row of its own: keys only when
      the words do not fit, hidden when the keys do not either (see trimTakebar). */
-  #hint { flex: 1 1 0; min-width: 0; text-align: right; white-space: nowrap; overflow: hidden; color: var(--faint); font-size: 11.5px; }
+  #hint { flex: 1 0 14em; min-width: 0; text-align: right; white-space: nowrap; overflow: hidden; color: var(--faint); font-size: 11.5px; }
   #hint.short .w { display: none; }
   #hint kbd { font: 11px var(--mono); color: var(--muted); }
   #error { flex-basis: 100%; color: var(--pgm); font-size: 12.5px; }
@@ -396,13 +413,13 @@
   <section id="deck" aria-label="Mixer controls">
     <div id="buses">
       <section class="card bus pgm"><h2 class="title">Program</h2><div class="scene" id="pgm">—</div><div class="state" id="pgm-state">on air</div></section>
-      <section class="card bus pvw"><h2 class="title" title="Selected background scene only; downstream keys are not shown here">Scene Preview</h2><div class="scene" id="pvw">—</div><div class="state" id="pvw-state">ready</div></section>
+      <section class="card bus pvw"><h2 class="title" title="The next background; downstream keys are not composited here">Preset</h2><div class="scene" id="pvw">—</div><div class="state" id="pvw-state">ready</div></section>
     </div>
 
     <div id="row2" hidden>
       <section class="card widget" id="keys-card" aria-label="Downstream keys" hidden>
         <header><h2 class="title">Keys</h2><span class="note">dirty feed only</span>
-          <span class="fade-ctl key-fade" id="key-fade"><label class="field" title="Key fade · empty or 0 cuts"><input id="key-fade-s" type="number" min="0" max="10" step="0.1" placeholder="0" aria-label="Key fade in seconds, empty or 0 cuts"><select id="key-time-unit" aria-label="Key duration unit"><option value="seconds">s</option><option value="frames">frames</option></select></label></span></header>
+          <span class="fade-ctl key-fade" id="key-fade"><label class="field" title="Unit of every key's Auto rate; 0 cuts"><select id="key-time-unit" aria-label="Key rate unit"><option value="frames">frames</option><option value="seconds">s</option></select></label></span></header>
         <div id="keys"></div><button class="btn" id="keys-all" type="button" title="One group command: all keys off if any are targeted on, otherwise all on (K)">Toggle all keys (K)</button>
       </section>
       <section class="card widget" id="slots-card" aria-labelledby="slots-title" hidden>
@@ -410,6 +427,13 @@
         <div id="slots"></div>
       </section>
     </div>
+
+    <section class="card" id="xpt-card" aria-label="Program and Preset rows">
+      <div class="xpt-banks" role="group" aria-label="Source bank"><span class="xpt-label">Bank</span><span id="bank-buttons"></span>
+        <button class="btn" id="bank-store" type="button" title="Store the first nine scenes listed below on this bank's buttons, for every controller">Store list</button></div>
+      <div class="xpt-row pgm-row"><span class="xpt-label">PGM</span><div id="pgm-row" role="group" aria-label="Program row: cuts to air"></div></div>
+      <div class="xpt-row pst-row"><span class="xpt-label">PST</span><div id="pst-row" role="group" aria-label="Preset row"></div></div>
+    </section>
 
     <section class="card" id="scenes-card">
       <header>
@@ -420,24 +444,26 @@
         <a class="newtab" id="graph-open" target="_blank" rel="noopener" hidden>Open full graph in new tab
           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 2h3v3M10 2 5.5 6.5"/></svg></a>
       </header>
-      <div id="source-banks"><label>Source bank <select id="bank" aria-label="Source bank"><option value="0">1</option><option value="1">2</option><option value="2">3</option></select></label>
-        <button class="btn" id="bank-save" type="button" title="Explicitly replace this bank with the first nine currently browsed scenes">Save browsed scenes to bank</button><div id="bank-buttons"></div></div>
       <div id="scenes" tabindex="-1"></div>
       <div id="graph" hidden></div>
     </section>
 
     <footer class="card" id="takebar">
-      <button class="btn" id="cut" type="button" title="Cut Preview to Program (C)" aria-keyshortcuts="C">Cut</button>
-      <button class="btn" id="auto" type="button" title="Auto: run the selected transition to Preview (Space)" aria-keyshortcuts="Space">Auto</button>
+      <span class="next-trans" id="next-trans" role="group" aria-label="Next transition"><span class="xpt-label">Next</span><button class="btn" id="next-bkgd" type="button" aria-pressed="true" disabled title="The background always transitions">BKGD</button><span id="next-keys"></span></span>
       <span class="vsep"></span>
-      <button class="btn" id="fade" type="button" aria-pressed="false" title="Select fade for Auto (F)" aria-keyshortcuts="F">Fade</button>
-      <span class="fade-ctl" id="fade-ctl"><label class="field"><input id="fade-s" type="number" min="0.1" step="0.1" value="0.5" aria-label="Fade duration"><select id="fade-time-unit" aria-label="Fade duration unit"><option value="seconds">s</option><option value="frames">frames</option></select></label></span>
+      <button class="btn" id="fade" type="button" aria-pressed="false" title="Select Mix for Auto and the lever (F)" aria-keyshortcuts="F">Mix</button>
+      <span class="fade-ctl" id="fade-ctl"><label class="field"><input id="fade-s" type="number" min="1" step="1" value="15" aria-label="Mix rate in frames"><select id="fade-time-unit" aria-label="Mix rate unit"><option value="frames">frames</option><option value="seconds">s</option></select></label></span>
       <span class="vsep"></span>
       <span id="wipes"></span>
       <label class="field" id="wipe-custom" hidden><input id="wipe-file" type="text" placeholder="wipe clip path on the mixer host" aria-label="Wipe clip path on the mixer host"></label>
       <span class="vsep"></span>
-      <button class="btn" id="direct" type="button" aria-pressed="false" title="Picks cut straight to Program (D)" aria-keyshortcuts="D">Direct cut: off</button>
-      <span id="hint" aria-label="Keyboard shortcuts"><kbd>1–9</kbd><span class="w"> scene</span> · <kbd>Space</kbd><span class="w"> auto</span> · <kbd>C</kbd><span class="w"> cut</span> · <kbd>F</kbd><span class="w"> fade</span> · <kbd>W</kbd><span class="w"> wipe</span> · <kbd>D</kbd><span class="w"> direct</span><span id="hint-pages" hidden> · <kbd>[ ]</kbd><span class="w"> pages</span></span></span>
+      <button class="btn" id="cut" type="button" title="Cut Preset to Program (C)" aria-keyshortcuts="C">Cut</button>
+      <button class="btn" id="auto" type="button" title="Auto: run the selected transition to Preset (Space)" aria-keyshortcuts="Space">Auto</button>
+      <span class="lever-ctl" id="lever-ctl"><input id="lever" type="range" min="0" max="1000" step="1" value="0" aria-label="Lever arm"
+        title="Lever arm (T-bar): mixes to Preset from the end it rests at; the other end completes, its start cancels"><span class="tprog" id="tprog" title="Transition progress"><i></i></span></span>
+      <span class="vsep"></span>
+      <span class="ftb-ctl" id="ftb-ctl" hidden><button class="btn" id="ftb" type="button" title="Fade to black and back: the keyed program, not the clean feed">FTB</button><label class="field"><input id="ftb-rate" type="number" min="0" step="1" value="30" aria-label="Fade to black rate in frames"><span>f</span></label></span>
+      <span id="hint" aria-label="Keyboard shortcuts"><kbd>1–9</kbd><span class="w"> preset</span> · <kbd>Space</kbd><span class="w"> auto</span> · <kbd>C</kbd><span class="w"> cut</span> · <kbd>F</kbd><span class="w"> mix</span> · <kbd>W</kbd><span class="w"> wipe</span><span id="hint-pages" hidden> · <kbd>[ ]</kbd><span class="w"> pages</span></span></span>
       <div id="error" role="alert"></div>
     </footer>
   </section>
@@ -489,14 +515,14 @@ let stale = false;               // the last /api/state poll failed
 let scenes = [];                 // [{id}], sorted like the tiles
 let visible = [];                // scene ids behind the tiles, in the order 1–9 picks them
 let selected = "";               // browsing and AUX assignment selection; takes use server Preview
-let direct = false;              // a pick goes straight to program
-let directTouched = false;       // once the operator toggles it, stop following the config
-let currentTransition = "cut";   // effect prepared for AUTO
+let currentTransition = "fade";  // effect prepared for AUTO: a mix (with a colour, a dip) or a wipe clip
 let tookTransition = false;      // once the operator takes one, stop following the config
 // Stop polling from overwriting typing, or a curve the operator picked.
-const touched = {fade: false, wipe: false, keyFade: false, fadeCurve: false, keyCurve: false};
+const touched = {fade: false, wipe: false, fadeCurve: false, keyCurve: false};
+// Each key's own Auto rate in seconds, as the operator last set it; the config's dsk rate otherwise.
+const keyRates = store.get("keyRates", {});
 let wipes = null;                // the library published by the mixer; null until the first state so an empty one still renders
-let currentWipe = null;          // the clip W and a direct-mode wipe use
+let currentWipe = null;          // the clip W selects
 let editBus = store.get("editBus", "");
 let armedSlot = null;            // multiview slot waiting for a scene
 let setupRevision;
@@ -552,24 +578,23 @@ function durationSeconds(id, unit, fallback) {
     return null;
   }
   const seconds = frames ? value / canvasFps() : value;
-  if ((id === "fade-s" && seconds <= 0) || (id === "key-fade-s" && seconds > 10)) {
-    showError(id === "fade-s" ? "Fade duration must be positive" : "Key duration cannot exceed 10 seconds"); return null;
+  if ((id === "fade-s" && seconds <= 0) || (id !== "fade-s" && seconds > 10)) {
+    showError(id === "fade-s" ? "The mix rate must be positive" : "A key rate cannot exceed 10 seconds"); return null;
   }
   return seconds;
 }
 function setDuration(id, unit, seconds) {
   $(id).value = $(unit).value === "frames" ? Math.round(seconds * canvasFps()) : seconds;
 }
-for (const [id, unit, touch] of [["fade-s", "fade-time-unit", "fade"], ["key-fade-s", "key-time-unit", "keyFade"]]) {
-  let previous = "seconds";
+for (const [id, unit, touch] of [["fade-s", "fade-time-unit", "fade"]]) {
+  let previous = $(unit).value;
   $(unit).onchange = () => {
     const seconds = Number($(id).value) / (previous === "frames" ? canvasFps() : 1);
     if (!canvasFps()) { $(unit).value = previous; return showError("Canvas frame rate is unavailable"); }
     previous = $(unit).value;
-    $(id).setAttribute("aria-label", `${touch === "fade" ? "Fade" : "Key"} duration in ${previous}`);
+    $(id).setAttribute("aria-label", `Mix rate in ${previous}`);
     $(id).step = previous === "frames" ? "1" : "0.1";
-    $(id).min = id === "fade-s" ? (previous === "frames" ? "1" : "0.001") : "0";
-    if (id === "key-fade-s") $(id).max = previous === "frames" ? 10 * canvasFps() : 10;
+    $(id).min = previous === "frames" ? "1" : "0.001";
     setDuration(id, unit, seconds); touched[touch] = true;
     $(id).dispatchEvent(new Event("change"));
   };
@@ -577,7 +602,7 @@ for (const [id, unit, touch] of [["fade-s", "fade-time-unit", "fade"], ["key-fad
 // Without a scene, a take acts on the Preview the mixer shows, as Space does: after a take the
 // preview is the scene that left program, not the one picked last.
 function take(kind, scene = state?.status?.pvw_scene, wipe = currentWipe) {
-  if (!scene) return showError("Select a Scene Preview before taking");
+  if (!scene) return showError("Select a Preset before taking");
   const payload = {command: kind, scene};
   if (kind === "fade") {
     payload.duration_sec = durationSeconds("fade-s", "fade-time-unit", 0.5);
@@ -595,7 +620,7 @@ function take(kind, scene = state?.status?.pvw_scene, wipe = currentWipe) {
 function pick(scene) {
   if (armedSlot !== null) return assignSlot(armedSlot.slot, scene, armedSlot.bus);
   selected = scene;
-  return take(direct ? "cut" : "preview", scene);
+  return take("preview", scene);
 }
 // As on a vision switcher, choosing the transition only prepares Auto; Cut and Auto take.
 function selectTransition(kind, clip) {
@@ -605,16 +630,23 @@ function selectTransition(kind, clip) {
   renderTransition();
   restFocus();
 }
+// A rate as a panel shows it: frames, or seconds when the operator works in seconds.
+function rateLabel(id, unit) {
+  const value = Number($(id).value);
+  return $(unit).value === "frames" ? `${Math.round(value)}f` : `${value}s`;
+}
 function transitionLabel() {
-  if (currentTransition === "fade") return fadeColor.hex() ? "dip" : "fade";
-  if (currentTransition === "wipe") return currentWipe?.name || "wipe";
-  return "cut";
+  if (currentTransition === "wipe") return currentWipe?.name || "Wipe";
+  return `${fadeColor.hex() ? "Dip" : "Mix"} ${rateLabel("fade-s", "fade-time-unit")}`;
 }
 function renderTransition() {
   $("fade").setAttribute("aria-pressed", String(currentTransition === "fade"));
+  $("fade").textContent = fadeColor.hex() ? "Dip" : "Mix";
   for (const button of $("wipes").children)
     button.setAttribute("aria-pressed", String(currentTransition === "wipe" && button.dataset.clip === (currentWipe?.id ?? "")));
   $("auto").textContent = `Auto · ${transitionLabel()}`;
+  // A wipe clip cannot be scrubbed by hand: the lever mixes only.
+  $("lever").disabled = currentTransition === "wipe";
   renderBuses();
 }
 function stepPreview(step) {
@@ -622,12 +654,6 @@ function stepPreview(step) {
   const at = visible.indexOf(selected);
   selected = visible[at < 0 ? (step > 0 ? 0 : visible.length - 1) : (at + step + visible.length) % visible.length];
   return take("preview", selected);
-}
-function setDirect(on) {
-  direct = on;
-  $("direct").setAttribute("aria-pressed", String(on));
-  $("direct").textContent = `Direct cut: ${on ? "on" : "off"}`;
-  renderBuses();
 }
 // One button per clip: during a live show a wipe must be one click away.
 function renderWipes(library) {
@@ -646,13 +672,12 @@ function renderWipes(library) {
 }
 function applySettings(s) {
   renderWipes(Array.isArray(s.wipes) ? s.wipes : []);
-  if (typeof s.direct === "boolean" && !directTouched) setDirect(s.direct);
   if (s.fade_seconds && !touched.fade) setDuration("fade-s", "fade-time-unit", s.fade_seconds);
   if (s.fade_curve && !touched.fadeCurve) curves.fade.set(s.fade_curve);
   if (store.get("fadeColor", null) === null) fadeColor.seed(s.fade_color || null);
-  if (s.dsk_fade_seconds !== undefined && !touched.keyFade) setDuration("key-fade-s", "key-time-unit", s.dsk_fade_seconds);
   if (s.dsk_fade_curve && !touched.keyCurve) curves.key.set(s.dsk_fade_curve);
-  if (s.transition && !tookTransition) currentTransition = s.transition;
+  // AUTO always runs a timed transition: a configured "cut" leaves it on Mix.
+  if (s.transition && s.transition !== "cut" && !tookTransition) currentTransition = s.transition;
   if (s.wipe_file && !touched.wipe && !wipes.length) $("wipe-file").value = s.wipe_file;
   renderTransition();
 }
@@ -663,15 +688,80 @@ function renderBuses() {
   $("pgm").textContent = status.pgm_scene || "—";
   $("pvw").textContent = status.pvw_scene || "—";
   const transition = status.transition || "idle";
-  // A second take of the same scene pauses a fade (Space again resumes it); C completes it.
-  const paused = status.transition_paused ? " · paused" : "";
-  $("pgm-state").textContent = transition === "idle" ? "on air" : `on air · ${transition}${paused}`;
-  $("pvw-state").textContent = direct ? "picks cut to program" : `Auto · ${transitionLabel()}`;
+  // A second Auto on the same Preset holds a mix (Space again runs it on); C completes it.
+  const how = status.transition_manual ? " · lever" : status.transition_paused ? " · held" : "";
+  const shown = transition === "crossfade" ? `mix ${Math.round(transitionProgress() * 100)}%` : transition;
+  $("pgm-state").textContent = transition === "idle" ? "on air" : `on air · ${shown}${how}`;
+  $("pvw-state").textContent = `Auto · ${transitionLabel()}`;
+  renderLever();
 }
-function keyTransition() {
-  const fade_seconds = durationSeconds("key-fade-s", "key-time-unit", 0);
-  return fade_seconds === null ? null : {fade_seconds, curve: curves.key.value};
+// The mix's progress now: as the last poll reported it, run on locally while AUTO drives it.
+let progressSample = {at: 0, progress: 0};
+function transitionProgress() {
+  const status = state?.status || {};
+  if (status.transition !== "crossfade") return 0;
+  const running = status.transition_on_air && !status.transition_paused && !status.transition_manual;
+  const elapsed = running && status.transition_duration_ms ? (performance.now() - progressSample.at) / status.transition_duration_ms : 0;
+  return Math.min(1, progressSample.progress + elapsed);
 }
+function renderLever() {
+  $("tprog").firstElementChild.style.width = `${Math.round(transitionProgress() * 100)}%`;
+}
+(function animateProgress() {
+  if (state?.status?.transition === "crossfade") renderLever();
+  requestAnimationFrame(animateProgress);
+})();
+// The lever sends its position as it moves; one request at a time, the newest position next.
+let leverNext = null, leverSending = false;
+async function sendLever() {
+  if (leverSending) return;
+  leverSending = true;
+  try {
+    while (leverNext !== null) {
+      const position = leverNext;
+      leverNext = null;
+      const duration_sec = durationSeconds("fade-s", "fade-time-unit", 0.5);
+      if (duration_sec === null) return;
+      await api("/api/command", {command: "lever", position, duration_sec, curve: curves.fade.value,
+                                 color: fadeColor.hex() || null});
+    }
+  } catch (exc) { showError(exc.message); }
+  finally { leverSending = false; }
+}
+$("lever").oninput = () => { leverNext = Number($("lever").value) / 1000; sendLever(); };
+function keyRateSeconds(key) {
+  return keyRates[key.id] ?? settings().dsk_fade_seconds ?? 0;
+}
+function keyTransition(key) {
+  const seconds = durationSeconds(`key-rate-${key.id}`, "key-time-unit", keyRateSeconds(key));
+  return seconds === null ? null : {fade_seconds: seconds, curve: curves.key.value};
+}
+function renderNextTrans() {
+  const keys = state?.dsk || [];
+  if (!changed($("next-keys"), [keys.map(k => [k.id, k.next_take]), keysPending])) return;
+  $("next-keys").replaceChildren(...keys.map(key => {
+    const button = el("button", "btn", key.id.replaceAll("_", " "));
+    button.setAttribute("aria-pressed", String(Boolean(key.next_take)));
+    button.disabled = keysPending;
+    button.title = `${key.next_take ? "Remove" : "Add"} ${key.id} ${key.next_take ? "from" : "to"} the next transition: it switches with the background, at its rate`;
+    button.onclick = () => prepareKeys(keys.filter(k => k.id === key.id ? !k.next_take : k.next_take).map(k => k.id));
+    return button;
+  }));
+}
+function renderFtb() {
+  const ftb = state?.ftb;
+  $("ftb-ctl").hidden = !(settings().dsk_keys || []).length || !ftb;
+  if ($("ftb-ctl").hidden) return;
+  const black = ftb.on_air === true || ftb.on === true;
+  $("ftb").dataset.black = String(black);
+  $("ftb").setAttribute("aria-pressed", String(ftb.on === true));
+  $("ftb").textContent = ftb.phase && ftb.phase.startsWith("fading") ? `FTB · ${ftb.phase}` : black ? "FTB · black" : "FTB";
+}
+$("ftb").onclick = () => {
+  const frames = Number($("ftb-rate").value);
+  if (!Number.isInteger(frames) || frames < 0 || !canvasFps()) return showError("Enter the fade-to-black rate in whole frames");
+  command({command: "ftb", toggle: true, fade_seconds: Math.min(10, frames / canvasFps())});
+};
 let keysPending = false;
 async function keyCommand(payload) {
   if (keysPending) return;
@@ -681,25 +771,24 @@ async function keyCommand(payload) {
   finally { keysPending = false; renderKeys(); }
 }
 function toggleAllKeys() {
-  const keys = state?.dsk || [], transition = keyTransition();
-  if (!keys.length || !transition) return;
+  const keys = state?.dsk || [];
+  if (!keys.length) return;
+  // One command, one frame: all keys at the first key's rate.
+  const transition = keyTransition(keys[0]);
+  if (!transition) return;
   return keyCommand({keys: keys.map(k => k.id), on: !keys.some(k => k.on), ...transition});
 }
 function prepareKeys(keys) {
-  const transition = keyTransition();
-  if (transition) return keyCommand({keys, prepare: true, ...transition});
-}
-function updatePreparedKeys() {
-  const keys = (state?.dsk || []).filter(k => k.next_take).map(k => k.id);
-  if (keys.length) prepareKeys(keys);
+  return keyCommand({keys, prepare: true});
 }
 function renderKeys() {
   const keys = state?.dsk || [];
   $("keys-card").hidden = !keys.length;
   $("keys-all").disabled = keysPending;
-  $("key-fade-s").disabled = $("key-time-unit").disabled = keysPending;
+  $("key-time-unit").disabled = keysPending;
   curves.key.root.querySelector("button").disabled = keysPending;
-  if (!changed($("keys"), [keys, keysPending])) return;
+  renderNextTrans();
+  if (!changed($("keys"), [keys, keysPending, $("key-time-unit").value])) return;
   rebuild($("keys"), keys.map(key => {
     const row = el("div", "key-controls"), tally = el("span", "key", key.id.replaceAll("_", " "));
     tally.dataset.onAir = String(key.on_air === true);
@@ -713,18 +802,24 @@ function renderKeys() {
       button.dataset.focus = `${key.id}-${kind}`;
       button.title = `${kind} ${key.id} ${key.on ? "off" : "on"}`;
       button.onclick = () => {
-        const transition = kind === "Cut" ? {fade_seconds: 0} : keyTransition();
+        const transition = kind === "Cut" ? {fade_seconds: 0} : keyTransition(key);
         if (transition) keyCommand({keys: [key.id], toggle: true, ...transition});
       };
       row.append(button);
     }
-    const label = el("label", "next-key"), check = el("input");
-    check.type = "checkbox"; check.checked = Boolean(key.next_take); check.disabled = keysPending;
-    check.dataset.focus = `${key.id}-next`;
-    check.onchange = () => prepareKeys(keys.filter(k => k.id === key.id ? check.checked : k.next_take).map(k => k.id));
-    label.append(check, document.createTextNode("With next take"));
-    label.title = "Toggle this key with every background take; Cut cuts it, Auto uses the key duration";
-    row.append(label);
+    // The key's own Auto rate, kept per key as a panel's keyer rate is.
+    const rate = el("input", "key-rate");
+    rate.id = `key-rate-${key.id}`;
+    rate.type = "number";
+    rate.min = "0";
+    rate.step = $("key-time-unit").value === "frames" ? "1" : "0.1";
+    rate.setAttribute("aria-label", `${key.id} Auto rate`);
+    rate.value = $("key-time-unit").value === "frames" ? Math.round(keyRateSeconds(key) * canvasFps()) : keyRateSeconds(key);
+    rate.onchange = () => {
+      const seconds = durationSeconds(rate.id, "key-time-unit", keyRateSeconds(key));
+      if (seconds !== null) { keyRates[key.id] = seconds; store.set("keyRates", keyRates); }
+    };
+    row.append(rate);
     return row;
   }));
 }
@@ -793,32 +888,62 @@ function renderChips() {
     return chip;
   }));
 }
-let sourceBanks = store.get("sourceBanks", null);
-if (!Array.isArray(sourceBanks) || sourceBanks.length !== 3 || sourceBanks.some(b => !Array.isArray(b) || b.some(id => typeof id !== "string"))) sourceBanks = null;
+// The banks are the show's, shared by every controller (/api/banks); which one this page shows is its own.
 let sourceBank = Math.max(0, Math.min(2, Number(store.get("sourceBank", 0)) || 0));
+const sourceBanks = () => state?.source_banks || [[], [], []];
+// A show without banks gets its first nine scenes on bank 1, stored once: a scene added later
+// must not shift the buttons under the operator's fingers.
+let seedingBanks = false;
+async function seedBanks() {
+  if (seedingBanks || state?.source_banks || !scenes.length) return;
+  seedingBanks = true;
+  try { state.source_banks = (await api("/api/banks", {banks: [scenes.slice(0, 9).map(s => s.id), [], []]})).banks; renderXpt(); }
+  catch (exc) { showError(exc.message); }
+  finally { seedingBanks = false; }
+}
+function bankScene(slot) {
+  const scene = sourceBanks()[sourceBank]?.[slot];
+  return scene && scenes.some(s => s.id === scene) ? scene : null;
+}
 function pickBank(slot) {
-  const scene = sourceBanks?.[sourceBank]?.[slot];
-  if (!scene || !scenes.some(s => s.id === scene)) return showError("This source-bank button is unassigned or unavailable");
+  const scene = bankScene(slot);
+  if (!scene) return showError("This button has no scene in this bank");
   pick(scene); restFocus();
 }
-function renderBanks() {
-  if (!sourceBanks && scenes.length) {
-    sourceBanks = [scenes.slice(0, 9).map(s => s.id), [], []];
-    store.set("sourceBanks", sourceBanks);
+function renderXpt() {
+  seedBanks();
+  const status = state?.status || {}, assigned = sourceBanks()[sourceBank] || [];
+  if (changed($("bank-buttons"), [sourceBank])) {
+    $("bank-buttons").replaceChildren(...[0, 1, 2].map(i => {
+      const button = el("button", "btn", String(i + 1));
+      button.setAttribute("aria-pressed", String(i === sourceBank));
+      button.title = `Bank ${i + 1}`;
+      button.onclick = () => { sourceBank = i; store.set("sourceBank", i); renderXpt(); restFocus(); };
+      return button;
+    }));
   }
-  $("bank").value = String(sourceBank);
-  const assigned = sourceBanks?.[sourceBank] || [];
-  if (!changed($("bank-buttons"), [assigned, scenes.map(s => s.id)])) return;
-  $("bank-buttons").replaceChildren(...Array.from({length: 9}, (_, i) => {
+  if (!changed($("pst-row"), [assigned, scenes.map(s => s.id), status.pgm_scene, status.pvw_scene])) return;
+  const row = (onclick, lit) => Array.from({length: 9}, (_, i) => {
     const id = assigned[i], available = scenes.some(s => s.id === id);
-    const button = el("button", "btn", `${i + 1} · ${id || "unassigned"}${id && !available ? " (unavailable)" : ""}`);
+    const button = el("button", "btn xpt");
+    button.append(el("span", "n", String(i + 1)), document.createTextNode(id || "—"));
     button.disabled = !available;
-    button.onclick = () => pickBank(i);
+    button.title = id ? (available ? id : `${id} (not in this show)`) : "No scene on this button";
+    button.classList.toggle("lit", available && id === lit);
+    button.onclick = () => { onclick(id); restFocus(); };
     return button;
-  }));
+  });
+  // The Program row cuts its scene to air at once, as a switcher's program bus does.
+  $("pgm-row").replaceChildren(...row((id) => take("cut", id), status.pgm_scene));
+  $("pst-row").replaceChildren(...row((id) => pick(id), status.pvw_scene));
 }
-$("bank").onchange = () => { sourceBank = Number($("bank").value); store.set("sourceBank", sourceBank); renderBanks(); restFocus(); };
-$("bank-save").onclick = () => { sourceBanks[sourceBank] = visible.slice(0, 9); store.set("sourceBanks", sourceBanks); renderBanks(); restFocus(); };
+$("bank-store").onclick = async () => {
+  const banks = sourceBanks().map(b => [...b]);
+  banks[sourceBank] = visible.slice(0, 9);
+  try { state.source_banks = (await api("/api/banks", {banks})).banks; renderXpt(); }
+  catch (exc) { showError(exc.message); }
+  restFocus();
+};
 function renderScenes() {
   const shown = scenes.filter((s) => filter === "all" || groupOf(s.id) === filter);
   visible = shown.map((s) => s.id);
@@ -826,7 +951,7 @@ function renderScenes() {
     $("scenes").replaceChildren(...shown.map((scene, i) => {
       const tile = el("button", "tile");
       tile.dataset.scene = scene.id;
-      tile.append(el("span", "n", ""), el("span", "label", scene.id));
+      tile.append(el("span", "label", scene.id));
       // Give the focus back: a focused tile would take Space as another click on itself.
       tile.onclick = () => { pick(scene.id); restFocus(); };
       return tile;
@@ -843,7 +968,7 @@ function setTab(next) {
   store.set("tab", next);
   $("tab-scenes").setAttribute("aria-pressed", String(tab === "scenes"));
   $("tab-graph").setAttribute("aria-pressed", String(tab === "graph"));
-  $("scenes").hidden = $("chips").hidden = $("source-banks").hidden = tab !== "scenes";
+  $("scenes").hidden = $("chips").hidden = tab !== "scenes";
   $("graph").hidden = $("graph-open").hidden = tab !== "graph";
   renderGraph();
   if (tab === "scenes") restFocus();
@@ -1246,7 +1371,6 @@ function curveMenu(label, touchedKey) {
   const menu = {value: "linear"};
   const dd = dropdown((value) => {
     menu.set(value); touched[touchedKey] = true;
-    if (touchedKey === "keyCurve") updatePreparedKeys();
   });
   const btn = dd.root.firstChild;
   btn.insertAdjacentHTML("afterbegin", '<svg class="glyph" viewBox="0 0 14 10" aria-hidden="true"><path/></svg>');
@@ -1687,14 +1811,13 @@ function render() {
   if (!selected || !scenes.some((scene) => scene.id === selected)) selected = status.pvw_scene || status.pgm_scene || "";
   applySettings(s);
   layoutWall();
-  renderCounts(); renderMeters(); renderHost(); renderWipeCache(); renderBuses(); renderKeys(); renderSlots(); renderChips(); renderScenes(); renderBanks();
+  renderCounts(); renderMeters(); renderHost(); renderWipeCache(); renderBuses(); renderKeys(); renderSlots(); renderChips(); renderScenes(); renderXpt(); renderFtb();
   observeCuts(); renderLatency(); placeMeterTip();
   $("hint-pages").hidden = !pagesBus();
   setMeterTip($("hint"), "Keyboard shortcuts", [
-    ["1–9", "Pick assigned scene from the selected source bank"], ["← / →", "Browse Preview only"],
-    ["Space", `Auto: ${transitionLabel()} to Preview (again on a fade: pause / resume)`], ["C", "Cut Preview to Program (completes a running transition)"],
-    ["F", "Select fade for Auto"], ["W", "Select wipe for Auto"],
-    ["D", "Toggle direct cut: picks cut straight to Program"],
+    ["1–9", "Preset row: the scene on that button of the bank shown"], ["← / →", "Browse Preset only"],
+    ["Space", `Auto: ${transitionLabel()} to Preset (again on a mix: hold / run on)`], ["C", "Cut Preset to Program (completes a running transition)"],
+    ["F", "Select Mix for Auto"], ["W", "Select wipe for Auto"],
     ["[ / ]", "Previous / next multiview page"],
     ["K", "All keys off if any are on; otherwise all on"],
     ...(gridAux() ? [[`Shift+1–${Math.min(slotsOf(gridAux()).length, 9)}`, "Assign selected scene to slot"]] : []),
@@ -1718,7 +1841,8 @@ async function refreshKeys() {
     const next = await api("/api/keys");
     mergeKeys(next);
     state.dsk = next.dsk;
-    renderKeys();
+    state.ftb = next.ftb;
+    renderKeys(); renderFtb();
   } catch (_) {
     state.dsk = (state.dsk || []).map(k => ({...k, phase: "unknown", on_air: null}));
     renderKeys();
@@ -1733,7 +1857,7 @@ async function refresh() {
       if (setupRevision !== undefined && setupRevision !== next.setup_revision) {
         keysSampledAt = -Infinity;
         selected = ""; armedSlot = null;
-        directTouched = tookTransition = false;
+        tookTransition = false;
         for (const k in touched) touched[k] = false;
         viewers.forEach((v) => (v.src = null));   // reconnect every player to the new graph
       }
@@ -1750,6 +1874,7 @@ async function refresh() {
       saveViewers();
     }
     state = next;
+    progressSample = {at: performance.now(), progress: next.status?.transition_progress || 0};
     $("conn").hidden = true;
     stale = false;
     render();
@@ -1770,10 +1895,9 @@ $("edit-bus").onchange = () => { editBus = $("edit-bus").value; armedSlot = null
 $("cut").onclick = () => take("cut");
 $("auto").onclick = () => take(currentTransition);
 $("fade").onclick = () => selectTransition("fade");
-$("direct").onclick = () => { directTouched = true; setDirect(!direct); };
 $("fade-s").oninput = () => { touched.fade = true; };
-$("key-fade-s").oninput = () => { touched.keyFade = true; };
-$("key-fade-s").onchange = updatePreparedKeys;
+$("fade-s").onchange = renderTransition;
+$("key-time-unit").onchange = () => renderKeys();
 $("wipe-file").oninput = () => { touched.wipe = true; };
 $("tab-scenes").onclick = () => setTab("scenes");
 $("tab-graph").onclick = () => setTab("graph");
@@ -1786,7 +1910,7 @@ for (const field of document.querySelectorAll("#deck input"))
 addEventListener("keydown", (e) => {
   if (e.defaultPrevented || e.target.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), .dd-menu') || e.metaKey || e.ctrlKey || e.altKey) return;
   // On the scene tiles and the take bar Space is Auto, never a second click on the focused control.
-  if (e.key === " " && e.target.closest?.('button, a, [role="button"]') && !e.target.closest?.("#scenes, #bank-buttons, #takebar")) return;
+  if (e.key === " " && e.target.closest?.('button, a, [role="button"]') && !e.target.closest?.("#scenes, #xpt-card, #takebar")) return;
   if (e.repeat && (e.key === " " || e.key.toLowerCase() === "k")) { e.preventDefault(); return; }
   const shifted = Number(e.code.replace("Digit", ""));
   if (e.shiftKey && shifted >= 1 && shifted <= slotsOf(gridAux()).length) { e.preventDefault(); assignSlot(shifted - 1, selected || null); return; }
@@ -1799,7 +1923,6 @@ addEventListener("keydown", (e) => {
   else if (k === "c") take("cut");
   else if (k === "f") selectTransition("fade");
   else if (k === "w") selectTransition("wipe");
-  else if (k === "d") $("direct").click();
   else if (bus && e.key === "[") pageCommand(bus, {step: -1});
   else if (bus && e.key === "]") pageCommand(bus, {step: 1});
   else return;
