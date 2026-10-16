@@ -143,7 +143,11 @@
   /* A fade: its rate field joined to a curve menu that shows the curve's shape. */
   .fade-ctl { display: inline-flex; }
   .fade-ctl .field { border-right: 0; border-radius: 7px 0 0 7px; }
-  .fade-ctl input { padding-right: 8px; }
+  .fade-ctl input { padding-right: 2px; }
+  /* A rate field's frame steps: two small arrows stacked beside the value. */
+  .field .stepper { display: flex; flex-direction: column; padding: 0 4px 0 0; }
+  .stepper button { border: 0; background: none; color: var(--muted); font-size: 7px; line-height: 1; padding: 1px 2px; cursor: pointer; }
+  .stepper button:hover { color: var(--text); }
   .fade-ctl .dd { display: flex; }
   .fade-ctl .dd-btn { border-radius: 0 7px 7px 0; padding: 0 5px; }
   .fade-ctl .dd-btn > :not(.glyph) { display: none; }
@@ -206,7 +210,7 @@
   #keys-card .note { flex: 1 1 0; width: 0; }   /* never widens the card; each key's tooltip says it too */
   .key-fade { margin-left: auto; align-self: center; flex: none; margin-block: -5px; }
   .key-fade .field { border-radius: 7px 0 0 7px; }
-  .key-fade .field input { width: 3.3em; padding: 3px 6px 3px 7px; font-size: 12px; }
+  .key-fade .field input { width: 3.3em; padding: 3px 2px 3px 7px; font-size: 12px; }
   .key-fade .dd-btn { border-radius: 0 7px 7px 0; }
   .key-fade .dd-btn svg.glyph { width: 12px; height: 9px; }
   .key-fade .dd-menu { left: auto; right: 0; }
@@ -1826,16 +1830,41 @@ $("ftb").onclick = toggleFtb;
 $("direct").onclick = () => { directTouched = true; setDirect(!direct); };
 $("fade-s").oninput = () => { touched.fade = true; renderTransition(); };
 $("key-fade-s").oninput = () => { touched.keyFade = true; };
-// A rate field steps a frame on the arrow keys and shows a valid entry as the panel would ("45" -> "1:15").
+// A rate field steps a frame on its arrows, the arrow keys and the wheel over it, and shows a valid entry
+// as the panel would ("45" -> "1:15").
+function stepRate(field, step) {
+  if (!fps()) return;
+  const frames = Math.max(Math.round((parseRate(field.value) ?? 0) * fps()) + step, Number(field.dataset.minFrames));
+  field.value = frames ? formatRate(frames / fps()) : "";
+  field.dispatchEvent(new Event("input"));
+}
 for (const field of [$("fade-s"), $("key-fade-s")]) {
+  const stepper = el("span", "stepper");
+  for (const [glyph, step, label] of [["▲", 1, "One frame longer"], ["▼", -1, "One frame shorter"]]) {
+    const button = el("button", "", glyph);
+    button.type = "button";
+    button.tabIndex = -1;
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.onmousedown = (e) => e.preventDefault();   // the focus stays put, so Space after a click is still Auto
+    button.onclick = () => stepRate(field, step);
+    stepper.append(button);
+  }
+  field.after(stepper);
   field.addEventListener("keydown", (e) => {
-    if (e.key !== "ArrowUp" && e.key !== "ArrowDown" || !fps()) return;
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     e.preventDefault();
-    const step = e.key === "ArrowUp" ? 1 : -1;
-    const frames = Math.max(Math.round((parseRate(field.value) ?? 0) * fps()) + step, Number(field.dataset.minFrames));
-    field.value = frames ? formatRate(frames / fps()) : "";
-    field.dispatchEvent(new Event("input"));
+    stepRate(field, e.key === "ArrowUp" ? 1 : -1);
   });
+  // A frame per wheel notch: a trackpad sends many small deltas, so they add up to half a notch first.
+  let wheel = 0;
+  field.parentElement.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    wheel += e.deltaMode ? e.deltaY * 40 : e.deltaY;   // lines (some Firefox wheels) or pixels
+    if (Math.abs(wheel) < 50) return;
+    stepRate(field, wheel < 0 ? 1 : -1);
+    wheel = 0;
+  }, {passive: false});
   field.addEventListener("change", () => { const seconds = parseRate(field.value); if (seconds) field.value = formatRate(seconds); });
 }
 $("wipe-file").oninput = () => { touched.wipe = true; };

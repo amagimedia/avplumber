@@ -57,7 +57,8 @@ next one starts, back at its start the mix is cancelled. After an AUTO or CUT en
 a mix the lever left half way, it acts again once moved to an end. The bar under
 the lever shows the transition's progress. Rates read as on a switcher panel:
 frames below a second (`15f`), seconds:frames from one second (`1:15`). Type
-either form, or frames alone (`45` shows as `1:15`); the arrow keys step a frame.
+either form, or frames alone (`45` shows as `1:15`); the small arrows beside it, the
+arrow keys and the mouse wheel over it step a frame.
 
 **Next** in the Preview box chooses what the next take changes, as on a GV panel:
 **BKGD** the scene, **1–4** the keys, numbered as in the Keys card, lit while
