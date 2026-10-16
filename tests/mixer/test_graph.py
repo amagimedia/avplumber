@@ -455,33 +455,17 @@ def test_a_browser_in_a_large_catalogue_cannot_share_a_declared_hdr_input_color(
             GraphOptions(inputs=inputs, output="p.mp4", input_color=color).validate()
 
 
-@pytest.mark.parametrize("stale_copy_setting", [None, "1"])
-def test_browser_keeps_the_return_queue_and_expires_idle_imports(monkeypatch, stale_copy_setting):
+def test_browser_keeps_the_return_queue_and_expires_idle_imports():
     from pyplumber.mixer import dmabuf_inputs
 
-    # A deployment environment left from the removed copy on import must not bring the copy back.
-    if stale_copy_setting is not None:
-        monkeypatch.setenv("AVP_BROWSER_COPY_ON_IMPORT", stale_copy_setting)
     nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
         fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=30, drm_hwaccel=None,
         cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=9)
     receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
     importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
     assert receive["return_queue"] == 3
-    assert importer["zero_copy"] is True  # The compositor samples Chromium's capture buffer in place.
     assert importer["max_imports"] == 12
     assert importer["import_ttl_ms"] == dmabuf_inputs.IMPORT_IDLE_MS
-
-
-def test_a_browser_reporting_a_fixed_capture_pool_is_refused(monkeypatch):
-    from pyplumber.mixer import dmabuf_inputs
-
-    status = {"windows": []}
-    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *args: status)
-    dmabuf_inputs.open_windows("http://b", [])
-    status["fixedCapturePoolSize"] = 9   # an image with the removed zero-copy export Electron
-    with pytest.raises(RuntimeError, match="zero-copy export is not supported; run Chromium's ordinary capture"):
-        dmabuf_inputs.open_windows("http://b", [])
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):

@@ -78,8 +78,8 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         source["return_queue"] = return_queue(browser_frame_queue)
     nodes = [
         api.IpcDmabufSource(source),
-        # zero_copy: the compositor samples the mapped DMA-BUF directly; no 8 MB copy per frame.
-        # Keep the recycling allocation pool registered, including live frames.
+        # The compositor samples the mapped DMA-BUF directly. Keep the recycling allocation
+        # pool registered, including live frames.
         # The ring bounds outstanding frames, not retired Chromium allocations:
         # expire idle imports instead of pinning them indefinitely. Lookups refresh
         # returning allocations before expiry. A page that paints now and then returns
@@ -90,7 +90,7 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         # retired full-resolution allocations per page during startup.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
-                            "auto_restart": "group", "zero_copy": True,
+                            "auto_restart": "group",
                             "max_imports": browser_frame_queue + 3,
                             "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
@@ -151,10 +151,6 @@ def open_windows(base_url: str, windows: List[dict]) -> None:
     so the changed pages open concurrently with one request in flight per worker."""
     started = time.monotonic()
     status = rest_request(base_url, "GET", "/status") or {}
-    # Only a browser image with the removed zero-copy export Electron reports a fixed pool.
-    if status.get("fixedCapturePoolSize"):
-        raise RuntimeError("Browser service reports a fixed capture pool: zero-copy export is not supported; "
-                           "run Chromium's ordinary capture (update the dma-browser image)")
     existing = {w["id"]: w for w in status.get("windows", [])}
     changed = []
     for spec in windows:

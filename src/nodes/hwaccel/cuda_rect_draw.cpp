@@ -177,8 +177,7 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
         throw Error("cuda_rect_overlay: CUarray input must be semiplanar YUV");
     const TextureFrameDesc *texture = textureFrameDesc(src);
     if (texture && !(packed_rgb && src_sw_fmt != sw_fmt && isRgbToYuvConvertible(src_sw_fmt, sw_fmt)))
-        throw Error("cuda_rect_overlay: texture-backed inputs require RGB-to-YUV composition; "
-                    "disable zero_copy at the importer for other canvas formats");
+        throw Error("cuda_rect_overlay: texture-backed inputs (DMA-BUF imports) require RGB-to-YUV composition");
 
     if (packed_rgb && src_sw_fmt != sw_fmt && isRgbToYuvConvertible(src_sw_fmt, sw_fmt)) {
         const int a_off = packedAlphaOffset(src_sw_fmt);
@@ -189,7 +188,7 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
         out.premultiplied = src->alpha_mode == AVALPHA_MODE_PREMULTIPLIED;
 #endif
         if (const TextureFrameDesc *tex = texture) {
-            // Zero-copy DMA-BUF import: sample the mapped array through its texture object.
+            // DMA-BUF import: sample the mapped array through its texture object.
             if (rgb_step != 4 || tex->width != src->width || tex->height != src->height)
                 throw Error("cuda_rect_overlay: texture-backed source must be 4-byte packed RGB at frame size");
             out.kind = blend ? AVP_RECT_KIND_RGBA_TEX : AVP_RECT_KIND_RGB_TEX;

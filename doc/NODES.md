@@ -907,16 +907,17 @@ Parameters:
 
 ### `drm_prime_to_cuda`
 
-Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frames are passed through unchanged.
+Import DRM PRIME frames into CUDA frames via EGL/GL interop, without copying: the output
+frame is the mapped buffer and keeps the input frame, and with it the producer's buffer,
+until the last consumer releases it. Non-DRM PRIME frames are passed through unchanged.
+A tiled (array) import is a texture-backed frame that only the CUDA compositor's
+RGB-to-YUV path samples; the compositor rejects other combinations before submitting
+draw work.
 
 1 input: `av::VideoFrame` (expects `DRM_PRIME` hardware "pixel format", pass-through otherwise), 1 output: `av::VideoFrame` (hardware "pixel format" `cuda`)
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
--   `zero_copy` (bool, default `false`) - expose a texture-backed frame for direct
-    sampling by the CUDA compositor's RGB-to-YUV path. Other consumers, including
-    packed RGB canvases, require `false`; the compositor rejects unsupported
-    texture-backed combinations before submitting draw work.
 
 Retired imports are released on a cleanup worker shared by the instance. Incoming
 frames needing a new import are dropped while cleanup is pending or their import
