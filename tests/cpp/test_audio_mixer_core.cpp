@@ -15,7 +15,10 @@ int main() {
     assert(program_gain == 1.f);
 
     gainsForProgress("dip", 0.25, {0}, {0}, 1, gains, program_gain, false, false);
-    assert(gains == std::vector<float>({0.5f}));
+    assert(gains == std::vector<float>({1.f}));
+    gainsForProgress("dip", 0.25, {0, 1}, {1, 2}, 3, gains, program_gain, true, true);
+    assert(gains == std::vector<float>({0.5f, 1.f, 0.f}));
+    assert(program_gain == 1.f);
 
     constexpr int sample_rate = 48000;
     constexpr size_t frame_samples = 960;
