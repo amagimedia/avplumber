@@ -32,9 +32,6 @@ Chromium copies into its capture pool and waits for GPU completion before delive
 `paint`. The browser then retains the texture until the mixer acknowledges its release.
 Keep DRM modifiers and texture-release acknowledgements intact.
 The mixer samples each imported capture buffer in place; it does not copy it again.
-dma-browser refuses the `AvpZeroCopyOffscreenExport` feature of a removed patched
-Electron, and the mixer's setup fails on a browser service that still reports a fixed
-capture pool.
 
 [Runnable mixer](../demos/mixer/README.md) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)

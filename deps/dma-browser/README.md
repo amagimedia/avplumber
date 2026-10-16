@@ -32,11 +32,6 @@ not built. The shim is native to the host CPU architecture. `bin/run.sh` also
 applies the Wayland, EGL/GBM, and DRM settings; hardware video decoding stays
 disabled.
 
-The service refuses to start when `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES` or
-`DMA_BROWSER_CHROMIUM_DISABLE_FEATURES` names `AvpZeroCopyOffscreenExport`, the
-feature of a removed zero-copy export Electron build: the mixer supports only
-Chromium's ordinary capture, whose buffers it samples in place.
-
 Two switches keep the GPU process stable, both on by default:
 
 - `DMA_BROWSER_WEBGPU_OPENGLES=0` turns off `--use-webgpu-adapter=opengles`.
