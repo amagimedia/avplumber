@@ -31,7 +31,7 @@ const {chromium} = require('playwright');
         playout: {A: {missed_deadlines: 1}, B: {missed_deadlines: 0}}, wipe_cache: {bytes: 200000000, budget_bytes: 600000000}},
       scenes: ['a', 'b'], aux_buses: aux,
       settings: {source_count: 192, source_counts: {video: 120, browser: 40, nv12: 32},
-        canvas: {width: 1920, height: 1080, fps: 25, working_format: 'nv12'}, preview_codecs: ['h264'],
+        canvas: {width: 1920, height: 1080, fps: 30, working_format: 'nv12'}, preview_codecs: ['h264'],
         aux_buses: aux.map(a => a.id), preview_outputs: aux.map((a, i) => ({bus: a.id, label: a.label,
           codec: 'h264', mountpoint: 5000 + 4 * i, fps: 25}))}};
     const root = path.join(__dirname, '../../pyplumber/mixer/gui/assets'), commands = [];
@@ -197,7 +197,7 @@ const {chromium} = require('playwright');
     await page.keyboard.press('f');
     assert.equal(await page.evaluate(() => currentTransition), 'fade', 'F selects fade');
     assert.deepEqual(commands, [], 'F does not take');
-    assert.equal(await page.locator('#auto').textContent(), 'Auto · fade', 'Auto shows what it will run');
+    assert.equal(await page.locator('#auto').textContent(), 'Auto · fade 15f', 'Auto shows what it will run, at its rate');
     // Clicking the selector must not leave Space to it: Space after a click is Auto, not a second selection.
     await page.locator('#fade').click();
     await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('Space')]);
@@ -260,7 +260,7 @@ const {chromium} = require('playwright');
     assert.deepEqual(commands, [], 'nothing armed takes nothing');
     await nextButton(1).click();
     assert(!(await page.locator('#lever').isDisabled()), 'BKGD gives the lever back');
-    // FTB: hidden without the keyer; it fades the keyed program at the Fade length and back, flashing while black.
+    // FTB: hidden without the keyer; it fades the keyed program at the Fade rate and back, flashing while black.
     assert(await page.locator('#ftb').isHidden(), 'no keyer, no FTB');
     sample.ftb = {on: false, phase: 'off'};
     await page.evaluate(() => refresh());
@@ -284,6 +284,33 @@ const {chromium} = require('playwright');
     await page.keyboard.press('ArrowRight');
     await page.evaluate(() => refresh());
     assert.deepEqual(commands, [], 'typing and held take/key shortcuts never send commands');
+    // Rates as on a switcher panel: frames below a second, seconds:frames from one; commands take seconds.
+    const rate = async (text) => { await page.locator('#fade-s').fill(text); return page.locator('#auto').textContent(); };
+    assert.equal(await rate('45'), 'Auto · fade 1:15', 'from a second the rate shows as seconds:frames');
+    await page.locator('#fade-s').press('Enter');
+    assert.equal(await page.locator('#fade-s').inputValue(), '1:15', 'an entry shows as the panel would');
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('Space')]);
+    assert.deepEqual(commands.splice(0).map(c => [c.command, c.duration_sec]), [['fade', 1.5]], 'the command takes seconds');
+    await page.locator('#fade-s').press('ArrowDown');
+    assert.equal(await page.locator('#fade-s').inputValue(), '1:14', 'arrows step a frame');
+    await rate('1f');
+    await page.locator('#fade-s').press('ArrowDown');
+    assert.equal(await page.locator('#fade-s').inputValue(), '1f', 'a fade runs at least a frame');
+    for (const bad of ['1:30', '0.5', '1:']) {
+      await page.evaluate(() => showError(''));
+      assert.equal(await rate(bad), 'Auto · fade', `no rate shown for ${bad}`);
+      await page.locator('#fade-s').press('Enter');
+      await page.keyboard.press('Space');
+      await page.waitForFunction(() => $('error').textContent.includes('seconds:frames'));
+      assert.deepEqual(commands, [], `${bad} sends nothing`);
+    }
+    assert.equal(await rate('15'), 'Auto · fade 15f');
+    assert.equal(await page.evaluate(() => { $('key-fade-s').value = '1:00'; return keyTransition().fade_seconds; }), 1,
+      'the key fade reads seconds:frames too');
+    await page.locator('#key-fade-s').fill('1f');
+    await page.locator('#key-fade-s').press('ArrowDown');
+    assert.equal(await page.locator('#key-fade-s').inputValue(), '', 'a key fade steps down to a cut');
+    await page.locator('#key-fade-s').press('Escape');
     await page.locator('#hint').hover();
     assert.match(await page.locator('#hint-tip').innerText(), /Browse Preview only/);
     assert.match(await page.locator('#hint-tip').innerText(), /Auto: fade to Preview/);

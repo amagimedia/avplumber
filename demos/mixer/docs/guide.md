@@ -50,12 +50,14 @@ the running mixer.
 The take bar follows a vision switcher's transition area. A scene tile or **1–9**
 selects Preview; with **Direct cut / D** a pick cuts straight to Program. **Cut / C**
 cuts Preview to Program and completes a running transition; **Auto / Space** runs
-the selected transition, **Fade / F** at its length in seconds or a wipe clip
+the selected transition, **Fade / F** at its rate or a wipe clip
 (**W**), and on a running fade holds it and runs it on again. The **lever** mixes
 by hand from the end it rests at: the far end completes the mix and is where the
 next one starts, back at its start the mix is cancelled. After an AUTO or CUT ended
 a mix the lever left half way, it acts again once moved to an end. The bar under
-the lever shows the transition's progress.
+the lever shows the transition's progress. Rates read as on a switcher panel:
+frames below a second (`15f`), seconds:frames from one second (`1:15`). Type
+either form, or frames alone (`45` shows as `1:15`); the arrow keys step a frame.
 
 **Next** in the Preview box chooses what the next take changes, as on a GV panel:
 **BKGD** the scene, **1–4** the keys, numbered as in the Keys card, lit while
@@ -64,14 +66,14 @@ armed keys go with the background transition on its clock: they mix at its rate,
 hold when it holds, follow the lever, cut with a cut and switch at a wipe clip's
 cut point; a cancelled transition leaves them as they were, and they stay armed
 for the following takes. Without BKGD, Cut cuts the armed keys and Auto fades them
-at the Fade length; the lever, which mixes the background only, is off. BKGD is
+at the Fade rate; the lever, which mixes the background only, is off. BKGD is
 the page's own; the armed keys are the mixer's, the same for every controller.
 
 Each key in the Keys card cuts on or off air, or fades at the card's key fade. Its
 red border is the tally of the last frame the keyer emitted, never a pending
 command; its number turns amber while it is armed. **K** changes every key on one
 frame: all off if any is on, otherwise all on. **FTB** in the Program box fades the
-keyed program to black at the Fade length and pressed again back; it flashes while
+keyed program to black at the Fade rate and pressed again back; it flashes while
 Program is black, and the clean feed is never faded. The slots card edits the
 Program preview's scene slots: click a slot, then a scene, or **Shift+1–8**.
 

@@ -140,13 +140,10 @@
   .dd-menu [aria-selected="true"] { color: var(--accent); }
   .dd-menu .meta { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .dd.up .dd-menu { top: auto; bottom: calc(100% + 6px); }   /* the take bar sits at the bottom of the window */
-  /* A fade: its seconds field joined to a curve menu that shows the curve's shape. */
+  /* A fade: its rate field joined to a curve menu that shows the curve's shape. */
   .fade-ctl { display: inline-flex; }
   .fade-ctl .field { border-right: 0; border-radius: 7px 0 0 7px; }
-  .fade-ctl .field span { padding-right: 8px; }
-  /* Arrow keys still step; the hover spinner would cover the value in these narrow fields. */
-  .fade-ctl input { appearance: textfield; }
-  .fade-ctl input::-webkit-inner-spin-button { display: none; }
+  .fade-ctl input { padding-right: 8px; }
   .fade-ctl .dd { display: flex; }
   .fade-ctl .dd-btn { border-radius: 0 7px 7px 0; padding: 0 5px; }
   .fade-ctl .dd-btn > :not(.glyph) { display: none; }
@@ -209,8 +206,7 @@
   #keys-card .note { flex: 1 1 0; width: 0; }   /* never widens the card; each key's tooltip says it too */
   .key-fade { margin-left: auto; align-self: center; flex: none; margin-block: -5px; }
   .key-fade .field { border-radius: 7px 0 0 7px; }
-  .key-fade .field input { width: 2.8em; padding: 3px 2px 3px 7px; font-size: 12px; }
-  .key-fade .field span { padding-right: 6px; font-size: 11px; }
+  .key-fade .field input { width: 3.3em; padding: 3px 6px 3px 7px; font-size: 12px; }
   .key-fade .dd-btn { border-radius: 0 7px 7px 0; }
   .key-fade .dd-btn svg.glyph { width: 12px; height: 9px; }
   .key-fade .dd-menu { left: auto; right: 0; }
@@ -297,7 +293,7 @@
   .field:focus-within { border-color: var(--accent); }
   .field span { color: var(--muted); padding-right: 10px; font-size: 12px; }
   #wipe-file { width: 16em; padding-right: 10px; }
-  #fade-s { width: 3em; }
+  #fade-s { width: 3.6em; }   /* fits "1:15" */
   .vsep { width: 1px; align-self: stretch; background: var(--edge); margin-inline: 2px; }
   /* Right-aligned in the space the controls' last row leaves, never on a row of its own: keys only when
      the words do not fit, hidden when the keys do not either (see trimTakebar). */
@@ -418,7 +414,7 @@
     <div id="row2" hidden>
       <section class="card widget" id="keys-card" aria-label="Downstream keys" hidden>
         <header><h2 class="title">Keys</h2><span class="note">dirty feed only</span>
-          <span class="fade-ctl key-fade" id="key-fade"><label class="field" title="Key fade · empty or 0 cuts"><input id="key-fade-s" type="number" min="0" max="10" step="0.1" placeholder="0" aria-label="Key fade in seconds, empty or 0 cuts"><span>s</span></label></span></header>
+          <span class="fade-ctl key-fade" id="key-fade"><label class="field" title="Key fade: frames (15) or seconds:frames (1:15) · empty or 0 cuts"><input id="key-fade-s" type="text" inputmode="numeric" placeholder="0f" data-min-frames="0" aria-label="Key fade in frames or seconds:frames, empty or 0 cuts"></label></span></header>
         <div id="keys"></div>
       </section>
       <section class="card widget" id="slots-card" aria-labelledby="slots-title" hidden>
@@ -434,7 +430,7 @@
         title="Lever (T-bar): mixes to Preview from the end it rests at; the far end completes, the start cancels"><span id="tprog"><i></i></span></span>
       <span class="vsep"></span>
       <button class="btn" id="fade" type="button" aria-pressed="false" title="Select fade for Auto (F)" aria-keyshortcuts="F">Fade</button>
-      <span class="fade-ctl" id="fade-ctl"><label class="field"><input id="fade-s" type="number" min="0.1" step="0.1" value="0.5" aria-label="Fade duration in seconds"><span>s</span></label></span>
+      <span class="fade-ctl" id="fade-ctl"><label class="field" title="Fade rate: frames (15) or seconds:frames (1:15)"><input id="fade-s" type="text" inputmode="numeric" data-min-frames="1" aria-label="Fade rate in frames or seconds:frames"></label></span>
       <span class="vsep"></span>
       <span id="wipes"></span>
       <label class="field" id="wipe-custom" hidden><input id="wipe-file" type="text" placeholder="wipe clip path on the mixer host" aria-label="Wipe clip path on the mixer host"></label>
@@ -559,18 +555,33 @@ async function command(body, onSuccess) {
 }
 
 /* ---------- takes ---------- */
-// A number field reads "" both when empty and when it holds no number; only empty means *empty*.
-function fieldSeconds(id, empty, message) {
-  if (!$(id).validity.badInput) return Number($(id).value) || empty;
-  showError(message);
-  return null;
+// Rates as on a switcher panel: frames below a second ("15f"), seconds:frames from one second ("1:15").
+// Commands still take seconds; seconds from the settings show as the nearest whole frame.
+const fps = () => settings().canvas?.fps;
+const FADE_SECONDS = 0.5;   // the fade an empty field runs
+function formatRate(seconds) {
+  const rate = fps(), frames = Math.round(seconds * rate);
+  return frames < rate ? `${frames}f` : `${Math.floor(frames / rate)}:${String(frames % rate).padStart(2, "0")}`;
 }
+// Frames ("15", "15f") or seconds:frames with fewer frames than the rate ("1:15"): seconds, or null.
+function parseRate(text) {
+  const rate = fps(), m = text.trim().toLowerCase().match(/^(?:(\d+):(\d{1,2})|(\d+)f?)$/);
+  if (!m || !rate || Number(m[2]) >= rate) return null;
+  return m[3] !== undefined ? Number(m[3]) / rate : Number(m[1]) + Number(m[2]) / rate;
+}
+// An empty field, or 0, reads as *empty*.
+function fieldRate(id, empty, message) {
+  const text = $(id).value.trim(), seconds = text ? parseRate(text) : empty;
+  if (seconds === null) showError(message);
+  return seconds === null ? null : seconds || empty;
+}
+const fadeSeconds = () => fieldRate("fade-s", FADE_SECONDS, "Enter the fade rate in frames (15) or seconds:frames (1:15)");
 // Without a scene, a take acts on the Preview the mixer shows, as Space does: after a take the
 // preview is the scene that left program, not the one picked last.
 function take(kind, scene = state?.status?.pvw_scene || selected, wipe = currentWipe) {
   const payload = {command: kind, scene};
   if (kind === "fade") {
-    payload.duration_sec = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
+    payload.duration_sec = fadeSeconds();
     if (payload.duration_sec === null) return;
     if (curves.fade.value !== "linear") payload.curve = curves.fade.value;   // linear: today's command
     if (fadeColor.hex()) payload.color = fadeColor.hex();                  // mix: no colour
@@ -591,7 +602,7 @@ function takeButton(kind) { return nextBkgd ? take(kind) : takeKeys(kind); }
 function takeKeys(kind) {
   const keys = armedKeys();
   if (!keys.length) return showError("Arm BKGD or a key for the take");
-  const fade_seconds = kind === "cut" ? 0 : fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
+  const fade_seconds = kind === "cut" ? 0 : fadeSeconds();
   if (fade_seconds === null) return;
   return command({command: "dsk", keys, toggle: true, fade_seconds, curve: curves.fade.value});
 }
@@ -617,7 +628,8 @@ function renderTransition() {
   $("fade").setAttribute("aria-pressed", String(currentTransition === "fade"));
   for (const button of $("wipes").children)
     button.setAttribute("aria-pressed", String(currentTransition === "wipe" && button.dataset.clip === (currentWipe?.id ?? "")));
-  $("auto").textContent = `Auto · ${transitionLabel()}`;
+  const rate = currentTransition === "fade" && parseRate($("fade-s").value);
+  $("auto").textContent = `Auto · ${transitionLabel()}${rate ? ` ${formatRate(rate)}` : ""}`;
   renderBuses();
 }
 function stepPreview(step) {
@@ -650,10 +662,10 @@ function renderWipes(library) {
 function applySettings(s) {
   renderWipes(Array.isArray(s.wipes) ? s.wipes : []);
   if (typeof s.direct === "boolean" && !directTouched) setDirect(s.direct);
-  if (s.fade_seconds && !touched.fade) $("fade-s").value = s.fade_seconds;
+  if (fps() && !touched.fade) $("fade-s").value = formatRate(s.fade_seconds || FADE_SECONDS);
   if (s.fade_curve && !touched.fadeCurve) curves.fade.set(s.fade_curve);
   if (store.get("fadeColor", null) === null) fadeColor.seed(s.fade_color || null);
-  if (s.dsk_fade_seconds !== undefined && !touched.keyFade) $("key-fade-s").value = s.dsk_fade_seconds || "";
+  if (fps() && s.dsk_fade_seconds !== undefined && !touched.keyFade) $("key-fade-s").value = s.dsk_fade_seconds ? formatRate(s.dsk_fade_seconds) : "";
   if (s.dsk_fade_curve && !touched.keyCurve) curves.key.set(s.dsk_fade_curve);
   if (s.transition && !tookTransition) currentTransition = s.transition;
   if (s.wipe_file && !touched.wipe && !wipes.length) $("wipe-file").value = s.wipe_file;
@@ -717,7 +729,7 @@ function sendLever() {
   leverRest = Number($("lever").value) / 1000;
   renderLever();
   {
-    const duration_sec = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
+    const duration_sec = fadeSeconds();
     if (duration_sec === null) return;
     const position = {position: Number($("lever").value) / 1000, duration_sec, curve: curves.fade.value,
                       color: fadeColor.hex() || null};
@@ -732,7 +744,7 @@ function sendLever() {
 $("lever").oninput = sendLever;
 $("lever").onpointerdown = openLeverSocket;   // open the channel before the first position
 function keyTransition() {
-  const fade_seconds = fieldSeconds("key-fade-s", 0, "Enter the key fade in seconds, or leave it empty to cut");
+  const fade_seconds = fieldRate("key-fade-s", 0, "Enter the key fade in frames (15) or seconds:frames (1:15), or leave it empty to cut");
   return fade_seconds === null ? null : {fade_seconds, curve: curves.key.value};
 }
 let keysPending = false;
@@ -787,9 +799,9 @@ function renderNext() {
   // The lever mixes the background only; the keyer has no lever of its own.
   $("lever").disabled = !nextBkgd;
 }
-// Fade to black: the keyed program, never the clean feed, at the Fade length; pressed again it fades back.
+// Fade to black: the keyed program, never the clean feed, at the Fade rate; pressed again it fades back.
 function toggleFtb() {
-  const fade_seconds = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
+  const fade_seconds = fadeSeconds();
   if (fade_seconds === null) return;
   $("ftb").setAttribute("aria-pressed", String(!state.ftb.on));   // at once; the poll confirms it
   restFocus();
@@ -800,7 +812,7 @@ function renderFtb() {
   $("ftb").hidden = !("on" in ftb);   // a show without the keyer has no fade to black
   $("ftb").setAttribute("aria-pressed", String(Boolean(ftb.on)));
   $("ftb").classList.toggle("black", ftb.phase === "on");
-  $("ftb").title = ftb.on ? "Fade back from black at the Fade length" : "Fade to black at the Fade length · dirty feeds only";
+  $("ftb").title = ftb.on ? "Fade back from black at the Fade rate" : "Fade to black at the Fade rate · dirty feeds only";
 }
 function renderKeys() {
   const keys = state.dsk || [];
@@ -1812,8 +1824,20 @@ $("auto").onclick = () => takeButton(currentTransition);
 $("fade").onclick = () => selectTransition("fade");
 $("ftb").onclick = toggleFtb;
 $("direct").onclick = () => { directTouched = true; setDirect(!direct); };
-$("fade-s").oninput = () => { touched.fade = true; };
+$("fade-s").oninput = () => { touched.fade = true; renderTransition(); };
 $("key-fade-s").oninput = () => { touched.keyFade = true; };
+// A rate field steps a frame on the arrow keys and shows a valid entry as the panel would ("45" -> "1:15").
+for (const field of [$("fade-s"), $("key-fade-s")]) {
+  field.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown" || !fps()) return;
+    e.preventDefault();
+    const step = e.key === "ArrowUp" ? 1 : -1;
+    const frames = Math.max(Math.round((parseRate(field.value) ?? 0) * fps()) + step, Number(field.dataset.minFrames));
+    field.value = frames ? formatRate(frames / fps()) : "";
+    field.dispatchEvent(new Event("input"));
+  });
+  field.addEventListener("change", () => { const seconds = parseRate(field.value); if (seconds) field.value = formatRate(seconds); });
+}
 $("wipe-file").oninput = () => { touched.wipe = true; };
 $("tab-scenes").onclick = () => setTab("scenes");
 $("tab-graph").onclick = () => setTab("graph");
