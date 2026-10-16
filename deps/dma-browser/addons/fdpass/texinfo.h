@@ -8,12 +8,7 @@
 //   0  u32 width
 //   4  u32 height
 //   8  u32 stride         bytes per row
-//   12 u32 pixel_format   FOURCC 'BGRA' (DRM ARGB8888) or 'RGBA' (DRM ABGR8888). Bit 31 set: an
-//                         acquire fence, a Linux sync_file fd, follows the plane fd in the same
-//                         SCM_RIGHTS message; the pixels may be read once it has signalled. A
-//                         receiver that predates the flag rejects the pixel format and acknowledges
-//                         the frame, so it forwards nothing it could not have waited for (it does
-//                         leak the fence fd, which it receives but does not know to close).
+//   12 u32 pixel_format   FOURCC 'BGRA' (DRM ARGB8888) or 'RGBA' (DRM ABGR8888)
 //   16 u64 modifier       DRM format modifier
 //   24 u64 offset         plane offset in bytes
 //   32 u64 timestamp      CLOCK_MONOTONIC nanoseconds of the paint
@@ -37,14 +32,3 @@ struct TexInfo {
 
 constexpr uint32_t TEXINFO_PIX_FMT_RGBA = ('R' << 24 | 'G' << 16 | 'B' << 8 | 'A');
 constexpr uint32_t TEXINFO_PIX_FMT_BGRA = ('B' << 24 | 'G' << 16 | 'R' << 8 | 'A');
-// The FOURCC bytes are ASCII, so bit 31 is free for the flag.
-constexpr uint32_t TEXINFO_PIXEL_FORMAT_ACQUIRE_FENCE = 0x80000000u;
-
-inline bool texinfoHasAcquireFence(uint32_t pixel_format) {
-    return (pixel_format & TEXINFO_PIXEL_FORMAT_ACQUIRE_FENCE) != 0;
-}
-
-/// The FOURCC without the fence flag.
-inline uint32_t texinfoPixelFormat(uint32_t pixel_format) {
-    return pixel_format & ~TEXINFO_PIXEL_FORMAT_ACQUIRE_FENCE;
-}

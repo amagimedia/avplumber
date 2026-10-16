@@ -21,9 +21,8 @@ extern "C" {
 #include <memory>
 #include <new>
 #include "../../hwaccel.hpp"
-#include "DmabufFenceWait.hpp"
 #include "DmabufReleaseQueue.hpp"
-#include "TexInfoMessage.hpp"   // the wire format: TexInfo and its fds, documented in texinfo.h
+#include "TexInfoMessage.hpp"   // the wire format: TexInfo and its fd, documented in texinfo.h
 
 class UnixFdpassClient {
 protected:
@@ -101,16 +100,7 @@ public:
         pollfds_[CONN_INDEX].events = connecting_ ? (POLLIN | POLLOUT) : POLLIN;
         return true;
     }
-    /// Waits for a frame's acquire fence on the connection that delivered it; interrupt() ends
-    /// the wait, as do the queue's own wake-ups when the receiver has been interrupted.
-    FenceWaitResult waitForFence(int fence_fd, int timeout_ms) {
-        const auto queue = std::atomic_load(&ack_queue_);
-        return ::waitForFence(fence_fd, timeout_ms, queue->wakeFd(), [&] {
-            queue->drainWakeFd();
-            return interrupted_.load() || queue->interrupted();
-        });
-    }
-    /// One frame: its header and the fds it came with, owned by the caller on success.
+    /// One frame: its header and its DMA-BUF fd, owned by the caller on success.
     bool recvFrame(TexInfoMessage &frame) {
         while (true) {
             if (interrupted_.load()) return false;
@@ -219,15 +209,9 @@ class IPCDMABUFSource: public NodeSingleOutput<av::VideoFrame>,
 protected:
     static constexpr uint32_t BYTES_PER_PIXEL = 4;
     static constexpr uint32_t MAX_DIMENSION = 16384;
-    static constexpr int64_t FENCE_LOG_INTERVAL_US = 1000000;
 
     UnixFdpassClient receiver_;
     std::atomic<uint64_t> received_{0};
-    // A frame whose acquire fence has not signalled after this long is dropped and acknowledged:
-    // generous next to the one or two milliseconds a fence takes, short next to a stalled source.
-    int fence_timeout_ms_ = 100;
-    FenceWaitStats fence_stats_;
-    int64_t last_fence_log_us_ = 0;
     int width_ = 0;
     int height_ = 0;
     av::Rational frame_rate_{0, 1};
@@ -236,7 +220,7 @@ protected:
     AVBufferRef* hw_frames_ctx_ = nullptr;
 
     static AVPixelFormat swFormatFromTexInfo(uint32_t pixel_format) {
-        switch (texinfoPixelFormat(pixel_format)) {
+        switch (pixel_format) {
             case TEXINFO_PIX_FMT_RGBA: return AV_PIX_FMT_RGBA;
             case TEXINFO_PIX_FMT_BGRA: return AV_PIX_FMT_BGRA;
             default: return AV_PIX_FMT_NONE;
@@ -244,29 +228,11 @@ protected:
     }
 
     static uint32_t drmFormatFromTexInfo(uint32_t pixel_format) {
-        switch (texinfoPixelFormat(pixel_format)) {
+        switch (pixel_format) {
             case TEXINFO_PIX_FMT_RGBA: return DRM_FORMAT_ABGR8888;
             case TEXINFO_PIX_FMT_BGRA: return DRM_FORMAT_ARGB8888;
             default: return 0;
         }
-    }
-
-    /// False when the frame must not be forwarded: its fence timed out, could not be waited on,
-    /// or the node is stopping. Logged at most once a second; the counters tell the rest.
-    bool fenceSignalled(int fence_fd) {
-        const FenceWaitResult waited = receiver_.waitForFence(fence_fd, fence_timeout_ms_);
-        fence_stats_.record(waited);
-        if (waited.outcome == FenceWaitOutcome::Signalled) return true;
-        const int64_t now_us = fenceMonotonicUs();
-        if (now_us - last_fence_log_us_ >= FENCE_LOG_INTERVAL_US) {
-            last_fence_log_us_ = now_us;
-            logstream << "ipc_dmabuf_source: acquire fence "
-                      << (waited.outcome == FenceWaitOutcome::TimedOut ? "not signalled within " + std::to_string(fence_timeout_ms_) + " ms"
-                          : waited.outcome == FenceWaitOutcome::Invalid ? "cannot be waited on" : "wait interrupted")
-                      << "; frame dropped (timeouts " << fence_stats_.timeouts.load()
-                      << ", invalid " << fence_stats_.invalid.load() << " so far)";
-        }
-        return false;
     }
 
     static bool validateTexInfo(const TexInfo &ti, uint64_t &object_size) {
@@ -310,11 +276,7 @@ public:
         if (key != "frame_stats") throw Error("ipc_dmabuf_source: unknown object " + key);
         const auto stats = receiver_.releaseQueue()->stats();
         return {{"received", received_.load()}, {"released", stats.released},
-                {"ack_sent", stats.sent}, {"ack_pending", stats.pending}, {"returns_queued", stats.queued},
-                {"fenced", fence_stats_.fenced.load()}, {"unfenced", fence_stats_.plain.load()},
-                {"fence_blocked", fence_stats_.blocked.load()}, {"fence_wait_us", fence_stats_.wait_us.load()},
-                {"fence_wait_max_us", fence_stats_.max_wait_us.load()},
-                {"fence_timeouts", fence_stats_.timeouts.load()}, {"fence_invalid", fence_stats_.invalid.load()}};
+                {"ack_sent", stats.sent}, {"ack_pending", stats.pending}, {"returns_queued", stats.queued}};
     }
     virtual void stop() {
         receiver_.interrupt();
@@ -331,23 +293,9 @@ public:
         ++received_;
         uint64_t object_size = 0;
         if (!validateTexInfo(ti, object_size)) {
-            frame.closeFds();
+            frame.closeFd();
             receiver_.releaseFrame(ti.frame_count);
             return;
-        }
-        // The pixels may be read once the fence has signalled; a frame without one is complete
-        // on arrival. The fence fd is done with either way.
-        if (frame.fence_fd >= 0) {
-            const bool signalled = fenceSignalled(frame.fence_fd);
-            close(frame.fence_fd);
-            frame.fence_fd = -1;
-            if (!signalled) {
-                frame.closeFds();
-                receiver_.releaseFrame(ti.frame_count);
-                return;
-            }
-        } else {
-            fence_stats_.unfenced();
         }
         const int dmabuf_fd = frame.plane_fd;
 
@@ -462,9 +410,6 @@ public:
         const int64_t return_queue = params.value("return_queue", int64_t(0));
         if (return_queue < 0 || return_queue > 64) throw Error("ipc_dmabuf_source: return_queue must be 0 to 64 frames");
         r->receiver_.setReturnQueue(static_cast<size_t>(return_queue));
-        r->fence_timeout_ms_ = params.value("fence_timeout_ms", 100);
-        if (r->fence_timeout_ms_ < 1 || r->fence_timeout_ms_ > 10000)
-            throw Error("ipc_dmabuf_source: fence_timeout_ms must be 1 to 10000");
         return r;
     }
     ~IPCDMABUFSource() {

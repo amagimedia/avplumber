@@ -70,7 +70,7 @@ def main():
             if all(max(abs(a - b) for a, b in zip(got[k], want[k])) <= 6 for k in want):
                 stats = avp.node("probe_receive").getObject("frame_stats")
                 print(f"PASS red and blue kept their channels: YCbCr={got} expected={want} "
-                      f"frames fenced={stats['fenced']} unfenced={stats['unfenced']}", flush=True)
+                      f"frames received={stats['received']}", flush=True)
                 break
         else:
             raise AssertionError(f"channel order or colour wrong: YCbCr={got} expected={want}; errors={errors}")

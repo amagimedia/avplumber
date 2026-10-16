@@ -79,9 +79,6 @@ ENV DMA_BROWSER_FORCE_NVIDIA=1
 # The NVIDIA runtime preserves host library paths, including on Ubuntu hosts.
 ENV GBM_BACKEND=nvidia-drm
 ENV GBM_BACKENDS_PATH=/usr/lib/x86_64-linux-gnu/gbm:/usr/lib64/gbm
-ENV LD_PRELOAD=/opt/dma-browser/native/gbm-linear-shim/libgbm_linear_shim.so
-ENV GBM_LINEAR_SHIM=1
-ENV GBM_LINEAR_SHIM_ADD_SCANOUT=1
 ENV DMA_BROWSER_ALLOWED_DIMS=1080x1920,1920x1080,1280x720
 ENV DMA_BROWSER_DMABUF_POOL_SIZE=9
 

@@ -20,17 +20,17 @@ npm start                # on NVIDIA, use the setup below before launching
 ### NVIDIA GPUs
 
 The default install downloads stock Electron from its official releases.
-Build and enable the supplied GBM shim on the NVIDIA host:
+Build the supplied GBM shim on the NVIDIA host:
 
 ```bash
 npm run rebuild:shim
-LD_PRELOAD="$PWD/native/gbm-linear-shim/libgbm_linear_shim.so" \
-GBM_LINEAR_SHIM=1 GBM_LINEAR_SHIM_ADD_SCANOUT=1 \
 DMA_BROWSER_FORCE_NVIDIA=1 npm start
 ```
 
-The shim is native to the host CPU architecture. `bin/run.sh` applies the
-Wayland, EGL/GBM, and DRM settings; hardware video decoding stays disabled.
+On NVIDIA, `bin/run.sh` always preloads the shim and refuses to start when it is
+not built. The shim is native to the host CPU architecture. `bin/run.sh` also
+applies the Wayland, EGL/GBM, and DRM settings; hardware video decoding stays
+disabled.
 
 The service refuses to start when `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES` or
 `DMA_BROWSER_CHROMIUM_DISABLE_FEATURES` names `AvpZeroCopyOffscreenExport`, the
@@ -47,8 +47,8 @@ Two switches keep the GPU process stable, both on by default:
 - `DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT=0` turns off
   `--disable-gpu-process-crash-limit`. Without it, a third GPU-process crash
   within five minutes of the last makes Chromium quit the worker.
-The [shared Docker stack](../../docker-compose/dmabuf/compose.yaml) builds and enables
-the shim automatically.
+The [shared Docker stack](../../docker-compose/dmabuf/compose.yaml) builds the shim
+into the image.
 
 ## Process grouping
 
@@ -132,8 +132,8 @@ processes to their main thread's). To stay cheap it reads one stat file per proc
 command line once, and thread files only for GPU processes. The first call only takes the
 baseline; calls within 500 ms of a sample return that sample again. The mixer polls every 5 s.
 
-Frames go to `/tmp/dma-page/{id}.sock` (dmabuf FD + 48-byte TexInfo header, plus the
-acquire fence fd when the header flags one; layout in `addons/fdpass/texinfo.h`).
+Frames go to `/tmp/dma-page/{id}.sock` (dmabuf FD + 48-byte TexInfo header; layout in
+`addons/fdpass/texinfo.h`).
 Audio (when `audio: true`) goes to `/tmp/dma-page/{id}-audio.sock` (raw interleaved float32 PCM).
 
 A main-frame load failure, a load exceeding `DMA_BROWSER_LOAD_WATCHDOG_MS` (30 s by default), or a
@@ -165,8 +165,8 @@ increments both counters. `fdpass_backpressure`, `fdpass_disconnected`, and
 `fdpass_errors` in `droppedReasons` count failed deliveries per consumer.
 
 The DMA-BUF socket is bidirectional. The browser retains every transmitted
-shared texture until the consumer acknowledges its frame number. On the stock
-copy path the maximum sent-but-unacknowledged count is the window's `ringSize`,
+shared texture until the consumer acknowledges its frame number. The maximum
+sent-but-unacknowledged count is the window's `ringSize`,
 else `DMA_BROWSER_DMABUF_POOL_SIZE` (default 9, range 1–64): if that limit is
 reached, the newest paint is dropped and released
 (`retained_pool_full`); an older in-flight texture is never released early. A
@@ -174,8 +174,8 @@ consumer that disconnects or crashes has every retained texture released or
 quarantined by the same release path. `/status` reports `releasedFrameCount` and
 `retainedFrameCount` for each window.
 
-`ringSize` bounds frames in flight, not allocations. On the stock copy path the
-buffers belong to Chromium's capture pool, which keeps at most two idle buffers
+`ringSize` bounds frames in flight, not allocations. The buffers belong to
+Chromium's capture pool, which keeps at most two idle buffers
 and destroys the surplus when frames come back in bunches, allocating new DMA-BUFs later. A consumer that
 needs a stable set of allocations from Electron returns one frame for
 each frame it receives (avplumber's `ipc_dmabuf_source` `return_queue`).

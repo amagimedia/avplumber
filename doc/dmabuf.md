@@ -24,9 +24,9 @@
 Use official Electron with its bundled Chromium and the
 [GBM shim](../deps/dma-browser/native/gbm-linear-shim/gbm_linear_shim.c).
 `LD_PRELOAD` clears `GBM_BO_USE_LINEAR` and adds `SCANOUT | RENDERING`, allowing
-NVIDIA-renderable capture buffers. It affects matching GBM allocations in that process;
-enable it only for the NVIDIA browser. `GBM_LINEAR_SHIM_LOG=1` logs changes.
-The Docker image and NVIDIA launcher enable the shim automatically.
+NVIDIA-renderable capture buffers. It affects every GBM allocation in that process.
+`bin/run.sh` always preloads it on NVIDIA and refuses to start when it is not built;
+`GBM_LINEAR_SHIM_LOG=1` logs changes.
 
 Chromium copies into its capture pool and waits for GPU completion before delivering
 `paint`. The browser then retains the texture until the mixer acknowledges its release.
