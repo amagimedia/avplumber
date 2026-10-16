@@ -20,17 +20,17 @@ npm start                # on NVIDIA, use the setup below before launching
 ### NVIDIA GPUs
 
 The default install downloads stock Electron from its official releases.
-Build and enable the supplied GBM shim on the NVIDIA host:
+Build the supplied GBM shim on the NVIDIA host:
 
 ```bash
 npm run rebuild:shim
-LD_PRELOAD="$PWD/native/gbm-linear-shim/libgbm_linear_shim.so" \
-GBM_LINEAR_SHIM=1 GBM_LINEAR_SHIM_ADD_SCANOUT=1 \
 DMA_BROWSER_FORCE_NVIDIA=1 npm start
 ```
 
-The shim is native to the host CPU architecture. `bin/run.sh` applies the
-Wayland, EGL/GBM, and DRM settings; hardware video decoding stays disabled.
+On NVIDIA, `bin/run.sh` always preloads the shim and refuses to start when it is
+not built. The shim is native to the host CPU architecture. `bin/run.sh` also
+applies the Wayland, EGL/GBM, and DRM settings; hardware video decoding stays
+disabled.
 
 The service refuses to start when `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES` or
 `DMA_BROWSER_CHROMIUM_DISABLE_FEATURES` names `AvpZeroCopyOffscreenExport`, the
@@ -47,8 +47,8 @@ Two switches keep the GPU process stable, both on by default:
 - `DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT=0` turns off
   `--disable-gpu-process-crash-limit`. Without it, a third GPU-process crash
   within five minutes of the last makes Chromium quit the worker.
-The [shared Docker stack](../../docker-compose/dmabuf/compose.yaml) builds and enables
-the shim automatically.
+The [shared Docker stack](../../docker-compose/dmabuf/compose.yaml) builds the shim
+into the image.
 
 ## Process grouping
 
