@@ -494,7 +494,7 @@ def record_setpriority(monkeypatch, fail=None):
 
 # The names avplumber, the CUDA driver and FFmpeg give their threads; the mixer's Python main
 # thread, an NVDEC input and the aux compositor are not deadline-critical.
-MIXER_THREADS = {1: "mixer.py", 2: "mixer_comp_a", 3: "mixer_comp_b", 4: "mixer_snapshot_a", 5: "mixer_snapshot_output",
+MIXER_THREADS = {1: "mixer.py", 2: "mixer_comp_a", 3: "mixer_comp_b", 4: "mixer_pts_gate_a", 5: "mixer_pts_gate_output",
                  6: "EventLoop", 7: "cuda-EvtHandlr", 8: "janus_encoder", 9: "janus_hdr_encoder", 10: "aux_mv2_encoder",
                  11: "input_12_decode", 12: "aux_mv2_comp", 13: "mixer_otm_scene_a", 14: "stats sender", 15: "dsk_comp"}
 CRITICAL_TIDS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 15}
@@ -515,8 +515,8 @@ def test_critical_threads_get_the_nice_level_each_period_and_are_logged_once(tmp
         assert sorted(calls[2 * len(CRITICAL_TIDS):]) == [(tid, -10) for tid in sorted(CRITICAL_TIDS | {16})]
     assert [r.getMessage() for r in caplog.records] == [
         "Mixer 4242: nice -10 on 10 threads: EventLoop (6), aux_mv2_encoder (10), cuda-EvtHandlr (7), dsk_comp (15), "
-        "janus_encoder (8), janus_hdr_encod (9), mixer_comp_a (2), mixer_comp_b (3), mixer_snapshot_ (4), "
-        "mixer_snapshot_ (5)",
+        "janus_encoder (8), janus_hdr_encod (9), mixer_comp_a (2), mixer_comp_b (3), mixer_pts_gate_ (4), "
+        "mixer_pts_gate_ (5)",
         "Mixer 4242: nice -10 on 1 thread: udp-tx (16)"]
     # A restarted mixer is logged in full again; while no mixer runs nothing is touched.
     caplog.clear()

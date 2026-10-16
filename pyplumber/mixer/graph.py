@@ -75,8 +75,8 @@ from .models import MixerScene, MixerSource
 from .prewarm import TransitionPrewarm
 
 
-class _SnapshotNode(InternalNode):
-    TYPE = "mixer_snapshot"
+class _PtsGateNode(InternalNode):
+    TYPE = "mixer_pts_gate"
 
 
 class _MixerSelector(InternalNode):
@@ -634,11 +634,8 @@ class MixerGraphBuilder:
 
                 "group": f"{self.name}_{slot}",
             }))
-            self._add_snapshot_node(
-                self._n(f"snapshot_{slot}"), self._e(f"scene_{slot}_composite"),
-                self._e(f"scene_{slot}_out"), f"{self.name}_{slot}",
-                slot=0 if slot == "a" else 1,
-            )
+            self._add_pts_gate(self._n(f"pts_gate_{slot}"), self._e(f"scene_{slot}_composite"),
+                               self._e(f"scene_{slot}_out"), f"{self.name}_{slot}")
             self.avp.addNode(OneToMany({
                 "drop": True,
                 "name": self._n(f"otm_scene_{slot}"),
@@ -649,11 +646,9 @@ class MixerGraphBuilder:
                 "group": f"{self.name}_{slot}",
             }))
 
-    def _add_snapshot_node(self, name, source, destination, group, slot=-1):
-        self.avp.addNode(_SnapshotNode({
-            "name": name, "src": source, "dst": destination, "group": group,
-            "snapshot": self._n("out_sel_snapshot"), "slot": slot,
-            "fps": self._fps_str(), "latency_ms": self.latency_ms,
+    def _add_pts_gate(self, name, source, destination, group):
+        self.avp.addNode(_PtsGateNode({
+            "name": name, "src": source, "dst": destination, "group": group, "fps": self._fps_str(),
         }))
 
     def _build_output_path(self) -> None:
@@ -712,8 +707,7 @@ class MixerGraphBuilder:
             "group": self.name,
         }))
 
-        self._add_snapshot_node(self._n("snapshot_output"),
-                                self._e("final_picture"), self._e("final_out"), self.name)
+        self._add_pts_gate(self._n("pts_gate_output"), self._e("final_picture"), self._e("final_out"), self.name)
 
     def _build_wipe_subgraph(self) -> None:
         """Create the pre-declared wipe subgraph.

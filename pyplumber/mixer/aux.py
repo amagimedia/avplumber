@@ -84,7 +84,7 @@ class AuxBus:
             raise ConfigError("main plus aux latency exceeds the six-frame aux history budget")
         # The program frame leaves the main compositor at its deadline, main latency after its
         # pts, and is drawn here pgm_delay_frames aux ticks plus the bus latency after it. That
-        # margin carries it through the output chain (snapshot, selectors, keyer, tap) to the bus:
+        # margin carries it through the output chain (pts gate, selectors, keyer, tap) to the bus:
         # below one program frame a pgm cell repeats or runs a tick late on every take.
         floor = 1000 / self.cfg.fps
         if self.pgm_edge and self.pgm_delay_frames * 1000 / fps + latency - self.main_latency_ms() < floor - 1e-6:

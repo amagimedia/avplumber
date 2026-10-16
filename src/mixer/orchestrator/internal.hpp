@@ -3,7 +3,6 @@
 // (src/mixer/orchestrator/*.cpp). Not part of the public interface.
 #include "MixerOrchestrator.hpp"
 #include "../graph_ops.hpp"
-#include "../primitives/OutputSnapshot.hpp"
 #include "../routing.hpp"
 #include "../primitives/TransitionGuard.hpp"
 #include "../../avutils.hpp"

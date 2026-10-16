@@ -63,45 +63,28 @@ newer than sm_89. The `dma-browser-cache` volume keeps each browser worker's
 compiled shader programs across container recreation. Keep GPU persistence mode on
 (`sudo systemctl enable --now nvidia-persistenced`); `stack.sh up` warns when it is off.
 
-## GPU time-sharing collapse (measured 2026-10-15)
+## GPU time-sharing collapse (2026-10-15)
 
-With 40 moving browser windows the show can tip into a state where every compositor's
-GPU wait rises from 2 ms to 33-66 ms while no engine is saturated (SM about 60 %, NVDEC
-about 75 %, NVENC about 40 %) and the host has idle CPU. Program and AUX then miss a
-third of their deadlines and NVENC's average latency goes from 8 ms to about 45 ms. The
-state is entered under perturbation (fade bursts, browser worker restarts, heavy host
-activity such as Docker log scans) and does not leave on its own: the mixer's CUDA
-context and Chromium's GL contexts time-share the GPU and the CUDA backlog never drains.
+With 40 moving browser windows the show could tip into a state where every compositor's
+GPU wait rose from 2 ms to 33-66 ms while no engine was saturated: Program and AUX missed a
+third of their deadlines and NVENC's average latency went from 8 ms to about 45 ms, until
+something paused Chromium. The mixer was then copying every browser frame on import. With
+the mixer sampling Chromium's capture buffers in place, the only path now, the same show ran
+clean with the browser uncapped, through hours of takes, fades and DSK keys.
 
-What resets it, measured: stopping Chromium's GPU processes (`electron --type=gpu-process`)
-for 2-3 seconds with SIGSTOP/SIGCONT; misses fall to zero within seconds and stay there.
-What did not matter: viewer PLIs (blocked for 60 s, no change), the fade implementation,
-source kind on program, DSK keys. Two GPU processes of 20 windows each were worse than
-four of ten (two clean starts failed).
+Two safeguards from that investigation stay cheap and remain in place on the measured host:
+a long compute time-slice (`nvidia-smi compute-policy --set-timeslice=3`, per boot; a
+oneshot systemd unit), with which the collapsed state ended on its own instead of persisting,
+and a watchdog that stops Chromium's GPU processes (`electron --type=gpu-process`) for 2-3 s,
+which reset that state within seconds.
 
-A long compute time-slice on the GPU (`nvidia-smi compute-policy --set-timeslice=3`, per boot; a
-oneshot systemd unit on the measured host) changes the kind of failure, measured 2026-10-15
-17:18-18:13 UTC: with it the collapse no longer persists. With the browser unthrottled (28 fps per
-window) a 12-cycle soak of the fade and DSK cases had one 12 s stall (all compositors drawing
-50-90 ms at once, 390 missed deadlines, 3950 AUX drops) that ended on its own, where the same
-browser load without the long slice collapsed within seconds and stayed collapsed. Capping the
-browser at 1.5 CPUs removes the stalls but starves the windows to 14-16 fps, which is visibly
-choppy on air, so the stack runs the browser unthrottled with the long slice and a watchdog, and
-the stall's cause (GPU time-sharing against Chromium's GL contexts or the 72 W power cap) is
-still being attributed with 1 s loggers of GPU clock, power, throttle reason and per-process use.
-
-Operating rules that follow: keep the browser container's CPU weight below the mixer's
-(`cpu_shares: 512` above; Chromium raises its GPU processes to nice -8 on its own), avoid
-CPU-bound work on the host while the show runs, and if an operator-side watchdog is used,
-have it act only in the setup's `running` phase, because a freeze during the 60 s
-clean-start window makes that start fail. The clean-start gate restarts its 10 s window on
-missed deadlines; output drops are reported but do not restart it, because in the collapsed
-state every bus drops about 15 frames a minute and a start would loop until the setup manager
-gave up. A start that begins inside the collapsed state still needs the GL side paused once
-before its window (an operator-side watchdog that freezes Electron's GPU processes for 2.5 s
-about 25 s after a new mixer process appears made every such start settle on 2026-10-15).
-An output node now gives up only after its writes have failed for 3 s; a burst of failed UDP
-writes after a stall used to stop the whole show through the program outputs' panic policy.
+Operating rules: keep the browser container's CPU weight below the mixer's (`cpu_shares: 512`
+above; Chromium raises its GPU processes to nice -8 on its own), avoid CPU-bound work on the
+host while the show runs, and have an operator-side watchdog act only in the setup's `running`
+phase, because a freeze during the 60 s clean-start window makes that start fail. The
+clean-start gate restarts its 10 s window on missed deadlines; output drops are reported but do
+not restart it. An output node counts a full send queue (ENOMEM from FFmpeg's paced UDP
+sender) as a dropped packet and gives up only after other write errors persist for 3 s.
 
 ## Output codecs and bitrates
 

@@ -106,6 +106,8 @@ protected:
     int64_t import_ttl_ms_ = 3000;
     int64_t last_purge_ms_ = 0;
     std::atomic<uint64_t> cache_hits_{0}, fresh_imports_{0}, expired_imports_{0}, evicted_imports_{0};
+    // An allocation whose texture cannot be created is not cached: each of its frames tries again.
+    std::atomic<uint64_t> texture_failures_{0};
 
     bool ensureEGL() {
         if (egl_.dpy != EGL_NO_DISPLAY) return true;
@@ -278,7 +280,9 @@ protected:
             CUcontext dummy; cuCtxPopCurrent(&dummy);
             if (!ok) {
                 e.tex = 0;
-                logstream << "drm2cuda: texture object creation failed";
+                const uint64_t failures = ++texture_failures_;
+                if (failures == 1 || failures % 64 == 0)
+                    logstream << "drm2cuda: texture object creation failed, frame dropped (" << failures << " so far)";
             }
         }
         if (!ok)
@@ -298,7 +302,6 @@ protected:
                      av::VideoFrame &dst) {
         if (!in.raw()->buf[0]) return false;
         const bool pitch = e->frame.frameType == CU_EGL_FRAME_TYPE_PITCH;
-        if (!pitch && !e->tex) return false;
         auto *owner = new MappedOwner{e, av_buffer_ref(in.raw()->buf[0])};
         if (!owner->input) { delete owner; return false; }
         AVFrame *f = dst.raw();
@@ -340,7 +343,7 @@ public:
         return {{"hits", cache_hits_.load()}, {"imports", fresh_imports_.load()},
                 {"expired", expired_imports_.load()}, {"evicted", evicted_imports_.load()},
                 {"instance_imports_alive", counts.first}, {"instance_cleanup_pending", counts.second},
-                {"admission_dropped", cleanup_->declined(import_budget_)}};
+                {"admission_dropped", cleanup_->declined(import_budget_)}, {"texture_failed", texture_failures_.load()}};
     }
     void stop() override {
         cleanup_->close(import_budget_);
@@ -394,9 +397,7 @@ public:
         bool ok = import_to_cuda(desc, w, h, swfmt, in, out);
         if (!ok) return;
 
-        if (hw_frames_ctx_ && !out.raw()->hw_frames_ctx) {
-            out.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);
-        }
+        out.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);
         out.setComplete(true);
         this->sink_->put(out);
     }

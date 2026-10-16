@@ -1,7 +1,7 @@
 #include "node_common.hpp"
 #include "../mixer/primitives/SourceDelivery.hpp"
 #include "../mixer/primitives/TickGrid.hpp"
-#include <deque>
+#include "../mixer/primitives/TraceRing.hpp"
 
 // Observe the published, keyed program. Slot prewarm and off-air sources never reach this node.
 class MixerDelivery : public NodeSISO<av::VideoFrame, av::VideoFrame>,
@@ -13,7 +13,7 @@ class MixerDelivery : public NodeSISO<av::VideoFrame, av::VideoFrame>,
     bool enabled_ = false;
     std::set<std::string> on_change_;
     std::string trace_source_;
-    std::deque<Parameters> trace_;
+    avp::mixer::TraceRing trace_;
 public:
     using NodeSISO::NodeSISO;
     av::Rational frameRate() override { return fps_; }
@@ -32,9 +32,8 @@ public:
                     Parameters ids = Parameters::array();
                     if (auto found = lineage.find(trace_source_); found != lineage.end())
                         for (const auto& capture : found->second) ids.push_back(capture.encode());
-                    trace_.push_back({{"pts_ns", frame->pts().timestamp({1, 1000000000})},
-                                      {"captures", std::move(ids)}});
-                    if (trace_.size() > 256) trace_.pop_front();
+                    trace_.push({{"pts_ns", frame->pts().timestamp({1, 1000000000})},
+                                 {"captures", std::move(ids)}});
                 }
             }
             this->source_->pop();
@@ -42,7 +41,7 @@ public:
     }
     Parameters getObject(const std::string key) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (key == "trace") return Parameters(trace_);
+        if (key == "trace") return trace_.json();
         if (key != "per_source") throw Error("mixer_delivery: unknown object " + key);
         Parameters result = Parameters::object();
         for (const auto& [name, count] : delivery_.counts())

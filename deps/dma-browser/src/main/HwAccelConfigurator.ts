@@ -66,8 +66,9 @@ export class HwAccelConfigurator {
       this.appendSwitch('disable-gpu-process-crash-limit');
     }
 
-    const extra = envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES');
-    const enabled = HwAccelConfigurator.dedupe(extra);
+    const enabled = HwAccelConfigurator.dedupe(
+      envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES'),
+    );
     if (enabled.length > 0) {
       this.appendSwitch('enable-features', enabled.join(','));
     }

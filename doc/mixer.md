@@ -191,10 +191,10 @@ thread priority), and `gui.web` (HTTP and CLI). Existing public imports from
 | `src/nodes/mixer_selector.cpp` | commits immediate takes on input frames; advances fades and wipes by media PTS |
 | `src/mixer/MixerGraph.hpp` | weak graph handles resolved outside frame processing, avoiding shutdown lock inversion |
 | `src/mixer/Playout.hpp` | clocked playout: per-input queues, deadlines, frame pick (unit-tested) |
-| `src/mixer/primitives/` | headers with no graph or CUDA dependency: `TickGrid`, `Cadence`, `MonotonicClock`, `CutLatency`, `CutLatencyProbe`, `Snapshot`, `OutputSnapshot`, `MixerState`, `TransitionGuard`, `PreviewFollow` (unit-tested where they carry logic), plus the compositor geometry headers below |
+| `src/mixer/primitives/` | headers with no graph or CUDA dependency: `TickGrid`, `Cadence`, `MonotonicClock`, `CutLatency`, `CutLatencyProbe`, `TraceRing`, `MixerState`, `TransitionGuard`, `PreviewFollow` (unit-tested where they carry logic), plus the compositor geometry headers below |
 | `src/nodes/mixer_compositor.cpp`, `mixer_keyer.cpp` | mixer-owned compositor nodes: the clocked playout of the scene slots, wipe and AUX buses (`mixer_compositor`); the DSK (`mixer_keyer`) |
 | `src/nodes/hwaccel/cuda_rect_compositor.hpp`, `cuda_rect_overlay.cpp` | the compositors' shared base (canvas, layers, control, drawing one frame); the generic unclocked `cuda_rect_overlay` |
-| `src/nodes/mixer_snapshot.cpp`, `mixer_pvw_follow.cpp` | mixer-owned nodes: the output hold and slot substitution (no longer armed by transitions, which capture nothing); an AUX bus's composition writer, which draws its PVW cells on the bus frame the bus's `pvw_align` picks ([AUX bus follower](#aux-bus-follower)) |
+| `src/nodes/mixer_pts_gate.cpp`, `mixer_pvw_follow.cpp` | mixer-owned nodes: the gate after each scene slot and before the outputs, which forwards frames in increasing pts order without blocking its producer; an AUX bus's composition writer, which draws its PVW cells on the bus frame the bus's `pvw_align` picks ([AUX bus follower](#aux-bus-follower)) |
 | `src/nodes/hwaccel/cuda_rect_draw.{hpp,cpp}`, `cuda_rect_scale.cu` | kernel module, canvas clear, per-layer draw |
 | `src/mixer/primitives/compositor_layers.hpp`, `pixel_layout.hpp`, `compositor_geometry.hpp` | layer parsing and draw-op resolution, format geometry, placement (pure; geometry and layout unit-tested) |
 
@@ -426,7 +426,7 @@ names a `wipe_cache_store`, `wipe_cache` holds that clip cache's `bytes`,
 The application exposes `node.object.get mixer_delivery per_source` for source
 quality on the **keyed program output**, after normalization to the canvas frame
 rate so inserted repeats count too. It follows capture identities through
-retiming, held copies, snapshots, compositing and both sides of a fade. `repeats`
+retiming, held copies, compositing and both sides of a fade. `repeats`
 counts reuse beyond the source's native frame period; `dropped` counts capture
 IDs skipped while continuously on air. Aliases count once. Prewarm, off-air gaps
 and queue cleanup do not count. A producer restart establishes a new baseline.

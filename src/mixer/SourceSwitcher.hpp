@@ -65,9 +65,7 @@ public:
         if constexpr (std::is_same_v<T, av::VideoFrame>) {
             if (auto probe = this->cutLatencyProbe()) {
                 const uint64_t token = probe->timing.tokenForInput(input_index, fallback);
-                // An interrupted fade can temporarily substitute the old
-                // picture into the target slot. Selecting it is not a cut.
-                if (token && !av_dict_get(data->raw()->metadata, "avp.mixer.snapshot", nullptr, 0)) {
+                if (token) {
                     // av::VideoFrame copies AVFrame properties, not CUDA pixels.
                     // Never edit the upstream frame shared with other branches.
                     av::VideoFrame tagged(*data);

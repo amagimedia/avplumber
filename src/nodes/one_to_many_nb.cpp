@@ -31,4 +31,4 @@ public:
     }
 };
 
-DECLNODE_ATD(one_to_many_nb, OneToManyNonBlocking);
+DECLNODE_ATD(one_to_many_nb, OneToManyNonBlocking)

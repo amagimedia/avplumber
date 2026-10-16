@@ -138,7 +138,8 @@ INSTANCE_PROFILES = {
 # profiles retain their decoder contracts and capacities.
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY] = deepcopy(INSTANCE_PROFILES[InstanceType.NVIDIA_L4])
 # Moving 1080p windows, including cropped DSKs, in workers of at most ten.
-# Short transition checks with the fixed nine-buffer exporter and CUDA queues 32/8.
+# Measured in short transition checks on the since-removed fixed nine-buffer browser build (with a copy
+# on import) and CUDA queues 32/8; not yet re-measured with Chromium's ordinary capture.
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["browser_windows_by_fps"] = {25: 40, 30: 40, 50: 40, 60: 30}
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["sources"][25] = 192
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["nvdec_decodes"][25] = 120

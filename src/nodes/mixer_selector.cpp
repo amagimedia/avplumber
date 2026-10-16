@@ -1,6 +1,6 @@
 #include "../mixer/SourceSwitcher.hpp"
 #include "../mixer/orchestrator/MixerOrchestrator.hpp"
-#include <deque>
+#include "../mixer/primitives/TraceRing.hpp"
 
 // The only frame-boundary commit points: program A/B/blend, and direct/wipe.
 // Both serialize with commands through MixerState, without a scheduling thread.
@@ -8,7 +8,7 @@ class MixerSelector : public MixerSourceSwitcher<av::VideoFrame>, public IReturn
     std::shared_ptr<avp::mixer::MixerState> state_;
     bool wipe_ = false;
     bool trace_enabled_ = false;
-    std::deque<Parameters> trace_;
+    avp::mixer::TraceRing trace_;
 public:
     using MixerSourceSwitcher::MixerSourceSwitcher;
 
@@ -35,10 +35,9 @@ public:
                 for (const auto* frame : frames)
                     heads.push_back(frame && frame->pts().isValid()
                         ? Parameters(frame->pts().timestamp({1, 1000000000})) : Parameters());
-                trace_.push_back({{"last_ns", last}, {"heads_ns", heads},
+                trace_.push({{"last_ns", last}, {"heads_ns", heads},
                     {"selected", active_input_.load()}, {"mode", int(mode)}, {"phase", int(phase)},
                     {"start_ns", state_->take_start_ns}});
-                if (trace_.size() > 256) trace_.pop_front();
             }
         }
         processHeads(frames, active_input_.load());
@@ -47,7 +46,7 @@ public:
     Parameters getObject(const std::string key) override {
         if (key == "trace") {
             std::lock_guard<std::mutex> lock(state_->mutex);
-            return Parameters(trace_);
+            return trace_.json();
         }
         throw Error("mixer_selector: unknown object: " + key);
     }

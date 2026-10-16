@@ -116,5 +116,4 @@ describe('HwAccelConfigurator.apply', () => {
     expect(findSwitch(calls, 'enable-logging')).toBeUndefined();
     expect(findSwitch(calls, 'v')).toBeUndefined();
   });
-
 });

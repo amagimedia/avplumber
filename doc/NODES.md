@@ -930,7 +930,8 @@ or for the next frame: for a caller that knows a burst of allocations is over, s
 has finished starting. They count as `expired`.
 
 `node.object.get <node> import_stats` includes an `admission_dropped` frame
-counter and instance-wide cleanup counts. These counters distinguish admission
+counter, a `texture_failed` frame counter (an array import whose texture object
+could not be created; the frame is dropped) and instance-wide cleanup counts. These counters distinguish admission
 drops from EGL/CUDA import work without per-frame logs.
 
 ### `object_tracker`

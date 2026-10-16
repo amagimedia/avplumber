@@ -13,7 +13,6 @@
 
 namespace avp::mixer {
 
-struct OutputSnapshot;
 
 class MixerOrchestrator {
     std::shared_ptr<MixerGraph> nodes_;
@@ -52,10 +51,8 @@ class MixerOrchestrator {
     /// Caller holds state_->mutex. Points the source_switcher at slot A or B, the only setting
     /// visible at the output, before applyPostTransitionRouting flips the rest: the window
     /// between the two would show only if the new direct path were not producing frames yet,
-    /// and at every caller it is. Returns selectorOutputNs() read right after the switch, for
-    /// finishSnapshot(); a finishing take publishes its preview between the two calls
-    /// (MixerState::publishTakePreview), so the AUX followers start while the routing runs.
-    int64_t switchProgramSelector(bool new_pgm_is_slot_a);
+    /// and at every caller it is.
+    void switchProgramSelector(bool new_pgm_is_slot_a);
     /// Restore steady-state routing after a cut or crossfade has concluded, once
     /// switchProgramSelector has switched the selector: the per-source OTM masks and the
     /// post-otm/compositor flips. Caller must hold state_->mutex.
@@ -72,12 +69,6 @@ class MixerOrchestrator {
     /// failed take does (abortTransition).
     enum class Interruption : std::uint8_t { Dropped, Replaced };
     void interruptTransition(Interruption why);
-    std::shared_ptr<OutputSnapshot> outputSnapshot() const;
-    /// Stops the slot substitution and releases a held output at the first selected frame
-    /// newer than `emitted`, the selector's newest output read after the selector was switched
-    /// (switchProgramSelector's return, or read now).
-    void finishSnapshot(int64_t emitted);
-    void finishSnapshot() { finishSnapshot(selectorOutputNs()); }
     /// pts (ns) of the newest frame the selector has emitted, 0 before its first.
     int64_t selectorOutputNs() const;
     /// Caller holds state_->mutex. Ends a transition: program on `new_pgm_scene`, the preview
@@ -85,9 +76,7 @@ class MixerOrchestrator {
     /// `effective_ns` (0: now).
     void finishTransition(bool new_pgm_is_slot_a, std::string new_pgm_scene, int64_t effective_ns);
     // Caller holds state_->mutex; restores live program after failed preparation.
-    // Requests a keyframe unless the dropped transition was a cut that had not flipped
-    // and no frozen picture is on air: the caller then finishes the snapshot, which
-    // replaces a frozen picture with the live program.
+    // Requests a keyframe unless the dropped transition was a cut that had not flipped.
     void restoreProgramRouting(MixerState::TransitionMode dropped);
     /// Caller holds state_->mutex: program routing restored, the wipe chain parked, nothing of
     /// the dropped transition left in the state. Cleanup failures are logged, never thrown.

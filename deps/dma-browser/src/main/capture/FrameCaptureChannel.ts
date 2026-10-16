@@ -44,7 +44,7 @@ const SOCKET_MONITOR_INTERVAL_MS = 1000;
 // Unclean disconnects cannot prove that CUDA has finished reading. Pin these
 // textures until the worker exits, and prevent repeated recreation leaking pools.
 const quarantinedTextures = new Map<string, Set<PaintTextureLike>>();
-export const DEFAULT_RETAINED_FRAME_POOL_SIZE = 11;
+export const DEFAULT_RETAINED_FRAME_POOL_SIZE = 9;
 
 export interface FrameCaptureChannelOptions {
   readonly socketPath: string;

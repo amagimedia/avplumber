@@ -348,15 +348,13 @@ def test_both_slots_share_rate_and_delay_without_second_resampler(native_boundar
         assert node["fps"] == "60/1"
         assert node["latency_ms"] == 50
         assert "warmup_timeout_ms" not in node   # a cold load must not flip to a partial canvas
-        snapshot = app.avp.nodes[f"mixer_snapshot_{slot}"]
-        assert snapshot["src"] == node["dst"]
-        assert snapshot["fps"] == "60/1"
-        assert snapshot["latency_ms"] == 50
-        assert app.avp.nodes[f"mixer_otm_scene_{slot}"]["src"] == snapshot["dst"]
-    output = app.avp.nodes["mixer_snapshot_output"]
+        gate = app.avp.nodes[f"mixer_pts_gate_{slot}"]
+        assert gate["type"] == "mixer_pts_gate"
+        assert gate["src"] == node["dst"]
+        assert gate["fps"] == "60/1"
+        assert app.avp.nodes[f"mixer_otm_scene_{slot}"]["src"] == gate["dst"]
+    output = app.avp.nodes["mixer_pts_gate_output"]
     assert output["src"] == app.avp.nodes["mixer_wipe_sel"]["dst"]
-    assert output["snapshot"] == snapshot["snapshot"]
-    assert output["slot"] == -1
 
 
 def test_compositors_wake_for_every_frame_unless_told_how_often_to_look(native_boundary):

@@ -6,14 +6,6 @@
 
 namespace avp::mixer {
 
-namespace {
-// The hold releases on the first frame newer than the selector's `emitted` (ns) output; without
-// one, on a frame stamped after now, two frames away behind the playout delay.
-int64_t releaseAfter(int64_t emitted_ns) {
-    return emitted_ns ? emitted_ns + 1 : wallclock.pts() * 1000000;
-}
-}
-
 MixerOrchestrator::MixerOrchestrator(std::shared_ptr<NodeManager> nodes, std::shared_ptr<MixerState> state)
     : MixerOrchestrator(std::make_shared<MixerGraph>(nodes), std::move(state)) {}
 
@@ -149,7 +141,6 @@ void MixerOrchestrator::dropTransition(MixerState::TransitionMode dropped) {
         // A resident chain parks at once. Group management retires a per-take decoder
         // independently: waiting here would add teardown time to every correction.
         cleanup([&] { retireWipeChain(); });
-    cleanup([&] { finishSnapshot(); });
     state_->blend_on_air = state_->wipe_on_air = state_->take_paused = false;
     state_->take_request.reset();
     // The program slot's routing was restored: the other slot is cold now.
@@ -187,18 +178,6 @@ void MixerOrchestrator::finishTransition(bool new_pgm_is_slot_a, std::string new
     logstream << "mixer: program " << state_->pgm_scene_name << " on slot " << (new_pgm_is_slot_a ? 'A' : 'B')
               << ", preview " << (state_->preview.pvw.empty() ? "cleared" : state_->preview.pvw)
               << " from pts_ns=" << effective_ns;
-}
-
-std::shared_ptr<OutputSnapshot> MixerOrchestrator::outputSnapshot() const {
-    return InstanceSharedObjects<OutputSnapshot>::get(
-        nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
-}
-
-void MixerOrchestrator::finishSnapshot(int64_t emitted) {
-    auto snapshot = outputSnapshot();
-    std::lock_guard<std::mutex> lock(snapshot->mutex);
-    snapshot->frames.finish();
-    snapshot->frames.arm(releaseAfter(emitted), false);
 }
 
 int64_t MixerOrchestrator::selectorOutputNs() const {

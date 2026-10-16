@@ -7,6 +7,7 @@ import { ManagedWindow, type IManagedWindowFactory } from './ManagedWindow';
 import { workerFramePhase } from './capture/FramePhase';
 import { WindowManager } from './WindowManager';
 import { AllowedDims } from './capture/AllowedDims';
+import { DEFAULT_RETAINED_FRAME_POOL_SIZE } from './capture/FrameCaptureChannel';
 import { RestServer } from './rest/RestServer';
 import { envFlag, envInt, envList, envString, type Env } from './support/env';
 import type { WindowConfig } from './config/WindowConfig';
@@ -54,9 +55,7 @@ export class Application {
         this.cfg.maxWindows,
       )} allowedDims=${this.cfg.allowedDims.listForLogging()} dmabufPoolSize=${String(
         this.cfg.dmabufPoolSize,
-      )} framePhase=${String(
-        this.cfg.framePhase,
-      )}`,
+      )} framePhase=${String(this.cfg.framePhase)}`,
     );
     try {
       this.logger.global(`gpuFeatureStatus=${JSON.stringify(app.getGPUFeatureStatus())}`);
@@ -66,8 +65,8 @@ export class Application {
 
     const logger = this.logger;
     const factory: IManagedWindowFactory = {
-      create: (windowCfg: WindowConfig) => {
-        return new ManagedWindow({
+      create: (windowCfg: WindowConfig) =>
+        new ManagedWindow({
           config: windowCfg,
           socketDir: this.cfg.socketDir,
           preloadPath: this.preloadPath(),
@@ -76,13 +75,10 @@ export class Application {
           loadWatchdogMs: this.cfg.loadWatchdogMs,
           retainedFramePoolSize: windowCfg.ringSize ?? this.cfg.dmabufPoolSize,
           framePhase: this.cfg.framePhase,
-        });
-      },
+        }),
     };
 
-    this.windowManager = new WindowManager(factory, {
-      maxWindows: this.cfg.maxWindows,
-    });
+    this.windowManager = new WindowManager(factory, { maxWindows: this.cfg.maxWindows });
     this.restServer = new RestServer(this.windowManager, {
       host: this.cfg.host,
       port: this.cfg.port,
@@ -128,7 +124,7 @@ export class Application {
     const dmabufPoolSize = envInt(
       this.env,
       'DMA_BROWSER_DMABUF_POOL_SIZE',
-      9,
+      DEFAULT_RETAINED_FRAME_POOL_SIZE,
       1,
       64,
     );

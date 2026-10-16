@@ -43,14 +43,12 @@ services:
     # work then outranks the mixer's deadline threads on the same host. A lower CPU weight for
     # the whole browser container keeps the mixer first (measured 2026-10-15 on the L4 show).
     cpu_shares: 512
-    # Ceiling only. A 1.5-CPU cap stops the GPU time-sharing stalls but starves the 40 windows to
-    # 14-16 fps (about 640 repeated browser frames a second on the compositor, measured 2026-10-15
-    # 18:16-19:00 UTC): visibly choppy, not an option on air. The browser normally uses ~2.8 CPUs.
+    # Ceiling only: the browser normally uses ~2.8 CPUs. A 1.5-CPU cap starves the 40 windows to
+    # 14-16 fps (about 640 repeated browser frames a second on the compositor, measured 2026-10-15).
     cpus: "4"
     environment:
       DMA_BROWSER_WINDOWS_PER_PROCESS: ${DMA_BROWSER_WINDOWS_PER_PROCESS:-10}
       DMA_BROWSER_STAGGER_FRAMES: ${DMA_BROWSER_STAGGER_FRAMES:-1}
-      DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: ${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:-}
 
   wayland:
     image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-wayland:${MIXER_RELEASE}
