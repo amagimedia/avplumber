@@ -50,6 +50,15 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
         return 0;
     }
     const auto direct = pts(0);
+    const auto overlay = pts(1);
+    // Host-side progress over the known wipe duration (linear t); audio can ramp even though
+    // video has no per-frame blend alpha like a fade.
+    const int64_t progress_pts = state_->wipe_switched ? direct : overlay;
+    if (state_->take_phase == MixerState::TakePhase::Wipe && progress_pts >= state_->take_start_ns) {
+        const double x = state_->take_duration_ns > 0
+            ? double(progress_pts - state_->take_start_ns) / double(state_->take_duration_ns) : 1.0;
+        emitTransitionProgress("wipe", std::min(1.0, std::max(0.0, x)), progress_pts);
+    }
     if (state_->wipe_switched && direct > last_ns &&
         direct >= state_->take_start_ns + state_->take_duration_ns) {
         completeTake(direct);

@@ -98,6 +98,11 @@ RUN if [ "${FFMPEG_TAG}" = "$(. /build/deps/ffmpeg/9/bases.env; echo "$upstream_
     fi \
     && bash /build/deps/ffmpeg/apply.sh /tmp/ffmpeg
 
+# Janus program audio encodes with libopus. Without it FFmpeg only has the
+# native Opus decoder, and the RTP mux fails open with a codec-direction error.
+RUN dnf -y install --setopt=install_weak_deps=False opus-devel \
+    && dnf clean all
+
 # PTX for the oldest deployed GPU (T4, sm_75); the driver JIT-compiles it for
 # newer ones such as the L4. CUDA 13 has no Volta target, so the old
 # compute_70 is gone.
@@ -116,6 +121,7 @@ RUN cd /tmp/ffmpeg \
         --enable-cuvid \
         --enable-ffnvcodec \
         --enable-libdrm \
+        --enable-libopus \
         --enable-nvdec \
         --enable-nvenc \
         --disable-libnpp \
@@ -139,7 +145,7 @@ RUN cd /tmp/ffmpeg \
 # Scene, wipe and key composition use AVP nodes.
 RUN ffmpeg="/usr/local/bin/ffmpeg -hide_banner" \
     && for f in scale_cuda tonemap_cuda; do $ffmpeg -filters | grep -q " $f " || exit 1; done \
-    && for e in h264_nvenc hevc_nvenc; do $ffmpeg -encoders | grep -q " $e " || exit 1; done \
+    && for e in h264_nvenc hevc_nvenc libopus; do $ffmpeg -encoders | grep -q " $e " || exit 1; done \
     && $ffmpeg -decoders | grep -q ' h264_cuvid ' \
     && $ffmpeg -hwaccels | grep -qx cuda \
     && $ffmpeg -buildconf | grep -q -- '--enable-libdrm' \
@@ -245,6 +251,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         python3 \
         python3-numpy \
         python3-pip \
+        opus \
     && dnf clean all \
     && mkdir -p /usr/share/glvnd/egl_vendor.d \
     && echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \
@@ -269,6 +276,7 @@ COPY --from=builder /opt/tensorrt /opt/tensorrt
 COPY --from=builder /build/_avplumber*.so /build/
 COPY --from=builder /build/pyplumber /build/pyplumber
 COPY demos/mixer /build/demos/mixer
+COPY demos/mixer_audio /build/demos/mixer_audio
 COPY docker-compose/mixer/deploy/l4/seed.py /build/docker-compose/mixer/deploy/l4/seed.py
 
 # CUDA is loaded through the driver at run time (deps/cuda_loader, ffnvcodec),

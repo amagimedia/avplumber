@@ -34,7 +34,7 @@ void MixerOrchestrator::completeTake(int64_t pts_ns) {
     const std::string scene = state_->transition_scene_name;
     state_->publishTakePreview(scene, pts_ns);
     applySceneControls(state_->scenes.at(scene));
-    applyPostTransitionRouting(destination_a, scene);
+    applyPostTransitionRouting(destination_a, scene, true, pts_ns);
     finishSnapshot(pts_ns - 1);
     finishTransition(destination_a, scene, pts_ns);
 }

@@ -95,6 +95,11 @@ class MixerOptions:
     dmabuf_rest: str = "http://127.0.0.1:9009"
     browser_frame_queue: int | None = None
     max_compositor_layers: int | None = None
+    # Optional audio-router node name (any IInputsObjects impl, e.g. audio_mixer).
+    # Mixer emits transition_ended / transition_progress to this single name; "" disables it.
+    # One name only: to split outputs across several consumers / none, use a fan-out
+    # IInputsObjects as this name (see doc/mixer_audio_follow_video.md).
+    audio_router_node: str = ""
 
     def __post_init__(self):
         if self.browser_frame_queue is None:
@@ -171,6 +176,11 @@ class MixerApplication:
     wipe_cache_mb: float = 640.0            # hold decoded wipes in GPU memory
     cut_latency_encoder: str = ""
     prewarm_cut_scenes: tuple[str, ...] = ()
+    # (source.id, decoded/resampled audio edge) for every source with has_audio
+    # set, fltp/48kHz, not yet connected to anything -- the caller (a demo
+    # that wants audio) builds and wires its own audio-router node from these;
+    # a plain video-only demo (e.g. this repo's own demos/mixer) just never has any.
+    audio_edges: tuple[tuple[str, str], ...] = ()
     held_outputs: tuple[str, ...] = ()      # prefixes of the program's Janus chains, built held
     browser_importers: tuple[str, ...] = ()  # the drm_prime_to_cuda node of every browser source
     _startup_error: str | None = field(default=None, init=False, repr=False)
@@ -262,6 +272,9 @@ class MixerApplication:
             self.mixer.finish_transition_preheat()
         self.mixer.start_output()
         self.avp.group(OUTPUT_GROUP).startNodes()
+        if self.mixer.audio_router_node:
+            self._wait_for_node(self.mixer.audio_router_node)
+            self.mixer.raise_initial_audio_gains()
         self._wait_for_edges(("mixer_final_out",), "program output")
         if self.wipe_cache_mb:
             self._preload_wipes()
@@ -390,10 +403,14 @@ def load_avp_api():
         AssumeVideoFormat,
         Bsf,
         CudaTransform,
+        AudioMixer,
+        DecAudio,
         DecVideo,
         Demux,
         DrmPrimeToCuda,
+        EncAudio,
         EncVideo,
+        FilterAudio,
         FilterVideo,
         ForceFPS,
         ForceKeyFrame,
@@ -408,6 +425,8 @@ def load_avp_api():
         RawVideoFileCuda,
         Realtime,
         RepeatLastFrame,
+        ResampleAudio,
+        ResampleAudioForwardChannels,
         SmoothTimestamps,
         Split,
     )
@@ -419,10 +438,14 @@ def load_avp_api():
         AssumeVideoFormat=AssumeVideoFormat,
         Bsf=Bsf,
         CudaTransform=CudaTransform,
+        AudioMixer=AudioMixer,
+        DecAudio=DecAudio,
         DecVideo=DecVideo,
         Demux=Demux,
         DrmPrimeToCuda=DrmPrimeToCuda,
+        EncAudio=EncAudio,
         EncVideo=EncVideo,
+        FilterAudio=FilterAudio,
         FilterVideo=FilterVideo,
         ForceFPS=ForceFPS,
         ForceKeyFrame=ForceKeyFrame,
@@ -437,6 +460,8 @@ def load_avp_api():
         RawVideoFileCuda=RawVideoFileCuda,
         Realtime=Realtime,
         RepeatLastFrame=RepeatLastFrame,
+        ResampleAudio=ResampleAudio,
+        ResampleAudioForwardChannels=ResampleAudioForwardChannels,
         RtcpFeedbackListener=RtcpFeedbackListener,
         SmoothTimestamps=SmoothTimestamps,
         Split=Split,
@@ -488,6 +513,7 @@ def _make_builder(avp, api, options, *, canvas, fps, working_format, color: Colo
         max_compositor_layers=options.max_compositor_layers or mixer_config.DEFAULT_MAX_COMPOSITOR_LAYERS,
         defer_initial_routes=True, defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
+        audio_router_node=options.audio_router_node or None,
         cache_wipes_mb=options.wipe_cache_mb or None, working_format=working_format, color=color,
         wipe_color=options.wipe_color or wipe_color)
 
@@ -681,6 +707,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     blended_sources = {item.source for scene in cfg.scenes for item in scene.items if item.blend}
     blended_sources |= {key.source for key in cfg.dsk_keys}
     input_edges: list[str] = []
+    audio_edges: list[tuple[str, str]] = []  # (source.id, audio edge), only sources with has_audio
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
         if source.kind == "browser":
@@ -709,9 +736,13 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 event_loop=_pacing_loop(index), pinned=cfg.raw_upload == "pinned",
                 direct=cfg.raw_upload == "direct", native_rate=True, color=source.color)
         else:
-            edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
+            edge, audio_edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop, continuous_loop=True,
-                               event_loop=_pacing_loop(index), decoder_params=source.decoder_params, native_rate=True)
+                               event_loop=_pacing_loop(index), decoder_params=source.decoder_params, native_rate=True,
+                               has_audio=source.has_audio,
+                               sync_team=(f"input_{index}_av_sync" if source.has_audio else None))
+            if audio_edge:
+                audio_edges.append((source.id, audio_edge))
         if source.transform:
             transformed_edge = f"input_{index}_transformed"
             # pass_arrays: the color stage and the compositors read arrays, so a frame that already
@@ -752,6 +783,16 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
+    program_audio_edge = None
+    if options.audio_router_node and audio_edges:
+        from .audio_mixer import wire_audio_mixer
+        wire_audio_mixer(avp, api, audio_edges, name=options.audio_router_node,
+                         outputs={"program": f"{options.audio_router_node}_program"},
+                         group=OUTPUT_GROUP)
+        program_audio_edge = f"{options.audio_router_node}_program"
+    elif options.audio_router_node and not audio_edges:
+        log.warning("audio_router_node=%r set but no has_audio sources; AFV will fire with nothing to mix",
+                    options.audio_router_node)
     from pyplumber.mixer.aux import AuxBus, AuxBuses
     aux = AuxBuses(avp, [AuxBus(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses]) if cfg.aux_buses else None
     keyer = DownstreamKeyer(avp, api, mixer, cfg, group=OUTPUT_GROUP) if cfg.dsk_keys else None
@@ -780,8 +821,16 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     importers = tuple(f"input_{index}_to_cuda" for index, source in enumerate(cfg.sources) if source.kind == "browser")
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend, held=held)
-    return _application(avp, mixer, options, input_edges, listener, routed_inputs=False, held_outputs=tuple(held), browser_importers=importers,
-                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers), aux_buses=aux)
+    if program_audio_edge and options.janus_output:
+        from .janus import JanusAudioConfig, build_janus_audio_output
+        build_janus_audio_output(
+            avp, api, program_audio_edge,
+            JanusAudioConfig(host=options.janus_host),
+            group=OUTPUT_GROUP, prefix="janus_audio")
+    return _application(avp, mixer, options, input_edges, listener, routed_inputs=False,
+                        held_outputs=tuple(held), browser_importers=importers,
+                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers),
+                        aux_buses=aux, audio_edges=tuple(audio_edges))
 
 
 def _startup_result(error=None):
