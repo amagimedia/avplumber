@@ -11,6 +11,9 @@ x-mixer-image: &mixer-image
 services:
   janus:
     extends: {file: ../../docker-compose/dmabuf/compose.yaml, service: janus}
+    environment:
+      # dmabuf/compose.yaml's janus service hardcodes this off; this demo is audio-follow-video.
+      JANUS_AUDIO_ENABLED: "true"
 
   janus-preview:
     extends: {file: ../../docker-compose/dmabuf/compose.yaml, service: janus-preview}
