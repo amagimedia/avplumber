@@ -42,7 +42,10 @@ const {chromium} = require('playwright');
         const command = route.request().postDataJSON();
         commands.push(command);
         if (command.command === 'preview') sample.status.pvw_scene = command.scene;
-        if (command.command === 'dsk') sample.dsk.find(key => key.id === command.key).on = command.on;
+        if (command.command === 'dsk' && command.prepare) sample.dsk.forEach(key => { key.next_take = command.keys.includes(key.id); });
+        else if (command.command === 'dsk' && command.keys)
+          sample.dsk.filter(key => command.keys.includes(key.id)).forEach(key => { key.on = command.toggle ? !key.on : command.on; });
+        else if (command.command === 'dsk') sample.dsk.find(key => key.id === command.key).on = command.on;
         return route.fulfill({json: {ok: true}});
       }
       if (url.pathname === '/outputs.js') return route.fulfill({contentType: 'text/javascript', body: fs.readFileSync(path.join(root, 'outputs.js'), 'utf8')});
@@ -228,6 +231,34 @@ const {chromium} = require('playwright');
     assert.deepEqual(commands.map(c => [c.key, c.on]).sort(), [['logo', true], ['title', true]], 'off keys all go on');
     assert(commands.every(c => c.fade_seconds === 0 && c.curve), 'key shortcuts use the key transition');
     commands.length = 0;
+    // Next Transition: an armed key goes with the background take, on the engine's clock; with BKGD
+    // off, Cut and Auto take the armed keys alone.
+    const nextButton = n => page.locator(`#next-keys button:nth-child(${n})`);
+    await nextButton(3).click();
+    await page.waitForFunction(() => state.dsk[1].next_take === true);
+    assert.deepEqual(commands.splice(0), [{command: 'dsk', keys: ['title'], prepare: true}], 'KEY 2 arms the second key');
+    assert(await page.locator('#keys .key:nth-child(2)').evaluate(n => n.classList.contains('armed')), 'the Keys card shows it armed');
+    assert(await nextButton(3).evaluate(n => n.classList.contains('air')), 'an on-air key shows its tally');
+    await page.evaluate(() => restFocus());
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('c')]);
+    assert.deepEqual(commands.splice(0).map(c => c.command), ['cut'], 'with BKGD a take is the background take');
+    await nextButton(1).click();
+    assert.equal(await page.locator('#pvw-state').textContent(), 'Auto · keys');
+    assert(await page.locator('#lever').isDisabled(), 'the lever mixes the background only');
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('Space')]);
+    assert.deepEqual(commands.splice(0).map(c => [c.command, c.keys, c.toggle, c.fade_seconds]), [['dsk', ['title'], true, 0.5]],
+      'Space after BKGD is Auto, which fades the armed keys alone at the Fade rate');
+    await page.evaluate(() => restFocus());
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('c')]);
+    assert.deepEqual(commands.splice(0).map(c => [c.command, c.fade_seconds]), [['dsk', 0]], 'Cut cuts them');
+    await nextButton(3).click();
+    await page.waitForFunction(() => !state.dsk[1].next_take);
+    commands.length = 0;
+    await page.locator('#cut').click();
+    assert.match(await page.locator('#error').textContent(), /Arm BKGD or a key/);
+    assert.deepEqual(commands, [], 'nothing armed takes nothing');
+    await nextButton(1).click();
+    assert(!(await page.locator('#lever').isDisabled()), 'BKGD gives the lever back');
     await page.evaluate(() => {
       for (const key of [' ', 'k']) window.dispatchEvent(new KeyboardEvent('keydown', {key, repeat: true}));
     });

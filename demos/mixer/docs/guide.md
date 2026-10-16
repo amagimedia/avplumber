@@ -47,37 +47,31 @@ shows the program with its enabled keys. Viewer selection is local to the
 browser. Scene takes, key buttons, AUX paging and AUX layout controls operate
 the running mixer.
 
-The page follows a vision switcher's panel. The **PGM** row cuts its scene to
-Program at once; the **PST** row, a scene tile and **1–9** select the Preset.
-**CUT / C** cuts the Preset to Program and completes a running transition;
-**AUTO / Space** runs the selected transition, **Mix** at its rate (frames by
-default, shown on AUTO, e.g. "Auto · Mix 15f") or a wipe clip; on a running mix
-it holds it and runs it on again. The **lever** mixes by hand from the end it
-rests at: the far end completes the mix and is where the next one starts, back
-at its start the mix is cancelled. After an AUTO or CUT ended a mix the lever
-left half way, it acts again once moved to an end. The bar under the lever
-shows the transition's progress. An empty Preset cannot be taken. The Preset
-box shows the background only, without downstream keys.
+The take bar follows a vision switcher's transition area. A scene tile or **1–9**
+selects Preview; with **Direct cut / D** a pick cuts straight to Program. **Cut / C**
+cuts Preview to Program and completes a running transition; **Auto / Space** runs
+the selected transition, **Fade / F** at its length in seconds or a wipe clip
+(**W**), and on a running fade holds it and runs it on again. The **lever** mixes
+by hand from the end it rests at: the far end completes the mix and is where the
+next one starts, back at its start the mix is cancelled. After an AUTO or CUT ended
+a mix the lever left half way, it acts again once moved to an end. The bar under
+the lever shows the transition's progress.
 
-The rows show one of three source banks; **Store list** puts the first nine
-scenes of the list below on the bank shown. Banks belong to the show and every
-controller sees the same ones; which bank a page shows is its own. A scene
-added to the show later never moves a button.
+**Next** in the Preview box chooses what the next take changes, as on a GV panel:
+**BKGD** the scene, **1–4** the keys, numbered as in the Keys card, lit while
+armed. A red dot marks a key on air, which an armed take removes. With BKGD the
+armed keys go with the background transition on its clock: they mix at its rate,
+hold when it holds, follow the lever, cut with a cut and switch at a wipe clip's
+cut point; a cancelled transition leaves them as they were, and they stay armed
+for the following takes. Without BKGD, Cut cuts the armed keys and Auto fades them
+at the Fade length; the lever, which mixes the background only, is off. BKGD is
+the page's own; the armed keys are the mixer's, the same for every controller.
 
-The **AUX bus to edit** selector delegates slot edits independently of the
-monitors. An armed slot belongs to that bus until assigned or cancelled.
-Changing the editing bus cancels the armed slot; changing a monitor does not.
-
-Each downstream key has **CUT** and **AUTO** and its own Auto rate. Its tally
-comes from the last frame emitted by the keyer: on, fading-in, fading-out, off,
-or unknown if telemetry is unavailable; a pending command never turns it on or
-off ahead of the picture. **Toggle all keys / K** changes every key on one
-frame: all off if any is on, otherwise all on. The **Next** buttons beside BKGD
-choose the keys that go with the next background transitions: they switch with
-it, at its rate, hold when it holds, follow the lever, cut with a cut and switch
-at a wipe clip's cut point; a cancelled transition leaves them as they were.
-**FTB** fades the keyed program to black and back at its own rate; the clean
-feed is never faded.
+Each key in the Keys card cuts on or off air, or fades at the card's key fade. Its
+red border is the tally of the last frame the keyer emitted, never a pending
+command; its number turns amber while it is armed. **K** changes every key on one
+frame: all off if any is on, otherwise all on. The slots card edits the Program
+preview's scene slots: click a slot, then a scene, or **Shift+1–8**.
 
 Each viewer must support its output codec. The recorded L4 show uses HEVC for
 Program preview and H.264 for dirty Program; an H.264-capable browser alone
