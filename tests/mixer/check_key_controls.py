@@ -2,10 +2,14 @@
 
 Uses the isolated 640x360 recovery graph, never the running demo's control port.
 Pass two frame_codes.py clips. Status is sampled while draining actual output frames.
+Next Transition keys follow the background take's clock: they mix, hold, follow the lever, cut,
+and return when the take is cancelled. The fade to black covers the keyed picture.
 """
 import argparse
 import json
 import time
+
+import numpy as np
 
 from check_transition_recovery import recovery_graph
 
@@ -20,11 +24,14 @@ def check(avp, mixer, output, errors):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             output.get(100)
-            rows = node.getObject('keys')
+            rows = node.getObject('keys')[:2]   # the two keys; the fade to black is the third input
             assert not errors, errors
             if predicate(rows):
                 return rows
         raise AssertionError(('key state did not arrive', rows))
+
+    def ftb_row():
+        return node.getObject('keys')[2]
 
     wait(lambda rows: all(r['phase'] == 'on' for r in rows))
     send('key_changes', {'inputs': 6, 'active_inputs': 1, 'duration_ms': 1000})
@@ -42,7 +49,7 @@ def check(avp, mixer, output, errors):
     assert rows[0]['opacity'] == 1, rows
     wait(lambda rows: rows[1]['phase'] == 'off')
     # Preparation does not alter air. Only a successfully started background take fires it.
-    send('prepare_inputs', {'inputs': 6, 'duration_ms': 1000})
+    send('prepare_inputs', {'inputs': 6})
     rows = wait(lambda rows: all(r['next_take'] for r in rows))
     assert rows[0]['on'] and not rows[1]['on'], rows
     mixer.preview('full1')
@@ -57,7 +64,44 @@ def check(avp, mixer, output, errors):
     # The persistent selection toggles again on the next cut, once, with no fade.
     mixer.cut('full0')
     wait(lambda rows: rows[0]['phase'] == 'on' and rows[1]['phase'] == 'off')
-    print('PASS: rendered tally, atomic group, reversal, forced completion, preparation, fade and cut')
+    # A held mix holds its keys too; running it on finishes them with the background.
+    mixer.preview('full1')
+    mixer.fade('full1', duration_sec=1)
+    wait(lambda rows: rows[0]['phase'] == 'fading-out' and .3 < rows[0]['opacity'] < .6)
+    mixer.fade('full1', duration_sec=1)   # AUTO again: held
+    held = wait(lambda rows: rows[0]['phase'] == 'fading-out')
+    time.sleep(0.5)
+    later = wait(lambda rows: True)
+    assert abs(later[0]['opacity'] - held[0]['opacity']) < 0.05, ('keys moved while the mix was held', held, later)
+    mixer.fade('full1', duration_sec=1)   # and on
+    wait(lambda rows: rows[0]['phase'] == 'off' and rows[1]['phase'] == 'on')
+    # The lever moves the keys with the background; back at its start they return.
+    mixer.preview('full0')
+
+    def lever(position):
+        avp.executeCommandsFromString(f'mixer.lever {{"mixer":"recovery","position":{position},"duration_sec":1}}')
+
+    lever(0.0)
+    lever(0.5)
+    rows = wait(lambda rows: rows[0]['phase'] == 'fading-in' and .4 < rows[0]['opacity'] < .6)
+    assert abs(rows[0]['opacity'] + rows[1]['opacity'] - 1) < 1e-6, rows
+    lever(0.0)
+    wait(lambda rows: rows[0]['phase'] == 'off' and rows[1]['phase'] == 'on')
+    send('prepare_inputs', {'inputs': 0})
+    # Fade to black over the keyed program, and back; the keys keep their state.
+    send('key_changes', {'inputs': 8, 'active_inputs': 15, 'duration_ms': 500})
+    deadline = time.monotonic() + 3
+    while not (ftb_row()['phase'] == 'on' and ftb_row()['opacity'] == 1):
+        output.get(100)
+        assert time.monotonic() < deadline, ftb_row()
+    frame = output.get(100)
+    luma = np.frombuffer(frame.data[0], dtype=np.uint8).reshape(360, frame.linesize[0])[:, :640]
+    assert luma.max() <= 20, ('not black under the fade to black', int(luma.max()))   # limited range black: 16
+    send('key_changes', {'inputs': 8, 'active_inputs': 7, 'duration_ms': 0})
+    rows = wait(lambda rows: True)
+    assert ftb_row()['phase'] == 'off' and rows[1]['on'], (ftb_row(), rows)
+    print('PASS: rendered tally, atomic group, reversal, forced completion, preparation, fade, cut, '
+          'held mix, lever, cancel and fade to black')
 
 
 if __name__ == '__main__':

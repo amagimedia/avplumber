@@ -5,6 +5,8 @@ The rules (Grass Valley Kayenne style, one A/B transition, nothing captured):
   * AUTO (fade) again for the scene on air pauses a crossfade, both sources moving; again resumes it.
   * Another scene during a transition replaces the preset picture; the transition continues to it.
   * A wipe ignores AUTO for its own scene; mixer.interrupt cuts back to the program.
+  * The lever holds a mix at its position; its far end completes, its start cancels, AUTO runs it
+    on; it does nothing under an AUTO, and after one it acts again only from one of its ends.
 
 Each case checks rendered pixels: which scene is on air (frame codes from frame_codes.py), that
 program keeps moving (no frozen picture) and that the old program never returns after the command.
@@ -350,6 +352,66 @@ def check(avp, mixer, rec, errors, control_port, wipe_file, wipe_seconds, spam_s
     assert_moving(rec.since(t0), 'mixed spam')
     check_errors(allow_wipe_cancel=True)
     case('mixed_spam', takes=81, final_landed_ms=round(latency * 1000))
+
+    def lever(position):
+        command(f'mixer.lever {{"mixer":"recovery","position":{position},"duration_sec":{FADE}}}')
+        return time.monotonic()
+
+    # 15. The lever holds the mix where it is, both sources moving, and its far end completes it.
+    settle('full0')
+    take('preview', 'full1')
+    lever(0.0)
+    t = lever(0.5)
+    time.sleep(0.5)
+    s = status()
+    assert s['transition'] == 'crossfade' and s['transition_manual'] and 0.4 < s['transition_progress'] < 0.6, s
+    held = rec.since(t + 0.2)
+    assert held and all(f[1] is None for f in held), 'the lever mix showed an endpoint'
+    assert_moving(held, 'lever held')
+    t = lever(1.0)
+    latency = landed(rec, 'full1', t, LANDING_S)
+    wait_idle('full1')
+    assert status()['lever']['origin'] == 1
+    case('lever_holds_and_completes', held_frames=len(held), landed_ms=round(latency * 1000))
+
+    # 16. Back at its start the lever cancels: Program and Preset as they were.
+    take('preview', 'full0')
+    t = lever(0.4)
+    time.sleep(0.4)
+    assert status()['transition_manual']
+    t = lever(1.0)
+    time.sleep(0.5)
+    s = status()
+    assert s['transition'] == 'idle' and s['pgm_scene'] == 'full1' and s['pvw_scene'] == 'full0', s
+    assert_absent(rec.since(t + LANDING_S), 'full0', 'lever cancel')
+    assert_moving(rec.since(t), 'lever cancel')
+    case('lever_start_cancels')
+
+    # 17. AUTO runs the lever's mix on from where the lever left it; the lever, half way, is
+    # picked up again only at one of its ends.
+    lever(0.6)   # from 1: four tenths of the mix
+    time.sleep(0.3)
+    t = take('fade', 'full0')
+    latency = landed(rec, 'full0', t, FADE * 0.6 + LANDING_S + 0.2)
+    wait_idle('full0')
+    assert not status()['lever']['engaged']
+    lever(0.3)
+    time.sleep(0.3)
+    assert status()['transition'] == 'idle', 'a lever away from its ends started a mix'
+    lever(0.0)
+    assert status()['lever'] == {**status()['lever'], 'engaged': True, 'origin': 0}
+    case('auto_runs_lever_mix_on', landed_ms=round(latency * 1000))
+
+    # 18. Under an AUTO the lever does nothing.
+    take('preview', 'full1')
+    t0 = take('fade', 'full1')
+    for position in (0.3, 0.7, 1.0, 0.0):
+        lever(position)
+        time.sleep(0.1)
+    latency = landed(rec, 'full1', t0, FADE + LANDING_S)
+    assert latency > FADE * 0.8, ('the lever changed an AUTO', latency)
+    wait_idle('full1')
+    case('lever_ignored_under_auto', landed_from_auto_ms=round(latency * 1000))
     return results
 
 

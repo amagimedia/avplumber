@@ -355,6 +355,7 @@ mixer.cut {"mixer":"mixer","scene":"grid_4_page_0"}
 mixer.fade {"mixer":"mixer","scene":"grid_4_page_0","duration_sec":0.5}
 mixer.fade {"mixer":"mixer","scene":"grid_4_page_0","duration_sec":1,"color":"#000000"}
 mixer.wipe {"mixer":"mixer","scene":"grid_4_page_0","wipe_file":"<path>/wipe.mov"}
+mixer.lever {"mixer":"mixer","position":0.35,"duration_sec":0.5}
 ```
 
 Cut, Fade and transparent media-file Wipe are supported. Fade uses the permanent
@@ -381,8 +382,28 @@ behaviour); nothing is captured or frozen:
 | `mixer.interrupt` | cuts back to the program as it was before the transition |
 
 A take while a cut or transition is only being prepared, nothing of it on air
-yet, replaces it. `mixer.status` reports `transition_on_air` and
-`transition_paused`. Pausing re-sends only the filter's alpha with a clamped
+yet, replaces it. `mixer.status` reports `transition_on_air`,
+`transition_paused`, `transition_manual`, `transition_progress` (at the newest
+program frame), `transition_duration_ms` and the `lever`.
+
+`mixer.lever` is a switcher's lever arm (T-bar) as a fader position in [0, 1],
+for a panel, a MIDI fader or the operator page (`/api/command` `lever`). From
+the end the lever rests at it starts a mix to Preview, held at the lever's
+progress with the same clamp a pause uses; the other end completes it and is
+where the next one starts; back at its start the mix is cancelled with Program
+and Preview unchanged. `duration_sec`, `curve` and `color` are the mix's, for
+AUTO: a fade take for the same Preview runs the lever's mix on from where the
+lever left it, and a cut completes it. While an AUTO, a cut or a wipe is on air
+the lever does nothing; a transition that ended away from the lever's far end
+leaves it inactive until it is brought to one of its ends, which becomes its
+start (`src/mixer/primitives/Lever.hpp`). The lever only mixes: a wipe clip
+cannot be scrubbed.
+
+The keys selected for the next transition (the keyer's `prepare_inputs`)
+follow the background take's own clock, which the orchestrator publishes for
+the keyer (`TakeClock`): they mix, hold, follow the lever, cut with a cut and
+switch at a wipe clip's cut point, and a cancelled take returns them to their
+state. Pausing re-sends only the filter's alpha with a clamped
 clock, so it costs nothing on the GPU. A replaced preset that never renders
 ends the transition through the take deadline, back to the program.
 

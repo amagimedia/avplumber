@@ -1298,8 +1298,35 @@ Parameters, in addition:
 -   `subscriptions` (array of strings, optional) - one shared frame
     subscription per input, in `src` order; an empty name (the program)
     subscribes nothing
+-   `mixer` (string, optional) - the mixer whose background transitions the
+    Next Transition keys follow (see `prepare_inputs`)
+-   `ftb_input` (int, optional) - an input nothing feeds: the keyer holds one
+    opaque black frame there, which its layer stretches over the canvas above
+    every key. Its key fade is the fade to black of the keyed program; the
+    clean feed, taken before the keyer, is never faded.
 
 `aux_mode`, `latency_ms` and `pgm_delay_frames` fail: the keyer has no playout.
+
+Objects (`node.object.set`):
+-   `active_inputs <mask>` cuts the keys to the mask; `fade_inputs {"active_inputs":
+    <mask>, "duration_ms": 0..10000, "curve": <name>}` fades the keys the mask
+    changes (0 cuts)
+-   `key_changes {"inputs": <mask>, "active_inputs": <mask>, "toggle": bool,
+    "duration_ms": 0..10000, "curve": <name>}` changes the keys in `inputs`
+    together on the next program frame, to the mask or (`toggle`) to the
+    opposite of their state; a cut also ends a fade they are running
+-   `prepare_inputs {"inputs": <mask>}` selects the Next Transition keys. From
+    the first program frame of each following background take of `mixer`, a
+    key turning on is at the take's progress and one turning off at its
+    complement: they mix with a mix, hold when it is held, follow the lever, cut
+    with a cut and switch at a wipe clip's cut point. A completed take leaves
+    them switched; a cancelled one returns them to the state they had. A
+    command for such a key during the take ends the take for it first.
+
+`node.object.get <node> keys` lists, per key input, what the last program frame
+showed: `on` (the key's state), `on_air`, `phase` (`on`, `off`, `fading-in`,
+`fading-out`, or `unknown` before the first frame), `opacity`, `available` (it
+has a frame), `pending` (the state is not on air yet) and `next_take`.
 
 ### `mixer_pvw_follow`
 

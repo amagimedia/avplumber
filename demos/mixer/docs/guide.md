@@ -45,37 +45,39 @@ select **Viewers 2**, then **Program preview** in one viewer and **Program dirty
 in the other. The first contains PVW, PGM and eight scene slots; the second
 shows the program with its enabled keys. Viewer selection is local to the
 browser. Scene takes, key buttons, AUX paging and AUX layout controls operate
-the running mixer. **Direct cut** always cuts a selected scene to Program.
-Otherwise scene clicks select Scene Preview. **Fade / Wipe** choose the effect;
-**AUTO / Space** runs it, and **CUT / C** cuts the displayed Preview. An empty
-Preview cannot be taken. Scene Preview shows the background only, without
-downstream keys; it is not a keyed look-ahead view.
+the running mixer.
+
+The page follows a vision switcher's panel. The **PGM** row cuts its scene to
+Program at once; the **PST** row, a scene tile and **1–9** select the Preset.
+**CUT / C** cuts the Preset to Program and completes a running transition;
+**AUTO / Space** runs the selected transition, **Mix** at its rate (frames by
+default, shown on AUTO, e.g. "Auto · Mix 15f") or a wipe clip; on a running mix
+it holds it and runs it on again. The **lever** mixes by hand from the end it
+rests at: the far end completes the mix and is where the next one starts, back
+at its start the mix is cancelled. After an AUTO or CUT ended a mix the lever
+left half way, it acts again once moved to an end. The bar under the lever
+shows the transition's progress. An empty Preset cannot be taken. The Preset
+box shows the background only, without downstream keys.
+
+The rows show one of three source banks; **Store list** puts the first nine
+scenes of the list below on the bank shown. Banks belong to the show and every
+controller sees the same ones; which bank a page shows is its own. A scene
+added to the show later never moves a button.
 
 The **AUX bus to edit** selector delegates slot edits independently of the
 monitors. An armed slot belongs to that bus until assigned or cancelled.
 Changing the editing bus cancels the armed slot; changing a monitor does not.
 
-**1–9** use the selected saved source bank, regardless of browsing filters.
-Three banks are stored in this browser. **Save browsed scenes to bank** explicitly
-replaces a bank with the first nine scenes in the current filter. Missing scenes
-remain labelled unavailable instead of being silently replaced. Arrow keys still
-browse Scene Preview. Fade and key durations accept seconds or whole frames at
-the canvas rate (for example, 12 frames at 25 fps is 0.48 seconds).
-
-Each downstream key has separate **CUT** and **AUTO** controls. Its tally comes
-from the last frame emitted by the keyer: on, fading-in, fading-out, off, or
-unknown if telemetry is unavailable. The requested on/off target is separate;
-pending commands never turn the tally on or off speculatively. Visibility means
-a key frame contributes with nonzero envelope opacity, not that its HTML contains
-nontransparent pixels. The UI polls this small tally separately every 200 ms.
-
-**Toggle all keys / K** sends one group operation: all off if any target is on,
-otherwise all on, using the key duration. **With next take** is a persistent
-selection: selected keys toggle on the first emitted frame of each new background
-take. CUT cuts those keys; AUTO runs their independent key fades at the configured
-key duration and curve. Pausing the background fade does not pause independent
-DSK fades. CUT completing that background transition also finishes its selected
-key fades. Preview selection and failed takes that never reach air do not fire keys.
+Each downstream key has **CUT** and **AUTO** and its own Auto rate. Its tally
+comes from the last frame emitted by the keyer: on, fading-in, fading-out, off,
+or unknown if telemetry is unavailable; a pending command never turns it on or
+off ahead of the picture. **Toggle all keys / K** changes every key on one
+frame: all off if any is on, otherwise all on. The **Next** buttons beside BKGD
+choose the keys that go with the next background transitions: they switch with
+it, at its rate, hold when it holds, follow the lever, cut with a cut and switch
+at a wipe clip's cut point; a cancelled transition leaves them as they were.
+**FTB** fades the keyed program to black and back at its own rate; the clean
+feed is never faded.
 
 Each viewer must support its output codec. The recorded L4 show uses HEVC for
 Program preview and H.264 for dirty Program; an H.264-capable browser alone
