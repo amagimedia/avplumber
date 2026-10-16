@@ -36,12 +36,18 @@ if [[ $# == 0 ]]; then
     echo "Usage: $0 {build|up -d|down|logs -f|config|...}" >&2
     exit 2
 fi
-# Without persistence mode the driver tears the GPU down whenever no process holds it,
-# so every container start pays its initialisation again.
-if [[ $1 == up ]] && command -v nvidia-smi >/dev/null &&
-    nvidia-smi --query-gpu=persistence_mode --format=csv,noheader 2>/dev/null | grep -q Disabled; then
-    echo "stack.sh: GPU persistence mode is off; enable it with" \
-        "'sudo systemctl enable --now nvidia-persistenced' (README.md)" >&2
+if [[ $1 == up ]] && command -v nvidia-smi >/dev/null; then
+    # Without persistence mode the driver tears the GPU down whenever no process holds it,
+    # so every container start pays its initialisation again.
+    if nvidia-smi --query-gpu=persistence_mode --format=csv,noheader 2>/dev/null | grep -q Disabled; then
+        echo "stack.sh: GPU persistence mode is off; enable it with" \
+            "'sudo systemctl enable --now nvidia-persistenced' (README.md)" >&2
+    fi
+    # The compute time-slice resets on every boot; gcp/host-setup.sh sets it on GCE.
+    if ! nvidia-smi compute-policy -l 2>/dev/null | grep -q 'Timeslice *Long'; then
+        echo "stack.sh: the GPU compute time-slice is not Long; set it with" \
+            "'sudo nvidia-smi compute-policy --set-timeslice=3' (README.md)" >&2
+    fi
 fi
 exec docker compose --env-file /dev/null --project-directory "$repo/docker-compose/mixer" \
     -f "$repo/docker-compose/mixer/compose.yaml" -f "$here/compose.yaml" "$@"

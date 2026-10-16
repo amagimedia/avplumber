@@ -49,6 +49,9 @@ services:
     environment:
       DMA_BROWSER_WINDOWS_PER_PROCESS: ${DMA_BROWSER_WINDOWS_PER_PROCESS:-10}
       DMA_BROWSER_STAGGER_FRAMES: ${DMA_BROWSER_STAGGER_FRAMES:-1}
+      # Frames a window may have out to the mixer; the L4 show runs 11 (9 is the least without
+      # repeated frames, deps/dma-browser/README.md).
+      DMA_BROWSER_DMABUF_POOL_SIZE: ${DMA_BROWSER_DMABUF_POOL_SIZE:-11}
 
   wayland:
     image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-wayland:${MIXER_RELEASE}

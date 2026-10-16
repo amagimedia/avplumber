@@ -72,18 +72,15 @@ something paused Chromium. The mixer was then copying every browser frame on imp
 the mixer sampling Chromium's capture buffers in place, the only path now, the same show ran
 clean with the browser uncapped, through hours of takes, fades and DSK keys.
 
-Two safeguards from that investigation stay cheap and remain in place on the measured host:
-a long compute time-slice (`nvidia-smi compute-policy --set-timeslice=3`, per boot; a
-oneshot systemd unit), with which the collapsed state ended on its own instead of persisting,
-and a watchdog that stops Chromium's GPU processes (`electron --type=gpu-process`) for 2-3 s,
-which reset that state within seconds.
+The host keeps a long compute time-slice (`nvidia-smi compute-policy --set-timeslice=3`), with
+which the collapsed state ended on its own instead of persisting. The policy resets on every
+boot: `gcp/host-setup.sh` sets it on GCE, and `stack.sh up` warns when it is not set.
 
 Operating rules: keep the browser container's CPU weight below the mixer's (`cpu_shares: 512`
 above; Chromium raises its GPU processes to nice -8 on its own), avoid CPU-bound work on the
-host while the show runs, and have an operator-side watchdog act only in the setup's `running`
-phase, because a freeze during the 60 s clean-start window makes that start fail. The
-clean-start gate restarts its 10 s window on missed deadlines; output drops are reported but do
-not restart it. An output node counts a full send queue (ENOMEM from FFmpeg's paced UDP
+host while the show runs, and do not pause containers during the 60 s clean-start window,
+because a freeze there makes that start fail. The clean-start gate restarts its 10 s window
+on missed deadlines; output drops are reported but do not restart it. An output node counts a full send queue (ENOMEM from FFmpeg's paced UDP
 sender) as a dropped packet and gives up only after other write errors persist for 3 s.
 
 ## Output codecs and bitrates
