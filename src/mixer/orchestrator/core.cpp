@@ -143,6 +143,10 @@ void MixerOrchestrator::dropTransition(MixerState::TransitionMode dropped) {
         cleanup([&] { retireWipeChain(); });
     state_->blend_on_air = state_->wipe_on_air = state_->take_paused = false;
     state_->take_request.reset();
+    endTakeClock(TakeClock::End::Cancelled, 0);   // keys going with it return to their state
+    state_->take_manual = state_->take_lever_done = false;
+    state_->take_progress = 0;
+    state_->lever.release();
     // The program slot's routing was restored: the other slot is cold now.
     state_->pvw_slot_scene.clear();
 }
@@ -222,7 +226,12 @@ Parameters MixerOrchestrator::status() const {
         case MixerState::TransitionMode::Wipe: s["transition"] = "wipe"; break;
     }
     s["transition_on_air"] = state_->blend_on_air || state_->wipe_on_air;
-    s["transition_paused"] = state_->take_paused;
+    s["transition_paused"] = state_->take_paused && !state_->take_manual;
+    s["transition_manual"] = state_->take_manual;
+    s["transition_progress"] = state_->take_progress;
+    s["transition_duration_ms"] = state_->take_duration_ns / 1000000;
+    s["lever"] = {{"position", state_->lever.position()}, {"origin", state_->lever.origin()},
+                  {"engaged", state_->lever.engaged()}};
     // Stall counters of both slot compositors, which take turns on program. Each
     // publishes them every 60 frames; one that is restarting is skipped, not waited for.
     const std::pair<const char*, std::string> slots[] = {

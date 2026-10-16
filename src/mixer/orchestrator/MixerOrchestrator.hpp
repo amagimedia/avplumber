@@ -93,6 +93,16 @@ class MixerOrchestrator {
     /// selection: the incoming picture changes as soon as the slot renders it.
     void replacePreset(const std::string& scene_name);
     void toggleCrossfadePause();
+    /// Caller holds state_->mutex. Holds the mix on air at `progress` (the lever's), as a pause holds.
+    void holdCrossfade(double progress);
+    /// Re-sends only the mix's progress: its mode and colour stay as the take set them.
+    void sendAlpha(const FadeRequest& request);
+    /// Caller holds state_->mutex. The keys' clock (TakeClock): a take on air from `start_ns`
+    /// over `duration_ns` (0: they switch at start_ns); the mix's clamps after a pause, resume or
+    /// lever move; the take's end, if the clock is still running.
+    void startTakeClock(int64_t start_ns, int64_t duration_ns, FadeCurve curve);
+    void clampTakeClock();
+    void endTakeClock(TakeClock::End end, int64_t end_ns);
     void prepareScene(const std::string& scene_name);
     bool destinationReady(const av::VideoFrame* frame) const;
     void completeTake(int64_t pts_ns);
@@ -131,6 +141,11 @@ public:
               FadeCurve curve = FadeCurve::Linear, std::optional<std::array<uint8_t, 3>> dip = std::nullopt,
               avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now());
     void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec);
+    /// The lever arm (T-bar) at `position` in [0, 1] (mixer.lever). From its rest it starts a
+    /// manual mix to Preview with AUTO's `duration_sec`, `curve` and `dip`, held at the lever's
+    /// progress; the far end completes it, the start cancels it with Program unchanged, AUTO
+    /// runs it on from there. An AUTO, cut or wipe on air ignores it; see Lever for pickup.
+    void lever(double position, double duration_sec, FadeCurve curve, std::optional<std::array<uint8_t, 3>> dip);
     /// Run the wipe subgraph once on *wipe_file* with the output kept on the
     /// direct branch, so file open, decoder and GPU filter initialisation (PTX
     /// compilation included) happen before the first real wipe. Blocks until

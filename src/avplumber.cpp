@@ -946,6 +946,25 @@ public:
             orch.fade(scene_name, duration_sec, curve, dip, CommandTiming::received());
         };
 
+        // mixer.lever {"mixer":"mixer","position":0.4,"duration_sec":1.0,"curve":"linear","color":null}:
+        // the lever arm (T-bar) at a fader position in [0, 1]; it mixes to Preview from the end it
+        // rests at, the other end completes, its start cancels. duration_sec, curve and color are
+        // the mix's, for AUTO to run it on from the lever.
+        commands_["mixer.lever"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.lever", arg);
+            const double position = req.at("position").get<double>();
+            if (!(position >= 0 && position <= 1))
+                throw Error("mixer.lever: position must be 0 to 1");
+            const double duration_sec = req.value("duration_sec", 1.0);
+            if (!(duration_sec > 0))
+                throw Error("mixer.lever: duration_sec must be > 0");
+            const auto curve = avp::mixer::parseFadeCurve(req.value("curve", std::string("linear")));
+            std::optional<std::array<uint8_t, 3>> dip;
+            if (req.contains("color") && !req.at("color").is_null())
+                dip = avp::mixer::parseDipColor(req.at("color").get<std::string>());
+            mixerOrchestrator(req.at("mixer").get<std::string>()).lever(position, duration_sec, curve, dip);
+        };
+
         // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0}
         commands_["mixer.wipe"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.wipe", arg);

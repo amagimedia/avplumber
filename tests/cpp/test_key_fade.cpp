@@ -80,12 +80,10 @@ void cuts() {
 
     key.retarget(true, 2, FadeCurve::Linear, frameTime(2), kPeriod);
     assert(key.moving() && key.target() && key.level(frameTime(2)) < 1);
-    key.finish();
+    key = KeyFade(true);   // a cut ends a running fade where it is going (mixer_keyer key_changes)
     assert(!key.moving() && key.level(frameTime(3)) == 1);
     key.retarget(false, 2, FadeCurve::Linear, frameTime(4), kPeriod);
     assert(key.moving() && !key.target() && key.level(frameTime(4)) > 0);
-    key.finish();
-    assert(!key.moving() && key.level(frameTime(5)) == 0);
 }
 
 void reversal() {

@@ -17,7 +17,7 @@ void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::Tra
     state_->transition_scene_name = scene_name;
     state_->take_phase = MixerState::TakePhase::Ready;
     state_->take_start_ns = 0;
-    state_->take_keys_started = false;
+    state_->take_progress = 0;
     state_->wipe_switched = false;
     state_->destination_ready = false;
     state_->take_deadline_ns = monotonicNs() + kTakeReadyTimeoutMs * 1000000;
@@ -39,6 +39,10 @@ void MixerOrchestrator::completeTake(int64_t pts_ns) {
     }
     state_->blend_on_air = state_->wipe_on_air = state_->take_paused = false;
     state_->take_request.reset();
+    endTakeClock(TakeClock::End::Completed, pts_ns);
+    state_->take_manual = state_->take_lever_done = false;
+    state_->take_progress = 0;
+    state_->lever.release();
     state_->publishTakePreview(scene, pts_ns);
     applySceneControls(state_->scenes.at(scene));
     applyPostTransitionRouting(destination_a, scene);
@@ -99,6 +103,12 @@ void MixerOrchestrator::replacePreset(const std::string& scene_name) {
 
 void MixerOrchestrator::toggleCrossfadePause() {
     if (!state_->take_request) return;
+    // AUTO on the lever's mix runs it on from the lever's progress; the lever is picked up
+    // again only at one of its ends.
+    if (state_->take_manual) {
+        state_->take_manual = state_->take_lever_done = false;
+        state_->lever.release();
+    }
     // Two ticks past the newest program frame: frames the compositor rendered meanwhile keep
     // the progress they were drawn with, so the held mix never steps back.
     const int64_t period_ns = av_rescale(1000000000, state_->fps_den, state_->fps_num);
@@ -116,10 +126,8 @@ void MixerOrchestrator::toggleCrossfadePause() {
     }
     state_->take_paused = !state_->take_paused;
     state_->take_request = request;
-    // Only the progress changes: mode and colour stay as the take set them.
-    for (const auto& command : state_->transition_control(request))
-        if (command.value.value("command", std::string()) == "alpha")
-            setNodeObject(state_->source_switcher_name + "_transition", command.key, command.value);
+    sendAlpha(request);
+    clampTakeClock();
     logstream << "mixer: fade to " << state_->transition_scene_name << (state_->take_paused ? " paused" : " resumed");
 }
 

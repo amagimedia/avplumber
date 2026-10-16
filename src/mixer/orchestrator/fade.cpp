@@ -20,6 +20,88 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     }
 }
 
+void MixerOrchestrator::lever(double position, double duration_sec, FadeCurve curve,
+                              std::optional<std::array<uint8_t, 3>> dip) {
+    if (!std::isfinite(position)) throw Error("mixer: invalid lever position");
+    if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid fade duration");
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto mode = state_->transition_mode.load();
+    const bool manual = mode == MixerState::TransitionMode::Crossfade && state_->take_manual;
+    if (mode != MixerState::TransitionMode::Idle && !manual) {
+        state_->lever.track(position);   // an AUTO, cut or wipe owns the program
+        return;
+    }
+    const auto move = state_->lever.move(position, manual);
+    if (move.kind == Lever::Kind::Idle) return;
+    if (move.kind == Lever::Kind::Cancel) {
+        interruptTransition(Interruption::Replaced);   // Program as it was, Preview kept
+        logstream << "mixer: lever back at its start, program unchanged";
+        return;
+    }
+    if (!manual) {
+        const std::string scene = state_->preview.pvw;
+        if (scene.empty() || !state_->scenes.count(scene) || scene == state_->pgm_scene_name) {
+            state_->lever.release();
+            return;
+        }
+        try {
+            beginTake(scene, MixerState::TransitionMode::Crossfade);
+            state_->take_received_ns = monotonicNs();
+            state_->take_duration_ns = int64_t(duration_sec * 1000000000);
+            state_->take_curve = curve;
+            state_->take_dip = dip;
+            state_->take_manual = true;
+        } catch (...) {
+            abortTransition(state_->transition_generation);
+            throw;
+        }
+        logstream << "mixer: lever mixes to " << scene;
+    }
+    state_->take_lever = move.progress;
+    state_->take_lever_done = move.kind == Lever::Kind::Complete;
+    if (state_->blend_on_air) holdCrossfade(move.progress);
+}
+
+void MixerOrchestrator::holdCrossfade(double progress) {
+    if (!state_->take_request) return;
+    FadeRequest request = *state_->take_request;
+    const int64_t at_ms = (state_->take_start_ns + int64_t(progress * double(state_->take_duration_ns))) / 1000000;
+    request.time_floor_ms = request.time_ceiling_ms = at_ms;
+    state_->take_hold_ns = at_ms * 1000000;
+    state_->take_paused = true;
+    state_->take_request = request;
+    sendAlpha(request);
+    clampTakeClock();
+}
+
+void MixerOrchestrator::sendAlpha(const FadeRequest& request) {
+    for (const auto& command : state_->transition_control(request))
+        if (command.value.value("command", std::string()) == "alpha")
+            setNodeObject(state_->source_switcher_name + "_transition", command.key, command.value);
+}
+
+void MixerOrchestrator::startTakeClock(int64_t start_ns, int64_t duration_ns, FadeCurve curve) {
+    state_->publishClock(state_->clock()->next(start_ns, duration_ns, curve));
+}
+
+void MixerOrchestrator::clampTakeClock() {
+    TakeClock clock = *state_->clock();
+    if (clock.end != TakeClock::End::Running || !state_->take_request) return;
+    const auto& request = *state_->take_request;
+    clock.start_ns = request.start_ms * 1000000;
+    clock.floor_ns = request.time_floor_ms ? *request.time_floor_ms * 1000000 : std::numeric_limits<int64_t>::min();
+    clock.ceiling_ns = request.time_ceiling_ms ? *request.time_ceiling_ms * 1000000 : std::numeric_limits<int64_t>::max();
+    state_->publishClock(clock);
+}
+
+void MixerOrchestrator::endTakeClock(TakeClock::End end, int64_t end_ns) {
+    TakeClock clock = *state_->clock();
+    if (clock.generation == 0 || clock.end != TakeClock::End::Running) return;
+    clock.end = end;
+    clock.end_ns = end_ns;
+    state_->publishClock(clock);
+}
+
 int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& frames, int active, int64_t last_ns) {
     const auto pts = [&](int input) {
         const auto* frame = frames.at(input);
@@ -41,8 +123,13 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
     // tick, so waiting for a strictly newer destination frame might never end.
     if (mode == MixerState::TransitionMode::Cut) {
         if (!destinationReady(frames[target]) || target_pts < last_ns) return on_air();
-        state_->startTakeKeys(target_pts == last_ns
-            ? target_pts + av_rescale(1000000000, state_->fps_den, state_->fps_num) : target_pts, true);
+        // The keys going with the cut switch on the first frame of the new program: the next
+        // tick's when this tick's destination frame is not emitted.
+        const int64_t keys_ns = target_pts == last_ns
+            ? target_pts + av_rescale(1000000000, state_->fps_den, state_->fps_num) : target_pts;
+        // A cut that completes a mix on air ends the mix's clock; any other starts its own.
+        if (state_->clock()->end != TakeClock::End::Running) startTakeClock(keys_ns, 0, FadeCurve::Linear);
+        endTakeClock(TakeClock::End::Completed, keys_ns);
         completeTake(target_pts);
         return target_pts == last_ns ? -1 : target;
     } else if (mode == MixerState::TransitionMode::Crossfade) {
@@ -54,11 +141,21 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
             const double duration = double(state_->take_duration_ns) / 1000000000;
             const double hold = av_q2d({state_->fps_den, state_->fps_num}) / duration;
             state_->take_start_ns = target_pts;
-            state_->take_request = FadeRequest{target_pts / 1000000, duration,
+            FadeRequest request{target_pts / 1000000, duration,
                     !state_->pgm_is_slot_a, state_->take_curve, state_->take_dip, hold, state_->canvas_transfer};
-            state_->take_paused = false;
-            for (const auto& command : state_->transition_control(*state_->take_request))
+            state_->take_paused = state_->take_manual;
+            if (state_->take_manual) {
+                // The lever's mix comes up at the lever's progress, not at the start of a ramp.
+                const int64_t at_ms = (target_pts + int64_t(state_->take_lever * double(state_->take_duration_ns))) / 1000000;
+                request.time_floor_ms = request.time_ceiling_ms = at_ms;
+                state_->take_hold_ns = at_ms * 1000000;
+            }
+            state_->take_request = request;
+            for (const auto& command : state_->transition_control(request))
                 setNodeObject(state_->source_switcher_name + "_transition", command.key, command.value);
+            startTakeClock(target_pts, state_->take_duration_ns,
+                           state_->take_dip ? FadeCurve::Linear : state_->take_curve);
+            clampTakeClock();
             // Keep direct frames available throughout the fade. One selector owns
             // the visible change; routing cleanup follows its endpoint frame.
             setNodeObject(state_->slot_a.post_otm_name, "outputs", Parameters(3u));
@@ -69,10 +166,11 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
         const int blend = MixerState::transSourceSwitcherIndex();
         const auto blend_pts = pts(blend);
         if (blend_pts > last_ns && blend_pts >= state_->take_start_ns) {
-            state_->startTakeKeys(blend_pts, false);
-            // A paused mix holds; a replaced preset completes only once its picture is there.
-            if (!state_->take_paused && state_->destination_ready &&
-                blend_pts >= state_->take_start_ns + state_->take_duration_ns) {
+            state_->take_progress = state_->clock()->progress(blend_pts);
+            // A paused mix holds, a manual one until the lever's end; a replaced preset
+            // completes only once its picture is there.
+            if (state_->destination_ready && (state_->take_lever_done || (!state_->take_paused &&
+                blend_pts >= state_->take_start_ns + state_->take_duration_ns))) {
                 completeTake(blend_pts);
                 // Emit this endpoint (already entirely the destination). The next
                 // invocation selects the new program's direct input.
@@ -91,6 +189,9 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
                destinationReady(frames[target]) && target_pts >= last_ns &&
                target_pts >= state_->take_start_ns + state_->take_duration_ns / 2) {
         state_->wipe_switched = true;
+        // The keys going with a wipe clip switch where the background does, under the clip.
+        startTakeClock(target_pts == last_ns
+            ? target_pts + av_rescale(1000000000, state_->fps_den, state_->fps_num) : target_pts, 0, FadeCurve::Linear);
         applySceneControls(state_->scenes.at(state_->transition_scene_name));
         return target_pts == last_ns ? -1 : target;
     } else if (mode == MixerState::TransitionMode::Wipe && state_->wipe_switched) {
