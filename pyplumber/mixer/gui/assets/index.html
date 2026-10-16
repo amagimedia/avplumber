@@ -264,6 +264,11 @@
   #graph .edge.sub { stroke-dasharray: 4 4; }
 
   #takebar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 12px; }
+  /* The lever arm (T-bar): a slider, with the transition's progress as a thin bar under it. */
+  .lever { display: inline-flex; flex-direction: column; justify-content: center; gap: 2px; width: 96px; }
+  #lever { width: 100%; height: 14px; margin: 0; accent-color: var(--muted); }
+  #tprog { height: 3px; border-radius: 2px; background: var(--edge); overflow: hidden; }
+  #tprog i { display: block; height: 100%; width: 0; background: var(--pgm); }
   #cut { border-color: var(--pgm); } #fade { border-color: var(--pvw); }
   .wipe { border-color: var(--wipe); }
   #wipes { display: inline-flex; flex-wrap: wrap; gap: 6px; }
@@ -419,6 +424,8 @@
     <footer class="card" id="takebar">
       <button class="btn" id="cut" type="button" title="Cut Preview to Program (C)" aria-keyshortcuts="C">Cut</button>
       <button class="btn" id="auto" type="button" title="Auto: run the selected transition to Preview (Space)" aria-keyshortcuts="Space">Auto</button>
+      <span class="lever"><input id="lever" type="range" min="0" max="1000" step="1" value="0" aria-label="Lever"
+        title="Lever (T-bar): mixes to Preview from the end it rests at; the far end completes, the start cancels"><span id="tprog"><i></i></span></span>
       <span class="vsep"></span>
       <button class="btn" id="fade" type="button" aria-pressed="false" title="Select fade for Auto (F)" aria-keyshortcuts="F">Fade</button>
       <span class="fade-ctl" id="fade-ctl"><label class="field"><input id="fade-s" type="number" min="0.1" step="0.1" value="0.5" aria-label="Fade duration in seconds"><span>s</span></label></span>
@@ -627,10 +634,46 @@ function renderBuses() {
   $("pvw").textContent = status.pvw_scene || "—";
   const transition = status.transition || "idle";
   // A second take of the same scene pauses a fade (Space again resumes it); C completes it.
-  const paused = status.transition_paused ? " · paused" : "";
-  $("pgm-state").textContent = transition === "idle" ? "on air" : `on air · ${transition}${paused}`;
+  const how = status.transition_manual ? " · lever" : status.transition_paused ? " · paused" : "";
+  const shown = transition === "crossfade" ? `crossfade ${Math.round(transitionProgress() * 100)}%` : transition;
+  $("pgm-state").textContent = transition === "idle" ? "on air" : `on air · ${shown}${how}`;
   $("pvw-state").textContent = direct ? "picks cut to program" : `Auto · ${transitionLabel()}`;
+  renderLever();
 }
+// The mix's progress now: as the last poll reported it, run on locally while AUTO drives it.
+let progressSample = {at: 0, progress: 0};
+function transitionProgress() {
+  const status = state?.status || {};
+  if (status.transition !== "crossfade") return 0;
+  const running = status.transition_on_air && !status.transition_paused && !status.transition_manual;
+  const elapsed = running && status.transition_duration_ms ? (performance.now() - progressSample.at) / status.transition_duration_ms : 0;
+  return Math.min(1, progressSample.progress + elapsed);
+}
+function renderLever() {
+  $("tprog").firstElementChild.style.width = `${Math.round(transitionProgress() * 100)}%`;
+}
+(function animateProgress() {
+  if (state?.status?.transition === "crossfade") renderLever();
+  requestAnimationFrame(animateProgress);
+})();
+// The lever sends its position as it moves, one request at a time, the newest position next.
+let leverNext = null, leverSending = false;
+async function sendLever() {
+  if (leverSending) return;
+  leverSending = true;
+  try {
+    while (leverNext !== null) {
+      const position = leverNext;
+      leverNext = null;
+      const duration_sec = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
+      if (duration_sec === null) return;
+      await api("/api/command", {command: "lever", position, duration_sec, curve: curves.fade.value,
+                                 color: fadeColor.hex() || null});
+    }
+  } catch (exc) { showError(exc.message); }
+  finally { leverSending = false; }
+}
+$("lever").oninput = () => { leverNext = Number($("lever").value) / 1000; sendLever(); };
 function keyTransition() {
   const fade_seconds = fieldSeconds("key-fade-s", 0, "Enter the key fade in seconds, or leave it empty to cut");
   return fade_seconds === null ? null : {fade_seconds, curve: curves.key.value};
@@ -1641,6 +1684,7 @@ async function refresh() {
       saveViewers();
     }
     state = next;
+    progressSample = {at: performance.now(), progress: next.status?.transition_progress || 0};
     $("conn").hidden = true;
     stale = false;
     render();

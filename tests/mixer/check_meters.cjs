@@ -200,6 +200,17 @@ const {chromium} = require('playwright');
     assert.deepEqual(commands.splice(0).map(c => c.command), ['fade'], 'Space after clicking Fade runs Auto');
     await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('c')]);
     assert.deepEqual(commands.splice(0).map(c => [c.command, c.scene]), [['cut', 'a']], 'C cuts the Preview');
+    // The lever sends its position with the mix's duration; Program shows the mix's progress.
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')),
+      page.evaluate(() => { $('lever').value = 400; $('lever').dispatchEvent(new Event('input')); })]);
+    assert.deepEqual(commands.splice(0).map(c => [c.command, c.position, c.duration_sec]), [['lever', 0.4, 0.5]]);
+    await page.evaluate(() => {
+      state.status = {...state.status, transition: 'crossfade', transition_on_air: true, transition_manual: true,
+                      transition_progress: 0.4, transition_duration_ms: 500};
+      progressSample = {at: performance.now(), progress: 0.4}; renderBuses();
+    });
+    assert.equal(await page.locator('#pgm-state').textContent(), 'on air · crossfade 40% · lever');
+    await page.evaluate(() => { state.status = {...state.status, transition: 'idle'}; renderBuses(); });
     await page.evaluate(() => { setDirect(true); restFocus(); });
     assert.equal(await page.locator('#direct').textContent(), 'Direct cut: on');
     await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('2')]);
