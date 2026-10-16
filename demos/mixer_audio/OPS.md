@@ -3,14 +3,14 @@
 Practical host layout, ports, and copy-paste commands so a later chat does
 not have to rediscover them. Product docs stay in [`README.md`](README.md).
 
-## Host layout (AWS Fedora demo: avplumber-lamus-2)
+## Host layout (AWS Fedora demo host)
 
 | Item | Path / value |
 |------|----------------|
 | Workspace root | `/home/fedora/audio-video-mixer/` |
 | avplumber checkout | `/home/fedora/audio-video-mixer/avplumber` |
-| SSH | `ssh -i ~/.ssh/awsdev.pem fedora@<HOST_IP>` |
-| Last used IP | `52.51.75.224` (public; changes if the instance is replaced) |
+| SSH | `ssh -i ~/.ssh/<your-key>.pem fedora@<HOST_IP>` |
+| Current IP | ask the team / check the ops channel — it changes whenever the instance is replaced |
 
 Test video **and** audio are fully synthetic — `prepare_demo.py` generates
 them on first run via FFmpeg (`lavfi testsrc2` / `sine=frequency=...` muxed
@@ -42,7 +42,7 @@ No CI/registry — the image is always rebuilt directly on the host.
 ## Rebuild and redeploy
 
 ```sh
-ssh -i ~/.ssh/awsdev.pem fedora@52.51.75.224
+ssh -i ~/.ssh/<your-key>.pem fedora@<HOST_IP>
 cd /home/fedora/audio-video-mixer/avplumber
 docker compose -f docker-compose/mixer_audio/compose.yaml build mixer
 docker compose -f docker-compose/mixer_audio/compose.yaml up -d --force-recreate mixer
