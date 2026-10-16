@@ -70,11 +70,15 @@ for the following takes. Without BKGD, Cut cuts the armed keys and Auto fades th
 at the Fade rate; the lever, which mixes the background only, is off. BKGD is
 the page's own; the armed keys are the mixer's, the same for every controller.
 
-Each key in the Keys card cuts on or off air, or fades at the card's key fade. Its
-red border is the tally of the last frame the keyer emitted, never a pending
-command; its number turns amber while it is armed. **K** changes every key on one
-frame: all off if any is on, otherwise all on. **FTB** in the Program box fades the
-keyed program to black at the Fade rate and pressed again back; it flashes while
+Each key in the Keys card goes on or off air at its own rate, shown on its tag
+(`12f`, `CUT`) and kept by the mixer for every controller, with the Fade curve;
+Shift+click cuts it whatever the rate. Clicking the tag edits the rate in place
+(frames, seconds:frames, or `0` / `c` to cut; Enter or leaving it sets it, Escape
+keeps the old one). Its red border is the tally of the last frame the keyer
+emitted, never a pending command; its number turns amber while it is armed. **K**
+changes every key, each at its own rate: all off if any is on, otherwise all on.
+**FTB** in the Program box fades the keyed program to black at the Fade rate and
+pressed again back; it flashes while
 Program is black, and the clean feed is never faded. The slots card edits the
 Program preview's scene slots: click a slot, then a scene, or **Shift+1–8**.
 

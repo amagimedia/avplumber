@@ -204,26 +204,29 @@
   .widget header .note.warn { color: var(--warn); }
   /* The longer "Program preview slots" title keeps its note on the same line down to a 1366 px window. */
   #slots-card header { column-gap: 7px; }
-  /* The key fade stays on the title line, compact and pulled into its height so the card does not grow;
-     the note gives way to it (see trimTakebar). */
   #keys-card header { flex-wrap: nowrap; }
-  #keys-card .note { flex: 1 1 0; width: 0; }   /* never widens the card; each key's tooltip says it too */
-  .key-fade { margin-left: auto; align-self: center; flex: none; margin-block: -5px; }
-  .key-fade .field { border-radius: 7px 0 0 7px; }
-  .key-fade .field input { width: 3.3em; padding: 3px 2px 3px 7px; font-size: 12px; }
-  .key-fade .dd-btn { border-radius: 0 7px 7px 0; }
-  .key-fade .dd-btn svg.glyph { width: 12px; height: 9px; }
-  .key-fade .dd-menu { left: auto; right: 0; }
-  #keys { display: grid; grid-template-columns: repeat(2, minmax(min-content, 1fr)); gap: 6px; }
+  #keys-card .note { flex: 1 1 0; width: 0; }   /* never widens the card; each key's tooltip says it too (see trimTakebar) */
+  #keys { display: grid; grid-template-columns: repeat(2, minmax(max-content, 1fr)); gap: 6px; }
   #row2.single #keys { grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
-  .key { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid var(--edge); border-radius: 7px;
-         background: var(--raised); cursor: pointer; font-size: 13px; text-align: left; }
+  /* A key: its take button and its rate tag in one box. A long name ends in an ellipsis, so the card keeps its height. */
+  .key { display: flex; align-items: center; min-width: 0; border: 1px solid var(--edge); border-radius: 7px; background: var(--raised); }
+  .key .take { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; padding: 6px 4px 6px 9px; border: 0;
+               background: none; cursor: pointer; font-size: 13px; text-align: left; }
+  .key .take span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* The key's number: red with the border while on air, amber while armed for the next transition. */
   .key .kn { display: inline-grid; place-items: center; min-width: 15px; height: 15px; border-radius: 4px; border: 1px solid var(--edge);
              font: 600 10px var(--mono); color: var(--muted); flex: none; }
-  .key[aria-pressed="true"] { border-color: var(--pgm); }
-  .key[aria-pressed="true"] .kn { border-color: var(--pgm); color: var(--pgm); }
+  .key.on { border-color: var(--pgm); }
+  .key.on .kn { border-color: var(--pgm); color: var(--pgm); }
   .key.armed .kn { background: var(--accent); border-color: var(--accent); color: #1c1305; }
+  /* The key's rate: a quiet tag; a click edits it in place, stepped like the Fade field. */
+  .krate { flex: none; margin-right: 5px; border: 1px solid transparent; border-radius: 4px; background: none; cursor: pointer;
+           font: 500 10px var(--mono); color: var(--faint); padding: 1px 4px; font-variant-numeric: tabular-nums; }
+  .krate:hover { border-color: var(--edge); color: var(--text); }
+  .krate:empty { display: none; }
+  .krate.edit { display: inline-flex; align-items: center; border-color: var(--accent); background: var(--bg); color: var(--text);
+                padding: 0 1px 0 4px; cursor: auto; }
+  .krate.edit input { width: 3em; border: 0; background: none; color: inherit; font: inherit; padding: 0; outline: none; }
   #slots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
   .slot { display: flex; min-width: 0; border: 1px solid var(--edge); border-radius: 7px; background: var(--raised); overflow: hidden; }
   .slot:has(.assign[aria-pressed="true"]) { border-color: var(--accent); }
@@ -417,8 +420,7 @@
 
     <div id="row2" hidden>
       <section class="card widget" id="keys-card" aria-label="Downstream keys" hidden>
-        <header><h2 class="title">Keys</h2><span class="note">dirty feed only</span>
-          <span class="fade-ctl key-fade" id="key-fade"><label class="field" title="Key fade: frames (15) or seconds:frames (1:15) · empty or 0 cuts"><input id="key-fade-s" type="text" inputmode="numeric" placeholder="0f" data-min-frames="0" aria-label="Key fade in frames or seconds:frames, empty or 0 cuts"></label></span></header>
+        <header><h2 class="title">Keys</h2><span class="note">dirty feed only</span></header>
         <div id="keys"></div>
       </section>
       <section class="card widget" id="slots-card" aria-labelledby="slots-title" hidden>
@@ -511,7 +513,7 @@ let directTouched = false;       // once the operator toggles it, stop following
 let currentTransition = "cut";   // what a pick uses in direct mode; the config may change it
 let tookTransition = false;      // once the operator takes one, stop following the config
 // Stop polling from overwriting typing, or a curve the operator picked.
-const touched = {fade: false, wipe: false, keyFade: false, fadeCurve: false, keyCurve: false};
+const touched = {fade: false, wipe: false, fadeCurve: false};
 let wipes = null;                // the library published by the mixer; null until the first state so an empty one still renders
 let currentWipe = null;          // the clip W and a direct-mode wipe use
 let armedSlot = null;            // multiview slot waiting for a scene
@@ -669,8 +671,6 @@ function applySettings(s) {
   if (fps() && !touched.fade) $("fade-s").value = formatRate(s.fade_seconds || FADE_SECONDS);
   if (s.fade_curve && !touched.fadeCurve) curves.fade.set(s.fade_curve);
   if (store.get("fadeColor", null) === null) fadeColor.seed(s.fade_color || null);
-  if (fps() && s.dsk_fade_seconds !== undefined && !touched.keyFade) $("key-fade-s").value = s.dsk_fade_seconds ? formatRate(s.dsk_fade_seconds) : "";
-  if (s.dsk_fade_curve && !touched.keyCurve) curves.key.set(s.dsk_fade_curve);
   if (s.transition && !tookTransition) currentTransition = s.transition;
   if (s.wipe_file && !touched.wipe && !wipes.length) $("wipe-file").value = s.wipe_file;
   renderTransition();
@@ -747,24 +747,19 @@ function sendLever() {
 }
 $("lever").oninput = sendLever;
 $("lever").onpointerdown = openLeverSocket;   // open the channel before the first position
-function keyTransition() {
-  const fade_seconds = fieldRate("key-fade-s", 0, "Enter the key fade in frames (15) or seconds:frames (1:15), or leave it empty to cut");
-  return fade_seconds === null ? null : {fade_seconds, curve: curves.key.value};
-}
 let keysPending = false;
 async function toggleAllKeys() {
   const keys = state?.dsk || [];
   if (keysPending || !keys.length) return;
-  const transition = keyTransition();
-  if (!transition) return;
   const on = !keys.some(key => key.on);
   keysPending = true;
   try {
     showError("");
-    keys.forEach((key, i) => { if (key.on !== on) $("keys").children[i]?.setAttribute("aria-pressed", String(on)); });
+    keys.forEach((key, i) => { if (key.on !== on) showKeyOn(i, on); });
     // Together, not one round trip after another: over a long link the last key lagged the first by seconds.
+    // Each key at its own rate.
     await Promise.all(keys.filter(key => key.on !== on)
-      .map(key => api("/api/command", {command: "dsk", key: key.id, on, ...transition})));
+      .map(key => api("/api/command", {command: "dsk", key: key.id, on, curve: curves.fade.value})));
   } catch (exc) { showError(exc.message); }
   finally { await refresh(); keysPending = false; }
 }
@@ -821,28 +816,66 @@ function renderFtb() {
 function renderKeys() {
   const keys = state.dsk || [];
   $("keys-card").hidden = !keys.length;
-  if (!changed($("keys"), keys)) {
+  // A rate being edited keeps its field: the poll rebuilds the keys only after it.
+  if (editingKey || !changed($("keys"), keys)) {
     // Undo a state shown at a click that the mixer did not take.
-    keys.forEach((key, i) => $("keys").children[i]?.setAttribute("aria-pressed", String(key.on)));
+    keys.forEach((key, i) => showKeyOn(i, key.on));
     return;
   }
   rebuild($("keys"), keys.map((key, i) => {
-    const name = key.id.replaceAll("_", " "), label = name[0].toUpperCase() + name.slice(1);
-    const button = el("button", "key");
-    button.append(el("span", "kn", String(i + 1)), el("span", "", label));
-    button.dataset.focus = key.id;
-    button.setAttribute("aria-pressed", String(key.on));
-    button.title = `${label} · ${key.on ? "take off" : "put on"} air · dirty feeds only`;
-    // An empty field cuts, even when the config fades by default.
-    button.onclick = () => {
-      const transition = keyTransition();
-      if (!transition) return;
+    const name = key.id.replaceAll("_", " "), label = name[0].toUpperCase() + name.slice(1), rate = keyRateText(key.rate);
+    const box = el("div", "key"), take = el("button", "take"), tag = el("button", "krate", rate);
+    box.append(take, tag);
+    take.append(el("span", "kn", String(i + 1)), el("span", "", label));
+    take.dataset.focus = key.id;
+    take.title = `${label} · ${key.on ? "take off" : "put on"} air at ${rate} · Shift: cut · dirty feeds only`;
+    // Each key at its own rate, which the mixer keeps for every controller; Shift cuts.
+    take.onclick = (e) => {
       // Show the requested state at once: the round trip to the mixer and the next poll come later.
-      button.setAttribute("aria-pressed", String(!key.on));
-      command({command: "dsk", key: key.id, on: !key.on, ...transition});
+      showKeyOn(i, !key.on);
+      command({command: "dsk", key: key.id, on: !key.on, curve: curves.fade.value, ...(e.shiftKey && {fade_seconds: 0})});
     };
-    return button;
+    tag.dataset.focus = `${key.id}-rate`;
+    tag.title = `${label}'s rate · click to change`;
+    tag.onclick = () => editKeyRate(tag, key, label);
+    showKeyOn(i, key.on, box);
+    return box;
   }));
+}
+const keyRateText = (seconds) => seconds === undefined ? "" : seconds ? formatRate(seconds) : "CUT";   // "": a mixer without key rates
+function showKeyOn(i, on, box = $("keys").children[i]) {
+  box?.classList.toggle("on", on);
+  box?.firstChild.setAttribute("aria-pressed", String(on));
+}
+// The tag turns into a rate field in place: Enter or leaving it sets the rate, Escape keeps the old one.
+let editingKey = null;
+function editKeyRate(tag, key, label) {
+  editingKey = key.id;
+  const field = el("span", "krate edit"), input = el("input");
+  input.value = key.rate ? formatRate(key.rate) : "";
+  input.placeholder = "CUT";
+  input.dataset.minFrames = "0";
+  input.setAttribute("aria-label", `${label}'s rate: frames (15) or seconds:frames (1:15), 0 or empty cuts`);
+  field.append(input);
+  tag.replaceWith(field);
+  rateField(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    const text = input.value.trim().toLowerCase();
+    const seconds = ["", "c", "cut"].includes(text) ? 0 : parseRate(text);
+    if (save && seconds === null) showError("Enter the key's rate in frames (15) or seconds:frames (1:15), or 0 to cut");
+    editingKey = null;
+    delete $("keys").dataset.signature;   // rebuild the keys with the tag back
+    restFocus();
+    if (save && seconds !== null && seconds !== key.rate) return command({command: "dsk", key: key.id, rate: seconds});
+    renderKeys();
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "Escape") finish(e.key === "Enter"); });
+  input.addEventListener("blur", () => finish(true));
 }
 function renderSlots() {
   const aux = gridAux(), keys = Boolean(state?.dsk?.length), slots = slotsOf(aux);
@@ -1343,10 +1376,9 @@ function curveMenu(label, touchedKey) {
   menu.root = dd.root;
   return menu;
 }
-const curves = {fade: curveMenu("Fade curve", "fadeCurve"), key: curveMenu("Key fade curve", "keyCurve")};
+const curves = {fade: curveMenu("Fade curve", "fadeCurve")};
 curves.fade.root.classList.add("up");
 $("fade-ctl").append(curves.fade.root);
-$("key-fade").append(curves.key.root);
 
 /* ---------- fade colour ---------- */
 // Mix crossfades; a colour dips through it, fully shown halfway (mixer.fade "color"). The button's
@@ -1829,7 +1861,6 @@ $("fade").onclick = () => selectTransition("fade");
 $("ftb").onclick = toggleFtb;
 $("direct").onclick = () => { directTouched = true; setDirect(!direct); };
 $("fade-s").oninput = () => { touched.fade = true; renderTransition(); };
-$("key-fade-s").oninput = () => { touched.keyFade = true; };
 // A rate field steps a frame on its arrows, the arrow keys and the wheel over it, and shows a valid entry
 // as the panel would ("45" -> "1:15").
 function stepRate(field, step) {
@@ -1838,7 +1869,7 @@ function stepRate(field, step) {
   field.value = frames ? formatRate(frames / fps()) : "";
   field.dispatchEvent(new Event("input"));
 }
-for (const field of [$("fade-s"), $("key-fade-s")]) {
+function rateField(field) {
   const stepper = el("span", "stepper");
   for (const [glyph, step, label] of [["▲", 1, "One frame longer"], ["▼", -1, "One frame shorter"]]) {
     const button = el("button", "", glyph);
@@ -1867,6 +1898,7 @@ for (const field of [$("fade-s"), $("key-fade-s")]) {
   }, {passive: false});
   field.addEventListener("change", () => { const seconds = parseRate(field.value); if (seconds) field.value = formatRate(seconds); });
 }
+rateField($("fade-s"));
 $("wipe-file").oninput = () => { touched.wipe = true; };
 $("tab-scenes").onclick = () => setTab("scenes");
 $("tab-graph").onclick = () => setTab("graph");

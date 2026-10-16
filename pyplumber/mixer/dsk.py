@@ -28,6 +28,8 @@ class DownstreamKeyer:
         self.keys = cfg.dsk_keys
         self.edges = [f"dsk_key_{k.id}" for k in self.keys]
         self.on = {k.id: k.on for k in self.keys}
+        # Each key's own fade, shared by every controller: a key change without fade_seconds takes it.
+        self.rates = {k.id: cfg.dsk_fade_seconds for k in self.keys}
         self.ftb_input, self.ftb_edge, self.ftb_on = len(self.keys) + 1, "dsk_ftb", False   # nothing feeds the edge
         self.lock = threading.Lock()
         for key, edge in zip(self.keys, self.edges):
@@ -75,8 +77,8 @@ class DownstreamKeyer:
         return feeds
 
     def set(self, request) -> dict:
-        """Put *key* on or off air. fade_seconds and curve default to the config's dsk ones;
-        0 seconds cuts. Only a key that changes takes this fade: the keyer never restarts
+        """Put *key* on or off air. fade_seconds defaults to the key's rate, curve to the config's;
+        0 seconds cuts. {"key", "rate"} sets that rate (0: the key cuts) and changes nothing on air. Only a key that changes takes this fade: the keyer never restarts
         another key's, and a command that leaves *key* as it is (a cut included) lets its
         running fade finish. The group form, keys=[...], changes all named keys on one
         program frame; its explicit cuts also finish running envelopes. toggle=True
@@ -84,6 +86,11 @@ class DownstreamKeyer:
         prepare=True selects the keys that switch with each following background take, on its
         clock (an empty list clears the selection); fade_seconds and curve do not apply to it."""
         key, on = request.get("key"), request.get("on")
+        if "rate" in request:
+            if not isinstance(key, str) or key not in self.rates:
+                raise ConfigError("dsk rate needs a known key")
+            self.rates[key] = key_fade_seconds(request["rate"], "dsk rate")
+            return self.state()
         keys = request.get("keys", [key])
         prepare = request.get("prepare", False)
         toggle = request.get("toggle", False)
@@ -93,7 +100,8 @@ class DownstreamKeyer:
                 or len(set(keys)) != len(keys) or (not prepare and not keys)
                 or (not prepare and not toggle and not isinstance(on, bool))):
             raise ConfigError("dsk needs a known key and a boolean on")
-        seconds = key_fade_seconds(request.get("fade_seconds", self.cfg.dsk_fade_seconds), "dsk fade_seconds")
+        seconds = key_fade_seconds(request.get("fade_seconds", self.rates.get(key, self.cfg.dsk_fade_seconds)),
+                                   "dsk fade_seconds")
         curve = fade_curve(request.get("curve", self.cfg.dsk_fade_curve), "dsk curve")
         duration_ms = round(seconds * 1000)
         with self.lock:
@@ -167,7 +175,7 @@ class DownstreamKeyer:
             native.pop("input", None)
             if "on" in native:
                 self.on[k.id] = native["on"]
-            rows.append({"id": k.id, "source": k.source, "on": self.on[k.id], **native})
+            rows.append({"id": k.id, "source": k.source, "on": self.on[k.id], "rate": self.rates[k.id], **native})
         return rows
 
     def _keyframe(self):

@@ -1914,7 +1914,7 @@ def test_dsk_command_cuts_keys_on_and_off(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     handler = app.avp.commands_registered["mixer.dsk"]
     assert json.loads(handler(json.dumps({"key": "strap", "on": True, "fade_seconds": 0}))) == [
-        {"id": "bug", "source": "page", "on": True}, {"id": "strap", "source": "page", "on": True}]
+        {"id": "bug", "source": "page", "on": True, "rate": 0.4}, {"id": "strap", "source": "page", "on": True, "rate": 0.4}]
     # A cut is exactly the pre-fade command, and asks the preview encoder for a keyframe like an M/E cut.
     assert app.avp.commands[-2:] == ["node.object.set dsk_comp active_inputs 7", KEYFRAME]
     handler(json.dumps({"key": "bug", "on": False, "fade_seconds": 0}))
@@ -1930,6 +1930,26 @@ def test_dsk_command_cuts_keys_on_and_off(tmp_path, monkeypatch):
         handler(json.dumps({"key": "nope", "on": True}))
 
 
+def test_each_key_takes_its_own_rate_unless_the_command_names_one(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    handler = app.avp.commands_registered["mixer.dsk"]
+    sent = len(app.avp.commands)
+    rows = json.loads(handler(json.dumps({"key": "bug", "rate": 1.5})))
+    assert [row["rate"] for row in rows] == [1.5, 0.4]
+    assert len(app.avp.commands) == sent, "a rate changes nothing on air"
+    handler(json.dumps({"key": "bug", "on": False}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 1, "duration_ms": 1500, "curve": "linear"}'
+    handler(json.dumps({"key": "strap", "rate": 0}))
+    handler(json.dumps({"key": "strap", "on": True}))
+    assert app.avp.commands[-2:] == ["node.object.set dsk_comp active_inputs 5", KEYFRAME]   # a 0 rate cuts
+    handler(json.dumps({"key": "strap", "on": False, "fade_seconds": 0.5}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 1, "duration_ms": 500, "curve": "linear"}'
+    for bad in ({"key": "nope", "rate": 1}, {"key": "bug", "rate": 11}, {"keys": ["bug"], "rate": 1}):
+        with pytest.raises(mixer_config.ConfigError):
+            handler(json.dumps(bad))
+    assert json.loads(app.avp.commands_registered["mixer.dsk_status"](""))[0]["rate"] == 1.5
+
+
 def test_dsk_cut_without_a_preview_encoder_sends_no_keyframe(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     app.mixer.keyframe_node = None
@@ -1941,7 +1961,7 @@ def test_dsk_command_fades_keys_with_a_curve(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     handler = app.avp.commands_registered["mixer.dsk"]
     rows = json.loads(handler(json.dumps({"key": "strap", "on": True, "fade_seconds": 0.75, "curve": "ease-out"})))
-    assert rows[1] == {"id": "strap", "source": "page", "on": True}
+    assert rows[1] == {"id": "strap", "source": "page", "on": True, "rate": 0.4}
     assert app.avp.commands[-1] == ('node.object.set dsk_comp fade_inputs '
                                     '{"active_inputs": 7, "duration_ms": 750, "curve": "ease-out"}')
     handler(json.dumps({"key": "bug", "on": False, "fade_seconds": 2}))

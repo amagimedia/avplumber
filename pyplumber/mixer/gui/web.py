@@ -20,6 +20,8 @@ mixer needs no HTTP server of its own and the pages need no build step:
                         (a fade may carry "curve": "linear"|"ease-in"|"ease-out"|"ease-in-out",
                         and "color": "#RRGGBB" to dip through that colour instead of mixing)
                         {"command": "dsk", "key": ..., "on": true|false, "fade_seconds"?: s, "curve"?: ...}
+                        (without fade_seconds a key takes its own rate, set by {"command": "dsk", "key": ...,
+                        "rate": s}; 0 cuts)
                         {"command": "dsk", "keys": [...], "on": true|false | "toggle": true, ...}
                         {"command": "dsk", "keys": [...], "prepare": true}: the keys that switch with the
                         next background transitions (Next Transition), on the transition's own clock
