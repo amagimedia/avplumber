@@ -51,7 +51,8 @@ The take bar follows a vision switcher's transition area. A scene tile or **1–
 selects Preview; with **Direct cut / D** a pick cuts straight to Program. **Cut / C**
 cuts Preview to Program and completes a running transition; **Auto / Space** runs
 the selected transition, **Fade / F** at its rate or a wipe clip
-(**W**), and on a running fade holds it and runs it on again. The **lever** mixes
+(**W**). Pressed again during its own mix it does what the menu beside it says:
+**Halt** holds the mix and once more runs it on, **Complete** finishes it at once. The **lever** mixes
 by hand from the end it rests at: the far end completes the mix and is where the
 next one starts, back at its start the mix is cancelled. After an AUTO or CUT ended
 a mix the lever left half way, it acts again once moved to an end. The bar under
@@ -80,7 +81,8 @@ changes every key, each at its own rate: all off if any is on, otherwise all on.
 **FTB** in the Program box fades the keyed program to black at the Fade rate and
 pressed again back; it flashes while
 Program is black, and the clean feed is never faded. The slots card edits the
-Program preview's scene slots: click a slot, then a scene, or **Shift+1–8**.
+scene slots of the multiview last clicked (marked "· slots" when two are on screen):
+click a slot, then a scene, or **Shift+1–8**.
 
 Each viewer must support its output codec. The recorded L4 show uses HEVC for
 Program preview and H.264 for dirty Program; an H.264-capable browser alone

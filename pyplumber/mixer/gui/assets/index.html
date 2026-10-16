@@ -142,6 +142,13 @@
   .dd.up .dd-menu { top: auto; bottom: calc(100% + 6px); }   /* the take bar sits at the bottom of the window */
   /* A fade: its rate field joined to a curve menu that shows the curve's shape. */
   .fade-ctl { display: inline-flex; }
+  /* Auto and, joined to it, the menu of what it does when pressed again during its mix. */
+  .auto-ctl { display: inline-flex; }
+  .auto-ctl #auto { border-radius: 7px 0 0 7px; border-right: 0; }
+  .auto-ctl .dd { display: flex; }
+  .auto-ctl .dd-btn { border-radius: 0 7px 7px 0; padding: 0 5px; }
+  .auto-ctl .dd-btn > span { display: none; }
+  .auto-ctl .dd-menu { min-width: 230px; }
   .fade-ctl .field { border-right: 0; border-radius: 7px 0 0 7px; }
   .fade-ctl input { padding-right: 2px; }
   /* A rate field's frame steps: two small arrows stacked beside the value. */
@@ -318,6 +325,7 @@
   .viewer > header { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; white-space: nowrap; padding: 8px 10px; border-bottom: 1px solid var(--edge); min-height: 45px; }
   .viewer .lbl { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
   .viewer .lbl::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--tally, var(--faint)); }
+  .viewer.edit .lbl::after { content: "· slots"; color: var(--accent); }   /* the bus the slots card edits */
   .viewer .close { margin-left: auto; flex: none; }
   /* A narrow paged viewer packs its header; if the label still does not fit, only the tally dot stays
      (.tight, set by fitHeader) so the pager and × stay on the card. */
@@ -431,7 +439,7 @@
 
     <footer class="card" id="takebar">
       <button class="btn" id="cut" type="button" title="Cut Preview to Program (C)" aria-keyshortcuts="C">Cut</button>
-      <button class="btn" id="auto" type="button" title="Auto: run the selected transition to Preview (Space)" aria-keyshortcuts="Space">Auto</button>
+      <span class="auto-ctl" id="auto-ctl"><button class="btn" id="auto" type="button" title="Auto: run the selected transition to Preview (Space)" aria-keyshortcuts="Space">Auto</button></span>
       <span class="lever"><input id="lever" type="range" min="0" max="1000" step="1" value="0" aria-label="Lever"
         title="Lever (T-bar): mixes to Preview from the end it rests at; the far end completes, the start cancels"><span id="tprog"><i></i></span></span>
       <span class="vsep"></span>
@@ -528,9 +536,12 @@ const auxById = (id) => auxBuses().find((aux) => aux.id === id);
 // A bus's cells of one role: "pvw", "pgm", "slot" (an assigned scene) or "source".
 const cellsOf = (aux, role) => (aux?.cells || []).filter((cell) => cell.role === role);
 const slotsOf = (aux) => cellsOf(aux, "slot").map((cell) => cell.slot).sort((a, b) => a - b);
-// Slot edits go to the bus with slots a viewer shows, else to the first one the mixer has.
-const gridAux = () => auxById(viewers.find((v) => !v.el.hidden && v.grid)?.grid) ||
-                      auxBuses().find((aux) => slotsOf(aux).length) || null;
+// The slots card edits the viewer last clicked among those showing a bus with slots, else the first of them,
+// else the first such bus.
+let editViewer = null;
+const showsSlots = (v) => v && viewers.includes(v) && !v.el.hidden && v.grid;
+const gridViewer = () => (showsSlots(editViewer) ? editViewer : viewers.find(showsSlots)) || null;
+const gridAux = () => auxById(gridViewer()?.grid) || auxBuses().find((aux) => slotsOf(aux).length) || null;
 const LAYOUT_NAMES = {pgm_pvw_grid: "PVW · PGM grid", source_pages: "Source pages"};
 function layoutName(spec) {
   if (spec.preset) return LAYOUT_NAMES[spec.preset] || spec.preset;
@@ -603,7 +614,22 @@ function take(kind, scene = state?.status?.pvw_scene || selected, wipe = current
 // every controller. With BKGD the engine carries the armed keys on the background take's own clock.
 let nextBkgd = true;
 const armedKeys = () => (state?.dsk || []).filter((key) => key.next_take).map((key) => key.id);
-function takeButton(kind) { return nextBkgd ? take(kind) : takeKeys(kind); }
+// Auto pressed again during its own mix: Halt is the mixer's own second press (it holds the mix, once more runs it
+// on); Complete finishes the mix at once, as Cut does.
+const AUTO_AGAIN = [["halt", "Halt", "holds the mix · again runs it on"], ["complete", "Complete", "finishes the mix at once"]];
+let autoAgainMode = AUTO_AGAIN.some(([value]) => value === store.get("autoAgain")) ? store.get("autoAgain") : "halt";
+const autoAgain = dropdown((value) => { autoAgain.set(autoAgainMode = value); store.set("autoAgain", value); });
+autoAgain.root.classList.add("up");
+autoAgain.setLabel("Auto pressed again");
+autoAgain.setOptions(AUTO_AGAIN.map(([value, label, meta]) => ({value, label, meta, group: "Auto pressed again during its mix"})));
+autoAgain.set(autoAgainMode);
+$("auto-ctl").append(autoAgain.root);
+function takeButton(kind) {
+  if (!nextBkgd) return takeKeys(kind);
+  const s = state?.status || {};
+  if (kind === "fade" && autoAgainMode === "complete" && s.transition === "crossfade" && !s.transition_manual) return take("cut");
+  return take(kind);
+}
 // Keys alone: Cut cuts the armed keys, Auto fades them at the Fade rate; each turns to its opposite.
 function takeKeys(kind) {
   const keys = armedKeys();
@@ -746,7 +772,9 @@ function sendLever() {
   }
 }
 $("lever").oninput = sendLever;
-$("lever").onpointerdown = openLeverSocket;   // open the channel before the first position
+// Open the channel before the first position. Released, the lever gives the focus back: the shortcuts stay live
+// and no focus ring stays on it.
+$("lever").onpointerdown = () => { openLeverSocket(); addEventListener("pointerup", restFocus, {once: true}); };
 let keysPending = false;
 async function toggleAllKeys() {
   const keys = state?.dsk || [];
@@ -886,6 +914,12 @@ function renderSlots() {
   $("scenes").classList.toggle("armed", armedSlot !== null);
   if (!aux) return;
   $("slots-title").textContent = `${outputLabel(aux.id)} slots`;
+  // With two or more on screen, the one the card edits says so.
+  const target = viewers.filter(showsSlots).length > 1 ? gridViewer() : null;
+  viewers.forEach((v) => {
+    v.el.classList.toggle("edit", v === target);
+    v.screen.title = (v.grid && v !== target && target ? "Click to edit its slots · " : "") + "Double-click or Enter for full screen";
+  });
   const problem = auxError(aux) || (aux.running ? "" : "compositor stopped");
   $("slot-note").textContent = armedSlot !== null ? `pick a scene for M${armedSlot + 1}` : problem ||
     (aux.composition_pending ? "preparing sources · the bus stays live" : `click a slot, then a scene · ⇧1–${Math.min(slots.length, 9)}`);
@@ -1502,6 +1536,12 @@ function addViewer(out) {
   v.screen.setAttribute("role", "button");
   const fullscreen = () => (document.fullscreenElement ? document.exitFullscreen() : v.screen.requestFullscreen?.())?.catch?.(() => {});
   v.screen.ondblclick = fullscreen;
+  v.screen.onclick = () => {
+    if (!v.grid || gridViewer() === v) return;
+    editViewer = v;
+    armedSlot = null;
+    renderSlots();
+  };
   v.screen.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); fullscreen(); } };
   v.statsRow = el("div", "vstats");
   v.statsRow.setAttribute("role", "group");
@@ -1804,7 +1844,7 @@ function render() {
   $("hint-pages").hidden = !pagesBus();
   setMeterTip($("hint"), "Keyboard shortcuts", [
     ["1–9", "Pick visible scene"], ["← / →", "Browse Preview only"],
-    ["Space", `Auto: ${transitionLabel()} to Preview (again on a fade: pause / resume)`], ["C", "Cut Preview to Program (completes a running transition)"],
+    ["Space", `Auto: ${transitionLabel()} to Preview (again on a fade: ${autoAgainMode === "complete" ? "complete it" : "pause / resume"})`], ["C", "Cut Preview to Program (completes a running transition)"],
     ["F", "Select fade for Auto"], ["W", "Select wipe for Auto"],
     ["D", "Toggle direct cut: picks cut straight to Program"],
     ["[ / ]", "Previous / next multiview page"],
