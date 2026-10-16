@@ -70,8 +70,10 @@ the page's own; the armed keys are the mixer's, the same for every controller.
 Each key in the Keys card cuts on or off air, or fades at the card's key fade. Its
 red border is the tally of the last frame the keyer emitted, never a pending
 command; its number turns amber while it is armed. **K** changes every key on one
-frame: all off if any is on, otherwise all on. The slots card edits the Program
-preview's scene slots: click a slot, then a scene, or **Shift+1–8**.
+frame: all off if any is on, otherwise all on. **FTB** in the Program box fades the
+keyed program to black at the Fade length and pressed again back; it flashes while
+Program is black, and the clean feed is never faded. The slots card edits the
+Program preview's scene slots: click a slot, then a scene, or **Shift+1–8**.
 
 Each viewer must support its output codec. The recorded L4 show uses HEVC for
 Program preview and H.264 for dirty Program; an H.264-capable browser alone

@@ -46,6 +46,7 @@ const {chromium} = require('playwright');
         else if (command.command === 'dsk' && command.keys)
           sample.dsk.filter(key => command.keys.includes(key.id)).forEach(key => { key.on = command.toggle ? !key.on : command.on; });
         else if (command.command === 'dsk') sample.dsk.find(key => key.id === command.key).on = command.on;
+        if (command.command === 'ftb') sample.ftb = {on: !sample.ftb.on, phase: sample.ftb.on ? 'off' : 'on'};
         return route.fulfill({json: {ok: true}});
       }
       if (url.pathname === '/outputs.js') return route.fulfill({contentType: 'text/javascript', body: fs.readFileSync(path.join(root, 'outputs.js'), 'utf8')});
@@ -259,6 +260,21 @@ const {chromium} = require('playwright');
     assert.deepEqual(commands, [], 'nothing armed takes nothing');
     await nextButton(1).click();
     assert(!(await page.locator('#lever').isDisabled()), 'BKGD gives the lever back');
+    // FTB: hidden without the keyer; it fades the keyed program at the Fade length and back, flashing while black.
+    assert(await page.locator('#ftb').isHidden(), 'no keyer, no FTB');
+    sample.ftb = {on: false, phase: 'off'};
+    await page.evaluate(() => refresh());
+    await page.waitForFunction(() => !$('ftb').hidden);
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.locator('#ftb').click()]);
+    assert.deepEqual(commands.splice(0).map(c => [c.command, c.toggle, c.fade_seconds]), [['ftb', true, 0.5]]);
+    await page.waitForFunction(() => $('ftb').classList.contains('black'));
+    assert.equal(await page.locator('#ftb').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.locator('#pgm-state').textContent(), 'on air · black');
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.keyboard.press('Space')]);
+    assert.deepEqual(commands.splice(0).map(c => c.command), ['fade'], 'Space after FTB is Auto, not FTB again');
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/command')), page.locator('#ftb').click()]);
+    await page.waitForFunction(() => !$('ftb').classList.contains('black') && $('ftb').getAttribute('aria-pressed') === 'false');
+    commands.length = 0;
     await page.evaluate(() => {
       for (const key of [' ', 'k']) window.dispatchEvent(new KeyboardEvent('keydown', {key, repeat: true}));
     });

@@ -182,6 +182,12 @@
   #next .seg button { position: relative; padding: 4px 8px; font-size: 11.5px; font-weight: 700; letter-spacing: .04em; min-width: 26px; }
   #next .seg button[aria-pressed="true"] { background: var(--accent); color: #1c1305; }
   /* On air now: an armed take removes it. */
+  /* FTB: lit while the keyed program fades to or holds black, flashing while black, as on a panel. */
+  #ftb { padding: 4px 9px; font-size: 11.5px; font-weight: 700; letter-spacing: .06em; margin-block: -6px -2px; border-color: var(--pgm); }
+  #ftb[aria-pressed="true"] { background: var(--pgm); border-color: var(--pgm); color: #fff; }
+  #ftb.black { animation: ftb-flash 1s steps(2, jump-none) infinite; }
+  @keyframes ftb-flash { 50% { background: var(--pgm-dim); color: var(--pgm); } }
+  @media (prefers-reduced-motion: reduce) { #ftb.black { animation: none; } }
   #next .seg button.air::after { content: ""; position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%;
                                   background: var(--pgm); box-shadow: 0 0 4px var(--pgm); }
   .bus.pgm { border-color: var(--pgm); background: linear-gradient(var(--pgm-dim), var(--panel) 70%); }
@@ -405,7 +411,7 @@
 <main>
   <section id="deck" aria-label="Mixer controls">
     <div id="buses">
-      <section class="card bus pgm"><h2 class="title">Program</h2><div class="scene" id="pgm">—</div><div class="state" id="pgm-state">on air</div></section>
+      <section class="card bus pgm"><h2 class="title">Program</h2><div class="scene" id="pgm">—</div><div class="foot"><div class="state" id="pgm-state">on air</div><button class="btn" id="ftb" type="button" aria-pressed="false" hidden>FTB</button></div></section>
       <section class="card bus pvw"><h2 class="title">Preview</h2><div class="scene" id="pvw">—</div><div class="foot"><div class="state" id="pvw-state">ready</div><span id="next" hidden><span class="seg-label">Next</span><span class="seg" id="next-keys" role="group" aria-label="Next transition"></span></span></div></section>
     </div>
 
@@ -663,7 +669,8 @@ function renderBuses() {
   // A second take of the same scene pauses a fade (Space again resumes it); C completes it.
   const how = status.transition_manual ? " · lever" : status.transition_paused ? " · paused" : "";
   const shown = transition === "crossfade" ? `crossfade ${Math.round(transitionProgress() * 100)}%` : transition;
-  $("pgm-state").textContent = transition === "idle" ? "on air" : `on air · ${shown}${how}`;
+  const black = {"fading-in": " · fading to black", on: " · black", "fading-out": " · fading from black"}[state?.ftb?.phase] || "";
+  $("pgm-state").textContent = (transition === "idle" ? "on air" : `on air · ${shown}${how}`) + black;
   $("pvw-state").textContent = direct ? "picks cut to program" : `Auto · ${nextBkgd ? transitionLabel() : "keys"}`;
   renderLever();
 }
@@ -779,6 +786,21 @@ function renderNext() {
   });
   // The lever mixes the background only; the keyer has no lever of its own.
   $("lever").disabled = !nextBkgd;
+}
+// Fade to black: the keyed program, never the clean feed, at the Fade length; pressed again it fades back.
+function toggleFtb() {
+  const fade_seconds = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
+  if (fade_seconds === null) return;
+  $("ftb").setAttribute("aria-pressed", String(!state.ftb.on));   // at once; the poll confirms it
+  restFocus();
+  return command({command: "ftb", toggle: true, fade_seconds, curve: curves.fade.value});
+}
+function renderFtb() {
+  const ftb = state.ftb || {};
+  $("ftb").hidden = !("on" in ftb);   // a show without the keyer has no fade to black
+  $("ftb").setAttribute("aria-pressed", String(Boolean(ftb.on)));
+  $("ftb").classList.toggle("black", ftb.phase === "on");
+  $("ftb").title = ftb.on ? "Fade back from black at the Fade length" : "Fade to black at the Fade length · dirty feeds only";
 }
 function renderKeys() {
   const keys = state.dsk || [];
@@ -1729,7 +1751,7 @@ function render() {
   if (!selected || !scenes.some((scene) => scene.id === selected)) selected = status.pvw_scene || status.pgm_scene || "";
   applySettings(s);
   layoutWall();   // first: the slots widget and the page keys follow what the viewers show
-  renderCounts(); renderMeters(); renderHost(); renderWipeCache(); renderBuses(); renderKeys(); renderNext(); renderSlots(); renderChips(); renderScenes();
+  renderCounts(); renderMeters(); renderHost(); renderWipeCache(); renderBuses(); renderFtb(); renderKeys(); renderNext(); renderSlots(); renderChips(); renderScenes();
   observeCuts(); renderLatency(); placeMeterTip();
   $("hint-pages").hidden = !pagesBus();
   setMeterTip($("hint"), "Keyboard shortcuts", [
@@ -1788,6 +1810,7 @@ async function refresh() {
 $("cut").onclick = () => takeButton("cut");
 $("auto").onclick = () => takeButton(currentTransition);
 $("fade").onclick = () => selectTransition("fade");
+$("ftb").onclick = toggleFtb;
 $("direct").onclick = () => { directTouched = true; setDirect(!direct); };
 $("fade-s").oninput = () => { touched.fade = true; };
 $("key-fade-s").oninput = () => { touched.keyFade = true; };
