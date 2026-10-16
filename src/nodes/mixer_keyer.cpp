@@ -1,5 +1,6 @@
 #include "hwaccel/cuda_rect_compositor.hpp"
 #include "../mixer/primitives/key_fade.hpp"
+#include "../mixer/primitives/MixerState.hpp"
 
 #include <cstdint>
 #include <deque>
@@ -12,7 +13,7 @@
 /// The mixer's downstream keyer (DSK): keys drawn over the program input (`clock_input`), whose
 /// frames drive the output (see process()). Keys switch with `active_inputs` (a cut) or
 /// `fade_inputs`.
-class MixerKeyer : public CudaRectCompositor {
+class MixerKeyer : public CudaRectCompositor, public IReturnsObjects {
     size_t clock_input_ = 0;
     av::Rational frame_rate_{0, 1};   // the clock input's grid for key timestamps and fades
     // Key frames waiting for the program tick they are stamped for. They arrive
@@ -36,17 +37,59 @@ class MixerKeyer : public CudaRectCompositor {
     // Keys whose rectangle may be composed alone, over a copy of the program frame, instead of
     // with the whole canvas (`bounded_keys`): per input, none unless the node names them.
     std::vector<bool> bounded_input_;
+    std::vector<bool> finish_key_;
+    struct KeyTally {
+        bool known = false, available = false, target = false, moving = false;
+        double opacity = 0;
+        int64_t pts_ns = 0;
+    };
+    std::vector<KeyTally> tally_; // last emitted program frame, under masks_mutex_
+    avp::mixer::SourceMask prepared_, taken_keys_;
+    KeyChange prepared_change_;
+    struct PreparedTake {
+        int64_t pts_ns;
+        avp::mixer::SourceMask keys;
+        KeyChange change;
+        bool finish;
+    };
+    std::deque<PreparedTake> prepared_takes_;
+
+    void takePrepared(int64_t pts_ns, bool cut, bool finish) {
+        std::lock_guard<std::mutex> lock(masks_mutex_);
+        if (!finish) taken_keys_ = prepared_;
+        if (taken_keys_.none()) return;
+        KeyChange change = prepared_change_;
+        if (cut) change.duration_s = 0;
+        // The pipeline bounds outstanding takes. Refuse a pathological control flood
+        // rather than silently throwing away a key operation.
+        if (prepared_takes_.size() >= 64) throw Error("mixer_keyer: prepared take queue full");
+        prepared_takes_.push_back({pts_ns, taken_keys_, change, finish});
+    }
 
     // One envelope step per key for the program frame at `pts`, under masks_mutex_.
     // A key whose fade target differs from `active` starts the change its latest
     // command asked for.
     void stepKeyFades(av::Timestamp pts, avp::mixer::SourceMask active, bool cut) {
+        while (!prepared_takes_.empty() && prepared_takes_.front().pts_ns <= pts.timestamp({1, 1000000000})) {
+            const auto take = prepared_takes_.front();
+            prepared_takes_.pop_front();
+            for (size_t i = 0; i < key_fade_.size(); ++i) {
+                if (!take.keys.test(int(i))) continue;
+                if (take.finish) finish_key_[i] = true;
+                else {
+                    active_inputs_.flip(int(i));
+                    key_change_[i] = take.change;
+                }
+            }
+        }
+        active = active_inputs_;
         const double t = pts.seconds();
         const double period = av_q2d(av_inv_q(frame_rate_.getValue()));
         for (size_t i = 0; i < key_fade_.size(); ++i) {
             if (i == clock_input_) continue;
             const KeyChange &change = key_change_[i];
             key_fade_[i].retarget(active.test((int)i), cut ? 0.0 : change.duration_s, change.curve, t, period);
+            if (finish_key_[i]) { key_fade_[i].finish(); finish_key_[i] = false; }
             key_opacity_[i] = float(key_fade_[i].level(t));
         }
     }
@@ -59,7 +102,7 @@ public:
           held_valid_(config.inputs),
           key_change_(config.inputs),
           key_opacity_(config.inputs, 1.f),
-          bounded_input_(config.inputs, false) {}
+          bounded_input_(config.inputs, false), finish_key_(config.inputs, false), tally_(config.inputs) {}
 
     // Each clock-input frame renders at once, at its own PTS, over every key
     // above fade level 0, using its newest frame stamped at or before that tick,
@@ -149,10 +192,59 @@ public:
             ++frame_counter_;
             this->sink_->put(frame);
         }
+        {
+            std::lock_guard<std::mutex> lock(masks_mutex_);
+            for (size_t i = 0; i < tally_.size(); ++i)
+                if (i != clock)
+                    tally_[i] = {true, held_valid_[i], key_fade_[i].target(), key_fade_[i].moving(),
+                                 key_opacity_[i], frame.pts().timestamp({1, 1000000000})};
+        }
+    }
+
+    Parameters getObject(const std::string key) override {
+        if (key != "keys") throw Error("mixer_keyer: unknown object: " + key);
+        std::lock_guard<std::mutex> lock(masks_mutex_);
+        Parameters rows = Parameters::array();
+        for (size_t i = 0; i < tally_.size(); ++i) {
+            if (i == clock_input_) continue;
+            const auto &t = tally_[i];
+            const char *phase = !t.known ? "unknown" : t.moving ? (t.target ? "fading-in" : "fading-out")
+                : t.opacity > 0 && t.available ? "on" : "off";
+            rows.push_back({{"input", i}, {"on", active_inputs_.test(int(i))},
+                {"on_air", t.known ? Parameters(t.available && t.opacity > 0) : Parameters()},
+                {"phase", phase}, {"opacity", t.known ? Parameters(t.opacity) : Parameters()},
+                {"available", t.available}, {"pts_ns", t.pts_ns},
+                {"pending", !t.known || active_inputs_.test(int(i)) != t.target},
+                {"next_take", prepared_.test(int(i))}});
+        }
+        return rows;
     }
 
     void setObject(const std::string key, const Parameters& value) override {
-        if (key == "active_inputs" || key == "fade_inputs") {
+        if (key == "prepare_inputs" || key == "key_changes") {
+            const auto affected = avp::mixer::parseSourceMask(value.at("inputs"));
+            if ((affected >> key_change_.size()).any() || affected.test(int(clock_input_)))
+                throw Error("mixer_keyer: inputs must name keys, not program");
+            const auto target = avp::mixer::parseSourceMask(value.value("active_inputs", Parameters(0u)));
+            const double ms = value.value("duration_ms", 0.0);
+            if (!(ms >= 0 && ms <= 10000)) throw Error("mixer_keyer: duration_ms must be 0 to 10000");
+            KeyChange change{ms / 1000, avp::mixer::parseFadeCurve(value.value("curve", std::string("linear")))};
+            std::lock_guard<std::mutex> lock(masks_mutex_);
+            if (key == "prepare_inputs") {
+                prepared_ = affected;
+                prepared_.reset(int(clock_input_));
+                prepared_change_ = change;
+            } else {
+                for (size_t i = 0; i < key_change_.size(); ++i) {
+                    if (i == clock_input_ || !affected.test(int(i))) continue;
+                    const bool on = value.value("toggle", false) ? !active_inputs_.test(int(i)) : target.test(int(i));
+                    active_inputs_.set(int(i), on);
+                    key_change_[i] = change;
+                    finish_key_[i] = ms == 0;
+                }
+            }
+            wakeInputs();
+        } else if (key == "active_inputs" || key == "fade_inputs") {
             // fade_inputs {"active_inputs": <mask>, "duration_ms": 0..10000, "curve": <name>}: the keys
             // the mask turns on or off fade over duration_ms, 0 cuts. active_inputs <mask> cuts.
             const bool fade = key == "fade_inputs";
@@ -218,6 +310,13 @@ std::shared_ptr<MixerKeyer> MixerKeyer::create(NodeCreationInfo &nci) {
     // Keys configured on come up fully on, as before fades existed.
     for (size_t i = 0; i < node->source_edges_.size(); ++i)
         node->key_fade_.emplace_back(node->active_inputs_.test((int)i));
+    if (params.contains("mixer")) {
+        auto state = InstanceSharedObjects<avp::mixer::MixerState>::get(nci.instance, params.at("mixer"));
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->take_keys = [weak = std::weak_ptr<MixerKeyer>(node)](int64_t pts, bool cut, bool finish) {
+            if (auto keyer = weak.lock()) keyer->takePrepared(pts, cut, finish);
+        };
+    }
     // The clock input is an ordinary edge: its empty name subscribes nothing.
     // A held copy can arrive before the live paint for the same timestamp. Let
     // the keyer's timestamp queue replace it; first-arrival rate limiting would

@@ -54,6 +54,7 @@ class DownstreamKeyer:
                     "z": i + 1, "blend": True} for i, k in enumerate(self.keys)]
         self.avp.addNode(self.mixer.canvas_compositor({
             "name": self.node_name, "src": [keyed, *self.edges], "dst": feeds["dirty"],
+            "mixer": self.mixer.name,
             "subscriptions": ["", *self.edges], "clock_input": 0,
             "fps": f"{self.mixer.fps_num}/{self.mixer.fps_den}",
             "max_layers": len(layers), "layers": layers, "active_inputs": self._mask(self.on),
@@ -70,14 +71,39 @@ class DownstreamKeyer:
         """Put *key* on or off air. fade_seconds and curve default to the config's dsk ones;
         0 seconds cuts. Only a key that changes takes this fade: the keyer never restarts
         another key's, and a command that leaves *key* as it is (a cut included) lets its
-        running fade finish."""
+        running fade finish. The group form, keys=[...], changes all named keys on one
+        program frame; its explicit cuts also finish running envelopes. toggle=True
+        resolves against native targets, not a controller's potentially stale copy.
+        prepare=True selects keys to toggle with each subsequent background take,
+        without changing their current targets (an empty list clears the selection)."""
         key, on = request.get("key"), request.get("on")
-        if key not in self.on or not isinstance(on, bool):
+        keys = request.get("keys", [key])
+        prepare = request.get("prepare", False)
+        toggle = request.get("toggle", False)
+        if not isinstance(prepare, bool) or not isinstance(toggle, bool):
+            raise ConfigError("dsk prepare and toggle must be booleans")
+        if (not isinstance(keys, list) or any(not isinstance(k, str) or k not in self.on for k in keys)
+                or len(set(keys)) != len(keys) or (not prepare and not keys)
+                or (not prepare and not toggle and not isinstance(on, bool))):
             raise ConfigError("dsk needs a known key and a boolean on")
         seconds = key_fade_seconds(request.get("fade_seconds", self.cfg.dsk_fade_seconds), "dsk fade_seconds")
         curve = fade_curve(request.get("curve", self.cfg.dsk_fade_curve), "dsk curve")
         duration_ms = round(seconds * 1000)
         with self.lock:
+            self.state()  # another controller or a prepared take may have changed the targets
+            if "keys" in request or prepare or toggle:
+                affected = source_mask_param(sum(1 << (i + 1) for i, k in enumerate(self.keys) if k.id in keys))
+                targets = {**self.on, **{k: not self.on[k] if toggle else on for k in keys}}
+                value = {"inputs": affected, "duration_ms": duration_ms, "curve": curve}
+                if not prepare:
+                    value.update(active_inputs=self._mask(targets), toggle=toggle)
+                self.avp.executeCommandsFromString(f"node.object.set {self.node_name} " +
+                    ("prepare_inputs " if prepare else "key_changes ") + json.dumps(value))
+                if not prepare:
+                    self.on = targets
+                    if not duration_ms:
+                        self._keyframe()
+                return self.state()
             changed = self.on[key] != on
             mask = self._mask({**self.on, key: on})
             # self.on changes only once the keyer took the command, so a rejected one reports nothing switched.
@@ -89,15 +115,31 @@ class DownstreamKeyer:
                 # Like an M/E cut: a key cut changes the picture at once, so the preview receiver
                 # should not wait for the next periodic keyframe. A fade changes it gradually.
                 if changed and self.mixer.keyframe_node:
-                    try:
-                        self.avp.executeCommandsFromString(keyframe_command(self.mixer.keyframe_node))
-                    except Exception as exc:   # the key already switched; a missed keyframe only delays the preview
-                        logging.getLogger(__name__).warning("dsk: keyframe trigger failed: %s", exc)
+                    self._keyframe()
             self.on[key] = on
             return self.state()
 
     def state(self) -> list:
-        return [{"id": k.id, "source": k.source, "on": self.on[k.id]} for k in self.keys]
+        try:
+            rendered = {row["input"]: row for row in self.avp.node(self.node_name).getObject("keys")}
+        except Exception:
+            rendered = {}  # startup/older module: visibility is unknown, never infer it from the target
+        rows = []
+        for i, k in enumerate(self.keys):
+            native = dict(rendered.get(i + 1, {}))
+            native.pop("input", None)
+            if "on" in native:
+                self.on[k.id] = native["on"]
+            rows.append({"id": k.id, "source": k.source, "on": self.on[k.id], **native})
+        return rows
+
+    def _keyframe(self):
+        if not self.mixer.keyframe_node:
+            return
+        try:
+            self.avp.executeCommandsFromString(keyframe_command(self.mixer.keyframe_node))
+        except Exception as exc:
+            logging.getLogger(__name__).warning("dsk: keyframe trigger failed: %s", exc)
 
 
 def register_dsk_commands(avp, keyer):

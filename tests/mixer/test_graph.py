@@ -90,6 +90,7 @@ class FakeMixer:
 
     def __init__(self, avp, **parameters):
         self.avp = avp
+        self.name = parameters.get("name", "mixer")
         self.parameters = parameters
         from pyplumber.mixer.backend import mixer_backend
         self.backend = mixer_backend(parameters.get("backend"))
@@ -2096,3 +2097,34 @@ def test_rendition_dpb_size_reaches_janus_and_record_encoders(tmp_path, dpb_size
 def test_rendition_dpb_size_is_bounded(dpb_size):
     with pytest.raises(mixer_config.ConfigError, match="dpb_size"):
         mixer_config.parse({**CONFIG, "renditions": [{"id": "sdr", "dpb_size": dpb_size}]})
+
+
+def test_dsk_group_is_one_native_command_and_preparation_does_not_change_targets(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    handler = app.avp.commands_registered["mixer.dsk"]
+    start = len(app.avp.commands)
+    handler(json.dumps({"keys": ["bug", "strap"], "on": False, "fade_seconds": 1}))
+    assert app.avp.commands[start:] == [
+        'node.object.set dsk_comp key_changes {"inputs": 6, "duration_ms": 1000, "curve": "linear", "active_inputs": 1, "toggle": false}']
+    handler(json.dumps({"keys": ["strap"], "prepare": True, "fade_seconds": .48}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp prepare_inputs {"inputs": 4, "duration_ms": 480, "curve": "linear"}'
+    rows = json.loads(app.avp.commands_registered["mixer.dsk_status"](""))
+    assert not any(row["on"] for row in rows)
+    handler(json.dumps({"keys": [], "prepare": True}))  # clear next-take selection
+    for keys in (["unknown"], ["bug", "bug"], "bug", []):
+        before = list(app.avp.commands)
+        with pytest.raises(mixer_config.ConfigError):
+            handler(json.dumps({"keys": keys, "on": True}))
+        assert app.avp.commands == before
+
+
+def test_dsk_tally_is_rendered_state_independent_of_requested_target(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    native = [{"input": 1, "on": False, "on_air": True, "phase": "fading-out", "opacity": .7,
+               "next_take": True, "pending": False, "pts_ns": 1000},
+              {"input": 2, "on": True, "on_air": False, "phase": "off", "opacity": 0,
+               "next_take": False, "pending": True, "pts_ns": 1000}]
+    monkeypatch.setattr(app.avp, "node", lambda _: SimpleNamespace(getObject=lambda _: native))
+    rows = json.loads(app.avp.commands_registered["mixer.dsk_status"](""))
+    assert rows[0]["on"] is False and rows[0]["on_air"] is True and rows[0]["phase"] == "fading-out"
+    assert rows[1]["on"] is True and rows[1]["on_air"] is False and rows[1]["pending"] is True

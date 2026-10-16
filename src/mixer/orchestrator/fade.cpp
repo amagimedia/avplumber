@@ -41,6 +41,8 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
     // tick, so waiting for a strictly newer destination frame might never end.
     if (mode == MixerState::TransitionMode::Cut) {
         if (!destinationReady(frames[target]) || target_pts < last_ns) return on_air();
+        state_->startTakeKeys(target_pts == last_ns
+            ? target_pts + av_rescale(1000000000, state_->fps_den, state_->fps_num) : target_pts, true);
         completeTake(target_pts);
         return target_pts == last_ns ? -1 : target;
     } else if (mode == MixerState::TransitionMode::Crossfade) {
@@ -67,6 +69,7 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
         const int blend = MixerState::transSourceSwitcherIndex();
         const auto blend_pts = pts(blend);
         if (blend_pts > last_ns && blend_pts >= state_->take_start_ns) {
+            state_->startTakeKeys(blend_pts, false);
             // A paused mix holds; a replaced preset completes only once its picture is there.
             if (!state_->take_paused && state_->destination_ready &&
                 blend_pts >= state_->take_start_ns + state_->take_duration_ns) {

@@ -8,12 +8,15 @@ mixer needs no HTTP server of its own and the pages need no build step:
     GET  /wall          every output side by side, nothing to control
     GET  /outputs.js    the output list both pages play from
     GET  /api/state     status + scenes + settings in one round trip
+    GET  /api/keys      small cached rendered-key tally, sampled separately from show telemetry
     GET  /api/outputs   the show's settings and the GPU figures alone, for player pages
     GET  /api/status    mixer.status alone, for scripts that poll often
     POST /api/command   {"command": "cut"|"fade"|"wipe"|"preview", "scene": ...}
                         (a fade may carry "curve": "linear"|"ease-in"|"ease-out"|"ease-in-out",
                         and "color": "#RRGGBB" to dip through that colour instead of mixing)
                         {"command": "dsk", "key": ..., "on": true|false, "fade_seconds"?: s, "curve"?: ...}
+                        {"command": "dsk", "keys": [...], "on": true|false | "toggle": true, ...}
+                        {"command": "dsk", "keys": [...], "prepare": true, "fade_seconds"?: s, "curve"?: ...}
                         A cut, fade or wipe superseded by a newer one before it reached
                         the mixer answers {"ok": true, "superseded": true}.
 
@@ -119,6 +122,11 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     reply["setup_revision"] = status["revision"]
                 self._send_json(200, reply)
+            except Exception as exc:
+                self._send_json(503, {"error": str(exc)})
+        elif path == "/api/keys":
+            try:
+                self._send_json(200, self.bridge.keys())
             except Exception as exc:
                 self._send_json(503, {"error": str(exc)})
         elif path in ("/api/state", "/api/status"):

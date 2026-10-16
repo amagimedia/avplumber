@@ -1131,3 +1131,18 @@ def test_shared_setup_widgets_and_application_page(client, http_server):
     assert error.value.code == 404
     server = http_server(FakeBridge(), setup=SimpleNamespace(page=lambda: b"AI mixer setup"))
     assert get_page(f"http://127.0.0.1:{server.server_port}", "/setup") == "AI mixer setup"
+
+
+def test_key_tally_poll_is_small_cached_and_invalidated_by_commands(client):
+    bridge = FakeBridge(replies={"mixer.dsk_status": '[{"id":"logo","on":false,"on_air":true,"phase":"fading-out"}]'})
+    base, _ = client(bridge)
+    def get():
+        with urllib.request.urlopen(base + '/api/keys') as response:
+            return json.load(response)
+    first = get()
+    assert first['dsk'][0]['phase'] == 'fading-out'
+    assert get() == first
+    assert bridge.sent == ['mixer.dsk_status']
+    bridge.take({'command': 'dsk', 'keys': ['logo'], 'on': False, 'fade_seconds': 0})
+    assert get()['dsk_sampled_at'] > first['dsk_sampled_at']
+    assert bridge.sent[-1] == 'mixer.dsk_status'

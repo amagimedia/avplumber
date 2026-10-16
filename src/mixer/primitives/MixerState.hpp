@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <functional>
 #include "CutLatencyProbe.hpp"
 #include "MonotonicClock.hpp"
 #include "source_mask.hpp"
@@ -43,6 +44,14 @@ struct SceneDefinition {
 
 struct MixerState : public InstanceShared<MixerState> {
     std::mutex mutex;
+    // Optional downstream keyer, called under mutex at the first on-air frame of a take.
+    // Its callback only queues a timestamped command; it never waits for rendering.
+    std::function<void(int64_t, bool, bool)> take_keys;
+    bool take_keys_started = false;
+    void startTakeKeys(int64_t pts_ns, bool cut) {
+        if (take_keys && (!take_keys_started || cut)) take_keys(pts_ns, cut, take_keys_started);
+        take_keys_started = true;
+    }
     TransitionControl transition_control = transitionControl("cuda");
 
     struct SourceInfo {

@@ -200,11 +200,19 @@
   .key-fade .dd-menu { left: auto; right: 0; }
   #keys { display: grid; grid-template-columns: repeat(2, minmax(min-content, 1fr)); gap: 6px; }
   #row2.single #keys { grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
+  .key-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  .key-controls .key { flex: 1 0 100%; }
+
+  .key-status, .next-key { font-size: 11px; color: var(--muted); }
+  #source-banks { padding: 8px; border-bottom: 1px solid var(--edge); }
+  #bank-buttons { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  #bank-buttons button { flex: 1 1 90px; }
+  select { background: var(--raised); color: var(--text); border: 1px solid var(--edge); border-radius: 4px; }
   .key { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid var(--edge); border-radius: 7px;
          background: var(--raised); cursor: pointer; font-size: 13px; text-align: left; }
   .key::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
-  .key[aria-pressed="true"] { border-color: var(--pgm); }
-  .key[aria-pressed="true"]::before { background: var(--pgm); box-shadow: 0 0 6px var(--pgm); }
+  .key[data-on-air="true"] { border-color: var(--pgm); }
+  .key[data-on-air="true"]::before { background: var(--pgm); box-shadow: 0 0 6px var(--pgm); }
   #slots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
   .slot { display: flex; min-width: 0; border: 1px solid var(--edge); border-radius: 7px; background: var(--raised); overflow: hidden; }
   .slot:has(.assign[aria-pressed="true"]) { border-color: var(--accent); }
@@ -388,17 +396,17 @@
   <section id="deck" aria-label="Mixer controls">
     <div id="buses">
       <section class="card bus pgm"><h2 class="title">Program</h2><div class="scene" id="pgm">—</div><div class="state" id="pgm-state">on air</div></section>
-      <section class="card bus pvw"><h2 class="title">Preview</h2><div class="scene" id="pvw">—</div><div class="state" id="pvw-state">ready</div></section>
+      <section class="card bus pvw"><h2 class="title" title="Selected background scene only; downstream keys are not shown here">Scene Preview</h2><div class="scene" id="pvw">—</div><div class="state" id="pvw-state">ready</div></section>
     </div>
 
     <div id="row2" hidden>
       <section class="card widget" id="keys-card" aria-label="Downstream keys" hidden>
         <header><h2 class="title">Keys</h2><span class="note">dirty feed only</span>
-          <span class="fade-ctl key-fade" id="key-fade"><label class="field" title="Key fade · empty or 0 cuts"><input id="key-fade-s" type="number" min="0" max="10" step="0.1" placeholder="0" aria-label="Key fade in seconds, empty or 0 cuts"><span>s</span></label></span></header>
-        <div id="keys"></div>
+          <span class="fade-ctl key-fade" id="key-fade"><label class="field" title="Key fade · empty or 0 cuts"><input id="key-fade-s" type="number" min="0" max="10" step="0.1" placeholder="0" aria-label="Key fade in seconds, empty or 0 cuts"><select id="key-time-unit" aria-label="Key duration unit"><option value="seconds">s</option><option value="frames">frames</option></select></label></span></header>
+        <div id="keys"></div><button class="btn" id="keys-all" type="button" title="One group command: all keys off if any are targeted on, otherwise all on (K)">Toggle all keys (K)</button>
       </section>
       <section class="card widget" id="slots-card" aria-labelledby="slots-title" hidden>
-        <header><h2 class="title" id="slots-title">Program preview slots</h2><span class="note" id="slot-note"></span></header>
+        <header><h2 class="title" id="slots-title">AUX slots</h2><select id="edit-bus" aria-label="AUX bus to edit"></select><span class="note" id="slot-note"></span></header>
         <div id="slots"></div>
       </section>
     </div>
@@ -412,6 +420,8 @@
         <a class="newtab" id="graph-open" target="_blank" rel="noopener" hidden>Open full graph in new tab
           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M5 2H2v8h8V7M7 2h3v3M10 2 5.5 6.5"/></svg></a>
       </header>
+      <div id="source-banks"><label>Source bank <select id="bank" aria-label="Source bank"><option value="0">1</option><option value="1">2</option><option value="2">3</option></select></label>
+        <button class="btn" id="bank-save" type="button" title="Explicitly replace this bank with the first nine currently browsed scenes">Save browsed scenes to bank</button><div id="bank-buttons"></div></div>
       <div id="scenes" tabindex="-1"></div>
       <div id="graph" hidden></div>
     </section>
@@ -421,7 +431,7 @@
       <button class="btn" id="auto" type="button" title="Auto: run the selected transition to Preview (Space)" aria-keyshortcuts="Space">Auto</button>
       <span class="vsep"></span>
       <button class="btn" id="fade" type="button" aria-pressed="false" title="Select fade for Auto (F)" aria-keyshortcuts="F">Fade</button>
-      <span class="fade-ctl" id="fade-ctl"><label class="field"><input id="fade-s" type="number" min="0.1" step="0.1" value="0.5" aria-label="Fade duration in seconds"><span>s</span></label></span>
+      <span class="fade-ctl" id="fade-ctl"><label class="field"><input id="fade-s" type="number" min="0.1" step="0.1" value="0.5" aria-label="Fade duration"><select id="fade-time-unit" aria-label="Fade duration unit"><option value="seconds">s</option><option value="frames">frames</option></select></label></span>
       <span class="vsep"></span>
       <span id="wipes"></span>
       <label class="field" id="wipe-custom" hidden><input id="wipe-file" type="text" placeholder="wipe clip path on the mixer host" aria-label="Wipe clip path on the mixer host"></label>
@@ -478,15 +488,16 @@ let state = null;                // last good /api/state
 let stale = false;               // the last /api/state poll failed
 let scenes = [];                 // [{id}], sorted like the tiles
 let visible = [];                // scene ids behind the tiles, in the order 1–9 picks them
-let selected = "";               // scene the take buttons act on
+let selected = "";               // browsing and AUX assignment selection; takes use server Preview
 let direct = false;              // a pick goes straight to program
 let directTouched = false;       // once the operator toggles it, stop following the config
-let currentTransition = "cut";   // what a pick uses in direct mode; the config may change it
+let currentTransition = "cut";   // effect prepared for AUTO
 let tookTransition = false;      // once the operator takes one, stop following the config
 // Stop polling from overwriting typing, or a curve the operator picked.
 const touched = {fade: false, wipe: false, keyFade: false, fadeCurve: false, keyCurve: false};
 let wipes = null;                // the library published by the mixer; null until the first state so an empty one still renders
 let currentWipe = null;          // the clip W and a direct-mode wipe use
+let editBus = store.get("editBus", "");
 let armedSlot = null;            // multiview slot waiting for a scene
 let setupRevision;
 let filter = store.get("filter", "all"), tab = store.get("tab", "scenes");
@@ -499,9 +510,8 @@ const auxById = (id) => auxBuses().find((aux) => aux.id === id);
 // A bus's cells of one role: "pvw", "pgm", "slot" (an assigned scene) or "source".
 const cellsOf = (aux, role) => (aux?.cells || []).filter((cell) => cell.role === role);
 const slotsOf = (aux) => cellsOf(aux, "slot").map((cell) => cell.slot).sort((a, b) => a - b);
-// Slot edits go to the bus with slots a viewer shows, else to the first one the mixer has.
-const gridAux = () => auxById(viewers.find((v) => !v.el.hidden && v.grid)?.grid) ||
-                      auxBuses().find((aux) => slotsOf(aux).length) || null;
+// Editing is explicitly delegated; changing a monitor never changes this bus.
+const gridAux = () => auxById(editBus) || null;
 const LAYOUT_NAMES = {pgm_pvw_grid: "PVW · PGM grid", source_pages: "Source pages"};
 function layoutName(spec) {
   if (spec.preset) return LAYOUT_NAMES[spec.preset] || spec.preset;
@@ -532,18 +542,45 @@ async function command(body, onSuccess) {
 }
 
 /* ---------- takes ---------- */
-// A number field reads "" both when empty and when it holds no number; only empty means *empty*.
-function fieldSeconds(id, empty, message) {
-  if (!$(id).validity.badInput) return Number($(id).value) || empty;
-  showError(message);
-  return null;
+function canvasFps() { return Number(settings().canvas?.fps) || 0; }
+function durationSeconds(id, unit, fallback) {
+  const field = $(id), frames = $(unit).value === "frames";
+  const value = field.value === "" ? fallback * (frames ? canvasFps() : 1) : Number(field.value);
+  if (field.validity.badInput || !Number.isFinite(value) || value < 0 ||
+      (frames && (!canvasFps() || !Number.isInteger(value)))) {
+    showError(frames ? "Enter a whole number of frames at the canvas rate" : "Enter a non-negative duration in seconds");
+    return null;
+  }
+  const seconds = frames ? value / canvasFps() : value;
+  if ((id === "fade-s" && seconds <= 0) || (id === "key-fade-s" && seconds > 10)) {
+    showError(id === "fade-s" ? "Fade duration must be positive" : "Key duration cannot exceed 10 seconds"); return null;
+  }
+  return seconds;
+}
+function setDuration(id, unit, seconds) {
+  $(id).value = $(unit).value === "frames" ? Math.round(seconds * canvasFps()) : seconds;
+}
+for (const [id, unit, touch] of [["fade-s", "fade-time-unit", "fade"], ["key-fade-s", "key-time-unit", "keyFade"]]) {
+  let previous = "seconds";
+  $(unit).onchange = () => {
+    const seconds = Number($(id).value) / (previous === "frames" ? canvasFps() : 1);
+    if (!canvasFps()) { $(unit).value = previous; return showError("Canvas frame rate is unavailable"); }
+    previous = $(unit).value;
+    $(id).setAttribute("aria-label", `${touch === "fade" ? "Fade" : "Key"} duration in ${previous}`);
+    $(id).step = previous === "frames" ? "1" : "0.1";
+    $(id).min = id === "fade-s" ? (previous === "frames" ? "1" : "0.001") : "0";
+    if (id === "key-fade-s") $(id).max = previous === "frames" ? 10 * canvasFps() : 10;
+    setDuration(id, unit, seconds); touched[touch] = true;
+    $(id).dispatchEvent(new Event("change"));
+  };
 }
 // Without a scene, a take acts on the Preview the mixer shows, as Space does: after a take the
 // preview is the scene that left program, not the one picked last.
-function take(kind, scene = state?.status?.pvw_scene || selected, wipe = currentWipe) {
+function take(kind, scene = state?.status?.pvw_scene, wipe = currentWipe) {
+  if (!scene) return showError("Select a Scene Preview before taking");
   const payload = {command: kind, scene};
   if (kind === "fade") {
-    payload.duration_sec = fieldSeconds("fade-s", 0.5, "Enter the fade length in seconds");
+    payload.duration_sec = durationSeconds("fade-s", "fade-time-unit", 0.5);
     if (payload.duration_sec === null) return;
     if (curves.fade.value !== "linear") payload.curve = curves.fade.value;   // linear: today's command
     if (fadeColor.hex()) payload.color = fadeColor.hex();                  // mix: no colour
@@ -556,7 +593,7 @@ function take(kind, scene = state?.status?.pvw_scene || selected, wipe = current
   return command(payload);
 }
 function pick(scene) {
-  if (armedSlot !== null && gridAux()) return assignSlot(armedSlot, scene);
+  if (armedSlot !== null) return assignSlot(armedSlot.slot, scene, armedSlot.bus);
   selected = scene;
   return take(direct ? "cut" : "preview", scene);
 }
@@ -610,10 +647,10 @@ function renderWipes(library) {
 function applySettings(s) {
   renderWipes(Array.isArray(s.wipes) ? s.wipes : []);
   if (typeof s.direct === "boolean" && !directTouched) setDirect(s.direct);
-  if (s.fade_seconds && !touched.fade) $("fade-s").value = s.fade_seconds;
+  if (s.fade_seconds && !touched.fade) setDuration("fade-s", "fade-time-unit", s.fade_seconds);
   if (s.fade_curve && !touched.fadeCurve) curves.fade.set(s.fade_curve);
   if (store.get("fadeColor", null) === null) fadeColor.seed(s.fade_color || null);
-  if (s.dsk_fade_seconds !== undefined && !touched.keyFade) $("key-fade-s").value = s.dsk_fade_seconds || "";
+  if (s.dsk_fade_seconds !== undefined && !touched.keyFade) setDuration("key-fade-s", "key-time-unit", s.dsk_fade_seconds);
   if (s.dsk_fade_curve && !touched.keyCurve) curves.key.set(s.dsk_fade_curve);
   if (s.transition && !tookTransition) currentTransition = s.transition;
   if (s.wipe_file && !touched.wipe && !wipes.length) $("wipe-file").value = s.wipe_file;
@@ -632,74 +669,94 @@ function renderBuses() {
   $("pvw-state").textContent = direct ? "picks cut to program" : `Auto · ${transitionLabel()}`;
 }
 function keyTransition() {
-  const fade_seconds = fieldSeconds("key-fade-s", 0, "Enter the key fade in seconds, or leave it empty to cut");
+  const fade_seconds = durationSeconds("key-fade-s", "key-time-unit", 0);
   return fade_seconds === null ? null : {fade_seconds, curve: curves.key.value};
 }
 let keysPending = false;
-async function toggleAllKeys() {
-  const keys = state?.dsk || [];
-  if (keysPending || !keys.length) return;
-  const transition = keyTransition();
-  if (!transition) return;
-  const on = !keys.some(key => key.on);
+async function keyCommand(payload) {
+  if (keysPending) return;
   keysPending = true;
-  try {
-    showError("");
-    keys.forEach((key, i) => { if (key.on !== on) $("keys").children[i]?.setAttribute("aria-pressed", String(on)); });
-    // Together, not one round trip after another: over a long link the last key lagged the first by seconds.
-    await Promise.all(keys.filter(key => key.on !== on)
-      .map(key => api("/api/command", {command: "dsk", key: key.id, on, ...transition})));
-  } catch (exc) { showError(exc.message); }
-  finally { await refresh(); keysPending = false; }
+  renderKeys();
+  try { await command({command: "dsk", ...payload}); }
+  finally { keysPending = false; renderKeys(); }
+}
+function toggleAllKeys() {
+  const keys = state?.dsk || [], transition = keyTransition();
+  if (!keys.length || !transition) return;
+  return keyCommand({keys: keys.map(k => k.id), on: !keys.some(k => k.on), ...transition});
+}
+function prepareKeys(keys) {
+  const transition = keyTransition();
+  if (transition) return keyCommand({keys, prepare: true, ...transition});
+}
+function updatePreparedKeys() {
+  const keys = (state?.dsk || []).filter(k => k.next_take).map(k => k.id);
+  if (keys.length) prepareKeys(keys);
 }
 function renderKeys() {
-  const keys = state.dsk || [];
+  const keys = state?.dsk || [];
   $("keys-card").hidden = !keys.length;
-  if (!changed($("keys"), keys)) {
-    // Undo a state shown at a click that the mixer did not take.
-    keys.forEach((key, i) => $("keys").children[i]?.setAttribute("aria-pressed", String(key.on)));
-    return;
-  }
-  rebuild($("keys"), keys.map((key) => {
-    const name = key.id.replaceAll("_", " "), label = name[0].toUpperCase() + name.slice(1);
-    const button = el("button", "key");
-    button.append(el("span", "", label));
-    button.dataset.focus = key.id;
-    button.setAttribute("aria-pressed", String(key.on));
-    button.title = `${label} · ${key.on ? "take off" : "put on"} air · dirty feeds only`;
-    // An empty field cuts, even when the config fades by default.
-    button.onclick = () => {
-      const transition = keyTransition();
-      if (!transition) return;
-      // Show the requested state at once: the round trip to the mixer and the next poll come later.
-      button.setAttribute("aria-pressed", String(!key.on));
-      command({command: "dsk", key: key.id, on: !key.on, ...transition});
-    };
-    return button;
+  $("keys-all").disabled = keysPending;
+  $("key-fade-s").disabled = $("key-time-unit").disabled = keysPending;
+  curves.key.root.querySelector("button").disabled = keysPending;
+  if (!changed($("keys"), [keys, keysPending])) return;
+  rebuild($("keys"), keys.map(key => {
+    const row = el("div", "key-controls"), tally = el("span", "key", key.id.replaceAll("_", " "));
+    tally.dataset.onAir = String(key.on_air === true);
+    const phase = key.phase || "unknown";
+    tally.append(el("span", "key-status", `${phase}${key.pending ? " · pending" : ""}`));
+    tally.title = "Last rendered program frame; target commands do not change this tally";
+    row.append(tally);
+    for (const kind of ["Cut", "Auto"]) {
+      const button = el("button", "btn", kind);
+      button.disabled = keysPending;
+      button.dataset.focus = `${key.id}-${kind}`;
+      button.title = `${kind} ${key.id} ${key.on ? "off" : "on"}`;
+      button.onclick = () => {
+        const transition = kind === "Cut" ? {fade_seconds: 0} : keyTransition();
+        if (transition) keyCommand({keys: [key.id], toggle: true, ...transition});
+      };
+      row.append(button);
+    }
+    const label = el("label", "next-key"), check = el("input");
+    check.type = "checkbox"; check.checked = Boolean(key.next_take); check.disabled = keysPending;
+    check.dataset.focus = `${key.id}-next`;
+    check.onchange = () => prepareKeys(keys.filter(k => k.id === key.id ? check.checked : k.next_take).map(k => k.id));
+    label.append(check, document.createTextNode("With next take"));
+    label.title = "Toggle this key with every background take; Cut cuts it, Auto uses the key duration";
+    row.append(label);
+    return row;
   }));
 }
 function renderSlots() {
+  const buses = auxBuses().filter(aux => slotsOf(aux).length);
+  if (!editBus && buses.length) { editBus = buses[0].id; store.set("editBus", editBus); }
+  if (changed($("edit-bus"), [buses.map(b => [b.id, outputLabel(b.id)]), editBus])) {
+    $("edit-bus").replaceChildren(...buses.map(b => new Option(outputLabel(b.id), b.id)));
+    if (editBus && !buses.some(b => b.id === editBus)) $("edit-bus").prepend(new Option(`${editBus} (unavailable)`, editBus));
+    $("edit-bus").value = editBus;
+  }
   const aux = gridAux(), keys = Boolean(state?.dsk?.length), slots = slotsOf(aux);
-  if (!aux || armedSlot >= slots.length) armedSlot = null;
-  $("slots-card").hidden = !aux;
-  $("row2").hidden = !aux && !keys;
+  if (armedSlot && !slotsOf(auxById(armedSlot.bus)).includes(armedSlot.slot)) armedSlot = null;
+  $("slots-card").hidden = !buses.length && !editBus;
+  $("row2").hidden = !buses.length && !editBus && !keys;
   $("row2").classList.toggle("single", !aux || !keys);
   $("scenes").classList.toggle("armed", armedSlot !== null);
-  if (!aux) return;
+  if (!aux) { $("slots").replaceChildren(); $("slot-note").textContent = "Select an available AUX bus"; return; }
   $("slots-title").textContent = `${outputLabel(aux.id)} slots`;
   const problem = auxError(aux) || (aux.running ? "" : "compositor stopped");
-  $("slot-note").textContent = armedSlot !== null ? `pick a scene for M${armedSlot + 1}` : problem ||
+  $("slot-note").textContent = armedSlot !== null ? `pick a scene for ${outputLabel(armedSlot.bus)} · M${armedSlot.slot + 1}` : problem ||
     (aux.composition_pending ? "preparing sources · the bus stays live" : `click a slot, then a scene · ⇧1–${Math.min(slots.length, 9)}`);
   $("slot-note").classList.toggle("warn", armedSlot === null && Boolean(problem));
-  if (!changed($("slots"), [aux.scenes, slots, armedSlot])) return;
+  if (!changed($("slots"), [aux.id, aux.scenes, slots, armedSlot])) return;
   rebuild($("slots"), slots.map((i) => {
     const scene = aux.scenes[i], cell = el("div", "slot");
     const assign = el("button", "assign" + (scene ? "" : " empty"));
     assign.dataset.focus = `assign${i}`;
-    assign.setAttribute("aria-pressed", String(armedSlot === i));
+    assign.setAttribute("aria-pressed", String(armedSlot?.bus === aux.id && armedSlot.slot === i));
     assign.append(el("b", "", `M${i + 1}`), tail("", scene || "empty"));
     assign.title = scene ? `${scene} · click, then a scene to replace` : "Click, then a scene";
-    assign.onclick = () => { armedSlot = armedSlot === i ? null : i; renderSlots(); };
+    assign.onclick = () => { armedSlot = armedSlot?.bus === aux.id && armedSlot.slot === i ? null : {bus: aux.id, slot: i}; renderSlots(); };
     const clear = el("button", "clear", "×");
     clear.dataset.focus = `clear${i}`;
     clear.setAttribute("aria-label", `Clear M${i + 1}`);
@@ -708,9 +765,9 @@ function renderSlots() {
     return cell;
   }));
 }
-function assignSlot(slot, scene) {
-  const aux = gridAux();
-  if (!aux) return;
+function assignSlot(slot, scene, bus = editBus) {
+  const aux = auxById(bus);
+  if (!aux || !slotsOf(aux).includes(slot)) return showError("The selected AUX slot is unavailable");
   const assignments = [...aux.scenes];
   assignments[slot] = scene;
   // A stale expected_revision comes back as an error; the refresh then loads the current assignments.
@@ -736,6 +793,32 @@ function renderChips() {
     return chip;
   }));
 }
+let sourceBanks = store.get("sourceBanks", null);
+if (!Array.isArray(sourceBanks) || sourceBanks.length !== 3 || sourceBanks.some(b => !Array.isArray(b) || b.some(id => typeof id !== "string"))) sourceBanks = null;
+let sourceBank = Math.max(0, Math.min(2, Number(store.get("sourceBank", 0)) || 0));
+function pickBank(slot) {
+  const scene = sourceBanks?.[sourceBank]?.[slot];
+  if (!scene || !scenes.some(s => s.id === scene)) return showError("This source-bank button is unassigned or unavailable");
+  pick(scene); restFocus();
+}
+function renderBanks() {
+  if (!sourceBanks && scenes.length) {
+    sourceBanks = [scenes.slice(0, 9).map(s => s.id), [], []];
+    store.set("sourceBanks", sourceBanks);
+  }
+  $("bank").value = String(sourceBank);
+  const assigned = sourceBanks?.[sourceBank] || [];
+  if (!changed($("bank-buttons"), [assigned, scenes.map(s => s.id)])) return;
+  $("bank-buttons").replaceChildren(...Array.from({length: 9}, (_, i) => {
+    const id = assigned[i], available = scenes.some(s => s.id === id);
+    const button = el("button", "btn", `${i + 1} · ${id || "unassigned"}${id && !available ? " (unavailable)" : ""}`);
+    button.disabled = !available;
+    button.onclick = () => pickBank(i);
+    return button;
+  }));
+}
+$("bank").onchange = () => { sourceBank = Number($("bank").value); store.set("sourceBank", sourceBank); renderBanks(); restFocus(); };
+$("bank-save").onclick = () => { sourceBanks[sourceBank] = visible.slice(0, 9); store.set("sourceBanks", sourceBanks); renderBanks(); restFocus(); };
 function renderScenes() {
   const shown = scenes.filter((s) => filter === "all" || groupOf(s.id) === filter);
   visible = shown.map((s) => s.id);
@@ -743,7 +826,7 @@ function renderScenes() {
     $("scenes").replaceChildren(...shown.map((scene, i) => {
       const tile = el("button", "tile");
       tile.dataset.scene = scene.id;
-      tile.append(el("span", "n", i < 9 ? String(i + 1) : ""), el("span", "label", scene.id));
+      tile.append(el("span", "n", ""), el("span", "label", scene.id));
       // Give the focus back: a focused tile would take Space as another click on itself.
       tile.onclick = () => { pick(scene.id); restFocus(); };
       return tile;
@@ -760,7 +843,7 @@ function setTab(next) {
   store.set("tab", next);
   $("tab-scenes").setAttribute("aria-pressed", String(tab === "scenes"));
   $("tab-graph").setAttribute("aria-pressed", String(tab === "graph"));
-  $("scenes").hidden = $("chips").hidden = tab !== "scenes";
+  $("scenes").hidden = $("chips").hidden = $("source-banks").hidden = tab !== "scenes";
   $("graph").hidden = $("graph-open").hidden = tab !== "graph";
   renderGraph();
   if (tab === "scenes") restFocus();
@@ -1161,7 +1244,10 @@ const CURVES = [["linear", "Linear", "even speed", "M1 9 13 1"], ["ease-in", "Ea
                 ["ease-out", "Ease out", "ends slow", "M1 9Q7 1 13 1"], ["ease-in-out", "Ease in-out", "slow start and end", "M1 9C5 9 9 1 13 1"]];
 function curveMenu(label, touchedKey) {
   const menu = {value: "linear"};
-  const dd = dropdown((value) => { menu.set(value); touched[touchedKey] = true; });
+  const dd = dropdown((value) => {
+    menu.set(value); touched[touchedKey] = true;
+    if (touchedKey === "keyCurve") updatePreparedKeys();
+  });
   const btn = dd.root.firstChild;
   btn.insertAdjacentHTML("afterbegin", '<svg class="glyph" viewBox="0 0 14 10" aria-hidden="true"><path/></svg>');
   dd.setLabel(label);
@@ -1600,12 +1686,12 @@ function render() {
   scenes.sort((a, b) => groupRank(a.id) - groupRank(b.id) || a.id.localeCompare(b.id, undefined, {numeric: true}));
   if (!selected || !scenes.some((scene) => scene.id === selected)) selected = status.pvw_scene || status.pgm_scene || "";
   applySettings(s);
-  layoutWall();   // first: the slots widget and the page keys follow what the viewers show
-  renderCounts(); renderMeters(); renderHost(); renderWipeCache(); renderBuses(); renderKeys(); renderSlots(); renderChips(); renderScenes();
+  layoutWall();
+  renderCounts(); renderMeters(); renderHost(); renderWipeCache(); renderBuses(); renderKeys(); renderSlots(); renderChips(); renderScenes(); renderBanks();
   observeCuts(); renderLatency(); placeMeterTip();
   $("hint-pages").hidden = !pagesBus();
   setMeterTip($("hint"), "Keyboard shortcuts", [
-    ["1–9", "Pick visible scene"], ["← / →", "Browse Preview only"],
+    ["1–9", "Pick assigned scene from the selected source bank"], ["← / →", "Browse Preview only"],
     ["Space", `Auto: ${transitionLabel()} to Preview (again on a fade: pause / resume)`], ["C", "Cut Preview to Program (completes a running transition)"],
     ["F", "Select fade for Auto"], ["W", "Select wipe for Auto"],
     ["D", "Toggle direct cut: picks cut straight to Program"],
@@ -1617,6 +1703,27 @@ function render() {
   renderGraph();
 }
 let polling = false, pollAgain = false;
+let keysPolling = false, keysSampledAt = -Infinity;
+function mergeKeys(next) {
+  if (next.dsk_sampled_at !== undefined && next.dsk_sampled_at >= keysSampledAt) {
+    keysSampledAt = next.dsk_sampled_at;
+  } else if (next.dsk_sampled_at !== undefined && state) {
+    next.dsk = state.dsk;
+  }
+}
+async function refreshKeys() {
+  if (keysPolling || document.hidden || !state?.dsk?.length) return;
+  keysPolling = true;
+  try {
+    const next = await api("/api/keys");
+    mergeKeys(next);
+    state.dsk = next.dsk;
+    renderKeys();
+  } catch (_) {
+    state.dsk = (state.dsk || []).map(k => ({...k, phase: "unknown", on_air: null}));
+    renderKeys();
+  } finally { keysPolling = false; }
+}
 async function refresh() {
   if (polling) { pollAgain = true; return; }
   polling = true;
@@ -1624,6 +1731,7 @@ async function refresh() {
     const next = await api("/api/state");
     if (next.setup_revision !== undefined) {
       if (setupRevision !== undefined && setupRevision !== next.setup_revision) {
+        keysSampledAt = -Infinity;
         selected = ""; armedSlot = null;
         directTouched = tookTransition = false;
         for (const k in touched) touched[k] = false;
@@ -1631,6 +1739,7 @@ async function refresh() {
       }
       setupRevision = next.setup_revision;
     }
+    mergeKeys(next);
     if (!state && !validSaved && !viewersTouched) {
       state = next;
       // With both monitors the first viewer shows the Program preview: its PGM tile keeps air in view.
@@ -1656,12 +1765,15 @@ async function refresh() {
 }
 
 /* ---------- controls ---------- */
+$("keys-all").onclick = toggleAllKeys;
+$("edit-bus").onchange = () => { editBus = $("edit-bus").value; armedSlot = null; store.set("editBus", editBus); renderSlots(); };
 $("cut").onclick = () => take("cut");
 $("auto").onclick = () => take(currentTransition);
 $("fade").onclick = () => selectTransition("fade");
 $("direct").onclick = () => { directTouched = true; setDirect(!direct); };
 $("fade-s").oninput = () => { touched.fade = true; };
 $("key-fade-s").oninput = () => { touched.keyFade = true; };
+$("key-fade-s").onchange = updatePreparedKeys;
 $("wipe-file").oninput = () => { touched.wipe = true; };
 $("tab-scenes").onclick = () => setTab("scenes");
 $("tab-graph").onclick = () => setTab("graph");
@@ -1674,12 +1786,12 @@ for (const field of document.querySelectorAll("#deck input"))
 addEventListener("keydown", (e) => {
   if (e.defaultPrevented || e.target.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), .dd-menu') || e.metaKey || e.ctrlKey || e.altKey) return;
   // On the scene tiles and the take bar Space is Auto, never a second click on the focused control.
-  if (e.key === " " && e.target.closest?.('button, a, [role="button"]') && !e.target.closest?.("#scenes, #takebar")) return;
+  if (e.key === " " && e.target.closest?.('button, a, [role="button"]') && !e.target.closest?.("#scenes, #bank-buttons, #takebar")) return;
   if (e.repeat && (e.key === " " || e.key.toLowerCase() === "k")) { e.preventDefault(); return; }
   const shifted = Number(e.code.replace("Digit", ""));
   if (e.shiftKey && shifted >= 1 && shifted <= slotsOf(gridAux()).length) { e.preventDefault(); assignSlot(shifted - 1, selected || null); return; }
   const digit = Number(e.key);
-  if (digit >= 1 && digit <= 9 && visible[digit - 1]) { e.preventDefault(); pick(visible[digit - 1]); return; }
+  if (digit >= 1 && digit <= 9) { e.preventDefault(); pickBank(digit - 1); return; }
   const k = e.key.toLowerCase(), bus = pagesBus();
   if (e.key === "ArrowLeft" || e.key === "ArrowRight") stepPreview(e.key === "ArrowLeft" ? -1 : 1);
   else if (e.key === " ") take(currentTransition);
@@ -1699,6 +1811,7 @@ setTab(tab === "graph" ? "graph" : "scenes");
 renderLatency();
 refresh();
 setInterval(refresh, 1000);
+setInterval(refreshKeys, 200);
 setInterval(() => { viewers.forEach(renderStream); renderLatency(); }, 1000);   // a player that stopped posting shows "—" after STREAM_STALE_MS
 addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>

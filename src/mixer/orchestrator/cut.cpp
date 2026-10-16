@@ -17,6 +17,7 @@ void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::Tra
     state_->transition_scene_name = scene_name;
     state_->take_phase = MixerState::TakePhase::Ready;
     state_->take_start_ns = 0;
+    state_->take_keys_started = false;
     state_->wipe_switched = false;
     state_->destination_ready = false;
     state_->take_deadline_ns = monotonicNs() + kTakeReadyTimeoutMs * 1000000;

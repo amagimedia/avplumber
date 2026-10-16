@@ -48,6 +48,8 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
             state_->take_start_ns = overlay;
             state_->take_phase = MixerState::TakePhase::Wipe;
             state_->wipe_on_air = true;
+            state_->startTakeKeys(std::max(overlay, last_ns +
+                av_rescale(1000000000, state_->fps_den, state_->fps_num)), false);
             return 1;
         }
         return 0;

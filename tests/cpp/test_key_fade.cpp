@@ -77,6 +77,15 @@ void cuts() {
     assert(near(key.level(frameTime(0)), 0.04));
     key.retarget(false, 0, FadeCurve::Linear, frameTime(1), kPeriod);
     assert(key.level(frameTime(1)) == 0);
+
+    key.retarget(true, 2, FadeCurve::Linear, frameTime(2), kPeriod);
+    assert(key.moving() && key.target() && key.level(frameTime(2)) < 1);
+    key.finish();
+    assert(!key.moving() && key.level(frameTime(3)) == 1);
+    key.retarget(false, 2, FadeCurve::Linear, frameTime(4), kPeriod);
+    assert(key.moving() && !key.target() && key.level(frameTime(4)) > 0);
+    key.finish();
+    assert(!key.moving() && key.level(frameTime(5)) == 0);
 }
 
 void reversal() {

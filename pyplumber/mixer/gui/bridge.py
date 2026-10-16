@@ -45,6 +45,18 @@ class MixerBridge:
         self._take_queue: collections.deque[int] = collections.deque()   # waiting, in arrival order
         self._waiting_program: int | None = None
         self._take_running = False
+        self._keys_lock = threading.Lock()
+        self._keys_at = float("-inf")
+        self._keys = []
+
+    def keys(self, timeout: float | None = None) -> dict:
+        """Small, shared poll for frame-derived key tally, independent of the large show state."""
+        with self._keys_lock:
+            now = time.monotonic()
+            if now - self._keys_at >= STATE_TTL_S or self._keys_at <= self._changed_at:
+                self._keys = json.loads(self.command("mixer.dsk_status", timeout) or "[]")
+                self._keys_at = now
+            return {"dsk": self._keys, "dsk_sampled_at": self._keys_at}
 
     def _run(self, coro, timeout: float | None = None):
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -135,7 +147,7 @@ class MixerBridge:
             state["aux_buses"] = [{**bus, "layouts": static["aux_layouts"][bus["id"]]}
                                   if bus.get("id") in static["aux_layouts"] else bus for bus in buses]
         if state["settings"].get("dsk_keys"):
-            state["dsk"] = json.loads(self.command("mixer.dsk_status", timeout) or "[]")
+            state.update(self.keys(timeout))
         return state
 
     def take(self, request: dict):

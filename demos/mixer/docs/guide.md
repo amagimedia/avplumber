@@ -45,8 +45,37 @@ select **Viewers 2**, then **Program preview** in one viewer and **Program dirty
 in the other. The first contains PVW, PGM and eight scene slots; the second
 shows the program with its enabled keys. Viewer selection is local to the
 browser. Scene takes, key buttons, AUX paging and AUX layout controls operate
-the running mixer. In Direct mode, selecting a scene takes it immediately
-using the selected transition; select Cut for the cut-only workflow.
+the running mixer. **Direct cut** always cuts a selected scene to Program.
+Otherwise scene clicks select Scene Preview. **Fade / Wipe** choose the effect;
+**AUTO / Space** runs it, and **CUT / C** cuts the displayed Preview. An empty
+Preview cannot be taken. Scene Preview shows the background only, without
+downstream keys; it is not a keyed look-ahead view.
+
+The **AUX bus to edit** selector delegates slot edits independently of the
+monitors. An armed slot belongs to that bus until assigned or cancelled.
+Changing the editing bus cancels the armed slot; changing a monitor does not.
+
+**1–9** use the selected saved source bank, regardless of browsing filters.
+Three banks are stored in this browser. **Save browsed scenes to bank** explicitly
+replaces a bank with the first nine scenes in the current filter. Missing scenes
+remain labelled unavailable instead of being silently replaced. Arrow keys still
+browse Scene Preview. Fade and key durations accept seconds or whole frames at
+the canvas rate (for example, 12 frames at 25 fps is 0.48 seconds).
+
+Each downstream key has separate **CUT** and **AUTO** controls. Its tally comes
+from the last frame emitted by the keyer: on, fading-in, fading-out, off, or
+unknown if telemetry is unavailable. The requested on/off target is separate;
+pending commands never turn the tally on or off speculatively. Visibility means
+a key frame contributes with nonzero envelope opacity, not that its HTML contains
+nontransparent pixels. The UI polls this small tally separately every 200 ms.
+
+**Toggle all keys / K** sends one group operation: all off if any target is on,
+otherwise all on, using the key duration. **With next take** is a persistent
+selection: selected keys toggle on the first emitted frame of each new background
+take. CUT cuts those keys; AUTO runs their independent key fades at the configured
+key duration and curve. Pausing the background fade does not pause independent
+DSK fades. CUT completing that background transition also finishes its selected
+key fades. Preview selection and failed takes that never reach air do not fire keys.
 
 Each viewer must support its output codec. The recorded L4 show uses HEVC for
 Program preview and H.264 for dirty Program; an H.264-capable browser alone

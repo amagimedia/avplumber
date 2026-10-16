@@ -21,7 +21,7 @@ from frame_codes import read_code
 
 
 @contextmanager
-def recovery_graph(paths, *, webui=None, port=18779, routed=False, control=False):
+def recovery_graph(paths, *, webui=None, port=18779, routed=False, control=False, keyer=False):
     avp = AVPlumber()
     errors = []
     avp.on_exception = lambda name, kind, message: errors.append((name, kind, message))
@@ -67,7 +67,21 @@ def recovery_graph(paths, *, webui=None, port=18779, routed=False, control=False
         mixer.add_scene(f'full{index}', {f'camera{index}': layer},
                         routes={f'camera{index}': index} if routed else None)
     mixer.set_initial_scene('full0')
+    if keyer:
+        mixer.add_aux_destination('camera0', 'test_key_1')
+        mixer.add_aux_destination('camera1', 'test_key_2')
     output_edge = mixer.build()
+    if keyer:
+        avp.addNode(mixer.canvas_compositor({
+            'name': 'test_keyer', 'mixer': 'recovery', 'group': 'readback',
+            'src': [output_edge, 'test_key_1', 'test_key_2'], 'dst': 'test_keyed',
+            'subscriptions': ['', 'test_key_1', 'test_key_2'], 'clock_input': 0, 'fps': '60/1',
+            'max_layers': 3, 'active_inputs': 7, 'metadata_key': 'test_keys',
+            'layers': [{'dst_w': 640, 'dst_h': 360},
+                       {'input': 1, 'dst_w': 64, 'dst_h': 64, 'blend': True, 'z': 1},
+                       {'input': 2, 'dst_x': 80, 'dst_w': 64, 'dst_h': 64, 'blend': True, 'z': 2}],
+        }, keyer=True))
+        output_edge = 'test_keyed'
     avp.addNode(FilterVideo({'name': 'pixel_readback', 'group': 'readback',
                             'src': output_edge, 'dst': 'pixels',
                             'hwaccel': 'recovery_gpu',
