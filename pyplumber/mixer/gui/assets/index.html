@@ -798,7 +798,7 @@ function renderNext() {
     const bkgd = el("button", "", "BKGD");
     bkgd.type = "button";
     bkgd.dataset.focus = "bkgd";
-    bkgd.onclick = () => { nextBkgd = !nextBkgd; renderNext(); renderBuses(); restFocus(); };
+    bkgd.onclick = () => { nextBkgd = !nextBkgd; renderNext(); renderBuses(); };
     rebuild($("next-keys"), [bkgd, ...keys.map((key, i) => {
       const button = el("button", "", String(i + 1));
       button.type = "button";
@@ -807,7 +807,6 @@ function renderNext() {
         const armed = new Set(armedKeys());
         armed.has(key.id) ? armed.delete(key.id) : armed.add(key.id);
         button.setAttribute("aria-pressed", String(armed.has(key.id)));   // at once; the poll confirms it
-        restFocus();   // Space stays Auto, not another press of this button
         command({command: "dsk", keys: [...armed], prepare: true});
       };
       return button;
@@ -831,7 +830,6 @@ function toggleFtb() {
   const fade_seconds = fadeSeconds();
   if (fade_seconds === null) return;
   $("ftb").setAttribute("aria-pressed", String(!state.ftb.on));   // at once; the poll confirms it
-  restFocus();
   return command({command: "ftb", toggle: true, fade_seconds, curve: curves.fade.value});
 }
 function renderFtb() {
@@ -861,7 +859,6 @@ function renderKeys() {
     take.onclick = (e) => {
       // Show the requested state at once: the round trip to the mixer and the next poll come later.
       showKeyOn(i, !key.on);
-      restFocus();   // Space stays Auto, not another press of this key
       command({command: "dsk", key: key.id, on: !key.on, curve: curves.fade.value, ...(e.shiftKey && {fade_seconds: 0})});
     };
     tag.dataset.focus = `${key.id}-rate`;
@@ -1537,10 +1534,7 @@ function addViewer(out) {
   v.screen.setAttribute("role", "button");
   const fullscreen = () => (document.fullscreenElement ? document.exitFullscreen() : v.screen.requestFullscreen?.())?.catch?.(() => {});
   v.screen.ondblclick = fullscreen;
-  // A click keeps the shortcuts on the scene grid (Space is Auto, not a press of this screen); Tab and Enter
-  // still reach full screen.
   v.screen.onclick = () => {
-    restFocus();
     if (!v.grid || gridViewer() === v) return;
     editViewer = v;
     armedSlot = null;
@@ -1952,10 +1946,12 @@ $("tab-graph").onclick = () => setTab("graph");
 function restFocus() { $("scenes").focus({preventScroll: true}); }
 for (const field of document.querySelectorAll("#deck input"))
   field.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "Escape") restFocus(); });
+// The shortcuts work wherever the focus is, a focused button included (Space is Auto, never a press of it), except
+// while typing in a field or choosing in an open menu. A focused lever keeps its arrow keys.
 addEventListener("keydown", (e) => {
-  if (e.defaultPrevented || e.target.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), .dd-menu') || e.metaKey || e.ctrlKey || e.altKey) return;
-  // On the scene tiles and the take bar Space is Auto, never a second click on the focused control.
-  if (e.key === " " && e.target.closest?.('button, a, [role="button"]') && !e.target.closest?.("#scenes, #takebar")) return;
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey ||
+      e.target.closest?.('input:not([type="range"]), textarea, select, [contenteditable]:not([contenteditable="false"]), .dd-menu') ||
+      (e.target.type === "range" && /^(Arrow|Home|End|Page)/.test(e.key))) return;
   if (e.repeat && (e.key === " " || e.key.toLowerCase() === "k")) { e.preventDefault(); return; }
   const shifted = Number(e.code.replace("Digit", ""));
   if (e.shiftKey && shifted >= 1 && shifted <= slotsOf(gridAux()).length) { e.preventDefault(); assignSlot(shifted - 1, selected || null); return; }
