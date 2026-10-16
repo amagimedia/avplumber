@@ -22,15 +22,15 @@ def test_seed_generates_portable_recipe_and_preserves_edits(tmp_path):
     path = tmp_path / "demo.json"
     recipe = json.loads(path.read_text())
     show = plan(recipe, tmp_path)[0]
-    assert len(show["sources"]) == 78
+    assert len(show["sources"]) == 192
     assert len(show["scenes"]) == 256
     assert [bus["id"] for bus in show["aux_buses"][:2]] == ["mv", "mv2"]
-    assert len(show["aux_buses"]) == 14
-    assert len(show["renditions"]) == 3
+    assert len(show["aux_buses"]) == 15
+    assert [r["id"] for r in show["renditions"]] == ["sdr", "sdr_clean"]
     assert all(b["renditions"][0]["preset"] == "p1" for b in show["aux_buses"])
     assert not (tmp_path / "mixer.demo.json").exists(), "only preparation publishes the generated show"
     videos = [s for s in show["sources"] if s["kind"] == "video"]
-    assert len(videos) == 44
+    assert len(videos) == 105
     assert all(s["decode_storage"] == "cuarray" and s["extra_hw_frames"] == 12 for s in videos)
     recipe["setup"]["encodes"]["mv"]["bitrate_kbps"] = 500
     path.write_text(json.dumps(recipe))
@@ -51,6 +51,7 @@ def test_seed_accepts_low_bandwidth_hevc_monitors_and_scales_extra_count(tmp_pat
     settings = json.loads((PACKAGE / "settings.json").read_text())
     for output in ("mv", "mv2", "extra"):
         settings["encodes"][output].update(codec="hevc_nvenc", preset="p3", bitrate_kbps=500)
+    settings["extra_aux"] = 30
     path = tmp_path / "initial.json"
     path.write_text(json.dumps(settings))
     media = tmp_path / "media"
@@ -86,7 +87,7 @@ def test_setup_browser_limit_includes_keys_and_clamps_saved_mix(fps, browsers):
     profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]
     settings = json.loads((PACKAGE / "settings.json").read_text())
     # A saved larger mix must follow the new rate's limits on Apply.
-    settings.update(fps=fps, source_count=180, weights=[22, 22, 4, 0, 36, 0, 0])
+    settings.update(fps=fps, bit_depth=10, chroma="422", source_count=180, weights=[22, 22, 4, 0, 36, 0, 0])
     recipe = recipe_for(profile, settings)
     show = plan(recipe, Path("/tmp/mixer-test"))[0]
     assert sum(s["kind"] == "browser" for s in show["sources"]) == browsers

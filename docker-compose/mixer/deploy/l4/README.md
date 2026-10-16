@@ -52,7 +52,7 @@ Its two viewers show Program/Preview and dirty Program with four keys. The
 Program/Preview and Multiviewer outputs in that show use HEVC; use a browser
 with HEVC WebRTC reception support to view them. The recording itself is H.264.
 
-First start seeds [settings.json](settings.json) and generates media. Later
+First start seeds [settings.json](settings.json), the show of that recording, and generates media. Later
 starts preserve saved settings; change an existing show through Setup.
 Keep the writable media directory, including `.nv-cache`, across restarts.
 Do not mount the generated show file separately: Setup replaces it atomically.
