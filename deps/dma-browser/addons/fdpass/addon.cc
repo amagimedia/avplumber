@@ -165,10 +165,7 @@ class Server {
     return abandoned;
   }
 
-  // The plane fd goes first in the message's SCM_RIGHTS, the acquire fence (fence_fd >= 0; the
-  // header's pixel format flag says it is there) second. Both are duplicated for the send and the
-  // duplicates closed before this returns, whatever happens in between.
-  SendResult sendToAll(int send_fd, int fence_fd, const std::vector<uint8_t> &meta) {
+  SendResult sendToAll(int send_fd, const std::vector<uint8_t> &meta) {
     SendResult result;
     const bool track_release = meta.size() >= sizeof(TexInfo);
     const uint64_t frame_count = track_release ? dmabufLoadLe64(meta.data() + 40) : 0;
@@ -189,15 +186,16 @@ class Server {
     }
     const int s_log_frames = fdpass_log_frames_enabled();
     // Duplicate once with CLOEXEC so we can reuse across clients safely
-    DupFds dups;
-    if (!dups.add(send_fd) || (fence_fd >= 0 && !dups.add(fence_fd))) {
+    int dup_fd = -1;
+
+    dup_fd = ::fcntl(send_fd, F_DUPFD_CLOEXEC, 3);
+    if (dup_fd < 0) {
       if (track_release) emit_release(path_, frame_count);
       result.errors = clients.size();
       return result;
     }
-    const int dup_fd = dups.fds[0];
 
-    char control[CMSG_SPACE(2 * sizeof(int))];
+    char control[CMSG_SPACE(sizeof(int))];
     std::memset(control, 0, sizeof(control));
     struct msghdr msgh; std::memset(&msgh, 0, sizeof(msgh));
     char dummy = 0;
@@ -205,10 +203,10 @@ class Server {
     if (!meta.empty()) { iov.iov_base = const_cast<uint8_t*>(meta.data()); iov.iov_len = meta.size(); }
     else { iov.iov_base = &dummy; iov.iov_len = 1; }
     msgh.msg_iov = &iov; msgh.msg_iovlen = 1;
-    msgh.msg_control = control; msgh.msg_controllen = CMSG_SPACE(dups.count * sizeof(int));
+    msgh.msg_control = control; msgh.msg_controllen = sizeof(control);
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msgh);
-    cmsg->cmsg_level = SOL_SOCKET; cmsg->cmsg_type = SCM_RIGHTS; cmsg->cmsg_len = CMSG_LEN(dups.count * sizeof(int));
-    std::memcpy(CMSG_DATA(cmsg), dups.fds, dups.count * sizeof(int));
+    cmsg->cmsg_level = SOL_SOCKET; cmsg->cmsg_type = SCM_RIGHTS; cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    *reinterpret_cast<int *>(CMSG_DATA(cmsg)) = dup_fd;
 
     if (track_release) beginFrameBroadcast(frame_count);
 
@@ -218,8 +216,8 @@ class Server {
         TexInfo ti{};
         std::memcpy(&ti, meta.data(), sizeof(TexInfo));
         logf(path_,
-             "[fdpass] frame tx path=%s send_fd=%d dup_fd=%d fence_fd=%d clients=%zu meta=%zu w=%u h=%u stride=%u pixfmt=0x%08x mod=%" PRIu64 " off=%" PRIu64 " ts=%" PRIu64 " frame=%" PRIu64,
-             path_.c_str(), send_fd, dup_fd, fence_fd, clients.size(), meta.size(),
+             "[fdpass] frame tx path=%s send_fd=%d dup_fd=%d clients=%zu meta=%zu w=%u h=%u stride=%u pixfmt=0x%08x mod=%" PRIu64 " off=%" PRIu64 " ts=%" PRIu64 " frame=%" PRIu64,
+             path_.c_str(), send_fd, dup_fd, clients.size(), meta.size(),
              ti.width, ti.height, ti.stride, ti.pixel_format,
              (uint64_t)ti.modifier, (uint64_t)ti.offset, (uint64_t)ti.timestamp, (uint64_t)ti.frame_count);
       } else {
@@ -270,24 +268,13 @@ class Server {
       logf(path_, "[fdpass] frame tx summary path=%s ok=%zu backpressure=%zu dropped=%zu clients=%zu",
            path_.c_str(), result.sent, result.backpressure, result.disconnected + result.errors, clients.size());
     }
+    ::close(dup_fd);
     return result;
   }
 
   ~Server() { stop(); }
 
  private:
-  struct DupFds {
-    int fds[2] = {-1, -1};
-    size_t count = 0;
-    bool add(int fd) {
-      const int dup_fd = ::fcntl(fd, F_DUPFD_CLOEXEC, 3);
-      if (dup_fd < 0) return false;
-      fds[count++] = dup_fd;
-      return true;
-    }
-    ~DupFds() { for (size_t i = 0; i < count; ++i) ::close(fds[i]); }
-  };
-
   struct PendingFrame {
     std::unordered_set<int> recipients;
     bool broadcast_complete = false;
@@ -527,7 +514,7 @@ Napi::Value CreateServer(const Napi::CallbackInfo &info) {
 Napi::Value BroadcastFd(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
   if (info.Length() < 2 || !info[0].IsString() || !info[1].IsNumber()) {
-    Napi::TypeError::New(env, "Expected (socketPath: string, fd: number, [meta?: Buffer], [fenceFd?: number])").ThrowAsJavaScriptException();
+    Napi::TypeError::New(env, "Expected (socketPath: string, fd: number, [meta?: Buffer])").ThrowAsJavaScriptException();
     return env.Null();
   }
   std::string path = info[0].As<Napi::String>().Utf8Value();
@@ -536,18 +523,6 @@ Napi::Value BroadcastFd(const Napi::CallbackInfo &info) {
   if (info.Length() >= 3 && info[2].IsBuffer()) {
     Napi::Buffer<uint8_t> buf = info[2].As<Napi::Buffer<uint8_t>>();
     meta.assign(buf.Data(), buf.Data() + buf.Length());
-  }
-  // The acquire fence: a sync_file fd, or absent (undefined or negative). The caller keeps
-  // ownership of it, as of the plane fd; only duplicates travel.
-  int fence_fd = -1;
-  if (info.Length() >= 4 && info[3].IsNumber()) fence_fd = std::max(-1, info[3].As<Napi::Number>().Int32Value());
-  if (meta.size() >= sizeof(TexInfo) && texinfoHasAcquireFence(dmabufLoadLe32(meta.data() + 12)) != (fence_fd >= 0)) {
-    // Sent as is, a receiver would take the wrong fd for the fence or wait on none: refuse before
-    // anything is tracked, so the caller releases the texture as for any failed broadcast.
-    Napi::TypeError::New(env, fence_fd >= 0 ? "fdpass: fence fd given but the TexInfo header does not flag a fence"
-                                            : "fdpass: TexInfo header flags a fence but no fence fd was given")
-        .ThrowAsJavaScriptException();
-    return env.Null();
   }
   auto it = g_servers.find(path);
   Server::SendResult result;
@@ -558,7 +533,7 @@ Napi::Value BroadcastFd(const Napi::CallbackInfo &info) {
     }
     if (meta.size() >= sizeof(TexInfo)) emit_release(path, dmabufLoadLe64(meta.data() + 40));
   } else {
-    result = it->second->sendToAll(fd, fence_fd, meta);
+    result = it->second->sendToAll(fd, meta);
   }
   auto value = Napi::Object::New(env);
   value.Set("clients", Napi::Number::New(env, result.clients));
