@@ -1652,7 +1652,7 @@ function fitHeader(v) {
   v.head.classList.toggle("tight", over(v.head) || over(v.head.querySelector(".dd-btn span")));
 }
 // A take bar separator is only shown between two controls on the same row, never at a row end, and
-// the key hint, like the Keys card's note beside the key fade, only when it fits whole (the hint first
+// the key hint, like the Keys card's note, only when it fits whole (the hint first
 // drops its words).
 function trimTakebar() {
   const hint = $("hint"), over = (n) => n.scrollWidth > n.clientWidth;
