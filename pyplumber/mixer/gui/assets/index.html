@@ -861,6 +861,7 @@ function renderKeys() {
     take.onclick = (e) => {
       // Show the requested state at once: the round trip to the mixer and the next poll come later.
       showKeyOn(i, !key.on);
+      restFocus();   // Space stays Auto, not another press of this key
       command({command: "dsk", key: key.id, on: !key.on, curve: curves.fade.value, ...(e.shiftKey && {fade_seconds: 0})});
     };
     tag.dataset.focus = `${key.id}-rate`;
@@ -1536,7 +1537,10 @@ function addViewer(out) {
   v.screen.setAttribute("role", "button");
   const fullscreen = () => (document.fullscreenElement ? document.exitFullscreen() : v.screen.requestFullscreen?.())?.catch?.(() => {});
   v.screen.ondblclick = fullscreen;
+  // A click keeps the shortcuts on the scene grid (Space is Auto, not a press of this screen); Tab and Enter
+  // still reach full screen.
   v.screen.onclick = () => {
+    restFocus();
     if (!v.grid || gridViewer() === v) return;
     editViewer = v;
     armedSlot = null;

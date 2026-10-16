@@ -359,6 +359,7 @@ const {chromium} = require('playwright');
     await Promise.all([sent(), take(2).click()]);
     const click = commands.splice(0)[0];
     assert(click.key === 'title' && !('fade_seconds' in click) && click.curve, 'a click takes the key at its own rate');
+    assert(await page.evaluate(() => document.activeElement === $('scenes')), 'and Space after it is Auto, not the key again');
     await Promise.all([sent(), take(2).click({modifiers: ['Shift']})]);
     assert.equal(commands.splice(0)[0].fade_seconds, 0, 'Shift+click cuts');
     // Auto pressed again during its own mix: Halt sends the fade again (the mixer holds it), Complete cuts.
@@ -395,6 +396,7 @@ const {chromium} = require('playwright');
     await page.locator('.viewer').nth(1).locator('.screen').click();
     assert.equal(await page.locator('#slots-title').textContent(), 'Aux 1 slots', 'a click on a viewer makes the card edit its bus');
     assert.deepEqual(await editing(), [false, true]);
+    assert(await page.evaluate(() => document.activeElement === $('scenes')), 'a click on a viewer keeps the shortcuts live');
     await show('aux0', 'program');
     await page.waitForFunction(() => !viewers[1].grid);
     assert.equal(await page.locator('#slots-title').textContent(), 'Aux 0 slots', 'the other takes over when it stops showing slots');
