@@ -408,7 +408,7 @@
         <div class="state" id="pgm-state">on air</div>
       </section>
       <section class="bus pvw" aria-label="Preview">
-        <div class="row"><span class="t">Preview<kbd class="k" title="← → browse Preview">← →</kbd></span><button class="chip direct" id="direct" type="button" aria-pressed="false" aria-keyshortcuts="Shift+D" title="Direct cut: picks cut straight to Program (Shift+D)">Direct<kbd class="k">⇧D</kbd></button></div>
+        <div class="row"><span class="t">Preview<kbd class="k" title="← → ↑ ↓ browse Preview">← →</kbd></span><button class="chip direct" id="direct" type="button" aria-pressed="false" aria-keyshortcuts="Shift+D" title="Direct cut: picks cut straight to Program (Shift+D)">Direct<kbd class="k">⇧D</kbd></button></div>
         <div class="name" id="pvw">—</div>
         <div class="row"><span class="state" id="pvw-state">ready</span>
           <span class="next" id="next" hidden><span class="lbl">Next</span><span class="seg small" id="next-keys" role="group" aria-label="Next transition"></span></span></div>
@@ -706,7 +706,7 @@ function renderTransition() {
   $("fade-s").style.width = `${Math.max(4.4, $("fade-s").value.length)}ch`;
   renderBuses();
 }
-// ← → walk every scene the filter shows, wrapping, and turn to the page that holds the new Preview.
+// ← → walk every scene the filter shows, ↑ ↓ a row of the grid, wrapping, and turn to the page that holds the new Preview.
 function stepPreview(step) {
   if (!shownIds.length) return;
   const at = shownIds.indexOf(selected);
@@ -793,6 +793,10 @@ const frameMs = () => 1000 / (fps() || 30);
 const GRIP_BACK_MS = 250;   // the grip's way back to the lever once a mix ends
 const CATCH_UP = 1.5;       // a T-bar behind the mixer's mix gains on it at most this many times the mix's own speed
 const CATCH_UP_MS = 200;    // and closes the gap by its share of this each ms, so it slows into place
+// How much later than this page's guess (its acceptance + a frame) the mixer's mixes start, learnt from each mix's
+// first sample: a guess that early would run the T-bar ahead and then hold it back.
+let startLag = 0;
+const guessStart = (t, x, duration) => t + frameMs() + startLag - x * duration;
 // clock.offset: the least arrival − now_pts_ms, let grow by CLOCK_DRIFT (the two clocks' rates differ by ppm).
 const clock = {offset: Infinity, at: 0, pts: -Infinity}, CLOCK_DRIFT = 1e-4;
 let mix = null, takePressedAt = -Infinity, takeAcceptedAt = -Infinity, takeRuns = false, gripBack = null, gripShown = 0;
@@ -836,8 +840,13 @@ function startMix(kind, start, duration, shape = takeShape(kind), x0 = 0) {
 function endMix(early = false) {
   if (!mixOn()) return;
   Object.assign(mix, {ended: performance.now(), early});
-  gripBack = {v: gripShown, at: mix.ended};
   lever.release();
+  // An Auto that got the bar to the far end leaves it there, mirrored; from a lever handed over midway, or short of
+  // its end, the bar goes back to where the lever is.
+  if ((early || mix.drawn >= 0.9) && !mix.x0 && lever.engaged && lever.progress() <= K_END) {
+    leverFlip = !leverFlip;
+    $("lever").value = barAt(lever.position) * 1000;
+  } else gripBack = {v: gripShown, at: mix.ended};
   animate();
 }
 // The earliest page time a poll's status can have been taken at.
@@ -877,7 +886,10 @@ function observe(s, t, clocked, asked) {
   // ended the one this page still drew when the press reached it. Not on air yet, it starts a frame on, as Auto's does.
   const renewed = mixOn() && mix.kind === kind && mix.heldX !== null && !s.transition_paused &&
     (!s.transition_on_air || x < mix.heldX - 0.05);
-  if (renewed && !s.transition_on_air && duration > 0) return Object.assign(startMix(kind, t + frameMs(), duration), {guess: true});
+  if (renewed && !s.transition_on_air && duration > 0) {
+    const guess = guessStart(t, 0, duration);
+    return Object.assign(startMix(kind, guess, duration), {guess});
+  }
   if (late || !(s.transition_on_air || x > 0) || !(duration > 0) || x >= 1) return;   // not on air yet, or done
   if (!mixOn() || mix.kind !== kind || (!mix.guess && Math.abs(mix.duration - duration) > 1) || renewed) {
     // First seen while the lever shows its take, it is that take run on (an Auto, this page's not yet accepted or
@@ -890,7 +902,10 @@ function observe(s, t, clocked, asked) {
   // else at the mixer's hold. Running: the earliest start of this run; a guess gives way to the first sample either way.
   if (s.transition_paused) mix.heldX ??= x;
   else if (mix.heldX !== null) Object.assign(mix, {start, heldX: null, guess: false});
-  else if (mix.guess || start < mix.start) Object.assign(mix, {start, guess: false});
+  else if (mix.guess !== false || start < mix.start) {
+    if (mix.guess !== false) startLag = Math.min(400, Math.max(0, (startLag + start - mix.guess + startLag) / 2));
+    Object.assign(mix, {start, guess: false});
+  }
   animate();
 }
 // The progress drawn at t: never below the last. The shown start goes toward the estimate: earlier by at most
@@ -900,7 +915,7 @@ function mixDrawn(t) {
   t = Math.max(t, mix.at);   // a frame's time can be before the moment this page started the mix
   if (mix.drawn >= 1 && mix.heldX === null) return endMix(true);
   const dt = t - mix.at;
-  mix.shown += Math.min(dt, Math.max(-(CATCH_UP - 1) * dt, (mix.start - mix.shown) * Math.min(1, dt / CATCH_UP_MS)));
+  mix.shown += Math.min(dt / 2, Math.max(-(CATCH_UP - 1) * dt, (mix.start - mix.shown) * Math.min(1, dt / CATCH_UP_MS)));
   const x = Math.min(mix.heldX ?? 1, Math.max(0, (t - mix.shown) / mix.duration));
   // A hold below where the T-bar is (another controller's Halt, seen a poll late) keeps it where it is.
   mix.x = Math.max(mix.x, Math.min(x, mix.x + CATCH_UP * dt / mix.duration));
@@ -930,16 +945,16 @@ function acceptTake(kind, {duration_sec: seconds, curve, color}, halted) {
   if (kind !== "fade" || halted) return;
   if (mixOn()) {
     if (mix.kind === "crossfade" && mix.heldX !== null && mix.resuming) {
-      const start = t + frameMs() - mix.heldX * mix.duration;
-      Object.assign(mix, {start, shown: start, heldX: null, guess: true, resuming: false});
+      const start = guessStart(t, mix.heldX, mix.duration);
+      Object.assign(mix, {start, shown: start, heldX: null, guess: start, resuming: false});
       animate();
     }
     return;
   }
   const x = lever.progress() > K_END ? lever.progress() : 0;
   lever.release();
-  startMix("crossfade", t + frameMs() - x * seconds * 1000, seconds * 1000, takeShape("crossfade", {curve, color}), x);
-  mix.guess = true;
+  mix = startMix("crossfade", guessStart(t, x, seconds * 1000), seconds * 1000, takeShape("crossfade", {curve, color}), x);
+  mix.guess = mix.start;
 }
 // Another controller's lever, while this page's has not moved.
 const theirLever = (s) => s?.transition_manual && lever.sent === undefined;
@@ -972,7 +987,7 @@ function renderProgramState(take) {
   if ($("pgm-state").textContent !== text) $("pgm-state").textContent = text;
 }
 function renderLever(frame) {
-  const t = frame ?? performance.now(), take = shownTake(frame), progress = take?.progress || 0, from = lever.origin, owned = mixOn();
+  const t = frame ?? performance.now(), take = shownTake(frame), progress = take?.progress || 0, from = barAt(lever.origin), owned = mixOn();
   renderProgramState(take);
   const lit = Math.round(progress * LEDS), pct = tbar.querySelector(".pct"), trail = tbar.querySelector(".trail");
   const rest = Number($("lever").value) / 1000, back = gripBack && Math.min(1, Math.max(0, t - gripBack.at) / GRIP_BACK_MS);
@@ -1028,6 +1043,10 @@ const K_END = 0.002, COMPLETE_GUARD_MS = 100, LEVER_QUIET_MS = 1000;
 // sentAt, turnedAt: when this page last sent a position, and one that changed the origin or engaged; movedAt: when
 // a poll last showed the mixer's lever somewhere else (another controller moving it); offAt: when a poll asked over a
 // second after this page's last position first showed the mixer's lever elsewhere.
+// The bar as drawn is the mixer's lever, or its mirror once an Auto ended at the far end: like a hardware T-bar the
+// bar stays where the mix took it, and the next take runs from there (the mixer's lever is still at its own origin).
+let leverFlip = false;
+const barAt = (v) => (leverFlip ? 1 - v : v);
 const lever = {origin: 0, engaged: true, position: Number($("lever").value) / 1000, sent: undefined, completedAt: -Infinity, parked: false,
   sentAt: -Infinity, turnedAt: -Infinity, movedAt: -Infinity, offAt: undefined,
   progress() { return this.engaged ? Math.abs(this.position - this.origin) : 0; },
@@ -1053,13 +1072,13 @@ const lever = {origin: 0, engaged: true, position: Number($("lever").value) / 10
     Object.assign(this, {origin: origin ?? this.origin, engaged: engaged ?? true});
     if ((adopt || this.sent === undefined) && position !== undefined) {
       if (Math.abs(position - this.position) >= 1e-6) this.movedAt = performance.now();
-      $("lever").value = (this.position = position) * 1000;
+      $("lever").value = barAt(this.position = position) * 1000;
       this.sent = undefined;
     }
   }};
 function sendLever() {
   if (owns()) {   // a focused lever's arrow keys during another's mix: it stays put
-    $("lever").value = lever.position * 1000;
+    $("lever").value = barAt(lever.position) * 1000;
     return renderLever();
   }
   // The mixer completes a take at its next frame after the far end, and until then reads a position at that end
@@ -1067,7 +1086,7 @@ function sendLever() {
   // off it, it waits a few frames.
   // Within K_END of an end the lever is at it: 0.998 completes a take from 0, yet |0.998 − 1| is a hair over K_END in
   // binary, so after that completion the mixer's Lever and its twin would read it as a new take at 0.2%.
-  const raw = Number($("lever").value) / 1000, value = raw <= K_END ? 0 : raw >= 1 - K_END ? 1 : raw;
+  const raw = barAt(Number($("lever").value) / 1000), value = raw <= K_END ? 0 : raw >= 1 - K_END ? 1 : raw;
   const wait = lever.completedAt + COMPLETE_GUARD_MS - performance.now();
   if (lever.parked && Math.abs(value - lever.origin) <= K_END) return renderLever();
   if (wait > 0) {
@@ -2186,7 +2205,7 @@ function render() {
 function renderHint() {
   const slots = slotsOf(gridAux()).length;
   setTip($("hint"), "Keyboard shortcuts", [
-    ["1–9", "Pick a scene on this page"], ["< >", "Previous / next scene page"], ["← →", "Browse Preview only"],
+    ["1–9", "Pick a scene on this page"], ["< >", "Previous / next scene page"], ["← → ↑ ↓", "Browse Preview only (↑ ↓ by grid row)"],
     ["Space", "Auto to Preview (again during its mix: Halt or Complete)"], ["C", "Cut Preview to Program (completes a running transition)"],
     ["F", "Select fade for Auto"], ["D", "Select dip for Auto"], ["W", "Select a wipe for Auto; again: the next wipe"],
     ["⇧D", "Direct cut: picks cut straight to Program"],
@@ -2319,6 +2338,11 @@ addEventListener("keydown", (e) => {
   if (digit >= 1 && digit <= 9 && visible[digit - 1]) { e.preventDefault(); pick(visible[digit - 1]); return; }
   const k = e.key.toLowerCase(), bus = pagesBus();
   if (e.key === "ArrowLeft" || e.key === "ArrowRight") stepPreview(e.key === "ArrowLeft" ? -1 : 1);
+  else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+    e.preventDefault();   // not a scroll of the page
+    const columns = getComputedStyle($("scenes")).gridTemplateColumns.split(" ").length;
+    stepPreview(e.key === "ArrowUp" ? -columns : columns);
+  }
   else if (e.key === " ") takeButton(currentTransition);
   else if (k === "k") toggleAllKeys();
   else if (k === "c") takeButton("cut");
