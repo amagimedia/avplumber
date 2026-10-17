@@ -2,6 +2,7 @@
 #include "mixer/backends/cuda/transition_control.hpp"
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,8 +54,60 @@ void leverRamp() {
     assert(near(requestProgress(still, 5000), 0.2) && near(requestProgress(still, 6000), 0.2));
 }
 
+// The schedule every consumer of a lever take evaluates (alpha, keys, a scrubbed clip) in ns, its
+// run-on when AUTO takes over, and where the lever's end lands.
+void leverSchedule() {
+    using avp::mixer::FadeRequest;
+    using avp::mixer::rampAt;
+    using avp::mixer::rampTimesNs;
+    using avp::mixer::requestProgress;
+    FadeRequest held{1000, 1.0, false};
+    held.time_floor_ms = held.time_ceiling_ms = 1300;
+    for (const auto& ramp : {avp::mixer::rampTo(held, 0.9, 2000, 2016), avp::mixer::rampTo(held, 0.1, 2000, 2016)})
+        for (int64_t t_ms = 1990; t_ms <= 2030; ++t_ms)   // the duration in whole ns: 1e-6 of a ramp
+            assert(std::fabs(rampAt(rampTimesNs(ramp), t_ms * 1000000) - requestProgress(ramp, t_ms)) < 1e-6);
+    const FadeRequest unclamped{1000, 2.0, false};
+    const auto ramp = rampTimesNs(unclamped);
+    assert(ramp.start_ns == 1000000000 && ramp.duration_ns == 2000000000 &&
+           ramp.floor_ns == std::numeric_limits<int64_t>::min() && ramp.ceiling_ns == std::numeric_limits<int64_t>::max());
+
+    // AUTO runs the lever's take on from where it is, at a whole take's rate, without a ceiling.
+    const auto lever = avp::mixer::rampTo(held, 0.6, 2000, 2016);
+    const auto run = avp::mixer::runOn(lever, 2100, 0.5);
+    assert(std::fabs(requestProgress(run, 2100) - requestProgress(lever, 2100)) < 1e-3);   // no jump
+    assert(std::fabs(requestProgress(run, 2050) - requestProgress(lever, 2100)) < 1e-3);   // older frames hold
+    assert(std::fabs(requestProgress(run, 2200) - (0.6 + 0.1 / 0.5)) < 1e-3);              // 1/duration
+    assert(requestProgress(run, 2300) == 1.0 && !run.time_ceiling_ms && run.duration_sec == 0.5);
+
+    // An end lands on the ramp's last frame by time, where its progress may stop short of the end.
+    FadeRequest near_end{1000, 1.0, false};
+    near_end.start_ms = 1000;
+    near_end.time_floor_ms = 1000;
+    near_end.time_ceiling_ms = 1980;   // progress 0.98 at the ceiling
+    assert(!avp::mixer::leverEndLanded(near_end, 1979999999) && avp::mixer::leverEndLanded(near_end, 1980000000));
+    near_end.duration_sec = -1;        // moving back: 0.02 at the ceiling
+    near_end.start_ms = 2000;
+    assert(std::fabs(requestProgress(near_end, 1980) - 0.02) < 1e-9 && avp::mixer::leverEndLanded(near_end, 1980000000));
+    assert(!avp::mixer::leverEndLanded(unclamped, std::numeric_limits<int64_t>::max()));   // AUTO's: no lever end
+}
+
+// The time a lever position takes to reach the picture, at 60 fps.
+void leverSpan() {
+    using avp::mixer::leverSpanNs;
+    const int64_t frame = 16666667, now = 10000000000;
+    assert(leverSpanNs(std::nullopt, now, 0, frame) == frame);                       // the first position
+    assert(leverSpanNs(std::nullopt, now, now - 20000000, frame) == 20000000);       // streamed
+    assert(leverSpanNs(std::nullopt, now, now - 1000000, frame) == frame);           // never under a frame
+    assert(leverSpanNs(std::nullopt, now, now - 2000000000, frame) == 100000000);    // seldom: 100 ms at most
+    assert(leverSpanNs(25.0, now, now - 2000000000, frame) == 25000000);             // the controller's spacing
+    assert(leverSpanNs(4.0, now, 0, frame) == frame);                                // one frame at least
+    assert(leverSpanNs(500.0, now, 0, frame) == 200000000);                          // 200 ms at most
+}
+
 int main() {
     leverRamp();
+    leverSchedule();
+    leverSpan();
     const auto control = avp::mixer::transitionControl("cuda");
     const std::string clip = "clip((t-12.345000)/0.750000,0,1)";
     // Every crossfade names its mode first: the filter keeps a dip's mode until told otherwise.

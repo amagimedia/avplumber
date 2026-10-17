@@ -55,4 +55,38 @@ public:
     bool engaged() const { return engaged_; }
 };
 
+/// How the lever's own take ends: at the far end (Complete) or back at its start (Cancel), each once
+/// the picture has followed the lever there.
+enum class LeverEnd { None, Complete, Cancel };
+
+/// What one lever position does to the program. Ignore: nothing (another take owns the program, or
+/// the lever's end is still landing, so only the position is kept); Drop: cancel at once, nothing
+/// of it is on air; Start: begin the lever's take at `progress`; Move: the lever's take goes to
+/// `progress`, and `end` says whether the lever reached one of its ends.
+struct LeverStep {
+    enum class Kind { Ignore, Drop, Start, Move };
+    Kind kind;
+    double progress = 0;
+    LeverEnd end = LeverEnd::None;
+};
+
+/// `idle`: no take at all; `lever_take`: the take is the lever's; `ending`: its end is landing;
+/// `on_air`: something of it is on air, so a cancel lands on the picture instead of dropping it.
+inline LeverStep leverStep(Lever& lever, double position, bool idle, bool lever_take, bool ending, bool on_air) {
+    using Kind = LeverStep::Kind;
+    if ((!idle && !lever_take) || ending) {
+        lever.track(position);
+        return {Kind::Ignore};
+    }
+    const auto move = lever.move(position, lever_take);
+    const Kind kind = lever_take ? Kind::Move : Kind::Start;
+    switch (move.kind) {
+        case Lever::Kind::Idle: return {Kind::Ignore};
+        case Lever::Kind::Cancel: return on_air ? LeverStep{Kind::Move, 0, LeverEnd::Cancel} : LeverStep{Kind::Drop};
+        case Lever::Kind::Complete: return {kind, 1, LeverEnd::Complete};
+        case Lever::Kind::Progress: break;
+    }
+    return {kind, move.progress};
+}
+
 } // namespace avp::mixer

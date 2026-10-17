@@ -772,10 +772,14 @@ class MixerGraphBuilder:
             # The resident player feeds the compositor directly: it stamps the clip on
             # the output tick grid from the take that armed it, and a force_fps here
             # would fill the gap between two takes with the previous clip's last frame.
+            # A lever's scrub pushes each tick one output frame before the compositor's
+            # deadline, not as the tick begins: a lever wipe follows the T-bar as soon as a
+            # mix does, instead of one latency_ms later.
             self.avp.addNode(ClipCache(clipcache.cache_node(
                 name=self._n("wipe_cache"), src=self._e("wipe_rt_out"),
                 dst=self._e("wipe_cached"), group=wipe_group, fps=fps_str,
-                budget_mb=self.cache_wipes_mb)))
+                budget_mb=self.cache_wipes_mb,
+                scrub_delay_ms=max(0.0, self.latency_ms - 1000 * self.fps_den / self.fps_num))))
             clip_edge = self._e("wipe_cached")
         else:
             self.avp.addNode(ForceFPS({

@@ -79,7 +79,7 @@ class MixerKeyer : public CudaRectCompositor, public IReturnsObjects {
         if (clock.generation != take_generation_) {
             if (taken_.any())   // the take carrying them ended between two of this keyer's frames
                 endTake(clock.previous.generation == take_generation_ && clock.previous.end == End::Completed);
-            if (clock.end != End::Cancelled && t_ns < clock.start_ns) return;   // not on air here yet
+            if (clock.end != End::Cancelled && t_ns < clock.on_air_ns) return;   // not on air here yet
             take_generation_ = clock.generation;
             if (clock.end == End::Cancelled) return;
             taken_ = prepared_;

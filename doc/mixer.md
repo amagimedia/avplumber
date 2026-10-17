@@ -356,6 +356,7 @@ mixer.fade {"mixer":"mixer","scene":"grid_4_page_0","duration_sec":0.5}
 mixer.fade {"mixer":"mixer","scene":"grid_4_page_0","duration_sec":1,"color":"#000000"}
 mixer.wipe {"mixer":"mixer","scene":"grid_4_page_0","wipe_file":"<path>/wipe.mov"}
 mixer.lever {"mixer":"mixer","position":0.35,"duration_sec":0.5}
+mixer.lever {"mixer":"mixer","position":0.35,"wipe_file":"<path>/wipe.mov","span_ms":16.7}
 ```
 
 Cut, Fade and transparent media-file Wipe are supported. Fade uses the permanent
@@ -368,6 +369,15 @@ compositor idle between wipes, and a take arms them in place (`play` on the
 creates, starts or stops nothing. A `load` on the `clip_cache` node ends on the
 decode chain's end-of-stream marker (`realtime` `forward_eof`), never on
 silence; its `status` names the clip still `loading`, and `forget` drops one.
+`scrub` replays a cached clip at the frame a schedule (`start_ns`,
+`duration_ns`, `floor_ns`, `ceiling_ns`: the lever's ramp on the output clock)
+shows on each tick, holding either end until `stop`; sent without `path` it
+changes the schedule from its `floor_ns` on, earlier ticks keeping the one they
+had. It pushes each tick `scrub_delay_ms` (default 0; the mixer's graph sets the
+wipe compositor's `latency_ms` less one frame) after the tick begins, so the
+lever's wipe reaches the picture as soon as its mix would; `status` reports
+the clip's `length_ns`, `scrub` and `scrub_late`, the ticks it pushed too late
+and skipped.
 
 There is one transition, and a take pressed while it is on air acts on it, as
 the CUT and AUTO buttons of a vision switcher's M/E do (Grass Valley Kayenne
@@ -375,9 +385,10 @@ behaviour); nothing is captured or frozen:
 
 | Take while a transition is on air | Result |
 |---|---|
-| `mixer.cut` | completes it at the next frame boundary: the preset's next ready frame goes to program |
+| `mixer.cut` | completes it at the next frame boundary: the preset's next ready frame goes to program; until then an AUTO for its scene is ignored |
 | `mixer.fade` (or `mixer.wipe`) for the scene of a crossfade on air | pauses it at its position, both sources moving; the next one resumes it from there |
-| `mixer.fade` for the scene of a wipe on air | ignored; the wipe runs to its end |
+| `mixer.fade` or `mixer.wipe` for the scene of the lever's take on air | runs it on from where the lever has it, at AUTO's rate (a wipe's: its clip's own) |
+| `mixer.fade` for the scene of an AUTO wipe on air | ignored; the wipe runs to its end |
 | any take, or `mixer.preview`, with another scene | replaces the preset picture under the running transition (as a preset-bus selection does), which then ends on that scene; a cut completes at once |
 | `mixer.interrupt` | cuts back to the program as it was before the transition |
 
@@ -396,14 +407,33 @@ AUTO: a fade take for the same Preview runs the lever's mix on from where the
 lever left it, and a cut completes it. While an AUTO, a cut or a wipe is on air
 the lever does nothing; a transition that ended away from the lever's far end
 leaves it inactive until it is brought to one of its ends, which becomes its
-start (`src/mixer/primitives/Lever.hpp`). The lever only mixes: a wipe clip
-cannot be scrubbed.
+start (`src/mixer/primitives/Lever.hpp`).
+
+With a `wipe_file` (a clip of the clip cache whose `wipe_cache` entry is
+`complete`; null or `""` mixes) the lever's take is a wipe of that clip instead:
+the clip's frame follows the lever forward and back (from the first position,
+below the clip's half until its overlay is on air), the background is Preview
+past the clip's half and Program before it, both ways, and AUTO runs it on at
+the clip's own rate (`transition_duration_ms` is the clip's length).
+`duration_sec`, `curve` and `color` are then ignored; decoding per take, the
+lever does not wipe, and a clip the cache does not hold is one error, the
+Preview kept. Each position moves the picture over `span_ms` (one frame to
+200 ms) when the controller sends it (the bridge's jitter pacing), else over the
+time since the previous position, one frame to 100 ms. An end is reached on the picture: the take
+completes or cancels on the program frame where the lever's ramp gets there,
+and positions arriving meanwhile only move the lever, so a late or repeated one
+never undoes that end; a take the lever ended leaves it engaged at that end,
+and a lever moved off it meanwhile starts the next take from there as it lands.
+The operator page's bridge sends the lever on a control connection of its own,
+never replaces an end position waiting to be sent but with the same end, and turns the page's `t_ms`
+(when it sampled the position) into `span_ms`, so positions delayed unevenly by
+the network land at the operator's own spacing.
 
 The keys selected for the next transition (the keyer's `prepare_inputs`)
 follow the background take's own clock, which the orchestrator publishes for
 the keyer (`TakeClock`): they mix, hold, follow the lever, cut with a cut and
-switch at a wipe clip's cut point, and a cancelled take returns them to their
-state. Pausing re-sends only the filter's alpha with a clamped
+switch at a wipe clip's cut point (with the lever's wipe, both ways where its
+background does), and a cancelled take returns them to their state. Pausing re-sends only the filter's alpha with a clamped
 clock, so it costs nothing on the GPU. A replaced preset that never renders
 ends the transition through the take deadline, back to the program.
 

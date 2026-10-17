@@ -41,9 +41,11 @@ void MixerOrchestrator::completeTake(int64_t pts_ns) {
     state_->blend_on_air = state_->wipe_on_air = state_->take_paused = false;
     state_->take_request.reset();
     endTakeClock(TakeClock::End::Completed, pts_ns);
-    state_->take_manual = state_->take_lever_done = false;
+    // A take the lever completed leaves it engaged at that end: moving it back starts the next.
+    if (state_->take_lever_end == LeverEnd::None) state_->lever.release();
+    state_->take_manual = false;
+    state_->take_lever_end = LeverEnd::None;
     state_->take_progress = 0;
-    state_->lever.release();
     state_->publishTakePreview(scene, pts_ns);
     applySceneControls(state_->scenes.at(scene));
     applyPostTransitionRouting(destination_a, scene);
@@ -78,8 +80,14 @@ bool MixerOrchestrator::actOnTransitionOnAir(const std::string& scene_name, Mixe
         // transition stays on air as it is, both sources moving.
         state_->transition_mode = MixerState::TransitionMode::Cut;
         state_->take_paused = false;
+        // The cut owns the take now: AUTO under it is ignored, and the lever is released when it
+        // lands, as after any take that ended without the lever.
+        state_->take_manual = false;
+        state_->take_lever_end = LeverEnd::None;
         state_->take_deadline_ns = monotonicNs() + kTakeReadyTimeoutMs * 1000000;
         logstream << "mixer: cut completes the transition on air, program " << scene_name;
+    } else if (same_scene && state_->take_manual) {
+        runOnFromLever();
     } else if (same_scene && state_->transition_mode == MixerState::TransitionMode::Crossfade) {
         toggleCrossfadePause();
     } else if (same_scene) {
@@ -102,28 +110,25 @@ void MixerOrchestrator::replacePreset(const std::string& scene_name) {
     logstream << "mixer: preset replaced under the " << state_->takeKind() << " on air by " << scene_name;
 }
 
+void MixerOrchestrator::runOnFromLever() {
+    if (!state_->take_request) return;
+    // AUTO on the lever's take runs it on from where the lever has it, at AUTO's rate (a wipe's:
+    // its clip's own); the lever is picked up again only at one of its ends.
+    state_->take_manual = false;
+    state_->take_lever_end = LeverEnd::None;
+    state_->lever.release();
+    const int64_t at_ms = takeScheduleFromNs() / 1000000;
+    const double x = requestProgress(*state_->take_request, at_ms);
+    state_->scheduleTake(runOn(*state_->take_request, at_ms, double(state_->take_duration_ns) / 1e9), false);
+    state_->take_start_ns = state_->take_request->start_ms * 1000000;
+    state_->take_paused = false;
+    applyTakeSchedule();
+    logstream << "mixer: AUTO runs the lever's " << state_->takeKind() << " to " << state_->transition_scene_name
+              << " on from " << x;
+}
+
 void MixerOrchestrator::toggleCrossfadePause() {
     if (!state_->take_request) return;
-    // AUTO on the lever's mix runs it on from where the lever has it, at AUTO's rate; the lever
-    // is picked up again only at one of its ends.
-    if (state_->take_manual) {
-        state_->take_manual = state_->take_lever_done = false;
-        state_->lever.release();
-        const int64_t at_ns = mixChangeNs();
-        FadeRequest request = *state_->take_request;
-        const double x = requestProgress(request, at_ns / 1000000);
-        state_->take_start_ns = at_ns - int64_t(x * double(state_->take_duration_ns));
-        request.duration_sec = double(state_->take_duration_ns) / 1e9;
-        request.start_ms = state_->take_start_ns / 1000000;
-        request.time_floor_ms = at_ns / 1000000;
-        request.time_ceiling_ms.reset();
-        state_->take_paused = false;
-        state_->take_request = request;
-        sendAlpha(request);
-        clampTakeClock();
-        logstream << "mixer: AUTO runs the lever's mix to " << state_->transition_scene_name << " on from " << x;
-        return;
-    }
     // The held mix never steps back: see mixChangeNs().
     const int64_t at_ns = mixChangeNs();
     FadeRequest request = *state_->take_request;
@@ -137,9 +142,8 @@ void MixerOrchestrator::toggleCrossfadePause() {
         request.time_ceiling_ms.reset();
     }
     state_->take_paused = !state_->take_paused;
-    state_->take_request = request;
-    sendAlpha(request);
-    clampTakeClock();
+    state_->scheduleTake(request, false);
+    applyTakeSchedule();
     logstream << "mixer: fade to " << state_->transition_scene_name << (state_->take_paused ? " paused" : " resumed");
 }
 

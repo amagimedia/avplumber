@@ -1,6 +1,7 @@
 #pragma once
 #include "../util.hpp"
 #include "primitives/fade_curve.hpp"
+#include "primitives/TakeClock.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -54,6 +55,41 @@ inline FadeRequest rampTo(FadeRequest request, double to, int64_t from_ms, int64
     request.time_floor_ms = from_ms;
     request.time_ceiling_ms = to_ms;
     return request;
+}
+
+/// `request`'s schedule in ns, as the alpha expression, the keys' clock and a scrubbed wipe clip
+/// all evaluate it.
+inline RampNs rampTimesNs(const FadeRequest& request) {
+    RampNs ramp{request.start_ms * 1000000, int64_t(request.duration_sec * 1e9)};
+    if (request.time_floor_ms) ramp.floor_ns = *request.time_floor_ms * 1000000;
+    if (request.time_ceiling_ms) ramp.ceiling_ns = *request.time_ceiling_ms * 1000000;
+    return ramp;
+}
+
+/// `request` running on from where it is at `at_ms` to its end at the rate of a whole take of
+/// `duration_sec`, unclamped from there: AUTO taking over from the lever.
+inline FadeRequest runOn(FadeRequest request, int64_t at_ms, double duration_sec) {
+    const double x = requestProgress(request, at_ms);
+    request.duration_sec = duration_sec;
+    request.start_ms = at_ms - int64_t(std::llround(x * duration_sec * 1000));
+    request.time_floor_ms = at_ms;
+    request.time_ceiling_ms.reset();
+    return request;
+}
+
+/// The time a lever position takes to reach the picture (ns): the controller's own spacing of its
+/// positions when it sends that (`span_ms`, paced against network jitter), one frame to 200 ms, else
+/// the time since the previous one arrived at `last_at_ns` (0: none): one frame when positions
+/// stream in, at most 100 ms when they come seldom. `period_ns`: one output frame.
+inline int64_t leverSpanNs(std::optional<double> span_ms, int64_t now_ns, int64_t last_at_ns, int64_t period_ns) {
+    if (span_ms) return std::clamp<int64_t>(int64_t(*span_ms * 1e6), period_ns, 200000000);
+    return last_at_ns ? std::clamp<int64_t>(now_ns - last_at_ns, period_ns, 100000000) : period_ns;
+}
+
+/// The lever's ramp to an end has reached the program frame at `pts_ns`. On time, never on the
+/// progress: a ramp's start is whole milliseconds, so its progress may stop just short of 0 or 1.
+inline bool leverEndLanded(const FadeRequest& request, int64_t pts_ns) {
+    return request.time_ceiling_ms && pts_ns >= *request.time_ceiling_ms * 1000000;
 }
 
 struct TransitionCommand {

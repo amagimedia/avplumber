@@ -70,7 +70,7 @@ void MixerOrchestrator::flushWipeEdges() {
     }
 }
 
-int64_t MixerOrchestrator::armWipeChain(const std::string& wipe_file) {
+Parameters MixerOrchestrator::armWipeChain(const std::string& wipe_file, std::optional<RampNs> scrub) {
     // The compositor applies these on its render thread, possibly one loop iteration
     // each, and activating an input without prewarm resets it, threshold included. So:
     // prewarm first, which keeps the activation from touching the reset; then the reset,
@@ -82,8 +82,14 @@ int64_t MixerOrchestrator::armWipeChain(const std::string& wipe_file) {
     setNodeObject(state_->wipe_overlay_name, "prewarm_inputs", Parameters(3u));
     resetInputIf(nodes_, state_->wipe_overlay_name);
     setNodeObject(state_->wipe_overlay_name, "active_inputs", Parameters(3u));
-    setNodeObject(state_->wipe_input_node_name, "play", Parameters(wipe_file));
-    return nodes_->node(state_->wipe_input_node_name)->getObject("status").at("start_tick").get<int64_t>();
+    if (scrub) {
+        Parameters arm = scrubSchedule(*scrub);
+        arm["path"] = wipe_file;
+        setNodeObject(state_->wipe_input_node_name, "scrub", arm);
+    } else {
+        setNodeObject(state_->wipe_input_node_name, "play", Parameters(wipe_file));
+    }
+    return nodes_->node(state_->wipe_input_node_name)->getObject("status");
 }
 
 void MixerOrchestrator::startWipeDecode(const std::string& wipe_file) {
@@ -144,9 +150,11 @@ void MixerOrchestrator::dropTransition(MixerState::TransitionMode dropped) {
     state_->blend_on_air = state_->wipe_on_air = state_->take_paused = false;
     state_->take_request.reset();
     endTakeClock(TakeClock::End::Cancelled, 0);   // keys going with it return to their state
-    state_->take_manual = state_->take_lever_done = false;
+    // A take the lever cancelled leaves it engaged where it is: moving it on starts the next.
+    if (state_->take_lever_end == LeverEnd::None) state_->lever.release();
+    state_->take_manual = false;
+    state_->take_lever_end = LeverEnd::None;
     state_->take_progress = 0;
-    state_->lever.release();
     // The program slot's routing was restored: the other slot is cold now.
     state_->pvw_slot_scene.clear();
 }
@@ -172,6 +180,7 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
     if (state_->transition_generation != generation) return;
     if (state_->cut_latency) state_->cut_latency->timing.cancel("failed");
     ++state_->transition_generation;
+    state_->take_lever_end = LeverEnd::None;   // a failed take ends without the lever
     dropTransition(state_->transition_mode.load());
     state_->clearTakePreview();
     state_->transition_mode = MixerState::TransitionMode::Idle;

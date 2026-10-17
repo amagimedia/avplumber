@@ -946,10 +946,14 @@ public:
             orch.fade(scene_name, duration_sec, curve, dip, CommandTiming::received());
         };
 
-        // mixer.lever {"mixer":"mixer","position":0.4,"duration_sec":1.0,"curve":"linear","color":null}:
+        // mixer.lever {"mixer":"mixer","position":0.4,"duration_sec":1.0,"curve":"linear","color":null,
+        //             "wipe_file":null,"span_ms":16.7}:
         // the lever arm (T-bar) at a fader position in [0, 1]; it mixes to Preview from the end it
         // rests at, the other end completes, its start cancels. duration_sec, curve and color are
-        // the mix's, for AUTO to run it on from the lever.
+        // the mix's, for AUTO to run it on from the lever. A wipe_file (null or "" mixes) wipes with
+        // that cached clip instead, its frame following the lever. span_ms (> 0, applied within one
+        // frame..200 ms): the time the picture takes to reach this position, the controller's own
+        // spacing of its positions.
         commands_["mixer.lever"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.lever", arg);
             const double position = req.at("position").get<double>();
@@ -962,7 +966,17 @@ public:
             std::optional<std::array<uint8_t, 3>> dip;
             if (req.contains("color") && !req.at("color").is_null())
                 dip = avp::mixer::parseDipColor(req.at("color").get<std::string>());
-            mixerOrchestrator(req.at("mixer").get<std::string>()).lever(position, duration_sec, curve, dip);
+            std::string wipe_file;
+            if (req.contains("wipe_file") && !req.at("wipe_file").is_null())
+                wipe_file = req.at("wipe_file").get<std::string>();
+            std::optional<double> span_ms;
+            if (req.contains("span_ms") && !req.at("span_ms").is_null()) {
+                span_ms = req.at("span_ms").get<double>();
+                if (!(*span_ms > 0))
+                    throw Error("mixer.lever: span_ms must be > 0");
+            }
+            mixerOrchestrator(req.at("mixer").get<std::string>()).lever(position, duration_sec, curve, dip,
+                                                                       wipe_file, span_ms);
         };
 
         // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0}

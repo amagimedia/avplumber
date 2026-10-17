@@ -86,7 +86,7 @@ class NativeEngine:
         self.events.append("shutdown")
 
 
-def application(native_boundary, **kwargs):
+def application(native_boundary, fps=60, **kwargs):
     nodes, builder = native_boundary
     api = SimpleNamespace(**{
         name: getattr(nodes, name) for name in (
@@ -97,7 +97,7 @@ def application(native_boundary, **kwargs):
     }, AVPlumber=NativeEngine, MixerGraphBuilder=builder)
     return build_application(GraphOptions(
         inputs=("camera-a.mp4", "camera-b.mp4"), output="program.ts",
-        fps=60, **kwargs,
+        fps=fps, **kwargs,
     ), api=api)
 
 
@@ -440,6 +440,14 @@ def test_cached_wipe_chain_runs_from_startup_parked_and_is_never_stopped(native_
         "mixer_" + edge for edge in (*clipcache.LOADER_EDGES, clipcache.CACHE_INPUT_EDGE)]
     assert engine.nodes["mixer_wipe_dec"]["dst"] == "mixer_" + clipcache.DECODED_EDGE
     assert engine.nodes["mixer_" + clipcache.CACHE_NODE]["src"] == "mixer_" + clipcache.CACHE_INPUT_EDGE
+
+
+@pytest.mark.parametrize("fps, delay_ms", [(25, 40), (30, 1000 / 30), (50, 40), (60, 1000 / 30)])
+def test_a_scrubbed_wipe_clip_is_pushed_one_frame_before_the_overlay_deadline(native_boundary, fps, delay_ms):
+    # As late as the overlay can still draw it: a lever wipe follows the T-bar as soon as a mix does.
+    nodes = application(native_boundary, fps=fps, wipe_cache_mb=256).avp.nodes
+    assert nodes["mixer_wipe_cache"]["scrub_delay_ms"] == pytest.approx(delay_ms)
+    assert nodes["mixer_wipe_overlay"]["latency_ms"] - delay_ms == pytest.approx(1000 / fps)
 
 
 def test_a_wipe_evicted_by_a_later_wipe_fails_the_start(native_boundary):

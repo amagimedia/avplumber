@@ -1400,7 +1400,10 @@ def test_clip_cache_node_parameters_name_the_clip_by_url():
                                 fps="60/1", budget_mb=256, url="/media/w.mov")
     assert node == {"name": "mixer_wipe_cache", "src": "in", "dst": "out", "group": "g",
                     "fps": "60/1", "cache": "clips", "url": "/media/w.mov", "budget_mb": 256}
-    assert "budget_mb" not in clipcache.cache_node(name="n", src="a", dst="b", group="g", fps="60/1")
+    default = clipcache.cache_node(name="n", src="a", dst="b", group="g", fps="60/1")
+    assert "budget_mb" not in default and "scrub_delay_ms" not in default
+    assert clipcache.cache_node(name="n", src="a", dst="b", group="g", fps="60/1",
+                                scrub_delay_ms=40)["scrub_delay_ms"] == 40
 
 
 RENDITION_CONFIG = {**CONFIG, "canvas": {"width": 1080, "height": 1920, "fps": 30},

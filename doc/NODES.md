@@ -1319,7 +1319,8 @@ Objects (`node.object.set`):
     the first program frame of each following background take of `mixer`, a
     key turning on is at the take's progress and one turning off at its
     complement: they mix with a mix, hold when it is held, follow the lever, cut
-    with a cut and switch at a wipe clip's cut point. A completed take leaves
+    with a cut and switch at a wipe clip's cut point, both ways with the lever's
+    wipe. A completed take leaves
     them switched; a cancelled one returns them to the state they had. A
     command for such a key during the take ends the take for it first.
 
