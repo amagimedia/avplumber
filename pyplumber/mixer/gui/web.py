@@ -9,8 +9,9 @@ mixer needs no HTTP server of its own and the pages need no build step:
     GET  /outputs.js    the output list both pages play from
     GET  /api/state     status + scenes + settings in one round trip
     GET  /api/lever     a WebSocket for the lever: text messages {"position": 0..1, "duration_sec"?, "curve"?,
-                        "color"?}, one per position, applied as POST /api/command "lever" is; one connection
-                        keeps a fader's positions in order and off the page's other requests
+                        "color"?, "wipe_file"?, "t_ms"?, "seq"?, "client"?}, one per position, applied as
+                        POST /api/command "lever" is; one connection keeps a fader's positions in order and
+                        off the page's other requests
     GET  /api/keys      small cached rendered-key and fade-to-black tally, sampled separately from show telemetry
     GET  /api/banks     the source banks: {"banks": [[scene|null, ...x9], x3] | null}, shared by every controller
     POST /api/banks     {"banks": [[...], [...], [...]]}: replaces them (kept with the show's settings)
@@ -30,15 +31,21 @@ mixer needs no HTTP server of its own and the pages need no build step:
                         next background transitions (Next Transition), on the transition's own clock
                         {"command": "ftb", "on": true|false | "toggle": true, "fade_seconds"?: s, "curve"?: ...}
                         fades the keyed program (not the clean feed) to black and back
-                        {"command": "lever", "position": 0..1, "duration_sec"?: s, "curve"?: ..., "color"?: ...}
+                        {"command": "lever", "position": 0..1, "duration_sec"?: s, "curve"?: ..., "color"?: ...,
+                        "wipe_file"?: path, "t_ms"?: ms, "seq"?: n, "client"?: id}
                         the lever arm (T-bar) for a panel, a MIDI fader or this page: from the end it rests
-                        at it mixes to Preview, the other end completes, its start cancels; positions sent
-                        faster than the mixer takes them collapse to the newest
+                        at it mixes to Preview (with a cached clip's "wipe_file": wipes, the clip following
+                        the lever), the other end completes, its start cancels, each once the picture got
+                        there (a position off that end meanwhile starts the next take then); positions sent
+                        faster than the mixer takes them collapse to the newest, an end position only into
+                        the same end. "t_ms", when the controller sampled the position on its own clock,
+                        paces positions against network jitter; "seq" numbered per "client", a late one is
+                        dropped
                         A cut, fade or wipe superseded by a newer one before it reached
                         the mixer answers {"ok": true, "superseded": true}.
 
-The bridge owns a single serialized control connection and reconnects when the
-mixer restarts, so the page can stay open across a mixer restart. Takes must not
+The bridge owns a serialized control connection, and one for the lever, and reconnects
+when the mixer restarts, so the page can stay open across a mixer restart. Takes must not
 queue behind polling: every tab shares one /api/state reply for STATE_TTL_S, and
 a burst of program takes (keyboard auto-repeat) collapses to its newest one.
 """
@@ -155,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
         if not key or self.headers.get("Upgrade", "").lower() != "websocket":
             self._send_json(400, {"error": "expected a WebSocket upgrade"})
             return
-        accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC11B85").encode()).digest()).decode()
+        accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
         self.send_response(101)
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")

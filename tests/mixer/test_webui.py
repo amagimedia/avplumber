@@ -1232,17 +1232,17 @@ def test_lever_positions_never_queue_behind_a_slow_mixer():
 
 
 def test_lever_websocket_streams_positions_in_order(client):
-    import base64, socket
+    import socket
     bridge = FakeBridge()
     base, server = client(bridge)
     sock = socket.create_connection(("127.0.0.1", server.server_port), timeout=5)
-    key = base64.b64encode(os.urandom(16)).decode()
-    sock.sendall((f"GET /api/lever HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                  f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+    # RFC 6455's own example: a browser opens the socket only with this answer to this key.
+    sock.sendall(("GET /api/lever HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                  "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
     reply = b""
     while b"\r\n\r\n" not in reply:
         reply += sock.recv(1024)
-    assert reply.startswith(b"HTTP/1.1 101") and b"Sec-WebSocket-Accept" in reply
+    assert reply.startswith(b"HTTP/1.1 101") and b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" in reply
 
     def send(opcode, payload):
         mask = os.urandom(4)
