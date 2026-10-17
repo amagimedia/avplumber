@@ -53,6 +53,9 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
         return 0;
     }
     const auto direct = pts(0);
+    // The wipe's progress for the status, as fade.cpp reports a mix's: at the newest direct frame.
+    if (direct > last_ns && state_->take_duration_ns > 0)
+        state_->take_progress = std::clamp(double(direct - state_->take_start_ns) / double(state_->take_duration_ns), 0.0, 1.0);
     // The overlay's frame of a tick can reach this selector before the direct frame of that tick
     // on every tick (2026-10-15 on the L4 show: wipes completed 3 to 8 s late, when timing jitter
     // let a direct frame through first). The equal tick completes the take without being emitted.
