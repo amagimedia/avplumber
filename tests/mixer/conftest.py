@@ -24,6 +24,17 @@ def nvenc():
             pytest.skip(f"requires an NVIDIA GPU with {codec}")
 
 
+@pytest.fixture(autouse=True)
+def unprobed_media(monkeypatch):
+    """A show build probes each video source's stream with ffprobe for the decode load; test shows
+    name media that does not exist, so their builds report none. A test of the load passes a probe."""
+    from pyplumber.mixer import config
+
+    def unprobed(path):
+        raise config.ConfigError(f"'{path}' is not probed in tests")
+    monkeypatch.setattr(config, "probe_video_stream", unprobed)
+
+
 @pytest.fixture
 def native_boundary(monkeypatch):
     before = set(sys.modules)

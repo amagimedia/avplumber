@@ -37,13 +37,73 @@ def compute_price(path: Path | None) -> dict | None:
     return {key: value[key] for key in ("hourly_usd", "label", "as_of", "source_url")}
 
 
+def _count(raw):
+    return int(raw) if raw.strip().isdigit() else None
+
+
+def _watts(raw):
+    try:
+        watts = float(raw)
+    except ValueError:
+        return None
+    return watts if math.isfinite(watts) and watts >= 0 else None
+
+
+def _text(raw):
+    """A text value; nvidia-smi's "[N/A]" or "[Not Supported]" reads None."""
+    raw = raw.strip()
+    return None if not raw or raw.startswith("[") else raw
+
+
+def _enabled(raw):
+    return {"Enabled": True, "Disabled": False}.get(raw.strip())
+
+
+# The --query-gpu fields of the per-second sample, the key each is published under and how it is
+# read. "sessions" is not published: it only checks the encoder session table.
+GPU_FIELDS = (
+    ("index", "index", _count), ("utilization.gpu", "gpu", _count), ("utilization.decoder", "decoder", _count),
+    ("utilization.encoder", "encoder", _count), ("memory.used", "memory_used_mib", _count),
+    ("memory.total", "memory_total_mib", _count), ("power.draw", "power_draw_w", _watts),
+    ("enforced.power.limit", "power_limit_w", _watts), ("encoder.stats.sessionCount", "sessions", _count),
+    ("clocks.sm", "clocks_sm_mhz", _count), ("clocks.mem", "clocks_mem_mhz", _count),
+    ("temperature.gpu", "temperature_c", _count), ("pstate", "pstate", _text),
+    ("pcie.link.gen.current", "pcie_gen", _count), ("pcie.link.width.current", "pcie_width", _count),
+    ("persistence_mode", "persistence", _enabled),
+)
+# What does not change while the driver is loaded, asked apart: a driver without compute_cap
+# (before R510) then loses only these facts, never the per-second sample.
+GPU_STATIC_FIELDS = (("index", "index", _count), ("name", "name", _text), ("driver_version", "driver", _text),
+                     ("compute_cap", "compute_capability", _text))
+# How often the facts the per-second sample leaves out are asked again: the static ones and the
+# CUDA version until they are known, the compute time-slice for good, as a boot service may set it
+# after this server started.
+GPU_FACTS_PERIOD_S = 60
+
+
+def _query_gpus(fields):
+    """One {key: value} per GPU from `nvidia-smi --query-gpu`, each value read by its field's reader."""
+    output = subprocess.check_output([
+        "nvidia-smi", "--query-gpu=" + ",".join(field for field, _, _ in fields),
+        "--format=csv,noheader,nounits"], text=True, stderr=subprocess.DEVNULL, timeout=1)
+    return [{key: read(raw) for (_, key, read), raw in zip(fields, row)}
+            for row in csv.reader(output.splitlines()) if len(row) == len(fields) and row[0].strip().isdigit()]
+
+
 class GpuStats:
-    """Share one bounded nvidia-smi sample across all viewers each second."""
+    """Share one bounded nvidia-smi sample across all viewers each second. Each GPU's sample also
+    carries the facts of GPU_STATIC_FIELDS, its CUDA version (`cuda`) and compute time-slice
+    (`compute_timeslice`, such as "Long"), which three more commands give every GPU_FACTS_PERIOD_S;
+    None while unknown."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.next_sample = 0
         self.values = []
+        self.next_facts = 0
+        self.static = {}   # GPU_STATIC_FIELDS by index
+        self.cuda = None
+        self.timeslices = {}
 
     def snapshot(self):
         if not self.lock.acquire(blocking=False):
@@ -52,26 +112,11 @@ class GpuStats:
             if time.monotonic() < self.next_sample:
                 return self.values
             self.next_sample = time.monotonic() + 1
-            output = subprocess.check_output([
-                "nvidia-smi", "--query-gpu=index,utilization.gpu,utilization.decoder,utilization.encoder,"
-                              "memory.used,memory.total,power.draw,enforced.power.limit,encoder.stats.sessionCount",
-                "--format=csv,noheader,nounits"], text=True, stderr=subprocess.DEVNULL, timeout=1)
-            keys = ("index", "gpu", "decoder", "encoder", "memory_used_mib", "memory_total_mib")
-            values = []
+            values = _query_gpus(GPU_FIELDS)
             session_counts = {}
-            for row in csv.reader(output.splitlines()):
-                if len(row) != len(keys) + 3 or not row[0].strip().isdigit():
-                    continue
-                sample: dict[str, int | float | None] = dict(zip(keys, (int(v) if v.strip().isdigit() else None for v in row[:len(keys)])))
-                for key, raw in zip(("power_draw_w", "power_limit_w"), row[len(keys):-1]):
-                    try:
-                        watts = float(raw)
-                        sample[key] = watts if math.isfinite(watts) and watts >= 0 else None
-                    except ValueError:
-                        sample[key] = None
+            for sample in values:
+                session_counts[sample["index"]] = sample.pop("sessions")
                 sample.update(encoder_sessions=None, encoder_fps=None, encoder_mpix_s=None)
-                session_counts[sample["index"]] = int(row[-1]) if row[-1].strip().isdigit() else None
-                values.append(sample)
             try:
                 totals = _encoder_snapshot(session_counts)
                 for sample in values:
@@ -81,12 +126,52 @@ class GpuStats:
                         sample.update(zip(("encoder_sessions", "encoder_fps", "encoder_mpix_s"), total))
             except (OSError, subprocess.SubprocessError, ValueError):
                 pass   # Missing session telemetry must not hide utilization or power.
+            if time.monotonic() >= self.next_facts:
+                self.next_facts = time.monotonic() + GPU_FACTS_PERIOD_S
+                self.static = self.static or _static_facts()
+                self.cuda = self.cuda or _cuda_version()
+                self.timeslices = _compute_timeslices()
+            unknown = {key: None for _, key, _ in GPU_STATIC_FIELDS[1:]}
+            for sample in values:
+                sample.update({**unknown, **self.static.get(sample["index"], {}), "cuda": self.cuda,
+                               "compute_timeslice": self.timeslices.get(sample["index"])})
             self.values = values
         except (OSError, subprocess.SubprocessError):
             self.values = []
         finally:
             self.lock.release()
         return self.values
+
+
+def _static_facts():
+    try:
+        return {facts.pop("index"): facts for facts in _query_gpus(GPU_STATIC_FIELDS)}
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+
+def _cuda_version():
+    """The CUDA version the driver supports, from the header of `nvidia-smi -q`, or None. Newer
+    drivers deprecate "CUDA Version" for "CUDA UMD Version" and print both for now."""
+    try:
+        output = subprocess.check_output(["nvidia-smi", "-q", "-d", "COMPUTE"], text=True,
+                                         stderr=subprocess.DEVNULL, timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = dict(re.findall(r"^\s*CUDA( UMD)? Version\s*:\s*(\d+(?:\.\d+)*)", output, re.MULTILINE))
+    return found.get(" UMD", found.get(""))
+
+
+def _compute_timeslices():
+    """Each GPU's compute time-slice, by index, from the `nvidia-smi compute-policy -l` table
+    (rows such as "|   0   Timeslice       Long          |"); {} where the command fails."""
+    try:
+        output = subprocess.check_output(["nvidia-smi", "compute-policy", "-l"], text=True,
+                                         stderr=subprocess.DEVNULL, timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return {int(index): value for index, value in
+            re.findall(r"^\|\s*(\d+)\s+Timeslice\s+(\S+)", output, re.MULTILINE)}
 
 
 def _encoder_snapshot(session_counts):

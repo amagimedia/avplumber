@@ -929,7 +929,14 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         for bus in aux:
             bus.build(options)
         aux.register_commands()
-    settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
+    # The show's settings and what the GPU decodes and encodes for it: the page's DEC and ENC figures.
+    settings = {**cfg.settings(), "encode_by_codec": mixer_config.encode_by_codec(
+        [*renditions, *(r for bus in cfg.aux_buses for r in bus.renditions)], cfg.working_format)}
+    try:
+        settings["decode"] = mixer_config.decode_load(cfg.sources)
+    except Exception as exc:   # a missing ffprobe or an unreadable header must not stop the show
+        log.warning("Decode load unknown: %s", exc)
+    settings = json.dumps(settings, separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True, True)   # polled: not logged
     held = []
     # Purge idle imports left by the capture pool's start-up churn.

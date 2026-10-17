@@ -8,6 +8,7 @@ from pyplumber.mixer.application import infer_output_format
 
 from pyplumber.mixer import config as mixer_config
 from pyplumber.mixer import config as mc
+from pyplumber.mixer.config import probe_video_stream   # conftest stubs the module's own for show builds
 from pyplumber.mixer.color import Color
 from pyplumber.mixer.graph import MixerGraphBuilder
 from pyplumber.mixer.cli import DIRECT_INPUT_LIMIT, GraphOptions, build_application, parse_args
@@ -960,6 +961,73 @@ def test_config_rejects_duplicate_locations_and_bad_references():
     assert mc.scene_layers(probed, probed.scenes[0])["cam"]["crop"] == {"x": 0, "y": 0, "w": 640, "h": 360}
 
 
+def test_decode_load_counts_each_video_source_once_at_its_own_rate():
+    # The live show: 105 HEVC 1080p30 clips.
+    live = [mc.Source(f"cam{i}", "video", f"/m/{i}.mp4") for i in range(105)]
+    assert mc.decode_load(live, probe=lambda _path: {"codec": "hevc", "width": 1920, "height": 1080, "fps": 30.0}) == {
+        "count": 105, "fps": 3150.0, "mpix_s": 6531.84, "by_codec": [{"codec": "hevc", "sources": 105, "fps": 3150.0}]}
+    streams = {"/a.mp4": {"codec": "h264", "width": 1280, "height": 720, "fps": 25.0},
+               "/b.mp4": {"codec": "hevc", "width": 3840, "height": 2160, "fps": 30000 / 1001},
+               "/c.mp4": {"codec": "h264", "width": 1920, "height": 1080, "fps": 50.0}}
+    show = [mc.Source("a", "video", "/a.mp4"), mc.Source("b", "video", "/b.mp4"), mc.Source("c", "video", "/c.mp4"),
+            mc.Source("raw", "v210", "/r.v210", 1920, 1080), mc.Source("page", "browser", "https://example.org/")]
+    assert mc.decode_load(show, probe=streams.__getitem__) == {
+        "count": 3, "fps": 104.97, "mpix_s": round((1280 * 720 * 25 + 3840 * 2160 * 30000 / 1001 + 1920 * 1080 * 50) / 1e6, 2),
+        "by_codec": [{"codec": "h264", "sources": 2, "fps": 75.0}, {"codec": "hevc", "sources": 1, "fps": 29.97}]}
+    assert mc.decode_load(show[3:]) == {"count": 0, "fps": 0, "mpix_s": 0, "by_codec": []}   # raw and browser: no decoder
+    with pytest.raises(KeyError):
+        mc.decode_load([*show, mc.Source("d", "video", "/d.mp4")], probe=streams.__getitem__)
+
+
+def test_encode_by_codec_counts_every_output_session():
+    renditions = [mc.Rendition("sdr", fps=60), mc.Rendition("hdr", fps=60, codec="hevc_nvenc"),
+                  mc.Rendition("record", target="p.ts", fps=30, codec="hevc_nvenc"), mc.Rendition("aux", fps=30, codec="h264_nvenc")]
+    assert mc.encode_by_codec(renditions, "nv12") == [{"codec": "h264", "sessions": 2, "fps": 90},
+                                                      {"codec": "hevc", "sessions": 2, "fps": 90}]
+    # An output that names no codec takes the canvas's: HEVC on a 10-bit canvas.
+    assert mc.encode_by_codec(renditions[:1], "p210le") == [{"codec": "hevc", "sessions": 1, "fps": 60}]
+    assert mc.encode_by_codec([], "nv12") == []
+
+
+FFPROBE = ["/usr/local/bin/ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+           "stream=codec_name,width,height,avg_frame_rate,r_frame_rate", "-of", "json", "/m/a.mp4"]
+
+
+@pytest.mark.parametrize("stream,expected", [
+    ({"codec_name": "hevc", "width": 1920, "height": 1080, "avg_frame_rate": "30/1", "r_frame_rate": "30/1"},
+     {"codec": "hevc", "width": 1920, "height": 1080, "fps": 30.0}),
+    ({"codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "0/0", "r_frame_rate": "30000/1001"},
+     {"codec": "h264", "width": 1280, "height": 720, "fps": 30000 / 1001}),
+    ({"codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "0/0", "r_frame_rate": "0/0"}, None),
+    ({"width": 1280, "height": 720, "avg_frame_rate": "25/1"}, None),
+    (None, None),
+])
+def test_stream_probe_reads_the_first_video_stream(monkeypatch, stream, expected):
+    runs = []
+    monkeypatch.setattr(mc.shutil, "which", lambda tool: f"/usr/local/bin/{tool}")
+    monkeypatch.setattr(mc.subprocess, "run", lambda command, **_: runs.append(command) or SimpleNamespace(
+        stdout=json.dumps({"streams": [stream] if stream else []})))
+    if expected is None:
+        with pytest.raises(mc.ConfigError, match="cannot probe the video stream"):
+            probe_video_stream("/m/a.mp4")
+    else:
+        assert probe_video_stream("/m/a.mp4") == expected
+    assert runs == [FFPROBE]
+    monkeypatch.setattr(mc.shutil, "which", lambda tool: None)
+    with pytest.raises(mc.ConfigError, match="ffprobe not found"):
+        probe_video_stream("/m/a.mp4")
+
+
+def test_settings_carry_the_encode_load_of_clean_and_dirty_renditions(tmp_path, monkeypatch):
+    renditions = [{"id": "sdr", "port": 5004, "codec": "h264_nvenc"}, {"id": "hdr", "port": 5006, "codec": "hevc_nvenc"},
+                  {"id": "sdr_clean", "port": 5010, "codec": "h264_nvenc", "feed": "clean", "fps": 30}]
+    monkeypatch.setattr(mc, "probe_video_stream", lambda _path: {"codec": "hevc", "width": 1920, "height": 1080, "fps": 30.0})
+    app, _ = _dsk_app(tmp_path, monkeypatch, renditions, canvas={**CONFIG["canvas"], "working_format": "p210le", "color": "hlg"})
+    settings = json.loads(app.avp.commands_registered["mixer.settings"](""))
+    assert settings["encode_by_codec"] == [{"codec": "h264", "sessions": 2, "fps": 90}, {"codec": "hevc", "sessions": 1, "fps": 60}]
+    assert settings["decode"] == {"count": 1, "fps": 30.0, "mpix_s": 62.21, "by_codec": [{"codec": "hevc", "sources": 1, "fps": 30.0}]}
+
+
 @pytest.mark.parametrize("flags", [(False, False), (True, False), (False, True), (True, True)])
 def test_independent_sources_require_explicit_opt_in_on_each_declaration(flags):
     sources = [{**CONFIG["sources"][0], "id": sid, "independent": independent}
@@ -1181,7 +1249,8 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
         "wipes": [{"id": "swoosh", "name": "swoosh", "path": "/media/swoosh.mov",
-                   "duration_seconds": 0.0}]}
+                   "duration_seconds": 0.0}],
+        "encode_by_codec": [{"codec": "h264", "sessions": 1, "fps": 60}]}
     # The settings name the compositor's inputs in the order the graph registered them.
     inputs = json.loads(application.avp.commands_registered["mixer.settings"](""))["inputs"]
     assert [source for source, _ in inputs] == [name.partition("#")[0] for name, _ in mixer.sources]
@@ -1914,7 +1983,8 @@ def test_dsk_command_cuts_keys_on_and_off(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     handler = app.avp.commands_registered["mixer.dsk"]
     assert json.loads(handler(json.dumps({"key": "strap", "on": True, "fade_seconds": 0}))) == [
-        {"id": "bug", "source": "page", "on": True, "rate": 0.4}, {"id": "strap", "source": "page", "on": True, "rate": 0.4}]
+        {"id": "bug", "source": "page", "on": True, "rate": None, "all_rate": 0.4},
+        {"id": "strap", "source": "page", "on": True, "rate": None, "all_rate": 0.4}]
     # A cut is exactly the pre-fade command, and asks the preview encoder for a keyframe like an M/E cut.
     assert app.avp.commands[-2:] == ["node.object.set dsk_comp active_inputs 7", KEYFRAME]
     handler(json.dumps({"key": "bug", "on": False, "fade_seconds": 0}))
@@ -1935,7 +2005,7 @@ def test_each_key_takes_its_own_rate_unless_the_command_names_one(tmp_path, monk
     handler = app.avp.commands_registered["mixer.dsk"]
     sent = len(app.avp.commands)
     rows = json.loads(handler(json.dumps({"key": "bug", "rate": 1.5})))
-    assert [row["rate"] for row in rows] == [1.5, 0.4]
+    assert [(row["rate"], row["all_rate"]) for row in rows] == [(1.5, 0.4), (None, 0.4)]
     assert len(app.avp.commands) == sent, "a rate changes nothing on air"
     handler(json.dumps({"key": "bug", "on": False}))
     assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 1, "duration_ms": 1500, "curve": "linear"}'
@@ -1950,6 +2020,43 @@ def test_each_key_takes_its_own_rate_unless_the_command_names_one(tmp_path, monk
     assert json.loads(app.avp.commands_registered["mixer.dsk_status"](""))[0]["rate"] == 1.5
 
 
+def test_keys_without_their_own_rate_follow_the_all_rate(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}],
+                      dsk={**DSK_KEYS, "fade_seconds": 1.2})
+    handler = app.avp.commands_registered["mixer.dsk"]
+    status = lambda: json.loads(app.avp.commands_registered["mixer.dsk_status"](""))   # noqa: E731
+    assert [(row["rate"], row["all_rate"]) for row in status()] == [(None, 1.2), (None, 1.2)]
+    sent = len(app.avp.commands)
+    rows = json.loads(handler(json.dumps({"all_rate": 0.8})))
+    assert [(row["rate"], row["all_rate"]) for row in rows] == [(None, 0.8), (None, 0.8)]
+    assert len(app.avp.commands) == sent, "the All rate changes nothing on air"
+    handler(json.dumps({"key": "strap", "on": True}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 7, "duration_ms": 800, "curve": "linear"}'
+    # A key's own rate wins over All, also when All changes later; null makes it follow All again.
+    handler(json.dumps({"key": "strap", "rate": 2}))
+    handler(json.dumps({"all_rate": 0.5}))
+    handler(json.dumps({"key": "strap", "on": False}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 3, "duration_ms": 2000, "curve": "linear"}'
+    assert [(row["rate"], row["all_rate"]) for row in status()] == [(None, 0.5), (2, 0.5)]
+    handler(json.dumps({"key": "strap", "rate": None}))
+    handler(json.dumps({"key": "strap", "on": True}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 7, "duration_ms": 500, "curve": "linear"}'
+    # The group form fades over All by default; an All rate of 0 cuts.
+    handler(json.dumps({"key": "bug", "rate": 3}))
+    handler(json.dumps({"keys": ["bug", "strap"], "toggle": True}))
+    assert json.loads(app.avp.commands[-1].split(" key_changes ")[1])["duration_ms"] == 500
+    handler(json.dumps({"all_rate": 0}))
+    handler(json.dumps({"key": "strap", "on": True}))
+    assert app.avp.commands[-2:] == ["node.object.set dsk_comp active_inputs 5", KEYFRAME]
+    sent = list(app.avp.commands)
+    for bad in ({"all_rate": 11}, {"all_rate": None}, {"all_rate": "1"}, {"all_rate": 1, "key": "bug"},
+                {"key": "nope", "rate": None}):
+        with pytest.raises(mixer_config.ConfigError):
+            handler(json.dumps(bad))
+    assert app.avp.commands == sent
+    assert status()[0]["all_rate"] == 0
+
+
 def test_dsk_cut_without_a_preview_encoder_sends_no_keyframe(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     app.mixer.keyframe_node = None
@@ -1961,7 +2068,7 @@ def test_dsk_command_fades_keys_with_a_curve(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     handler = app.avp.commands_registered["mixer.dsk"]
     rows = json.loads(handler(json.dumps({"key": "strap", "on": True, "fade_seconds": 0.75, "curve": "ease-out"})))
-    assert rows[1] == {"id": "strap", "source": "page", "on": True, "rate": 0.4}
+    assert rows[1] == {"id": "strap", "source": "page", "on": True, "rate": None, "all_rate": 0.4}
     assert app.avp.commands[-1] == ('node.object.set dsk_comp fade_inputs '
                                     '{"active_inputs": 7, "duration_ms": 750, "curve": "ease-out"}')
     handler(json.dumps({"key": "bug", "on": False, "fade_seconds": 2}))

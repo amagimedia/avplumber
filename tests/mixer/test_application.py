@@ -85,7 +85,9 @@ def test_config_renditions_do_not_need_cli_output_flags(tmp_path):
     assert nodes["record_output"]["url"] == "program.ts"
     assert nodes["record_fps"]["fps"] == "60/1"
     assert app.mixer.parameters["fps"] == (60, 1)
-    assert json.loads(app.avp.commands_registered["mixer.settings"]("")) == cfg.settings()
+    # The show's settings, with the NVENC load of its outputs; its media cannot be probed here: no decode load.
+    assert json.loads(app.avp.commands_registered["mixer.settings"]("")) == {
+        **cfg.settings(), "encode_by_codec": [{"codec": "h264", "sessions": 1, "fps": 60}]}
     from pyplumber.mixer.cli import GraphOptions, build_application as build_cli
     path = tmp_path / "show.json"
     doc = {**CONFIG, "sources": CONFIG["sources"][:1], "scenes": CONFIG["scenes"][:1],
@@ -187,6 +189,37 @@ def test_going_on_air_releases_idle_browser_imports_before_the_outputs():
     # The counters start from zero before the output is let go: nothing on air is reset away.
     assert commands[-4:] == ["node.object.set mixer_comp_a reset_counters true", "node.object.set mixer_comp_b reset_counters true",
                              "node.object.set janus_rtp_output hold false", "node.object.set janus_force_keyframe trigger true"]
+
+
+def test_settings_report_what_every_decoder_and_encoder_of_the_show_does(native_boundary, monkeypatch, caplog):
+    class Engine(FakeAvp):
+        def addNode(self, node, **kwargs):
+            super().addNode(node)
+
+    cfg = show()
+    hevc = replace(cfg.renditions[0], id="hevc", target="hevc.ts", codec="hevc_nvenc", fps=30)
+    cfg = replace(cfg, renditions=(*cfg.renditions, hevc), aux_buses=config.parse_aux_buses([{
+        "id": "cameras", "layout": {"preset": "source_pages"}, "renditions": [{"id": "monitor", "port": 5012}],
+    }], cfg))
+    api = fake_api()
+    api.AVPlumber, api.MixerGraphBuilder = Engine, native_boundary[1]
+
+    def settings():
+        return json.loads(build_application(cfg, api=api).avp.commands_registered["mixer.settings"](""))
+    # The program record at 60 fps and the aux monitor at the bus's 30 share H.264; the second record is HEVC.
+    encode = [{"codec": "h264", "sessions": 2, "fps": 90}, {"codec": "hevc", "sessions": 1, "fps": 30}]
+    streams = {"/media/cam.mp4": {"codec": "hevc", "width": 1920, "height": 1080, "fps": 30.0},
+               "idle.mp4": {"codec": "h264", "width": 1280, "height": 720, "fps": 25.0}}
+    monkeypatch.setattr(config, "probe_video_stream", streams.__getitem__)
+    reported = settings()
+    assert reported["encode_by_codec"] == encode
+    assert reported["decode"] == {"count": 2, "fps": 55.0, "mpix_s": 85.25, "by_codec": [
+        {"codec": "h264", "sources": 1, "fps": 25.0}, {"codec": "hevc", "sources": 1, "fps": 30.0}]}
+    # A source that cannot be probed leaves the decode load out, never a total without it.
+    del streams["idle.mp4"]
+    reported = settings()
+    assert "decode" not in reported and reported["encode_by_codec"] == encode
+    assert "Decode load unknown" in caplog.text
 
 
 @pytest.mark.parametrize("missing_frame", [False, True])

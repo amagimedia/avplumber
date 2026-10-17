@@ -21,7 +21,10 @@ mixer needs no HTTP server of its own and the pages need no build step:
                         and "color": "#RRGGBB" to dip through that colour instead of mixing)
                         {"command": "dsk", "key": ..., "on": true|false, "fade_seconds"?: s, "curve"?: ...}
                         (without fade_seconds a key takes its own rate, set by {"command": "dsk", "key": ...,
-                        "rate": s}; 0 cuts)
+                        "rate": s}, 0 cuts; until it has one, or after "rate": null, it takes the All rate, set
+                        by {"command": "dsk", "all_rate": s}, which starts at the show's dsk fade_seconds and
+                        is also the group form's default; each key row reports "rate", its own or null, and
+                        "all_rate")
                         {"command": "dsk", "keys": [...], "on": true|false | "toggle": true, ...}
                         {"command": "dsk", "keys": [...], "prepare": true}: the keys that switch with the
                         next background transitions (Next Transition), on the transition's own clock

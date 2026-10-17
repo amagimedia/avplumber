@@ -8,6 +8,8 @@ the same scene gets alias names (``id#2``, ``id#3``...) that share its frames.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
 import json
 import math
 import re
@@ -835,15 +837,19 @@ def load(path: str, *, max_compositor_layers: Optional[int] = None) -> MixerConf
     return parse(doc)
 
 
+def _ffprobe_video(ffprobe: str, path: str, entries: str, output_format: str) -> str:
+    """ffprobe's *entries* of the first video stream of *path*, printed as *output_format*."""
+    return subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                           f"stream={entries}", "-of", output_format, path],
+                          capture_output=True, text=True, timeout=30).stdout
+
+
 def probe_video_size(path: str) -> Tuple[int, int]:
     """Width and height of the first video stream, via ffprobe or, failing that, ffmpeg -i."""
     ffprobe, ffmpeg = shutil.which("ffprobe"), shutil.which("ffmpeg")
     text = ""
     if ffprobe:
-        out = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
-                              "stream=width,height", "-of", "csv=p=0", path],
-                             capture_output=True, text=True, timeout=30)
-        text = out.stdout.strip().replace(",", "x")
+        text = _ffprobe_video(ffprobe, path, "width,height", "csv=p=0").strip().replace(",", "x")
     elif ffmpeg:
         out = subprocess.run([ffmpeg, "-hide_banner", "-i", path], capture_output=True, text=True, timeout=30)
         match = re.search(r"Video:.*?\b(\d{2,5})x(\d{2,5})\b", out.stderr)
@@ -854,6 +860,55 @@ def probe_video_size(path: str) -> Tuple[int, int]:
     if not match:
         raise ConfigError(f"cannot probe the size of '{path}'")
     return int(match.group(1)), int(match.group(2))
+
+
+def probe_video_stream(path: str) -> Dict[str, Any]:
+    """The first video stream's {"codec" (FFmpeg's name, such as "hevc"), "width", "height", "fps"}, via ffprobe."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise ConfigError(f"ffprobe not found to probe '{path}'")
+    streams = json.loads(_ffprobe_video(ffprobe, path, "codec_name,width,height,avg_frame_rate,r_frame_rate",
+                                        "json") or "{}").get("streams") or [{}]
+    stream = streams[0]
+    # A container without an average rate reports 0/0; the stream's base rate is the frame rate then.
+    rate = next((Fraction(r) for r in (stream.get("avg_frame_rate"), stream.get("r_frame_rate"))
+                 if re.fullmatch(r"[1-9]\d*/[1-9]\d*", r or "")), None)
+    if not stream.get("codec_name") or not stream.get("width") or not stream.get("height") or rate is None:
+        raise ConfigError(f"cannot probe the video stream of '{path}'")
+    return {"codec": stream["codec_name"], "width": stream["width"], "height": stream["height"], "fps": float(rate)}
+
+
+PROBE_WORKERS = 8   # ffprobe processes decode_load runs at once
+
+
+def decode_load(sources, probe=None) -> Dict[str, Any]:
+    """What the GPU decoders do for a show: each "video" source decodes every frame of its file at the
+    file's own rate (raw and browser sources decode nothing). {"count", "fps", "mpix_s", "by_codec":
+    [{"codec", "sources", "fps"}, most sources first]}, from one probe of each source's stream (*probe*,
+    probe_video_stream by default); one that fails raises, so no total ever leaves a source out."""
+    probe = probe or probe_video_stream
+    with ThreadPoolExecutor(PROBE_WORKERS) as pool:
+        streams = list(pool.map(probe, [s.location for s in sources if s.kind == "video"]))
+    return {"count": len(streams), "fps": round(sum(s["fps"] for s in streams), 2),
+            "mpix_s": round(sum(s["width"] * s["height"] * s["fps"] for s in streams) / 1e6, 2),
+            "by_codec": _by_codec(((s["codec"], s["fps"]) for s in streams), "sources")}
+
+
+def encode_by_codec(renditions, working_format: str) -> List[Dict[str, Any]]:
+    """The NVENC sessions a show's encoded outputs (*renditions*) open and the frames they encode per
+    second, by codec, most sessions first. Codecs are named like decode_load's ("h264", "hevc")."""
+    return _by_codec((((r.codec or default_codec(working_format)).removesuffix("_nvenc"), r.fps) for r in renditions),
+                     "sessions")
+
+
+def _by_codec(streams, count_key: str) -> List[Dict[str, Any]]:
+    """[{"codec", *count_key*, "fps"}] of (codec, fps) *streams*, the codec with the most first."""
+    totals: Dict[str, Tuple[int, float]] = {}
+    for codec, fps in streams:
+        count, total = totals.get(codec, (0, 0))
+        totals[codec] = (count + 1, total + fps)
+    return [{"codec": codec, count_key: count, "fps": round(fps, 2)}
+            for codec, (count, fps) in sorted(totals.items(), key=lambda item: (-item[1][0], item[0]))]
 
 
 def with_probed_sizes(cfg: MixerConfig, probe=probe_video_size) -> MixerConfig:

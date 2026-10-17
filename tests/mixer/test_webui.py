@@ -59,6 +59,10 @@ def client(monkeypatch, http_server):
     return start
 
 
+# The per-second sample's fields after encoder.stats.sessionCount: clocks, temperature, pstate, PCIe, persistence.
+LIVE = ', 2040, 6250, 61, P0, 4, 16, Enabled'
+
+
 def mock_gpu_queries(monkeypatch, query):
     monkeypatch.setattr('pyplumber.mixer.gui.telemetry.subprocess.check_output', query)
     monkeypatch.setattr('pyplumber.mixer.gui.telemetry._encoder_snapshot', lambda counts: _encoder_totals(
@@ -76,35 +80,104 @@ def test_gpu_samples_are_cached_and_missing_metrics_stay_unknown(monkeypatch):
             return '# GPU Session Process Codec H V Average Average\n# Idx Id Id Type Res Res FPS Latency(us)\n' \
                    '0 10 200 H.264 1920 1080 24.5 17000\n0 11 200 H.265 1280 720 25 12000\n' \
                    '1 12 201 AV1 3840 2160 12.5 20000\n'
-        return '0, 93, [N/A], 12, 14336, 15360, 53.95, 72.00, 2\n1, 0, 99, [N/A], 15104, 24576, [N/A], [Not Supported], 1\n'
+        if args[0][1].startswith('--query-gpu=index,utilization'):
+            return ('0, 93, [N/A], 12, 14336, 15360, 53.95, 72.00, 2' + LIVE + '\n1, 0, 99, [N/A], 15104, 24576, [N/A], '
+                    '[Not Supported], 1, [N/A], [N/A], [N/A], [N/A], [N/A], [N/A], [N/A]\n')
+        return ''   # the facts: tested apart
     mock_gpu_queries(monkeypatch, query)
     stats = GpuStats()
     first = stats.snapshot()
     assert first[0] == dict(index=0, gpu=93, decoder=None, encoder=12, memory_used_mib=14336, memory_total_mib=15360,
                           power_draw_w=53.95, power_limit_w=72.0, encoder_sessions=2,
-                          encoder_fps=49.5, encoder_mpix_s=pytest.approx(1920 * 1080 * 24.5 / 1e6 + 1280 * 720 * 25 / 1e6))
+                          encoder_fps=49.5, encoder_mpix_s=pytest.approx(1920 * 1080 * 24.5 / 1e6 + 1280 * 720 * 25 / 1e6),
+                          clocks_sm_mhz=2040, clocks_mem_mhz=6250, temperature_c=61, pstate='P0', pcie_gen=4,
+                          pcie_width=16, persistence=True, name=None, driver=None, compute_capability=None,
+                          cuda=None, compute_timeslice=None)
     assert first[1]['encoder'] is None
     assert first[1]['power_draw_w'] is None and first[1]['power_limit_w'] is None
+    assert all(first[1][key] is None for key in ('clocks_sm_mhz', 'temperature_c', 'pstate', 'pcie_gen', 'persistence'))
     assert first[1]['index'] == 1 and first[1]['gpu'] == 0
     assert first[1]['encoder_sessions'] == 1 and first[1]['encoder_fps'] == 12.5
     assert first[1]['encoder_mpix_s'] == pytest.approx(3840 * 2160 * 12.5 / 1e6)
     now[0] = .5
-    assert stats.snapshot() == first and len(calls) == 2
+    assert stats.snapshot() == first and len(calls) == 5   # the sample, its sessions and three facts commands
     now[0] = 1
     stats.lock.acquire()
     try:
-        assert stats.snapshot() == first and len(calls) == 2
+        assert stats.snapshot() == first and len(calls) == 5
     finally:
         stats.lock.release()
     stats.snapshot()
-    assert len(calls) == 4
+    assert len(calls) == 7   # the facts are not asked again within GPU_FACTS_PERIOD_S
     assert 'power.draw,enforced.power.limit' in calls[0][0][1]
     assert 'encoder.stats.sessionCount' in calls[0][0][1]
 
 
+# What R615 prints (a time-slice table and the -q header with both CUDA versions); one row per GPU otherwise.
+COMPUTE_POLICIES = ('+-------------------------------------+\n| GPU compute policies:               |\n'
+                    '| GPU     Name           Value        |\n|=====================================|\n'
+                    '|   0   Timeslice       Long          |\n|   1   Timeslice       Default       |\n'
+                    '+-------------------------------------+\n')
+NVSMI_LOG = ('==============NVSMI LOG==============\n'
+             'Timestamp                                              : Thu Oct 15 17:59:49 2026\n'
+             'Driver Version                                         : 615.71.09 [Deprecated; will be removed in CUDA 14.0.]\n'
+             'CUDA Version                                           : 13.4 [Deprecated; will be removed in CUDA 14.0.]\n'
+             'KMD Version                                            : 615.71.09\n'
+             'CUDA UMD Version                                       : 13.5\n'
+             'Attached GPUs                                          : 2\n')
+
+
+def test_gpu_facts_are_asked_once_and_the_time_slice_every_minute(monkeypatch):
+    now, calls = [0], []
+    replies = {'--query-gpu=index,name,driver_version,compute_cap': '0, NVIDIA L4, 615.71.09, 8.9\n1, Tesla T4, 615.71.09, 7.5\n',
+               '-q': NVSMI_LOG, 'compute-policy': COMPUTE_POLICIES, 'encodersessions': ''}
+    monkeypatch.setattr('pyplumber.mixer.gui.telemetry.time.monotonic', lambda: now[0])
+    def query(command, **_):
+        calls.append(command[1])
+        if command[1].startswith('--query-gpu=index,utilization'):
+            return f'0, 60, 70, 40, 100, 200, 50, 72, 0{LIVE}\n1, 10, 20, 30, 100, 200, 40, 70, 0, 585, 5000, 44, P8, 1, 8, Disabled\n'
+        return replies[command[1]]
+    mock_gpu_queries(monkeypatch, query)
+    stats = GpuStats()
+    first, second = stats.snapshot()
+    assert {k: first[k] for k in ('name', 'driver', 'compute_capability', 'cuda', 'compute_timeslice', 'clocks_sm_mhz',
+                                  'clocks_mem_mhz', 'temperature_c', 'pstate', 'pcie_gen', 'pcie_width', 'persistence')} == dict(
+        name='NVIDIA L4', driver='615.71.09', compute_capability='8.9', cuda='13.5', compute_timeslice='Long',
+        clocks_sm_mhz=2040, clocks_mem_mhz=6250, temperature_c=61, pstate='P0', pcie_gen=4, pcie_width=16, persistence=True)
+    assert (second['name'], second['compute_capability'], second['compute_timeslice']) == ('Tesla T4', '7.5', 'Default')
+    assert (second['pstate'], second['pcie_gen'], second['pcie_width'], second['persistence']) == ('P8', 1, 8, False)
+    assert calls[2:] == ['--query-gpu=index,name,driver_version,compute_cap', '-q', 'compute-policy']
+    now[0] = 59
+    stats.snapshot()
+    assert len(calls) == 7   # the sample and its sessions alone
+    replies['compute-policy'] = COMPUTE_POLICIES.replace('Long   ', 'Short  ')
+    now[0] = 60
+    assert stats.snapshot()[0]['compute_timeslice'] == 'Short'
+    assert calls[7:] == [calls[0], 'encodersessions', 'compute-policy'], 'what is known is not asked again'
+
+
+@pytest.mark.parametrize('static,log,policies', [
+    (subprocess.CalledProcessError(6, 'nvidia-smi'), 'CUDA Version : 12.2\n', subprocess.TimeoutExpired('nvidia-smi', 1)),
+    ('0, NVIDIA L4\n', 'no version here\n', 'Not supported in this container\n'),
+])
+def test_missing_gpu_facts_read_none_and_keep_the_sample(monkeypatch, static, log, policies):
+    def query(command, **_):
+        if command[1].startswith('--query-gpu=index,utilization'):
+            return f'0, 60, 70, 40, 100, 200, 50, 72, 0{LIVE}\n'
+        reply = {'-q': log, 'compute-policy': policies, 'encodersessions': ''}.get(command[1], static)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+    mock_gpu_queries(monkeypatch, query)
+    sample = GpuStats().snapshot()[0]
+    assert sample['gpu'] == 60 and sample['clocks_sm_mhz'] == 2040
+    assert (sample['name'], sample['driver'], sample['compute_capability'], sample['compute_timeslice']) == (None,) * 4
+    assert sample['cuda'] == ('12.2' if log.startswith('CUDA') else None)
+
+
 @pytest.mark.parametrize('raw', ['NaN', 'inf', '-1', '[N/A]'])
 def test_invalid_power_readings_do_not_hide_utilization(monkeypatch, raw):
-    mock_gpu_queries(monkeypatch, lambda *a, **kw: f'0, 60, 70, 40, 100, 200, {raw}, {raw}, 1\n')
+    mock_gpu_queries(monkeypatch, lambda *a, **kw: f'0, 60, 70, 40, 100, 200, {raw}, {raw}, 1{LIVE}\n')
     sample = GpuStats().snapshot()[0]
     assert sample['gpu'] == 60
     assert sample['power_draw_w'] is None and sample['power_limit_w'] is None
@@ -115,7 +188,7 @@ def test_encoder_zero_requires_a_driver_session_counter(monkeypatch, sessions):
     def query(command, **_):
         if command[1] == 'encodersessions':
             return sessions
-        return '0, 60, 70, 40, 100, 200, 50, 72, 0\n1, 10, 20, 30, 100, 200, 50, 72, [N/A]\n'
+        return f'0, 60, 70, 40, 100, 200, 50, 72, 0{LIVE}\n1, 10, 20, 30, 100, 200, 50, 72, [N/A]{LIVE}\n'
     mock_gpu_queries(monkeypatch, query)
     first, second = GpuStats().snapshot()
     assert (first['encoder_sessions'], first['encoder_fps'], first['encoder_mpix_s']) == (0, 0, 0)
@@ -131,7 +204,7 @@ def test_incomplete_encoder_rows_do_not_publish_partial_totals(monkeypatch, bad)
     def query(command, **_):
         if command[1] == 'encodersessions':
             return '0 10 200 H.264 1920 1080 25 1\n' + bad + '\n1 11 200 H.265 1280 720 0 0\n'
-        return '0, 60, 70, 40, 100, 200, 50, 72, 2\n1, 10, 20, 30, 100, 200, 40, 72, 1\n'
+        return f'0, 60, 70, 40, 100, 200, 50, 72, 2{LIVE}\n1, 10, 20, 30, 100, 200, 40, 72, 1{LIVE}\n'
     mock_gpu_queries(monkeypatch, query)
     first, second = GpuStats().snapshot()
     assert all(first[key] is None for key in ('encoder_sessions', 'encoder_fps', 'encoder_mpix_s'))
@@ -149,7 +222,7 @@ def test_missing_or_changing_encoder_sample_preserves_gpu_metrics(monkeypatch, r
             if isinstance(result, Exception):
                 raise result
             return result
-        return '0, 60, 70, 40, 100, 200, 50.25, 72, 2\n'
+        return f'0, 60, 70, 40, 100, 200, 50.25, 72, 2{LIVE}\n'
     mock_gpu_queries(monkeypatch, query)
     sample = GpuStats().snapshot()[0]
     assert all(sample[key] is None for key in ('encoder_sessions', 'encoder_fps', 'encoder_mpix_s'))
