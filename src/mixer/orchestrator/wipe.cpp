@@ -81,9 +81,10 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
         return 0;
     }
     // The wipe's progress for the status, as fade.cpp reports a mix's: at the newest direct frame;
-    // the lever's (or AUTO running it on) on its schedule.
+    // the lever's (or AUTO running it on) on its schedule. That frame's tick may be out already: the
+    // overlay's frame of a tick usually comes first (below).
     const auto direct = pts(0);
-    if (direct > last_ns && (state_->take_request || state_->take_duration_ns > 0))
+    if (direct >= last_ns && direct > 0 && (state_->take_request || state_->take_duration_ns > 0))
         state_->take_progress = state_->take_request ? rampAt(state_->take_schedule, direct)
             : std::clamp(double(direct - state_->take_start_ns) / double(state_->take_duration_ns), 0.0, 1.0);
     // The overlay's frame of a tick can reach this selector before the direct frame of that tick
