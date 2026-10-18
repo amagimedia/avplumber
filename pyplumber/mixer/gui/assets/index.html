@@ -272,6 +272,7 @@
   .rate:focus-within { box-shadow: inset 0 0 0 1px var(--muted); }
   #fade-s { width: 4.4ch; border: 0; padding: 0; background: none; color: inherit; text-align: center; outline: none;
             font: 700 15px var(--mono); font-variant-numeric: tabular-nums; }
+  #fade-s:not(:focus) { cursor: pointer; }
   .step { width: 24px; height: 24px; border: 0; border-radius: 6px; background: linear-gradient(var(--cap-hi), var(--cap)); font-size: 15px; font-weight: 600; cursor: pointer; }
   .seg.icons button { padding: 6px 8px; }
   .seg svg { width: 16px; height: 12px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; flex: none; }
@@ -432,7 +433,7 @@
           title="Lever (T-bar): mixes to Preview from the end it rests at; the far end completes, the start cancels"></div>
       </div>
       <div class="side">
-        <div class="rate" id="fade-ctl" title="Fade rate: frames (15) or seconds:frames (1:15) · wheel or −/+: a frame · with Shift: a second"><button class="step" type="button" data-step="-1" aria-label="One frame shorter">−</button><input id="fade-s" type="text" inputmode="numeric" data-min-frames="1" aria-label="Fade rate in frames or seconds:frames"><button class="step" type="button" data-step="1" aria-label="One frame longer">+</button></div>
+        <div class="rate" id="fade-ctl" title="Fade rate · click: 15f, 30f, 2s, 3s · double-click: type frames (15) or seconds:frames (1:15) · wheel or −/+: a frame · with Shift: a second"><button class="step" type="button" data-step="-1" aria-label="One frame shorter">−</button><input id="fade-s" type="text" inputmode="numeric" data-min-frames="1" aria-label="Fade rate in frames or seconds:frames"><button class="step" type="button" data-step="1" aria-label="One frame longer">+</button></div>
         <div class="seg icons" id="curves" role="group" aria-label="Fade curve"></div>
       </div>
       <div class="ctrl">
@@ -2333,6 +2334,17 @@ function rateField(field, steps) {
 }
 rateField($("fade-s"), [...$("fade-ctl").querySelectorAll(".step")]);
 $("fade-s").addEventListener("change", renderTransition);   // after rateField's reformat: "300" becomes "10:00"
+// A click on the fade rate steps its presets and round again, as a key's rate tag does; a double click types in it.
+// The focus stays put, so Space after a click is still Auto.
+$("fade-s").addEventListener("mousedown", (e) => {
+  const field = e.currentTarget;
+  if (document.activeElement === field || e.detail > 1 || !fps()) return;
+  e.preventDefault();
+  const presets = [15, 30, 2 * fps(), 3 * fps()], now = Math.round((parseRate(field.value) ?? FADE_SECONDS) * fps());
+  field.value = formatRate((presets.find((n) => n > now) ?? presets[0]) / fps());
+  field.dispatchEvent(new Event("input"));
+});
+$("fade-s").addEventListener("dblclick", (e) => e.currentTarget.select());
 $("wipe-file").oninput = () => { touched.wipe = true; };
 
 // The keyboard focus rests on the scene grid, so 1–9 and Shift+1–9 work without a click first. A field
