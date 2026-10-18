@@ -397,7 +397,8 @@ behaviour); nothing is captured or frozen:
 A take while a cut or transition is only being prepared, nothing of it on air
 yet, replaces it. `mixer.status` reports `transition_on_air`,
 `transition_paused`, `transition_manual`, `transition_progress` (at the newest
-program frame), `transition_duration_ms` and the `lever`.
+program frame, whose pts `transition_progress_pts_ms` gives on the clock of
+`now_pts_ms`, 0 before one), `transition_duration_ms` and the `lever`.
 
 `mixer.lever` is a switcher's lever arm (T-bar) as a fader position in [0, 1],
 for a panel, a MIDI fader or the operator page (`/api/command` `lever`). From

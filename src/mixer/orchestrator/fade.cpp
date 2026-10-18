@@ -248,7 +248,7 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
         const int blend = MixerState::transSourceSwitcherIndex();
         const auto blend_pts = pts(blend);
         if (blend_pts > last_ns && blend_pts >= state_->take_start_ns) {
-            state_->take_progress = state_->clock()->progress(blend_pts);
+            state_->setTakeProgress(state_->clock()->progress(blend_pts), blend_pts);
             // A paused mix holds, a manual one until the lever's ramp to one of its ends reaches
             // this frame; a replaced preset completes only once its picture is there. This frame
             // goes out either way: at a cancel it is Program alone, at the end entirely the

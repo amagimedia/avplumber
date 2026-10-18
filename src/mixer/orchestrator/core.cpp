@@ -154,7 +154,7 @@ void MixerOrchestrator::dropTransition(MixerState::TransitionMode dropped) {
     if (state_->take_lever_end == LeverEnd::None) state_->lever.release();
     state_->take_manual = false;
     state_->take_lever_end = LeverEnd::None;
-    state_->take_progress = 0;
+    state_->setTakeProgress(0, 0);
     // The program slot's routing was restored: the other slot is cold now.
     state_->pvw_slot_scene.clear();
 }
@@ -243,6 +243,7 @@ Parameters MixerOrchestrator::status() const {
     s["transition_paused"] = state_->take_paused && !state_->take_manual;
     s["transition_manual"] = state_->take_manual;
     s["transition_progress"] = state_->take_progress;
+    s["transition_progress_pts_ms"] = state_->take_progress_ns / 1000000;   // the frame it is at (0: none)
     s["transition_duration_ms"] = state_->take_duration_ns / 1000000;
     s["lever"] = {{"position", state_->lever.position()}, {"origin", state_->lever.origin()},
                   {"engaged", state_->lever.engaged()}};

@@ -866,7 +866,10 @@ function observe(s, t, clocked, asked) {
   const kind = takeMix(s);
   const duration = s.transition_duration_ms;
   const shape = mixOn() && mix.kind === kind ? mix : takeShape(kind);
-  const x = sampleX(s, kind, shape), start = t - x * duration;
+  // The progress is at a program frame older than the status (a wipe's ~50 ms on the L4 show, where it joins the
+  // program): dated by that frame, as the mixer has it. A server without its time dates it by the status.
+  const frameAge = s.transition_progress_pts_ms > 0 && s.now_pts_ms !== undefined ? s.now_pts_ms - s.transition_progress_pts_ms : 0;
+  const x = sampleX(s, kind, shape), start = t - frameAge - x * duration;
   // Taken before the mixer finished the mix this page ended ahead of it: a new take starts after it. A cut on its way
   // still shows the lever as it was.
   const late = mix?.early && mix.kind === kind && start < mix.ended - frameMs();
