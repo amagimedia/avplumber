@@ -216,7 +216,10 @@
   .key-big.flash kbd, .auto.run kbd { color: rgb(255 255 255 / .8); }
   .auto.held { background: linear-gradient(#3b2c0e, var(--accent-dim)); color: var(--accent); box-shadow: 0 3px 0 #07090b, inset 0 0 0 2px var(--accent); }
   /* The T-bar: the LEDs and the trail show the mix's progress from the end it started at, the grip where the lever is. */
-  .tbar { grid-area: tbar; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "leds pct" "track track"; gap: 6px 12px; align-items: center; }
+  .tbar { grid-area: tbar; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "leds pct turn" "track track track"; gap: 6px 12px; align-items: center; }
+  #tbar-turn { grid-area: turn; width: 22px; height: 22px; padding: 3px; display: grid; place-items: center; background: none; }
+  #tbar-turn:hover { color: var(--text); background: var(--cap); }
+  #tbar-turn svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
   .leds { grid-area: leds; display: grid; grid-template-columns: repeat(40, 1fr); gap: 3px; height: 5px; }
   .leds i { border-radius: 2px; background: var(--groove); }
   .leds i.on { background: var(--led); box-shadow: 0 0 6px rgb(56 214 127 / .55); }
@@ -242,6 +245,27 @@
   .owned #lever { pointer-events: none; }
   #lever::-webkit-slider-thumb { -webkit-appearance: none; width: 36px; height: 44px; }
   #lever::-moz-range-thumb { width: 36px; height: 44px; border: 0; }
+  /* The T-bar upright, as on a panel: the rate, curves and transitions over Cut and Auto, and the bar beside them as tall
+     as the panel, its start at the bottom. The lever is the same range input, turned. */
+  @media (min-width: 641px) {
+    .tp.vertical { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "side tbar" "ctrl tbar" "take tbar"; }
+    .tp.vertical .side { align-self: auto; }
+    .tp.vertical .key-big { width: auto; height: 58px; }
+    .tp.vertical .tbar { grid-template-columns: auto auto; grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "pct turn" "leds track"; justify-items: center; align-items: stretch; gap: 6px 8px; }
+    .tp.vertical .pct { min-width: 0; text-align: center; }
+    .tp.vertical .leds { grid-template-columns: 5px; grid-template-rows: repeat(40, 1fr); height: auto; width: 5px; margin-block: 18px; transform: scaleY(-1); gap: 2px; }
+    .tp.vertical .track { width: 40px; height: auto; min-height: 150px; }
+    .tp.vertical .track::before { left: 50%; right: auto; top: 18px; bottom: 18px; width: 4px; height: auto; margin: 0 0 0 -2px; }
+    .tp.vertical .track::after { left: 7px; right: 7px; top: 18px; bottom: 18px; background: repeating-linear-gradient(0deg, var(--groove) 0 1px, transparent 1px calc(10% - .1px)); }
+    .tp.vertical .trail { top: auto; left: 50%; width: 4px; margin: 0 0 0 -2px;
+                          bottom: calc(18px + var(--a, 0) * (100% - 36px)); height: calc((var(--b, 0) - var(--a, 0)) * (100% - 36px)); }
+    .tp.vertical .grip { top: auto; left: -6px; right: -6px; width: auto; height: 28px; bottom: calc(18px + var(--v, 0) * (100% - 36px)); transform: translateY(50%);
+                         background: linear-gradient(0deg, transparent 12px, var(--pgm) 12px 16px, transparent 16px), repeating-linear-gradient(90deg, rgb(0 0 0 / .14) 0 1px, transparent 1px 4px),
+                                     linear-gradient(0deg, #8e99a6, #e9edf1 45%, #f7f9fb 55%, #9aa5b2); }
+    .tp.vertical #lever { top: 0; left: -6px; width: calc(100% + 12px); height: 100%; writing-mode: vertical-lr; direction: rtl; }
+    .tp.vertical #lever::-webkit-slider-thumb { width: 44px; height: 36px; }
+    .tp.vertical #lever::-moz-range-thumb { width: 44px; height: 36px; }
+  }
   .ctrl { grid-area: ctrl; display: flex; gap: 10px; align-items: center; min-width: 0; }
   .types { flex: 1; min-width: 0; }
   .types > button { flex: 0 0 auto; padding-inline: 14px; }
@@ -365,7 +389,7 @@
   }
   @media (max-width: 640px) {
     .buses, .row2 { grid-template-columns: minmax(0, 1fr); } .meters { margin-left: 0; }
-    .tp { grid-template-columns: minmax(0, 1fr); grid-template-areas: "take" "tbar" "side" "ctrl"; } .takes { grid-template-columns: 1fr 1fr; } .key-big { width: auto; height: 60px; }
+    .tp { grid-template-columns: minmax(0, 1fr); grid-template-areas: "take" "tbar" "side" "ctrl"; } .takes { grid-template-columns: 1fr 1fr; } .key-big { width: auto; height: 60px; } #tbar-turn { display: none; }
     .seg { max-width: 100%; overflow-x: auto; scrollbar-width: none; } .ctrl { flex-wrap: wrap; } .types { flex: 1 1 100%; } .again { margin-left: 0; } kbd.hint { display: none; }
     .pager { flex-wrap: wrap; margin-left: 0; min-width: 0; max-width: 100%; }
     .tip, .tip.wide { min-width: 0; width: min(420px, calc(100vw - 32px)); box-sizing: border-box; }   /* its padding inside the window too */
@@ -429,6 +453,7 @@
       </div>
       <div class="tbar">
         <div class="leds" aria-hidden="true"></div><span class="pct" aria-hidden="true">0%</span>
+        <button class="mini" id="tbar-turn" type="button" aria-pressed="false" title="Stand the T-bar upright or lay it flat (kept in this browser)" aria-label="Upright T-bar"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 11 3.4"/><path d="M11.5 1v3h-3"/></svg></button>
         <div class="track"><div class="trail"></div><div class="grip"></div><input id="lever" type="range" min="0" max="1000" step="1" value="0" aria-label="T-bar"
           title="Lever (T-bar): mixes to Preview from the end it rests at; the far end completes, the start cancels"></div>
       </div>
@@ -1130,21 +1155,35 @@ $("lever").oninput = sendLever;
 // and no focus ring stays on it. A press on the track puts the grip under the pointer at once (Chromium moves its range
 // thumb only once the pointer moves); a press on the grip only picks it up, as a hardware handle: a jump of the
 // grip's half width would leave a 1-2% mix on air.
+// A pointer's place along a box in the lever's direction, from the lever's start (the left, or the bottom upright), and
+// the box's length that way.
+function along(e, box) {
+  const r = box.getBoundingClientRect();
+  return $("tp").classList.contains("vertical") ? [r.bottom - e.clientY, r.height] : [e.clientX - r.left, r.width];
+}
+// The T-bar lies flat or stands upright, as this browser last had it.
+function turnTbar(upright) {
+  $("tp").classList.toggle("vertical", upright);
+  $("tbar-turn").setAttribute("aria-pressed", String(upright));
+  store.set("tbarUpright", upright);
+}
+turnTbar(store.get("tbarUpright", false) === true);
+$("tbar-turn").onclick = () => { turnTbar(!$("tp").classList.contains("vertical")); restFocus(); };
 $("lever").onpointerdown = (e) => {
   openLeverSocket();
   addEventListener("pointerup", restFocus, {once: true});
   if ($("lever").disabled) return;
-  const r = tbar.querySelector(".track").getBoundingClientRect();
+  const [at, size] = along(e, tbar.querySelector(".track"));
   // On the grip's way back a press where the lever rests picks it up there; any other is off the lever.
   if (gripBack && !takeOwns()) {
-    if (Math.abs(e.clientX - (r.left + 18 + Number($("lever").value) / 1000 * (r.width - 36))) > 18) return e.preventDefault();
+    if (Math.abs(at - (18 + Number($("lever").value) / 1000 * (size - 36))) > 18) return e.preventDefault();
     gripBack = null;
     return renderLever();
   }
   if (takeOwns()) return;
-  const grip = tbar.querySelector(".grip").getBoundingClientRect();
-  if (Math.abs(e.clientX - (grip.left + grip.width / 2)) <= grip.width / 2) return;
-  const value = Math.round(Math.min(1, Math.max(0, (e.clientX - r.left - 18) / (r.width - 36))) * 1000);
+  const [onGrip, grip] = along(e, tbar.querySelector(".grip"));
+  if (Math.abs(onGrip - grip / 2) <= grip / 2) return;
+  const value = Math.round(Math.min(1, Math.max(0, (at - 18) / (size - 36))) * 1000);
   if (value !== Number($("lever").value)) { $("lever").value = value; sendLever(); }
 };
 let keysPending = false;
