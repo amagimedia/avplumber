@@ -255,24 +255,34 @@
     #deck.upright > * { grid-column: 1 / -1; }
     #deck.upright > #scenes-card { grid-column: 1; grid-row: -2; }
     #deck.upright > #tp { grid-column: 2; grid-row: -2; }
-    .upright .tp { width: 310px; box-sizing: border-box; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto 1fr auto;
+    .upright .tp { width: 360px; box-sizing: border-box; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto minmax(0, 1fr);
                    grid-template-areas: "side tbar" "ctrl tbar" "take tbar"; }
     .upright .side { flex-direction: column; align-items: stretch; align-self: start; gap: 8px; }
     .upright .side > *, .upright .side .seg button { flex: 1; }
     .upright #fade-s { flex: 1; }
     .upright .ctrl { flex-direction: column; align-items: stretch; flex-wrap: nowrap; }
-    .upright .types { flex: 0 1 auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto minmax(0, 1fr); }
+    /* Fade and Dip side by side, each key letter at its button's right edge so F and D line up; Dip's colours on their own
+       row under them, three small swatches; the wipes two to a row under a label set in the divider. */
+    .upright .types { flex: 0 1 auto; display: grid; grid-template-columns: 1fr 1fr; align-items: center; }
     .upright .types > button { justify-content: flex-start; }
-    .upright #fade, .upright .wipes { grid-column: 1 / -1; }
-    .upright .wipes { flex-direction: column; align-items: stretch; margin: 2px 0 0; padding: 4px 0 0; border-left: 0; border-top: 1px solid var(--edge); }
-    .upright .wipes .grp { padding: 4px 10px; }
-    /* At least two wipes show; on a short window the scenes give up the room. */
-    .upright .wipes .list { flex-direction: column; overflow: hidden auto; min-height: 56px; }
+    .upright #fade kbd.k, .upright #dip kbd.k { margin-left: auto; }
+    .upright .dips { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 3px 8px 5px; }
+    .upright .dips button { width: auto; height: 14px; border-radius: 4px; }
+    .upright .wipes { grid-column: 1 / -1; position: relative; flex-direction: column; align-items: stretch; margin: 6px 0 0; padding: 8px 0 0; border-left: 0; border-top: 1px solid var(--edge); }
+    .upright .wipes .grp { position: absolute; top: -8px; left: 8px; padding: 0 6px; background: var(--well); font: 600 9.5px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+    .upright .wipes .grp kbd.k { margin-left: 5px; }
+    .upright .wipes .list { display: grid; grid-template-columns: 1fr 1fr; overflow: visible; }
     .upright .types button { padding-block: 5px; }
-    .upright .wipes .list button { flex: none; justify-content: flex-start; }
+    .upright .wipes .list button { justify-content: center; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
     .upright .again { margin: 0; }
     .upright .again button { flex: 1; }
-    .upright .key-big { width: auto; height: 60px; }
+    /* Cut over Auto beside the bar take the room left under the transitions. */
+    .upright .takes { grid-template-columns: minmax(0, 1fr); grid-template-rows: 1fr 1fr; }
+    .upright .key-big { width: auto; height: auto; min-height: 48px; }
+    /* The scenes header keeps one row beside the panel: the filters say what the grid is and the page box where it is, so
+       the title, the count and the key hints give way; the filters tighten. */
+    .upright .scenes > header > .lbl, .upright .scenes > header > kbd.k, .upright .scenes .pager .count, .upright .scenes .pager kbd.hint { display: none; }
+    .upright #chips button { padding-inline: 6px; }
     .upright .tbar { grid-template-columns: auto auto; grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "pct pct" "leds track"; justify-items: start; align-items: stretch; gap: 4px 8px; }
     .upright .pct { min-width: 0; line-height: 18px; }
     .upright .leds { grid-template-columns: 6px; grid-template-rows: repeat(40, 1fr); height: auto; width: 6px; margin-block: 18px; transform: scaleY(-1); gap: 3px; }
@@ -290,8 +300,8 @@
   }
   /* A short window: the upright panel tightens before the page scrolls. */
   @media (min-width: 1151px) and (max-height: 800px) {
-    .upright .tp { row-gap: 6px; } .upright .side { gap: 5px; } .upright .key-big { height: 48px; }
-    .upright .types button { padding-block: 3px; } .upright .wipes .list { min-height: 48px; }
+    .upright .tp { row-gap: 6px; } .upright .side { gap: 5px; } .upright .types button { padding-block: 3px; }
+    .upright .takes { grid-template-columns: 1fr 1fr; grid-template-rows: auto; }
   }
   @media (max-width: 1150px) { #tbar-turn { display: none; } }
   .ctrl { grid-area: ctrl; display: flex; gap: 10px; align-items: center; min-width: 0; }
@@ -1554,7 +1564,7 @@ function measure() {
   const grid = $("scenes"), cs = getComputedStyle(grid);
   const w = grid.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
   const h = grid.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
-  const cols = Math.max(1, Math.floor((w + 6) / 156));
+  const cols = Math.max(1, Math.floor((w + 6) / ($("deck").classList.contains("upright") ? 132 : 156)));   // narrower beside the upright panel
   const stacked = matchMedia("(max-width: 1150px)").matches;
   const rows = stacked ? 8 : Math.max(1, Math.floor((h + 6) / 43));
   grid.style.setProperty("--cols", cols);
@@ -2514,7 +2524,8 @@ addEventListener("keydown", (e) => {
 
 (validSaved ? savedViewers : ["program"]).forEach(addViewer);
 pageSize = measure();
-new ResizeObserver(() => { const n = measure(); if (n !== pageSize) { pageSize = n; renderScenes(); } }).observe($("scenes"));
+// On any resize: the page size, and whether the page buttons still fit beside the filters (renderScenes redraws only what changed).
+new ResizeObserver(() => { pageSize = measure(); renderScenes(); }).observe($("scenes"));
 restFocus();
 renderLatency(); renderHint();
 refresh();
