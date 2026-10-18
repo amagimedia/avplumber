@@ -216,8 +216,10 @@
   .key-big.flash kbd, .auto.run kbd { color: rgb(255 255 255 / .8); }
   .auto.held { background: linear-gradient(#3b2c0e, var(--accent-dim)); color: var(--accent); box-shadow: 0 3px 0 #07090b, inset 0 0 0 2px var(--accent); }
   /* The T-bar: the LEDs and the trail show the mix's progress from the end it started at, the grip where the lever is. */
-  .tbar { grid-area: tbar; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "leds pct turn" "track track track"; gap: 6px 12px; align-items: center; }
-  #tbar-turn { grid-area: turn; width: 22px; height: 22px; padding: 3px; display: grid; place-items: center; background: none; }
+  .tbar { grid-area: tbar; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "leds pct" "track track"; gap: 6px 12px; align-items: center; }
+  /* Turning the panel: a small icon in its top right corner, over the room the rate and curves leave above them. */
+  .tp { position: relative; }
+  #tbar-turn { position: absolute; top: 5px; right: 6px; width: 18px; height: 18px; padding: 2px; display: grid; place-items: center; background: none; }
   #tbar-turn:hover { color: var(--text); background: var(--cap); }
   #tbar-turn svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
   .leds { grid-area: leds; display: grid; grid-template-columns: repeat(40, 1fr); gap: 3px; height: 5px; }
@@ -249,31 +251,30 @@
      keys and slots, its bar as tall as the panel beside the rate, curves, transitions, Cut and Auto; the bar's start is
      at the bottom. The lever is the same range input, turned. */
   @media (min-width: 1151px) {
-    #deck.upright { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 10px; }
+    #deck.upright { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto auto 1fr; gap: 10px; }
     #deck.upright > * { grid-column: 1 / -1; }
     #deck.upright > #scenes-card { grid-column: 1; grid-row: -2; }
     #deck.upright > #tp { grid-column: 2; grid-row: -2; }
-    .upright .tp { width: 270px; box-sizing: border-box; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr) auto;
+    .upright .tp { width: 310px; box-sizing: border-box; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto 1fr auto;
                    grid-template-areas: "side tbar" "ctrl tbar" "take tbar"; }
     .upright .side { flex-direction: column; align-items: stretch; align-self: start; gap: 8px; }
     .upright .side > *, .upright .side .seg button { flex: 1; }
     .upright #fade-s { flex: 1; }
-    .upright .ctrl { flex-direction: column; align-items: stretch; flex-wrap: nowrap; min-height: 0; }
-    .upright .types { flex: 0 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto minmax(0, 1fr); }
+    .upright .ctrl { flex-direction: column; align-items: stretch; flex-wrap: nowrap; }
+    .upright .types { flex: 0 1 auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto minmax(0, 1fr); }
     .upright .types > button { justify-content: flex-start; }
     .upright #fade, .upright .wipes { grid-column: 1 / -1; }
-    .upright .wipes { min-height: 0; flex-direction: column; align-items: stretch; margin: 2px 0 0; padding: 4px 0 0; border-left: 0; border-top: 1px solid var(--edge); }
+    .upright .wipes { flex-direction: column; align-items: stretch; margin: 2px 0 0; padding: 4px 0 0; border-left: 0; border-top: 1px solid var(--edge); }
     .upright .wipes .grp { padding: 4px 10px; }
-    .upright .wipes .list { flex-direction: column; overflow: hidden auto; }
+    /* At least two wipes show; on a short window the scenes give up the room. */
+    .upright .wipes .list { flex-direction: column; overflow: hidden auto; min-height: 56px; }
+    .upright .types button { padding-block: 5px; }
     .upright .wipes .list button { flex: none; justify-content: flex-start; }
     .upright .again { margin: 0; }
     .upright .again button { flex: 1; }
-    .upright .takes { grid-template-columns: minmax(0, 1fr); }
-    .upright .key-big { width: auto; height: 62px; }
-    .upright .scenes > header { flex-wrap: wrap; row-gap: 8px; }
-    .upright #chips { flex: none; overflow: visible; }
-    .upright .tbar { grid-template-columns: auto auto; grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "pct turn" "leds track"; justify-items: center; align-items: stretch; gap: 8px 8px; }
-    .upright .pct { min-width: 0; text-align: center; }
+    .upright .key-big { width: auto; height: 60px; }
+    .upright .tbar { grid-template-columns: auto auto; grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "pct pct" "leds track"; justify-items: start; align-items: stretch; gap: 4px 8px; }
+    .upright .pct { min-width: 0; line-height: 18px; }
     .upright .leds { grid-template-columns: 6px; grid-template-rows: repeat(40, 1fr); height: auto; width: 6px; margin-block: 18px; transform: scaleY(-1); gap: 3px; }
     .upright .track { width: 64px; height: auto; min-height: 240px; }
     .upright .track::before { left: 50%; right: auto; top: 18px; bottom: 18px; width: 4px; height: auto; margin: 0 0 0 -2px; }
@@ -286,6 +287,11 @@
     .upright #lever { top: 0; left: -8px; width: calc(100% + 16px); height: 100%; writing-mode: vertical-lr; direction: rtl; }
     .upright #lever::-webkit-slider-thumb { width: 80px; height: 36px; }
     .upright #lever::-moz-range-thumb { width: 80px; height: 36px; }
+  }
+  /* A short window: the upright panel tightens before the page scrolls. */
+  @media (min-width: 1151px) and (max-height: 800px) {
+    .upright .tp { row-gap: 6px; } .upright .side { gap: 5px; } .upright .key-big { height: 48px; }
+    .upright .types button { padding-block: 3px; } .upright .wipes .list { min-height: 48px; }
   }
   @media (max-width: 1150px) { #tbar-turn { display: none; } }
   .ctrl { grid-area: ctrl; display: flex; gap: 10px; align-items: center; min-width: 0; }
@@ -502,7 +508,7 @@
       <header>
         <span class="lbl">Scenes</span><kbd class="k" title="1–9 pick the scenes numbered on this page">1–9</kbd>
         <span class="seg small" id="chips" role="group" aria-label="Scene filter"></span>
-        <span class="pager"><span class="count" id="count"></span><button class="pg" id="pg-prev" type="button" aria-label="Previous page" title="Previous page (&lt;)">‹</button><span class="seg small" id="pages" role="group" aria-label="Scene pages"></span><button class="pg" id="pg-next" type="button" aria-label="Next page" title="Next page (&gt;)">›</button><kbd class="hint">&lt; &gt;</kbd></span>
+        <span class="pager"><span class="count" id="count"></span><button class="pg" id="pg-prev" type="button" aria-label="Previous page" title="Previous page (&lt; or ,)">‹</button><span class="seg small" id="pages" role="group" aria-label="Scene pages"></span><button class="pg" id="pg-next" type="button" aria-label="Next page" title="Next page (&gt; or .)">›</button><kbd class="hint">&lt; &gt;</kbd></span>
       </header>
       <div class="grid" id="scenes" tabindex="-1"></div>
     </section>
@@ -2432,6 +2438,8 @@ addEventListener("keydown", (e) => {
   const digit = Number(e.key);
   if (digit >= 1 && digit <= 9 && visible[digit - 1]) { e.preventDefault(); pick(visible[digit - 1]); return; }
   const k = e.key.toLowerCase(), bus = pagesBus();
+  // The scene pages: < and >, or the keys they share without Shift (, and .), wherever the layout puts them.
+  const flip = {"<": -1, ",": -1, ">": 1, ".": 1}[e.key] ?? {Comma: -1, Period: 1}[e.code];
   if (e.key === "ArrowLeft" || e.key === "ArrowRight") stepPreview(e.key === "ArrowLeft" ? -1 : 1);
   else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
     e.preventDefault();   // not a scroll of the page
@@ -2445,7 +2453,7 @@ addEventListener("keydown", (e) => {
   else if (k === "w") selectWipe();
   else if (k === "d" && e.shiftKey) $("direct").click();   // Shift, not the letter's case: D with Caps Lock still dips
   else if (k === "d") selectDip();
-  else if (e.key === "<" || e.key === ">") flipPage(e.key === "<" ? -1 : 1);
+  else if (flip) flipPage(flip);
   else if (bus && e.key === "[") pageCommand(bus, {step: -1});
   else if (bus && e.key === "]") pageCommand(bus, {step: 1});
   else return;
