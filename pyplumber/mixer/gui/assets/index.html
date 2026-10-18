@@ -245,27 +245,49 @@
   .owned #lever { pointer-events: none; }
   #lever::-webkit-slider-thumb { -webkit-appearance: none; width: 36px; height: 44px; }
   #lever::-moz-range-thumb { width: 36px; height: 44px; border: 0; }
-  /* The T-bar upright, as on a panel: the rate, curves and transitions over Cut and Auto, and the bar beside them as tall
-     as the panel, its start at the bottom. The lever is the same range input, turned. */
-  @media (min-width: 641px) {
-    .tp.vertical { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "side tbar" "ctrl tbar" "take tbar"; }
-    .tp.vertical .side { align-self: auto; }
-    .tp.vertical .key-big { width: auto; height: 58px; }
-    .tp.vertical .tbar { grid-template-columns: auto auto; grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "pct turn" "leds track"; justify-items: center; align-items: stretch; gap: 6px 8px; }
-    .tp.vertical .pct { min-width: 0; text-align: center; }
-    .tp.vertical .leds { grid-template-columns: 5px; grid-template-rows: repeat(40, 1fr); height: auto; width: 5px; margin-block: 18px; transform: scaleY(-1); gap: 2px; }
-    .tp.vertical .track { width: 40px; height: auto; min-height: 150px; }
-    .tp.vertical .track::before { left: 50%; right: auto; top: 18px; bottom: 18px; width: 4px; height: auto; margin: 0 0 0 -2px; }
-    .tp.vertical .track::after { left: 7px; right: 7px; top: 18px; bottom: 18px; background: repeating-linear-gradient(0deg, var(--groove) 0 1px, transparent 1px calc(10% - .1px)); }
-    .tp.vertical .trail { top: auto; left: 50%; width: 4px; margin: 0 0 0 -2px;
-                          bottom: calc(18px + var(--a, 0) * (100% - 36px)); height: calc((var(--b, 0) - var(--a, 0)) * (100% - 36px)); }
-    .tp.vertical .grip { top: auto; left: -6px; right: -6px; width: auto; height: 28px; bottom: calc(18px + var(--v, 0) * (100% - 36px)); transform: translateY(50%);
-                         background: linear-gradient(0deg, transparent 12px, var(--pgm) 12px 16px, transparent 16px), repeating-linear-gradient(90deg, rgb(0 0 0 / .14) 0 1px, transparent 1px 4px),
-                                     linear-gradient(0deg, #8e99a6, #e9edf1 45%, #f7f9fb 55%, #9aa5b2); }
-    .tp.vertical #lever { top: 0; left: -6px; width: calc(100% + 12px); height: 100%; writing-mode: vertical-lr; direction: rtl; }
-    .tp.vertical #lever::-webkit-slider-thumb { width: 44px; height: 36px; }
-    .tp.vertical #lever::-moz-range-thumb { width: 44px; height: 36px; }
+  /* The T-bar upright, as on a panel: the transition panel stands as a column beside the scenes, under Program, Preview,
+     keys and slots, its bar as tall as the panel beside the rate, curves, transitions, Cut and Auto; the bar's start is
+     at the bottom. The lever is the same range input, turned. */
+  @media (min-width: 1151px) {
+    #deck.upright { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 10px; }
+    #deck.upright > * { grid-column: 1 / -1; }
+    #deck.upright > #scenes-card { grid-column: 1; grid-row: -2; }
+    #deck.upright > #tp { grid-column: 2; grid-row: -2; }
+    .upright .tp { width: 270px; box-sizing: border-box; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr) auto;
+                   grid-template-areas: "side tbar" "ctrl tbar" "take tbar"; }
+    .upright .side { flex-direction: column; align-items: stretch; align-self: start; gap: 8px; }
+    .upright .side > *, .upright .side .seg button { flex: 1; }
+    .upright #fade-s { flex: 1; }
+    .upright .ctrl { flex-direction: column; align-items: stretch; flex-wrap: nowrap; min-height: 0; }
+    .upright .types { flex: 0 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto minmax(0, 1fr); }
+    .upright .types > button { justify-content: flex-start; }
+    .upright #fade, .upright .wipes { grid-column: 1 / -1; }
+    .upright .wipes { min-height: 0; flex-direction: column; align-items: stretch; margin: 2px 0 0; padding: 4px 0 0; border-left: 0; border-top: 1px solid var(--edge); }
+    .upright .wipes .grp { padding: 4px 10px; }
+    .upright .wipes .list { flex-direction: column; overflow: hidden auto; }
+    .upright .wipes .list button { flex: none; justify-content: flex-start; }
+    .upright .again { margin: 0; }
+    .upright .again button { flex: 1; }
+    .upright .takes { grid-template-columns: minmax(0, 1fr); }
+    .upright .key-big { width: auto; height: 62px; }
+    .upright .scenes > header { flex-wrap: wrap; row-gap: 8px; }
+    .upright #chips { flex: none; overflow: visible; }
+    .upright .tbar { grid-template-columns: auto auto; grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "pct turn" "leds track"; justify-items: center; align-items: stretch; gap: 8px 8px; }
+    .upright .pct { min-width: 0; text-align: center; }
+    .upright .leds { grid-template-columns: 6px; grid-template-rows: repeat(40, 1fr); height: auto; width: 6px; margin-block: 18px; transform: scaleY(-1); gap: 3px; }
+    .upright .track { width: 64px; height: auto; min-height: 240px; }
+    .upright .track::before { left: 50%; right: auto; top: 18px; bottom: 18px; width: 4px; height: auto; margin: 0 0 0 -2px; }
+    .upright .track::after { left: 9px; right: 9px; top: 18px; bottom: 18px; background: repeating-linear-gradient(0deg, var(--groove) 0 1px, transparent 1px calc(10% - .1px)); }
+    .upright .trail { top: auto; left: 50%; width: 4px; margin: 0 0 0 -2px;
+                      bottom: calc(18px + var(--a, 0) * (100% - 36px)); height: calc((var(--b, 0) - var(--a, 0)) * (100% - 36px)); }
+    .upright .grip { top: auto; left: -8px; right: -8px; width: auto; height: 34px; bottom: calc(18px + var(--v, 0) * (100% - 36px)); transform: translateY(50%);
+                     background: linear-gradient(0deg, transparent 15px, var(--pgm) 15px 19px, transparent 19px), repeating-linear-gradient(90deg, rgb(0 0 0 / .14) 0 1px, transparent 1px 4px),
+                                 linear-gradient(0deg, #8e99a6, #e9edf1 45%, #f7f9fb 55%, #9aa5b2); }
+    .upright #lever { top: 0; left: -8px; width: calc(100% + 16px); height: 100%; writing-mode: vertical-lr; direction: rtl; }
+    .upright #lever::-webkit-slider-thumb { width: 80px; height: 36px; }
+    .upright #lever::-moz-range-thumb { width: 80px; height: 36px; }
   }
+  @media (max-width: 1150px) { #tbar-turn { display: none; } }
   .ctrl { grid-area: ctrl; display: flex; gap: 10px; align-items: center; min-width: 0; }
   .types { flex: 1; min-width: 0; }
   .types > button { flex: 0 0 auto; padding-inline: 14px; }
@@ -296,7 +318,8 @@
   .rate:focus-within { box-shadow: inset 0 0 0 1px var(--muted); }
   #fade-s { width: 4.4ch; border: 0; padding: 0; background: none; color: inherit; text-align: center; outline: none;
             font: 700 15px var(--mono); font-variant-numeric: tabular-nums; }
-  #fade-s:not(:focus) { cursor: pointer; }
+  /* One click sets the fade rate to a preset; lit while the rate is that one. */
+  .presets button { padding: 3px 6px; font: 600 10.5px var(--mono); }
   .step { width: 24px; height: 24px; border: 0; border-radius: 6px; background: linear-gradient(var(--cap-hi), var(--cap)); font-size: 15px; font-weight: 600; cursor: pointer; }
   .seg.icons button { padding: 6px 8px; }
   .seg svg { width: 16px; height: 12px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; flex: none; }
@@ -389,7 +412,7 @@
   }
   @media (max-width: 640px) {
     .buses, .row2 { grid-template-columns: minmax(0, 1fr); } .meters { margin-left: 0; }
-    .tp { grid-template-columns: minmax(0, 1fr); grid-template-areas: "take" "tbar" "side" "ctrl"; } .takes { grid-template-columns: 1fr 1fr; } .key-big { width: auto; height: 60px; } #tbar-turn { display: none; }
+    .tp { grid-template-columns: minmax(0, 1fr); grid-template-areas: "take" "tbar" "side" "ctrl"; } .takes { grid-template-columns: 1fr 1fr; } .key-big { width: auto; height: 60px; }
     .seg { max-width: 100%; overflow-x: auto; scrollbar-width: none; } .ctrl { flex-wrap: wrap; } .types { flex: 1 1 100%; } .again { margin-left: 0; } kbd.hint { display: none; }
     .pager { flex-wrap: wrap; margin-left: 0; min-width: 0; max-width: 100%; }
     .tip, .tip.wide { min-width: 0; width: min(420px, calc(100vw - 32px)); box-sizing: border-box; }   /* its padding inside the window too */
@@ -453,12 +476,13 @@
       </div>
       <div class="tbar">
         <div class="leds" aria-hidden="true"></div><span class="pct" aria-hidden="true">0%</span>
-        <button class="mini" id="tbar-turn" type="button" aria-pressed="false" title="Stand the T-bar upright or lay it flat (kept in this browser)" aria-label="Upright T-bar"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 11 3.4"/><path d="M11.5 1v3h-3"/></svg></button>
+        <button class="mini" id="tbar-turn" type="button" aria-pressed="false" title="Stand the transition panel upright with a tall T-bar, or lay it flat (kept in this browser)" aria-label="Upright T-bar"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 11 3.4"/><path d="M11.5 1v3h-3"/></svg></button>
         <div class="track"><div class="trail"></div><div class="grip"></div><input id="lever" type="range" min="0" max="1000" step="1" value="0" aria-label="T-bar"
           title="Lever (T-bar): mixes to Preview from the end it rests at; the far end completes, the start cancels"></div>
       </div>
       <div class="side">
-        <div class="rate" id="fade-ctl" title="Fade rate · click: 15f, 30f, 2s, 3s · double-click: type frames (15) or seconds:frames (1:15) · wheel or −/+: a frame · with Shift: a second"><button class="step" type="button" data-step="-1" aria-label="One frame shorter">−</button><input id="fade-s" type="text" inputmode="numeric" data-min-frames="1" aria-label="Fade rate in frames or seconds:frames"><button class="step" type="button" data-step="1" aria-label="One frame longer">+</button></div>
+        <div class="rate" id="fade-ctl" title="Fade rate: frames (15) or seconds:frames (1:15) · wheel or −/+: a frame · with Shift: a second"><button class="step" type="button" data-step="-1" aria-label="One frame shorter">−</button><input id="fade-s" type="text" inputmode="numeric" data-min-frames="1" aria-label="Fade rate in frames or seconds:frames"><button class="step" type="button" data-step="1" aria-label="One frame longer">+</button></div>
+        <div class="seg small presets" id="fade-presets" role="group" aria-label="Fade rate presets"><button type="button" data-rate="15" title="Fade rate 15 frames">15f</button><button type="button" data-rate="30" title="Fade rate 30 frames">30f</button><button type="button" data-rate="2:00" title="Fade rate 2 seconds">2s</button><button type="button" data-rate="3:00" title="Fade rate 3 seconds">3s</button></div>
         <div class="seg icons" id="curves" role="group" aria-label="Fade curve"></div>
       </div>
       <div class="ctrl">
@@ -731,6 +755,8 @@ function renderTransition() {
     button.setAttribute("aria-pressed", String(currentTransition === "wipe" && button.dataset.clip === (currentWipe?.id ?? "")));
   // As wide as its rate, as the panel's readout: "10:00" needs a fifth character.
   $("fade-s").style.width = `${Math.max(4.4, $("fade-s").value.length)}ch`;
+  const rate = parseRate($("fade-s").value);
+  for (const button of $("fade-presets").children) button.setAttribute("aria-pressed", String(rate !== null && rate === parseRate(button.dataset.rate)));
   renderBuses();
 }
 // ← → walk every scene the filter shows, ↑ ↓ a row of the grid, wrapping, and turn to the page that holds the new Preview.
@@ -1159,16 +1185,16 @@ $("lever").oninput = sendLever;
 // the box's length that way.
 function along(e, box) {
   const r = box.getBoundingClientRect();
-  return $("tp").classList.contains("vertical") ? [r.bottom - e.clientY, r.height] : [e.clientX - r.left, r.width];
+  return $("deck").classList.contains("upright") ? [r.bottom - e.clientY, r.height] : [e.clientX - r.left, r.width];
 }
 // The T-bar lies flat or stands upright, as this browser last had it.
 function turnTbar(upright) {
-  $("tp").classList.toggle("vertical", upright);
+  $("deck").classList.toggle("upright", upright);
   $("tbar-turn").setAttribute("aria-pressed", String(upright));
   store.set("tbarUpright", upright);
 }
 turnTbar(store.get("tbarUpright", false) === true);
-$("tbar-turn").onclick = () => { turnTbar(!$("tp").classList.contains("vertical")); restFocus(); };
+$("tbar-turn").onclick = () => { turnTbar(!$("deck").classList.contains("upright")); restFocus(); };
 $("lever").onpointerdown = (e) => {
   openLeverSocket();
   addEventListener("pointerup", restFocus, {once: true});
@@ -2378,17 +2404,15 @@ function rateField(field, steps) {
 }
 rateField($("fade-s"), [...$("fade-ctl").querySelectorAll(".step")]);
 $("fade-s").addEventListener("change", renderTransition);   // after rateField's reformat: "300" becomes "10:00"
-// A click on the fade rate steps its presets and round again, as a key's rate tag does; a double click types in it.
-// The focus stays put, so Space after a click is still Auto.
-$("fade-s").addEventListener("mousedown", (e) => {
-  const field = e.currentTarget;
-  if (document.activeElement === field || e.detail > 1 || !fps()) return;
-  e.preventDefault();
-  const presets = [15, 30, 2 * fps(), 3 * fps()], now = Math.round((parseRate(field.value) ?? FADE_SECONDS) * fps());
-  field.value = formatRate((presets.find((n) => n > now) ?? presets[0]) / fps());
-  field.dispatchEvent(new Event("input"));
-});
-$("fade-s").addEventListener("dblclick", (e) => e.currentTarget.select());
+for (const button of $("fade-presets").children) {
+  button.tabIndex = -1;
+  button.onmousedown = (e) => e.preventDefault();   // the focus stays put, so Space after a click is still Auto
+  button.onclick = () => {
+    if (!fps()) return;
+    $("fade-s").value = formatRate(parseRate(button.dataset.rate));
+    $("fade-s").dispatchEvent(new Event("input"));
+  };
+}
 $("wipe-file").oninput = () => { touched.wipe = true; };
 
 // The keyboard focus rests on the scene grid, so 1–9 and Shift+1–9 work without a click first. A field
