@@ -231,8 +231,6 @@ struct MixerState : public InstanceShared<MixerState> {
     int64_t lever_at_ns = 0;    // monotonic time of the last lever position, for the ramp to the next
     int64_t wipe_scrub_delay_ns = 0;   // the clip player's scrub_delay_ms of the lever's wipe
     double take_progress = 0;   // the background transition's progress at the newest program frame
-    int64_t take_progress_ns = 0;   // that frame's pts (0: none yet)
-    void setTakeProgress(double progress, int64_t pts_ns) { take_progress = progress; take_progress_ns = pts_ns; }
     // The background transition's clock for the downstream keyer's Next Transition keys. Replaced,
     // never edited, so the keyer's render thread reads it without this mutex.
     std::shared_ptr<const TakeClock> take_clock = std::make_shared<const TakeClock>();

@@ -795,10 +795,10 @@ const frameMs = () => 1000 / (fps() || 30);
 const GRIP_BACK_MS = 250;   // the grip's way back to the lever once a mix ends
 const CATCH_UP = 1.5;       // a T-bar behind the mixer's mix gains on it at most this many times the mix's own speed
 const CATCH_UP_MS = 200;    // and closes the gap by its share of this each ms, so it slows into place
-// How much later than this page's guess (its acceptance + a frame) the mixer's mixes start, learnt from each mix's
-// first sample: a guess that early would run the T-bar ahead and then hold it back.
-let startLag = 0;
-const guessStart = (t, x, duration) => t + frameMs() + startLag - x * duration;
+// How much later than this page's guess (its acceptance + a frame) the mixer's mixes start, learnt per kind from each
+// mix's first sample (a wipe arms its clip first): a guess that early would run the T-bar ahead and then hold it back.
+const startLag = {crossfade: 0, wipe: 0};
+const guessStart = (t, x, duration, kind) => t + frameMs() + startLag[kind] - x * duration;
 // clock.offset: the least arrival − now_pts_ms, let grow by CLOCK_DRIFT (the two clocks' rates differ by ppm).
 const clock = {offset: Infinity, at: 0, pts: -Infinity}, CLOCK_DRIFT = 1e-4;
 let mix = null, takePressedAt = -Infinity, takeAcceptedAt = -Infinity, takeRuns = false, gripBack = null, gripShown = 0;
@@ -866,10 +866,7 @@ function observe(s, t, clocked, asked) {
   const kind = takeMix(s);
   const duration = s.transition_duration_ms;
   const shape = mixOn() && mix.kind === kind ? mix : takeShape(kind);
-  // The progress is at a program frame older than the status (a wipe's ~50 ms on the L4 show, where it joins the
-  // program): dated by that frame, as the mixer has it. A server without its time dates it by the status.
-  const frameAge = s.transition_progress_pts_ms > 0 && s.now_pts_ms !== undefined ? s.now_pts_ms - s.transition_progress_pts_ms : 0;
-  const x = sampleX(s, kind, shape), start = t - frameAge - x * duration;
+  const x = sampleX(s, kind, shape), start = t - x * duration;
   // Taken before the mixer finished the mix this page ended ahead of it: a new take starts after it. A cut on its way
   // still shows the lever as it was.
   const late = mix?.early && mix.kind === kind && start < mix.ended - frameMs();
@@ -892,7 +889,7 @@ function observe(s, t, clocked, asked) {
   const renewed = mixOn() && mix.kind === kind && mix.heldX !== null && !s.transition_paused &&
     (!s.transition_on_air || x < mix.heldX - 0.05);
   if (renewed && !s.transition_on_air && duration > 0) {
-    const guess = guessStart(t, 0, duration);
+    const guess = guessStart(t, 0, duration, kind);
     return Object.assign(startMix(kind, guess, duration), {guess});
   }
   if (late || !(s.transition_on_air || x > 0) || !(duration > 0) || x >= 1) return;   // not on air yet, or done
@@ -908,7 +905,7 @@ function observe(s, t, clocked, asked) {
   if (s.transition_paused) mix.heldX ??= x;
   else if (mix.heldX !== null) Object.assign(mix, {start, heldX: null, guess: false});
   else if (mix.guess !== false || start < mix.start) {
-    if (mix.guess !== false) startLag = Math.min(400, Math.max(0, (startLag + start - mix.guess + startLag) / 2));
+    if (mix.guess !== false) startLag[kind] = Math.min(400, Math.max(0, (startLag[kind] + start - mix.guess + startLag[kind]) / 2));
     Object.assign(mix, {start, guess: false});
   }
   animate();
@@ -952,16 +949,18 @@ function acceptTake(kind, {duration_sec: seconds, curve, color}, halted) {
   if (kind === "cut" || halted) return;
   if (mixOn()) {
     if (mix.heldX !== null && mix.resuming) {
-      const start = guessStart(t, mix.heldX, mix.duration);
+      const start = guessStart(t, mix.heldX, mix.duration, mix.kind);
       Object.assign(mix, {start, shown: start, heldX: null, guess: start, resuming: false});
       animate();
     }
     return;
   }
-  if (kind !== "fade") return;   // a wipe is drawn once the mixer has its clip on air (observe)
+  // A wipe decoded per take, or of unknown length, is drawn once the mixer has its clip on air (observe).
+  if (kind === "wipe" && !(seconds > 0 && state?.status?.wipe_cache)) return;
+  const mixKind = kind === "fade" ? "crossfade" : "wipe", duration = seconds * 1000;
   const x = lever.progress() > K_END ? lever.progress() : 0;
   lever.release();
-  mix = startMix("crossfade", guessStart(t, x, seconds * 1000), seconds * 1000, takeShape("crossfade", {curve, color}), x);
+  mix = startMix(mixKind, guessStart(t, x, duration, mixKind), duration, takeShape(mixKind, {curve, color}), x);
   mix.guess = mix.start;
 }
 // Another controller's lever, while this page's has not moved.

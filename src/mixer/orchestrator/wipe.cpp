@@ -89,8 +89,8 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
     // overlay's frame of a tick usually comes first (below).
     const auto direct = pts(0);
     if (direct >= last_ns && direct > 0 && (state_->take_request || state_->take_duration_ns > 0))
-        state_->setTakeProgress(state_->take_request ? rampAt(state_->take_schedule, direct)
-            : std::clamp(double(direct - state_->take_start_ns) / double(state_->take_duration_ns), 0.0, 1.0), direct);
+        state_->take_progress = state_->take_request ? rampAt(state_->take_schedule, direct)
+            : std::clamp(double(direct - state_->take_start_ns) / double(state_->take_duration_ns), 0.0, 1.0);
     // The overlay's frame of a tick can reach this selector before the direct frame of that tick
     // on every tick (2026-10-15 on the L4 show: wipes completed 3 to 8 s late, when timing jitter
     // let a direct frame through first). The equal tick completes the take without being emitted.
