@@ -364,9 +364,11 @@ CUDA transition filter. The media wipe graph is predeclared. Decoding per take,
 the orchestrator starts it on the selected clip and stops it after the wipe.
 With the clip cache (`mixer.init` `wipe_cache_store` and `wipe_overlay`) the
 player group runs for the life of the graph: the clip player and the wipe
-compositor idle between wipes, and a take arms them in place (`play` on the
+compositor idle between wipes, and a take arms them in place (`scrub` on the
 `clip_cache` node, a reset and `active_inputs` on the compositor), so a wipe
-creates, starts or stops nothing. A `load` on the `clip_cache` node ends on the
+creates, starts or stops nothing. The clip follows the take's schedule as a
+mix's alpha does: AUTO's from the clip's first tick over its `duration_sec`,
+held and resumed by AUTO pressed again, the lever's as the lever moves it. A `load` on the `clip_cache` node ends on the
 decode chain's end-of-stream marker (`realtime` `forward_eof`), never on
 silence; its `status` names the clip still `loading`, and `forget` drops one.
 `scrub` replays a cached clip at the frame a schedule (`start_ns`,
@@ -386,9 +388,9 @@ behaviour); nothing is captured or frozen:
 | Take while a transition is on air | Result |
 |---|---|
 | `mixer.cut` | completes it at the next frame boundary: the preset's next ready frame goes to program; until then an AUTO for its scene is ignored |
-| `mixer.fade` (or `mixer.wipe`) for the scene of a crossfade on air | pauses it at its position, both sources moving; the next one resumes it from there |
+| `mixer.fade` (or `mixer.wipe`) for the scene of a crossfade, or of a wipe of the clip cache, on air | pauses it at its position (a wipe's clip on its frame), both sources moving; the next one resumes it from there |
 | `mixer.fade` or `mixer.wipe` for the scene of the lever's take on air | runs it on from where the lever has it, at AUTO's rate (a wipe's: its clip's own) |
-| `mixer.fade` for the scene of an AUTO wipe on air | ignored; the wipe runs to its end |
+| `mixer.fade` for the scene of a wipe decoded per take on air | ignored; the wipe runs to its end |
 | any take, or `mixer.preview`, with another scene | replaces the preset picture under the running transition (as a preset-bus selection does), which then ends on that scene; a cut completes at once |
 | `mixer.interrupt` | cuts back to the program as it was before the transition |
 

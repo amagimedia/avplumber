@@ -88,8 +88,9 @@ bool MixerOrchestrator::actOnTransitionOnAir(const std::string& scene_name, Mixe
         logstream << "mixer: cut completes the transition on air, program " << scene_name;
     } else if (same_scene && state_->take_manual) {
         runOnFromLever();
-    } else if (same_scene && state_->transition_mode == MixerState::TransitionMode::Crossfade) {
-        toggleCrossfadePause();
+    } else if (same_scene && (state_->transition_mode == MixerState::TransitionMode::Crossfade ||
+                              (state_->transition_mode == MixerState::TransitionMode::Wipe && state_->take_request))) {
+        toggleTakePause();
     } else if (same_scene) {
         logstream << "mixer: " << (pressed == MixerState::TransitionMode::Wipe ? "wipe" : "fade")
                   << " to " << scene_name << " ignored: the " << state_->takeKind() << " on air continues";
@@ -127,10 +128,10 @@ void MixerOrchestrator::runOnFromLever() {
               << " on from " << x;
 }
 
-void MixerOrchestrator::toggleCrossfadePause() {
+void MixerOrchestrator::toggleTakePause() {
     if (!state_->take_request) return;
-    // The held mix never steps back: see mixChangeNs().
-    const int64_t at_ns = mixChangeNs();
+    // The held mix never steps back (mixChangeNs()), nor a wipe's clip (a tick its player has not pushed).
+    const int64_t at_ns = takeScheduleFromNs();
     FadeRequest request = *state_->take_request;
     if (!state_->take_paused) {
         request.time_ceiling_ms = at_ns / 1000000;
@@ -144,7 +145,8 @@ void MixerOrchestrator::toggleCrossfadePause() {
     state_->take_paused = !state_->take_paused;
     state_->scheduleTake(request, false);
     applyTakeSchedule();
-    logstream << "mixer: fade to " << state_->transition_scene_name << (state_->take_paused ? " paused" : " resumed");
+    logstream << "mixer: " << state_->takeKind() << " to " << state_->transition_scene_name
+              << (state_->take_paused ? " paused" : " resumed");
 }
 
 } // namespace avp::mixer

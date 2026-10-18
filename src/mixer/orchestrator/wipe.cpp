@@ -22,23 +22,27 @@ void MixerOrchestrator::armWipe(const std::string& scene_name, const std::string
         state_->take_phase = MixerState::TakePhase::WipeReady;
         resetInputIf(nodes_, state_->wipe_base_fps_name);
         if (state_->wipeChainStaysRunning()) {
-            std::optional<RampNs> scrub;
-            if (!duration_sec) {
-                // The lever's wipe: its clip held at the first frame until the lever moves it.
-                const int64_t now_ms = monotonicNs() / 1000000;
-                FadeRequest held{now_ms, 1.0, !state_->pgm_is_slot_a};
-                held.time_floor_ms = held.time_ceiling_ms = now_ms;
-                state_->scheduleTake(held, true);
-                scrub = rampTimesNs(held);
-            }
-            const Parameters player = armWipeChain(wipe_file, scrub);
+            // The clip follows the take's schedule, as a mix's alpha does: the lever's held at its
+            // first frame until the lever moves it, AUTO's running from the clip's first tick, so
+            // AUTO pressed again holds and resumes a wipe as it does a mix.
+            const int64_t now_ms = monotonicNs() / 1000000;
+            FadeRequest held{now_ms, 1.0, !state_->pgm_is_slot_a};
+            held.time_floor_ms = held.time_ceiling_ms = now_ms;
+            state_->scheduleTake(held, true);
+            const Parameters player = armWipeChain(wipe_file, rampTimesNs(held));
             state_->wipe_first_ns = av::Timestamp(player.at("start_tick").get<int64_t>(),
                                                   {state_->fps_den, state_->fps_num}).timestamp({1, 1000000000});
+            state_->wipe_scrub_delay_ns = player.at("scrub_delay_ns").get<int64_t>();
             if (!duration_sec) {
                 // AUTO runs the lever's wipe on at the clip's own rate.
                 state_->take_duration_ns = player.at("length_ns").get<int64_t>();
-                state_->wipe_scrub_delay_ns = player.at("scrub_delay_ns").get<int64_t>();
                 state_->take_manual = true;
+            } else {
+                // The player pushes the first tick scrub_delay after it begins, long after this change.
+                FadeRequest run{state_->wipe_first_ns / 1000000, *duration_sec, !state_->pgm_is_slot_a};
+                run.time_floor_ms = run.start_ms;
+                state_->scheduleTake(run, false);
+                applyTakeSchedule();
             }
         } else {
             nodes_->group(state_->wipe_group_name)->stopNodesAndWait();
@@ -73,7 +77,7 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
                 // Its clip followed the lever below the switch point (leverTo) and goes on to the
                 // lever's position from a tick the program selector has not decided yet.
                 startTakeClock(overlay, state_->take_duration_ns, FadeCurve::Linear, kWipeSwitchAt);
-                if (state_->take_lever > kLeverWipeArmedAt) moveLever(state_->take_lever, std::nullopt);
+                if (state_->take_manual && state_->take_lever > kLeverWipeArmedAt) moveLever(state_->take_lever, std::nullopt);
                 else clampTakeClock();
             }
             return 1;
@@ -90,10 +94,13 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
     // The overlay's frame of a tick can reach this selector before the direct frame of that tick
     // on every tick (2026-10-15 on the L4 show: wipes completed 3 to 8 s late, when timing jitter
     // let a direct frame through first). The equal tick completes the take without being emitted.
-    // The lever's end lands on the frame its ramp reaches, AUTO's at the end of the clip.
+    // The lever's end lands on the frame its ramp reaches, AUTO's where its schedule ends (never
+    // while held), or at the end of the clip it decodes per take.
+    const bool ran_out = !state_->take_manual && (state_->take_request
+        ? rampAt(state_->take_schedule, direct) >= 1.0
+        : direct >= state_->take_start_ns + state_->take_duration_ns);
     if (direct > 0 && direct >= last_ns &&
-        endTakeAt(direct, state_->wipe_switched && state_->destination_ready,
-                  !state_->take_manual && direct >= state_->take_start_ns + state_->take_duration_ns))
+        endTakeAt(direct, state_->wipe_switched && state_->destination_ready, ran_out))
         return direct == last_ns ? -1 : 0;   // completeTake retired the overlay
     return active;
 }

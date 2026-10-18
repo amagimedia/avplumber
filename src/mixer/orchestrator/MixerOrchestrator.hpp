@@ -104,7 +104,7 @@ class MixerOrchestrator {
     /// Load `scene_name` into the preset slot under the transition on air, like a preset-bus
     /// selection: the incoming picture changes as soon as the slot renders it.
     void replacePreset(const std::string& scene_name);
-    void toggleCrossfadePause();
+    void toggleTakePause();
     /// Caller holds state_->mutex. The lever at `position`, moving there over `span_ms` (lever()),
     /// for the take state_->lever_take describes.
     void leverTo(double position, std::optional<double> span_ms);

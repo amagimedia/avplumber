@@ -650,7 +650,7 @@ function takeButton(kind) {
   }
   if (!nextBkgd) return takeKeys(kind);
   const s = state?.status || {};
-  // Cut also completes a wipe on air; the mixer ignores a second wipe take, so Halt leaves a wipe running.
+  // Cut also completes a wipe on air; Halt holds a wipe of the clip cache as it holds a mix.
   // Running: this page's model of it (from the press on, and over by its end), else as the poll shows it.
   const running = mixOn() || (!!takeMix(s) && !endedHere());
   if (kind !== "cut" && autoAgainMode === "complete" && running) return take("cut", mixOn() && takeScene || undefined);
@@ -931,11 +931,13 @@ function mixDrawn(t) {
 function pressTake(kind) {
   if (!["cut", "fade", "wipe"].includes(kind)) return false;
   takePressedAt = performance.now();
-  const fading = kind === "fade" && mixOn() && mix.kind === "crossfade", halt = fading && (mix.heldX === null || mix.resuming);
+  // Any Auto holds the mixer's mix, and a wipe of its clip cache (a wipe decoded per take runs to its end).
+  const holding = kind !== "cut" && mixOn() && (mix.kind === "crossfade" || !!state?.status?.wipe_cache);
+  const halt = holding && (mix.heldX === null || mix.resuming);
   takeRuns = kind !== "cut" && !halt;
   if (kind === "cut") return mixOn() ? endMix(true) : lever.release();
   if (halt && mix.heldX === null) { mixDrawn(performance.now()); mix.heldX = mix.x; renderLever(); }
-  if (fading) mix.resuming = !halt;
+  if (holding) mix.resuming = !halt;
   return halt;
 }
 // Accepted: a held mix runs on from its hold, a new Auto starts a frame on (the mixer's Ready), from where the lever's
@@ -944,15 +946,16 @@ function acceptTake(kind, {duration_sec: seconds, curve, color}, halted) {
   if (!["cut", "fade", "wipe"].includes(kind)) return;
   const t = performance.now();
   takeAcceptedAt = t;
-  if (kind !== "fade" || halted) return;
+  if (kind === "cut" || halted) return;
   if (mixOn()) {
-    if (mix.kind === "crossfade" && mix.heldX !== null && mix.resuming) {
+    if (mix.heldX !== null && mix.resuming) {
       const start = guessStart(t, mix.heldX, mix.duration);
       Object.assign(mix, {start, shown: start, heldX: null, guess: start, resuming: false});
       animate();
     }
     return;
   }
+  if (kind !== "fade") return;   // a wipe is drawn once the mixer has its clip on air (observe)
   const x = lever.progress() > K_END ? lever.progress() : 0;
   lever.release();
   mix = startMix("crossfade", guessStart(t, x, seconds * 1000), seconds * 1000, takeShape("crossfade", {curve, color}), x);
