@@ -867,8 +867,8 @@ const takeWaiting = () => !!takeMix(state?.status) && !state.status.transition_o
 const takeOwns = () => mixOn() || takeWaiting();
 // The lever takes no press while a take owns the program, nor while the grip is drawn away from it on its way back
 // but where the lever rests: a press elsewhere would be off the lever's real grip and put the lever, and a mix that
-// far, on air at once.
-const owns = () => takeOwns() || gripBack !== null;
+// far, on air at once. Nor while the mixer's lever is still to be parked where the bar is (parkLever).
+const owns = () => takeOwns() || gripBack !== null || parking !== null;
 // The mix's time progress x at t by its start estimate, held at heldX.
 const mixX = (t) => Math.min(mix.heldX ?? 1, Math.max(0, (t - mix.start) / mix.duration));
 // The T-bar's progress at x: the curve, a dip's two halves around its hold, and the lever's x0 a mix was handed
@@ -890,22 +890,28 @@ const sampleX = (s, kind, shape) => (kind === "crossfade" && !shape.dip ? CURVE_
 // ended it ahead of the mixer (at its end, or at the operator's Cut).
 function startMix(kind, start, duration, shape = takeShape(kind), x0 = 0) {
   const {curve, dip} = shape;
+  // far: the lever's end the mix runs to; the grip runs from where the lever rests (gripFrom) to that end as drawn
+  // (gripTo); pgm: Program as the mix started, so a poll tells its completion; done: the mixer is done with it and the
+  // bar runs out to its end.
   mix = {kind, start, shown: start, duration, curve, dip, x0, bias: x0 - CURVE_AT[curve][0](x0), heldX: null, guess: false,
-         x: x0, drawn: x0, at: performance.now(), ended: 0, early: false};
+         x: x0, drawn: x0, at: performance.now(), ended: 0, early: false, far: 1 - lever.origin, done: false,
+         gripFrom: Number($("lever").value) / 1000, gripTo: barAt(1 - lever.origin), pgm: state?.status?.pgm_scene};
   animate();
   return mix;
 }
-// The mixer releases the lever whenever a take ends; the grip goes back to it.
-function endMix(early = false) {
+// The mixer releases the lever whenever a take ends. A mix that completed leaves the bar at the far end, as a hardware
+// T-bar stays where the mix took it: the mixer's lever, parked at the near end, is mirrored; left midway (an Auto ran
+// the lever's take on, or a Cut ended it there), it is parked at the far end. A mix the mixer ended short of its end
+// sends the grip back to where the lever is.
+function endMix(early = false, completed = early) {
   if (!mixOn()) return;
   Object.assign(mix, {ended: performance.now(), early});
   lever.release();
-  // An Auto that got the bar to the far end leaves it there, mirrored; from a lever handed over midway, or short of
-  // its end, the bar goes back to where the lever is.
-  if ((early || mix.drawn >= 0.9) && !mix.x0 && lever.engaged && lever.progress() <= K_END) {
+  if (!completed) gripBack = {v: gripShown, at: mix.ended};
+  else if (lever.engaged && Math.abs(lever.position - mix.far) > K_END) {
     leverFlip = !leverFlip;
     $("lever").value = barAt(lever.position) * 1000;
-  } else gripBack = {v: gripShown, at: mix.ended};
+  } else parkLever(mix.far);
   animate();
 }
 // The earliest page time a poll's status can have been taken at.
@@ -940,7 +946,21 @@ function observe(s, t, clocked, asked) {
     if (off) leverSocket?.close();
     lever.sync(s.lever, quiet);
   }
-  if (!kind) return endMix();
+  if (!kind) {
+    // A lever this page parked is there once the mixer shows it engaged at that end; a poll asked after the position
+    // went that shows it elsewhere (the mixer only tracked it under its take) sends it again.
+    if (parking && !s.transition_manual) {
+      if (s.lever?.engaged && Math.abs(s.lever.position - parking.position) <= K_END) parking = null;
+      else if (asked > parking.sentAt) sendPark();
+    }
+    if (!mixOn() || mix.done) return;
+    // The mixer is done with the mix the bar still draws (its poll came late). Completed, the bar runs out to the far
+    // end at its catch-up speed when that takes no longer than the grip's way back, else it is there at once.
+    if (s.pgm_scene === mix.pgm) return endMix();
+    if ((1 - mix.drawn) / CATCH_UP * mix.duration > GRIP_BACK_MS) return endMix(false, true);
+    Object.assign(mix, {done: true, start: Math.min(mix.start, t - mix.duration), heldX: null, guess: false});
+    return animate();
+  }
   // A mix held at this page's press that is not on air, or runs below where it was held, is a new take: the mixer had
   // ended the one this page still drew when the press reached it. Not on air yet, it starts a frame on, as Auto's does.
   const renewed = mixOn() && mix.kind === kind && mix.heldX !== null && !s.transition_paused &&
@@ -1003,6 +1023,7 @@ function acceptTake(kind, {duration_sec: seconds, curve, color}, halted) {
   if (!["cut", "fade", "wipe"].includes(kind)) return;
   const t = performance.now();
   takeAcceptedAt = t;
+  if (kind === "cut" && !lever.engaged) parkLever(1 - lever.origin);   // the Cut ended the lever's own take midway
   if (kind === "cut" || halted) return;
   if (mixOn()) {
     if (mix.heldX !== null && mix.resuming) {
@@ -1056,7 +1077,8 @@ function renderLever(frame) {
   const lit = Math.round(progress * LEDS), pct = tbar.querySelector(".pct"), trail = tbar.querySelector(".trail");
   const rest = Number($("lever").value) / 1000, back = gripBack && Math.min(1, Math.max(0, t - gripBack.at) / GRIP_BACK_MS);
   if (back === 1) gripBack = null;
-  gripShown = owned ? (from ? 1 - progress : progress) : gripBack ? rest + (gripBack.v - rest) * (1 - back) ** 2 : rest;
+  gripShown = owned ? mix.gripFrom + (mix.gripTo - mix.gripFrom) * (progress - mix.x0) / (1 - mix.x0)
+    : gripBack ? rest + (gripBack.v - rest) * (1 - back) ** 2 : rest;
   tbar.querySelector(".track").style.setProperty("--v", gripShown);
   trail.style.setProperty("--a", from ? 1 - progress : 0);
   trail.style.setProperty("--b", from ? 1 : progress);
@@ -1067,9 +1089,9 @@ function renderLever(frame) {
   $("auto").classList.toggle("run", owned && !take.held);
   $("auto").classList.toggle("held", !!take?.held);
   $("tp").classList.toggle("held-on", !!take?.held);
-  // While an Auto or wipe owns the program the mixer only records the lever (held included), so it takes no press. On
-  // the grip's way back it takes one, where the lever rests (onpointerdown).
-  $("tp").classList.toggle("owned", takeOwns());
+  // While an Auto or wipe owns the program the mixer only records the lever (held included), so it takes no press, nor
+  // while it is being parked. On the grip's way back it takes one, where the lever rests (onpointerdown).
+  $("tp").classList.toggle("owned", takeOwns() || parking !== null);
   if ((owned && (mix.heldX === null || mix.x < mix.heldX)) || gripBack) animate();   // a held mix stands still once at its hold
 }
 // While the T-bar moves it is drawn on every animation frame, at the display's rate and at the frame's time; standing
@@ -1131,6 +1153,11 @@ const lever = {kind: "crossfade", origin: 0, engaged: true, position: Number($("
     else if (this.position >= 1 - K_END) this.origin = 1;
     else this.engaged = false;
   },
+  // Parked at an end by this page, as the position sent then leaves the mixer's lever (Lever::move at an end).
+  park(position) {
+    Object.assign(this, {position, origin: position, engaged: true, parked: true, sent: position});
+    this.sentAt = this.turnedAt = performance.now();
+  },
   // As the mixer reports it; a lever this page has not moved, or left (adopt), also takes the mixer's position.
   sync({origin, engaged, position}, adopt) {
     Object.assign(this, {origin: origin ?? this.origin, engaged: engaged ?? true});
@@ -1146,6 +1173,35 @@ function leverWipe() {
   if (currentTransition !== "wipe") return null;
   const path = currentWipe ? currentWipe.path : $("wipe-file").value.trim();
   return (state?.status?.wipe_cache?.clips || []).some((c) => c.path === path && c.complete) ? path : undefined;
+}
+// The lever, left disengaged where a take ran on from it (the mixer's Lever::release), is parked at that take's far end
+// as a hand would leave it there: the twin at once, the mixer's lever by the position. Under its take the mixer only
+// tracks a position, and would release the lever at that end still disengaged, so the position goes again until a poll
+// shows the lever engaged there (observe); the lever takes no press until then, and a mixer that never shows it (another
+// controller moved it) is given up on.
+let parking = null;   // {position, sentAt}
+const PARK_GIVE_UP_MS = 2000;
+function parkLever(position) {
+  lever.park(position);
+  $("lever").value = barAt(position) * 1000;
+  parking = {position, sentAt: -Infinity, at: performance.now()};
+  sendPark();
+}
+function sendPark() {
+  if (performance.now() - parking.at > PARK_GIVE_UP_MS) { parking = null; return; }
+  parking.sentAt = performance.now();
+  shipLever({position: parking.position, ...leverTake(fadeSeconds() ?? FADE_SECONDS, leverWipe() || null)});
+}
+// What a position carries: the mix it runs (the fade rate, curve and colour, or the wipe).
+const leverTake = (duration_sec, wipe_file) => ({duration_sec, curve: curves.fade.value, color: fadeColor.hex() || null, wipe_file});
+// A position goes over the socket, numbered; as a request until the socket is open.
+// t_ms: when the position was sampled; the bridge spaces the positions by it, whatever the network did to them.
+function shipLever(position) {
+  openLeverSocket();
+  const message = {seq: ++leverSeq, client: leverClient, ...position, t_ms: performance.now()};
+  if (leverSocket.readyState !== WebSocket.OPEN) return postLever(message);
+  leverSocket.send(JSON.stringify(message));
+  leverSocket.last = message;
 }
 function sendLever() {
   if (owns()) {   // a focused lever's arrow keys during another's mix: it stays put
@@ -1168,19 +1224,14 @@ function sendLever() {
   if (duration_sec === null) return renderLever();
   const wipe_file = leverWipe();
   if (wipe_file === undefined) return renderLever();
-  const position = {position: value, duration_sec, curve: curves.fade.value, color: fadeColor.hex() || null, wipe_file};
+  const position = {position: value, ...leverTake(duration_sec, wipe_file)};
   lever.kind = wipe_file ? "wipe" : "crossfade";
   lever.move(value);
   renderLever();
   // Program's state names the lever's mix as a take's; a new object on every move would never be seen, so never cleared.
   const name = wipe_file ? (currentWipe?.name || "wipe").toLowerCase() : position.color ? "dip" : "fade";
   if (tookAs?.transition !== lever.kind || tookAs.name !== name) tookAs = {transition: lever.kind, name};
-  openLeverSocket();
-  // t_ms: when the position was sampled; the bridge spaces the positions by it, whatever the network did to them.
-  const message = {seq: ++leverSeq, client: leverClient, ...position, t_ms: performance.now()};
-  if (leverSocket.readyState !== WebSocket.OPEN) return postLever(message);
-  leverSocket.send(JSON.stringify(message));
-  leverSocket.last = message;
+  shipLever(position);
 }
 $("lever").oninput = sendLever;
 // Open the channel before the first position. Released, the lever gives the focus back: the shortcuts stay live
@@ -2353,10 +2404,11 @@ async function refresh() {
     // A take not on air yet is asked about again soon, so the T-bar starts with it rather than a poll later, and a
     // running mix a few times a second, so its model has the samples of the least delay to go by.
     const s = state?.status, waiting = takeWaiting();
-    // So is a hold of this page's the mixer has not shown yet, and another controller's lever while it moves.
+    // So is a hold of this page's the mixer has not shown yet, a lever being parked, and another controller's lever
+    // while it moves.
     const unsure = mixOn() && mix.heldX !== null && !s?.transition_paused;
     const theirs = theirLever(s) && performance.now() - lever.movedAt < LEVER_QUIET_MS;
-    if (waiting || unsure || theirs || (mixOn() && mix.heldX === null)) readyPoll ??= setTimeout(() => { readyPoll = null; refresh(); }, waiting ? 150 : 250);
+    if (waiting || unsure || theirs || parking || (mixOn() && mix.heldX === null)) readyPoll ??= setTimeout(() => { readyPoll = null; refresh(); }, waiting || parking ? 150 : 250);
   }
 }
 
