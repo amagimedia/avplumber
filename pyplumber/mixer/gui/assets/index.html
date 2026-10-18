@@ -674,6 +674,7 @@ function selectTransition(kind, clip) {
   tookTransition = true;
   if (clip) currentWipe = clip;
   renderTransition();
+  renderNext();
   // W too: the list scrolls sideways to the chosen wipe, the page stays where it is.
   const list = $("wipes"), chosen = kind === "wipe" && list.querySelector('[aria-pressed="true"]');
   if (chosen) {
@@ -966,9 +967,9 @@ function shownTake(frame) {
     const progress = mixDrawn(frame ?? mix.at);
     if (mixOn()) return {kind: mix.kind, progress, held: mix.heldX !== null};
   }
-  if (lever.progress() > K_END) return {kind: "crossfade", progress: lever.progress(), lever: true};
+  if (lever.progress() > K_END) return {kind: lever.kind, progress: lever.progress(), lever: true};
   const s = state?.status || {};
-  return theirLever(s) ? {kind: "crossfade", progress: s.transition_progress || 0, lever: true} : null;
+  return theirLever(s) ? {kind: s.transition, progress: s.transition_progress || 0, lever: true} : null;
 }
 // The LEDs and the trail fill from the end the lever started at, so they grow toward the grip whichever way
 // the lever runs; under AUTO they fill the same way at the mix's progress, the grip runs with them, and it goes
@@ -1047,7 +1048,7 @@ const K_END = 0.002, COMPLETE_GUARD_MS = 100, LEVER_QUIET_MS = 1000;
 // bar stays where the mix took it, and the next take runs from there (the mixer's lever is still at its own origin).
 let leverFlip = false;
 const barAt = (v) => (leverFlip ? 1 - v : v);
-const lever = {origin: 0, engaged: true, position: Number($("lever").value) / 1000, sent: undefined, completedAt: -Infinity, parked: false,
+const lever = {kind: "crossfade", origin: 0, engaged: true, position: Number($("lever").value) / 1000, sent: undefined, completedAt: -Infinity, parked: false,
   sentAt: -Infinity, turnedAt: -Infinity, movedAt: -Infinity, offAt: undefined,
   progress() { return this.engaged ? Math.abs(this.position - this.origin) : 0; },
   move(position) {
@@ -1076,6 +1077,13 @@ const lever = {origin: 0, engaged: true, position: Number($("lever").value) / 10
       this.sent = undefined;
     }
   }};
+// The lever's wipe: the clip Auto wipes with, once the mixer holds it decoded (wipe_cache; the lever does not decode).
+// null: the lever mixes; undefined: a wipe the lever cannot run yet.
+function leverWipe() {
+  if (currentTransition !== "wipe") return null;
+  const path = currentWipe ? currentWipe.path : $("wipe-file").value.trim();
+  return (state?.status?.wipe_cache?.clips || []).some((c) => c.path === path && c.complete) ? path : undefined;
+}
 function sendLever() {
   if (owns()) {   // a focused lever's arrow keys during another's mix: it stays put
     $("lever").value = barAt(lever.position) * 1000;
@@ -1095,14 +1103,18 @@ function sendLever() {
   }
   const duration_sec = fadeSeconds();
   if (duration_sec === null) return renderLever();
-  const position = {position: value, duration_sec, curve: curves.fade.value, color: fadeColor.hex() || null};
+  const wipe_file = leverWipe();
+  if (wipe_file === undefined) return renderLever();
+  const position = {position: value, duration_sec, curve: curves.fade.value, color: fadeColor.hex() || null, wipe_file};
+  lever.kind = wipe_file ? "wipe" : "crossfade";
   lever.move(value);
   renderLever();
   // Program's state names the lever's mix as a take's; a new object on every move would never be seen, so never cleared.
-  const name = position.color ? "dip" : "fade";
-  if (tookAs?.transition !== "crossfade" || tookAs.name !== name) tookAs = {transition: "crossfade", name};
+  const name = wipe_file ? (currentWipe?.name || "wipe").toLowerCase() : position.color ? "dip" : "fade";
+  if (tookAs?.transition !== lever.kind || tookAs.name !== name) tookAs = {transition: lever.kind, name};
   openLeverSocket();
-  const message = {seq: ++leverSeq, client: leverClient, ...position};
+  // t_ms: when the position was sampled; the bridge spaces the positions by it, whatever the network did to them.
+  const message = {seq: ++leverSeq, client: leverClient, ...position, t_ms: performance.now()};
   if (leverSocket.readyState !== WebSocket.OPEN) return postLever(message);
   leverSocket.send(JSON.stringify(message));
   leverSocket.last = message;
@@ -1177,7 +1189,10 @@ function renderNext() {
     $("keys").children[i]?.classList.toggle("armed", Boolean(key.next_take));
   });
   // The lever mixes the background only; the keyer has no lever of its own.
-  $("lever").disabled = !nextBkgd;
+  const wipeWaits = leverWipe() === undefined;
+  $("lever").disabled = !nextBkgd || wipeWaits;
+  $("lever").title = wipeWaits ? "Lever (T-bar): wipes once the mixer has this wipe's clip decoded in GPU memory"
+    : "Lever (T-bar): mixes to Preview from the end it rests at; the far end completes, the start cancels";
 }
 // Fade to black: the keyed program, never the clean feed, at the Fade rate; pressed again it fades back.
 function toggleFtb() {
