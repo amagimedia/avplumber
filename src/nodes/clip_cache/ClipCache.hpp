@@ -74,6 +74,13 @@ public:
         return it->second.frames;
     }
 
+    /// *key* is held whole: take() returns its frames.
+    bool cached(const std::string& key) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = clips_.find(key);
+        return it != clips_.end() && it->second.complete;
+    }
+
     void begin(const std::string& key) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& clip = clips_[key];

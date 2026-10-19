@@ -1,11 +1,13 @@
 """Remote GPU smoke for raw_video_file_cuda: end of file, loop timestamps, a fresh read on
-every pass and byte-exact upload from page-locked memory (cacheable and write-combined).
+every pass and byte-exact upload from page-locked memory (cacheable and write-combined), and a
+looped file kept in that memory: read once, and again only after the file changes.
 
 The download is a verification boundary; the node itself never reads its pictures back.
 """
 import os
 from pathlib import Path
 import tempfile
+import time
 
 import numpy as np
 
@@ -115,6 +117,7 @@ def check_pixels(directory, fmt, write_combined):
             seen.append(pictures.index(data))
         assert not errors, errors
         assert seen == [n % FRAMES for n in range(3 * FRAMES)], seen
+        assert file_reads(avp) >= 3 * FRAMES, f"{file_reads(avp)} pictures read from the file for three passes"
         # Rewrite picture 2 where it lies. The node and the two edges hold fewer than two passes
         # of pictures read before the rewrite, so the third pass from here shows the file as it is.
         with open(path, "r+b") as file:
@@ -131,6 +134,72 @@ def check_pixels(directory, fmt, write_combined):
         finish(avp, nodes)
 
 
+def file_reads(avp):
+    return avp.node("reader").getObject("stats")["file_reads"]
+
+
+def check_resident(directory, fmt):
+    """A resident looped file is read once however many passes are shown, byte-exact on every
+    pass, and read once more after the file changes."""
+    dtype, shift = (np.uint8, 0) if fmt == "nv12" else (np.uint16, 6)
+    sample_bytes = np.dtype(dtype).itemsize
+    pictures = [picture(32 + 16 * i, dtype, shift) for i in range(FRAMES)]
+    replacement = picture(200, dtype, shift)
+    path = Path(directory) / f"resident_{fmt}.raw"
+    path.write_bytes(b"".join(pictures))
+    avp, errors = make_avp("raw_gpu", capacity=2)
+    nodes = []
+    try:
+        nodes.append(reader(avp, path, fmt=fmt, loop=True, loop_continuous_ts=True, resident=True))
+        nodes.append(downloaded(avp, fmt))
+        output = avp.getEdge("result", "VideoFrame")
+        avp.group("probe").startNodes()
+        seen = [samples(frame, sample_bytes) for frame in drain(output, errors, timeout=10, limit=4 * FRAMES)]
+        assert not errors, errors
+        assert seen == [pictures[n % FRAMES] for n in range(4 * FRAMES)], "a resident pass differs from the file"
+        assert file_reads(avp) == FRAMES, f"{file_reads(avp)} pictures read from the file for {FRAMES} kept in memory"
+        with open(path, "r+b") as file:
+            os.pwrite(file.fileno(), replacement, 2 * len(pictures[0]))
+            os.fsync(file.fileno())
+        # The change is noticed where a pass starts; the node and the two edges hold fewer than
+        # two passes of pictures from before it.
+        later = [samples(frame, sample_bytes) for frame in drain(output, errors, timeout=10, limit=4 * FRAMES)]
+        assert not errors, errors
+        changed = pictures[:2] + [replacement] + pictures[3:]
+        assert all(data in changed or data in pictures for data in later), "a picture that was never in the file"
+        assert replacement in later[2 * FRAMES:], "a picture rewritten in the file never appeared"
+        assert pictures[2] not in later[2 * FRAMES:], "the old picture is still shown two passes after the rewrite"
+        assert file_reads(avp) == 2 * FRAMES, f"{file_reads(avp)} pictures read; the changed file is read once more"
+        print(f"PASS: resident {fmt} file read once for four passes, once more after it changed", flush=True)
+    finally:
+        finish(avp, nodes)
+
+
+def check_pool_bound(directory):
+    """With pool_frames the node has at most that many device frames: while its consumer holds
+    them all it waits, and it goes on as soon as one comes back."""
+    path = Path(directory) / "pool.raw"
+    path.write_bytes(b"".join(picture(32 + 16 * i) for i in range(FRAMES)))
+    avp, errors = make_avp("raw_gpu", capacity=1)
+    nodes = []
+    try:
+        nodes.append(reader(avp, path, loop=True, loop_continuous_ts=True, resident=True, pool_frames=3))
+        output = avp.getEdge("pictures", "VideoFrame")
+        avp.group("probe").startNodes()
+        held = [frame for frame in drain(output, errors, timeout=10, limit=3)]   # three held here
+        time.sleep(.5)
+        stats = avp.node("reader").getObject("stats")
+        assert not errors, errors
+        assert stats["frames_allocated"] == 3, stats
+        assert output.occupied == 0 and stats["frames"] == 3, f"{stats}: the node went on with every frame held"
+        held.pop(0)   # one back to the pool
+        assert len(list(drain(output, errors, timeout=10, limit=1))) == 1
+        assert avp.node("reader").getObject("stats")["frames_allocated"] == 3
+        print("PASS: pool_frames 3 holds the node at three device frames until one comes back", flush=True)
+    finally:
+        finish(avp, nodes)
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as directory:
         check_single_pass(directory)
@@ -139,3 +208,5 @@ if __name__ == "__main__":
         for fmt in ("nv12", "p010le"):
             for write_combined in (False, True):
                 check_pixels(directory, fmt, write_combined)
+            check_resident(directory, fmt)
+        check_pool_bound(directory)

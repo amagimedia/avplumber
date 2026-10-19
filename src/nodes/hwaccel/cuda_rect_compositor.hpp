@@ -8,6 +8,7 @@
 #include "../../mixer/primitives/compositor_layers.hpp"
 #include "../../mixer/primitives/frame_subscription.hpp"
 #include "../../mixer/primitives/source_mask.hpp"
+#include "../../mixer/primitives/SourceDelivery.hpp"
 #include "cuda_rect_draw.hpp"
 #include "cuda_rect_frame.hpp"
 #include "cuda_rect_texture.h"
@@ -192,6 +193,22 @@ protected:
 
         if (metadata_src && metadata_src->raw())
             avp::mixer::copySourceProps(outf, *metadata_src, type_);
+        avp::mixer::clearSourceFrames(outf.raw());
+        for (size_t i = 0; i < ops.size(); ++i) {
+            const auto& op = ops[i];
+            if (!op.src || op.layer.opacity <= 0) continue;
+            const auto bounds = [](const LayerSpec& l) {
+                return avp::mixer::Rect{l.dst_x, l.dst_y, l.dst_w ? l.dst_w : l.crop_w,
+                                       l.dst_h ? l.dst_h : l.crop_h};
+            };
+            const auto r = bounds(op.layer);
+            const bool covered = std::any_of(ops.begin() + i + 1, ops.end(), [&](const DrawOp& above) {
+                if (!above.src || above.layer.blend || above.layer.opacity <= 0) return false;
+                const auto a = bounds(above.layer);
+                return a.x <= r.x && a.y <= r.y && a.x + a.w >= r.x + r.w && a.y + a.h >= r.y + r.h;
+            });
+            if (!covered) avp::mixer::mergeSourceFrames(outf.raw(), op.src->raw());
+        }
         setCanvasColor(outf.raw());
         if (hasCanvasColor())
             av_frame_side_data_remove_by_props(&outf.raw()->side_data, &outf.raw()->nb_side_data,
@@ -223,8 +240,9 @@ protected:
     }
 
     /// Subscribes each input to the shared source `subscriptions` names in `src` order, paced at
-    /// `fps`. With `allow_unsubscribed`, an empty name leaves that input an ordinary edge.
-    void subscribe(NodeCreationInfo &nci, av::Rational fps, bool allow_unsubscribed) {
+    /// `fps` unless `rate_limit` is false. With `allow_unsubscribed`, an empty name leaves
+    /// that input an ordinary edge.
+    void subscribe(NodeCreationInfo &nci, av::Rational fps, bool allow_unsubscribed, bool rate_limit = true) {
         const auto names = jsonToStringList(nci.params.at("subscriptions"));
         if (names.size() != source_edges_.size())
             throw Error(std::string(type_) + ": subscriptions must match inputs");
@@ -234,7 +252,7 @@ protected:
                 continue;
             }
             auto subscription = InstanceSharedObjects<avp::mixer::FrameSubscription>::get(nci.instance, name);
-            subscription->configure(fps);
+            subscription->configure(fps, rate_limit);
             subscriptions_.push_back(subscription);
         }
     }

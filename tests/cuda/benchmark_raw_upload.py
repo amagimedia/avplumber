@@ -37,7 +37,7 @@ def run(args):
                         "name": f"input_{tag}", "url": str(path), "dst": uploaded, "hwaccel": "upload_bench",
                         "group": group, "pixel_format": args.format, "video_size": f"{width}x{height}",
                         "framerate": f"{args.fps}/1", "loop": True, "loop_continuous_ts": True,
-                        "write_combined": args.write_combined})]
+                        "write_combined": args.write_combined, "resident": args.resident})]
                 else:
                     packets = _raw_file_packets(avp, api, tag, str(path), pixel_format=args.format,
                                                video_size=f"{width}x{height}", group=group,
@@ -72,7 +72,7 @@ def run(args):
             elapsed = time.monotonic() - started
             after = resource.getrusage(resource.RUSAGE_SELF)
             counts = [edge.enqueued_total - initial for edge, initial in zip(outputs, start_counts)]
-            result = dict(mode=args.mode, write_combined=args.write_combined, inputs=args.inputs, format=args.format, width=width, height=height,
+            result = dict(mode=args.mode, write_combined=args.write_combined, resident=args.resident, inputs=args.inputs, format=args.format, width=width, height=height,
                           target_fps=args.fps, seconds=elapsed, frames=counts,
                           fps=[count / elapsed for count in counts],
                           cpu_seconds=(after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime),
@@ -90,6 +90,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("filter", "pageable", "direct"), required=True)
     parser.add_argument("--write-combined", action="store_true", help="direct mode: write-combined page-locked memory")
+    parser.add_argument("--resident", action="store_true", help="direct mode: keep the file's pictures in page-locked memory")
     parser.add_argument("--inputs", type=int, default=8)
     parser.add_argument("--format", choices=("nv12", "p010le"), default="p010le")
     parser.add_argument("--width", type=int, default=1920)

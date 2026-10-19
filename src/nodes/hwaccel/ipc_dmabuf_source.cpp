@@ -1,4 +1,5 @@
 #include "../node_common.hpp"
+#include "../../mixer/primitives/SourceDelivery.hpp"
 extern "C" {
 #include <libavutil/buffer.h>
 #include <libavutil/hwcontext_drm.h>
@@ -20,19 +21,7 @@ extern "C" {
 #include <new>
 #include "../../hwaccel.hpp"
 #include "DmabufReleaseQueue.hpp"
-
-#pragma pack(push, 1)
-struct TexInfo {
-    uint32_t width;
-    uint32_t height;
-    uint32_t stride;
-    uint32_t pixel_format; // DRM FourCC or compatible value
-    uint64_t modifier;
-    uint64_t offset;
-    uint64_t timestamp; // nanoseconds
-    uint64_t frame_count;
-};
-#pragma pack(pop)
+#include "TexInfoMessage.hpp"   // the wire format: TexInfo and its fd, documented in texinfo.h
 
 class UnixFdpassClient {
 protected:
@@ -110,14 +99,8 @@ public:
         pollfds_[CONN_INDEX].events = connecting_ ? (POLLIN | POLLOUT) : POLLIN;
         return true;
     }
-    bool recvTexInfoAndFD(TexInfo &info, int &received_fd) {
-        received_fd = -1;
-        // Prepare to receive payload + a single FD via SCM_RIGHTS
-        char control[CMSG_SPACE(sizeof(int))];
-        struct iovec iov;
-        iov.iov_base = &info;
-        iov.iov_len = sizeof(info);
-        struct msghdr msg;
+    /// One frame: its header and its DMA-BUF fd, owned by the caller on success.
+    bool recvFrame(TexInfoMessage &frame) {
         while (true) {
             if (interrupted_.load()) return false;
             // Ensure we have a connection
@@ -170,36 +153,18 @@ public:
                 continue;
             }
             if (pollfds_[CONN_INDEX].revents & (POLLIN)) {
-                memset(&msg, 0, sizeof(msg));
-                msg.msg_iov = &iov;
-                msg.msg_iovlen = 1;
-                msg.msg_control = control;
-                msg.msg_controllen = sizeof(control);
-                ssize_t r = recvmsg(conn_fd_, &msg, MSG_DONTWAIT);
-                if (r <= 0) {
+                const TexInfoRecvStatus status = recvTexInfoMessage(conn_fd_, frame);
+                if (status == TexInfoRecvStatus::Closed) {
                     // connection reset or EOF: close and wait for next
                     closeConnection();
                     continue;
                 }
-                // Ancillary data
-                for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-                     cmsg != nullptr; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-                    if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-                        int *fds = reinterpret_cast<int*>(CMSG_DATA(cmsg));
-                        // Expect one fd
-                        received_fd = fds[0];
-                        break;
-                    }
-                }
-                if (received_fd < 0) {
-                    logstream << "fdpass: recvmsg without FD";
-                    closeConnection();
-                    return false;
-                }
-                if (static_cast<size_t>(r) < sizeof(TexInfo)) {
-                    logstream << "fdpass: metadata too small (" << r << ")";
-                    close(received_fd);
-                    received_fd = -1;
+                if (status != TexInfoRecvStatus::Ok) {
+                    // A sender this receiver does not understand (or the reverse): nothing of the
+                    // message is kept. A whole header still names the frame, which goes back so
+                    // the sender's buffer is not lost before the connection is dropped.
+                    logstream << "fdpass: " << texInfoRecvStatusText(status) << "; closing the connection";
+                    if (status != TexInfoRecvStatus::Short) ack_queue_->enqueue(frame.info.frame_count);
                     closeConnection();
                     return false;
                 }
@@ -241,8 +206,6 @@ class IPCDMABUFSource: public NodeSingleOutput<av::VideoFrame>,
                        public ITimeBaseSource,
                        public IReturnsObjects {
 protected:
-    static constexpr uint32_t PIX_FMT_RGBA = ('R' << 24 | 'G' << 16 | 'B' << 8 | 'A');
-    static constexpr uint32_t PIX_FMT_BGRA = ('B' << 24 | 'G' << 16 | 'R' << 8 | 'A');
     static constexpr uint32_t BYTES_PER_PIXEL = 4;
     static constexpr uint32_t MAX_DIMENSION = 16384;
 
@@ -251,21 +214,22 @@ protected:
     int width_ = 0;
     int height_ = 0;
     av::Rational frame_rate_{0, 1};
+    avp::mixer::CaptureNumbering capture_numbering_;
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVBufferRef* hw_frames_ctx_ = nullptr;
 
     static AVPixelFormat swFormatFromTexInfo(uint32_t pixel_format) {
         switch (pixel_format) {
-            case PIX_FMT_RGBA: return AV_PIX_FMT_RGBA;
-            case PIX_FMT_BGRA: return AV_PIX_FMT_BGRA;
+            case TEXINFO_PIX_FMT_RGBA: return AV_PIX_FMT_RGBA;
+            case TEXINFO_PIX_FMT_BGRA: return AV_PIX_FMT_BGRA;
             default: return AV_PIX_FMT_NONE;
         }
     }
 
     static uint32_t drmFormatFromTexInfo(uint32_t pixel_format) {
         switch (pixel_format) {
-            case PIX_FMT_RGBA: return DRM_FORMAT_ABGR8888;
-            case PIX_FMT_BGRA: return DRM_FORMAT_ARGB8888;
+            case TEXINFO_PIX_FMT_RGBA: return DRM_FORMAT_ABGR8888;
+            case TEXINFO_PIX_FMT_BGRA: return DRM_FORMAT_ARGB8888;
             default: return 0;
         }
     }
@@ -318,20 +282,21 @@ public:
         this->finished_ = true;
     }
     virtual void process() {
-        TexInfo ti{};
-        int dmabuf_fd = -1;
-        if (!receiver_.recvTexInfoAndFD(ti, dmabuf_fd)) {
+        TexInfoMessage frame;
+        if (!receiver_.recvFrame(frame)) {
             wallclock.sleepms(5);
             return;
         }
+        const TexInfo &ti = frame.info;
 
         ++received_;
         uint64_t object_size = 0;
         if (!validateTexInfo(ti, object_size)) {
-            close(dmabuf_fd);
+            frame.closeFd();
             receiver_.releaseFrame(ti.frame_count);
             return;
         }
+        const int dmabuf_fd = frame.plane_fd;
 
         // Ensure/refresh HW frames context for filters
         if (hwaccel_) {
@@ -398,6 +363,8 @@ public:
         vfrm.raw()->height = ti.height;
         vfrm.setTimeBase({1, 1000000});
         vfrm.raw()->pts = ti.timestamp / 1000;
+        if (frame_rate_.getNumerator() > 0)
+            capture_numbering_.stamp(vfrm.raw(), avp::mixer::captureKey, ti.frame_count, frame_rate_.getValue());
 
         if (hw_frames_ctx_) {
             vfrm.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);

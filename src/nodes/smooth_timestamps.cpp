@@ -138,6 +138,14 @@ public:
                 return;
             }
 
+            // This edge has one producer. Reserve room before changing the timeline:
+            // retrying a full sink must not number the same input a second time.
+            const auto output = this->edgeSink()->edge();
+            if (output->occupied() >= int(output->capacity())) {
+                if (!ticks) this->processWhenSignalled(output->consumedEvent());
+                return;
+            }
+
             T& frame = *dataptr;
 
             // EOF marker: pass through untouched

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Browser alpha verification fixture</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; }
+  #patches { position: absolute; left: 5%; top: 30%; width: 90%; height: 32%; display: flex; gap: 2%; }
+  #patches > div { flex: 1; background: linear-gradient(to bottom, white 0% 25%, red 25% 50%, lime 50% 75%, blue 75%); }
+</style>
+<!-- Fixed geometry for smoke_browser_alpha.py's premultiplied pixel checks, independent of demo styling. -->
+<div id="patches">
+  <div style="opacity: 0"></div>
+  <div style="opacity: .25"></div>
+  <div style="opacity: .5"></div>
+  <div style="opacity: .75"></div>
+  <div style="opacity: 1"></div>
+</div>
+</html>

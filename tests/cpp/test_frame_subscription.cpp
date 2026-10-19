@@ -32,6 +32,15 @@ int main() {
     publish(2000000000);
     assert(count == 31);
 
+    // A timestamp-matching consumer must see a live paint that supersedes a
+    // synthetic hold for the same tick. It chooses the picture at render time.
+    subscription.configure({50, 1}, false);
+    subscription.enable(true);
+    publish(2020000000); // held picture
+    publish(2020000000); // live paint, before the consumer's deadline
+    publish(2040000000);
+    assert(count == 34);
+
     std::atomic<bool> running{true};
     std::atomic<int> delivered{0};
     std::thread producer([&] {

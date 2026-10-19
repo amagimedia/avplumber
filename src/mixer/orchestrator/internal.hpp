@@ -3,7 +3,6 @@
 // (src/mixer/orchestrator/*.cpp). Not part of the public interface.
 #include "MixerOrchestrator.hpp"
 #include "../graph_ops.hpp"
-#include "../primitives/OutputSnapshot.hpp"
 #include "../routing.hpp"
 #include "../primitives/TransitionGuard.hpp"
 #include "../../avutils.hpp"
@@ -18,4 +17,12 @@
 #include <unordered_map>
 #include <utility>
 
-namespace avp::mixer { using namespace avp::mixer::graph; }
+namespace avp::mixer {
+using namespace avp::mixer::graph;
+
+/// A schedule as the clip_cache node's "scrub" object takes it.
+inline Parameters scrubSchedule(const RampNs& ramp) {
+    return {{"start_ns", ramp.start_ns}, {"duration_ns", ramp.duration_ns},
+            {"floor_ns", ramp.floor_ns}, {"ceiling_ns", ramp.ceiling_ns}};
+}
+}

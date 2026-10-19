@@ -8,11 +8,14 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
+#include <memory>
 #include <vector>
 #include <atomic>
 #include "CutLatencyProbe.hpp"
+#include "Lever.hpp"
 #include "MonotonicClock.hpp"
 #include "source_mask.hpp"
+#include "TakeClock.hpp"
 #include "../transition_control.hpp"
 
 extern "C" {
@@ -189,6 +192,50 @@ struct MixerState : public InstanceShared<MixerState> {
     bool destination_ready = false;
     FadeCurve take_curve = FadeCurve::Linear;
     std::optional<std::array<uint8_t, 3>> take_dip;
+    // What program shows besides a slot's direct picture: the crossfade compositor (program
+    // selector on input 2) or the wipe overlay (wipe selector on input 1). While one is on air
+    // a take acts on that transition, as a switcher's CUT and AUTO do, and never starts another.
+    bool blend_on_air = false;
+    bool wipe_on_air = false;
+    // The crossfade on air, kept to re-send its alpha when AUTO pauses or resumes it; for a wipe
+    // the lever started, the schedule its clip, its background and its keys follow.
+    std::optional<FadeRequest> take_request;
+    // Its schedule, each change applying from its floor on (RampHistory): what the lever's wipe
+    // clip, its background and the keys read a tick by.
+    RampHistory take_schedule;
+    /// The take follows `request`: all of it (`whole`), else from the request's floor on.
+    void scheduleTake(const FadeRequest& request, bool whole) {
+        take_request = request;
+        if (whole) take_schedule = RampHistory(rampTimesNs(request));
+        else take_schedule.change(rampTimesNs(request));
+    }
+    // Paused by AUTO pressed again: the mix holds at the program time `take_hold_ns` and both
+    // sources keep moving; nothing is captured.
+    bool take_paused = false;
+    int64_t take_hold_ns = 0;
+    // The lever arm (mixer.lever). A crossfade or wipe it started is manual: held at take_lever's
+    // progress, as a pause holds, until the lever reaches one of its ends (take_lever_end: the
+    // take completes or cancels once the picture got there), or AUTO runs it on from there.
+    Lever lever;
+    // The take the newest lever position asked for, which a position kept while the lever's end
+    // landed starts once it has.
+    struct LeverTake {
+        double duration_sec = 1;
+        FadeCurve curve = FadeCurve::Linear;
+        std::optional<std::array<uint8_t, 3>> dip;
+        std::string wipe_file;   // empty: a mix
+    } lever_take;
+    bool take_manual = false;
+    double take_lever = 0;
+    LeverEnd take_lever_end = LeverEnd::None;
+    int64_t lever_at_ns = 0;    // monotonic time of the last lever position, for the ramp to the next
+    int64_t wipe_scrub_delay_ns = 0;   // the clip player's scrub_delay_ms of the lever's wipe
+    double take_progress = 0;   // the background transition's progress at the newest program frame
+    // The background transition's clock for the downstream keyer's Next Transition keys. Replaced,
+    // never edited, so the keyer's render thread reads it without this mutex.
+    std::shared_ptr<const TakeClock> take_clock = std::make_shared<const TakeClock>();
+    std::shared_ptr<const TakeClock> clock() const { return std::atomic_load(&take_clock); }
+    void publishClock(TakeClock clock) { std::atomic_store(&take_clock, std::make_shared<const TakeClock>(clock)); }
     uint64_t scene_revision = 0;
 
 
@@ -226,6 +273,11 @@ struct MixerState : public InstanceShared<MixerState> {
     /// Cached wipes keep the player group running: no node is created, started or stopped
     /// for a take, so its CUDA allocations and threads never churn under the program.
     bool wipeChainStaysRunning() const { return !wipe_cache_store.empty(); }
+    /// mixer.init declared the wipe subgraph; without it there is no wipe.
+    bool wipeSubgraph() const {
+        return !wipe_otm_name.empty() && !wipe_selector_name.empty() &&
+               !wipe_group_name.empty() && !wipe_input_node_name.empty();
+    }
     // Edges to flush before each wipe starts and after each wipe stops.
     // Prevents frames from a previous wipe run from bleeding into the next one.
     std::vector<std::string> wipe_flush_edges;
