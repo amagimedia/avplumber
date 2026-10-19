@@ -321,14 +321,15 @@ frames, so a shorter window waits for that); a miss starts the window again.
 Output drops are counted but do not restart it: while the GPU is time-shared
 with the browser every bus drops a few frames a minute, and no start would
 settle. After `start_stable_timeout_sec` (default 60;
-`--start-stable-timeout-sec`) startup fails, naming the compositor that kept
-counting or drew nothing; outputs remain held. Once stable, it resets every
+`--start-stable-timeout-sec`) the show goes on air unsettled: a warning names
+the compositor that kept counting or drew nothing. Either way, it resets every
 compositor's counters and releases all outputs together on a key
 frame, in that order, so what the counters say on air starts from zero and
 nothing on air is reset away. `mixer.startup` answers with how it went:
-`settled`, `waited_sec`, `reason`, each compositor's `counters` at the release
-and the `warm_up` totals the reset discarded. Setup waits up to 180 s for the
-mixer's startup: the preheat and this wait share that budget.
+`settled` (false after the timeout), `waited_sec`, `reason`, each compositor's
+`counters` at the release and the `warm_up` totals the reset discarded. Setup
+waits up to 180 s for the mixer's startup: the preheat and this wait share that
+budget.
 
 Sources feed the compositors directly after source normalization.
 Their scene layers use `dst_x`, `dst_y`, `dst_w`, `dst_h`, optional `crop`, and

@@ -53,9 +53,9 @@ JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 4_500
 PREHEAT_POLL_INTERVAL_SEC = 0.02
 # Going on air: the outputs are released after START_STABLE_SEC (MixerOptions.start_stable_sec) in
 # which no compositor missed a deadline and every bus drew; output drops are counted, not gated
-# on. Startup fails after START_STABLE_TIMEOUT_SEC if it cannot settle. The first 60 output
-# frames of a bus can pass before its frame count is published (4 s at 15 fps), so a shorter
-# window waits for that.
+# on. After START_STABLE_TIMEOUT_SEC without settling they are released anyway, flagged. The
+# first 60 output frames of a bus can pass before its frame count is published (4 s at 15 fps),
+# so a shorter window waits for that.
 START_STABLE_SEC = 10.0
 START_STABLE_TIMEOUT_SEC = 60.0
 SETTLE_POLL_SEC = 0.5
@@ -99,7 +99,7 @@ class MixerOptions:
     janus_rtcp_port: int = 0
     preheat_timeout_sec: float = 60.0
     start_stable_sec: float = START_STABLE_SEC            # clean stretch every compositor must show before the outputs are released
-    start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC   # fail startup if the show cannot settle
+    start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC   # release unsettled, flagged, after this
     wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
     wipe_color: str = ""                 # explicit SDR override; empty preserves tags with an SDR fallback
     cut_latency_encoder: str = ""        # opt-in cut-to-output observer on this encoder
@@ -378,7 +378,8 @@ class MixerApplication:
         are released only after start_stable_sec in which no compositor missed a deadline and
         every bus drew, so the load of starting (decoder opens, CUDA contexts, browser pages, raw
         files being page-locked) has calmed down before anything goes out; after
-        start_stable_timeout_sec startup fails with the bus that could not settle. The
+        start_stable_timeout_sec they are released anyway, with a warning naming the bus that
+        could not settle and `settled` false in `startup`. The
         compositors count from zero first, then the outputs start together on a key frame: what
         viewers get and what the counters say both begin with the stable show, and nothing on air
         is ever reset away. What the start counted is kept in `startup` (`mixer.startup`)."""
@@ -395,8 +396,6 @@ class MixerApplication:
         # into it: one program slot drawing is the program drawing. Every bus must draw.
         ticking = [tuple(program), *((bus,) for bus in buses)]
         report = self._wait_until_settled(compositors, self.start_stable_sec, self.start_stable_timeout_sec, ticking)
-        if not report["settled"]:
-            raise RuntimeError(f"Mixer startup did not settle after {report['waited_sec']:.1f} s: {report['reason']}")
         prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
         browser = self._browser_snapshot()
         self.avp.executeCommandsFromString("\n".join(
@@ -408,9 +407,12 @@ class MixerApplication:
         self.startup = {**report, "outputs": len(prefixes), "warm_up": warm_up, "released_at": time.time(),
                         "browser_windows": browser, "stable_sec": self.start_stable_sec,
                         "timeout_sec": self.start_stable_timeout_sec}
-        log.info("On air after %.1f s: %d outputs released; stable for %g s; the start's %d missed deadlines "
-                 "and %d output drops are not counted", report["waited_sec"], len(prefixes), self.start_stable_sec,
-                 warm_up["missed_deadlines"], warm_up["output_drops"])
+        stability = (f"stable for {self.start_stable_sec:g} s" if report["settled"] else
+                     f"never stable for {self.start_stable_sec:g} s ({report['reason']})")
+        log.log(logging.INFO if report["settled"] else logging.WARNING,
+                "On air after %.1f s: %d outputs released; %s; the start's %d missed deadlines "
+                "and %d output drops are not counted", report["waited_sec"], len(prefixes), stability,
+                warm_up["missed_deadlines"], warm_up["output_drops"])
 
     def _browser_snapshot(self) -> dict | None:
         """Browser counters for startup delivery and the on-air measurement baseline."""
