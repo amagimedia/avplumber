@@ -18,11 +18,21 @@ STATE_TTL_S = 0.2
 # asked for this often, not on every poll: a new show is seen within that time of its start.
 STATIC_TTL_S = 5.0
 LEVER_END = 0.002   # this close to an end the lever is there (src/mixer/primitives/Lever.hpp)
+LEVER_CLIENTS = 16   # controllers whose lever bookkeeping is kept; every page load is a new one
 
 
 def lever_end(position: float) -> int | None:
     """The end (0 or 1) the lever is at, None between them."""
     return 0 if position <= LEVER_END else 1 if position >= 1 - LEVER_END else None
+
+
+def remember_client(table: dict, client, value) -> None:
+    """`table[client] = value` as its newest entry, forgetting the controllers heard from least
+    recently beyond LEVER_CLIENTS."""
+    table.pop(client, None)
+    table[client] = value
+    while len(table) > LEVER_CLIENTS:
+        del table[next(iter(table))]
 
 
 class LeverPacer:
@@ -138,7 +148,7 @@ class MixerBridge:
             if isinstance(client, str) and isinstance(seq, int):
                 if seq <= self._lever_seq.get(client, -1):
                     return True
-                self._lever_seq[client] = seq
+                remember_client(self._lever_seq, client, seq)
             end = lever_end(position)
             while self._lever_waiting and lever_end(self._lever_waiting[-1][0]["position"]) in (None, end):
                 self._lever_waiting.pop()
@@ -155,7 +165,8 @@ class MixerBridge:
                     fields, client = self._lever_waiting.popleft()
                     t_ms = fields.pop("t_ms", None)
                     if t_ms is not None:
-                        pacer = self._lever_pacers.setdefault(client, LeverPacer())
+                        pacer = self._lever_pacers.get(client) or LeverPacer()
+                        remember_client(self._lever_pacers, client, pacer)
                         fields["span_ms"] = round(pacer.span_ms(t_ms, time.monotonic()), 3)
                     # The state a page polls changes where a stroke starts and at its ends.
                     at_end = lever_end(fields["position"]) is not None

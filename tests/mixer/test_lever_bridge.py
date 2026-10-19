@@ -10,7 +10,7 @@ import time
 import pytest
 
 from pyplumber.mixer.control import AvpProtocolError
-from pyplumber.mixer.gui.bridge import LeverPacer, MixerBridge
+from pyplumber.mixer.gui.bridge import LEVER_CLIENTS, LeverPacer, MixerBridge
 from test_webui import FakeBridge
 
 
@@ -59,6 +59,16 @@ def test_an_end_held_behind_a_slow_mixer_is_sent_once():
     gate.set()
     first.join(5)
     assert [line["position"] for line in sent_lever(bridge)] == [0.5, 1.0, 0.6]
+
+
+def test_lever_bookkeeping_keeps_only_the_controllers_heard_from_last():
+    bridge = FakeBridge()
+    for load in range(LEVER_CLIENTS * 2):   # a page reloaded again and again: a new controller each time
+        bridge.take({"command": "lever", "position": 0.5, "seq": 1, "client": f"load{load}", "t_ms": 1000.0})
+        bridge.take({"command": "lever", "position": 0.5, "seq": load + 1, "client": "panel", "t_ms": 1000.0 + load})
+    assert len(bridge._lever_seq) == len(bridge._lever_pacers) == LEVER_CLIENTS
+    assert bridge._lever_seq["panel"] == LEVER_CLIENTS * 2 and "panel" in bridge._lever_pacers
+    assert "load0" not in bridge._lever_seq and f"load{LEVER_CLIENTS * 2 - 1}" in bridge._lever_seq
 
 
 def test_state_expires_where_a_stroke_starts_and_at_its_ends_only():
