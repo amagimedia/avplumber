@@ -1,5 +1,7 @@
 #include <chrono>
 #include "node_common.hpp"
+#include "../OutputProgress.hpp"
+#include "../OutputLogRedaction.hpp"
 #include <atomic>
 #include <fstream>
 
@@ -18,6 +20,21 @@ class StreamOutput: public NodeSingleInput<av::Packet>, public IFlushable, publi
                     public IInputsObjects {
 protected:
     av::FormatContext octx_;
+    bool redact_url_ = false;
+    OutputProgress progress_;
+    bool fifo_ = false;
+    bool fifo_failed_ = false;
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<int64_t> finalize_deadline_ms_{0};
+    static int64_t steadyMilliseconds() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    static int interruptFifo(void* opaque) {
+        auto* self = static_cast<StreamOutput*>(opaque);
+        const auto deadline = self->finalize_deadline_ms_.load();
+        return self->stop_requested_.load() || (deadline && steadyMilliseconds() >= deadline);
+    }
     // `hold`: packets are taken and not written, so the chain before the output runs (an encoder
     // opens on its first frame) while nothing leaves. Released, writing starts at a key packet.
     std::atomic<bool> held_{false};
@@ -71,8 +88,18 @@ protected:
     }
 public:
     using NodeSingleInput<av::Packet>::NodeSingleInput;
+    ~StreamOutput() override {
+        if (fifo_ && octx_.isOpened()) {
+            stop_requested_.store(true);
+            try { flush(); } catch (...) { }
+        }
+    }
     av::FormatContext& ctx() {
         return octx_;
+    }
+    void stop() override {
+        stop_requested_.store(true);
+        NodeSingleInput<av::Packet>::stop();
     }
     virtual void process() {
         av::Packet pkt = this->source_->get();
@@ -80,6 +107,7 @@ public:
             flush();
             return;
         }
+        if (fifo_failed_) return; // Drain only this optional destination until real EOF.
         if (pkt && held_.load(std::memory_order_acquire)) {
             wait_for_key_ = true;
             return;
@@ -118,9 +146,19 @@ public:
                         publishCurrentSeekTables();
                     }
                 }
+                const auto payload_bytes = pkt.size();
                 octx_.writePacket(pkt);
+                progress_.wrote(payload_bytes, std::chrono::duration<double>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
                 errors_ = 0;
             } catch (std::exception &e) {
+                if (fifo_) {
+                    // FIFO handles reconnects internally. A terminal worker failure
+                    // disables only this transport; retain its consumer through EOF.
+                    fifo_failed_ = true;
+                    logstream << "live transport disabled after terminal FIFO error (destination redacted)";
+                    return;
+                }
                 // FFmpeg's paced UDP sender (bitrate=, fifo_size=) reports its full send queue as
                 // ENOMEM. An encoder catching up after a stall overfills it for a moment; that
                 // packet is lost like any on the network (receivers ask for a keyframe), and the
@@ -137,7 +175,7 @@ public:
                     }
                     return;
                 }
-                logstream << "writePacket failed: " << e.what();
+                logstream << "writePacket failed: " << (redact_url_ ? "destination redacted" : e.what());
                 // A burst of packets after a stall can fail for a few hundred milliseconds at once
                 // (2026-10-15: 21 consecutive UDP writes failed within 100 ms on both program outputs
                 // and the panic policy stopped the whole show). Give up only when the failures have
@@ -146,6 +184,7 @@ public:
                 if (errors_ == 0) first_error_ = now;
                 errors_++;
                 if (errors_ > 20 && now - first_error_ > std::chrono::seconds(3)) {
+                    if (redact_url_) throw Error("output write failed (destination redacted)");
                     throw;
                 }
             }
@@ -164,8 +203,21 @@ public:
             commitPendingSeekEntries();
             publishCurrentSeekTables();
         }
-        octx_.writeTrailer();
-        octx_.close();
+        if (fifo_) finalize_deadline_ms_.store(steadyMilliseconds() + 3000);
+        try {
+            octx_.writeTrailer();
+            octx_.close();
+        } catch (...) {
+            if (fifo_) {
+                logstream << "live transport finalization ended with unavailable destination";
+                octx_.close();
+                this->finished_ = true;
+                return;
+            }
+            if (redact_url_) throw Error("output finalization failed (destination redacted)");
+            throw;
+        }
+        progress_.flush();
         this->finished_ = true;
     }
     static std::shared_ptr<StreamOutput> create(NodeCreationInfo &nci) {
@@ -185,7 +237,12 @@ public:
         
         std::string url = params["url"];
         
-        logstream << "output url: " << url;
+        r->redact_url_ = params.value("redact_url", false);
+        r->fifo_ = params.count("fifo_options") != 0;
+        if (r->redact_url_) OutputLogRedaction::add(url);
+        r->progress_.setPath(params.value("progress_file", std::string{}));
+        r->progress_.setSubmitted(r->fifo_);
+        logstream << "output url: " << (r->redact_url_ ? "[redacted]" : url);
         const char *protocol = avio_find_protocol_name(url.c_str());
         r->udp_ = protocol && std::string(protocol) == "udp";
         
@@ -198,13 +255,29 @@ public:
         }
         
         muxer->initFromFormatContext(octx);
+        if (r->fifo_) {
+            // Encoders see the real muxer's codec/global-header requirements once.
+            // FIFO owns network open/recovery and clones these codec parameters;
+            // neither recovery nor a missing receiver reinitializes an encoder.
+            Parameters fifo_params = params["fifo_options"];
+            fifo_params["fifo_format"] = format;
+            fifo_params["format_opts"] = opts.toString('=', ':');
+            opts = parametersToDict(fifo_params);
+            octx.setFormat(av::OutputFormat("fifo", url));
+            // Bypass AVCPP's non-atomic access timer: FIFO invokes this callback
+            // on its own worker. Protocol rw_timeout bounds individual I/O calls.
+            octx.raw()->interrupt_callback = {interruptFifo, r.get()};
+        }
         
         octx.raw()->url = av_strdup(url.c_str()); // workaround for avcpp not using avformat_alloc_output_context2
-        octx.openOutput(url, opts);
-        
-        muxer->initFromFormatContextPostOpenPreWriteHeader(octx);
-
-        octx.writeHeader(opts);
+        try {
+            octx.openOutput(url, opts);
+            muxer->initFromFormatContextPostOpenPreWriteHeader(octx);
+            octx.writeHeader(opts);
+        } catch (...) {
+            if (r->redact_url_) throw Error("output initialization failed (destination redacted)");
+            throw;
+        }
         edge->setConsumer(r);
         
         muxer->initFromFormatContextPostOpen(octx);
