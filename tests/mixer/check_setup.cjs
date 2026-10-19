@@ -170,7 +170,7 @@ const { chromium } = require('playwright');
     assert.deepEqual([eight.source_count, eight.weights.reduce((a, b) => a + b, 0)], [8, 8], 'typing a replacement restores a valid setup');
 
     // Editing the global total restores Balanced counts, the docs' table with four key pages
-    // (docs/cookbook/source-limits.html: SDR NVDEC, HLG NVDEC, HLG v210, browser, NV12, P010).
+    // (cookbook source-limits.html: SDR NVDEC, HLG NVDEC, HLG v210, browser, NV12, P010).
     assert.equal(await page.locator('#source-controls input[type=number]').count(), 7);
     const balanced = {'8:420': [[40, 0, 0, 36, 30, 0], [36, 0, 0, 36, 34, 0], [22, 0, 0, 36, 20, 0], [18, 0, 0, 36, 17, 0]],
       '10:420': [[16, 19, 0, 31, 10, 10], [15, 18, 0, 30, 12, 11], [10, 12, 0, 34, 7, 6], [8, 10, 0, 28, 6, 5]],
