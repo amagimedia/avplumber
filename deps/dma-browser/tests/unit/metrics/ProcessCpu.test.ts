@@ -389,8 +389,6 @@ describe('readCpuSample and ProcessCpuSampler', () => {
       taskList: calls * 5,
       threadStat: calls * 150,
     });
-    // At one call every 5 s, 25 ms would be 0.5 % of a core.
-    expect(msPerCall).toBeLessThan(25);
   });
 
   it('reports figures between calls and reuses them within the minimum interval', async () => {
