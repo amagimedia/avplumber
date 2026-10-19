@@ -933,12 +933,13 @@ function startMix(kind, start, duration, shape = takeShape(kind), x0 = 0) {
   const {curve, dip} = shape;
   // far: the lever's end the mix runs to; the grip runs from where the lever rests (gripFrom) to that end as drawn
   // (gripTo); pgm: Program as the mix started, so a poll tells its completion; done: the mixer is done with it and the
-  // bar runs out to its end; own: this page pressed its take (at most a second before it started, as a press precedes
-  // its take), not another controller.
+  // bar runs out to its end; own: this page took it, not another controller: it pressed its take (at most a second
+  // before it started, as a press precedes its take), or the mix runs on this page's own lever take (x0, a lever this
+  // page moved).
   mix = {kind, start, shown: start, duration, curve, dip, x0, bias: x0 - CURVE_AT[curve][0](x0), heldX: null, guess: false,
          x: x0, drawn: x0, at: performance.now(), ended: 0, early: false, far: 1 - lever.origin, done: false,
          gripFrom: Number($("lever").value) / 1000, gripTo: barAt(1 - lever.origin), pgm: state?.status?.pgm_scene,
-         own: takePressedAt >= start - LEVER_QUIET_MS};
+         own: takePressedAt >= start - LEVER_QUIET_MS || (x0 > 0 && lever.sent !== undefined)};
   animate();
   return mix;
 }
