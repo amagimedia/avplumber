@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Launcher for dma-browser.
 #
-# The public Docker image uses official Electron with the bundled GBM shim.
-# Native launches must configure that shim as described in README.md.
+# Official Electron; on NVIDIA always with the bundled GBM shim preloaded.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,9 +97,6 @@ apply_nvidia_runtime() {
   local render_node
   local gl_backend="${DMA_BROWSER_GL_BACKEND:-angle}"
   local angle_backend="${DMA_BROWSER_ANGLE_BACKEND:-gl-egl}"
-  local scanout_feature="RenderableMappableSharedImageForceScanout"
-
-  export DMA_BROWSER_CHROMIUM_EXTRA_FEATURES="${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:+${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES},}${scanout_feature}"
 
   if wayland_display="$(detect_wayland_display)"; then
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -130,11 +126,25 @@ apply_nvidia_runtime() {
   echo "dma-browser: NVIDIA runtime enabled, electron_args=${electron_args[*]}" >&2
 }
 
+# NVIDIA's GBM allocates Chromium's capture buffers renderable only with the shim's usage flags.
+apply_gbm_shim() {
+  local shim="$PROJECT_ROOT/native/gbm-linear-shim/libgbm_linear_shim.so"
+  if [[ ! -f "$shim" ]]; then
+    echo "dma-browser: GBM shim not built (run 'npm run rebuild:shim')" >&2
+    exit 1
+  fi
+  case ":${LD_PRELOAD:-}:" in
+    *":$shim:"*) ;;
+    *) export LD_PRELOAD="$shim${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+  esac
+}
+
 if detect_nvidia; then
+  apply_gbm_shim
   apply_nvidia_runtime
 fi
 
-ELECTRON_BIN="${ELECTRON_BIN:-$PROJECT_ROOT/node_modules/.bin/electron}"
+ELECTRON_BIN="$PROJECT_ROOT/node_modules/.bin/electron"
 if [[ ! -x "$ELECTRON_BIN" ]]; then
   echo "dma-browser: electron not installed (run 'npm install' first)" >&2
   exit 1

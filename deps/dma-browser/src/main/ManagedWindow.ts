@@ -76,6 +76,7 @@ export interface ManagedWindowOptions {
   readonly logger: Logger;
   readonly allowedDims: AllowedDims;
   readonly loadWatchdogMs: number;
+  /** Sent-but-unacknowledged frames kept before new paints are dropped. */
   readonly retainedFramePoolSize: number;
   /** Where in the frame period this window's frames start (0 to 1); null keeps Chromium's timing. */
   readonly framePhase: number | null;
@@ -85,6 +86,7 @@ export interface IManagedWindow {
   readonly id: string;
   create(): Promise<void>;
   refresh(): void;
+  paint(enabled: boolean): void;
   update(url: string): void;
   show(visible: boolean): void;
   destroy(): Promise<void>;
@@ -256,6 +258,18 @@ export class ManagedWindow implements IManagedWindow {
     }
   }
 
+  public paint(enabled: boolean): void {
+    if (!this.win || this.win.isDestroyed()) return;
+    const wc = this.win.webContents;
+    if (enabled) {
+      // Starting an active capturer replaces its buffer pool in Electron.
+      if (!wc.isPainting()) wc.startPainting();
+      wc.invalidate();
+    } else if (wc.isPainting()) {
+      wc.stopPainting();
+    }
+  }
+
   public update(url: string): void {
     if (!this.win || this.win.isDestroyed()) return;
     this.config = { ...this.config, url };
@@ -312,6 +326,7 @@ export class ManagedWindow implements IManagedWindow {
           releasedFrameCount: channelStats.releasedFrameCount,
           retainedFrameCount: channelStats.retainedFrameCount,
           quarantinedFrameCount: channelStats.quarantinedFrameCount,
+          paintsSkipped: channelStats.paintsSkipped,
           lastPaintTsMs: channelStats.lastPaintTsMs,
         }
       : {
@@ -322,6 +337,7 @@ export class ManagedWindow implements IManagedWindow {
           releasedFrameCount: 0,
           retainedFrameCount: 0,
           quarantinedFrameCount: 0,
+          paintsSkipped: 0,
           lastPaintTsMs: null,
         };
     return {

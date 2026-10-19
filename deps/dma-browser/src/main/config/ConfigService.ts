@@ -112,4 +112,10 @@ export class ConfigService {
     const show = requireBoolean(obj, 'show', true);
     return { id, show };
   }
+
+  public validatePainting(input: unknown): { id: string; enabled: boolean } {
+    const { id } = this.validateId(input);
+    const enabled = requireBoolean(input as Record<string, unknown>, 'enabled', true);
+    return { id, enabled };
+  }
 }

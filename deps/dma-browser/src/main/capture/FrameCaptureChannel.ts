@@ -3,6 +3,7 @@ import * as fdpass from 'fdpass';
 import type { WebContents } from 'electron';
 import type { LogSink } from '../support/Logger';
 import type { AllowedDims } from './AllowedDims';
+import { CaptureCounterGaps, paintFrameCount } from './CaptureCounterGaps';
 import type { CaptureStats, ICaptureChannel } from './ICaptureChannel';
 import { TexInfoEncoder, type PixelFormat } from './TexInfoEncoder';
 
@@ -43,7 +44,7 @@ const SOCKET_MONITOR_INTERVAL_MS = 1000;
 // Unclean disconnects cannot prove that CUDA has finished reading. Pin these
 // textures until the worker exits, and prevent repeated recreation leaking pools.
 const quarantinedTextures = new Map<string, Set<PaintTextureLike>>();
-export const DEFAULT_RETAINED_FRAME_POOL_SIZE = 11;
+export const DEFAULT_RETAINED_FRAME_POOL_SIZE = 9;
 
 export interface FrameCaptureChannelOptions {
   readonly socketPath: string;
@@ -63,6 +64,7 @@ export interface FrameCaptureChannelOptions {
 export class FrameCaptureChannel implements ICaptureChannel {
   private readonly opts: FrameCaptureChannelOptions;
   private readonly encoder = new TexInfoEncoder();
+  private readonly counterGaps = new CaptureCounterGaps();
   private readonly stats: MutableStats = {
     paintCount: 0,
     droppedFrames: 0,
@@ -83,8 +85,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
 
   constructor(opts: FrameCaptureChannelOptions) {
     this.opts = opts;
-    this.retainedFramePoolSize =
-      opts.retainedFramePoolSize ?? DEFAULT_RETAINED_FRAME_POOL_SIZE;
+    this.retainedFramePoolSize = opts.retainedFramePoolSize ?? DEFAULT_RETAINED_FRAME_POOL_SIZE;
   }
 
   public start(): Promise<void> {
@@ -163,12 +164,28 @@ export class FrameCaptureChannel implements ICaptureChannel {
       retainedFrameCount: this.retainedFrames.size,
       quarantinedFrameCount: quarantinedTextures.get(this.opts.socketPath)?.size ?? 0,
       lastPaintTsMs: this.stats.lastPaintTsMs,
+      paintsSkipped: this.counterGaps.skipped,
     };
+  }
+
+  /** Never throws: a paint whose texture cannot be read is handled by handlePaint. */
+  private countSkippedPaints(event: PaintEventLike): void {
+    try {
+      this.counterGaps.observe(paintFrameCount(event.texture?.textureInfo));
+    } catch {
+      // a texture that throws on access is dropped below
+    }
   }
 
   private handlePaint(event: PaintEventLike, img: PaintImageLike): void {
     this.stats.paintCount++;
     this.stats.lastPaintTsMs = Date.now();
+    const skippedBefore = this.counterGaps.skipped;
+    this.countSkippedPaints(event);
+    // Keep missing Chromium captures and locally discarded paints visible in the
+    // wire sequence. Numbering only successful sends hides those losses downstream.
+    this.nextFrameNumber += BigInt(this.counterGaps.skipped - skippedBefore);
+    const frameNumber = this.nextFrameNumber++;
     let tex: PaintTextureLike | null | undefined;
     let retained: RetainedFrame | null = null;
     try {
@@ -254,7 +271,6 @@ export class FrameCaptureChannel implements ICaptureChannel {
         const stride = meta.stride && meta.stride >= minStride ? meta.stride : minStride;
         const pixelFormat = this.pixelFormatOf(info);
 
-        const frameNumber = this.nextFrameNumber++;
         const header = this.encoder.encode({
           codedWidth: codedW,
           codedHeight: codedH,
@@ -277,7 +293,8 @@ export class FrameCaptureChannel implements ICaptureChannel {
               for (const reason of ['backpressure', 'disconnected', 'errors'] as const) {
                 if (result[reason]) {
                   const key = `fdpass_${reason}`;
-                  this.stats.droppedReasons[key] = (this.stats.droppedReasons[key] ?? 0) + result[reason];
+                  this.stats.droppedReasons[key] =
+                    (this.stats.droppedReasons[key] ?? 0) + result[reason];
                 }
               }
             }
@@ -418,7 +435,9 @@ export class FrameCaptureChannel implements ICaptureChannel {
       } catch (err) {
         this.opts.log.write(`stopPainting failed: ${String(err)}`);
       }
-      this.opts.log.write('DMA-BUF consumer disconnected with outstanding frames; source paused, restart this browser worker');
+      this.opts.log.write(
+        'DMA-BUF consumer disconnected with outstanding frames; source paused, restart this browser worker',
+      );
     }
     textures.add(frame.texture);
   }

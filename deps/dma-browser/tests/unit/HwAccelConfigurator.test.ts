@@ -87,18 +87,15 @@ describe('HwAccelConfigurator.apply', () => {
     const { cl, calls } = recorder();
     new HwAccelConfigurator(
       {
-        DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:
-          'RenderableMappableSharedImageForceScanout, MyCustomFeature',
+        DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: 'MyCustomFeature, OtherFeature, MyCustomFeature',
         DMA_BROWSER_CHROMIUM_DISABLE_FEATURES: 'Vulkan, AnotherFeature',
       },
       cl,
     ).apply();
     const enabled = (findSwitch(calls, 'enable-features')?.value ?? '').split(',');
     const disabled = (findSwitch(calls, 'disable-features')?.value ?? '').split(',');
-    expect(enabled).toContain('MyCustomFeature');
-    expect(enabled.filter((f) => f === 'RenderableMappableSharedImageForceScanout')).toHaveLength(
-      1,
-    );
+    expect(enabled).toContain('OtherFeature');
+    expect(enabled.filter((f) => f === 'MyCustomFeature')).toHaveLength(1);
     expect(disabled).toContain('AnotherFeature');
     expect(disabled.filter((f) => f === 'Vulkan')).toHaveLength(1);
   });
