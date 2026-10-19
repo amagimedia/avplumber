@@ -1,14 +1,14 @@
-From 8db48ba137cad4d2a81df9fdf8b498ddd184a8df Mon Sep 17 00:00:00 2001
+From f6f4b6c5ef19d8aaca5e0dc5625d61c6025c9077 Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Thu, 15 Oct 2026 02:19:08 +0200
 Subject: [PATCH] avfilter/transition_cuda: propagate visible source metadata
 
 ---
- libavfilter/vf_transition_cuda.c | 51 ++++++++++++++++++++++++++++++++
- 1 file changed, 51 insertions(+)
+ libavfilter/vf_transition_cuda.c | 52 ++++++++++++++++++++++++++++++++
+ 1 file changed, 52 insertions(+)
 
 diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
-index cf74f22350..1b26758819 100644
+index cf74f22350..d0e4551407 100644
 --- a/libavfilter/vf_transition_cuda.c
 +++ b/libavfilter/vf_transition_cuda.c
 @@ -31,6 +31,7 @@
@@ -76,20 +76,21 @@ index cf74f22350..1b26758819 100644
  /**
   * Perform blend overlay picture over main picture
   */
-@@ -373,6 +417,12 @@ static int transition_cuda_blend(FFFrameSync *fs)
-         return ret;
+@@ -399,6 +443,13 @@ static int transition_cuda_blend(FFFrameSync *fs)
+                ctx->alpha_coef);
      }
  
 +    ret = transition_metadata(ctx, input_main, input_overlay);
 +    if (ret < 0) {
 +        av_frame_free(&input_main);
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
 +        return ret;
 +    }
 +
-     // push cuda context
- 
-     ret = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
-@@ -731,6 +781,7 @@ static int transition_cuda_process_command(AVFilterContext *avctx,
+     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(ctx->in_format_main);
+     float dip[4][2] = { { 0 } };
+     if (ctx->transition_mode == TRANSITION_MODE_DIP)
+@@ -731,6 +782,7 @@ static int transition_cuda_process_command(AVFilterContext *avctx,
  #define RUNTIME_FLAGS (FLAGS | AV_OPT_FLAG_RUNTIME_PARAM)
  
  static const AVOption transition_cuda_options[] = {
