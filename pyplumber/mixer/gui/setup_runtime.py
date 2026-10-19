@@ -107,6 +107,9 @@ def _fits(cfg, spec):
 
 
 class SetupRuntime:
+    # CPU-only asset preparation may overlap playback. GPU producers must opt out.
+    prepare_while_running = True
+
     def __init__(self, media_dir, recipe_path, bridge, profile, mixer_args=(), browser_url="http://127.0.0.1:9009",
                  janus_api=None, *, instance_type="", mixer_command=None, config_name="mixer.json"):
         self.media_dir = Path(media_dir).resolve()
@@ -324,6 +327,15 @@ class SetupRuntime:
                     bus.update(fields)
                     write_atomic(path, json.dumps(doc, indent=2) + "\n")
 
+    # Beside the show's settings, not in them: an Apply rewrites the show file.
+    def source_banks(self):
+        path = self.media_dir / "source_banks.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def remember_banks(self, banks):
+        """Keep the operator's source banks across restarts and Apply."""
+        write_atomic(self.media_dir / "source_banks.json", json.dumps(banks) + "\n")
+
     def _stop(self, timeout=STOP_TIMEOUT_SEC):
         with self.stop_lock:
             process = self.process
@@ -498,7 +510,7 @@ class SetupRuntime:
                 defined = {n["name"] for n in nodes}
                 working = {n["name"] for n in nodes if n["type"] == "filter_video" and n["working"]}
                 working.update("mixer_color_" + n["name"][len("mixer_otm_"):]
-                               for n in nodes if n["type"] == "one_to_many" and n["working"]
+                               for n in nodes if n["type"] in ("one_to_many", "one_to_many_nb") and n["working"]
                                and n["name"].startswith("mixer_otm_")
                                and "mixer_color_" + n["name"][len("mixer_otm_"):] not in defined)
                 failed = source_nodes - working
@@ -545,7 +557,9 @@ class SetupRuntime:
         started = time.monotonic()
         try:
             previous = config.read_bytes() if had_previous else None
-            # Complete missing assets while the old mixer continues to run.
+            if not self.prepare_while_running:
+                self._stop()
+                stopped = True
             log.info("Preparing assets")
             self.prepare(recipe, progress=lambda done, total:
                     self._status("preparing", f"Preparing assets… {done}/{total} ready."))
@@ -553,8 +567,9 @@ class SetupRuntime:
             if self.closing.is_set():
                 raise RuntimeError("Setup server is stopping")
             self._status("starting", "Restarting mixer…")
-            self._stop()
-            stopped = True
+            if not stopped:
+                self._stop()
+                stopped = True
             recipe_show = json.loads(config.read_bytes())
             self._mountpoints(recipe_show, wanted, replace=True)
             self._start_recovering(config, json.loads(previous or b"{}"))

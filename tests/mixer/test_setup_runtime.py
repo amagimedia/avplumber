@@ -38,10 +38,21 @@ def test_generic_setups_expand(tmp_path, count, fps):
 
 @pytest.mark.parametrize('changes', [{'source_count': 0}, {'scene_count': 0}, {'scene_count': 193}, {'fps': 24},
     {'weights': [0] * 5}, {'weights': [True] * 5}, {'resolution': '../../file'}, {'command': 'id'},
-    {'fps': 25.0}, {'bit_depth': 10.0}])
+    {'fps': 25.0}, {'bit_depth': 10.0}, {'browser_motion': 'unknown'}])
 def test_reject_unbounded_settings(changes):
     with pytest.raises(ValueError):
         recipe_for(T4, {**DEFAULT_SETTINGS, **changes})
+
+
+@pytest.mark.parametrize("motion", [None, "static", "dynamic", "half"])
+def test_browser_motion_reaches_recipe_and_saved_settings(motion):
+    settings = {k: v for k, v in DEFAULT_SETTINGS.items() if k != "browser_motion"}
+    if motion is not None:
+        settings["browser_motion"] = motion
+    recipe = recipe_for(T4, settings)
+    expected = motion or "static"
+    assert recipe["setup"]["browser_motion"] == expected
+    assert next(spec for spec in recipe["inputs"] if spec["kind"] == "browser")["motion"] == expected
 
 
 def prepare_without_media(recipe, directory, **kwargs):
@@ -93,10 +104,16 @@ def crash(runtime, code=-11):
     SetupRuntime._watch(runtime, process)
 
 
-def test_prepare_failure_keeps_old_show_and_process(runtime, monkeypatch):
+@pytest.mark.parametrize("prepare_while_running", [False, True])
+def test_prepare_failure_restores_old_show(runtime, monkeypatch, prepare_while_running):
+    runtime.prepare_while_running = prepare_while_running
     config = runtime.media_dir / 'mixer.demo.json'
     config.write_text('{"old": true}')
+    events = []
+    monkeypatch.setattr(runtime, '_stop', lambda **kwargs: events.append('stop'))
+    monkeypatch.setattr(runtime, '_start', lambda _: events.append('restore'))
     def fail(*args, **kwargs):
+        events.append('prepare')
         raise ValueError('disk full')
     monkeypatch.setattr(prepare_demo, 'prepare', fail)
     apply_and_wait(runtime, DEFAULT_SETTINGS)
@@ -104,6 +121,21 @@ def test_prepare_failure_keeps_old_show_and_process(runtime, monkeypatch):
     assert 'disk full' in runtime.status()['message']
     assert json.loads(config.read_text()) == {'old': True}
     assert runtime.process.poll() is None
+    assert events == (['prepare'] if prepare_while_running else ['stop', 'prepare', 'stop', 'restore'])
+
+
+def test_demo_stops_gpu_playback_before_preparing_assets(runtime, monkeypatch):
+    events = []
+    monkeypatch.setattr(runtime, '_stop', lambda **kwargs: events.append('stop'))
+    def prepare(recipe, directory, **kwargs):
+        assert events == ['stop']
+        events.append('prepare')
+        prepare_without_media(recipe, directory, **kwargs)
+    monkeypatch.setattr(prepare_demo, 'prepare', prepare)
+    monkeypatch.setattr(runtime, '_start', lambda _: events.append('start'))
+    apply_and_wait(runtime, DEFAULT_SETTINGS)
+    assert runtime.status()['phase'] == 'running'
+    assert events == ['stop', 'prepare', 'start']
 
 
 def test_failed_start_restores_previous_show(runtime, monkeypatch):
@@ -569,7 +601,8 @@ def test_invalid_preserved_aux_rejected_before_preparation(runtime, monkeypatch)
     assert runtime.worker is None
 
 
-@pytest.mark.parametrize("bypass", [False, True])
+# What stamps a source's colour: its filter graph, or its fan-out on a thread or on an event loop.
+@pytest.mark.parametrize("bypass", [False, "one_to_many", "one_to_many_nb"])
 @pytest.mark.parametrize("hdr", [False, True])
 @pytest.mark.parametrize("sdr_codec", ["h264", "h265"])
 def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr_codec, bypass):
@@ -586,7 +619,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr
         if command == "nodes.json":
             # An unused source can wait for consumers; readiness must not require its frames.
             return json.dumps([{"name": ("mixer_otm_" if bypass else "mixer_color_") + name,
-                                "type": "one_to_many" if bypass else "filter_video", "working": True}
+                                "type": bypass or "filter_video", "working": True}
                                for name in ("visible", "unused")])
         calls.append(command)
         assert len(calls) <= len(expected)
@@ -599,6 +632,7 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr, sdr
 
 @pytest.mark.parametrize("nodes", [[], [{"name": "mixer_color_hdr", "type": "filter_video", "working": False}],
     [{"name": "mixer_otm_hdr", "type": "one_to_many", "working": False}],
+    [{"name": "mixer_otm_hdr", "type": "one_to_many_nb", "working": False}],
     [{"name": "mixer_color_hdr", "type": "filter_video", "working": False},
      {"name": "mixer_otm_hdr", "type": "one_to_many", "working": True}]])
 def test_start_rejects_missing_or_failed_source_normalization(runtime, monkeypatch, nodes):
@@ -1472,6 +1506,23 @@ def test_cuarray_profile_only_changes_encoded_generated_inputs():
     assert all("decode_storage" not in source and "extra_hw_frames" not in source for source in recipe["inputs"][2:])
     for instance in (InstanceType.TESLA_T4, InstanceType.NVIDIA_L4):
         assert all("decode_storage" not in source for source in recipe_for(INSTANCE_PROFILES[instance], DEFAULT_SETTINGS)["inputs"])
+
+
+@pytest.mark.parametrize("fps", [25, 30, 50, 60])
+@pytest.mark.parametrize("depth,chroma", [(8, "420"), (10, "420"), (10, "422")])
+def test_setup_keeps_capacity_profile_runtime_bounds(tmp_path, fps, depth, chroma):
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]
+    settings = {**DEFAULT_SETTINGS, "fps": fps, "bit_depth": depth, "chroma": chroma,
+                "weights": [8, 0, 0, 0, 2, 0, 0]}
+    show, _, _ = prepare_demo.plan(recipe_for(profile, settings), tmp_path)
+    cfg = parse(show)
+    assert cfg.decoded_frames_ahead == 1
+    assert cfg.raw_pool_frames == 10
+    assert cfg.raw_upload == "resident"
+    assert cfg.source_fan_out == "event_loop"
+    assert cfg.input_poll_ms == cfg.aux_input_poll_ms == 8
+    assert cfg.fps == fps
+    assert cfg.working_format == ("nv12" if depth == 8 else "p010le" if chroma == "420" else "p210le")
 
 
 def test_first_resume_keeps_declared_outputs_and_applies_shared_aux_codec(runtime, monkeypatch):

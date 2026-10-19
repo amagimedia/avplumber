@@ -13,14 +13,11 @@ import pytest
 @pytest.mark.parametrize("case", [
     "unopened", "encoder_failure", "parse_failure", "init_failure", "initialized",
 ])
-def test_bsf_shutdown(case, tmp_path):
+def test_bsf_shutdown(case, tmp_path, run_script):
     if importlib.util.find_spec("_avplumber") is None:
         pytest.skip("requires the native avplumber extension")
     try:
-        result = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()), case, str(tmp_path / "output.nut")],
-            capture_output=True, text=True, timeout=10,
-        )
+        result = run_script(Path(__file__).resolve(), case, tmp_path / "output.nut", timeout=10)
     except subprocess.TimeoutExpired as error:
         pytest.fail(f"BSF {case} exceeded shutdown deadline: {error.stdout!r}{error.stderr!r}")
     assert result.returncode == 0, result.stdout + result.stderr

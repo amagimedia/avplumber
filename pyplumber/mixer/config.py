@@ -8,6 +8,8 @@ the same scene gets alias names (``id#2``, ``id#3``...) that share its frames.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
 import json
 import math
 import re
@@ -30,7 +32,9 @@ WORKING_FORMATS = ("nv12", "p010le", "p210le")
 # patched hwupload_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it),
 # or one raw_video_file_cuda node that reads each picture into page-locked memory and uploads it
 # from there (opt-in; no staging copy, one thread per source).
-RAW_UPLOADS = ("hwupload", "pinned", "direct")
+RAW_UPLOADS = ("hwupload", "pinned", "direct", "resident")
+INPUT_ROUTINGS = ("input", "demux")   # which node sends a file's video stream to its decoder
+SOURCE_FAN_OUTS = ("thread", "event_loop")   # what hands a source's frames to the compositors
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 193         # mixer_compositor active_inputs is a 193-bit pad mask (SourceMask, kSourceMaskBits)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 640
@@ -84,15 +88,16 @@ def earlier_browser_ring_size(value):
     return min(value, BROWSER_FRAME_QUEUE_MAX) if type(value) is int else value
 
 
-# The most frames one browser window can have out: Chromium's capture pool of eleven less the two
-# idle buffers it keeps.
+# The capture pool has eleven buffers; leave two free for capture and delivery.
+BROWSER_FRAME_QUEUE_DEFAULT = 9
 BROWSER_FRAME_QUEUE_MAX = 9
 
 
 def default_browser_frame_queue(fps):
-    """Frames one browser window may have out at once, at any rate: all nine. The mixer takes up to
-    three of them to return frames one per new frame (dmabuf_inputs.return_queue)."""
-    return BROWSER_FRAME_QUEUE_MAX
+    """Frames one browser window may have out at once, at any rate: all nine of the stock capture
+    pool. The mixer takes up to three of them to return frames one per new frame
+    (dmabuf_inputs.return_queue)."""
+    return BROWSER_FRAME_QUEUE_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -142,6 +147,7 @@ class Source:
     # storage with the source's colour matching the canvas, the source needs no colour filter.
     decoded_format: str = ""
     extra_hw_frames: int = 3       # CUarray application headroom, beyond codec/working surfaces
+    capture_cadence: str = "continuous"  # browser: "on_change" permits intentional static holds
 
     @property
     def decoder_params(self):
@@ -269,7 +275,13 @@ class MixerConfig:
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
     raw_upload: str = "hwupload"   # canvas.raw_upload: one of RAW_UPLOADS
+    input_routing: str = "input"   # canvas.input_routing: one of INPUT_ROUTINGS
     latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default default_latency_ms(fps)
+    input_poll_ms: Optional[int] = None  # canvas.input_poll_ms: how often a program compositor looks for frames
+    aux_input_poll_ms: Optional[int] = None  # canvas.aux_input_poll_ms: the same for the aux bus compositors
+    source_fan_out: str = "thread"       # canvas.source_fan_out: one of SOURCE_FAN_OUTS
+    decoded_frames_ahead: Optional[int] = None   # canvas.decoded_frames_ahead: decoded frames queued before pacing
+    raw_pool_frames: Optional[int] = None        # canvas.raw_pool_frames: device frames per direct/resident raw source
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBusConfig, ...] = ()
@@ -322,11 +334,15 @@ class MixerConfig:
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
                       "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps}
                      for b in self.aux_buses for r in b.renditions]
+        aliases = self.alias_counts
         return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
                 "preview_codecs": preview_codecs, **({"program_outputs": programs} if programs else {}),
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources) for kind in _SOURCE_KEYS},
+                # [source id, kind] per compositor input, in the order of the inputs: each source once
+                # per alias (application.py builds them so); telemetry deduplicates physical source IDs.
+                "inputs": [[s.id, s.kind] for s in self.sources for _ in range(aliases[s.id])],
                 # Of the "video" inputs, those declared HDR; an undeclared one counts as SDR.
                 "hdr_video": sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"]) for s in self.sources),
                 "direct": self.direct,
@@ -420,6 +436,9 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     decoded_format = s.get("decoded_format", "")
     if decoded_format not in ("", "nv12", "p010le") or decoded_format and (kind != "video" or source_filter):
         raise ConfigError(f"{where}: decoded_format is nv12 or p010le, on a video source without a filter")
+    cadence = s.get("capture_cadence", "continuous")
+    if cadence not in ("continuous", "on_change") or "capture_cadence" in s and kind != "browser":
+        raise ConfigError(f"{where}: capture_cadence must be continuous or on_change on a browser source")
     hold_last_frame = s.get("hold_last_frame", True)
     if not isinstance(hold_last_frame, bool) or "hold_last_frame" in s and kind != "browser":
         raise ConfigError(f"{where}: hold_last_frame must be a boolean on a browser source")
@@ -438,7 +457,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
         raise ConfigError(f"{where}: {e}") from e
     return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)),
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
-                  loop=bool(s.get("loop", True)), hold_last_frame=hold_last_frame, filter_graph=source_filter,
+                  loop=bool(s.get("loop", True)), capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
                   decoded_format=decoded_format,
                   transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,
@@ -529,6 +548,13 @@ def _unique(items: List[Any], where: str, label: str = "id") -> None:
         raise ConfigError(f"{where}: duplicate {label} '{items[-1].id}'")
 
 
+def _optional_canvas_count(canvas: dict, key: str, minimum: int, unit: str) -> Optional[int]:
+    value = canvas.get(key)
+    if value is not None and (type(value) is not int or value < minimum):
+        raise ConfigError(f"canvas.{key} must be a whole number of {unit}, {minimum} or more")
+    return value
+
+
 def parse(doc: Dict[str, Any]) -> MixerConfig:
     for key in ("canvas", "sources", "scenes"):
         if key not in doc:
@@ -548,6 +574,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     raw_upload = canvas.get("raw_upload", "hwupload")
     if raw_upload not in RAW_UPLOADS:
         raise ConfigError(f"canvas.raw_upload must be one of {', '.join(RAW_UPLOADS)}")
+    input_routing = canvas.get("input_routing", "input")
+    if input_routing not in INPUT_ROUTINGS:
+        raise ConfigError(f"canvas.input_routing must be one of {', '.join(INPUT_ROUTINGS)}")
     latency_ms = canvas.get("latency_ms")
     if latency_ms is not None:
         try:
@@ -556,6 +585,13 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             raise ConfigError("canvas.latency_ms must be a number of milliseconds") from None
         if not 0 <= latency_ms < 6000 / fps:
             raise ConfigError(f"canvas.latency_ms must be at least 0 and below six frames ({6000 / fps:.1f} ms at {fps} fps)")
+    source_fan_out = canvas.get("source_fan_out", "thread")
+    if source_fan_out not in SOURCE_FAN_OUTS:
+        raise ConfigError(f"canvas.source_fan_out must be one of {', '.join(SOURCE_FAN_OUTS)}")
+    raw_pool_frames = _optional_canvas_count(canvas, "raw_pool_frames", 1, "frames")
+    decoded_frames_ahead = _optional_canvas_count(canvas, "decoded_frames_ahead", 1, "frames")
+    input_poll_ms = _optional_canvas_count(canvas, "input_poll_ms", 0, "milliseconds")
+    aux_input_poll_ms = _optional_canvas_count(canvas, "aux_input_poll_ms", 0, "milliseconds")
     try:
         out_color = declared_color(canvas) or Color()
         out_color.validate_format(working_format)
@@ -633,7 +669,10 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     cfg = MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
                        browser_frame_queue=doc.get("browser_frame_queue", earlier_browser_ring_size(doc.get("browser_ring_size"))),
                        max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
-                       initial_scene=initial, working_format=working_format, raw_upload=raw_upload, latency_ms=latency_ms, out_color=out_color,
+                       initial_scene=initial, working_format=working_format, raw_upload=raw_upload, input_routing=input_routing,
+                       latency_ms=latency_ms, input_poll_ms=input_poll_ms, aux_input_poll_ms=aux_input_poll_ms,
+                       source_fan_out=source_fan_out, decoded_frames_ahead=decoded_frames_ahead,
+                       raw_pool_frames=raw_pool_frames, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))
@@ -798,15 +837,19 @@ def load(path: str, *, max_compositor_layers: Optional[int] = None) -> MixerConf
     return parse(doc)
 
 
+def _ffprobe_video(ffprobe: str, path: str, entries: str, output_format: str) -> str:
+    """ffprobe's *entries* of the first video stream of *path*, printed as *output_format*."""
+    return subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                           f"stream={entries}", "-of", output_format, path],
+                          capture_output=True, text=True, timeout=30).stdout
+
+
 def probe_video_size(path: str) -> Tuple[int, int]:
     """Width and height of the first video stream, via ffprobe or, failing that, ffmpeg -i."""
     ffprobe, ffmpeg = shutil.which("ffprobe"), shutil.which("ffmpeg")
     text = ""
     if ffprobe:
-        out = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
-                              "stream=width,height", "-of", "csv=p=0", path],
-                             capture_output=True, text=True, timeout=30)
-        text = out.stdout.strip().replace(",", "x")
+        text = _ffprobe_video(ffprobe, path, "width,height", "csv=p=0").strip().replace(",", "x")
     elif ffmpeg:
         out = subprocess.run([ffmpeg, "-hide_banner", "-i", path], capture_output=True, text=True, timeout=30)
         match = re.search(r"Video:.*?\b(\d{2,5})x(\d{2,5})\b", out.stderr)
@@ -817,6 +860,55 @@ def probe_video_size(path: str) -> Tuple[int, int]:
     if not match:
         raise ConfigError(f"cannot probe the size of '{path}'")
     return int(match.group(1)), int(match.group(2))
+
+
+def probe_video_stream(path: str) -> Dict[str, Any]:
+    """The first video stream's {"codec" (FFmpeg's name, such as "hevc"), "width", "height", "fps"}, via ffprobe."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise ConfigError(f"ffprobe not found to probe '{path}'")
+    streams = json.loads(_ffprobe_video(ffprobe, path, "codec_name,width,height,avg_frame_rate,r_frame_rate",
+                                        "json") or "{}").get("streams") or [{}]
+    stream = streams[0]
+    # A container without an average rate reports 0/0; the stream's base rate is the frame rate then.
+    rate = next((Fraction(r) for r in (stream.get("avg_frame_rate"), stream.get("r_frame_rate"))
+                 if re.fullmatch(r"[1-9]\d*/[1-9]\d*", r or "")), None)
+    if not stream.get("codec_name") or not stream.get("width") or not stream.get("height") or rate is None:
+        raise ConfigError(f"cannot probe the video stream of '{path}'")
+    return {"codec": stream["codec_name"], "width": stream["width"], "height": stream["height"], "fps": float(rate)}
+
+
+PROBE_WORKERS = 8   # ffprobe processes decode_load runs at once
+
+
+def decode_load(sources, probe=None) -> Dict[str, Any]:
+    """What the GPU decoders do for a show: each "video" source decodes every frame of its file at the
+    file's own rate (raw and browser sources decode nothing). {"count", "fps", "mpix_s", "by_codec":
+    [{"codec", "sources", "fps"}, most sources first]}, from one probe of each source's stream (*probe*,
+    probe_video_stream by default); one that fails raises, so no total ever leaves a source out."""
+    probe = probe or probe_video_stream
+    with ThreadPoolExecutor(PROBE_WORKERS) as pool:
+        streams = list(pool.map(probe, [s.location for s in sources if s.kind == "video"]))
+    return {"count": len(streams), "fps": round(sum(s["fps"] for s in streams), 2),
+            "mpix_s": round(sum(s["width"] * s["height"] * s["fps"] for s in streams) / 1e6, 2),
+            "by_codec": _by_codec(((s["codec"], s["fps"]) for s in streams), "sources")}
+
+
+def encode_by_codec(renditions, working_format: str) -> List[Dict[str, Any]]:
+    """The NVENC sessions a show's encoded outputs (*renditions*) open and the frames they encode per
+    second, by codec, most sessions first. Codecs are named like decode_load's ("h264", "hevc")."""
+    return _by_codec((((r.codec or default_codec(working_format)).removesuffix("_nvenc"), r.fps) for r in renditions),
+                     "sessions")
+
+
+def _by_codec(streams, count_key: str) -> List[Dict[str, Any]]:
+    """[{"codec", *count_key*, "fps"}] of (codec, fps) *streams*, the codec with the most first."""
+    totals: Dict[str, Tuple[int, float]] = {}
+    for codec, fps in streams:
+        count, total = totals.get(codec, (0, 0))
+        totals[codec] = (count + 1, total + fps)
+    return [{"codec": codec, count_key: count, "fps": round(fps, 2)}
+            for codec, (count, fps) in sorted(totals.items(), key=lambda item: (-item[1][0], item[0]))]
 
 
 def with_probed_sizes(cfg: MixerConfig, probe=probe_video_size) -> MixerConfig:

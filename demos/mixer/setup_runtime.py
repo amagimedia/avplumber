@@ -17,7 +17,7 @@ DEMO_DIR = Path(__file__).resolve().parent
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
-                        encodes={}, dsk=[], clean_feed=False, extra_aux=0)
+                        encodes={}, dsk=[], clean_feed=False, extra_aux=0, browser_motion="static")
 
 
 
@@ -45,12 +45,17 @@ def current_settings(profile, settings):
     encodes = {**programs, "extra": dict(defaults["aux"]), **encodes}
     encodes = {o: {"codec": "hevc_nvenc" if o == "hdr" else "h264_nvenc", **e} if isinstance(e, dict) else e
                for o, e in encodes.items()}
-    return {"extra_aux": 0, **{k: v for k, v in settings.items() if k not in ("browser_frame_queue", "browser_ring_size", "bitrate_kbps")},
+    return {"extra_aux": 0, "browser_motion": "static",
+            **{k: v for k, v in settings.items() if k not in ("browser_frame_queue", "browser_ring_size", "bitrate_kbps")},
             "encodes": encodes}
 
 
 def extra_aux_limit(profile, cfg, encodes):
     return output_limit(profile, cfg, encodes, reserve_clean=True)
+
+
+def browser_limit(profile, fps):
+    return profile.get("browser_windows_by_fps", {}).get(fps, profile["browser_windows"])
 
 
 def source_limit(profile, fps, bit_depth=8, chroma="420"):
@@ -59,7 +64,7 @@ def source_limit(profile, fps, bit_depth=8, chroma="420"):
     pair (8-bit 4:2:2) is refused by the mode checks in recipe_for."""
     profile = for_mode(profile, bit_depth, chroma)
     total = int(profile["sources"][fps] * profile["mode_share"].get(f"{bit_depth}:{chroma}", 1.0))
-    return min(total, profile["nvdec_decodes"][fps] + profile["browser_windows"] + profile["raw_upload_units"][fps]
+    return min(total, profile["nvdec_decodes"][fps] + browser_limit(profile, fps) + profile["raw_upload_units"][fps]
                + (profile["hlg_v210"] if chroma == "422" else 0))
 
 
@@ -70,7 +75,7 @@ def source_counts(profile, total, weights, fps=25, reserved_browsers=0):
     # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
     for indices, costs, limit, name in (
             ((2, 3), (1, 1), profile["hlg_v210"], "4:2:2 upload"),
-            ((4,), (1,), profile["browser_windows"] - reserved_browsers, "Browser"),
+            ((4,), (1,), browser_limit(profile, fps) - reserved_browsers, "Browser"),
             ((0, 1), (1, 1), profile["nvdec_decodes"][fps], "Combined NVDEC"),
             ((5, 6), (1, 2), profile["raw_upload_units"][fps], "Raw 4:2:0 upload units")):
         group = [(i, cost) for i, cost in zip(indices, costs) if i < len(weights)]
@@ -102,6 +107,7 @@ def recipe_for(profile, settings):
                          ("fps", (25, 30, 50, 60)),
                          ("bit_depth", (8, 10)),
                          ("chroma", ("420", "422")),
+                         ("browser_motion", prepare_demo.BROWSER_MOTIONS),
                          ("layout", ("balanced", "grids", "fullscreen"))):
         if settings[key] not in choices or key in ("fps", "bit_depth") and type(settings[key]) is not int:
             raise ValueError(f"Unsupported {key}")
@@ -147,6 +153,7 @@ def recipe_for(profile, settings):
     _check_hdr_decodes(profile, counts[1], settings["fps"])
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
+    recipe["canvas"].update(profile.get("canvas", {}))
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
     def program_encode(output):
         encode = settings["encodes"][output]
@@ -172,7 +179,7 @@ def recipe_for(profile, settings):
     for source, count in zip(recipe["inputs"], counts):
         source["weight"] = count
         if source["kind"] == "browser":
-            source.update(width=width, height=height)
+            source.update(width=width, height=height, motion=settings["browser_motion"])
     layouts = {"fullscreen": 2}
     mode = settings["layout"]
     if mode != "fullscreen":
@@ -204,6 +211,9 @@ def _check_hdr_decodes(profile, count, fps):
 
 
 class SetupRuntime(BaseSetupRuntime):
+    # Synthetic clips use NVENC on the same GPU as the current show.
+    prepare_while_running = False
+
     def __init__(self, media_dir, recipe_path, bridge, instance_type, *args, **kwargs):
         instance_type = InstanceType(instance_type)
         super().__init__(media_dir, recipe_path, bridge, INSTANCE_PROFILES[instance_type], *args,

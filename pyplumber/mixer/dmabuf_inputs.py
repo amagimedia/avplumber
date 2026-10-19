@@ -24,7 +24,10 @@ IMPORT_IDLE_MS = 10_000
 # The return queue: frames the mixer has finished with wait here and go back to the browser one
 # per new frame (ipc_dmabuf_source `return_queue`), so the browser's pool gets one buffer back for
 # each it hands out and stops destroying and allocating buffers. It is part of the window's frame
-# queue, which the browser service counts as frames not yet returned.
+# queue, which the browser service counts as frames not yet returned (its `ringSize`), and which
+# must leave two buffers free in Chromium's capture pool: Chromium lends
+# eleven buffers per window and the browser needs two of them for the frame being delivered
+# and the one in its paint handler.
 RETURN_QUEUE = 3
 # Frames of the queue left to the mixer's own pipeline before any go to the return queue.
 MIN_FRAMES_IN_FLIGHT = 3
@@ -62,7 +65,8 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
     alpha is premultiplied; the consumer tags it (the mixer does in its colour node).
     Geometry and format come from each frame, and ``smooth_timestamps`` already stamps
     in 1/*fps*, so the chain has no format or time-base nodes of its own.
-    *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted)."""
+    *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted).
+    """
     if browser_frame_queue is None:
         browser_frame_queue = default_browser_frame_queue(fps)
     drm_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda"))
@@ -74,18 +78,20 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         source["return_queue"] = return_queue(browser_frame_queue)
     nodes = [
         api.IpcDmabufSource(source),
-        # zero_copy: the compositor samples the mapped DMA-BUF directly; no 8 MB copy per frame.
-        # Keep the recycling allocation pool registered, including live frames.
+        # The compositor samples the mapped DMA-BUF directly. Keep the recycling allocation
+        # pool registered, including live frames.
         # The ring bounds outstanding frames, not retired Chromium allocations:
         # expire idle imports instead of pinning them indefinitely. Lookups refresh
         # returning allocations before expiry. A page that paints now and then returns
         # to an allocation seconds later, not ring cycles later: an import dropped in
         # between is registered again on its next use, and each release takes the CUDA
         # library's context lock exclusively, stalling every other thread in the context.
+        # Three spare registrations cover pool rotation without retaining dozens of
+        # retired full-resolution allocations per page during startup.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
-                            "auto_restart": "group", "zero_copy": True,
-                            "max_imports": max(32, browser_frame_queue),
+                            "auto_restart": "group",
+                            "max_imports": browser_frame_queue + 3,
                             "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
@@ -184,6 +190,12 @@ def refresh_windows(base_url: str, ids: List[str]) -> None:
     """Reload pages so ones that only paint on load paint again into a connected chain."""
     for name in ids:
         rest_request(base_url, "POST", "/window/refresh", {"id": name})
+
+
+def paint_windows(base_url: str, ids: List[str], enabled: bool) -> None:
+    """Pause capture during GPU warm-up; resuming also invalidates static pages."""
+    for name in ids:
+        rest_request(base_url, "POST", "/window/paint", {"id": name, "enabled": enabled})
 
 
 def wait_for_sockets(paths: List[str], timeout_sec: float) -> None:
