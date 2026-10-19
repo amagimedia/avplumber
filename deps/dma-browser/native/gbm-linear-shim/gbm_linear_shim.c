@@ -73,14 +73,8 @@ static uint32_t rewrite_usage(const char* function_name,
                               uint32_t height,
                               uint32_t format,
                               uint32_t flags) {
-  if (!env_enabled("GBM_LINEAR_SHIM", true)) {
-    return flags;
-  }
-
-  uint32_t rewritten = flags & ~GBM_BO_USE_LINEAR;
-  if (env_enabled("GBM_LINEAR_SHIM_ADD_SCANOUT", true)) {
-    rewritten |= GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
-  }
+  const uint32_t rewritten =
+      (flags & ~GBM_BO_USE_LINEAR) | GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
 
   if (log_enabled()) {
     fprintf(stderr,

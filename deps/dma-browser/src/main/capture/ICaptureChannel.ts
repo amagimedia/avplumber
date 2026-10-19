@@ -11,5 +11,7 @@ export interface CaptureStats {
   readonly releasedFrameCount: number;
   readonly retainedFrameCount: number;
   readonly quarantinedFrameCount: number;
+  /** Paints Chromium numbered but never delivered (gaps in metadata.frameCount). */
+  readonly paintsSkipped: number;
   readonly lastPaintTsMs: number | null;
 }

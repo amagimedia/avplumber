@@ -22,6 +22,7 @@ function fakeWindow(config: WindowConfig, overrides: Partial<IManagedWindow> = {
       releasedFrameCount: 0,
       retainedFrameCount: 0,
       quarantinedFrameCount: 0,
+      paintsSkipped: 0,
       lastPaintTsMs: null,
     },
   };
@@ -29,6 +30,7 @@ function fakeWindow(config: WindowConfig, overrides: Partial<IManagedWindow> = {
     id: config.id,
     create: vi.fn().mockResolvedValue(undefined),
     refresh: vi.fn(),
+    paint: vi.fn(),
     update: vi.fn(),
     show: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),

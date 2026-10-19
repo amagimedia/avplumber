@@ -42,5 +42,7 @@ export interface WindowStats {
   readonly releasedFrameCount: number;
   readonly retainedFrameCount: number;
   readonly quarantinedFrameCount: number;
+  /** Paints Chromium skipped before the app saw them, from gaps in the capture counter. */
+  readonly paintsSkipped: number;
   readonly lastPaintTsMs: number | null;
 }

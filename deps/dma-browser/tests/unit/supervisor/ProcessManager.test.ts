@@ -18,6 +18,7 @@ function snapshot(config: WindowConfig): WindowSnapshot {
       releasedFrameCount: 0,
       retainedFrameCount: 0,
       quarantinedFrameCount: 0,
+      paintsSkipped: 0,
       lastPaintTsMs: null,
     },
   };
@@ -79,6 +80,10 @@ class FakeWorker implements BrowserWorker {
   }
 
   public async refresh(id: string): Promise<WindowSnapshot> {
+    return this.require(id);
+  }
+
+  public async paint(id: string, _enabled: boolean): Promise<WindowSnapshot> {
     return this.require(id);
   }
 

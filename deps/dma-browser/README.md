@@ -9,10 +9,6 @@ workers for the requested maximum. All workers remain behind the same REST API
 on `127.0.0.1:9009`. The project configuration uses Electron 44 / Chromium
 152.
 
-To build the runtime-gated Electron native-handle change yourself, use the
-patch and script documented in
-[DMA-BUF integration](../../doc/dmabuf.md#shim-and-chromium-patches).
-
 ## Quick start
 
 ```bash
@@ -24,17 +20,17 @@ npm start                # on NVIDIA, use the setup below before launching
 ### NVIDIA GPUs
 
 The default install downloads stock Electron from its official releases.
-Build and enable the supplied GBM shim on the NVIDIA host:
+Build the supplied GBM shim on the NVIDIA host:
 
 ```bash
 npm run rebuild:shim
-LD_PRELOAD="$PWD/native/gbm-linear-shim/libgbm_linear_shim.so" \
-GBM_LINEAR_SHIM=1 GBM_LINEAR_SHIM_ADD_SCANOUT=1 \
 DMA_BROWSER_FORCE_NVIDIA=1 npm start
 ```
 
-The shim is native to the host CPU architecture. `bin/run.sh` applies the
-Wayland, EGL/GBM, and DRM settings; hardware video decoding stays disabled.
+On NVIDIA, `bin/run.sh` always preloads the shim and refuses to start when it is
+not built. The shim is native to the host CPU architecture. `bin/run.sh` also
+applies the Wayland, EGL/GBM, and DRM settings; hardware video decoding stays
+disabled.
 
 Two switches keep the GPU process stable, both on by default:
 
@@ -46,9 +42,8 @@ Two switches keep the GPU process stable, both on by default:
 - `DMA_BROWSER_DISABLE_GPU_CRASH_LIMIT=0` turns off
   `--disable-gpu-process-crash-limit`. Without it, a third GPU-process crash
   within five minutes of the last makes Chromium quit the worker.
-The [shared Docker stack](../../docker-compose/dmabuf/compose.yaml) builds and enables
-the shim automatically. Alternatively, use the patched Electron build linked
-above without the shim.
+The [shared Docker stack](../../docker-compose/dmabuf/compose.yaml) builds the shim
+into the image.
 
 ## Process grouping
 
@@ -105,12 +100,35 @@ the worker's point of the period.
 | POST   | `/window/close`     | `{ id }`                                                          |
 | GET    | `/window/close/all` |                                                                   |
 | POST   | `/window/refresh`   | `{ id }`                                                          |
+| POST   | `/window/paint`     | `{ id, enabled }`                                                 |
 | POST   | `/window/update`    | `{ id, url }`                                                     |
 | POST   | `/window/show`      | `{ id, show }`                                                    |
 | GET    | `/status`           |                                                                   |
 | POST   | `/workers/recover`  | `{ ids }`                                                         |
+| GET    | `/metrics/cpu`      |                                                                   |
 
-Frames go to `/tmp/dma-page/{id}.sock` (dmabuf FD + 48-byte TexInfo header).
+`/window/paint` pauses or resumes offscreen painting without reloading the page.
+Resuming also requests a fresh paint, including for static pages. A mixer can
+pause after receiving its first usable frame while its output surfaces warm up,
+then resume before releasing output.
+
+`paintsSkipped` counts paints Chromium numbered but never delivered: the gaps in
+the paint textures' `textureInfo.metadata.frameCount` (the capturer's
+`capture_counter`). The capturer's own "capture skipped" (too many frames
+outstanding) takes no number and is not counted. A
+counter that starts low again (a reload) is a new baseline, not a gap.
+
+`/metrics/cpu` reads `/proc` for this service's own process tree (Linux only; 500 elsewhere) and
+returns the CPU used since the previous call, in percent of one core: by Chromium process type
+(`processes`), the GPU process split into viz compositor, GPU main (the thread whose tid is the
+pid), IO and other threads (`gpuThreads`), and cores' worth used with a per-core split
+(`cores`, an approximation: GPU-process threads are charged to the core each last ran on, other
+processes to their main thread's). To stay cheap it reads one stat file per process, each
+command line once, and thread files only for GPU processes. The first call only takes the
+baseline; calls within 500 ms of a sample return that sample again. The mixer polls every 5 s.
+
+Frames go to `/tmp/dma-page/{id}.sock` (dmabuf FD + 48-byte TexInfo header; layout in
+`addons/fdpass/texinfo.h`).
 Audio (when `audio: true`) goes to `/tmp/dma-page/{id}-audio.sock` (raw interleaved float32 PCM).
 
 A main-frame load failure, a load exceeding `DMA_BROWSER_LOAD_WATCHDOG_MS` (30 s by default), or a
@@ -133,8 +151,8 @@ unacknowledged textures, pauses the affected source, and reports
 `quarantinedFrameCount` in `/status`. After stopping the affected consumer,
 restart its browser worker with `POST /workers/recover`; reopening the window
 alone is refused. Other windows in that worker also restart, so `ids` must list
-all of them. This protocol controls buffer reuse; it does not supply a
-producer-ready GPU fence.
+all of them. This protocol controls buffer reuse. Stock Electron waits for its
+GPU work before delivering `paint`.
 
 `txFrameCount` counts paints delivered to at least one consumer. `droppedFrames`
 counts paints with no consumer or any failed delivery, so a partial broadcast
@@ -143,17 +161,19 @@ increments both counters. `fdpass_backpressure`, `fdpass_disconnected`, and
 
 The DMA-BUF socket is bidirectional. The browser retains every transmitted
 shared texture until the consumer acknowledges its frame number. The maximum
-sent-but-unacknowledged count is the window's `ringSize`, else
-`DMA_BROWSER_DMABUF_POOL_SIZE` (default 11; both range 1–64). If that limit is
-reached, the newest paint is dropped and released; an older in-flight texture is
-never released early. `/status` reports `releasedFrameCount` and
+sent-but-unacknowledged count is the window's `ringSize`,
+else `DMA_BROWSER_DMABUF_POOL_SIZE` (default 9, range 1–64): if that limit is
+reached, the newest paint is dropped and released
+(`retained_pool_full`); an older in-flight texture is never released early. A
+consumer that disconnects or crashes has every retained texture released or
+quarantined by the same release path. `/status` reports `releasedFrameCount` and
 `retainedFrameCount` for each window.
 
 `ringSize` bounds frames in flight, not allocations. The buffers belong to
-Chromium's capture pool, which keeps at most two idle buffers: when frames come
-back in bunches it destroys the surplus and allocates new buffers later, each a
-new DMA-BUF. A consumer that needs a stable set of allocations returns one frame
-for each frame it receives (avplumber's `ipc_dmabuf_source` `return_queue`).
+Chromium's capture pool, which keeps at most two idle buffers
+and destroys the surplus when frames come back in bunches, allocating new DMA-BUFs later. A consumer that
+needs a stable set of allocations from Electron returns one frame for
+each frame it receives (avplumber's `ipc_dmabuf_source` `return_queue`).
 
 ## Layout
 
