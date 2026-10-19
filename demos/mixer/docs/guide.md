@@ -45,8 +45,44 @@ select **Viewers 2**, then **Program preview** in one viewer and **Program dirty
 in the other. The first contains PVW, PGM and eight scene slots; the second
 shows the program with its enabled keys. Viewer selection is local to the
 browser. Scene takes, key buttons, AUX paging and AUX layout controls operate
-the running mixer. In Direct mode, selecting a scene takes it immediately
-using the selected transition; select Cut for the cut-only workflow.
+the running mixer.
+
+The take bar follows a vision switcher's transition area. A scene tile or **1–9**
+selects Preview; with **Direct cut / D** a pick cuts straight to Program. **Cut / C**
+cuts Preview to Program and completes a running transition; **Auto / Space** runs
+the selected transition, **Fade / F** at its rate or a wipe clip
+(**W**). Pressed again during its own mix it does what the menu beside it says:
+**Halt** holds the mix and once more runs it on, **Complete** finishes it at once. The **lever** mixes
+by hand from the end it rests at: the far end completes the mix and is where the
+next one starts, back at its start the mix is cancelled. After an AUTO or CUT ended
+a mix the lever left half way, it acts again once moved to an end. The bar under
+the lever shows the transition's progress. Rates read as on a switcher panel:
+frames below a second (`15f`), seconds:frames from one second (`1:15`). Type
+either form, or frames alone (`45` shows as `1:15`); the small arrows beside it, the
+arrow keys and the mouse wheel over it step a frame.
+
+**Next** in the Preview box chooses what the next take changes, as on a GV panel:
+**BKGD** the scene, **1–4** the keys, numbered as in the Keys card, lit while
+armed. A red dot marks a key on air, which an armed take removes. With BKGD the
+armed keys go with the background transition on its clock: they mix at its rate,
+hold when it holds, follow the lever, cut with a cut and switch at a wipe clip's
+cut point; a cancelled transition leaves them as they were, and they stay armed
+for the following takes. Without BKGD, Cut cuts the armed keys and Auto fades them
+at the Fade rate; the lever, which mixes the background only, is off. BKGD is
+the page's own; the armed keys are the mixer's, the same for every controller.
+
+Each key in the Keys card goes on or off air at its own rate, shown on its tag
+(`12f`, `CUT`) and kept by the mixer for every controller, with the Fade curve;
+Shift+click cuts it whatever the rate. Clicking the tag edits the rate in place
+(frames, seconds:frames, or `0` / `c` to cut; Enter or leaving it sets it, Escape
+keeps the old one). Its red border is the tally of the last frame the keyer
+emitted, never a pending command; its number turns amber while it is armed. **K**
+changes every key, each at its own rate: all off if any is on, otherwise all on.
+**FTB** in the Program box fades the keyed program to black at the Fade rate and
+pressed again back; it flashes while
+Program is black, and the clean feed is never faded. The slots card edits the
+scene slots of the multiview last clicked (marked "· slots" when two are on screen):
+click a slot, then a scene, or **Shift+1–8**.
 
 Each viewer must support its output codec. The recorded L4 show uses HEVC for
 Program preview and H.264 for dirty Program; an H.264-capable browser alone

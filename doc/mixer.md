@@ -71,11 +71,42 @@ callback. The upload graph stamps tags without adding a node. Configured
 geometry transforms preserve frame properties. Other integrations must uphold
 the promise themselves; the default is `color_tagged=False`.
 
-The captured 188-source show (plus four browser keys) had 152 file pacers and
-32 eligible raw colour filters. These two changes remove 184 nodes and queues
+The captured 188-source show (plus four browser keys) had 152 per-input rate-normalization
+nodes and 32 eligible raw colour filters. These two changes remove 184 nodes and queues
 from that configuration. This is a derived count, not a newly measured deployed
 graph or a throughput claim. See the [cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 for revision-specific evidence and the ranked optimization list.
+
+## Input CPU and scheduling
+
+The config-driven mixer defaults to `canvas.input_routing: "input"`: `input_rec`
+routes packets straight to decoder edges, eliminating a separate demux node,
+thread and intermediate packet queue per source. It requests `frame_metadata: []`
+because its input chain does not consume those dictionary entries. Shared input
+helpers keep the older metadata and demux defaults for other applications;
+speed control and synchronized replay consumers may still require `frame_ts`.
+This selects `input_rec` dictionary entries, not colour tags, HDR side data or
+the capture identities used to count source delivery.
+
+NVDEC input chains set libavcodec `threads=1` to avoid automatic frame-thread pools. The pinned
+FFmpeg 9 series also skips HEVC software-table clears when hardware decoding;
+that patch leaves software decoding unchanged. `decoded_frames_ahead` bounds the
+queue before pacing, while `extra_hw_frames` supplies decoder surface headroom.
+They are separate limits: reducing the latter too far can exhaust decode surfaces.
+
+The `nvidia_l4_cuarray` profile selects `source_fan_out: "event_loop"`,
+`decoded_frames_ahead: 1`, and 8 ms Program/AUX input polling. Fan-out then runs
+on the source's pacing loop instead of a dedicated thread. Its nonblocking node
+requires `drop: true`: a full destination loses that destination's frame rather
+than blocking the shared loop. Coalesced edge signals and event-loop registrations
+reduce redundant wake-ups; compositor polling reduces scans between deadlines.
+These changes do not remove decoder threads or relax frame deadlines. Generic
+configuration still defaults to threaded fan-out and event-driven input waits.
+
+For raw loops the L4 profile selects `resident` uploads and ten device frames per
+source. Resident mode avoids repeated host reads, retains page-locked host memory,
+and still uploads every displayed frame. Treat these as workload settings:
+qualify transitions, source repeats/skips and GPU waits alongside CPU savings.
 
 ## Shared GUI and setup
 
@@ -160,10 +191,10 @@ thread priority), and `gui.web` (HTTP and CLI). Existing public imports from
 | `src/nodes/mixer_selector.cpp` | commits immediate takes on input frames; advances fades and wipes by media PTS |
 | `src/mixer/MixerGraph.hpp` | weak graph handles resolved outside frame processing, avoiding shutdown lock inversion |
 | `src/mixer/Playout.hpp` | clocked playout: per-input queues, deadlines, frame pick (unit-tested) |
-| `src/mixer/primitives/` | headers with no graph or CUDA dependency: `TickGrid`, `Cadence`, `MonotonicClock`, `CutLatency`, `CutLatencyProbe`, `Snapshot`, `OutputSnapshot`, `MixerState`, `TransitionGuard`, `PreviewFollow` (unit-tested where they carry logic), plus the compositor geometry headers below |
+| `src/mixer/primitives/` | headers with no graph or CUDA dependency: `TickGrid`, `Cadence`, `MonotonicClock`, `CutLatency`, `CutLatencyProbe`, `TraceRing`, `MixerState`, `TransitionGuard`, `PreviewFollow` (unit-tested where they carry logic), plus the compositor geometry headers below |
 | `src/nodes/mixer_compositor.cpp`, `mixer_keyer.cpp` | mixer-owned compositor nodes: the clocked playout of the scene slots, wipe and AUX buses (`mixer_compositor`); the DSK (`mixer_keyer`) |
 | `src/nodes/hwaccel/cuda_rect_compositor.hpp`, `cuda_rect_overlay.cpp` | the compositors' shared base (canvas, layers, control, drawing one frame); the generic unclocked `cuda_rect_overlay` |
-| `src/nodes/mixer_snapshot.cpp`, `mixer_pvw_follow.cpp` | mixer-owned nodes: the output hold and slot substitution; an AUX bus's composition writer, which draws its PVW cells on the bus frame the bus's `pvw_align` picks ([AUX bus follower](#aux-bus-follower)) |
+| `src/nodes/mixer_pts_gate.cpp`, `mixer_pvw_follow.cpp` | mixer-owned nodes: the gate after each scene slot and before the outputs, which forwards frames in increasing pts order without blocking its producer; an AUX bus's composition writer, which draws its PVW cells on the bus frame the bus's `pvw_align` picks ([AUX bus follower](#aux-bus-follower)) |
 | `src/nodes/hwaccel/cuda_rect_draw.{hpp,cpp}`, `cuda_rect_scale.cu` | kernel module, canvas clear, per-layer draw |
 | `src/mixer/primitives/compositor_layers.hpp`, `pixel_layout.hpp`, `compositor_geometry.hpp` | layer parsing and draw-op resolution, format geometry, placement (pure; geometry and layout unit-tested) |
 
@@ -270,8 +301,35 @@ Applications that need immediate transitions must preheat the complete path:
 3. Start both compositors with the scaling kernel loaded and fixed output pools.
 4. Temporarily feed both compositor outputs to `transition_cuda`, wait for a
    transition output frame, then restore steady routing.
-5. Open the output gate for fresh frames, start the encoder/output group and
-   declare the graph ready.
+5. Open the output gate for fresh frames, start the encoder/output group, wait
+   for the show to be stable, release the held outputs and declare the graph
+   ready.
+
+Browser pages pause painting after their individual first usable frames arrive.
+The mixer repeats those frames while output pools and encoders warm up, retires
+unused imports, then resumes painting before checking stability. This bounds
+capture churn while other inputs are still starting. Painting also resumes if
+startup fails.
+
+Going on air: every Janus output is built held (`output` `hold`): its chain
+runs, so the encoder opens, and nothing is sent, so a deadline missed while the
+show comes up is counted and never seen. Once the last bus encodes, the
+application waits for `start_stable_sec` (`MixerOptions`, default 10;
+`--start-stable-sec`) in which no compositor missed a deadline and every bus
+and one program slot drew frames (a bus publishes its frame count every 60
+frames, so a shorter window waits for that); a miss starts the window again.
+Output drops are counted but do not restart it: while the GPU is time-shared
+with the browser every bus drops a few frames a minute, and no start would
+settle. After `start_stable_timeout_sec` (default 60;
+`--start-stable-timeout-sec`) the show goes on air unsettled: a warning names
+the compositor that kept counting or drew nothing. Either way, it resets every
+compositor's counters and releases all outputs together on a key
+frame, in that order, so what the counters say on air starts from zero and
+nothing on air is reset away. `mixer.startup` answers with how it went:
+`settled` (false after the timeout), `waited_sec`, `reason`, each compositor's
+`counters` at the release and the `warm_up` totals the reset discarded. Setup
+waits up to 180 s for the mixer's startup: the preheat and this wait share that
+budget.
 
 Sources feed the compositors directly after source normalization.
 Their scene layers use `dst_x`, `dst_y`, `dst_w`, `dst_h`, optional `crop`, and
@@ -298,6 +356,8 @@ mixer.cut {"mixer":"mixer","scene":"grid_4_page_0"}
 mixer.fade {"mixer":"mixer","scene":"grid_4_page_0","duration_sec":0.5}
 mixer.fade {"mixer":"mixer","scene":"grid_4_page_0","duration_sec":1,"color":"#000000"}
 mixer.wipe {"mixer":"mixer","scene":"grid_4_page_0","wipe_file":"<path>/wipe.mov"}
+mixer.lever {"mixer":"mixer","position":0.35,"duration_sec":0.5}
+mixer.lever {"mixer":"mixer","position":0.35,"wipe_file":"<path>/wipe.mov","span_ms":16.7}
 ```
 
 Cut, Fade and transparent media-file Wipe are supported. Fade uses the permanent
@@ -305,14 +365,80 @@ CUDA transition filter. The media wipe graph is predeclared. Decoding per take,
 the orchestrator starts it on the selected clip and stops it after the wipe.
 With the clip cache (`mixer.init` `wipe_cache_store` and `wipe_overlay`) the
 player group runs for the life of the graph: the clip player and the wipe
-compositor idle between wipes, and a take arms them in place (`play` on the
+compositor idle between wipes, and a take arms them in place (`scrub` on the
 `clip_cache` node, a reset and `active_inputs` on the compositor), so a wipe
-creates, starts or stops nothing. A `load` on the `clip_cache` node ends on the
+creates, starts or stops nothing. The clip follows the take's schedule as a
+mix's alpha does: AUTO's from the clip's first tick over its `duration_sec`,
+held and resumed by AUTO pressed again, the lever's as the lever moves it. A `load` on the `clip_cache` node ends on the
 decode chain's end-of-stream marker (`realtime` `forward_eof`), never on
 silence; its `status` names the clip still `loading`, and `forget` drops one.
-A new take can interrupt an ongoing
-transition using the current output picture; interrupting a wipe parks the
-chain the same way.
+`scrub` replays a cached clip at the frame a schedule (`start_ns`,
+`duration_ns`, `floor_ns`, `ceiling_ns`: the lever's ramp on the output clock)
+shows on each tick, holding either end until `stop`; sent without `path` it
+changes the schedule from its `floor_ns` on, earlier ticks keeping the one they
+had. It pushes each tick `scrub_delay_ms` (default 0; the mixer's graph sets the
+wipe compositor's `latency_ms` less one frame) after the tick begins, so the
+lever's wipe reaches the picture as soon as its mix would; `status` reports
+the clip's `length_ns`, `scrub` and `scrub_late`, the ticks it pushed too late
+and skipped.
+
+There is one transition, and a take pressed while it is on air acts on it, as
+the CUT and AUTO buttons of a vision switcher's M/E do (Grass Valley Kayenne
+behaviour); nothing is captured or frozen:
+
+| Take while a transition is on air | Result |
+|---|---|
+| `mixer.cut` | completes it at the next frame boundary: the preset's next ready frame goes to program; until then an AUTO for its scene is ignored |
+| `mixer.fade` (or `mixer.wipe`) for the scene of a crossfade, or of a wipe of the clip cache, on air | pauses it at its position (a wipe's clip on its frame), both sources moving; the next one resumes it from there |
+| `mixer.fade` or `mixer.wipe` for the scene of the lever's take on air | runs it on from where the lever has it, at AUTO's rate (a wipe's: its clip's own) |
+| `mixer.fade` for the scene of a wipe decoded per take on air | ignored; the wipe runs to its end |
+| any take, or `mixer.preview`, with another scene | replaces the preset picture under the running transition (as a preset-bus selection does), which then ends on that scene; a cut completes at once |
+| `mixer.interrupt` | cuts back to the program as it was before the transition |
+
+A take while a cut or transition is only being prepared, nothing of it on air
+yet, replaces it. `mixer.status` reports `transition_on_air`,
+`transition_paused`, `transition_manual`, `transition_progress` (at the newest
+program frame), `transition_duration_ms` and the `lever`.
+
+`mixer.lever` is a switcher's lever arm (T-bar) as a fader position in [0, 1],
+for a panel, a MIDI fader or the operator page (`/api/command` `lever`). From
+the end the lever rests at it starts a mix to Preview, held at the lever's
+progress with the same clamp a pause uses; the other end completes it and is
+where the next one starts; back at its start the mix is cancelled with Program
+and Preview unchanged. `duration_sec`, `curve` and `color` are the mix's, for
+AUTO: a fade take for the same Preview runs the lever's mix on from where the
+lever left it, and a cut completes it. While an AUTO, a cut or a wipe is on air
+the lever does nothing; a transition that ended away from the lever's far end
+leaves it inactive until it is brought to one of its ends, which becomes its
+start (`src/mixer/primitives/Lever.hpp`).
+
+With a `wipe_file` (a clip of the clip cache whose `wipe_cache` entry is
+`complete`; null or `""` mixes) the lever's take is a wipe of that clip instead:
+the clip's frame follows the lever forward and back (from the first position,
+below the clip's half until its overlay is on air), the background is Preview
+past the clip's half and Program before it, both ways, and AUTO runs it on at
+the clip's own rate (`transition_duration_ms` is the clip's length).
+`duration_sec`, `curve` and `color` are then ignored; decoding per take, the
+lever does not wipe, and a clip the cache does not hold is one error, the
+Preview kept. Each position moves the picture over `span_ms` (one frame to
+200 ms) when the controller sends it (the bridge's jitter pacing), else over the
+time since the previous position, one frame to 100 ms. An end is reached on the picture: the take
+completes or cancels on the program frame where the lever's ramp gets there,
+and positions arriving meanwhile only move the lever, so a late or repeated one
+never undoes that end; a take the lever ended leaves it engaged at that end,
+and a lever moved off it meanwhile starts the next take from there as it lands.
+The operator page's bridge sends the lever on a control connection of its own,
+never replaces an end position waiting to be sent but with the same end, and turns the page's `t_ms`
+(when it sampled the position) into `span_ms`, so positions delayed unevenly by
+the network land at the operator's own spacing.
+
+The keys selected for the next transition (the keyer's `prepare_inputs`)
+follow the background take's own clock, which the orchestrator publishes for
+the keyer (`TakeClock`): they mix, hold, follow the lever, cut with a cut and
+switch at a wipe clip's cut point (with the lever's wipe, both ways where its
+background does), and a cancelled take returns them to their state. Pausing re-sends only the filter's alpha with a clamped
+clock, so it costs nothing on the GPU. A replaced preset that never renders
+ends the transition through the take deadline, back to the program.
 
 A fade with `"color"` (opaque RGB such as `"#000000"`, in libavutil colour
 syntax) is a dip: program fades to that colour over the first half and the
@@ -327,8 +453,8 @@ Y 16 and white Y 235 (8-bit SDR), and on HLG white is graphics white (203 nits,
 only the picture still visible (none during the hold), so a dip costs no more
 than a crossfade: two launches per frame, no extra buffers or passes, and
 nothing while no transition runs. Readiness, timing, interruption and cleanup
-are the crossfade's; an interrupted dip keeps the picture it had reached,
-which at the midpoint is the solid colour.
+are the crossfade's; a paused dip holds the picture it had reached, which at
+the midpoint is the solid colour.
 
 After a completed take the preview is the scene that left program (OBS's
 "Swap Preview/Program Scenes After Transitioning", always on; a failed take,
@@ -350,6 +476,33 @@ and `missed_deadlines`, published every 60 output frames. When `mixer.init`
 names a `wipe_cache_store`, `wipe_cache` holds that clip cache's `bytes`,
 `budget_bytes` and `clips` (`path`, `frames`, `bytes`, `complete`).
 `mixer.scenes <name>` lists registered scenes.
+
+The application exposes `node.object.get mixer_delivery per_source` for source
+quality on the **keyed program output**, after normalization to the canvas frame
+rate so inserted repeats count too. It follows capture identities through
+retiming, held copies, compositing and both sides of a fade. `repeats`
+counts reuse beyond the source's native frame period; `dropped` counts capture
+IDs skipped while continuously on air. Aliases count once. Prewarm, off-air gaps
+and queue cleanup do not count. A producer restart establishes a new baseline.
+Browser wire IDs preserve known Chromium capture gaps and locally discarded paints,
+including those rejected by the sender's in-flight limit.
+For a source faster than the output, only skips beyond the normal rate-conversion
+allowance count; capture IDs alone cannot distinguish losses within that allowance
+from intentional sampling. Matching capture and output rates have no such allowance.
+The UI uses these counters, never the compositors' queue diagnostics. They measure
+source selection before encoding, not packet loss or playback at a remote viewer.
+For frame-by-frame diagnosis, set `mixer_delivery`'s `trace_source` object to a
+source ID, then read `trace`. It retains the last 256 program timestamps and
+capture identities for that source, without retaining pixel buffers. Set
+`trace_source` to an empty string to disable tracing and clear the history.
+
+Browser sources default to `capture_cadence: "continuous"`. Declare
+`"on_change"` for intentional static pages: reused captures then appear only as
+`static_holds`, while skipped new captures still count. The mixer never infers a
+static page from a stopped producer. The demo generator declares its static
+preset automatically. The CUDA transition filter needs the source-metadata
+patch in the bundled FFmpeg series to preserve both inputs' identities.
+
 
 The alpha media path decodes the wipe in software and uploads it to the mixer
 CUDA device. This is separate from the GPU-native program video path.
