@@ -42,7 +42,9 @@ For a remote host set `JANUS_HOST_IP=<host>`; allow TCP 7681/8080 and UDP
 20000–20100. Stop with `docker compose -f docker-compose/mixer/compose.yaml down`.
 
 Setup saves settings and generated assets in `media/`; applying changes pauses
-output while the mixer restarts. Keep that directory writable and mount it
+output before asset preparation and restarts the mixer afterward. Synthetic
+clip generation uses NVENC and must not compete with the live show for GPU
+memory. Cached clips are reused. Keep that directory writable and mount it
 whole: Setup atomically replaces the generated show. Capacity comes from the
 selected [instance profile](instance_profiles.py), not a universal source limit.
 
@@ -60,5 +62,5 @@ selected [instance profile](instance_profiles.py), not a universal source limit.
 - [Operator guide](docs/guide.md): CLI, TUI, Docker, proxy and tests.
 - [Capacity](docs/capacity.md) and [latency](docs/latency.md): scoped measurements and reproduction.
 - [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/): implementation and tuning notes.
-- [DMA-BUF integration](../../doc/dmabuf.md): shared browser services, shim and Chromium patches.
+- [DMA-BUF integration](../../doc/dmabuf.md): shared browser capture and the GBM shim.
 - [Mixer base API](../../doc/mixer.md): reuse `pyplumber.mixer.build_application` in other applications; no demo imports required.

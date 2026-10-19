@@ -32,6 +32,15 @@ It has the same parameters as the `input` node and some additional
 -   `timestamp_source` (string) - timestamp source used to synchronize multiple videos. Possible values are `wallclock` and `input`. Both values are calculated from the timestamps offsets file (`ts_offsets`)
 -   `preseek` (float, seconds, default 0) - how many seconds to preseek back to increase chance of finding a keyframe, when seek to timestamp (`seek` command) is requested
 -   `team` (string, name of instance-shared object) - if specified, seeks on the `input` nodes may be synchronized inside specified team 
+-   `frame_metadata` (list of strings, default: all of them) - which keys the node stamps on the frames its decoders hand back:
+    `video_ts`, `video_pts`, `input_ts`, `output_ts`, `wallclock_ts`, `wallclock`, `frame_no`, `frame_ts` on video frames
+    (`frame_no`, and `frame_ts` from the table, need `seek_table`), `frame_ts` and `sample_rate` on audio frames.
+    `realtime` reads `frame_no`, `frame_ts` and `wallclock` for its team and playback info and `speed_video` reads `frame_ts`;
+    a graph that reads none of them may pass `[]` and spare every frame the stamping and every hop the dictionary copy
+-   `routing` (dictionary of string => string) and `streams_filter` (string) - as in `demux`: each routed stream goes
+    straight to its own queue, given instead of `dst`. Packets of streams without a route are dropped and the EOF marker
+    goes to every routed queue. Spares the `demux` hop for a file whose streams the node reads anyway; `wait_for_keyframe`
+    stays with `demux`
 
 Runtime control: `node.object.set <name> request-eof true` interrupts further
 input reads while keeping the producer alive to drain buffered demux/parser
@@ -162,6 +171,8 @@ Recommended options for displaying live video:
         the route if stream not found)
 -   `wait_for_keyframe` (bool): default false, discard packets until a
     keyframe appears in any video stream
+
+`input_rec` accepts the same `routing` and `streams_filter` and then needs no `demux`.
 
 ### `dec_video`, `dec_audio`
 
@@ -418,6 +429,24 @@ input stream changes parameters.
 1 input, multi outputs: anything
 
 -   `drop` (bool) - drop packets if output queue is full, disabled by default
+
+### `one_to_many`, `one_to_many_nb`
+
+1 input, multi outputs (at most 32): anything. Each frame is handed to the outputs selected by a
+mask that can change while the node runs.
+
+-   `outputs` (int or bit string, default `1`) - the outputs that receive frames, bit *n* for the
+    *n*-th name in `dst`; `node.object.set <node> outputs <mask>` changes it
+-   `drop` (bool, default `false`) - drop a frame for an output whose queue is full instead of
+    waiting for room
+-   `frame_color` (object, optional) - colour fields written on every video frame before it is
+    handed out: `color_trc`, `color_primaries`, `colorspace`, `color_range`
+-   `subscribed_outputs` (object, optional) - output name => frame subscription name: that output
+    receives frames while its subscription is enabled, whatever the mask says, and never waits
+
+`one_to_many` runs on a thread of its own, woken by every frame. `one_to_many_nb` runs on an event
+loop (`event_loop`, as `realtime` does) when its input signals a frame, so a graph with many of them
+has no thread per fan-out; it cannot wait for room in an output, so it requires `drop: true`.
 
 ### `join_metadata`
 
@@ -778,11 +807,19 @@ Parameters:
     `one_to_many`: `color_trc`, `color_primaries`, `colorspace`, `color_range`
 -   `write_combined` (bool, default `false`) - allocate the page-locked memory write-combined.
     Whether that makes the read cheaper depends on the host; measure before using it.
+-   `pool_frames` (int, default `0`: no bound) - at most this many device frames. FFmpeg's pool
+    grows to the most frames ever out at once and keeps them; bounded, the node waits (up to five
+    seconds, as it does for device memory) until one comes back. `stats` reports `frames_allocated`.
+-   `resident` (bool, default `false`) - with `loop`: keep the file's pictures in the
+    page-locked memory. Each is read when it is first shown and only transferred after that,
+    so a pass after the first reads nothing. Where a pass starts the node compares the file's
+    modification time and reads the pictures again if it has changed. The memory is the size
+    of the file and cannot be swapped out; the node fails to start if it cannot be had.
 
 The read is a blocking local `pread`; there is no read timeout, and a file that ends inside a
 picture after it was opened stops the node with an error. `node.object.get <node> stats`
-returns `frames`, `passes` and the duration of the last read and upload (`read_us`,
-`upload_us`).
+returns `frames`, `passes`, the number of pictures read from the file (`file_reads`) and the
+duration of the last read and upload (`read_us`, `upload_us`).
 
 The upload half is `src/nodes/hwaccel/CudaPinnedUploader.hpp`, which any source able to write
 its samples where it is told can use.
@@ -820,6 +857,9 @@ reconnection. The matching dma-browser sender stops deliveries on `Drain` and
 reclaims outstanding frames on `Drained`, sent after the last reference is freed.
 An unclean disconnect quarantines unacknowledged browser textures; see
 [DMA-BUF recovery and counters](../deps/dma-browser/README.md#frame-lifetime-and-transport-counters).
+
+Each frame is a 48-byte `TexInfo` header with one DMA-BUF fd sent via `SCM_RIGHTS`.
+Stock Electron waits for its GPU work before delivering the paint event.
 
 1 output: `av::VideoFrame` (hardware "pixel format" `DRM_PRIME`)
 
@@ -867,16 +907,17 @@ Parameters:
 
 ### `drm_prime_to_cuda`
 
-Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frames are passed through unchanged.
+Import DRM PRIME frames into CUDA frames via EGL/GL interop, without copying: the output
+frame is the mapped buffer and keeps the input frame, and with it the producer's buffer,
+until the last consumer releases it. Non-DRM PRIME frames are passed through unchanged.
+A tiled (array) import is a texture-backed frame that only the CUDA compositor's
+RGB-to-YUV path samples; the compositor rejects other combinations before submitting
+draw work.
 
 1 input: `av::VideoFrame` (expects `DRM_PRIME` hardware "pixel format", pass-through otherwise), 1 output: `av::VideoFrame` (hardware "pixel format" `cuda`)
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
--   `zero_copy` (bool, default `false`) - expose a texture-backed frame for direct
-    sampling by the CUDA compositor's RGB-to-YUV path. Other consumers, including
-    packed RGB canvases, require `false`; the compositor rejects unsupported
-    texture-backed combinations before submitting draw work.
 
 Retired imports are released on a cleanup worker shared by the instance. Incoming
 frames needing a new import are dropped while cleanup is pending or their import
@@ -889,7 +930,8 @@ or for the next frame: for a caller that knows a burst of allocations is over, s
 has finished starting. They count as `expired`.
 
 `node.object.get <node> import_stats` includes an `admission_dropped` frame
-counter and instance-wide cleanup counts. These counters distinguish admission
+counter, a `texture_failed` frame counter (an array import whose texture object
+could not be created; the frame is dropped) and instance-wide cleanup counts. These counters distinguish admission
 drops from EGL/CUDA import work without per-frame logs.
 
 ### `object_tracker`
@@ -1176,6 +1218,13 @@ Parameters, in addition:
     tick its frame is drawn: the inputs' arrival budget
 -   `pgm_delay_frames` (int, optional) - match the last input that many ticks
     back (a Program preview's finished program arrives one frame after its sources)
+-   `input_poll_ms` (int, default `0`) - `0`: the output thread is woken by every
+    frame an input gives. Above `0`: it sleeps until the next deadline or a control
+    change and looks for frames at most this often in between. A tick is drawn at its
+    deadline in both cases; the second spares a compositor with many inputs thousands
+    of wake-ups a second. Each input's queue must hold what arrives within one interval.
+    `node.object.get <node> status` reports the setting and `input_passes`, how often
+    the thread has looked.
 -   `aux_mode` (bool, default `false`) - an AUX bus: a private CUDA stream,
     subscribed inputs, layers from `composition` only (no per-frame metadata
     layers), and frames dropped rather than waited for when the output edge is full
@@ -1249,8 +1298,36 @@ Parameters, in addition:
 -   `subscriptions` (array of strings, optional) - one shared frame
     subscription per input, in `src` order; an empty name (the program)
     subscribes nothing
+-   `mixer` (string, optional) - the mixer whose background transitions the
+    Next Transition keys follow (see `prepare_inputs`)
+-   `ftb_input` (int, optional) - an input nothing feeds: the keyer holds one
+    opaque black frame there, which its layer stretches over the canvas above
+    every key. Its key fade is the fade to black of the keyed program; the
+    clean feed, taken before the keyer, is never faded.
 
 `aux_mode`, `latency_ms` and `pgm_delay_frames` fail: the keyer has no playout.
+
+Objects (`node.object.set`):
+-   `active_inputs <mask>` cuts the keys to the mask; `fade_inputs {"active_inputs":
+    <mask>, "duration_ms": 0..10000, "curve": <name>}` fades the keys the mask
+    changes (0 cuts)
+-   `key_changes {"inputs": <mask>, "active_inputs": <mask>, "toggle": bool,
+    "duration_ms": 0..10000, "curve": <name>}` changes the keys in `inputs`
+    together on the next program frame, to the mask or (`toggle`) to the
+    opposite of their state; a cut also ends a fade they are running
+-   `prepare_inputs {"inputs": <mask>}` selects the Next Transition keys. From
+    the first program frame of each following background take of `mixer`, a
+    key turning on is at the take's progress and one turning off at its
+    complement: they mix with a mix, hold when it is held, follow the lever, cut
+    with a cut and switch at a wipe clip's cut point, both ways with the lever's
+    wipe. A completed take leaves
+    them switched; a cancelled one returns them to the state they had. A
+    command for such a key during the take ends the take for it first.
+
+`node.object.get <node> keys` lists, per key input, what the last program frame
+showed: `on` (the key's state), `on_air`, `phase` (`on`, `off`, `fading-in`,
+`fading-out`, or `unknown` before the first frame), `opacity`, `available` (it
+has a frame), `pending` (the state is not on air yet) and `next_take`.
 
 ### `mixer_pvw_follow`
 
