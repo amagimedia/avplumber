@@ -21,13 +21,15 @@ from frame_codes import read_code
 
 
 @contextmanager
-def recovery_graph(paths, *, webui=None, port=18779, routed=False):
+def recovery_graph(paths, *, webui=None, port=18779, routed=False, control=False, keyer=False):
     avp = AVPlumber()
     errors = []
     avp.on_exception = lambda name, kind, message: errors.append((name, kind, message))
     avp.executeCommandsFromString('hwaccel.init {"name":"recovery_gpu","type":"cuda"}')
-    if webui:
+    if webui or control:
+        # `control`: commands with replies (mixer.status) over the control port.
         avp.enableControlServer(port)
+    if webui:
         avp.registerWithWebUI(webui, "immediate-transition-test", "")
     avp.edges.planCapacity('*', 3)
     for index, path in enumerate(paths):
@@ -65,7 +67,22 @@ def recovery_graph(paths, *, webui=None, port=18779, routed=False):
         mixer.add_scene(f'full{index}', {f'camera{index}': layer},
                         routes={f'camera{index}': index} if routed else None)
     mixer.set_initial_scene('full0')
+    if keyer:
+        mixer.add_aux_destination('camera0', 'test_key_1')
+        mixer.add_aux_destination('camera1', 'test_key_2')
     output_edge = mixer.build()
+    if keyer:
+        avp.addNode(mixer.canvas_compositor({
+            'name': 'test_keyer', 'mixer': 'recovery', 'group': 'readback',
+            'src': [output_edge, 'test_key_1', 'test_key_2', 'test_ftb'], 'dst': 'test_keyed',
+            'subscriptions': ['', 'test_key_1', 'test_key_2', ''], 'clock_input': 0, 'fps': '60/1',
+            'max_layers': 4, 'active_inputs': 7, 'metadata_key': 'test_keys', 'ftb_input': 3,
+            'layers': [{'dst_w': 640, 'dst_h': 360},
+                       {'input': 1, 'dst_w': 64, 'dst_h': 64, 'blend': True, 'z': 1},
+                       {'input': 2, 'dst_x': 80, 'dst_w': 64, 'dst_h': 64, 'blend': True, 'z': 2},
+                       {'input': 3, 'dst_w': 640, 'dst_h': 360, 'blend': True, 'z': 3}],
+        }, keyer=True))
+        output_edge = 'test_keyed'
     avp.addNode(FilterVideo({'name': 'pixel_readback', 'group': 'readback',
                             'src': output_edge, 'dst': 'pixels',
                             'hwaccel': 'recovery_gpu',
@@ -198,6 +215,30 @@ def check_recovery(avp, mixer, output, errors):
         sample(5.7)
         command('node.object.set target_gate active 0')
         results.append({'failure': 'missing_wipe', 'moving_program_frames': moving_program(0)})
+
+    # A second AUTO for the scene of the fade on air pauses it (both sources keep moving) and
+    # a third resumes it to its endpoint, as on a Grass Valley switcher; neither waits out the
+    # take deadline.
+    command('node.object.set target_gate active 0')
+    sample(0.3)
+    mixer.fade('full1', duration_sec=0.5)
+    sample(0.15)
+    mixer.fade('full1', duration_sec=0.5)
+    sample(1.0)
+    mixer.fade('full1', duration_sec=0.5)
+    sample(1.0)
+    results.append({'failure': 'paused_and_resumed_fade', 'moving_program_frames': moving_program(1)})
+    mixer.cut('full0')
+    sample(0.5)
+
+    # A cut replacing a running fade must land whichever slot is its destination, even when
+    # the destination frame of a tick arrives after the retained still of that tick.
+    for scene, identity in (('full1', 1), ('full0', 0)):
+        mixer.fade(scene, duration_sec=0.5)
+        sample(0.15)
+        mixer.cut(scene)
+        sample(1.0)
+        results.append({'failure': 'cut_replaced_fade_' + scene, 'moving_program_frames': moving_program(identity)})
 
     # Cancelling a failed preparation must not let its old poll undo a take.
     command('node.object.set target_gate active 1')

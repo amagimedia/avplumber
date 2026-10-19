@@ -59,6 +59,10 @@ def client(monkeypatch, http_server):
     return start
 
 
+# The per-second sample's fields after encoder.stats.sessionCount: clocks, temperature, pstate, PCIe, persistence.
+LIVE = ', 2040, 6250, 61, P0, 4, 16, Enabled'
+
+
 def mock_gpu_queries(monkeypatch, query):
     monkeypatch.setattr('pyplumber.mixer.gui.telemetry.subprocess.check_output', query)
     monkeypatch.setattr('pyplumber.mixer.gui.telemetry._encoder_snapshot', lambda counts: _encoder_totals(
@@ -76,35 +80,104 @@ def test_gpu_samples_are_cached_and_missing_metrics_stay_unknown(monkeypatch):
             return '# GPU Session Process Codec H V Average Average\n# Idx Id Id Type Res Res FPS Latency(us)\n' \
                    '0 10 200 H.264 1920 1080 24.5 17000\n0 11 200 H.265 1280 720 25 12000\n' \
                    '1 12 201 AV1 3840 2160 12.5 20000\n'
-        return '0, 93, [N/A], 12, 14336, 15360, 53.95, 72.00, 2\n1, 0, 99, [N/A], 15104, 24576, [N/A], [Not Supported], 1\n'
+        if args[0][1].startswith('--query-gpu=index,utilization'):
+            return ('0, 93, [N/A], 12, 14336, 15360, 53.95, 72.00, 2' + LIVE + '\n1, 0, 99, [N/A], 15104, 24576, [N/A], '
+                    '[Not Supported], 1, [N/A], [N/A], [N/A], [N/A], [N/A], [N/A], [N/A]\n')
+        return ''   # the facts: tested apart
     mock_gpu_queries(monkeypatch, query)
     stats = GpuStats()
     first = stats.snapshot()
     assert first[0] == dict(index=0, gpu=93, decoder=None, encoder=12, memory_used_mib=14336, memory_total_mib=15360,
                           power_draw_w=53.95, power_limit_w=72.0, encoder_sessions=2,
-                          encoder_fps=49.5, encoder_mpix_s=pytest.approx(1920 * 1080 * 24.5 / 1e6 + 1280 * 720 * 25 / 1e6))
+                          encoder_fps=49.5, encoder_mpix_s=pytest.approx(1920 * 1080 * 24.5 / 1e6 + 1280 * 720 * 25 / 1e6),
+                          clocks_sm_mhz=2040, clocks_mem_mhz=6250, temperature_c=61, pstate='P0', pcie_gen=4,
+                          pcie_width=16, persistence=True, name=None, driver=None, compute_capability=None,
+                          cuda=None, compute_timeslice=None)
     assert first[1]['encoder'] is None
     assert first[1]['power_draw_w'] is None and first[1]['power_limit_w'] is None
+    assert all(first[1][key] is None for key in ('clocks_sm_mhz', 'temperature_c', 'pstate', 'pcie_gen', 'persistence'))
     assert first[1]['index'] == 1 and first[1]['gpu'] == 0
     assert first[1]['encoder_sessions'] == 1 and first[1]['encoder_fps'] == 12.5
     assert first[1]['encoder_mpix_s'] == pytest.approx(3840 * 2160 * 12.5 / 1e6)
     now[0] = .5
-    assert stats.snapshot() == first and len(calls) == 2
+    assert stats.snapshot() == first and len(calls) == 5   # the sample, its sessions and three facts commands
     now[0] = 1
     stats.lock.acquire()
     try:
-        assert stats.snapshot() == first and len(calls) == 2
+        assert stats.snapshot() == first and len(calls) == 5
     finally:
         stats.lock.release()
     stats.snapshot()
-    assert len(calls) == 4
+    assert len(calls) == 7   # the facts are not asked again within GPU_FACTS_PERIOD_S
     assert 'power.draw,enforced.power.limit' in calls[0][0][1]
     assert 'encoder.stats.sessionCount' in calls[0][0][1]
 
 
+# What R615 prints (a time-slice table and the -q header with both CUDA versions); one row per GPU otherwise.
+COMPUTE_POLICIES = ('+-------------------------------------+\n| GPU compute policies:               |\n'
+                    '| GPU     Name           Value        |\n|=====================================|\n'
+                    '|   0   Timeslice       Long          |\n|   1   Timeslice       Default       |\n'
+                    '+-------------------------------------+\n')
+NVSMI_LOG = ('==============NVSMI LOG==============\n'
+             'Timestamp                                              : Thu Oct 15 17:59:49 2026\n'
+             'Driver Version                                         : 615.71.09 [Deprecated; will be removed in CUDA 14.0.]\n'
+             'CUDA Version                                           : 13.4 [Deprecated; will be removed in CUDA 14.0.]\n'
+             'KMD Version                                            : 615.71.09\n'
+             'CUDA UMD Version                                       : 13.5\n'
+             'Attached GPUs                                          : 2\n')
+
+
+def test_gpu_facts_are_asked_once_and_the_time_slice_every_minute(monkeypatch):
+    now, calls = [0], []
+    replies = {'--query-gpu=index,name,driver_version,compute_cap': '0, NVIDIA L4, 615.71.09, 8.9\n1, Tesla T4, 615.71.09, 7.5\n',
+               '-q': NVSMI_LOG, 'compute-policy': COMPUTE_POLICIES, 'encodersessions': ''}
+    monkeypatch.setattr('pyplumber.mixer.gui.telemetry.time.monotonic', lambda: now[0])
+    def query(command, **_):
+        calls.append(command[1])
+        if command[1].startswith('--query-gpu=index,utilization'):
+            return f'0, 60, 70, 40, 100, 200, 50, 72, 0{LIVE}\n1, 10, 20, 30, 100, 200, 40, 70, 0, 585, 5000, 44, P8, 1, 8, Disabled\n'
+        return replies[command[1]]
+    mock_gpu_queries(monkeypatch, query)
+    stats = GpuStats()
+    first, second = stats.snapshot()
+    assert {k: first[k] for k in ('name', 'driver', 'compute_capability', 'cuda', 'compute_timeslice', 'clocks_sm_mhz',
+                                  'clocks_mem_mhz', 'temperature_c', 'pstate', 'pcie_gen', 'pcie_width', 'persistence')} == dict(
+        name='NVIDIA L4', driver='615.71.09', compute_capability='8.9', cuda='13.5', compute_timeslice='Long',
+        clocks_sm_mhz=2040, clocks_mem_mhz=6250, temperature_c=61, pstate='P0', pcie_gen=4, pcie_width=16, persistence=True)
+    assert (second['name'], second['compute_capability'], second['compute_timeslice']) == ('Tesla T4', '7.5', 'Default')
+    assert (second['pstate'], second['pcie_gen'], second['pcie_width'], second['persistence']) == ('P8', 1, 8, False)
+    assert calls[2:] == ['--query-gpu=index,name,driver_version,compute_cap', '-q', 'compute-policy']
+    now[0] = 59
+    stats.snapshot()
+    assert len(calls) == 7   # the sample and its sessions alone
+    replies['compute-policy'] = COMPUTE_POLICIES.replace('Long   ', 'Short  ')
+    now[0] = 60
+    assert stats.snapshot()[0]['compute_timeslice'] == 'Short'
+    assert calls[7:] == [calls[0], 'encodersessions', 'compute-policy'], 'what is known is not asked again'
+
+
+@pytest.mark.parametrize('static,log,policies', [
+    (subprocess.CalledProcessError(6, 'nvidia-smi'), 'CUDA Version : 12.2\n', subprocess.TimeoutExpired('nvidia-smi', 1)),
+    ('0, NVIDIA L4\n', 'no version here\n', 'Not supported in this container\n'),
+])
+def test_missing_gpu_facts_read_none_and_keep_the_sample(monkeypatch, static, log, policies):
+    def query(command, **_):
+        if command[1].startswith('--query-gpu=index,utilization'):
+            return f'0, 60, 70, 40, 100, 200, 50, 72, 0{LIVE}\n'
+        reply = {'-q': log, 'compute-policy': policies, 'encodersessions': ''}.get(command[1], static)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+    mock_gpu_queries(monkeypatch, query)
+    sample = GpuStats().snapshot()[0]
+    assert sample['gpu'] == 60 and sample['clocks_sm_mhz'] == 2040
+    assert (sample['name'], sample['driver'], sample['compute_capability'], sample['compute_timeslice']) == (None,) * 4
+    assert sample['cuda'] == ('12.2' if log.startswith('CUDA') else None)
+
+
 @pytest.mark.parametrize('raw', ['NaN', 'inf', '-1', '[N/A]'])
 def test_invalid_power_readings_do_not_hide_utilization(monkeypatch, raw):
-    mock_gpu_queries(monkeypatch, lambda *a, **kw: f'0, 60, 70, 40, 100, 200, {raw}, {raw}, 1\n')
+    mock_gpu_queries(monkeypatch, lambda *a, **kw: f'0, 60, 70, 40, 100, 200, {raw}, {raw}, 1{LIVE}\n')
     sample = GpuStats().snapshot()[0]
     assert sample['gpu'] == 60
     assert sample['power_draw_w'] is None and sample['power_limit_w'] is None
@@ -115,7 +188,7 @@ def test_encoder_zero_requires_a_driver_session_counter(monkeypatch, sessions):
     def query(command, **_):
         if command[1] == 'encodersessions':
             return sessions
-        return '0, 60, 70, 40, 100, 200, 50, 72, 0\n1, 10, 20, 30, 100, 200, 50, 72, [N/A]\n'
+        return f'0, 60, 70, 40, 100, 200, 50, 72, 0{LIVE}\n1, 10, 20, 30, 100, 200, 50, 72, [N/A]{LIVE}\n'
     mock_gpu_queries(monkeypatch, query)
     first, second = GpuStats().snapshot()
     assert (first['encoder_sessions'], first['encoder_fps'], first['encoder_mpix_s']) == (0, 0, 0)
@@ -131,7 +204,7 @@ def test_incomplete_encoder_rows_do_not_publish_partial_totals(monkeypatch, bad)
     def query(command, **_):
         if command[1] == 'encodersessions':
             return '0 10 200 H.264 1920 1080 25 1\n' + bad + '\n1 11 200 H.265 1280 720 0 0\n'
-        return '0, 60, 70, 40, 100, 200, 50, 72, 2\n1, 10, 20, 30, 100, 200, 40, 72, 1\n'
+        return f'0, 60, 70, 40, 100, 200, 50, 72, 2{LIVE}\n1, 10, 20, 30, 100, 200, 40, 72, 1{LIVE}\n'
     mock_gpu_queries(monkeypatch, query)
     first, second = GpuStats().snapshot()
     assert all(first[key] is None for key in ('encoder_sessions', 'encoder_fps', 'encoder_mpix_s'))
@@ -149,7 +222,7 @@ def test_missing_or_changing_encoder_sample_preserves_gpu_metrics(monkeypatch, r
             if isinstance(result, Exception):
                 raise result
             return result
-        return '0, 60, 70, 40, 100, 200, 50.25, 72, 2\n'
+        return f'0, 60, 70, 40, 100, 200, 50.25, 72, 2{LIVE}\n'
     mock_gpu_queries(monkeypatch, query)
     sample = GpuStats().snapshot()[0]
     assert all(sample[key] is None for key in ('encoder_sessions', 'encoder_fps', 'encoder_mpix_s'))
@@ -246,9 +319,9 @@ def test_host_stats_sample_load_cpu_and_the_busiest_mixer_thread(tmp_path, monke
     assert stats.values == dict(load1=21.4, vcpus=2, cpu_pct=52, mixer_cpu_pct=round(117 * 100 / hz / 2, 1),
                                thread_pct=round(76 * 100 / hz / 2), thread_name="mixer_comp_a", thread_count=3,
                                # every thread by kind, busiest first; a thread first seen now counts from zero
-                               thread_kinds=[{"name": "mixer_comp_a", "count": 1, "pct": round(76 * 100 / hz / 2, 1), "max_pct": round(76 * 100 / hz / 2, 1)},
-                                             {"name": "mixer (new)", "count": 1, "pct": round(31 * 100 / hz / 2, 1), "max_pct": round(31 * 100 / hz / 2, 1)},
-                                             {"name": "mixer.py", "count": 1, "pct": round(10 * 100 / hz / 2, 1), "max_pct": round(10 * 100 / hz / 2, 1)}])
+                               thread_kinds=[{"name": "mixer_comp_a", "count": 1, "pct": round(76 * 100 / hz / 2, 1), "avg_pct": round(76 * 100 / hz / 2, 1), "max_pct": round(76 * 100 / hz / 2, 1)},
+                                             {"name": "mixer (new)", "count": 1, "pct": round(31 * 100 / hz / 2, 1), "avg_pct": round(31 * 100 / hz / 2, 1), "max_pct": round(31 * 100 / hz / 2, 1)},
+                                             {"name": "mixer.py", "count": 1, "pct": round(10 * 100 / hz / 2, 1), "avg_pct": round(10 * 100 / hz / 2, 1), "max_pct": round(10 * 100 / hz / 2, 1)}])
     # Without a mixer, or before its first diff after a restart, the thread fields stay unknown.
     pid[0] = None
     now[0] += 1.0
@@ -309,17 +382,133 @@ def test_host_stats_sum_the_threads_by_kind(tmp_path, monkeypatch):
     stats.sample()
     pct = lambda ticks: round(ticks * 100 / hz, 1)
     assert stats.values["thread_count"] == 35
-    assert stats.values["thread_kinds"] == [   # the kind with the busiest thread first
-        {"name": "mixer_comp_a", "count": 1, "pct": pct(40), "max_pct": pct(40)},
-        {"name": "EventLoop", "count": 2, "pct": pct(14), "max_pct": pct(8)},
-        {"name": "aux_auxN_encod", "count": 2, "pct": pct(6), "max_pct": pct(4)},  # one kind under two cut-off spellings
-        {"name": "input_N", "count": 30, "pct": pct(30), "max_pct": pct(1)},       # thirty small threads, one line
+    assert stats.values["thread_kinds"] == [   # the largest total first
+        {"name": "mixer_comp_a", "count": 1, "pct": pct(40), "avg_pct": pct(40), "max_pct": pct(40)},
+        {"name": "input_N", "count": 30, "pct": pct(30), "avg_pct": pct(1), "max_pct": pct(1)},  # thirty small threads, one line
+        {"name": "EventLoop", "count": 2, "pct": pct(14), "avg_pct": pct(7), "max_pct": pct(8)},
+        {"name": "aux_auxN_encod", "count": 2, "pct": pct(6), "avg_pct": pct(3), "max_pct": pct(4)},  # one kind, two cut-off spellings
     ]
     assert (stats.values["thread_name"], stats.values["thread_pct"]) == ("mixer_comp_a", round(40 * 100 / hz))
     # Beyond the limit the remaining kinds are one "other" row, so the list stays short.
     rows = thread_kinds([(n, f"kind{chr(97 + n)}") for n in range(1, 8)], 100, 3)
     assert [(r["name"], r["count"], r["pct"]) for r in rows] == [("kindh", 1, 7.0), ("kindg", 1, 6.0), ("kindf", 1, 5.0), ("other", 4, 10.0)]
     assert rows[-1]["max_pct"] == 4.0
+
+
+def test_thread_kinds_rank_by_total_and_aux_threads_are_one_row_like_any_kind():
+    from pyplumber.mixer.gui.telemetry import thread_kinds
+    # 24 AUX compositors of 3 ticks each outweigh one event loop thread of 50: the total decides,
+    # not the busiest thread. Ticks over one second at 100 ticks per second are percent.
+    used = ([(3, f"aux_aux{n}_comp") for n in range(1, 25)] + [(50, "EventLoop"), (10, "EventLoop")]
+            + [(1, f"decode_{n}") for n in range(40)] + [(n, f"misc{chr(97 + n)}") for n in range(1, 9)])
+    rows = thread_kinds(used, 100, 8)
+    assert [(r["name"], r["count"], r["pct"], r["avg_pct"], r["max_pct"]) for r in rows[:3]] == [   # avg = total / n
+        ("aux_auxN_comp", 24, 72.0, 3.0, 3.0), ("EventLoop", 2, 60.0, 30.0, 50.0), ("decode_N", 40, 40.0, 1.0, 1.0)]
+    assert [r["name"] for r in rows[3:]] == ["misci", "misch", "miscg", "miscf", "misce", "other"]
+    assert rows[-1] == {"name": "other", "count": 3, "pct": 6.0, "avg_pct": 2.0, "max_pct": 3.0}   # miscb, miscc and miscd past the eight
+
+
+def test_chromium_summary_names_and_sorts_the_rows():
+    from pyplumber.mixer.gui.telemetry import chromium_summary
+    assert chromium_summary({"intervalS": None, "processes": []}) is None   # the service's first answer is a baseline
+    row = lambda name, n, pct, max_pct, key="type": {key: name, "n": n, "pct": pct, "avgPct": pct / n, "maxPct": max_pct}
+    raw = {"intervalS": 1.0, "hz": 100, "totalPct": 148.2,
+           "cores": {"used": 1.48, "hostVcpus": 16,
+                     "perCore": [{"cpu": 0, "chromiumPct": 5, "hostPct": 40}, {"cpu": 1, "chromiumPct": 0, "hostPct": 10},
+                                 {"cpu": 2, "chromiumPct": 62, "hostPct": 91.5}, {"cpu": 3, "chromiumPct": 40.2, "hostPct": None},
+                                 {"cpu": 4, "chromiumPct": 12, "hostPct": 30}, {"cpu": 5, "chromiumPct": 7, "hostPct": 20}]},
+           "processes": [row("browser", 2, 12.6, 9), row("renderer", 24, 52, 6.3), row("gpu", 2, 80.4, 52.1), row("utility", 6, 3.2, 1.4)],
+           "gpuThreads": [row("other", 40, 5.6, 1.1, "name"), row("io", 2, 6.2, 3.5, "name"),
+                          row("viz", 2, 38.5, 24, "name"), row("main", 2, 30.1, 19.8, "name")],
+           "threads": []}
+    summary = chromium_summary(raw)
+    assert (summary["total_pct"], summary["cores_used"], summary["vcpus"]) == (148.2, 1.48, 16)
+    assert [(r["name"], r["count"], r["pct"], r["avg_pct"], r["max_pct"]) for r in summary["processes"]] == [   # the largest total first
+        ("GPU process", 2, 80.4, 40.2, 52.1), ("renderer", 24, 52, 2.2, 6.3), ("browser", 2, 12.6, 6.3, 9), ("utility", 6, 3.2, 0.5, 1.4)]
+    assert [r["name"] for r in summary["gpu_threads"]] == ["viz compositor", "GPU main", "IO", "other"]   # a fixed order
+    assert "busiest_cores" not in summary   # the hover keeps the cores' worth in all, not a per-core table
+    raw["processes"][0]["pct"] = "12"
+    with pytest.raises(ValueError):
+        chromium_summary(raw)
+
+
+def test_browser_cpu_tolerates_an_older_browser_image_and_an_outage():
+    from pyplumber.mixer.gui.telemetry import BrowserCpuStats
+    answers = []
+    def fetch():
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    stats = BrowserCpuStats("http://127.0.0.1:9009/", period_s=1, absent_s=30, fetch=fetch)
+    assert BrowserCpuStats("http://x").period_s == 5   # the default: the hover needs no more
+    answers.append(urllib.error.HTTPError("http://127.0.0.1:9009/metrics/cpu", 404, "Not Found", None, None))
+    assert stats.poll() == 30 and stats.values is None and stats.error == "HTTP 404"   # no endpoint: ask again later
+    answers.append(urllib.error.URLError(ConnectionRefusedError(111, "refused")))
+    assert stats.poll() == 1 and stats.values is None   # the service restarting
+    answers.append({"intervalS": None})
+    assert stats.poll() == 1 and stats.values is None and stats.error is None   # a baseline: nothing to show yet
+    answers.append({"intervalS": 1, "totalPct": 50, "cores": {"hostVcpus": 4, "perCore": []},
+                    "processes": [{"type": "gpu", "n": 1, "pct": 50, "avgPct": 50, "maxPct": 50}], "gpuThreads": []})
+    assert stats.poll() == 1
+    assert stats.values["processes"] == [{"name": "GPU process", "count": 1, "pct": 50, "avg_pct": 50.0, "max_pct": 50}]
+    answers.append(ValueError("not JSON"))
+    assert stats.poll() == 1 and stats.values is None
+    answers.append([])   # an answer of the wrong shape leaves the section hidden; the thread polls on
+    assert stats.poll() == 1 and stats.values is None and stats.error.startswith("AttributeError")
+
+
+def browser_status(*windows):
+    """GET /status of the browser service: (id, paints, sent, dropped, reasons[, paintsSkipped]) per window."""
+    def window(wid, paints, sent, dropped, reasons, *skipped):
+        stats = {"paintCount": paints, "txFrameCount": sent, "droppedFrames": dropped, "droppedReasons": reasons,
+                 "releasedFrameCount": 0, "retainedFrameCount": 0, "quarantinedFrameCount": 0, "lastPaintTsMs": None}
+        return {"id": wid, "stats": {**stats, **({"paintsSkipped": skipped[0]} if skipped else {})}}
+    return {"windows": [window(*w) for w in windows], "count": len(windows), "maxWindows": 8}
+
+
+def test_browser_drops_over_the_window_survive_a_window_restart_and_new_windows():
+    from pyplumber.mixer.gui.telemetry import BrowserCpuStats
+    now, status = [0.0], [None]
+    stats = BrowserCpuStats("http://127.0.0.1:9009", fetch=lambda: {"intervalS": None},
+                            fetch_status=lambda: status[0], clock=lambda: now[0])
+    assert stats.drops.values is None
+    status[0] = browser_status(("web_1", 1000, 990, 10, {"no_consumer": 10}, 3), ("web_2", 500, 500, 0, {}, 0))
+    stats.poll_status()   # the baseline: what the windows counted before is not recent
+    assert stats.drops.values == {"window_s": 600, "covered_s": 0, "windows": 2, "paints": 0, "sent": 0, "dropped": 0,
+                                  "reasons": [], "worst": None, "skipped": 0}
+    now[0] = 5.0
+    status[0] = browser_status(("web_1", 1150, 1130, 20, {"no_consumer": 12, "retained_pool_full": 8}, 7),
+                               ("web_2", 650, 646, 4, {"retained_pool_full": 4}, 1))
+    stats.poll_status()
+    assert stats.drops.values == {"window_s": 600, "covered_s": 5, "windows": 2, "paints": 300, "sent": 286, "dropped": 14,
+                                  "reasons": [("retained_pool_full", 12), ("no_consumer", 2)],
+                                  "worst": {"id": "web_1", "dropped": 10}, "skipped": 5}
+    # web_2's worker restarted (its counters fell: they count from zero), web_3 opened, the service hiccuped.
+    now[0] = 10.0
+    status[0] = None
+    stats.poll_status()
+    assert stats.drops.values["dropped"] == 14   # a failed poll leaves the figures standing
+    now[0] = 15.0
+    status[0] = browser_status(("web_1", 1300, 1280, 20, {"no_consumer": 12, "retained_pool_full": 8}, 7),
+                               ("web_2", 100, 94, 6, {"retained_pool_full": 6}, 2), ("web_3", 50, 50, 0, {}, 0))
+    stats.poll_status()
+    values = stats.drops.values
+    assert (values["windows"], values["paints"], values["dropped"], values["skipped"]) == (3, 600, 20, 7)
+    assert values["worst"] == {"id": "web_1", "dropped": 10} and values["reasons"] == [("retained_pool_full", 18), ("no_consumer", 2)]
+    # Ten minutes on, what happened before has left the window.
+    now[0] = 700.0
+    stats.poll_status()
+    assert stats.drops.values["dropped"] == 0 and stats.drops.values["covered_s"] == 685
+
+
+def test_browser_drops_from_an_app_without_skipped_paints_say_none():
+    from pyplumber.mixer.gui.telemetry import browser_drop_summary, window_counters
+    counters = window_counters(browser_status(("web_1", 10, 9, 1, {"no_consumer": 1})))
+    assert ("web_1", "skipped") not in counters
+    assert browser_drop_summary(counters)["skipped"] is None
+    with pytest.raises(ValueError):
+        window_counters(browser_status(("web_1", 10, 9, -1, {})))
 
 
 def test_host_stats_thread_hides_the_meters_during_an_error_and_logs_it_once(tmp_path, monkeypatch, caplog):
@@ -378,7 +567,7 @@ def record_setpriority(monkeypatch, fail=None):
 
 # The names avplumber, the CUDA driver and FFmpeg give their threads; the mixer's Python main
 # thread, an NVDEC input and the aux compositor are not deadline-critical.
-MIXER_THREADS = {1: "mixer.py", 2: "mixer_comp_a", 3: "mixer_comp_b", 4: "mixer_snapshot_a", 5: "mixer_snapshot_output",
+MIXER_THREADS = {1: "mixer.py", 2: "mixer_comp_a", 3: "mixer_comp_b", 4: "mixer_pts_gate_a", 5: "mixer_pts_gate_output",
                  6: "EventLoop", 7: "cuda-EvtHandlr", 8: "janus_encoder", 9: "janus_hdr_encoder", 10: "aux_mv2_encoder",
                  11: "input_12_decode", 12: "aux_mv2_comp", 13: "mixer_otm_scene_a", 14: "stats sender", 15: "dsk_comp"}
 CRITICAL_TIDS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 15}
@@ -399,8 +588,8 @@ def test_critical_threads_get_the_nice_level_each_period_and_are_logged_once(tmp
         assert sorted(calls[2 * len(CRITICAL_TIDS):]) == [(tid, -10) for tid in sorted(CRITICAL_TIDS | {16})]
     assert [r.getMessage() for r in caplog.records] == [
         "Mixer 4242: nice -10 on 10 threads: EventLoop (6), aux_mv2_encoder (10), cuda-EvtHandlr (7), dsk_comp (15), "
-        "janus_encoder (8), janus_hdr_encod (9), mixer_comp_a (2), mixer_comp_b (3), mixer_snapshot_ (4), "
-        "mixer_snapshot_ (5)",
+        "janus_encoder (8), janus_hdr_encod (9), mixer_comp_a (2), mixer_comp_b (3), mixer_pts_gate_ (4), "
+        "mixer_pts_gate_ (5)",
         "Mixer 4242: nice -10 on 1 thread: udp-tx (16)"]
     # A restarted mixer is logged in full again; while no mixer runs nothing is touched.
     caplog.clear()
@@ -508,6 +697,19 @@ def test_state_carries_the_host_sample(client):
     assert get(url, "/api/state")[1]["host"] == host.values
 
 
+def test_state_carries_the_chromium_figures(client):
+    from pyplumber.mixer.gui.telemetry import BrowserCpuStats
+    bridge = FakeBridge(STATE_REPLIES)
+    url, _ = client(bridge)
+    assert get(url, "/api/state")[1]["chromium"] is None   # no browser service named: the tip has no Chromium part
+    browser = BrowserCpuStats("http://127.0.0.1:9009", fetch=lambda: None)
+    browser.values = {"total_pct": 50, "processes": []}
+    browser.drops.values = {"window_s": 600, "covered_s": 30, "dropped": 3}
+    url, _ = client(FakeBridge(STATE_REPLIES), browser_cpu=browser)
+    body = get(url, "/api/state")[1]
+    assert body["chromium"] == browser.values and body["browser_drops"] == browser.drops.values
+
+
 def test_delivery_counts_cover_the_last_ten_minutes_not_the_time_since_the_start():
     totals, now = {"missed_deadlines": 59, "output_drops": 3}, [1000.0]
     recent = RecentCounts(lambda: dict(totals), clock=lambda: now[0])
@@ -557,12 +759,184 @@ def test_delivery_totals_are_the_pages_sums_or_nothing_while_a_bus_is_missing():
     assert delivery_totals({"status": state["status"], "settings": {}}) == {"missed_deadlines": 1, "output_drops": 0}
 
 
+class PlayoutBridge:
+    """A bridge with a mixer state, each compositor's per_input reply and the mixer's startup report
+    (None: a mixer without `mixer.startup`, which answers the command with an error), recording
+    its commands."""
+
+    def __init__(self, state, per_input, startup=None):
+        self.mixer, self._state, self.per_input, self.commands = "mixer", state, per_input, []
+        self.startup = startup
+
+    def state(self, timeout=None):
+        return self._state
+
+    def command(self, line, timeout=None):
+        self.commands.append(line)
+        if line == "mixer.startup":
+            if self.startup is None:
+                raise RuntimeError("Unknown command: mixer.startup")
+            return json.dumps(self.startup)
+        return json.dumps(self.per_input[line.split()[1]])
+
+
+PLAYOUT_STATE = {"status": {"playout": {"A": {"missed_deadlines": 1}, "B": {"missed_deadlines": 0}}}, "settings": {
+    # Compositor inputs in order; "cam" is used twice in a scene, so it has two inputs.
+    "inputs": [["cam", "video"], ["cam", "video"], ["web_1", "browser"], ["web_2", "browser"], ["clip", "nv12"]]}}
+
+
+def row(repeats, discarded, overflow=0):
+    return {"repeats": repeats, "discarded": discarded, "overflow": overflow}
+
+
+def test_playout_counters_use_published_program_source_ids_only():
+    from pyplumber.mixer.gui.telemetry import playout_counters
+    bridge = PlayoutBridge(PLAYOUT_STATE, {"mixer_delivery": {
+        "cam": {"repeats": 5, "dropped": 1},
+        "web_1": {"repeats": 7, "dropped": 2}}})
+    assert playout_counters(bridge) == {
+        "missed_deadlines": 1, "output_drops": 0,
+        ("input", "cam", "other", "repeats"): 5, ("input", "cam", "other", "dropped"): 1,
+        ("input", "web_1", "browser", "repeats"): 7, ("input", "web_1", "browser", "dropped"): 2,
+        ("input", "web_2", "browser", "repeats"): 0, ("input", "web_2", "browser", "dropped"): 0,
+        ("input", "clip", "other", "repeats"): 0, ("input", "clip", "other", "dropped"): 0}
+    assert bridge.commands == ["mixer.startup", "node.object.get mixer_delivery per_source"]
+    # Off-air web_2 and duplicate cam aliases add nothing. Older binaries have no quality data.
+    older = PlayoutBridge(PLAYOUT_STATE, {"mixer_comp_a": [row(99999, 99999)] * 5})
+    assert playout_counters(older) == {"missed_deadlines": 1, "output_drops": 0}
+    on_air = PlayoutBridge({**PLAYOUT_STATE, "settings": {}}, {}, startup={"released_at": 1_700_000_018.0})
+    assert playout_counters(on_air) == {"missed_deadlines": 1, "output_drops": 0, "on_air": 1_700_000_018.0}
+    with pytest.raises(ValueError):
+        playout_counters(PlayoutBridge(PLAYOUT_STATE, {"mixer_delivery": {"web_1": {"repeats": "x", "dropped": 0}}}))
+
+
+def test_a_new_on_air_moment_starts_the_window_again_with_everything_the_mixer_counted_since():
+    """The mixer resets its counters as it goes on air (mixer.startup `released_at`): a sample from
+    a show that went on air anew counts from zero, even when its totals have already passed the
+    old show's, so nothing of the old show or of the new one's warm-up is in the window."""
+    totals, now = {"missed_deadlines": 3, "output_drops": 0, "on_air": 1000.0}, [0.0]
+    recent = RecentCounts(lambda: dict(totals), clock=lambda: now[0])
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 0, "on_air": 1000.0, "missed_deadlines": 0, "output_drops": 0}
+    now[0], totals["missed_deadlines"] = 100.0, 5
+    recent.sample()
+    assert recent.values["missed_deadlines"] == 2 and recent.values["on_air"] == 1000.0
+    # The mixer restarted and went on air at 1150 with 7 misses since: more than the 5 before, so
+    # no total fell; the on-air moment says it is a new count.
+    now[0], totals = 200.0, {"missed_deadlines": 7, "output_drops": 1, "on_air": 1150.0}
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 0, "on_air": 1150.0, "missed_deadlines": 7, "output_drops": 1}
+    now[0], totals = 205.0, {"missed_deadlines": 8, "output_drops": 1, "on_air": 1150.0}
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 5, "on_air": 1150.0, "missed_deadlines": 8, "output_drops": 1}
+    # A sample without the moment (mixer.startup did not answer, or an older mixer) is not a new
+    # one, and the same moment after it is not either: the window goes on.
+    now[0], totals = 210.0, {"missed_deadlines": 9, "output_drops": 1}
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 10, "missed_deadlines": 9, "output_drops": 1}
+    now[0], totals = 215.0, {"missed_deadlines": 10, "output_drops": 1, "on_air": 1150.0}
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 15, "on_air": 1150.0, "missed_deadlines": 10, "output_drops": 1}
+
+
+def test_browser_drops_count_from_the_mixers_on_air_moment_not_from_the_pages_load():
+    """The browser windows drop frames while the show is built (no consumer yet) and the web UI polls
+    them all along. When the mixer reports a new on-air moment, with the counters it read from the
+    browser service then (mixer.startup `browser_windows`), the window starts from those: what the
+    pages dropped before on air is not recent, what they dropped since is."""
+    from pyplumber.mixer.gui.telemetry import BrowserCpuStats
+    now, wall, status, report = [0.0], [5000.0], [None], [None]
+    stats = BrowserCpuStats("http://127.0.0.1:9009", fetch=lambda: {"intervalS": None}, fetch_status=lambda: status[0],
+                            clock=lambda: now[0], on_air=lambda: report[0], wall=lambda: wall[0])
+    # Polled while the show is built: the pages load and drop frames with no consumer.
+    status[0] = browser_status(("web_1", 100, 0, 100, {"no_consumer": 100}, 0))
+    stats.poll_status()
+    now[0], wall[0] = 30.0, 5030.0
+    status[0] = browser_status(("web_1", 700, 0, 700, {"no_consumer": 700}, 0))
+    stats.poll_status()
+    assert stats.drops.values["dropped"] == 600 and "since" not in stats.drops.values
+    # The mixer went on air at wall 5033 (3 s ago), reading 760 dropped frames; since then 2 more.
+    now[0], wall[0] = 36.0, 5036.0
+    report[0] = {"released_at": 5033.0, "browser_windows": {"web_1": {"paintCount": 790, "txFrameCount": 30, "droppedFrames": 760,
+                                                                       "droppedReasons": {"no_consumer": 760}}}}
+    status[0] = browser_status(("web_1", 880, 118, 762, {"no_consumer": 760, "retained_pool_full": 2}, 0))
+    stats.poll_status()
+    assert stats.drops.values == {"window_s": 600, "covered_s": 3, "since": 5033.0, "windows": 1, "paints": 90, "sent": 88, "dropped": 2,
+                                  "reasons": [("retained_pool_full", 2)], "worst": {"id": "web_1", "dropped": 2}, "skipped": 0}
+    # The same report again changes nothing; the window goes on from the on-air counters.
+    now[0], wall[0] = 41.0, 5041.0
+    status[0] = browser_status(("web_1", 1030, 265, 765, {"no_consumer": 760, "retained_pool_full": 5}, 0))
+    stats.poll_status()
+    assert (stats.drops.values["covered_s"], stats.drops.values["dropped"], stats.drops.values["since"]) == (8, 5, 5033.0)
+    # A new start whose browser counters the mixer could not read: the window starts again with this
+    # poll as its baseline, so nothing is recent yet.
+    now[0], wall[0] = 100.0, 5100.0
+    report[0] = {"released_at": 5099.0, "browser_windows": None}
+    status[0] = browser_status(("web_1", 2000, 1200, 800, {"no_consumer": 795, "retained_pool_full": 5}, 0))
+    stats.poll_status()
+    assert stats.drops.values == {"window_s": 600, "covered_s": 0, "since": 5099.0, "windows": 1, "paints": 0, "sent": 0, "dropped": 0,
+                                  "reasons": [], "worst": None, "skipped": 0}
+    now[0], wall[0] = 105.0, 5105.0
+    status[0] = browser_status(("web_1", 2150, 1349, 801, {"no_consumer": 795, "retained_pool_full": 6}, 0))
+    stats.poll_status()
+    assert (stats.drops.values["covered_s"], stats.drops.values["dropped"]) == (5, 1)
+    # No report (an older mixer, or none running): the window is left alone.
+    report[0] = None
+    now[0], wall[0] = 110.0, 5110.0
+    stats.poll_status()
+    assert (stats.drops.values["covered_s"], stats.drops.values["dropped"], stats.drops.values["since"]) == (10, 1, 5099.0)
+
+
+def test_the_startup_report_is_read_from_the_mixer_or_is_none():
+    from pyplumber.mixer.gui.telemetry import startup_report
+    assert startup_report(PlayoutBridge({}, {})) is None   # an older mixer: the command fails
+    assert startup_report(PlayoutBridge({}, {}, startup={"released_at": 1.0})) == {"released_at": 1.0}
+    assert startup_report(PlayoutBridge({}, {}, startup=[1, 2])) is None   # not a report
+
+
+def test_recent_input_repeats_cover_the_window_with_the_worst_browser_source():
+    from pyplumber.mixer.gui.telemetry import input_counters, playout_summary
+    inputs = PLAYOUT_STATE["settings"]["inputs"]
+    sources, now = {}, [0.0]
+    recent = RecentCounts(lambda: {"missed_deadlines": 0, "output_drops": 0, **input_counters(inputs, sources)},
+                          clock=lambda: now[0], summary=playout_summary)
+    recent.sample()
+    assert recent.values["inputs"]["browser"] == {"sources": 2, "repeats": 0, "dropped": 0, "worst": None}
+    now[0] = 5.0
+    sources.update({name: {"repeats": repeat, "dropped": drop} for name, repeat, drop in
+                    [("cam", 3, 3), ("web_1", 12, 1), ("web_2", 20, 20), ("clip", 2, 0)]})
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 5, "missed_deadlines": 0, "output_drops": 0, "inputs": {
+        # Output identities count a source once, even if both transition slots draw it.
+        "browser": {"sources": 2, "repeats": 32, "dropped": 21, "worst": {"source": "web_2", "repeats": 20, "dropped": 20}},
+        "other": {"sources": 2, "repeats": 5, "dropped": 3}}}
+    # Another show's inputs: the window starts again from its current totals.
+    inputs, now[0] = [["page", "browser"]], 10.0
+    sources = {"page": {"repeats": 7, "dropped": 0}}
+    recent.sample()
+    assert recent.values["covered_s"] == 0
+    assert recent.values["inputs"]["browser"] == {"sources": 1, "repeats": 0, "dropped": 0, "worst": None}
+    assert recent.values["inputs"]["other"] == {"sources": 0, "repeats": 0, "dropped": 0}
+
+
 def test_state_carries_the_recent_delivery_counts(client):
     recent = RecentCounts(lambda: {"missed_deadlines": 7, "output_drops": 0})
     url, _ = client(FakeBridge(STATE_REPLIES), recent=recent)
     assert get(url, "/api/state")[1]["recent"] is None            # no sample yet
     recent.sample()
     assert get(url, "/api/state")[1]["recent"] == {"window_s": 600, "covered_s": 0, "missed_deadlines": 0, "output_drops": 0}
+
+
+@pytest.mark.parametrize("previous_epoch", [None, 100])
+def test_state_waits_for_browser_counts_from_the_same_show(client, previous_epoch):
+    recent = SimpleNamespace(values={"on_air": 200, "missed_deadlines": 0, "output_drops": 0})
+    drops = SimpleNamespace(values={"since": previous_epoch, "dropped": 250000})
+    browser = SimpleNamespace(values=None, drops=drops)
+    url, _ = client(FakeBridge(STATE_REPLIES), recent=recent, browser_cpu=browser)
+    assert get(url, "/api/state")[1]["browser_drops"] is None
+    assert drops.values["dropped"] == 250000  # serving the page never changes measured counters
+    drops.values = {"since": 200, "dropped": 3}
+    assert get(url, "/api/state")[1]["browser_drops"] == drops.values
 
 
 STATE_REPLIES = {"mixer.status": '{"pgm_scene":"a"}', "mixer.scenes": '["a","b"]', "mixer.settings": "{}"}
@@ -834,3 +1208,160 @@ def test_shared_setup_widgets_and_application_page(client, http_server):
     assert error.value.code == 404
     server = http_server(FakeBridge(), setup=SimpleNamespace(page=lambda: b"AI mixer setup"))
     assert get_page(f"http://127.0.0.1:{server.server_port}", "/setup") == "AI mixer setup"
+
+
+def test_lever_positions_never_queue_behind_a_slow_mixer():
+    bridge = FakeBridge()
+    bridge.gates["mixer.lever"] = gate = threading.Event()
+    first = threading.Thread(target=bridge.take, args=({"command": "lever", "position": 0.1, "duration_sec": 1},))
+    first.start()
+    while not bridge.sent:
+        time.sleep(0.01)
+    # While the first position is with the mixer, newer ones only replace each other.
+    for position in (0.2, 0.3, 0.4):
+        assert bridge.take({"command": "lever", "position": position, "duration_sec": 1}) is True
+    gate.set()
+    first.join(5)
+    assert [json.loads(line.split(" ", 1)[1])["position"] for line in bridge.sent] == [0.1, 0.4]
+    with pytest.raises(ValueError):
+        bridge.take({"command": "lever", "position": 1.5})
+    # Streamed positions arrive out of order sometimes: per page, an older one is dropped.
+    bridge.gates.clear()
+    bridge.sent.clear()
+    for seq, position in ((5, 0.5), (4, 0.45), (6, 0.6)):
+        bridge.take({"command": "lever", "position": position, "seq": seq, "client": "page-a"})
+    bridge.take({"command": "lever", "position": 0.1, "seq": 1, "client": "page-b"})
+    assert [json.loads(line.split(" ", 1)[1])["position"] for line in bridge.sent] == [0.5, 0.6, 0.1]
+    assert all("seq" not in line and "client" not in line for line in bridge.sent)
+
+
+def lever_socket(server):
+    """A browser's /api/lever WebSocket to `server`, and a function sending one masked frame on it."""
+    import socket
+    sock = socket.create_connection(("127.0.0.1", server.server_port), timeout=5)
+    # RFC 6455's own example: a browser opens the socket only with this answer to this key.
+    sock.sendall(("GET /api/lever HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                  "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+    reply = b""
+    while b"\r\n\r\n" not in reply:
+        reply += sock.recv(1024)
+    assert reply.startswith(b"HTTP/1.1 101") and b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" in reply
+
+    def send(opcode, payload):
+        mask = os.urandom(4)
+        sock.sendall(bytes([0x80 | opcode, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+    return sock, send
+
+
+def lever_sent(bridge, newest: float) -> list[float]:
+    """The positions sent to mixer.lever, once `newest` is among them (a socket's go on a thread of their own)."""
+    deadline = time.monotonic() + 5
+    while True:
+        positions = [json.loads(line.split(" ", 1)[1])["position"] for line in bridge.sent if line.startswith("mixer.lever ")]
+        if newest in positions or time.monotonic() > deadline:
+            return positions
+        time.sleep(0.01)
+
+
+def test_lever_websocket_streams_positions_in_order(client):
+    bridge = FakeBridge()
+    base, server = client(bridge)
+    sock, send = lever_socket(server)
+    for position in (0.25, 0.5, 2.0, 0.75):   # an invalid one is skipped; the channel stays open
+        send(0x1, json.dumps({"position": position, "duration_sec": 1}).encode())
+    send(0x9, b"hi")
+    assert sock.recv(16) == bytes([0x8A, 2]) + b"hi"
+    send(0x8, b"")
+    assert sock.recv(16)[:1] == bytes([0x88])
+    sock.close()
+    # One the mixer has not taken yet when a newer one arrives is replaced by it.
+    positions = lever_sent(bridge, 0.75)
+    assert positions[-1] == 0.75 and positions == sorted(set(positions)) and set(positions) <= {0.25, 0.5, 0.75}
+
+
+def test_lever_websocket_collapses_positions_behind_a_slow_mixer(client):
+    # The socket is read on while a position is with the mixer: what arrives meanwhile collapses
+    # to the newest behind every end on its way there, and still goes after the socket closed.
+    bridge = FakeBridge()
+    bridge.gates["mixer.lever"] = gate = threading.Event()
+    _, server = client(bridge)
+    sock, send = lever_socket(server)
+    try:
+        send(0x1, json.dumps({"position": 0.5, "seq": 1, "client": "page"}).encode())
+        while not bridge.sent:
+            time.sleep(0.01)
+        for seq, position in enumerate((0.6, 0.7, 1.0, 0.9, 0.8, 0.0, 0.1, 0.2), start=2):
+            send(0x1, json.dumps({"position": position, "seq": seq, "client": "page"}).encode())
+        send(0x9, b"hi")   # answered once every position before it was read
+        assert sock.recv(16) == bytes([0x8A, 2]) + b"hi"
+        send(0x8, b"")
+        assert sock.recv(16)[:1] == bytes([0x88])
+    finally:
+        gate.set()
+        sock.close()
+    assert lever_sent(bridge, 0.2) == [0.5, 1.0, 0.0, 0.2]
+    bridge.take({"command": "lever", "position": 0.3})   # the lever is free for the next controller
+    assert lever_sent(bridge, 0.3) == [0.5, 1.0, 0.0, 0.2, 0.3]
+
+
+def test_source_banks_are_shared_and_kept_by_the_setup_manager(client, tmp_path):
+    class Setup:
+        saved = None
+        def source_banks(self): return self.saved
+        def remember_banks(self, banks): Setup.saved = banks
+        def status(self): return {"phase": "running", "message": "", "revision": 1}
+    base, _ = client(FakeBridge(), setup=Setup())
+    def call(method, body=None):
+        request = urllib.request.Request(base + "/api/banks", method=method,
+                                         data=json.dumps(body).encode() if body is not None else None)
+        with urllib.request.urlopen(request) as response:
+            return json.load(response)
+    assert call("GET") == {"banks": None}
+    banks = [["a", "b"], [], ["c", None]]
+    assert call("POST", {"banks": banks}) == {"banks": banks}
+    assert Setup.saved == banks and call("GET") == {"banks": banks}
+    with pytest.raises(urllib.error.HTTPError) as rejected:
+        call("POST", {"banks": [["a"]]})
+    assert rejected.value.code == 400
+
+
+@pytest.mark.parametrize("stored", [ValueError("Expecting value: line 1 column 1"), [["a"]], {"banks": []}])
+def test_unusable_stored_source_banks_start_empty_instead_of_failing_every_poll(client, caplog, stored):
+    class Setup:
+        reads = 0
+        saved = None
+        def source_banks(self):
+            Setup.reads += 1
+            if isinstance(stored, Exception):
+                raise stored
+            return stored
+        def remember_banks(self, banks): Setup.saved = banks
+        def status(self): return {"phase": "running", "message": "", "revision": 1}
+    base, _ = client(FakeBridge(STATE_REPLIES), setup=Setup())
+    with caplog.at_level(logging.WARNING):
+        assert get(base, "/api/banks") == (200, {"banks": None})
+        status, state = get(base, "/api/state")
+        assert status == 200 and state["source_banks"] is None
+    assert Setup.reads == 1 and "source banks" in caplog.text
+    banks = [["a"], [], []]
+    request = urllib.request.Request(base + "/api/banks", method="POST", data=json.dumps({"banks": banks}).encode())
+    with urllib.request.urlopen(request) as response:
+        assert json.load(response) == {"banks": banks}
+    assert Setup.saved == banks
+
+
+def test_key_tally_poll_is_small_cached_and_invalidated_by_commands(client):
+    bridge = FakeBridge(replies={"mixer.dsk_status": '[{"id":"logo","on":false,"on_air":true,"phase":"fading-out"}]',
+                                 "mixer.ftb_status": '{"on":false,"on_air":false,"phase":"off"}'})
+    base, _ = client(bridge)
+    def get():
+        with urllib.request.urlopen(base + '/api/keys') as response:
+            return json.load(response)
+    first = get()
+    assert first['dsk'][0]['phase'] == 'fading-out'
+    assert first['ftb']['phase'] == 'off'
+    assert get() == first
+    assert bridge.sent == ['mixer.dsk_status', 'mixer.ftb_status']
+    bridge.take({'command': 'dsk', 'keys': ['logo'], 'on': False, 'fade_seconds': 0})
+    assert get()['dsk_sampled_at'] > first['dsk_sampled_at']
+    assert bridge.sent[-2:] == ['mixer.dsk_status', 'mixer.ftb_status']

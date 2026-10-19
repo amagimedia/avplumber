@@ -4,18 +4,16 @@ import importlib.util
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 
 import pytest
 
 
-def test_filter_stop_with_pending_input():
+def test_filter_stop_with_pending_input(run_script):
     if importlib.util.find_spec('_avplumber') is None or not shutil.which('ffmpeg'):
         pytest.skip('requires the native extension and ffmpeg')
-    result = subprocess.run([sys.executable, str(Path(__file__).resolve())],
-                            capture_output=True, text=True, timeout=15)
+    result = run_script(Path(__file__).resolve(), timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'did not finish after stop' not in result.stdout + result.stderr
     assert 'PASS filter stop' in result.stdout
