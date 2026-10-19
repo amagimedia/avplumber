@@ -787,6 +787,13 @@ async function tbarUnderJitter(browser) {
     'ease-out': [(x) => x * (2 - x), (p) => 1 - Math.sqrt(1 - p)],
     'ease-in-out': [(x) => x * x * (3 - 2 * x), (p) => 0.5 - Math.sin(Math.asin(1 - 2 * p) / 3)]};
   const WIPE_MS = 32 * F;
+  // A dip's picture (fade_curve.hpp dipCurveExpression), which its T-bar draws on the dip's clock: the curve once per
+  // half, around a hold of a frame at the colour; a progress on the hold stands for no one moment.
+  const dipped = ([c, inverse], duration) => {
+    const lo = 0.5 - Math.min(0.5, F / duration) / 2, hi = 1 - lo;
+    return [(x) => (x < lo ? c(x / lo) / 2 : x < hi ? 0.5 : 0.5 + c((x - hi) / lo) / 2),
+      (p) => (p < 0.5 ? inverse(2 * p) * lo : p > 0.5 ? hi + inverse(2 * p - 1) * lo : NaN)];
+  };
   // A fade's progress is its curve's, a dip's and a wipe's their clock's (fade.cpp, wipe.cpp).
   const mixer = {mode: 'idle', start: 0, duration: 0, curve: 'linear', heldAt: null, manual: false, origin: 0, position: 0, cutAt: 0, takes: [],
     x(t) { return Math.min(1, Math.max(0, ((this.heldAt ?? Math.floor(t / F) * F) - this.start) / this.duration)); },
@@ -825,7 +832,8 @@ async function tbarUnderJitter(browser) {
   let cache = null, served = null, changedAt = 0, lastSeq = -1, wsAt = 0;
   const streamed = [];   // the lever's positions that came over its socket, in the order they came
   const lever = (c, t) => { if (c.seq > lastSeq) { lastSeq = c.seq; mixer.command(c, t); changedAt = t; } };
-  // A 120 Hz display: animation frames on its grid, the frame's time to each callback; __onFrame runs after them.
+  // A 120 Hz display: animation frames on its grid, the frame's time to each callback; __onFrame runs after them, with
+  // the time they took.
   const frameClock = () => {
     const period = 1000 / 120, queue = [], grid = (t) => Math.max(last + period, Math.round(t / period) * period);
     let timer = null, last = -Infinity;
@@ -834,7 +842,7 @@ async function tbarUnderJitter(browser) {
       timer = null;
       const at = performance.now(), ts = last = grid(at);   // a timer a little early or late still hits its frame
       queue.splice(0).forEach((cb) => cb(ts));
-      window.__onFrame?.(ts, at);
+      window.__onFrame?.(ts, at, performance.now() - at);
       schedule();
     };
     const schedule = () => {
@@ -844,6 +852,21 @@ async function tbarUnderJitter(browser) {
     window.__startFrames = schedule;
   };
   const show = bigShow(), {context, page, errors} = await openPage(browser, {...show, init: frameClock});
+  // The host's timers, on a blank page: the median wait of a timeout set for a 120 Hz frame. A headless browser on a
+  // desktop can fire it tens of ms late (macOS coalesces a windowless process's timers), and there no page is drawn at
+  // 120 Hz; the frame rate is then reported only, and every frame drawing the T-bar (shaped) is still checked.
+  const blank = await context.newPage();
+  const hostFrame = await blank.evaluate(() => new Promise((done) => {
+    const waits = [];
+    let last = performance.now();
+    const tick = () => {
+      waits.push(-last + (last = performance.now()));
+      if (waits.length < 60) setTimeout(tick, 1000 / 120); else done(waits.sort((a, b) => a - b)[30]);
+    };
+    setTimeout(tick, 1000 / 120);
+  }));
+  await blank.close();
+  console.log(`  host timers: a 120 Hz frame's timeout fires after ${hostFrame.toFixed(1)} ms` + (hostFrame < 9.5 ? '' : ', so 120 Hz is not checked here'));
   await page.route('**/api/state', async (route) => {
     await sleep(delay());
     const t = now(), fresh = cache && t - cache.at < 200 && cache.at > changedAt ? cache : {at: t, status: mixer.status(t)};
@@ -874,11 +897,13 @@ async function tbarUnderJitter(browser) {
     touched.fade = true;
     window.frames_ = [];
     const q = (s) => document.querySelector(s);
-    window.__onFrame = (t, at) => {
+    // start: the page's estimate of the mix's start; gap: how far the start the T-bar is drawn by (mix.shown) is from
+    // it, once a sample has replaced the page's own guess; null before that and with no mix on.
+    window.__onFrame = (t, at, cost) => {
       const trail = q('#tp .trail').style;
-      frames_.push({t, at, p: trail.getPropertyValue('--b') - trail.getPropertyValue('--a'),
+      frames_.push({t, at, cost, p: trail.getPropertyValue('--b') - trail.getPropertyValue('--a'),
         v: Number(q('#tp .track').style.getPropertyValue('--v')), lever: $('lever').value / 1000, asked: __asked,
-        settled: mix ? mix.fix.at + mix.fix.ms : 0});
+        start: mixOn() ? mix.start : null, gap: mixOn() && mix.guess === false ? mix.start - mix.shown : null});
     };
     __startFrames();
   });
@@ -896,15 +921,34 @@ async function tbarUnderJitter(browser) {
   const smooth = (frames, duration, name, what) => frames.forEach((f, i) => i && assert(f.p - frames[i - 1].p <= (f.t - frames[i - 1].t) * (1.5 * steepest[name] / duration + 0.001) + 0.003,
     `${what}: the T-bar jumps from ${frames[i - 1].p} to ${f.p} at ${Math.round(f.t)} ms`));
   const measured = [];
-  // The T-bar against the mix, once the page's last correction of the take has eased in: every frame's lag behind the
+  // The T-bar against the mix, once a correction of the page's has eased in: every frame's lag behind the
   // mixer, the time between the frame and the mixer's moment of that progress (through the mixer's curve), is the same
   // to within 1 ms, so the T-bar has the mix's curve and rate, and it is under 200 ms (the network's least delay and a
   // frame's grain). Measured over the whole take: the largest change of speed from one frame to the next, in the mix's
   // own speed (1 / duration).
-  const shaped = (frames, name, duration, what) => {
-    const truth = mixer.takes.at(-1), [c, inverse] = CURVES[truth.curve], whole = frames.filter((f) => f.p > 0.02 && f.p < 0.98);
+  // Eased in: mixDrawn takes a share of the gap to the estimate each ms (CATCH_UP_MS), so a correction has no end, and
+  // a sample with a shorter delay can correct the estimate late in a take. A frame's lag is the drawn start's, which only
+  // goes toward the estimate, so over a run of frames within 1 ms of one estimate, the lag moves by less than that 1 ms:
+  // the T-bar runs the mix's curve, at its rate, between the page's corrections. Measured over the last run that lasts
+  // the time of ten 120 Hz frames (ten frames where the host keeps 120 Hz, fewer and further apart where it does not,
+  // hostFrame), so after the last correction that leaves time to settle. The catch-up
+  // takes about a second to come that close, so a take with its lag measured (settles) runs three; a wipe's clip is too
+  // short, and its frames show only rate and curve.
+  // Drawn at the display's rate: every frame it offered while the T-bar moved drew it and asked for the next, exactly
+  // one, within half a frame; and on a host whose timers keep 120 Hz (hostFrame), at 120 Hz.
+  const shaped = (frames, name, duration, what, {settles = true, dip} = {}) => {
+    const truth = mixer.takes.at(-1), whole = frames.filter((f) => f.p > 0.02 && f.p < 0.98);
+    const [c, inverse] = dip ? dipped(CURVES[dip], truth.duration) : CURVES[truth.curve];
     assert.equal(truth.curve, name, `${what}: the mixer runs ${name}`);
-    const mid = whole.filter((f) => f.t >= Math.max(...frames.map((g) => g.settled))), n = mid.length;
+    const runs = [[]];
+    whole.forEach((f) => {
+      const run = runs.at(-1);
+      if (f.gap === null || Math.abs(f.gap) >= 1) runs.push([]);
+      else if (run.length && run.at(-1).start !== f.start) runs.push([f]);
+      else run.push(f);
+    });
+    const long = (run) => run.length >= 3 && run.at(-1).t - run[0].t >= 9 * 1000 / 120;
+    const mid = (runs.findLast(long) ?? runs.reduce((a, b) => (b.length > a.length ? b : a))).filter((f) => !Number.isNaN(inverse(f.p))), n = mid.length;
     const lags = mid.map((f) => f.t + offset - truth.start - inverse(f.p) * truth.duration), lag = lags.reduce((s, x) => s + x, 0) / n;
     const shape = Math.max(...mid.map((f) => Math.abs(f.p - c((f.t + offset - lag - truth.start) / truth.duration))));
     let jerk = 0;
@@ -913,32 +957,38 @@ async function tbarUnderJitter(browser) {
       jerk = Math.max(jerk, Math.abs(v(whole[i - 1], whole[i]) - v(whole[i - 2], whole[i - 1])));
     }
     const gaps = frames.slice(1).map((f, i) => f.at - frames[i].at).sort((a, b) => a - b), spread = Math.max(...lags) - Math.min(...lags);
-    measured.push({what, frames: whole.length, settled: n, gapMs: gaps[gaps.length >> 1], lag, spread, shape, jerk});
-    assert(gaps[gaps.length >> 1] < 9.5, `${what}: drawn at 120 Hz (median frame ${gaps[gaps.length >> 1]} ms)`);
-    assert(n >= 10, `${what}: settled for ten frames at least (${n} of ${whole.length})`);
+    const costs = frames.filter((f) => f.p > 0).map((f) => f.cost).sort((a, b) => a - b), median = (all) => all[all.length >> 1];
+    measured.push({what, frames: whole.length, settled: n, gapMs: median(gaps), costMs: median(costs), lag, spread, shape, jerk});
+    whole.forEach((f, i) => i && assert.equal(f.asked - whole[i - 1].asked, 1, `${what}: the T-bar is drawn on every frame (${Math.round(f.t)} ms)`));
+    assert(median(costs) < 1000 / 240, `${what}: a frame is drawn within half a 120 Hz frame (median ${median(costs)} ms)`);
+    if (hostFrame < 9.5) assert(median(gaps) < 9.5, `${what}: drawn at 120 Hz (median frame ${median(gaps)} ms)`);
+    if (!settles) return;
+    assert(n && long(mid), `${what}: settled for ten 120 Hz frames at least (${n} of ${whole.length}, ${n && Math.round(mid.at(-1).t - mid[0].t)} ms)`);
     assert(spread < 1 && lag > -F && lag < 200, `${what}: runs the mix's curve ${Math.round(lag)} ms behind it, to within ${spread} ms`);
   };
-  // An Auto: from 0 to 100% along its curve, never back, and the take ends.
-  const auto = async (key, name, duration, what) => {
+  // An Auto: from 0 to 100% along its curve, never back, and the take ends. A mix the page cannot draw before the mixer
+  // shows it on air (seen: a wipe of a clip of unknown length) starts at that sample's progress (observe), and is smooth
+  // from there.
+  const auto = async (key, name, duration, what, options = {}) => {
     const t0 = await press(key);
     await sleep(duration + 800);
     const frames = await recorded(t0, await at()), run = take(frames);
     rising(run, what);
-    smooth(run, duration, name, what);
-    shaped(run, name, duration, what);
+    smooth(options.seen ? run.slice(run.findIndex((f) => f.p > 0)) : run, duration, name, what);
+    shaped(run, name, duration, what, options);
     assert(run.at(-1).p === 1 && frames.at(-1).p === 0, `${what} reaches 100% and then the take ends`);
   };
-  await rate('1:00');
-  await auto('Space', 'linear', 1000, 'linear Auto');
+  await rate('3:00');
+  await auto('Space', 'linear', 3000, 'linear Auto');
   for (const name of ['ease-in', 'ease-out', 'ease-in-out']) {
     await curve(name);
-    await auto('Space', name, 1000, `${name} Auto`);
+    await auto('Space', name, 3000, `${name} Auto`);
   }
-  // A dip runs its clock, whichever curve its halves have; so does a wipe, its clip's.
+  // A dip runs its clock, whichever curve its halves have, and its T-bar draws its picture; a wipe runs its clip's.
   await page.locator('#dip').click();
-  await auto('Space', 'linear', 1000, 'ease-in-out dip');
+  await auto('Space', 'linear', 3000, 'ease-in-out dip', {dip: 'ease-in-out'});
   await page.keyboard.press('w');
-  await auto('Space', 'linear', WIPE_MS, 'wipe');
+  await auto('Space', 'linear', WIPE_MS, 'wipe', {settles: false, seen: true});
   await page.keyboard.press('f');
   // Held, an eased Auto and a dip stand still; Auto again runs them on to the end.
   await rate('2:00');
@@ -968,7 +1018,8 @@ async function tbarUnderJitter(browser) {
   await sleep(1500);
   let frames = await recorded(cut, await at());
   const cleared = frames.findIndex((f) => f.p === 0);
-  assert(frames[cleared].t - cut < 100 && frames.slice(cleared).every((f) => f.p === 0), 'a cut clears the T-bar at once and for good');
+  // At once: within the press's way to the page (100 ms) and a frame of the host's (hostFrame).
+  assert(frames[cleared].t - cut < 100 + hostFrame && frames.slice(cleared).every((f) => f.p === 0), 'a cut clears the T-bar at once and for good');
   let t0 = await press('Space');
   await sleep(2500);
   frames = await recorded(t0, await at());
@@ -997,7 +1048,8 @@ async function tbarUnderJitter(browser) {
   assert.equal(frames.at(-1).asked, frames[0].asked, 'a T-bar standing still asks for no frames');
   assert.deepEqual(errors, []);
   for (const m of measured)
-    console.log(`  ${m.what}: ${m.frames} frames at ${m.gapMs.toFixed(1)} ms; settled ${m.settled}: ${m.lag.toFixed(1)} ms behind the mix to within ` +
-                `${m.spread.toFixed(3)} ms, off its curve by ${m.shape.toExponential(1)}; speed change per frame up to ${m.jerk.toFixed(3)}`);
+    console.log(`  ${m.what}: ${m.frames} frames at ${m.gapMs.toFixed(1)} ms, drawn in ${m.costMs.toFixed(2)} ms; settled ${m.settled}: ` +
+                `${m.lag.toFixed(1)} ms behind the mix to within ${m.spread.toFixed(3)} ms, off its curve by ${m.shape.toExponential(1)}; ` +
+                `speed change per frame up to ${m.jerk.toFixed(3)}`);
   await context.close();
 }
