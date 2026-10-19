@@ -325,14 +325,16 @@
   .dips .custom, .dips .custom[aria-pressed="true"] { position: relative; overflow: hidden; background: conic-gradient(#e5484d, #f5a524, #30a46c, #6e8bf5, #c56ef5, #e5484d); }
   /* The native picker opens from the swatch's click (Safari opens none that is display: none) and never takes the focus. */
   .dips input { position: absolute; inset: 0; opacity: 0; pointer-events: none; }
-  /* The show's wipe clips, however many: they fill the room Fade and Dip leave, and more than fit scroll sideways,
-     with arrows at the ends. */
+  /* The show's wipe clips, however many: they fill the room Fade and Dip leave, names shorten to an ellipsis, and more
+     than fit scroll sideways, the edge faded while clips are past it. */
   .wipes { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; margin-left: 4px; padding-left: 4px; border-left: 1px solid var(--edge); }
   .wipes .grp { flex: none; display: inline-flex; align-items: center; font-weight: 600; font-size: 12.5px; color: var(--muted); padding: 0 6px 0 10px; }
   .wipes .grp kbd.k { background: rgb(0 0 0 / .25); margin-left: 7px; }
   .wipes .list { flex: 1; min-width: 0; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
   .wipes .list::-webkit-scrollbar { display: none; }
-  .wipes .list button { flex: 1 0 auto; }
+  .wipes .list button { flex: 1 1 auto; min-width: 6em; }
+  .wipes .list button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wipes .list.more { mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); }
   /* A show without a wipe library: the clip's path on the mixer host, typed. */
   #wipe-custom { flex: none; display: flex; border-radius: 6px; background: var(--cap); }
   #wipe-custom:focus-within { box-shadow: inset 0 0 0 1px var(--muted); }
@@ -396,6 +398,12 @@
   .viewer .pager { margin-left: 0; }
   .viewer .pager .mono { min-width: 5ch; text-align: center; font-weight: 700; font-size: 12px; }
   .viewer .sp { flex: 1; }
+  /* A narrow viewer keeps its output's name readable: the [ ] hint and the ↗ link give way (the player opens from a
+     wider viewer or the wall), the layout picker shortens before the output's, and the output's keeps a floor. */
+  .viewer { container-type: inline-size; }
+  @container (max-width: 420px) { .viewer > header kbd.hint, .viewer > header .open { display: none; } .viewer .pager .mono { min-width: 0; } }
+  .viewer > header > .pick.out { flex: 0 1 auto; min-width: 9ch; }
+  .viewer > header > .pick:not(.out) { flex-shrink: 4; }
   .screen { position: relative; flex: 1 1 0; min-height: 0; margin: 0 10px; border-radius: 6px; overflow: hidden; background: #000; container-type: size;
             user-select: none; }
   /* The picture: the output's aspect (--ar, its canvas "w / h") fitted inside the screen, in full screen too. */
@@ -810,13 +818,15 @@ function setDirect(on) {
   renderBuses();
 }
 // One button per clip: during a live show a wipe must be one click away. More than fit scroll sideways.
+const fadeWipes = () => { const list = $("wipes"); list.classList.toggle("more", list.scrollLeft + list.clientWidth < list.scrollWidth - 1); };
 function renderWipes(library) {
   if (JSON.stringify(library) === JSON.stringify(wipes)) return;
   wipes = library;
   currentWipe = library.find((w) => w.id === currentWipe?.id) || library[0] || null;
   $("wipe-custom").hidden = library.length > 0;
   $("wipes").replaceChildren(...(library.length ? library : [null]).map((clip) => {
-    const button = el("button", "wipe", clip ? clip.name || clip.id : "Media wipe");
+    const button = el("button", "wipe");
+    button.append(el("span", "", clip ? clip.name || clip.id : "Media wipe"));
     button.type = "button";
     if (clip) button.title = `Select for Auto: ${clip.path}${clip.duration_seconds ? ` · ${clip.duration_seconds} s` : ""}`;
     button.dataset.clip = clip ? clip.id : "";
@@ -824,7 +834,10 @@ function renderWipes(library) {
     button.onclick = () => selectTransition("wipe", clip);
     return button;
   }));
+  fadeWipes();
 }
+$("wipes").addEventListener("scroll", fadeWipes);
+new ResizeObserver(fadeWipes).observe($("wipes"));
 // The list has no scroll bar, so a plain wheel scrolls it sideways as well, not only Shift+wheel or a sideways swipe.
 $("wipes").addEventListener("wheel", (e) => {
   const list = $("wipes"), d = e.deltaY || e.deltaX;
@@ -2043,6 +2056,7 @@ function addViewer(out) {
   const v = {out, uid: ++viewerSerial, el: el("section", "panel viewer"), head: el("header"), src: null};
   v.tally = el("span", "tally");
   v.dd = dropdown("outputs", (value) => { v.out = value; saveViewers(); redraw(); });
+  v.dd.root.classList.add("out");
   v.layouts = dropdown("layouts", (value) => {
     const aux = auxById(v.aux);
     if (aux) command({command: "aux_layout", bus: aux.id, layout: aux.layouts[Number(value)]});
