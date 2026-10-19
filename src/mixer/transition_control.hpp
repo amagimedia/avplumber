@@ -82,7 +82,8 @@ inline FadeRequest runOn(FadeRequest request, int64_t at_ms, double duration_sec
 /// the time since the previous one arrived at `last_at_ns` (0: none): one frame when positions
 /// stream in, at most 100 ms when they come seldom. `period_ns`: one output frame.
 inline int64_t leverSpanNs(std::optional<double> span_ms, int64_t now_ns, int64_t last_at_ns, int64_t period_ns) {
-    if (span_ms) return std::clamp<int64_t>(int64_t(*span_ms * 1e6), period_ns, 200000000);
+    // Clamped in double: a large finite span would overflow int64 ns.
+    if (span_ms) return int64_t(std::clamp(*span_ms * 1e6, double(period_ns), 200e6));
     return last_at_ns ? std::clamp<int64_t>(now_ns - last_at_ns, period_ns, 100000000) : period_ns;
 }
 

@@ -102,6 +102,7 @@ void leverSpan() {
     assert(leverSpanNs(25.0, now, now - 2000000000, frame) == 25000000);             // the controller's spacing
     assert(leverSpanNs(4.0, now, 0, frame) == frame);                                // one frame at least
     assert(leverSpanNs(500.0, now, 0, frame) == 200000000);                          // 200 ms at most
+    assert(leverSpanNs(1e300, now, 0, frame) == 200000000);                          // beyond int64 ns too
 }
 
 int main() {
