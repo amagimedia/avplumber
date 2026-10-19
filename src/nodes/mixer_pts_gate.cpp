@@ -32,7 +32,7 @@ public:
     }
 
     static std::shared_ptr<MixerPtsGate> create(NodeCreationInfo& nci) {
-        const auto fps = parseRatio(nci.params.value("fps", std::string("60/1")));
+        const auto fps = parseRatio(nci.params.at("fps"));
         return NodeSISO::createCommon<MixerPtsGate>(nci.edges, nci.params, fps);
     }
 };
