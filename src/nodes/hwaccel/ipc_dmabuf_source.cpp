@@ -1,6 +1,5 @@
 #include "../node_common.hpp"
 #include "../../mixer/primitives/SourceDelivery.hpp"
-#include "../../mixer/primitives/MonotonicClock.hpp"
 extern "C" {
 #include <libavutil/buffer.h>
 #include <libavutil/hwcontext_drm.h>
@@ -215,7 +214,7 @@ protected:
     int width_ = 0;
     int height_ = 0;
     av::Rational frame_rate_{0, 1};
-    uint64_t capture_epoch_ = avp::mixer::monotonicNs(), last_capture_ = 0;
+    avp::mixer::CaptureNumbering capture_numbering_;
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVBufferRef* hw_frames_ctx_ = nullptr;
 
@@ -364,13 +363,8 @@ public:
         vfrm.raw()->height = ti.height;
         vfrm.setTimeBase({1, 1000000});
         vfrm.raw()->pts = ti.timestamp / 1000;
-        if (ti.frame_count < last_capture_) capture_epoch_ = avp::mixer::monotonicNs();
-        last_capture_ = ti.frame_count;
-        if (frame_rate_.getNumerator() > 0) {
-            const auto period = av_rescale_q(1, av_inv_q(frame_rate_.getValue()), AVRational{1, 1000000000});
-            avp::mixer::setFrameTag(vfrm.raw(), avp::mixer::captureKey,
-                avp::mixer::SourceFrame{capture_epoch_, ti.frame_count, uint64_t(period)}.encode());
-        }
+        if (frame_rate_.getNumerator() > 0)
+            capture_numbering_.stamp(vfrm.raw(), avp::mixer::captureKey, ti.frame_count, frame_rate_.getValue());
 
         if (hw_frames_ctx_) {
             vfrm.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);

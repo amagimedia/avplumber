@@ -1,5 +1,7 @@
 #include "mixer/primitives/SourceDelivery.hpp"
 #include <cassert>
+#include <chrono>
+#include <thread>
 using namespace avp::mixer;
 int main() {
     SourceDelivery d;
@@ -58,4 +60,19 @@ int main() {
     assert(sourceFrames(out).empty());
     assert(sourceFrames(copy).size() == 1);
     av_frame_free(&copy); av_frame_free(&out); av_frame_free(&b); av_frame_free(&a);
+    CaptureNumbering numbering;
+    AVFrame* captured = av_frame_alloc();
+    auto stamp = [&](uint64_t number, AVRational rate = {25, 1}) {
+        numbering.stamp(captured, captureKey, number, rate);
+        return SourceFrame::decode(av_dict_get(captured->metadata, captureKey, nullptr, 0)->value);
+    };
+    const auto first = stamp(0);
+    assert(first.number == 0 && first.period_ns == 40000000);
+    assert(stamp(5).epoch == first.epoch);
+    assert(stamp(5).epoch == first.epoch); // A repeated number is not a restart.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const auto restarted = stamp(2, {30000, 1001});
+    assert(restarted.epoch > first.epoch && restarted.number == 2 && restarted.period_ns == 33366667);
+    assert(stamp(3).epoch == restarted.epoch);
+    av_frame_free(&captured);
 }

@@ -11,7 +11,10 @@
 extern "C" {
 #include <libavutil/dict.h>
 #include <libavutil/frame.h>
+#include <libavutil/mathematics.h>
+#include <libavutil/rational.h>
 }
+#include "MonotonicClock.hpp"
 
 namespace avp::mixer {
 inline constexpr const char* sourcePrefix = "avp.source.";
@@ -42,6 +45,18 @@ inline void setFrameTag(AVFrame* frame, const char* key, const std::string& valu
     if (av_dict_set(&frame->metadata, key, value.c_str(), 0) < 0)
         throw std::runtime_error("cannot allocate source frame metadata");
 }
+// Numbers one producer's pictures. A number that goes back means the producer restarted, so a new
+// epoch begins and SourceDelivery takes a fresh baseline instead of counting regressions.
+class CaptureNumbering {
+    uint64_t epoch_ = monotonicNs(), last_ = 0;
+public:
+    void stamp(AVFrame* frame, const char* key, uint64_t number, AVRational rate) {
+        if (number < last_) epoch_ = monotonicNs();
+        last_ = number;
+        const auto period = av_rescale_q(1, av_inv_q(rate), AVRational{1, 1000000000});
+        setFrameTag(frame, key, SourceFrame{epoch_, number, uint64_t(period)}.encode());
+    }
+};
 inline void clearSourceFrames(AVFrame* frame) {
     while (auto* e = av_dict_get(frame->metadata, sourcePrefix, nullptr, AV_DICT_IGNORE_SUFFIX))
         av_dict_set(&frame->metadata, e->key, nullptr, 0);

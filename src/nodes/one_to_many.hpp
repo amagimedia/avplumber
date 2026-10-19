@@ -5,7 +5,6 @@
 #include "../mixer/primitives/frame_subscription.hpp"
 #include "../frame_color_tags.hpp"
 #include "../mixer/primitives/SourceDelivery.hpp"
-#include "../mixer/primitives/MonotonicClock.hpp"
 
 inline uint32_t parseOutputsMask(const Parameters& value) { return parseBitmask(value); }
 
@@ -28,8 +27,7 @@ protected:
     std::vector<std::string> output_names_;
     std::string source_identity_;
     av::Rational source_rate_{0, 1};
-    uint64_t source_epoch_ = avp::mixer::monotonicNs();
-    int64_t source_number_ = -1;
+    avp::mixer::CaptureNumbering source_numbering_;
 
     void stampSource(T* data) {
         if constexpr (std::is_same_v<T, av::VideoFrame>) {
@@ -40,18 +38,14 @@ protected:
                 return;
             }
             if (source_rate_.getNumerator() <= 0) {
-                auto rate = this->edgeSource()->edge()->template findNodeUp<IFrameRateSource>();
+                auto rate = this->template findNodeUp<IFrameRateSource>();
                 if (!rate) return;
                 source_rate_ = rate->frameRate();
             }
             if (source_rate_.getNumerator() <= 0) return;
             const int64_t number = data->pts().timestamp(av_inv_q(source_rate_.getValue()));
             if (number < 0) return;
-            if (number < source_number_) source_epoch_ = avp::mixer::monotonicNs();
-            source_number_ = number;
-            const auto period = av_rescale_q(1, av_inv_q(source_rate_.getValue()), AVRational{1, 1000000000});
-            avp::mixer::setFrameTag(data->raw(), key.c_str(),
-                avp::mixer::SourceFrame{source_epoch_, uint64_t(number), uint64_t(period)}.encode());
+            source_numbering_.stamp(data->raw(), key.c_str(), uint64_t(number), source_rate_.getValue());
         }
     }
 
