@@ -280,9 +280,11 @@
     .upright .takes { grid-template-columns: minmax(0, 1fr); grid-template-rows: 1fr 1fr; }
     .upright .key-big { width: auto; height: auto; min-height: 48px; }
     /* The scenes header keeps one row beside the panel: the filters say what the grid is and the page box where it is, so
-       the title, the count and the key hints give way; the filters tighten. */
+       the title, the count and the key hints give way; the filters and the page box tighten, enough for macOS's wider
+       system font. */
     .upright .scenes > header > .lbl, .upright .scenes > header > kbd.k, .upright .scenes .pager .count, .upright .scenes .pager kbd.hint { display: none; }
-    .upright #chips button { padding-inline: 6px; }
+    .upright #chips button { padding-inline: 4px; gap: 4px; }
+    .upright .scenes .pager { gap: 4px; } .upright #pages .mono { padding-inline: 6px; }
     .upright .tbar { grid-template-columns: auto auto; grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "pct pct" "leds track"; justify-items: start; align-items: stretch; gap: 4px 8px; }
     .upright .pct { min-width: 0; line-height: 18px; }
     .upright .leds { grid-template-columns: 6px; grid-template-rows: repeat(40, 1fr); height: auto; width: 6px; margin-block: 18px; transform: scaleY(-1); gap: 3px; }
