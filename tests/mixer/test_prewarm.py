@@ -5,6 +5,7 @@ these tests ensure READY cannot be published before the graph is warmed.
 """
 import importlib
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -231,6 +232,28 @@ def test_browser_painting_resumes_after_output_warmup_or_failure(native_boundary
         paused = events[events.index("paint False") + 1:events.index("paint True")]
         assert paused[0] == paused[-1] == "purge 0"
     assert app.avp.events.count("paint False") == app.avp.events.count("paint True") == 1
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_a_failed_resume_of_painting_never_replaces_the_startup_error(native_boundary, monkeypatch, caplog, failure):
+    app = application(native_boundary)
+    app.browser_windows = ("web",)
+    monkeypatch.setattr(app, "_browser_snapshot", lambda: {})
+    monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", lambda *args: None)
+    def paint(url, ids, enabled):
+        if enabled:
+            raise OSError("browser service gone")
+    monkeypatch.setattr("pyplumber.mixer.application.paint_windows", paint)
+    inspect = app.avp.getEdge
+    def get_edge(name, data_type=None):
+        if failure and name == "mixer_trans_out":
+            raise RuntimeError("warmup failed")
+        return inspect(name, data_type)
+    monkeypatch.setattr(app.avp, "getEdge", get_edge)
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError if failure else OSError,
+                                                         match="warmup failed" if failure else "browser service gone"):
+        app.start()
+    assert ("browser service gone" in caplog.text) == failure and not app.avp.ready
 
 
 def test_browser_pauses_while_another_input_is_still_starting(native_boundary, monkeypatch):

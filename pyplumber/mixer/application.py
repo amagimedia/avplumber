@@ -288,7 +288,15 @@ class MixerApplication:
                     paint_windows(self.dmabuf_rest, ids, False)
                     paused.update(ids)
             if self.browser_windows:
-                painting.callback(paint_windows, self.dmabuf_rest, windows, True)
+                def resume_painting(_type, failure, _traceback):
+                    try:
+                        paint_windows(self.dmabuf_rest, windows, True)
+                    except Exception as exc:
+                        if failure is None:
+                            raise
+                        # The startup error stays the one reported.
+                        log.warning("Browser painting did not resume after the failed start: %s", exc)
+                painting.push(resume_painting)
             for group in self.input_groups:
                 self.avp.group(group).startNodes()
             if windows:
