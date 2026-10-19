@@ -1,13 +1,11 @@
-extern "C" {
-#include <libavformat/avformat.h>
-}
 #include <unordered_set>
 #include <atomic>
 #include "node_common.hpp"
+#include "stream_routing.hpp"
 
 class StreamDemuxer: public NodeSingleInput<av::Packet>, public NodeWithOutputs<av::Packet>, public IReportsFinish {
 protected:
-    std::unordered_map<int, std::shared_ptr<Edge<av::Packet>> > map_;
+    StreamRoutingSink routes_;
     std::unordered_set<int> video_streams_;
     bool report_unknown_stream_ = false; // TODO: setting this variable in factory function
     bool waiting_for_keyframe_ = false;
@@ -27,55 +25,32 @@ public:
         finished_ = true;
         NodeSingleInput<av::Packet>::stop();
     }
-    void addStream(int stream_index, std::shared_ptr<Edge<av::Packet>> edge, bool is_video) {
-        if (map_.count(stream_index)!=0) {
-            throw Error("Adding stream requested but this stream_index already exists.");
-        }
-        map_[stream_index] = edge;
-        if (is_video) {
-            video_streams_.insert(stream_index);
-        }
-    }
     virtual void process() {
         if (finished()) {
             return;
         }
         av::Packet pkt = this->source_->get();
         if (isEofMarker(pkt)) {
-            // eof marker
-            // put on each queue
-            for (auto& m: map_) {
-                m.second->enqueue(createEofPacket(m.first));
-            }
+            // eof marker, put on each queue
+            routes_.put(pkt);
             // EOF may arrive while stop() wakes a blocked read. Never undo
             // that explicit stop when keeping an interactive input seekable.
             if (stop_on_eof_) {
                 finished_ = true;
             }
-        } else {
-            auto iter = map_.find(pkt.streamIndex());
-            if (iter != map_.end()) {
-                if (iter->second != nullptr) { // null pointer means that we should ignore that packet
-                    if (waiting_for_keyframe_ && video_streams_.count(pkt.streamIndex()) && pkt.isKeyPacket()) {
-                        waiting_for_keyframe_ = false;
-                    }
-                    if (!waiting_for_keyframe_) {
-                        iter->second->enqueue(pkt);
-                    } // else drop
-                }
-            } else if (report_unknown_stream_) {
-                logstream << "Unknown stream " << pkt.streamIndex() << std::endl;
+        } else if (routes_.routes(pkt.streamIndex())) {
+            if (waiting_for_keyframe_ && video_streams_.count(pkt.streamIndex()) && pkt.isKeyPacket()) {
+                waiting_for_keyframe_ = false;
             }
+            if (!waiting_for_keyframe_) {
+                routes_.put(pkt);
+            } // else drop
+        } else if (report_unknown_stream_) {
+            logstream << "Unknown stream " << pkt.streamIndex() << std::endl;
         }
     }
     virtual void forEachOutput(std::function<void(Sink<av::Packet>*)> cb) {
-        for (auto it: map_) {
-            if (it.second==nullptr) continue;
-            //std::unique_ptr<EdgeSink<av::Packet>> esink = it.second->makeSink();
-            //cb(esink.get());
-            EdgeSink<av::Packet> esink(it.second);
-            cb(&esink);
-        }
+        routes_.forEachOutput(cb);
     }
     static std::shared_ptr<StreamDemuxer> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
@@ -90,125 +65,19 @@ public:
         if (params.count("stop_on_eof")) {
             r->stop_on_eof_ = params["stop_on_eof"];
         }
-        
+
         // find source of streams:
         std::shared_ptr<IStreamsInput> streams_in = in_edge->findNodeUp<IStreamsInput>();
         if (streams_in == nullptr) {
             throw Error("Demuxer not connected to stream input!");
         }
-        
-        streams_in->discardAllStreams();
-        
-        std::string streams_filter;
-        if (params.count("streams_filter")==1) {
-            streams_filter = params["streams_filter"];
-        }
-        
-        auto foundStream = [&](av::Stream stream, const std::string route_to) {
-            std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(route_to);
-            std::shared_ptr<InputStreamMetadata> md = edge->metadata<InputStreamMetadata>(true);
-            streams_in->enableStream(stream.index());
-            md->source_stream = stream;
-            r->addStream(stream.index(), edge, stream.isVideo());
-            edge->setProducer(r);
-        };
-        
-        Parameters routing = params["routing"];
-        for (Parameters::iterator route = routing.begin(); route != routing.end(); ++route) {
-            // parse source stream specification:
-            std::string sourcespec = route.key();
-            std::string route_to = route.value();
-            bool optional = false;
-            
-            if (sourcespec.length() < 1) {
-                throw Error("Source specification too short");
+
+        connectStreamRoutes(edges, *streams_in, r, params, [&r](av::Stream stream, std::shared_ptr<Edge<av::Packet>> edge) {
+            r->routes_.add(stream.index(), edge);
+            if (stream.isVideo()) {
+                r->video_streams_.insert(stream.index());
             }
-            if (sourcespec[0]=='?') {
-                optional = true;
-                sourcespec = sourcespec.substr(1);
-                if (sourcespec.length() < 1) {
-                    throw Error("Source specification too short");
-                }
-            }
-            char typetag = sourcespec[0];
-            AVMediaType mediatype;
-            bool absolute_index = false;
-            if ( (typetag=='v') || (typetag=='V') ) {
-                mediatype = AVMEDIA_TYPE_VIDEO;
-            } else if ( (typetag=='a') || (typetag=='A') ) {
-                mediatype = AVMEDIA_TYPE_AUDIO;
-            } else if (typetag == 'd' || typetag == 'D') {
-                mediatype = AVMEDIA_TYPE_DATA;
-            } else if (typetag>='0' && typetag<='9') {
-                absolute_index = true;
-            } else {
-                throw Error(std::string("Invalid media type specification: ") + typetag);
-            }
-            
-            bool found = false;
-            if (absolute_index) {
-                int sindex;
-                try {
-                    sindex = std::stoi(sourcespec);
-                } catch (std::invalid_argument &e) {
-                    throw Error("Invalid source specification: " + sourcespec);
-                }
-                if (sindex >= 0 && sindex < streams_in->streamsCount()) {
-                    foundStream(streams_in->stream(sindex), route_to);
-                    found = true;
-                }
-            } else {
-                int sindex = 0;
-                if (sourcespec.length() > 1) {
-                    // override default ( = 0 ) index
-                    if ( (sourcespec.length() == 2) || (sourcespec[1] != ':') ) {
-                        throw Error("Invalid syntax: " + sourcespec);
-                    }
-                    std::string indexstr = sourcespec.substr(2);
-                    try {
-                        sindex = std::stoi(indexstr);
-                    } catch (std::invalid_argument &e) {
-                        throw Error("Invalid number " + indexstr + " in source specification: " + sourcespec);
-                    }
-                }
-                int index_reached = 0;
-                for (int i=0; i<streams_in->streamsCount(); i++) {
-                    av::Stream stream = streams_in->stream(i);
-                    bool matched = stream.mediaType()==mediatype;
-                    if (matched && !streams_filter.empty()) {
-                        int match_result = avformat_match_stream_specifier(streams_in->formatContext().raw(), stream.raw(), streams_filter.c_str());
-                        if (match_result<0) {
-                            throw Error("avformat_match_stream_specifier returned " + std::to_string(match_result) +
-                                        " for stream index " + std::to_string(stream.index()));
-                        }
-                        matched = match_result > 0;
-                    }
-                    if (matched) {
-                        if (index_reached == sindex) {
-                            // found stream corresponding to specification!
-                            foundStream(stream, route_to);
-                            found = true;
-                            break;
-                        }
-                        index_reached++;
-                    }
-                }
-                
-            }
-            if (!found) {
-                if (optional) {
-                    logstream << "No optional stream " << sourcespec << " found.";
-                    // Create the edge typed as av::Packet so ATD-based downstream
-                    // nodes (e.g. Realtime) can detect their data type. Mark the
-                    // producer finished immediately so consumers receive EOF rather
-                    // than blocking forever waiting for data that will never arrive.
-                    auto missing_edge = edges.find<av::Packet>(route_to);
-                    missing_edge->finishProducer();
-                } else {
-                    throw Error("No stream " + sourcespec + " found!");
-                }
-            }
-        }
+        });
         return r;
     }
 };

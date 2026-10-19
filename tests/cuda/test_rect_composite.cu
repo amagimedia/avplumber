@@ -500,6 +500,29 @@ int main() {
         }, 0, dev_table);
     }
 
+    // Sparse browser pages: zero-alpha margins and mixed chroma blocks at the card edge.
+    // Compare with the independent per-layer kernels, including texture-backed sampling.
+    for (int premultiplied : {0, 1}) {
+        Rgba sparse(128, 64, &rng);
+        sparse.premultiplied = premultiplied;
+        for (int y = 0; y < sparse.h; ++y) for (int x = 0; x < sparse.w; ++x) {
+            auto *pixel = &sparse.px.host[y * sparse.px.pitch + x * 4];
+            pixel[3] = x >= 39 && x < 91 && y >= 17 && y < 47 ? (x == 39 ? 128 : 255) : 0;
+            if (premultiplied) for (int c = 0; c < 3; ++c) pixel[c] = pixel[c] * pixel[3] / 255;
+        }
+        check(cudaMemcpy(sparse.px.dev, sparse.px.host.data(), sparse.px.host.size(), cudaMemcpyHostToDevice), "upload sparse RGBA");
+        RgbaTex texture(sparse);
+        for (const Fmt *format : {&NV12, &P010, &P210}) for (int transfer : {0, 1, 2}) {
+            for (bool textured : {false, true}) {
+                const Layer key{textured ? AVP_RECT_KIND_RGBA_TEX : AVP_RECT_KIND_RGBA, nullptr,
+                                &sparse, textured ? &texture : nullptr, 0, 0, 128, 64, 2, 4, 250, 134};
+                scenario("sparse RGBA coverage", *format, 320, 180, {key}, transfer, dev_table);
+                auto faded = key; faded.opacity = 0.5f;
+                fadeScenario("sparse RGBA key fade", *format, 320, 180, {faded}, transfer, dev_table);
+            }
+        }
+    }
+
     // Keys over the program through viewports, against the whole-canvas launch.
     {
         Frame pgm(NV12, 1920, 1080, &rng), pgm_odd(NV12, 1082, 606, &rng), pgm10(P010, 1920, 1080, &rng), pgm422(P210, 1920, 1080, &rng);

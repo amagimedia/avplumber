@@ -1,4 +1,5 @@
 #include "MultiEventWait.hpp"
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <thread>
@@ -45,6 +46,21 @@ int main() {
     assert(wait.wait(-1));
     for (auto &event : events) assert(!signalled(event));
     assert(!wait.wait(0));
+
+    // A caller that asks is told which events fired, by their place in its list: a compositor
+    // then looks at those sources only. An event listed twice is reported at its first place.
+    std::vector<uint32_t> fired{99};
+    assert(!wait.wait(0, &fired) && fired.empty());
+    events[3].signal();
+    events[150].signal();
+    events[150].signal();
+    stop.signal();
+    assert(wait.wait(0, &fired));
+    std::sort(fired.begin(), fired.end());
+    assert((fired == std::vector<uint32_t>{3, 150, 200}));
+    events[7].signal();
+    assert(wait.wait(0, &fired) && (fired == std::vector<uint32_t>{7}));
+    assert(!wait.wait(0, &fired) && fired.empty());
 
     // An event not in the list does not wake the wait and keeps its signal.
     taken.signal();

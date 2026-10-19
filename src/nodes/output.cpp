@@ -1,3 +1,4 @@
+#include <chrono>
 #include "node_common.hpp"
 #include <atomic>
 #include <fstream>
@@ -31,6 +32,10 @@ protected:
     int current_seek_table_index_ = 0;
     bool should_close_ = false;
     int errors_ = 0;
+    std::chrono::steady_clock::time_point first_error_{};
+    bool udp_ = false;   // the url's protocol is udp: its paced send queue can fill
+    uint64_t queue_full_drops_ = 0;   // since the last line about them
+    std::chrono::steady_clock::time_point queue_full_logged_{};
     void commitPendingSeekEntries() {
         if (seek_table_entries_.empty()) {
             return;
@@ -116,9 +121,31 @@ public:
                 octx_.writePacket(pkt);
                 errors_ = 0;
             } catch (std::exception &e) {
+                // FFmpeg's paced UDP sender (bitrate=, fifo_size=) reports its full send queue as
+                // ENOMEM. An encoder catching up after a stall overfills it for a moment; that
+                // packet is lost like any on the network (receivers ask for a keyframe), and the
+                // output goes on. 2026-10-15: these drops reached the panic policy and restarted
+                // the whole show four times. Any other protocol's ENOMEM is an error like the rest.
+                const auto *code = dynamic_cast<const std::system_error *>(&e);
+                if (udp_ && code && code->code().value() == AVERROR(ENOMEM)) {
+                    ++queue_full_drops_;
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - queue_full_logged_ >= std::chrono::seconds(1)) {
+                        logstream << "output: send queue full, " << queue_full_drops_ << " packet(s) dropped";
+                        queue_full_drops_ = 0;
+                        queue_full_logged_ = now;
+                    }
+                    return;
+                }
                 logstream << "writePacket failed: " << e.what();
+                // A burst of packets after a stall can fail for a few hundred milliseconds at once
+                // (2026-10-15: 21 consecutive UDP writes failed within 100 ms on both program outputs
+                // and the panic policy stopped the whole show). Give up only when the failures have
+                // persisted for a while, not after a packet count that one burst exceeds.
+                const auto now = std::chrono::steady_clock::now();
+                if (errors_ == 0) first_error_ = now;
                 errors_++;
-                if (errors_>20) {
+                if (errors_ > 20 && now - first_error_ > std::chrono::seconds(3)) {
                     throw;
                 }
             }
@@ -159,6 +186,8 @@ public:
         std::string url = params["url"];
         
         logstream << "output url: " << url;
+        const char *protocol = avio_find_protocol_name(url.c_str());
+        r->udp_ = protocol && std::string(protocol) == "udp";
         
         av::OutputFormat ofmt(format, url);
         octx.setFormat(ofmt);

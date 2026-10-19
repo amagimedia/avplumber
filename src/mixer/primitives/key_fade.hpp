@@ -47,6 +47,9 @@ class KeyFade {
     }
 
 public:
+    bool target() const { return target_; }
+    bool moving() const { return span_ > 0; }
+
     /// Settled at the target: level 1 when on (a key configured on at start), else 0.
     explicit KeyFade(bool on = false) : target_(on) { settle(); }
 

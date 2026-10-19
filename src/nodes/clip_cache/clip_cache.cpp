@@ -1,7 +1,9 @@
 #include "../node_common.hpp"
 #include "ClipCache.hpp"
 #include "../../MultiEventWait.hpp"
+#include "../../mixer/primitives/ClipScrub.hpp"
 #include "../../mixer/primitives/MonotonicClock.hpp"
+#include "../../mixer/primitives/TakeClock.hpp"
 #include "../../mixer/primitives/TickGrid.hpp"
 
 extern "C" {
@@ -11,6 +13,7 @@ extern "C" {
 
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 /// Replay a short clip from GPU memory, filling the cache on a loading pass.
@@ -18,8 +21,9 @@ extern "C" {
 /// The node runs for the life of the graph; nothing is created, started or
 /// stopped for a take. "load" <path> reads that clip from the decode chain
 /// upstream into the cache; "play" <path> replays a cached clip from its first
-/// frame; "stop" ends a replay; "forget" <path> drops a clip, cached or loading.
-/// Between clips the thread waits on its events.
+/// frame; "scrub" replays one at the frame a schedule shows on each tick (the
+/// lever's wipe); "stop" ends a replay; "forget" <path> drops a clip, cached or
+/// loading. Between clips the thread waits on its events.
 ///
 /// A load ends when the decode chain's end-of-stream marker arrives (realtime
 /// passes it on with forward_eof), and on nothing else: a producer stalled for
@@ -30,7 +34,11 @@ extern "C" {
 /// A replay is stamped on the output tick grid from the tick after it was
 /// armed and each frame is pushed when its tick begins, so a clocked compositor
 /// downstream matches frame k to tick T0+k with its whole deadline to draw it,
-/// and rejects anything stamped before the arm with one reset.
+/// and rejects anything stamped before the arm with one reset. A scrub pushes
+/// every tick `scrub_delay_ms` after it begins, nearer the compositor's
+/// deadline, so a change of the schedule reaches an earlier tick; a change
+/// applies from its floor on (avp::mixer::RampHistory), so the ticks before it
+/// show what the program and the keys see there.
 static constexpr int IDLE_WAKE_MS = 200;
 
 class ClipCacheNode : public NodeSISO<av::VideoFrame, av::VideoFrame>,
@@ -53,9 +61,18 @@ protected:
     int logged_first_ = 0;
     std::string key_;                          // clip being replayed
     std::vector<av::VideoFrame> playback_;
+    std::vector<int64_t> offsets_;             // each frame's elapsedNs()
+    int64_t length_ns_ = 0;
     size_t index_ = 0;
     int64_t start_tick_ = 0;
     bool playing_ = false;
+    // Scrubbing: the frame on each tick is the one the schedule's progress shows there.
+    bool scrub_ = false;
+    avp::mixer::RampHistory schedule_;
+    size_t scrub_frame_ = 0;                   // the frame pushed last
+    int64_t next_tick_ = 0;
+    int64_t scrub_delay_ns_ = 0;
+    uint64_t scrub_late_ = 0;                  // ticks pushed too late, skipped
 
     static size_t frameBytes(const av::VideoFrame& frame) {
         const AVFrame* raw = frame.raw();
@@ -101,32 +118,72 @@ protected:
         wake_.signal();
     }
 
+    /// Replays cached `clip` from the first tick still ahead: from its first frame
+    /// on, or (`scrub` set) at the frame that schedule shows on each tick.
+    void arm(const std::string& clip, std::optional<avp::mixer::RampNs> scrub) {
+        std::vector<av::VideoFrame> frames = cache_->take(clip);
+        if (frames.empty()) throw Error("clip_cache: not cached: " + clip);
+        std::lock_guard<std::mutex> lock(mutex_);
+        playback_ = std::move(frames);
+        key_ = clip;
+        offsets_.resize(playback_.size());
+        for (size_t i = 0; i < playback_.size(); ++i) offsets_[i] = elapsedNs(i);
+        length_ns_ = avp::mixer::clipLengthNs(offsets_, grid_.time(1));
+        index_ = 0;
+        start_tick_ = next_tick_ = grid_.atOrBefore(avp::mixer::monotonicNs()) + 1;   // the first tick still ahead
+        scrub_ = scrub.has_value();
+        if (scrub_) schedule_ = avp::mixer::RampHistory(*scrub);
+        scrub_frame_ = 0;
+        playing_ = true;
+        wake_.signal();
+        logstream << "clip_cache: " << (scrub_ ? "scrubbing " : "replaying ") << playback_.size()
+                  << " cached frame(s) of " << clip << " from tick " << start_tick_;
+    }
+
     /// True when a replay frame was pushed or the thread should come back at once.
     bool replay() {
         std::unique_lock<std::mutex> lock(mutex_);
         if (!playing_) return false;
-        if (index_ >= playback_.size()) {
+        if (!scrub_ && index_ >= playback_.size()) {
             playing_ = false;
             playback_.clear();
             logstream << "clip_cache: finished replaying " << key_;
             return false;
         }
-        const int64_t tick = start_tick_ + grid_.nearestIndex(elapsedNs(index_));
-        const int64_t due = grid_.time(tick), now = avp::mixer::monotonicNs();
+        const int64_t now = avp::mixer::monotonicNs();
+        // A scrub never ends: parked at either end it pushes that frame on every tick, and after
+        // a stall it goes on from the tick due now instead of pushing the ones it missed.
+        const int64_t tick = scrub_ ? std::max(next_tick_, grid_.atOrBefore(now - scrub_delay_ns_))
+                                    : start_tick_ + grid_.nearestIndex(elapsedNs(index_));
+        const int64_t due = grid_.time(tick) + (scrub_ ? scrub_delay_ns_ : 0);
         if (now < due) {
             lock.unlock();
             std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<int64_t>(due - now, grid_.time(1))));
             return true;
         }
-        av::VideoFrame out = playback_[index_];
+        const size_t frame = scrub_ ? avp::mixer::frameAt(offsets_, length_ns_,
+                                          avp::mixer::rampAt(schedule_, grid_.time(tick)), grid_)
+                                    : index_;
+        av::VideoFrame out = playback_[frame];
         out.setTimeBase(timeBase());
         out.setPts(av::Timestamp(tick, timeBase()));
         out.setComplete(true);
         // Never blocks under the mutex: a full queue means the consumer is not
         // keeping up, and one frame late is no better than one frame less.
         this->sink_->put(out, true);
-        ++index_;
+        if (scrub_) {
+            scrub_late_ += uint64_t(tick - next_tick_);
+            next_tick_ = tick + 1;
+            scrub_frame_ = frame;
+        } else {
+            ++index_;
+        }
         return true;
+    }
+
+    static avp::mixer::RampNs schedule(const Parameters& value) {
+        return {value.at("start_ns").get<int64_t>(), value.at("duration_ns").get<int64_t>(),
+                value.at("floor_ns").get<int64_t>(), value.at("ceiling_ns").get<int64_t>()};
     }
 
 public:
@@ -185,24 +242,23 @@ public:
 
     void setObject(const std::string key, const Parameters& value) override {
         if (key == "play") {
-            const std::string clip = value.get<std::string>();
-            std::vector<av::VideoFrame> frames = cache_->take(clip);
-            if (frames.empty()) throw Error("clip_cache: not cached: " + clip);
-            std::lock_guard<std::mutex> lock(mutex_);
-            playback_ = std::move(frames);
-            key_ = clip;
-            index_ = 0;
-            start_tick_ = grid_.atOrBefore(avp::mixer::monotonicNs()) + 1;   // the first tick still ahead
-            playing_ = true;
-            wake_.signal();
-            logstream << "clip_cache: replaying " << playback_.size() << " cached frame(s) of " << clip
-                      << " from tick " << start_tick_;
+            arm(value.get<std::string>(), std::nullopt);
+        } else if (key == "scrub") {
+            // {"path"?, "start_ns", "duration_ns", "floor_ns", "ceiling_ns"}: the schedule
+            // (avp::mixer::RampNs, on the output's clock) whose progress picks each tick's frame;
+            // with "path" it arms that clip, without it the schedule changes from its floor on.
+            if (value.contains("path")) {
+                arm(value.at("path").get<std::string>(), schedule(value));
+            } else {
+                std::lock_guard<std::mutex> lock(mutex_);
+                schedule_.change(schedule(value));
+            }
         } else if (key == "stop") {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!playing_) return;
-            playing_ = false;
+            logstream << "clip_cache: stopped replaying " << key_ << " at frame " << (scrub_ ? scrub_frame_ : index_);
+            playing_ = scrub_ = false;
             playback_.clear();
-            logstream << "clip_cache: stopped replaying " << key_ << " at frame " << index_;
         } else if (key == "load") {
             load(value.get<std::string>());
         } else if (key == "forget") {
@@ -222,7 +278,8 @@ public:
     /// "status": the cache's, plus "loading", the clip being read ("" when none: a load
     /// that ended shows there and in its clip's "complete"), "playing" and "start_tick",
     /// the output tick of the last replay's first frame, which is where that replay's
-    /// output begins.
+    /// output begins; "length_ns", that clip's length; "scrub", whether it is scrubbed,
+    /// "scrub_delay_ns" and "scrub_late", the ticks a scrub pushed too late and skipped.
     Parameters getObject(const std::string key) override {
         if (key != "status") throw Error("clip_cache: unknown object key: " + key);
         // Locked before the cache is read: finishLoad() completes the clip and clears
@@ -233,6 +290,10 @@ public:
         status["loading"] = loading_key_;
         status["playing"] = playing_;
         status["start_tick"] = start_tick_;
+        status["length_ns"] = length_ns_;
+        status["scrub"] = scrub_;
+        status["scrub_delay_ns"] = scrub_delay_ns_;
+        status["scrub_late"] = scrub_late_;
         return status;
     }
 
@@ -243,6 +304,9 @@ public:
             nci.instance, params.value("cache", std::string("clips")));
         if (params.count("fps")) r->fps_ = parseRatio(params["fps"]);
         r->grid_ = avp::mixer::TickGrid(r->fps_);
+        const double scrub_delay_ms = params.value("scrub_delay_ms", 0.0);
+        if (!(scrub_delay_ms >= 0)) throw Error("clip_cache: scrub_delay_ms must be >= 0");
+        r->scrub_delay_ns_ = int64_t(scrub_delay_ms * 1e6);
         if (params.count("budget_mb"))
             r->cache_->setBudget((size_t)params["budget_mb"].get<double>() * 1024u * 1024u);
         // End-of-stream markers from the decode chain are clip boundaries, not this
