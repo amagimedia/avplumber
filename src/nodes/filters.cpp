@@ -11,6 +11,7 @@ extern "C" {
 #include "../hwaccel.hpp"
 #include <avcpp/channellayout.h>
 #include <chrono>
+#include <mutex>
 
 template<typename T> struct FilterMediaSpecific {
 };
@@ -306,6 +307,29 @@ protected:
     int threads_ = 0; // AVFilterGraph::nb_threads; 0 lets FFmpeg pick one slice thread per CPU
     std::shared_ptr<HWAccelDevice> hwaccel_;
     std::vector<bool> input_eof_;
+    // Commands from control threads wait here for the node thread: a filter is not thread-safe, and a command
+    // sent beside it re-parsed transition_cuda's alpha expression while av_expr_eval walked it (segfault).
+    struct FilterCommand { std::string target, command, argument; };
+    std::mutex commands_mutex_;
+    std::vector<FilterCommand> pending_commands_;
+
+    // Before the graph exists they keep waiting, so they reach the first frames.
+    void applyPendingCommands() {
+        if (filter_graph_ == nullptr) return;
+        std::vector<FilterCommand> commands;
+        {
+            std::lock_guard<std::mutex> lock(commands_mutex_);
+            commands.swap(pending_commands_);
+        }
+        for (const FilterCommand &c : commands) {
+            char response[1024] = {};
+            const int ret = avfilter_graph_send_command(
+                filter_graph_, c.target.c_str(), c.command.c_str(), c.argument.c_str(),
+                response, sizeof(response), 0);
+            if (ret < 0)
+                logstream << "filter_command " << c.target << "." << c.command << " failed: " << av::error2string(ret);
+        }
+    }
 
     void freeFilterGraph() {
         if (filter_graph_ == nullptr) return;
@@ -668,6 +692,7 @@ public:
                 if (filter_graph_==nullptr) {
                     maybeInitFilterGraph(true);
                 }
+                applyPendingCommands();   // before this frame meets the filters
                 if (filter_graph_!=nullptr) {
                     if (do_shift_) {
                         eq_.in(*frmin);
@@ -762,21 +787,11 @@ public:
             throw Error("filter node: unknown object key: " + key);
         if (!value.is_object())
             throw Error("filter_command must be an object");
-        if (!filter_graph_)
-            throw Error("filter_command requires an initialized filter graph");
 
-        const std::string target = value.value("target", std::string("all"));
-        const std::string command = value.at("command").get<std::string>();
-        const std::string argument = value.value("argument", std::string(""));
-        char response[1024] = {};
-        const int ret = avfilter_graph_send_command(
-            filter_graph_, target.c_str(), command.c_str(), argument.c_str(),
-            response, sizeof(response), 0);
-        if (ret < 0) {
-            throw Error(
-                "filter_command " + target + "." + command + " failed: " +
-                av::error2string(ret));
-        }
+        FilterCommand command{value.value("target", std::string("all")), value.at("command").get<std::string>(),
+                              value.value("argument", std::string(""))};
+        std::lock_guard<std::mutex> lock(commands_mutex_);
+        pending_commands_.push_back(std::move(command));
     }
 
     virtual void initDefaults(const Parameters &params) = 0;

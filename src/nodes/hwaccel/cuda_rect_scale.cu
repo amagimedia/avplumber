@@ -451,6 +451,10 @@ __device__ __forceinline__ void composite_body(
                 if (!kChroma) {
                     float rgb[3];
                     const float fx = (ox + 0.5f) * xs - 0.5f, fy = (oy + 0.5f) * ys - 0.5f;
+                    const float a = !blend ? 1.f : (textured ? sample_alpha_tex(tex, sx, sy, sw, sh, a_off, fx, fy)
+                                                             : sample_alpha(src, pitch, sx, sy, sw, sh, step, a_off, fx, fy));
+                    // Transparent browser margins need neither RGB reads nor HDR conversion.
+                    if (a <= 0.f) continue;
                     if (textured) sample_rgb_tex(tex, sx, sy, sw, sh, r_off, g_off, b_off, fx, fy, rgb);
                     else sample_rgb(src, pitch, sx, sy, sw, sh, step, r_off, g_off, b_off, fx, fy, rgb);
                     if (!blend) {
@@ -458,11 +462,9 @@ __device__ __forceinline__ void composite_body(
                         const float luma = graphic_luma(rgb, transfer) * dst_scale;
                         acc[p][0] = stored_code(min(max(luma, 0.f), maxv));
                     } else {
-                        const float a = textured ? sample_alpha_tex(tex, sx, sy, sw, sh, a_off, fx, fy)
-                                                 : sample_alpha(src, pitch, sx, sy, sw, sh, step, a_off, fx, fy);
                         if (premultiplied)
                             for (int c = 0; c < 3; ++c)
-                                rgb[c] = a > 0.f ? min(rgb[c] / a, 255.f) : 0.f;
+                                rgb[c] = min(rgb[c] / a, 255.f);
                         convert_graphic_rgb(rgb, transfer, white, peak);
                         const float luma = graphic_luma(rgb, transfer) * dst_scale;
                         // Opacity weights coverage only: the colour above was un-premultiplied
@@ -482,22 +484,24 @@ __device__ __forceinline__ void composite_body(
                         if (box + i2 >= dw || boy + j >= dh || x + i2 >= canvas_w || y + j >= canvas_h) continue;
                         float rgb[3];
                         const float fx = (box + i2 + 0.5f) * xs - 0.5f, fy = (boy + j + 0.5f) * ys - 0.5f;
+                        // Transparent samples still count in the chroma block's coverage.
+                        ++cnt;
+                        const float a = !blend ? 1.f : (textured ? sample_alpha_tex(tex, sx, sy, sw, sh, a_off, fx, fy)
+                                                                 : sample_alpha(src, pitch, sx, sy, sw, sh, step, a_off, fx, fy));
+                        if (a <= 0.f) continue;
                         if (textured) sample_rgb_tex(tex, sx, sy, sw, sh, r_off, g_off, b_off, fx, fy, rgb);
                         else sample_rgb(src, pitch, sx, sy, sw, sh, step, r_off, g_off, b_off, fx, fy, rgb);
                         if (!blend) {
                             convert_graphic_rgb(rgb, transfer, white, peak);
                             sum[0] += rgb[0]; sum[1] += rgb[1]; sum[2] += rgb[2];
                         } else {
-                            const float a = textured ? sample_alpha_tex(tex, sx, sy, sw, sh, a_off, fx, fy)
-                                                     : sample_alpha(src, pitch, sx, sy, sw, sh, step, a_off, fx, fy);
                             if (premultiplied)
                                 for (int c = 0; c < 3; ++c)
-                                    rgb[c] = a > 0.f ? min(rgb[c] / a, 255.f) : 0.f;
+                                    rgb[c] = min(rgb[c] / a, 255.f);
                             convert_graphic_rgb(rgb, transfer, white, peak);
                             sum[0] += a * rgb[0]; sum[1] += a * rgb[1]; sum[2] += a * rgb[2];
                             sum_a += a;
                         }
-                        ++cnt;
                     }
                 }
                 float cb, cr;

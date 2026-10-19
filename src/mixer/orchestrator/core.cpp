@@ -6,14 +6,6 @@
 
 namespace avp::mixer {
 
-namespace {
-// The hold releases on the first frame newer than the selector's `emitted` (ns) output; without
-// one, on a frame stamped after now, two frames away behind the playout delay.
-int64_t releaseAfter(int64_t emitted_ns) {
-    return emitted_ns ? emitted_ns + 1 : wallclock.pts() * 1000000;
-}
-}
-
 MixerOrchestrator::MixerOrchestrator(std::shared_ptr<NodeManager> nodes, std::shared_ptr<MixerState> state)
     : MixerOrchestrator(std::make_shared<MixerGraph>(nodes), std::move(state)) {}
 
@@ -78,7 +70,7 @@ void MixerOrchestrator::flushWipeEdges() {
     }
 }
 
-int64_t MixerOrchestrator::armWipeChain(const std::string& wipe_file) {
+Parameters MixerOrchestrator::armWipeChain(const std::string& wipe_file, std::optional<RampNs> scrub) {
     // The compositor applies these on its render thread, possibly one loop iteration
     // each, and activating an input without prewarm resets it, threshold included. So:
     // prewarm first, which keeps the activation from touching the reset; then the reset,
@@ -90,8 +82,14 @@ int64_t MixerOrchestrator::armWipeChain(const std::string& wipe_file) {
     setNodeObject(state_->wipe_overlay_name, "prewarm_inputs", Parameters(3u));
     resetInputIf(nodes_, state_->wipe_overlay_name);
     setNodeObject(state_->wipe_overlay_name, "active_inputs", Parameters(3u));
-    setNodeObject(state_->wipe_input_node_name, "play", Parameters(wipe_file));
-    return nodes_->node(state_->wipe_input_node_name)->getObject("status").at("start_tick").get<int64_t>();
+    if (scrub) {
+        Parameters arm = scrubSchedule(*scrub);
+        arm["path"] = wipe_file;
+        setNodeObject(state_->wipe_input_node_name, "scrub", arm);
+    } else {
+        setNodeObject(state_->wipe_input_node_name, "play", Parameters(wipe_file));
+    }
+    return nodes_->node(state_->wipe_input_node_name)->getObject("status");
 }
 
 void MixerOrchestrator::startWipeDecode(const std::string& wipe_file) {
@@ -123,58 +121,49 @@ void MixerOrchestrator::interruptTransition(Interruption why) {
     if (state_->cut_latency) state_->cut_latency->timing.cancel();
     if (state_->transition_mode == MixerState::TransitionMode::Idle) return;
     const auto previous_mode = state_->transition_mode.load();
-    // A crossfade's blended picture exists only inside the transition compositor,
-    // so it has to be frozen to survive the interruption. A wipe's does not: the
-    // output carries the wipe graphic, and freezing that would paint the graphic
-    // into the program, where the next wipe would composite over it and the two
-    // would stack. In every other mode the program slot keeps rendering, so the
-    // direct branch restored below is already the right picture.
-    const bool freeze = previous_mode == MixerState::TransitionMode::Crossfade;
-    auto snapshot = outputSnapshot();
-    if (freeze) {
-        std::lock_guard<std::mutex> lock(snapshot->mutex);
-        if (!snapshot->output_connected)
-            throw Error("mixer: interruption requires mixer_snapshot output and slot nodes");
-        snapshot->frames.capture(state_->pgmSourceSwitcherIndex());
-    }
+    const bool was_on_air = state_->blend_on_air || state_->wipe_on_air;
     const auto generation = ++state_->transition_generation;
     TransitionGuard guard([&] { abortTransition(generation); });
-    restoreProgramRouting(previous_mode);
-    if (previous_mode == MixerState::TransitionMode::Wipe && !state_->wipe_group_name.empty()) {
-        // A resident chain parks at once. Group management retires a per-take decoder
-        // independently: waiting here would add teardown time to every correction,
-        // including a hard cut.
-        retireWipeChain();
-    }
-    // The program slot's routing was restored above: the other slot is cold now.
-    state_->pvw_slot_scene.clear();
+    // Back to the program as it was before the transition, like a switcher's transition cut
+    // back to its initial state. A take replaces only one that is not on air yet (takes on air
+    // go to actOnTransitionOnAir), so for it nothing visible changes.
+    dropTransition(previous_mode);
     if (why == Interruption::Replaced) state_->forgetTake(); else state_->clearTakePreview();
     state_->transition_mode = MixerState::TransitionMode::Idle;
-    {
-        // Read after the selector was switched: everything it has emitted so far, from the old
-        // program or the dropped transition, is older than the release and cannot end the hold
-        // even when still in flight to the output, and the first frame of the new selection does.
-        const auto release_pts = releaseAfter(selectorOutputNs());
-        std::lock_guard<std::mutex> lock(snapshot->mutex);
-        // Without a freeze, drop any substitution an earlier interruption left in the slot.
-        if (!freeze) snapshot->frames.finish();
-        snapshot->frames.arm(release_pts, freeze);
-    }
     guard.release();
-    logstream << "mixer: interrupted transition; " << (freeze ? "retained the blended picture"
-                                                             : "returned to the program picture");
+    logstream << "mixer: interrupted transition; " << (was_on_air ? "back to the program picture"
+                                                                  : "nothing was on air yet");
+}
+
+void MixerOrchestrator::dropTransition(MixerState::TransitionMode dropped) {
+    auto cleanup = [](auto action) {
+        try { action(); }
+        catch (const std::exception& e) {
+            logstream << "mixer: transition cleanup failed: " << e.what();
+        }
+    };
+    cleanup([&] { restoreProgramRouting(dropped); });
+    if ((dropped == MixerState::TransitionMode::Wipe || state_->wipe_on_air) && !state_->wipe_group_name.empty())
+        // A resident chain parks at once. Group management retires a per-take decoder
+        // independently: waiting here would add teardown time to every correction.
+        cleanup([&] { retireWipeChain(); });
+    state_->blend_on_air = state_->wipe_on_air = state_->take_paused = false;
+    state_->take_request.reset();
+    endTakeClock(TakeClock::End::Cancelled, 0);   // keys going with it return to their state
+    // A take the lever cancelled leaves it engaged where it is: moving it on starts the next.
+    if (state_->take_lever_end == LeverEnd::None) state_->lever.release();
+    state_->take_manual = false;
+    state_->take_lever_end = LeverEnd::None;
+    state_->take_progress = 0;
+    // The program slot's routing was restored: the other slot is cold now.
+    state_->pvw_slot_scene.clear();
 }
 
 void MixerOrchestrator::restoreProgramRouting(MixerState::TransitionMode dropped) {
-    bool picture_changed = dropped != MixerState::TransitionMode::Cut;
-    if (!picture_changed) {
-        // A cut that interrupted a crossfade froze its blend; dropping this cut
-        // too puts the live program back on air.
-        auto snapshot = outputSnapshot();
-        std::lock_guard<std::mutex> lock(snapshot->mutex);
-        picture_changed = snapshot->frames.holding() ||
-            snapshot->frames.replaces(state_->pgmSourceSwitcherIndex());
-    }
+    // A cut that had not landed left program untouched, unless it was completing a transition
+    // on air; everything else showed something that the program picture now replaces.
+    const bool picture_changed = dropped != MixerState::TransitionMode::Cut ||
+                                 state_->blend_on_air || state_->wipe_on_air;
     switchProgramSelector(state_->pgm_is_slot_a);
     applyPostTransitionRouting(state_->pgm_is_slot_a, state_->pgm_scene_name, picture_changed);
     applySceneControls(state_->scenes.at(state_->pgm_scene_name));
@@ -191,20 +180,8 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
     if (state_->transition_generation != generation) return;
     if (state_->cut_latency) state_->cut_latency->timing.cancel("failed");
     ++state_->transition_generation;
-    const auto mode = state_->transition_mode.load();
-    auto cleanup = [](auto action) {
-        try { action(); }
-        catch (const std::exception& e) {
-            logstream << "mixer: transition abort cleanup failed: " << e.what();
-        }
-    };
-    cleanup([&] { restoreProgramRouting(mode); });
-    if (mode == MixerState::TransitionMode::Wipe && !state_->wipe_group_name.empty())
-        cleanup([&] { retireWipeChain(); });
-    // Remove slot substitution even when the target never produced a frame.
-    // The output gate still waits for a fresh program frame before releasing.
-    cleanup([&] { finishSnapshot(); });
-    state_->pvw_slot_scene.clear();
+    state_->take_lever_end = LeverEnd::None;   // a failed take ends without the lever
+    dropTransition(state_->transition_mode.load());
     state_->clearTakePreview();
     state_->transition_mode = MixerState::TransitionMode::Idle;
 }
@@ -216,16 +193,9 @@ void MixerOrchestrator::finishTransition(bool new_pgm_is_slot_a, std::string new
               << " from pts_ns=" << effective_ns;
 }
 
-std::shared_ptr<OutputSnapshot> MixerOrchestrator::outputSnapshot() const {
-    return InstanceSharedObjects<OutputSnapshot>::get(
-        nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
-}
-
-void MixerOrchestrator::finishSnapshot(int64_t emitted) {
-    auto snapshot = outputSnapshot();
-    std::lock_guard<std::mutex> lock(snapshot->mutex);
-    snapshot->frames.finish();
-    snapshot->frames.arm(releaseAfter(emitted), false);
+int64_t MixerOrchestrator::mixChangeNs() const {
+    const int64_t shown_ns = selectorOutputNs();
+    return (shown_ns ? shown_ns : monotonicNs()) + 2 * av_rescale(1000000000, state_->fps_den, state_->fps_num);
 }
 
 int64_t MixerOrchestrator::selectorOutputNs() const {
@@ -269,6 +239,13 @@ Parameters MixerOrchestrator::status() const {
         case MixerState::TransitionMode::Crossfade: s["transition"] = "crossfade"; break;
         case MixerState::TransitionMode::Wipe: s["transition"] = "wipe"; break;
     }
+    s["transition_on_air"] = state_->blend_on_air || state_->wipe_on_air;
+    s["transition_paused"] = state_->take_paused && !state_->take_manual;
+    s["transition_manual"] = state_->take_manual;
+    s["transition_progress"] = state_->take_progress;
+    s["transition_duration_ms"] = state_->take_duration_ns / 1000000;
+    s["lever"] = {{"position", state_->lever.position()}, {"origin", state_->lever.origin()},
+                  {"engaged", state_->lever.engaged()}};
     // Stall counters of both slot compositors, which take turns on program. Each
     // publishes them every 60 frames; one that is restarting is skipped, not waited for.
     const std::pair<const char*, std::string> slots[] = {

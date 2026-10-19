@@ -125,13 +125,9 @@ void MixerOrchestrator::initializeRoutedRoutes() {
     publishSourceRoutes(state_->pgm_is_slot_a ? scene : nullptr, state_->pgm_is_slot_a ? nullptr : scene);
 }
 
-int64_t MixerOrchestrator::switchProgramSelector(bool new_pgm_is_slot_a) {
+void MixerOrchestrator::switchProgramSelector(bool new_pgm_is_slot_a) {
     setNodeObject(state_->source_switcher_name, "active",
                   Parameters(new_pgm_is_slot_a ? 0 : 1));
-    // Read at once: the selector drains its inactive inputs, so the new program's first frame
-    // arrives at the next main deadline, and the routing could take until then. The followers
-    // of a take get their change now, for the same reason.
-    return selectorOutputNs();
 }
 
 void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
@@ -194,9 +190,14 @@ void MixerOrchestrator::applySceneControls(const SceneDefinition& scene) {
 
 void MixerOrchestrator::preview(const std::string& scene_name) {
     std::lock_guard<std::mutex> lock(state_->mutex);
-    ensureIdle();
     if (!state_->scenes.count(scene_name))
         throw Error("mixer.preview: unknown scene: " + scene_name);
+    if (state_->blend_on_air || state_->wipe_on_air) {
+        // A preset selection during a transition changes its incoming picture, as on a switcher.
+        if (scene_name != state_->transition_scene_name) replacePreset(scene_name);
+        return;
+    }
+    ensureIdle();
 
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
     const auto& slot = state_->pvwSlot();

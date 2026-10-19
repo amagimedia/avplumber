@@ -17,9 +17,10 @@ class FrameSubscription : public InstanceShared<FrameSubscription> {
     std::optional<int64_t> last_tick_;
 public:
     bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
-    void configure(av::Rational fps) {
+    void configure(av::Rational fps, bool rate_limit = true) {
         std::lock_guard<std::mutex> lock(mutex_);
-        rate_.emplace(fps);
+        if (rate_limit) rate_.emplace(fps);
+        else rate_.reset();
         enabled_.store(false, std::memory_order_relaxed);
         closed_ = false;
         last_tick_.reset();
