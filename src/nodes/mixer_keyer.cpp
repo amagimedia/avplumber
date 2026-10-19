@@ -34,7 +34,7 @@ class MixerKeyer : public CudaRectCompositor, public IReturnsObjects {
     };
     std::vector<KeyChange> key_change_;
     std::vector<avp::mixer::KeyFade> key_fade_;
-    std::vector<float> key_opacity_;   // per input, for this program frame; the clock input stays 1
+    std::vector<float> key_opacity_;   // render thread: per input, for this program frame; the clock input stays 1
     // Keys whose rectangle may be composed alone, over a copy of the program frame, instead of
     // with the whole canvas (`bounded_keys`): per input, none unless the node names them.
     std::vector<bool> bounded_input_;
@@ -107,14 +107,12 @@ class MixerKeyer : public CudaRectCompositor, public IReturnsObjects {
     }
 
     // A command for a key a take carries ends the take for that key: it returns to the state
-    // it had, and the command applies from there.
+    // it had, and the command applies from there. Control thread: key_opacity_ is the render
+    // thread's, which reads it unlocked; stepKeyFades sets it from key_fade_ on the next frame.
     void releaseTaken(avp::mixer::SourceMask keys) {
         const auto released = taken_ & keys;
-        for (size_t i = 0; i < key_fade_.size(); ++i) {
-            if (!released.test(int(i))) continue;
-            key_fade_[i] = avp::mixer::KeyFade(taken_on_.test(int(i)));
-            key_opacity_[i] = taken_on_.test(int(i)) ? 1.f : 0.f;
-        }
+        for (size_t i = 0; i < key_fade_.size(); ++i)
+            if (released.test(int(i))) key_fade_[i] = avp::mixer::KeyFade(taken_on_.test(int(i)));
         taken_ &= ~released;
     }
 
