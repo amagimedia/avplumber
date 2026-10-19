@@ -33,6 +33,7 @@ protected:
     bool should_close_ = false;
     int errors_ = 0;
     std::chrono::steady_clock::time_point first_error_{};
+    bool udp_ = false;   // the url's protocol is udp: its paced send queue can fill
     uint64_t queue_full_drops_ = 0;   // since the last line about them
     std::chrono::steady_clock::time_point queue_full_logged_{};
     void commitPendingSeekEntries() {
@@ -124,9 +125,9 @@ public:
                 // ENOMEM. An encoder catching up after a stall overfills it for a moment; that
                 // packet is lost like any on the network (receivers ask for a keyframe), and the
                 // output goes on. 2026-10-15: these drops reached the panic policy and restarted
-                // the whole show four times.
+                // the whole show four times. Any other protocol's ENOMEM is an error like the rest.
                 const auto *code = dynamic_cast<const std::system_error *>(&e);
-                if (code && code->code().value() == AVERROR(ENOMEM)) {
+                if (udp_ && code && code->code().value() == AVERROR(ENOMEM)) {
                     ++queue_full_drops_;
                     const auto now = std::chrono::steady_clock::now();
                     if (now - queue_full_logged_ >= std::chrono::seconds(1)) {
@@ -185,6 +186,8 @@ public:
         std::string url = params["url"];
         
         logstream << "output url: " << url;
+        const char *protocol = avio_find_protocol_name(url.c_str());
+        r->udp_ = protocol && std::string(protocol) == "udp";
         
         av::OutputFormat ofmt(format, url);
         octx.setFormat(ofmt);
