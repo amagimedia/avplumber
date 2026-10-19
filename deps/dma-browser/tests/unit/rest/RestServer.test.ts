@@ -29,6 +29,7 @@ function snapshotFor(cfg: WindowConfig): WindowSnapshot {
       releasedFrameCount: 0,
       retainedFrameCount: 0,
       quarantinedFrameCount: 0,
+      paintsSkipped: 0,
       lastPaintTsMs: null,
     },
   };
@@ -40,6 +41,7 @@ function buildManager(overrides: Partial<WindowControl> = {}): WindowControl {
     close: vi.fn(),
     closeAll: vi.fn().mockResolvedValue(undefined),
     refresh: vi.fn(),
+    paint: vi.fn(),
     update: vi.fn(),
     show: vi.fn(),
     status: vi.fn().mockReturnValue({ windows: [], count: 0, maxWindows: 8 }),
@@ -59,6 +61,23 @@ const validBody = {
   fps: 30,
   audio: false,
 };
+
+describe('POST /window/paint', () => {
+  it.each([false, true])('sets painting to %s', async (enabled) => {
+    const paint = vi.fn().mockResolvedValue(snapshotFor(validBody));
+    const res = await request(buildServer(buildManager({ paint })).app)
+      .post('/window/paint').send({ id: 'win-1', enabled });
+    expect(res.status).toBe(200);
+    expect(paint).toHaveBeenCalledWith('win-1', enabled);
+  });
+  it('rejects a non-boolean painting state', async () => {
+    const paint = vi.fn();
+    const res = await request(buildServer(buildManager({ paint })).app)
+      .post('/window/paint').send({ id: 'win-1', enabled: 'false' });
+    expect(res.status).toBe(400);
+    expect(paint).not.toHaveBeenCalled();
+  });
+});
 
 describe('POST /window/open', () => {
   it('200 with snapshot on success', async () => {
@@ -197,5 +216,39 @@ describe('POST /workers/recover', () => {
     expect((await request(buildServer(buildManager()).app).post('/workers/recover').send({ ids: [] })).status).toBe(409);
     const manager = buildManager({ recover: vi.fn().mockRejectedValue(new Error('worker failed')) });
     expect((await request(buildServer(manager).app).post('/workers/recover').send({ ids: ['win-1'] })).status).toBe(500);
+  });
+});
+
+describe('GET /metrics/cpu', () => {
+  it('returns the sampler figures', async () => {
+    const metrics = {
+      intervalS: 1,
+      hz: 100,
+      totalPct: 12.5,
+      cores: { used: 0.13, hostVcpus: 4, perCore: [] },
+      processes: [{ type: 'gpu', n: 1, pct: 12.5, avgPct: 12.5, maxPct: 12.5 }],
+      gpuThreads: [],
+    };
+    const cpu = { metrics: vi.fn().mockResolvedValue(metrics) };
+    const server = new RestServer(
+      buildManager(),
+      { host: '127.0.0.1', port: 0 },
+      new ConfigService(),
+      cpu,
+    );
+    const res = await request(server.app).get('/metrics/cpu');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(metrics);
+  });
+
+  it('answers 500 where /proc cannot be read', async () => {
+    const cpu = { metrics: vi.fn().mockRejectedValue(new Error('ENOENT: /proc')) };
+    const server = new RestServer(
+      buildManager(),
+      { host: '127.0.0.1', port: 0 },
+      new ConfigService(),
+      cpu,
+    );
+    expect((await request(server.app).get('/metrics/cpu')).status).toBe(500);
   });
 });

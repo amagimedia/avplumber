@@ -108,6 +108,10 @@ driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader -i 0 2>/de
   echo "ERROR: driver $driver, expected $expected: use a matching host image"; exit 1;
 }
 
+# A long compute time-slice lets the mixer keep its deadlines beside Chromium's GL contexts
+# (docker-compose/mixer/deploy/l4/README.md). The policy resets on every boot.
+nvidia-smi compute-policy --set-timeslice=3
+
 # The browser sources render through /dev/dri/renderD128; NVIDIA GBM needs modeset.
 [ "$(cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null)" = Y ] || modprobe nvidia-drm modeset=1
 

@@ -17,9 +17,7 @@ export interface AppliedSwitch {
  * Configures Chromium command-line switches for offscreen DMA-BUF capture on
  * Linux + Electron/Chromium.
  *
- * Reads `DMA_BROWSER_*` env vars. The NVIDIA launcher adds the custom
- * native-handle feature through `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES` only
- * after it detects NVIDIA.
+ * Reads `DMA_BROWSER_*` env vars for stock Electron/Chromium.
  */
 export class HwAccelConfigurator {
   private static readonly DISABLED_FEATURES_BASE: readonly string[] = [

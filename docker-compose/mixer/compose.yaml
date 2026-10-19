@@ -33,6 +33,12 @@ services:
       # Sources, then the downstream-key windows (prepare_demo.DSK_WINDOWS): keys
       # export DMA-BUFs at the graphic's own size, not a transparent full frame.
       DMA_BROWSER_ALLOWED_DIMS: 1920x1080,1080x1920,1016x172,1920x80,152x152,304x152
+      # Each worker's Chromium profile, whose GPUCache/GPUPersistentCache hold the compiled
+      # shader programs (the NVIDIA GL disk cache stays unused under Chromium). In the
+      # default /tmp a recreated container compiles them all again.
+      DMA_BROWSER_WORKER_DATA_ROOT: /var/cache/dma-browser/workers
+    volumes:
+      - dma-browser-cache:/var/cache/dma-browser
 
   mixer:
     extends: {file: ../../docker-compose/dmabuf/compose.yaml, service: cuda-consumer}
@@ -91,3 +97,4 @@ services:
 volumes:
   wayland-runtime:
   dma-browser-sockets:
+  dma-browser-cache:

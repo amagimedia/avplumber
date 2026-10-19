@@ -98,10 +98,16 @@ RUN if [ "${FFMPEG_TAG}" = "$(. /build/deps/ffmpeg/9/bases.env; echo "$upstream_
     fi \
     && bash /build/deps/ffmpeg/apply.sh /tmp/ffmpeg
 
-# PTX for the oldest deployed GPU (T4, sm_75); the driver JIT-compiles it for
-# newer ones such as the L4. CUDA 13 has no Volta target, so the old
-# compute_70 is gone.
+# FFmpeg's CUDA filters as fatbins with machine code for T4 (sm_75), A100 (sm_80),
+# A10 (sm_86) and L4 (sm_89), as the Makefile does for AVP's own kernels, plus
+# compute_89 PTX for newer GPUs. PTX alone made the driver JIT-compile every filter
+# on a host's first start (a ~15 s GPU stall on the L4) and again after each driver
+# update. configure hardcodes -ptx; the fatbin keeps the .ptx file name, and
+# ff_cuda_load_module's cuModuleLoadData() accepts either. CUDA 13 has no Volta
+# target, so the old compute_70 is gone.
 RUN cd /tmp/ffmpeg \
+    && grep -q 'nvccflags="$nvccflags -ptx"' configure \
+    && sed -i 's/nvccflags="$nvccflags -ptx"/nvccflags="$nvccflags -fatbin"/' configure \
     && ./configure \
         --prefix=/usr/local \
         --libdir=/usr/local/lib \
@@ -128,9 +134,15 @@ RUN cd /tmp/ffmpeg \
         --extra-ldflags=-L/usr/local/cuda/targets/x86_64-linux/lib \
         --extra-ldexeflags=-Wl,--disable-new-dtags,-rpath,/usr/local/lib \
         --nvcc=/usr/local/cuda/bin/nvcc \
-        --nvccflags='-gencode arch=compute_75,code=compute_75 -O2' \
+        --nvccflags='-gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_89,code=compute_89 -O2' \
         || { cat /tmp/ffmpeg/ffbuild/config.log; exit 1; } \
     && make -j"${BUILD_JOBS}" \
+    && modules="$(find libavfilter -name '*.ptx')" \
+    && test -n "$modules" \
+    && for m in $modules; do \
+        [ "$(od -An -tx1 -N4 "$m" | tr -d ' ')" = 50ed55ba ] \
+            || { echo "$m is not a CUDA fatbin" >&2; exit 1; }; \
+    done \
     && make install \
     && ldconfig \
     && rm -rf /tmp/ffmpeg

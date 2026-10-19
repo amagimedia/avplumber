@@ -96,6 +96,10 @@ export class ProcessManager implements WindowControl {
     return this.requireOwner(id).refresh(id);
   }
 
+  public async paint(id: string, enabled: boolean): Promise<WindowSnapshot> {
+    return this.requireOwner(id).paint(id, enabled);
+  }
+
   public async update(id: string, url: string): Promise<WindowSnapshot> {
     return this.requireOwner(id).update(id, url);
   }
