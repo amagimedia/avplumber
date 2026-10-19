@@ -912,8 +912,6 @@ const takeOwns = () => mixOn() || takeWaiting();
 // but where the lever rests: a press elsewhere would be off the lever's real grip and put the lever, and a mix that
 // far, on air at once. Nor while the mixer's lever is still to be parked where the bar is (parkLever).
 const owns = () => takeOwns() || gripBack !== null || parking !== null;
-// The mix's time progress x at t by its start estimate, held at heldX.
-const mixX = (t) => Math.min(mix.heldX ?? 1, Math.max(0, (t - mix.start) / mix.duration));
 // The T-bar's progress at x: the curve, a dip's two halves around its hold, and the lever's x0 a mix was handed
 // over at (the difference to the curve fades out over the rest of the mix).
 function mixY(x) {
@@ -935,17 +933,20 @@ function startMix(kind, start, duration, shape = takeShape(kind), x0 = 0) {
   const {curve, dip} = shape;
   // far: the lever's end the mix runs to; the grip runs from where the lever rests (gripFrom) to that end as drawn
   // (gripTo); pgm: Program as the mix started, so a poll tells its completion; done: the mixer is done with it and the
-  // bar runs out to its end.
+  // bar runs out to its end; own: this page pressed its take (at most a second before it started, as a press precedes
+  // its take), not another controller.
   mix = {kind, start, shown: start, duration, curve, dip, x0, bias: x0 - CURVE_AT[curve][0](x0), heldX: null, guess: false,
          x: x0, drawn: x0, at: performance.now(), ended: 0, early: false, far: 1 - lever.origin, done: false,
-         gripFrom: Number($("lever").value) / 1000, gripTo: barAt(1 - lever.origin), pgm: state?.status?.pgm_scene};
+         gripFrom: Number($("lever").value) / 1000, gripTo: barAt(1 - lever.origin), pgm: state?.status?.pgm_scene,
+         own: takePressedAt >= start - LEVER_QUIET_MS};
   animate();
   return mix;
 }
 // The mixer releases the lever whenever a take ends. A mix that completed leaves the bar at the far end, as a hardware
 // T-bar stays where the mix took it: the mixer's lever, parked at the near end, is mirrored; left midway (an Auto ran
-// the lever's take on, or a Cut ended it there), it is parked at the far end. A mix the mixer ended short of its end
-// sends the grip back to where the lever is.
+// the lever's take on, or a Cut ended it there), it is parked at the far end by the page that took it, not by every page
+// watching (another controller parks its own). A mix the mixer ended short of its end sends the grip back to where the
+// lever is.
 function endMix(early = false, completed = early) {
   if (!mixOn()) return;
   Object.assign(mix, {ended: performance.now(), early});
@@ -954,7 +955,7 @@ function endMix(early = false, completed = early) {
   else if (lever.engaged && Math.abs(lever.position - mix.far) > K_END) {
     leverFlip = !leverFlip;
     $("lever").value = barAt(lever.position) * 1000;
-  } else parkLever(mix.far);
+  } else if (mix.own) parkLever(mix.far);
   animate();
 }
 // The earliest page time a poll's status can have been taken at.

@@ -323,7 +323,7 @@ const {launch, openPage, bigShow} = require('./page_fixture.cjs');
     assert.deepEqual([t.on, t.run], [0, true], 'a wipe runs Auto without a progress of its own');
     await status({transition: 'idle', transition_on_air: false});
     await page.waitForTimeout(300);
-    assert.equal((await tbar()).grip, rest, 'once the mix ends the grip is back where the lever rests');
+    assert.equal(Math.round((await tbar()).grip * 1000) / 1000, rest, 'once the mix ends the grip is back where the lever rests');
     // Cut flashes as pressed.
     await Promise.all([sent(), page.locator('#cut').click()]);
     commands.length = 0;
