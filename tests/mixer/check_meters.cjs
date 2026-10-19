@@ -37,7 +37,9 @@ const {launch, openPage, bigShow} = require('./page_fixture.cjs');
         encode_by_codec: [{codec: 'h264', sessions: 30, fps: 750}],
         aux_buses: aux.map(a => a.id), preview_outputs: aux.map((a, i) => ({bus: a.id, label: a.label,
           codec: 'h264', mountpoint: 5000 + 4 * i, fps: 25}))}};
-    const {page, errors, commands, requests, sent} = await openPage(browser, {state: sample, config: {compute_price: {hourly_usd: 1.2}}});
+    // The wheel checks below are for a classic wheel, so the page runs as off macOS on any host.
+    const {page, errors, commands, requests, sent} = await openPage(browser, {state: sample, config: {compute_price: {hourly_usd: 1.2}},
+      init: () => Object.defineProperty(Navigator.prototype, 'platform', {get: () => 'Linux x86_64'})});
     await page.waitForFunction(() => document.querySelector('#power b').textContent === '50/72 W');
     // A tip's figures: the second column of its first table (ENC and DEC have a codec table under it).
     const values = id => page.locator(`#${id}-tip table:first-of-type td:nth-child(2)`).allTextContents();
@@ -280,10 +282,11 @@ const {launch, openPage, bigShow} = require('./page_fixture.cjs');
     assert.deepEqual(commands.splice(0).map(c => c.command), ['fade'], 'Space after clicking Fade runs Auto');
     await Promise.all([sent(), page.keyboard.press('c')]);
     assert.deepEqual(commands.splice(0).map(c => [c.command, c.scene]), [['cut', 'a']], 'C cuts the Preview');
-    // The lever sends its position with the mix's duration; Program shows the mix's progress.
+    // The lever sends its position with the mix's duration; Program shows the mix's progress. The bar is drawn from
+    // the end the last completed take left it at (barAt), so its 40% is the mixer's lever at 0.4 either way.
     await page.waitForFunction(() => gripBack === null);   // the lever takes no press while the grip goes back to it
     await Promise.all([sent(),
-      page.evaluate(() => { $('lever').value = 400; $('lever').dispatchEvent(new Event('input')); })]);
+      page.evaluate(() => { $('lever').value = barAt(0.4) * 1000; $('lever').dispatchEvent(new Event('input')); })]);
     assert.deepEqual(commands.splice(0).map(c => [c.command, c.position, c.duration_sec]), [['lever', 0.4, 0.5]]);
     // Program shows the lever's mix at once, and a mix from the polls.
     const pgmState = () => $('pgm-state').textContent;
@@ -300,21 +303,21 @@ const {launch, openPage, bigShow} = require('./page_fixture.cjs');
     assert.equal(await page.evaluate(() => { tookAs = {transition: 'crossfade', name: 'dip'}; renderBuses(); return $('pgm-state').textContent; }),
       'on air · dip 40% · lever');
     // A lever back at an end reads idle at once, before the poll says the mix is over.
-    assert.equal(await page.evaluate(() => { $('lever').value = 0; $('lever').dispatchEvent(new Event('input')); return $('pgm-state').textContent; }),
+    assert.equal(await page.evaluate(() => { $('lever').value = barAt(0) * 1000; $('lever').dispatchEvent(new Event('input')); return $('pgm-state').textContent; }),
       'on air', 'a lever back at its origin is idle');
-    // A wipe first seen halfway eases in to its progress.
+    // A wipe first seen halfway is drawn at its progress; this page's take named it when the mixer accepted it.
+    await page.evaluate(() => { tookAs = {transition: 'wipe', name: 'diagonal sweep'}; });
     await poll({transition: 'wipe', transition_on_air: true, transition_manual: false, transition_progress: 0.5,
                 transition_duration_ms: 1e9, lever: {position: 0, origin: 0, engaged: true}});
-    await page.evaluate(() => { tookAs = {transition: 'wipe', name: 'diagonal sweep'}; });
     await page.waitForFunction(() => document.querySelector('#tp .pct').textContent === '50%');
     assert.equal(await page.evaluate(pgmState), 'on air · diagonal sweep 50%', 'a wipe with a progress shows it, and so does the T-bar');
     // The mixer only records the lever under another's mix, so the lever takes no press and its arrows keep it put.
     commands.length = 0;
     assert.deepEqual(await page.evaluate(() => {
-      const events = getComputedStyle($('lever')).pointerEvents;
+      const events = getComputedStyle($('lever')).pointerEvents, at = $('lever').value;
       $('lever').value = 900; $('lever').dispatchEvent(new Event('input'));
-      return [events, $('lever').value];
-    }), ['none', '0'], 'the lever stays put under a wipe');
+      return [events, $('lever').value === at];
+    }), ['none', true], 'the lever stays put under a wipe');
     assert.deepEqual(commands, [], 'and sends nothing');
     await poll({transition: 'idle', transition_progress: 0});
     await poll({transition: 'wipe', transition_progress: 0});
@@ -338,6 +341,9 @@ const {launch, openPage, bigShow} = require('./page_fixture.cjs');
     assert.equal(await page.locator('#direct').getAttribute('aria-pressed'), 'true', 'Direct lights in the Preview box');
     await Promise.all([sent(), page.keyboard.press('2')]);
     assert.equal(commands.splice(0)[0].command, 'cut', 'a Direct pick cuts whatever Auto is set to');
+    // That Cut ended the lever's take left midway: the page parks the lever at the far end until a poll shows it there.
+    await poll({lever: {position: 1, origin: 1, engaged: true}});
+    commands.length = 0;
     await page.evaluate(() => restFocus());
     assert.equal(await page.locator('#fade').getAttribute('aria-pressed'), 'true');
     await page.keyboard.press('d');
