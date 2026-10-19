@@ -2444,7 +2444,8 @@ async function refresh() {
     }
     state = next;
     const at = sampleTime(pts, arrived), s = next.status;
-    const early = asked < takeAcceptedAt || takeAcceptedAt < takePressedAt;   // asked before the last take was accepted
+    // Asked, or taken (a reply of the bridge's cache), before the last take was accepted.
+    const early = asked < takeAcceptedAt || at < takeAcceptedAt || takeAcceptedAt < takePressedAt;
     const runs = takeMix(s) && s.transition_on_air && !s.transition_paused && s.transition_progress > 0;
     if (s && at >= takePressedAt && (!early || (takeRuns && runs))) observe(s, at, pts !== undefined, asked);
     $("conn").hidden = true;
