@@ -1279,6 +1279,31 @@ def test_source_banks_are_shared_and_kept_by_the_setup_manager(client, tmp_path)
     assert rejected.value.code == 400
 
 
+@pytest.mark.parametrize("stored", [ValueError("Expecting value: line 1 column 1"), [["a"]], {"banks": []}])
+def test_unusable_stored_source_banks_start_empty_instead_of_failing_every_poll(client, caplog, stored):
+    class Setup:
+        reads = 0
+        saved = None
+        def source_banks(self):
+            Setup.reads += 1
+            if isinstance(stored, Exception):
+                raise stored
+            return stored
+        def remember_banks(self, banks): Setup.saved = banks
+        def status(self): return {"phase": "running", "message": "", "revision": 1}
+    base, _ = client(FakeBridge(STATE_REPLIES), setup=Setup())
+    with caplog.at_level(logging.WARNING):
+        assert get(base, "/api/banks") == (200, {"banks": None})
+        status, state = get(base, "/api/state")
+        assert status == 200 and state["source_banks"] is None
+    assert Setup.reads == 1 and "source banks" in caplog.text
+    banks = [["a"], [], []]
+    request = urllib.request.Request(base + "/api/banks", method="POST", data=json.dumps({"banks": banks}).encode())
+    with urllib.request.urlopen(request) as response:
+        assert json.load(response) == {"banks": banks}
+    assert Setup.saved == banks
+
+
 def test_key_tally_poll_is_small_cached_and_invalidated_by_commands(client):
     bridge = FakeBridge(replies={"mixer.dsk_status": '[{"id":"logo","on":false,"on_air":true,"phase":"fading-out"}]',
                                  "mixer.ftb_status": '{"on":false,"on_air":false,"phase":"off"}'})

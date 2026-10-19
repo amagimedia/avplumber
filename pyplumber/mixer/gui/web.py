@@ -107,19 +107,32 @@ class SourceBanks:
         self.setup = setup if callable(getattr(setup, "source_banks", None)) else None
         self.lock, self.banks, self.loaded = threading.Lock(), None, self.setup is None
 
+    @classmethod
+    def _checked(cls, banks):
+        """A copy of `banks`, or ValueError when they are not BANKS lists of BUTTONS scene ids or nulls."""
+        if (not isinstance(banks, list) or len(banks) != cls.BANKS
+                or any(not isinstance(b, list) or len(b) > cls.BUTTONS for b in banks)
+                or any(s is not None and not isinstance(s, str) for b in banks for s in b)):
+            raise ValueError(f"banks must be {cls.BANKS} lists of at most {cls.BUTTONS} scene ids or nulls")
+        return [list(b) for b in banks]
+
     def get(self):
         with self.lock:
             if not self.loaded:
-                self.banks, self.loaded = self.setup.source_banks(), True
+                # Read once: a stored file that cannot be used leaves the buttons empty rather than
+                # failing every state poll.
+                try:
+                    stored = self.setup.source_banks()
+                    self.banks = None if stored is None else self._checked(stored)
+                except (OSError, ValueError) as exc:
+                    logging.getLogger(__name__).warning("source banks: cannot use the stored banks: %s", exc)
+                self.loaded = True
             return self.banks
 
     def set(self, banks):
-        if (not isinstance(banks, list) or len(banks) != self.BANKS
-                or any(not isinstance(b, list) or len(b) > self.BUTTONS for b in banks)
-                or any(s is not None and not isinstance(s, str) for b in banks for s in b)):
-            raise ValueError(f"banks must be {self.BANKS} lists of at most {self.BUTTONS} scene ids or nulls")
+        banks = self._checked(banks)
         with self.lock:
-            self.banks, self.loaded = [list(b) for b in banks], True
+            self.banks, self.loaded = banks, True
             if self.setup:
                 self.setup.remember_banks(self.banks)
         return self.banks
