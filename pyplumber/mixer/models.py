@@ -22,6 +22,8 @@ class MixerSource:
     # Set by the builder: the colour fields this source's fan-out stamps on every frame, when
     # that is all its colour stage would do.
     frame_color: Optional[Dict[str, str]] = None
+    # The event loop this source's fan-out runs on; None: on a thread of its own.
+    fan_out_loop: Optional[str] = None
 
 
 @dataclass

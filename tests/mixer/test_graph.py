@@ -8,6 +8,7 @@ from pyplumber.mixer.application import infer_output_format
 
 from pyplumber.mixer import config as mixer_config
 from pyplumber.mixer import config as mc
+from pyplumber.mixer.config import probe_video_stream   # conftest stubs the module's own for show builds
 from pyplumber.mixer.color import Color
 from pyplumber.mixer.graph import MixerGraphBuilder
 from pyplumber.mixer.cli import DIRECT_INPUT_LIMIT, GraphOptions, build_application, parse_args
@@ -90,6 +91,7 @@ class FakeMixer:
 
     def __init__(self, avp, **parameters):
         self.avp = avp
+        self.name = parameters.get("name", "mixer")
         self.parameters = parameters
         from pyplumber.mixer.backend import mixer_backend
         self.backend = mixer_backend(parameters.get("backend"))
@@ -161,7 +163,7 @@ def fake_api():
         "CudaTransform": "cuda_transform", "DecVideo": "dec_video", "Demux": "demux",
         "DrmPrimeToCuda": "drm_prime_to_cuda", "EncVideo": "enc_video", "FilterVideo": "filter_video",
         "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input_rec",
-        "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer",
+        "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer", "MixerDelivery": "mixer_delivery",
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
         "RawVideoFileCuda": "raw_video_file_cuda", "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
         "SmoothTimestamps": "smooth_timestamps", "Split": "split",
@@ -436,7 +438,7 @@ def test_a_browser_in_a_large_catalogue_is_normalized_like_a_file(tmp_path):
                             api=fake_api())
     nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
     browser = nodes[f"normalize_{DIRECT_INPUT_LIMIT}"]
-    # The transform reads the zero-copy browser frame and writes the canvas's YUV storage.
+    # The transform reads the imported DMA-BUF frame and writes the canvas's YUV storage.
     assert (browser["type"], browser["src"]) == ("cuda_transform", f"input_{DIRECT_INPUT_LIMIT}_held")
     assert browser["outputs"] == [{**nodes["normalize_0"]["outputs"][0],
                                    "dst": f"input_{DIRECT_INPUT_LIMIT}_normalized"}]
@@ -453,6 +455,19 @@ def test_a_browser_in_a_large_catalogue_cannot_share_a_declared_hdr_input_color(
     for color in ("hlg", "pq"):
         with pytest.raises(ValueError, match="a browser page is SDR"):
             GraphOptions(inputs=inputs, output="p.mp4", input_color=color).validate()
+
+
+def test_browser_keeps_the_return_queue_and_expires_idle_imports():
+    from pyplumber.mixer import dmabuf_inputs
+
+    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
+        fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=30, drm_hwaccel=None,
+        cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=9)
+    receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
+    importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
+    assert receive["return_queue"] == 3
+    assert importer["max_imports"] == 12
+    assert importer["import_ttl_ms"] == dmabuf_inputs.IMPORT_IDLE_MS
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
@@ -578,7 +593,8 @@ def test_browser_failure_precedes_native_initialization(monkeypatch):
     from pyplumber.mixer import application
     monkeypatch.setattr(application, "open_windows", fail)
     monkeypatch.setattr(application, "_init_avp", lambda *args: pytest.fail("native threads started before browser preparation"))
-    cfg = SimpleNamespace(fps=60, latency_ms=None, browser_frame_queue=11, max_compositor_layers=256, sources=[SimpleNamespace(
+    cfg = SimpleNamespace(fps=60, latency_ms=None, input_poll_ms=None, source_fan_out="thread",
+                          decoded_frames_ahead=None, raw_pool_frames=None, browser_frame_queue=11, max_compositor_layers=256, sources=[SimpleNamespace(
         kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60, hold_last_frame=True)])
     with pytest.raises(RuntimeError, match="browser unavailable"):
         application._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api(), ExitStack())
@@ -715,12 +731,14 @@ def _raw_420_nodes(tmp_path, kind, color, *, source_options=None, process_source
 
 
 @pytest.mark.parametrize("kind,fmt,color", [("nv12", "nv12", "sdr"), ("p010", "p010le", "hlg")])
-@pytest.mark.parametrize("upload", ["hwupload", "pinned", "direct"])
+@pytest.mark.parametrize("upload", ["hwupload", "pinned", "direct", "resident"])
 def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
     app, nodes, chain = _raw_420_nodes(tmp_path, kind, color, raw_upload=upload)
-    if upload == "direct":
-        # One node reads each picture into page-locked memory and uploads it from there.
+    if upload in ("direct", "resident"):
+        # One node reads each picture into page-locked memory and uploads it from there;
+        # resident, a looped file's pictures stay in that memory.
         assert chain == ["input_0", "realtime_0"]
+        assert nodes["input_0"].pop("resident", False) is (upload == "resident")
         assert nodes["input_0"] == {
             "name": "input_0", "type": "raw_video_file_cuda", "url": str(tmp_path / "pattern.raw"),
             "dst": "input_0_cuda", "hwaccel": "mixer_gpu", "group": nodes["realtime_0"]["group"],
@@ -735,7 +753,8 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
     assert nodes["input_0"]["format"] == "rawvideo"
     assert nodes["input_0"]["options"] == {"pixel_format": fmt, "video_size": "320x180", "framerate": "60/1"}
     if upload == "hwupload":
-        assert chain == ["input_0", "demux_0", "decode_0", "filter_0", "realtime_0", "upload_0"]
+        assert chain == ["input_0", "decode_0", "filter_0", "realtime_0", "upload_0"]
+        assert nodes["input_0"]["routing"] == {"?v:0": "input_0_video_packets"} and "dst" not in nodes["input_0"]
         assert nodes["input_0"]["loop_continuous_ts"] is False   # setpts counts frames across loops instead
         assert nodes["decode_0"]["codec"] == "rawvideo"
         assert "hwaccel" not in nodes["decode_0"] and "options" not in nodes["decode_0"]
@@ -752,8 +771,8 @@ def test_raw_420_source_upload_path(tmp_path, kind, fmt, color, upload):
         assert source["pre_otm_edge"] == "input_0_uploaded" and source["pixel_format"] == fmt
     else:
         # Rawvideo wraps the packets; the patched filter uploads on the shared device.
-        assert chain == ["input_0", "demux_0", "decode_0", "upload_0", "realtime_0"]
-        assert nodes["demux_0"]["routing"] == {"v:0": "input_0_packed"}
+        assert chain == ["input_0", "decode_0", "upload_0", "realtime_0"]
+        assert nodes["input_0"]["routing"] == {"v:0": "input_0_packed"} and "dst" not in nodes["input_0"]
         upload = nodes["upload_0"]
         assert nodes["decode_0"]["codec"] == "rawvideo"
         assert nodes["decode_0"]["pixel_format"] == fmt
@@ -789,10 +808,107 @@ def test_a_single_pass_raw_file_restarts_its_group_from_the_reading_node(tmp_pat
     assert nodes["input_0"]["auto_restart"] == "group"
 
 
+def test_a_single_pass_raw_file_is_not_kept_in_memory(tmp_path):
+    _, nodes, _ = _raw_420_nodes(tmp_path, "nv12", "sdr", raw_upload="resident", source_options={"loop": False})
+    assert "resident" not in nodes["input_0"]
+
+
 def test_raw_upload_rejects_unknown_modes():
-    with pytest.raises(mixer_config.ConfigError, match="raw_upload must be one of hwupload, pinned, direct"):
+    with pytest.raises(mixer_config.ConfigError, match="raw_upload must be one of hwupload, pinned, direct, resident"):
         mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "raw_upload": "pageable"}})
     assert mixer_config.parse(CONFIG).raw_upload == "hwupload"
+
+
+def _video_source_nodes(**canvas):
+    """The config-driven chain of one video file (the first CONFIG source), by node name,
+    and the names of its group's nodes in creation order."""
+    doc = {"canvas": {**CONFIG["canvas"], **canvas}, "sources": [CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+    app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4"), api=fake_api())
+    nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+    chain = [name for name in nodes if name.endswith("_0") and nodes[name].get("group") == nodes["input_0"]["group"]]
+    return nodes, chain
+
+
+@pytest.mark.parametrize("ahead", [None, 1, 2])
+def test_canvas_decoded_frames_ahead_bounds_the_queue_in_front_of_pacing(ahead):
+    doc = {"canvas": {**CONFIG["canvas"], **({} if ahead is None else {"decoded_frames_ahead": ahead})},
+           "sources": [CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+    app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4"), api=fake_api())
+    nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+    assert nodes["realtime_0"]["src"] == "input_0_decoded"
+    # Each frame waiting there is a decoder output surface held for nothing but slack.
+    assert dict(app.avp.edges.plans).get("input_0_decoded") == ahead
+
+
+@pytest.mark.parametrize("frames", [None, 10])
+def test_canvas_raw_pool_frames_bounds_each_raw_source_pool(tmp_path, frames):
+    canvas = {"raw_upload": "resident", **({} if frames is None else {"raw_pool_frames": frames})}
+    _, nodes, _ = _raw_420_nodes(tmp_path, "nv12", "sdr", **canvas)
+    assert nodes["input_0"].get("pool_frames") == frames
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "one", True])
+def test_canvas_raw_pool_frames_rejects_what_is_not_a_count(bad):
+    with pytest.raises(mixer_config.ConfigError, match="raw_pool_frames"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "raw_pool_frames": bad}})
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "one", True])
+def test_canvas_decoded_frames_ahead_rejects_what_is_not_a_count(bad):
+    with pytest.raises(mixer_config.ConfigError, match="decoded_frames_ahead"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "decoded_frames_ahead": bad}})
+
+
+def test_config_sources_stamp_no_frame_metadata():
+    nodes, _ = _video_source_nodes()
+    assert nodes["input_0"]["frame_metadata"] == []
+
+
+def test_config_sources_route_the_video_stream_inside_the_reading_node():
+    nodes, chain = _video_source_nodes()
+    assert chain == ["input_0", "decode_0", "realtime_0"]
+    assert nodes["input_0"]["routing"] == {"?v:0": "input_0_video_packets"}
+    assert "dst" not in nodes["input_0"]
+    assert nodes["decode_0"]["src"] == "input_0_video_packets"
+
+
+def test_config_input_routing_demux_keeps_the_demux_hop():
+    nodes, chain = _video_source_nodes(input_routing="demux")
+    assert chain == ["input_0", "demux_0", "decode_0", "realtime_0"]
+    assert nodes["input_0"]["dst"] == "input_0_packets" and "routing" not in nodes["input_0"]
+    assert (nodes["demux_0"]["src"], nodes["demux_0"]["routing"]) == ("input_0_packets", {"?v:0": "input_0_video_packets"})
+    assert nodes["decode_0"]["src"] == "input_0_video_packets"
+
+
+def test_input_routing_rejects_unknown_modes():
+    with pytest.raises(mixer_config.ConfigError, match="input_routing must be one of input, demux"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "input_routing": "splitter"}})
+    assert mixer_config.parse(CONFIG).input_routing == "input"
+
+
+def test_build_input_keeps_the_demux_hop_unless_told():
+    from pyplumber.mixer.inputs import build_input
+    chains = {}
+    for demux in (None, False):
+        avp = FakeAvp()
+        build_input(avp, fake_api(), "pl", "clip.mp4", group="pl", fps=30, **({} if demux is None else {"demux": demux}))
+        chains[demux] = [node.parameters["type"] for node in avp.nodes]
+    assert chains[None] == ["input_rec", "demux", "dec_video", "realtime", "force_fps"]
+    assert chains[False] == ["input_rec", "dec_video", "realtime", "force_fps"]
+
+
+def test_build_input_stamps_every_frame_metadata_key_unless_told():
+    from pyplumber.mixer.inputs import build_input
+    for keys, expected in ((None, {}), (["frame_ts"], {"frame_metadata": ["frame_ts"]})):
+        avp = FakeAvp()
+        build_input(avp, fake_api(), "pl", "clip.mp4", group="pl", fps=30,
+                    **({} if keys is None else {"frame_metadata": keys}))
+        params = {node.parameters["name"]: node.parameters for node in avp.nodes}["input_pl"]
+        assert {key: value for key, value in params.items() if key == "frame_metadata"} == expected
 
 
 @pytest.mark.parametrize("changes", [{"width": 319}, {"height": 0}, {"color": "hlg"}, {"color": ""}])
@@ -843,6 +959,73 @@ def test_config_rejects_duplicate_locations_and_bad_references():
     assert probed.source("page").width == 1920          # declared sizes are kept
     # cover of a 16:9 clip into the full 16:9 box keeps the whole frame
     assert mc.scene_layers(probed, probed.scenes[0])["cam"]["crop"] == {"x": 0, "y": 0, "w": 640, "h": 360}
+
+
+def test_decode_load_counts_each_video_source_once_at_its_own_rate():
+    # The live show: 105 HEVC 1080p30 clips.
+    live = [mc.Source(f"cam{i}", "video", f"/m/{i}.mp4") for i in range(105)]
+    assert mc.decode_load(live, probe=lambda _path: {"codec": "hevc", "width": 1920, "height": 1080, "fps": 30.0}) == {
+        "count": 105, "fps": 3150.0, "mpix_s": 6531.84, "by_codec": [{"codec": "hevc", "sources": 105, "fps": 3150.0}]}
+    streams = {"/a.mp4": {"codec": "h264", "width": 1280, "height": 720, "fps": 25.0},
+               "/b.mp4": {"codec": "hevc", "width": 3840, "height": 2160, "fps": 30000 / 1001},
+               "/c.mp4": {"codec": "h264", "width": 1920, "height": 1080, "fps": 50.0}}
+    show = [mc.Source("a", "video", "/a.mp4"), mc.Source("b", "video", "/b.mp4"), mc.Source("c", "video", "/c.mp4"),
+            mc.Source("raw", "v210", "/r.v210", 1920, 1080), mc.Source("page", "browser", "https://example.org/")]
+    assert mc.decode_load(show, probe=streams.__getitem__) == {
+        "count": 3, "fps": 104.97, "mpix_s": round((1280 * 720 * 25 + 3840 * 2160 * 30000 / 1001 + 1920 * 1080 * 50) / 1e6, 2),
+        "by_codec": [{"codec": "h264", "sources": 2, "fps": 75.0}, {"codec": "hevc", "sources": 1, "fps": 29.97}]}
+    assert mc.decode_load(show[3:]) == {"count": 0, "fps": 0, "mpix_s": 0, "by_codec": []}   # raw and browser: no decoder
+    with pytest.raises(KeyError):
+        mc.decode_load([*show, mc.Source("d", "video", "/d.mp4")], probe=streams.__getitem__)
+
+
+def test_encode_by_codec_counts_every_output_session():
+    renditions = [mc.Rendition("sdr", fps=60), mc.Rendition("hdr", fps=60, codec="hevc_nvenc"),
+                  mc.Rendition("record", target="p.ts", fps=30, codec="hevc_nvenc"), mc.Rendition("aux", fps=30, codec="h264_nvenc")]
+    assert mc.encode_by_codec(renditions, "nv12") == [{"codec": "h264", "sessions": 2, "fps": 90},
+                                                      {"codec": "hevc", "sessions": 2, "fps": 90}]
+    # An output that names no codec takes the canvas's: HEVC on a 10-bit canvas.
+    assert mc.encode_by_codec(renditions[:1], "p210le") == [{"codec": "hevc", "sessions": 1, "fps": 60}]
+    assert mc.encode_by_codec([], "nv12") == []
+
+
+FFPROBE = ["/usr/local/bin/ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+           "stream=codec_name,width,height,avg_frame_rate,r_frame_rate", "-of", "json", "/m/a.mp4"]
+
+
+@pytest.mark.parametrize("stream,expected", [
+    ({"codec_name": "hevc", "width": 1920, "height": 1080, "avg_frame_rate": "30/1", "r_frame_rate": "30/1"},
+     {"codec": "hevc", "width": 1920, "height": 1080, "fps": 30.0}),
+    ({"codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "0/0", "r_frame_rate": "30000/1001"},
+     {"codec": "h264", "width": 1280, "height": 720, "fps": 30000 / 1001}),
+    ({"codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "0/0", "r_frame_rate": "0/0"}, None),
+    ({"width": 1280, "height": 720, "avg_frame_rate": "25/1"}, None),
+    (None, None),
+])
+def test_stream_probe_reads_the_first_video_stream(monkeypatch, stream, expected):
+    runs = []
+    monkeypatch.setattr(mc.shutil, "which", lambda tool: f"/usr/local/bin/{tool}")
+    monkeypatch.setattr(mc.subprocess, "run", lambda command, **_: runs.append(command) or SimpleNamespace(
+        stdout=json.dumps({"streams": [stream] if stream else []})))
+    if expected is None:
+        with pytest.raises(mc.ConfigError, match="cannot probe the video stream"):
+            probe_video_stream("/m/a.mp4")
+    else:
+        assert probe_video_stream("/m/a.mp4") == expected
+    assert runs == [FFPROBE]
+    monkeypatch.setattr(mc.shutil, "which", lambda tool: None)
+    with pytest.raises(mc.ConfigError, match="ffprobe not found"):
+        probe_video_stream("/m/a.mp4")
+
+
+def test_settings_carry_the_encode_load_of_clean_and_dirty_renditions(tmp_path, monkeypatch):
+    renditions = [{"id": "sdr", "port": 5004, "codec": "h264_nvenc"}, {"id": "hdr", "port": 5006, "codec": "hevc_nvenc"},
+                  {"id": "sdr_clean", "port": 5010, "codec": "h264_nvenc", "feed": "clean", "fps": 30}]
+    monkeypatch.setattr(mc, "probe_video_stream", lambda _path: {"codec": "hevc", "width": 1920, "height": 1080, "fps": 30.0})
+    app, _ = _dsk_app(tmp_path, monkeypatch, renditions, canvas={**CONFIG["canvas"], "working_format": "p210le", "color": "hlg"})
+    settings = json.loads(app.avp.commands_registered["mixer.settings"](""))
+    assert settings["encode_by_codec"] == [{"codec": "h264", "sessions": 2, "fps": 90}, {"codec": "hevc", "sessions": 1, "fps": 60}]
+    assert settings["decode"] == {"count": 1, "fps": 30.0, "mpix_s": 62.21, "by_codec": [{"codec": "hevc", "sources": 1, "fps": 30.0}]}
 
 
 @pytest.mark.parametrize("flags", [(False, False), (True, False), (False, True), (True, True)])
@@ -922,7 +1105,8 @@ def test_browser_hold_last_frame_defaults_on_and_reaches_the_window(tmp_path, mo
     (tmp_path / "page.sock").touch()
     opened = []
     monkeypatch.setattr(dmabuf_inputs, "rest_request",
-                        lambda base, method, p, body=None: opened.append(body) or fake_browser_rest(base, method, p, body))
+                        lambda base, method, p, body=None: (opened.append(body) if p == "/window/open" else None)
+                        or fake_browser_rest(base, method, p, body))
     path = tmp_path / "show.json"
     path.write_text(json.dumps({**CONFIG, "sources": [cam, {**page, "hold_last_frame": False}]}))
     build_application(GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)), api=fake_api())
@@ -1038,11 +1222,12 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert "alias_0" not in nodes  # shared fan-out belongs to the reusable builder
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
     assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
+    opened = [o for o in opened if o[1] == "/window/open"]   # the capture-mode read follows the opens
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
                              "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}
     # Three of the six frames of this show's queue are the return queue.
     assert nodes["input_1_receive"]["return_queue"] == 3
-    assert nodes["input_1_to_cuda"]["max_imports"] == 32
+    assert nodes["input_1_to_cuda"]["max_imports"] == 9
     # Ten idle seconds, not one: a page that paints now and then must find its allocations registered.
     assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 10000
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}
@@ -1059,11 +1244,16 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         "preview_codecs": [],
         "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
         "source_counts": {"video": 1, "browser": 1, "v210": 0, "nv12": 0, "p010": 0}, "hdr_video": 0,
+        "inputs": [["cam", "video"], ["cam", "video"], ["page", "browser"]],
         "direct": False, "fade_seconds": 0.8, "fade_curve": "linear", "fade_color": None, "transition": "cut",
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
         "wipes": [{"id": "swoosh", "name": "swoosh", "path": "/media/swoosh.mov",
-                   "duration_seconds": 0.0}]}
+                   "duration_seconds": 0.0}],
+        "encode_by_codec": [{"codec": "h264", "sessions": 1, "fps": 60}]}
+    # The settings name the compositor's inputs in the order the graph registered them.
+    inputs = json.loads(application.avp.commands_registered["mixer.settings"](""))["inputs"]
+    assert [source for source, _ in inputs] == [name.partition("#")[0] for name, _ in mixer.sources]
     assert nodes["program_format"]["width"] == 1920
     assert nodes["program_fps"]["fps"] == "60/1"      # outputs follow the document's fps, not the CLI default
 
@@ -1210,7 +1400,10 @@ def test_clip_cache_node_parameters_name_the_clip_by_url():
                                 fps="60/1", budget_mb=256, url="/media/w.mov")
     assert node == {"name": "mixer_wipe_cache", "src": "in", "dst": "out", "group": "g",
                     "fps": "60/1", "cache": "clips", "url": "/media/w.mov", "budget_mb": 256}
-    assert "budget_mb" not in clipcache.cache_node(name="n", src="a", dst="b", group="g", fps="60/1")
+    default = clipcache.cache_node(name="n", src="a", dst="b", group="g", fps="60/1")
+    assert "budget_mb" not in default and "scrub_delay_ms" not in default
+    assert clipcache.cache_node(name="n", src="a", dst="b", group="g", fps="60/1",
+                                scrub_delay_ms=40)["scrub_delay_ms"] == 40
 
 
 RENDITION_CONFIG = {**CONFIG, "canvas": {"width": 1080, "height": 1920, "fps": 30},
@@ -1282,7 +1475,7 @@ def test_renditions_of_one_size_share_one_draw_and_replace_the_split(tmp_path):
     # Every rendition is scaled, so the transform is the feed's only reader: no split.
     assert "split_renditions" not in nodes
     transform = nodes["transform_renditions"]
-    assert transform["src"] == "mixer_final_out"
+    assert transform["src"] == "program_measured"
     assert [(o["dst"], o["width"], o["height"]) for o in transform["outputs"]] == [
         (["program_sized_low", "program_sized_file"], 1280, 720), (["program_sized_tiny"], 640, 360)]
     assert all("fps" not in o and "drop" not in o for o in transform["outputs"])
@@ -1296,7 +1489,7 @@ def test_renditions_of_one_size_share_one_draw_and_replace_the_split(tmp_path):
 def test_a_single_scaled_rendition_reads_the_feed_through_the_transform(tmp_path):
     nodes = _rendition_nodes(tmp_path, [{"id": "low", "port": 5004, "width": 1280, "height": 720}])
     assert "split_renditions" not in nodes
-    assert nodes["transform_renditions"]["src"] == "mixer_final_out"
+    assert nodes["transform_renditions"]["src"] == "program_measured"
     assert nodes["scale_low"]["src"] == "program_sized_low"
     assert nodes["janus_format"]["width"] == 1280 and nodes["janus_format"]["height"] == 720
 
@@ -1566,6 +1759,33 @@ def test_generated_ten_bit_sdr_show_uses_hevc_profile():
     assert mixer_config.parse(doc).out_color == Color("sdr")
 
 
+def test_canvas_input_poll_reaches_the_builder(tmp_path, monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
+    (tmp_path / "page.sock").touch()
+    doc = {**CONFIG, "canvas": {**CONFIG["canvas"], "input_poll_ms": 8}}
+    assert mixer_config.parse(doc).input_poll_ms == 8
+    assert mixer_config.parse(CONFIG).input_poll_ms is None
+    for bad in (-1, 2.5, "often", True):
+        with pytest.raises(mixer_config.ConfigError, match="input_poll_ms"):
+            mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "input_poll_ms": bad}})
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps(doc))
+    FakeMixer.instances.clear()
+    build_application(GraphOptions(config=str(path), janus_output=True, dmabuf_socket_dir=str(tmp_path)),
+                      api=fake_api())
+    assert FakeMixer.instances[-1].parameters["input_poll_ms"] == 8
+
+
+def test_aux_input_poll_ms_parses_and_validates():
+    assert mixer_config.parse(CONFIG).aux_input_poll_ms is None
+    doc = {**CONFIG, "canvas": {**CONFIG["canvas"], "aux_input_poll_ms": 8}}
+    assert mixer_config.parse(doc).aux_input_poll_ms == 8
+    for bad in (-1, 8.0, "8", True):
+        with pytest.raises(mixer_config.ConfigError):
+            mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "aux_input_poll_ms": bad}})
+
+
 def test_canvas_latency_reaches_the_builder_unless_the_cli_overrides_it(tmp_path, monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
     monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
@@ -1711,10 +1931,15 @@ def test_dsk_keys_the_program_after_the_mixer_with_one_small_program_clocked_pas
     app, nodes = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     keyer = nodes["dsk_comp"]
     assert keyer["type"] == "mixer_keyer"
-    assert keyer["src"] == ["mixer_final_out", "dsk_key_bug", "dsk_key_strap"]
-    assert keyer["subscriptions"] == ["", "dsk_key_bug", "dsk_key_strap"]
+    # The last input is the fade to black: nothing feeds it; the keyer holds a black frame there.
+    assert keyer["src"] == ["mixer_final_out", "dsk_key_bug", "dsk_key_strap", "dsk_ftb"]
+    assert keyer["subscriptions"] == ["", "dsk_key_bug", "dsk_key_strap", ""]
+    assert keyer["ftb_input"] == 3 and keyer["mixer"] == "mixer"
+    assert [(edge, size) for edge, size in app.avp.edges.plans if edge.startswith("dsk_key_")] == [
+        ("dsk_key_bug", 2), ("dsk_key_strap", 2)]
     assert keyer["clock_input"] == 0 and "latency_ms" not in keyer
-    assert keyer["max_layers"] == 3 and keyer["metadata_key"] == "dsk_layers_v1"
+    assert keyer["max_layers"] == 4 and keyer["metadata_key"] == "dsk_layers_v1"
+    assert keyer["layers"][3] == {"input": 3, "dst_x": 0, "dst_y": 0, "dst_w": 1920, "dst_h": 1080, "z": 3, "blend": True}
     assert keyer["layers"][0] == {"dst_x": 0, "dst_y": 0, "dst_w": 1920, "dst_h": 1080}
     assert keyer["layers"][1] == {"input": 1, "dst_x": 1700, "dst_y": 40, "dst_w": 160, "dst_h": 90, "z": 1, "blend": True}
     assert keyer["layers"][2]["dst_w"] == 1920 and keyer["layers"][2]["blend"] is True
@@ -1724,7 +1949,7 @@ def test_dsk_keys_the_program_after_the_mixer_with_one_small_program_clocked_pas
     assert nodes["input_1_to_cuda"]["drop_alpha"] is False
     # No clean rendition: no split, the only encoder reads the keyed program.
     assert "split_clean" not in nodes
-    assert nodes["scale_sdr"]["src"] == "program_dirty"
+    assert nodes["scale_sdr"]["src"] == "program_measured"
 
 
 def test_dsk_composes_the_whole_canvas_unless_a_key_says_its_rectangle_is_enough(tmp_path, monkeypatch):
@@ -1744,7 +1969,7 @@ def test_dsk_clean_and_dirty_renditions_each_keep_sdr_and_hdr(tmp_path, monkeypa
     assert nodes["split_clean"]["src"] == "mixer_final_out"
     assert nodes["split_clean"]["dst"] == ["program_clean", "dsk_program"]
     assert nodes["dsk_comp"]["src"][0] == "dsk_program"
-    assert nodes["split_renditions"]["src"] == "program_dirty"
+    assert nodes["split_renditions"]["src"] == "program_measured"
     assert nodes["split_renditions_clean"]["src"] == "program_clean"
     assert nodes["scale_hdr_clean"]["src"] == "program_rendition_hdr_clean"
     settings = json.loads(app.avp.commands_registered["mixer.settings"](""))
@@ -1761,7 +1986,8 @@ def test_dsk_command_cuts_keys_on_and_off(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     handler = app.avp.commands_registered["mixer.dsk"]
     assert json.loads(handler(json.dumps({"key": "strap", "on": True, "fade_seconds": 0}))) == [
-        {"id": "bug", "source": "page", "on": True}, {"id": "strap", "source": "page", "on": True}]
+        {"id": "bug", "source": "page", "on": True, "rate": None, "all_rate": 0.4},
+        {"id": "strap", "source": "page", "on": True, "rate": None, "all_rate": 0.4}]
     # A cut is exactly the pre-fade command, and asks the preview encoder for a keyframe like an M/E cut.
     assert app.avp.commands[-2:] == ["node.object.set dsk_comp active_inputs 7", KEYFRAME]
     handler(json.dumps({"key": "bug", "on": False, "fade_seconds": 0}))
@@ -1777,6 +2003,63 @@ def test_dsk_command_cuts_keys_on_and_off(tmp_path, monkeypatch):
         handler(json.dumps({"key": "nope", "on": True}))
 
 
+def test_each_key_takes_its_own_rate_unless_the_command_names_one(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    handler = app.avp.commands_registered["mixer.dsk"]
+    sent = len(app.avp.commands)
+    rows = json.loads(handler(json.dumps({"key": "bug", "rate": 1.5})))
+    assert [(row["rate"], row["all_rate"]) for row in rows] == [(1.5, 0.4), (None, 0.4)]
+    assert len(app.avp.commands) == sent, "a rate changes nothing on air"
+    handler(json.dumps({"key": "bug", "on": False}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 1, "duration_ms": 1500, "curve": "linear"}'
+    handler(json.dumps({"key": "strap", "rate": 0}))
+    handler(json.dumps({"key": "strap", "on": True}))
+    assert app.avp.commands[-2:] == ["node.object.set dsk_comp active_inputs 5", KEYFRAME]   # a 0 rate cuts
+    handler(json.dumps({"key": "strap", "on": False, "fade_seconds": 0.5}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 1, "duration_ms": 500, "curve": "linear"}'
+    for bad in ({"key": "nope", "rate": 1}, {"key": "bug", "rate": 11}, {"keys": ["bug"], "rate": 1}):
+        with pytest.raises(mixer_config.ConfigError):
+            handler(json.dumps(bad))
+    assert json.loads(app.avp.commands_registered["mixer.dsk_status"](""))[0]["rate"] == 1.5
+
+
+def test_keys_without_their_own_rate_follow_the_all_rate(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}],
+                      dsk={**DSK_KEYS, "fade_seconds": 1.2})
+    handler = app.avp.commands_registered["mixer.dsk"]
+    status = lambda: json.loads(app.avp.commands_registered["mixer.dsk_status"](""))   # noqa: E731
+    assert [(row["rate"], row["all_rate"]) for row in status()] == [(None, 1.2), (None, 1.2)]
+    sent = len(app.avp.commands)
+    rows = json.loads(handler(json.dumps({"all_rate": 0.8})))
+    assert [(row["rate"], row["all_rate"]) for row in rows] == [(None, 0.8), (None, 0.8)]
+    assert len(app.avp.commands) == sent, "the All rate changes nothing on air"
+    handler(json.dumps({"key": "strap", "on": True}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 7, "duration_ms": 800, "curve": "linear"}'
+    # A key's own rate wins over All, also when All changes later; null makes it follow All again.
+    handler(json.dumps({"key": "strap", "rate": 2}))
+    handler(json.dumps({"all_rate": 0.5}))
+    handler(json.dumps({"key": "strap", "on": False}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 3, "duration_ms": 2000, "curve": "linear"}'
+    assert [(row["rate"], row["all_rate"]) for row in status()] == [(None, 0.5), (2, 0.5)]
+    handler(json.dumps({"key": "strap", "rate": None}))
+    handler(json.dumps({"key": "strap", "on": True}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp fade_inputs {"active_inputs": 7, "duration_ms": 500, "curve": "linear"}'
+    # The group form fades over All by default; an All rate of 0 cuts.
+    handler(json.dumps({"key": "bug", "rate": 3}))
+    handler(json.dumps({"keys": ["bug", "strap"], "toggle": True}))
+    assert json.loads(app.avp.commands[-1].split(" key_changes ")[1])["duration_ms"] == 500
+    handler(json.dumps({"all_rate": 0}))
+    handler(json.dumps({"key": "strap", "on": True}))
+    assert app.avp.commands[-2:] == ["node.object.set dsk_comp active_inputs 5", KEYFRAME]
+    sent = list(app.avp.commands)
+    for bad in ({"all_rate": 11}, {"all_rate": None}, {"all_rate": "1"}, {"all_rate": 1, "key": "bug"},
+                {"key": "nope", "rate": None}):
+        with pytest.raises(mixer_config.ConfigError):
+            handler(json.dumps(bad))
+    assert app.avp.commands == sent
+    assert status()[0]["all_rate"] == 0
+
+
 def test_dsk_cut_without_a_preview_encoder_sends_no_keyframe(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     app.mixer.keyframe_node = None
@@ -1788,7 +2071,7 @@ def test_dsk_command_fades_keys_with_a_curve(tmp_path, monkeypatch):
     app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
     handler = app.avp.commands_registered["mixer.dsk"]
     rows = json.loads(handler(json.dumps({"key": "strap", "on": True, "fade_seconds": 0.75, "curve": "ease-out"})))
-    assert rows[1] == {"id": "strap", "source": "page", "on": True}
+    assert rows[1] == {"id": "strap", "source": "page", "on": True, "rate": None, "all_rate": 0.4}
     assert app.avp.commands[-1] == ('node.object.set dsk_comp fade_inputs '
                                     '{"active_inputs": 7, "duration_ms": 750, "curve": "ease-out"}')
     handler(json.dumps({"key": "bug", "on": False, "fade_seconds": 2}))
@@ -1823,6 +2106,24 @@ def test_dsk_command_the_keyer_rejects_switches_nothing(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         app.avp.commands_registered["mixer.dsk"](json.dumps({"key": "strap", "on": True, "fade_seconds": 1}))
     assert [row["on"] for row in json.loads(app.avp.commands_registered["mixer.dsk_status"](""))] == [True, False]
+
+
+def test_ftb_fades_the_keyed_program_and_keeps_the_keys(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    ftb = app.avp.commands_registered["mixer.ftb"]
+    ftb(json.dumps({"on": True, "fade_seconds": 1}))
+    # Only the fade-to-black input changes; the mask it carries keeps the key that is on (bit 1).
+    assert app.avp.commands[-1] == ('node.object.set dsk_comp key_changes '
+                                    '{"inputs": 8, "active_inputs": 11, "duration_ms": 1000, "curve": "linear"}')
+    # A key command meanwhile keeps the fade to black in its mask.
+    app.avp.commands_registered["mixer.dsk"](json.dumps({"key": "strap", "on": True, "fade_seconds": 0}))
+    assert app.avp.commands[-2] == "node.object.set dsk_comp active_inputs 15"
+    ftb(json.dumps({"toggle": True, "fade_seconds": 0}))
+    assert app.avp.commands[-2:] == ['node.object.set dsk_comp key_changes '
+                                     '{"inputs": 8, "active_inputs": 7, "duration_ms": 0, "curve": "linear"}', KEYFRAME]
+    assert json.loads(app.avp.commands_registered["mixer.ftb_status"](""))["on"] is False
+    with pytest.raises(mixer_config.ConfigError):
+        ftb(json.dumps({"fade_seconds": 1}))
 
 
 def test_dsk_config_fade_is_the_command_default(tmp_path, monkeypatch):
@@ -1947,3 +2248,35 @@ def test_rendition_dpb_size_reaches_janus_and_record_encoders(tmp_path, dpb_size
 def test_rendition_dpb_size_is_bounded(dpb_size):
     with pytest.raises(mixer_config.ConfigError, match="dpb_size"):
         mixer_config.parse({**CONFIG, "renditions": [{"id": "sdr", "dpb_size": dpb_size}]})
+
+
+def test_dsk_group_is_one_native_command_and_preparation_does_not_change_targets(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    handler = app.avp.commands_registered["mixer.dsk"]
+    start = len(app.avp.commands)
+    handler(json.dumps({"keys": ["bug", "strap"], "on": False, "fade_seconds": 1}))
+    assert app.avp.commands[start:] == [
+        'node.object.set dsk_comp key_changes {"inputs": 6, "duration_ms": 1000, "curve": "linear", "active_inputs": 1, "toggle": false}']
+    # Next Transition keys switch at the background transition's rate: a key rate does not apply.
+    handler(json.dumps({"keys": ["strap"], "prepare": True}))
+    assert app.avp.commands[-1] == 'node.object.set dsk_comp prepare_inputs {"inputs": 4}'
+    rows = json.loads(app.avp.commands_registered["mixer.dsk_status"](""))
+    assert not any(row["on"] for row in rows)
+    handler(json.dumps({"keys": [], "prepare": True}))  # clear next-take selection
+    for keys in (["unknown"], ["bug", "bug"], "bug", []):
+        before = list(app.avp.commands)
+        with pytest.raises(mixer_config.ConfigError):
+            handler(json.dumps({"keys": keys, "on": True}))
+        assert app.avp.commands == before
+
+
+def test_dsk_tally_is_rendered_state_independent_of_requested_target(tmp_path, monkeypatch):
+    app, _ = _dsk_app(tmp_path, monkeypatch, [{"id": "sdr", "port": 5004}])
+    native = [{"input": 1, "on": False, "on_air": True, "phase": "fading-out", "opacity": .7,
+               "next_take": True, "pending": False, "pts_ns": 1000},
+              {"input": 2, "on": True, "on_air": False, "phase": "off", "opacity": 0,
+               "next_take": False, "pending": True, "pts_ns": 1000}]
+    monkeypatch.setattr(app.avp, "node", lambda _: SimpleNamespace(getObject=lambda _: native))
+    rows = json.loads(app.avp.commands_registered["mixer.dsk_status"](""))
+    assert rows[0]["on"] is False and rows[0]["on_air"] is True and rows[0]["phase"] == "fading-out"
+    assert rows[1]["on"] is True and rows[1]["on_air"] is False and rows[1]["pending"] is True

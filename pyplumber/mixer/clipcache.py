@@ -38,18 +38,21 @@ def loader_group(mixer_name: str) -> str:
 
 def cache_node(*, name: str, src: str, dst: str, group: str, fps: str,
                store: str = STORE, budget_mb: float | None = None,
-               url: str = "") -> Dict[str, Any]:
+               url: str = "", scrub_delay_ms: float | None = None) -> Dict[str, Any]:
     """Parameters for the clip_cache node.
 
     ``url`` names the clip the decode chain delivers when both groups start
     together (a preload without a running player). The running node is told
     what to load with its ``load`` object and what to replay with ``play``,
-    which is how the mixer arms a media wipe.
+    which is how the mixer arms a media wipe. ``scrub_delay_ms``: how long after
+    a tick begins a lever's scrub pushes that tick's frame (the node's default 0).
     """
     node: Dict[str, Any] = {"name": name, "src": src, "dst": dst, "group": group,
                             "fps": fps, "cache": store, "url": url}
     if budget_mb is not None:
         node["budget_mb"] = budget_mb
+    if scrub_delay_ms is not None:
+        node["scrub_delay_ms"] = scrub_delay_ms
     return node
 
 

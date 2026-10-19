@@ -17,7 +17,7 @@ class CudaMixerBackend:
 
     def transition(self, params):
         from pyplumber.node import FilterVideo
-        return FilterVideo({"graph": "transition_cuda=alpha='0':eval=frame", "threads": self.graph_threads, **params})
+        return FilterVideo({"graph": "transition_cuda=alpha='0':eval=frame:metadata_prefix=avp.source.", "threads": self.graph_threads, **params})
 
     def scale(self, *, width=None, height=None, pixel_format=None, interpolation=None):
         values = {"w": width, "h": height, "interp_algo": interpolation, "format": pixel_format}

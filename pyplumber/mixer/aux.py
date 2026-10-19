@@ -84,7 +84,7 @@ class AuxBus:
             raise ConfigError("main plus aux latency exceeds the six-frame aux history budget")
         # The program frame leaves the main compositor at its deadline, main latency after its
         # pts, and is drawn here pgm_delay_frames aux ticks plus the bus latency after it. That
-        # margin carries it through the output chain (snapshot, selectors, keyer, tap) to the bus:
+        # margin carries it through the output chain (pts gate, selectors, keyer, tap) to the bus:
         # below one program frame a pgm cell repeats or runs a tick late on every take.
         floor = 1000 / self.cfg.fps
         if self.pgm_edge and self.pgm_delay_frames * 1000 / fps + latency - self.main_latency_ms() < floor - 1e-6:
@@ -104,6 +104,8 @@ class AuxBus:
             "max_layers": self.bus.max_layers,
             "group": self.group, "auto_restart": "off", "on_error": "off",
             **({"pgm_delay_frames": self.pgm_delay_frames} if self.pgm_delay_frames else {}),
+            # Look for frames every few milliseconds instead of waking for each source's frame.
+            **({} if self.cfg.aux_input_poll_ms is None else {"input_poll_ms": self.cfg.aux_input_poll_ms}),
             **initial["base"],
         }, api=self.api), early_create=True)
         r = self.bus.renditions[0]
@@ -273,9 +275,11 @@ class AuxBuses:
     def __len__(self):
         return len(self.buses)
 
-    def start(self):
+    def start(self, ready=None):
         for bus in self:
             bus.start()
+            if ready:
+                ready(bus)
         self.thread = threading.Thread(target=self.run, name="aux", daemon=True)
         self.thread.start()
 

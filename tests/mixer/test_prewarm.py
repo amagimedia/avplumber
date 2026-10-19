@@ -5,6 +5,7 @@ these tests ensure READY cannot be published before the graph is warmed.
 """
 import importlib
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -74,6 +75,10 @@ class NativeEngine:
         self.ready = True
         self.events.append("READY")
 
+    def registerControlCommand(self, name, handler, _payload, _quiet=False):
+        self.commands_registered = getattr(self, "commands_registered", {})
+        self.commands_registered[name] = handler
+
     def enableControlServer(self, _port):
         pass
 
@@ -82,18 +87,18 @@ class NativeEngine:
         self.events.append("shutdown")
 
 
-def application(native_boundary, **kwargs):
+def application(native_boundary, fps=60, **kwargs):
     nodes, builder = native_boundary
     api = SimpleNamespace(**{
         name: getattr(nodes, name) for name in (
             "AssumeVideoFormat", "Bsf", "DecVideo", "Demux", "EncVideo",
             "FilterVideo", "ForceFPS", "ForceKeyFrame", "InputRec", "Mux",
-            "Output", "PreheatVideoRouter", "Realtime", "Split",
+            "Output", "PreheatVideoRouter", "Realtime", "Split", "MixerDelivery",
         )
     }, AVPlumber=NativeEngine, MixerGraphBuilder=builder)
     return build_application(GraphOptions(
         inputs=("camera-a.mp4", "camera-b.mp4"), output="program.ts",
-        fps=60, **kwargs,
+        fps=fps, **kwargs,
     ), api=api)
 
 
@@ -139,6 +144,54 @@ def test_native_startup_error_aborts_without_waiting_for_frames(native_boundary,
     assert not engine.ready
 
 
+def test_static_browser_retries_its_first_paint_until_the_input_is_ready(native_boundary, monkeypatch):
+    app = application(native_boundary)
+    app.browser_windows = ("late", "ready")
+    app.browser_input_edges = app.input_edges
+    app.dmabuf_rest = "http://browser"
+    app.avp.missing.add(app.input_edges[0])
+    monkeypatch.setattr(app, "_browser_snapshot", lambda: {"late": {"txFrameCount": 5}})
+    monkeypatch.setattr("pyplumber.mixer.application.paint_windows", lambda *args: None)
+    now, refreshes = [0.0], []
+    monkeypatch.setattr("pyplumber.mixer.application.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("pyplumber.mixer.application.time.sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    def refresh(url, ids):
+        refreshes.append(list(ids))
+        if len(refreshes) == 2:
+            app.avp.missing.clear()
+    monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", refresh)
+    app.start()
+    assert refreshes == [["late", "ready"], ["late"]]
+    assert app.avp.ready
+
+
+@pytest.mark.parametrize("previous_frames", [0, 20])
+def test_browser_delivery_waits_for_cuda_without_reloading(native_boundary, monkeypatch, previous_frames):
+    app = application(native_boundary)
+    app.browser_windows = ("moving",)
+    app.browser_input_edges = (app.input_edges[0],)
+    app.dmabuf_rest = "http://browser"
+    app.avp.missing.add(app.input_edges[0])
+    now, sent, refreshes = [0.0], [previous_frames], []
+    monkeypatch.setattr("pyplumber.mixer.application.time.monotonic", lambda: now[0])
+    monkeypatch.setattr(app, "_browser_snapshot", lambda: {"moving": {"txFrameCount": sent[0]}})
+    monkeypatch.setattr("pyplumber.mixer.application.paint_windows", lambda *args: None)
+    def sleep(seconds):
+        now[0] += seconds
+        if now[0] >= 3:
+            app.avp.missing.clear()
+    def refresh(url, ids):
+        if ids:
+            refreshes.append(list(ids))
+            sent[0] += 1
+    monkeypatch.setattr("pyplumber.mixer.application.time.sleep", sleep)
+    monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", refresh)
+    app.start()
+    assert refreshes == [["moving"]]
+    assert now[0] >= 3
+    assert app.avp.ready
+
+
 def test_native_error_handler_restored_after_successful_start(native_boundary):
     app = application(native_boundary)
     received = []
@@ -152,14 +205,91 @@ def test_native_error_handler_restored_after_successful_start(native_boundary):
 
 
 @pytest.mark.parametrize("failure", [False, True])
+def test_browser_painting_resumes_after_output_warmup_or_failure(native_boundary, monkeypatch, failure):
+    app = application(native_boundary)
+    app.browser_windows = ("web",)
+    monkeypatch.setattr(app, "_browser_snapshot", lambda: {})
+    monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", lambda *args: None)
+    monkeypatch.setattr("pyplumber.mixer.application.paint_windows",
+                        lambda url, ids, enabled: app.avp.events.append(f"paint {enabled}"))
+    monkeypatch.setattr(app, "_purge_idle_imports",
+                        lambda wait=False, **kwargs: app.avp.events.append(f"purge {kwargs.get('idle_ms', 500)}") or 0)
+    inspect = app.avp.getEdge
+    def get_edge(name, data_type=None):
+        if failure and name == "mixer_trans_out":
+            raise RuntimeError("warmup failed")
+        return inspect(name, data_type)
+    monkeypatch.setattr(app.avp, "getEdge", get_edge)
+    if failure:
+        with pytest.raises(RuntimeError, match="warmup failed"):
+            app.start()
+        assert not app.avp.ready
+        assert app.avp.events[-1] == "paint True"
+    else:
+        app.start()
+        events = app.avp.events
+        assert events.index("paint False") < events.index("start output") < events.index("paint True") < events.index("READY")
+        paused = events[events.index("paint False") + 1:events.index("paint True")]
+        assert paused[0] == paused[-1] == "purge 0"
+    assert app.avp.events.count("paint False") == app.avp.events.count("paint True") == 1
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_a_failed_resume_of_painting_never_replaces_the_startup_error(native_boundary, monkeypatch, caplog, failure):
+    app = application(native_boundary)
+    app.browser_windows = ("web",)
+    monkeypatch.setattr(app, "_browser_snapshot", lambda: {})
+    monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", lambda *args: None)
+    def paint(url, ids, enabled):
+        if enabled:
+            raise OSError("browser service gone")
+    monkeypatch.setattr("pyplumber.mixer.application.paint_windows", paint)
+    inspect = app.avp.getEdge
+    def get_edge(name, data_type=None):
+        if failure and name == "mixer_trans_out":
+            raise RuntimeError("warmup failed")
+        return inspect(name, data_type)
+    monkeypatch.setattr(app.avp, "getEdge", get_edge)
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError if failure else OSError,
+                                                         match="warmup failed" if failure else "browser service gone"):
+        app.start()
+    assert ("browser service gone" in caplog.text) == failure and not app.avp.ready
+
+
+def test_browser_pauses_while_another_input_is_still_starting(native_boundary, monkeypatch):
+    app = application(native_boundary)
+    app.browser_windows = ("early",)
+    app.browser_input_edges = (app.input_edges[0],)
+    late = app.input_edges[1]
+    app.avp.missing.add(late)
+    now, paints = [0.0], []
+    monkeypatch.setattr(app, "_browser_snapshot", lambda: {})
+    monkeypatch.setattr("pyplumber.mixer.application.refresh_windows", lambda *args: None)
+    monkeypatch.setattr("pyplumber.mixer.application.paint_windows",
+                        lambda url, ids, enabled: paints.append((list(ids), enabled, now[0], late in app.avp.missing)))
+    monkeypatch.setattr("pyplumber.mixer.application.time.monotonic", lambda: now[0])
+    def sleep(seconds):
+        now[0] += seconds
+        if now[0] >= 2:
+            app.avp.missing.clear()
+    monkeypatch.setattr("pyplumber.mixer.application.time.sleep", sleep)
+    app.start()
+    assert paints[0] == (["early"], False, 0.0, True)
+    assert paints[1][0:2] == (["early"], True)
+    assert paints[1][2] >= 2 and paints[1][3] is False
+    assert len(paints) == 2 and app.avp.ready
+
+
+@pytest.mark.parametrize("failure", [False, True])
 def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boundary, monkeypatch, failure):
     app = application(native_boundary)
     class Aux:
         def __iter__(self):
             return iter([SimpleNamespace(prefix="aux_test")])
 
-        def start(self):
+        def start(self, ready):
             app.avp.events.append("start aux_test")
+            ready(next(iter(self)))
     app.aux_buses = Aux()
     app.avp.nodes["aux_test_comp"] = {"group": "aux_test"}   # the bus's compositor, asked for its counters
     original = app.avp.on_exception
@@ -178,9 +308,10 @@ def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boun
     else:
         app.start()
         events = app.avp.events
-        # The bus's output is let go only once it encodes, and before the mixer says it is ready.
-        assert events.index("inspect aux_test_encoded") < events.index("node.object.set aux_test_rtp_output hold false") \
-            < events.index("node.object.set aux_test_comp reset_counters true") < events.index("READY")
+        # The bus's output is let go only once it encodes, after its counters start from zero, and
+        # before the mixer says it is ready.
+        assert events.index("inspect aux_test_encoded") < events.index("node.object.set aux_test_comp reset_counters true") \
+            < events.index("node.object.set aux_test_rtp_output hold false") < events.index("READY")
     assert app.avp.on_exception == original
 
 
@@ -240,15 +371,21 @@ def test_both_slots_share_rate_and_delay_without_second_resampler(native_boundar
         assert node["fps"] == "60/1"
         assert node["latency_ms"] == 50
         assert "warmup_timeout_ms" not in node   # a cold load must not flip to a partial canvas
-        snapshot = app.avp.nodes[f"mixer_snapshot_{slot}"]
-        assert snapshot["src"] == node["dst"]
-        assert snapshot["fps"] == "60/1"
-        assert snapshot["latency_ms"] == 50
-        assert app.avp.nodes[f"mixer_otm_scene_{slot}"]["src"] == snapshot["dst"]
-    output = app.avp.nodes["mixer_snapshot_output"]
+        gate = app.avp.nodes[f"mixer_pts_gate_{slot}"]
+        assert gate["type"] == "mixer_pts_gate"
+        assert gate["src"] == node["dst"]
+        assert gate["fps"] == "60/1"
+        assert app.avp.nodes[f"mixer_otm_scene_{slot}"]["src"] == gate["dst"]
+    output = app.avp.nodes["mixer_pts_gate_output"]
     assert output["src"] == app.avp.nodes["mixer_wipe_sel"]["dst"]
-    assert output["snapshot"] == snapshot["snapshot"]
-    assert output["slot"] == -1
+
+
+def test_compositors_wake_for_every_frame_unless_told_how_often_to_look(native_boundary):
+    nodes = application(native_boundary).avp.nodes
+    assert all("input_poll_ms" not in nodes[f"mixer_comp_{slot}"] for slot in "ab")
+    nodes = application(native_boundary, mixer_input_poll_ms=8).avp.nodes
+    assert [nodes[f"mixer_comp_{slot}"]["input_poll_ms"] for slot in "ab"] == [8, 8]
+    assert "input_poll_ms" not in nodes["mixer_wipe_overlay"]   # two inputs: nothing to save
 
 
 def test_prewarm_does_not_rebuild_graph_or_change_requested_program(native_boundary):
@@ -326,6 +463,14 @@ def test_cached_wipe_chain_runs_from_startup_parked_and_is_never_stopped(native_
         "mixer_" + edge for edge in (*clipcache.LOADER_EDGES, clipcache.CACHE_INPUT_EDGE)]
     assert engine.nodes["mixer_wipe_dec"]["dst"] == "mixer_" + clipcache.DECODED_EDGE
     assert engine.nodes["mixer_" + clipcache.CACHE_NODE]["src"] == "mixer_" + clipcache.CACHE_INPUT_EDGE
+
+
+@pytest.mark.parametrize("fps, delay_ms", [(25, 40), (30, 1000 / 30), (50, 40), (60, 1000 / 30)])
+def test_a_scrubbed_wipe_clip_is_pushed_one_frame_before_the_overlay_deadline(native_boundary, fps, delay_ms):
+    # As late as the overlay can still draw it: a lever wipe follows the T-bar as soon as a mix does.
+    nodes = application(native_boundary, fps=fps, wipe_cache_mb=256).avp.nodes
+    assert nodes["mixer_wipe_cache"]["scrub_delay_ms"] == pytest.approx(delay_ms)
+    assert nodes["mixer_wipe_overlay"]["latency_ms"] - delay_ms == pytest.approx(1000 / fps)
 
 
 def test_a_wipe_evicted_by_a_later_wipe_fails_the_start(native_boundary):
@@ -449,7 +594,7 @@ def test_pad_masks_above_64_travel_as_bit_strings(native_boundary, tmp_path, cou
     nodes, builder = native_boundary
     api = SimpleNamespace(**{name: getattr(nodes, name) for name in (
         "AssumeVideoFormat", "Bsf", "DecVideo", "Demux", "EncVideo", "FilterVideo", "ForceFPS",
-        "ForceKeyFrame", "InputRec", "Mux", "Output", "PreheatVideoRouter", "Realtime", "Split")},
+        "ForceKeyFrame", "InputRec", "Mux", "Output", "PreheatVideoRouter", "Realtime", "Split", "MixerDelivery")},
         AVPlumber=ConfigEngine, MixerGraphBuilder=builder)
     app = build_application(GraphOptions(config=str(path), output="program.ts"), api=api)
 
@@ -460,6 +605,47 @@ def test_pad_masks_above_64_travel_as_bit_strings(native_boundary, tmp_path, cou
     assert isinstance(mask, str), f"mask past bit 63 must not be a JSON number: {mask!r}"
     assert [i for i, bit in enumerate(mask) if bit == "1"] == lit
     assert len(app.avp.nodes["mixer_comp_a"]["src"]) == count
+
+
+@pytest.mark.parametrize("fan_out, node_type", [(None, "one_to_many"), ("thread", "one_to_many"),
+                                                ("event_loop", "one_to_many_nb")])
+def test_a_source_is_fanned_out_by_a_thread_unless_the_canvas_names_the_event_loop(native_boundary, tmp_path,
+                                                                                    fan_out, node_type):
+    doc = {
+        "canvas": {"width": 320, "height": 180, "fps": 60, **({"source_fan_out": fan_out} if fan_out else {})},
+        "sources": [{"id": f"s{i}", "kind": "video", "path": f"/m/{i}.mp4", "width": 320, "height": 180}
+                    for i in range(6)],
+        "scenes": [{"id": "wide", "items": [{"source": "s0", "dst": {"x": 0, "y": 0, "w": 320, "h": 180}}]}],
+        "initial_scene": "wide",
+    }
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps(doc))
+    class ConfigEngine(NativeEngine):
+        def registerControlCommand(self, *args, **kwargs):
+            pass
+
+    nodes, builder = native_boundary
+    api = SimpleNamespace(**{name: getattr(nodes, name) for name in (
+        "AssumeVideoFormat", "Bsf", "DecVideo", "Demux", "EncVideo", "FilterVideo", "ForceFPS",
+        "ForceKeyFrame", "InputRec", "Mux", "Output", "PreheatVideoRouter", "Realtime", "Split", "MixerDelivery")},
+        AVPlumber=ConfigEngine, MixerGraphBuilder=builder)
+    engine = build_application(GraphOptions(config=str(path), output="program.ts"), api=api).avp.nodes
+    for i in range(6):
+        fan = engine[f"mixer_otm_s{i}"]
+        assert fan["type"] == node_type
+        # The loop that paces the source also hands its frames out: no thread wakes in between.
+        assert fan.get("event_loop") == (engine[f"realtime_{i}"]["event_loop"] if node_type == "one_to_many_nb" else None)
+        assert fan["drop"] is True
+
+
+def test_source_fan_out_rejects_unknown_modes():
+    from pyplumber.mixer import config as mixer_config
+    doc = {"canvas": {"width": 320, "height": 180, "fps": 60, "source_fan_out": "fibre"},
+           "sources": [{"id": "s0", "kind": "video", "path": "/m/0.mp4", "width": 320, "height": 180}],
+           "scenes": [{"id": "wide", "items": [{"source": "s0", "dst": {"x": 0, "y": 0, "w": 320, "h": 180}}]}],
+           "initial_scene": "wide"}
+    with pytest.raises(mixer_config.ConfigError, match="source_fan_out must be one of thread, event_loop"):
+        mixer_config.parse(doc)
 
 
 def test_geometry_is_resolved_by_two_compositors_without_filter_branches(native_boundary):

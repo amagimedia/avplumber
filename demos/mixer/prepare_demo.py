@@ -30,6 +30,7 @@ from demos.mixer.hdr_patterns import write_hlg
 from pyplumber.mixer.config import MAX_SOURCES, default_browser_frame_queue, earlier_browser_ring_size, parse
 
 DEMO_DIR = Path(__file__).resolve().parent
+BROWSER_MOTIONS = ("static", "dynamic", "half")
 
 # Janus RTP port of the clean SDR program; 5004/5006 carry the keyed program and
 # 5008 the multiview. The clean feed is SDR, with an independent codec.
@@ -284,7 +285,11 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if "pattern" in spec:
                     if spec["pattern"] != "alpha" or "url" in spec:
                         raise ValueError(f"{name}: browser pattern must be alpha, without a url")
-                    url = page_url(DEMO_DIR / "browser_alpha.html", source=source["id"])
+                    motion = spec.get("motion", "static")
+                    if motion not in BROWSER_MOTIONS:
+                        raise ValueError(f"{name}: browser motion must be {', '.join(BROWSER_MOTIONS)}")
+                    url = page_url(DEMO_DIR / "browser_alpha.html", source=source["id"], motion=motion)
+                    source["capture_cadence"] = "continuous" if motion == "dynamic" else "on_change"
                 else:
                     url = spec["url"]
                 source.update(kind="browser", url=url, width=spec.get("width", width), height=spec.get("height", height), color="sdr")
@@ -326,8 +331,10 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     for page in pages:
         x, y, w, h = rects[page]
         window_w, window_h = DSK_WINDOWS[page]
+        # The clock and lower third hold still between updates; only the ticker and left bug animate continuously.
         sources.append({"id": f"dsk_{page}", "kind": "browser", "url": page_url(DEMO_DIR / "dsk" / f"{page}.html", fps=fps),
-                        "width": window_w, "height": window_h, "color": "sdr"})
+                        "width": window_w, "height": window_h, "color": "sdr",
+                        "capture_cadence": "on_change" if page in ("lower_third", "bug_right") else "continuous"})
         # Each window is its graphic and nothing else, so its rectangle is all the keyer needs to compose.
         keys.append({"id": page, "source": f"dsk_{page}", "dst": {"x": x, "y": y, "w": w, "h": h}, "bounded": True})
     renditions = recipe["renditions"]

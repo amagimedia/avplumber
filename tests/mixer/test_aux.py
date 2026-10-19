@@ -30,6 +30,28 @@ def pages_json(**kwargs):
     return {"id": "sources", "layout": {"preset": "source_pages"}, "renditions": [{"id": "monitor", "port": 5012}], **kwargs}
 
 
+@pytest.mark.parametrize("failure", [False, True])
+def test_aux_start_waits_for_each_output_and_stops_on_failure(monkeypatch, failure):
+    events = []
+    def bus(name):
+        return SimpleNamespace(bus=SimpleNamespace(id=name), start=lambda: events.append("start " + name))
+    buses = AuxBuses(None, [bus("first"), bus("second")])
+    monkeypatch.setattr(buses, "run", lambda: None)
+    def ready(bus):
+        events.append("ready " + bus.bus.id)
+        if failure:
+            raise RuntimeError("encoder failed")
+    if failure:
+        with pytest.raises(RuntimeError, match="encoder failed"):
+            buses.start(ready)
+        assert events == ["start first", "ready first"]
+        assert buses.thread is None
+    else:
+        buses.start(ready)
+        buses.thread.join()
+        assert events == ["start first", "ready first", "start second", "ready second"]
+
+
 # PGM bottom left, PVW nowhere, three slots: nothing about the grid preset is assumed.
 CELLS = [{"role": "slot", "slot": 2, "x": 0, "y": 0, "w": 540, "h": 480},
          {"role": "slot", "slot": 0, "x": 540, "y": 0, "w": 540, "h": 480},
@@ -566,3 +588,24 @@ def test_a_bus_without_the_pgm_pad_draws_any_layout_but_pgm_cells(cfg):
     listed = make_bus(cfg, pages_json(layouts=[{"preset": "pgm_pvw_grid"}]))
     assert (listed.inputs()[-1], listed.pgm_delay_frames) == ("aux_sources_pgm", 1)
     assert [l.get("preset") for l in listed.bus.layouts] == ["source_pages", "pgm_pvw_grid"]
+
+
+def _built_compositor(cfg, monkeypatch):
+    import pyplumber.mixer.janus as janus
+    nodes = []
+    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: "listener")
+    avp = SimpleNamespace(addNode=lambda node, **kw: nodes.append(node), edges=SimpleNamespace(planCapacity=lambda *a: None))
+    api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
+    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
+                            canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
+                            backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
+    options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="")
+    AuxBus(avp, api, mixer, cfg, parse_aux_buses([bus_json(scenes=["repeat"])], cfg)[0]).build(options)
+    return nodes[0].parameters
+
+
+def test_bus_compositor_wakes_for_every_frame_unless_told_how_often_to_look(cfg, monkeypatch):
+    assert "input_poll_ms" not in _built_compositor(cfg, monkeypatch)
+    assert _built_compositor(replace(cfg, aux_input_poll_ms=8), monkeypatch)["input_poll_ms"] == 8
+    # The program compositors' interval is theirs alone.
+    assert "input_poll_ms" not in _built_compositor(replace(cfg, input_poll_ms=8), monkeypatch)

@@ -85,7 +85,8 @@ def _build_input(
             api, prefix=f"input_{index}",
             socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
             fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
-            source_group=group, processing_group=group, hold=True, browser_frame_queue=options.browser_frame_queue,
+            source_group=group, processing_group=group, hold=True,
+            browser_frame_queue=options.browser_frame_queue,
             event_loop=_pacing_loop(index))
         for node in nodes:
             avp.addNode(node)
@@ -235,8 +236,9 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="open the dmabuf:// windows with this page through the dma-browser REST API")
     add("--dmabuf-rest", default="http://127.0.0.1:9009")
     add("--browser-frame-queue", "--browser-ring-size", type=int, dest="browser_frame_queue",
-        help="frames one browser window may have out at once, 1 to 9 (default 9; JSON config owns this in "
-             "--config mode). --browser-ring-size is the option's earlier name")
+        help="frames one browser window may have out at once, 1 to 9 (default 9; "
+             "JSON config owns this in --config mode). --browser-ring-size is "
+             "the option's earlier name")
     add("--janus-output", action="store_true", help="Publish the video-only program to Janus over RTP")
     add("--janus-host", default=JANUS_DEFAULT_HOST)
     add("--janus-video-port", type=int, default=JANUS_DEFAULT_VIDEO_PORT)
@@ -249,6 +251,12 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="Minimum forced-keyframe spacing for Janus output in media time "
              "(default: 150 ms; 0 disables rate limiting)")
     add("--preheat-timeout", dest="preheat_timeout_sec", type=float, default=60.0)
+    add("--start-stable-sec", dest="start_stable_sec", type=float, default=GraphOptions.start_stable_sec,
+        help="Release the outputs after this many seconds in which no compositor missed a deadline "
+             f"and every bus drew (default: {GraphOptions.start_stable_sec:g})")
+    add("--start-stable-timeout-sec", dest="start_stable_timeout_sec", type=float, default=GraphOptions.start_stable_timeout_sec,
+        help="Release the outputs anyway, flagged unsettled, after this long without a stable window "
+             f"(default: {GraphOptions.start_stable_timeout_sec:g})")
     add("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
                             "(the TUI still selects the clip for each wipe)")
     add("--wipe-cache-mb", type=float, default=GraphOptions.wipe_cache_mb,

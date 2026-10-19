@@ -15,7 +15,7 @@ log = logging.getLogger("webui")
 # characters. avplumber names a node's thread after the node (src/util.cpp set_thread_name), so
 # these are the scene compositors mixer_comp_a/b; "dsk_comp", the downstream keyer's compositor
 # (pyplumber/mixer/dsk.py, no mixer_ prefix), which every program frame passes through after
-# mixer_snapshot_output; the snapshot nodes mixer_snapshot_a/b/output, all "mixer_snapshot_"
+# mixer_pts_gate_output; the gates mixer_pts_gate_a/b/output, all "mixer_pts_gate_"
 # once cut; "EventLoop", the tick thread (src/EventLoop.hpp); the CUDA driver's own event thread
 # "cuda-EvtHandlr"; "udp-tx", FFmpeg's paced UDP sender, which exists because the Janus RTP URL
 # sets bitrate and fifo_size; and every NVENC node: janus_encoder, janus_<rendition>_encoder
@@ -26,7 +26,7 @@ log = logging.getLogger("webui")
 # janus_repeat_headers, janus_mux, janus_rtp_output) are left at nice 0: each runs for
 # microseconds per frame and sleeps otherwise, which CFS already wakes promptly. Widen the set
 # only after measuring that it moves the missed-deadline counter.
-CRITICAL_THREADS = re.compile(r"^(mixer_comp_|dsk_comp|mixer_snapshot|EventLoop|cuda-EvtHandlr|udp-tx)|_encod")
+CRITICAL_THREADS = re.compile(r"^(mixer_comp_|dsk_comp|mixer_pts_gate|EventLoop|cuda-EvtHandlr|udp-tx)|_encod")
 CRITICAL_NICE_PERIOD_S = 10
 
 

@@ -137,6 +137,10 @@ INSTANCE_PROFILES = {
 # Opt-in measured HEVC fixtures and fixed CUarray pools; the FFmpeg 8.1/linear
 # profiles retain their decoder contracts and capacities.
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY] = deepcopy(INSTANCE_PROFILES[InstanceType.NVIDIA_L4])
+# Moving 1080p windows, including cropped DSKs, in workers of at most ten.
+# Measured in short transition checks on the since-removed fixed nine-buffer browser build (with a copy
+# on import) and CUDA queues 32/8; not yet re-measured with Chromium's ordinary capture.
+INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["browser_windows_by_fps"] = {25: 40, 30: 40, 50: 40, 60: 30}
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["sources"][25] = 192
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["nvdec_decodes"][25] = 120
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["raw_upload_units"][25] = 32
@@ -147,4 +151,10 @@ INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["sources"][30] = 192
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["nvdec_decodes"][30] = 105
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["generated_decode"] = {
     "codec": "hevc", "decode_storage": "cuarray", "extra_hw_frames": 12,
+}
+# These bounds and scheduling settings are part of the measured source capacities.
+# Setup Apply must generate the same runtime as the qualified show.
+INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["canvas"] = {
+    "raw_upload": "resident", "input_poll_ms": 8, "aux_input_poll_ms": 8,
+    "source_fan_out": "event_loop", "decoded_frames_ahead": 1, "raw_pool_frames": 10,
 }

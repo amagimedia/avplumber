@@ -60,6 +60,7 @@ from pyplumber.node import (
     Demux,
     DecVideo,
     OneToMany,
+    OneToManyNb,
     Realtime,
     SourceSwitcher,
 )
@@ -74,8 +75,8 @@ from .models import MixerScene, MixerSource
 from .prewarm import TransitionPrewarm
 
 
-class _SnapshotNode(InternalNode):
-    TYPE = "mixer_snapshot"
+class _PtsGateNode(InternalNode):
+    TYPE = "mixer_pts_gate"
 
 
 class _MixerSelector(InternalNode):
@@ -110,6 +111,7 @@ class MixerGraphBuilder:
         wipe_color=None,
         backend=None,
         max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS,
+        input_poll_ms: Optional[int] = None,   # None: the program compositors wake for every source frame
     ):
         self.avp = avp
         self.name = name
@@ -127,6 +129,7 @@ class MixerGraphBuilder:
         self.defer_initial_routes = defer_initial_routes
         self.latency_ms = latency_ms if latency_ms is not None else default_latency_ms(self.fps_num / self.fps_den)
         self.max_compositor_layers = max_compositor_layers
+        self.input_poll_ms = input_poll_ms
         self.working_format = working_format
         self.color = Color.parse(color)
         self.color.validate_format(working_format)
@@ -169,7 +172,7 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
-        color_tagged=False,
+        color_tagged=False, fan_out_loop=None,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -196,6 +199,9 @@ class MixerGraphBuilder:
             one_to_many (typically the force_fps output of the input chain).
         input_group:
             Avplumber group that owns this source's conversion and fan-out nodes.
+        fan_out_loop:
+            Name of an event loop to hand this source's frames out on (one_to_many_nb)
+            instead of a thread of its own; typically the loop that paces the source.
         """
         if self._built:
             raise RuntimeError("Cannot add sources after build()")
@@ -211,7 +217,8 @@ class MixerGraphBuilder:
         self._sources.append(MixerSource(name, pre_otm_edge, input_group,
                                                color=color, color_tagged=color_tagged,
                                                pixel_format=pixel_format, packed_rgb=packed_rgb,
-                                               premultiplied_alpha=premultiplied_alpha))
+                                               premultiplied_alpha=premultiplied_alpha,
+                                               fan_out_loop=fan_out_loop))
         self._source_index[name] = idx
         return self
 
@@ -512,6 +519,7 @@ class MixerGraphBuilder:
                 "drop": True,
                     "name": self._n(f"color_alias_{first.name}"), "src": prepared, "dst": outputs,
                     "outputs": (1 << len(outputs)) - 1, "group": first.input_group,
+                    "source_identity": first.name,
                     **({"frame_color": tags} if tags else {}),
                 }))
             else:
@@ -572,15 +580,19 @@ class MixerGraphBuilder:
 
             if src.route_router is None:
                 aux_edges = self._aux_routes.get(src.name, [])
-                self.avp.addNode(OneToMany({
+                # On the source's pacing loop when it names one: no thread wakes for each frame.
+                fan_out = OneToManyNb if src.fan_out_loop else OneToMany
+                self.avp.addNode(fan_out({
                 "drop": True,
-                    "type": "one_to_many",
+                    **({"event_loop": src.fan_out_loop} if src.fan_out_loop else {}),
                     "name": self._n(f"otm_{src.name}"),
                     "src": prepared_edges[src.name],
                     "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b"), *aux_edges],
                     **({"subscribed_outputs": {edge: edge for edge in aux_edges}} if aux_edges else {}),
                     **({"frame_color": src.frame_color} if src.frame_color else {}),
                     "outputs": outputs_init,
+                    **({"source_identity": src.name} if prepared_edges[src.name] == src.pre_otm_edge or
+                       sum(s.pre_otm_edge == src.pre_otm_edge for s in self._sources) == 1 else {}),
 
                     "group": src.input_group,
                 }))
@@ -612,6 +624,7 @@ class MixerGraphBuilder:
                 "max_layers": self.max_compositor_layers,
                 "fps": self._fps_str(),
                 "latency_ms": self.latency_ms,
+                **({} if self.input_poll_ms is None else {"input_poll_ms": self.input_poll_ms}),
                 "layers": [
                     {**self._initial_scene_def().sources[source.name], "input": i}
                     for i, source in enumerate(self._sources)
@@ -621,11 +634,8 @@ class MixerGraphBuilder:
 
                 "group": f"{self.name}_{slot}",
             }))
-            self._add_snapshot_node(
-                self._n(f"snapshot_{slot}"), self._e(f"scene_{slot}_composite"),
-                self._e(f"scene_{slot}_out"), f"{self.name}_{slot}",
-                slot=0 if slot == "a" else 1,
-            )
+            self._add_pts_gate(self._n(f"pts_gate_{slot}"), self._e(f"scene_{slot}_composite"),
+                               self._e(f"scene_{slot}_out"), f"{self.name}_{slot}")
             self.avp.addNode(OneToMany({
                 "drop": True,
                 "name": self._n(f"otm_scene_{slot}"),
@@ -636,11 +646,9 @@ class MixerGraphBuilder:
                 "group": f"{self.name}_{slot}",
             }))
 
-    def _add_snapshot_node(self, name, source, destination, group, slot=-1):
-        self.avp.addNode(_SnapshotNode({
-            "name": name, "src": source, "dst": destination, "group": group,
-            "snapshot": self._n("out_sel_snapshot"), "slot": slot,
-            "fps": self._fps_str(), "latency_ms": self.latency_ms,
+    def _add_pts_gate(self, name, source, destination, group):
+        self.avp.addNode(_PtsGateNode({
+            "name": name, "src": source, "dst": destination, "group": group, "fps": self._fps_str(),
         }))
 
     def _build_output_path(self) -> None:
@@ -699,8 +707,7 @@ class MixerGraphBuilder:
             "group": self.name,
         }))
 
-        self._add_snapshot_node(self._n("snapshot_output"),
-                                self._e("final_picture"), self._e("final_out"), self.name)
+        self._add_pts_gate(self._n("pts_gate_output"), self._e("final_picture"), self._e("final_out"), self.name)
 
     def _build_wipe_subgraph(self) -> None:
         """Create the pre-declared wipe subgraph.
@@ -765,10 +772,14 @@ class MixerGraphBuilder:
             # The resident player feeds the compositor directly: it stamps the clip on
             # the output tick grid from the take that armed it, and a force_fps here
             # would fill the gap between two takes with the previous clip's last frame.
+            # A lever's scrub pushes each tick one output frame before the compositor's
+            # deadline, not as the tick begins: a lever wipe follows the T-bar as soon as a
+            # mix does, instead of one latency_ms later.
             self.avp.addNode(ClipCache(clipcache.cache_node(
                 name=self._n("wipe_cache"), src=self._e("wipe_rt_out"),
                 dst=self._e("wipe_cached"), group=wipe_group, fps=fps_str,
-                budget_mb=self.cache_wipes_mb)))
+                budget_mb=self.cache_wipes_mb,
+                scrub_delay_ms=max(0.0, self.latency_ms - 1000 * self.fps_den / self.fps_num))))
             clip_edge = self._e("wipe_cached")
         else:
             self.avp.addNode(ForceFPS({
