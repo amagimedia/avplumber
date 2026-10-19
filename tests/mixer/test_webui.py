@@ -1235,10 +1235,9 @@ def test_lever_positions_never_queue_behind_a_slow_mixer():
     assert all("seq" not in line and "client" not in line for line in bridge.sent)
 
 
-def test_lever_websocket_streams_positions_in_order(client):
+def lever_socket(server):
+    """A browser's /api/lever WebSocket to `server`, and a function sending one masked frame on it."""
     import socket
-    bridge = FakeBridge()
-    base, server = client(bridge)
     sock = socket.create_connection(("127.0.0.1", server.server_port), timeout=5)
     # RFC 6455's own example: a browser opens the socket only with this answer to this key.
     sock.sendall(("GET /api/lever HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -1251,7 +1250,23 @@ def test_lever_websocket_streams_positions_in_order(client):
     def send(opcode, payload):
         mask = os.urandom(4)
         sock.sendall(bytes([0x80 | opcode, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+    return sock, send
 
+
+def lever_sent(bridge, newest: float) -> list[float]:
+    """The positions sent to mixer.lever, once `newest` is among them (a socket's go on a thread of their own)."""
+    deadline = time.monotonic() + 5
+    while True:
+        positions = [json.loads(line.split(" ", 1)[1])["position"] for line in bridge.sent if line.startswith("mixer.lever ")]
+        if newest in positions or time.monotonic() > deadline:
+            return positions
+        time.sleep(0.01)
+
+
+def test_lever_websocket_streams_positions_in_order(client):
+    bridge = FakeBridge()
+    base, server = client(bridge)
+    sock, send = lever_socket(server)
     for position in (0.25, 0.5, 2.0, 0.75):   # an invalid one is skipped; the channel stays open
         send(0x1, json.dumps({"position": position, "duration_sec": 1}).encode())
     send(0x9, b"hi")
@@ -1259,7 +1274,34 @@ def test_lever_websocket_streams_positions_in_order(client):
     send(0x8, b"")
     assert sock.recv(16)[:1] == bytes([0x88])
     sock.close()
-    assert [json.loads(line.split(" ", 1)[1])["position"] for line in bridge.sent] == [0.25, 0.5, 0.75]
+    # One the mixer has not taken yet when a newer one arrives is replaced by it.
+    positions = lever_sent(bridge, 0.75)
+    assert positions[-1] == 0.75 and positions == sorted(set(positions)) and set(positions) <= {0.25, 0.5, 0.75}
+
+
+def test_lever_websocket_collapses_positions_behind_a_slow_mixer(client):
+    # The socket is read on while a position is with the mixer: what arrives meanwhile collapses
+    # to the newest behind every end on its way there, and still goes after the socket closed.
+    bridge = FakeBridge()
+    bridge.gates["mixer.lever"] = gate = threading.Event()
+    _, server = client(bridge)
+    sock, send = lever_socket(server)
+    try:
+        send(0x1, json.dumps({"position": 0.5, "seq": 1, "client": "page"}).encode())
+        while not bridge.sent:
+            time.sleep(0.01)
+        for seq, position in enumerate((0.6, 0.7, 1.0, 0.9, 0.8, 0.0, 0.1, 0.2), start=2):
+            send(0x1, json.dumps({"position": position, "seq": seq, "client": "page"}).encode())
+        send(0x9, b"hi")   # answered once every position before it was read
+        assert sock.recv(16) == bytes([0x8A, 2]) + b"hi"
+        send(0x8, b"")
+        assert sock.recv(16)[:1] == bytes([0x88])
+    finally:
+        gate.set()
+        sock.close()
+    assert lever_sent(bridge, 0.2) == [0.5, 1.0, 0.0, 0.2]
+    bridge.take({"command": "lever", "position": 0.3})   # the lever is free for the next controller
+    assert lever_sent(bridge, 0.3) == [0.5, 1.0, 0.0, 0.2, 0.3]
 
 
 def test_source_banks_are_shared_and_kept_by_the_setup_manager(client, tmp_path):

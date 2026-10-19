@@ -131,10 +131,17 @@ class MixerBridge:
             return {**self._keys, "dsk_sampled_at": self._keys_at}
 
     def lever(self, request: dict) -> bool:
+        """queue_lever, sending on the caller's thread when no position was being sent."""
+        if self.queue_lever(request):
+            self.send_lever()
+        return True
+
+    def queue_lever(self, request: dict) -> bool:
         """The lever arm. A fader reports positions faster than they matter: the newest waits while
         one is being sent and replaces any older one waiting, so positions never queue up; an end
         position is replaced only by the same end again (an end completes or cancels the take).
-        With the controller's `t_ms` each position carries the `span_ms` LeverPacer gives it."""
+        With the controller's `t_ms` each position carries the `span_ms` LeverPacer gives it.
+        True when none was being sent: the caller is then the one to send_lever, and must."""
         position = request.get("position")
         if isinstance(position, bool) or not isinstance(position, (int, float)) or not 0 <= position <= 1:
             raise ValueError("lever needs a position from 0 to 1")
@@ -147,21 +154,25 @@ class MixerBridge:
         with self._lever_lock:
             if isinstance(client, str) and isinstance(seq, int):
                 if seq <= self._lever_seq.get(client, -1):
-                    return True
+                    return False
                 remember_client(self._lever_seq, client, seq)
             end = lever_end(position)
             while self._lever_waiting and lever_end(self._lever_waiting[-1][0]["position"]) in (None, end):
                 self._lever_waiting.pop()
             self._lever_waiting.append((fields, client if isinstance(client, str) else None))
             if self._lever_sending:
-                return True
+                return False
             self._lever_sending = True
+            return True
+
+    def send_lever(self) -> None:
+        """Sends the waiting lever positions until none is left."""
         try:
             while True:
                 with self._lever_lock:
                     if not self._lever_waiting:
                         self._lever_sending = False
-                        return True
+                        return
                     fields, client = self._lever_waiting.popleft()
                     t_ms = fields.pop("t_ms", None)
                     if t_ms is not None:

@@ -188,6 +188,14 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(bytes([0x80 | opcode, len(payload)]) + payload)   # control frames: < 126 bytes
             self.wfile.flush()
 
+        warn = partial(logging.getLogger(__name__).warning, "lever: %s")
+
+        def send() -> None:
+            try:
+                self.bridge.send_lever()
+            except Exception as exc:
+                warn(exc)
+
         while True:
             head = self.rfile.read(2)
             if len(head) < 2:
@@ -209,9 +217,12 @@ class Handler(BaseHTTPRequestHandler):
                 frame(0xA, data[:125])
             elif opcode == 0x1:
                 try:
-                    self.bridge.lever({**json.loads(data), "command": "lever"})
+                    # Sent on a thread of its own, the socket read on meanwhile: positions arriving
+                    # while one is with the mixer collapse (MixerBridge.queue_lever).
+                    if self.bridge.queue_lever({**json.loads(data), "command": "lever"}):
+                        threading.Thread(target=send, daemon=True, name="lever").start()
                 except Exception as exc:   # one bad position must not close a fader's channel
-                    logging.getLogger(__name__).warning("lever: %s", exc)
+                    warn(exc)
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
         path = self.path.partition("?")[0]
