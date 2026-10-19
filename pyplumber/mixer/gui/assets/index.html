@@ -1015,10 +1015,11 @@ function observe(s, t, clocked, asked) {
   if (late || !(s.transition_on_air || x > 0) || !(duration > 0) || x >= 1) return;   // not on air yet, or done
   if (!mixOn() || mix.kind !== kind || (!mix.guess && Math.abs(mix.duration - duration) > 1) || renewed) {
     // First seen while the lever shows its take, it is that take run on (an Auto, this page's not yet accepted or
-    // another controller's): it goes on from the lever's progress, as acceptTake's does.
+    // another controller's): it goes on from the lever's progress, as acceptTake's does. Else it is drawn from its
+    // progress at once: the catch-up bounds only the samples after the first, and would leave it behind.
     const x0 = !mixOn() && leverShown > K_END ? leverShown : 0;
     if (x0) lever.release();
-    startMix(kind, start, duration, undefined, x0);
+    Object.assign(startMix(kind, start, duration, undefined, x0), {x: x0 || x});
   }
   // Held: the T-bar stays where this page's Halt stopped it (the mixer held a little later; the run-on catches that up),
   // else at the mixer's hold. Running: the earliest start of this run; a guess gives way to the first sample either way.

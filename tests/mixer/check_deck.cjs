@@ -311,11 +311,14 @@ const {launch, openPage, bigShow} = require('./page_fixture.cjs');
     await status({transition_paused: true});
     t = await tbar();
     assert.deepEqual([t.on, t.run, t.held, t.heldOn], [16, false, true, true], 'held: Auto and the LEDs in amber');
-    await status({transition_paused: false, lever: {origin: 1}});
+    // A mix from the lever's far end, where a completed take left it: the grip runs from there with them.
+    await status({transition: 'idle', transition_on_air: false, transition_paused: false});
+    await status({transition: 'crossfade', transition_on_air: true, lever: {origin: 1, position: 1}});
+    await page.waitForFunction(() => document.querySelector('#tp .pct').textContent === '40%');
     t = await tbar();
     assert.deepEqual([t.on, t.from, t.trail.map((v) => Math.round(v * 100) / 100), Math.round(t.grip * 100) / 100], [16, 24, [0.6, 1], 0.6],
       'from the far end they fill from the right');
-    await status({transition: 'wipe', transition_progress: 0, lever: {origin: 0}});
+    await status({transition: 'wipe', transition_progress: 0, lever: {origin: 0, position: 0}});
     t = await tbar();
     assert.deepEqual([t.on, t.run], [0, true], 'a wipe runs Auto without a progress of its own');
     await status({transition: 'idle', transition_on_air: false});
