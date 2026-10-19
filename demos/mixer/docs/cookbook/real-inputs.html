@@ -15,10 +15,11 @@
 </head>
 <body>
 <main>
+<p class="archive-note"><b>Historical recipe — not current setup guidance.</b> Measurements and implementation links below belong to their original workload and revision. Deployment labels and defaults may be obsolete. <a href="index.html">Use the reviewed performance recipes</a>; <a href="history.html">browse historical evidence</a>.</p>
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Real 1080p inputs, no shortcuts</h1>
-<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09); read against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13 and still current. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Capacity tests still require independent real-resolution inputs processed at native cadence. The eight small mixed-rate barcoded inputs are a correctness fixture, explicitly not a capacity qualification.</p>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09); read against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13 and still current. Measurements retain their original workload and scope. <a href="https://amagimedia.github.io/avplumber/demos/mixer/docs/">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> Capacity tests still require independent real-resolution inputs processed at native cadence. The eight small mixed-rate barcoded inputs are a correctness fixture, explicitly not a capacity qualification.</p>
   <p class="lede">The capacity demo proves what real inputs cost: every scene source is its own input of at least 1080p25, with its own media, processed on every frame. The four downstream keys are separate browser inputs at their graphics dimensions; they are included in the 192-input total.</p>
   <span class="pill live">Status: Implemented</span>
 
@@ -168,7 +169,7 @@
         <li>0 new nodes, 0 new queues, 0 new threads.</li>
         <li>Disk and page cache grow with the source count: a raw 1080p NV12 clip at 25 fps is ≈ 155 MB per 2 s, one per raw source.</li>
         <li>VRAM: nothing held for looped clips.</li>
-        <li>Host memory, with <code>raw_upload: "resident"</code> (on a branch; the demo show runs it): each raw file is held in page-locked memory after its first pass, 8.8 GB for 47 two-second clips. Every picture is still transferred to the GPU for every showing, as from a capture card that writes into page-locked memory (<a href="input-decode-cpu.html#resident">Input, decode and wake-ups</a>).</li>
+        <li>Host memory, with <code>raw_upload: "resident"</code> (on a branch; the demo show runs it): each raw file is held in page-locked memory after its first pass, 8.8 GB for 47 two-second clips. Every picture is still transferred to the GPU for every showing, as from a capture card that writes into page-locked memory (<a href="history/input-decode-cpu.html#resident">Input, decode and wake-ups</a>).</li>
         <li>GPU and CPU: full 1080p decode, upload or import on every frame, for every source. This is the honest load.</li>
       </ul></li>
     <li><b>Risk</b>

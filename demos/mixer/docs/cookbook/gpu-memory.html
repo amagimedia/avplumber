@@ -23,10 +23,11 @@
 </head>
 <body>
 <main>
+<p class="archive-note"><b>Historical recipe — not current setup guidance.</b> Measurements and implementation links below belong to their original workload and revision. Deployment labels and defaults may be obsolete. <a href="index.html">Use the reviewed performance recipes</a>; <a href="history.html">browse historical evidence</a>.</p>
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>GPU memory: frames no tick can show any more</h1>
-  <p class="note">Measured on 14 October 2026 on the 16 vCPU NVIDIA L4 host that runs the demo; GPU memory is the whole card as the driver reports it, unless a line says per process. Not on <code>develop</code>: the changes are on the avplumber branch <a href="https://github.com/amagimedia/avplumber/tree/7310870e214a0924ea6ec850648fa6779a781b0d"><code>mixer/vram</code> at 7310870e</a> and run in the demo show. <a href="../">Watch the current 192-input L4 demo.</a></p>
+  <p class="note">Measured on 14 October 2026 on the 16 vCPU NVIDIA L4 host that runs the demo; GPU memory is the whole card as the driver reports it, unless a line says per process. Not on <code>develop</code>: the changes are on the avplumber branch <a href="https://github.com/amagimedia/avplumber/tree/7310870e214a0924ea6ec850648fa6779a781b0d"><code>mixer/vram</code> at 7310870e</a> and run in the demo show. <a href="https://amagimedia.github.io/avplumber/demos/mixer/docs/">Watch the current 192-input L4 demo.</a></p>
   <p class="lede">Until every input of a compositor has a picture, at the start of a show, the compositor cannot draw a tick, and it queued up to eight frames of every other input meanwhile. Each of those frames is a GPU buffer from its source's pool, the pools grew to hold them, and such pools never shrink: the start set the memory the show then kept. The playout now lets a frame go as soon as a newer one is at or before the tick due now, which no tick can undo. What is drawn is unchanged. The show's steady GPU memory fell from 20.1 to 18.8 GB, and the start no longer runs the card out of memory.</p>
   <span class="pill optin">Status: on a branch, running in the demo show</span>
 
@@ -96,7 +97,7 @@
       <thead><tr><th>Build or setting</th><th>Whole GPU</th><th>Mixer CPU</th><th>What it is</th></tr></thead>
       <tbody>
         <tr><td>After the input hops</td><td>20.2 GB</td><td>265&nbsp;%</td><td class="l">the reference for this page</td></tr>
-        <tr><td>Fan-out on the pacing loops</td><td>19.3–20.1 GB</td><td>247&nbsp;%</td><td class="l">a CPU change (<a href="input-decode-cpu.html#fan-out">its page</a>)</td></tr>
+        <tr><td>Fan-out on the pacing loops</td><td>19.3–20.1 GB</td><td>247&nbsp;%</td><td class="l">a CPU change (<a href="history/input-decode-cpu.html#fan-out">its page</a>)</td></tr>
         <tr><td><code>decoded_frames_ahead: 1</code></td><td>20.1 GB</td><td>247&nbsp;%</td><td class="l">one decoded frame waits in front of pacing instead of three; the raw reader waits for GPU memory instead of failing</td></tr>
         <tr><td>Playout drops superseded frames</td><td>18.76 GB</td><td>246&nbsp;%</td><td class="l">the change above</td></tr>
         <tr><td>Sources at <code>extra_hw_frames: 8</code></td><td>17.78 GB</td><td>248&nbsp;%</td><td class="l">8 spare decoder arrays instead of 12</td></tr>

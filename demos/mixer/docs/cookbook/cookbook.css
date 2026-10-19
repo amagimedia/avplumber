@@ -50,3 +50,23 @@ figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size
 .note { font-size: 14px; color: var(--muted); }
 footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
 @media (max-width: 600px) { main { padding: 22px 16px 40px; } }
+
+/* Current cookbook navigation and evidence tables. */
+.review, .archive-note { border-left: 3px solid var(--accent); padding: 10px 14px; background: var(--panel); }
+.archive-note { border-color: var(--amber); }
+.recipes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 310px), 1fr)); gap: 12px; padding: 0; list-style: none; }
+.recipes li { margin: 0; }
+.recipes a { display: block; height: 100%; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); text-decoration: none; }
+.recipes a:hover, .recipes a:focus-visible { border-color: var(--accent); }
+.recipes b { display: block; color: #edf4ff; }
+.recipes span { display: block; margin-top: 8px; color: var(--body); }
+pre { overflow-x: auto; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; line-height: 1.6; }
+pre code { border: 0; padding: 0; background: transparent; }
+table { display: block; overflow-x: auto; width: 100%; border-collapse: collapse; color: var(--body); }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); min-width: 90px; }
+th { color: #edf4ff; background: var(--panel); }
+.flow { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 24px 0; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; text-align: center; }
+.flow span { border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+.flow strong, .flow .wide { grid-column: 1 / -1; }
+
+.recipes .impact { color: var(--accent); font-size: 13px; line-height: 1.45; }

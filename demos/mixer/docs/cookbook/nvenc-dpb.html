@@ -9,10 +9,11 @@
 </head>
 <body>
 <main>
+<p class="archive-note"><b>Historical recipe — not current setup guidance.</b> Measurements and implementation links below belong to their original workload and revision. Deployment labels and defaults may be obsolete. <a href="index.html">Use the reviewed performance recipes</a>; <a href="history.html">browse historical evidence</a>.</p>
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>One reference frame for monitor encoders</h1>
-<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="../">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> AUX rendition defaults use dpb_size: 1, including additional buses. The two-monitor memory example below is historical; it is not the saving for every possible output count. Program and clean-feed settings are separate.</p>
+<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. <a href="https://amagimedia.github.io/avplumber/demos/mixer/docs/">Watch the current 192-input L4 demo.</a></p><p class="note"><b>Current scope.</b> AUX rendition defaults use dpb_size: 1, including additional buses. The two-monitor memory example below is historical; it is not the saving for every possible output count. Program and clean-feed settings are separate.</p>
   <p class="lede">The monitor encoders, one per AUX bus, keep one reference frame instead of the several NVENC reserves by default, because without B-frames each frame is predicted from the previous one. Measured on an NVIDIA L4 on 2026-10-14: an H.264 1080p p3 encoder with the AUX settings holds about 48 MiB with NVENC's own choice and about 34 MiB with <code>dpb_size</code> 1.</p>
   <span class="pill live">Status: Implemented</span>
 

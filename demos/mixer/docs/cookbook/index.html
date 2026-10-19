@@ -1,86 +1,56 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="How the AVPlumber live mixer is made cheaper without cheating: each optimization explained with a diagram, what it does, why, what it costs, its risk and how to switch it off.">
-  <title>Mixer optimization cookbook · AVPlumber</title>
-  <link rel="stylesheet" href="cookbook.css">
-  <style>
-    .intro { max-width: 78ch; }
-    .group { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin: 30px 0 10px; }
-    .entries { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
-    .entries li { margin: 0; }
-    .entries a { display: flex; flex-direction: column; height: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-                 padding: 14px 16px; color: inherit; text-decoration: none; }
-    .entries a:hover, .entries a:focus-visible { border-color: var(--accent); }
-    .entries .pill { align-self: flex-start; margin: 0 0 10px; }
-    .entries b { color: #edf4ff; font-size: 16px; line-height: 1.35; }
-    .entries span.sum { color: var(--body); line-height: 1.55; margin-top: 6px; font-size: 15px; }
-    .docs { padding-left: 20px; }
-    .docs li { margin: 6px 0; }
-  </style>
-</head>
-<body>
-<main>
-  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Changes with demonstrated CPU, GPU or VRAM impact, plus clearly identified mechanisms that reduce work."><title>Mixer optimization cookbook · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
+<body><main><p class="site"><a href="index.html">AVPlumber · Mixer cookbook</a></p>
+<h1>Mixer optimization cookbook</h1><p class="lede">Changes with demonstrated CPU, GPU or VRAM impact, plus clearly identified mechanisms that reduce work.</p>
+<p class="note review">Reviewed 15 October 2026 against <a href="https://github.com/amagimedia/avplumber/tree/e72ff8b4ce3374918d85658d73e25cd6a5d36d39"><code>e72ff8b4</code></a>. Setup defaults and capacity notes updated at <a href="https://github.com/amagimedia/avplumber/tree/74e3392f406eabf648dc34c1acdb8423bc8330dd"><code>74e3392f</code></a>. These describe code and named workload settings, not the live state of every deployment.</p>
+<p class="note">The fixed-pool export Electron and the mixer's copy on import were removed at <a href="https://github.com/amagimedia/avplumber/tree/159d0182"><code>159d0182</code></a>: browsers run stock Electron with Chromium's ordinary capture, sampled in place. Measurements below that name a fixed pool or a copy on import describe the removed path.</p>
 
-  <h1>Mixer optimization cookbook</h1>
-<p class="note">Implementation links are pinned to <a href="https://github.com/amagimedia/avplumber/tree/c20464a5006ea331f816a03874103173f3f234e1">develop at c20464a5</a> (2026-10-09). The mixer has changed since; this page was checked against <a href="https://github.com/amagimedia/avplumber/tree/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">develop at 8fa15c92</a> on 2026-10-13. Measurements retain their original workload and scope. The three pages for the work of 13 and 14 October describe avplumber branches that are not merged to <code>develop</code> yet and run in the demo show; each names its branches and links to their commits. <a href="../">Watch the current 192-input L4 demo.</a></p>
-  <p class="lede intro">Every capacity-demo scene source is a unique, independent input of at least 1080p25, processed every frame, so no optimization may take a shortcut that <a href="real-inputs.html">real inputs</a> would not allow. Each change is explained with what it does, why, what it costs, its risk and how to switch it off before it ships.</p>
+<p>Ranked for the current browser-heavy L4 workload and the size of the supported benefit. CPU percentages below mean percent of one core; 100% is one full core. Historical before/after steps share baselines and are not additive. Each entry labels whether its evidence is a measurement or an implementation mechanism.</p>
+<h2 id="top-10">Performance changes worth preserving</h2><ol class="recipes">
+<li><a href="cuda-streams.html"><b>1. CUDA work queues: 32 compute / 8 copy</b><span class="impact">GPU scheduling · short matched transition check</span><span>At 36 browsers/50 fps on the since-removed fenced browser build, acquire-fence waits averaged ~14 → 1.7 ms and repeats went from thousands to zero. Reduced queue serialization is the likely mechanism; this adds no GPU engines.</span></a></li>
+<li><a href="raw-uploads.html"><b>2. Pinned direct and resident raw inputs</b><span class="impact">CPU · historical 192-source measurements</span><span>Direct uploads removed CPU copies and 141 threads; mixer CPU fell 679 → 510% of one core. Later resident files reduced the input-reading group 139.7 → 27.3%, at ~8.8 GB pinned host RAM.</span></a></li>
+<li><a href="input-decode-cpu.html"><b>3. Direct input routing and optional metadata</b><span class="impact">CPU · historical combined-change measurement</span><span>The routing/metadata/signalling build reduced mixer CPU 322 → 265% of one core and removed 105 demux threads. It preserves independent decoding and realtime pacing; individual changes were not measured separately.</span></a></li>
+<li><a href="nvdec-cuarray.html"><b>4. CUarray decode and hardware-only HEVC work</b><span class="impact">VRAM and CPU · two historical comparisons</span><span>CUarray storage saved 4.88 GiB at 192 inputs/20 outputs. Skipping software-only HEVC table clears reduced decoder CPU ~86 → 62% of one core. Arrays are a storage/copy optimization, not universally faster textures.</span></a></li>
+<li><a href="compositor-wait.html"><b>5. Ready-input waits and bounded polling</b><span class="impact">CPU · historical compositor measurements</span><span>Epoll reduced the busiest compositor 51.8 → 34.7% of one core. In later builds, 8 ms input polling reduced each Program compositor 12.1 → 7.3%. These are separate comparisons; keep deadline and delivery checks.</span></a></li>
+<li><a href="browser-frame-queue.html"><b>6. Browser frames go back one per new frame</b><span class="impact">GPU allocation stability · 192-input L4 show</span><span>Chromium's ordinary capture, sampled in place, with a return queue of three in a frame queue of nine. A copy on import on top of it stalled the whole GPU within a minute under 40 moving windows.</span></a></li>
+<li><a href="event-loops.html"><b>7. Shared fan-out loops and coalesced signals</b><span class="impact">CPU scheduling and thread count · historical evidence</span><span>Event-loop fan-out removed 192 threads (1,081 → 889). Its CPU mostly moved onto shared loops; persistent waits and coalesced signals reduce wake overhead. Thread reduction is measured; an isolated large CPU saving is not claimed.</span></a></li>
+<li><a href="dsk-fades.html"><b>8. Cropped DSKs and transparent-pixel fast paths</b><span class="impact">GPU pixel work · implementation mechanism</span><span>Cropped keys reduce capture and composition pixels; alpha-zero samples skip RGB/HDR conversion. Full-size scene pages keep true 1080p capture. This avoids known work, but there is no isolated percentage-speedup measurement.</span></a></li>
+</ol>
+<p>Supporting guides: <a href="color-tags.html">source colour tags and conversion</a> · <a href="delivery-counters.html">on-air repeats, skips and lean diagnostics</a>.</p>
+<h2>Start with the right defaults</h2><table><thead><tr><th>Layer</th>
+<th>What the reviewed configuration selects</th>
+</tr>
+</thead><tbody><tr><td>L4 deployment</td>
+<td>32 CUDA compute queues, eight copy queues; browser frame staggering enabled; up to ten windows per worker</td>
+</tr>
+<tr><td>L4 CUarray Setup defaults</td>
+<td>40 browser windows at 25/30/50 fps; 30 at 60 fps, including four DSKs. AUX encoders default to p1.</td>
+</tr>
+<tr><td>L4 source profile</td>
+<td>Resident raw files; event-loop fan-out; Program/AUX input polling 8 ms; decoded lookahead one; raw pool ten</td>
+</tr>
+<tr><td>L4 CUarray decode</td>
+<td>HEVC, CUarray storage, twelve extra decode surfaces</td>
+</tr>
+<tr><td>Browser installation</td>
+<td>Stock Electron with the GBM shim, always preloaded on NVIDIA, in Docker and direct npm installs</td>
+</tr>
+<tr><td>Moving-browser experiment</td>
+<td>Removed path: fixed prewarmed pool nine, AVP copy on import, 4 × 10 windows at 50 fps; 3 × 10 at 60 fps with AUX p1</td>
+</tr>
+</tbody></table>
+<p>Generic library defaults differ. Each recipe names which settings belong to a profile, deployment override or optional build. Neither a browser ring nor CUDA queue count sets the compositor deadline.</p>
+<p>Setup Apply and Defaults use those rate-dependent browser limits when allocating sources. Explicit saved encoder choices remain editable and preserved; Defaults restores AUX p1. The mixer samples Chromium's capture buffers in place. <a href="source-limits.html#setup-defaults">Fresh seed and saved-configuration behavior</a>.</p>
+<h2>What was actually demonstrated</h2><p><a href="source-limits.html">Read the current workload and limits</a> before choosing a count: 40 moving windows at 25/30/50 fps and 30 at 60 fps were short checks with 32-layer transitions, with isolated repeats in some runs. They are not a claim of flawless sustained output or 40 windows at 60 fps.</p>
+<p><a href="https://amagimedia.github.io/avplumber/demos/mixer/docs/">The recorded mixer UI</a> is a separate demonstration. Older CPU, memory and capacity experiments remain in <a href="history.html">historical evidence</a>; obsolete browser, stream and branch-state advice has been removed from this recommendation list.</p>
+<h2>Maintained references</h2><ul><li><a href="https://github.com/amagimedia/avplumber/blob/6d644b6ca61d8e475fec465df645064948caa9f8/demos/mixer/docs/config.md">Mixer configuration</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/74e3392f406eabf648dc34c1acdb8423bc8330dd/demos/mixer/docs/capacity.md">Capacity and validation scope</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/159d0182/deps/dma-browser/README.md">Browser service</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/74e3392f406eabf648dc34c1acdb8423bc8330dd/docker-compose/mixer/deploy/l4/README.md">Portable L4 deployment</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/doc/NODES.md">Node reference</a></li>
+</ul>
 
-  <p class="note"><b>Current demonstration.</b> The <a href="../">10-second recording</a> shows the real two-viewer interface: Program/Preview, dirty Program, four keys and direct cuts on the 192-input L4 show. It is separate from the capacity measurements below.</p>
-<h2 id="top-10">Top 10 optimizations to preserve</h2><p>Ranked for this large mixer workload by measured benefit, graph simplification and operational value. Seven are on <code>develop</code>. Three, marked <i>branch</i>, are on avplumber branches that run in the demo show and are not merged to <code>develop</code> yet.</p><ol><li><a href="nvdec-cuarray.html"><b>NVDEC CUarray storage</b></a> — 4.88 GiB saved in the matched historical 192-input / 20-output comparison.</li><li><a href="input-decode-cpu.html"><b>Input, decode and wake-ups</b></a> (<i>branch</i>; one change on <code>develop</code>) — On the 192-source 1080p30 show the mixer fell from 502 to about 234&nbsp;% of a core and from 1,186 to 889 threads, with no missed deadline; the stack then ran seven minutes on 8 vCPUs.</li><li><a href="raw-uploads.html"><b>Read raw frames straight into page-locked memory</b></a> — 192 sources at 1080p30: the mixer fell from 679 to 510&nbsp;% of a core and lost 141 threads; the 47 upload threads are gone.</li><li><a href="browser-frame-queue.html"><b>Return browser frames one per new frame</b></a> — At 192 sources and 1080p30 on the L4: Program deadlines missed in ten minutes fell from 28 / 21 to 0 / 0, and new browser buffer imports from about 10 a second to none.</li><li><a href="compositor-wait.html"><b>Wait for sources with epoll</b></a> — The busiest thread, Program compositor A, fell from 51.8 to 34.7&nbsp;% of a core; the 20 AUX compositors from 80.8 to 45.4&nbsp;%.</li><li><a href="chromium-zero-copy-export.html"><b>Chromium paints into the buffer the mixer reads</b></a> (<i>branch</i> and a patched browser) — One draw per frame instead of a draw, a copy and a poll, lent with a fence: browser 159 → 148&nbsp;% of a core and browser-source repeats 170–200 → 36–87 per 30 s in a ten-minute trial.</li><li><a href="gpu-memory.html"><b>Release frames no tick can show</b></a> (<i>branch</i>) — Steady GPU memory 20.1 → 18.8 GB, start-up peak 22.4 → 19.2 GB, and no failed allocation at start.</li><li><a href="event-loops.html"><b>Pacing loops: no spin, four shards</b></a> — Each loop fell from 26–30&nbsp;% to about 8&nbsp;% of a core at 30 fps once <code>realtime</code> stopped spinning on a time base finer than the clock; four shards bound per-loop timer work.</li><li><a href="color-tags.html"><b>Colour tags at the fan-out</b></a> — A source whose colour stage only tagged has no colour filter and no thread for one: 141 threads fewer on the 192-source SDR show.</li><li><a href="filter-threads.html"><b>Single-thread GPU filter graphs</b></a> — Avoids an idle FFmpeg slice pool per graph; historical savings around 1,600 threads.</li></ol>
-<h2 class="group">Implemented recipes and measurements</h2>
-  <ul class="entries">
-    <li><a href="nvdec-cuarray.html"><span class="pill optin">Opt-in, measured on L4</span><b>NVDEC arrays without a staging copy</b><span class="sum">At 192 inputs and 20 outputs: 20.65 → 15.77 GiB, saving 4.88 GiB (23.7%). Fixed pools and direct array sampling supported earlier 28-output probes; current SDR25 admission is 26 outputs while decoded queues stay at three frames.</span></a></li>
-    <li><a href="input-decode-cpu.html"><span class="pill optin">Branches, running in the demo</span><b>Input, decode and wake-ups: 502 to 234&nbsp;% of a core</b><span class="sum">On the 192-source 1080p30 show: raw files kept in page-locked memory (the reading threads 139.7 → 27.3&nbsp;%), HEVC frames that skip software-only table clears (on develop), no metadata strings or demux hop per frame, compositors that take only the inputs that signalled and look for frames every 8 ms (each Program compositor 12.1 → 7.3&nbsp;%), fan-outs on the pacing loops (192 threads fewer), an epoll event loop and queue signals written only when read. Mixer 502 → about 234&nbsp;%, 1,186 → 889 threads, 0 missed deadlines; seven minutes on 8 vCPUs.</span></a></li>
-    <li><a href="gpu-memory.html"><span class="pill optin">Branch, running in the demo</span><b>GPU memory: frames no tick can show any more</b><span class="sum">A compositor that could not tick yet held eight frames of every input, and the sources' pools grew to match for the life of the show. The playout now releases superseded frames before every draw: steady 20.1 → 18.8 GB, start-up peak 22.4 → 19.2 GB, no failed allocation at start. Fewer spare decoder arrays saved more but made starts fail; per-unit costs measured.</span></a></li>
-    <li><a href="browser-frame-queue.html"><span class="pill live">Live, on by default</span><b>Browser frames go back one per new frame</b><span class="sum">Frames returned in bunches made Chromium's pool destroy and allocate buffers; each new buffer was a CUDA import and a release that held the CUDA library's lock against every other GPU call. One return per arriving frame, from a return queue of three in a frame queue of nine: at 192 sources and 1080p30, Program deadlines missed in ten minutes 28 / 21 → 0 / 0, AUX 97 → 0, imports about 10 a second → none. The 30 fps limit rose from 170 to 192 sources.</span></a></li>
-    <li><a href="raw-uploads.html"><span class="pill live">Live</span><b>Raw frames read straight into the memory the GPU reads</b><span class="sum">A raw NV12 source copied each 3.1 MB frame twice on the CPU before the GPU saw it. One node now reads the file straight into page-locked memory and uploads from there: one thread per raw source where there were four. On the 192-source show the 47 upload threads (132 % of a core) are gone and the mixer fell from 679 to 510 % of a core, 1,327 to 1,186 threads, with no missed deadline in the first hour.</span></a></li>
-    <li><a href="compositor-wait.html"><span class="pill live">Live</span><b>The compositor's wait costs the frames that arrived</b><span class="sum">The busiest thread of the 192-source show waited for its sources with poll(): 193 descriptors on each of about 2,200 wakes a second. With epoll, Program compositor A fell from 51.8 to 34.7 % of a core (kernel time 17.4 → 3.0) and the 20 AUX compositors from 80.8 to 45.4 %, with no change in when the thread wakes. On one tree with and without the commit: 43 → 32 %. A second commit drops two unused passes over the inputs: AUX compositors 44 → 32 %. Projected for 1080p50: 84 → 51 %. On branches since, the compositors take only the inputs that signalled and look for frames at an interval.</span></a></li>
-    <li><a href="chromium-zero-copy-export.html"><span class="pill optin">Opt-in, patched browser; trial in the demo</span><b>Chromium paints into the buffer the mixer reads</b><span class="sum">A patched Chromium 152 paints each window's root pass straight into exportable DMA-BUFs and lends them with a sync_file fence the mixer waits on: no copy, no 2 ms poll. The first trial stalled the whole GPU through buffer churn; with a pool that never frees and reuses first in, first out, a ten-minute trial read browser 159 → 148&nbsp;% of a core, GPU-process main thread 31 → 19&nbsp;%, browser repeats 170–200 → 36–87 per 30 s, +0.5 GB.</span></a></li>
-    <li><a href="color-tags.html"><span class="pill live">Live</span><b>Colour tags at the fan-out</b><span class="sum">A source whose declared colour already matches the canvas needs its frames tagged and nothing else, and had a filter node and a thread for that. The fan-out every source has anyway now stamps the tags: browser sources, and decoded sources that declare their storage format, have no colour filter. On the 192-source SDR show at 1080p30 that removed 141 colour threads; the mixer went from 1,472 to 1,327 threads.</span></a></li>
-    <li><a href="event-loops.html"><span class="pill live">Live</span><b>Event-loop sharding</b><span class="sum">Source pacing timers are spread over four event-loop threads, which bounds the modeled quadratic timer work per loop. Most of what a loop cost at 30 fps was <code>realtime</code> spinning on a time base finer than the clock: with that fixed, each loop fell from 26–30 % to about 8 % of a core.</span></a></li>
-    <li><a href="source-limits.html"><span class="pill live">Profile-specific limits</span><b>Source limits by mode and frame rate</b><span class="sum">L4 CUarray SDR at 25 and 30 fps: 192 inputs including four keys and 256 scenes, with an output ceiling of 26 at both rates; the 30 fps show ran with 24. Current admission limits and historical T4 measurements are separated by GPU, format and frame rate.</span></a></li>
-    <li><a href="cuda-streams.html"><span class="pill live">Live</span><b>One main CUDA stream, one per monitor</b><span class="sum">The program runs on one CUDA stream; each aux monitor gets its own non-blocking stream, isolating stream ordering while GPU resources remain shared.</span></a></li>
-    <li><a href="multiviewer.html"><span class="pill live">Live</span><b>Multiviewer: 192 sources, 12 at a time</b><span class="sum">The recorded L4 show has 16 pages of 12 equal tiles. Only the 12 on screen send frames, so off-page sources add no AUX draw or retained AUX frame; upstream decoding remains active.</span></a></li>
-    <li><a href="browser-handoff.html"><span class="pill live">Implemented; historical test deployment</span><b>Browser frame hand-off</b><span class="sum">The browser's frame socket thread waits in poll() instead of waking every millisecond, and failed pages reload without dropping the mixer's connection, holding their last frame while they do. The new browser image used 1.2 fewer cores at 110 sources; the hold is not measured yet.</span></a></li>
-    <li><a href="browser-paint-cost.html"><span class="pill live">Implemented; historical test deployment</span><b>Browser CPU is per painted frame</b><span class="sum">Chromium costs ~3.5 ms CPU per delivered frame per window, whatever the page. A test page that rests two thirds of the time and Electron 44: Electron 5.90 → 2.83 cores, host idle 28 → 50 % at 68 inputs, 60 fps. A later audit splits the cost: 1.5–1.9 ms per painted frame, and 1.1–1.4 cores for ticks that come whether a window paints or not.</span></a></li>
-    <li><a href="gpu-process-crash.html"><span class="pill live">Implemented; historical test deployment</span><b>Keeping Vulkan out of the GPU process</b><span class="sum">Recreating all browser windows crashed Chromium's GPU process and killed workers. WebGPU on OpenGL ES and no crash limit: 5 restarts, 0 crashes.</span></a></li>
-    <li><a href="browser-frame-stagger.html"><span class="pill optin">Opt-in, measured on L4</span><b>Browser frame ticks staggered at 60 fps</b><span class="sum">Every 60 fps browser window ticked at the same instant: a 2 ms spike of about 57 runnable threads per frame on 16 vCPUs, and a one-minute load average floating between 9 and 23 at 53 % CPU. With each worker at its own phase: peak 57 → 22.9, threads waiting for a CPU 4.55 → 1.30, 0 missed deadlines before and after.</span></a></li>
-    <li><a href="real-inputs.html"><span class="pill live">Live</span><b>Real 1080p inputs, no shortcuts</b><span class="sum">The ground rule: every capacity-demo source is its own input of at least 1080p25, with its own media, processed on every frame.</span></a></li>
-    <li><a href="pgm-delay.html"><span class="pill live">Live</span><b>PGM delay instead of a longer aux deadline</b><span class="sum">The Program preview matches only its PGM pad one frame back, so its 100 source pads keep the normal 80 ms deadline.</span></a></li>
-    <li><a href="dsk-fades.html"><span class="pill live">Live</span><b>DSK fades in one pass</b><span class="sum">A key fades by weighting its alpha in the existing keyer pass: no second compositor, and frames without a fade run the old kernels.</span></a></li>
-    <li><a href="key-prewarm.html"><span class="pill live">Live</span><b>Prewarmed DSK keys</b><span class="sum">Keys stay subscribed while off, so a key cut or fade-in starts on the next program frame instead of 1–2 frames later.</span></a></li>
-    <li><a href="filter-threads.html"><span class="pill live">Live</span><b>One thread per GPU filter graph</b><span class="sum">GPU and metadata-only filter graphs run on one thread instead of an idle 16-thread FFmpeg slice pool each.</span></a></li>
-    <li><a href="nvenc-dpb.html"><span class="pill live">Live</span><b>One reference frame for monitor encoders</b><span class="sum">AUX encoders keep one NVENC reference frame, because without B-frames each frame is predicted from the previous one.</span></a></li>
-    <li><a href="contexts.html"><span class="pill live">Live</span><b>Unused GPU contexts</b><span class="sum">Removes an OpenGL context in every browser importer and a process-wide CUDA context. Both held memory and drew nothing.</span></a></li>
-    <li><a href="force-fps-center-phase.html"><span class="pill live">Implemented; cadence GPU-tested</span><b>Native input cadence</b><span class="sum">Retains realtime, removes 152 input FPS nodes in the captured show, and preserves fractional source periods with a 1/120000 time base.</span></a></li>
-    <li><a href="loop-continuous-timestamps.html"><span class="pill live">Live</span><b>Looped clips keep counting across the wrap</b><span class="sum">A looped file's next pass is shifted by the length of the one before, so timestamps keep rising and a wrap no longer costs the source a frame: about 0.9 drops/s per source with 2 s clips before.</span></a></li>
-  </ul>
 
-  <h2 class="group">Integration and validation scope</h2>
-  <ul class="entries">
-    <li><a href="wipe-preload.html"><span class="pill impl">Built, Python tests pass; dedicated wipe GPU qualification pending</span><b>A wipe clip is cached whole or the start fails</b><span class="sum">A stalled GPU upload on a fresh container was taken for the end of a clip: one wipe was stored with 2 frames instead of 120, the next with 129. A load now ends on the end-of-stream marker, its frame count is checked, and compiled CUDA kernels are kept on the media volume.</span></a></li>
-    <li><a href="cuda-transform.html"><span class="pill impl">Implemented; primitive and mixer integration GPU smokes pass</span><b>cuda_transform, the shared geometry node</b><span class="sum">One CUDA frame in, one frame per output canvas, drawn by the compositors' own module; an output that would only repeat the input gets the input frame itself. Source transforms, catalogue normalization and resized renditions use it. GPU integration smokes pass; no full-show throughput comparison is claimed.</span></a></li>
-  </ul>
-
-  <h2 class="group">Rejected</h2>
-  <ul class="entries">
-    <li><a href="rejected.html"><span class="pill rejected">Rejected</span><b>Ideas we measured and dropped</b><span class="sum">Twelve ideas that broke the every-source-real rule, saved almost nothing, or made cuts, pictures or the pipeline slower; one earlier proposal, shorter decoded frame queues, now an option that did not lower memory by itself; and what the 13–14 October work tried without gain.</span></a></li>
-  </ul>
-
-  <h2>Markdown references</h2>
-  <ul class="docs">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/doc/dmabuf.md">DMA-BUF integration</a>: shared browser services, allocation shim and landed Chromium changes.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/demos/mixer/docs/config.md">config.md</a>: configuration reference for sources, scenes, aux buses, DSK and outputs.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/demos/mixer/docs/capacity.md">capacity.md</a>: measured capacity and where the limits are.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/demos/mixer/docs/recipe.md">recipe.md</a>: the workload recipe that generates the demo sources and scenes.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/doc/NODES.md">doc/NODES.md</a>: node reference.</li>
-  </ul>
-
-  <footer><a href="../index.html">← Live mixer demo</a></footer>
-</main>
-</body>
-</html>
+<footer><a href="index.html#top-10">← Performance recipes</a> · <a href="source-limits.html">Measured scope and limits</a> · <a href="history.html">Historical evidence</a></footer></main></body></html>

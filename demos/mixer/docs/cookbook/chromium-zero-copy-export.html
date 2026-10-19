@@ -24,12 +24,13 @@
 </head>
 <body>
 <main>
+<p class="archive-note"><b>Historical recipe — not current setup guidance.</b> Measurements and implementation links below belong to their original workload and revision. Deployment labels and defaults may be obsolete. <a href="index.html">Use the reviewed performance recipes</a>; <a href="history.html">browse historical evidence</a>. The export was removed at <a href="https://github.com/amagimedia/avplumber/tree/159d0182"><code>159d0182</code></a>: the browser image runs stock Electron, and the mixer supports only Chromium's ordinary capture, sampled in place.</p>
   <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
 
   <h1>Chromium paints into the buffer the mixer reads</h1>
-  <p class="note">Measured on 2026-10-14 on the 16 vCPU NVIDIA L4 host that runs the demo. Not on <code>develop</code>: the Chromium and Electron patches are not yet published, and the mixer side, which waits on each frame's fence, is on the avplumber branch <a href="https://github.com/amagimedia/avplumber/tree/93ab99980ca7fe5af51452702a8dc80c493fcbf1"><code>mixer/browser-acquire-fence</code> at 93ab9998</a>. The demo show has run with the patched browser since the trial below. <a href="../">Watch the current 192-input L4 demo.</a></p>
+  <p class="note">Measured on 2026-10-14 on the 16 vCPU NVIDIA L4 host that runs the demo. Not on <code>develop</code>: the Chromium and Electron patches are not yet published, and the mixer side, which waits on each frame's fence, is on the avplumber branch <a href="https://github.com/amagimedia/avplumber/tree/93ab99980ca7fe5af51452702a8dc80c493fcbf1"><code>mixer/browser-acquire-fence</code> at 93ab9998</a>. The demo show ran with the patched browser from the trial below until the export was removed. <a href="https://amagimedia.github.io/avplumber/demos/mixer/docs/">Watch the current 192-input L4 demo.</a></p>
   <p class="lede">A browser source is an offscreen Electron window whose frames reach the mixer as DMA-BUFs. Stock Chromium draws the window's picture into a private texture, copies it into a separate capture buffer, and then polls until the copy has finished before it hands the buffer over. With the patches, Chromium's compositor paints the picture straight into a buffer it can export, and lends that buffer to the mixer together with a fence that signals when the drawing is done. The mixer waits on the fence before it reads. No copy, no polling, and the buffer is painted again only after the mixer gives it back.</p>
-  <span class="pill optin">Status: opt-in, patched browser; running in the demo show as a trial</span>
+  <span class="pill optin">Status: removed; ran in the demo show as a trial with a patched browser</span>
 
   <ul class="figures" aria-label="Measured facts">
     <li><b>159 → 148&nbsp;%</b><span>of one vCPU, the browser container with 40 windows, in a ten-minute trial on the 192-source show</span></li>

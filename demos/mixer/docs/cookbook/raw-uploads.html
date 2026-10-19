@@ -1,211 +1,41 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="A raw NV12 source in the AVPlumber mixer copied every frame twice on the CPU before the GPU saw it. A node that reads the file straight into page-locked memory removed the upload threads: the 192-source show fell from 679 to 510 percent of a core.">
-  <title>Raw frames read straight into the memory the GPU reads · Mixer optimization cookbook</title>
-  <link rel="stylesheet" href="cookbook.css">
-  <style>
-    .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 22px 0 0; padding: 0; list-style: none; }
-    .figures li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
-    .figures b { display: block; font-size: 23px; font-weight: 650; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; color: #edf4ff; }
-    .figures span { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; line-height: 1.45; }
-    .measured { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 14px 0 0; max-width: 760px; }
-    .measured table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-    .measured th, .measured td { padding: 8px 14px; border-bottom: 1px solid var(--line); text-align: right; color: var(--body); white-space: nowrap; }
-    .measured tr:last-child td { border-bottom: 0; }
-    .measured th:first-child, .measured td:first-child { text-align: left; }
-    .measured th { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; }
-    .measured td:last-child { color: #edf4ff; }
-    .changes { padding-left: 20px; }
-    .changes li { margin: 10px 0; }
-  </style>
-</head>
-<body>
-<main>
-  <p class="site"><a href="index.html">AVPlumber · Mixer optimization cookbook</a></p>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Direct uploads remove CPU copies and upload threads. Resident looped files also remove repeated reads, at an explicit pinned-RAM cost."><title>2. Read raw inputs into pinned memory once · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
+<body><main><p class="site"><a href="index.html">AVPlumber · Mixer cookbook</a></p>
+<h1>2. Read raw inputs into pinned memory once</h1><p class="lede">Direct uploads remove CPU copies and upload threads. Resident looped files also remove repeated reads, at an explicit pinned-RAM cost.</p>
+<p class="note review">Reviewed 15 October 2026 against <a href="https://github.com/amagimedia/avplumber/tree/e72ff8b4ce3374918d85658d73e25cd6a5d36d39"><code>e72ff8b4</code></a>. These pages describe that code and named workload settings; they do not assert what every deployment runs.</p>
 
-  <h1>Raw frames read straight into the memory the GPU reads</h1>
-  <p class="note">Measured on 2026-10-13 on the 16 vCPU L4 host that runs the demo. Source links are pinned to <a href="https://github.com/amagimedia/avplumber/commit/8fa15c92d4915414f3e1fd769a6a9432b11b7f47">commit 8fa15c92</a> on <code>develop</code>. <a href="../">Watch the current 192-input L4 demo.</a></p>
-  <p class="lede">An uncompressed 1080p NV12 frame is 3.1 MB, and a raw source hands one to the GPU for every frame it shows. The mixer's raw file sources copied each of those frames twice on the CPU first: out of the page cache into a packet, and out of the packet into a page-locked staging buffer. A source node that reads the file straight into the page-locked buffer leaves one copy and one thread per source. On the 192-source show, 47 of them raw, the upload threads disappeared and the mixer went from 679 to 510&nbsp;% of a core.</p>
-  <span class="pill live">Status: Live; the demo recipe selects it</span>
+<h2>Choose the mode for the input</h2><table><thead><tr><th>Mode</th>
+<th>Work avoided</th>
+<th>Scope</th>
+</tr>
+</thead><tbody><tr><td><code>hwupload</code></td>
+<td>Baseline FFmpeg path</td>
+<td>Generic parser default</td>
+</tr>
+<tr><td><code>direct</code></td>
+<td>Read into pinned staging memory; no separate raw upload node/thread</td>
+<td>Raw-file path</td>
+</tr>
+<tr><td><code>resident</code></td>
+<td>Direct upload plus retained file contents in pinned host memory</td>
+<td>L4 profile; looped NV12/P010 files</td>
+</tr>
+<tr><td><code>pinned</code></td>
+<td>Patched FFmpeg pinned upload path</td>
+<td>Alternative filter path</td>
+</tr>
+</tbody></table>
+<p>Resident mode fills each file-backed frame on first use and reuses the pinned host bytes on subsequent loops; file changes are checked at the loop boundary. Each source still transfers every displayed frame to the GPU on its own cadence. This does not cache a GPU texture to fake independent live inputs.</p>
+<p>The raw uploader uses a private stream and waits for its transfer before handing the frame on. <code>raw_pool_frames=10</code> in the L4 profile bounds its GPU-frame pool; it is independent of the browser ring and the size of the resident file contents.</p>
+<h2>Costs and measured benefit</h2><p>Pinned host memory cannot be swapped out. The historical 47 two-second clips used roughly 8.8 GB. Resident files are a useful benchmark model for capture writing into pinned memory, but do not make arbitrary live input I/O free.</p>
+<p>The earlier direct-upload change reduced mixer CPU from 679 to 510% of one core and removed 141 threads. The later resident-file change reduced the historical input-reading group from 139.7 to 27.3%. These are different steps in the 192-source experiment. <a href="history/raw-uploads.html">Original direct-upload measurements</a> · <a href="history/input-decode-cpu.html#resident">resident-file measurements</a>.</p>
+<h2>Verify</h2><p>Check pinned host memory and GPU-pool high-water marks, file-change handling, cadence across loop boundaries and pixel correctness for each storage format. Keep v210's distinct unpack/upload path in the comparison instead of assuming NV12 results apply.</p>
 
-  <ul class="figures" aria-label="Measured facts">
-    <li><b>679 → 510&nbsp;%</b><span>of one core, the whole mixer, 192 sources at 1080p30</span></li>
-    <li><b>132 → 0&nbsp;%</b><span>the 47 upload threads: they no longer exist</span></li>
-    <li><b>1,327 → 1,186</b><span>threads: three fewer for each raw source</span></li>
-    <li><b>322 → 123&nbsp;%</b><span>time threads spent runnable without a core</span></li>
-    <li><b>34 → 30&nbsp;%</b><span>each Program compositor, which the change does not touch</span></li>
-    <li><b>0</b><span>missed deadlines, dropped frames and repeated raw frames in the first hour on the new path</span></li>
-  </ul>
-
-  <figure>
-    <div class="diagram">
-      <svg viewBox="0 0 700 300" role="img" aria-labelledby="path-t path-d">
-        <title id="path-t">Where the bytes of one raw frame go on the way to the GPU, in the three upload modes</title>
-        <desc id="path-d">With hwupload the frame is copied by the CPU from the page cache to a packet buffer and then transferred from that pageable buffer by the driver. With pinned it is copied by the CPU twice, from the page cache to a packet buffer and from there to a page-locked staging buffer, and the GPU reads the staging buffer. With direct it is copied by the CPU once, from the page cache straight into the page-locked buffer the GPU reads.</desc>
-        <g font-family="system-ui, sans-serif" font-size="11">
-          <text x="0" y="16" fill="#edf4ff" font-size="13" font-weight="600">Illustration · one 3.1 MB NV12 frame, from the file to the GPU</text>
-          <text x="0" y="50" fill="#f2878a" font-size="12.5" font-weight="600">hwupload</text>
-          <rect x="90" y="34" width="120" height="40" rx="6" fill="#1c2738" stroke="#3a4a62"/><text x="150.0" y="51" fill="#edf4ff" text-anchor="middle" font-weight="600">page cache</text><text x="150.0" y="66" fill="#a4b4ca" text-anchor="middle" font-size="10">the file</text><line x1="210" y1="54" x2="284" y2="54" stroke="#e5484d" stroke-width="2"/><path d="M283,50 L290,54 L283,58 Z" fill="#e5484d"/><text x="250.0" y="47" fill="#e5484d" text-anchor="middle" font-size="10">CPU copy</text>
-          <rect x="290" y="34" width="120" height="40" rx="6" fill="#1c2738" stroke="#3a4a62"/><text x="350.0" y="51" fill="#edf4ff" text-anchor="middle" font-weight="600">packet buffer</text><text x="350.0" y="66" fill="#a4b4ca" text-anchor="middle" font-size="10">pageable, new each frame</text><line x1="410" y1="54" x2="564" y2="54" stroke="#f5a524" stroke-width="2"/><path d="M563,50 L570,54 L563,58 Z" fill="#f5a524"/><text x="490.0" y="47" fill="#f5a524" text-anchor="middle" font-size="10">driver, under its shared lock</text>
-          <rect x="570" y="34" width="120" height="40" rx="6" fill="#262a4d" stroke="#6e8bf5"/><text x="630.0" y="51" fill="#edf4ff" text-anchor="middle" font-weight="600">GPU frame</text><text x="630.0" y="66" fill="#a4b4ca" text-anchor="middle" font-size="10"></text>
-          <text x="0" y="136" fill="#f5a524" font-size="12.5" font-weight="600">pinned</text>
-          <rect x="90" y="120" width="110" height="40" rx="6" fill="#1c2738" stroke="#3a4a62"/><text x="145.0" y="137" fill="#edf4ff" text-anchor="middle" font-weight="600">page cache</text><text x="145.0" y="152" fill="#a4b4ca" text-anchor="middle" font-size="10">the file</text><line x1="200" y1="140" x2="244" y2="140" stroke="#e5484d" stroke-width="2"/><path d="M243,136 L250,140 L243,144 Z" fill="#e5484d"/><text x="225.0" y="133" fill="#e5484d" text-anchor="middle" font-size="10">CPU copy</text>
-          <rect x="250" y="120" width="120" height="40" rx="6" fill="#1c2738" stroke="#3a4a62"/><text x="310.0" y="137" fill="#edf4ff" text-anchor="middle" font-weight="600">packet buffer</text><text x="310.0" y="152" fill="#a4b4ca" text-anchor="middle" font-size="10">pageable, new each frame</text><line x1="370" y1="140" x2="414" y2="140" stroke="#e5484d" stroke-width="2"/><path d="M413,136 L420,140 L413,144 Z" fill="#e5484d"/><text x="395.0" y="133" fill="#e5484d" text-anchor="middle" font-size="10">CPU copy</text>
-          <rect x="420" y="120" width="100" height="40" rx="6" fill="#1d3a2c" stroke="#30a46c"/><text x="470.0" y="137" fill="#edf4ff" text-anchor="middle" font-weight="600">staging</text><text x="470.0" y="152" fill="#a4b4ca" text-anchor="middle" font-size="10">page-locked</text><line x1="520" y1="140" x2="564" y2="140" stroke="#6e8bf5" stroke-width="2"/><path d="M563,136 L570,140 L563,144 Z" fill="#6e8bf5"/><text x="545.0" y="133" fill="#6e8bf5" text-anchor="middle" font-size="10">GPU reads</text>
-          <rect x="570" y="120" width="120" height="40" rx="6" fill="#262a4d" stroke="#6e8bf5"/><text x="630.0" y="137" fill="#edf4ff" text-anchor="middle" font-weight="600">GPU frame</text><text x="630.0" y="152" fill="#a4b4ca" text-anchor="middle" font-size="10"></text>
-          <text x="0" y="222" fill="#7fd6a8" font-size="12.5" font-weight="600">direct</text>
-          <rect x="90" y="206" width="120" height="40" rx="6" fill="#1c2738" stroke="#3a4a62"/><text x="150.0" y="223" fill="#edf4ff" text-anchor="middle" font-weight="600">page cache</text><text x="150.0" y="238" fill="#a4b4ca" text-anchor="middle" font-size="10">the file</text><line x1="210" y1="226" x2="364" y2="226" stroke="#e5484d" stroke-width="2"/><path d="M363,222 L370,226 L363,230 Z" fill="#e5484d"/><text x="290.0" y="219" fill="#e5484d" text-anchor="middle" font-size="10">CPU copy (the read itself)</text>
-          <rect x="370" y="206" width="150" height="40" rx="6" fill="#1d3a2c" stroke="#30a46c"/><text x="445.0" y="223" fill="#edf4ff" text-anchor="middle" font-weight="600">the node's block</text><text x="445.0" y="238" fill="#a4b4ca" text-anchor="middle" font-size="10">page-locked, reused</text><line x1="520" y1="226" x2="564" y2="226" stroke="#6e8bf5" stroke-width="2"/><path d="M563,222 L570,226 L563,230 Z" fill="#6e8bf5"/><text x="545.0" y="219" fill="#6e8bf5" text-anchor="middle" font-size="10">GPU reads</text>
-          <rect x="570" y="206" width="120" height="40" rx="6" fill="#262a4d" stroke="#6e8bf5"/><text x="630.0" y="223" fill="#edf4ff" text-anchor="middle" font-weight="600">GPU frame</text><text x="630.0" y="238" fill="#a4b4ca" text-anchor="middle" font-size="10"></text>
-          <g fill="#a4b4ca"><line x1="90" y1="280" x2="110" y2="280" stroke="#e5484d" stroke-width="2"/><text x="116" y="284">a CPU thread moves every byte</text>
-          <line x1="330" y1="280" x2="350" y2="280" stroke="#6e8bf5" stroke-width="2"/><text x="356" y="284">the GPU fetches the bytes itself; no CPU thread touches them</text></g>
-        </g>
-      </svg>
-    </div>
-    <figcaption>Illustration, not a measurement. Red arrows are copies a CPU thread performs byte by byte. The blue arrow is the transfer to the GPU, which the GPU performs itself from page-locked memory.</figcaption>
-  </figure>
-
-  <h2>Three ways to hand a frame to the GPU</h2>
-  <p><code>canvas.raw_upload</code> selects how NV12 and P010 file sources reach CUDA. Each step below fixed what the one before it left.</p>
-  <ol class="changes">
-    <li><b><code>hwupload</code>: FFmpeg's stock upload from ordinary memory.</b> The frame sits in ordinary pageable memory, so the driver has to make it transferable on every frame, and traces showed upload, import and compositor threads waiting on one another inside the driver while it did. In a 68-input show at 60 fps with 17 raw sources this path missed 69&nbsp;% of Program deadlines. It remains the library default; it needs no patched FFmpeg.</li>
-    <li><b><code>pinned</code>: a patched FFmpeg filter with a page-locked staging buffer and its own CUDA stream.</b> The same show, measured with the pinned uploader that preceded the filter, missed no deadline. This step removed waiting, not work: threads stopped queueing on the driver's lock, but every byte of every frame was still moved by a CPU thread, twice. On the 192-source show the 47 upload threads spent 132&nbsp;% of a core doing nothing but the second copy.</li>
-    <li><b><code>direct</code>: one node, <code>raw_video_file_cuda</code>, that owns the page-locked buffer and reads the file into it.</b> The read is the only copy. There is no packet, no decoder that wraps the packet, no staging step, and no FFmpeg patch involved.</li>
-  </ol>
-
-  <h2>What a frame cost with <code>pinned</code></h2>
-  <p>The chain was <code>input_rec → demux → dec_video(rawvideo) → filter_video(hwupload_cuda=pinned=1)</code>: four threads for each raw source. Per 3.1 MB frame:</p>
-  <ul class="where">
-    <li><b>The input thread</b> allocated a new 3.1 MB packet and called <code>read()</code>, which copies the frame out of the page cache: about 0.85 ms of kernel time.</li>
-    <li><b>The demuxer and the raw "decoder"</b> passed the packet on. The decoder only wraps the packet's bytes as a frame, but each is a thread, a queue and two wake-ups.</li>
-    <li><b>The upload thread</b> copied the frame row by row into its staging buffer, about 0.9 ms of user time, then asked the GPU to fetch it and slept until it had. The packet was freed on this thread, not the one that allocated it.</li>
-  </ul>
-  <p>Two copies of 3.1 MB for each of 1,410 raw frames a second is about 9 GB a second through the CPU, and about three times that in memory traffic, since a copy reads its source and writes a destination that is not in cache. That traffic is shared with every other thread on the machine.</p>
-
-  <h2>What the node does</h2>
-  <ol class="changes">
-    <li><b>At start it allocates one page-locked block</b> the size of a frame through the CUDA driver, a private CUDA stream, and a pool of GPU frames.</li>
-    <li><b>For each frame it calls <code>pread()</code> into that block</b> at the frame's offset in the file. The kernel's copy out of the page cache lands directly where the GPU will read.</li>
-    <li><b>It queues one transfer per plane</b> from the block to a GPU frame on its own stream, after an event that orders the transfer behind any reader still using that pooled frame, and waits for the stream to finish. This is the sequence the <code>pinned</code> filter uses; only the staging copy before it is gone.</li>
-    <li><b>It stamps the timestamp and the colour tags</b> and puts the frame on its output queue, where it blocks until the pacing node takes the previous one. The block is free again as soon as the transfer has finished.</li>
-  </ol>
-  <p>Looping is arithmetic on a frame counter: the offset wraps, the timestamp counts on. Nothing is kept between passes. Every frame shown was read from the file and transferred for that showing, so a raw file still stands in for a live uncompressed input.</p>
-
-  <h2>Why the upload reads 0&nbsp;%</h2>
-  <p>The thread meter no longer lists an upload class because no thread has that job. The upload thread did three things, and each went somewhere:</p>
-  <ul class="where">
-    <li><b>The copy into staging</b>, nearly all of its 132&nbsp;%, is not done by anyone. The bytes are already in page-locked memory when the read returns.</li>
-    <li><b>Asking the GPU to fetch the frame and waiting for it</b> moved to the reading thread. The reading threads' user time rose from 14 to 20&nbsp;% of a core for all 1,410 frames a second: about 45 µs a frame.</li>
-    <li><b>The transfer itself</b> never was CPU work. The GPU reads page-locked memory over the bus on its own; while it does, the thread sleeps.</li>
-  </ul>
-  <p>So the upload is not free, it is small: about 6 points of a core where there were 132. What a raw source still costs is the read: about 113&nbsp;% of a core of kernel time for 47 sources, the one copy that remains.</p>
-
-  <h2>Before and after</h2>
-  <p>The running 192-source show at 1080p30 (105 HEVC through NVDEC, 40 browser, 47 raw NV12; 24 encoded outputs), one 20-second reading of every mixer thread on the build before and one on the build with the node, about three minutes after it started.</p>
-  <figure>
-    <div class="diagram">
-      <svg viewBox="0 0 700 284" role="img" aria-labelledby="cpu-t cpu-d">
-        <title id="cpu-t">Measured CPU by thread class with the pinned filter and with the direct node, user and kernel time</title>
-        <desc id="cpu-d">Upload threads: 125 percent of a core user and 6 kernel with pinned, gone with direct. Decode and demux threads: 97 user and 16 kernel with pinned, 86 user and 12 kernel with direct. Reading threads: 14 user and 125 kernel with pinned, 20 user and 120 kernel with direct. The two Program compositors: 61 user and 7 kernel with pinned, 53 user and 6 kernel with direct.</desc>
-        <g font-family="system-ui, sans-serif" font-size="11">
-          <text x="0" y="16" fill="#edf4ff" font-size="13" font-weight="600">Measured · % of one core, 192 sources at 1080p30, 47 of them raw NV12</text>
-          <rect x="300" y="24" width="10" height="10" fill="#6e8bf5"/><text x="315" y="33" fill="#a4b4ca">user time</text>
-          <rect x="390" y="24" width="10" height="10" fill="#e5484d"/><text x="405" y="33" fill="#a4b4ca">kernel time</text>
-          <text x="0" y="58" fill="#edf4ff" font-weight="600">Upload threads (47, then none)</text><text x="292" y="58" fill="#a4b4ca" text-anchor="end">pinned</text><rect x="300" y="46" width="275.9" height="16" fill="#6e8bf5"/><rect x="575.9" y="46" width="13.6" height="16" fill="#e5484d"/><text x="595.5" y="58" fill="#edf4ff">132 %</text><text x="292" y="80" fill="#a4b4ca" text-anchor="end">direct</text><rect x="300" y="68" width="0.0" height="16" fill="#6e8bf5"/><rect x="300.0" y="68" width="0.0" height="16" fill="#e5484d"/><text x="306.0" y="80" fill="#edf4ff">no such thread</text><text x="0" y="112" fill="#edf4ff" font-weight="600">Decode and demux threads (305, then 211)</text><text x="292" y="112" fill="#a4b4ca" text-anchor="end">pinned</text><rect x="300" y="100" width="212.3" height="16" fill="#6e8bf5"/><rect x="512.3" y="100" width="35.6" height="16" fill="#e5484d"/><text x="553.9" y="112" fill="#edf4ff">113 %</text><text x="292" y="134" fill="#a4b4ca" text-anchor="end">direct</text><rect x="300" y="122" width="189.9" height="16" fill="#6e8bf5"/><rect x="489.9" y="122" width="25.5" height="16" fill="#e5484d"/><text x="521.4" y="134" fill="#edf4ff">98 %</text><text x="0" y="166" fill="#edf4ff" font-weight="600">Reading threads (47 raw + 105 compressed)</text><text x="292" y="166" fill="#a4b4ca" text-anchor="end">pinned</text><rect x="300" y="154" width="30.8" height="16" fill="#6e8bf5"/><rect x="330.8" y="154" width="275.4" height="16" fill="#e5484d"/><text x="612.2" y="166" fill="#edf4ff">139 %</text><text x="292" y="188" fill="#a4b4ca" text-anchor="end">direct</text><rect x="300" y="176" width="44.4" height="16" fill="#6e8bf5"/><rect x="344.4" y="176" width="264.9" height="16" fill="#e5484d"/><text x="615.3" y="188" fill="#edf4ff">141 %</text><text x="0" y="220" fill="#edf4ff" font-weight="600">The two Program compositors</text><text x="292" y="220" fill="#a4b4ca" text-anchor="end">pinned</text><rect x="300" y="208" width="135.1" height="16" fill="#6e8bf5"/><rect x="435.1" y="208" width="14.7" height="16" fill="#e5484d"/><text x="455.8" y="220" fill="#edf4ff">68 %</text><text x="292" y="242" fill="#a4b4ca" text-anchor="end">direct</text><rect x="300" y="230" width="116.6" height="16" fill="#6e8bf5"/><rect x="416.6" y="230" width="14.1" height="16" fill="#e5484d"/><text x="436.7" y="242" fill="#edf4ff">59 %</text>
-        </g>
-      </svg>
-    </div>
-    <figcaption>Measured. The reading threads look unchanged because the 47 raw readers keep the name <code>input_N</code> and are counted with the 105 compressed sources' inputs; inside the class, kernel time is the read and user time is where the upload's remainder went.</figcaption>
-  </figure>
-  <div class="measured">
-    <table>
-      <thead><tr><th>% of one core</th><th>Threads</th><th>pinned</th><th>Threads</th><th>direct</th></tr></thead>
-      <tbody>
-        <tr><td><code>upload_N</code></td><td>47</td><td>132.1</td><td>0</td><td>–</td></tr>
-        <tr><td><code>input_N</code>, raw and compressed</td><td>152</td><td>138.8</td><td>152</td><td>140.6</td></tr>
-        <tr><td>&nbsp;&nbsp;of which kernel</td><td></td><td>125.2</td><td></td><td>120.4</td></tr>
-        <tr><td><code>decode_N</code></td><td>153</td><td>99.4</td><td>106</td><td>87.6</td></tr>
-        <tr><td><code>demux_N</code></td><td>152</td><td>13.8</td><td>105</td><td>9.5</td></tr>
-        <tr><td>Program compositor A</td><td>1</td><td>34.3</td><td>1</td><td>29.9</td></tr>
-        <tr><td>Program compositor B</td><td>1</td><td>33.9</td><td>1</td><td>29.6</td></tr>
-        <tr><td>AUX compositors</td><td>20</td><td>36.6</td><td>20</td><td>33.6</td></tr>
-        <tr><td>Pacing loops</td><td>5</td><td>37.2</td><td>5</td><td>33.4</td></tr>
-        <tr><td>All mixer threads</td><td>1,327</td><td>679</td><td>1,186</td><td>510</td></tr>
-        <tr><td>&nbsp;&nbsp;user / kernel</td><td></td><td>433 / 244</td><td></td><td>285 / 227</td></tr>
-        <tr><td>Time runnable without a core</td><td></td><td>322</td><td></td><td>123</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <ul class="where">
-    <li>The threads that vanished account for about 148 of the 169 points: the uploads, and the 47 raw sources' decode and demux threads.</li>
-    <li>The rest came from threads the change does not touch. The compositors, the pacing loops and the AUX buses all read lower: with 4.4 GB a second less being copied and 141 fewer threads waking every frame, they wait less for memory and for a core.</li>
-    <li>Time spent runnable without a core fell by 62&nbsp;%, far more than the CPU saved. That is the figure that says how close a 30 fps show is to missing a deadline.</li>
-    <li>GPU memory was unchanged (19,337 and 19,291 MiB): the same number of frames is held on the GPU, and one page-locked frame per source in host memory before and after.</li>
-    <li>An hour later the show had missed no deadline and dropped no frame, and neither Program compositor had repeated a frame of any raw source since the start.</li>
-  </ul>
-
-  <h2>Isolated: the upload paths alone</h2>
-  <p>Eight raw NV12 1080p sources at 30 fps on a second, otherwise idle L4 host of the same shape, each paced, scaled on the GPU and discarded, 30 seconds per path (<code>tests/cuda/benchmark_raw_upload.py</code>). The figures are the whole process, so they include the pacing, the scaler and the sink of each source, which are the same on every row.</p>
-  <div class="measured">
-    <table>
-      <thead><tr><th>Upload path</th><th>% of one core</th><th>User</th><th>Kernel</th><th>Threads</th><th>CPU ms per frame</th></tr></thead>
-      <tbody><tr><td><code>hwupload</code></td><td>42</td><td>23</td><td>19</td><td>54</td><td>1.75</td></tr><tr><td><code>pinned</code></td><td>41</td><td>22</td><td>19</td><td>54</td><td>1.69</td></tr><tr><td><code>direct</code></td><td>22</td><td>4</td><td>17</td><td>30</td><td>0.90</td></tr><tr><td><code>direct</code>, write-combined block</td><td>21</td><td>3</td><td>18</td><td>30</td><td>0.86</td></tr></tbody>
-    </table>
-  </div>
-  <ul class="where">
-    <li><b><code>pinned</code> costs the same CPU as <code>hwupload</code>.</b> With eight sources on an idle machine nothing waits on the driver, so what <code>pinned</code> fixed does not show; what it left, the two copies, is the whole bill on both rows.</li>
-    <li><b><code>direct</code> halves it</b>: the user time, which was the second copy, is gone, and the kernel time, which is the read, is unchanged.</li>
-    <li><b>A write-combined block makes no difference</b> (16.4 and 16.2&nbsp;% for the eight reading threads). The node offers it as <code>write_combined</code>; it stays off.</li>
-    <li>A frame costs less here than on the busy demo host (about 0.7 ms a copy against 0.9), because nothing else is using the memory.</li>
-  </ul>
-  <h2>What it gives up</h2>
-  <ul class="where">
-    <li><b>Read-ahead in memory.</b> The old chain kept about ten frames of packets queued in RAM ahead of pacing. The node holds two frames, both already on the GPU: one in its output queue and the one it is waiting to put there. A read that stalls for longer than a frame period now shows as a repeated frame where 300 ms of queued packets used to hide it. The demo's raw files stay in the page cache and the raw sources repeated no frame in the first hour; a show reading raw video from a slow disk should raise the output queue's capacity, not a deadline.</li>
-    <li><b>A read timeout.</b> <code>input_rec</code> watches its reads; a blocking local <code>pread()</code> has no watchdog. A file that ends inside a frame after it was opened stops the node with an error.</li>
-    <li><b>Formats.</b> NV12 and P010 only. Packed v210 still goes through <code>hwupload_cuda=v210_width=…</code>, because the unpack kernel lives in the FFmpeg patch, and decoded RGBA clips still use the <code>pinned</code> filter.</li>
-  </ul>
-
-  <h2>For a live uncompressed input</h2>
-  <p>The upload half is its own class, <code>CudaPinnedUploader</code>: the page-locked block, the stream, the ordering event, the transfers and the frame pool. A source that can write its samples where it is told uses it the same way: a capture SDK given the block as its buffer, or a packet reassembler that assembles rows into it. For such a source the remaining copy does not exist either; the file read is what stands in for it here.</p>
-
-  <h2>Since this measurement</h2>
-  <p>A fourth mode, <code>"resident"</code>, keeps a looped file's pictures in one page-locked block the size of the file: each picture is read the first time it is shown, and later passes only transfer it to the GPU. On the same show on 13 October the 152 reading threads fell from 139.7 to 27.3&nbsp;% of a core and the mixer from 471 to 335&nbsp;%, at the price of 8.8 GB of host memory that cannot be swapped out. It is on an avplumber branch, not yet on <code>develop</code>; the demo show runs it, while Setup still builds shows with <code>direct</code>. Every picture is still transferred for every showing. <a href="input-decode-cpu.html#resident">Input, decode and wake-ups</a> has the measurement and why it still stands in for a live input.</p>
-
-  <h2>At a glance</h2>
-  <ul class="cards">
-    <li><b>What</b>One node per raw NV12 or P010 file source reads each frame straight into page-locked memory and has the GPU fetch it from there. It replaces four nodes and the staging copy between them.</li>
-    <li><b>Why</b>The <code>pinned</code> filter removed the waits on the driver's lock but still moved every frame twice on the CPU. Forty-seven upload threads spent 1.3 cores on the second copy.</li>
-    <li><b>Latency</b>0 frames added. A frame is uploaded one ahead of pacing, as before.</li>
-    <li class="flag"><b>Side effects</b>No packets queued in RAM ahead of pacing, so a slow read is no longer absorbed. No read timeout.</li>
-    <li><b>Cost</b>One page-locked frame per source (3.1 MB for 1080p NV12), which the staging buffer already cost. No FFmpeg patch.</li>
-    <li><b>Risk</b>Low for files in the page cache. Tests cover byte-exact NV12 and P010, loop timestamps, end of file, and a frame rewritten in the file while it loops, which must show up on a later pass.</li>
-    <li><b>Switch it off</b><code>"canvas": {"raw_upload": "pinned"}</code> restores the filter chain; <code>"hwupload"</code> the stock one. <code>"resident"</code>, on a branch, goes one step further (above).</li>
-  </ul>
-
-  <h2>Related pages</h2>
-  <ul class="where">
-    <li><a href="browser-frame-queue.html">Browser frames go back one per new frame</a>: the driver lock that uploads wait on, read directly.</li>
-    <li><a href="color-tags.html">Colour tags at the fan-out</a>: the node stamps the declared tags, so a raw source needs no colour filter.</li>
-    <li><a href="compositor-wait.html">The compositor's wait costs the frames that arrived</a>: the busiest single thread, and how the per-thread readings are taken.</li>
-    <li><a href="real-inputs.html">Real 1080p inputs, no shortcuts</a> and <a href="source-limits.html">Source limits by mode and frame rate</a>: what the raw sources stand in for and how many a show carries.</li>
-  </ul>
-
-  <h2>Where in the code</h2>
-  <ul class="where">
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/src/nodes/hwaccel/raw_video_file_cuda.cpp"><code>src/nodes/hwaccel/raw_video_file_cuda.cpp</code></a>: the node: the read, the timestamps, end of file.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/src/nodes/hwaccel/CudaPinnedUploader.hpp"><code>src/nodes/hwaccel/CudaPinnedUploader.hpp</code></a>: the page-locked block and the transfer, for any source that can fill it.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/src/nodes/hwaccel/raw_frame_index.hpp"><code>src/nodes/hwaccel/raw_frame_index.hpp</code></a>: where frame n of a file is and when it is shown.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/pyplumber/mixer/inputs.py"><code>pyplumber/mixer/inputs.py</code></a>: <code>build_raw420_input</code>, the three chains.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/deps/ffmpeg/9/0017-avfilter-hwupload-cuda-pinned.patch"><code>deps/ffmpeg/9/0017-avfilter-hwupload-cuda-pinned.patch</code></a>: the <code>pinned</code> filter, still used for v210 and RGBA.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/tests/cuda/smoke_raw_direct_input.py"><code>tests/cuda/smoke_raw_direct_input.py</code></a> and <a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/tests/cuda/benchmark_raw_upload.py"><code>tests/cuda/benchmark_raw_upload.py</code></a>: what the node must keep doing, and the three paths side by side.</li>
-    <li><a href="https://github.com/amagimedia/avplumber/blob/8fa15c92d4915414f3e1fd769a6a9432b11b7f47/doc/NODES.md"><code>doc/NODES.md</code></a>: the node's parameters.</li>
-  </ul>
-  <p class="note">Source links are pinned to the measured commit.</p>
-
-  <footer><a href="index.html">← All cookbook pages</a></footer>
-</main>
-</body>
-</html>
+<h2>Implementation at the reviewed revision</h2><ul class="where"><li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/nodes/hwaccel/raw_video_file_cuda.cpp">src/nodes/hwaccel/raw_video_file_cuda.cpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/nodes/hwaccel/CudaPinnedUploader.hpp">src/nodes/hwaccel/CudaPinnedUploader.hpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/demos/mixer/instance_profiles.py">demos/mixer/instance_profiles.py</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/pyplumber/mixer/config.py">pyplumber/mixer/config.py</a></li>
+</ul>
+<footer><a href="index.html#top-10">← Performance recipes</a> · <a href="source-limits.html">Measured scope and limits</a> · <a href="history.html">Historical evidence</a></footer></main></body></html>

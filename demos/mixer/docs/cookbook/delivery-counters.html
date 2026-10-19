@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="A smooth output clock can conceal stale source pictures. Count capture identities on air and confirm the encoded image."><title>Measure what actually reaches Program · Mixer cookbook</title><link rel="stylesheet" href="cookbook.css"></head>
+<body><main><p class="site"><a href="index.html">AVPlumber · Mixer cookbook</a></p>
+<h1>Measure what actually reaches Program</h1><p class="lede">A smooth output clock can conceal stale source pictures. Count capture identities on air and confirm the encoded image.</p>
+<p class="note review">Reviewed 15 October 2026 against <a href="https://github.com/amagimedia/avplumber/tree/e72ff8b4ce3374918d85658d73e25cd6a5d36d39"><code>e72ff8b4</code></a>. These pages describe that code and named workload settings; they do not assert what every deployment runs.</p>
+
+<h2>Count delivery, not prewarm traffic</h2><p>Preserve capture identity through Chromium delivery, the private CUDA copy, pacing, compositing and source selection. The <code>repeats</code> counter measures reuse beyond the source’s native frame period; <code>dropped</code> counts capture IDs skipped while continuously on air. Aliases count once, and a producer restart establishes a new baseline. Capture-sequence gaps reveal skipped source pictures; sender acknowledgements and import-cache hits do not.</p>
+<p>Warm-up, off-air subscriptions and declared <code>on_change</code> static holds are not continuous-source visual repeats. Intentional static holds appear as <code>static_holds</code>; skipped new captures still count. A freshly selected source needs an observation baseline; counts must not bridge unrelated off-air periods. Compare counter deltas over a known scene sequence, not process-lifetime totals with unknown setup history.</p>
+<p>A faster source has an allowance for intentional rate conversion, so capture IDs cannot distinguish losses within that allowance from expected sampling. At matching capture and output rates there is no such allowance. For diagnosis, set <code>mixer_delivery</code>’s <code>trace_source</code> to a source ID and read <code>trace</code>: the last 256 Program timestamps and capture IDs, without retaining pixels.</p>
+<h2>Observe after output pacing</h2><p>Output <code>force_fps</code> can maintain a steady stream by reusing an old frame. Program delivery observation belongs after this step. Compositor deadline misses, browser transport failures, dropped queue entries, source capture gaps and output repeats describe different failures; do not combine them into a single unexplained “discard” total.</p>
+<p>Ordinary compositor <code>status</code> returns aggregate counters; the per-input diagnostic array is exposed separately as <code>per_input</code>. This avoids serializing one record per input for every bus on every UI poll. Source-quality counters come from <code>node.object.get mixer_delivery per_source</code> on keyed Program, before encoding; they do not measure remote playback or network loss.</p>
+<h2>Use a short, reproducible acceptance test</h2><ol><li>Warm every fixed browser allocation and establish stable imports.</li>
+<li>Enable the intended moving pages and keys at the actual canvas rate.</li>
+<li>Measure deltas through one-second fades and cuts between the heaviest supported scenes, spaced six seconds apart.</li>
+<li>Record the existing encoded Program output. Check RTP cadence and decoded moving regions alongside source counters.</li>
+<li>Report repeats/skips, misses and imports separately, with rate, process grouping, scene layers and encoder presets.</li>
+</ol>
+<p>Regular RTP timestamps alone do not prove changing pixels. A moving ticker alone does not prove every tile advanced. Source lineage also has limits during transitions that show the same source more than once. Use both counters and appropriate image regions, and label short smoke results as such.</p>
+
+<h2>Implementation at the reviewed revision</h2><ul class="where"><li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/nodes/mixer_delivery.cpp">src/nodes/mixer_delivery.cpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/nodes/source_switcher.cpp">src/nodes/source_switcher.cpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/pyplumber/mixer/application.py">pyplumber/mixer/application.py</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/deps/dma-browser/README.md">deps/dma-browser/README.md</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/tools/mixer-recording/README.md">tools/mixer-recording/README.md</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/e72ff8b4ce3374918d85658d73e25cd6a5d36d39/src/nodes/mixer_compositor.cpp">src/nodes/mixer_compositor.cpp</a></li>
+<li><a href="https://github.com/amagimedia/avplumber/blob/6d644b6ca61d8e475fec465df645064948caa9f8/doc/mixer.md">doc/mixer.md</a></li>
+</ul>
+<footer><a href="index.html#top-10">← Performance recipes</a> · <a href="source-limits.html">Measured scope and limits</a> · <a href="history.html">Historical evidence</a></footer></main></body></html>
