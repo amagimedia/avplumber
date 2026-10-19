@@ -829,10 +829,14 @@ def test_a_new_on_air_moment_starts_the_window_again_with_everything_the_mixer_c
     now[0], totals = 205.0, {"missed_deadlines": 8, "output_drops": 1, "on_air": 1150.0}
     recent.sample()
     assert recent.values == {"window_s": 600, "covered_s": 5, "on_air": 1150.0, "missed_deadlines": 8, "output_drops": 1}
-    # An older mixer without the report: the window goes on as before, without the moment.
+    # A sample without the moment (mixer.startup did not answer, or an older mixer) is not a new
+    # one, and the same moment after it is not either: the window goes on.
     now[0], totals = 210.0, {"missed_deadlines": 9, "output_drops": 1}
     recent.sample()
-    assert recent.values == {"window_s": 600, "covered_s": 0, "missed_deadlines": 9, "output_drops": 1}
+    assert recent.values == {"window_s": 600, "covered_s": 10, "missed_deadlines": 9, "output_drops": 1}
+    now[0], totals = 215.0, {"missed_deadlines": 10, "output_drops": 1, "on_air": 1150.0}
+    recent.sample()
+    assert recent.values == {"window_s": 600, "covered_s": 15, "on_air": 1150.0, "missed_deadlines": 10, "output_drops": 1}
 
 
 def test_browser_drops_count_from_the_mixers_on_air_moment_not_from_the_pages_load():

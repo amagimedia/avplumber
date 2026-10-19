@@ -369,11 +369,14 @@ class RecentCounts:
         on_air = totals.pop(ON_AIR, None)
         now = self.clock()
         last = self._samples[-1][1] if self._samples else None
-        if last is not None and (on_air != self.on_air or any(totals.get(key, count) < count for key, count in last.items())):
+        # A sample without the moment (the report did not answer) is not a new one.
+        if last is not None and ((on_air is not None and on_air != self.on_air)
+                                 or any(totals.get(key, count) < count for key, count in last.items())):
             self._samples = [(now, dict.fromkeys(totals, 0))]
         elif last is not None and set(totals) != set(last):
             self._samples = []
-        self.on_air = on_air
+        if on_air is not None:
+            self.on_air = on_air
         self._samples.append((now, dict(totals)))
         while self._samples[0][0] < now - self.window_s:
             self._samples.pop(0)
