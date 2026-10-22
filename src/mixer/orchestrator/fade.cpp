@@ -27,6 +27,25 @@ void MixerOrchestrator::beginCrossfade(const std::string& scene_name, double dur
     }
 }
 
+void MixerOrchestrator::emitTransitionProgress(const char* kind, double t, int64_t pts_ns) {
+    if (state_->audio_router_node_name.empty()) return;
+    const auto pgm_it = state_->scenes.find(state_->pgm_scene_name);
+    if (pgm_it == state_->scenes.end()) return;
+    const std::string& incoming_name = state_->audio_fade_incoming_scene.empty()
+        ? state_->pvw_slot_scene : state_->audio_fade_incoming_scene;
+    const auto in_it = state_->scenes.find(incoming_name);
+    if (in_it == state_->scenes.end()) return;
+    const SceneDefinition& outgoing = pgm_it->second;
+    const SceneDefinition& incoming = in_it->second;
+    Parameters from = Parameters::array();
+    Parameters to = Parameters::array();
+    for (const auto& kv : outgoing.sources) from.push_back(kv.first);
+    for (const auto& kv : incoming.sources) to.push_back(kv.first);
+    setNodeObject(state_->audio_router_node_name, "transition_progress",
+                  {{"output", "program"}, {"kind", kind}, {"from", from}, {"to", to},
+                   {"t", t}, {"pts", pts_ns}});
+}
+
 void MixerOrchestrator::lever(double position, double duration_sec, FadeCurve curve,
                               std::optional<std::array<uint8_t, 3>> dip, const std::string& wipe_file,
                               std::optional<double> span_ms) {
@@ -249,6 +268,9 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
         const auto blend_pts = pts(blend);
         if (blend_pts > last_ns && blend_pts >= state_->take_start_ns) {
             state_->take_progress = state_->clock()->progress(blend_pts);
+            // Audio follows the mix at the same progress, the lever's included: an audio router has no
+            // per-frame alpha of its own, so it is told once per program frame of the mix.
+            emitTransitionProgress(state_->takeKind(), state_->take_progress, blend_pts);
             // A paused mix holds, a manual one until the lever's ramp to one of its ends reaches
             // this frame; a replaced preset completes only once its picture is there. This frame
             // goes out either way: at a cancel it is Program alone, at the end entirely the
