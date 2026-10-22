@@ -137,40 +137,52 @@ public:
         const av::Timestamp pts = in->pts();
         const std::vector<const av::VideoFrame *> sources{in};
         std::vector<std::pair<Output *, av::VideoFrame>> drawn;
+        // The device's stream is usually NULL, CUDA's default stream, so whether work was queued
+        // is tracked apart from the handle. Skipping the wait on a NULL stream released the input
+        // and handed on outputs while their draws were queued, and the next frame rewrote the
+        // rect table under its pending upload: a kernel read source planes at 0x0 (Xid 31).
         CUstream stream = nullptr;
-        for (auto &out : outputs_) {
-            if (!due(out, pts))
-                continue;
-            const CudaRectDraw::Canvas &cv = out.draw->canvas();
-            if (in_fmt == AV_PIX_FMT_NONE || !avp::mixer::canvasAccepts(in_fmt, cv.sw_fmt))
-                throw Error(std::string(kType) + ": input hw sw_format mismatch output sw_format");
-            if (!cv.allow_hdr_depth_reduction)
-                if (const char *hdr = avp::mixer::hdrOnEightBitCanvas(in->raw()->color_trc, cv.sw_fmt))
-                    throw Error(avp::mixer::hdrOnEightBitError(kType, hdr) +
-                                ", or set allow_hdr_depth_reduction on the output");
-            const auto ops = avp::mixer::resolveDrawOps(sources, out.layers, cv.width, cv.height, cv.sw_fmt);
-            const bool pass = in_fmt == cv.sw_fmt && avp::mixer::copiesWholeFrame(ops, cv.width, cv.height) &&
-                              (in->raw()->format == AV_PIX_FMT_CUDA || out.pass_arrays);
-            if (pass != out.passing) {
-                out.passing = pass;
-                logstream << kType << ": output " << (&out - outputs_.data())
-                          << (pass ? " passes the input frame on" : " draws the input frame");
+        bool queued = false;
+        try {
+            for (auto &out : outputs_) {
+                if (!due(out, pts))
+                    continue;
+                const CudaRectDraw::Canvas &cv = out.draw->canvas();
+                if (in_fmt == AV_PIX_FMT_NONE || !avp::mixer::canvasAccepts(in_fmt, cv.sw_fmt))
+                    throw Error(std::string(kType) + ": input hw sw_format mismatch output sw_format");
+                if (!cv.allow_hdr_depth_reduction)
+                    if (const char *hdr = avp::mixer::hdrOnEightBitCanvas(in->raw()->color_trc, cv.sw_fmt))
+                        throw Error(avp::mixer::hdrOnEightBitError(kType, hdr) +
+                                    ", or set allow_hdr_depth_reduction on the output");
+                const auto ops = avp::mixer::resolveDrawOps(sources, out.layers, cv.width, cv.height, cv.sw_fmt);
+                const bool pass = in_fmt == cv.sw_fmt && avp::mixer::copiesWholeFrame(ops, cv.width, cv.height) &&
+                                  (in->raw()->format == AV_PIX_FMT_CUDA || out.pass_arrays);
+                if (pass != out.passing) {
+                    out.passing = pass;
+                    logstream << kType << ": output " << (&out - outputs_.data())
+                              << (pass ? " passes the input frame on" : " draws the input frame");
+                }
+                if (pass) {
+                    drawn.emplace_back(&out, *in);   // a new reference to the same buffers
+                    continue;
+                }
+                if (!queued) {
+                    out.draw->ensureDevice();
+                    stream = out.draw->stream();
+                }
+                av::VideoFrame outf = avp::mixer::canvasFrame(out.frames.get(), kType);
+                queued = true;   // draw() may queue work and then throw
+                out.draw->draw(stream, ops, outf.raw(), in->raw());
+                avp::mixer::copySourceProps(outf, *in, kType);
+                outf.setPts(pts);
+                drawn.emplace_back(&out, std::move(outf));
             }
-            if (pass) {
-                drawn.emplace_back(&out, *in);   // a new reference to the same buffers
-                continue;
-            }
-            if (!stream) {
-                out.draw->ensureDevice();
-                stream = out.draw->stream();
-            }
-            av::VideoFrame outf = avp::mixer::canvasFrame(out.frames.get(), kType);
-            out.draw->draw(stream, ops, outf.raw(), in->raw());
-            avp::mixer::copySourceProps(outf, *in, kType);
-            outf.setPts(pts);
-            drawn.emplace_back(&out, std::move(outf));
+        } catch (...) {
+            // Queued draws read the input and write outputs that unwinding releases.
+            if (queued) AVP_CHECK_CU(cuStreamSynchronize(stream));
+            throw;
         }
-        if (stream && AVP_CHECK_CU(cuStreamSynchronize(stream)))
+        if (queued && AVP_CHECK_CU(cuStreamSynchronize(stream)))
             throw Error(std::string(kType) + ": cuStreamSynchronize failed");
 
         // Release the input before a put can wait: it may be a decoder surface.
