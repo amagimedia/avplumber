@@ -13,6 +13,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -76,6 +77,11 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     };
 
     std::deque<PendingFrame> pending_;
+    // A held frame waits for the next frames' luma. When the source stalls
+    // (event end, sender restart, network gap) none arrive, so the held frames
+    // leave with the diffs they have after this much silence; the stream stays open.
+    static constexpr int kStallReleaseMs = 100;
+    std::chrono::steady_clock::time_point last_input_ = std::chrono::steady_clock::now();
 
     void releaseBuffers() {
         for (CUdeviceptr p : d_ring_y_) {
@@ -303,7 +309,18 @@ public:
                 throw Error("luma_diff: cannot finish previous frame");
             in_flight_ = av::VideoFrame();
         }
-        av::VideoFrame frm = this->source_->get();
+        av::VideoFrame frm;
+        if (pending_.empty()) {
+            frm = this->source_->get();
+        } else if (!this->source_->tryGet(frm, kStallReleaseMs / 4)) {
+            // An empty frame is the EOF marker, so a timeout must not reach it.
+            if (std::chrono::steady_clock::now() - last_input_
+                    >= std::chrono::milliseconds(kStallReleaseMs)) {
+                drainPendingOnEof();
+            }
+            return;
+        }
+        last_input_ = std::chrono::steady_clock::now();
         if (isEofMarker(frm)) {
             drainPendingOnEof();
             this->sink_->put(frm);
