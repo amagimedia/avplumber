@@ -303,6 +303,14 @@ class MixerConfig:
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
 
+    @property
+    def audio_rendition(self) -> Optional[str]:
+        """The Janus program rendition carrying the program audio when a source has audio: the first
+        dirty one, since the audio has one RTP port (janus.JanusAudioConfig)."""
+        if not any(s.has_audio for s in self.sources):
+            return None
+        return next((r.id for r in self.renditions if r.target == "janus" and r.feed == "dirty"), None)
+
     def settings(self) -> Dict[str, Any]:
         """Canvas format, source counts, operator settings and preview outputs for control surfaces."""
         wipes = [{"id": w.id, "name": w.label, "path": w.path,
@@ -325,7 +333,8 @@ class MixerConfig:
             return {"rendition": r.id, "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
                     "port": port, "mountpoint": janus_mountpoint_id(port), "fps": r.fps}
 
-        programs = [preview(r) for r in self.renditions if r.target == "janus" and r.feed == "dirty"]
+        programs = [{**preview(r), **({"audio": True} if r.id == self.audio_rendition else {})}
+                    for r in self.renditions if r.target == "janus" and r.feed == "dirty"]
         previews = []
         for r in self.renditions if self.dsk_keys else ():
             if r.feed == "clean" and r.target == "janus":

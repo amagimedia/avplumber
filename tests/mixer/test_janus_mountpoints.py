@@ -149,6 +149,19 @@ def test_later_failure_restores_prior_replacements_and_removes_new_mounts(janus)
     assert 5028 not in janus.state["mountpoints"]
 
 
+def test_program_audio_is_added_to_a_video_only_mountpoint(janus):
+    previous = contract()
+    previous["media"] = previous["media"][:1]
+    janus.state["contracts"][1] = previous
+    desired = {**janus_mountpoints._create("sdr", 5004, fmtp=previous["media"][0]["fmtp"], extra=False),
+               **janus_mountpoints._audio()}
+    janus_mountpoints.sync(janus.api, {"sdr": desired}, replace=True)
+    replacement = streaming(janus, "create")[0]
+    assert replacement["media"][0] == {**previous["media"][0], "iface": "127.0.0.1"}
+    assert replacement["media"][1] == {"type": "audio", "mid": "a", "port": 5002, "rtcpport": 5003,
+                                       "iface": "127.0.0.1", "pt": 111, "codec": "opus", "fmtp": "stereo=1"}
+
+
 def test_unchanged_codec_does_not_interrupt_viewers(janus):
     janus.state["contracts"][1] = contract()
     spec = janus_mountpoints._create("sdr", 5004, fmtp=contract()["media"][0]["fmtp"], extra=False)

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Mapping, Optional, Sequence, Tuple
 
+AUDIO_MIXER = "audio_mixer"   # the node a show whose sources have audio mixes it in
+
 
 def wire_audio_mixer(
     avp,
@@ -21,7 +23,7 @@ def wire_audio_mixer(
     *,
     fps: str,
     latency_ms: float,
-    name: str = "audio_mixer",
+    name: str = AUDIO_MIXER,
     outputs: Optional[Mapping[str, str]] = None,
     dst_channel_layout: str = "stereo",
     dst_sample_rate: int = 48_000,

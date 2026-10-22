@@ -2158,9 +2158,8 @@ function refreshViewer(v, options) {
   renderOverlay(v, aux, size, opt.unplayable ? "This browser cannot play H.265" : "");
   // The program plays at once; other outputs wait for the state that names their mountpoints.
   // A viewer hidden for lack of room drops its stream.
-  // The only Janus mountpoint that ever carries audio is "program" (see docker-compose/images/preview);
-  // offering the mute toggle on any other output's viewer would just be a dead button.
-  v.mute.hidden = !isProgramValue(v.out);
+  // Only the program output that carries the show's audio (settings program_outputs) offers the mute.
+  v.mute.hidden = !opt.audio;
   const src = !v.el.hidden && !opt.unplayable && (state || isProgramValue(v.out)) ? opt.url : "";
   if (v.src !== src) {
     v.src = src; v.stats = null; v.frame.src = src || "about:blank"; v.frame.hidden = !src;   // about:blank is white
