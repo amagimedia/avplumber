@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 
 from pyplumber.mixer.color import default_codec, rendition_color, rendition_format
 from pyplumber.mixer.config import parse
-from pyplumber.mixer.janus import janus_mountpoint_id
+from pyplumber.mixer.janus import JanusAudioConfig, janus_mountpoint_id
 
 DESCRIPTION = "avplumber extra aux"
 TIMEOUT_SEC = 3
@@ -23,6 +23,12 @@ def _create(bus_id, port, codec="h264", fmtp="profile-level-id=640028;packetizat
             "audio": False, "video": True, "videoport": port, "videortcpport": port + 1,
             "videoiface": "127.0.0.1", "videopt": 96, "videocodec": codec,
             "videofmtp": fmtp, "permanent": False}
+
+
+def _audio(audio=JanusAudioConfig()):
+    """The Opus stream build_janus_audio_output sends, as create fields (as the program's jcfg template)."""
+    return {"audio": True, "audioport": audio.audio_port, "audiortcpport": audio.audio_port + 1,
+            "audioiface": "127.0.0.1", "audiopt": audio.payload_type, "audiocodec": "opus", "audiofmtp": "stereo=1"}
 
 
 def outputs(show, extra_aux=0):
@@ -43,6 +49,8 @@ def outputs(show, extra_aux=0):
         fmtp = f"profile-id={2 if profile == 'main10' else 1}" if hevc else (
             f"profile-level-id={'640028' if profile == 'high' else '4d0028' if profile == 'main' else '42e028'};packetization-mode=1")
         result[key] = _create(key, rendition.port or 5004, "h265" if hevc else "h264", fmtp, extra=extra)
+        if not aux and rendition.id == cfg.audio_rendition:
+            result[key].update(_audio())
 
     for rendition in cfg.renditions:
         if rendition.target == "janus" and (rendition.feed != "clean" or cfg.dsk_keys):
@@ -91,7 +99,9 @@ def _replacement(info, wanted):
     if len(videos) != 1:
         raise RuntimeError(f"Janus mountpoint {info['id']}: expected one video stream")
     video = videos[0]
-    if video.get("codec") == wanted["videocodec"] and video.get("fmtp", "") == wanted["videofmtp"]:
+    has_audio = any(m.get("type") == "audio" for m in info.get("media", []))
+    if (video.get("codec") == wanted["videocodec"] and video.get("fmtp", "") == wanted["videofmtp"]
+            and (has_audio or not wanted["audio"])):
         return None
     previous = _snapshot(info)
     replacement = json.loads(json.dumps(previous))
@@ -99,6 +109,11 @@ def _replacement(info, wanted):
     if video["port"] != wanted["videoport"]:
         raise RuntimeError(f"Janus mountpoint {info['id']}: RTP port differs from the mixer output")
     video.update(codec=wanted["videocodec"], fmtp=wanted["videofmtp"], pt=wanted["videopt"])
+    if wanted["audio"] and not has_audio:
+        replacement["media"].append({"type": "audio", "mid": "a", "port": wanted["audioport"],
+                                     "rtcpport": wanted["audiortcpport"], "iface": wanted["audioiface"],
+                                     "pt": wanted["audiopt"], "codec": wanted["audiocodec"],
+                                     "fmtp": wanted["audiofmtp"]})
     return previous, replacement
 
 

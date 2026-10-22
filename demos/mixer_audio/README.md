@@ -14,9 +14,8 @@ Protocol: [Audio-follow-video](../../doc/mixer_audio_follow_video.md). Node:
 
 - `prepare_demo` marks `kind: video` MP4/file sources `has_audio: true` and
   regenerates synthetic MP4s (cache `synthetic_v6_*`) with AAC sine tones.
-- Setup injects `--audio-router-node audio_mixer` into mixer CLI args.
-- `build_application` wires `audio_mixer` and `build_janus_audio_output` when
-  that option and Janus output are set.
+- The mixer wires `audio_mixer` for those sources by itself (doc/mixer_audio_follow_video.md).
+- `build_application` adds `build_janus_audio_output` with Janus output.
 
 ## Run
 

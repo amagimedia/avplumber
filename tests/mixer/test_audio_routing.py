@@ -76,13 +76,29 @@ def test_no_cut_before_nodes_exist_then_a_startup_cut_after_start(native_boundar
     assert app.avp.events.index("start output") < app.avp.events.index(cut_events[0])
 
 
-def test_no_audio_router_means_no_startup_cut_and_no_audio_fields(native_boundary):
+def test_sources_with_audio_bring_the_audio_mixer(native_boundary):
+    # Unread, a source's audio edge would fill and hold its demux, and the video with it.
     nodes, builder = native_boundary
     app = build_application(_audio_show(), MixerOptions(), api=_api(nodes, builder))
-    assert not [e for e in app.avp.events if e.startswith("mixer.cut ")]
     init_events = [e for e in app.avp.events if e.startswith("mixer.init ")]
-    assert "audio_router_node" not in init_events[0]
-    assert "audio_bus" not in init_events[0]
+    assert '"audio_router_node": "audio_mixer"' in init_events[0]
+    assert app.avp.nodes["audio_mixer"]["source_ids"] == ["cam"]
+
+
+def test_the_program_audio_is_on_one_janus_output_and_in_its_settings():
+    import pyplumber.mixer.tools.janus_mountpoints as janus_mountpoints
+    show = {"canvas": CONFIG["canvas"], "sources": [{**CONFIG["sources"][0], "has_audio": True}],
+            "scenes": [{"id": "full", "items": CONFIG["scenes"][0]["items"]}],
+            "renditions": [{"id": "sdr", "target": "janus", "port": 5004},
+                           {"id": "hd", "target": "janus", "port": 5006, "codec": "hevc_nvenc"}]}
+    specs = janus_mountpoints.outputs(show)
+    assert (specs["sdr"]["audio"], specs["sdr"]["audioport"], specs["sdr"]["audiocodec"]) == (True, 5002, "opus")
+    assert specs["hd"]["audio"] is False
+    programs = mixer_config.parse(show).settings()["program_outputs"]
+    assert [o.get("audio", False) for o in programs] == [True, False]
+    show["sources"][0]["has_audio"] = False
+    assert not any(spec["audio"] for spec in janus_mountpoints.outputs(show).values())
+    assert not any("audio" in o for o in mixer_config.parse(show).settings()["program_outputs"])
 
 
 def test_video_only_show_is_unaffected(native_boundary):
