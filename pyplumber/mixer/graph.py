@@ -105,6 +105,7 @@ class MixerGraphBuilder:
         latency_ms: Optional[float] = None,
         defer_output: bool = False,
         keyframe_node: Optional[str] = None,
+        audio_router_node: Optional[str] = None,
         cache_wipes_mb: Optional[float] = None,   # None keeps the decode-per-take chain
         working_format: str = "nv12",   # compositor/transition sw_format
         color="sdr",
@@ -123,6 +124,8 @@ class MixerGraphBuilder:
         # Triggered when a transition reaches the output, so receivers do not wait
         # for the next periodic keyframe to see the new scene.
         self.keyframe_node = keyframe_node
+        # Optional audio-router node; unset keeps AFV routing a no-op.
+        self.audio_router_node = audio_router_node
         # When set, wipe clips are held decoded in GPU memory (pyplumber.mixer.clipcache)
         # and a take replays them instead of opening and decoding the file again.
         self.cache_wipes_mb = cache_wipes_mb
@@ -360,6 +363,18 @@ class MixerGraphBuilder:
         cmd = {"mixer": self.name, "scene": scene}
         self.avp.executeCommandsFromString(f"mixer.cut {json.dumps(cmd)}")
         self._current_pgm = scene
+
+    def raise_initial_audio_gains(self) -> None:
+        """Re-run the initial-scene cut so audio_router_node (e.g. AudioMixer)
+        receives transition_ended and raises its PGM gains off their all-zero
+        construction default.
+
+        No-op without an audio_router_node. Call only once the compositor and
+        audio_router_node nodes actually exist (both are created lazily when
+        their owning groups start) — see MixerApplication._start().
+        """
+        if self.audio_router_node:
+            self.cut(self._initial_pgm_scene)
 
     def preview(self, scene: str) -> None:
         """Preload *scene* into the hidden PVW slot without taking it to program."""
@@ -832,6 +847,7 @@ class MixerGraphBuilder:
             "color": self.color.transfer,   # the canvas a dip colour is converted for
             "source_switcher": self._n("out_sel"),
             **({"keyframe_node": self.keyframe_node} if self.keyframe_node else {}),
+            **({"audio_router_node": self.audio_router_node} if self.audio_router_node else {}),
             "initial_pgm_slot": self._initial_pgm_slot,
             "initial_pgm_scene": self._initial_pgm_scene,
             "wipe_otm": self._n("otm_final"),
@@ -888,6 +904,15 @@ class MixerGraphBuilder:
             self._routes_initialized = True
 
         self.avp.executeCommandsFromString("\n".join(lines))
+
+        # Initial PGM video is wired above (slot/compositor active_inputs), not via
+        # applyPostTransitionRouting. An audio_router_node still needs one
+        # transition_ended to raise its PGM gains off their all-zero construction
+        # default, but the compositor and audio-router nodes a cut touches are
+        # created lazily when their groups start — strictly after build() returns.
+        # A cut fired here always races ahead of that and fails with "node has no
+        # runtime controls". raise_initial_audio_gains() does this instead, once
+        # a caller (see MixerApplication._start()) knows those nodes exist.
 
     def _scene_command(self, scene_name: str, scene: MixerScene) -> str:
         scene_def = {"sources": scene.sources}

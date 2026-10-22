@@ -148,6 +148,7 @@ class Source:
     decoded_format: str = ""
     extra_hw_frames: int = 3       # CUarray application headroom, beyond codec/working surfaces
     capture_cadence: str = "continuous"  # browser: "on_change" permits intentional static holds
+    has_audio: bool = False        # demux/decode an audio track alongside video (kind == "video" only)
 
     @property
     def decoder_params(self):
@@ -302,6 +303,14 @@ class MixerConfig:
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
 
+    @property
+    def audio_rendition(self) -> Optional[str]:
+        """The Janus program rendition carrying the program audio when a source has audio: the first
+        dirty one, since the audio has one RTP port (janus.JanusAudioConfig)."""
+        if not any(s.has_audio for s in self.sources):
+            return None
+        return next((r.id for r in self.renditions if r.target == "janus" and r.feed == "dirty"), None)
+
     def settings(self) -> Dict[str, Any]:
         """Canvas format, source counts, operator settings and preview outputs for control surfaces."""
         wipes = [{"id": w.id, "name": w.label, "path": w.path,
@@ -324,7 +333,8 @@ class MixerConfig:
             return {"rendition": r.id, "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
                     "port": port, "mountpoint": janus_mountpoint_id(port), "fps": r.fps}
 
-        programs = [preview(r) for r in self.renditions if r.target == "janus" and r.feed == "dirty"]
+        programs = [{**preview(r), **({"audio": True} if r.id == self.audio_rendition else {})}
+                    for r in self.renditions if r.target == "janus" and r.feed == "dirty"]
         previews = []
         for r in self.renditions if self.dsk_keys else ():
             if r.feed == "clean" and r.target == "janus":
@@ -442,6 +452,9 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     hold_last_frame = s.get("hold_last_frame", True)
     if not isinstance(hold_last_frame, bool) or "hold_last_frame" in s and kind != "browser":
         raise ConfigError(f"{where}: hold_last_frame must be a boolean on a browser source")
+    has_audio = s.get("has_audio", False)
+    if not isinstance(has_audio, bool) or has_audio and kind != "video":
+        raise ConfigError(f"{where}: has_audio must be a boolean, and only applies to kind video")
     try:
         color = declared_color(s)
         if kind != "video" and color is None:
@@ -459,6 +472,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
+                  has_audio=has_audio,
                   decoded_format=decoded_format,
                   transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,
                   **(color.tags if color else {}))

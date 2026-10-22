@@ -59,7 +59,7 @@ function programOptions(s, keys) {
     return outputs.map(o => ({group: "Program", dot: "var(--pgm)", program: true, chrome: 49,
       value: outputs.length === 1 ? "program" : `program:${o.rendition}`,
       label: outputs.length === 1 ? name : `${name} · ${(o.color || "sdr").toUpperCase()} · ${codecName(o.codec)}`,
-      preferred: o === preferred, url: playerUrl(o), unplayable: !playable(o.codec),
+      preferred: o === preferred, url: playerUrl(o), unplayable: !playable(o.codec), audio: !!o.audio,
       meta: [keys && "with keys", (o.color || "sdr").toUpperCase(), codecName(o.codec),
         s.canvas && canvasText({...s.canvas, fps: o.fps || s.canvas.fps})].filter(Boolean).join(" · ")}));
   }

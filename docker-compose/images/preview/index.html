@@ -439,6 +439,13 @@
     // second: only the values the footer shows, parsed from it; "—" becomes null. `search` tells the
     // embedding page which of its URLs posted, since a frame keeps its window when it navigates.
     if (window.parent && window.parent !== window) {
+      // The embedding page's click-blocking overlay (over this cross-origin frame) keeps the
+      // native <video controls> mute button out of reach, so it drives this one instead.
+      // Flipping .muted on an already-autoplaying element needs no fresh user gesture in this
+      // frame -- only starting unmuted playback would.
+      window.addEventListener("message", (e) => {
+        if (e.data?.type === "avp-preview-mute") preview.muted = Boolean(e.data.muted);
+      });
       const shown = id => {
         const value = Number.parseFloat(document.getElementById(id).textContent);
         return Number.isFinite(value) ? value : null;
