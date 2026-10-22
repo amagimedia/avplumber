@@ -938,6 +938,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     if options.audio_router_node and audio_edges:
         from .audio_mixer import wire_audio_mixer
         wire_audio_mixer(avp, api, audio_edges, name=options.audio_router_node,
+                         fps=f"{mixer.fps_num}/{mixer.fps_den}", latency_ms=mixer.latency_ms,
                          outputs={"program": f"{options.audio_router_node}_program"},
                          group=OUTPUT_GROUP)
         program_audio_edge = f"{options.audio_router_node}_program"
