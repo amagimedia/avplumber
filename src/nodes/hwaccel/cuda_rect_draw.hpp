@@ -107,10 +107,13 @@ private:
     bool opacity_warned_ = false;   // an op with opacity < 1 on a kind that cannot blend, logged once
     bool filter_warned_ = false;    // an op naming a filter on a kind drawn bilinear, logged once
     uint64_t bad_sources_ = 0;      // layers left out because the driver did not know a plane (sourceProblem)
-    // Rect table: pinned host staging + device copy, one entry per op, reused every frame
-    // (the node synchronizes the stream after each frame).
+    // Rect table: pinned host staging + device copy, one entry per op, reused every frame. The
+    // upload reads the pinned staging when the stream reaches it, not when it is queued, so the
+    // staging is not written again until the GPU is done with the last draw (table_done_).
     AvpRectLayer *table_host_ = nullptr;
     CUdeviceptr table_device_ = 0;
+    CUevent table_done_ = nullptr;   // recorded after the last launch that reads the table
+    bool table_in_use_ = false;      // table_done_ is recorded and not yet waited for
     std::unique_ptr<RectArrayTextures> array_textures_;
     CUevent producer_ready_ = nullptr;
     std::vector<CUstream> waited_streams_;
@@ -121,6 +124,8 @@ private:
     };
     std::vector<RectViewport> over_views_;   // drawOver's last rectangles, logged when they change
 
+    void waitForTable();
+    void tableQueued(CUstream stream);
     int fillTable(CUstream stream, const std::vector<DrawOp> &ops, const AVFrame *canvas, TableKinds &kinds);
     void launch(CUstream stream, const TableKinds &kinds, CUdeviceptr table, int n, AVFrame *canvas,
                 const AVFrame *color_src, const RectViewport &view);
