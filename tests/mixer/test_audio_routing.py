@@ -22,13 +22,10 @@ class _Engine(NativeEngine):
 
 def _api(nodes, builder):
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
+    # Every node class the graph tests build from (test_graph.fake_api), from the native boundary.
+    engine = {"AVPlumber", "MixerGraphBuilder", "RtcpFeedbackListener"}
     return SimpleNamespace(**{
-        name: getattr(nodes, name) for name in (
-            "AssumeVideoFormat", "AudioMixer", "Bsf", "DecAudio", "DecVideo", "Demux", "EncAudio",
-            "EncVideo", "FilterAudio", "FilterVideo", "ForceFPS", "ForceKeyFrame", "InputRec", "Mux",
-            "Output", "PreheatVideoRouter", "Realtime", "ResampleAudio",
-            "ResampleAudioForwardChannels", "Split",
-        )
+        name: getattr(nodes, name) for name in vars(fake_api()) if name not in engine
     }, AVPlumber=_Engine, MixerGraphBuilder=builder, RtcpFeedbackListener=RtcpFeedbackListener)
 
 
