@@ -10,6 +10,7 @@ extern "C" {
 }
 
 #include <cmath>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -256,6 +257,55 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     }
 }
 
+// Asks the driver about every plane the kernel will read: a texture handle must name a live
+// texture object, a device pointer must lie in a live allocation that reaches the plane's last
+// row. The kernel would otherwise read through it and fault the whole CUDA context. Empty when
+// all is well, else why not.
+std::string CudaRectDraw::sourceProblem(const DrawOp &op, const AvpRectLayer &entry) const {
+    if (!cuMemGetAddressRange || !cuTexObjectGetResourceDesc) return {};
+    const AVFrame *src = op.src->raw();
+    const bool packed = entry.kind >= AVP_RECT_KIND_RGB;
+    const bool textures = entry.kind == AVP_RECT_KIND_RGB_TEX || entry.kind == AVP_RECT_KIND_RGBA_TEX || entry.yuv_texture;
+    const int planes = packed ? 1 : av_pix_fmt_count_planes(canvas_.sw_fmt);
+    const AVPixFmtDescriptor *sd = av_pix_fmt_desc_get(frameSwFormat(*op.src));
+    std::ostringstream why;
+    for (int p = 0; p < planes; ++p) {
+        const unsigned long long handle = entry.src[p];
+        if (!handle) {
+            why << "plane " << p << " is null";
+            return why.str();
+        }
+        if (textures) {
+            CUDA_RESOURCE_DESC desc{};
+            if (cuTexObjectGetResourceDesc(&desc, (CUtexObject)handle) != CUDA_SUCCESS) {
+                why << "texture " << p << " (" << handle << ") is not a live texture object";
+                return why.str();
+            }
+            continue;
+        }
+        if (isTextureDataTag(handle)) {
+            why << "a texture-backed frame lost its descriptor (opaque_ref), data[0]=0x" << std::hex << handle;
+            return why.str();
+        }
+        CUdeviceptr base = 0;
+        size_t size = 0;
+        if (cuMemGetAddressRange(&base, &size, (CUdeviceptr)handle) != CUDA_SUCCESS) {
+            why << "plane " << p << " (0x" << std::hex << handle << ") is not in a live device allocation";
+            return why.str();
+        }
+        const int shift = p && sd ? sd->log2_chroma_h : 0;
+        const int rows = (src->height + (1 << shift) - 1) >> shift;
+        const unsigned long long last_row =
+            handle + (unsigned long long)std::max(rows - 1, 0) * (unsigned long long)std::abs(src->linesize[p]);
+        if (last_row >= (unsigned long long)base + size) {
+            why << "plane " << p << " row " << rows - 1 << " lies past its allocation (0x" << std::hex << base
+                << std::dec << " + " << size << " bytes, pitch " << src->linesize[p] << ")";
+            return why.str();
+        }
+    }
+    return {};
+}
+
 void CudaRectDraw::waitForProducer(const AVFrame *src, CUstream stream) {
     if (!src->hw_frames_ctx) return;
     const auto *frames = reinterpret_cast<const AVHWFramesContext *>(src->hw_frames_ctx->data);
@@ -309,6 +359,15 @@ int CudaRectDraw::fillTable(CUstream stream, const std::vector<DrawOp> &ops, con
         AvpRectLayer &entry = table_host_[n];
         waitForProducer(op.src->raw(), stream);
         fillTableEntry(op, canvas, entry);
+        const std::string problem = sourceProblem(op, entry);
+        if (!problem.empty()) {
+            if (bad_sources_++ % 100 == 0)
+                logstream << "cuda_rect_overlay: layer " << (&op - ops.data()) << " (input " << op.layer.input
+                          << ", kind " << entry.kind << ", pts " << op.src->pts() << ", format "
+                          << op.src->raw()->format << "): " << problem << "; layer not drawn ("
+                          << bad_sources_ << " so far)";
+            continue;
+        }
         kinds.array = kinds.array || entry.yuv_texture;
         kinds.rgb = kinds.rgb || entry.kind >= AVP_RECT_KIND_RGB;
         const bool fades = entry.kind >= AVP_RECT_KIND_RGB && entry.mul < 1.f;   // only a blended RGBA mul is below 1
@@ -356,6 +415,8 @@ void CudaRectDraw::launch(CUstream stream, const TableKinds &kinds, CUdeviceptr 
     int transfer = kernelTransfer(canvas_.transfer);
     float sdr_white = canvas_.sdr_white, hdr_peak = canvas_.hdr_peak;
     int pitch0 = canvas->linesize[0], pitch1 = planes > 1 ? canvas->linesize[1] : 0;
+    if (!canvas->data[0] || (planes > 1 && !canvas->data[1]) || (n > 0 && !table))
+        throw Error("cuda_rect_overlay: null canvas plane or rect table at launch");
     CUdeviceptr plane0 = (CUdeviceptr)canvas->data[0] + (CUdeviceptr)view.y * pitch0 +
                          (CUdeviceptr)view.x * plane0Lanes(sw_fmt) * dst_sb;
     CUdeviceptr plane1 = planes > 1 ? (CUdeviceptr)canvas->data[1] + (CUdeviceptr)(view.y >> sub_y) * pitch1 +
@@ -434,7 +495,10 @@ bool CudaRectDraw::drawOver(CUstream stream, const std::vector<DrawOp> &ops, AVF
 
     ensureKernels();
     TableKinds kinds;
+    const uint64_t bad_before = bad_sources_;
     const int n = fillTable(stream, ops, canvas, kinds);   // also orders this stream after every producer
+    // A layer left out may be the base this path copies from: draw the whole canvas instead.
+    if (bad_sources_ != bad_before) return false;
     const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(sw_fmt);
     const int sub_x = cd->log2_chroma_w, sub_y = cd->log2_chroma_h;
     for (int p = 0; p < planes; ++p) {
