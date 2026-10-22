@@ -426,6 +426,8 @@
   .vstats > span { position: relative; outline: none; cursor: default; }
   .vstats > span:hover > .tip, .vstats > span:focus-visible > .tip { display: block; top: auto; bottom: calc(100% + 8px); left: 0; right: auto; }
   .vstats > span:hover::after { content: ""; position: absolute; left: 0; right: 0; bottom: 100%; height: 8px; }
+  .viewer .mute svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .viewer .mute[aria-pressed="true"] { color: var(--accent); }   /* program audio muted in this viewer */
   .screen:focus-visible { outline: none; }
   .screen:focus-visible:not(:fullscreen)::after { outline: 2px solid var(--muted); outline-offset: -2px; border-radius: inherit; }
   .ovl .box { position: absolute; box-sizing: border-box; border: 2px solid transparent; }
@@ -2056,7 +2058,7 @@ const optionOf = (v, options) => options.find((o) => o.value === v.out) || optio
 const redraw = () => (state ? render() : layoutWall());
 
 function addViewer(out) {
-  const v = {out, uid: ++viewerSerial, el: el("section", "panel viewer"), head: el("header"), src: null};
+  const v = {out, uid: ++viewerSerial, el: el("section", "panel viewer"), head: el("header"), src: null, muted: true};
   v.tally = el("span", "tally");
   v.dd = dropdown("outputs", (value) => { v.out = value; saveViewers(); redraw(); });
   v.dd.root.classList.add("out");
@@ -2081,10 +2083,27 @@ function addViewer(out) {
   v.open.rel = "noopener";
   v.open.title = "Open in the player: status, errors, all stats";
   v.open.setAttribute("aria-label", "Open in the player");
+  // The screen's click-blocking layer keeps the player's own <video controls> (mute included) out of
+  // reach on purpose (see .screen::after); this button reaches the muted flag anyway, over postMessage.
+  v.mute = el("button", "mini mute");
+  v.mute.type = "button";
+  const setMuted = (muted) => {
+    v.muted = muted;
+    v.mute.setAttribute("aria-pressed", String(muted));
+    v.mute.title = muted ? "Program audio is muted here — click to unmute" : "Click to mute";
+    v.mute.setAttribute("aria-label", muted ? "Unmute program audio" : "Mute program audio");
+    v.mute.innerHTML = muted
+      ? '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 4.5h2L6 2v8L3 7.5H1z"/><path d="M8 4l3 4M11 4l-3 4"/></svg>'
+      : '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 4.5h2L6 2v8L3 7.5H1z"/><path d="M8 3.3c1.4 1.1 1.4 4.3 0 5.4M9.6 1.8c2.6 2 2.6 6.4 0 8.4"/></svg>';
+    if (v.src) v.frame.contentWindow?.postMessage({type: "avp-preview-mute", muted}, "*");
+  };
+  v.mute.onclick = () => setMuted(!v.muted);
+  v.setMuted = setMuted;
+  setMuted(v.muted);
   v.close = el("button", "mini close", "×");
   v.close.type = "button";
   v.close.onclick = () => { viewersTouched = true; closedOut = null; viewers.splice(viewers.indexOf(v), 1); v.el.remove(); saveViewers(); redraw(); };
-  v.head.append(v.tally, v.dd.root, el("span", "edit-mark", "· slots"), v.layouts.root, v.pager, el("span", "sp"), v.open, v.close);
+  v.head.append(v.tally, v.dd.root, el("span", "edit-mark", "· slots"), v.layouts.root, v.pager, el("span", "sp"), v.mute, v.open, v.close);
   v.screen = el("div", "screen");
   v.frame = el("iframe");
   v.frame.setAttribute("allow", "autoplay; fullscreen; picture-in-picture");
@@ -2139,10 +2158,16 @@ function refreshViewer(v, options) {
   renderOverlay(v, aux, size, opt.unplayable ? "This browser cannot play H.265" : "");
   // The program plays at once; other outputs wait for the state that names their mountpoints.
   // A viewer hidden for lack of room drops its stream.
+  // The only Janus mountpoint that ever carries audio is "program" (see docker-compose/images/preview);
+  // offering the mute toggle on any other output's viewer would just be a dead button.
+  v.mute.hidden = !isProgramValue(v.out);
   const src = !v.el.hidden && !opt.unplayable && (state || isProgramValue(v.out)) ? opt.url : "";
   if (v.src !== src) {
     v.src = src; v.stats = null; v.frame.src = src || "about:blank"; v.frame.hidden = !src;   // about:blank is white
     renderStream(v);   // a new source drops the previous one's stats
+    // A new src reloads the iframe, resetting the player's <video> to its HTML-default muted="true";
+    // re-send the last choice once that fresh document is up.
+    if (src) v.frame.addEventListener("load", () => v.setMuted(v.muted), {once: true});
   }
   v.open.href = opt.url;
   v.open.hidden = !src;
