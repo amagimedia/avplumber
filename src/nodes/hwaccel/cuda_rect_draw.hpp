@@ -16,6 +16,7 @@ extern "C" {
 }
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace avp::mixer {
@@ -105,6 +106,7 @@ private:
     CUfunction composite_filter_kernel_ = nullptr;            // any layer kind, fade, storage and filter
     bool opacity_warned_ = false;   // an op with opacity < 1 on a kind that cannot blend, logged once
     bool filter_warned_ = false;    // an op naming a filter on a kind drawn bilinear, logged once
+    uint64_t bad_sources_ = 0;      // layers left out because the driver did not know a plane (sourceProblem)
     // Rect table: pinned host staging + device copy, one entry per op, reused every frame
     // (the node synchronizes the stream after each frame).
     AvpRectLayer *table_host_ = nullptr;
@@ -124,6 +126,7 @@ private:
                 const AVFrame *color_src, const RectViewport &view);
     bool baseCoversCanvas(const DrawOp &op, const AVFrame *base) const;
     void fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out);
+    std::string sourceProblem(const DrawOp &op, const AvpRectLayer &entry) const;
     void waitForProducer(const AVFrame *src, CUstream stream);
     void validateSourceColor(const av::VideoFrame &src, bool packed_rgb, const AVFrame *canvas) const;
 };

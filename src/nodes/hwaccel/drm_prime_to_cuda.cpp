@@ -322,8 +322,8 @@ protected:
         d->tex = e->tex;
         d->width = width;
         d->height = height;
-        // A texture handle, never dereferenced as memory.
-        f->data[0] = reinterpret_cast<uint8_t *>(static_cast<uintptr_t>(e->tex));   // NOLINT(performance-no-int-to-ptr)
+        // A tagged texture handle, never dereferenced as memory (cuda_rect_texture.h).
+        f->data[0] = reinterpret_cast<uint8_t *>(static_cast<uintptr_t>(avp::mixer::textureDataTag(e->tex)));   // NOLINT(performance-no-int-to-ptr)
         f->linesize[0] = width * 4;
         return true;
     }
