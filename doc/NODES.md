@@ -413,10 +413,21 @@ Multi-input AFV consumer for the mixer’s `transition_ended` /
 floating-point output is not clipped; consumers converting it to an integer
 sample format should apply their required limiter first.
 
+Clocked by the program's video ticks, never by its inputs: each block of
+`frame_samples` leaves at the deadline of the video tick holding its last
+sample (tick time + `latency_ms`), with that tick's picture, stamped with its
+media time. Inputs are placed by their `realtime` `set_pts` timestamps; a source
+that is late or gone is silence in the block (faded out and back in over 3 ms),
+so it never holds the other sources or the buses back. The `status` object
+counts blocks, skipped blocks, output drops and, per source, `dropped` (late),
+`missing` (filled with silence) and `jumps` (timestamp discontinuities).
+
 -   `src` (list of edges) and `source_ids` (same length; logical mixer source ids)
 -   `outputs` (object: bus id → output edge), e.g. `{"program": "audio_mixer_program"}`
 -   `dst_channel_layout` (string, default `stereo`), `dst_sample_rate` (default 48000),
     `frame_samples` (default 960; 20 ms at 48 kHz for Opus)
+-   `fps` (string, e.g. `30000/1001`) and `latency_ms`: the program compositor's;
+    `latency_ms` must exceed one video frame
 
 Wire via `pyplumber.mixer.audio_mixer.wire_audio_mixer` /
 `MixerOptions.audio_router_node`.
