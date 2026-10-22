@@ -6,8 +6,8 @@ import threading
 import pytest
 
 from pyplumber.mixer.aux import AuxBus, AuxBuses
-from pyplumber.mixer.aux_layout import (base_composition, check_assignments, grid_cells, layout_cells, page_grid,
-                                        parse_layout, pvw_layouts)
+from pyplumber.mixer.aux_layout import (PROGRAM_SENTINEL, base_composition, base_sources, check_assignments,
+                                        grid_cells, layout_cells, page_grid, parse_layout, pvw_layouts, pvw_sources)
 from pyplumber.mixer.config import (aux_fps, default_latency_ms, default_pgm_delay_frames, parse_aux_buses)
 from pyplumber.mixer.config import MAX_SOURCES, ConfigError, Item, MixerConfig, Rect, Scene, Source
 
@@ -345,8 +345,25 @@ def test_follower_gets_preview_layers_and_base_of_the_current_layout(cfg):
     scenes = ["repeat"] + [None] * 7
     bus.assign({"expected_revision": bus.revision, "scenes": scenes})
     layout, = avp.layouts
-    assert layout == {"revision": bus.revision, "pvw": pvw_layouts(cfg, grid_cells(cfg)),
-                      "base": base_composition(cfg, grid_cells(cfg), scenes)}
+    cells = grid_cells(cfg)
+    assert layout == {"revision": bus.revision, "output": "multiview",
+                      "pvw": pvw_layouts(cfg, cells),
+                      "base": base_composition(cfg, cells, scenes),
+                      "base_sources": base_sources(cfg, cells, scenes),
+                      "pvw_sources": pvw_sources(cfg, cells)}
+
+
+def test_afv_source_ids_use_program_sentinel_and_scene_sources(cfg):
+    cells = CELLS
+    scenes = ["full", "repeat", "full"]
+    assert base_sources(cfg, cells, scenes) == ["s0", "s63", PROGRAM_SENTINEL]
+    assert pvw_sources(cfg, cells) == {}   # no pvw cell
+    grid = grid_cells(cfg)
+    assert PROGRAM_SENTINEL in base_sources(cfg, grid, ["full"] + [None] * 7)
+    assert "s0" in base_sources(cfg, grid, ["full"] + [None] * 7)
+    assert set(pvw_sources(cfg, grid)) == {"full", "repeat", "grid64"}
+    assert pvw_sources(cfg, grid)["full"] == ["s0"]
+    assert pvw_sources(cfg, grid)["repeat"] == ["s0"]  # aliases collapse to one id
 
 
 def test_runtime_layout_switch_keeps_assignments_by_slot(cfg):

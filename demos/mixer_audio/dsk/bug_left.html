@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>DSK corner bug</title>
+<!-- Station bug for the top-left corner: a mark with a turning ring. Square window. -->
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  body { display: grid; place-items: center; font-family: system-ui, sans-serif; }
+  #ring { position: absolute; inset: 6%; border-radius: 50%; will-change: transform;
+          background: conic-gradient(#ff5a1f 0 30%, #ffffff40 30% 100%); animation: turn 4s linear infinite;
+          -webkit-mask: radial-gradient(circle, transparent 60%, black 61%); mask: radial-gradient(circle, transparent 60%, black 61%); }
+  #mark { position: relative; width: 62%; height: 62%; border-radius: 50%; background: #101c2bcc;
+          display: grid; place-items: center; color: white; font-weight: 800; font-size: 26vh; }
+  @keyframes turn { to { transform: rotate(1turn); } }
+</style>
+<div id="ring"></div>
+<div id="mark">AVP</div>
+</html>

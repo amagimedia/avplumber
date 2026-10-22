@@ -5,9 +5,14 @@
 ``input_rec`` can route its video stream to the decoder's edge itself (``demux=False``); the
 ``demux`` node stays for callers that address it by name.
 
+With ``has_audio``:
+
+``demux -> dec_audio -> resample -> realtime(set_pts, same RealTimeTeam as video)``
+
 ``realtime(set_pts=True)`` rebases every source onto the host monotonic clock,
 which is the time base the native mixer schedules cuts in. The mixer keeps
 native input cadence; other callers retain rate normalization by default.
+Per-source audio and video share one team so lip-sync keeps a single offset.
 """
 
 from __future__ import annotations
@@ -46,8 +51,9 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
                 pause_params: Optional[dict] = None,
                 auto_restart: Optional[str] = "group", event_loop: Optional[str] = None,
                 native_rate: bool = False, frame_metadata: Optional[Sequence[str]] = None,
-                demux: bool = True, decoded_ahead: Optional[int] = None) -> str:
-    """Add the chain for one source and return its paced output edge.
+                demux: bool = True, decoded_ahead: Optional[int] = None, has_audio: bool = False,
+                audio_sample_rate: int = 48000) -> tuple[str, Optional[str]]:
+    """Add the chain for one source; return its (paced video edge, audio edge or None).
 
     ``native_rate`` preserves source cadence for a clocked compositor; otherwise
     the shared playlist chain still normalizes to ``fps/fps_den``.
@@ -71,17 +77,47 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     ``decoded_ahead`` bounds the decoded frames waiting in front of the pacing chain (the
     engine's default queue size when omitted); with a hardware decoder each is a surface of
     device memory held for slack alone.
+
+    ``has_audio`` additionally demuxes/decodes/resamples the source's audio
+    track to ``audio_sample_rate``/fltp, then paces it through
+    ``realtime(set_pts=True)`` on the same ``RealTimeTeam`` as this source's
+    video (``input_{tag}_av_sync`` when ``sync_team`` is omitted). Video is
+    ``master=true``, audio ``master=false``, with identical ``tick_period`` /
+    ``event_loop`` / ``realtime_params`` so lip-sync shares one wallclock
+    offset. The source's own channel layout (mono, stereo, 5.1, ...) is
+    preserved rather than forced to a fixed one. Returns ``None`` for the
+    audio edge when ``has_audio`` is false.
     """
     edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
     if decoded_ahead is not None:
         # addNode creates the edge, so the plan must come first.
         avp.edges.planCapacity(edge("decoded"), decoded_ahead)
     restart = {} if auto_restart is None else {"auto_restart": auto_restart}
+    # Per-source A/V lip-sync: audio and video realtime must share one team and
+    # the same timebase (RealTimeTeam::checkTimeBase). Caller-supplied sync_team
+    # (replay seek wiring) is reused; otherwise invent one when audio is present.
+    if has_audio and sync_team is None:
+        sync_team = f"input_{tag}_av_sync"
     sync = {} if sync_team is None else {"sync_team": sync_team}
     _add_packet_input(avp, api, tag, {
         "url": url, "loop": loop, "loop_continuous_ts": loop and continuous_loop,
         **_frame_metadata(frame_metadata), **(input_params or {}),
-    }, group=group, routing={"?v:0": edge("video_packets")}, demux=demux, restart=restart)
+    }, group=group, routing={"?v:0": edge("video_packets"), **({"?a:0": edge("audio_packets")} if has_audio else {})},
+       demux=demux, restart=restart)
+    audio_edge = None
+    if has_audio:
+        avp.addNode(api.DecAudio({
+            "name": f"decode_audio_{tag}", "src": edge("audio_packets"), "dst": edge("audio_decoded"),
+            "group": group, **restart,
+        }))
+        avp.addNode(api.ResampleAudioForwardChannels({
+            "name": f"resample_audio_{tag}", "src": edge("audio_decoded"), "dst": edge("audio_resampled"),
+            "dst_sample_rate": audio_sample_rate,
+            "dst_sample_format": "fltp", "compensation": 0, "group": group, **restart,
+        }))
+        audio_edge = _pace_audio(
+            avp, api, tag, edge("audio_resampled"), group=group, sync_team=sync_team,
+            realtime_params=realtime_params, event_loop=event_loop, native_rate=native_rate)
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": edge("video_packets"), "dst": edge("decoded"),
         # The GPU decodes: a libavcodec frame thread only reserves one more decode surface, 16 of them
@@ -111,8 +147,37 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
             "team": pause_team, "group": group, **sync, **(pause_params or {}),
         }))
         realtime_src = edge("paused")
-    return _pace(avp, api, tag, realtime_src, fps=fps, fps_den=fps_den, group=group,
-                 sync_team=sync_team, realtime_params=realtime_params, event_loop=event_loop, native_rate=native_rate)
+    video_edge = _pace(avp, api, tag, realtime_src, fps=fps, fps_den=fps_den, group=group,
+                       sync_team=sync_team, realtime_params=realtime_params, event_loop=event_loop,
+                       native_rate=native_rate, master=True if has_audio else None)
+    return video_edge, audio_edge
+
+
+def _realtime_timing(native_rate: bool) -> dict:
+    """Shared realtime timing so A/V teammates pass RealTimeTeam::checkTimeBase."""
+    if not native_rate:
+        return {}
+    # realtime follows the wallclock; time_base is only the unit it counts and stamps in.
+    # 1/120000 represents 1001/24000, 1001/30000 and 1001/60000 exactly. Millisecond PTS
+    # can cross the compositor's nearest-tick boundary and cause repeat/drop pairs.
+    # Its built-in thresholds are in milliseconds, so preserve their durations
+    # explicitly when choosing the finer time base.
+    return {"time_base": "1/120000", "negative_time_tolerance": .25,
+            "discontinuity_threshold": 1.0}
+
+
+def _pace_audio(avp, api, tag: str, src: str, *, group: str,
+                sync_team: Optional[str] = None, realtime_params: Optional[dict] = None,
+                event_loop: Optional[str] = None, native_rate: bool = False) -> str:
+    """Pace one audio edge onto the same RealTimeTeam / timebase as the video path."""
+    loop = {} if event_loop is None else {"event_loop": event_loop}
+    avp.addNode(api.Realtime({
+        "name": f"realtime_audio_{tag}", "src": src, "dst": f"input_{tag}_audio_realtime",
+        "set_pts": True, "master": False, "group": group, **loop,
+        **({} if sync_team is None else {"team": sync_team}),
+        **_realtime_timing(native_rate), **(realtime_params or {}),
+    }))
+    return f"input_{tag}_audio_realtime"
 
 
 def _frame_metadata(keys: Optional[Sequence[str]]) -> dict:
@@ -122,23 +187,17 @@ def _frame_metadata(keys: Optional[Sequence[str]]) -> dict:
 
 def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
           sync_team: Optional[str] = None, realtime_params: Optional[dict] = None,
-          event_loop: Optional[str] = None, native_rate: bool = False) -> str:
+          event_loop: Optional[str] = None, native_rate: bool = False,
+          master: Optional[bool] = None) -> str:
     """Rebase onto the host clock; optionally normalize cadence for non-clocked consumers."""
     loop = {} if event_loop is None else {"event_loop": event_loop}
-    timing = {}
-    if native_rate:
-        # realtime follows the wallclock; time_base is only the unit it counts and stamps in.
-        # 1/120000 represents 1001/24000, 1001/30000 and 1001/60000 exactly. Millisecond PTS
-        # can cross the compositor's nearest-tick boundary and cause repeat/drop pairs.
-        # Its built-in thresholds are in milliseconds, so preserve their durations
-        # explicitly when choosing the finer time base.
-        timing = {"time_base": "1/120000", "negative_time_tolerance": .25,
-                  "discontinuity_threshold": 1.0}
+    master_param = {} if master is None else {"master": master}
     avp.addNode(api.Realtime({
         "name": f"realtime_{tag}", "src": src, "dst": f"input_{tag}_realtime",
-        "set_pts": True, "group": group, **loop,
+        "set_pts": True, "group": group, **loop, **master_param,
         **({"capture_identity": True} if native_rate else {}),
-        **({} if sync_team is None else {"team": sync_team}), **timing, **(realtime_params or {}),
+        **({} if sync_team is None else {"team": sync_team}),
+        **_realtime_timing(native_rate), **(realtime_params or {}),
     }))
     if native_rate:
         return f"input_{tag}_realtime"
@@ -232,7 +291,7 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
         from .backends.cuda import CudaMixerBackend   # backends load only when used
         # Neither setpts nor hwupload does CPU slice work: one filter thread each.
         threads = CudaMixerBackend.graph_threads
-        edge = build_input(avp, api, tag, path, group=group, fps=fps, fps_den=fps_den,
+        edge, _audio_edge = build_input(avp, api, tag, path, group=group, fps=fps, fps_den=fps_den,
                            hwaccel=None, loop=loop, auto_restart=None if loop else "group",
                            input_params={"format": "rawvideo", "options": {
                                "pixel_format": pixel_format, "video_size": f"{width}x{height}",
