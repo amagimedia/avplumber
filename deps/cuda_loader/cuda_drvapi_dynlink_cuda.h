@@ -1815,6 +1815,7 @@ typedef CUresult CUDAAPI tcuTexObjectCreate(CUtexObject *pTexObject,
                                             const struct CUDA_TEXTURE_DESC_st *pTexDesc,
                                             const struct CUDA_RESOURCE_VIEW_DESC_st *pResViewDesc);
 typedef CUresult CUDAAPI tcuTexObjectDestroy(CUtexObject texObject);
+typedef CUresult CUDAAPI tcuTexObjectGetResourceDesc(struct CUDA_RESOURCE_DESC_st *pResDesc, CUtexObject texObject);
 
 
 /* Missing name-to-string error API */
@@ -1963,6 +1964,7 @@ extern tcuSurfObjectDestroy             *cuSurfObjectDestroy;
 /* Texture object function pointers */
 extern tcuTexObjectCreate               *cuTexObjectCreate;
 extern tcuTexObjectDestroy              *cuTexObjectDestroy;
+extern tcuTexObjectGetResourceDesc      *cuTexObjectGetResourceDesc;
 
 // These functions could be using the CUDA 3.2 interface (_v2)
 extern tcuMemcpyHtoD                   *cuMemcpyHtoD;
