@@ -23,6 +23,14 @@ From Python, `MixerOptions.audio_router_node` (default `""`) flows through
 `build_application` to `MixerGraphBuilder`; passing it to `MixerGraphBuilder`
 directly works the same way for applications that build the graph by hand.
 
+A show whose sources have `has_audio` needs nothing more: `build_application`
+then defaults `audio_router_node` to the in-tree `audio_mixer` (an unread audio
+edge would fill and hold its source's demux, and the video with it), Setup's
+Janus program mountpoint (`tools/janus_mountpoints.py`) gets the Opus stream
+on the first dirty Janus program rendition, and that output's entry in
+`settings.program_outputs` carries `"audio": true`, which shows the viewers'
+mute toggle. Set `audio_router_node` only to route to a different node.
+
 ## Events
 
 Both are `setObject(audio_router_node_name, <key>, <params>)`:
