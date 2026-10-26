@@ -205,10 +205,32 @@ class MixerApplication:
     start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC
     startup: dict | None = field(default=None, init=False)   # how going on air went; `mixer.startup` answers with it
     _startup_error: str | None = field(default=None, init=False, repr=False)
+    # Audio edges held empty while preheating, see _drain_preheat_audio: set once the
+    # inputs start, emptied again as soon as the router consumes them.
+    _audio_preheat_drain: tuple[str, ...] = field(default=(), init=False, repr=False)
 
     def _check_startup(self) -> None:
         if self._startup_error:
             raise RuntimeError(self._startup_error)
+
+    def _drain_preheat_audio(self) -> None:
+        """Keep the per-source audio queues empty until the router drains them itself.
+
+        A source's demuxer feeds its video and its audio packets from one node, so a
+        full audio queue stops its video too. Nothing reads the audio until
+        `audio_router_node` starts, which is after the compositors and the transition
+        have to have drawn, so the whole audio chain fills within a second of the
+        inputs starting and wedges every demuxer behind it -- the preheat then waits
+        for frames that can no longer arrive. The pre-roll discarded here is pre-roll
+        the output gate (`start_output`) would drop anyway.
+        """
+        edges = self.avp.edges
+        for name in self._audio_preheat_drain:
+            # Only ever touch an edge the audio chain has already created: asking for one
+            # by name creates it, and an audio queue created as the default video type
+            # makes its own node fail to start.
+            if edges.exists__AudioSamples(name):
+                edges.find__AudioSamples(name).clear()
 
     def _preload_wipes(self) -> None:
         """Decode every wipe once into GPU memory (see pyplumber.mixer.clipcache).
@@ -236,6 +258,7 @@ class MixerApplication:
         waiting = set(edges)
         while True:
             self._check_startup()
+            self._drain_preheat_audio()
             missing = [edge for edge in edges if self.avp.getEdge(edge, data_type).enqueued_total == 0]
             if on_ready:
                 ready = waiting.difference(missing)
@@ -266,6 +289,7 @@ class MixerApplication:
         deadline = time.monotonic() + self.preheat_timeout_sec
         while not self.avp.node(name).isWorking:
             self._check_startup()
+            self._drain_preheat_audio()
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"mixer preheat timed out starting node {name}")
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
@@ -307,6 +331,7 @@ class MixerApplication:
                         # The startup error stays the one reported.
                         log.warning("Browser painting did not resume after the failed start: %s", exc)
                 painting.push(resume_painting)
+            self._audio_preheat_drain = tuple(edge for _source, edge in self.audio_edges)
             for group in self.input_groups:
                 self.avp.group(group).startNodes()
             if windows:
@@ -355,6 +380,8 @@ class MixerApplication:
         self.avp.group(OUTPUT_GROUP).startNodes()
         if self.mixer.audio_router_node:
             self._wait_for_node(self.mixer.audio_router_node)
+            # From here the router reads the per-source audio itself.
+            self._audio_preheat_drain = ()
             self.mixer.raise_initial_audio_gains()
         self._wait_for_edges(("mixer_final_out",), "program output")
         if self.wipe_cache_mb:
