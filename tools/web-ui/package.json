@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "golden-layout": "^2.6.0",
-    "ws": "^8.17.0"
+    "ws": "~8.20.1"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.0",
