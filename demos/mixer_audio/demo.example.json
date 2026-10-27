@@ -1,5 +1,5 @@
 {
-  "source_count": 16,
+  "source_count": 96,
   "scene_count": 24,
   "seed": 7,
   "canvas": {
@@ -7,7 +7,7 @@
     "working_format": "p210le", "color": "hlg",
     "raw_upload": "pinned"
   },
-  "generation": {"seconds": 300},
+  "generation": {"seconds": 2},
   "inputs": [
     {"id": "sdr420", "kind": "generated", "color": "sdr", "chroma": "420", "weight": 8},
     {"id": "hlg420", "kind": "generated", "color": "hlg", "chroma": "420", "weight": 4},
