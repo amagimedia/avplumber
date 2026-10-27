@@ -1,6 +1,6 @@
 {
-  "source_count": 96,
-  "scene_count": 24,
+  "source_count": 64,
+  "scene_count": 86,
   "seed": 7,
   "canvas": {
     "width": 1920, "height": 1080, "fps": 30,
@@ -16,7 +16,7 @@
     {"id": "browser", "kind": "browser", "pattern": "alpha", "weight": 0}
   ],
   "layouts": {
-    "fullscreen": 2,
+    "fullscreen": 64,
     "grid_2": 2,
     "grid_4": 2,
     "grid_8": 2,
