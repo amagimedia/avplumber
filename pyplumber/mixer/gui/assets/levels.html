@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AVPlumber levels</title>
+<!-- webui.py fills in its options for the page; the file holds the defaults. -->
+<script id="config" type="application/json">{}</script>
+<style>
+  /* Dark-only, in the mixer page's tokens (index.html). */
+  :root {
+    color-scheme: dark;
+    --bg: #0a0c0f; --well: #0c0f13; --edge: #222a33; --groove: #1a2028;
+    --text: #e8edf2; --muted: #8b98a5; --faint: #56616d;
+    --pgm: #e5484d; --led: #38d67f; --accent: #f5a524;
+  }
+  html, body { height: 100%; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); overflow: hidden;
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; gap: 12px; padding: 12px 16px;
+  }
+  header { display: flex; align-items: center; gap: 14px; }
+  h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
+  .link { color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+  .link:hover { color: var(--accent); }
+  #conn { margin-left: auto; color: var(--pgm); font-size: 12px; }
+  #empty { color: var(--muted); font-size: 13px; }
+  #levels { flex: 1; min-height: 0; display: flex; gap: 22px; align-items: stretch; overflow-x: auto; padding: 4px 2px; }
+  .ch { display: grid; grid-template-rows: auto 1fr auto; justify-items: center; gap: 8px; min-width: 64px; }
+  .ch .id { font: 600 11px/1.3 ui-monospace, monospace; letter-spacing: .02em; color: var(--muted); text-align: center;
+           max-width: 110px; overflow-wrap: anywhere; }
+  .ch .db { font: 700 12px ui-monospace, monospace; font-variant-numeric: tabular-nums; color: var(--text); }
+  .fader { position: relative; flex: 1; width: 40px; min-height: 160px; }
+  .fader .fill { position: absolute; left: 50%; bottom: 0; width: 6px; margin-left: -3px; border-radius: 3px;
+                background: var(--led); box-shadow: 0 0 8px rgb(56 214 127 / .55); height: calc(var(--v, 0.78) * 100%); pointer-events: none; }
+  /* 0 dB sits at (0 - DB_MIN) / (DB_MAX - DB_MIN) = 70/80 of the fader's travel. */
+  .fader .zero { position: absolute; left: 4px; right: 4px; height: 1px; background: var(--faint); bottom: 87.5%; pointer-events: none; }
+  .fader input[type="range"] {
+    position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; appearance: none; -webkit-appearance: none;
+    background: var(--well); border-radius: 6px; box-shadow: inset 0 0 0 1px var(--edge);
+    writing-mode: vertical-lr; direction: rtl; cursor: grab; touch-action: none;
+  }
+  .fader input[type="range"]::-webkit-slider-runnable-track { background: transparent; }
+  .fader input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 34px; height: 16px; border-radius: 4px; cursor: grab;
+    background: linear-gradient(0deg, #8e99a6, #e9edf1 45%, #f7f9fb 55%, #9aa5b2);
+    box-shadow: 0 2px 6px rgb(0 0 0 / .65), inset 0 0 0 1px rgb(255 255 255 / .35);
+  }
+  .fader input[type="range"]::-moz-range-thumb {
+    width: 34px; height: 16px; border: 0; border-radius: 4px; cursor: grab;
+    background: linear-gradient(0deg, #8e99a6, #e9edf1 45%, #f7f9fb 55%, #9aa5b2);
+  }
+</style>
+
+<header>
+  <h1>AVPlumber levels</h1>
+  <a class="link" href="/">Mixer</a>
+  <span id="conn" role="status" hidden></span>
+</header>
+<p id="empty" hidden>No audio sources in this show.</p>
+<main id="levels" aria-label="Per-source audio levels"></main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const DB_MIN = -70, DB_MAX = 10;
+const fracOf = (db) => (db - DB_MIN) / (DB_MAX - DB_MIN);
+let signature = "", dragging = null;   // the source id currently being dragged, so the poll does not fight it
+
+function commit(id, db) {
+  return fetch("/api/command", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({command: "audio_gain", gains: {[id]: db}}),
+  }).catch(() => {});
+}
+
+function channel(id, db) {
+  const ch = document.createElement("div"), fader = document.createElement("div");
+  const fill = document.createElement("div"), zero = document.createElement("div");
+  const input = document.createElement("input"), idEl = document.createElement("div"), dbEl = document.createElement("div");
+  ch.className = "ch";
+  idEl.className = "id"; idEl.textContent = idEl.title = id;
+  fader.className = "fader";
+  fill.className = "fill"; zero.className = "zero";
+  input.type = "range"; input.min = DB_MIN; input.max = DB_MAX; input.step = 0.5; input.value = db;
+  input.setAttribute("aria-label", `${id} volume, dB`);
+  dbEl.className = "db";
+  const paint = (value) => {
+    fader.style.setProperty("--v", fracOf(value));
+    dbEl.textContent = `${value > 0 ? "+" : ""}${value.toFixed(1)} dB`;
+  };
+  paint(db);
+  // Sends on every change while dragging, not just on release, like a real fader; a send still
+  // in flight holds the newest value rather than queuing one request per pointer move.
+  let lastSent = db, inFlight = false, pending = null;
+  const send = (value) => {
+    if (value === lastSent) return;
+    lastSent = value;
+    if (inFlight) { pending = value; return; }
+    inFlight = true;
+    commit(id, value).finally(() => {
+      inFlight = false;
+      if (pending !== null) { const v = pending; pending = null; send(v); }
+    });
+  };
+  input.oninput = () => {
+    dragging = id;
+    const value = Number(input.value);
+    paint(value);
+    send(value);
+  };
+  const release = () => { dragging = null; send(Number(input.value)); };
+  input.onpointerup = release;
+  input.onblur = release;
+  input.onchange = release;   // keyboard adjustment: no pointerup/blur to fall back on
+  fader.append(input, fill, zero);
+  ch.append(idEl, fader, dbEl);
+  return ch;
+}
+
+function render(state) {
+  const sources = (state.settings || {}).audio_sources || [];
+  const gains = state.audio_gain || [];
+  $("empty").hidden = sources.length > 0;
+  if (dragging || !sources.length) return;
+  const next = JSON.stringify([sources, gains]);
+  if (next === signature) return;
+  signature = next;
+  $("levels").replaceChildren(...sources.map((id) => {
+    const row = gains.find((g) => g.id === id);
+    return channel(id, row ? row.gain_db : 0);
+  }));
+}
+
+let polling = false;
+async function refresh() {
+  if (polling) return;
+  polling = true;
+  try {
+    const response = await fetch("/api/state"), state = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(state.error || `${response.status} ${response.statusText}`);
+    $("conn").hidden = true;
+    render(state);
+  } catch (exc) {
+    $("conn").textContent = exc.message || String(exc);
+    $("conn").hidden = false;
+  } finally {
+    polling = false;
+  }
+}
+
+refresh();
+setInterval(refresh, 1000);
+addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
+</html>

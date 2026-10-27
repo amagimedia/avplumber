@@ -353,6 +353,7 @@ class MixerConfig:
                 # [source id, kind] per compositor input, in the order of the inputs: each source once
                 # per alias (application.py builds them so); telemetry deduplicates physical source IDs.
                 "inputs": [[s.id, s.kind] for s in self.sources for _ in range(aliases[s.id])],
+                "audio_sources": [s.id for s in self.sources if s.has_audio],
                 # Of the "video" inputs, those declared HDR; an undeclared one counts as SDR.
                 "hdr_video": sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"]) for s in self.sources),
                 "direct": self.direct,

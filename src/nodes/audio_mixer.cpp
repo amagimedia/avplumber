@@ -19,6 +19,9 @@ constexpr const char* kProgramSentinel = "program";
 constexpr float kGainEpsilon = 1e-6f;
 // A mix thread held up longer than this resumes at the current block instead of catching up.
 constexpr int64_t kMaxBehindNs = 1000000000;
+// How long a full 0..1 swing of an operator's set_source_gain takes to glide in; smaller
+// changes (a fader nudge) glide proportionally faster. Declicks a step change in the mix.
+constexpr float kGainRampSeconds = 0.03f;
 
 int channelCount(uint64_t layout) {
 #if API_NEW_CHANNEL_LAYOUT
@@ -78,6 +81,13 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
     int64_t next_block_ = -1;   // index of the next block to mix, in frame_samples; -1: not started
     std::vector<SourceState> sources_;
     std::unordered_map<std::string, size_t> source_index_;
+    // A persistent, operator-set multiplier per source, independent of AFV's crossfade gains.
+    // base_gains_ is the ramped value actually applied, gliding toward base_gain_targets_ (the
+    // latest requested one, what getObject("status") reports) at gain_ramp_step_ per sample.
+    std::vector<float> base_gains_;
+    std::vector<float> base_gain_targets_;
+    std::vector<std::vector<float>> gain_ramp_;   // this block's per-sample curve, by source
+    float gain_ramp_step_ = 0.f;
     std::vector<Bus> buses_;
     std::unordered_map<std::string, size_t> bus_index_;
     std::vector<std::vector<float>> program_frame_;
@@ -195,11 +205,12 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
             const size_t end = bus.pending.empty() ? frame_samples_
                 : size_t(std::min<int64_t>(bus.pending.front().sample - first, int64_t(frame_samples_)));
             for (size_t si = 0; si < sources_.size(); ++si) {
-                const float g = bus.gains[si];
-                if (g < kGainEpsilon) continue;
+                const float bus_gain = bus.gains[si];
+                if (bus_gain < kGainEpsilon) continue;
+                const float* curve = gain_ramp_[si].data();
                 for (int ch = 0; ch < channels_; ++ch) {
                     float* dp = reinterpret_cast<float*>(out.data(ch));
-                    avp::audio_mixer::addSamples(dp, sources_[si].block[size_t(ch)].data(), begin, end, g);
+                    avp::audio_mixer::addSamplesCurve(dp, sources_[si].block[size_t(ch)].data(), curve, begin, end, bus_gain);
                 }
             }
             if (!is_program && bus.program_gain >= kGainEpsilon) {
@@ -219,9 +230,26 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         return out;
     }
 
+    /// This block's per-source gain curve: base_gains_ gliding toward base_gain_targets_ at
+    /// gain_ramp_step_ per sample, carrying its end value into the next block.
+    void updateGainRamps() {
+        for (size_t si = 0; si < sources_.size(); ++si) {
+            float g = base_gains_[si];
+            const float target = base_gain_targets_[si];
+            float* curve = gain_ramp_[si].data();
+            for (size_t k = 0; k < frame_samples_; ++k) {
+                if (g < target) g = std::min(target, g + gain_ramp_step_);
+                else if (g > target) g = std::max(target, g - gain_ramp_step_);
+                curve[k] = g;
+            }
+            base_gains_[si] = g;
+        }
+    }
+
     void mixBlock(int64_t block) {
         const int64_t first = block * int64_t(frame_samples_);
         for (auto& src : sources_) src.queue->read(frame_samples_, src.block);
+        updateGainRamps();
         program_frame_.assign(size_t(channels_), std::vector<float>(frame_samples_, 0.f));
         size_t program_bi = SIZE_MAX;
         auto pit = bus_index_.find(kProgramSentinel);
@@ -267,6 +295,13 @@ public:
 
     virtual void setObject(const std::string key, const Parameters& params) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (key == "set_source_gain") {
+            if (!params.count("source")) return;
+            auto it = source_index_.find(params["source"].get<std::string>());
+            if (it == source_index_.end()) return;
+            base_gain_targets_[it->second] = std::max(0.f, params.value("gain", 1.0f));
+            return;
+        }
         if (key != "transition_ended" && key != "transition_progress") return;
         if (!params.count("output")) return;
         const std::string output = params["output"].get<std::string>();
@@ -301,8 +336,9 @@ public:
         if (key != "status") throw Error("audio_mixer: unknown object " + key);
         std::lock_guard<std::mutex> lock(mutex_);
         Parameters sources = Parameters::array();
-        for (const auto& src : sources_) {
-            Parameters s = {{"id", src.id}};
+        for (size_t i = 0; i < sources_.size(); ++i) {
+            const auto& src = sources_[i];
+            Parameters s = {{"id", src.id}, {"gain", base_gain_targets_[i]}};
             if (src.queue) {
                 const auto& c = src.queue->counts();
                 s["dropped"] = c.dropped;
@@ -379,6 +415,10 @@ public:
             node->sources_[i].id = ids[i].get<std::string>();
             node->source_index_[node->sources_[i].id] = i;
         }
+        node->base_gains_.assign(node->sources_.size(), 1.f);
+        node->base_gain_targets_.assign(node->sources_.size(), 1.f);
+        node->gain_ramp_.assign(node->sources_.size(), std::vector<float>(node->frame_samples_, 1.f));
+        node->gain_ramp_step_ = 1.f / (kGainRampSeconds * float(node->sample_rate_));
 
         if (!params.count("outputs") || !params["outputs"].is_object() || params["outputs"].empty())
             throw Error("audio_mixer: outputs object required (e.g. {\"program\": \"edge\"})");

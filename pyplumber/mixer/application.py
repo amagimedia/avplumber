@@ -22,9 +22,10 @@ from . import config as mixer_config
 from .backend import mixer_backend
 from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, rendition_color, rendition_format
 from .config import FEEDS
-from .dsk import DownstreamKeyer, register_dsk_commands
+from .audio_gain import AudioGainController, register_audio_gain_commands
 from .dmabuf_inputs import (dmabuf_cuda_input_nodes, open_windows, paint_windows,
                             refresh_windows, rest_request, wait_for_sockets)
+from .dsk import DownstreamKeyer, register_dsk_commands
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
@@ -974,6 +975,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                          outputs={"program": f"{options.audio_router_node}_program"},
                          group=OUTPUT_GROUP)
         program_audio_edge = f"{options.audio_router_node}_program"
+        gain_controller = AudioGainController(avp, options.audio_router_node, [sid for sid, _ in audio_edges])
+        register_audio_gain_commands(avp, gain_controller)
     elif options.audio_router_node and not audio_edges:
         log.warning("audio_router_node=%r set but no has_audio sources; AFV will fire with nothing to mix",
                     options.audio_router_node)
