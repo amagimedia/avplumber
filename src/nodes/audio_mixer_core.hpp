@@ -75,6 +75,13 @@ inline void addSamples(float* dst, const float* src, size_t begin, size_t end, f
         dst[sample] += src[sample] * gain;
 }
 
+/// As addSamples, but a per-sample curve (one entry per index in [0, end)) carries its own
+/// gain alongside the constant `gain`, so a change to the curve's target declicks sample-accurately.
+inline void addSamplesCurve(float* dst, const float* src, const float* curve, size_t begin, size_t end, float gain) {
+    for (size_t sample = begin; sample < end; ++sample)
+        dst[sample] += src[sample] * curve[sample] * gain;
+}
+
 /// One source's samples on the mixer's sample index (monotonic time × sample rate), from their
 /// arrival until the block holding them is read. A block takes what arrived and is silence where
 /// nothing did: a late or stopped source never holds the others back. The step into silence fades
