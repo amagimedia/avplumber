@@ -131,6 +131,8 @@ void CudaRectDraw::unload() {
         cuCtxSetCurrent(cuda_dev_->cuda_ctx);
         AVP_CHECK_CU(cuStreamSynchronize(cuda_dev_->stream));
         if (producer_ready_) { AVP_CHECK_CU(cuEventDestroy(producer_ready_)); producer_ready_ = nullptr; }
+        if (table_done_) { AVP_CHECK_CU(cuEventDestroy(table_done_)); table_done_ = nullptr; }
+        table_in_use_ = false;
         array_textures_.reset();
         if (table_device_) { AVP_CHECK_CU(cuMemFree(table_device_)); table_device_ = 0; }
         if (table_host_) { AVP_CHECK_CU(cuMemFreeHost(table_host_)); table_host_ = nullptr; }
@@ -275,7 +277,28 @@ void CudaRectDraw::waitForProducer(const AVFrame *src, CUstream stream) {
     waited_streams_.push_back(device->stream);
 }
 
+// Before the staging is written: the last upload must have read it and the last launch the
+// device table. Free for callers that synchronize after every frame; for one that does not, this
+// waits instead of letting the kernel read a half-written table.
+void CudaRectDraw::waitForTable() {
+    if (!table_in_use_) return;
+    if (AVP_CHECK_CU(cuEventSynchronize(table_done_)))
+        throw Error("cuda_rect_overlay: waiting for the previous draw's rect table failed");
+    table_in_use_ = false;
+}
+
+// After each upload of the table and each launch that reads it, so a throw between the two still
+// leaves the upload covered.
+void CudaRectDraw::tableQueued(CUstream stream) {
+    if (!table_done_ && AVP_CHECK_CU(cuEventCreate(&table_done_, CU_EVENT_DISABLE_TIMING)))
+        throw Error("cuda_rect_overlay: cannot create the rect table event");
+    if (AVP_CHECK_CU(cuEventRecord(table_done_, stream)))
+        throw Error("cuda_rect_overlay: cannot record the rect table event");
+    table_in_use_ = true;
+}
+
 int CudaRectDraw::fillTable(CUstream stream, const std::vector<DrawOp> &ops, const AVFrame *canvas, TableKinds &kinds) {
+    waitForTable();
     waited_streams_.clear();
     if (array_textures_) array_textures_->begin();
     int n = 0;
@@ -359,9 +382,13 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
     ensureKernels();
     TableKinds kinds;
     const int n = fillTable(stream, ops, canvas, kinds);
-    if (n > 0 && AVP_CHECK_CU(cuMemcpyHtoDAsync(table_device_, table_host_, sizeof(AvpRectLayer) * n, stream)))
-        throw Error("cuda_rect_overlay: rect table upload failed");
+    if (n > 0) {
+        if (AVP_CHECK_CU(cuMemcpyHtoDAsync(table_device_, table_host_, sizeof(AvpRectLayer) * n, stream)))
+            throw Error("cuda_rect_overlay: rect table upload failed");
+        tableQueued(stream);
+    }
     launch(stream, kinds, table_device_, n, canvas, color_src, {0, 0, canvas_.width, canvas_.height});
+    if (n > 0) tableQueued(stream);
 }
 
 bool CudaRectDraw::baseCoversCanvas(const DrawOp &op, const AVFrame *base) const {
@@ -430,7 +457,9 @@ bool CudaRectDraw::drawOver(CUstream stream, const std::vector<DrawOp> &ops, AVF
         for (int i = 0; i < n; ++i) host[i] = viewportLayer(table_host_[i], views[v], sub_x, sub_y);
         if (AVP_CHECK_CU(cuMemcpyHtoDAsync(device, host, sizeof(AvpRectLayer) * n, stream)))
             throw Error("cuda_rect_overlay: rect table upload failed");
+        tableQueued(stream);
         launch(stream, kinds, device, n, canvas, color_src, views[v]);
+        tableQueued(stream);
     }
     if (views != over_views_) {
         over_views_ = views;
