@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Inside the 192-input mixer · AVPlumber</title>
+<meta name="description" content="avplumber 192-input mixer graph: 1,457 nodes and 5,856 edges, prewarmed routing into two clocked slots, DSK, AUX buses and how it scales.">
+<meta property="og:title" content="1,457 nodes. 5,856 edges. One program. · AVPlumber mixer">
+<meta property="og:image" content="https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo-poster.jpg">
+<style>
+/* Layout: reframer-style sheets — counts first, node-level mixer graph, scaling table, routing stepper, deadline strip. */
+:root{--ink:#16252d;--muted:#61717a;--line:#dce4e5;--paper:#f5f7f5;--card:#ffffff;--grid:#b3c1c33b;--blue:#3264d7;--teal:#008978;--orange:#c9661e;--pink:#b94083;--gray:#81929e;--chip:#e4eee8;--sel:#16252d;--sel-ink:#ffffff;
+--c-src-f:#e1f6ef;--c-src-s:#51b6a4;--c-src-i:#007b6b;--c-gpu-f:#eee6fb;--c-gpu-s:#ac8bde;--c-gpu-i:#7950ca;--c-ctl-f:#edf3ff;--c-ctl-s:#7399e8;--c-ctl-i:#3264d7;--c-out-f:#fff0dc;--c-out-s:#dfab6e;--c-out-i:#b85b18;--c-key-f:#fce6f1;--c-key-s:#d88eb6;--c-key-i:#ae397a;--c-off-f:#f3f4f5;--c-off-s:#b9c1c7;--c-off-i:#64717c;
+--font:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--ink:#e3ecee;--muted:#9aabb3;--line:#2c3a40;--paper:#11191d;--card:#172227;--grid:#46585e55;--blue:#7d9ff0;--teal:#3cc2ab;--orange:#e79a55;--pink:#e07fb5;--gray:#7f9099;--chip:#20302f;--sel:#e3ecee;--sel-ink:#11191d;
+--c-src-f:#163731;--c-src-s:#3a9483;--c-src-i:#6fd8c3;--c-gpu-f:#2a2340;--c-gpu-s:#7f64b6;--c-gpu-i:#c3abf3;--c-ctl-f:#1c2944;--c-ctl-s:#5376c2;--c-ctl-i:#9db7f5;--c-out-f:#3a2a17;--c-out-s:#a8783e;--c-out-i:#f0b77c;--c-key-f:#3b1f2f;--c-key-s:#a65f88;--c-key-i:#f0a3cc;--c-off-f:#1d272b;--c-off-s:#4b5a61;--c-off-i:#93a3ab;color-scheme:dark}}
+:root[data-theme="dark"]{--ink:#e3ecee;--muted:#9aabb3;--line:#2c3a40;--paper:#11191d;--card:#172227;--grid:#46585e55;--blue:#7d9ff0;--teal:#3cc2ab;--orange:#e79a55;--pink:#e07fb5;--gray:#7f9099;--chip:#20302f;--sel:#e3ecee;--sel-ink:#11191d;
+--c-src-f:#163731;--c-src-s:#3a9483;--c-src-i:#6fd8c3;--c-gpu-f:#2a2340;--c-gpu-s:#7f64b6;--c-gpu-i:#c3abf3;--c-ctl-f:#1c2944;--c-ctl-s:#5376c2;--c-ctl-i:#9db7f5;--c-out-f:#3a2a17;--c-out-s:#a8783e;--c-out-i:#f0b77c;--c-key-f:#3b1f2f;--c-key-s:#a65f88;--c-key-i:#f0a3cc;--c-off-f:#1d272b;--c-off-s:#4b5a61;--c-off-i:#93a3ab;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}
+button{font:inherit;cursor:pointer}
+button:focus-visible,a:focus-visible{outline:3px solid var(--blue);outline-offset:3px}
+code{font-family:var(--mono);font-size:.92em}
+.wrap{max-width:1740px;margin:auto;padding-block:28px 32px;display:grid;gap:30px}
+header{display:grid;gap:18px}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex-wrap:wrap}
+.brand{font-size:12px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:clamp(30px,4vw,52px);letter-spacing:-.05em;line-height:1.08;margin:8px 0 6px;text-wrap:balance}
+.lede{color:var(--muted);font-size:14px;margin:0;max-width:75ch;line-height:1.5}
+header nav{display:flex;gap:16px;font-size:13px;font-weight:650;flex-wrap:wrap;align-items:center}
+.stamp{background:var(--chip);padding:7px 11px;border-radius:30px;font-size:11px;white-space:nowrap;color:var(--ink)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;min-width:0}
+.tile b{display:block;font-size:30px;letter-spacing:-.04em;font-variant-numeric:tabular-nums;line-height:1.1}
+.tile span{font-size:12px;color:var(--muted);line-height:1.4;display:block;margin-top:4px}
+.tile.hero b{color:var(--teal)}
+.sheet{background:var(--card);border:1px solid var(--line);border-radius:20px;overflow:hidden}
+.bar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:14px 18px;border-bottom:1px solid var(--line)}
+.tabs{display:flex;gap:5px;flex-wrap:wrap}
+.tabs button{border:1px solid transparent;background:transparent;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:650;color:var(--muted)}
+.tabs button[aria-pressed=true]{background:var(--sel);color:var(--sel-ink)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:19px;border-top:3px solid;margin-right:5px;vertical-align:middle}
+.legend .dash{border-top-style:dashed}
+.canvas{overflow-x:auto;background-image:radial-gradient(var(--grid) 1px,transparent 1px);background-size:20px 20px}
+svg{display:block;width:100%;height:auto}
+#map{min-width:1150px}#route{min-width:900px}
+svg text{font-family:var(--font);fill:var(--ink)}
+.zone{fill:var(--paper);stroke:var(--line);stroke-width:1.5}
+.zone-label{font-size:12px;font-weight:750;letter-spacing:1.4px;fill:var(--muted)}
+.zone-count{font-size:12px;font-weight:800;fill:var(--ink);font-variant-numeric:tabular-nums}
+.edge{fill:none;stroke-width:2.3;stroke-linejoin:round;transition:opacity .25s}
+.k-frame{stroke:var(--teal)}.k-key{stroke:var(--pink)}.k-tap{stroke:var(--teal);stroke-dasharray:2 5;stroke-width:2.6}.k-ctl{stroke:var(--blue);stroke-dasharray:6 6}
+.edge-label{font-size:12px;fill:var(--muted);paint-order:stroke;stroke:var(--card);stroke-width:6px;stroke-linejoin:round}
+.node{cursor:pointer;transition:opacity .25s}.node:focus{outline:none}
+.node rect{stroke-width:1.5}
+.node:hover rect,.node:focus rect,.node.selected rect{stroke-width:3}
+.node .tag{font-size:10px;letter-spacing:1.2px;font-weight:750}
+.node .name{font-size:17px;font-weight:750;letter-spacing:-.3px}
+.node .sub{font-size:12.5px;fill:var(--muted)}
+.node .chain{font-size:12px;font-family:var(--mono);fill:var(--muted)}
+.mult{font-size:12px;font-weight:800;font-variant-numeric:tabular-nums}
+.faded{opacity:.14}
+.inspector{display:grid;grid-template-columns:minmax(150px,240px) 1fr auto;gap:14px;align-items:center;min-height:64px;padding:13px 20px;border-top:1px solid var(--line);font-size:13px}
+.inspector>*{min-width:0}
+.inspector code{display:block;color:var(--muted);font-size:11px;margin-top:4px;overflow-wrap:anywhere}
+.inspector span{color:var(--muted);line-height:1.5}
+h2{font-size:25px;letter-spacing:-.6px;margin:0;text-wrap:balance}
+.sec-head{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+.sec-head p{margin:5px 0 0;color:var(--muted);font-size:13px;max-width:80ch;line-height:1.5}
+.table-wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:760px;font-size:13px}
+th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:750}
+td.n{font-variant-numeric:tabular-nums;font-weight:700;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+.pill{display:inline-block;font-size:11px;font-weight:750;border-radius:20px;padding:3px 9px;white-space:nowrap}
+.p-live{background:var(--c-src-f);color:var(--c-src-i)}
+.p-restart{background:var(--c-out-f);color:var(--c-out-i)}
+.p-free{background:var(--c-ctl-f);color:var(--c-ctl-i)}
+.steps{display:flex;gap:6px;flex-wrap:wrap}
+.step{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:10px;padding:8px 12px;text-align:left;font-size:13px;font-weight:650}
+.step small{display:block;font-size:10px;font-weight:700;letter-spacing:1px;color:var(--muted)}
+.step[aria-pressed=true]{background:var(--sel);color:var(--sel-ink);border-color:var(--sel)}
+.step[aria-pressed=true] small{color:var(--sel-ink);opacity:.7}
+.r-edge{fill:none;stroke-width:2.5;transition:opacity .2s,stroke-width .2s}
+.r-draw{stroke:var(--teal);stroke-width:3.5;stroke-dasharray:8 6;animation:flow 1s linear infinite}
+.r-warm{stroke:var(--teal);stroke-width:1.6;stroke-dasharray:3 6;opacity:.55;animation:flow 1s linear infinite}
+.r-off{stroke:var(--gray);stroke-width:1.2;opacity:.18}
+@keyframes flow{to{stroke-dashoffset:-28}}
+.r-card rect{stroke-width:1.5}
+.r-card .name{font-size:17px;font-weight:750}
+.r-card .sub{font-size:12.5px;fill:var(--muted)}
+.r-state{font-size:12.5px;font-weight:650;font-family:var(--mono)}
+.note{display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap;padding:13px 20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted);line-height:1.5}
+.note b{color:var(--ink)}
+.strip-wrap{overflow-x:auto;padding:18px 20px}
+.strip{display:grid;grid-template-columns:150px repeat(10,minmax(54px,1fr));gap:4px;min-width:720px;font-variant-numeric:tabular-nums}
+.strip .h{font-size:11px;color:var(--muted);text-align:center;padding-bottom:4px}
+.strip .h.cmd{color:var(--blue);font-weight:750}
+.strip .rn{font-size:12px;font-weight:700;display:flex;align-items:center}
+.cell{height:34px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-family:var(--mono)}
+.cX{background:var(--c-ctl-f);color:var(--c-ctl-i)}
+.cY{background:var(--c-src-f);color:var(--c-src-i)}
+.cN{background:var(--c-off-f);color:var(--c-off-i);font-weight:500}
+.cap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted);padding:0 20px 16px}
+footer{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+footer nav{display:flex;gap:16px;flex-wrap:wrap}
+@media(max-width:750px){.inspector{grid-template-columns:1fr;gap:6px}.bar{padding:10px}.tile b{font-size:24px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header>
+  <div class="top">
+    <div>
+      <div class="brand">avplumber · live mixer demo · 192 inputs</div>
+      <h1>1,457 nodes. 5,856 edges. One program.</h1>
+      <p class="lede">The mixer graph of the <a href="./">recorded L4 show</a>: 105 NVDEC, 36 browser scenes, 47 raw NV12 and 4 browser keys, 256 scenes, Program, clean Program and 22 AUX buses at 1920×1080p30 SDR. Every input is a real, independent source. Each card below stands for one node, or for one chain repeated per source.</p>
+    </div>
+    <nav aria-label="Documentation"><a href="./">▶ Watch the 192-input demo</a><a href="cookbook/">Cookbook</a><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/README.md">Demo README</a><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/capacity.md">Capacity</a><a href="https://github.com/amagimedia/avplumber/blob/develop/doc/mixer.md">Mixer API</a><span class="stamp">Reviewed · 28 Oct 2026 · develop 8251eee</span></nav>
+  </div>
+  <div class="tiles">
+    <div class="tile hero"><b>1,457</b><span>nodes, each with its own thread or event-loop callback</span></div>
+    <div class="tile hero"><b>5,856</b><span>edges: bounded queues, one consumer each</span></div>
+    <div class="tile"><b>4,224</b><span>of them AUX taps (22 buses × 192 sources), idle until a layout draws the source</span></div>
+    <div class="tile"><b>0</b><span>nodes for 256 scenes: a scene is a layer list sent to a compositor</span></div>
+    <div class="tile"><b>25</b><span>clocked compositors: slots A and B, wipe overlay and 22 AUX buses</span></div>
+    <div class="tile"><b>≈1,200</b><span>process threads measured on a 192-input L4 run (5 Oct)</span></div>
+  </div>
+</header>
+
+<section class="sheet" aria-label="Mixer graph">
+  <div class="bar">
+    <div class="tabs" aria-label="Graph sections">
+      <button data-view="all" aria-pressed="true">Whole graph</button>
+      <button data-view="inputs" aria-pressed="false">Inputs + fan-out</button>
+      <button data-view="core" aria-pressed="false">Program core</button>
+      <button data-view="outputs" aria-pressed="false">DSK, AUX + encoders</button>
+    </div>
+    <div class="legend"><span><i style="color:var(--teal)"></i>CUDA frames</span><span><i class="dash" style="color:var(--teal)"></i>Subscribed AUX taps</span><span><i style="color:var(--pink)"></i>Key alpha</span><span><i class="dash" style="color:var(--blue)"></i>Native control</span></div>
+  </div>
+  <div class="canvas"><svg id="map" viewBox="0 0 1720 1255" role="group" aria-labelledby="map-title map-desc">
+    <title id="map-title">avplumber mixer graph of the 192-input show, node level</title>
+    <desc id="map-desc">Four input chains, repeated per source, feed 192 one_to_many fan-out nodes. Each fan-out feeds compositor slot A, slot B and 22 AUX taps. Each slot runs compositor, snapshot and scene fan-out into the program selector or the fade transition. The program passes the wipe base pacer, final fan-out, wipe selector with its overlay and clip cache, output snapshot, clean split, DSK keyer and AUX program tap, then the Program and clean encoder chains. 22 AUX buses each run a compositor, a preview follower and an eight-node encoder chain. A timeline below shows one frame: it waits up to two frames in the slot queue, then every stage runs within one output tick; the AUX program cell follows one frame later.</desc>
+    <defs></defs>
+    <g id="zones"></g><g id="edges"></g><g id="nodes"></g>
+  </svg></div>
+  <div class="inspector" aria-live="polite"><div><strong id="d-title">Select a card.</strong><code id="d-native">node names and counts</code></div><span id="d-text">Counts come from building this show's configuration with the develop graph builder; the deployed show can differ by a few nodes with its AUX layouts.</span><a id="d-link" href="https://github.com/amagimedia/avplumber/blob/8251eee0536961d1b8bbe578805abbf53d2d3d44/pyplumber/mixer/application.py">Source ↗</a></div>
+</section>
+
+<section aria-labelledby="scale-title">
+  <div class="sec-head"><div><h2 id="scale-title">How it scales</h2>
+  <p>Cost grows linearly in sources and outputs, and not at all in scenes. What changes during a show costs no nodes; what changes the topology needs a Setup apply, which restarts the mixer and pauses output.</p></div></div>
+  <div class="sheet"><div class="table-wrap"><table>
+    <thead><tr><th>Add one</th><th>Nodes</th><th>Edges</th><th>While on air</th><th>Bounded by</th></tr></thead>
+    <tbody>
+      <tr><td>Scene</td><td class="n">0</td><td class="n">0</td><td><span class="pill p-live">live</span> <code>mixer.scene</code></td><td>Nothing in the graph. Draw cost is per layer on screen, not per scene defined.</td></tr>
+      <tr><td>Take: cut, fade, wipe</td><td class="n">0</td><td class="n">0</td><td><span class="pill p-live">live</span></td><td>Writes one composition, the fan-out masks and the selector. Prewarmed: on air at the next deadline.</td></tr>
+      <tr><td>Key on or off, AUX layout, slot, page</td><td class="n">0</td><td class="n">0</td><td><span class="pill p-live">live</span> <code>mixer.dsk</code>, <code>mixer.aux*</code></td><td>Taps are prebuilt for every source, so a bus switches by subscribing, not by rewiring.</td></tr>
+      <tr><td>NVDEC source</td><td class="n">6</td><td class="n">31</td><td><span class="pill p-restart">Setup apply</span></td><td>193 compositor pads (192 with a PGM cell). In practice NVDEC and VRAM: the L4 CUarray profile admits 192 sources.</td></tr>
+      <tr><td>Browser source</td><td class="n">6</td><td class="n">31</td><td><span class="pill p-restart">Setup apply</span></td><td>Same pads; Chromium CPU and GPU paint cost per page.</td></tr>
+      <tr><td>AUX bus</td><td class="n">10</td><td class="n">≈202</td><td><span class="pill p-restart">Setup apply</span></td><td>NVENC: 26 SDR outputs at 25/30 fps on L4, including Program and clean; this show runs 24. Hard ceiling 30.</td></tr>
+      <tr><td>Program rendition</td><td class="n">8</td><td class="n">8</td><td><span class="pill p-restart">Setup apply</span></td><td>NVENC, as above. The program is composited once; a rendition adds only an encode.</td></tr>
+      <tr><td>Another show</td><td class="n">1,457</td><td class="n">5,856</td><td><span class="pill p-free">new GPU</span></td><td>One show per GPU; capacity comes from that GPU's measured profile (T4 110, L4 192 sources).</td></tr>
+    </tbody></table></div>
+    <div class="note"><span><b>Not elastic:</b> every source decodes all the time, on screen or not; sources and outputs are wired at build time.</span><span>Profiles: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/instance_profiles.py">instance_profiles.py</a></span></div>
+  </div>
+</section>
+
+<section id="routing" aria-labelledby="routing-title">
+  <div class="sec-head">
+    <div><h2 id="routing-title">Prewarmed routing, step by step</h2>
+    <p>The demo starts with <code>--prewarm-cut-scene '*'</code>: every scene source feeds both compositor slots all the time, and each slot keeps a held picture per source. A take changes only what a slot draws and which slot the selector puts on air.</p></div>
+  </div>
+  <div class="sheet">
+    <div class="bar"><div class="steps" id="steps"></div><div class="legend"><span><i style="color:var(--teal)"></i>Drawn</span><span><i class="dash" style="color:var(--teal)"></i>Routed, held warm</span><span><i style="color:var(--gray);opacity:.5"></i>Not routed</span></div></div>
+    <div class="canvas"><svg id="route" viewBox="0 0 1300 400" role="group" aria-labelledby="route-title"><title id="route-title">Source routes into compositor slots A and B during a take</title><g id="r-edges"></g><g id="r-nodes"></g></svg></div>
+    <div class="note" aria-live="polite"><span id="r-note"></span><span id="r-cmd"></span></div>
+  </div>
+</section>
+
+<section aria-labelledby="strip-title">
+  <div class="sec-head"><div><h2 id="strip-title">One direct cut, deadline by deadline</h2>
+  <p>Each column is one 33 ms output deadline at 30 fps. A slot draws the frames stamped two deadlines earlier (<code>latency_ms</code> 67). The cut command arrives between deadlines 3 and 4.</p></div></div>
+  <div class="sheet">
+    <div class="strip-wrap"><div class="strip" id="strip"></div></div>
+    <div class="cap"><span>Slot B already holds Y's pictures, so Y is on program at the next deadline (t4). The AUX PGM cell follows one frame later (<code>pgm_delay_frames</code> 1).</span><span>Structural delays from code only. Measured cut latency: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/latency.md">latency.md</a>.</span></div>
+  </div>
+</section>
+
+<footer><span>Architecture from repository code, not live telemetry. Thread count: 2026-10-05 L4 run, 192 sources / 256 scenes / 26 outputs.</span><nav><a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md">Show configuration</a><a href="https://github.com/amagimedia/avplumber/blob/develop/doc/dmabuf.md">Browser DMA-BUF</a><a href="https://github.com/amagimedia/avplumber">Repository ↗</a></nav></footer>
+</div>
+
+<script>
+'use strict';
+const repo='https://github.com/amagimedia/avplumber/blob/8251eee0536961d1b8bbe578805abbf53d2d3d44/';
+const NS='http://www.w3.org/2000/svg';
+function el(tag,attrs={},text){const e=document.createElementNS(NS,tag);for(const[k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e}
+const W=150,H=78;
+// Lanes (w 520) are chains repeated per source; small cards are single nodes unless n says otherwise.
+const blocks=[
+{id:'nvdec',x:40,y:80,w:520,h:140,rows:['105',['input','demux','NVDEC','pace','colour']],v:'inputs',k:'src',n:'5 × 105 = 525',tag:'NVDEC FILES',title:'HEVC decode chain',native:'input_# · demux_# · decode_# · realtime_# · mixer_color_v#',detail:'Decode to fixed CUarray surfaces, then pace on the file’s own cadence and stamp the colour contract. No per-input force_fps: the compositor picks frames at the canvas rate.',file:'pyplumber/mixer/inputs.py'},
+{id:'raw',x:40,y:230,w:520,h:140,rows:['47',['input','demux','decode','pace','upload','tags']],v:'inputs',k:'src',n:'6 × 47 = 282',tag:'RAW NV12 FILES',title:'Upload chain',native:'input_# · demux_# · decode_# · realtime_# · upload_# · filter_#',detail:'Headerless NV12 read, uploaded from pinned memory one frame ahead of pacing, tags stamped in the upload graph, so no colour node.',file:'pyplumber/mixer/inputs.py'},
+{id:'browser',x:40,y:380,w:520,h:140,rows:['36',['DMA-BUF','to CUDA','smooth','hold','colour']],v:'inputs',k:'src',n:'5 × 36 = 180',tag:'CHROMIUM SCENES',title:'DMA-BUF import chain',native:'input_#_receive · _to_cuda · _smooth · _hold · mixer_color_b#',detail:'Pages render in the shared browser service; frames arrive as DMA-BUF handles and are imported into CUDA without a copy. A crashed page repeats its last frame.',file:'pyplumber/mixer/dmabuf_inputs.py'},
+{id:'keys',x:40,y:530,w:520,h:140,rows:['4',['DMA-BUF','to CUDA','smooth','hold','colour']],v:'outputs',k:'key',n:'5 × 4 = 20',tag:'CHROMIUM KEYS',title:'Key import chain',native:'input_#_receive … mixer_color_dsk_<key>',detail:'Lower third, ticker and two bugs. Keys are ordinary sources with alpha; they stay subscribed while off, so a key comes on at once.',file:'pyplumber/mixer/dsk.py'},
+{id:'otm',x:615,y:80,w:190,h:590,fan:['1','2','⋮','192'],v:'inputs',k:'gpu',n:'× 192',tag:'ONE_TO_MANY',title:'Fan-out',native:'mixer_otm_<source> · outputs bitmask',detail:'One per source: edges are queues, not broadcasts. Bit 0 feeds slot A, bit 1 slot B; 22 AUX taps are separately subscribed. The orchestrator rewrites the bitmask on every preview and take; with prewarm it stays A|B.',file:'src/mixer/routing.hpp',extra:['→ slot A · → slot B','→ 22 AUX taps','→ DSK (keys only)']},
+{id:'compA',x:860,y:90,v:'core',k:'gpu',tag:'MIXER_COMPOSITOR',title:'Slot A',sub:'clocked · 192 in',native:'mixer_comp_a (fps 30, latency_ms 67)',detail:'Draws only active_inputs; prewarm_inputs keep queues and held pictures without drawing. Each output frame carries its composition revision.',file:'src/nodes/mixer_compositor.cpp'},
+{id:'snapA',x:1030,y:90,v:'core',k:'gpu',tag:'MIXER_SNAPSHOT',title:'Snapshot A',sub:'held-frame swap',native:'mixer_snapshot_a',detail:'Lets a slot substitute the picture the output instance retained, without a GPU copy, when a take must hold a still.',file:'src/nodes/mixer_snapshot.cpp'},
+{id:'osA',x:1200,y:90,v:'core',k:'gpu',tag:'ONE_TO_MANY',title:'Scene out A',sub:'direct · fade',native:'mixer_otm_scene_a',detail:'Sends slot A to the selector directly and to the fade. Only the program slot is on; both during a fade.',file:'pyplumber/mixer/graph.py'},
+{id:'compB',x:860,y:250,v:'core',k:'gpu',tag:'MIXER_COMPOSITOR',title:'Slot B',sub:'clocked · 192 in',native:'mixer_comp_b',detail:'The second slot, over the same 192 inputs. Program and preview alternate between A and B on every take.',file:'src/nodes/mixer_compositor.cpp'},
+{id:'snapB',x:1030,y:250,v:'core',k:'gpu',tag:'MIXER_SNAPSHOT',title:'Snapshot B',sub:'held-frame swap',native:'mixer_snapshot_b',detail:'As snapshot A.',file:'src/nodes/mixer_snapshot.cpp'},
+{id:'osB',x:1200,y:250,v:'core',k:'gpu',tag:'ONE_TO_MANY',title:'Scene out B',sub:'direct · fade',native:'mixer_otm_scene_b',detail:'As scene out A.',file:'pyplumber/mixer/graph.py'},
+{id:'trans',x:1370,y:170,v:'core',k:'gpu',tag:'FILTER_VIDEO',title:'Fade',sub:'crossfade · dip',native:'mixer_out_sel_transition (transition_cuda)',detail:'Permanent CUDA crossfade and dip, mixed by frame PTS. Warmed once at startup; idle between fades.',file:'pyplumber/mixer/graph.py'},
+{id:'sel',x:1550,y:170,v:'core',k:'gpu',tag:'MIXER_SELECTOR',title:'Selector',sub:'A · B · fade',native:'mixer_out_sel',detail:'Commits a cut on the first frame carrying the new revision; fades and wipes progress by PTS. No take delay.',file:'src/nodes/mixer_selector.cpp'},
+{id:'wfps',x:1550,y:370,v:'core',k:'gpu',tag:'FORCE_FPS',title:'Wipe pacer',sub:'canvas rate',native:'mixer_wipe_base_fps',detail:'Holds the program at the canvas rate for the wipe overlay.',file:'pyplumber/mixer/graph.py'},
+{id:'ofin',x:1370,y:370,v:'core',k:'gpu',tag:'ONE_TO_MANY',title:'Output gate',sub:'opens after preheat',native:'mixer_otm_final (enable_from)',detail:'Closed until preheat finishes, then opened for fresh frames only. Feeds the wipe selector directly and the wipe overlay.',file:'pyplumber/mixer/prewarm.py'},
+{id:'wover',x:1200,y:370,v:'core',k:'gpu',tag:'MIXER_COMPOSITOR',title:'Wipe overlay',sub:'program + clip',native:'mixer_wipe_overlay',detail:'Draws the alpha clip over the program. Idle between wipes.',file:'pyplumber/mixer/graph.py'},
+{id:'wsel',x:1030,y:370,v:'core',k:'gpu',tag:'MIXER_SELECTOR',title:'Wipe select',sub:'program · wipe',native:'mixer_wipe_sel',detail:'Passes the program straight through between wipes.',file:'src/nodes/mixer_selector.cpp'},
+{id:'snapO',x:860,y:370,v:'core',k:'gpu',tag:'MIXER_SNAPSHOT',title:'Snapshot out',sub:'on-air picture',native:'mixer_snapshot_output',detail:'Records the committed picture that the slot snapshots can substitute.',file:'src/nodes/mixer_snapshot.cpp'},
+{id:'clip',x:1200,y:480,v:'core',k:'gpu',n:'6',tag:'CLIP CACHE',title:'Wipe clips',sub:'decoded once',native:'mixer_wipe_input · demux · dec · fmt · rt · mixer_wipe_cache',detail:'Alpha clips decode once into a cache; the player stays parked and a take arms it in place. Nothing is created or started under the program.',file:'pyplumber/mixer/clipcache.py'},
+{id:'orch',x:1550,y:480,v:'core',k:'ctl',tag:'NATIVE CONTROL',title:'Orchestrator',sub:'not a node',native:'MixerOrchestrator (src/mixer/orchestrator)',detail:'Owns program and preview state. A take writes the slot composition (layers, active inputs, revision, warm), the fan-out masks, scene outs and the selector. See the routing steps below.',file:'src/mixer/orchestrator/scene.cpp'},
+{id:'split',x:860,y:600,v:'outputs',k:'key',tag:'SPLIT',title:'Clean split',sub:'clean · keyed',native:'split_clean',detail:'The clean feed leaves before the keys.',file:'pyplumber/mixer/dsk.py'},
+{id:'dsk',x:1030,y:600,v:'outputs',k:'key',tag:'MIXER_KEYER',title:'DSK',sub:'4 keys',native:'dsk_comp (clock_input 0)',detail:'Draws up to four browser keys over each program frame, clocked by the program, fading on and off.',file:'pyplumber/mixer/dsk.py'},
+{id:'tap',x:1200,y:600,v:'outputs',k:'key',tag:'ONE_TO_MANY',title:'PGM tap',sub:'PGM + 22 AUX',native:'program_aux_tap',detail:'An AUX PGM cell shows what goes to air: the keyed program, subscribed per bus.',file:'pyplumber/mixer/application.py'},
+{id:'aux',x:40,y:820,w:520,h:180,rows:['22',['follow','comp','sdr','fps','fmt','kf','NVENC','hdr','mux','RTP']],v:'outputs',k:'gpu',n:'10 × 22 = 220',tag:'AUX BUSES',title:'AUX bus',native:'aux_<id>_comp · _pvw · _sdr · _fps · _format · _force_keyframe · _encoder · _repeat_headers · _mux · _rtp_output',detail:'Each bus subscribes only the 192 taps its layout draws, plus the PGM tap one frame late. Layout, slot and page changes are live. A late bus drops output; it never blocks Program.',file:'pyplumber/mixer/aux.py'},
+{id:'pgm',x:1200,y:820,w:400,h:80,v:'outputs',k:'out',n:'8',tag:'PROGRAM ENCODE',title:'Program (dirty)',sub:'scale → fps → format → keyframe → NVENC p3 → RTP',native:'scale_sdr · janus_fps · _format · _force_keyframe · janus_encoder · _repeat_headers · _mux · _rtp_output',detail:'A cut triggers one keyframe here. RTP leaves the graph for Janus.',file:'pyplumber/mixer/application.py'},
+{id:'clean',x:760,y:820,w:400,h:80,v:'outputs',k:'out',n:'8',tag:'CLEAN ENCODE',title:'Program (clean)',sub:'same chain, no keys',native:'scale_clean · janus_clean_*',detail:'The program without downstream keys.',file:'pyplumber/mixer/application.py'}
+];
+const edges=[
+['nvdec','otm','frame','M560 150H615'],['raw','otm','frame','M560 300H615'],['browser','otm','frame','M560 450H615'],['keys','otm','key','M560 600H615'],
+['otm','compA','frame','M805 129H860','192',818,121],['otm','compB','frame','M805 289H860','192',818,281],
+['compA','snapA','frame','M1010 129H1030'],['snapA','osA','frame','M1180 129H1200'],
+['compB','snapB','frame','M1010 289H1030'],['snapB','osB','frame','M1180 289H1200'],
+['osA','sel','frame','M1350 105H1535V190H1550','direct',1430,98],['osB','sel','frame','M1350 313H1535V228H1550','direct',1430,306],
+['osA','trans','frame','M1350 145H1360V190H1370'],['osB','trans','frame','M1350 273H1360V228H1370'],
+['trans','sel','frame','M1520 209H1550'],['sel','wfps','frame','M1625 248V370'],
+['wfps','ofin','frame','M1550 409H1520'],['ofin','wover','frame','M1370 409H1350'],['wover','wsel','frame','M1200 409H1180'],['wsel','snapO','frame','M1030 409H1010'],
+['ofin','wsel','frame','M1445 370V352H1105V370','between wipes',1230,345],
+['clip','wover','frame','M1275 480V448'],
+['snapO','split','frame','M935 448V600'],['split','dsk','frame','M1010 639H1030'],['dsk','tap','frame','M1180 639H1200'],
+['otm','dsk','key','M805 585H1105V600','4 key edges',900,578],
+['tap','pgm','frame','M1300 678V820'],['split','clean','frame','M935 678V820','clean',945,770],
+['tap','aux','frame','M1225 678V745H520V820','22 PGM taps',1050,738]
+];
+const views={all:null,inputs:['nvdec','raw','browser','keys','otm','compA','compB','orch'],core:['compA','snapA','osA','trans','compB','snapB','osB','sel','wfps','ofin','wover','clip','orch','wsel','snapO'],outputs:['snapO','split','dsk','tap','aux','pgm','clean','keys','otm']};
+const map=document.querySelector('#map');
+const defs=map.querySelector('defs');
+for(const[k,c]of[['frame','teal'],['key','pink'],['tap','teal'],['ctl','blue']]){const m=el('marker',{id:'ar-'+k,viewBox:'0 0 10 10',refX:9,refY:5,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'});m.append(el('path',{d:'M0 0L10 5L0 10Z',style:'fill:var(--'+c+')'}));defs.append(m)}
+const zones=map.querySelector('#zones');
+for(const[x,y,w,h,label,count]of[[20,40,560,650,'INPUT CHAINS','1,007 nodes'],[595,40,230,650,'FAN-OUT','192 nodes'],[840,40,870,670,'PROGRAM CORE + DSK','22 nodes'],[20,790,1690,240,'AUX BUSES + ENCODERS','236 nodes']]){
+ zones.append(el('rect',{x,y,width:w,height:h,rx:20,class:'zone'}));zones.append(el('text',{x:x+20,y:y+26,class:'zone-label'},label));zones.append(el('text',{x:x+w-20,y:y+26,'text-anchor':'end',class:'zone-count'},count))}
+const eg=map.querySelector('#edges');
+for(const[a,b,k,d,label,lx,ly]of edges){const g=el('g',{'data-a':a,'data-b':b});g.append(el('path',{d,class:'edge k-'+k,'marker-end':'url(#ar-'+k+')'}));if(label)g.append(el('text',{x:lx,y:ly,class:'edge-label'},label));eg.append(g)}
+const ng=map.querySelector('#nodes');
+// Instance 1 drawn as its node chain; instances 2…N as a bundle of lines, like the fan-out.
+function stackRows(g,b,c){
+  const[last,pills]=b.rows,y0=68,stroke=c('s');
+  g.append(el('text',{x:44,y:y0+4,'text-anchor':'end',class:'mult',style:'fill:'+c('i')},'1'));
+  let x=56;
+  pills.forEach((t,i)=>{
+    const w=t.length*6.8+(pills.length>7?9:12);
+    g.append(el('rect',{x,y:y0-9,width:w,height:18,rx:5,style:`fill:var(--card);stroke:${stroke};stroke-width:1.3`}));
+    g.append(el('text',{x:x+w/2,y:y0+4,'text-anchor':'middle',class:'chain',style:'fill:var(--ink)'},t));
+    x+=w;
+    if(i<pills.length-1){const gap=pills.length>7?7:12;g.append(el('path',{d:`M${x} ${y0}H${x+gap}`,style:`stroke:${stroke};stroke-width:1.3;fill:none`}));x+=gap}
+  });
+  const end=b.w-10,mid=b.h/2+(b.h>150?10:0),n=8;
+  for(let i=0;i<n;i++){const y=y0+24+i*(b.h>150?10:6);
+    g.append(el('path',{d:`M56 ${y}H${end-70}C${end-30} ${y} ${end-30} ${mid} ${end} ${mid}`,style:`stroke:${stroke};stroke-width:1.1;fill:none;opacity:${i===0?.9:.45}`}))}
+  const yl=y0+24,yn=y0+24+(n-1)*(b.h>150?10:6);
+  g.append(el('text',{x:44,y:yl+4,'text-anchor':'end',class:'mult',style:'fill:'+c('i')},'2'));
+  g.append(el('text',{x:44,y:(yl+yn)/2+4,'text-anchor':'end',class:'mult',style:'fill:'+c('i')},'⋮'));
+  g.append(el('text',{x:44,y:yn+4,'text-anchor':'end',class:'mult',style:'fill:'+c('i')},last));
+}
+function fanStack(g,b,c){
+  const top=190,gap=118;
+  b.fan.forEach((lab,i)=>{
+    const y=top+i*gap;
+    g.append(el('text',{x:44,y:y+5,'text-anchor':'end',class:'mult',style:'fill:'+c('i')},lab));
+    if(lab==='⋮'){for(const dy of[-30,0,30])g.append(el('circle',{cx:95,cy:y+dy,r:2.5,style:'fill:'+c('s')}));return}
+    g.append(el('rect',{x:58,y:y-9,width:22,height:18,rx:4,style:`fill:var(--card);stroke:${c('s')};stroke-width:1.5`}));
+    for(let j=0;j<7;j++)g.append(el('path',{d:`M80 ${y}C110 ${y} 120 ${y-36+j*12} 170 ${y-36+j*12}`,style:`stroke:${c('s')};stroke-width:1;fill:none;opacity:${j<2?1:.55}`}));
+  });
+  g.append(el('text',{x:176,y:top-38,'text-anchor':'end',class:'sub'},'A, B + 22 taps each'));
+}
+// The 4,224 AUX taps: a bundle, one stroke per few hundred edges.
+(()=>{const gt=el('g',{'data-a':'otm','data-b':'aux'});
+  for(let i=0;i<16;i++){const x0=628+i*10.5,y1=838+i*9.5;gt.append(el('path',{d:`M${x0} 670C${x0} 760 ${640} ${y1} 560 ${y1}`,class:'edge k-tap',style:'stroke-width:1.2;opacity:.7'}))}
+  gt.append(el('text',{x:640,y:770,class:'edge-label'},'192 × 22 = 4,224 tap edges'));
+  map.querySelector('#edges').append(gt)})();
+for(const b of blocks){
+  const w=b.w||W,h=b.h||H,c=k=>`var(--c-${b.k}-${k})`;
+  const g=el('g',{id:'n-'+b.id,class:'node',tabindex:0,role:'button','aria-label':b.title+(b.n?' '+b.n:''),transform:`translate(${b.x} ${b.y})`});
+  g.append(el('rect',{width:w,height:h,rx:12,style:`fill:${c('f')};stroke:${c('s')}`+(b.k==='ctl'?';stroke-dasharray:6 5':'')}));
+  g.append(el('text',{x:14,y:20,class:'tag',style:'fill:'+c('i')},b.tag));
+  if(b.n)g.append(el('text',{x:w-12,y:20,'text-anchor':'end',class:'mult',style:'fill:'+c('i')},b.n));
+  g.append(el('text',{x:14,y:46,class:'name',style:w>300?'font-size:20px':''},b.title));
+  if(b.sub)g.append(el('text',{x:14,y:66,class:'sub'},b.sub));
+  if(b.chain)g.append(el('text',{x:14,y:66,class:'chain'},b.chain));
+  if(b.rows)stackRows(g,b,c);
+  (b.extra||[]).forEach((t,i)=>g.append(el('text',{x:14,y:72+i*22,class:'sub'},t)));
+  if(b.fan)fanStack(g,b,c);
+  const pick=()=>{ng.querySelectorAll('.selected').forEach(n=>n.classList.remove('selected'));g.classList.add('selected');
+    document.querySelector('#d-title').textContent=b.title+(b.n?' · '+b.n:'');document.querySelector('#d-native').textContent=b.native;
+    document.querySelector('#d-text').textContent=b.detail;document.querySelector('#d-link').href=repo+b.file};
+  g.addEventListener('click',pick);g.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick()}});
+  ng.append(g);
+}
+document.querySelectorAll('[data-view]').forEach(btn=>btn.addEventListener('click',()=>{
+  const keep=views[btn.dataset.view];
+  document.querySelectorAll('[data-view]').forEach(t=>t.setAttribute('aria-pressed',String(t===btn)));
+  ng.querySelectorAll('.node').forEach(n=>n.classList.toggle('faded',!!keep&&!keep.includes(n.id.slice(2))));
+  eg.querySelectorAll('g').forEach(g=>g.classList.toggle('faded',!!keep&&!(keep.includes(g.dataset.a)&&keep.includes(g.dataset.b))));
+}));
+
+/* ---- one frame's life: time to scale, 1 frame = 33 ms at 30 fps ---- */
+(()=>{
+  const z=map.querySelector('#zones'),T=el('g'),x0=200,F=260,ya=1205;
+  z.append(el('rect',{x:20,y:1050,width:1690,height:190,rx:20,class:'zone'}));
+  z.append(el('text',{x:40,y:1076,class:'zone-label'},'ONE FRAME\u2019S LIFE · TO SCALE · 30 FPS'));
+  z.append(el('text',{x:1690,y:1076,'text-anchor':'end',class:'zone-count'},'deadline = PTS + 2 frames (67 ms) · 3 frames at 50/60 fps'));
+  const X=f=>x0+f*F,txt='font-size:13px;font-family:var(--font)';
+  for(let f=0;f<=5;f++){T.append(el('path',{d:`M${X(f)} 1092V${ya+6}`,style:'stroke:var(--line);stroke-width:1.2;stroke-dasharray:3 4'}));
+    T.append(el('text',{x:X(f),y:ya+24,'text-anchor':'middle',class:'mult',style:'fill:var(--muted)'},f===0?'PTS':`+${Math.round(f*1000/30)} ms`))}
+  T.append(el('path',{d:`M${X(0)} ${ya}H${X(5)+30}`,style:'stroke:var(--muted);stroke-width:1.5;fill:none','marker-end':'url(#ar-frame)'}));
+  const bar=(f0,f1,row,cls,inside,bold,rest)=>{
+    const yy=1094+row*34;
+    T.append(el('rect',{x:X(f0),y:yy,width:X(f1)-X(f0),height:24,rx:6,style:`fill:var(--c-${cls}-f);stroke:var(--c-${cls}-s);stroke-width:1.3`}));
+    T.append(el('text',{x:X(f0)+10,y:yy+16,style:txt+';font-weight:700;fill:var(--c-'+cls+'-i)'},inside));
+    const t=el('text',{x:X(f1)+12,y:yy+16,style:txt+';fill:var(--muted)'});
+    const b=el('tspan',{style:'font-weight:700;fill:var(--ink)'},bold+' ');t.append(b,document.createTextNode(rest));T.append(t);
+  };
+  bar(0,2,0,'src','playout queue','waits ≤ 2 frames.','A late source repeats its held picture; nothing waits.');
+  bar(2,3,1,'gpu','deadline tick','One tick:','slot draws → selector → wipe → DSK → NVENC, done before the next.');
+  bar(3,4,2,'key','AUX PGM','+1 frame:','the keyed program reaches the AUX PGM cells.');
+  T.append(el('text',{x:40,y:1110,style:txt+';font-weight:700;fill:var(--c-src-i)'},'Input frame'));
+  T.append(el('text',{x:40,y:1128,style:txt+';fill:var(--muted)'},'paced to the wall'));
+  T.append(el('text',{x:40,y:1146,style:txt+';fill:var(--muted)'},'clock, stamped'));
+  map.append(T);
+})();
+
+/* ---- routing stepper ---- */
+const R=document.querySelector('#route');
+const rcards=[
+ {id:'X',x:30,y:30,w:240,title:'Scene X sources',sub:'on program now'},
+ {id:'Y',x:30,y:150,w:240,title:'Scene Y sources',sub:'the next scene'},
+ {id:'R',x:30,y:270,w:240,title:'Every other source',sub:'used by the other 254 scenes'},
+ {id:'A',x:520,y:40,w:260,title:'Slot A'},
+ {id:'B',x:520,y:250,w:260,title:'Slot B'},
+ {id:'F',x:880,y:150,w:170,title:'Fade',sub:'transition_cuda'},
+ {id:'S',x:1090,y:150,w:190,title:'Selector → PGM'}
+];
+const rlines={XA:'M270 70C400 70 390 80 520 80',YA:'M270 190C400 190 390 95 520 95',RA:'M270 310C400 310 390 110 520 110',
+ XB:'M270 75C400 75 390 275 520 275',YB:'M270 195C400 195 390 290 520 290',RB:'M270 315C400 315 390 305 520 305',
+ AS:'M780 90H1060V175H1090',BS:'M780 300H1060V225H1090',AF:'M780 110H840V180H880',BF:'M780 280H840V220H880',FS:'M1050 200H1090'};
+const re=R.querySelector('#r-edges'),rn=R.querySelector('#r-nodes'),lines={},states={};
+for(const[k,d]of Object.entries(rlines)){lines[k]=el('path',{d,class:'r-edge r-off'});re.append(lines[k])}
+for(const c of rcards){const h=c.id==='A'||c.id==='B'?110:80;const kind=c.id==='X'?'ctl':c.id==='Y'?'src':c.id==='R'?'off':'gpu';
+ const g=el('g',{class:'r-card',transform:`translate(${c.x} ${c.y})`});
+ g.append(el('rect',{width:c.w,height:h,rx:12,style:`fill:var(--c-${kind}-f);stroke:var(--c-${kind}-s)`}));
+ g.append(el('text',{x:14,y:30,class:'name'},c.title));
+ if(c.sub)g.append(el('text',{x:14,y:54,class:'sub'},c.sub));
+ if(h===110||c.id==='S'){states[c.id]=el('text',{x:14,y:c.id==='S'?58:62,class:'r-state',style:`fill:var(--c-${kind}-i)`});g.append(states[c.id]);
+  if(h===110){states[c.id+'2']=el('text',{x:14,y:86,class:'sub'});g.append(states[c.id+'2'])}}
+ rn.append(g)}
+R.append(el('text',{x:300,y:385,class:'edge-label'},'fan-out outputs per source: bit 0 → A, bit 1 → B'));
+// d = drawn, w = routed + held warm, o = not routed.
+const steps=[
+ {name:'On air',cmd:'',r:{XA:'d',YA:'w',RA:'w',XB:'w',YB:'w',RB:'w',AS:'d'},A:['active: X','draws scene X'],B:['active: none','holds warm pictures'],S:'A on air',
+  note:'Program X is drawn by slot A. Every scene source also feeds both slots; slot B draws nothing but keeps each source’s latest picture.'},
+ {name:'Preview Y',cmd:'mixer.preview {"scene":"Y"}',r:{XA:'d',YA:'w',RA:'w',XB:'w',YB:'d',RB:'w',AS:'d'},A:['active: X','draws scene X'],B:['active: Y · rev 8','draws Y at the next deadline'],S:'A on air',
+  note:'Slot B gets one composition object: Y’s layers, active inputs, revision 8, warm. Its sources are already queued, so B draws Y at the next deadline. PVW monitors show it.'},
+ {name:'Cut',cmd:'mixer.cut {"scene":"Y"}',r:{XA:'d',YA:'w',RA:'w',XB:'w',YB:'d',RB:'w',BS:'d'},A:['active: X','last X frame'],B:['active: Y · rev 8','draws scene Y'],S:'B on air',
+  note:'The selector switches to B and commits on the first frame carrying revision 8. The program encoder gets one keyframe. No take delay.'},
+ {name:'After the take',cmd:'',r:{XA:'w',YA:'w',RA:'w',XB:'w',YB:'d',RB:'w',BS:'d'},A:['active: none','holds warm pictures'],B:['active: Y','draws scene Y'],S:'B on air',
+  note:'Slot A stops drawing (active_inputs 0, scene fan-out A off). Preview now shows X, swapped like OBS; it is only shown, so A costs no draw until the next take.'},
+ {name:'Fade instead',cmd:'mixer.fade {"scene":"Y","duration_sec":0.5}',r:{XA:'d',YA:'w',RA:'w',XB:'w',YB:'d',RB:'w',AF:'d',BF:'d',FS:'d'},A:['active: X','outgoing scene'],B:['active: Y · rev 8','incoming scene'],S:'fade on air',
+  note:'Both slots draw and feed the permanent transition. The selector takes the fade output; the mix advances by frame PTS. At the end it lands on B, as after a cut.'}
+];
+let step=0;
+const stepBox=document.querySelector('#steps');
+steps.forEach((s,i)=>{const b=document.createElement('button');b.className='step';b.innerHTML='<small>'+(i+1)+'</small>'+s.name;b.addEventListener('click',()=>{step=i;renderRoute()});stepBox.append(b)});
+function renderRoute(){
+ const s=steps[step];
+ for(const[k,p]of Object.entries(lines))p.setAttribute('class','r-edge r-'+{d:'draw',w:'warm',o:'off'}[s.r[k]||'o']);
+ states.A.textContent=s.A[0];states.A2.textContent=s.A[1];
+ states.B.textContent=s.B[0];states.B2.textContent=s.B[1];states.S.textContent=s.S;
+ document.querySelector('#r-note').innerHTML='<b>'+s.name+'.</b> '+s.note;
+ const cmd=document.querySelector('#r-cmd');cmd.replaceChildren();if(s.cmd){const c=document.createElement('code');c.textContent=s.cmd;cmd.append(c)}
+ stepBox.querySelectorAll('.step').forEach((b,i)=>b.setAttribute('aria-pressed',String(i===step)));
+}
+
+/* ---- deadline strip ---- */
+(()=>{
+ const strip=document.querySelector('#strip'),flip=4; // a prewarmed scene flips at the next deadline
+ const add=(cls,text)=>{const d=document.createElement('div');d.className=cls;d.textContent=text;strip.append(d)};
+ add('h','');for(let t=1;t<=10;t++)add('h'+(t===flip?' cmd':''),(t===flip?'cut ↓ ':'')+'t'+t);
+ const row=(name,f)=>{add('rn',name);for(let t=1;t<=10;t++){const[c,txt]=f(t);add('cell '+c,txt)}};
+ row('Sources',()=>['cN','frames']);
+ row('Slot A draws',t=>t<flip?['cX','X']:t===flip?['cX','X last']:['cN','warm']);
+ row('Slot B draws',t=>t<flip?['cN','warm']:['cY','Y']);
+ row('Program',t=>t<flip?['cX','X']:['cY','Y']);
+ row('AUX PGM cell',t=>t<=flip?['cX','X']:['cY','Y']);
+})();
+renderRoute();
+</script>
+</body>
+</html>
