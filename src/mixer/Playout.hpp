@@ -17,7 +17,8 @@ namespace avp::mixer {
 enum class TimestampMode { Cadence, Presentation };
 
 // Frame is a reference-owning value (e.g. VideoFrame or EglImageFrame).
-// Rendering adapters retain the decision until their output is accepted.
+// Rendering adapters retain the decision until their output is accepted. Its frame pointers
+// borrow the queue/held values, which cannot be replaced until commit().
 template<class Frame> class Playout {
 public:
     struct Stats {
@@ -29,7 +30,7 @@ public:
     };
     struct Decision {
         int64_t index;
-        std::vector<std::optional<Frame>> frames;
+        std::vector<const Frame*> frames;
     };
 
 private:
@@ -166,6 +167,7 @@ public:
             if (now_ns < *waiting_deadline_) return nullptr;
         }
         pending_ = Decision{scheduled, {}};
+        pending_->frames.reserve(inputs_.size());
         for (size_t i = 0; i < inputs_.size(); ++i) {
             auto &input = inputs_[i];
             size_t count = 0;
@@ -174,8 +176,8 @@ public:
                 ++count;
             }
             consume_[i] = count;
-            pending_->frames.push_back(count ? std::optional<Frame>(input.queue[count-1].frame)
-                                             : input.held);
+            pending_->frames.push_back(count ? &input.queue[count-1].frame
+                                             : input.held ? &*input.held : nullptr);
         }
         return &*pending_;
     }
@@ -205,7 +207,7 @@ public:
             auto &input = inputs_[i];
             if (consume_[i]) {
                 input.stats.discarded += consume_[i] - 1;
-                input.held = std::move(pending_->frames[i]);
+                input.held = std::move(input.queue[consume_[i] - 1].frame);
                 input.held_index = input.queue[consume_[i] - 1].index;
                 for (size_t count = consume_[i]; count; --count) input.queue.pop_front();
             } else if (input.held) {
