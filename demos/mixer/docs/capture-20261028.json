@@ -1,0 +1,58 @@
+{
+  "captured": "2026-10-28",
+  "revision": "8251eee0536961d1b8bbe578805abbf53d2d3d44",
+  "branch": "develop",
+  "gpu": "NVIDIA L4",
+  "vcpus": 12,
+  "inputs": 192,
+  "source_counts": {
+    "nvdec": 105,
+    "browser_scene": 36,
+    "raw_nv12": 47,
+    "browser_keys": 4
+  },
+  "scenes": 256,
+  "encoded_outputs": 24,
+  "canvas": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "format": "SDR 8-bit 4:2:0"
+  },
+  "recording": {
+    "file": "mixer-192-input-ui-tbar-20261028-1080p30.mp4",
+    "method": "Actual live Chrome UI, recorded from its X display with FFmpeg x11grab. Both WebRTC viewers, mouse-operated controls and T-bar are captured together; no offline UI reconstruction or substituted viewer pictures.",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "frames": 600,
+    "duration_seconds": 20,
+    "browser": "Chrome 156.0.8078.73",
+    "viewer_decode": "NVIDIA VA-API",
+    "sequence": [
+      "Direct scene cut",
+      "Preview selection",
+      "Manual fade to 50 percent, hold and complete",
+      "Preview selection and return stroke"
+    ]
+  },
+  "playback_interval": [
+    {
+      "viewer": "Program preview",
+      "width": 1920,
+      "height": 1080,
+      "elapsed_seconds": 21.123759,
+      "total_video_frames_delta": 633,
+      "dropped_video_frames_delta": 209
+    },
+    {
+      "viewer": "Program dirty",
+      "width": 1920,
+      "height": 1080,
+      "elapsed_seconds": 21.12044,
+      "total_video_frames_delta": 633,
+      "dropped_video_frames_delta": 204
+    }
+  ],
+  "scope": "Documentation screen recording on a shared host. Browser presentation dropped frames during this capture; the 30 fps screen recording does not assert 30 unique presented frames per viewer per second. This does not replace historical capacity or latency benchmarks."
+}
