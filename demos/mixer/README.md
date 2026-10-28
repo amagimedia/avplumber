@@ -6,21 +6,21 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 [![192-input mixer: Program/Preview and dirty Program with four downstream keys](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo-poster.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
 [Watch the 20-second demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
-[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-tbar-20261028-1080p30.mp4) ·
+[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-ui-tbar-20261028-1080p30.mp4) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
 [Configuration](docs/config.md) · [Run manually](docs/guide.md)
 
-Captured 2026-10-28 on an NVIDIA L4 and replayed in the real two-viewer interface:
-192 inputs (105 NVDEC, 36 browser scene sources, 47 raw NV12 and four browser
-keys), 256 scenes and 24 encoded outputs at 1920×1080p30 SDR. It shows direct
-cuts and manual T-bar fades, including a halfway hold and a return stroke,
-with all four keys enabled. Both encoded outputs were recorded on the
-instance at Janus’s RTP input before Internet transport, then combined with the matching UI
-and sampled mixer status at 30 fps. The fade itself is in the recorded Program output. [Original Program recording](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-pgm-tbar-20261028-1080p30.mp4)
-retains the encoder bitstream, including capture preroll and tail. Setup counts the 188 scene sources separately
-from the keys. This documentation recording does not refresh the historical capacity benchmark.
-The same show runs at 1080p25 with 26 outputs; see the
-[capacity page](docs/capacity.md).
+Captured 2026-10-28 directly from the live mixer UI: two live WebRTC viewers,
+the upright T-bar, direct cuts and manual fades with a halfway hold and a return stroke.
+The 192-input develop show runs on one NVIDIA L4 with 256 scenes and 24 encoded outputs
+at 1920×1080p30 SDR. Its inputs are 105 NVDEC videos, 36 browser scene sources,
+47 raw NV12 feeds and four browser keys. All four keys are on in the recording.
+
+The video is a 30 fps screen capture of the actual interface, operated with mouse
+clicks and T-bar drags. Its viewer pictures and controls are captured together;
+there is no offline UI reconstruction. Setup counts the 188 scene sources separately
+from the keys. This documentation recording does not refresh the historical
+[capacity measurements](docs/capacity.md).
 
 ## Run
 

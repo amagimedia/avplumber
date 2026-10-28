@@ -1,30 +1,40 @@
 # Mixer demo recording
 
-The [demo page](https://amagimedia.github.io/avplumber/demos/mixer/docs/) replays a 20-second
-host capture in the matching mixer UI. Both encoded outputs are recorded at Janus's RTP input,
-before Internet transport. The T-bar follows sampled mixer status, including a halfway hold,
-completion and a return stroke. This is a reconstruction from recorded video and state, not a
-browser screen recording or a measurement of WebRTC latency.
+The current [demo page](https://amagimedia.github.io/avplumber/demos/mixer/docs/) uses a
+screen recording of the **actual live UI**, including both WebRTC viewers and the T-bar.
+Record the controls and pictures together; do not reconstruct the UI from sampled state.
 
-1. **Capture** on the host running the 192-input, 256-scene, 24-output 1080p30 show:
-   `python3 capture_on_instance.py > capture.json`. It changes scenes, keys and the lever, then
-   restores Program, Preview and keys. Avoid operating the show during the capture. Copy the
-   two `.mjr` files it names out of Janus as `pgm.mjr` and `preview.mjr`, and save the matching
-   control page (`/`) and `/outputs.js` as `ui.html` and `outputs.js`.
-2. **Process** after capture, with python3, numpy and ffmpeg, in the directory holding those files:
-   `python3 process.py`. It recognizes H.264/H.265, reconstructs access units, discards an incomplete
-   final access unit, reports RTP timestamp steps and packet gaps, extracts the requested frames,
-   and measures ticker motion. The Program MP4 preserves the encoder bitstream, with preroll
-   and tail. Review `report.json`; constant RTP cadence alone does not prove that source frames
-   or compositors met every deadline.
-3. **Render** in a Playwright container in that directory: `node render.cjs`. Each frame uses
-   recorded pictures, the latest sampled status and the matching UI, with an upright T-bar.
-   `render-check.json` records the drawn grip and sampled position for verification.
-4. **Encode** `ui-frames/%03d.png` at the captured frame rate, inspect the transition and hold,
-   and extract a poster and scene stills. Do this after capture so offline processing does not
-   compete with the live show during measurement.
+## Live UI capture
 
-`capture.json` contains the rate, frame count and timeline used by both downstream tools. Full
-state and recording paths are private; publish only a sanitized configuration and timing summary.
-Keep deadline/drop counters scoped to their measured interval. See
-[publishing](../../.github/pages/README.md) for release assets and Pages updates.
+`capture_ui.cjs` runs in a dedicated Linux desktop with a 1920×1080 X display, a window
+manager, Playwright, Chrome and FFmpeg with x11grab/libx264. The browser must support both
+outputs' H.264 profiles. Software-only Chrome may play Program but reject the High-profile
+AUX viewer; verify hardware decoding before recording. This setup belongs to the capture
+browser and does not require rebuilding or restarting the mixer.
+
+```sh
+MIXER_UI_URL=http://127.0.0.1:7681/ DISPLAY=:99 node capture_ui.cjs ui-capture
+```
+
+Optional environment variables: `CHROME_EXECUTABLE`, `CHROME_ARGS` (a JSON array), and
+`MIXER_HTTP_USER` / `MIXER_HTTP_PASSWORD` for a protected proxy. Keep credentials out of Git.
+
+The script selects the two viewers and upright T-bar using browser preferences, checks
+that both streams decode, then operates scene buttons and the T-bar with real mouse input.
+It records 20 seconds at 30 fps with cuts, a halfway hold and a return stroke. It restores
+Program, Preview and keys afterward if the show has not changed. A setup revision change
+aborts the capture and leaves the new deployment alone. Avoid other show controls during
+the short recording window.
+
+Review `live-ui.mp4` and the before/after playback counters in `capture.json`. Full state and
+URLs in that report are private: publish only a sanitized capture summary. Verify frame
+count, rate, dimensions, both moving viewers and the actual T-bar fade before replacing the
+[release assets and Pages links](../../.github/pages/README.md).
+
+## Earlier host-output recordings
+
+`capture_on_instance.py`, `process.py` and `render.cjs` implement the older workflow: record
+Program and Program/Preview RTP inputs at Janus before Internet transport, extract pictures,
+and replay sampled state in the control page. That workflow preserves the native Program
+bitstream but **does not capture live UI operation**. It remains available for reproducing the
+historical recordings; use `capture_ui.cjs` for the current documentation video.
