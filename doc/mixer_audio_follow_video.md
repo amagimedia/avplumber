@@ -112,9 +112,21 @@ itself, only hands out the edges:
 
 In-tree node `audio_mixer` (`src/nodes/audio_mixer.cpp`) implements this
 protocol: multi-input fltp sum, multi-bus keyed by `output`, hard-sync gain at
-`pts`. With `MixerOptions.audio_router_node` set and `has_audio` sources,
-`build_application` wires it via `pyplumber.mixer.audio_mixer.wire_audio_mixer`
-and can send the program bus to Janus Opus (`build_janus_audio_output`).
+`pts`. With `MixerOptions.audio_router_node` set, `has_audio` sources, and
+`MixerOptions.build_audio_mixer` left at its default `True`, `build_application`
+wires it via `pyplumber.mixer.audio_mixer.wire_audio_mixer` and can send the
+program bus to Janus Opus (`build_janus_audio_output`); it also wires the
+per-source gain controller (`audio_gain.py`), which speaks `audio_mixer`'s own
+`set_source_gain` control command.
+
+To put a different `IInputsObjects` impl in this slot instead (e.g.
+`dyremix_mixer`), set `MixerOptions.build_audio_mixer = False`:
+`build_application` then leaves `audio_router_node` untouched instead of
+building `audio_mixer` under that name, and skips the `audio_gain.py` gain
+controller (it only understands `audio_mixer`'s protocol). The caller is then
+responsible for building and wiring that node itself — including Janus program
+audio and the `{audio_router_node}_{bus.id}` aux-leg edges `aux.py` expects for
+AUX buses with an `audio_port` — before `MixerApplication.start()` runs.
 
 ## One `audio_router_node` vs several consumers
 
@@ -123,9 +135,10 @@ mix/bus per `output` (as `audio_mixer` does).
 
 To use different consumers per output without changing the orchestrator — e.g.
 `audio_mixer` for `program`, another AFV consumer for one AUX, and no audio for
-others — register a thin fan-out node as `audio_router_node`. It implements
-`IInputsObjects::setObject`, reads `params.output`, and forwards (or drops) to
-the chosen node.
+others — register a thin fan-out node as `audio_router_node` (with
+`MixerOptions.build_audio_mixer = False`, same as any other custom
+`IInputsObjects` impl — see above). It implements `IInputsObjects::setObject`,
+reads `params.output`, and forwards (or drops) to the chosen node.
 
 Conditions when mixing consumers:
 
