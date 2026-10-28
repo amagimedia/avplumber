@@ -36,6 +36,9 @@ public:
         closed_ = true;
     }
     template<class Frame, class Publish> void publish(const Frame &frame, Publish send) {
+        // Most source/AUX pairs are inactive. Avoid touching their mutex; the
+        // locked recheck still makes disable/close acknowledge all prior sends.
+        if (!enabled()) return;
         std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
         if (!lock || !enabled()) return;
         if (rate_ && frame.pts().isValid()) {
