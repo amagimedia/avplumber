@@ -120,7 +120,7 @@ Up to four browser keys over the finished program. `feed: "clean"` omits them. K
 
 | field | default | meaning |
 | --- | --- | --- |
-| `fade_seconds` | `0.4` | how long a key change fades, 0 to 10; `0` cuts |
+| `fade_seconds` | `0.4` | initial shared ALL key rate, 0 to 10 seconds; `0` cuts. Keys start by following ALL |
 | `fade_curve` | `"linear"` | easing of a key fade, the same presets as `control.fade_curve` |
 
 
@@ -131,6 +131,37 @@ Up to four browser keys over the finished program. `feed: "clean"` omits them. K
 | `dst` | whole canvas | `x`, `y`, `w`, `h` on the canvas; the window is scaled into it |
 | `on` | `false` | on air at start |
 | `bounded` | `false` | compose only this key's rectangle instead of the whole canvas, while every key on air is `bounded`; for a key that fills a known part of the picture, such as a lower third |
+
+### Runtime key rates and takes
+
+Rates are mixer state shared by all controllers. They are separate from the background
+Fade rate. These control commands use seconds; replace `lower_third` with a configured key ID:
+
+```text
+mixer.dsk {"all_rate":0.4}
+mixer.dsk {"key":"lower_third","rate":1.0}
+mixer.dsk {"key":"lower_third","on":true}
+mixer.dsk {"key":"lower_third","on":false,"fade_seconds":0}
+mixer.dsk {"key":"lower_third","rate":null}
+```
+
+`rate: null` restores inheritance from ALL. Changing a rate does not change visibility.
+An explicit `fade_seconds` overrides the saved rate for that command only. A group request
+with `keys: [...]` and `toggle: true` changes the named keys together; it uses `all_rate`
+unless `fade_seconds` is supplied. The UI's ALL/K action instead sends each key at its own
+rate, preserving overrides.
+
+```text
+mixer.dsk {"keys":["lower_third","ticker"],"toggle":true,"fade_seconds":0.5}
+mixer.dsk {"keys":["lower_third"],"prepare":true}
+mixer.dsk {"keys":[],"prepare":true}
+```
+
+`prepare: true` selects the keys for subsequent background takes (NEXT); an empty list
+clears the selection. Prepared keys follow the background take's clock instead of their
+independent rates: fades, holds, manual lever progress, cuts and wipe cut points remain
+aligned. See [operator controls](guide.md#next-combine-background-and-key-takes) for the
+separate key-only Auto behavior and the distinction between ALL and NEXT.
 
 ## aux_buses
 

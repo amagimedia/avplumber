@@ -54,11 +54,20 @@ selected [instance profile](instance_profiles.py), not a universal source limit.
 
 ## Controls
 
-- Scene: select Preview, or take immediately in Direct mode.
-- Cut / Fade / Wipe: take the selected scene; a new take interrupts the old one.
-- T-bar: move between Program and Preview; hold midway or reverse the stroke.
-- Keys: toggle browser overlays on the program; clean outputs omit them.
-- AUX: choose layouts, scene slots or source pages independently of Program.
+- Preview/Program: select the next scene, or enable Direct to cut on selection.
+- Cut, Auto, Fade, colour Dip and media wipes; Auto can halt/resume or complete a take.
+- T-bar: horizontal or upright, manual fade with a hold, cancellation or return stroke;
+  cached wipes can follow the lever too.
+- DSK: independent per-key fades or cuts, a shared ALL rate with per-key overrides,
+  and Shift+click for an immediate key cut.
+- NEXT: arm background and keys for one transition, or take only the armed keys.
+- FTB: fade the keyed program to black while the clean feed remains available.
+- Two resizable viewers, editable multiview slots, AUX layouts/source paging and an output wall.
+- Live GPU, encoder/decoder, memory, power, CPU, thread and delivery statistics.
+
+See the [operator controls](docs/guide.md#controls) or the
+[illustrated Pages guide](https://amagimedia.github.io/avplumber/demos/mixer/docs/controls.html)
+for rate editing, NEXT behavior and shortcuts.
 
 ## Configure and extend
 
