@@ -40,7 +40,11 @@ public:
         bool allow_hdr_depth_reduction = false;
     };
 
-    CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int max_layers = 256);
+    // Stream completion is for callers that already synchronize each output;
+    // asynchronous callers keep the finer-grained event protecting the table.
+    enum class TableCompletion { Event, Stream };
+    CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int max_layers = 256,
+                 TableCompletion table_completion = TableCompletion::Event);
     ~CudaRectDraw();
     CudaRectDraw(const CudaRectDraw &) = delete;
     CudaRectDraw &operator=(const CudaRectDraw &) = delete;
@@ -58,6 +62,8 @@ public:
     void ensureKernels();
     void unload();
     CUstream stream() const { return (CUstream)cuda_dev_->stream; }
+    /// Wait for this stream's output and release any rect-table use it completed.
+    void synchronize(CUstream stream);
 
     /// Compose the frame: background where nothing draws, then every resolved op in order, in one
     /// kernel launch. Validates each source's color tags against the canvas contract first.
@@ -107,11 +113,13 @@ private:
     bool filter_warned_ = false;    // an op naming a filter on a kind drawn bilinear, logged once
     // Rect table: pinned host staging + device copy, one entry per op, reused every frame. The
     // upload reads the pinned staging when the stream reaches it, not when it is queued, so the
-    // staging is not written again until the GPU is done with the last draw (table_done_).
+    // staging is not written again until the last draw's event or stream has completed.
     AvpRectLayer *table_host_ = nullptr;
     CUdeviceptr table_device_ = 0;
     CUevent table_done_ = nullptr;   // recorded after the last launch that reads the table
-    bool table_in_use_ = false;      // table_done_ is recorded and not yet waited for
+    const TableCompletion table_completion_;
+    CUstream table_stream_ = nullptr;
+    bool table_in_use_ = false;
     std::unique_ptr<RectArrayTextures> array_textures_;
     CUevent producer_ready_ = nullptr;
     std::vector<CUstream> waited_streams_;
