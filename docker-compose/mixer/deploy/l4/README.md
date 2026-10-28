@@ -9,7 +9,8 @@ Docker Compose and NVIDIA Container Toolkit. The measured host has 16 vCPUs,
 
 ```sh
 cp docker-compose/mixer/deploy/l4/.env.example docker-compose/mixer/deploy/l4/.env
-# Set destination addresses and optional authentication in .env.
+htpasswd -Bc <path> <user> && chmod 644 <path>
+# Set destination addresses and MIXER_HTPASSWD=<path> in .env.
 docker-compose/mixer/deploy/l4/stack.sh build
 docker-compose/mixer/deploy/l4/stack.sh up -d
 docker-compose/mixer/deploy/l4/stack.sh logs -f mixer
@@ -42,9 +43,15 @@ without refilling other types; editing **Unique sources** restores the balanced
 proportions. Per-type controls enforce the remaining total, shared NVDEC, HDR
 surface, browser/DSK and weighted upload budgets. Rate or format changes reduce
 custom counts where necessary, keeping disabled types at zero.
+The included proxy asks for a password on every path and forwards the mixer
+pages and player, including their WebSockets; `stack.sh` refuses to start the
+stack without `MIXER_HTPASSWD`. The mixer pages, player and web UI listen on loopback only.
 Allow the public proxy port and `JANUS_RTP_PORT_RANGE` (UDP 20000–20100 by
-default). Set `MIXER_HTPASSWD` or use an authenticated reverse proxy.
-The included proxy forwards HTTP and WebSocket paths.
+default), nothing else.
+
+The [AVPlumber web UI](../../../../tools/web-ui/README.md) shows the mixer graph
+read-only. Reach it through an SSH tunnel, `ssh -L 22222:127.0.0.1:22222 <host>`,
+then open <http://127.0.0.1:22222>.
 
 The [current demo recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 shows this profile at 192 inputs / 256 scenes / 24 outputs, 1080p30 SDR.

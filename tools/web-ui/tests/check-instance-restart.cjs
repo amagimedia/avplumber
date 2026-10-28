@@ -2,80 +2,23 @@
 // avplumber control server, and a WebSocket client standing in for an open graph tab.
 // No browser and no connection to a native instance. Run: node tests/check-instance-restart.cjs
 const assert = require('node:assert/strict');
-const net = require('node:net');
-const path = require('node:path');
-const { spawn } = require('node:child_process');
-const WebSocket = require('../node_modules/ws');
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const { delay, freePort, fakeAvplumber, startBackend, postJson, openTab } = require('./backendHarness.cjs');
 const INTERNAL_FIELDS = ['lastHeartbeat', 'usesHeartbeat', 'explicit', 'connectionLost'];
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer().once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
-
-// Answers every command with an empty JSON body, like an idle engine.
-function fakeAvplumber(port) {
-  const sockets = new Set();
-  const server = net.createServer(socket => {
-    sockets.add(socket);
-    socket.on('close', () => sockets.delete(socket));
-    socket.write('100 VTR READY\n');
-    socket.on('data', data => {
-      for (const line of String(data).split('\n').filter(Boolean)) {
-        socket.write(line === 'bye' ? 'BYE\n' : '201 OK\n[]\n\n');
-      }
-    });
-  });
-  const kill = () => {
-    for (const socket of sockets) socket.destroy();
-    return new Promise(resolve => server.close(resolve));
-  };
-  return new Promise(resolve => server.listen(port, '127.0.0.1', () => resolve({ kill })));
-}
-
-function openTab(uiPort) {
-  const ws = new WebSocket(`ws://127.0.0.1:${uiPort}/ws`);
-  const broadcasts = [];
-  const replies = new Map();
-  ws.on('message', data => {
-    const message = JSON.parse(data);
-    if (message.type === 'instances') broadcasts.push(message.instances);
-    if (message.type === 'response') replies.get(message.id)?.(message);
-  });
-  const command = (id, command, instanceId) => new Promise(resolve => {
-    replies.set(id, resolve);
-    ws.send(JSON.stringify({ type: 'command', id, command, instanceId }));
-  });
-  return new Promise(resolve => ws.on('open', () => resolve({ ws, broadcasts, command })));
-}
 
 function assertPublic(instance) {
   for (const field of INTERNAL_FIELDS) assert.equal(field in instance, false, `${field} leaked`);
 }
 
 (async () => {
-  const [uiPort, avpPort] = [await freePort(), await freePort()];
-  const env = { ...process.env, WEBUI_PORT: String(uiPort) };
-  delete env.AVPLUMBER_PORT; // no env-configured default instance
-  const backend = spawn(process.execPath, [path.join(__dirname, '../backend/server.js')],
-    { env, stdio: ['ignore', 'ignore', 'inherit'] });
-  const api = `http://127.0.0.1:${uiPort}/api/instances`;
+  const avpPort = await freePort();
+  const { uiPort, api, backend } = await startBackend();
   const heartbeat = async () => {
-    const res = await fetch(`${api}/heartbeat`, { method: 'POST', body: JSON.stringify({ id: 'mixer', port: avpPort }) });
+    const res = await postJson(`${api}/heartbeat`, { id: 'mixer', port: avpPort });
     assert.equal(res.status, 200);
     return res.json();
   };
   let avp;
   try {
-    for (let i = 0; ; i++) {
-      try { await fetch(api); break; } catch (e) { if (i > 50) throw e; await delay(100); }
-    }
     avp = await fakeAvplumber(avpPort);
     assertPublic(await heartbeat());
 

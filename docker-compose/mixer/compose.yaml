@@ -74,6 +74,9 @@ services:
       - "${MIXER_CONTROL_PORT:-7777}"
       - --http-port
       - "${MIXER_HTTP_PORT:-7681}"
+      # The control pages have no authentication; a deployment behind a reverse proxy binds them to 127.0.0.1.
+      - --bind
+      - ${MIXER_HTTP_BIND:-0.0.0.0}
       - --dmabuf-rest
       - http://127.0.0.1:${DMA_BROWSER_REST_PORT:-9009}
       # The setup's extra aux outputs create their Janus mountpoints here.

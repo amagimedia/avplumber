@@ -54,7 +54,6 @@
     <button class="graph-expand" on:click={() => dock?.container?.parent?.parent?.toggleMaximise?.()}>Expand / restore graph</button>
     <button on:click={() => c.refreshNodes?.()}>Refresh graph</button>
     <button on:click={() => c.refreshQueues?.()}>Refresh queues</button>
-    <button on:click={() => c.resetQueueStats?.()}>Reset queue stats</button>
     <label class="hint">
       <input type="checkbox" bind:checked={liveQueueStats} />
       live graph queue stats

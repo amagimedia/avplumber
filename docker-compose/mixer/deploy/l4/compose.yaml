@@ -36,6 +36,9 @@ services:
 
   janus-preview:
     image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-preview:${MIXER_RELEASE}
+    environment:
+      # Reached through the proxy's /preview/ only.
+      JANUS_PREVIEW_BIND: 127.0.0.1
 
   dma-browser:
     image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-browser:${MIXER_RELEASE}
@@ -70,13 +73,13 @@ services:
     image: nginx:alpine
     network_mode: host
     restart: unless-stopped
-    depends_on: [mixer, janus-preview, graph]
+    depends_on: [mixer, janus-preview]
     environment:
       MIXER_PUBLIC_PORT: ${MIXER_PUBLIC_PORT:-7681}
       MIXER_HTTP_PORT: ${MIXER_HTTP_PORT}
       MIXER_PREVIEW_PORT: ${JANUS_PREVIEW_PORT}
-      MIXER_AUTH_REALM: ${MIXER_AUTH_REALM:-off}
       NGINX_ENVSUBST_FILTER: ^MIXER_
     volumes:
       - ./deploy/l4/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro,z
+      # stack.sh refuses to start without it; /dev/null (no users) answers every request with 401.
       - ${MIXER_HTPASSWD:-/dev/null}:/etc/nginx/mixer.htpasswd:ro

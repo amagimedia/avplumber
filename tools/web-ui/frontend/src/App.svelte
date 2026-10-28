@@ -339,16 +339,6 @@
   function refreshCorrectionGroups() {
     sendCommand('correction_groups.json', 'correction_groups.json').catch(() => {});
   }
-  function resetQueueStats() {
-    const generation = instanceGeneration;
-    // Reset queue occupancy stats in avplumber so we don't miss peaks between UI polls.
-    sendCommand('queues.stats.reset', 'queues.stats.reset')
-      .catch(() => {})
-      .finally(() => {
-        if (generation === instanceGeneration) refreshQueues();
-      });
-  }
-
   function clearNodeObjects() {
     nodeObjects = {};
   }
@@ -459,22 +449,6 @@
     }
   }
 
-  let consoleInput = '';
-
-  function submitConsole() {
-    const cmd = consoleInput.trim();
-    if (!cmd) return;
-    consoleInput = '';
-    sendCommand(cmd).catch(() => {});
-  }
-
-  function handleConsoleKeydown(e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      submitConsole();
-    }
-  }
-
   onMount(() => {
     loadInstances();
     connectWs();
@@ -558,10 +532,6 @@
 
   function setAutoRefreshNodeObjects(v) {
     autoRefreshNodeObjects = !!v;
-  }
-
-  function setConsoleInput(v) {
-    consoleInput = v == null ? '' : String(v);
   }
 
   const panelRegistry = {
@@ -741,7 +711,7 @@
               maximised: false,
               isClosable: true,
               reorderEnabled: true,
-              title: "Raw console",
+              title: "Messages",
               componentType: "console",
               componentState: {}
             }
@@ -809,7 +779,6 @@
 
     refreshNodes,
     refreshQueues,
-    resetQueueStats,
 
     autoRefreshQueues,
     autoRefreshMs,
@@ -840,10 +809,6 @@
     logs,
 
     consoleLines,
-    consoleInput,
-    setConsoleInput,
-    handleConsoleKeydown,
-    submitConsole,
 
     syncGroups,
     correctionGroups,

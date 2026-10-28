@@ -228,20 +228,6 @@ pre {
   color: var(--muted);
 }
 
-.console-input {
-  display: flex;
-  gap: 0.25rem;
-  margin-bottom: 0.25rem;
-}
-
-.console-input input {
-  flex: 1;
-}
-
-.console-input input:focus {
-  border-color: var(--accent);
-}
-
 .node-table {
   border-collapse: collapse;
   width: 100%;

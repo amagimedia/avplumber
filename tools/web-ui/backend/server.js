@@ -1,7 +1,8 @@
 // Minimal Node.js backend for avplumber web UI.
 // Responsibilities:
 // - Serve static frontend files from ./public
-// - Expose WebSocket endpoint (/ws) that proxies commands to avplumber TCP control server
+// - Expose WebSocket endpoint (/ws) that proxies read-only queries to avplumber TCP control server
+//   (requestGuards.js lists them; the UI is a viewer and never changes an instance)
 // - Accept HTTP POST /api/stats from avplumber's stats.subscribe and fan out to WebSocket clients
 // - Optionally tail avplumber logfile (LOG_FILE env) and stream lines to clients
 
@@ -14,8 +15,12 @@ const url = require('url');
 const net = require('net');
 const WebSocket = require('ws');
 const { generationCounter, noteConnectionLost, noteHeartbeat, heartbeatExpired } = require('./instanceRestart');
+const { readOnlyCommand, isSafeId, allowedHostnames, upgradeAllowed, isJsonRequest } = require('./requestGuards');
 
 const HTTP_PORT = parseInt(process.env.WEBUI_PORT || process.env.PORT || '22222', 10);
+const BIND = process.env.WEBUI_BIND || '127.0.0.1';
+const ALLOWED_HOSTS = allowedHostnames(BIND, process.env.WEBUI_ALLOWED_HOSTS);
+const WS_MAX_PAYLOAD = 1024 * 1024;
 const AVP_HOST = process.env.AVPLUMBER_HOST || '127.0.0.1';
 const AVP_PORT = parseInt(process.env.AVPLUMBER_PORT || '0', 10);
 const LOG_FILE = process.env.AVPLUMBER_LOGFILE || process.env.LOG_FILE || '';
@@ -49,7 +54,10 @@ function addInstance(def, usesHeartbeat = false) {
   if (!port || Number.isNaN(port)) {
     throw new Error('valid port required');
   }
-  let id = def.id || `${host}:${port}`;
+  let id = def.id ? String(def.id) : `${host}:${port}`;
+  if (!isSafeId(id)) {
+    throw new Error(`invalid instance id: ${id}`);
+  }
   if (instances.has(id)) {
     // Make it unique
     id = `${id}-${Date.now()}`;
@@ -150,20 +158,24 @@ if (AVP_PORT) {
   });
 }
 
-// Stats history: { [instanceId: string]: { [streamName: string]: { ts: number, data: any }[] } }
-const statsHistory = {};
+// Stats history: Map<instanceId, Map<streamName, { ts: number, data: any }[]>>
+const statsHistory = new Map();
 const STATS_HISTORY_LIMIT = 512;
 
 function addStatsSample(obj, instanceId) {
   const instKey = instanceId || 'default';
   const streamKey = obj && typeof obj === 'object' && obj.name ? String(obj.name) : 'default';
-  if (!statsHistory[instKey]) {
-    statsHistory[instKey] = {};
+  if (!isSafeId(instKey) || !isSafeId(streamKey)) {
+    throw new Error('invalid instance or stream name');
   }
-  if (!statsHistory[instKey][streamKey]) {
-    statsHistory[instKey][streamKey] = [];
+  if (!statsHistory.has(instKey)) {
+    statsHistory.set(instKey, new Map());
   }
-  const arr = statsHistory[instKey][streamKey];
+  const streams = statsHistory.get(instKey);
+  if (!streams.has(streamKey)) {
+    streams.set(streamKey, []);
+  }
+  const arr = streams.get(streamKey);
   arr.push({ ts: Date.now(), data: obj });
   if (arr.length > STATS_HISTORY_LIMIT) {
     arr.splice(0, arr.length - STATS_HISTORY_LIMIT);
@@ -171,10 +183,10 @@ function addStatsSample(obj, instanceId) {
 }
 
 function latestStatsSnapshot() {
-  const out = {};
-  for (const [instKey, streams] of Object.entries(statsHistory)) {
-    out[instKey] = {};
-    for (const [name, arr] of Object.entries(streams)) {
+  const out = Object.create(null);
+  for (const [instKey, streams] of statsHistory) {
+    out[instKey] = Object.create(null);
+    for (const [name, arr] of streams) {
       if (arr.length > 0) {
         out[instKey][name] = arr[arr.length - 1];
       }
@@ -234,6 +246,12 @@ function serveStatic(req, res) {
 }
 const server = http.createServer((req, res) => {
   const parsed = url.parse(req.url, true);
+
+  if (req.method === 'POST' && !isJsonRequest(req.headers)) {
+    res.writeHead(415, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ error: 'Content-Type must be application/json' }));
+    return;
+  }
 
   if (req.method === 'GET' && parsed.pathname === '/api/instances') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -330,10 +348,11 @@ const server = http.createServer((req, res) => {
             client.send(msg);
           }
         }
+        res.writeHead(204);
       } catch (e) {
-        console.error('Failed to parse stats JSON:', e);
+        console.error('Rejected stats sample:', e.message);
+        res.writeHead(400);
       }
-      res.writeHead(204);
       res.end();
     });
     return;
@@ -493,7 +512,12 @@ class AvpConnection {
   }
 }
 
-const wss = new WebSocket.Server({ server, path: '/ws' });
+const wss = new WebSocket.Server({
+  server,
+  path: '/ws',
+  maxPayload: WS_MAX_PAYLOAD,
+  verifyClient: ({ req }, done) => done(upgradeAllowed(req.headers, ALLOWED_HOSTS), 403, 'Forbidden')
+});
 
 // Broadcast instance list updates to all WebSocket clients
 function broadcastInstancesUpdate() {
@@ -560,6 +584,9 @@ for (const inst of instances.values()) {
 
 wss.on('connection', (ws) => {
   const connByInstance = new Map();
+  // Protocol violations and oversized messages close this connection; without a listener they
+  // would end the process.
+  ws.on('error', (err) => console.warn('WebSocket client error:', err.message));
 
   function getOrCreateConn(instanceId) {
     const inst = instances.get(instanceId);
@@ -585,12 +612,16 @@ wss.on('connection', (ws) => {
     }
     if (!msg || typeof msg !== 'object') return;
 
-    if (msg.type === 'command' && typeof msg.command === 'string') {
+    if (msg.type === 'command') {
       const id = msg.id || null;
-      const instanceId = msg.instanceId || 'default';
+      const instanceId = typeof msg.instanceId === 'string' ? msg.instanceId : 'default';
       try {
+        const command = readOnlyCommand(msg.command);
+        if (!command) {
+          throw new Error('Not a read-only query; the web UI cannot change an instance');
+        }
         const conn = getOrCreateConn(instanceId);
-        const result = await conn.sendCommand(id, msg.command);
+        const result = await conn.sendCommand(id, command);
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(
             JSON.stringify({
@@ -630,8 +661,9 @@ wss.on('connection', (ws) => {
 });
 
 
-server.listen(HTTP_PORT, () => {
-  console.log(`avplumber web-ui listening on http://localhost:${HTTP_PORT}`);
+server.listen(HTTP_PORT, BIND, () => {
+  const { address, family, port } = server.address();
+  console.log(`avplumber web-ui listening on http://${family === 'IPv6' ? `[${address}]` : address}:${port}`);
   if (instances.size > 0) {
     console.log(
       'Initial instances:',

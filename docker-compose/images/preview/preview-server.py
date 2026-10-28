@@ -20,6 +20,7 @@ JANUS_REST = os.environ.get(
 JANUS_WS = os.environ.get("JANUS_WS", f"ws://127.0.0.1:{os.environ.get('JANUS_WS_PORT', '8188')}")
 MIXER_STATE_URL = os.environ.get("MIXER_STATE_URL", "")
 PREVIEW_PORT = int(os.environ.get("JANUS_PREVIEW_PORT", "8080"))
+PREVIEW_BIND = os.environ.get("JANUS_PREVIEW_BIND", "0.0.0.0")
 
 
 class ReceiverSamples:
@@ -200,4 +201,4 @@ class PreviewHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", PREVIEW_PORT), PreviewHandler).serve_forever()
+    ThreadingHTTPServer((PREVIEW_BIND, PREVIEW_PORT), PreviewHandler).serve_forever()

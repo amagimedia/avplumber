@@ -36,7 +36,7 @@ Make sure to clone this repo with `--recursive` option.
 
     git clone --recursive https://github.com/amagimedia/avplumber
     docker build -t avplumber .
-    docker run -p 20200:20200 avplumber -p 20200
+    docker run -p 127.0.0.1:20200:20200 avplumber -p 20200 --control-bind 0.0.0.0
 
 or if you don't want to use Docker but have Ubuntu:
 
@@ -172,6 +172,11 @@ Some nodes require that other node implementing specific features (an *interface
 
 ## Control methods
 avplumber is controlled using text commands on TCP socket, so it can be controlled manually using `netcat` or `telnet`. `--port` argument specifies the port to listen on.
+
+`--control-bind` sets the address that port listens on. The default is `127.0.0.1`, so only local clients can connect.
+The protocol has no authentication: anyone who reaches the port controls the instance, including files and URLs that nodes open.
+Use `--control-bind 0.0.0.0` (or `::` for IPv6) only when another host or a Docker port mapping must reach it, and limit access with a firewall or the mapping itself (`-p 127.0.0.1:20200:20200` above).
+From Python, `AVPlumber.enableControlServer(port, bind_address="127.0.0.1")` takes the same address.
 
 `--script` argument specifies commands to execute on startup.
 
