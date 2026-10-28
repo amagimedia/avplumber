@@ -49,7 +49,9 @@ def outputs(show, extra_aux=0):
         fmtp = f"profile-id={2 if profile == 'main10' else 1}" if hevc else (
             f"profile-level-id={'640028' if profile == 'high' else '4d0028' if profile == 'main' else '42e028'};packetization-mode=1")
         result[key] = _create(key, rendition.port or 5004, "h265" if hevc else "h264", fmtp, extra=extra)
-        if not aux and rendition.id == cfg.audio_rendition:
+        if rendition.audio_port:
+            result[key].update(_audio(audio=JanusAudioConfig(audio_port=rendition.audio_port)))
+        elif not aux and rendition.id == cfg.audio_rendition:
             result[key].update(_audio())
 
     for rendition in cfg.renditions:

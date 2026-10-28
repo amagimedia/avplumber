@@ -128,6 +128,12 @@ class AuxBus:
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
             hold=True)   # MixerApplication releases every output together once the show has settled
+        if r.audio_port and options.audio_router_node:
+            from .janus import JanusAudioConfig, build_janus_audio_output
+            build_janus_audio_output(
+                self.avp, self.api, f"{options.audio_router_node}_{self.bus.id}",
+                JanusAudioConfig(host=options.janus_host, audio_port=r.audio_port),
+                group=self.group, prefix=f"{self.prefix}_audio", failure_mode="off")
         self.avp.addNode(_PvwFollowNode({
             "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,
             "fps": str(fps), "latency_ms": latency, "main_latency_ms": self.main_latency_ms(),
