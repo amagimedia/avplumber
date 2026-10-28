@@ -101,6 +101,106 @@ def test_the_program_audio_is_on_one_janus_output_and_in_its_settings():
     assert not any("audio" in o for o in mixer_config.parse(show).settings()["program_outputs"])
 
 
+def test_audio_port_duplicates_program_audio_onto_another_rendition():
+    """HDR wants the same audio SDR already has, not an independent mix: audio_port on a
+    top-level rendition (unlike on an AUX bus's) attaches a second Opus leg at its own port,
+    alongside -- not instead of -- the legacy audio_rendition's."""
+    import pyplumber.mixer.tools.janus_mountpoints as janus_mountpoints
+    show = {"canvas": CONFIG["canvas"], "sources": [{**CONFIG["sources"][0], "has_audio": True}],
+            "scenes": [{"id": "full", "items": CONFIG["scenes"][0]["items"]}],
+            "renditions": [{"id": "sdr", "target": "janus", "port": 5004},
+                           {"id": "hdr", "target": "janus", "port": 5006, "codec": "hevc_nvenc",
+                            "audio_port": 5012}]}
+    specs = janus_mountpoints.outputs(show)
+    assert (specs["sdr"]["audio"], specs["sdr"]["audioport"]) == (True, 5002)
+    assert (specs["hdr"]["audio"], specs["hdr"]["audioport"]) == (True, 5012)
+    programs = mixer_config.parse(show).settings()["program_outputs"]
+    assert [o.get("audio", False) for o in programs] == [True, True]
+
+
+def test_audio_port_rendition_duplicates_the_program_bus_via_a_split(native_boundary):
+    nodes, builder = native_boundary
+    cfg = mixer_config.parse({
+        "canvas": CONFIG["canvas"], "sources": [{**CONFIG["sources"][0], "has_audio": True}],
+        "scenes": [{"id": "full", "items": CONFIG["scenes"][0]["items"]}],
+        "renditions": [{"id": "sdr", "target": "janus", "port": 5004},
+                       {"id": "hdr", "target": "janus", "port": 5006, "codec": "hevc_nvenc",
+                        "audio_port": 5012}],
+    })
+    app = build_application(cfg, MixerOptions(janus_output=True), api=_api(nodes, builder))
+    # audio_mixer declares its bus edges under "outputs", not "dst", so the graph's dependency sort
+    # never learns it produces audio_mixer_program; a Split reading that edge directly can be built
+    # before audio_mixer exists and fail. The no-op relay has a plain "dst", so Split's dependency
+    # on it (not on audio_mixer) is one the sort does track.
+    relay = app.avp.nodes["program_audio_relay"]
+    assert relay["src"] == "audio_mixer_program"
+    split = app.avp.nodes["split_program_audio"]
+    assert split["src"] == "audio_mixer_program_relay"
+    assert set(split["dst"]) == {"audio_mixer_program_split", "janus_audio_hdr_src"}
+    # The legacy leg now reads the split's own branch, not the raw bus edge.
+    assert app.avp.nodes["janus_audio_limiter"]["src"] == "audio_mixer_program_split"
+    assert app.avp.nodes["janus_audio_hdr_limiter"]["src"] == "janus_audio_hdr_src"
+
+
+def test_aux_bus_audio_port_is_surfaced_in_preview_outputs():
+    """The webui's mute icon (outputs.js previewOption/programOptions) is keyed off an "audio"
+    flag it reads straight from mixer.settings; an AUX bus with audio_port must carry it in
+    preview_outputs the same way a program rendition carries it in program_outputs, or the icon
+    never shows even though the bus has a real, independent Opus leg."""
+    cfg = mixer_config.parse({
+        "canvas": CONFIG["canvas"], "sources": [{**CONFIG["sources"][0], "has_audio": True}],
+        "scenes": [{"id": "full", "items": CONFIG["scenes"][0]["items"]}],
+        "renditions": [{"id": "record", "target": "program.ts"}],
+        "aux_buses": [
+            {"id": "aux1", "renditions": [{"id": "aux1_sdr", "port": 5010, "audio_port": 5016}]},
+            {"id": "aux2", "renditions": [{"id": "aux2_sdr", "port": 5012}]},
+        ],
+    })
+    previews = {o["bus"]: o for o in cfg.settings()["preview_outputs"]}
+    assert previews["aux1"]["audio"] is True
+    assert "audio" not in previews["aux2"]
+
+
+def test_aux_bus_with_audio_port_gets_its_own_outputs_entry(native_boundary, monkeypatch):
+    """The AuxBus/AuxBuses themselves (their own audio leg) are covered in test_aux.py; this
+    isolates the one line in application.py that decides audio_mixer's outputs map, by faking
+    out the aux compositor build (native_boundary's engine stub predates aux support)."""
+    import pyplumber.mixer.aux as aux_module
+
+    class FakeAuxBus:
+        def __init__(self, avp, api, mixer, cfg, bus):
+            self.bus, self.pgm_edge = bus, None
+
+        def build(self, options):
+            pass
+
+    class FakeAuxBuses:
+        def __init__(self, avp, buses):
+            self._buses = buses
+
+        def __iter__(self):
+            return iter(self._buses)
+
+        def __len__(self):
+            return len(self._buses)
+
+        def register_commands(self):
+            pass
+
+    monkeypatch.setattr(aux_module, "AuxBus", FakeAuxBus)
+    monkeypatch.setattr(aux_module, "AuxBuses", FakeAuxBuses)
+    nodes, builder = native_boundary
+    cfg = mixer_config.parse({
+        "canvas": CONFIG["canvas"], "sources": [{**CONFIG["sources"][0], "has_audio": True}],
+        "scenes": [{"id": "full", "items": CONFIG["scenes"][0]["items"]}],
+        "renditions": [{"id": "record", "target": "program.ts"}],
+        "aux_buses": [{"id": "aux1", "renditions": [{"id": "aux1_sdr", "port": 5010, "audio_port": 5016}]}],
+    })
+    app = build_application(cfg, MixerOptions(audio_router_node="audio_mixer"), api=_api(nodes, builder))
+    outputs = app.avp.nodes["audio_mixer"]["outputs"]
+    assert outputs == {"program": "audio_mixer_program", "aux1": "audio_mixer_aux1"}
+
+
 def test_video_only_show_is_unaffected(native_boundary):
     """has_audio default off: a plain video-only show must not change behavior."""
     nodes, builder = native_boundary

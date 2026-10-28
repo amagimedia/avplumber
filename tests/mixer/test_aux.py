@@ -540,6 +540,49 @@ def test_bus_builds_its_nodes_in_one_group(cfg, monkeypatch, codec, profile):
     assert follower["layout"] == bus.layout_object()
 
 
+def test_bus_with_audio_port_gets_its_own_independent_audio_mixer_bus(cfg, monkeypatch):
+    """An AUX bus is its own compositor, so audio_port registers it as a second, independently
+    driven audio_mixer bus (its already-wired mixer_pvw_follow drives the gains) -- not a tap of
+    the main program bus. Without audio_port (the other test here), no audio leg is built at all."""
+    import pyplumber.mixer.janus as janus
+    legs = []
+    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: "listener")
+    monkeypatch.setattr(janus, "build_janus_audio_output", lambda avp, api, src_edge, audio, **kw: legs.append((src_edge, audio, kw)))
+    avp = SimpleNamespace(addNode=lambda node, **kw: None, edges=SimpleNamespace(planCapacity=lambda *a: None))
+    api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
+    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
+                            canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
+                            backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
+    options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="",
+                              audio_router_node="audio_mixer")
+    spec = bus_json(scenes=["repeat"], renditions=[{"id": "monitor", "port": 5010, "audio_port": 5016}])
+    bus = AuxBus(avp, api, mixer, cfg, parse_aux_buses([spec], cfg)[0])
+    bus.build(options)
+    assert len(legs) == 1
+    src_edge, audio, kw = legs[0]
+    assert src_edge == "audio_mixer_multiview"   # the bus id, not "audio_mixer_program"
+    assert audio.audio_port == 5016
+    assert kw["prefix"] == "aux_multiview_audio"
+
+
+def test_bus_without_audio_port_builds_no_audio_leg(cfg, monkeypatch):
+    import pyplumber.mixer.janus as janus
+    legs = []
+    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: "listener")
+    monkeypatch.setattr(janus, "build_janus_audio_output", lambda *a, **kw: legs.append((a, kw)))
+    avp = SimpleNamespace(addNode=lambda node, **kw: None, edges=SimpleNamespace(planCapacity=lambda *a: None))
+    api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
+    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
+                            canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
+                            backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
+    options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="",
+                              audio_router_node="audio_mixer")
+    spec = bus_json(scenes=["repeat"])   # no audio_port on its rendition
+    bus = AuxBus(avp, api, mixer, cfg, parse_aux_buses([spec], cfg)[0])
+    bus.build(options)
+    assert legs == []
+
+
 class _Built(Exception):
     pass
 

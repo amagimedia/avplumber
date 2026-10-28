@@ -29,6 +29,21 @@
     {"id": "sdr", "target": "janus", "port": 5004, "codec": "h264_nvenc", "profile": "baseline",
      "bitrate_kbps": 6000, "preset": "p3", "tonemap": "mobius", "tonemap_param": 0.9},
     {"id": "hdr", "target": "janus", "port": 5006, "codec": "hevc_nvenc", "profile": "main10",
-     "bitrate_kbps": 8000, "preset": "p3"}
+     "bitrate_kbps": 8000, "preset": "p3", "audio_port": 5012}
+  ],
+  "aux_buses": [
+    {"id": "aux1", "renditions": [
+      {"id": "aux1_sdr", "port": 5014, "bitrate_kbps": 2000, "preset": "p3"}
+    ]},
+    {"id": "aux2",
+     "layout": {"cells": [
+       {"role": "source", "source": 0,  "x": 0,   "y": 0,   "w": 960, "h": 540},
+       {"role": "source", "source": 1,  "x": 960, "y": 0,   "w": 960, "h": 540},
+       {"role": "source", "source": 32, "x": 0,   "y": 540, "w": 960, "h": 540},
+       {"role": "source", "source": 33, "x": 960, "y": 540, "w": 960, "h": 540}
+     ]},
+     "renditions": [
+       {"id": "aux2_sdr", "port": 5018, "audio_port": 5020, "bitrate_kbps": 2000, "preset": "p3"}
+     ]}
   ]
 }

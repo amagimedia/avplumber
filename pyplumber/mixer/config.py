@@ -177,6 +177,10 @@ class Rendition:
     profile: str = ""                # "" lets the encoder pick main/main10/baseline
     preset: str = "p7"               # NVENC quality preset
     port: int = 0                    # janus target: 0 keeps the configured port
+    # 0: no dedicated audio leg. On a top-level rendition, a Janus Opus RTP pair here duplicates
+    # the "program" audio_mixer bus (same content as the audio_rendition). On an AUX bus's
+    # rendition, it registers that bus's own id as a second, independently-mixed audio_mixer bus.
+    audio_port: int = 0
     # An explicit operator requests SDR. Otherwise codec/color select the target
     # and automatic HDR-to-SDR conversion uses clip to preserve SDR reference white.
     tonemap: str = ""
@@ -333,7 +337,7 @@ class MixerConfig:
             return {"rendition": r.id, "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
                     "port": port, "mountpoint": janus_mountpoint_id(port), "fps": r.fps}
 
-        programs = [{**preview(r), **({"audio": True} if r.id == self.audio_rendition else {})}
+        programs = [{**preview(r), **({"audio": True} if r.id == self.audio_rendition or r.audio_port else {})}
                     for r in self.renditions if r.target == "janus" and r.feed == "dirty"]
         previews = []
         for r in self.renditions if self.dsk_keys else ():
@@ -342,7 +346,8 @@ class MixerConfig:
                 previews.append({"bus": f"clean_{r.id}", "label": f"Program clean · {output['color'].upper()}", **output})
         previews += [{"bus": b.id, "label": aux_label(b.id, b.label, b.layout),
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
-                      "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps}
+                      "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps,
+                      **({"audio": True} if r.audio_port else {})}
                      for b in self.aux_buses for r in b.renditions]
         aliases = self.alias_counts
         return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
@@ -523,18 +528,23 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
     return rendition
 
 
-def check_janus_ports(renditions, default_port: int = 5004) -> None:
+def check_janus_ports(renditions, default_port: int = 5004, default_audio_port: int = 5002) -> None:
     """Janus renditions need distinct RTP ports whose RTCP port (RTP + 1) is free too; port 0 is
-    the mixer's --janus-video-port, 5004 by default. parse_aux_buses checks the main renditions
-    together with the aux ones."""
-    used = set()
+    the mixer's --janus-video-port, 5004 by default. A rendition's audio_port (if set) needs the
+    same, against the same pool: it shares the UDP port space with every video leg, and with the
+    legacy single audio leg's default port (--janus-audio-port, 5002), reserved whether or not a
+    rendition opts into it, since any has_audio source claims it at runtime. parse_aux_buses checks
+    the main renditions together with the aux ones."""
+    used = {default_audio_port, default_audio_port + 1}
     for r in renditions:
         if r.target != "janus":
             continue
-        port = r.port or default_port
-        if not 1 <= port < 65535 or used.intersection((port, port + 1)):
-            raise ConfigError("Janus renditions need distinct RTP/RTCP port pairs in 1..65535")
-        used.update((port, port + 1))
+        for port in (r.port or default_port, r.audio_port):
+            if not port:
+                continue
+            if not 1 <= port < 65535 or used.intersection((port, port + 1)):
+                raise ConfigError("Janus renditions need distinct RTP/RTCP port pairs in 1..65535")
+            used.update((port, port + 1))
 
 
 def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:

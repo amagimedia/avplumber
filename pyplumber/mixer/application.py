@@ -970,11 +970,15 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     program_audio_edge = None
     if options.audio_router_node and audio_edges:
         from .audio_mixer import wire_audio_mixer
-        wire_audio_mixer(avp, api, audio_edges, name=options.audio_router_node,
+        router = options.audio_router_node
+        # An AUX bus with its own audio_port gets a second bus here, independently driven by its
+        # own mixer_pvw_follow (aux.py stamps "output": bus.id on every layout it sends).
+        aux_outputs = {bus.id: f"{router}_{bus.id}" for bus in cfg.aux_buses if bus.renditions[0].audio_port}
+        wire_audio_mixer(avp, api, audio_edges, name=router,
                          fps=f"{mixer.fps_num}/{mixer.fps_den}", latency_ms=mixer.latency_ms,
-                         outputs={"program": f"{options.audio_router_node}_program"},
+                         outputs={"program": f"{router}_program", **aux_outputs},
                          group=OUTPUT_GROUP)
-        program_audio_edge = f"{options.audio_router_node}_program"
+        program_audio_edge = f"{router}_program"
         gain_controller = AudioGainController(avp, options.audio_router_node, [sid for sid, _ in audio_edges])
         register_audio_gain_commands(avp, gain_controller)
     elif options.audio_router_node and not audio_edges:
@@ -1033,6 +1037,34 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend, held=held)
     if program_audio_edge and options.janus_output:
         from .janus import JanusAudioConfig, build_janus_audio_output
+        # Renditions beyond the legacy single audio leg that opt into their own audio_port (e.g.
+        # "hdr") get the literal same program audio, duplicated: they encode the same composite as
+        # every other rendition, so they hear the same mix, not an independent one (that is what
+        # distinguishes them from an AUX bus, which has its own compositor and its own bus above).
+        duplicates = [r for r in cfg.renditions if r.audio_port]
+        if duplicates:
+            # AudioMixer declares its bus edges under "outputs" (a dict), not "dst", so the graph's
+            # dependency sort (NodeGroupUtils::offers/needs, graph_mgmt.cpp) never learns it produces
+            # program_audio_edge; a Split reading it directly can be built before audio_mixer exists
+            # and fail ATD with "Node factory returned nullptr". This no-op relay has a plain "dst",
+            # so Split's "src" dependency on *it* (not on audio_mixer) is one the sorter does track.
+            relay_edge = program_audio_edge + "_relay"
+            avp.addNode(api.FilterAudio({
+                "name": "program_audio_relay", "src": program_audio_edge, "dst": relay_edge,
+                "graph": "anull", "dst_sample_rate": 48_000, "dst_channel_layout": "stereo",
+                "dst_sample_format": "fltp", "group": OUTPUT_GROUP,
+            }))
+            branches = [f"janus_audio_{r.id}_src" for r in duplicates]
+            avp.addNode(api.Split({
+                "name": "split_program_audio", "src": relay_edge,
+                "dst": [program_audio_edge + "_split", *branches], "group": OUTPUT_GROUP, "on_error": "panic",
+            }))
+            program_audio_edge = program_audio_edge + "_split"
+            for r, branch in zip(duplicates, branches):
+                build_janus_audio_output(
+                    avp, api, branch,
+                    JanusAudioConfig(host=options.janus_host, audio_port=r.audio_port),
+                    group=OUTPUT_GROUP, prefix=f"janus_audio_{r.id}")
         build_janus_audio_output(
             avp, api, program_audio_edge,
             JanusAudioConfig(host=options.janus_host),

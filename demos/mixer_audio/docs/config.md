@@ -40,6 +40,7 @@ The program is composited once. Each rendition adds an encode. With no rendition
 | `profile` | from codec/depth | HEVC `main`/`main10`; H.264 `baseline` for Janus, `high` for files. No B-frames |
 | `preset` | `"p7"` | NVENC quality preset. The setup page sets p1, p3 or p5 on every output it generates ([NVENC costs](capacity.md#reading-the-limits)) |
 | `port` | — | Janus target: overrides the RTP port from the command line |
+| `audio_port` | none | a Janus Opus RTP pair for this rendition: on a top-level rendition it duplicates the same program audio the audio-carrying rendition already has (e.g. giving HDR what SDR has); on an AUX bus's rendition it registers that bus as its own, independently mixed `audio_mixer` bus instead |
 | `color` | automatic | `sdr`, `hlg`, or `pq`; H.264 always requires SDR, HEVC otherwise inherits the canvas |
 | `feed` | `"dirty"` | `"clean"` encodes the program without the [downstream keys](#dsk); without keys both are the program |
 | `tonemap` | none | requests an SDR output from an HDR canvas: `clip` (exact SDR, hard-clipped highlights), `mobius` (see `tonemap_param`), `hable`, `reinhard`, `gamma`, `linear`, `none` |
