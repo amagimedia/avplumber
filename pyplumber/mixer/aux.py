@@ -92,7 +92,10 @@ class AuxBus:
                               f"latency_ms ({self.main_latency_ms():g}) by a program frame ({floor:.1f} ms) at least, "
                               f"for the program frame to reach the bus in time")
         inputs = self.inputs()
-        converted = f"{self.prefix}_sdr"
+        # The compositor already stamps the canvas colour contract. SDR/NV12 can go
+        # straight to the encoder chain without a setparams-only thread and queue.
+        needs_conversion = self.cfg.out_color.transfer != "sdr" or self.cfg.working_format != "nv12"
+        converted = f"{self.prefix}_sdr" if needs_conversion else self.output_edge
         for edge in [*inputs, self.output_edge, converted]:
             self.avp.edges.planCapacity(edge, 1)
         initial = self.layout_object()
@@ -109,13 +112,14 @@ class AuxBus:
             **initial["base"],
         }, api=self.api), early_create=True)
         r = self.bus.renditions[0]
-        self.avp.addNode(self.api.FilterVideo({
-            "name": converted, "src": self.output_edge, "dst": converted,
-            "hwaccel": self.hwaccel, "group": self.group, "defer_preliminary_init": True,
-            "threads": self.mixer.backend.graph_threads,
-            "graph": self.mixer.backend.conversion("sdr", "nv12", source=self.cfg.out_color,
-                                      source_format=self.cfg.working_format, tonemap=r.tonemap or "clip"),
-        }))
+        if needs_conversion:
+            self.avp.addNode(self.api.FilterVideo({
+                "name": converted, "src": self.output_edge, "dst": converted,
+                "hwaccel": self.hwaccel, "group": self.group, "defer_preliminary_init": True,
+                "threads": self.mixer.backend.graph_threads,
+                "graph": self.mixer.backend.conversion("sdr", "nv12", source=self.cfg.out_color,
+                                          source_format=self.cfg.working_format, tonemap=r.tonemap or "clip"),
+            }))
         self.listener = build_janus_output(
             self.avp, self.api, converted,
             JanusVideoConfig(host=options.janus_host, video_port=r.port,

@@ -79,9 +79,9 @@ def main():
         path = root / "mixer.json"
         path.write_text(json.dumps(config))
         api = load_avp_api()
-        filter_video = api.FilterVideo
-        api.FilterVideo = lambda params: filter_video({**params, "src": "aux_test_gated"}
-            if params["name"] == "aux_mv_sdr" else params)
+        force_fps = api.ForceFPS
+        api.ForceFPS = lambda params: force_fps({**params, "src": "aux_test_gated"}
+            if params["name"] == "aux_mv_fps" else params)
         with patch("pyplumber.mixer.cli.load_avp_api", return_value=api):
             app = build_application(GraphOptions(config=str(path), janus_output=True, remote_control_port=18777,
                                                  prewarm_cut_scenes=("*",)))

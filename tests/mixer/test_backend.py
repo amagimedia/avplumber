@@ -60,7 +60,7 @@ def test_program_wipe_aux_and_renditions_use_same_backend(native_boundary, tmp_p
     types = {n.parameters["name"]: n.parameters["type"] for n in app.avp.nodes if "name" in n.parameters}
     assert {types[name] for kind, name in calls if kind == "compositor"} == {"mixer_compositor"}
     assert ("transition", "mixer_out_sel_transition") in calls
-    assert len([c for c in calls if c[0] == "conversion"]) == 3  # source, aux and PGM rendition
+    assert len([c for c in calls if c[0] == "conversion"]) == 2  # source and PGM; AUX is already SDR/NV12
 
 
 @pytest.mark.parametrize("scene_view", [True, False])
@@ -163,7 +163,8 @@ def test_pacing_loops_and_single_threaded_gpu_graphs(native_boundary, tmp_path, 
 
     filters = {name: p for name, p in graph.items() if p["type"] == "filter_video"}
     single = {name for name, p in filters.items() if p.get("threads") == 1}
-    assert {"mixer_color_video0", "scale_program", "aux_mv_sdr", "mixer_out_sel_transition"} <= single
+    assert {"mixer_color_video0", "scale_program", "mixer_out_sel_transition"} <= single
+    assert "aux_mv_sdr" not in graph
     # CPU work (the wipe decode conversion) keeps FFmpeg's threads.
     assert "mixer_wipe_fmt" in filters and "mixer_wipe_fmt" not in single
     # A raw source's setpts and hwupload graphs do no CPU slice work either.
