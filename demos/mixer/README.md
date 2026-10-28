@@ -5,19 +5,21 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 
 [![192-input mixer: Program/Preview and dirty Program with four downstream keys](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo-poster.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
-[Watch the 10-second demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
-[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo-1080p30.mp4) ·
+[Watch the 20-second demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
+[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-tbar-20261028-1080p30.mp4) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
 [Configuration](docs/config.md) · [Run manually](docs/guide.md)
 
-Captured 2026-10-12 on an NVIDIA L4 and replayed in the real two-viewer interface:
+Captured 2026-10-28 on an NVIDIA L4 and replayed in the real two-viewer interface:
 192 inputs (105 NVDEC, 36 browser scene sources, 47 raw NV12 and four browser
 keys), 256 scenes and 24 encoded outputs at 1920×1080p30 SDR. It shows direct
-cuts with all four keys enabled. Both encoded outputs were recorded on the
-instance before Internet transport, then combined with the recorded UI state
-and cut sequence at 30 fps. [Original Program recording](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-pgm-instance-1080p30.mp4)
+cuts and manual T-bar fades, including a halfway hold and a return stroke,
+with all four keys enabled. Both encoded outputs were recorded on the
+instance at Janus’s RTP input before Internet transport, then combined with the matching UI
+and sampled mixer status at 30 fps. The fade itself is in the recorded Program output. [Original Program recording](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-pgm-tbar-20261028-1080p30.mp4)
 retains the encoder bitstream, including capture preroll and tail. Setup counts the 188 scene sources separately
-from the keys. The same show runs at 1080p25 with 26 outputs; see the
+from the keys. This documentation recording does not refresh the historical capacity benchmark.
+The same show runs at 1080p25 with 26 outputs; see the
 [capacity page](docs/capacity.md).
 
 ## Run
@@ -52,6 +54,7 @@ selected [instance profile](instance_profiles.py), not a universal source limit.
 
 - Scene: select Preview, or take immediately in Direct mode.
 - Cut / Fade / Wipe: take the selected scene; a new take interrupts the old one.
+- T-bar: move between Program and Preview; hold midway or reverse the stroke.
 - Keys: toggle browser overlays on the program; clean outputs omit them.
 - AUX: choose layouts, scene slots or source pages independently of Program.
 
