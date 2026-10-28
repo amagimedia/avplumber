@@ -8,7 +8,7 @@
 <meta property="og:title" content="1,457 nodes. 5,856 edges. One program. · AVPlumber mixer">
 <meta property="og:image" content="https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo-poster.jpg">
 <style>
-/* Layout: reframer-style sheets — counts first, node-level mixer graph, scaling table, routing stepper, deadline strip. */
+/* Layout: reframer-style sheets — counts first, node-level mixer graph, scaling table, routing stepper, cut timeline. */
 :root{--ink:#16252d;--muted:#61717a;--line:#dce4e5;--paper:#f5f7f5;--card:#ffffff;--grid:#b3c1c33b;--blue:#3264d7;--teal:#008978;--orange:#c9661e;--pink:#b94083;--gray:#81929e;--chip:#e4eee8;--sel:#16252d;--sel-ink:#ffffff;
 --c-src-f:#e1f6ef;--c-src-s:#51b6a4;--c-src-i:#007b6b;--c-gpu-f:#eee6fb;--c-gpu-s:#ac8bde;--c-gpu-i:#7950ca;--c-ctl-f:#edf3ff;--c-ctl-s:#7399e8;--c-ctl-i:#3264d7;--c-out-f:#fff0dc;--c-out-s:#dfab6e;--c-out-i:#b85b18;--c-key-f:#fce6f1;--c-key-s:#d88eb6;--c-key-i:#ae397a;--c-off-f:#f3f4f5;--c-off-s:#b9c1c7;--c-off-i:#64717c;
 --font:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -45,7 +45,7 @@ header nav{display:flex;gap:16px;font-size:13px;font-weight:650;flex-wrap:wrap;a
 .legend .dash{border-top-style:dashed}
 .canvas{overflow-x:auto;background-image:radial-gradient(var(--grid) 1px,transparent 1px);background-size:20px 20px}
 svg{display:block;width:100%;height:auto}
-#map{min-width:1150px}#route{min-width:900px}
+#map{min-width:1150px}#route,#cut{min-width:900px}
 svg text{font-family:var(--font);fill:var(--ink)}
 .zone{fill:var(--paper);stroke:var(--line);stroke-width:1.5}
 .zone-label{font-size:12px;font-weight:750;letter-spacing:1.4px;fill:var(--muted)}
@@ -95,15 +95,6 @@ tr:last-child td{border-bottom:0}
 .r-state{font-size:12.5px;font-weight:650;font-family:var(--mono)}
 .note{display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap;padding:13px 20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted);line-height:1.5}
 .note b{color:var(--ink)}
-.strip-wrap{overflow-x:auto;padding:18px 20px}
-.strip{display:grid;grid-template-columns:150px repeat(10,minmax(54px,1fr));gap:4px;min-width:720px;font-variant-numeric:tabular-nums}
-.strip .h{font-size:11px;color:var(--muted);text-align:center;padding-bottom:4px}
-.strip .h.cmd{color:var(--blue);font-weight:750}
-.strip .rn{font-size:12px;font-weight:700;display:flex;align-items:center}
-.cell{height:34px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-family:var(--mono)}
-.cX{background:var(--c-ctl-f);color:var(--c-ctl-i)}
-.cY{background:var(--c-src-f);color:var(--c-src-i)}
-.cN{background:var(--c-off-f);color:var(--c-off-i);font-weight:500}
 .cap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted);padding:0 20px 16px}
 footer{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
 footer nav{display:flex;gap:16px;flex-wrap:wrap}
@@ -185,10 +176,10 @@ footer nav{display:flex;gap:16px;flex-wrap:wrap}
 
 <section aria-labelledby="strip-title">
   <div class="sec-head"><div><h2 id="strip-title">One direct cut, deadline by deadline</h2>
-  <p>Each column is one 33 ms output deadline at 30 fps. A slot draws the frames stamped two deadlines earlier (<code>latency_ms</code> 67). The cut command arrives between deadlines 3 and 4.</p></div></div>
+  <p>To scale at 30 fps: one output deadline every 33 ms. The cut command lands between two deadlines; slot B already holds scene Y, so Y is on program at the very next deadline.</p></div></div>
   <div class="sheet">
-    <div class="strip-wrap"><div class="strip" id="strip"></div></div>
-    <div class="cap"><span>Slot B already holds Y's pictures, so Y is on program at the next deadline (t4). The AUX PGM cell follows one frame later (<code>pgm_delay_frames</code> 1).</span><span>Structural delays from code only. Measured cut latency: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/latency.md">latency.md</a>.</span></div>
+    <div class="canvas"><svg id="cut" viewBox="0 0 1300 330" role="img" aria-labelledby="cut-title"><title id="cut-title">A direct cut on a 33 ms deadline grid: slot A draws X until the next deadline, slot B switches from holding Y to drawing Y, program shows Y from that deadline and AUX PGM cells one frame later.</title></svg></div>
+    <div class="cap"><span>The AUX PGM cell follows one frame later (<code>pgm_delay_frames</code> 1). The program encoder gets one keyframe on the cut.</span><span>Structural delays from code only. Measured cut latency: <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/latency.md">latency.md</a>.</span></div>
   </div>
 </section>
 
@@ -394,17 +385,28 @@ function renderRoute(){
  stepBox.querySelectorAll('.step').forEach((b,i)=>b.setAttribute('aria-pressed',String(i===step)));
 }
 
-/* ---- deadline strip ---- */
+/* ---- one direct cut, to scale: 1 frame = 33 ms at 30 fps ---- */
 (()=>{
- const strip=document.querySelector('#strip'),flip=4; // a prewarmed scene flips at the next deadline
- const add=(cls,text)=>{const d=document.createElement('div');d.className=cls;d.textContent=text;strip.append(d)};
- add('h','');for(let t=1;t<=10;t++)add('h'+(t===flip?' cmd':''),(t===flip?'cut ↓ ':'')+'t'+t);
- const row=(name,f)=>{add('rn',name);for(let t=1;t<=10;t++){const[c,txt]=f(t);add('cell '+c,txt)}};
- row('Sources',()=>['cN','frames']);
- row('Slot A draws',t=>t<flip?['cX','X']:t===flip?['cX','X last']:['cN','warm']);
- row('Slot B draws',t=>t<flip?['cN','warm']:['cY','Y']);
- row('Program',t=>t<flip?['cX','X']:['cY','Y']);
- row('AUX PGM cell',t=>t<=flip?['cX','X']:['cY','Y']);
+  const svg=document.querySelector('#cut'),x0=190,F=170,X=f=>x0+f*F,cmd=2.45,flip=3,rows=[52,98,144,190,236],axis=282;
+  const txt='font-size:13px;font-family:var(--font)';
+  for(let f=0;f<=6;f++){svg.append(el('path',{d:`M${X(f)} 34V${axis+6}`,style:'stroke:var(--line);stroke-width:1.2;stroke-dasharray:3 4'}));
+    svg.append(el('text',{x:X(f),y:axis+24,'text-anchor':'middle',class:'mult',style:'fill:var(--muted)'},f===0?'0 ms':`${Math.round(f*1000/30)} ms`))}
+  svg.append(el('path',{d:`M${X(0)} ${axis}H${X(6)+30}`,style:'stroke:var(--muted);stroke-width:1.5;fill:none','marker-end':'url(#ar-frame)'}));
+  const bar=(row,f0,f1,cls,label)=>{const y=rows[row]-13;
+    svg.append(el('rect',{x:X(f0)+2,y,width:X(f1)-X(f0)-4,height:26,rx:6,style:`fill:var(--c-${cls}-f);stroke:var(--c-${cls}-s);stroke-width:1.3`}));
+    svg.append(el('text',{x:X(f0)+12,y:y+17,style:txt+`;font-weight:700;fill:var(--c-${cls}-i)`},label))};
+  [['Slot A','draws program'],['Slot B','the other slot'],['Program','selector output'],['AUX PGM cell','+1 frame'],['Encoder','program NVENC']].forEach(([n,sub],i)=>{
+    svg.append(el('text',{x:20,y:rows[i]-1,style:txt+';font-weight:700;fill:var(--ink)'},n));
+    svg.append(el('text',{x:20,y:rows[i]+15,style:'font-size:12px;font-family:var(--font);fill:var(--muted)'},sub))});
+  bar(0,0,flip,'ctl','X');bar(0,flip,6,'off','warm, not drawn');
+  bar(1,0,flip,'off','holds Y warm, not drawn');bar(1,flip,6,'src','Y');
+  bar(2,0,flip,'ctl','X');bar(2,flip,6,'src','Y');
+  bar(3,0,flip+1,'ctl','X');bar(3,flip+1,6,'src','Y');
+  bar(4,0,flip,'ctl','X');bar(4,flip,6,'src','Y · keyframe first');
+  svg.append(el('path',{d:`M${X(cmd)} 24V${axis}`,style:'stroke:var(--blue);stroke-width:2.2;stroke-dasharray:6 5'}));
+  svg.append(el('text',{x:X(cmd)-8,y:20,'text-anchor':'end',style:txt+';font-weight:700;fill:var(--blue)'},'mixer.cut arrives'));
+  svg.append(el('path',{d:`M${X(flip)} 24V${axis}`,style:'stroke:var(--teal);stroke-width:2.5'}));
+  svg.append(el('text',{x:X(flip)+8,y:20,style:txt+';font-weight:700;fill:var(--teal)'},'next deadline: Y on air'));
 })();
 renderRoute();
 </script>
