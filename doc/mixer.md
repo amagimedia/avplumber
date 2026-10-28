@@ -3,6 +3,8 @@
 AVPlumber's mixer is a two-slot program/preview video switcher. The reusable
 graph builder is `pyplumber/mixer/graph.py`; the native control implementation is in
 `src/mixer/`; the maintained example is `demos/mixer/`.
+The [architecture page](https://amagimedia.github.io/avplumber/demos/mixer/docs/architecture.html)
+draws the graph of the 192-input demo show node by node, with routing and frame timing.
 
 ## Building a mixer application
 
