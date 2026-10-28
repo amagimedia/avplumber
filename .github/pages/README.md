@@ -21,12 +21,12 @@ Keep historical measurements attached to their workload and revision; a code
 review or small smoke test does not refresh a capacity benchmark. Publish
 sanitized textual evidence without private host or storage paths.
 
-The October mixer demo replays 10 seconds in the real main UI, with
-Program/Preview and dirty Program viewers, four keys and direct cuts. Record
-both existing encoded outputs on the instance before Internet transport;
-render each frame with the recorded state and cut sequence to preserve cadence.
-The tools are in [tools/mixer-recording](../../tools/mixer-recording/README.md).
-The original Program MP4 retains the encoder bitstream. Its
-`capture-20261012.json` describes the observed 192-input L4 configuration at 1080p30;
-it does not replace historical capacity or latency measurements. September
-mixer graph images and recordings remain historical release assets.
+The current October mixer demo replays 20 seconds in the actual control page at
+2× Retina scale, with two viewers, an upright T-bar and sampled performance meters.
+Capture both encoded outputs on the host before Janus and record the real UI's
+control trace and state concurrently. Render offline at 30 fps; validate native
+packet continuity and ticker motion before publishing. The tools are in
+[tools/mixer-recording](../../tools/mixer-recording/README.md).
+Publish sanitized metadata in `capture-20261028.json`, clearly identifying the UI
+and metrics as replayed. Keep historical capacity and latency measurements unchanged.
+Earlier recordings remain historical release assets.

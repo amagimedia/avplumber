@@ -5,20 +5,24 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 
 [![192-input mixer: Program/Preview and dirty Program with four downstream keys](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo-poster.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
-[Watch the 10-second demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
-[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-demo-1080p30.mp4) ·
+[Watch the 20-second demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
+[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-tbar-retina-20261028-30fps.mp4) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
 [Configuration](docs/config.md) · [Run manually](docs/guide.md)
 
-Captured 2026-10-12 on an NVIDIA L4 and replayed in the real two-viewer interface:
-192 inputs (105 NVDEC, 36 browser scene sources, 47 raw NV12 and four browser
-keys), 256 scenes and 24 encoded outputs at 1920×1080p30 SDR. It shows direct
-cuts with all four keys enabled. Both encoded outputs were recorded on the
-instance before Internet transport, then combined with the recorded UI state
-and cut sequence at 30 fps. [Original Program recording](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-pgm-instance-1080p30.mp4)
-retains the encoder bitstream, including capture preroll and tail. Setup counts the 188 scene sources separately
-from the keys. The same show runs at 1080p25 with 26 outputs; see the
-[capacity page](docs/capacity.md).
+Captured 2026-10-28 on the 192-input develop show: 105 NVDEC videos, 36 browser scene
+sources, 47 raw NV12 feeds and four browser keys, with 256 scenes and 24 encoded outputs
+at 1920×1080p30 SDR on one NVIDIA L4. All four keys are enabled.
+
+The two viewers use native encoded pictures captured on the host before Janus. The actual
+control page replays the recorded mouse-operated T-bar and sampled performance meters at
+2656×1468, 2× Retina scale. The sequence includes a manual fade, halfway hold, completion,
+return stroke and cut. CPU/GPU meters show captured measurements; this is an offline UI
+replay, not a WebRTC screen recording. Both streams have continuous 30 fps RTP timestamps
+and zero packet gaps; all 599 measured ticker steps advance by exactly four pixels.
+
+Setup counts the 188 scene sources separately from the keys. This documentation recording
+does not refresh the historical [capacity measurements](docs/capacity.md).
 
 ## Run
 
@@ -50,10 +54,20 @@ selected [instance profile](instance_profiles.py), not a universal source limit.
 
 ## Controls
 
-- Scene: select Preview, or take immediately in Direct mode.
-- Cut / Fade / Wipe: take the selected scene; a new take interrupts the old one.
-- Keys: toggle browser overlays on the program; clean outputs omit them.
-- AUX: choose layouts, scene slots or source pages independently of Program.
+- Preview/Program: select the next scene, or enable Direct to cut on selection.
+- Cut, Auto, Fade, colour Dip and media wipes; Auto can halt/resume or complete a take.
+- T-bar: horizontal or upright, manual fade with a hold, cancellation or return stroke;
+  cached wipes can follow the lever too.
+- DSK: independent per-key fades or cuts, a shared ALL rate with per-key overrides,
+  and Shift+click for an immediate key cut.
+- NEXT: arm background and keys for one transition, or take only the armed keys.
+- FTB: fade the keyed program to black while the clean feed remains available.
+- Two resizable viewers, editable multiview slots, AUX layouts/source paging and an output wall.
+- Live GPU, encoder/decoder, memory, power, CPU, thread and delivery statistics.
+
+See the [operator controls](docs/guide.md#controls) or the
+[illustrated Pages guide](https://amagimedia.github.io/avplumber/demos/mixer/docs/controls.html)
+for rate editing, NEXT behavior and shortcuts.
 
 ## Configure and extend
 
