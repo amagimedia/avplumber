@@ -17,7 +17,7 @@
 <div class="page">
   <header class="masthead">
     <a class="brand" href="https://github.com/amagimedia/avplumber" aria-label="AVPlumber on GitHub"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 6h9l8 10h9M3 26h9l8-10M3 16h26"/><circle cx="3" cy="6" r="2"/><circle cx="3" cy="16" r="2"/><circle cx="3" cy="26" r="2"/><circle cx="29" cy="16" r="2"/></svg>avplumber<span>/ mixer</span></a>
-    <nav aria-label="Main navigation"><a href="#inside">Inside the show</a><a href="cookbook/">Cookbook</a><a class="nav-cta" href="https://github.com/amagimedia/avplumber/tree/develop/demos/mixer">Run it yourself <span aria-hidden="true">↗</span></a></nav>
+    <nav aria-label="Main navigation"><a href="controls.html">Operator guide</a><a href="#inside">Inside the show</a><a href="cookbook/">Cookbook</a><a class="nav-cta" href="https://github.com/amagimedia/avplumber/tree/develop/demos/mixer">Run it yourself <span aria-hidden="true">↗</span></a></nav>
   </header>
   <main>
     <section class="hero" aria-labelledby="headline">
@@ -56,12 +56,17 @@
       <div class="workflow-grid">
         <article><span class="step green">01 / PREVIEW</span><h3>See the next take.</h3><p>Program and Preview share a monitor with eight scene slots. Browse 256 scenes without losing sight of what is on air.</p></article>
         <article><span class="step orange">02 / TRANSITION</span><h3>Control the mix by hand.</h3><p>Cut directly, or move the T-bar through a fade. Stop halfway, complete the take, then reverse the bar for the next scene. The recording shows the mixer’s actual output throughout.</p></article>
-        <article><span class="step red-text">03 / ON AIR</span><h3>Keep graphics on top.</h3><p>The second viewer shows the dirty feed: lower third, ticker and two corner bugs. The separate clean feed omits those keys.</p></article>
+        <article><span class="step red-text">03 / ON AIR</span><h3>Keep graphics on top.</h3><p>Give each downstream key its own fade or cut rate, or let it follow ALL. Shift-click cuts a key immediately. Dirty Program includes the graphics; the clean feed omits them.</p></article>
+        <article><span class="step orange">04 / NEXT</span><h3>Take scenes and keys together.</h3><p>Arm BKGD and keys to follow one fade, hold, T-bar move or wipe cut point. Turn BKGD off to take only the armed keys at the main Fade rate.</p></article>
+        <article><span class="step red-text">05 / TRANSITIONS</span><h3>Fade, dip, wipe or go black.</h3><p>Auto can halt and resume or complete a take. Dip through a chosen colour; scrub a ready cached wipe with the lever. FTB fades dirty Program to black while clean stays available.</p></article>
+        <article><span class="step green">06 / MONITOR</span><h3>See the outputs and the load.</h3><p>Resize two viewers, assign multiview slots and page AUX sources, or open the output wall. Inspect GPU, encoder, decoder, VRAM, power, CPU, thread and delivery meters.</p></article>
       </div>
+      <p class="scope"><a href="controls.html">Operator guide: per-key rates, ALL inheritance, NEXT behavior, T-bar and shortcuts ↗</a></p>
     </section>
     <section class="docs" aria-labelledby="docs-title">
       <div class="docs-intro"><p class="eyebrow">BUILD YOUR OWN SHOW</p><h2 id="docs-title">Open the hood.</h2><p>A processing graph you can configure,<br>inspect and extend.</p></div>
       <div class="doc-links">
+        <a href="controls.html"><span><b>Operate the switcher</b><small>T-bar, per-key transitions, NEXT, FTB and monitoring</small></span><i aria-hidden="true">↗</i></a>
         <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/mixer"><span><b>Run the mixer</b><small>Docker, Setup and the operator controls</small></span><i aria-hidden="true">↗</i></a>
         <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md"><span><b>Configure a show</b><small>Sources, scenes, keys, AUX and renditions</small></span><i aria-hidden="true">↗</i></a>
         <a href="cookbook/"><span><b>The optimization cookbook</b><small>GPU composition, browser capture and measured limits</small></span><i aria-hidden="true">↗</i></a>

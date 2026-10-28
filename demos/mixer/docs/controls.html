@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Operate the mixer: T-bar fades, per-key DSK rates, ALL inheritance, NEXT takes, dips, wipes, fade to black, AUX and performance meters.">
+<title>Mixer operator controls · AVPlumber</title><link rel="stylesheet" href="cookbook/cookbook.css">
+<style>video{display:block;width:100%;height:auto;margin:24px 0;border:1px solid var(--line);border-radius:8px}h3{margin-top:32px}table{display:block;overflow-x:auto}nav ul{columns:2;column-width:240px}</style>
+</head><body><main><p class="site"><a href="./">AVPlumber · Mixer demo</a> / Operator controls</p>
+<h1>Mix scenes. Transition each key.</h1><p class="lede">Manual and automatic takes, independent downstream-key rates, and one NEXT selection for background and graphics.</p>
+<video controls muted playsinline preload="metadata" poster="mixer-demo-poster.jpg" aria-label="Retina mixer demonstration with two viewers, manual T-bar fade and performance meters"><source src="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-tbar-retina-20261028-30fps.mp4" type="video/mp4"><a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-tbar-retina-20261028-30fps.mp4">Download the 20-second demo</a></video>
+<nav aria-label="Operator guide contents"><div class="toc">
+<ul>
+<li><a href="#preview-program-and-automatic-takes">Preview, Program and automatic takes</a></li>
+<li><a href="#manual-t-bar">Manual T-bar</a></li>
+<li><a href="#dsk-independent-key-transitions-and-all-rate">DSK: independent key transitions and ALL rate</a></li>
+<li><a href="#next-combine-background-and-key-takes">NEXT: combine background and key takes</a></li>
+<li><a href="#fade-to-black">Fade to black</a></li>
+<li><a href="#viewers-aux-and-output-wall">Viewers, AUX and output wall</a></li>
+<li><a href="#performance-bar-and-viewer-statistics">Performance bar and viewer statistics</a></li>
+<li><a href="#keyboard-reference">Keyboard reference</a></li>
+</ul>
+</div>
+</nav>
+<p>The Compose stack starts the web UI. With a standalone backend:</p>
+<pre><code class="language-sh">python3 -m pyplumber.mixer.gui --host 127.0.0.1 --port 7777 --http-port 7681
+</code></pre>
+<p>The <a href="https://amagimedia.github.io/avplumber/demos/mixer/docs/">20-second Retina demonstration</a>
+shows two viewers, four downstream keys, a manual fade, halfway hold and return stroke.
+Its native pictures were captured before Janus; controls and measured performance meters
+are replayed in the actual UI. The controls below describe the live operator page.</p>
+<h3 id="preview-program-and-automatic-takes">Preview, Program and automatic takes</h3>
+<p>A scene tile or <strong>1–9</strong> selects Preview. <strong>Direct / Shift+D</strong> makes a scene pick cut
+straight to Program; the arrow keys still browse Preview without taking it. Scene filters
+and page buttons let you browse the catalogue. After a completed background take, Preview
+becomes the scene that left Program.</p>
+<p>Choose <strong>Fade / F</strong>, <strong>Dip / D</strong>, or a media wipe (<strong>W</strong>, repeated to cycle the list), then
+press <strong>Auto / Space</strong> to run it. Selecting a transition prepares Auto; it does not take.
+Fade mixes the scenes. Dip goes through black, white or a chosen colour. The curve buttons
+shape a fade or each half of a dip. A wipe uses its clip's duration and cut point; clip
+paths refer to files on the mixer host.</p>
+<p><strong>Cut / C</strong> takes immediately, or completes a transition already on air. The <strong>Halt / Complete</strong>
+selector controls a second Auto press during its own transition: Halt pauses it with both
+sources still moving, and another press resumes; Complete finishes it immediately.</p>
+<p>The rate field uses the show's frame rate: <code>15f</code> means 15 frames, <code>1:15</code> means one second
+and 15 frames. Bare <code>45</code> is 45 frames, displayed as <code>1:15</code> at 30 fps. Presets, the small
+arrows and the mouse wheel change the rate; Shift with the wheel steps one second.</p>
+<h3 id="manual-t-bar">Manual T-bar</h3>
+<p>Use the rotate button to place the T-bar horizontally or upright. Drag from the end where
+it rests to mix toward Preview. Stop anywhere to hold the mixture while both sources keep
+moving. Reach the far end to complete the take; the next take starts from that end in the
+opposite direction. Return to the starting end to cancel the take. The grip, percentage,
+LEDs and trail show its position and progress.</p>
+<p>Auto can run a manual fade on from its current position; Cut completes it. If an automatic
+take finishes while the physical lever is between endpoints, the lever must return to an
+endpoint before starting another take. The page parks its on-screen lever as needed.</p>
+<p>A selected wipe can follow the lever forward and backward once its complete clip is decoded
+in the GPU wipe cache. The lever is unavailable while that wipe is not ready. Without a
+selected wipe, manual operation mixes the scenes. The T-bar requires <strong>NEXT → BKGD</strong>; it
+cannot perform a key-only take.</p>
+<h3 id="dsk-independent-key-transitions-and-all-rate">DSK: independent key transitions and ALL rate</h3>
+<p>Downstream keys are overlays applied after the scene transition: lower third, ticker and
+corner bugs in this demo. <strong>Program dirty</strong> includes them; the clean feed omits them while
+retaining the scene transition. Off-air keys remain subscribed so they can be brought in.</p>
+<p>Click a key's name to fade it on or off at its effective rate, using the selected Fade curve.
+<strong>Shift+click</strong> cuts that key regardless of its saved rate. Each key can have its own rate,
+or inherit the shared <strong>ALL</strong> rate. Rates and inheritance belong to the running mixer and
+are shared by every controller; changing a rate does not itself put a key on or off air.</p>
+<table>
+<thead>
+<tr>
+<th>Rate control</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Click the ALL rate tag</td>
+<td>Cycle CUT, ¼ second, ½ second and 1 second</td>
+</tr>
+<tr>
+<td>Click a key's rate tag</td>
+<td>Cycle its own CUT, ¼ second, ½ second and 1 second, then return to following ALL</td>
+</tr>
+<tr>
+<td>Wheel over a rate tag</td>
+<td>Step one frame; Shift steps one second. On a key, this sets its own rate</td>
+</tr>
+<tr>
+<td>Focus a tag and press F2</td>
+<td>Type frames (<code>15</code> or <code>15f</code>), seconds:frames (<code>1:15</code>), or <code>0</code>, <code>c</code>, <code>cut</code> or an empty field for CUT</td>
+</tr>
+<tr>
+<td>Type <code>all</code> in a key's rate editor</td>
+<td>Restore inheritance from ALL</td>
+</tr>
+<tr>
+<td>Enter or leave the editor / Escape</td>
+<td>Save / cancel the edit</td>
+</tr>
+</tbody>
+</table>
+<p>Key rates are limited to 0–10 seconds. The ALL tag changes only keys that follow it;
+explicit key rates remain independent. <strong>ALL / K</strong> takes all keys off if any is on,
+otherwise takes all on, each at its own effective rate. This is different from a key-only
+NEXT take, which uses one common take rate.</p>
+<p>For example, set ALL to <code>12f</code>, the lower third to <code>30f</code>, and a bug to CUT. The ticker and
+other following keys use 12 frames, the lower third uses 30, and the bug cuts. Changing
+ALL to <code>15f</code> leaves those two explicit overrides intact. Type <code>all</code> on the lower third's
+tag to make it follow ALL again.</p>
+<p>The red tally reflects the keyer's reported on-air state (a click responds immediately,
+then the mixer confirms it). An amber key number means it is armed for the next take;
+arming alone does not make it visible.</p>
+<h3 id="next-combine-background-and-key-takes">NEXT: combine background and key takes</h3>
+<p>The <strong>NEXT</strong> row in Preview arms <strong>BKGD</strong> and individual keys. An armed key toggles on the
+take: off-air keys come in, on-air keys go out. The red dot marks a key currently on air.</p>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Background</th>
+<th>Armed keys</th>
+<th>Rate / clock</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BKGD on, Cut</td>
+<td>Cuts to Preview</td>
+<td>Cut to their opposite state</td>
+<td>Same take</td>
+</tr>
+<tr>
+<td>BKGD on, Auto fade or dip</td>
+<td>Runs the selected transition</td>
+<td>Follow its progress and hold/resume</td>
+<td>Background take's clock</td>
+</tr>
+<tr>
+<td>BKGD on, T-bar</td>
+<td>Follows the lever</td>
+<td>Follow the manual take; cancel restores their original state</td>
+<td>Lever progress</td>
+</tr>
+<tr>
+<td>BKGD on, media wipe</td>
+<td>Runs or manually scrubs the ready wipe</td>
+<td>Switch at the wipe's cut point</td>
+<td>Wipe clock / position</td>
+</tr>
+<tr>
+<td>BKGD off, Cut</td>
+<td>Unchanged</td>
+<td>Cut to their opposite state</td>
+<td>Immediate</td>
+</tr>
+<tr>
+<td>BKGD off, Auto</td>
+<td>Unchanged</td>
+<td>Fade together</td>
+<td>Main Fade rate and curve, regardless of individual key rates</td>
+</tr>
+<tr>
+<td>Direct key click or ALL / K</td>
+<td>Unchanged</td>
+<td>Operates the clicked key or all keys, irrespective of NEXT</td>
+<td>Each key's own rate or inherited ALL rate</td>
+</tr>
+</tbody>
+</table>
+<p>NEXT selection stays armed for subsequent takes. BKGD selection belongs to this page;
+armed keys are shared by all controllers. With BKGD off the T-bar is disabled. Arm at
+least one key for a key-only take.</p>
+<p>To remove a lower third during a scene change, arm BKGD and key 1, select the next scene
+in Preview and press Auto. The lower third follows that scene transition even if its
+independent key button has a different rate. To fade only the lower third and ticker
+together, turn BKGD off, arm keys 1 and 2, set the main Fade rate and press Auto.</p>
+<h3 id="fade-to-black">Fade to black</h3>
+<p><strong>FTB</strong> in Program fades the finished keyed program to black at the main Fade rate and
+curve; press it again to fade back. It flashes while Program is black. The clean feed
+is unaffected. This is distinct from Dip, which transitions between scenes through a colour.</p>
+<h3 id="viewers-aux-and-output-wall">Viewers, AUX and output wall</h3>
+<p>For the recorded layout, select <strong>Viewers 2</strong>, <strong>Program preview</strong> in the first viewer
+and <strong>Program dirty</strong> in the second. Program preview contains PVW, PGM and eight scene
+slots. Drag the dividers to resize the deck and viewers; double-click a viewer or press
+Enter while it has focus for full screen. The T-bar orientation, viewer choices and
+split sizes are local browser preferences.</p>
+<p>The slots card controls the multiview last clicked, marked “· slots” when applicable.
+Click a slot and then a scene to assign it, or use <strong>Shift+1–8</strong> for the selected scene.
+AUX layout selectors and source-page buttons change that bus on the running mixer;
+<strong>[ / ]</strong> page a source multiview. These operations are shared, not local viewer preferences.
+<strong>Outputs</strong> opens the output wall for monitoring the configured feeds and renditions.</p>
+<p>Each browser must support the selected output's codec and profile. The approved October
+28 recording used H.264 for both viewers; other setups can offer HEVC or multiple colour
+renditions. <strong>Setup</strong> configures the show, sources, scenes, keys and outputs; applying it
+restarts the mixer. Selecting a viewer does not change the output's encoding.</p>
+<h3 id="performance-bar-and-viewer-statistics">Performance bar and viewer statistics</h3>
+<p>Hover or focus a top-bar meter for details; Escape dismisses its tip.</p>
+<table>
+<thead>
+<tr>
+<th>Meter</th>
+<th>What it shows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LAT</td>
+<td>Measured cut latency; its tip includes cut p95, deadline misses, AUX drops and input repeat/skip counters</td>
+</tr>
+<tr>
+<td>GPU / ENC / DEC</td>
+<td>GPU work, NVENC and NVDEC utilization separately; tips include device and codec/session details</td>
+</tr>
+<tr>
+<td>VRAM / POWER</td>
+<td>Used/total GPU memory and power draw/limit</td>
+</tr>
+<tr>
+<td>WIPES</td>
+<td>GPU wipe-cache use and available clip details</td>
+</tr>
+<tr>
+<td>LOAD / CPU</td>
+<td>One-minute host load relative to vCPU count, and host CPU utilization; CPU's tip shows mixer cores and sources/core</td>
+</tr>
+<tr>
+<td>THREAD</td>
+<td>Busiest mixer thread, in percent of one CPU core; its tip groups mixer threads and Chromium processes</td>
+</tr>
+</tbody>
+</table>
+<p>On multiple GPUs the utilization meters show the busiest device and VRAM the fullest;
+the tips list devices. A viewer's <strong>RTT</strong>, <strong>FPS</strong> and <strong>BUF</strong> describe its WebRTC connection,
+decoded frames per second and jitter-buffer residence. Missing or stale player statistics show a dash. Viewer
+network statistics and the LAT cut measurement describe different parts of delivery.</p>
+<h3 id="keyboard-reference">Keyboard reference</h3>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1–9</td>
+<td>Pick a visible scene; Direct mode takes it immediately</td>
+</tr>
+<tr>
+<td>Arrow keys</td>
+<td>Browse Preview only; up/down move by a scene-grid row</td>
+</tr>
+<tr>
+<td>&lt; / &gt; or , / .</td>
+<td>Change scene page</td>
+</tr>
+<tr>
+<td>Shift+D</td>
+<td>Toggle Direct</td>
+</tr>
+<tr>
+<td>C / Space</td>
+<td>Cut / Auto</td>
+</tr>
+<tr>
+<td>F / D / W</td>
+<td>Select Fade / Dip / wipe; repeated W cycles wipes</td>
+</tr>
+<tr>
+<td>K</td>
+<td>All keys off if any is on, otherwise all on</td>
+</tr>
+<tr>
+<td>Shift+1–8</td>
+<td>Assign selected scene to a multiview slot</td>
+</tr>
+<tr>
+<td>[ / ]</td>
+<td>Previous / next source-multiview page</td>
+</tr>
+<tr>
+<td>F2 on a rate tag</td>
+<td>Edit that key's or ALL's transition rate</td>
+</tr>
+</tbody>
+</table>
+<p>Shortcuts do not take over while typing in a text field or choosing in an open menu.</p>
+<p class="note review">Controls reviewed against develop <a href="https://github.com/amagimedia/avplumber/tree/8251eee0536961d1b8bbe578805abbf53d2d3d44"><code>8251eee0</code></a>, 28 October 2026. The video demonstrates the manual fade and four on-air keys; the guide also covers controls not exercised in that recording.</p>
+<footer><a href="./">← Watch the demo</a> · <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/guide.md#controls">Maintained operator guide</a> · <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md#dsk">Key configuration and commands</a> · <a href="cookbook/">Optimization cookbook</a></footer>
+</main></body></html>

@@ -20,8 +20,13 @@ HLG/PQ require 10-bit storage. Browser graphics are SDR; the compositor converts
 | `width`, `height` | — | the program raster the compositor draws into |
 | `fps` | `30` | **how often the compositor renders**, and the clock the whole mixer runs on: inputs are re-timed to it and browser pages are asked to paint at it |
 | `working_format` | `nv12` | compositor and transition pixel storage: `nv12` (8-bit 4:2:0), `p010le` (10-bit 4:2:0) or `p210le` (10-bit 4:2:2). 8-bit sources are promoted onto a 10-bit canvas; `p210le` keeps 4:2:2 through conversion and compositing. Renditions are 4:2:0 for NVENC, subsampled once |
-| `raw_upload` | `hwupload` | `hwupload` or `pinned` (`hwupload_cuda=pinned=1`, requires the FFmpeg patch); Setup uses pinned staging. [Details](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html) |
+| `raw_upload` | `hwupload` | `hwupload`, `pinned` (`hwupload_cuda=pinned=1`, requires the FFmpeg patch), `direct` (one `raw_video_file_cuda` node per source: the file is read into page-locked memory and uploaded from there, no staging copy) or `resident` (as `direct`, and a looped file's pictures stay in that memory after their first showing, so later passes read nothing; the memory is the size of the file and is not swappable). Setup uses `resident` for `nvidia_l4_cuarray`, otherwise `direct`. Every mode still uploads each displayed raw frame to the GPU. [Details](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html) |
+| `input_routing` | `input` | which node hands a file's video stream to its decoder: `input` (the reading node sends it to the decoder's edge itself) or `demux` (a `demux` node per source between the two, the earlier wiring: one more thread and two more hand-offs per packet) |
 | `color` | `sdr` | canvas color contract: `sdr` (BT.709), `hlg` or `pq` (BT.2020). HLG/PQ need a 10-bit `working_format`. Every source is converted to it on the GPU; renditions convert from it |
+| `raw_pool_frames` | unset | `direct` and `resident` raw sources: at most this many device frames per source. Unset, a source's pool grows to the most frames ever out at once (a stall of the compositors at start sets it) and keeps them; bounded, the source waits for a frame to come back |
+| `decoded_frames_ahead` | unset (3) | how many decoded frames of a file or stream source may wait in front of its pacing node. Each is a decoder output frame in GPU memory (3.1 MB at 1080p) held for slack; `1` keeps the next frame ready and nothing more |
+| `source_fan_out` | `thread` | what hands each source's frames to the compositors and AUX buses: `thread` (a `one_to_many` node per source, woken once per frame) or `event_loop` (`one_to_many_nb` on the loop that paces the source: no thread per source) |
+| `input_poll_ms` | unset | unset or `0`: each program compositor is woken by every frame any source gives. A number: it sleeps to its next deadline and looks for frames at most that often in between (and at once for a cut). A tick is drawn at its deadline either way, so with many sources this only removes wake-ups; a source's queue (three frames) must hold what arrives within one interval. `8` suits rates up to 60 fps |
 | `latency_ms` | 2 frames up to 30 fps, 3 at 50/60 | playout buffer between a source frame's arrival and its tick (80 ms at 25 fps, 50 ms at 60). A frame later than that is skipped and the previous one repeated, so set it just above the worst source jitter; must stay below six frames. `--mixer-latency-ms` on the command line overrides it |
 
 ## renditions
@@ -62,10 +67,12 @@ One source ID opens one decoder or browser window; scenes and aliases reuse it. 
 | `color` | browser, v210, nv12, p010 | required color contract (`sdr`, `hlg`, `pq`); browser and NV12 sources must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
 | `url`, `width`, `height` | browser | page and the window it is rendered in (all three required) |
 | `fps` | browser | paint rate; defaults to the canvas rate |
+| `capture_cadence` | browser | `continuous` (default) checks repeated captures on program; `on_change` records intentional static holds separately. Does not alter capture or pacing |
 | `hold_last_frame` | browser | default `true`: while a failed or crashed page reloads, repeat its last frame. `false` shows Chromium's empty error page (transparent or black) instead |
 | `width`, `height` | video | optional; probed with ffprobe at load when absent |
 | `loop` | both | default `true` |
 | `decode_storage` | video | default `cuda`; experimental `cuarray` requires the patched upstream FFmpeg build and compatible array consumers, and selects zero-copy NVDEC without CPU fallback |
+| `decoded_format` | video | optional `nv12` or `p010le`: what the decoder is known to yield (8-bit or 10-bit 4:2:0 from NVDEC). With a declared `color` that matches the canvas and this equal to the canvas storage, the source's frames are tagged by its fan-out and it needs no colour filter and no thread for one. Leave it out for media of unknown depth: the colour filter then converts when it must. Not with `filter` |
 | `extra_hw_frames` | CUarray video | default `3`: fixed application headroom beyond codec and FFmpeg working surfaces; size it for the graph's retained-frame demand |
 | `transform` | video/v210/nv12/p010 | optional geometry applied once before the source filter, color and fan-out: `{"width", "height", "fit", "crop", "sw_format"}`. The frame, or its `crop` `[x, y, w, h]`, is scaled onto a canvas of that even size by `cuda_transform`; `fit` is `contain` (default, black bars) or `stretch`. `sw_format` (`nv12`, `p010le`, `p210le`) is the source's own storage: raw kinds supply it, a `video` source must state it. A frame that already has the size and storage is passed on undrawn; one of lower depth is promoted, one of higher depth is an error |
 | `filter` | video/v210/nv12/p010 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
@@ -113,7 +120,7 @@ Up to four browser keys over the finished program. `feed: "clean"` omits them. K
 
 | field | default | meaning |
 | --- | --- | --- |
-| `fade_seconds` | `0.4` | how long a key change fades, 0 to 10; `0` cuts |
+| `fade_seconds` | `0.4` | initial shared ALL key rate, 0 to 10 seconds; `0` cuts. Keys start by following ALL |
 | `fade_curve` | `"linear"` | easing of a key fade, the same presets as `control.fade_curve` |
 
 
@@ -124,6 +131,37 @@ Up to four browser keys over the finished program. `feed: "clean"` omits them. K
 | `dst` | whole canvas | `x`, `y`, `w`, `h` on the canvas; the window is scaled into it |
 | `on` | `false` | on air at start |
 | `bounded` | `false` | compose only this key's rectangle instead of the whole canvas, while every key on air is `bounded`; for a key that fills a known part of the picture, such as a lower third |
+
+### Runtime key rates and takes
+
+Rates are mixer state shared by all controllers. They are separate from the background
+Fade rate. These control commands use seconds; replace `lower_third` with a configured key ID:
+
+```text
+mixer.dsk {"all_rate":0.4}
+mixer.dsk {"key":"lower_third","rate":1.0}
+mixer.dsk {"key":"lower_third","on":true}
+mixer.dsk {"key":"lower_third","on":false,"fade_seconds":0}
+mixer.dsk {"key":"lower_third","rate":null}
+```
+
+`rate: null` restores inheritance from ALL. Changing a rate does not change visibility.
+An explicit `fade_seconds` overrides the saved rate for that command only. A group request
+with `keys: [...]` and `toggle: true` changes the named keys together; it uses `all_rate`
+unless `fade_seconds` is supplied. The UI's ALL/K action instead sends each key at its own
+rate, preserving overrides.
+
+```text
+mixer.dsk {"keys":["lower_third","ticker"],"toggle":true,"fade_seconds":0.5}
+mixer.dsk {"keys":["lower_third"],"prepare":true}
+mixer.dsk {"keys":[],"prepare":true}
+```
+
+`prepare: true` selects the keys for subsequent background takes (NEXT); an empty list
+clears the selection. Prepared keys follow the background take's clock instead of their
+independent rates: fades, holds, manual lever progress, cuts and wipe cut points remain
+aligned. See [operator controls](guide.md#next-combine-background-and-key-takes) for the
+separate key-only Auto behavior and the distinction between ALL and NEXT.
 
 ## aux_buses
 
@@ -196,11 +234,12 @@ Per-input `force_fps` is omitted; output/AUX normalization remains. The shared
 input helper's default normalized behavior for other applications is unchanged.
 Browser sources retain their separate timestamp smoothing/repeat chain.
 
-`canvas.raw_upload: "pinned"` uses patched FFmpeg's `hwupload_cuda`; the old
-custom raw uploader nodes are retired. NV12/P010 and v210 builders stamp declared
-YUV tags in the upload graph. The application bypasses a standalone tag-only
-colour filter only when no user filter or processing callback can invalidate
-that promise. Real colour conversion and alpha processing remain. A source
+`canvas.raw_upload: "direct"` reads each NV12/P010 file with one
+`raw_video_file_cuda` node, which uploads from page-locked memory and stamps the
+declared YUV tags itself. `"pinned"` uses patched FFmpeg's `hwupload_cuda`, as the
+v210 builder always does; those two stamp the tags in the upload graph. The
+application bypasses a standalone tag-only colour filter only when no user filter
+or processing callback can invalidate that promise. Real colour conversion and alpha processing remain. A source
 `transform` preserves the tags, while an arbitrary `filter_graph` or
 `process_source` callback disables automatic eligibility.
 
