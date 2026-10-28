@@ -160,7 +160,16 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         }
     }
 
-    void insertEvent(Bus& bus, GainEvent ev) {
+    void insertEvent(Bus& bus, GainEvent ev, bool is_transition_ended) {
+        if (is_transition_ended) {
+            // transition_ended concludes this bus's sequence: the orchestrator and MixerPvwFollow
+            // never run two transitions on one bus at once, so anything still queued to fire
+            // strictly after this moment is a stray tail of the sequence this event just ended,
+            // not a still-valid step of a different, still-running one. Drop it so applyEvents can
+            // never later snap the mix back to a stale progress value (e.g. after an interrupt).
+            while (!bus.pending.empty() && bus.pending.back().sample > ev.sample)
+                bus.pending.pop_back();
+        }
         if (ev.sample == 0) {
             bus.gains = ev.gains;
             bus.program_gain = ev.program_gain;
@@ -329,7 +338,7 @@ public:
                 kind, t, from_idx, to_idx, sources_.size(), ev.gains, ev.program_gain,
                 from_prog, to_prog);
         }
-        insertEvent(bus, std::move(ev));
+        insertEvent(bus, std::move(ev), key == "transition_ended");
     }
 
     virtual Parameters getObject(const std::string key) override {
