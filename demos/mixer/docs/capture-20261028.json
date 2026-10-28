@@ -1,0 +1,119 @@
+{
+  "captured": "2026-10-28",
+  "revision": "8251eee0536961d1b8bbe578805abbf53d2d3d44",
+  "branch": "develop",
+  "gpu": "NVIDIA L4",
+  "vcpus": 12,
+  "inputs": 192,
+  "source_counts": {
+    "nvdec": 105,
+    "browser_scene": 36,
+    "raw_nv12": 47,
+    "browser_keys": 4
+  },
+  "scenes": 256,
+  "encoded_outputs": 24,
+  "canvas": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "format": "SDR 8-bit 4:2:0"
+  },
+  "recording": {
+    "file": "mixer-192-input-tbar-retina-20261028-30fps.mp4",
+    "method": "Program and Program/Preview encoder RTP captured on the instance loopback before Janus. Native frames are inserted beneath the actual develop UI viewer overlays. Recorded mouse-operated controls and measured performance statistics are replayed offline at 30 fps.",
+    "width": 2656,
+    "height": 1468,
+    "css_viewport": [
+      1328,
+      734
+    ],
+    "device_scale_factor": 2,
+    "fps": 30,
+    "frames": 600,
+    "duration_seconds": 20,
+    "sequence": [
+      {
+        "seconds": [
+          2,
+          4
+        ],
+        "action": "Manual T-bar fade to 50 percent"
+      },
+      {
+        "seconds": [
+          4,
+          5
+        ],
+        "action": "Halfway hold"
+      },
+      {
+        "seconds": [
+          5,
+          7
+        ],
+        "action": "Complete fade"
+      },
+      {
+        "seconds": [
+          11,
+          15
+        ],
+        "action": "Return stroke"
+      },
+      {
+        "seconds": 17,
+        "action": "Direct cut"
+      }
+    ]
+  },
+  "scope": "Documentation capture on a shared host; UI and performance meters are replayed. Native video is not transported through WebRTC. This does not replace historical capacity or latency benchmarks.",
+  "validation": {
+    "pgm": {
+      "packets": 24239,
+      "rtp_frames": 1073,
+      "packet_sequence_gaps": 0,
+      "window_tick_deltas": {
+        "3000": 599
+      },
+      "incomplete_tail_discarded": true
+    },
+    "preview": {
+      "packets": 16747,
+      "rtp_frames": 1073,
+      "packet_sequence_gaps": 0,
+      "window_tick_deltas": {
+        "3000": 599
+      },
+      "incomplete_tail_discarded": true
+    },
+    "ticker": {
+      "frame_pairs": 599,
+      "horizontal_steps_px": {
+        "-4": 599
+      },
+      "median_match_error": 0.0
+    },
+    "final_ui_video": {
+      "width": 2656,
+      "height": 1468,
+      "frames": 600,
+      "fps": 30,
+      "unique_ticker_frames": 600,
+      "ticker_steps_at_viewer_scale_px": {
+        "-1": 599
+      }
+    }
+  },
+  "performance": {
+    "method": "24 actual state samples collected during capture; held until the next sample in the UI replay.",
+    "cpu_percent_range": [
+      53,
+      83
+    ],
+    "gpu_percent_range": [
+      71,
+      78
+    ]
+  }
+}
