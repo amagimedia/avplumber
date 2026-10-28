@@ -21,11 +21,12 @@ Keep historical measurements attached to their workload and revision; a code
 review or small smoke test does not refresh a capacity benchmark. Publish
 sanitized textual evidence without private host or storage paths.
 
-The current October mixer demo is a 20-second, 30 fps recording of the actual
-control page with two live WebRTC viewers and a visible upright T-bar. Operate
-the page while recording its display; do not substitute rendered state or recorded
-pictures for the live viewers. Check both viewers are decoding before capture.
-The tools are in [tools/mixer-recording](../../tools/mixer-recording/README.md).
-Publish sanitized capture metadata in `capture-20261028.json`; keep historical
-capacity and latency measurements unchanged. Earlier host-output recordings and
-September graph images remain historical release assets.
+The current October mixer demo replays 20 seconds in the actual control page at
+2× Retina scale, with two viewers, an upright T-bar and sampled performance meters.
+Capture both encoded outputs on the host before Janus and record the real UI's
+control trace and state concurrently. Render offline at 30 fps; validate native
+packet continuity and ticker motion before publishing. The tools are in
+[tools/mixer-recording](../../tools/mixer-recording/README.md).
+Publish sanitized metadata in `capture-20261028.json`, clearly identifying the UI
+and metrics as replayed. Keep historical capacity and latency measurements unchanged.
+Earlier recordings remain historical release assets.

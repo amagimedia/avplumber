@@ -6,21 +6,23 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 [![192-input mixer: Program/Preview and dirty Program with four downstream keys](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo-poster.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
 [Watch the 20-second demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
-[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-ui-tbar-20261028-1080p30.mp4) ·
+[MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-tbar-retina-20261028-30fps.mp4) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
 [Configuration](docs/config.md) · [Run manually](docs/guide.md)
 
-Captured 2026-10-28 directly from the live mixer UI: two live WebRTC viewers,
-the upright T-bar, direct cuts and manual fades with a halfway hold and a return stroke.
-The 192-input develop show runs on one NVIDIA L4 with 256 scenes and 24 encoded outputs
-at 1920×1080p30 SDR. Its inputs are 105 NVDEC videos, 36 browser scene sources,
-47 raw NV12 feeds and four browser keys. All four keys are on in the recording.
+Captured 2026-10-28 on the 192-input develop show: 105 NVDEC videos, 36 browser scene
+sources, 47 raw NV12 feeds and four browser keys, with 256 scenes and 24 encoded outputs
+at 1920×1080p30 SDR on one NVIDIA L4. All four keys are enabled.
 
-The video is a 30 fps screen capture of the actual interface, operated with mouse
-clicks and T-bar drags. Its viewer pictures and controls are captured together;
-there is no offline UI reconstruction. Setup counts the 188 scene sources separately
-from the keys. This documentation recording does not refresh the historical
-[capacity measurements](docs/capacity.md).
+The two viewers use native encoded pictures captured on the host before Janus. The actual
+control page replays the recorded mouse-operated T-bar and sampled performance meters at
+2656×1468, 2× Retina scale. The sequence includes a manual fade, halfway hold, completion,
+return stroke and cut. CPU/GPU meters show captured measurements; this is an offline UI
+replay, not a WebRTC screen recording. Both streams have continuous 30 fps RTP timestamps
+and zero packet gaps; all 599 measured ticker steps advance by exactly four pixels.
+
+Setup counts the 188 scene sources separately from the keys. This documentation recording
+does not refresh the historical [capacity measurements](docs/capacity.md).
 
 ## Run
 
