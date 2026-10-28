@@ -81,7 +81,7 @@ function programOptions(s, keys) {
   }));
 }
 // A preview output, the clean feed or an aux bus: an H.264 or H.265 mountpoint of its own.
-const previewOption = (o) => ({value: o.bus, label: o.label || o.bus, url: playerUrl(o), chrome: 49, unplayable: !playable(o.codec)});
+const previewOption = (o) => ({value: o.bus, label: o.label || o.bus, url: playerUrl(o), chrome: 49, unplayable: !playable(o.codec), audio: !!o.audio});
 // Canvas pixels of an output: an aux bus reports its own, the program has the mixer's.
 function canvasSize(s, aux) {
   const c = s.canvas;
