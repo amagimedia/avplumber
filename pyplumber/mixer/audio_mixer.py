@@ -8,6 +8,14 @@ another AFV consumer for one AUX, none for others) without changing the orchestr
 put a thin fan-out ``IInputsObjects`` node as ``audio_router_node`` and forward by
 ``output``. Each consumer still needs its ``audio_edges`` (shared or separate); an AUX
 cell with the ``program`` sentinel needs a tap of the program audio bus.
+
+Any other ``IInputsObjects`` impl (e.g. ``dyremix_mixer``) can take this slot too:
+set ``MixerOptions.build_audio_mixer = False`` so ``build_application`` leaves
+``audio_router_node`` alone instead of wiring this module's node under that name.
+Two things ride along with this module specifically and are then the caller's own
+responsibility: the ``{audio_router_node}_{bus.id}`` edge convention ``aux.py``
+assumes for AUX audio ports, and the ``set_source_gain`` / ``status.sources[].gain``
+protocol ``audio_gain.py``'s gain controller drives.
 """
 from __future__ import annotations
 

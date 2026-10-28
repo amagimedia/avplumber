@@ -228,6 +228,44 @@ def test_audio_mixer_is_wired_when_router_and_has_audio(native_boundary):
     assert "program" in params["outputs"]
 
 
+def test_unbuilt_audio_router_node_is_cleared_not_left_dangling(native_boundary):
+    """A router name with no has_audio sources behind it must not survive into
+    mixer.init: app.mixer.audio_router_node is what MixerApplication._warm_outputs
+    waits on, and a node that is never built would hang preheat for
+    preheat_timeout_sec (60s by default) before failing -- see application.py's
+    `elif options.audio_router_node and not audio_edges` branch."""
+    nodes, builder = native_boundary
+    cfg = mixer_config.parse({
+        "canvas": CONFIG["canvas"], "sources": [CONFIG["sources"][0]],
+        "scenes": [{"id": "full", "items": CONFIG["scenes"][0]["items"]}],
+        "renditions": [{"id": "record", "target": "program.ts"}],
+    })
+    app = build_application(cfg, MixerOptions(audio_router_node="custom_router"),
+                            api=_api(nodes, builder))
+    assert app.audio_edges == ()
+    assert app.mixer.audio_router_node == ""
+    init_events = [e for e in app.avp.events if e.startswith("mixer.init ")]
+    assert "audio_router_node" not in init_events[0]
+
+
+def test_build_audio_mixer_false_leaves_a_custom_router_name_alone(native_boundary):
+    """With build_audio_mixer=False, build_application must not build its own
+    audio_mixer node (or anything else) under the caller's router name -- that
+    name is reserved for an IInputsObjects impl the caller builds itself (e.g.
+    dyremix_mixer in avplumber-nodes-2), and a competing audio_mixer there would
+    defeat the whole point of supplying a custom node."""
+    nodes, builder = native_boundary
+    app = build_application(_audio_show(),
+                            MixerOptions(audio_router_node="dyremix", build_audio_mixer=False),
+                            api=_api(nodes, builder))
+    assert app.audio_edges
+    assert app.mixer.audio_router_node == "dyremix"
+    assert app.avp.nodes.get("dyremix") is None
+    assert not any(params.get("type") == "audio_mixer" for params in app.avp.nodes.values())
+    init_events = [e for e in app.avp.events if e.startswith("mixer.init ")]
+    assert '"audio_router_node": "dyremix"' in init_events[0]
+
+
 def test_janus_audio_limits_float_mix_before_s16_conversion():
     from pyplumber.mixer.janus import JanusAudioConfig, build_janus_audio_output
 

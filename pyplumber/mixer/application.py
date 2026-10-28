@@ -113,8 +113,13 @@ class MixerOptions:
     # Optional audio-router node name (any IInputsObjects impl, e.g. audio_mixer).
     # Mixer emits transition_ended / transition_progress to this single name; "" disables it.
     # One name only: to split outputs across several consumers / none, use a fan-out
-    # IInputsObjects as this name (see doc/mixer_audio_follow_video.md).
+    # IInputsObjects as this name (see doc/mixer_audio_follow_video.md). With
+    # has_audio sources, build_application wires the in-tree audio_mixer under this
+    # name unless build_audio_mixer is False -- set it False to supply a different
+    # IInputsObjects impl here yourself (e.g. dyremix_mixer); build_application then
+    # leaves this name alone and skips the audio_mixer-specific gain controller.
     audio_router_node: str = ""
+    build_audio_mixer: bool = True
 
     def __post_init__(self):
         if self.browser_frame_queue is None:
@@ -969,21 +974,28 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
     program_audio_edge = None
     if options.audio_router_node and audio_edges:
-        from .audio_mixer import wire_audio_mixer
         router = options.audio_router_node
-        # An AUX bus with its own audio_port gets a second bus here, independently driven by its
-        # own mixer_pvw_follow (aux.py stamps "output": bus.id on every layout it sends).
-        aux_outputs = {bus.id: f"{router}_{bus.id}" for bus in cfg.aux_buses if bus.renditions[0].audio_port}
-        wire_audio_mixer(avp, api, audio_edges, name=router,
-                         fps=f"{mixer.fps_num}/{mixer.fps_den}", latency_ms=mixer.latency_ms,
-                         outputs={"program": f"{router}_program", **aux_outputs},
-                         group=OUTPUT_GROUP)
-        program_audio_edge = f"{router}_program"
-        gain_controller = AudioGainController(avp, options.audio_router_node, [sid for sid, _ in audio_edges])
-        register_audio_gain_commands(avp, gain_controller)
+        if options.build_audio_mixer:
+            from .audio_mixer import wire_audio_mixer
+            # An AUX bus with its own audio_port gets a second bus here, independently driven by its
+            # own mixer_pvw_follow (aux.py stamps "output": bus.id on every layout it sends).
+            aux_outputs = {bus.id: f"{router}_{bus.id}" for bus in cfg.aux_buses if bus.renditions[0].audio_port}
+            wire_audio_mixer(avp, api, audio_edges, name=router,
+                             fps=f"{mixer.fps_num}/{mixer.fps_den}", latency_ms=mixer.latency_ms,
+                             outputs={"program": f"{router}_program", **aux_outputs},
+                             group=OUTPUT_GROUP)
+            program_audio_edge = f"{router}_program"
+            gain_controller = AudioGainController(avp, options.audio_router_node, [sid for sid, _ in audio_edges])
+            register_audio_gain_commands(avp, gain_controller)
+        # else: the caller builds and wires its own IInputsObjects node named `router`,
+        # including any Janus program audio and {router}_{bus.id} aux legs it wants;
+        # audio_gain's set_source_gain protocol is audio_mixer-specific and skipped here too.
     elif options.audio_router_node and not audio_edges:
         log.warning("audio_router_node=%r set but no has_audio sources; AFV will fire with nothing to mix",
                     options.audio_router_node)
+        # Nothing was ever built under this name: clear it so _warm_outputs never
+        # waits on a node that will never start (see MixerApplication._wait_for_node).
+        mixer.audio_router_node = ""
     from pyplumber.mixer.aux import AuxBus, AuxBuses
     aux = AuxBuses(avp, [AuxBus(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses]) if cfg.aux_buses else None
     keyer = DownstreamKeyer(avp, api, mixer, cfg, group=OUTPUT_GROUP) if cfg.dsk_keys else None
