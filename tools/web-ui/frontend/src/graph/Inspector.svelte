@@ -3,7 +3,7 @@
   import { createEventDispatcher } from 'svelte';
   import './graph.css';
   import { graphModel, selectionPath, nodeInputs, nodeOutputs, groupInputs } from './model.mjs';
-  import { fillPct, fillClass, framesText, dropText, trimParams } from './format.mjs';
+  import { fillPct, fillClass, framesText, dropText, trimParams, kindClass } from './format.mjs';
 
   export let nodes = [];
   export let queues = [];
@@ -20,6 +20,7 @@
   $: ins = node ? nodeInputs(model, node.n) : group ? groupInputs(model, group.id) : [];
   $: outs = node ? nodeOutputs(model, node.n) : [];
   $: gid = node?.g || group?.id;
+  $: src = gid && model.groups.get(gid).src;
   $: drawnBy = gid && (model.onAir.get(gid) || []);
   $: showDrawnBy = gid && (model.onAir.has(gid) || model.groups.get(gid).member && model.groups.get(gid).d === 'inputs');
   $: drawing = node && model.drawing.get(node.n);
@@ -50,8 +51,11 @@
       <dl class="gv-kv">
         <dt>Type</dt><dd><code>{node.t}</code></dd>
         <dt>Group</dt><dd><button class="icon-btn" style="padding:2px 8px" on:click={() => pickGroup(node.g)}>{node.g}</button></dd>
+        {#if src}<dt>Source</dt><dd class="gv-src"><i class={kindClass(src)}></i>{src}</dd>{/if}
         <dt>Path</dt><dd>{path.nodes.size} nodes · {path.edges.size} flowing queues</dd>
       </dl>
+    {:else if src}
+      <dl class="gv-kv"><dt>Source</dt><dd class="gv-src"><i class={kindClass(src)}></i>{src}</dd></dl>
     {/if}
     {#if showDrawnBy}
       <div class="sub-h">Drawn by · {drawnBy.length}</div>

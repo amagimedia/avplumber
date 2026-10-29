@@ -38,7 +38,10 @@ Zooming changes the level of detail, by the size of one row on screen:
 * **Overview** (under 12 px): each area is a grid of square tiles, one per group, coloured by health; areas are
   joined by summed links labelled with their frames per second and flowing queue count. A dot marks a source that a
   compositor draws now (its `active_inputs` over its input queues), as of the last `nodes.json`: the page fetches it
-  when it loads the graph, so the dots do not follow later takes.
+  when it loads the graph, so the dots do not follow later takes. A band along the bottom of a numbered input's tile
+  shows its source kind by its source node: NVDEC (`dec_video`), browser (`ipc_dmabuf_source`) or raw
+  (`raw_video_file_cuda`). The chips in the inputs header count them and are the legend: hovering one highlights its
+  inputs, a click pins the highlight. Zoomed in, a tile names its kind under the number.
 * **Groups** (12–30 px): every node as a dot with its name; the queues from the inputs are summed into one trunk per
   consumer.
 * **Nodes** (30–90 px): small node cards and every queue, routed orthogonally, each target with its own lane.
@@ -54,8 +57,8 @@ queues; the inspector shows its queues (frames in queue now / average / maximum 
 it (*Drawn by*) or which sources a compositor draws (*Drawing*), and its parameters.
 
 Pinch or scroll to zoom, two-finger scroll or drag to pan. Keys: `1`–`4` Overview, Groups, Nodes, Details; `0` fit;
-`+` / `-` zoom; `/` search; `Shift+F` fullscreen (the inspector then floats over the graph); `Esc` leaves fullscreen
-or clears the selection.
+`+` / `-` zoom; `/` search; `Shift+F` fullscreen (the inspector then floats over the graph); `Esc` clears a pinned
+source kind, else leaves fullscreen or clears the selection.
 
 The graph is drawn with WebGL (sigma.js). A browser without it (GPU disabled, some remote desktops) shows a notice in
 the graph card instead; search, the other widgets and the Queues and Nodes pages still work.

@@ -1,6 +1,7 @@
 // Text shared by the graph view's canvas labels, hover cards and inspector.
 
 export const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+export const kindClass = k => 's-' + k.toLowerCase();  // a source kind's colour (graph.css)
 export const fmtK = v => v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0);
 const fmtAvg = v => String(Math.round(v * 100) / 100);
 

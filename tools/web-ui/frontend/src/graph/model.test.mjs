@@ -63,7 +63,7 @@ test('areas: numbered source family plus other source groups, other families by 
   assert.deepEqual(new Set(ids('aux')), new Set([...range(AUX).map(k => `aux_aux${k}`), 'aux_mv']));
   assert.deepEqual(ids('core'), ['mixer', 'output', 'wipe'], 'mixer hint order first, then by name');
   const [inputs, core, aux] = model.areas;
-  assert.equal(inputs.title, 'Inputs'); assert.equal(inputs.count, `${INPUTS} sources · ${INPUTS} NVDEC`);
+  assert.equal(inputs.title, 'Inputs'); assert.equal(inputs.count, `${INPUTS} sources`); assert.deepEqual(inputs.kinds, [['NVDEC', INPUTS]]);
   assert.equal(core.title, 'Program core'); assert.equal(core.tag, 'mixer'); assert.equal(core.count, '3 groups');
   assert.equal(aux.title, 'AUX + multiview');
   // inputs: one row per group, bands side by side; core starts below the top; one area gap before AUX
@@ -89,6 +89,28 @@ test('tile names: mixer hints, numbered members by number, generic fallback stri
   assert.equal(generic.areaById.get('core').tag, 'core');
   assert.equal(generic.groups.get('program').name, 'program');
   assert.equal(generic.groups.get('egress').zone, 'out', 'a core group with an output node is coloured as output');
+});
+
+test('source kinds: numbered inputs by their nodes\' types, first match wins, nothing for other groups', () => {
+  const nodes = [];
+  const node = (name, type, group, params = {}) => nodes.push({name, type, params: {name, type, group, ...params}});
+  const kinds = ['dec_video', 'ipc_dmabuf_source', 'raw_video_file_cuda', 'ipc_dmabuf_source', 'filter_video', 'dec_video', 'raw_video_file_cuda', 'ipc_dmabuf_source', 'dec_video'];
+  kinds.forEach((t, i) => {
+    node(`src_${i}`, t, `cam_${i}`, {dst: `cam_${i}_out`});
+    node(`fan_${i}`, 'one_to_many_nb', `cam_${i}`, {src: `cam_${i}_out`, dst: `mix_${i}`});
+  });
+  node('both', 'raw_video_file_cuda', 'cam_8', {dst: 'cam_8_raw'});  // dec_video comes first in SOURCE_KINDS
+  node('clip', 'dec_video', 'clip_load', {dst: 'clip_out'});
+  node('comp', 'mixer_compositor', 'program', {src: [...kinds.map((_, i) => `mix_${i}`), 'cam_8_raw', 'clip_out']});
+  const m = buildGraphModel({nodes, queues: []}), src = g => m.groups.get(g).src;
+  assert.deepEqual(kinds.map((_, i) => src(`cam_${i}`)), ['NVDEC', 'browser', 'raw', 'browser', undefined, 'NVDEC', 'raw', 'browser', 'NVDEC']);
+  assert.equal(m.groups.get('clip_load').d, 'inputs');
+  assert.equal(src('clip_load'), undefined, 'a source group outside the numbered family has no kind');
+  assert.equal(src('program'), undefined);
+  const z = m.areaById.get('inputs');
+  assert.equal(z.count, '9 sources');
+  assert.deepEqual(z.kinds, [['NVDEC', 3], ['browser', 3], ['raw', 2]]);
+  assert.equal(m.areaById.get('core').kinds, undefined);
 });
 
 test('tiles: one square tile per group inside its area frame, no overlaps', () => {
@@ -256,7 +278,12 @@ test('real 192-input mixer dump', {skip: !(DUMP && fs.existsSync(DUMP)) && 'set 
   assert.equal(model.nodeCount, nodes.length);
   assert.equal(model.edges.length, 5400);
   assert.deepEqual(model.areas.map(z => [z.d, z.title]), [['inputs', 'Inputs'], ['core', 'Program core'], ['aux', 'AUX + multiview']]);
-  assert.equal(model.areaById.get('inputs').count, '192 sources · 105 NVDEC · 40 browser · 47 raw');
+  assert.equal(model.areaById.get('inputs').count, '192 sources');
+  assert.deepEqual(model.areaById.get('inputs').kinds, [['NVDEC', 105], ['browser', 40], ['raw', 47]]);
+  const inputGroups = [...model.groups.values()].filter(g => /^input_\d+$/.test(g.id)), kindCount = k => inputGroups.filter(g => g.src === k).length;
+  assert.deepEqual([inputGroups.length, kindCount('NVDEC'), kindCount('browser'), kindCount('raw')], [192, 105, 40, 47]);
+  assert.equal(model.groups.get('input_84').src, 'NVDEC');
+  assert.equal(model.groups.get('mixer_wipe_load').src, undefined, 'the wipe clip decodes with NVDEC but is not a numbered input');
   assert.equal(model.groups.get('mixer_wipe_load').d, 'inputs');
   assert.equal(model.groups.get('aux_mv2').name, 'MV 2');
   assert.equal(model.groups.get('aux_aux12').name, 'AUX 12');

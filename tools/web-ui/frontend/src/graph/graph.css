@@ -18,12 +18,18 @@
 .gv-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background-image: radial-gradient(#ffffff09 1px, transparent 1px); background-size: 20px 20px; }
 .gv-sigma { position: absolute; inset: 0; z-index: 2; }
 .gv-zones, .gv-cards { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-.gv-zones { z-index: 0; }
+/* .gv-zones has no z-index: the area frames paint below the canvases, their headers above them (the kind chips take the pointer) */
 .gv-cards { z-index: 3; }
 .gv-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
 .gv-zone { position: absolute; background: color-mix(in srgb, var(--panel) 55%, transparent); border: 1px solid var(--edge); border-radius: 10px; }
-.gv-zone b { position: absolute; left: 10px; top: -8px; transform: translateY(-100%); font-size: 11px; font-weight: 600; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.gv-zone b { position: absolute; z-index: 4; left: 10px; top: -8px; transform: translateY(-100%); font-size: 11px; font-weight: 600; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
 .gv-zone b span { color: var(--faint); font-weight: 500; letter-spacing: .04em; text-transform: none; margin-left: 8px; font-variant-numeric: tabular-nums; }
+/* source kind chips in the inputs header: the legend of the tiles' kind bands; hover highlights a kind, click pins it */
+.gv-zone .gv-chip { pointer-events: auto; margin-left: 6px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--edge); background: var(--panel); border-radius: 6px; padding: 1px 7px; font-size: 11px; font-weight: 600; letter-spacing: .02em; text-transform: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.gv-zone .gv-chip:hover, .gv-zone .gv-chip.on { color: var(--text); border-color: var(--muted); }
+.gv-zone .gv-chip[aria-pressed=true] { background: var(--raised); color: var(--text); border-color: var(--text); }
+.gv-chip i, .gv-src i { width: 8px; height: 8px; border-radius: 2px; background: currentColor; flex: none; }
+.s-nvdec { color: var(--src-nvdec); } .s-browser { color: var(--src-browser); } .s-raw { color: var(--src-raw); }
 
 /* node cards (Nodes, Details) */
 .gv-card { position: absolute; left: 0; top: 0; will-change: transform; pointer-events: auto; border: 1.5px solid; border-radius: 10px; padding: 5px 8px; overflow: hidden; cursor: pointer; display: flex; flex-direction: column; justify-content: center; gap: 2px; line-height: 1.2; }
@@ -45,8 +51,11 @@
 /* pooled labels: group names (Groups and deeper), tile names and link totals (Overview) */
 .gv-glabel { position: absolute; left: 0; top: 0; transform-origin: right center; font-size: 11px; font-weight: 600; color: var(--muted); background: var(--bg); border-radius: 4px; padding: 0 5px; white-space: nowrap; pointer-events: none; will-change: transform; }
 .gv-glabel.d { color: var(--pgm); }
-.gv-tlabel { position: absolute; left: 0; top: 0; font-size: 12px; font-weight: 750; color: var(--bg); white-space: nowrap; pointer-events: none; letter-spacing: -.2px; will-change: transform; }
+.gv-tlabel { position: absolute; left: 0; top: 0; font-size: 12px; font-weight: 750; color: var(--bg); white-space: nowrap; text-align: center; pointer-events: none; letter-spacing: -.2px; will-change: transform; }
 .gv-tlabel.idle { color: var(--faint); }
+.gv-tlabel small { display: grid; font-size: .72em; font-weight: 650; line-height: 1.1; letter-spacing: .02em; }
+.gv-stage[data-hl] .gv-tlabel[data-k] { opacity: .3; }
+.gv-stage[data-hl=NVDEC] .gv-tlabel[data-k=NVDEC], .gv-stage[data-hl=browser] .gv-tlabel[data-k=browser], .gv-stage[data-hl=raw] .gv-tlabel[data-k=raw] { opacity: 1; }
 .gv-tlabel.z-src { color: var(--c-src-i); } .gv-tlabel.z-gpu { color: var(--c-gpu-i); } .gv-tlabel.z-ctl { color: var(--c-ctl-i); } .gv-tlabel.z-out { color: var(--c-out-i); } .gv-tlabel.d { color: var(--c-key-i); }
 .gv-llabel { position: absolute; left: 0; top: 0; font-size: 11px; font-weight: 750; line-height: 1.25; text-align: center; background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; padding: 3px 8px; white-space: nowrap; pointer-events: none; font-variant-numeric: tabular-nums; will-change: transform; }
 .gv-llabel small { display: block; font-size: 10px; font-weight: 600; color: var(--muted); }
@@ -75,6 +84,7 @@
 .gv-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12.5px; margin: 0; }
 .gv-kv dt { color: var(--muted); }
 .gv-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.gv-kv .gv-src { display: flex; align-items: center; gap: 6px; font-weight: 600; }
 .gv-nm { font-size: 17px; font-weight: 750; letter-spacing: -.3px; margin: 0 0 2px; overflow-wrap: anywhere; }
 .gv-pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
 .gv-params { margin: 8px 0 0; background: var(--bg); border: 1px solid var(--edge); border-radius: 10px; padding: 8px 10px; font-family: var(--mono); font-size: 11.5px; overflow: auto; max-height: 150px; }

@@ -89,7 +89,7 @@
     else if (ev.key === '0') stage.fit();
     else if (ev.key === '+' || ev.key === '=') stage.zoomIn();
     else if (ev.key === '-') stage.zoomOut();
-    else if (ev.key === 'Escape') { if (max && !document.fullscreenElement) setMax(false); else stage.select(null); }
+    else if (ev.key === 'Escape') { if (stage.clearKindPin()) return; if (max && !document.fullscreenElement) setMax(false); else stage.select(null); }
   }
 </script>
 

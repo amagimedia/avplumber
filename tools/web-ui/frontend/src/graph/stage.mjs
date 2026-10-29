@@ -4,13 +4,14 @@
 // selection, hover-free state or stats changes.
 import Sigma from 'sigma';
 import Graph from 'graphology';
-import {CW, selectionPath, isProblem, nodeInputs} from './model.mjs';
-import {esc, fmtK, framesText, queueText, fillPct, fillClass} from './format.mjs';
+import {CW, SOURCE_KINDS, selectionPath, isProblem, nodeInputs} from './model.mjs';
+import {esc, fmtK, framesText, queueText, fillPct, fillClass, kindClass} from './format.mjs';
 
 const LEVELS = [0, 12, 30, 90];  // px per row where Overview / Groups / Nodes / Details start
 const JUMP_PY = [0, 18, 44, 120];       // px per row a level button or key jumps to
 const MIN_RATIO = 0.003, MAX_RATIO = 1.5;
 const MAX_CARDS = 350, MAX_GROUP_LABELS = 220;
+const BAND = 0.2, KIND_FADE = 0.22, KIND_LINE_PX = 36;  // source kind band (share of the tile height), others' alpha while one kind is highlighted, tile size that shows the kind line
 
 const rgba = (h, a) => {
   h = h.trim().replace('#', '');
@@ -23,7 +24,8 @@ function readColors(el) {
   const s = getComputedStyle(el), v = k => s.getPropertyValue(k).trim();
   const C = {ink: v('--text'), muted: v('--muted'), paper: v('--bg'), card: v('--panel'), line: v('--edge'), teal: v('--pvw'),
     orange: v('--accent'), red: v('--pgm'), pkt: v('--wipe'), off: v('--c-off-s'), badF: v('--c-key-f'),
-    zs: Object.fromEntries(ZONES.map(z => [z, v(`--c-${z}-s`)])), zf: Object.fromEntries(ZONES.map(z => [z, v(`--c-${z}-f`)]))};
+    zs: Object.fromEntries(ZONES.map(z => [z, v(`--c-${z}-s`)])), zf: Object.fromEntries(ZONES.map(z => [z, v(`--c-${z}-f`)])),
+    src: Object.fromEntries(SOURCE_KINDS.map(([, k]) => [k, v(`--src-${k.toLowerCase()}`)]))};
   C.faded = rgba(v('--faint'), 0.14); C.tally = C.ink;
   return C;
 }
@@ -33,9 +35,9 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
   // Colours come from the CSS tokens, read once the stage is in the document: a dock panel is mounted detached.
   const C = {};
   const syncColors = () => { if (!C.ink && stage.isConnected) Object.assign(C, readColors(stage)); };
-  const st = {sel: null, selQ: null, path: null, level: -1, hoverNode: null, hover: null};
+  const st = {sel: null, selQ: null, path: null, level: -1, hoverNode: null, hover: null, kindHover: null, kindPin: null};
   let model = null, groupBoxes = new Map();
-  let batches = {groupBoxes: [], edges: [], lines: [], tally: new Path2D()}, segs = [], groupBoxList = [], dirty = true;
+  let batches = {groupBoxes: [], edges: [], bands: [], tally: [], lines: []}, segs = [], groupBoxList = [], dirty = true;
   const G = new Graph({type: 'directed'});
 
   // ---------- sigma: nodes only ----------
@@ -102,9 +104,11 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
     if (st.level === 1) for (const r of model.links) { if (r.from !== 'area:inputs') continue; const s = linkStyle(r); if (s) add(s, r.pts, r); }
     if (st.level >= 1) for (const q of model.edges) { if (st.level === 1 && isInputTap(q)) continue; const s = queueStyle(q); if (s) add(s, model.routes.get(q.n), q); }
     // Overview: one square tile per group, filled by health, in the mixer's bus-card look (dim fill, bright outline of the
-    // same hue). Deeper levels: a faint groupBox under each group's nodes.
-    const lb = new Map(), eb = new Map();
-    const batch = (map, color, l, r) => { let b = map.get(color); if (!b) map.set(color, b = {color, path: new Path2D()}); b.path.roundRect(l.x, l.y, l.w, l.h, r); };
+    // same hue), numbered inputs with a band of their source kind's colour along the bottom. Deeper levels: a faint
+    // groupBox under each group's nodes. Overview batches of input tiles are split by kind (k), so a highlighted kind
+    // only changes their alpha.
+    const lb = new Map(), eb = new Map(), bb = new Map(), tb = new Map();
+    const batch = (map, k, color) => { const key = `${k}|${color}`; let b = map.get(key); if (!b) map.set(key, b = {k, color, path: new Path2D()}); return b.path; };
     groupBoxList = [];
     for (const g of model.groups.values()) {
       const l = st.level === 0 ? g.tile : groupBoxes.get(g.id);
@@ -113,19 +117,19 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
       const bad = g.st === 'drop', idle = g.off || g.st === 'idle';
       const fill = dim ? C.faded : bad ? C.badF : idle ? C.card : C.zf[g.zone];
       const edge = st.level !== 0 || dim ? null : bad ? C.red : g.st === 'full' ? C.orange : idle ? C.line : C.zs[g.zone];
-      const r = tileRadius(l.w, l.h);
-      batch(lb, fill, l, r);
-      if (edge) batch(eb, edge, l, r);
+      const r = tileRadius(l.w, l.h), k = st.level === 0 && g.d === 'inputs' ? g.src || '' : null;
+      batch(lb, k, fill).roundRect(l.x, l.y, l.w, l.h, r);
+      if (edge) batch(eb, k, edge).roundRect(l.x, l.y, l.w, l.h, r);
+      if (st.level === 0 && g.src && !dim) batch(bb, k, C.src[g.src]).roundRect(l.x, l.y, l.w, l.h * BAND, [r, r, 0, 0]);  // graph y points up: y is the bottom edge
     }
     // Overview: a dot on every tile that some compositor draws right now.
-    const tally = new Path2D();
     if (st.level === 0) for (const gid of model.onAir.keys()) {
-      const t = model.groups.get(gid)?.tile;
+      const g = model.groups.get(gid), t = g?.tile;
       if (!t) continue;
-      const r = t.w * 0.075, cx = t.x + t.w - r * 1.7, cy = t.y + t.h - r * 1.7;
-      tally.moveTo(cx + r, cy); tally.arc(cx, cy, r, 0, Math.PI * 2);
+      const r = t.w * 0.075, cx = t.x + t.w - r * 1.7, cy = t.y + t.h - r * 1.7, p = batch(tb, g.d === 'inputs' ? g.src || '' : null, C.tally);
+      p.moveTo(cx + r, cy); p.arc(cx, cy, r, 0, Math.PI * 2);
     }
-    batches = {tally, groupBoxes: [...lb.values()], edges: [...eb.values()], lines: [...by.values()].sort((a, b) => a.z - b.z)};
+    batches = {groupBoxes: [...lb.values()], edges: [...eb.values()], bands: [...bb.values()], tally: [...tb.values()], lines: [...by.values()].sort((a, b) => a.z - b.z)};
     dirty = false;
   }
 
@@ -143,12 +147,13 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
     xf = {sx: ux.x - o.x, sy: uy.y - o.y, ox: o.x, oy: o.y};
     ectx.setTransform(1, 0, 0, 1, 0, 0); ectx.clearRect(0, 0, ecv.width, ecv.height);
     ectx.setTransform(xf.sx * dpr, 0, 0, xf.sy * dpr, xf.ox * dpr, xf.oy * dpr);
-    const k = 1 / xf.sx;
-    ectx.globalAlpha = st.level === 0 ? 1 : 0.6;
-    for (const b of batches.groupBoxes) { ectx.fillStyle = b.color; ectx.fill(b.path); }
+    const k = 1 / xf.sx, kind = st.level === 0 && (st.kindHover || st.kindPin), base = st.level === 0 ? 1 : 0.6;
+    const alpha = b => kind && b.k !== null && b.k !== kind ? KIND_FADE : 1;
+    for (const b of batches.groupBoxes) { ectx.globalAlpha = base * alpha(b); ectx.fillStyle = b.color; ectx.fill(b.path); }
+    for (const b of batches.bands) { ectx.globalAlpha = alpha(b); ectx.fillStyle = b.color; ectx.fill(b.path); }
+    for (const b of batches.edges) { ectx.globalAlpha = alpha(b); ectx.strokeStyle = b.color; ectx.lineWidth = 1.5 * k; ectx.stroke(b.path); }
+    for (const b of batches.tally) { ectx.globalAlpha = alpha(b); ectx.fillStyle = b.color; ectx.fill(b.path); }
     ectx.globalAlpha = 1;
-    for (const b of batches.edges) { ectx.strokeStyle = b.color; ectx.lineWidth = 1.5 * k; ectx.stroke(b.path); }
-    ectx.fillStyle = C.tally; ectx.fill(batches.tally);
     ectx.lineJoin = 'round'; ectx.lineCap = 'round';
     for (const b of batches.lines) { ectx.strokeStyle = b.color; ectx.lineWidth = b.w * k; ectx.stroke(b.path); }
     if (st.selQ && st.level > 0 && model.routes.has(st.selQ)) strokePts(model.routes.get(st.selQ), 3.2);
@@ -169,11 +174,13 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
   };
   const initCard = e => e.addEventListener('click', ev => { ev.stopPropagation(); select({kind: 'node', id: e.dataset.id}); });
   const centerAt = (el, p) => { el.hidden = false; el.style.transform = `translate(calc(${p.x}px - 50%), calc(${p.y}px - 50%))`; };
+  const kindHTML = k => `<span class="${kindClass(k)}">${esc(k)}</span>`;
+  const groupHTML = g => esc(g.id) + (g.src ? ` · ${kindHTML(g.src)}` : '');
   const cardHTML = (m, detail) => {
-    const ins = nodeInputs(model, m.n).filter(q => q.st !== 'idle'), q = ins[0];
-    const tag = m.zone === 'out' ? 'output' : model.areaById.get(m.d).tag;
+    const ins = nodeInputs(model, m.n).filter(q => q.st !== 'idle'), q = ins[0], src = model.groups.get(m.g).src;
+    const tag = src ? kindHTML(src) : esc(m.zone === 'out' ? 'output' : model.areaById.get(m.d).tag);
     const name = detail || !m.n.startsWith(m.g + '_') ? m.n : m.n.slice(m.g.length + 1);
-    return `<span class="gv-tag">${esc(tag)} · ${esc(m.g)}</span><span class="gv-name">${esc(name)}</span>`
+    return `<span class="gv-tag">${tag} · ${esc(m.g)}</span><span class="gv-name">${esc(name)}</span>`
       + `<span class="gv-sub">${esc(m.t)}${q ? ` · ${q.pps.toFixed(0)} pps` : ''}${m.w ? '' : ' · OFF'}</span>`
       + (q ? `<span class="gv-sub">${framesText(q)}${ins.length > 1 ? ` · +${ins.length - 1} in` : ''}</span><span class="gv-meter ${fillClass(q)}"><i style="width:${fillPct(q)}%"></i></span>` : '');
   };
@@ -194,12 +201,15 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
       for (const g of model.groups.values()) {
         const t = g.tile, px = t.w * Math.abs(xf.sx), fs = fit.get(g.d);
         if (px < (g.d === 'inputs' ? 22 : 34) || !fs || fitOf(g) < fs) continue;
-        const p = gl(t.x + t.w / 2, t.y + t.h / 2);
+        // a numbered input's label sits above its kind band, with the kind under the number once the tile is large enough
+        const p = gl(t.x + t.w / 2, t.y + t.h * (g.src ? (1 + BAND) / 2 : 0.5));
         if (p.x < -60 || p.x > W + 60 || p.y < -20 || p.y > H + 20) continue;
-        const el = take(tilePool, nt++, 'gv-tlabel');
-        if (el.dataset.g !== g.id || el.dataset.v !== v) {
-          el.dataset.g = g.id; el.dataset.v = v; el.textContent = g.name;
+        const el = take(tilePool, nt++, 'gv-tlabel'), kindLine = !!g.src && px >= KIND_LINE_PX, key = kindLine ? v + 'k' : v;
+        if (el.dataset.g !== g.id || el.dataset.v !== key) {
+          el.dataset.g = g.id; el.dataset.v = key;
+          if (kindLine) el.innerHTML = `${esc(g.name)}<small class="${kindClass(g.src)}">${esc(g.src)}</small>`; else el.textContent = g.name;
           el.className = 'gv-tlabel ' + (g.st === 'idle' ? 'idle' : g.st === 'drop' ? 'd' : 'z-' + g.zone);
+          if (g.d === 'inputs') el.dataset.k = g.src || ''; else delete el.dataset.k;
         }
         const fsPx = fs.toFixed(1) + 'px';
         if (el.style.fontSize !== fsPx) el.style.fontSize = fsPx;
@@ -218,7 +228,7 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
       const p = gl(g.x0 * CW - 2.6, -(g.y0 + g.y1) / 2);
       if (p.y < -20 || p.y > H + 20 || p.x < -10 || p.x > W + 400) continue;
       const el = take(labelPool, nl++, 'gv-glabel');
-      if (el.dataset.g !== g.id || el.dataset.v !== v) { el.dataset.g = g.id; el.dataset.v = v; el.textContent = g.id; el.className = 'gv-glabel' + (g.st === 'drop' ? ' d' : ''); }
+      if (el.dataset.g !== g.id || el.dataset.v !== v) { el.dataset.g = g.id; el.dataset.v = v; el.innerHTML = groupHTML(g); el.className = 'gv-glabel' + (g.st === 'drop' ? ' d' : ''); }
       el.hidden = false; el.style.transform = `translate(calc(${p.x}px - 100%), ${p.y - 7}px)`;
       if (nl > MAX_GROUP_LABELS) break;
     }
@@ -306,7 +316,7 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
   const hoverId = h => h?.link || h?.q || h?.groupBox?.g;
   function hoverAt(target) {
     if (!model) return;
-    if (target.closest(`.gv-card,${overlay}`)) { if (st.hover) { st.hover = null; hideTip(); renderer.scheduleRender(); } return; }
+    if (target.closest(`.gv-card,.gv-chip,${overlay}`)) { if (st.hover) { st.hover = null; hideTip(); renderer.scheduleRender(); } return; }
     const h = st.hoverNode ? null : hitTest(mouse.x, mouse.y);
     if (hoverId(h) === hoverId(st.hover)) return;
     st.hover = h; container.style.cursor = h ? 'pointer' : '';
@@ -314,7 +324,7 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
       const r = h.link;
       showTip(`<b>${esc(placeName(r.from))} → ${esc(placeName(r.to))}</b><code>${r.n} queues · ${r.active} flowing · ${r.pps.toFixed(0)} pps${r.drop ? ` · ${r.drop} dropped` : ''}</code><code>click: open</code>`);
     } else if (h?.q) showTip(`<b>${esc(h.q.a)} → ${esc(h.q.b)}</b><code>${esc(h.q.n)}</code><code>${esc(queueText(h.q))}</code><code>click: follow queue</code>`);
-    else if (h?.groupBox) { const g = h.groupBox.g; showTip(`<b>${esc(g.id)}</b><code>${g.n} nodes · ${g.st}${g.off ? ' · has OFF nodes' : ''}</code><code>click: open group</code>`); }
+    else if (h?.groupBox) { const g = h.groupBox.g; showTip(`<b>${groupHTML(g)}</b><code>${g.n} nodes · ${g.st}${g.off ? ' · has OFF nodes' : ''}</code><code>click: open group</code>`); }
     else hideTip();
     renderer.scheduleRender();
   }
@@ -376,6 +386,17 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
   // From a click on the stage: applied here, then reported.
   function select(s, fly) { apply(s, fly); onSelect?.(st.sel); }
 
+  // ---------- source kind highlight: a hovered or pinned header chip dims the other input tiles ----------
+  let chips = [];
+  function setKind(hover, pin, force) {
+    if (!force && hover === st.kindHover && pin === st.kindPin) return;
+    st.kindHover = hover; st.kindPin = pin;
+    const kind = hover || pin;
+    if (kind) stage.dataset.hl = kind; else delete stage.dataset.hl;  // dims the other inputs' tile labels (graph.css)
+    for (const c of chips) { c.setAttribute('aria-pressed', String(c.dataset.kind === pin)); c.classList.toggle('on', c.dataset.kind === kind); }
+    renderer.scheduleRender();
+  }
+
   // ---------- model ----------
   function setModel(m) {
     model = m;
@@ -385,10 +406,19 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
     for (const d of zoneDivs) d.remove();
     zoneDivs = m.areas.map(z => {
       const d = document.createElement('div');
-      d.className = 'gv-zone'; d.innerHTML = `<b>${esc(z.title.toUpperCase())}<span>${esc(z.count)}</span></b>`;
+      d.className = 'gv-zone';
+      d.innerHTML = `<b>${esc(z.title.toUpperCase())}<span>${esc(z.count)}</span>${(z.kinds || []).map(([k, c]) => `<button class="gv-chip" data-kind="${esc(k)}"`
+        + ` data-tip="click: pin · Esc: clear"><i class="${kindClass(k)}"></i>${c} ${esc(k)}</button>`).join('')}</b>`;
       zonesEl.append(d);
       return d;
     });
+    chips = zoneDivs.flatMap(d => [...d.querySelectorAll('.gv-chip')]);
+    for (const c of chips) {
+      c.addEventListener('pointerenter', () => setKind(c.dataset.kind, st.kindPin));
+      c.addEventListener('pointerleave', () => setKind(null, st.kindPin));
+      c.addEventListener('click', () => setKind(st.kindHover, st.kindPin === c.dataset.kind ? null : c.dataset.kind));
+    }
+    setKind(null, chips.some(c => c.dataset.kind === st.kindPin) ? st.kindPin : null, true);
     st.hover = null; st.hoverNode = null; hideTip();
     apply(st.sel, false);
     renderer.refresh();
@@ -419,6 +449,8 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
       } else if (s || st.sel) apply(s, fly);
     },
     select,
+    // Esc: a pinned source kind highlight is cleared first; false when there was none.
+    clearKindPin() { if (!st.kindPin) return false; setKind(st.kindHover, null); return true; },
     jumpLevel,
     zoomIn: () => cam.animatedZoom({duration: 140, factor: 2}),
     zoomOut: () => cam.animatedUnzoom({duration: 140, factor: 2}),

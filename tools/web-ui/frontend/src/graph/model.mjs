@@ -23,7 +23,8 @@ const GROUP_HINTS = {
 };
 const MIXER_CORE = {group: 'mixer', title: 'Program core', tag: 'mixer'};  // used when the graph has a "mixer" group
 const AREA_TITLES = {inputs: 'Inputs', core: 'Core', aux: 'AUX + multiview'};
-const SOURCE_KINDS = [['dec_video', 'NVDEC'], ['ipc_dmabuf_source', 'browser'], ['raw_video_file_cuda', 'raw']];
+// Source kind (g.src) of a numbered input group by its nodes' types, the first match winning; other groups have none.
+export const SOURCE_KINDS = [['dec_video', 'NVDEC'], ['ipc_dmabuf_source', 'browser'], ['raw_video_file_cuda', 'raw']];
 
 const NB_FANOUT = 'one_to_many_nb';  // drops by design when a consumer still holds a newer frame
 const NEAR_FULL = 0.9;               // average fill of capacity
@@ -186,8 +187,9 @@ export function buildGraphModel({nodes = [], queues = []} = {}, previous = null)
     z.rect = {x0: z.x0 * CW - 3, x1: z.x1 * CW + 3, top: -z.y0 + 1.2, bot: -z.y1 - 1.2};
     if (d === 'inputs') {
       const members = gs.filter(g => tokenOf(g.id) === sourceToken && familyIndex(g.id) >= 0);
-      const kinds = SOURCE_KINDS.map(([t, k]) => [k, members.filter(g => g.nodes.some(n => meta.get(n).t === t)).length]).filter(([, c]) => c);
-      Object.assign(z, {title: AREA_TITLES.inputs, tag: 'input', zone: 'src', count: `${members.length} sources${kinds.map(([k, c]) => ` · ${c} ${k}`).join('')}`});
+      for (const g of members) g.src = SOURCE_KINDS.find(([t]) => g.nodes.some(n => meta.get(n).t === t))?.[1];
+      const kinds = SOURCE_KINDS.map(([, k]) => [k, members.filter(g => g.src === k).length]).filter(([, c]) => c);
+      Object.assign(z, {title: AREA_TITLES.inputs, tag: 'input', zone: 'src', count: `${members.length} sources`, kinds});
     } else if (d === 'core') Object.assign(z, {title: mixerCore ? MIXER_CORE.title : AREA_TITLES.core, tag: mixerCore ? MIXER_CORE.tag : 'core', zone: 'gpu'});
     else Object.assign(z, {title: AREA_TITLES[d] || d.toUpperCase(), tag: d, zone: 'ctl'});
     z.count ??= `${gs.length} groups`;

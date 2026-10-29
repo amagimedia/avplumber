@@ -13,6 +13,9 @@
   --c-out-f: var(--accent-dim); --c-out-s: #a8741c; --c-out-i: #f7c46c;
   --c-key-f: var(--pgm-dim); --c-key-i: #ff9a9d;
   --c-off-f: var(--panel); --c-off-s: #2a323c; --c-off-i: var(--faint);
+  /* source kinds of the graph's numbered inputs: pale cyan, orchid, neutral grey; apart from the health and packet
+     colours by lightness as well as hue, so they stay distinct under protan and deutan vision */
+  --src-nvdec: #96e8ec; --src-browser: #e0a1fb; --src-raw: #adaba4;
   --ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
