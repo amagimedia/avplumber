@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0b0e12">
+  <meta name="description" content="Explore a real 192-input video mixer as a WebGL processing graph. Watch AVPlumber's Sigma.js viewer zoom from the whole show to individual nodes and queue statistics.">
+  <meta property="og:title" content="192 inputs. Follow every frame. · AVPlumber">
+  <meta property="og:description" content="The Sigma.js WebGL viewer: 999 nodes, 5,378 connected queues, four zoom levels. Watch the 24-second demo.">
+  <meta property="og:image" content="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-overview-20261029.png">
+  <title>192 inputs. Follow every frame. · AVPlumber</title>
+  <link rel="stylesheet" href="demos/webui/docs/demo.css">
+  <script src="demos/webui/docs/demo.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#demo">Skip to demo</a>
+<div class="page">
+  <header>
+    <a class="brand" href="./" aria-label="AVPlumber home"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 6h9l8 10h9M3 26h9l8-10M3 16h26"/><circle cx="3" cy="6" r="2"/><circle cx="3" cy="16" r="2"/><circle cx="3" cy="26" r="2"/><circle cx="29" cy="16" r="2"/></svg>avplumber</a>
+    <nav aria-label="Main navigation"><a href="#zoom">Zoom levels</a><a href="demos/mixer/docs/">Mixer demo</a><a href="https://github.com/amagimedia/avplumber/blob/develop/tools/web-ui/README.md">Viewer docs</a><a href="https://github.com/amagimedia/avplumber">GitHub ↗</a></nav>
+  </header>
+  <main>
+    <section class="hero">
+      <div><p class="eyebrow"><span class="dot"></span> REAL-TIME MEDIA GRAPHS · OPEN SOURCE</p><h1><span>192 inputs.</span><br>Follow every frame.</h1></div>
+      <div class="intro"><p>See the whole mixer. Zoom into a pipeline.<br>Follow a queue to the node behind it.</p><p class="subtle">The WebGL graph viewer, built with Sigma.js.</p><div class="spec"><span>999 NODES</span><span>5,378 QUEUES</span><span>4 ZOOM LEVELS</span></div></div>
+    </section>
+    <section class="demo" id="demo" aria-labelledby="demo-title">
+      <div class="bar"><h2 id="demo-title"><span class="dot"></span> THE ACTUAL WEBGL VIEWER</h2><span>24 SECONDS · 2× RETINA · 30 FPS</span></div>
+      <video id="reel" controls muted playsinline preload="metadata" width="3200" height="1800" poster="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-overview-20261029.png" aria-describedby="capture-note" aria-label="AVPlumber graph viewer: overview of 192 inputs, search for a browser pipeline, group and node zoom levels, detailed queue statistics and full parameters">
+        <source src="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-zoom-20261029-30fps.mp4" type="video/mp4">
+        <a href="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-zoom-20261029-30fps.mp4">Download the viewer demo MP4</a>.
+      </video>
+      <div class="chapters" aria-label="Video chapters"><button data-seek="0">00:00 <b>Overview</b></button><button data-seek="5">00:05 <b>Groups</b></button><button data-seek="9">00:09 <b>Nodes</b></button><button data-seek="14">00:14 <b>Details</b></button><button data-seek="17">00:17 <b>Parameters</b></button><button id="replay">Replay ↻</button></div>
+    </section>
+    <p class="note" id="capture-note">Real topology and queue telemetry captured from the running 192-input, 1080p30 NVIDIA L4 mixer on 29 October 2026. The actual viewer replays those samples at a fixed 30 fps, rendered at 3200 × 1800 with 2× pixel density. This is a recorded UI demonstration, not a live connection or a performance benchmark. <a href="demos/webui/docs/capture-20261029.json">Capture details ↗</a> · <a href="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-zoom-20261029-30fps.mp4">Download MP4 ↓</a></p>
+    <section id="zoom" aria-labelledby="zoom-title">
+      <div class="section-heading"><div><p class="eyebrow">ONE GRAPH, FOUR SCALES</p><h2 id="zoom-title">From the whole show to one queue.</h2></div><p>Choose a view.<br>Open the image for full Retina resolution.</p></div>
+      <div class="zoom-tabs" role="group" aria-label="Screenshot zoom level">
+        <button data-view="overview" aria-pressed="true"><span>01</span><b>Overview</b><small>192 sources, Program and AUX</small></button>
+        <button data-view="groups" aria-pressed="false"><span>02</span><b>Groups</b><small>Pipelines and aggregated routes</small></button>
+        <button data-view="nodes" aria-pressed="false"><span>03</span><b>Nodes</b><small>Individual processing stages</small></button>
+        <button data-view="details" aria-pressed="false"><span>04</span><b>Details</b><small>Frame rates, fill and connections</small></button>
+      </div>
+      <figure class="screenshot"><a id="shot-link" href="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-overview-20261029.png" target="_blank" rel="noopener"><img id="shot" src="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-overview-20261029.png" width="3200" height="1800" loading="lazy" alt="Overview of all 192 inputs, Program core and 22 AUX/multiview groups, with queue statistics"></a><figcaption><span id="shot-caption">Overview · 105 NVDEC sources, 40 browser sources and 47 raw feeds.</span><a id="shot-download" href="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-overview-20261029.png">Full-resolution PNG ↗</a></figcaption></figure>
+      <noscript><p>All four screenshots: <a href="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-groups-20261029.png">Groups</a> · <a href="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-nodes-20261029.png">Nodes</a> · <a href="https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-details-20261029.png">Details</a>.</p></noscript>
+    </section>
+    <section class="features" aria-label="Viewer features">
+      <article><span class="eyebrow">MAP</span><h3>Keep your place.</h3><p>Zoom changes the detail, not the topology. Inputs, the Program core and AUX buses keep a stable layout as queue statistics update.</p></article>
+      <article><span class="eyebrow">FOLLOW</span><h3>Trace the processing path.</h3><p>Search for a node or group, then follow its connected queues. Inspect frame rates, queue fill, drops and subscription state.</p></article>
+      <article><span class="eyebrow">INSPECT</span><h3>Read the full configuration.</h3><p>Open complete parameters and copy their JSON. Node and queue tables reach the entire graph. The viewer only queries the engine.</p></article>
+    </section>
+    <section class="more" aria-labelledby="more-title"><div><p class="eyebrow">BUILD WITH AVPLUMBER</p><h2 id="more-title">A graph you can make your own.</h2><p>FFmpeg-based media nodes, typed queues and a text control API.</p></div><div class="links">
+      <a href="https://github.com/amagimedia/avplumber/blob/develop/tools/web-ui/README.md"><b>Run the WebGL viewer</b><span>Setup, controls, telemetry and deployment ↗</span></a>
+      <a href="demos/mixer/docs/"><b>Watch the 192-input mixer</b><span>T-bar fades, downstream keys and two viewers ↗</span></a>
+      <a href="demos/mixer/docs/cookbook/"><b>Read the mixer cookbook</b><span>GPU composition, frame timing and routing ↗</span></a>
+      <a href="https://github.com/amagimedia/avplumber#demos"><b>Explore the other demos</b><span>Playlist, replay, Chromium DMA-BUF and more ↗</span></a>
+    </div></section>
+  </main>
+  <footer><a class="brand" href="https://github.com/amagimedia/avplumber">avplumber</a><span>Open source. Built for the next frame.</span><a href="demos/webui/docs/media.sha256">Media checksums ↗</a></footer>
+</div>
+</body>
+</html>

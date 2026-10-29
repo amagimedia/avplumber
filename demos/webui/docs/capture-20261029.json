@@ -1,0 +1,102 @@
+{
+  "captured_at": "2026-10-29T12:18:21.139Z",
+  "viewer_revision": "ec2b0ccc61d7459d4d09e92849966514bf26bc87",
+  "viewer_source": "https://github.com/amagimedia/avplumber/tree/ec2b0ccc61d7459d4d09e92849966514bf26bc87/tools/web-ui",
+  "workload": {
+    "inputs": 192,
+    "nvdec_video_sources": 105,
+    "browser_sources_including_keys": 40,
+    "raw_nv12_sources": 47,
+    "scenes": 256,
+    "encoded_outputs": 24,
+    "canvas": {
+      "width": 1920,
+      "height": 1080,
+      "fps": 30
+    },
+    "gpu": "NVIDIA L4"
+  },
+  "topology": {
+    "nodes": 999,
+    "connected_queues": 5378,
+    "reported_queues": 5379
+  },
+  "telemetry": {
+    "sample_count": 32,
+    "sample_span_seconds": 31.001,
+    "queries": [
+      "nodes.json",
+      "queues.json",
+      "mixer.status mixer",
+      "sync_groups.json",
+      "correction_groups.json"
+    ]
+  },
+  "render": {
+    "width": 3200,
+    "height": 1800,
+    "css_width": 1600,
+    "css_height": 900,
+    "device_scale_factor": 2,
+    "fps": 30,
+    "frames": 720,
+    "duration_seconds": 24,
+    "method": "Actual unmodified viewer rendered in Chrome with captured topology and telemetry replayed on a fixed animation timeline. Browser UI interactions select zoom levels and inspect a DMA-BUF-to-CUDA node. No synthesized engine statistics."
+  },
+  "chapters": [
+    {
+      "seconds": 0,
+      "title": "Overview"
+    },
+    {
+      "seconds": 5,
+      "title": "Groups"
+    },
+    {
+      "seconds": 9,
+      "title": "Nodes"
+    },
+    {
+      "seconds": 14,
+      "title": "Details"
+    },
+    {
+      "seconds": 17,
+      "title": "Full parameters"
+    },
+    {
+      "seconds": 20.5,
+      "title": "Return to overview"
+    }
+  ],
+  "screenshots": [
+    {
+      "name": "webgl-192-overview-20261029.png",
+      "seconds": 1.5
+    },
+    {
+      "name": "webgl-192-groups-20261029.png",
+      "seconds": 7.5
+    },
+    {
+      "name": "webgl-192-nodes-20261029.png",
+      "seconds": 11.5
+    },
+    {
+      "name": "webgl-192-details-20261029.png",
+      "seconds": 15.5
+    }
+  ],
+  "scope": "Documentation UI replay of a real running graph. Not a live viewer, mixer video output recording, new performance benchmark, or replacement for historical capacity measurements.",
+  "validation": {
+    "decoded_frames": 720,
+    "presentation_timestamps": "Continuous 1/30-second steps",
+    "browser_errors": 0,
+    "screenshots": "Four PNGs, each 3200\u00d71800",
+    "page_checks": [
+      "Four screenshot views load",
+      "Video chapter seeking and playback",
+      "No horizontal overflow at 390 CSS pixels"
+    ]
+  }
+}
