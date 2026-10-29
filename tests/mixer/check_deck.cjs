@@ -28,6 +28,7 @@ const {launch, openPage, bigShow} = require('./page_fixture.cjs');
     assert.equal(await text('#hint-tip h4'), 'Keyboard shortcuts');
     assert.equal(await page.locator('#top a[href="/wall"]').textContent(), 'Outputs ↗');
     assert(await page.locator('#setup-link').isVisible(), 'Setup shows when the mixer allows it');
+    assert.equal(await page.locator('#graph-link:visible').getAttribute('href'), '/graph/', 'Graph shows where the server says it is');
 
     // Program and Preview: FTB beside Program, Direct beside Preview, Next under it.
     assert.equal(await text('#pgm'), 'grid_100');

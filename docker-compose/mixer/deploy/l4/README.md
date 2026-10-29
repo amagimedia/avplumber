@@ -37,7 +37,7 @@ Override `DMA_BROWSER_WINDOWS_PER_PROCESS` and `DMA_BROWSER_STAGGER_FRAMES` in
 ordinary capture, and the mixer samples each captured buffer in place (see the
 [browser configuration](../../../../deps/dma-browser/README.md)).
 
-Open `http://<host>:7681/setup/`, controls at `/`, outputs at `/wall`.
+Open `http://<host>:7681/setup/`, controls at `/`, outputs at `/wall`, the graph at `/graph/`.
 Each source count is editable, including zero. Count edits recalculate the total
 without refilling other types; editing **Unique sources** restores the balanced
 proportions. Per-type controls enforce the remaining total, shared NVDEC, HDR
@@ -49,9 +49,11 @@ stack without `MIXER_HTPASSWD`. The mixer pages, player and web UI listen on loo
 Allow the public proxy port and `JANUS_RTP_PORT_RANGE` (UDP 20000–20100 by
 default), nothing else.
 
-The [AVPlumber web UI](../../../../tools/web-ui/README.md) shows the mixer graph
-read-only. Reach it through an SSH tunnel, `ssh -L 22222:127.0.0.1:22222 <host>`,
-then open <http://127.0.0.1:22222>.
+The proxy also serves the read-only [AVPlumber web UI](../../../../tools/web-ui/README.md)
+at `/graph/`, linked as **Graph** from the controls, and its bridge at `/graph/ws` for the
+player's [cut-latency meter](../../../../doc/mixer_cut_latency.md). The viewer answers only
+the hostnames in `WEBUI_ALLOWED_HOSTS` (default `JANUS_NAT_1_1`, else `JANUS_HOST_IP`) and localhost; opened by
+another name it stays empty. It accepts only GET requests through the proxy.
 
 The [current demo recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 shows this profile at 192 inputs / 256 scenes / 24 outputs, 1080p30 SDR.

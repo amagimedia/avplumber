@@ -1,17 +1,22 @@
 <script>
   import { onDestroy, onMount } from 'svelte';
-  import { sampleQueueFlow } from './queueFlow.mjs';
   import { instanceRestarted } from './instanceRestart.mjs';
+  import { hoverTips } from './graph/hoverTips.mjs';
   import DockHost from './DockHost.svelte';
   import GraphPanel from './panels/GraphPanel.svelte';
-  import NodesPanel from './panels/NodesPanel.svelte';
-  import SelectedNodePanel from './panels/SelectedNodePanel.svelte';
+  import SelectedPanel from './panels/SelectedPanel.svelte';
+  import InstancePanel from './panels/InstancePanel.svelte';
   import NodeObjectsPanel from './panels/NodeObjectsPanel.svelte';
-  import QueuesPanel from './panels/QueuesPanel.svelte';
   import StatsPanel from './panels/StatsPanel.svelte';
   import LogsPanel from './panels/LogsPanel.svelte';
   import ConsolePanel from './panels/ConsolePanel.svelte';
   import InstanceSharedObjectsPanel from './panels/InstanceSharedObjectsPanel.svelte';
+  import QueuesPage from './panels/QueuesPage.svelte';
+  import NodesPage from './panels/NodesPage.svelte';
+
+  // Behind a reverse proxy the page can live under a path prefix (e.g. /graph/); the API and the
+  // WebSocket are then under the same prefix.
+  const basePath = window.location.pathname.replace(/[^/]*$/, '');
 
   let ws;
   let wsConnected = false;
@@ -32,16 +37,14 @@
   let queuesObservedAt = 0;
   let queuesFresh = false;
   let queuesInstance = null;
-  $: queueStatsFresh = wsConnected && autoRefreshQueues && queuesFresh && queuesInstance === currentInstanceId;
-  let queuesText = '';
+  $: queueStatsFresh = wsConnected && queuesFresh && queuesInstance === currentInstanceId;
   let statsByInstance = {};
   let currentStatsPrettyText = '';
   let hasReceivedStats = false;
   let hasReceivedLog = false;
   let logs = [];
   let consoleLines = [];
-  let autoRefreshQueues = true;
-  let autoRefreshMs = 1000;
+  const queuesRefreshMs = 1000;
   let autoRefreshISOs = true;
   let syncGroups = [];
   let correctionGroups = [];
@@ -49,19 +52,30 @@
   /** @type {any} */
   let dockHost;
 
-  // Selected node state (from graph click or nodes list click)
-  let selectedNodeName = '';
-  $: selectedNode = selectedNodeName ? (nodes || []).find((n) => n && n.name === selectedNodeName) : null;
-
-  function setSelectedNodeName(name) {
-    selectedNodeName = name ? String(name) : '';
+  // Pages: the graph with its dock of widgets, and the full Queues and Nodes tables (#queues, #nodes).
+  const pages = ['graph', 'queues', 'nodes'];
+  const pageFromHash = () => (pages.includes(window.location.hash.slice(1)) ? window.location.hash.slice(1) : 'graph');
+  let page = pageFromHash();
+  function showPage(p) {
+    page = p;
+    const url = new URL(window.location.href);
+    url.hash = p === 'graph' ? '' : p;
+    window.history.replaceState(null, '', url);
   }
-  function setAutoRefreshQueues(v) {
-    autoRefreshQueues = !!v;
+
+  // Selected node or group, shared by the graph, the inspectors and the table pages; `queue` names
+  // the queue that was followed to it, which the graph outlines.
+  /** @type {{kind: 'node' | 'group', id: string, queue?: string} | null} */
+  let selected = null;
+  function setSelected(s) {
+    selected = s && s.id ? { kind: s.kind === 'group' ? 'group' : 'node', id: String(s.id),
+                             ...(typeof s.queue === 'string' ? { queue: s.queue } : {}) } : null;
+  }
+  function openInGraph(s) {
+    setSelected(s);
+    showPage('graph');
   }
 
-  // Clipboard helpers (for params table)
-  let lastCopiedParamKey = '';
   async function copyToClipboard(text) {
     const t = text == null ? '' : String(text);
     try {
@@ -89,24 +103,6 @@
     }
   }
 
-  async function copyParam(key, value) {
-    const text =
-      value == null
-        ? ''
-        : typeof value === 'string'
-          ? value
-          : typeof value === 'number' || typeof value === 'boolean'
-            ? String(value)
-            : JSON.stringify(value, null, 2);
-    const ok = await copyToClipboard(text);
-    if (ok) {
-      lastCopiedParamKey = String(key);
-      setTimeout(() => {
-        if (lastCopiedParamKey === String(key)) lastCopiedParamKey = '';
-      }, 900);
-    }
-  }
-
   // node.object.get panel state
   const objectNamesByType = {
     input: ['streams', 'programs'],
@@ -120,7 +116,6 @@
   let nodeObjectsRefreshMs = 2000;
   let nodeObjects = {}; // { [nodeName]: { [objectName]: { ts, ok, data?, error? } } }
   let nodeObjectsInFlight = false;
-  let selectedNodeObjectsInFlight = false;
 
   let lastInstanceSeen = null;
 
@@ -178,8 +173,8 @@
     }
   }
 
-  // Drops in-flight replies and queue-rate history of the previous instance or process; the
-  // reactive block below then re-requests everything for the current instance.
+  // Drops in-flight replies and the queue samples of the previous instance or process; the
+  // reactive statement below then re-requests everything for the current instance.
   function invalidateInstanceRequests() {
     instanceGeneration += 1;
     for (const request of pending.values()) request.reject(new Error('Instance changed'));
@@ -191,7 +186,7 @@
 
   async function loadInstances() {
     try {
-      const res = await fetch('/api/instances');
+      const res = await fetch(`${basePath}api/instances`);
       const data = await res.json();
       updateInstances(data.instances);
     } catch (e) {
@@ -201,8 +196,7 @@
 
   function connectWs() {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${window.location.host}/ws`;
-    ws = new WebSocket(url);
+    ws = new WebSocket(`${proto}://${window.location.host}${basePath}ws`);
 
     ws.onopen = () => {
       wsConnected = true;
@@ -227,7 +221,7 @@
         const { id, statusLine, body, error } = msg;
         const request = pending.get(id);
         // Check ownership before settling a promise: a delayed reply must not
-        // complete a different instance's request or trigger its fallback.
+        // complete a different instance's request.
         if (!request || msg.instanceId !== request.instanceId ||
             request.instanceId !== currentInstanceId || request.generation !== instanceGeneration) return;
         pending.delete(id);
@@ -236,9 +230,6 @@
         const resp = { statusLine, body, error, ok };
         if (ok) request.resolve(resp);
         else request.reject(resp);
-        const header = statusLine || (error ? 'ERROR' : '');
-        const text = [header, body || '', error || ''].filter(Boolean).join('\n');
-        //if (text) appendConsole(`# [${id || '-'}]\n${text}`);
 
         if (ok) {
           if (request.kind === 'nodes.json') {
@@ -257,18 +248,13 @@
           } else if (request.kind === 'queues.json') {
             try {
               const arr = JSON.parse(body || '[]');
-              const now = Date.now();
-              const previous = queuesInstance === currentInstanceId && now - queuesObservedAt <= autoRefreshMs * 3 ? queues : [];
-              queues = sampleQueueFlow(Array.isArray(arr) ? arr : [], previous);
-              queuesObservedAt = now;
+              queues = Array.isArray(arr) ? arr : [];
+              queuesObservedAt = Date.now();
               queuesFresh = true;
               queuesInstance = currentInstanceId;
-              queuesText = '';
             } catch (e) {
               appendConsole(`queues.json parse error: ${e}`);
             }
-          } else if (request.kind === 'queues.stats') {
-            queuesText = body || '';
           } else if (request.kind === 'sync_groups.json') {
             try {
               const arr = JSON.parse(body || '[]');
@@ -326,12 +312,7 @@
     sendCommand('nodes.json', 'nodes.json').catch(() => {});
   }
   function refreshQueues() {
-    const generation = instanceGeneration;
-    // Prefer JSON stats; fall back to text if unsupported
-    sendCommand('queues.json', 'queues.json').catch(() => {
-      if (generation !== instanceGeneration) return;
-      sendCommand('queues.stats', 'queues.stats').catch(() => {});
-    });
+    sendCommand('queues.json', 'queues.json').catch(() => {});
   }
   function refreshSyncGroups() {
     sendCommand('sync_groups.json', 'sync_groups.json').catch(() => {});
@@ -343,25 +324,14 @@
     nodeObjects = {};
   }
 
-  function objectEntryText(v) {
-    if (v == null) return '';
-    if (typeof v === 'string') return v;
-    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-    try {
-      return JSON.stringify(v, null, 2);
-    } catch {
-      return String(v);
-    }
-  }
-
-  async function refreshSingleNodeObject(nodeName, objName) {
+  // One node.object.get reply as the Objects panel shows it; null when the instance changed meanwhile.
+  async function fetchNodeObject(nodeName, objName) {
     const generation = instanceGeneration;
-    const now = Date.now();
     const cmd = `node.object.get ${nodeName} ${objName}`;
-    const id = `obj-${encodeURIComponent(nodeName)}-${objName}-${now}`;
+    const id = `obj-${encodeURIComponent(nodeName)}-${objName}-${Date.now()}`;
     try {
       const resp = await sendCommand(cmd, id);
-      if (generation !== instanceGeneration) return;
+      if (generation !== instanceGeneration) return null;
       let parsed = null;
       let parseOk = false;
       try {
@@ -370,33 +340,12 @@
       } catch {
         parsed = resp.body || '';
       }
-      nodeObjects = {
-        ...nodeObjects,
-        [nodeName]: {
-          ...(nodeObjects[nodeName] || {}),
-          [objName]: {
-            ts: Date.now(),
-            ok: true,
-            data: parsed,
-            json: parseOk
-          }
-        }
-      };
+      return { ts: Date.now(), ok: true, data: parsed, json: parseOk };
     } catch (err) {
-      if (generation !== instanceGeneration) return;
+      if (generation !== instanceGeneration) return null;
       const msg =
         err && typeof err === 'object' ? err.error || err.statusLine || String(err) : String(err);
-      nodeObjects = {
-        ...nodeObjects,
-        [nodeName]: {
-          ...(nodeObjects[nodeName] || {}),
-          [objName]: {
-            ts: Date.now(),
-            ok: false,
-            error: msg
-          }
-        }
-      };
+      return { ts: Date.now(), ok: false, error: msg };
     }
   }
 
@@ -413,60 +362,34 @@
     const generation = instanceGeneration;
     nodeObjectsInFlight = true;
     try {
-      // Sequential refresh: few calls, avoids state update races.
+      // One request at a time, applied together: a mixer has hundreds of objects, and every change of
+      // nodeObjects updates all panels.
+      const next = {};
       for (const n of nodesSupportingObjects) {
-        const objNames = objectNamesByType[n.type] || [];
-        for (const objName of objNames) {
-          if (generation !== instanceGeneration) return;
-          await refreshSingleNodeObject(n.name, objName);
+        for (const objName of objectNamesByType[n.type] || []) {
+          const entry = await fetchNodeObject(n.name, objName);
+          if (!entry || generation !== instanceGeneration) return;
+          (next[n.name] ||= {})[objName] = entry;
         }
       }
+      nodeObjects = next;
     } finally {
       nodeObjectsInFlight = false;
-    }
-  }
-
-  $: selectedNodeObjectNames =
-    selectedNode && selectedNode.type && objectNamesByType[selectedNode.type]
-      ? objectNamesByType[selectedNode.type]
-      : [];
-
-  async function refreshSelectedNodeObjects() {
-    if (selectedNodeObjectsInFlight) return;
-    if (!wsConnected) return;
-    if (!currentInstanceId) return;
-    if (!selectedNode || !selectedNode.name) return;
-    if (!selectedNodeObjectNames || selectedNodeObjectNames.length === 0) return;
-    const generation = instanceGeneration;
-    selectedNodeObjectsInFlight = true;
-    try {
-      for (const objName of selectedNodeObjectNames) {
-        if (generation !== instanceGeneration) return;
-        await refreshSingleNodeObject(selectedNode.name, objName);
-      }
-    } finally {
-      selectedNodeObjectsInFlight = false;
     }
   }
 
   onMount(() => {
     loadInstances();
     connectWs();
-
-    setTimeout(() => {
-      refreshNodes();
-      refreshQueues();
-      refreshSyncGroups();
-      refreshCorrectionGroups();
-    }, 1000);
+    const onHash = () => { page = pageFromHash(); };
+    window.addEventListener('hashchange', onHash);
 
     const t = setInterval(() => {
-      if (queuesFresh && Date.now() - queuesObservedAt > autoRefreshMs * 3) queuesFresh = false;
-      if (!autoRefreshQueues) return;
+      if (queuesFresh && Date.now() - queuesObservedAt > queuesRefreshMs * 3) queuesFresh = false;
       if (!wsConnected) return;
       if (!currentInstanceId) return;
       refreshQueues();
-    }, autoRefreshMs);
+    }, queuesRefreshMs);
 
     const tObjects = setInterval(() => {
       if (!autoRefreshNodeObjects) return;
@@ -479,12 +402,13 @@
       if (!currentInstanceId) return;
       refreshSyncGroups();
       refreshCorrectionGroups();
-    }, autoRefreshMs);
+    }, queuesRefreshMs);
 
     return () => {
       clearInterval(t);
       clearInterval(tObjects);
       clearInterval(tISOs);
+      window.removeEventListener('hashchange', onHash);
     };
   });
 
@@ -501,8 +425,7 @@
       invalidateInstanceRequests();
       nodes = [];
       queues = [];
-      queuesText = '';
-      selectedNodeName = '';
+      selected = null;
       clearNodeObjects();
       syncGroups = [];
       correctionGroups = [];
@@ -534,255 +457,84 @@
     autoRefreshNodeObjects = !!v;
   }
 
+  $: currentInstance = instances.find(instance => instance.id === currentInstanceId) || null;
+  $: liveState = !wsConnected ? 'down' : queueStatsFresh ? 'live' : currentInstanceId ? 'stale' : 'waiting';
+  $: stamp = !wsConnected ? 'Disconnected · reconnecting'
+    : !currentInstanceId ? (requestedInstanceId ? `Waiting for ${requestedInstanceId}` : 'No instance registered')
+    : queueStatsFresh ? `Live · ${new Date(queuesObservedAt).toLocaleTimeString()}`
+    : 'Waiting for queue stats';
+
   const panelRegistry = {
     graph: GraphPanel,
-    nodes: NodesPanel,
-    selected: SelectedNodePanel,
+    selected: SelectedPanel,
+    instance: InstancePanel,
     nodeObjects: NodeObjectsPanel,
-    queues: QueuesPanel,
     stats: StatsPanel,
+    instanceSharedObjects: InstanceSharedObjectsPanel,
     logs: LogsPanel,
-    console: ConsolePanel,
-    instanceSharedObjects: InstanceSharedObjectsPanel
+    console: ConsolePanel
   };
 
+  const panel = (componentType, title, componentState = {}) => ({ type: 'component', componentType, title, componentState });
+  // The graph card and a rail of widget cards, as on the mixer page; panels can be dragged into
+  // other stacks, and Reset layout restores this.
   const defaultDockLayoutConfig = {
     root: {
-      type: "column",
+      type: 'row',
       content: [
+        { type: 'stack', size: '76%', header: { show: false }, content: [panel('graph', 'Graph')] },
         {
-          type: "row",
+          type: 'column',
+          size: '24%',
           content: [
+            { type: 'stack', size: '45%', content: [panel('selected', 'Selected')] },
+            { type: 'stack', size: '31%', content: [panel('instance', 'Instance')] },
             {
-              type: "stack",
+              type: 'stack',
+              size: '24%',
               content: [
-                {
-                  type: "component",
-                  size: "56%",
-                  id: "",
-                  maximised: false,
-                  isClosable: true,
-                  reorderEnabled: true,
-                  title: "Graph preview",
-                  componentType: "graph",
-                  componentState: {}
-                }
-              ],
-              size: "71.71717171717171%",
-              id: "",
-              maximised: false,
-              isClosable: true,
-              activeItemIndex: 0
-            },
-            {
-              type: "column",
-              content: [
-                {
-                  type: "stack",
-                  content: [
-                    {
-                      type: "component",
-                      size: "1fr",
-                      id: "",
-                      maximised: false,
-                      isClosable: true,
-                      reorderEnabled: true,
-                      title: "Selected node",
-                      componentType: "selected",
-                      componentState: {}
-                    },
-                    {
-                      type: "component",
-                      size: "1fr",
-                      id: "",
-                      maximised: false,
-                      isClosable: true,
-                      reorderEnabled: true,
-                      title: "Node objects",
-                      componentType: "nodeObjects",
-                      componentState: {}
-                    },
-                    {
-                      type: "component",
-                      size: "1fr",
-                      id: "",
-                      maximised: false,
-                      isClosable: true,
-                      reorderEnabled: true,
-                      title: "Statistics",
-                      componentType: "stats",
-                      componentState: {}
-                    },
-                    {
-                      type: "component",
-                      size: "1fr",
-                      id: "",
-                      maximised: false,
-                      isClosable: true,
-                      reorderEnabled: true,
-                      title: "Instance-Shared Objects",
-                      componentType: "instanceSharedObjects",
-                      componentState: {}
-                    }
-                  ],
-                  size: "50%",
-                  id: "",
-                  maximised: false,
-                  isClosable: true,
-                  activeItemIndex: 0,
-                  header: {
-                    popout: false,
-                    close: "Close",
-                    maximise: "Maximise",
-                    minimise: false,
-                    tabDropdown: "Tabs"
-                  }
-                },
-                {
-                  type: "stack",
-                  content: [
-                    {
-                      type: "component",
-                      size: "1fr",
-                      id: "",
-                      maximised: false,
-                      isClosable: true,
-                      reorderEnabled: true,
-                      title: "Graph / nodes",
-                      componentType: "nodes",
-                      componentState: {}
-                    },
-                    {
-                      type: "component",
-                      size: "1fr",
-                      id: "",
-                      maximised: false,
-                      isClosable: true,
-                      reorderEnabled: true,
-                      title: "Queues",
-                      componentType: "queues",
-                      componentState: {}
-                    }
-                  ],
-                  size: "50%",
-                  id: "",
-                  maximised: false,
-                  isClosable: true,
-                  activeItemIndex: 1,
-                  header: {
-                    popout: false,
-                    close: "Close",
-                    maximise: "Maximise",
-                    minimise: false,
-                    tabDropdown: "Tabs"
-                  }
-                }
-              ],
-              size: "28.28282828282828%",
-              id: "",
-              isClosable: true
+                panel('nodeObjects', 'Objects'),
+                panel('stats', 'Stats'),
+                panel('instanceSharedObjects', 'Shared'),
+                panel('logs', 'Logs', { wrap: false, autoScroll: true }),
+                panel('console', 'Messages')
+              ]
             }
-          ],
-          size: "72%",
-          id: "",
-          isClosable: true
-        },
-        {
-          type: "stack",
-          content: [
-            {
-              type: "component",
-              size: "1fr",
-              id: "",
-              maximised: false,
-              isClosable: true,
-              reorderEnabled: true,
-              title: "Logs",
-              componentType: "logs",
-              componentState: {
-                wrap: false,
-                autoScroll: true
-              }
-            },
-            {
-              type: "component",
-              size: "1fr",
-              id: "",
-              maximised: false,
-              isClosable: true,
-              reorderEnabled: true,
-              title: "Messages",
-              componentType: "console",
-              componentState: {}
-            }
-          ],
-          size: "28%",
-          id: "",
-          maximised: false,
-          isClosable: true,
-          activeItemIndex: 0,
-          header: {
-            popout: false,
-            close: "Close",
-            maximise: "Maximise",
-            minimise: false,
-            tabDropdown: "Tabs"
-          }
+          ]
         }
-      ],
-      size: "1fr",
-      id: "",
-      isClosable: true
+      ]
     },
-    openPopouts: [],
     settings: {
       constrainDragToContainer: true,
       reorderEnabled: true,
-      popoutWholeStack: false,
-      blockedPopoutsThrowError: true,
-      closePopoutsOnUnload: true,
-      responsiveMode: "none",
+      responsiveMode: 'none',
       tabOverlapAllowance: 0,
       reorderOnTabMenuClick: true,
-      tabControlOffset: 10,
-      popInOnClose: false
+      tabControlOffset: 10
     },
     dimensions: {
-      borderWidth: 5,
-      borderGrabWidth: 5,
-      defaultMinItemHeight: "0px",
-      defaultMinItemWidth: "10px",
-      headerHeight: 20,
-      dragProxyWidth: 300,
-      dragProxyHeight: 200
+      borderWidth: 12,
+      borderGrabWidth: 12,
+      defaultMinItemHeight: '60px',
+      defaultMinItemWidth: '200px',
+      headerHeight: 34
     },
     header: {
-      show: "top",
+      show: 'top',
       popout: false,
-      dock: "dock",
-      close: "Close",
-      maximise: "Maximise",
-      minimise: "Minimise",
-      tabDropdown: "Tabs"
+      dock: false,
+      close: 'Close',
+      maximise: 'Maximise',
+      minimise: 'Restore',
+      tabDropdown: 'More panels'
     }
   };
 
   $: dockCtx = {
     nodes,
     queues,
-    queuesText,
-    queueStatsFresh,
-
-    selectedNodeName,
-    selectedNode,
-    setSelectedNodeName,
-
-    refreshNodes,
-    refreshQueues,
-
-    autoRefreshQueues,
-    autoRefreshMs,
-    setAutoRefreshQueues,
+    selected,
+    setSelected,
 
     objectNamesByType,
     nodeObjects,
@@ -793,14 +545,7 @@
     nodeObjectsRefreshMs,
     setAutoRefreshNodeObjects,
 
-    selectedNodeObjectNames,
-    refreshSelectedNodeObjects,
-    selectedNodeObjectsInFlight,
-
-    objectEntryText,
-    copyParam,
     copyToClipboard,
-    lastCopiedParamKey,
 
     hasReceivedStats,
     currentStatsPrettyText,
@@ -819,39 +564,51 @@
   };
 </script>
 
-<div class="app-root">
-  <header class="topbar">
-    <h1 class="title">AVPlumber graph</h1>
-    <div class="status">
-      <span class="badge {wsConnected ? 'badge-connected' : 'badge-disconnected'}">
-        WS: {wsConnected ? 'connected' : 'disconnected'}
-      </span>
-      <button on:click={() => dockHost && dockHost.resetLayout && dockHost.resetLayout()}>Reset layout</button>
-      <div class="instance-select">
-        <label>
-          Instance:
-          <select bind:value={currentInstanceId}>
-            {#if !currentInstanceId && requestedInstanceId}
-              <option value={null}>Waiting for instance {requestedInstanceId}</option>
-            {:else if instances.length === 0}
-              <option value="">no instances</option>
-            {/if}
-            {#each instances as inst}
-                <option value={inst.id}>
-                  {inst.name || inst.id} ({inst.host}:{inst.port})
-                </option>
-            {/each}
-          </select>
-        </label>
-      </div>
-    </div>
+<!-- Controls carry data-tip for the dark hover labels of the mixer page, never a native title. -->
+<div class="app-root" use:hoverTips>
+  <header class="appbar">
+    <div class="brand">avplumber · web UI</div>
+    <label class="inst" data-tip={currentInstance ? `${currentInstance.host}:${currentInstance.port} · ${stamp}` : stamp}>
+      <span class="dot {liveState}"></span>
+      <select bind:value={currentInstanceId} aria-label="Instance">
+        {#if !currentInstanceId && requestedInstanceId}
+          <option value={null}>Waiting for {requestedInstanceId}</option>
+        {:else if instances.length === 0}
+          <option value={null}>No instances</option>
+        {/if}
+        {#each instances as inst (inst.id)}
+          <option value={inst.id}>{inst.name || inst.id}</option>
+        {/each}
+      </select>
+    </label>
+    <nav class="tabs" aria-label="Pages">
+      <button aria-pressed={page === 'graph'} on:click={() => showPage('graph')}>Graph</button>
+      <button aria-pressed={page === 'queues'} on:click={() => showPage('queues')}>Queues</button>
+      <button aria-pressed={page === 'nodes'} on:click={() => showPage('nodes')}>Nodes</button>
+    </nav>
+    <div class="spacer"></div>
+    {#if page === 'graph'}
+      <button class="icon-btn small" data-tip="Put the widgets back where they started"
+        on:click={() => dockHost && dockHost.resetLayout && dockHost.resetLayout()}>Reset layout</button>
+    {/if}
+    <span class="stamp">{stamp}</span>
   </header>
 
-  <DockHost
-    bind:this={dockHost}
-    registry={panelRegistry}
-    ctx={dockCtx}
-    layoutConfig={defaultDockLayoutConfig}
-    storageKey="avplumber.webui.dock.layout.v1"
-  />
+  <main data-nodes={nodes.length} data-queues={queues.length} data-selected={selected ? `${selected.kind}:${selected.id}` : ''}>
+    <!-- The graph page stays mounted while a table page is shown, so the view keeps its camera. -->
+    <section class="page page-graph" hidden={page !== 'graph'}>
+      <DockHost
+        bind:this={dockHost}
+        registry={panelRegistry}
+        ctx={dockCtx}
+        layoutConfig={defaultDockLayoutConfig}
+        storageKey="avplumber.webui.dock.layout.v2"
+      />
+    </section>
+    {#if page === 'queues'}
+      <QueuesPage {nodes} {queues} on:select={(e) => openInGraph(e.detail)} />
+    {:else if page === 'nodes'}
+      <NodesPage {nodes} {queues} on:select={(e) => openInGraph(e.detail)} />
+    {/if}
+  </main>
 </div>

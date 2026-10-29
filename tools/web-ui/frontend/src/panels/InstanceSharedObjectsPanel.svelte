@@ -6,158 +6,71 @@
   $: c = $ctx;
   $: dock;
   $: state;
+  const yes = (v) => (v ? 'Yes' : 'No');
+  const seconds = (v) => (typeof v === 'number' ? v.toFixed(6) : '–');
 </script>
 
-<div class="panel avp-panel">
+<div class="panel">
   <div class="toolbar">
-    <button on:click={() => c.refreshSyncGroups?.()}>Refresh Sync Groups</button>
-    <button on:click={() => c.refreshCorrectionGroups?.()}>Refresh Correction Groups</button>
-    <button on:click={() => {
-      c.refreshSyncGroups?.();
-      c.refreshCorrectionGroups?.();
-    }}>Refresh All</button>
-    <label style="margin-left: auto; display: flex; align-items: center; gap: 0.25rem; font-size: 0.85rem;">
-      <input type="checkbox" checked={c.autoRefreshISOs} on:change={(e) => c.setAutoRefreshISOs?.(e.target.checked)} />
-      Auto-refresh
+    <label class="check" data-tip="Ask for both lists every second">
+      <input type="checkbox" checked={c.autoRefreshISOs} on:change={(e) => c.setAutoRefreshISOs?.(e.target.checked)} /> Auto-refresh
     </label>
+    <button class="icon-btn small push" on:click={() => { c.refreshSyncGroups?.(); c.refreshCorrectionGroups?.(); }}>Refresh</button>
   </div>
 
-  <div class="scrollable small-text iso-scrollable">
-    <h3>Sync Groups (RealTimeTeam)</h3>
+  <div class="body flush">
+    <div class="sub-h" style="margin: 10px 12px 6px">Sync groups · realtime teams</div>
     {#if c.syncGroups && c.syncGroups.length > 0}
-      <table class="node-table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Offset</th>
-            <th>Timebase</th>
-            <th>Flushing</th>
-            <th>First</th>
-            <th>Seek Targets</th>
-            <th>Linked Teams</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each c.syncGroups as sg}
-            <tr>
-              <td><code>{sg.name}</code></td>
-              <td>{sg.offset != null ? sg.offset : 'NOPTS'}</td>
-              <td>{sg.timebase_num}/{sg.timebase_den}</td>
-              <td>{sg.flushing ? 'Yes' : 'No'}</td>
-              <td>{sg.first ? 'Yes' : 'No'}</td>
-              <td>{sg.seek_targets_count}</td>
-              <td>{sg.linked_teams_count}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+      <div style="overflow-x: auto">
+        <table class="mini-tbl">
+          <thead><tr><th>Name</th><th>Offset</th><th>Timebase</th><th>Flushing</th><th>First</th><th>Seek targets</th><th>Linked teams</th></tr></thead>
+          <tbody>
+            {#each c.syncGroups as sg (sg.name)}
+              <tr>
+                <td><code>{sg.name}</code></td>
+                <td>{sg.offset != null ? sg.offset : 'NOPTS'}</td>
+                <td>{sg.timebase_num}/{sg.timebase_den}</td>
+                <td>{yes(sg.flushing)}</td>
+                <td>{yes(sg.first)}</td>
+                <td>{sg.seek_targets_count}</td>
+                <td>{sg.linked_teams_count}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
     {:else}
-      <p class="hint">No sync groups found. Use <code>realtime</code> nodes with a <code>team</code> parameter to create sync groups.</p>
+      <p class="hint" style="margin: 0 12px">None. <code>realtime</code> nodes with a <code>team</code> parameter create sync groups.</p>
     {/if}
 
-    <h3 style="margin-top: 2em;">Sentinel Correction Groups (PTSCorrectorCommon)</h3>
+    <div class="sub-h" style="margin: 16px 12px 6px">Sentinel correction groups</div>
     {#if c.correctionGroups && c.correctionGroups.length > 0}
-      <table class="node-table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Has Timeshift</th>
-            <th>Timeshift (s)</th>
-            <th>Timeshift Locked</th>
-            <th>Timebase</th>
-            <th>Has Clock</th>
-            <th>Clock (s)</th>
-            <th>Start TS (s)</th>
-            <th>Reporting</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each c.correctionGroups as cg}
-            <tr>
-              <td><code>{cg.name}</code></td>
-              <td>{cg.has_timeshift ? 'Yes' : 'No'}</td>
-              <td>
-                {#if cg.has_timeshift && typeof cg.timeshift_seconds === 'number'}
-                  {cg.timeshift_seconds.toFixed(6)}
-                {:else}
-                  -
-                {/if}
-              </td>
-              <td>{cg.timeshift_locked ? 'Yes' : 'No'}</td>
-              <td>{cg.timebase_num}/{cg.timebase_den}</td>
-              <td>{cg.has_clock ? 'Yes' : 'No'}</td>
-              <td>
-                {#if cg.has_clock && typeof cg.clock_seconds === 'number'}
-                  {cg.clock_seconds.toFixed(6)}
-                {:else}
-                  -
-                {/if}
-              </td>
-              <td>
-                {#if typeof cg.start_ts_seconds === 'number'}
-                  {cg.start_ts_seconds.toFixed(6)}
-                {:else}
-                  -
-                {/if}
-              </td>
-              <td>{cg.reporting ? 'Yes' : 'No'}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-
-      <details style="margin-top: 1em;">
-        <summary>Detailed Statistics</summary>
-        <div style="margin-top: 0.5em;">
-          {#each c.correctionGroups as cg}
-            <div style="margin-bottom: 1em; padding: 0.5em; background: var(--bg); border-radius: 4px;">
-              <h4 style="margin: 0 0 0.5em 0;"><code>{cg.name}</code></h4>
-              <pre class="small-text" style="margin: 0; white-space: pre-wrap;">{JSON.stringify(cg, null, 2)}</pre>
-            </div>
-          {/each}
-        </div>
+      <div style="overflow-x: auto">
+        <table class="mini-tbl">
+          <thead><tr><th>Name</th><th>Timeshift (s)</th><th>Locked</th><th>Timebase</th><th>Clock (s)</th><th>Start TS (s)</th><th>Reporting</th></tr></thead>
+          <tbody>
+            {#each c.correctionGroups as cg (cg.name)}
+              <tr>
+                <td><code>{cg.name}</code></td>
+                <td>{cg.has_timeshift ? seconds(cg.timeshift_seconds) : '–'}</td>
+                <td>{yes(cg.timeshift_locked)}</td>
+                <td>{cg.timebase_num}/{cg.timebase_den}</td>
+                <td>{cg.has_clock ? seconds(cg.clock_seconds) : '–'}</td>
+                <td>{seconds(cg.start_ts_seconds)}</td>
+                <td>{yes(cg.reporting)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+      <details style="margin: 10px 12px 12px">
+        <summary><b>All fields</b></summary>
+        {#each c.correctionGroups as cg (cg.name)}
+          <div class="obj"><div class="sub-h">{cg.name}</div><pre class="wrap">{JSON.stringify(cg, null, 2)}</pre></div>
+        {/each}
       </details>
     {:else}
-      <p class="hint">No correction groups found. Use <code>sentinel</code> nodes with a <code>correction_group</code> parameter to create correction groups.</p>
+      <p class="hint" style="margin: 0 12px 12px"><code>sentinel</code> nodes with a <code>correction_group</code> parameter create correction groups.</p>
     {/if}
   </div>
 </div>
-
-<style>
-  h3 {
-    margin-top: 1em;
-    margin-bottom: 0.5em;
-    font-size: 1.1em;
-    font-weight: bold;
-  }
-  h4 {
-    font-size: 1em;
-    font-weight: bold;
-  }
-  .hint {
-    color: var(--muted);
-    font-style: italic;
-    padding: 1em;
-  }
-  code {
-    background: var(--panel);
-    color: var(--text);
-    padding: 2px 6px;
-    border-radius: 3px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    font-size: 0.9em;
-    border: 1px solid var(--edge);
-  }
-  .iso-scrollable {
-    min-height: 300px;
-    max-height: none !important;
-    flex: 1 1 auto;
-  }
-  .toolbar label {
-    color: var(--muted);
-  }
-  .toolbar input[type="checkbox"] {
-    cursor: pointer;
-  }
-</style>
-

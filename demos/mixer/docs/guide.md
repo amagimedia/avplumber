@@ -247,7 +247,10 @@ Fedora image); the manual mixer needs no neural models.
 Serve controls at `/` and the preview server at `/preview/`, stripping that
 prefix. Set `MIXER_PREVIEW_BASE=/preview/` (or pass `--preview-base /preview/`
 to `python3 -m pyplumber.mixer.gui`).
-Forward WebSocket upgrades for the preview's Janus path as well as normal HTTP.
+Serve the [web UI](../../../tools/web-ui/README.md) at `/graph/` the same way and set
+`MIXER_GRAPH_URL=/graph/` (or `--graph-url /graph/`) for a **Graph** link in the controls;
+the web UI's `WEBUI_ALLOWED_HOSTS` must name the hostname browsers use.
+Forward WebSocket upgrades for the preview's Janus path and the web UI's `/graph/ws` as well as normal HTTP.
 The [L4 proxy template](../../../docker-compose/mixer/deploy/l4/nginx.conf.template) is a complete example.
 WebRTC also needs the configured UDP range reachable from the viewer.
 

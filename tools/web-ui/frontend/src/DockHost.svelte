@@ -180,7 +180,8 @@
     if (!layout || !storageKey || isDragging || isApplyingLayout) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      if (isDragging || isApplyingLayout) return;
+      // A hidden page lays its panels out at zero size; that is no layout to keep.
+      if (isDragging || isApplyingLayout || !hostEl?.getClientRects().length) return;
       try {
         // saveLayout() returns ResolvedLayoutConfig. Convert it to LayoutConfig before persisting,
         // otherwise loadLayout() will crash trying to parse numbers as strings.
@@ -246,39 +247,60 @@
     const rect = hostEl.getBoundingClientRect();
     const w = Math.max(0, Math.floor(rect.width));
     const h = Math.max(0, Math.floor(rect.height));
-    layout.setSize(w, h);
+    // A hidden page measures 0×0; keep the last size so its panels do not lay out at zero.
+    if (w && h) layout.setSize(w, h);
+  }
+
+  // Golden Layout puts native title tooltips on its tabs and buttons; the UI shows dark hover labels
+  // (data-tip) instead. A tab's title repeats its visible label, so it is dropped.
+  function replaceTitles() {
+    for (const el of hostEl.querySelectorAll('.lm_header [title]')) {
+      if (!el.classList.contains('lm_tab')) el.dataset.tip = el.title;
+      el.removeAttribute('title');
+    }
   }
 
   onMount(() => {
     if (!hostEl) return;
 
+    // A text in place of a panel that cannot be shown.
+    const placeholder = (container, text) => {
+      const el = document.createElement('pre');
+      el.style.cssText = 'margin: 0; padding: 10px 12px; white-space: pre-wrap';
+      el.textContent = text;
+      container.element.replaceChildren(el);
+      return { component: { destroy: () => el.remove() }, virtual: false };
+    };
+
     // Bind/unbind mounting of Svelte components into Golden Layout containers.
     const bind = (container, itemConfig) => {
       const type = itemConfig && itemConfig.componentType;
       const Ctor = type && typeof type === 'string' ? registry[type] : null;
-      if (!Ctor) {
-        const el = document.createElement('pre');
-        el.style.margin = '0';
-        el.textContent = `Unknown panel type: ${String(type)}`;
-        container.element.appendChild(el);
-        return { component: { destroy: () => el.remove() }, virtual: false };
-      }
+      if (!Ctor) return placeholder(container, `Unknown panel type: ${String(type)}`);
 
       // Ensure container is empty and ready.
       container.element.innerHTML = '';
 
-      const inst = new Ctor({
-        target: container.element,
-        props: {
-          ctx: ctxStore,
-          dock: {
-            container,
-            layout,
-            saveLayout: saveLayoutDebounced
-          },
-          state: itemConfig && itemConfig.componentState ? itemConfig.componentState : {}
-        }
-      });
+      let inst;
+      try {
+        inst = new Ctor({
+          target: container.element,
+          props: {
+            ctx: ctxStore,
+            dock: {
+              container,
+              layout,
+              saveLayout: saveLayoutDebounced
+            },
+            state: itemConfig && itemConfig.componentState ? itemConfig.componentState : {}
+          }
+        });
+      } catch (e) {
+        // A panel that throws while mounting (its markup may be half there) must not leave the whole dock empty:
+        // loadLayout() would give up on every other panel.
+        console.warn(`Panel ${type} failed:`, e);
+        return placeholder(container, `Panel failed: ${e?.message || e}`);
+      }
 
       componentByContainer.set(container, inst);
       return { component: inst, virtual: false };
@@ -305,6 +327,10 @@
     const ro = new ResizeObserver(() => setSizeFromHost());
     ro.observe(hostEl);
     setSizeFromHost();
+    const titles = new MutationObserver((muts) => {
+      if (muts.some((m) => !m.target.closest?.('.lm_content'))) replaceTitles();
+    });
+    titles.observe(hostEl, { subtree: true, childList: true, attributes: true, attributeFilter: ['title'] });
 
     // Track drag operations using Golden Layout's official events.
     layout.on('dragStart', () => {
@@ -352,6 +378,7 @@
     return () => {
       try {
         ro.disconnect();
+        titles.disconnect();
       } catch (_) {
         // ignore
       }

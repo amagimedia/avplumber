@@ -1,24 +1,12 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
-import sveltePreprocess from 'svelte-preprocess';
 
 export default defineConfig({
-  plugins: [
-    svelte({
-      preprocess: sveltePreprocess({
-        typescript: {
-          tsconfigFile: './tsconfig.json',
-          compilerOptions: {
-            verbatimModuleSyntax: true
-          }
-        }
-      })
-    })
-  ],
+  // Relative asset URLs, so the page also works behind a reverse proxy under a path prefix (README).
+  base: './',
+  plugins: [svelte()],
   build: {
     outDir: 'dist',
     emptyOutDir: true
   }
 });
-
-

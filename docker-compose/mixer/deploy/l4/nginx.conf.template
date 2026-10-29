@@ -17,6 +17,15 @@ server {
     location /preview/ {
         proxy_pass http://127.0.0.1:${MIXER_PREVIEW_PORT}/;
     }
+    # The read-only graph viewer (tools/web-ui), its bridge at /graph/ws. GET only: instance
+    # registration, heartbeats and stats are POSTs from the mixer to the loopback port itself.
+    location = /graph {
+        return 301 /graph/;
+    }
+    location /graph/ {
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:22222/;
+    }
     location / {
         proxy_pass http://127.0.0.1:${MIXER_HTTP_PORT};
     }

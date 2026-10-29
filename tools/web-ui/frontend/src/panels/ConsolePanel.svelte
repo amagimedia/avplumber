@@ -9,11 +9,10 @@
 </script>
 
 <!-- Display only: the UI's own messages (parse errors, restart notices). -->
-<div class="panel avp-panel">
-  <pre class="scrollable small-text">
-{#each c.consoleLines as line}
-{line}
-{/each}</pre>
+<div class="panel">
+  {#if c.consoleLines.length}
+    <pre class="body">{c.consoleLines.join('\n')}</pre>
+  {:else}
+    <div class="body"><p class="hint">No messages.</p></div>
+  {/if}
 </div>
-
-

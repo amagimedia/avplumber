@@ -42,53 +42,39 @@
   }
 </script>
 
-<div class="panel avp-panel">
-  <TextPanelToolbar wrap={wrap} onWrapChange={setWrap} onCopy={copyAll} />
-
-  <div class="toolbar">
-    <button on:click={() => c.refreshNodeObjects?.()} disabled={c.nodeObjectsInFlight}>
-      {c.nodeObjectsInFlight ? 'Refreshing…' : 'Refresh node objects'}
-    </button>
-    <label class="hint" style="margin-left: auto;">
-      <input
-        type="checkbox"
-        checked={c.autoRefreshNodeObjects}
-        on:change={(e) => c.setAutoRefreshNodeObjects?.(e.target.checked)}
-      />
-      auto-refresh ({c.nodeObjectsRefreshMs}ms)
+<div class="panel">
+  <TextPanelToolbar wrap={wrap} onWrapChange={setWrap} onCopy={copyAll}>
+    <label class="check" data-tip="Ask every node below for its objects every {c.nodeObjectsRefreshMs / 1000} s">
+      <input type="checkbox" checked={c.autoRefreshNodeObjects}
+        on:change={(e) => c.setAutoRefreshNodeObjects?.(e.target.checked)} /> Auto-refresh
     </label>
-  </div>
+    <button class="icon-btn small" on:click={() => c.refreshNodeObjects?.()} disabled={c.nodeObjectsInFlight}>
+      Refresh
+    </button>
+  </TextPanelToolbar>
 
-  <div class="scrollable small-text">
+  <div class="body">
     {#if !c.nodesSupportingObjects || c.nodesSupportingObjects.length === 0}
-      <div class="hint">
-        No nodes in this graph currently expose objects via <code>node.object.get</code>.
-      </div>
+      <p class="hint">No node in this graph exposes objects via <code>node.object.get</code>.</p>
     {:else}
       {#each c.nodesSupportingObjects as n (n.name)}
         <details open>
-          <summary>
-            <strong>{n.name}</strong>
-            <span class="hint">({n.type})</span>
-          </summary>
-          <div class="small-text" style="margin: 8px 0 12px 0;">
-            {#each (c.objectNamesByType?.[n.type] || []) as objName (objName)}
-              <div style="margin: 8px 0;">
-                <div class="hint"><code>{`node.object.get ${n.name} ${objName}`}</code></div>
-                {#if c.nodeObjects?.[n.name]?.[objName]?.ok}
-                  <pre class="small-text" class:avp-prewrap={wrap}>{JSON.stringify(c.nodeObjects[n.name][objName].data, null, 2)}</pre>
-                {:else if c.nodeObjects?.[n.name]?.[objName]?.error}
-                  <div class="hint">Error: {c.nodeObjects[n.name][objName].error}</div>
-                {:else}
-                  <div class="hint">No data yet.</div>
-                {/if}
-              </div>
-            {/each}
-          </div>
+          <summary><b>{n.name}</b><small>{n.type}</small></summary>
+          {#each (c.objectNamesByType?.[n.type] || []) as objName (objName)}
+            {@const entry = c.nodeObjects?.[n.name]?.[objName]}
+            <div class="obj">
+              <div class="sub-h">{objName}</div>
+              {#if entry?.ok}
+                <pre class:wrap>{JSON.stringify(entry.data, null, 2)}</pre>
+              {:else if entry?.error}
+                <p class="hint">Error: {entry.error}</p>
+              {:else}
+                <p class="hint">No data yet.</p>
+              {/if}
+            </div>
+          {/each}
         </details>
       {/each}
     {/if}
   </div>
 </div>
-
-

@@ -765,8 +765,8 @@ const {launch, openPage, bigShow} = require('./page_fixture.cjs');
     await count(1);
     await count(2);
     assert.deepEqual(await viewerOuts(), [first, other], '1 then 2 brings back the hidden output');
-    // The Signal flow tab and the graph view are gone, and nothing asks for the graph's port.
-    assert.equal(await page.locator('#tab-graph, #graph, #graph-link, #graph-open').count(), 0);
+    // The Signal flow tab is gone, and nothing asks for the graph's port: the Graph link goes through the page's origin.
+    assert.equal(await page.locator('#tab-graph, #graph, #graph-open').count(), 0);
     assert.deepEqual(requests.filter(url => url.includes(':22222')), []);
     assert.deepEqual(errors, []);
     await tbarUnderJitter(browser);

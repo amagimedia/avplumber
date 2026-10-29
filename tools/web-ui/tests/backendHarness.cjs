@@ -4,6 +4,7 @@ const net = require('node:net');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const WebSocket = require('../node_modules/ws');
+const { startFakeEngine } = require('./fakeEngine.cjs');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function freePort() {
@@ -16,27 +17,8 @@ function freePort() {
   });
 }
 
-// Answers every command with an empty JSON body, like an idle engine; `received` lists the lines.
-function fakeAvplumber(port) {
-  const sockets = new Set();
-  const received = [];
-  const server = net.createServer(socket => {
-    sockets.add(socket);
-    socket.on('close', () => sockets.delete(socket));
-    socket.write('100 VTR READY\n');
-    socket.on('data', data => {
-      for (const line of String(data).split('\n').filter(Boolean)) {
-        received.push(line);
-        socket.write(line === 'bye' ? 'BYE\n' : '201 OK\n[]\n\n');
-      }
-    });
-  });
-  const kill = () => {
-    for (const socket of sockets) socket.destroy();
-    return new Promise(resolve => server.close(resolve));
-  };
-  return new Promise(resolve => server.listen(port, '127.0.0.1', () => resolve({ kill, received })));
-}
+// An idle engine on `port` (fakeEngine.cjs): queries answer empty JSON; `received` lists the command lines.
+const fakeAvplumber = port => startFakeEngine({ port });
 
 // Starts the backend with `extraEnv` and waits until it answers; `api` is its /api/instances URL.
 async function startBackend(extraEnv = {}) {

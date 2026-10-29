@@ -1,0 +1,99 @@
+/* The graph view, its inspector and instance tiles, on the app's mixer palette and controls (styles.css: tokens, zone
+   colours, .sheet, .bar, .seg, .icon-btn, .pill, .fill, .sub-h). Classes are prefixed gv- because the stage creates
+   its labels and cards outside Svelte's scoped styles. styles.css comes later in the bundle, so a rule here that
+   refines one of its classes needs a more specific selector. */
+
+/* graph widget: fills its dock card; fullscreen covers the window */
+.gv-gw { position: relative; display: flex; flex-direction: column; height: 100%; width: 100%; min-height: 0; min-width: 0; background: var(--panel); }
+.gv-gw.max { position: fixed; inset: 0; z-index: 50; }
+.gv-search { position: relative; }
+.gv-search input { width: 230px; max-width: 52vw; border: 1px solid var(--edge); background: var(--raised); border-radius: 7px; padding: 4px 10px; font-size: 13px; }
+.gv-sugg { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; box-shadow: 0 12px 32px rgb(0 0 0 / .5); z-index: 20; padding: 4px; max-height: 280px; overflow: auto; }
+.gv-sugg button { display: flex; justify-content: space-between; gap: 10px; width: 100%; text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 6px 8px; font-size: 12.5px; }
+.gv-sugg button small { color: var(--muted); font-family: var(--mono); }
+.gv-sugg button:hover, .gv-sugg button.on { background: var(--raised); }
+.gv-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
+.gv-legend i { display: inline-block; width: 16px; border-top: 3px solid; margin-right: 5px; vertical-align: middle; }
+.gv-legend .tally { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--text); margin-right: 5px; vertical-align: middle; }
+.gv-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background-image: radial-gradient(#ffffff09 1px, transparent 1px); background-size: 20px 20px; }
+.gv-sigma { position: absolute; inset: 0; z-index: 2; }
+.gv-zones, .gv-cards { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.gv-zones { z-index: 0; }
+.gv-cards { z-index: 3; }
+.gv-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
+.gv-zone { position: absolute; background: color-mix(in srgb, var(--panel) 55%, transparent); border: 1px solid var(--edge); border-radius: 10px; }
+.gv-zone b { position: absolute; left: 10px; top: -8px; transform: translateY(-100%); font-size: 11px; font-weight: 600; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.gv-zone b span { color: var(--faint); font-weight: 500; letter-spacing: .04em; text-transform: none; margin-left: 8px; font-variant-numeric: tabular-nums; }
+
+/* node cards (Nodes, Details) */
+.gv-card { position: absolute; left: 0; top: 0; will-change: transform; pointer-events: auto; border: 1.5px solid; border-radius: 10px; padding: 5px 8px; overflow: hidden; cursor: pointer; display: flex; flex-direction: column; justify-content: center; gap: 2px; line-height: 1.2; }
+.gv-card .gv-tag { font-size: 9px; letter-spacing: 1.1px; font-weight: 750; text-transform: uppercase; }
+.gv-card .gv-name { font-size: 13px; font-weight: 750; letter-spacing: -.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gv-card .gv-sub { font-size: 11px; color: var(--muted); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gv-meter { height: 4px; border-radius: 3px; background: var(--edge); overflow: hidden; margin-top: 3px; }
+.gv-meter i { display: block; height: 100%; background: var(--pvw); }
+.gv-meter.warn i { background: var(--accent); }
+.gv-meter.bad i { background: var(--pgm); }
+.gv-card.small .gv-sub, .gv-card.small .gv-meter, .gv-card.small .gv-tag { display: none; }
+.gv-card.sel { box-shadow: 0 0 0 3px var(--raised); }
+.gv-card.faded { opacity: .25; }
+.gv-card.k-src { background: var(--c-src-f); border-color: var(--c-src-s); } .gv-card.k-src .gv-tag { color: var(--c-src-i); }
+.gv-card.k-gpu { background: var(--c-gpu-f); border-color: var(--c-gpu-s); } .gv-card.k-gpu .gv-tag { color: var(--c-gpu-i); }
+.gv-card.k-ctl { background: var(--c-ctl-f); border-color: var(--c-ctl-s); } .gv-card.k-ctl .gv-tag { color: var(--c-ctl-i); }
+.gv-card.k-out { background: var(--c-out-f); border-color: var(--c-out-s); } .gv-card.k-out .gv-tag { color: var(--c-out-i); }
+
+/* pooled labels: group names (Groups and deeper), tile names and link totals (Overview) */
+.gv-glabel { position: absolute; left: 0; top: 0; transform-origin: right center; font-size: 11px; font-weight: 600; color: var(--muted); background: var(--bg); border-radius: 4px; padding: 0 5px; white-space: nowrap; pointer-events: none; will-change: transform; }
+.gv-glabel.d { color: var(--pgm); }
+.gv-tlabel { position: absolute; left: 0; top: 0; font-size: 12px; font-weight: 750; color: var(--bg); white-space: nowrap; pointer-events: none; letter-spacing: -.2px; will-change: transform; }
+.gv-tlabel.idle { color: var(--faint); }
+.gv-tlabel.z-src { color: var(--c-src-i); } .gv-tlabel.z-gpu { color: var(--c-gpu-i); } .gv-tlabel.z-ctl { color: var(--c-ctl-i); } .gv-tlabel.z-out { color: var(--c-out-i); } .gv-tlabel.d { color: var(--c-key-i); }
+.gv-llabel { position: absolute; left: 0; top: 0; font-size: 11px; font-weight: 750; line-height: 1.25; text-align: center; background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; padding: 3px 8px; white-space: nowrap; pointer-events: none; font-variant-numeric: tabular-nums; will-change: transform; }
+.gv-llabel small { display: block; font-size: 10px; font-weight: 600; color: var(--muted); }
+
+/* hover labels: the mixer page's .meter-tip; .gv-htip is the one for controls, never native title tooltips */
+.gv-tip, .gv-htip { position: absolute; z-index: 30; pointer-events: none; width: max-content; max-width: min(290px, calc(100vw - 24px)); padding: 10px 12px; border: 1px solid var(--edge); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px #0008; color: var(--text); font-size: 11px; line-height: 1.5; white-space: normal; }
+.gv-htip { position: fixed; z-index: 60; }
+.gv-tip b { font-weight: 600; }
+.gv-tip code { display: block; color: var(--muted); font-family: inherit; font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* stage overlays */
+.gv-hud { position: absolute; z-index: 4; left: 12px; bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: none; }
+.gv-hud > span { background: var(--panel); border: 1px solid var(--edge); border-radius: 7px; padding: 4px 9px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.gv-hud b { color: var(--text); }
+.gv-hud .seg { pointer-events: auto; }
+.gv-hud .seg button { padding: 4px 9px; font-size: 11px; }
+.gv-nogl { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; margin: 0; padding: 24px; text-align: center; }
+.gv-zoomctl { position: absolute; z-index: 4; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
+.gv-zoomctl button { width: 30px; height: 30px; padding: 0; border: 1px solid var(--edge); background: var(--panel); border-radius: 6px; font-size: 15px; line-height: 1; display: grid; place-items: center; }
+.gv-zoomctl button:hover { border-color: var(--muted); }
+.gv-gw .gv-float { position: absolute; z-index: 5; right: 58px; bottom: 12px; width: 320px; max-width: calc(100% - 80px); max-height: calc(100% - 24px); display: none; }
+.gv-gw.max .gv-float.has { display: flex; }
+.gv-wbody { padding: 10px 12px 12px; font-size: 13px; min-width: 0; overflow: auto; }
+
+/* inspector */
+.gv-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12.5px; margin: 0; }
+.gv-kv dt { color: var(--muted); }
+.gv-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.gv-nm { font-size: 17px; font-weight: 750; letter-spacing: -.3px; margin: 0 0 2px; overflow-wrap: anywhere; }
+.gv-pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.gv-params { margin: 8px 0 0; background: var(--bg); border: 1px solid var(--edge); border-radius: 10px; padding: 8px 10px; font-family: var(--mono); font-size: 11.5px; overflow: auto; max-height: 150px; }
+.gv-qlist { display: grid; gap: 6px; }
+.gv-q { display: grid; grid-template-columns: minmax(0, 1fr) 64px 46px; gap: 8px; align-items: center; font-size: 12px; border: 0; background: transparent; text-align: left; padding: 4px 6px; border-radius: 8px; width: 100%; }
+.gv-q:hover { background: var(--raised); }
+.gv-q > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
+.gv-q em { font-style: normal; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.gv-q .gv-qmeta { grid-column: 1 / -1; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: -3px; white-space: normal; }
+.gv-empty { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.gv-glist { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.gv-glist button { border: 1px solid var(--edge); background: var(--bg); border-radius: 7px; padding: 4px 7px; font-size: 11.5px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+.gv-glist button:hover { background: var(--raised); }
+
+/* instance tiles */
+.gv-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.gv-tile { background: var(--raised); border: 1px solid var(--edge); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.gv-tile b { display: block; font-size: 21px; letter-spacing: -.04em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.gv-tile span { font-size: 11px; color: var(--muted); }
+.gv-tile small { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+.gv-tile.hero b { color: var(--pvw); }
+.gv-tile.bad b { color: var(--pgm); }

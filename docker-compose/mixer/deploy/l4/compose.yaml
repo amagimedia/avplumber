@@ -6,6 +6,8 @@ services:
     environment:
       CUDA_DEVICE_MAX_CONNECTIONS: ${CUDA_DEVICE_MAX_CONNECTIONS:-32}
       CUDA_DEVICE_MAX_COPY_CONNECTIONS: ${CUDA_DEVICE_MAX_COPY_CONNECTIONS:-8}
+      # The operator page links to the graph viewer the proxy serves there.
+      MIXER_GRAPH_URL: /graph/
     build:
       dockerfile: docker-compose/mixer/Dockerfile.fedora44
       args:
@@ -68,6 +70,8 @@ services:
     restart: unless-stopped
     environment:
       WEBUI_PORT: "22222"
+      # Hostnames the browser reaches the proxy by; the viewer refuses other Host headers.
+      WEBUI_ALLOWED_HOSTS: ${WEBUI_ALLOWED_HOSTS:-${JANUS_NAT_1_1:-${JANUS_HOST_IP:-}}}
 
   proxy:
     image: nginx:alpine

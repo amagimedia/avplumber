@@ -120,7 +120,7 @@ function bigShow() {
     recent: {window_s: 600, covered_s: 600, missed_deadlines: 0, output_drops: 0,
       inputs: {browser: {sources: 36, repeats: 0, dropped: 0, worst: null}, other: {sources: 152, repeats: 0, dropped: 0}}},
   };
-  const config = {setup: true, compute_price: {hourly_usd: 1.2}};
+  const config = {setup: true, graph_url: '/graph/', compute_price: {hourly_usd: 1.2}};
   // Viewer 1 plays Program dirty, viewer 2 the Program preview.
   const stats = {[program_outputs[0].mountpoint]: [38, 30, 12], default: [41, 30, 14]};
   return {state, config, stats, storage: {viewers: ['program', 'pvw']}};

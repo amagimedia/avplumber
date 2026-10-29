@@ -62,17 +62,19 @@ Supply a deployment-local `metrics.json` alongside the preview's `index.html`:
 
 ```json
 {
-  "ws_url": "ws://127.0.0.1:22222/ws",
+  "ws_url": "ws://<host>:7681/graph/ws",
   "instance_id": "127.0.0.1:7777",
   "mixer": "mixer"
 }
 ```
 
 Use the WebUI bridge address reachable **from the browser**, the registered
-instance ID, and `wss://` when the preview is HTTPS. Keep deployment addresses
-and source lists out of the public repository. The existing bridge is a control
-endpoint, not an authenticated read-only API; retain its deployment's access
-controls. The measurement client sends only `mixer.status`, once per second,
+instance ID, and `wss://` when the preview is HTTPS. The L4 stack's proxy serves
+the bridge at `/graph/ws` of the player's own origin, behind its password
+(as in the example). Keep deployment addresses and source lists
+out of the public repository. The bridge forwards only read-only queries and
+listens on loopback; it has no authentication of its own, so reach it through an
+authenticated proxy or an SSH tunnel. The measurement client sends only `mixer.status`, once per second,
 with one request in flight and timeout/reconnect handling. WS and browser
 delivery delay do not enter the AVP measurement. It never enables the probe or
 sends cuts automatically. An older AVP build displays “Mixer not instrumented”
