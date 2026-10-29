@@ -102,6 +102,41 @@ HDR 4:2:2 at 60 fps. See the [capacity page](../../../../demos/mixer/docs/capaci
 
 ## Move an instance
 
+### Publish and mirror with GitHub Actions
+
+The manual **Mixer images** workflow builds the six services defined by this
+Compose stack, publishes them to GAR with full commit-SHA tags, and copies their
+exact digests to optional regional mirrors. It also copies the proxy image so a
+release can be pulled entirely from GAR. It does not change running instances.
+
+Configure these repository Actions variables:
+
+| Variable | Value |
+| --- | --- |
+| `MIXER_GAR_PREFIX` | `<region>-docker.pkg.dev/<project>/<repository>/avplumber-mixer-l4` |
+| `MIXER_GAR_MIRRORS` | Optional whitespace-separated image prefixes in other regions |
+| `MIXER_GCP_WIF_PROVIDER` | Workload Identity provider resource name restricted to this repository |
+| `MIXER_GCP_SERVICE_ACCOUNT` | CI service account with Artifact Registry writer access to those repositories |
+
+The workflow uses the `amagi-amd64-xlarge` runner, matching the related media
+projects. Each service has its own GAR build cache. The source checkout includes
+recursive submodules; FFmpeg and the CUDA build settings come from `stack.sh`
+and the existing Dockerfiles. CI verifies packaging; GPU playback still needs
+validation on the deployment host.
+
+Run the workflow on `develop`, then download its `mixer-release-<commit>` artifact.
+It contains a source receipt and a Compose override for each registry, pinning
+every image by digest, including the seed and proxy services. Check out the same
+source commit on the host, configure its `.env`, and use the override for that
+host's region:
+
+```sh
+docker-compose/mixer/deploy/l4/stack.sh -f <path-to-registry.compose.yaml> pull
+docker-compose/mixer/deploy/l4/stack.sh -f <path-to-registry.compose.yaml> up -d --no-build
+```
+
+### Transfer an existing local build
+
 Keep source revision, image release and media together. Set destination choices
 in the untracked `.env`; `MIXER_MEDIA_DIR` selects the host media directory.
 Stop cleanly before copying media, or start empty to use packaged defaults.
