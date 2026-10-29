@@ -6,6 +6,7 @@ screenshots and captured reports there; the code branch links to the
 
 Large recordings and graph images are release assets:
 
+- [WebGL viewer media](https://github.com/amagimedia/avplumber/releases/tag/webui-demo-media-2026-10)
 - [Current mixer media](https://github.com/amagimedia/avplumber/releases/tag/mixer-demo-media-2026-10)
 - [Replay media](https://github.com/amagimedia/avplumber/releases/tag/replay-demo-media-2026-09)
 - [DMA-BUF media](https://github.com/amagimedia/avplumber/releases/tag/dmabuf-demo-media-2026-09)
@@ -30,3 +31,10 @@ packet continuity and ticker motion before publishing. The tools are in
 Publish sanitized metadata in `capture-20261028.json`, clearly identifying the UI
 and metrics as replayed. Keep historical capacity and latency measurements unchanged.
 Earlier recordings remain historical release assets.
+
+The Pages root features the 192-input Sigma.js viewer demo. Its 24-second video
+and four full-resolution screenshots use the actual viewer at 2× Retina scale,
+with topology and queue telemetry captured from the running L4 show on 2026-10-29.
+The UI replays those samples on a fixed 30 fps timeline; it is not a live connection
+or a capacity benchmark. Keep the capture report and SHA-256 manifest under
+`demos/webui/docs/` on `gh-pages`, and link this demo from both mixer and WebUI docs.

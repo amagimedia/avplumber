@@ -6,6 +6,7 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 [![192-input mixer: Program/Preview and dirty Program with four downstream keys](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo-poster.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
 [Watch the 20-second demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
+[WebGL graph demo and zoom levels](https://amagimedia.github.io/avplumber/) ·
 [MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-tbar-retina-20261028-30fps.mp4) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
 [Configuration](docs/config.md) · [Run manually](docs/guide.md)
@@ -23,6 +24,17 @@ and zero packet gaps; all 599 measured ticker steps advance by exactly four pixe
 
 Setup counts the 188 scene sources separately from the keys. This documentation recording
 does not refresh the historical [capacity measurements](docs/capacity.md).
+
+### Inspect the 192-input graph
+
+The [WebGL viewer demo](https://amagimedia.github.io/avplumber/) follows the same
+192-input workload from the whole show down to individual processing nodes. Its
+[four zoom-level screenshots](https://amagimedia.github.io/avplumber/#zoom) and
+24-second video show 999 nodes and 5,378 connected queues captured on 2026-10-29.
+The viewer replays recorded telemetry at 2× Retina scale and 30 fps; graph counts
+belong to this capture, independently of older architecture or capacity reports.
+See the [WebUI documentation](../../tools/web-ui/README.md) to connect it to your
+own mixer. The portable L4 deployment exposes it through the controls' **Graph** link.
 
 ## Run
 

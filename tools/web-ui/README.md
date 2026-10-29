@@ -12,6 +12,23 @@ A WebGL graph viewer built with Sigma.js, in the mixer operator page's look, for
 It is a viewer: it cannot change, start, stop, add or delete anything on an
 instance (see [Read-only bridge and network access](#read-only-bridge-and-network-access)).
 
+## 192-input demo
+
+[![The Sigma.js viewer showing all 192 inputs, Program and AUX buses](https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-overview-20261029.png)](https://amagimedia.github.io/avplumber/)
+
+[Watch the 24-second demo](https://amagimedia.github.io/avplumber/) ·
+[Four zoom-level screenshots](https://amagimedia.github.io/avplumber/#zoom) ·
+[Download MP4](https://github.com/amagimedia/avplumber/releases/download/webui-demo-media-2026-10/webgl-192-zoom-20261029-30fps.mp4) ·
+[Run the mixer](../../demos/mixer/README.md)
+
+The actual viewer renders the running 192-input, 1080p30 L4 mixer's captured topology
+and telemetry: 999 nodes and 5,378 connected queues. Follow Overview → Groups → Nodes →
+Details, then inspect a browser source's DMA-BUF-to-CUDA node and its full parameters.
+Captured 2026-10-29 and replayed at 3200×1800, 2× Retina scale and fixed 30 fps.
+This is a UI recording, not a live connection or a new performance benchmark.
+The [capture report](https://amagimedia.github.io/avplumber/demos/webui/docs/capture-20261029.json)
+records the source revision, workload and rendering method.
+
 ## Pages
 
 The top bar picks the instance and one of three pages; `#queues` and `#nodes` in the URL open the table pages.
