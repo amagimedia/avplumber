@@ -27,13 +27,16 @@ export MIXER_WEBUI_URL=http://127.0.0.1:22222
 export MIXER_RECIPE=/media/demo.json
 export MIXER_MEDIA_DIR="${MIXER_MEDIA_DIR:-$repo/media}"
 export MIXER_INITIAL_SETTINGS="${MIXER_INITIAL_SETTINGS:-$here/settings.json}"
-export MIXER_AUTH_REALM=off
-if [[ -n "${MIXER_HTPASSWD:-}" ]]; then
-    [[ -f "$MIXER_HTPASSWD" ]] || { echo "MIXER_HTPASSWD must name an existing file" >&2; exit 2; }
-    export MIXER_AUTH_REALM=Mixer
-fi
+# nginx on MIXER_PUBLIC_PORT is the only way in; the services behind it listen on loopback.
+export MIXER_HTTP_BIND=127.0.0.1
 if [[ $# == 0 ]]; then
     echo "Usage: $0 {build|up -d|down|logs -f|config|...}" >&2
+    exit 2
+fi
+# The proxy serves the mixer's control pages, so no command that starts it runs without a password file.
+if [[ $1 =~ ^(up|start|restart)$ && ! -f "${MIXER_HTPASSWD:-}" ]]; then
+    echo "stack.sh: set MIXER_HTPASSWD in $here/.env to an existing htpasswd file, for example" \
+        "'htpasswd -Bc <path> <user>' then 'chmod 644 <path>' (README.md)" >&2
     exit 2
 fi
 if [[ $1 == up ]] && command -v nvidia-smi >/dev/null; then

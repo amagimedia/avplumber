@@ -801,7 +801,13 @@ public:
             rest_.setBaseURL(params["url"].get<std::string>());
         }
         if (params.count("interval")) {
-            interval_ms_ = static_cast<AVTS>(params["interval"].get<double>() * 1000.0);
+            const double interval_s = params["interval"].get<double>();
+            // mainloop() aligns sends with `% interval_ms_`: 0 ms would be a division by zero.
+            // The upper bound keeps the cast to AVTS defined (NaN fails both comparisons).
+            if (!(interval_s >= 0.001 && interval_s <= 86400.0)) {
+                throw Error("stats.subscribe: interval must be between 0.001 and 86400 seconds, got " + params["interval"].dump());
+            }
+            interval_ms_ = static_cast<AVTS>(interval_s * 1000.0);
         }
         if (params.count("max_age")) {
             history_max_age_ = params["max_age"];

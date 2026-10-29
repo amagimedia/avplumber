@@ -112,7 +112,8 @@ qualify transitions, source repeats/skips and GPU waits alongside CPU savings.
 
 Run `python -m pyplumber.mixer.gui --port 7777`: `/` controls the mixer and
 `/wall` shows its outputs. Both use `pyplumber/mixer/gui/assets/`; neither needs
-`demos/`. `--preview-base /preview/` supports a reverse-proxied Janus player.
+`demos/`. `--preview-base /preview/` supports a reverse-proxied Janus player,
+`--graph-url /graph/` links the controls to a reverse-proxied [web UI](../tools/web-ui/README.md).
 The optional terminal client is `python -m pyplumber.mixer.gui.tui`.
 
 Embed the same server in another application:

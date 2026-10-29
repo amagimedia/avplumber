@@ -117,8 +117,9 @@ services:
     volumes:
       - wayland-runtime:/run/avp-wayland
       - dma-browser-sockets:/tmp/dma-page
+    # The REST API opens and drives browser windows; host-network consumers reach it on loopback.
     ports:
-      - "${DMA_BROWSER_REST_PORT:-9009}:9009"
+      - "127.0.0.1:${DMA_BROWSER_REST_PORT:-9009}:9009"
 
   cuda-consumer:
     image: ${AVPLUMBER_IMAGE:-avplumber:local}

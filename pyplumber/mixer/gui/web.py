@@ -349,14 +349,18 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(bridge: MixerBridge, bind: str, port: int, setup: SetupController | None = None, host_stats: HostStats | None = None,
           preview_base: str | None = None, price: dict | None = None, *, gpu: GpuTelemetry | None = None,
-          recent: RecentCounts | None = None, browser_cpu: BrowserCpuStats | None = None) -> ThreadingHTTPServer:
+          recent: RecentCounts | None = None, browser_cpu: BrowserCpuStats | None = None,
+          graph_url: str = "") -> ThreadingHTTPServer:
     """`preview_base`: where the page's players load from, when not port 8080 of the page's host.
     Normalized here, so every caller's page carries a base the player resolves its files against.
+    `graph_url`: where the read-only graph view (tools/web-ui) is, linked from the page's top bar.
     `setup` owns application-specific input/settings policy. `gpu` may be shared
     with another server; when omitted, this server creates one cached sampler. `browser_cpu` polls
     the browser service's CPU figures for the page."""
     preview_base = normalize_preview_base(preview_base or "")
     config: dict = {"preview_base": preview_base} if preview_base else {}
+    if graph_url:
+        config["graph_url"] = graph_url
     if setup:
         config["setup"] = True
     if price:
@@ -379,6 +383,9 @@ def parse_args(argv: list[str] | None = None, *, configure=None) -> argparse.Nam
     parser.add_argument("--preview-base", nargs="?", const="", default="",
                         help="Where the page's players load from: a path on the page's own origin, such as /preview/ "
                              "behind a reverse proxy, or a URL (default: port 8080 of the page's host)")
+    parser.add_argument("--graph-url", default=os.environ.get("MIXER_GRAPH_URL", ""),
+                        help="Where the AVPlumber graph view is, a path on the page's own origin such as /graph/ "
+                             "or a URL; the page links to it. Default: no link. Env: MIXER_GRAPH_URL")
     parser.add_argument("--transition", choices=("cut", "fade", "wipe"),
                         help="Override the page's initial transition without changing the running mixer")
     parser.add_argument("--compute-price", type=Path, default=os.environ.get("MIXER_COMPUTE_PRICE") or None,
@@ -425,7 +432,8 @@ def main(argv: list[str] | None = None, *, configure=None, setup_factory=None) -
     if args.critical_nice:
         CriticalNice(mixer_pid, args.critical_nice).start()
     server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats,
-                   preview_base=args.preview_base, price=price, recent=recent, browser_cpu=browser_cpu)
+                   preview_base=args.preview_base, price=price, recent=recent, browser_cpu=browser_cpu,
+                   graph_url=args.graph_url)
     print(f"mixer web UI on http://{args.bind}:{args.http_port} "
           f"controlling {args.mixer} at {args.host}:{args.port}", flush=True)
     def stop(_signum, _frame):

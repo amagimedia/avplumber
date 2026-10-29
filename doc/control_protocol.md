@@ -1,6 +1,8 @@
 ## Control protocol
 Control protocol loosely follows [MVCP](https://www.mltframework.org/docs/mvcp/).
 
+The server listens on `127.0.0.1` unless started with `--control-bind` (see [Control methods](../README.md#control-methods)). It has no authentication.
+
 On new connection, server (avplumber) sends a line: `100 VTR READY`
 
 Client issues a command followed by arguments separated by spaces and ending with the new line character. The last argument may contain spaces.
@@ -250,7 +252,7 @@ Subscribe to statistics. JSON object structure:
 {
   "url":"",         // URL to put statistics using HTTP POST. Empty to write them to console.
   "name":"qwerty",  // opaque
-  "interval":1,     // refresh interval, in seconds
+  "interval":1,     // refresh interval, in seconds, from 0.001 to 86400; other values are rejected with 500 ERROR
   "streams":{
     "audio":[
       {

@@ -50,7 +50,10 @@ private:
 public:
     AVPlumber();
     ~AVPlumber();
-    void enableControlServer(const uint16_t tcp_port);
+    // Loopback only: the control protocol has no authentication. Pass "0.0.0.0" (or "::")
+    // only where other hosts or a container port mapping must reach the port.
+    static constexpr const char* DEFAULT_CONTROL_BIND = "127.0.0.1";
+    void enableControlServer(const uint16_t tcp_port, const std::string& bind_address = DEFAULT_CONTROL_BIND);
     void registerWithWebUI(const std::string& webui_api_url, const std::string& instance_name = "", const std::string& log_file = "");
     ControlImpl* controlImpl() { return impl_; }
     std::shared_ptr<NodeManager> manager();

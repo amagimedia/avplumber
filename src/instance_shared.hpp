@@ -8,6 +8,7 @@
 #include <string>
 #include <functional>
 #include <type_traits>
+#include <utility>
 
 class InstanceData;
 
@@ -100,17 +101,24 @@ private:
     static std::unordered_map<const InstanceData*, std::unordered_map<std::string, std::shared_ptr<Object>>> objects_;
     static std::mutex busy_;
 
-    static std::shared_ptr<Object>& find(const InstanceData &instance, const std::string id) {
+    // "@name" is a global object (stored under nullptr), any other id belongs to the instance.
+    static std::pair<const InstanceData*, std::string> resolve(const InstanceData &instance, const std::string &id) {
         if (id.length()<1) {
             throw Error("too short shared object id: " + id);
         }
         bool is_global = id[0]=='@';
-        const InstanceData* instance_ptr = is_global ? nullptr : &instance;
         std::string object_id = is_global ? id.substr(1) : id;
         if (is_global && object_id.length()<1) {
             throw Error("too short global object id: " + id);
         }
-        
+        return {is_global ? nullptr : &instance, object_id};
+    }
+    static std::shared_ptr<Object>& find(const InstanceData &instance, const std::string id) {
+        // not a structured binding: C++17 lambdas cannot capture one
+        const auto resolved = resolve(instance, id);
+        const InstanceData* instance_ptr = resolved.first;
+        const std::string &object_id = resolved.second;
+
         // we need to track created objects in InstanceSharedObjectsDestructors,
         // so we track inner maps as their destruction will also destroy all objects inside.
         // let's add the destructor to InstanceSharedObjectsDestructors once per inner map.
@@ -131,8 +139,7 @@ public:
         if (!r) {
             r = SharedConstructorHelper::tryImplicitCreate<Object>(id);
             if constexpr (std::is_base_of_v<IShutdownable, Object>) {
-                bool is_global = !id.empty() && id[0] == '@';
-                const InstanceData* instance_ptr = is_global ? nullptr : &instance;
+                const InstanceData* instance_ptr = resolve(instance, id).first;
                 std::weak_ptr<Object> wptr = r;
                 InstanceSharedObjectsDestructors::addPreShutdownHook(instance_ptr, [wptr] {
                     if (auto p = wptr.lock()) p->shutdown();
@@ -140,6 +147,15 @@ public:
             }
         }
         return r;
+    }
+    // Like get(), but never creates the object (nor an empty slot for it): nullptr when absent.
+    static std::shared_ptr<Object> getIfExists(const InstanceData &instance, const std::string &id) {
+        std::unique_lock<decltype(busy_)> lock(busy_);
+        const auto [instance_ptr, object_id] = resolve(instance, id);
+        auto inner = objects_.find(instance_ptr);
+        if (inner == objects_.end()) return nullptr;
+        auto entry = inner->second.find(object_id);
+        return entry == inner->second.end() ? nullptr : entry->second;
     }
     enum class PolicyIfExists {
         Overwrite,

@@ -32,6 +32,7 @@ int main(int argc, char **argv) {
 
     std::string script_path;
     uint16_t tcp_port;
+    std::string control_bind;
     std::string log_path;
     std::string webui_api_url;
     std::string instance_name;
@@ -39,6 +40,7 @@ int main(int argc, char **argv) {
 
     args.Var(script_path, 's', "script", std::string(""), "Execute commands from this file");
     args.Var(tcp_port, 'p', "port", uint16_t(0), "Port to listen on, for commands (0 to disable)");
+    args.Var(control_bind, 'b', "control-bind", std::string(AVPlumber::DEFAULT_CONTROL_BIND), "Address the command port listens on; the protocol has no authentication, so 0.0.0.0 exposes it to the network");
     args.Var(log_path, 'l', "logfile", std::string(""), "Write messages to this file (does not affect libav messages)");
     args.Var(webui_api_url, 'w', "webui-api", std::string(""), "Web UI server API endpoint URL for auto-registration (e.g., http://localhost:22222)");
     args.Var(instance_name, 'n', "instance-name", std::string(""), "Instance name for web UI registration");
@@ -58,7 +60,7 @@ int main(int argc, char **argv) {
     avp_ptr = std::make_shared<AVPlumber>();
     AVPlumber &avp = *avp_ptr;
     avp.setLogFile(log_path);
-    avp.enableControlServer(tcp_port);
+    avp.enableControlServer(tcp_port, control_bind);
     if (!webui_api_url.empty()) {
         avp.registerWithWebUI(webui_api_url, instance_name, log_path);
     }
