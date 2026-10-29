@@ -155,6 +155,6 @@ INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["generated_decode"] = {
 # These bounds and scheduling settings are part of the measured source capacities.
 # Setup Apply must generate the same runtime as the qualified show.
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["canvas"] = {
-    "raw_upload": "resident", "input_poll_ms": 8, "aux_input_poll_ms": 8,
+    "raw_upload": "resident", "input_poll_ms": 16, "aux_input_poll_ms": 16,
     "source_fan_out": "event_loop", "decoded_frames_ahead": 1, "raw_pool_frames": 10,
 }

@@ -369,6 +369,40 @@ void rational_clock_and_reference_lifetime() {
     CHECK(owner.expired());
 }
 
+void decisions_borrow_frames_until_commit_including_repeats() {
+    // A move-only frame makes an accidental ownership copy a compile error. This also
+    // exercises a decision retained under backpressure and the held-frame repeat path.
+    const avp::mixer::TickGrid rate(av::Rational(30, 1));
+    avp::mixer::Playout<std::unique_ptr<int>> mix(2, rate, 0.0,
+                                               avp::mixer::TimestampMode::Presentation);
+    mix.push(0, std::make_unique<int>(42), 0);
+    const auto first = mix.prepare(0);
+    CHECK(first && first->frames[0] && !first->frames[1]);
+    CHECK(**first->frames[0] == 42);
+    const auto pixels = first->frames[0]->get();
+    mix.discardSuperseded(rate.time(100));
+    CHECK(mix.prepare(rate.time(100)) == first);
+    CHECK(first->frames[0]->get() == pixels);
+    bool rejected = false;
+    try { mix.resetInput(0); }
+    catch (const std::logic_error&) { rejected = true; }
+    CHECK(rejected && **first->frames[0] == 42);
+    mix.commit();
+    const auto repeated = mix.prepare(rate.time(1));
+    CHECK(repeated && repeated->frames[0]->get() == pixels);
+    mix.commit();
+    CHECK(mix.stats(0).repeats == 1);
+    mix.push(0, std::make_unique<int>(43), rate.time(2));
+    mix.push(1, std::make_unique<int>(99), rate.time(2));
+    const auto next = mix.prepare(rate.time(2));
+    CHECK(next && **next->frames[0] == 43 && **next->frames[1] == 99);
+    mix.commit();
+    mix.resetInput(0);
+    const auto reset = mix.prepare(rate.time(3));
+    CHECK(reset && !reset->frames[0] && **reset->frames[1] == 99);
+    mix.commit();
+}
+
 void invalid_parameters_fail_early() {
     for (double latency : {-1.0, std::numeric_limits<double>::infinity(),
                            std::numeric_limits<double>::quiet_NaN()}) {
@@ -469,7 +503,11 @@ void prewarmed_slots_share_frame_ids_and_output_ticks() {
         if (tick >= 37) {
             auto pvw = preview.prepare(rate.time(tick) + 33333334, true);
             CHECK(pvw && pvw->index == pgm->index);
-            CHECK(pvw->frames == pgm->frames);
+            CHECK(pvw->frames.size() == pgm->frames.size());
+            for (size_t i = 0; i < pgm->frames.size(); ++i) {
+                CHECK(bool(pvw->frames[i]) == bool(pgm->frames[i]));
+                CHECK(!pgm->frames[i] || *pvw->frames[i] == *pgm->frames[i]);
+            }
             preview.commit();
         }
         program.commit();
@@ -871,6 +909,7 @@ void discarding_superseded_frames_never_changes_what_is_drawn() {
 
 int main(int argc, char **argv) {
     const std::pair<const char *, void (*)()> cases[] = {
+        {"decisions_borrow_frames_until_commit_including_repeats", decisions_borrow_frames_until_commit_including_repeats},
         {"prewarm_activation_keeps_the_reset_threshold", prewarm_activation_keeps_the_reset_threshold},
         {"input_offset_selects_a_late_source_one_tick_later", input_offset_selects_a_late_source_one_tick_later},
         {"staged_input_readiness_preserves_old_output", staged_input_readiness_preserves_old_output},

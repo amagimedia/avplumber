@@ -616,7 +616,7 @@ public:
 		if (!decision)
 			return;
 		for (size_t input = 0; input < held_.size(); ++input) {
-			held_valid_[input] = decision->frames[input].has_value();
+			held_valid_[input] = decision->frames[input] != nullptr;
 			if (held_valid_[input])
 				held_[input] = *decision->frames[input];
 		}

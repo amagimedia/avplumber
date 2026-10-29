@@ -377,7 +377,8 @@ public:
                 }
                 if (frameUsable(*frame)) {
                     requireDrawable(*frame);
-                    playout_->push(i, *frame, frame->pts().timestamp({1, 1000000000}));
+                    const auto timestamp = frame->pts().timestamp({1, 1000000000});
+                    playout_->push(i, std::move(*frame), timestamp);
                 }
                 source_edges_[i]->pop();
             }

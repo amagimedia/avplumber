@@ -138,6 +138,7 @@ public:
         do {
             iter++;
             AVTS iter_begin = wallclock.pts();
+            if (!ticks) now_ts_ = rescaleTS({iter_begin, wallclock.timeBase()}, timebase_).timestamp();
 
             process_next = false;
             bool emit = true;
@@ -316,10 +317,12 @@ public:
                     if (!marker) {
                         setLastFrame(dataptr);
                     }
-                    if (!ticks) {
-                        // process next packet
+                    if (!ticks && iter >= 8) {
+                        // Bound catch-up work so other sources on the loop get a turn.
                         this->yieldAndProcess();
                     } else {
+                        // Inspect the next frame now: normally it needs a timer or an
+                        // input wait, not another callback on this same event loop.
                         process_next = true;
                     }
                 }

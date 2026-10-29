@@ -56,8 +56,10 @@ int tableFilter(const LayerSpec &layer) {
 
 } // namespace
 
-CudaRectDraw::CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int max_layers)
-    : hwaccel_(std::move(hw)), canvas_(canvas), max_layers_(max_layers) {}
+CudaRectDraw::CudaRectDraw(std::shared_ptr<HWAccelDevice> hw, Canvas canvas, int max_layers,
+                           TableCompletion table_completion)
+    : hwaccel_(std::move(hw)), canvas_(canvas), max_layers_(max_layers),
+      table_completion_(table_completion) {}
 
 CudaRectDraw::~CudaRectDraw() { unload(); }
 
@@ -282,6 +284,11 @@ void CudaRectDraw::waitForProducer(const AVFrame *src, CUstream stream) {
 // waits instead of letting the kernel read a half-written table.
 void CudaRectDraw::waitForTable() {
     if (!table_in_use_) return;
+    if (table_completion_ == TableCompletion::Stream) {
+        // Also covers a previous draw that threw after uploading or launching.
+        synchronize(table_stream_);
+        return;
+    }
     if (AVP_CHECK_CU(cuEventSynchronize(table_done_)))
         throw Error("cuda_rect_overlay: waiting for the previous draw's rect table failed");
     table_in_use_ = false;
@@ -290,11 +297,20 @@ void CudaRectDraw::waitForTable() {
 // After each upload of the table and each launch that reads it, so a throw between the two still
 // leaves the upload covered.
 void CudaRectDraw::tableQueued(CUstream stream) {
-    if (!table_done_ && AVP_CHECK_CU(cuEventCreate(&table_done_, CU_EVENT_DISABLE_TIMING)))
-        throw Error("cuda_rect_overlay: cannot create the rect table event");
-    if (AVP_CHECK_CU(cuEventRecord(table_done_, stream)))
-        throw Error("cuda_rect_overlay: cannot record the rect table event");
+    if (table_completion_ == TableCompletion::Event) {
+        if (!table_done_ && AVP_CHECK_CU(cuEventCreate(&table_done_, CU_EVENT_DISABLE_TIMING)))
+            throw Error("cuda_rect_overlay: cannot create the rect table event");
+        if (AVP_CHECK_CU(cuEventRecord(table_done_, stream)))
+            throw Error("cuda_rect_overlay: cannot record the rect table event");
+    }
+    table_stream_ = stream;
     table_in_use_ = true;
+}
+
+void CudaRectDraw::synchronize(CUstream stream) {
+    if (AVP_CHECK_CU(cuStreamSynchronize(stream)))
+        throw Error("cuda_rect_overlay: cuStreamSynchronize failed");
+    if (table_stream_ == stream) table_in_use_ = false;
 }
 
 int CudaRectDraw::fillTable(CUstream stream, const std::vector<DrawOp> &ops, const AVFrame *canvas, TableKinds &kinds) {
