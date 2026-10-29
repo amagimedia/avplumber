@@ -14,7 +14,7 @@
 
 <!-- The graph card; in fullscreen the inspector floats over it. -->
 <div class="panel">
-  <GraphView nodes={c.nodes} queues={c.queues} selected={c.selected} on:select={select}>
+  <GraphView nodes={c.nodes} queues={c.queues} selected={c.selected} compose={c.compose} on:select={select}>
     <svelte:fragment slot="floating">
       <Inspector nodes={c.nodes} queues={c.queues} selected={c.selected} on:select={select} />
     </svelte:fragment>

@@ -10,6 +10,7 @@
   export let nodes = [];
   export let queues = [];
   export let selected = null;  // {kind: 'node' | 'group', id, queue?} or null
+  export let compose = null;   // the mixer's program compose time: {ms, budgetMs, maxMs} or null
 
   const dispatch = createEventDispatcher();
   const LEVEL_NAMES = ['Overview', 'Groups', 'Nodes', 'Details'];
@@ -133,6 +134,7 @@
       {/if}
       <span><b>{model.nodeCount.toLocaleString()}</b> nodes</span><span><b>{model.edges.length.toLocaleString()}</b> queues</span>
       <span data-tip="Frames handed from node to node per second, summed over all queues"><b>{fmtK(throughput)}</b> frames/s</span>
+      {#if compose}<span data-tip="Time the mixer takes to compose one program frame (CPU issue and GPU work), mean over the last 2 s, against the frame period; worst frame since start {compose.maxMs.toFixed(1)} ms">compose <b>{compose.ms.toFixed(1)}</b> / {compose.budgetMs.toFixed(1)} ms</span>{/if}
     </div>
     {#if !noGl}
       <div class="gv-zoomctl">

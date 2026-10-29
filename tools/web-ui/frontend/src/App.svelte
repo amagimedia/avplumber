@@ -336,6 +336,28 @@
     nodeObjects = {};
   }
 
+  // Program compose time from the mixer's own tick timing (mixer.status, playout.<program slot>.timing.draw): the mean
+  // over the frames drawn since the previous poll, against the frame period. Only for graphs with a mixer.
+  $: mixerName = (Array.isArray(nodes) ? nodes : []).find((n) => n?.type === 'mixer_compositor' && n.params?.mixer)?.params.mixer || null;
+  let compose = null, composePrev = null;
+  async function refreshCompose() {
+    if (!mixerName || !wsConnected || !currentInstanceId) { compose = null; return; }
+    const generation = instanceGeneration;
+    try {
+      const resp = await sendCommand(`mixer.status ${mixerName}`, `mixer-status-${Date.now()}`);
+      if (generation !== instanceGeneration) return;
+      const status = JSON.parse(resp.body || '{}'), slot = status.pgm_slot, draw = status.playout?.[slot]?.timing?.draw;
+      if (!draw?.count) { compose = null; return; }
+      const now = { slot, count: draw.count, sum: draw.mean_ms * draw.count };
+      const prev = composePrev?.slot === slot && now.count > composePrev.count ? composePrev : null;  // not across a cut or a counter reset
+      compose = { ms: prev ? (now.sum - prev.sum) / (now.count - prev.count) : draw.mean_ms,
+                  budgetMs: status.playout[slot].timing.period_ms, maxMs: draw.max_ms };
+      composePrev = now;
+    } catch {
+      if (generation === instanceGeneration) compose = null;
+    }
+  }
+
   // One node.object.get reply as the Objects panel shows it; null when the instance changed meanwhile.
   async function fetchNodeObject(nodeName, objName) {
     const generation = instanceGeneration;
@@ -409,6 +431,7 @@
       if (!autoRefreshNodeObjects) return;
       refreshNodeObjects();
     }, nodeObjectsRefreshMs);
+    const tCompose = setInterval(refreshCompose, 2000);
 
     const tISOs = setInterval(() => {
       if (!autoRefreshISOs) return;
@@ -421,6 +444,7 @@
     return () => {
       clearInterval(t);
       clearInterval(tObjects);
+      clearInterval(tCompose);
       clearInterval(tISOs);
       window.removeEventListener('hashchange', onHash);
     };
@@ -549,6 +573,7 @@
     queues,
     selected,
     setSelected,
+    compose,
 
     objectNamesByType,
     nodeObjects,
