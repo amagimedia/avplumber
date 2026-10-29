@@ -54,6 +54,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sources", type=int, choices=(2, 64, 96), default=2,
                         help="Use tiny independent decoders to exercise the wide aux mask")
+    parser.add_argument("--full-rate", action="store_true", help="Run AUX at the 60 fps canvas rate")
+    parser.add_argument("--input-poll-ms", type=int, default=0, help="Program/AUX input polling interval; zero wakes per frame")
     parser.add_argument("--webui", default="http://127.0.0.1:22222", help="existing WebUI backend")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="avp-aux-") as directory:
@@ -72,9 +74,11 @@ def main():
         sources[1:1] = [{**sources[0], "id": f"unused{i}"} for i in range(args.sources - 2)]
         for source in sources:
             source["independent"] = True
-        config = {"canvas": {"width": 320, "height": 480, "fps": 60}, "sources": sources, "scenes": scenes,
+        config = {"canvas": {"width": 320, "height": 480, "fps": 60, "input_poll_ms": args.input_poll_ms,
+                             "aux_input_poll_ms": args.input_poll_ms},
+                  "sources": sources, "scenes": scenes,
                   "initial_scene": "red", "renditions": [{"id": "pgm", "target": "janus", "port": 15004}],
-                  "aux_buses": [{"id": "mv", "scenes": ["red", "blue", "repeat", None, None, None, None, None],
+                  "aux_buses": [{"id": "mv", "full_rate": args.full_rate, "scenes": ["red", "blue", "repeat", None, None, None, None, None],
                                  "renditions": [{"id": "monitor", "port": 15008}]}]}
         path = root / "mixer.json"
         path.write_text(json.dumps(config))

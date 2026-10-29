@@ -1520,7 +1520,7 @@ def test_setup_keeps_capacity_profile_runtime_bounds(tmp_path, fps, depth, chrom
     assert cfg.raw_pool_frames == 10
     assert cfg.raw_upload == "resident"
     assert cfg.source_fan_out == "event_loop"
-    assert cfg.input_poll_ms == cfg.aux_input_poll_ms == 8
+    assert cfg.input_poll_ms == cfg.aux_input_poll_ms == 16
     assert cfg.fps == fps
     assert cfg.working_format == ("nv12" if depth == 8 else "p010le" if chroma == "420" else "p210le")
 
