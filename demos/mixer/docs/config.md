@@ -54,6 +54,11 @@ The program is composited once. Each rendition adds an encode. With no rendition
 | `tonemap_param` | `0` | operator knee in reference-white units; `0` = operator default (0.3 mobius/reinhard, 1.8 gamma). mobius must be below 1.0; `0.9` keeps 90% of SDR white untouched |
 | `dpb_size` | `0` | NVENC reference frames kept, 0–16; `0` lets NVENC choose. Without B-frames `1` is enough and frees the other reference surfaces; it may cost quality at low bitrates, so measure before setting it on a program output. Aux monitors default to `1` |
 
+Janus RTP uses 1200-byte UDP packets and a pacing rate of three times the encoder bitrate.
+Literal loopback destinations allow an initial burst of 24 packets (28.8 kB); other addresses
+and hostnames allow four. The larger local allowance reduces timer wakes with many outputs,
+while longer keyframe bursts remain paced.
+
 ## sources
 
 One source ID opens one decoder or browser window; scenes and aliases reuse it. Repeated locations require `independent: true` on every declaration. Browser import is provided by the [shared DMA-BUF integration](../../../doc/dmabuf.md). CUarray requires compatible FFmpeg/consumers and a fixed surface budget; it has no copy fallback or decoder auto-restart. See the [CUarray cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/nvdec-cuarray.html).
