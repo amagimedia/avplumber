@@ -303,10 +303,22 @@
     });
   }
 
+  // The Objects panel follows the selection: the selected node, or the nodes of the selected group, that expose objects.
   $: nodesSupportingObjects =
-    Array.isArray(nodes) && nodes.length
-      ? nodes.filter((n) => n && n.type && objectNamesByType[n.type] && n.name)
+    Array.isArray(nodes) && selected
+      ? nodes.filter((n) => n && n.name && objectNamesByType[n.type] &&
+          (selected.kind === 'node' ? n.name === selected.id : String(n.params?.group || '') === selected.id))
       : [];
+  // A new selection shows its objects at once instead of at the next tick.
+  let objectsFor = '';
+  $: {
+    const key = nodesSupportingObjects.map((n) => n.name).join(',');
+    if (key !== objectsFor) {
+      objectsFor = key;
+      clearNodeObjects();
+      refreshNodeObjects();
+    }
+  }
 
   function refreshNodes() {
     sendCommand('nodes.json', 'nodes.json').catch(() => {});
@@ -345,7 +357,8 @@
       if (generation !== instanceGeneration) return null;
       const msg =
         err && typeof err === 'object' ? err.error || err.statusLine || String(err) : String(err);
-      return { ts: Date.now(), ok: false, error: msg };
+      // A declared node the engine has not created (e.g. the wipe-clip loader before a clip loads) has no objects yet.
+      return { ts: Date.now(), ok: false, error: msg, off: /Node not created/.test(msg) };
     }
   }
 
@@ -359,7 +372,7 @@
       return;
     }
 
-    const generation = instanceGeneration;
+    const generation = instanceGeneration, forKey = objectsFor;
     nodeObjectsInFlight = true;
     try {
       // One request at a time, applied together: a mixer has hundreds of objects, and every change of
@@ -367,7 +380,7 @@
       const next = {};
       for (const n of nodesSupportingObjects) {
         for (const objName of objectNamesByType[n.type] || []) {
-          const entry = await fetchNodeObject(n.name, objName);
+          const entry = n.working === false ? { ts: Date.now(), ok: false, off: true } : await fetchNodeObject(n.name, objName);
           if (!entry || generation !== instanceGeneration) return;
           (next[n.name] ||= {})[objName] = entry;
         }
@@ -375,6 +388,7 @@
       nodeObjects = next;
     } finally {
       nodeObjectsInFlight = false;
+      if (forKey !== objectsFor) refreshNodeObjects();
     }
   }
 
