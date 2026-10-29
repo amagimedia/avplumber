@@ -1,12 +1,17 @@
 # avplumber web-ui
 
-A web UI made in Node & Svelte, for viewing:
+A web UI with a Node.js backend and Svelte frontend, for viewing:
+
 * the graph, with grouped navigation and static queue activity indicators
 * queues statistics (fill, pps)
 * node creation-time parameters
 * node objects (`node.object.get`)
 * statistics from instance-shared objects (realtime, sentinel)
 * stream analysis statistics from `stats.subscribe`
+
+The new [Sigma.js/WebGL graph viewer](https://github.com/amagimedia/avplumber/blob/webui-graph-view/tools/web-ui/README.md#graph)
+is available on `webui-graph-view`. It adds zoom-dependent graph detail and dedicated
+Queues and Nodes pages. That renderer is not yet part of `develop`.
 
 Graph arrows show direction. Blue indicates observed dequeue activity; gray indicates idle or unknown activity. Amber indicates a queue accumulating or not draining across consecutive samples, which may be intentional buffering. Red indicates newly observed drops. The small fill marker shows current occupancy, or the fullest queue in a grouped connection; hover shows rates and affected queue counts. Grouped rates are totals in items/second.
 
@@ -18,13 +23,18 @@ When the avplumber process behind an open instance restarts under the same host:
 
 ## How to use
 
-```
-cd frontend
+From the repository root:
+
+```sh
+cd tools/web-ui
+npm ci
 npm run build
 npm start
 ```
 
-and when starting avplumber, specify `--webui-api` and `--instance-name`. Also, make sure that `--port` is specified, otherwise web UI won't be able to execute necessary commands.
+Open <http://127.0.0.1:22222>. `WEBUI_PORT` changes the listening port.
+When starting avplumber, specify `--webui-api`, `--instance-name` and `--port`;
+the UI needs the engine's control port to query its graph and statistics.
 
 Selecting an instance updates the URL with `?instance=<id>`; share that URL to
 open the same graph. An unavailable instance displays a waiting state instead
