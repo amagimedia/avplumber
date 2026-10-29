@@ -229,6 +229,14 @@ test('instance summary, search and the shared model', () => {
   assert.equal(s.nodes, nodes.length); assert.equal(s.off, 1);
   assert.equal(s.queues, model.edges.length);
   assert.equal(s.dropped, 7); assert.equal(s.dropQueues, 1); assert.equal(s.skipped, 4); assert.equal(s.droppingNow, 0);
+  assert.equal(s.share, 7 / s.moved); assert.equal(s.level, 'ok', 'a few frames lost since start stay green');
+  // the worst queue since the previous sample: under 0.5% green, from 0.5% orange, above 1% red
+  const levelAfter = (dropped, enqueued) => {
+    const m = buildGraphModel({nodes, queues: sample(nodes)});
+    updateQueueStats(m, sample(nodes, {input_9_dec: {dropped_total: dropped, enqueued_total: 3000 + enqueued}}));
+    return summarizeInstance(m).level;
+  };
+  assert.deepEqual([levelAfter(4, 996), levelAfter(6, 994), levelAfter(11, 989)], ['ok', 'warn', 'bad']);
   const hits = search(searchEntries(model), 'aux_aux');
   assert.equal(hits[0].kind, 'group'); assert.equal(hits.length, AUX);
   assert.deepEqual(search(searchEntries(model), 'mixer_comp').map(h => h.id), ['comp', 'mv_comp', 'aux0_comp', 'aux1_comp', 'aux2_comp', 'aux3_comp', 'aux4_comp', 'aux5_comp', 'aux6_comp', 'aux7_comp'],

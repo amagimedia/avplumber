@@ -106,4 +106,4 @@
 .gv-tile span { font-size: 11px; color: var(--muted); }
 .gv-tile small { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; }
 .gv-tile.hero b { color: var(--pvw); }
-.gv-tile.bad b { color: var(--pgm); }
+.gv-tile.ok b { color: var(--pvw); } .gv-tile.warn b { color: var(--accent); } .gv-tile.bad b { color: var(--pgm); }

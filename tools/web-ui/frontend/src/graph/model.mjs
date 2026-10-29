@@ -29,6 +29,7 @@ export const SOURCE_KINDS = [['dec_video', 'NVDEC'], ['ipc_dmabuf_source', 'brow
 const NB_FANOUT = 'one_to_many_nb';  // drops by design when a consumer still holds a newer frame
 const NEAR_FULL = 0.9;               // average fill of capacity
 const TILE_DROP_SHARE = 0.01;        // a group tile turns red only when a queue lost more than this share of its frames
+const DROP_WARN_SHARE = 0.005;       // the instance's drop tile turns orange from this share, red above TILE_DROP_SHARE
 
 const refs = v => typeof v === 'string' ? [v] : Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
 const groupOf = n => String(n.params?.group || 'ungrouped');
@@ -368,16 +369,24 @@ export const groupInputs = (model, gid) => {
   return (g?.nodes || []).flatMap(n => nodeInputs(model, n)).filter(q => model.meta.get(q.a).g !== gid);
 };
 
+// Drop health: the share of frames lost between nodes since start (moved = frames offered to the queues), and a level
+// from the worse of that share and the share the worst queue lost since the previous sample.
 export function summarizeInstance(model) {
-  const s = {nodes: model.nodeCount, off: 0, queues: model.edges.length, flowing: 0, dropped: 0, dropQueues: 0, skipped: 0, full: 0, droppingNow: 0};
+  const s = {nodes: model.nodeCount, off: 0, queues: model.edges.length, flowing: 0, dropped: 0, dropQueues: 0, skipped: 0, full: 0,
+    droppingNow: 0, moved: 0, share: 0, level: 'ok'};
+  let worstNow = 0;
   for (const m of model.meta.values()) if (!m.w) s.off++;
   for (const q of model.edges) {
     if (q.st !== 'idle') s.flowing++;
     if (q.st === 'full') s.full++;
-    if (q.st === 'drop') s.droppingNow++;
-    if (q.nb) s.skipped += q.dr;
-    else if (q.dr > 0) { s.dropped += q.dr; s.dropQueues++; }
+    if (q.st === 'drop') { s.droppingNow++; worstNow = Math.max(worstNow, q.drD / Math.max(1, (q.enqD || 0) + q.drD)); }
+    if (q.nb) { s.skipped += q.dr; continue; }
+    s.moved += (q.enq || 0) + (q.dr || 0);
+    if (q.dr > 0) { s.dropped += q.dr; s.dropQueues++; }
   }
+  s.share = s.moved ? s.dropped / s.moved : 0;
+  const worst = Math.max(s.share, worstNow);
+  s.level = worst > TILE_DROP_SHARE ? 'bad' : worst >= DROP_WARN_SHARE ? 'warn' : 'ok';
   return s;
 }
 

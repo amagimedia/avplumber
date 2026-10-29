@@ -3,6 +3,8 @@
 export const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
 export const kindClass = k => 's-' + k.toLowerCase();  // a source kind's colour (graph.css)
 export const fmtK = v => v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0);
+export const compact = v => new Intl.NumberFormat('en', {notation: 'compact', maximumFractionDigits: 1}).format(v);
+export const pctText = x => !x ? '0%' : x < 1e-5 ? '<0.001%' : (x * 100).toFixed(x < 1e-3 ? 3 : 2) + '%';
 const fmtAvg = v => String(Math.round(v * 100) / 100);
 
 export const fillPct = q => q.c > 0 ? Math.min(100, q.avg / q.c * 100) : 0;
