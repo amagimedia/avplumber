@@ -30,7 +30,7 @@ function readColors(el) {
   return C;
 }
 
-export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
+export function createGraphStage(els, {onSelect, onLevel}) {
   const {stage, sigma: container, edges: ecv, zones: zonesEl, cards: cardsEl, tip} = els;
   // Colours come from the CSS tokens, read once the stage is in the document: a dock panel is mounted detached.
   const C = {};
@@ -252,16 +252,12 @@ export function createGraphStage(els, {onSelect, onLevel, onFrame}) {
 
   // ---------- frame loop ----------
   const rowPx = () => Math.abs(renderer.graphToViewport({x: 0, y: -1}).y - renderer.graphToViewport({x: 0, y: 0}).y);
-  let t0 = 0, msAvg = 0;
-  renderer.on('beforeRender', () => { t0 = performance.now(); syncColors(); });
+  renderer.on('beforeRender', syncColors);
   renderer.on('afterRender', () => {
     if (!model) return;
     const py = rowPx(), level = py >= LEVELS[3] ? 3 : py >= LEVELS[2] ? 2 : py >= LEVELS[1] ? 1 : 0;
     if (level !== st.level) { st.level = level; onLevel?.(level); refresh(); return; }
     drawCanvas(); layoutHTML(py);
-    const ms = performance.now() - t0;
-    msAvg = msAvg ? msAvg * 0.92 + ms * 0.08 : ms;
-    onFrame?.(msAvg);
   });
 
   // ---------- instant zoom: trackpad pinch, wheel and scroll handled here, applied without animation ----------

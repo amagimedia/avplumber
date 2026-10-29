@@ -5,6 +5,7 @@
   import './graph.css';
   import { graphModel, searchEntries, search } from './model.mjs';
   import { createGraphStage } from './stage.mjs';
+  import { fmtK } from './format.mjs';
 
   export let nodes = [];
   export let queues = [];
@@ -12,11 +13,12 @@
 
   const dispatch = createEventDispatcher();
   const LEVEL_NAMES = ['Overview', 'Groups', 'Nodes', 'Details'];
-  let root, stageEl, sigmaEl, edgesEl, zonesEl, cardsEl, tipEl, msEl, searchEl;
+  let root, stageEl, sigmaEl, edgesEl, zonesEl, cardsEl, tipEl, searchEl;
   let stage = null, shownModel = null, shownVersion = -1, noGl = false;
-  let level = -1, max = false, msText = '';
+  let level = -1, max = false;
 
   $: model = graphModel(nodes, queues);
+  $: throughput = model.edges.reduce((sum, q) => q.kind === 'frame' ? sum + q.pps : sum, 0);
   $: if (stage) sync(model);
   $: if (stage && shownModel) stage.setSelection(selected);
 
@@ -31,7 +33,6 @@
       stage = createGraphStage({stage: stageEl, sigma: sigmaEl, edges: edgesEl, zones: zonesEl, cards: cardsEl, tip: tipEl}, {
         onSelect: s => dispatch('select', s),
         onLevel: l => { level = l; },
-        onFrame: ms => { const t = ms.toFixed(1); if (t !== msText) { msText = t; msEl.textContent = t; } },
       });
     } catch (e) {
       // sigma throws without WebGL (GPU off, locked-down or remote-desktop browsers); its first canvas is already in
@@ -131,7 +132,7 @@
         </div>
       {/if}
       <span><b>{model.nodeCount.toLocaleString()}</b> nodes</span><span><b>{model.edges.length.toLocaleString()}</b> queues</span>
-      {#if !noGl}<span>frame <b bind:this={msEl}>–</b> ms</span>{/if}
+      <span data-tip="Frames handed from node to node per second, summed over all queues"><b>{fmtK(throughput)}</b> frames/s</span>
     </div>
     {#if !noGl}
       <div class="gv-zoomctl">
