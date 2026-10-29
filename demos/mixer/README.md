@@ -9,6 +9,7 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 [WebGL graph demo and zoom levels](https://amagimedia.github.io/avplumber/) ·
 [MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/mixer-192-input-tbar-retina-20261028-30fps.mp4) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
+[Architecture: 1,457 nodes, 5,856 edges](https://amagimedia.github.io/avplumber/demos/mixer/docs/architecture.html) ·
 [Configuration](docs/config.md) · [Run manually](docs/guide.md)
 
 Captured 2026-10-28 on the 192-input develop show: 105 NVDEC videos, 36 browser scene
