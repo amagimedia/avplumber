@@ -69,6 +69,8 @@ services:
     restart: unless-stopped
     environment:
       WEBUI_PORT: ${WEBUI_PORT:-22222}
+      WEBUI_BIND: ${WEBUI_BIND:-127.0.0.1}
+      WEBUI_ALLOWED_HOSTS: ${WEBUI_ALLOWED_HOSTS:-}
       AVPLUMBER_HOST: 127.0.0.1
       AVPLUMBER_PORT: ${REMOTE_CONTROL_PORT:-22422}
       AVPLUMBER_LOGFILE: ${AVP_LOGFILE:-/var/log/avplumber/avplumber.log}

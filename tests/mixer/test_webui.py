@@ -1182,6 +1182,18 @@ def test_the_page_carries_where_the_player_is(client):
         assert CONFIG_SCRIPT % '{"preview_base": "/preview/"}' in get_page(url, "/wall")
 
 
+def test_the_page_links_to_the_graph_view_only_when_told_where_it_is(client, monkeypatch):
+    url, _ = client(FakeBridge())
+    assert CONFIG_SCRIPT % "{}" in get_page(url) and 'id="graph-link"' in get_page(url)
+    url, _ = client(FakeBridge(), graph_url="/graph/")
+    assert CONFIG_SCRIPT % '{"graph_url": "/graph/"}' in get_page(url)
+    monkeypatch.delenv("MIXER_GRAPH_URL", raising=False)
+    assert parse_args([]).graph_url == ""
+    monkeypatch.setenv("MIXER_GRAPH_URL", "/graph/")
+    assert parse_args([]).graph_url == "/graph/"
+    assert parse_args(["--graph-url", "https://graph.example/"]).graph_url == "https://graph.example/"
+
+
 def test_no_player_address_can_end_the_config_script():
     base = "/</script><script>alert(1)</script>/"
     html = page({"preview_base": base}).decode()

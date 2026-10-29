@@ -5,7 +5,7 @@ avplumber is a graph-based real-time processing framework. Graph can be reconfig
 ## Highlights
 
 * [GPU video mixer](demos/mixer/README.md) with Preview/Program, T-bar transitions, per-key DSK fades and AUX monitors. [Watch the 192-input demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/).
-* [Node.js + Svelte WebUI](tools/web-ui/README.md) with live graph and queue statistics. The new [WebGL graph viewer built with Sigma.js](https://github.com/amagimedia/avplumber/blob/webui-graph-view/tools/web-ui/README.md#graph) is available on `webui-graph-view`.
+* [WebGL graph viewer](tools/web-ui/README.md) built with Sigma.js: zoom from grouped inputs to individual nodes, inspect live queue statistics, subscriptions and node parameters.
 * [DMA-BUF input from Chromium](doc/dmabuf.md): import browser graphics into CUDA through EGL, preserving alpha for overlays and keys.
 * [🦀 Rust refactor 🚧](https://github.com/amagimedia/avplumber/tree/rust-dev): the framework and node port is in progress on `rust-dev`.
 * [VOD replay player](demos/replay/README.md) with frame-accurate seeking, scrubbing, variable speed, reverse playback and WebRTC output via Janus. A [Rust version](https://github.com/amagimedia/avplumber/blob/rust-dev/demos/replay-rust/README.md) is also available.
