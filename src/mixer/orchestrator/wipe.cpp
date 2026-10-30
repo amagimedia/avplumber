@@ -5,9 +5,27 @@ namespace avp::mixer {
 
 void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec) {
     if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid wipe duration");
+    const auto check = [&] {
+        if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
+        if (!state_->wipeSubgraph()) throw Error("mixer: wipe requires the wipe subgraph");
+    };
+    std::string decode_group;
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        check();
+        if (actOnTransitionOnAir(scene_name, MixerState::TransitionMode::Wipe)) return;
+        if (!state_->wipeChainStaysRunning()) {
+            // Decoding per take, the previous clip's decoder must stop first, which joins its
+            // threads. Both selectors take the mutex every frame, so wait without it. A wipe
+            // armed but not on air owns that decoder: drop it first, which nothing shows.
+            if (state_->transition_mode == MixerState::TransitionMode::Wipe)
+                interruptTransition(Interruption::Replaced);
+            decode_group = state_->wipe_group_name;
+        }
+    }
+    if (!decode_group.empty()) nodes_->group(decode_group)->stopNodesAndWait();
     std::lock_guard<std::mutex> lock(state_->mutex);
-    if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
-    if (!state_->wipeSubgraph()) throw Error("mixer: wipe requires the wipe subgraph");
+    check();   // another client may have changed the show meanwhile
     if (actOnTransitionOnAir(scene_name, MixerState::TransitionMode::Wipe)) return;
     armWipe(scene_name, wipe_file, duration_sec);
 }
@@ -45,6 +63,7 @@ void MixerOrchestrator::armWipe(const std::string& scene_name, const std::string
                 applyTakeSchedule();
             }
         } else {
+            // wipe() waited for it unlocked; at once now unless another client's wipe started it.
             nodes_->group(state_->wipe_group_name)->stopNodesAndWait();
             const auto previous = edgeLastTsIfExists(nodes_, edgeNameAt(nodes_, state_->wipe_selector_name, "src", 1));
             state_->wipe_first_ns = previous.isValid() ? previous.timestamp({1, 1000000000}) + 1 : 0;
