@@ -93,3 +93,4 @@ for rate editing, NEXT behavior and shortcuts.
 - [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/): implementation and tuning notes.
 - [DMA-BUF integration](../../doc/dmabuf.md): shared browser capture and the GBM shim.
 - [Mixer base API](../../doc/mixer.md): reuse `pyplumber.mixer.build_application` in other applications; no demo imports required.
+- [Audio-follow-video](../../doc/mixer_audio_follow_video.md): the `audio_router_node` signal and `transition_ended`/`transition_progress` protocol; open `audio_mixer` demo: [demos/mixer_audio](../mixer_audio).

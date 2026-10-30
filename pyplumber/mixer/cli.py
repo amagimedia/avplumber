@@ -91,7 +91,7 @@ def _build_input(
         for node in nodes:
             avp.addNode(node)
     else:
-        fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
+        fps_edge, _audio_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop, continuous_loop=True,
                                event_loop=_pacing_loop(index), native_rate=True)
     if not normalize:
@@ -239,7 +239,11 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="frames one browser window may have out at once, 1 to 9 (default 9; "
              "JSON config owns this in --config mode). --browser-ring-size is "
              "the option's earlier name")
-    add("--janus-output", action="store_true", help="Publish the video-only program to Janus over RTP")
+    add("--janus-output", action="store_true",
+        help="Publish program video (and audio_mixer program bus when --audio-router-node is set) to Janus over RTP")
+    add("--audio-router-node", default="", metavar="NAME",
+        help="IInputsObjects node for transition_ended/transition_progress (e.g. audio_mixer); "
+             "with has_audio sources, build_application wires that node")
     add("--janus-host", default=JANUS_DEFAULT_HOST)
     add("--janus-video-port", type=int, default=JANUS_DEFAULT_VIDEO_PORT)
     add("--janus-video-pt", type=int, default=JANUS_DEFAULT_VIDEO_PT)

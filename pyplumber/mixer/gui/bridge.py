@@ -110,6 +110,9 @@ class MixerBridge:
         self._keys_lock = threading.Lock()
         self._keys_at = float("-inf")
         self._keys = {"dsk": [], "ftb": {}}
+        self._audio_gain_lock = threading.Lock()
+        self._audio_gain_at = float("-inf")
+        self._audio_gain: list = []
         self._lever_lock = threading.Lock()
         # Positions waiting while one is being sent: the newest, behind the end positions on its
         # way there, each of which only the same end again replaces (an end completes or cancels
@@ -129,6 +132,15 @@ class MixerBridge:
                               "ftb": json.loads(self.command("mixer.ftb_status", timeout) or "{}")}
                 self._keys_at = now
             return {**self._keys, "dsk_sampled_at": self._keys_at}
+
+    def audio_gain(self, timeout: float | None = None) -> list:
+        """Small, shared poll for per-source audio gain, independent of the large show state."""
+        with self._audio_gain_lock:
+            now = time.monotonic()
+            if now - self._audio_gain_at >= STATE_TTL_S or self._audio_gain_at <= self._changed_at:
+                self._audio_gain = json.loads(self.command("mixer.audio_gain_status", timeout) or "[]")
+                self._audio_gain_at = now
+            return list(self._audio_gain)
 
     def lever(self, request: dict) -> bool:
         """queue_lever, sending on the caller's thread when no position was being sent."""
@@ -294,6 +306,8 @@ class MixerBridge:
                                   if bus.get("id") in static["aux_layouts"] else bus for bus in buses]
         if state["settings"].get("dsk_keys"):
             state.update(self.keys(timeout))
+        if state["settings"].get("audio_sources"):
+            state["audio_gain"] = self.audio_gain(timeout)
         return state
 
     def take(self, request: dict):
@@ -302,7 +316,7 @@ class MixerBridge:
         command = request.get("command")
         if command == "lever":
             return self.lever(request)
-        if command in ("dsk", "ftb", *AUX_COMMANDS):
+        if command in ("dsk", "ftb", "audio_gain", *AUX_COMMANDS):
             payload = {k: v for k, v in request.items() if k != "command"}
             try:
                 result = json.loads(self.command(f"mixer.{command} " + json.dumps(payload)) or "{}")

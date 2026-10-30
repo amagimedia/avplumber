@@ -106,6 +106,7 @@ class FakeMixer:
         (self.canvas_w, self.canvas_h), self.working_format = parameters["canvas"], parameters["working_format"]
         self.color = Color.parse(parameters["color"])
         self.keyframe_node = parameters.get("keyframe_node")
+        self.audio_router_node = parameters.get("audio_router_node")
         self.instances.append(self)
 
     def add_aux_destination(self, source, edge):
@@ -160,12 +161,16 @@ class FakeRtcpFeedbackListener:
 def fake_api():
     types = {
         "AssumeVideoFormat": "assume_video_format", "Bsf": "bsf", "ClipCache": "clip_cache",
-        "CudaTransform": "cuda_transform", "DecVideo": "dec_video", "Demux": "demux",
-        "DrmPrimeToCuda": "drm_prime_to_cuda", "EncVideo": "enc_video", "FilterVideo": "filter_video",
+        "AudioMixer": "audio_mixer",
+        "CudaTransform": "cuda_transform", "DecAudio": "dec_audio", "DecVideo": "dec_video", "Demux": "demux",
+        "DrmPrimeToCuda": "drm_prime_to_cuda", "EncAudio": "enc_audio", "EncVideo": "enc_video",
+        "FilterAudio": "filter_audio", "FilterVideo": "filter_video",
+        "ResampleAudioForwardChannels": "resample_audio_forward_channels",
         "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input_rec",
         "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer", "MixerDelivery": "mixer_delivery",
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
         "RawVideoFileCuda": "raw_video_file_cuda", "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
+        "ResampleAudio": "resample_audio",
         "SmoothTimestamps": "smooth_timestamps", "Split": "split",
     }
     return SimpleNamespace(AVPlumber=FakeAvp, MixerGraphBuilder=FakeMixer,
@@ -595,7 +600,8 @@ def test_browser_failure_precedes_native_initialization(monkeypatch):
     monkeypatch.setattr(application, "_init_avp", lambda *args: pytest.fail("native threads started before browser preparation"))
     cfg = SimpleNamespace(fps=60, latency_ms=None, input_poll_ms=None, source_fan_out="thread",
                           decoded_frames_ahead=None, raw_pool_frames=None, browser_frame_queue=11, max_compositor_layers=256, sources=[SimpleNamespace(
-        kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60, hold_last_frame=True)])
+        kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60, hold_last_frame=True,
+        has_audio=False)])
     with pytest.raises(RuntimeError, match="browser unavailable"):
         application._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api(), ExitStack())
 
@@ -1245,6 +1251,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
         "source_counts": {"video": 1, "browser": 1, "v210": 0, "nv12": 0, "p010": 0}, "hdr_video": 0,
         "inputs": [["cam", "video"], ["cam", "video"], ["page", "browser"]],
+        "audio_sources": [],
         "direct": False, "fade_seconds": 0.8, "fade_curve": "linear", "fade_color": None, "transition": "cut",
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",

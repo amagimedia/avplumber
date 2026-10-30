@@ -145,6 +145,24 @@
     import { createReceiverMonitor } from "./receiver-stats.mjs";
     import { JanusSocket } from "./janus-socket.mjs";
     import { playerOutputs } from "./output-selection.mjs";
+    // Registered before any await below (mixerState's fetch can take seconds): the embedding page
+    // sends avp-preview-mute right on this iframe's "load", which can fire well before a listener
+    // declared after an awaited step exists -- postMessage does not queue for a listener that
+    // attaches later, so that message is just lost, forever leaving desiredMuted at its default.
+    const earlyPreview = document.getElementById("preview");
+    let desiredMuted = true;
+    if (window.parent && window.parent !== window) {
+      // The embedding page's click-blocking overlay (over this cross-origin frame) keeps the
+      // native <video controls> mute button out of reach, so it drives this one instead.
+      // Flipping .muted on an already-autoplaying element needs no fresh user gesture in this
+      // frame -- only starting unmuted playback would.
+      window.addEventListener("message", (e) => {
+        if (e.data?.type === "avp-preview-mute") {
+          desiredMuted = Boolean(e.data.muted);
+          earlyPreview.muted = desiredMuted;
+        }
+      });
+    }
     const codecSelect = document.getElementById("codec");
     function renderGpuStats(gpus) {
       const level = (value, orange, red) => !Number.isFinite(value) ? "unknown"
@@ -207,7 +225,7 @@
     // reverse proxy prefix such as /preview/ (whose trailing slash this relies on).
     const serverUrl = new URL("janus", location.href).href;
     const statusEl = document.getElementById("status");
-    const preview = document.getElementById("preview");
+    const preview = earlyPreview;   // declared at the top, before any await; see its comment
     const rttValue = document.getElementById("rtt-value");
 
     let janus = null;
@@ -315,7 +333,15 @@
         if (preview.srcObject !== stream) {
           preview.srcObject = stream;
         }
-        preview.play().catch(error => {
+        // A mute message can arrive before real media exists (postMessage carries no user gesture
+        // into this frame, so play() with muted already false here can be silently refused). Always
+        // (re)start from the markup's safe muted=true, exactly like a fresh document, then flip to
+        // the embedding page's last choice only once play() confirms this is the "already-autoplaying"
+        // element the mute listener below can toggle without a fresh gesture.
+        preview.muted = true;
+        preview.play().then(() => {
+          preview.muted = desiredMuted;
+        }).catch(error => {
           if (error.name !== "AbortError") {
             setStatus(error.message, true);
           }

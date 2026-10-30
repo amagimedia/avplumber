@@ -8,8 +8,8 @@ import time
 import uuid
 
 from ..node import InternalNode
-from .aux_layout import (base_composition, check_assignments, count, draws_program, layout_cells, page_count,
-                         page_grid, parse_layout, pvw_layouts)
+from .aux_layout import (base_composition, base_sources, check_assignments, count, draws_program, layout_cells,
+                         page_count, page_grid, parse_layout, pvw_layouts, pvw_sources)
 from .config import ConfigError, aux_fps
 
 
@@ -69,10 +69,13 @@ class AuxBus:
         return self.bus.latency_ms if self.bus.latency_ms is not None else self.main_latency_ms()
 
     def layout_object(self):
-        """The follower's ``layout``: every scene's preview layers and the base, with the revision."""
+        """The follower's ``layout``: preview layers, base, and AFV source id lists for apply-time emit."""
         cells = self.cells()
-        return {"revision": self.revision, "pvw": pvw_layouts(self.cfg, cells),
-                "base": base_composition(self.cfg, cells, self.scenes)}
+        return {"revision": self.revision, "output": self.bus.id,
+                "pvw": pvw_layouts(self.cfg, cells),
+                "base": base_composition(self.cfg, cells, self.scenes),
+                "base_sources": base_sources(self.cfg, cells, self.scenes),
+                "pvw_sources": pvw_sources(self.cfg, cells)}
 
     def build(self, options):
         """The bus's nodes, all in its own group: compositor, follower, conversion, encoder, Janus output."""
@@ -129,6 +132,17 @@ class AuxBus:
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
             hold=True)   # MixerApplication releases every output together once the show has settled
+        # Prefer the mixer's copy: build_application clears it when no has_audio sources
+        # remain, while a stale options.audio_router_node would still wire an unfed edge.
+        router = getattr(self.mixer, "audio_router_node", None)
+        if router is None:
+            router = getattr(options, "audio_router_node", None)
+        if r.audio_port and router:
+            from .janus import JanusAudioConfig, build_janus_audio_output
+            build_janus_audio_output(
+                self.avp, self.api, f"{router}_{self.bus.id}",
+                JanusAudioConfig(host=options.janus_host, audio_port=r.audio_port),
+                group=self.group, prefix=f"{self.prefix}_audio", failure_mode="off")
         self.avp.addNode(_PvwFollowNode({
             "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,
             "fps": str(fps), "latency_ms": latency, "main_latency_ms": self.main_latency_ms(),

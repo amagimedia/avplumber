@@ -59,7 +59,7 @@ function programOptions(s, keys) {
     return outputs.map(o => ({group: "Program", dot: "var(--pgm)", program: true, chrome: 49,
       value: outputs.length === 1 ? "program" : `program:${o.rendition}`,
       label: outputs.length === 1 ? name : `${name} · ${(o.color || "sdr").toUpperCase()} · ${codecName(o.codec)}`,
-      preferred: o === preferred, url: playerUrl(o), unplayable: !playable(o.codec),
+      preferred: o === preferred, url: playerUrl(o), unplayable: !playable(o.codec), audio: !!o.audio,
       meta: [keys && "with keys", (o.color || "sdr").toUpperCase(), codecName(o.codec),
         s.canvas && canvasText({...s.canvas, fps: o.fps || s.canvas.fps})].filter(Boolean).join(" · ")}));
   }
@@ -81,7 +81,7 @@ function programOptions(s, keys) {
   }));
 }
 // A preview output, the clean feed or an aux bus: an H.264 or H.265 mountpoint of its own.
-const previewOption = (o) => ({value: o.bus, label: o.label || o.bus, url: playerUrl(o), chrome: 49, unplayable: !playable(o.codec)});
+const previewOption = (o) => ({value: o.bus, label: o.label || o.bus, url: playerUrl(o), chrome: 49, unplayable: !playable(o.codec), audio: !!o.audio});
 // Canvas pixels of an output: an aux bus reports its own, the program has the mixer's.
 function canvasSize(s, aux) {
   const c = s.canvas;

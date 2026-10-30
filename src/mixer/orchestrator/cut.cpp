@@ -49,7 +49,7 @@ void MixerOrchestrator::completeTake(int64_t pts_ns) {
     state_->publishTakePreview(scene, pts_ns);
     const auto& definition = state_->scenes.at(scene);
     applySceneControls(definition);
-    applyPostTransitionRouting(destination_a, definition);
+    applyPostTransitionRouting(destination_a, definition, true, pts_ns);
     finishTransition(destination_a, scene, pts_ns);
 }
 
