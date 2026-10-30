@@ -2196,6 +2196,25 @@ def test_dsk_config_rejects_invalid_keys(dsk, message):
         mixer_config.parse({**CONFIG, "dsk": dsk})
 
 
+@pytest.mark.parametrize("doc,message", [
+    ({**CONFIG, "sources": [{**CONFIG["sources"][0], "id": "cam 1"}, CONFIG["sources"][1]]}, r"sources\[0\]: id must be"),
+    ({**CONFIG, "scenes": [{**CONFIG["scenes"][0], "id": "full\nmixer.cut"}, CONFIG["scenes"][1]]}, r"scenes\[0\]: id must be"),
+])
+def test_source_and_scene_ids_are_single_protocol_words(doc, message):
+    with pytest.raises(mixer_config.ConfigError, match=message):
+        mixer_config.parse(doc)
+
+
+def test_builder_rejects_names_the_control_protocol_would_split():
+    from pyplumber.mixer.graph import MixerGraphBuilder
+    mixer = MixerGraphBuilder.__new__(MixerGraphBuilder)
+    mixer._built = False
+    with pytest.raises(ValueError, match="source name"):
+        mixer.add_source("cam 1", "cam_edge", "cam_group")
+    with pytest.raises(ValueError, match="scene name"):
+        mixer.define_scene("full\nmixer.cut", {})
+
+
 def test_rendition_feed_is_clean_or_dirty():
     with pytest.raises(mixer_config.ConfigError, match="feed must be one of"):
         mixer_config.parse({**CONFIG, "renditions": [{"id": "x", "feed": "keyed"}]})

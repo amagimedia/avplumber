@@ -67,7 +67,8 @@ from pyplumber.node import (
 
 
 from .color import Color
-from .config import DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, default_latency_ms, fade_color, fade_curve
+from .config import (DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, default_latency_ms, fade_color, fade_curve,
+                     protocol_name)
 from .backend import mixer_backend
 from .control import source_mask_param
 from . import clipcache
@@ -205,6 +206,7 @@ class MixerGraphBuilder:
         """
         if self._built:
             raise RuntimeError("Cannot add sources after build()")
+        protocol_name(name, "source name")
         if name in self._source_index:
             raise ValueError(f"Source '{name}' already registered")
         if color is not None:
@@ -240,6 +242,7 @@ class MixerGraphBuilder:
         """
         if self._built:
             raise RuntimeError("Cannot add sources after build()")
+        protocol_name(name, "source name")
         if name in self._source_index:
             raise ValueError(f"Source '{name}' already registered")
         idx = len(self._sources)
@@ -291,6 +294,7 @@ class MixerGraphBuilder:
         After build, it also emits ``mixer.scene`` so runtime policies can
         reuse generic scene names with different source-slot assignments.
         """
+        protocol_name(name, "scene name")
         if any("graph" in spec for spec in sources.values()):
             raise ValueError("Scene filter graphs were removed; filter the source upstream")
         sources = {source: dict(spec) for source, spec in sources.items()}
