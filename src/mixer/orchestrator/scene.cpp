@@ -136,11 +136,15 @@ void MixerOrchestrator::emitTransitionEnded(const SceneDefinition& scene, int64_
     for (const auto& kv : scene.sources)
         sources.push_back(kv.first);
     const char* kind = state_->takeKind();
-    setNodeObject(state_->audio_router_node_name, "transition_ended",
-                  {{"output", "program"},
-                   {"kind", kind && *kind ? kind : "cut"},
-                   {"sources", sources},
-                   {"pts", pts_ns}});
+    try {
+        setNodeObject(state_->audio_router_node_name, "transition_ended",
+                      {{"output", "program"},
+                       {"kind", kind && *kind ? kind : "cut"},
+                       {"sources", sources},
+                       {"pts", pts_ns}});
+    } catch (const std::exception& e) {
+        logstream << "mixer: transition_ended failed: " << e.what();
+    }
 }
 
 void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
