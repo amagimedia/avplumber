@@ -41,9 +41,13 @@ void MixerOrchestrator::emitTransitionProgress(const char* kind, double t, int64
     Parameters to = Parameters::array();
     for (const auto& kv : outgoing.sources) from.push_back(kv.first);
     for (const auto& kv : incoming.sources) to.push_back(kv.first);
-    setNodeObject(state_->audio_router_node_name, "transition_progress",
-                  {{"output", "program"}, {"kind", kind}, {"from", from}, {"to", to},
-                   {"t", t}, {"pts", pts_ns}});
+    try {
+        setNodeObject(state_->audio_router_node_name, "transition_progress",
+                      {{"output", "program"}, {"kind", kind}, {"from", from}, {"to", to},
+                       {"t", t}, {"pts", pts_ns}});
+    } catch (const std::exception& e) {
+        logstream << "mixer: transition_progress failed: " << e.what();
+    }
 }
 
 void MixerOrchestrator::lever(double position, double duration_sec, FadeCurve curve,
