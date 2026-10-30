@@ -536,3 +536,15 @@ def test_program_delivery_and_explicit_static_cadence():
 def test_production_api_exposes_program_delivery_node(native_boundary):
     from pyplumber.mixer.application import load_avp_api
     assert load_avp_api().MixerDelivery.TYPE == "mixer_delivery"
+
+
+def test_options_the_show_overrides_are_refused_instead_of_ignored():
+    cfg = show()   # 60 fps canvas, a recording rendition
+    with pytest.raises(ValueError) as error:
+        build_application(cfg, MixerOptions(fps=25, max_compositor_layers=7, output="other.mp4",
+                                            codec="hevc_nvenc", bitrate="20M"), api=fake_api())
+    for option in ("fps=25", "max_compositor_layers=7", "output='other.mp4'", "codec='hevc_nvenc'", "bitrate='20M'"):
+        assert option in str(error.value)
+    # Defaults, and values equal to the show's, are not conflicts.
+    build_application(cfg, MixerOptions(fps=cfg.fps, max_compositor_layers=cfg.max_compositor_layers), api=fake_api())
+    build_application(cfg, MixerOptions(), api=fake_api())

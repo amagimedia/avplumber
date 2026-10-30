@@ -603,6 +603,21 @@ def infer_output_format(output: str, explicit_format: str | None = None) -> str:
     raise ValueError("cannot infer output format; pass --output-format")
 
 
+def _refuse_overridden_options(options: MixerOptions, cfg: "mixer_config.MixerConfig") -> None:
+    """The show owns its canvas and, when it has renditions, its outputs. An option changed from its
+    default to something else would be ignored, so it is an error instead."""
+    defaults = type(options)()
+    conflicts = [f"{name}={getattr(options, name)!r} (the show has {value!r})"
+                 for name, value in (("fps", cfg.fps), ("working_format", cfg.working_format),
+                                     ("max_compositor_layers", cfg.max_compositor_layers))
+                 if getattr(options, name) not in (getattr(defaults, name), value)]
+    if cfg.renditions:
+        conflicts += [f"{name}={getattr(options, name)!r} (the show's renditions are its outputs)"
+                      for name in ("output", "codec", "bitrate") if getattr(options, name) != getattr(defaults, name)]
+    if conflicts:
+        raise ValueError("options the show overrides: " + ", ".join(conflicts))
+
+
 def _decoder_params(source: "mixer_config.Source", cfg: "mixer_config.MixerConfig") -> dict:
     """A CUarray decoder whose pool would take the show's decoder pools past
     canvas.decoder_pool_budget_mib fails at open, by name, before the device runs out of memory."""
@@ -796,6 +811,7 @@ def build_application(cfg: mixer_config.MixerConfig, options: MixerOptions | Non
     view. Build failures, including callback exceptions, shut down the engine.
     """
     options = options or MixerOptions()
+    _refuse_overridden_options(options, cfg)
     # Config-owned renditions need no redundant CLI-style output flag. Also
     # enable keyframe control and validate Janus settings for those renditions.
     options = replace(options, fps=cfg.fps, working_format=cfg.working_format,

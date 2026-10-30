@@ -25,6 +25,9 @@ finally:
 
 The show supplies sources, scenes and renditions. `MixerOptions` supplies
 runtime settings and optional fallback outputs when the show has no renditions.
+An option the show overrides is an error, not ignored, once it is changed from its
+default: `fps`, `working_format` and `max_compositor_layers` always, and `output`,
+`codec` and `bitrate` when the show has renditions.
 The returned application exposes `avp`, `mixer` and `aux_buses`. Web UI
 registration and the application's event loop remain caller-owned. Importing
 the API does not load the native engine; building does.
