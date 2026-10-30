@@ -56,6 +56,9 @@ player at <http://127.0.0.1:8080>. Select SDR if HEVC playback is unavailable.
 
 For a remote host set `JANUS_HOST_IP=<host>`; allow TCP 7681/8080 and UDP
 20000–20100. Stop with `docker compose -f docker-compose/mixer/compose.yaml down`.
+The page and the mixer's control port 7777 have no authentication: allow them
+only from trusted networks, or use the L4 preset's proxy with `MIXER_HTPASSWD`.
+`MIXER_BIND=127.0.0.1` keeps the page local.
 
 Setup saves settings and generated assets in `media/`; applying changes pauses
 output before asset preparation and restarts the mixer afterward. Synthetic

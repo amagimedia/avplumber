@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -18,7 +19,7 @@ import pytest
 
 from demos.mixer.webui import parse_args
 
-from pyplumber.mixer.control import mixer_command
+from pyplumber.mixer.control import AvpProtocolError, mixer_command
 from pyplumber.mixer.gui.web import (CONFIG_SCRIPT, CriticalNice, GpuStats, HostStats, MixerBridge, normalize_preview_base, page,
                    compute_price, serve)
 from pyplumber.mixer.gui.telemetry import RecentCounts, _encoder_snapshot, _encoder_totals, delivery_totals
@@ -1047,6 +1048,90 @@ def test_a_preview_never_supersedes_a_waiting_program_take():
         thread.join(5)
     assert bridge.sent == [mixer_command(r.pop("command"), "mixer", **r) for r in requests]
     assert sent == [True] * len(requests)
+
+
+def control_port(reply):
+    """A control port that greets each connection and answers each line with `reply(connection, line)`,
+    bytes, or closes the connection on None. Returns its port and the (connection, line) pairs received."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    received = []
+
+    def serve():
+        for connection in counter():
+            sock, _ = listener.accept()
+            with sock, sock.makefile("rb") as lines:
+                sock.sendall(b"100 VTR READY\n")
+                for line in lines:
+                    received.append((connection, line.decode().rstrip("\n")))
+                    answer = reply(connection, received[-1][1])
+                    if answer is None:
+                        break
+                    try:
+                        sock.sendall(answer)
+                    except OSError:
+                        break
+    threading.Thread(target=serve, daemon=True).start()
+    return listener.getsockname()[1], received
+
+
+def test_bridge_resends_only_to_a_mixer_that_closed_the_connection():
+    port, received = control_port(lambda connection, _line: None if connection == 0 else b"200 OK\n")
+    MixerBridge("127.0.0.1", port, "mixer", timeout=2).command("mixer.cut x")
+    assert received == [(0, "mixer.cut x"), (1, "mixer.cut x")]
+
+
+def test_bridge_never_resends_a_command_the_mixer_answered_or_may_have_run():
+    def reply(_connection, line):
+        if line == "slow":
+            time.sleep(0.4)
+        return b"500 ERROR: no\n" if line == "rejected" else b"200 OK\n"
+    port, received = control_port(reply)
+    bridge = MixerBridge("127.0.0.1", port, "mixer", timeout=0.2)
+
+    with pytest.raises(AvpProtocolError):
+        bridge.command("rejected")
+    with pytest.raises(TimeoutError):
+        bridge.command("slow")
+    time.sleep(0.6)   # past the slow reply: a resend would have arrived
+    bridge.command("next")   # on a new connection: the slow reply cannot answer it
+    assert received == [(0, "rejected"), (0, "slow"), (1, "next")]
+
+
+def test_banks_and_lever_refuse_another_sites_page(client):
+    base, server = client(FakeBridge())
+    request = urllib.request.Request(base + "/api/banks", method="POST", data=b'{"banks": []}',
+                                     headers={"Origin": "https://elsewhere.invalid"})
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 403
+    # A WebSocket is not subject to CORS: the upgrade itself is refused.
+    with socket.create_connection(("127.0.0.1", server.server_port), timeout=5) as sock:
+        sock.sendall(b"GET /api/lever HTTP/1.1\r\nHost: x\r\nOrigin: https://elsewhere.invalid\r\n"
+                     b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                     b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+        assert sock.recv(1024).startswith(b"HTTP/1.1 403")
+
+
+def test_command_endpoint_takes_same_origin_json_only(client):
+    bridge = FakeBridge()
+    url, _ = client(bridge)
+    cut = json.dumps({"command": "cut", "scene": "a"}).encode()
+    for headers, data, code in [({"Origin": "https://elsewhere.invalid"}, cut, 403),
+                                ({"Sec-Fetch-Site": "cross-site"}, cut, 403),
+                                ({"Content-Type": "text/plain"}, cut, 400),   # a form any page can send
+                                ({}, b" " * 16385, 400), ({}, b"[]", 400)]:
+        request = urllib.request.Request(url + "/api/command", data=data,
+                                         headers={"Content-Type": "application/json", **headers})
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+        assert error.value.code == code
+    assert bridge.sent == []
+
+    request = urllib.request.Request(url + "/api/command", data=cut, headers={
+        "Content-Type": "application/json", "Origin": url, "Sec-Fetch-Site": "same-origin"})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+    assert bridge.sent == ['mixer.cut {"scene":"a","mixer":"mixer"}']
 
 
 def test_status_endpoint_sends_only_mixer_status(client):

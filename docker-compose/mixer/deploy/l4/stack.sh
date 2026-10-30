@@ -21,6 +21,8 @@ export AVPLUMBER_REVISION="${AVPLUMBER_REVISION:-$(git -C "$repo" rev-parse HEAD
 export MIXER_RELEASE="${MIXER_RELEASE:-${AVPLUMBER_REVISION:0:12}}"
 export MIXER_INSTANCE_TYPE=nvidia_l4_cuarray
 export MIXER_HTTP_PORT="${MIXER_HTTP_PORT:-17681}"
+# Only the proxy reaches the page, so MIXER_HTPASSWD cannot be bypassed on MIXER_HTTP_PORT.
+export MIXER_BIND="${MIXER_BIND:-127.0.0.1}"
 export JANUS_PREVIEW_PORT="${JANUS_PREVIEW_PORT:-18080}"
 export MIXER_PREVIEW_BASE=/preview/
 export MIXER_WEBUI_URL=http://127.0.0.1:22222
