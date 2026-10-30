@@ -81,6 +81,10 @@ inline void copySourceProps(av::VideoFrame &outf, const av::VideoFrame &src, con
         throw Error(type + ": av_frame_copy_props failed: " + av::error2string(cpy));
     // The draw applied the source's crop; another reader must not apply it to the canvas again.
     outf.raw()->crop_left = outf.raw()->crop_right = outf.raw()->crop_top = outf.raw()->crop_bottom = 0;
+    // A rendered picture is not the source's coded one. A source I-frame's type would make NVENC
+    // code every composite showing it as an intra frame: one per canvas tick it is repeated on.
+    outf.setPictureType(AV_PICTURE_TYPE_NONE);
+    outf.setKeyFrame(false);
     // The output owns a new canvas; an imported source texture describes
     // only that source's storage, not these rendered pixels.
     if (textureFrameDesc(outf.raw()))
