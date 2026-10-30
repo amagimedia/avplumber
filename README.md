@@ -2,12 +2,13 @@
 
 avplumber is a graph-based real-time processing framework. Graph can be reconfigured on the fly using a text API. Most nodes are based on FFmpeg's libavcodec, libavformat & libavfilter. You can create entire transcoding & filtering chain in it, replacing FFmpeg in many use cases.
 
-## What's new
-* [🦀 Rust refactor 🚧](https://github.com/amagimedia/avplumber/tree/rust-dev?tab=readme-ov-file#--rust-refactor-in-progress--)
-* High performance [GPU video mixer](demos/mixer/README.md) · [Watch the 192-input demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
-* [VOD player](demos/replay/README.md) with frame-accurate playback control and WebRTC output via Janus. [Rust version](https://github.com/amagimedia/avplumber/blob/rust-dev/demos/replay-rust/README.md) also available
-* [DMA-BUF input from Chromium](doc/dmabuf.md)
-* [Node+Svelte WebUI](tools/web-ui/README.md) with realtime graph statistics
+## Highlights
+
+* [GPU video mixer](demos/mixer/README.md) with Preview/Program, T-bar transitions, per-key DSK fades and AUX monitors. [Watch the 192-input demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/).
+* [WebGL graph viewer](tools/web-ui/README.md) built with Sigma.js: zoom from grouped inputs to individual nodes, inspect live queue statistics, subscriptions and node parameters. [Watch the demo and explore four zoom levels](https://amagimedia.github.io/avplumber/).
+* [DMA-BUF input from Chromium](doc/dmabuf.md): import browser graphics into CUDA through EGL, preserving alpha for overlays and keys.
+* [🦀 Rust refactor 🚧](https://github.com/amagimedia/avplumber/tree/rust-dev): the framework and node port is in progress on `rust-dev`.
+* [VOD replay player](demos/replay/README.md) with frame-accurate seeking, scrubbing, variable speed, reverse playback and WebRTC output via Janus. A [Rust version](https://github.com/amagimedia/avplumber/blob/rust-dev/demos/replay-rust/README.md) is also available.
 
 [All demos](#demos)
 
@@ -87,7 +88,7 @@ builds, NVIDIA requirements, and a local WebRTC preview.
 
 | Demo | What it demonstrates | Requirements |
 | --- | --- | --- |
-| [Mixer](demos/mixer/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) | Mix video and DMA-BUF browser sources with AVP compositors, Preview/Program, transitions, keys and AUX monitors. | NVIDIA decode/encode; patched FFmpeg included in Docker build. |
+| [Mixer](demos/mixer/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) | Mix video and DMA-BUF browser sources with Preview/Program, T-bar transitions, per-key DSK fades and AUX monitors. | NVIDIA decode/encode; patched FFmpeg included in Docker build. |
 | [Playlist](demos/playlist/README.md) | Play, loop, reorder, and edit clips with a terminal UI and generated test media. | NVIDIA + Janus for video; UI-only preview works without a GPU. |
 | [Replay](demos/replay/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4) · [graph](https://amagimedia.github.io/avplumber/demos/replay/docs/replay-graph.png) | Convert a file to seekable replay; seek by frame or time, scrub, change speed, and play in reverse. | NVIDIA + Janus; convert the input first. |
 | [Replay (Rust)](https://github.com/amagimedia/avplumber/blob/rust-dev/demos/replay-rust/README.md) | As above, ported to Rust. | Janus; optional NVIDIA; convert the input first. |

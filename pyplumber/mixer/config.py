@@ -391,6 +391,13 @@ class ConfigError(ValueError):
     pass
 
 
+def protocol_name(value: Any, what: str) -> str:
+    """`value` as a source or scene name, one word of the control protocol's space-separated lines."""
+    if not isinstance(value, str) or not value or any(c.isspace() or not c.isprintable() for c in value):
+        raise ConfigError(f"{what} must be a non-empty name without spaces or control characters, not {value!r}")
+    return value
+
+
 def _rect(obj: Any, where: str) -> Rect:
     if not isinstance(obj, dict) or any(k not in obj for k in ("x", "y", "w", "h")):
         raise ConfigError(f"{where}: rect needs x, y, w, h")
@@ -432,6 +439,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     sid, kind = str(s.get("id", "")), s.get("kind")
     if not sid or "#" in sid:
         raise ConfigError(f"{where}: id required (no '#')")
+    protocol_name(sid, f"{where}: id")
     if kind not in _SOURCE_KEYS:
         raise ConfigError(f"{where}: kind must be one of {', '.join(_SOURCE_KEYS)}")
     if not all(k in s for k in _SOURCE_KEYS[kind]):
@@ -680,7 +688,7 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             if not isinstance(blend, bool):
                 raise ConfigError(f"{iw}: blend must be a boolean")
             items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop, blend))
-        scenes.append(Scene(str(sc["id"]), tuple(items)))
+        scenes.append(Scene(protocol_name(str(sc["id"]), f"{where}: id"), tuple(items)))
         _unique(scenes, where, "scene id")
     if not scenes:
         raise ConfigError("scenes must not be empty")

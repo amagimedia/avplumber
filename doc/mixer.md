@@ -114,6 +114,9 @@ Run `python -m pyplumber.mixer.gui --port 7777`: `/` controls the mixer and
 `/wall` shows its outputs. Both use `pyplumber/mixer/gui/assets/`; neither needs
 `demos/`. `--preview-base /preview/` supports a reverse-proxied Janus player.
 The optional terminal client is `python -m pyplumber.mixer.gui.tui`.
+The server has no authentication and listens on `--bind` (default `0.0.0.0`);
+restrict access in the deployment. It refuses other sites' pages: POSTs and the
+lever WebSocket check the Origin, and `/api/command` takes JSON only.
 
 Embed the same server in another application:
 

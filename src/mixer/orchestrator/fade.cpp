@@ -300,8 +300,8 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
                                                target_pts, destinationReady(frames[target]), last_ns);
         if (background.preview != state_->wipe_switched) {
             state_->wipe_switched = background.preview;
-            applySceneControls(state_->scenes.at(background.preview ? state_->transition_scene_name
-                                                                    : state_->pgm_scene_name));
+            applySceneControls(background.preview ? state_->scenes.at(state_->transition_scene_name)
+                                                  : state_->pgmScene());
         }
         if (!background.emit) return -1;   // never a tick already out, nor one of the other side
         return background.preview ? target : program;

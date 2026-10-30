@@ -46,6 +46,11 @@ The web UI defaults to `http://127.0.0.1:22222`, Janus HTTP to
 `http://127.0.0.1:8088/janus`, and the preview server to
 `http://127.0.0.1:8080`.
 
+The Sigma.js graph viewer listens on loopback by default. For direct access from
+another host, set `WEBUI_BIND=0.0.0.0` and `WEBUI_ALLOWED_HOSTS=<host>` in the env
+file; multiple viewer hostnames may be comma-separated. For a reverse proxy,
+keep the loopback bind and follow the [WebUI proxy configuration](../tools/web-ui/README.md#behind-a-reverse-proxy).
+
 The preview footer supports [cut-to-encoded-output measurements](../doc/mixer_cut_latency.md)
 beside WebRTC RTT. Enable the optional native probe and supply a deployment-local
 `metrics.json`; the viewer never changes the mixer itself.

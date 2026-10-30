@@ -171,7 +171,7 @@ public:
     // each off key's frames (held plus queued, as for an on key) and a queue
     // step per key frame, but no GPU work.
     void process() override {
-        if (sent_eof_) return;
+        if (parkedAfterEof()) return;   // the program's end is final
         const size_t clock = clock_input_;
         av::VideoFrame *program = source_edges_[clock]->peek();
         // Step the envelopes on the frame about to be drawn (EOF markers have no PTS).

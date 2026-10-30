@@ -12,6 +12,8 @@ on:
 jobs:
   analyze:
     name: Analyze
+    # A fork's pull request would run its code on the self-hosted runner; its changes are analysed after merge.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: shubham-local-ubuntu
     timeout-minutes: 30
     permissions:

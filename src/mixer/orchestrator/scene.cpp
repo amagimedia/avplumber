@@ -54,6 +54,15 @@ void MixerOrchestrator::defineScene(const std::string& name, const SceneDefiniti
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (state_->scene_definitions_frozen)
         throw Error("mixer.scene: aux-enabled setup has fixed scene definitions; reload setup to edit");
+    if (const auto existing = state_->scenes.find(name); existing != state_->scenes.end()) {
+        // A loaded slot keeps its composition: the edit takes effect when the scene is next
+        // taken. The program's routing follows the definition on air meanwhile; the PVW slot
+        // reloads. A running take has loaded its destination, and completes on that.
+        if (state_->transition_mode != MixerState::TransitionMode::Idle && name == state_->transition_scene_name)
+            throw Error("mixer.scene: " + name + " is being taken; define it again after the transition");
+        if (name == state_->pgm_scene_name && !state_->pgm_definition) state_->pgm_definition = existing->second;
+        if (name == state_->pvw_slot_scene) state_->pvw_slot_scene.clear();
+    }
     if (state_->prewarm_cut_scenes.count(name) &&
             (!canPrewarmScene(def) || (state_->computeActiveInputsMask(def) & ~state_->prewarm_source_mask).any()))
         state_->prewarm_cut_scenes.erase(name); // Edited source identity takes the ordinary cold path.
@@ -88,7 +97,7 @@ void MixerOrchestrator::prewarmCuts(const std::vector<std::string>& scenes) {
         setNodeObject(slot.compositor_name, "prewarm_inputs", toParameters(mask));
     state_->prewarm_cut_scenes = {scenes.begin(), scenes.end()};
     state_->prewarm_source_mask = mask;
-    const auto* pgm = &state_->scenes.at(state_->pgm_scene_name);
+    const auto* pgm = &state_->pgmScene();
     const auto* pvw = state_->pvw_slot_scene.empty() ? nullptr : &state_->scenes.at(state_->pvw_slot_scene);
     publishSourceRoutes(state_->pgm_is_slot_a ? pgm : pvw, state_->pgm_is_slot_a ? pvw : pgm);
 }
@@ -121,7 +130,7 @@ void MixerOrchestrator::initializeRoutedRoutes() {
     }
     if (state_->pgm_scene_name.empty() || !state_->scenes.count(state_->pgm_scene_name))
         return;
-    const auto* scene = &state_->scenes.at(state_->pgm_scene_name);
+    const auto* scene = &state_->pgmScene();
     publishSourceRoutes(state_->pgm_is_slot_a ? scene : nullptr, state_->pgm_is_slot_a ? nullptr : scene);
 }
 
@@ -148,13 +157,8 @@ void MixerOrchestrator::emitTransitionEnded(const SceneDefinition& scene, int64_
 }
 
 void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
-                                                   const std::string& new_pgm_scene,
+                                                   const SceneDefinition& scene,
                                                    bool picture_changed, int64_t pts_ns) {
-    const auto scene_it = state_->scenes.find(new_pgm_scene);
-    if (scene_it == state_->scenes.end())
-        return;
-
-    const SceneDefinition& scene = scene_it->second;
     const SourceMask active = state_->computeActiveInputsMask(scene);
     auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
     auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
@@ -194,7 +198,7 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
         {"active_inputs", toParameters(active_mask)}, {"revision", slot.revision},
         {"warm", warm_cut && state_->prewarm_cut_scenes.count(scene_name) && canPrewarmScene(scene)}});
 
-    const auto* pgm = &state_->scenes.at(state_->pgm_scene_name);
+    const auto* pgm = &state_->pgmScene();
     publishSourceRoutes(is_slot_a ? &scene : pgm, is_slot_a ? pgm : &scene);
     // Remember incoming scene for fade/dip/wipe progress; completeTake emits transition_ended.
     state_->audio_fade_incoming_scene = scene_name;

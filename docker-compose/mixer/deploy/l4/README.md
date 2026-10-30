@@ -37,6 +37,10 @@ ordinary capture, and the mixer samples each captured buffer in place (see the
 [browser configuration](../../../../deps/dma-browser/README.md)).
 
 Open `http://<host>:7681/setup/`, controls at `/`, outputs at `/wall`.
+The controls' **Graph** link opens the read-only Sigma.js viewer at `/graph/`.
+If viewers use a DNS name instead of the configured public address, set
+`WEBUI_ALLOWED_HOSTS` to that name (comma-separated for multiple names).
+The graph backend remains on loopback; the proxy serves its page and WebSocket.
 Each source count is editable, including zero. Count edits recalculate the total
 without refilling other types; editing **Unique sources** restores the balanced
 proportions. Per-type controls enforce the remaining total, shared NVDEC, HDR

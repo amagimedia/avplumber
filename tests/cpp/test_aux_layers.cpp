@@ -27,6 +27,19 @@ int main() {
     assert(ops[2].layer.dst_w == 160 && ops[2].layer.dst_h == 90);
     assert(ops[2].layer.dst_x == 0 && ops[2].layer.dst_y == 74);
 
+    // A sized layer partly off the canvas draws its visible part, its source cut in proportion.
+    const auto edges = resolveDrawOps(sources, parseLayersArray(Parameters::parse(R"([
+        {"input":0,"dst_x":-80,"dst_y":-40,"dst_w":320,"dst_h":180},
+        {"input":0,"dst_x":160,"dst_y":90,"dst_w":320,"dst_h":180}
+    ])")), 320, 180, AV_PIX_FMT_NV12);
+    assert(edges.size() == 2 && edges[0].src == &frame && edges[1].src == &frame);
+    assert(edges[0].layer.dst_x == 0 && edges[0].layer.dst_y == 0);
+    assert(edges[0].layer.dst_w == 240 && edges[0].layer.dst_h == 140);
+    assert(edges[0].layer.crop_x == 80 && edges[0].layer.crop_y == 40);
+    assert(edges[0].layer.crop_w == 240 && edges[0].layer.crop_h == 140);
+    assert(edges[1].layer.dst_x == 160 && edges[1].layer.dst_w == 160 && edges[1].layer.dst_h == 90);
+    assert(edges[1].layer.crop_x == 0 && edges[1].layer.crop_w == 160 && edges[1].layer.crop_h == 90);
+
     // Opacity is not read from JSON; a partial fade is carried.
     auto faded = parseLayersArray(Parameters::parse(R"([{"input":0,"blend":true,"opacity":0.5},{"input":0,"blend":true}])"));
     assert(faded[0].opacity == 1.f);

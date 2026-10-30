@@ -56,12 +56,12 @@ class MixerOrchestrator {
     void switchProgramSelector(bool new_pgm_is_slot_a);
     /// Restore steady-state routing after a cut or crossfade has concluded, once
     /// switchProgramSelector has switched the selector: the per-source OTM masks and the
-    /// post-otm/compositor flips. Caller must hold state_->mutex.
-    /// `picture_changed` false (the on-air picture stays the same) skips
-    /// the encoder keyframe request. Does nothing for an unknown scene.
+    /// post-otm/compositor flips, for `scene` as the program slot draws it. Caller must hold
+    /// state_->mutex. `picture_changed` false (the on-air picture stays the same) skips
+    /// the encoder keyframe request.
     /// `pts_ns`: media time (ns, same clock as realtime set_pts / compositor frames) at which
     /// the new program picture applies; 0 means apply as soon as the router can.
-    void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene,
+    void applyPostTransitionRouting(bool new_pgm_is_slot_a, const SceneDefinition& scene,
                                     bool picture_changed = true, int64_t pts_ns = 0);
 
     /// Notify audio_router_node that program sources have committed (transition_ended).

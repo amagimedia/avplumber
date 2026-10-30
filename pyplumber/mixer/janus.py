@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from ipaddress import ip_address
 
 from .color import TEN_BIT_FORMATS, default_codec
 
 RTP_PACKET_SIZE = 1_200
+LOCAL_RTP_BURST_PACKETS = 24
 DEFAULT_KEYFRAME_MIN_INTERVAL_MS = 150
 # Periodic IDR period. Viewers joining or losing packets get an IDR through
 # RTCP PLI (RtcpFeedbackListener) and Janus retransmits on NACK, so a longer
@@ -58,8 +60,15 @@ class JanusVideoConfig:
         # feedback has its own socket in RtcpFeedbackListener below.
         # Three times the average rate drains keyframe bursts without building
         # a sustained backlog or reducing the encoder's detail budget.
+        # A local Janus can receive roughly one 6 Mbps/30 fps frame without
+        # per-packet timer wakes. Longer bursts still follow the same rate limit.
+        try:
+            loopback = ip_address(self.host).is_loopback
+        except ValueError:
+            loopback = False  # Keep network pacing for names without resolving them here.
+        burst_packets = LOCAL_RTP_BURST_PACKETS if loopback else 4
         return (f"udp://{self.host}:{self.video_port}?pkt_size={RTP_PACKET_SIZE}"
-                f"&bitrate={self.bitrate_kbps * 3000}&burst_bits={RTP_PACKET_SIZE * 8 * 4}"
+                f"&bitrate={self.bitrate_kbps * 3000}&burst_bits={RTP_PACKET_SIZE * 8 * burst_packets}"
                 "&buffer_size=2097152&fifo_size=8192")
 
 

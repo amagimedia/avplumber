@@ -5,14 +5,9 @@
 </script>
 
 <div class="toolbar">
-  <label class="hint">
-    <input type="checkbox" checked={wrap} on:change={(e) => onWrapChange(!!e.target.checked)} />
-    wrap
-  </label>
-
+  <label class="check"><input type="checkbox" checked={wrap} on:change={(e) => onWrapChange(!!e.target.checked)} /> Wrap</label>
+  <slot />
   {#if onCopy}
-    <button on:click={onCopy} style="margin-left: auto;">Copy</button>
+    <button class="icon-btn small push" on:click={onCopy}>Copy</button>
   {/if}
 </div>
-
-

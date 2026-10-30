@@ -21,6 +21,7 @@ from fractions import Fraction
 
 from pyplumber import AVPlumber
 from pyplumber import node as n
+from _avplumber import MetadataFrame, Rational
 
 SOURCES = 16
 SECONDS = 5
@@ -83,7 +84,55 @@ def paced(raw, fps):
     return used_ms / frames, [b - a for a, b in zip(stamps, stamps[1:])]
 
 
+def backpressure():
+    """A stalled sink preserves ordered frames, exact PTS and EOF through catch-up."""
+    avp = AVPlumber()
+    errors = []
+    avp.on_exception = lambda *error: errors.append(error)
+    avp.edges.planCapacity("pending", 64)
+    avp.edges.planCapacity("paced", 3)
+    source = avp.getEdge("pending", "MetadataFrame")
+    output = avp.getEdge("paced", "MetadataFrame")
+    avp.addNode(n.Realtime({
+        "name": "pacer", "group": "test", "src": "pending", "dst": "paced",
+        "set_pts": True, "time_base": "1/120000", "forward_eof": True,
+        "negative_time_tolerance": 10, "discontinuity_threshold": 20,
+    }))
+    for i in range(32):
+        assert source.enqueue(MetadataFrame(i, Rational(1, 100), {"sequence": i}))
+    assert source.enqueue(MetadataFrame())
+    try:
+        avp.group("test").startNodes()
+        deadline = time.monotonic() + 5
+        while output.occupied < 3:
+            assert not errors, errors
+            assert time.monotonic() < deadline, "pacer did not fill its output"
+            time.sleep(.005)
+        time.sleep(.5)  # more than eight frames become due while the output is full
+        stamps = []
+        sequence = []
+        eof = False
+        while time.monotonic() < deadline:
+            assert not errors, errors
+            frame = output.tryGet(100)
+            if frame is None:
+                continue
+            if frame.pts.timestamp == NOPTS:
+                eof = True
+                break
+            sequence.append(frame.metadata["sequence"])
+            stamps.append(Fraction(frame.pts.timestamp) * frame.pts.timebase.num / frame.pts.timebase.den)
+        assert eof, "pacer failed to forward EOF after draining its backlog"
+        assert sequence == list(range(32)), sequence
+        assert set(b - a for a, b in zip(stamps, stamps[1:])) == {Fraction(1, 100)}
+        assert output.tryGet(50) is None, "duplicate output after EOF"
+    finally:
+        avp.shutdown()
+    print("PASS backpressure: 32 ordered frames, exact PTS, then EOF")
+
+
 def main():
+    backpressure()
     with tempfile.TemporaryDirectory() as tmp:
         raw = pathlib.Path(tmp) / "gray.raw"
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x48:rate=30",

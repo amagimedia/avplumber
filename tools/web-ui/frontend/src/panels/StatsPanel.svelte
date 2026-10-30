@@ -32,16 +32,16 @@
   }
 </script>
 
-<div class="panel avp-panel">
+<div class="panel">
   <TextPanelToolbar wrap={wrap} onWrapChange={setWrap} onCopy={copy} />
-
-  {#if !c.hasReceivedStats}
-    <p class="hint">
-      Configure <code>stats.subscribe</code> in avplumber with
-      <code>"url":"http://WEBUI_HOST:WEBUI_PORT/api/stats?instance=INSTANCE_ID"</code>.
-    </p>
+  {#if c.hasReceivedStats}
+    <pre class="body" class:wrap>{c.currentStatsPrettyText}</pre>
+  {:else}
+    <div class="body">
+      <p class="hint">
+        Stream analysis statistics appear here once avplumber sends them: configure <code>stats.subscribe</code> with
+        <code>"url":"http://WEBUI_HOST:WEBUI_PORT/api/stats?instance=INSTANCE_ID"</code>.
+      </p>
+    </div>
   {/if}
-  <pre class="scrollable small-text" class:avp-prewrap={wrap}>{c.currentStatsPrettyText}</pre>
 </div>
-
-

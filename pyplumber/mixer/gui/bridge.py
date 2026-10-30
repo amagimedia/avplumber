@@ -214,9 +214,10 @@ class MixerBridge:
 
     def command(self, line: str, timeout: float | None = None) -> str | None:
         """Send one command, reconnecting once if the mixer was restarted; a lever position on the
-        lever's own connection. A command the mixer answered with an error is not sent again: it
-        reached the mixer, and the error is the answer. `timeout` bounds both the exchange and the
-        wait for it, for replies that outgrow the default."""
+        lever's own connection. `timeout` bounds both the exchange and the wait for it, for replies
+        that outgrow the default. Only a closed connection is retried: the restarted mixer never
+        received the line. A command the mixer answered with an error reached it, and the error is
+        the answer; after a timeout it may have run, and resending it would run it twice."""
         budget = self.timeout if timeout is None else timeout
         lever = line.startswith("mixer.lever ")
         connection = self._lever_connection if lever else self._connection
@@ -225,12 +226,17 @@ class MixerBridge:
                 if not connection.connected:
                     self._run(connection.connect())
                 return self._run(connection.command(line, budget), budget)
+            except (ConnectionError, EOFError):
+                pass
             except AvpProtocolError:
                 raise
             except Exception:
+                # A reply still in flight must not answer the next command.
                 self._run(connection.disconnect())
-                self._run(connection.connect())
-                return self._run(connection.command(line, budget), budget)
+                raise
+            self._run(connection.disconnect())
+            self._run(connection.connect())
+            return self._run(connection.command(line, budget), budget)
 
     def status(self, timeout: float | None = None) -> dict:
         return json.loads(self.command(f"mixer.status {self.mixer}", timeout) or "{}")

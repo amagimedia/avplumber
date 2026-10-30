@@ -530,8 +530,8 @@ def test_bus_builds_its_nodes_in_one_group(cfg, monkeypatch, codec, profile):
     assert (encoders[0]["codec"], encoders[0]["profile"], encoders[0]["enc_format"]) == (codec, profile, "nv12")
     preview = replace(cfg, aux_buses=parse_aux_buses([spec], cfg)).settings()["preview_outputs"][0]
     assert preview["codec"] == ("h265" if codec == "hevc_nvenc" else "h264")
-    compositor, converted, follower = (n.parameters for n in nodes)
-    assert {p["group"] for p in (compositor, converted, follower)} == {"aux_multiview"}
+    compositor, follower = nodes[0].parameters, nodes[-1].parameters
+    assert {node.parameters["group"] for node in nodes} == {"aux_multiview"}
     assert compositor["src"] == compositor["subscriptions"] == [*bus.edges, "aux_multiview_pgm"]
     assert (compositor["max_layers"], compositor["pgm_delay_frames"]) == (640, 1)
     assert compositor["layers"] == follower["layout"]["base"]["layers"]
@@ -671,18 +671,42 @@ def test_a_bus_without_the_pgm_pad_draws_any_layout_but_pgm_cells(cfg):
     assert [l.get("preset") for l in listed.bus.layouts] == ["source_pages", "pgm_pvw_grid"]
 
 
-def _built_compositor(cfg, monkeypatch):
+def _built_bus(cfg, monkeypatch):
     import pyplumber.mixer.janus as janus
-    nodes = []
-    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: "listener")
+    from pyplumber.mixer.backends.cuda import CudaMixerBackend
+    nodes, outputs = [], []
+    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: outputs.append(a[2]))
     avp = SimpleNamespace(addNode=lambda node, **kw: nodes.append(node), edges=SimpleNamespace(planCapacity=lambda *a: None))
     api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
     mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
                             canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
-                            backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
+                            backend=CudaMixerBackend())
     options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="")
     AuxBus(avp, api, mixer, cfg, parse_aux_buses([bus_json(scenes=["repeat"])], cfg)[0]).build(options)
-    return nodes[0].parameters
+    return {node.parameters["name"]: node.parameters for node in nodes}, outputs[0]
+
+
+def _built_compositor(cfg, monkeypatch):
+    return _built_bus(cfg, monkeypatch)[0]["aux_multiview_comp"]
+
+
+@pytest.mark.parametrize("transfer,storage,conversion", [
+    ("sdr", "nv12", None),
+    ("sdr", "p010le", "scale_cuda=format=nv12"),
+    ("hlg", "p010le", "tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12"),
+    ("pq", "p210le", "tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12"),
+])
+def test_aux_only_converts_when_canvas_is_not_already_sdr_nv12(cfg, monkeypatch, transfer, storage, conversion):
+    from pyplumber.mixer.color import Color
+    nodes, output = _built_bus(replace(cfg, out_color=Color(transfer), working_format=storage), monkeypatch)
+    if conversion is None:
+        assert "aux_multiview_sdr" not in nodes
+        assert output == nodes["aux_multiview_comp"]["dst"]
+    else:
+        node = nodes["aux_multiview_sdr"]
+        assert node["src"] == nodes["aux_multiview_comp"]["dst"]
+        assert output == node["dst"]
+        assert conversion in node["graph"]
 
 
 def test_bus_compositor_wakes_for_every_frame_unless_told_how_often_to_look(cfg, monkeypatch):

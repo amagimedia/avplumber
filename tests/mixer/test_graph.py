@@ -1323,11 +1323,13 @@ def test_janus_rejects_invalid_keyframe_limit(minimum):
 
 
 @pytest.mark.parametrize("bitrate,pacing", [(3000, "9000000"), (8000, "24000000")])
-def test_janus_paces_rtp_without_reducing_encoding_quality(bitrate, pacing):
+@pytest.mark.parametrize("host,burst", [("127.0.0.1", "230400"), ("127.0.0.2", "230400"),
+                                      ("192.0.2.1", "38400"), ("janus.example", "38400")])
+def test_janus_paces_rtp_without_reducing_encoding_quality(bitrate, pacing, host, burst):
     from urllib.parse import parse_qs, urlsplit
     from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
     avp = FakeAvp()
-    build_janus_output(avp, fake_api(), "program", JanusVideoConfig(bitrate_kbps=bitrate),
+    build_janus_output(avp, fake_api(), "program", JanusVideoConfig(host=host, bitrate_kbps=bitrate),
                        fps=30, width=1080, height=1920)
     nodes = {n.parameters["name"]: n.parameters for n in avp.nodes}
     output = nodes["janus_rtp_output"]
@@ -1338,7 +1340,7 @@ def test_janus_paces_rtp_without_reducing_encoding_quality(bitrate, pacing):
     query = parse_qs(url.query)
     assert query["bitrate"] == [pacing]
     assert query["pkt_size"] == ["1200"]
-    assert query["burst_bits"] == ["38400"]
+    assert query["burst_bits"] == [burst]
     assert nodes["janus_encoder"]["options"]["b"] == f"{bitrate}k"
     assert nodes["janus_encoder"]["options"]["bufsize"] == f"{bitrate}k"
 
@@ -2199,6 +2201,25 @@ def test_mixer_fade_rejects_an_unknown_curve():
 def test_dsk_config_rejects_invalid_keys(dsk, message):
     with pytest.raises(mixer_config.ConfigError, match=message):
         mixer_config.parse({**CONFIG, "dsk": dsk})
+
+
+@pytest.mark.parametrize("doc,message", [
+    ({**CONFIG, "sources": [{**CONFIG["sources"][0], "id": "cam 1"}, CONFIG["sources"][1]]}, r"sources\[0\]: id must be"),
+    ({**CONFIG, "scenes": [{**CONFIG["scenes"][0], "id": "full\nmixer.cut"}, CONFIG["scenes"][1]]}, r"scenes\[0\]: id must be"),
+])
+def test_source_and_scene_ids_are_single_protocol_words(doc, message):
+    with pytest.raises(mixer_config.ConfigError, match=message):
+        mixer_config.parse(doc)
+
+
+def test_builder_rejects_names_the_control_protocol_would_split():
+    from pyplumber.mixer.graph import MixerGraphBuilder
+    mixer = MixerGraphBuilder.__new__(MixerGraphBuilder)
+    mixer._built = False
+    with pytest.raises(ValueError, match="source name"):
+        mixer.add_source("cam 1", "cam_edge", "cam_group")
+    with pytest.raises(ValueError, match="scene name"):
+        mixer.define_scene("full\nmixer.cut", {})
 
 
 def test_rendition_feed_is_clean_or_dirty():

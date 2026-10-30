@@ -179,6 +179,22 @@ inline void applyLayerMetadata(std::vector<LayerSpec> &layers, const char *json)
     }
 }
 
+/// Clip a layer drawing source `crop` into `dst` to `bounds`, cutting the source in proportion.
+/// False when nothing of it remains.
+inline bool clipLayer(Rect &crop, Rect &dst, const Rect &bounds) {
+    const int left = std::max(dst.x, bounds.x), top = std::max(dst.y, bounds.y);
+    const int right = std::min(dst.x + dst.w, bounds.x + bounds.w);
+    const int bottom = std::min(dst.y + dst.h, bounds.y + bounds.h);
+    if (right <= left || bottom <= top) return false;
+    const Rect s = crop;
+    crop.x = s.x + int(av_rescale(left - dst.x, s.w, dst.w));
+    crop.y = s.y + int(av_rescale(top - dst.y, s.h, dst.h));
+    crop.w = s.x + int(av_rescale(right - dst.x, s.w, dst.w)) - crop.x;
+    crop.h = s.y + int(av_rescale(bottom - dst.y, s.h, dst.h)) - crop.y;
+    dst = {left, top, right - left, bottom - top};
+    return true;
+}
+
 /// Resolve each layer against its source frame: crop/destination clipping, chroma alignment,
 /// fit/contain placement, then z-order. Missing sources and empty rectangles yield ops with
 /// src == nullptr; a placement rejected by geometry keeps a negative src_w so the log can name it.
@@ -213,7 +229,10 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
                 ops.push_back(rejected);
                 continue;
             }
-            const auto &p = *placement;
+            auto p = *placement;
+            // A box partly off the canvas draws its visible part: plane regions cannot start
+            // left of or above the canvas. A tile layer is clipped to its tile below.
+            if (!L.tile.w) clipLayer(p.source, p.destination, {0, 0, canvas_w, canvas_h});
             L.crop_x = p.source.x; L.crop_y = p.source.y;
             L.crop_w = p.source.w; L.crop_h = p.source.h;
             L.dst_x = p.destination.x; L.dst_y = p.destination.y;
@@ -258,16 +277,11 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         const int y = t.y + map(l.dst_y, t.h, l.scene_h, ay);
         const int right = t.x + map(l.dst_x + w, t.w, l.scene_w, ax);
         const int bottom = t.y + map(l.dst_y + h, t.h, l.scene_h, ay);
-        const int cx = std::max(x, t.x), cy = std::max(y, t.y);
-        const int cr = std::min(right, t.x + t.w), cb = std::min(bottom, t.y + t.h);
-        if (cr <= cx || cb <= cy) { op.src = nullptr; continue; }
         // Clip after fitting in the original scene, before drawing into its tile.
-        const int sx = l.crop_x, sy = l.crop_y, sw = l.crop_w, sh = l.crop_h;
-        l.crop_x = sx + map(cx - x, sw, right - x, 1);
-        l.crop_y = sy + map(cy - y, sh, bottom - y, 1);
-        l.crop_w = sx + map(cr - x, sw, right - x, 1) - l.crop_x;
-        l.crop_h = sy + map(cb - y, sh, bottom - y, 1) - l.crop_y;
-        l.dst_x = cx; l.dst_y = cy; l.dst_w = cr - cx; l.dst_h = cb - cy;
+        Rect crop{l.crop_x, l.crop_y, l.crop_w, l.crop_h}, dst{x, y, right - x, bottom - y};
+        if (!clipLayer(crop, dst, t)) { op.src = nullptr; continue; }
+        l.crop_x = crop.x; l.crop_y = crop.y; l.crop_w = crop.w; l.crop_h = crop.h;
+        l.dst_x = dst.x; l.dst_y = dst.y; l.dst_w = dst.w; l.dst_h = dst.h;
     }
     // z decides who draws on top; equal z keeps source order (stable).
     std::stable_sort(ops.begin(), ops.end(),

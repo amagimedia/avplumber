@@ -26,7 +26,8 @@ HLG/PQ require 10-bit storage. Browser graphics are SDR; the compositor converts
 | `raw_pool_frames` | unset | `direct` and `resident` raw sources: at most this many device frames per source. Unset, a source's pool grows to the most frames ever out at once (a stall of the compositors at start sets it) and keeps them; bounded, the source waits for a frame to come back |
 | `decoded_frames_ahead` | unset (3) | how many decoded frames of a file or stream source may wait in front of its pacing node. Each is a decoder output frame in GPU memory (3.1 MB at 1080p) held for slack; `1` keeps the next frame ready and nothing more |
 | `source_fan_out` | `thread` | what hands each source's frames to the compositors and AUX buses: `thread` (a `one_to_many` node per source, woken once per frame) or `event_loop` (`one_to_many_nb` on the loop that paces the source: no thread per source) |
-| `input_poll_ms` | unset | unset or `0`: each program compositor is woken by every frame any source gives. A number: it sleeps to its next deadline and looks for frames at most that often in between (and at once for a cut). A tick is drawn at its deadline either way, so with many sources this only removes wake-ups; a source's queue (three frames) must hold what arrives within one interval. `8` suits rates up to 60 fps |
+| `input_poll_ms` | unset | unset or `0`: each program compositor is woken by every frame any source gives. A number: it sleeps to its next deadline and looks for frames at most that often in between (and at once for a cut). A tick is drawn at its deadline either way, so with many sources this only removes wake-ups; a source's queue (three frames) must hold what arrives within one interval. Setup uses `16` for the L4 CUarray profile (rates up to 60 fps) |
+| `aux_input_poll_ms` | unset | the AUX buses' input polling interval, independent of `input_poll_ms`. Setup uses `16` ms for the L4 CUarray profile. Buses still wake at their output deadlines and immediately for control changes; polling less often reduces queue checks between ticks. Keep the interval below the fastest subscribed input's frame period |
 | `latency_ms` | 2 frames up to 30 fps, 3 at 50/60 | playout buffer between a source frame's arrival and its tick (80 ms at 25 fps, 50 ms at 60). A frame later than that is skipped and the previous one repeated, so set it just above the worst source jitter; must stay below six frames. `--mixer-latency-ms` on the command line overrides it |
 
 ## renditions
@@ -53,6 +54,11 @@ The program is composited once. Each rendition adds an encode. With no rendition
 | `max_cll`, `max_fall` | derived | PQ metadata in nits: MaxCLL = `tonemap_peak` × 100, MaxFALL = 40% of MaxCLL; MaxFALL cannot exceed MaxCLL. Requires compatible NVENC headers/driver. |
 | `tonemap_param` | `0` | operator knee in reference-white units; `0` = operator default (0.3 mobius/reinhard, 1.8 gamma). mobius must be below 1.0; `0.9` keeps 90% of SDR white untouched |
 | `dpb_size` | `0` | NVENC reference frames kept, 0–16; `0` lets NVENC choose. Without B-frames `1` is enough and frees the other reference surfaces; it may cost quality at low bitrates, so measure before setting it on a program output. Aux monitors default to `1` |
+
+Janus RTP uses 1200-byte UDP packets and a pacing rate of three times the encoder bitrate.
+Literal loopback destinations allow an initial burst of 24 packets (28.8 kB); other addresses
+and hostnames allow four. The larger local allowance reduces timer wakes with many outputs,
+while longer keyframe bursts remain paced.
 
 ## sources
 
@@ -120,7 +126,7 @@ Up to four browser keys over the finished program. `feed: "clean"` omits them. K
 
 | field | default | meaning |
 | --- | --- | --- |
-| `fade_seconds` | `0.4` | how long a key change fades, 0 to 10; `0` cuts |
+| `fade_seconds` | `0.4` | initial shared ALL key rate, 0 to 10 seconds; `0` cuts. Keys start by following ALL |
 | `fade_curve` | `"linear"` | easing of a key fade, the same presets as `control.fade_curve` |
 
 
@@ -131,6 +137,37 @@ Up to four browser keys over the finished program. `feed: "clean"` omits them. K
 | `dst` | whole canvas | `x`, `y`, `w`, `h` on the canvas; the window is scaled into it |
 | `on` | `false` | on air at start |
 | `bounded` | `false` | compose only this key's rectangle instead of the whole canvas, while every key on air is `bounded`; for a key that fills a known part of the picture, such as a lower third |
+
+### Runtime key rates and takes
+
+Rates are mixer state shared by all controllers. They are separate from the background
+Fade rate. These control commands use seconds; replace `lower_third` with a configured key ID:
+
+```text
+mixer.dsk {"all_rate":0.4}
+mixer.dsk {"key":"lower_third","rate":1.0}
+mixer.dsk {"key":"lower_third","on":true}
+mixer.dsk {"key":"lower_third","on":false,"fade_seconds":0}
+mixer.dsk {"key":"lower_third","rate":null}
+```
+
+`rate: null` restores inheritance from ALL. Changing a rate does not change visibility.
+An explicit `fade_seconds` overrides the saved rate for that command only. A group request
+with `keys: [...]` and `toggle: true` changes the named keys together; it uses `all_rate`
+unless `fade_seconds` is supplied. The UI's ALL/K action instead sends each key at its own
+rate, preserving overrides.
+
+```text
+mixer.dsk {"keys":["lower_third","ticker"],"toggle":true,"fade_seconds":0.5}
+mixer.dsk {"keys":["lower_third"],"prepare":true}
+mixer.dsk {"keys":[],"prepare":true}
+```
+
+`prepare: true` selects the keys for subsequent background takes (NEXT); an empty list
+clears the selection. Prepared keys follow the background take's clock instead of their
+independent rates: fades, holds, manual lever progress, cuts and wipe cut points remain
+aligned. See [operator controls](guide.md#next-combine-background-and-key-takes) for the
+separate key-only Auto behavior and the distinction between ALL and NEXT.
 
 ## aux_buses
 

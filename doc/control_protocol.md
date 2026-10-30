@@ -12,6 +12,9 @@ Server (avplumber) responds with line with status code and information:
 * `500 ERROR: ...`
 * `BYE` and connection close - special response for `bye` command
 
+The control port listens on every IPv4 interface and has no authentication. Any
+client that reaches it can run every command, including creating nodes that read
+and write files, so the deployment must restrict access to it (e.g. a firewall).
 
 ## Commands
 

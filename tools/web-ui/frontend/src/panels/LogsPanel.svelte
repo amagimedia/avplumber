@@ -62,10 +62,11 @@
     c.copyToClipboard?.(t);
   }
 
-  // Follow new logs when enabled.
-  $: if (autoScroll) {
-    // Trigger after DOM updates
-    if (preEl) setTimeout(scrollToBottom, 0);
+  // Follow new lines when enabled; only a new logs array has them (the panel context changes far more often).
+  let followedLogs = null;
+  $: if (autoScroll && preEl && c.logs !== followedLogs) {
+    followedLogs = c.logs;
+    setTimeout(scrollToBottom, 0);  // after the DOM update
   }
 
   onMount(() => {
@@ -74,29 +75,19 @@
   });
 </script>
 
-<div class="panel avp-panel">
-  <div class="toolbar">
-    <label class="hint">
-      <input type="checkbox" checked={wrap} on:change={(e) => setWrap(e.target.checked)} />
-      wrap
+<div class="panel">
+  <TextPanelToolbar wrap={wrap} onWrapChange={setWrap} onCopy={copy}>
+    <label class="check" data-tip="Keep the newest line in view; scrolling up pauses it">
+      <input type="checkbox" checked={autoScroll} on:change={(e) => setAutoScroll(e.target.checked)} /> Follow
     </label>
-    <label class="hint" style="margin-left: 0.6rem;">
-      <input type="checkbox" checked={autoScroll} on:change={(e) => setAutoScroll(e.target.checked)} />
-      follow
-    </label>
-    <button on:click={copy} style="margin-left: auto;">Copy</button>
-  </div>
-
+  </TextPanelToolbar>
   {#if !c.hasReceivedLog}
-    <p class="hint">
-      If avplumber is started with <code>-l logfile</code> and web-ui has
-      <code>AVPLUMBER_LOGFILE</code> set, new lines will appear here.
-    </p>
+    <div class="body" style="flex: none">
+      <p class="hint">
+        If avplumber is started with <code>-l logfile</code> and the web UI has <code>AVPLUMBER_LOGFILE</code> set, new lines
+        appear here.
+      </p>
+    </div>
   {/if}
-  <pre bind:this={preEl} class="scrollable small-text" class:avp-prewrap={wrap} on:scroll={handleScroll}>
-{#each c.logs as line}
-{line}
-{/each}</pre>
+  <pre bind:this={preEl} class="body" class:wrap on:scroll={handleScroll}>{(c.logs || []).join('\n')}</pre>
 </div>
-
-

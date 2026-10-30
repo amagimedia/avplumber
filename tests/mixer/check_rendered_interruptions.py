@@ -152,6 +152,68 @@ def check_graph(avp, mixer, output, errors, wipe_file, wipe_seconds):
     collect(0.5)
     live_scene(1)
     results.append({'explicit_interrupt': 'back to program', 'burst_cuts': 20, 'final_scene': 'full1'})
+
+    full = {'dst_w': 640, 'dst_h': 360}
+    def define(name, camera, **layer):
+        mixer.define_scene(name, {f'camera{camera}': {**full, **layer}},
+                           routes={f'camera{camera}': camera} if routes else None)
+
+    # A layer partly off the canvas draws its visible part: camera1's right half on the left.
+    define('off_left', 1, dst_x=-320)
+    mixer.cut('off_left')
+    collect(0.5)
+    images = [image for _, image in collect(0.3)]
+    left = float(np.mean([image[:, :300].mean() for image in images]))
+    right = float(np.mean([image[:, 340:].mean() for image in images]))
+    assert left > 60 and right < 30, ('off-canvas layer', left, right)
+    results.append({'off_canvas_layer': 'visible part drawn', 'left_luma': left, 'right_luma': right})
+
+    # A redefinition takes effect when the scene is next taken: program keeps its live picture,
+    # and a preview slot holding the old definition loads the new one.
+    mixer.cut('full0')
+    collect(0.5)
+    live_scene(0)
+    define('full0', 1)
+    live_scene(0, seconds=0.8)
+    mixer.cut('full1')
+    collect(0.5)
+    mixer.cut('full0')
+    collect(0.5)
+    live_scene(1)
+    define('full0', 0)
+    mixer.cut('full1')
+    collect(0.5)
+    mixer.cut('full0')
+    collect(0.5)
+    live_scene(0)
+    mixer.preview('full1')
+    collect(0.3)
+    define('full1', 0)
+    mixer.cut('full1')
+    collect(0.5)
+    live_scene(0)
+    define('full1', 1)
+    mixer.cut('full0')
+    collect(0.5)
+    mixer.cut('full1')
+    collect(0.5)
+    live_scene(1)
+    results.append({'redefinition': 'program kept, preview reloaded'})
+
+    # A wipe after one whose decoder is still stopping waits for it without holding the mixer:
+    # program output does not stall meanwhile.
+    mixer.cut('full0')
+    collect(0.5)
+    take('media_wipe', 'full1')
+    collect(0.3, allow_wipe_cancel=True)
+    avp.executeCommandsFromString('mixer.interrupt {"mixer":"recovery"}')
+    take('media_wipe', 'full1')
+    stamps = [at for at, _ in collect(1.0, allow_wipe_cancel=True)]
+    longest = float(np.max(np.diff(stamps)))
+    assert len(stamps) >= 45 and longest < 0.2, ('program output stalled', len(stamps), longest)
+    collect(wipe_seconds + 1, allow_wipe_cancel=True)
+    live_scene(1)
+    results.append({'wipe_after_interrupted_wipe': 'no stall', 'longest_gap_ms': longest * 1000})
     return results
 
 

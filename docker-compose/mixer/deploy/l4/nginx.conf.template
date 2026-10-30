@@ -20,6 +20,13 @@ server {
     location /ws {
         proxy_pass http://127.0.0.1:22222;
     }
+    location = /graph {
+        return 301 /graph/;
+    }
+    location /graph/ {
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:22222/;
+    }
     location / {
         proxy_pass http://127.0.0.1:${MIXER_HTTP_PORT};
     }

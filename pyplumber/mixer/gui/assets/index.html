@@ -481,7 +481,7 @@
   <div class="tools">
     <span class="seg small" id="viewer-count" role="group" aria-label="Number of viewers"><button type="button" data-n="1">1</button><button type="button" data-n="2">2</button></span>
     <span class="keyhint" id="hint" tabindex="0" aria-label="Keyboard shortcuts">⌨</span>
-    <nav class="links"><a href="/wall" target="_blank" rel="noopener" title="Every output side by side in a new tab">Outputs ↗</a><a href="/levels" target="_blank" rel="noopener" title="Per-source audio levels in a new tab">Levels ↗</a><a id="setup-link" href="/setup/" hidden>Setup</a></nav>
+    <nav class="links"><a href="/wall" target="_blank" rel="noopener" title="Every output side by side in a new tab">Outputs ↗</a><a href="/levels" target="_blank" rel="noopener" title="Per-source audio levels in a new tab">Levels ↗</a><a id="graph-link" target="_blank" rel="noopener" title="The processing graph in a new tab" hidden>Graph ↗</a><a id="setup-link" href="/setup/" hidden>Setup</a></nav>
   </div>
 </header>
 
@@ -559,6 +559,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 $("setup-link").hidden = !config.setup;
+if (config.graph_url) Object.assign($("graph-link"), { href: config.graph_url, hidden: false });
 const store = {
   get(k, d) { try { const v = localStorage.getItem("avplumber.mixer." + k); return v === null ? d : JSON.parse(v); } catch (_) { return d; } },
   set(k, v) { try { localStorage.setItem("avplumber.mixer." + k, JSON.stringify(v)); } catch (_) {} },

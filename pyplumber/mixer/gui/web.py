@@ -47,6 +47,10 @@ mixer needs no HTTP server of its own and the pages need no build step:
                         A cut, fade or wipe superseded by a newer one before it reached
                         the mixer answers {"ok": true, "superseded": true}.
 
+Requests from another site's page are refused: POSTs and the lever WebSocket check the
+Origin, and /api/command takes `application/json` only. There is no authentication:
+restrict who reaches --bind, for example with a firewall or an authenticating reverse proxy.
+
 The bridge owns a serialized control connection, and one for the lever, and reconnects
 when the mixer restarts, so the page can stay open across a mixer restart. Takes must not
 queue behind polling: every tab shares one /api/state reply for STATE_TTL_S, and
@@ -175,6 +179,9 @@ class Handler(BaseHTTPRequestHandler):
     def _lever_socket(self) -> None:
         """Serves one WebSocket (RFC 6455) of lever positions until the client closes it. Only what a
         browser sends is handled: masked text frames of one fragment, ping and close."""
+        if self._cross_origin():   # a WebSocket is not subject to CORS: any page may open one
+            self._send_json(403, {"error": "Use the pages of this instance"})
+            return
         key = self.headers.get("Sec-WebSocket-Key")
         if not key or self.headers.get("Upgrade", "").lower() != "websocket":
             self._send_json(400, {"error": "expected a WebSocket upgrade"})
@@ -299,21 +306,33 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send_json(404, {"error": "not found"})
 
+    def _cross_origin(self) -> bool:
+        """A browser request sent by another origin's page, which must not drive this instance.
+        Clients other than browsers send no Origin; who may reach the port is the deployment's choice."""
+        origin = self.headers.get("Origin")
+        return bool(origin and urlsplit(origin).netloc != self.headers.get("Host")) or \
+            self.headers.get("Sec-Fetch-Site") == "cross-site"
+
+    def _read_json(self, limit: int, what: str) -> dict:
+        """The request's JSON object. Requiring application/json also makes a browser preflight any
+        other origin's request, which this server never answers with CORS headers."""
+        size = int(self.headers.get("Content-Length", "0"))
+        if not 0 < size <= limit or self.headers.get_content_type() != "application/json":
+            raise ValueError(f"Expected a JSON {what} request of at most {limit} bytes")
+        body = json.loads(self.rfile.read(size))
+        if not isinstance(body, dict):
+            raise ValueError(f"Expected a JSON {what} object")
+        return body
+
     def do_POST(self) -> None:  # noqa: N802
         if self.path.partition("?")[0] == "/api/setup" and self.setup_manager:
             self.close_connection = True
             # The setup endpoint accepts same-origin JSON, never shell commands.
-            origin = self.headers.get("Origin")
-            if (origin and urlsplit(origin).netloc != self.headers.get("Host")) or self.headers.get("Sec-Fetch-Site") == "cross-site":
+            if self._cross_origin():
                 self._send_json(403, {"error": "Use the setup page on this instance"})
                 return
             try:
-                size = int(self.headers.get("Content-Length", "0"))
-                if not 0 < size <= 4096 or self.headers.get_content_type() != "application/json":
-                    raise ValueError("Expected a JSON setup request of at most 4096 bytes")
-                settings = json.loads(self.rfile.read(size))
-                if not isinstance(settings, dict):
-                    raise ValueError("Expected a JSON setup object")
+                settings = self._read_json(4096, "setup")
                 self.setup_manager.apply(settings)
                 self._send_json(202, self.setup_manager.status())
             except (ValueError, KeyError, TypeError) as exc:
@@ -323,9 +342,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
+        if self._cross_origin():
+            self.close_connection = True   # the body stays unread
+            self._send_json(403, {"error": "Use the pages of this instance"})
+            return
         if self.path.partition("?")[0] == "/api/banks":
             try:
-                body = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+                size = int(self.headers.get("Content-Length", 0) or 0)
+                if size > 16384:
+                    raise ValueError("Expected source banks of at most 16384 bytes")
+                body = self.rfile.read(size)
                 self._send_json(200, {"banks": self.banks.set(json.loads(body or b"{}").get("banks"))})
             except (ValueError, AttributeError) as exc:
                 self._send_json(400, {"error": str(exc)})
@@ -336,8 +362,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
             return
         try:
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
-            request = json.loads(body or b"{}")
+            # The L4 proxy's body limit (docker-compose/mixer/deploy/l4/nginx.conf.template).
+            request = self._read_json(16384, "command")
+        except ValueError as exc:
+            self.close_connection = True   # the body may be unread
+            self._send_json(400, {"error": str(exc)})
+            return
+        try:
             result = self.bridge.take(request)
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
@@ -355,14 +386,18 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(bridge: MixerBridge, bind: str, port: int, setup: SetupController | None = None, host_stats: HostStats | None = None,
           preview_base: str | None = None, price: dict | None = None, *, gpu: GpuTelemetry | None = None,
-          recent: RecentCounts | None = None, browser_cpu: BrowserCpuStats | None = None) -> ThreadingHTTPServer:
+          recent: RecentCounts | None = None, browser_cpu: BrowserCpuStats | None = None,
+          graph_url: str = "") -> ThreadingHTTPServer:
     """`preview_base`: where the page's players load from, when not port 8080 of the page's host.
     Normalized here, so every caller's page carries a base the player resolves its files against.
+    `graph_url`: where the read-only graph view (tools/web-ui) is, linked from the page's top bar.
     `setup` owns application-specific input/settings policy. `gpu` may be shared
     with another server; when omitted, this server creates one cached sampler. `browser_cpu` polls
     the browser service's CPU figures for the page."""
     preview_base = normalize_preview_base(preview_base or "")
     config: dict = {"preview_base": preview_base} if preview_base else {}
+    if graph_url:
+        config["graph_url"] = graph_url
     if setup:
         config["setup"] = True
     if price:
@@ -385,6 +420,9 @@ def parse_args(argv: list[str] | None = None, *, configure=None) -> argparse.Nam
     parser.add_argument("--preview-base", nargs="?", const="", default="",
                         help="Where the page's players load from: a path on the page's own origin, such as /preview/ "
                              "behind a reverse proxy, or a URL (default: port 8080 of the page's host)")
+    parser.add_argument("--graph-url", default=os.environ.get("MIXER_GRAPH_URL", ""),
+                        help="Where the AVPlumber graph view is, a path on the page's own origin such as /graph/ "
+                             "or a URL; the page links to it. Default: no link. Env: MIXER_GRAPH_URL")
     parser.add_argument("--transition", choices=("cut", "fade", "wipe"),
                         help="Override the page's initial transition without changing the running mixer")
     parser.add_argument("--compute-price", type=Path, default=os.environ.get("MIXER_COMPUTE_PRICE") or None,
@@ -431,7 +469,8 @@ def main(argv: list[str] | None = None, *, configure=None, setup_factory=None) -
     if args.critical_nice:
         CriticalNice(mixer_pid, args.critical_nice).start()
     server = serve(bridge, args.bind, args.http_port, setup=setup, host_stats=host_stats,
-                   preview_base=args.preview_base, price=price, recent=recent, browser_cpu=browser_cpu)
+                   preview_base=args.preview_base, price=price, recent=recent, browser_cpu=browser_cpu,
+                   graph_url=args.graph_url)
     print(f"mixer web UI on http://{args.bind}:{args.http_port} "
           f"controlling {args.mixer} at {args.host}:{args.port}", flush=True)
     def stop(_signum, _frame):
