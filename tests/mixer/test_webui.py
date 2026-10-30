@@ -1093,6 +1093,7 @@ def test_bridge_never_resends_a_command_the_mixer_answered_or_may_have_run():
     with pytest.raises(TimeoutError):
         bridge.command("slow")
     time.sleep(0.6)   # past the slow reply: a resend would have arrived
+    bridge.timeout = 5   # the control port serves one connection at a time; it may still be on the slow one
     bridge.command("next")   # on a new connection: the slow reply cannot answer it
     assert received == [(0, "rejected"), (0, "slow"), (1, "next")]
 
