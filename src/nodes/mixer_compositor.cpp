@@ -344,7 +344,12 @@ public:
             sent_eof_ = false;
             may_hold_frames_.assign(source_edges_.size(), 1);
         }
-        if (sent_eof_) return;
+        if (sent_eof_) {
+            // Nothing left to draw until an input change above resets it; returning at once would
+            // spin the thread. The node's own wait, which input polling also uses.
+            waitForFrames();
+            return;
+        }
         if (!(active | prewarm).any()) {
             waitForFrames();
             return;

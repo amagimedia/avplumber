@@ -111,6 +111,15 @@ protected:
         for (auto &edge : source_edges_) edge->producedEvent().signal();
     }
 
+    /// After the end-of-stream marker there is nothing to draw: parks the render thread until
+    /// stop(), an input frame or a control change wakes it, since returning from process() at
+    /// once would spin it. True while the stream has ended.
+    bool parkedAfterEof() {
+        if (!sent_eof_) return false;
+        this->waitForInput();
+        return true;
+    }
+
     // An unspecified canvas color preserves the node's metadata inheritance for non-mixer callers.
     bool hasCanvasColor() const { return draw_.canvas().transfer != AVCOL_TRC_UNSPECIFIED; }
 
