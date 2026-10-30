@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verify a supported patch series reproduces its pinned tree.
 set -euo pipefail
-[[ $# -eq 2 ]] || { echo "usage: $0 <n8.0|n8.1|master-98e92563> /path/to/FFmpeg" >&2; exit 2; }
+[[ $# -eq 2 ]] || { echo "usage: $0 <n8.0|n8.1|master-1bfb9160> /path/to/FFmpeg" >&2; exit 2; }
 dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 case "$1" in
     n8.0|n8.1)
@@ -10,7 +10,7 @@ case "$1" in
         case "$1" in n8.0) k=n80 ;; n8.1) k=n81 ;; esac
         v="${k}_commit"; base_commit=${!v}; v="${k}_tree"; expected_tree=${!v}
         ;;
-    master-98e92563)
+    master-1bfb9160)
         series=9
         source "$dir/9/bases.env"
         base_commit=$upstream_commit

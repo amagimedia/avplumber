@@ -1489,6 +1489,3 @@ index 0000000..a338be4
 +    return ff_filter_frame(outlink, out);
 +}
 +#endif
--- 
-2.55.0
-

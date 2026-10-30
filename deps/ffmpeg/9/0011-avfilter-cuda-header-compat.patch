@@ -64,6 +64,3 @@ index a858679..dd38354 100644
  FF_DISABLE_DEPRECATION_WARNINGS
      s->var_values[VAR_POS] = frame_in->pkt_pos == -1 ? NAN : frame_in->pkt_pos;
  FF_ENABLE_DEPRECATION_WARNINGS
--- 
-2.55.0
-

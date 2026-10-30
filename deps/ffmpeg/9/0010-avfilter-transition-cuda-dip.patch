@@ -312,6 +312,3 @@ index 86a2eaf..6f21f5b 100644
      float alpha = alpha_coef;
      int px = x / lanes;
      int pw = overlay_w / lanes;
--- 
-2.55.0
-

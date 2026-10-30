@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Fri, 30 Oct 2026 16:09:05 +0100
+Subject: [PATCH] avfilter, avutil: give a hardware pool frame its requested
+ size
+
+A writable copy of a decoded hardware frame is allocated from the decoder's
+frames context, whose surfaces have the coded size (1920x1088 for 1080p
+HEVC). ff_default_get_video_buffer2() and av_frame_make_writable() returned
+such copies at the pool's size, so ff_filter_frame() rejected them as a
+changed frame size: CUDA filters fed by NVDEC that copy or make their
+input writable (overlay_cuda, transition_cuda) failed with "Frame size or
+format changed without filter graph reinitialization".
+---
+ libavfilter/video.c | 11 ++++++++++-
+ libavutil/frame.c   | 10 ++++++++--
+ 2 files changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/libavfilter/video.c b/libavfilter/video.c
+index 3480c15..8e9e0e0 100644
+--- a/libavfilter/video.c
++++ b/libavfilter/video.c
+@@ -69,8 +69,17 @@ AVFrame *ff_default_get_video_buffer2(AVFilterLink *link, int w, int h, int alig
+             return NULL;
+ 
+         ret = av_hwframe_get_buffer(li->l.hw_frames_ctx, frame, 0);
+-        if (ret < 0)
++        if (ret < 0) {
+             av_frame_free(&frame);
++            return NULL;
++        }
++        /* A pool can be larger than the frames it serves, as a decoder's is
++         * (coded size). Give the frame the size it was requested with, which
++         * ff_filter_frame() checks against the link. */
++        if (w <= frame->width && h <= frame->height) {
++            frame->width  = w;
++            frame->height = h;
++        }
+ 
+         return frame;
+     }
+diff --git a/libavutil/frame.c b/libavutil/frame.c
+index 185adbe..c63daf0 100644
+--- a/libavutil/frame.c
++++ b/libavutil/frame.c
+@@ -571,9 +571,15 @@ int av_frame_make_writable(AVFrame *frame)
+         return ret;
+     }
+ 
+-    if (frame->hw_frames_ctx)
++    if (frame->hw_frames_ctx) {
+         ret = av_hwframe_get_buffer(frame->hw_frames_ctx, &tmp, 0);
+-    else
++        /* A pool can be larger than its frames, as a decoder's is (coded
++         * size): the copy keeps the frame's own size. */
++        if (ret >= 0 && frame->width <= tmp.width && frame->height <= tmp.height) {
++            tmp.width  = frame->width;
++            tmp.height = frame->height;
++        }
++    } else
+         ret = av_frame_get_buffer(&tmp, 0);
+     if (ret < 0)
+         return ret;

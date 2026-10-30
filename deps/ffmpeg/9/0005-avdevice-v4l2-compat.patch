@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Wed, 12 Aug 2026 15:54:13 +0000
-Subject: [PATCH 05/10] avdevice/v4l2: retain source timestamps
+Subject: [PATCH] avdevice/v4l2: retain source timestamps
 
 Preserve the legacy V4L2 timestamp behavior used by avplumber inputs.
 
@@ -11,7 +11,7 @@ Original-commit: 961ec93cbc352178ae5572c8d7f03f508edc3147
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/libavdevice/v4l2.c b/libavdevice/v4l2.c
-index 2ca093b..2334c43 100644
+index 4d42a3f..9374734 100644
 --- a/libavdevice/v4l2.c
 +++ b/libavdevice/v4l2.c
 @@ -595,7 +595,7 @@ static int mmap_read_frame(AVFormatContext *ctx, AVPacket *pkt)

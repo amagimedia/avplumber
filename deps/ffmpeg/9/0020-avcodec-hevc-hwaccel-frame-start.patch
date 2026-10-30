@@ -1,4 +1,4 @@
-From 4c85b08b19a4c673927917cca21dc6c27324ec48 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Tue, 13 Oct 2026 21:43:47 +0200
 Subject: [PATCH] avcodec/hevc: do not clear software decode tables for hwaccel
@@ -13,10 +13,10 @@ clears then; software decoding is unchanged.
  1 file changed, 9 insertions(+), 5 deletions(-)
 
 diff --git a/libavcodec/hevc/hevcdec.c b/libavcodec/hevc/hevcdec.c
-index b6234a6c34..aacd2e7c27 100644
+index f1bd562..b7786b3 100644
 --- a/libavcodec/hevc/hevcdec.c
 +++ b/libavcodec/hevc/hevcdec.c
-@@ -3316,11 +3316,15 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
+@@ -3475,11 +3475,15 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
          }
      }
  
@@ -37,6 +37,3 @@ index b6234a6c34..aacd2e7c27 100644
  
      if (IS_IDR(s))
          ff_hevc_clear_refs(l);
--- 
-2.55.0
-

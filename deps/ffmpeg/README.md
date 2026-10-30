@@ -1,14 +1,14 @@
 # FFmpeg patch series
 
 `apply.sh` selects the series from the upstream checkout. Both series include opt-in pinned CUDA upload and GPU v210 unpacking. The experimental `9/` series targets the exact development revision
-`98e92563a3b60dbf6d370fd3491d7f896398e4c1` (`master-98e92563`), with libavcodec 63,
+`1bfb91609d921d1df949b111edfb43a378ca072e` (`master-1bfb9160`), with libavcodec 63,
 libavfilter 12 and libavutil 61. It does **not** apply to release n9.0.2; that
 release also lacks the opaque CUDA array decode path being evaluated here.
 Pin the commit, not the moving `master` branch.
 
 ```bash
 deps/ffmpeg/apply.sh <ffmpeg-checkout>
-deps/ffmpeg/verify.sh master-98e92563 <ffmpeg-repo>
+deps/ffmpeg/verify.sh master-1bfb9160 <ffmpeg-repo>
 ```
 
 Build the experimental revision with nv-codec-headers **n13.1.15.0**
@@ -17,7 +17,7 @@ The existing Docker defaults remain FFmpeg 8.1 / headers 13.0.19.0. A revision
 hash needs an explicit fetch/checkout; `git clone --branch` accepts a branch
 or tag, not a commit hash. Rebuild avcpp, the AVP binary and Python module
 against the selected library ABI, and keep runtime library selection consistent.
-The Fedora mixer Dockerfile accepts `--build-arg FFMPEG_TAG=master-98e92563`
+The Fedora mixer Dockerfile accepts `--build-arg FFMPEG_TAG=master-1bfb9160`
 to fetch both pinned revisions; the default remains `n8.1`.
 
 ## Development-series differences
@@ -75,6 +75,13 @@ and AArch64 patches remain too. Changes from the 8.x series:
   `decode_slice_data()` returns before either runs. On NVDEC HEVC sources the
   clears were a quarter of the decoder thread's CPU. Software decoding is
   unchanged.
+- Upstream rejects a frame whose size differs from its link's (since
+  `f2bf7a2440`). A writable copy of a decoded hardware frame comes from the
+  decoder's pool, whose surfaces have the coded size (1920x1088 for 1080p
+  HEVC), so CUDA filters fed by NVDEC that copy their input or make it
+  writable (`overlay_cuda`, `transition_cuda`) failed. Pool frames from
+  `ff_default_get_video_buffer2()` and `av_frame_make_writable()` now keep
+  the requested size.
 
 CUARRAY is a separate opt-in pixel format. Linear `AV_PIX_FMT_CUDA` and CPU
 decoding remain upstream options. The experimental series permits `scale_cuda`

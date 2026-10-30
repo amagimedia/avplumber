@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Sat, 3 Oct 2026 00:19:50 +0200
-Subject: [PATCH 01/10] swscale/aarch64: port ARGB to YUVA420P acceleration
+Subject: [PATCH] swscale/aarch64: port ARGB to YUVA420P acceleration
 
 ---
  libswscale/aarch64/input.S                 |  32 ++++
@@ -85,7 +85,7 @@ index 4f86364..3844db2 100644
          case AV_PIX_FMT_BGR24:
              c->lumToYV12 = ff_bgr24ToY_neon;
 diff --git a/libswscale/aarch64/swscale_unscaled.c b/libswscale/aarch64/swscale_unscaled.c
-index c9041db..ebee5b5 100644
+index d11625d..c726a8f 100644
 --- a/libswscale/aarch64/swscale_unscaled.c
 +++ b/libswscale/aarch64/swscale_unscaled.c
 @@ -21,6 +21,13 @@
@@ -218,7 +218,7 @@ index c9041db..ebee5b5 100644
  /* We need a 16 pixel width alignment. This constraint can easily be removed
   * for input reading but for the output which is 4-bytes per pixel (RGBA) the
   * assembly might be writing as much as 4*15=60 extra bytes at the end of the
-@@ -203,6 +319,15 @@ static void get_unscaled_swscale_neon(SwsInternal *c) {
+@@ -205,6 +321,15 @@ static void get_unscaled_swscale_neon(SwsInternal *c) {
          (c->opts.src_format == AV_PIX_FMT_NV24 || c->opts.src_format == AV_PIX_FMT_NV42) &&
          !(c->opts.src_h & 1) && !(c->opts.src_w & 15) && !accurate_rnd)
          c->convert_unscaled = nv24_to_yuv420p_neon_wrapper;

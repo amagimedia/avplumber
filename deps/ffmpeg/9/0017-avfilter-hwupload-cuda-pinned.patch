@@ -1,4 +1,4 @@
-From 1957e2eee74a09db54c98d3c138921a0c18ce918 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Tue, 6 Oct 2026 13:21:44 +0200
 Subject: [PATCH] avfilter/hwupload_cuda: opt-in pinned staging and GPU v210
@@ -14,10 +14,10 @@ Reuse the supplied CUDA context, stage software frames in pinned memory and copy
  create mode 100644 libavfilter/vf_hwupload_cuda.cu
 
 diff --git a/doc/filters.texi b/doc/filters.texi
-index d8151d61b8..3f2b22e825 100644
+index 0167152..6478de0 100644
 --- a/doc/filters.texi
 +++ b/doc/filters.texi
-@@ -16106,6 +16106,20 @@ It accepts the following optional parameters:
+@@ -16164,6 +16164,20 @@ It accepts the following optional parameters:
  @table @option
  @item device
  The number of the CUDA device to use
@@ -39,10 +39,10 @@ index d8151d61b8..3f2b22e825 100644
  
  @section hqx
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index 31ee83855c..eea07eecb8 100644
+index a4bd8ef..2f5e9ed 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
-@@ -362,6 +362,9 @@ OBJS-$(CONFIG_HUESATURATION_FILTER)          += vf_huesaturation.o
+@@ -363,6 +363,9 @@ OBJS-$(CONFIG_HUESATURATION_FILTER)          += vf_huesaturation.o
  OBJS-$(CONFIG_HWDOWNLOAD_FILTER)             += vf_hwdownload.o
  OBJS-$(CONFIG_HWMAP_FILTER)                  += vf_hwmap.o
  OBJS-$(CONFIG_HWUPLOAD_CUDA_FILTER)          += vf_hwupload_cuda.o
@@ -53,7 +53,7 @@ index 31ee83855c..eea07eecb8 100644
  OBJS-$(CONFIG_HYSTERESIS_FILTER)             += vf_hysteresis.o framesync.o
  OBJS-$(CONFIG_ICCDETECT_FILTER)              += vf_iccdetect.o fflcms2.o
 diff --git a/libavfilter/vf_hwupload_cuda.c b/libavfilter/vf_hwupload_cuda.c
-index 9920bbcfc8..2df767e0ca 100644
+index 1478b02..112e441 100644
 --- a/libavfilter/vf_hwupload_cuda.c
 +++ b/libavfilter/vf_hwupload_cuda.c
 @@ -18,6 +18,9 @@
@@ -355,7 +355,7 @@ index 9920bbcfc8..2df767e0ca 100644
      { "device", "Number of the device to use", OFFSET(device_idx), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
      { "output_format", "Output frame format", OFFSET(output_format), AV_OPT_TYPE_INT, { .i64 = CUDAUPLOAD_FMT_CUDA }, 0, CUDAUPLOAD_FMT_NB - 1, FLAGS, .unit = "output_format" },
          { "cuda",    "Pitch-linear device memory (default)", 0, AV_OPT_TYPE_CONST, { .i64 = CUDAUPLOAD_FMT_CUDA },    .flags = FLAGS, .unit = "output_format" },
-@@ -211,6 +417,9 @@ const FFFilter ff_vf_hwupload_cuda = {
+@@ -212,6 +418,9 @@ const FFFilter ff_vf_hwupload_cuda = {
      .p.description = NULL_IF_CONFIG_SMALL("Upload a system memory frame to a CUDA device."),
  
      .p.priv_class  = &cudaupload_class,
@@ -367,7 +367,7 @@ index 9920bbcfc8..2df767e0ca 100644
      .uninit    = cudaupload_uninit,
 diff --git a/libavfilter/vf_hwupload_cuda.cu b/libavfilter/vf_hwupload_cuda.cu
 new file mode 100644
-index 0000000000..c81a04d567
+index 0000000..c81a04d
 --- /dev/null
 +++ b/libavfilter/vf_hwupload_cuda.cu
 @@ -0,0 +1,24 @@
@@ -395,6 +395,3 @@ index 0000000000..c81a04d567
 +    uv[pair * 2] = (bits & 1023) << 6;
 +    uv[pair * 2 + 1] = ((bits >> 20) & 1023) << 6;
 +}
--- 
-2.55.0
-

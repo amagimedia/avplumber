@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Sat, 3 Oct 2026 00:21:14 +0200
-Subject: [PATCH 02/10] avfilter: port CUDA composition suite and preserve
- upstream scaling saturation
+Subject: [PATCH] avfilter: port CUDA composition suite and preserve upstream
+ scaling saturation
 
 ---
  configure                           |   7 +
@@ -33,10 +33,10 @@ Subject: [PATCH 02/10] avfilter: port CUDA composition suite and preserve
  create mode 100644 libavfilter/vf_transition_cuda.cu
 
 diff --git a/configure b/configure
-index 759cb8d..24994e4 100755
+index ae79502..49790b8 100755
 --- a/configure
 +++ b/configure
-@@ -3549,6 +3549,8 @@ chromakey_cuda_filter_deps="ffnvcodec"
+@@ -3547,6 +3547,8 @@ chromakey_cuda_filter_deps="ffnvcodec"
  chromakey_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
  colorspace_cuda_filter_deps="ffnvcodec"
  colorspace_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
@@ -45,7 +45,7 @@ index 759cb8d..24994e4 100755
  hwupload_cuda_filter_deps="ffnvcodec"
  scale_cuda_filter_deps="ffnvcodec"
  scale_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
-@@ -3558,6 +3560,11 @@ transpose_cuda_filter_deps="ffnvcodec"
+@@ -3556,6 +3558,11 @@ transpose_cuda_filter_deps="ffnvcodec"
  transpose_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
  overlay_cuda_filter_deps="ffnvcodec"
  overlay_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
@@ -58,10 +58,10 @@ index 759cb8d..24994e4 100755
  pad_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
  
 diff --git a/doc/filters.texi b/doc/filters.texi
-index 81e9e28..43dd30f 100644
+index 37f9123..d1d3743 100644
 --- a/doc/filters.texi
 +++ b/doc/filters.texi
-@@ -19900,6 +19900,53 @@ testsrc=s=100x100, split=4 [in0][in1][in2][in3];
+@@ -19970,6 +19970,53 @@ testsrc=s=100x100, split=4 [in0][in1][in2][in3];
  
  @end itemize
  
@@ -116,10 +116,10 @@ index 81e9e28..43dd30f 100644
  
  Apply Overcomplete Wavelet denoiser.
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index 15d0b23..6f32d8a 100644
+index e00652e..a824c09 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
-@@ -253,6 +253,8 @@ OBJS-$(CONFIG_COLORSPACE_CUDA_FILTER)        += vf_colorspace_cuda.o \
+@@ -254,6 +254,8 @@ OBJS-$(CONFIG_COLORSPACE_CUDA_FILTER)        += vf_colorspace_cuda.o \
                                                  vf_colorspace_cuda.ptx.o \
                                                  cuda/load_helper.o
  OBJS-$(CONFIG_COLORTEMPERATURE_FILTER)       += vf_colortemperature.o
@@ -128,7 +128,7 @@ index 15d0b23..6f32d8a 100644
  OBJS-$(CONFIG_CONVOLUTION_FILTER)            += vf_convolution.o
  OBJS-$(CONFIG_CONVOLUTION_OPENCL_FILTER)     += vf_convolution_opencl.o opencl.o \
                                                  opencl/convolution.o
-@@ -262,6 +264,7 @@ OBJS-$(CONFIG_COREIMAGE_FILTER)              += vf_coreimage.o
+@@ -263,6 +265,7 @@ OBJS-$(CONFIG_COREIMAGE_FILTER)              += vf_coreimage.o
  OBJS-$(CONFIG_CORR_FILTER)                   += vf_corr.o framesync.o
  OBJS-$(CONFIG_COVER_RECT_FILTER)             += vf_cover_rect.o lavfutils.o
  OBJS-$(CONFIG_CROP_FILTER)                   += vf_crop.o
@@ -136,7 +136,7 @@ index 15d0b23..6f32d8a 100644
  OBJS-$(CONFIG_CROPDETECT_FILTER)             += vf_cropdetect.o edge_common.o
  OBJS-$(CONFIG_CUE_FILTER)                    += f_cue.o
  OBJS-$(CONFIG_CURVES_FILTER)                 += vf_curves.o
-@@ -425,6 +428,9 @@ OBJS-$(CONFIG_OSCILLOSCOPE_FILTER)           += vf_datascope.o
+@@ -426,6 +429,9 @@ OBJS-$(CONFIG_OSCILLOSCOPE_FILTER)           += vf_datascope.o
  OBJS-$(CONFIG_OVERLAY_FILTER)                += vf_overlay.o framesync.o
  OBJS-$(CONFIG_OVERLAY_CUDA_FILTER)           += vf_overlay_cuda.o framesync.o vf_overlay_cuda.ptx.o \
                                                  cuda/load_helper.o
@@ -146,7 +146,7 @@ index 15d0b23..6f32d8a 100644
  OBJS-$(CONFIG_OVERLAY_OPENCL_FILTER)         += vf_overlay_opencl.o opencl.o \
                                                  opencl/overlay.o framesync.o
  OBJS-$(CONFIG_OVERLAY_QSV_FILTER)            += vf_overlay_qsv.o framesync.o
-@@ -545,6 +551,8 @@ OBJS-$(CONFIG_TONEMAP_OPENCL_FILTER)         += vf_tonemap_opencl.o opencl.o \
+@@ -546,6 +552,8 @@ OBJS-$(CONFIG_TONEMAP_OPENCL_FILTER)         += vf_tonemap_opencl.o opencl.o \
                                                  opencl/tonemap.o opencl/colorspace_common.o
  OBJS-$(CONFIG_TONEMAP_VAAPI_FILTER)          += vf_tonemap_vaapi.o vaapi_vpp.o
  OBJS-$(CONFIG_TPAD_FILTER)                   += vf_tpad.o
@@ -3613,10 +3613,10 @@ index f1323d1..62f7988 100644
 -
  }
 diff --git a/libavfilter/vf_scale_cuda.c b/libavfilter/vf_scale_cuda.c
-index 747cc62..b37ae4a 100644
+index 55839ac..94946af 100644
 --- a/libavfilter/vf_scale_cuda.c
 +++ b/libavfilter/vf_scale_cuda.c
-@@ -411,6 +411,11 @@ static int inter_buf_init(AVFilterContext *ctx, CUDATex *tex,
+@@ -455,6 +455,11 @@ static int inter_buf_init(AVFilterContext *ctx, CUDATex *tex,
          tex->linesize[i] = pitch;
  
          CUDA_TEXTURE_DESC tex_desc = {
@@ -3628,7 +3628,7 @@ index 747cc62..b37ae4a 100644
              /* inter tex is always read as float */
              .filterMode = CU_TR_FILTER_MODE_POINT,
          };
-@@ -1083,6 +1088,11 @@ static int cuda_tex_map_frame(AVFilterContext *ctx, const AVFrame *frame,
+@@ -1616,6 +1621,11 @@ static int cuda_tex_map_frame(AVFilterContext *ctx, const AVFrame *frame,
              continue;
  
          CUDA_TEXTURE_DESC tex_desc = {
@@ -3641,7 +3641,7 @@ index 747cc62..b37ae4a 100644
                            CU_TR_FILTER_MODE_LINEAR :
                            CU_TR_FILTER_MODE_POINT,
 diff --git a/libavfilter/vf_scale_cuda.cu b/libavfilter/vf_scale_cuda.cu
-index 7243777..7229d97 100644
+index 14bc355..6f92401 100644
 --- a/libavfilter/vf_scale_cuda.cu
 +++ b/libavfilter/vf_scale_cuda.cu
 @@ -1048,24 +1048,29 @@ struct Convert_rgb0_rgba

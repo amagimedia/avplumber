@@ -8,7 +8,7 @@ Subject: [PATCH] avcodec/nvdec: honor explicit opaque output surface budgets
  1 file changed, 12 insertions(+), 1 deletion(-)
 
 diff --git a/libavcodec/nvdec.c b/libavcodec/nvdec.c
-index f0ae213..5e72d84 100644
+index d928e3c..26e577e 100644
 --- a/libavcodec/nvdec.c
 +++ b/libavcodec/nvdec.c
 @@ -466,7 +466,18 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
@@ -31,6 +31,3 @@ index f0ae213..5e72d84 100644
              av_log(avctx, AV_LOG_VERBOSE, "unsafe_output + cuarray: %d decode surfaces (pool=%d, max=%d)\n",
                     decode_pool_size, frames_ctx->initial_pool_size, MAX_NUM_REGISTERED_DECODE_SURFACES);
          } else if (avctx->extra_hw_frames > 0) {
--- 
-2.55.0
-

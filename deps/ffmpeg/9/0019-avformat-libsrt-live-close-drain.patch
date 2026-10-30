@@ -1,4 +1,4 @@
-From eecb04adc1ed5ff7c2a48844e21626da5864e8f8 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Fri, 9 Oct 2026 14:19:16 +0200
 Subject: [PATCH] avformat/libsrt: drain live publishers before explicit linger
@@ -10,10 +10,10 @@ Subject: [PATCH] avformat/libsrt: drain live publishers before explicit linger
  2 files changed, 61 insertions(+), 1 deletion(-)
 
 diff --git a/doc/protocols.texi b/doc/protocols.texi
-index dbb1f166c7..26139fe3bd 100644
+index 4544ed3..3cfcad8 100644
 --- a/doc/protocols.texi
 +++ b/doc/protocols.texi
-@@ -2098,6 +2098,14 @@ Default is -1. -1 means auto (off with 0 seconds in live mode, on with 180
+@@ -2153,6 +2153,14 @@ Default is -1. -1 means auto (off with 0 seconds in live mode, on with 180
  seconds in file mode). The range for this option is integers in the
  0 - @code{INT_MAX}.
  
@@ -29,7 +29,7 @@ index dbb1f166c7..26139fe3bd 100644
  When true, use Timestamp-based Packet Delivery mode. The default behavior
  depends on the transmission type: enabled in live mode, disabled in file
 diff --git a/libavformat/libsrt.c b/libavformat/libsrt.c
-index c1d93b2550..5e72d520b2 100644
+index c1d93b2..5e72d52 100644
 --- a/libavformat/libsrt.c
 +++ b/libavformat/libsrt.c
 @@ -608,16 +608,68 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
@@ -102,6 +102,3 @@ index c1d93b2550..5e72d520b2 100644
  }
  
  static const AVClass libsrt_class = {
--- 
-2.55.0
-

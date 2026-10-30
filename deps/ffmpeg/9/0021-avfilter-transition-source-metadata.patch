@@ -1,4 +1,4 @@
-From d911ecb639ffda70a351773797785539e383b16d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Thu, 15 Oct 2026 02:12:25 +0200
 Subject: [PATCH] avfilter/transition_cuda: propagate visible source metadata
@@ -8,7 +8,7 @@ Subject: [PATCH] avfilter/transition_cuda: propagate visible source metadata
  1 file changed, 51 insertions(+)
 
 diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
-index 2ba563bb69..3b88e54f74 100644
+index 2ba563b..3b88e54 100644
 --- a/libavfilter/vf_transition_cuda.c
 +++ b/libavfilter/vf_transition_cuda.c
 @@ -31,6 +31,7 @@
@@ -97,6 +97,3 @@ index 2ba563bb69..3b88e54f74 100644
      { "alpha", "set the alpha expression of overlay in range [0.0-1.0] (default is 1.0)", OFFSET(alpha_expr), AV_OPT_TYPE_STRING, { .str = "1.0" }, 0, 0, RUNTIME_FLAGS },
      { "mode", "set the CUDA transition mode", OFFSET(transition_mode), AV_OPT_TYPE_INT, { .i64 = TRANSITION_MODE_FADE }, 0, TRANSITION_MODE_NB - 1, RUNTIME_FLAGS, "mode" },
          { "fade",       "crossfade",             0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_FADE },       .flags = RUNTIME_FLAGS, .unit = "mode" },
--- 
-2.55.0
-

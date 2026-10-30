@@ -4,14 +4,14 @@ Date: Sat, 3 Oct 2026 00:38:23 +0200
 Subject: [PATCH] avfilter/scale_cuda: allow CUarray identity passthrough
 
 ---
- libavfilter/vf_scale_cuda.c | 13 ++++++++++++-
- 1 file changed, 12 insertions(+), 1 deletion(-)
+ libavfilter/vf_scale_cuda.c | 21 +++++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
 
 diff --git a/libavfilter/vf_scale_cuda.c b/libavfilter/vf_scale_cuda.c
-index b37ae4a..3e05d1c 100644
+index 94946af..8799132 100644
 --- a/libavfilter/vf_scale_cuda.c
 +++ b/libavfilter/vf_scale_cuda.c
-@@ -529,6 +529,12 @@ static av_cold int init_processing_chain(AVFilterContext *ctx, int in_width, int
+@@ -769,6 +769,12 @@ static av_cold int init_processing_chain(AVFilterContext *ctx, int in_width, int
  
          s->use_filters = 0;
      } else {
@@ -24,7 +24,16 @@ index b37ae4a..3e05d1c 100644
          s->passthrough = 0;
  
          ret = init_hwframe_ctx(s, in_frames_ctx->device_ref, out_width, out_height);
-@@ -1010,6 +1016,11 @@ static av_cold int cudascale_config_props(AVFilterLink *outlink)
+@@ -1411,7 +1417,7 @@ static int cudascale_query_formats(const AVFilterContext *ctx,
+                                    AVFilterFormatsConfig **cfg_out)
+ {
+     const CUDAScaleContext *s = ctx->priv;
+-    static const enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_CUDA, AV_PIX_FMT_NONE };
++    static const enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_CUDA, AV_PIX_FMT_CUARRAY, AV_PIX_FMT_NONE };
+     static const int rgb_ranges[] = { AVCOL_RANGE_JPEG, AVCOL_RANGE_UNSPECIFIED, -1 };
+     static const int yuv_ranges[] = { AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG, -1 };
+     const AVPixFmtDescriptor *out_desc = s->format != AV_PIX_FMT_NONE ?
+@@ -1543,15 +1549,18 @@ static av_cold int cudascale_config_props(AVFilterLink *outlink)
             outlink->w, outlink->h, av_get_pix_fmt_name(s->out_fmt),
             s->passthrough ? " (passthrough)" : "");
  
@@ -33,18 +42,18 @@ index b37ae4a..3e05d1c 100644
 +    if (s->passthrough)
 +        return 0;
 +
-     if (s->use_filters) {
-         ret = cudascale_setup_filters(ctx, inlink->w, inlink->h);
-         if (ret < 0)
-@@ -1443,7 +1454,7 @@ const FFFilter ff_vf_scale_cuda = {
-     FILTER_INPUTS(cudascale_inputs),
-     FILTER_OUTPUTS(cudascale_outputs),
+     ret = cudascale_load_functions(ctx);
+     if (ret < 0)
+         return ret;
  
--    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
-+    FILTER_PIXFMTS(AV_PIX_FMT_CUDA, AV_PIX_FMT_CUARRAY),
+-    if (!s->passthrough) {
+-        ret = cudascale_setup_filters(ctx, inlink->w, inlink->h);
+-        if (ret < 0)
+-            return ret;
+-    }
++    ret = cudascale_setup_filters(ctx, inlink->w, inlink->h);
++    if (ret < 0)
++        return ret;
  
-     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
- };
--- 
-2.55.0
-
+     return 0;
+ 

@@ -1,14 +1,14 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: x <x@y>
 Date: Wed, 16 Sep 2026 19:56:02 +0200
-Subject: [PATCH 04/10] 0005-avformat-rtp-rfc4175.patch
+Subject: [PATCH] 0005-avformat-rtp-rfc4175.patch
 
 ---
- libavformat/rtpdec_rfc4175.c | 88 ++++++++++++++++++++++++++++++++----
- 1 file changed, 80 insertions(+), 8 deletions(-)
+ libavformat/rtpdec_rfc4175.c | 85 +++++++++++++++++++++++++++++++++---
+ 1 file changed, 78 insertions(+), 7 deletions(-)
 
 diff --git a/libavformat/rtpdec_rfc4175.c b/libavformat/rtpdec_rfc4175.c
-index b49fc55..2f0dff0 100644
+index a73f59e..aff7a9d 100644
 --- a/libavformat/rtpdec_rfc4175.c
 +++ b/libavformat/rtpdec_rfc4175.c
 @@ -43,6 +43,9 @@ struct PayloadContext {
@@ -70,22 +70,19 @@ index b49fc55..2f0dff0 100644
  static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
                                   AVStream *st, AVPacket *pkt, uint32_t *timestamp,
                                   const uint8_t * buf, int len,
-@@ -255,8 +272,12 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+@@ -263,7 +280,10 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
               * previous frame (or pair of fields) anyway by filling the AVPacket.
               */
              av_log(ctx, AV_LOG_ERROR, "Missed previous RTP Marker\n");
--            missed_last_packet = 1;
--            rfc4175_finalize_packet(data, pkt, st->index);
-+            if (ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) {
+-            missed_last_packet = rfc4175_finalize_packet(data, pkt, st->index) >= 0;
++            if (ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT)
 +                rfc4175_discard_packet(data);
-+            } else {
-+                missed_last_packet = 1;
-+                rfc4175_finalize_packet(data, pkt, st->index);
-+            }
++            else
++                missed_last_packet = rfc4175_finalize_packet(data, pkt, st->index) >= 0;
          }
  
          if (!data->frame)
-@@ -270,6 +291,11 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+@@ -280,6 +300,11 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
          }
      }
  
@@ -97,14 +94,14 @@ index b49fc55..2f0dff0 100644
      /*
       * looks for the 'Continuation bit' in scan lines' headers
       * to find where data start
-@@ -310,13 +336,59 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+@@ -320,13 +345,59 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
          if (line >= data->height)
-             return AVERROR_INVALIDDATA;
+             goto invalid;
  
 -        /* prevent ill-formed packets to write after buffer's end */
 -        copy_offset = (line * data->width + offset) * data->pgroup / data->xinc;
 -        if (copy_offset + length > data->frame_size || !data->frame)
--            return AVERROR_INVALIDDATA;
+-            goto invalid;
 +        if ((ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) &&
 +            (data->next_line != line || data->next_offset != offset)) {
 +            av_log(ctx, AV_LOG_ERROR,
@@ -131,7 +128,7 @@ index b49fc55..2f0dff0 100644
 +
 +            /* libavformat stores YUV420 planar frames, depacketized payload is interleaved */
 +            if (line % 2 != 0 || !data->frame || (offset % 2) != 0 || (length % 6) != 0)
-+                return AVERROR_INVALIDDATA;
++                goto invalid;
 +
 +            yd1p = data->frame + line * data->width + offset;
 +            yd2p = yd1p + data->width;
@@ -155,7 +152,7 @@ index b49fc55..2f0dff0 100644
 +            /* prevent ill-formed packets to write after buffer's end */
 +            copy_offset = (line * data->width + offset) * data->pgroup / data->xinc;
 +            if (copy_offset + length > data->frame_size || !data->frame)
-+                return AVERROR_INVALIDDATA;
++                goto invalid;
 +
 +            dest = data->frame + copy_offset;
 +            memcpy(dest, payload, length);

@@ -12,7 +12,7 @@ Keep internally allocated unsafe-output CUarray pools on individual nonblocking 
  create mode 100644 libavcodec/nvdec_stream.h
 
 diff --git a/libavcodec/nvdec.c b/libavcodec/nvdec.c
-index 5e72d84..45f7f4d 100644
+index 26e577e..fe78295 100644
 --- a/libavcodec/nvdec.c
 +++ b/libavcodec/nvdec.c
 @@ -41,6 +41,10 @@
@@ -218,6 +218,3 @@ index 0000000..342b0ed
 +}
 +
 +#endif /* AVCODEC_NVDEC_STREAM_H */
--- 
-2.55.0
-
