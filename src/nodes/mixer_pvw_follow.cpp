@@ -45,6 +45,9 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     const std::string compositor_name_;
     const std::weak_ptr<NodeWrapper> compositor_;
     const avp::mixer::PreviewFollowTiming timing_;
+    // Copied under state_->mutex at construction: process() must not take that lock (orchestrator
+    // holds it while routing takes / stopping groups). The name is fixed at mixer.init.
+    const std::string audio_router_;
     // Layouts and status, under layouts_mutex_, which is never held while taking another lock.
     // mutable: const readers (transitionSources / transitionPts helpers) still need the lock.
     mutable std::mutex layouts_mutex_;
@@ -133,37 +136,33 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
         return out;
     }
 
-    /// Media time for AFV: program frame pts when timed; else the aux deadline of the draw tick;
-    /// else `applied_at` (immediate layout apply). Same clock as realtime set_pts.
+    /// Media time for AFV: the AUX frame PTS of the first tick that draws the change (same clock
+    /// as realtime set_pts). Not the program frame's pts — with pgm_delay that would switch audio
+    /// early — and not the compositor deadline (pts + aux latency), which would switch one aux
+    /// latency late. Immediate / layout applies use the tick first drawn after `applied_at`.
     int64_t transitionPts(const Change& change, int64_t applied_at) const {
-        if (change.effective_ns) return change.effective_ns;
-        if (change.target) return timing_.deadline(change.target);
-        return applied_at;
+        if (change.target) return timing_.aux.time(change.target);
+        return timing_.aux.time(timing_.tickDrawnAfter(applied_at));
     }
 
     /// After a composition apply that changes what is drawn (not settle-only warm).
     void emitTransitionEnded(const Change& change, int64_t pts_ns) {
+        if (audio_router_.empty()) return;
         std::string output;
         {
             std::lock_guard<std::mutex> lock(layouts_mutex_);
             output = output_;
         }
         if (output.empty()) return;
-        std::string router;
-        {
-            std::lock_guard<std::mutex> lock(state_->mutex);
-            router = state_->audio_router_node_name;
-        }
-        if (router.empty()) return;
         const std::string kind = change.kind.empty() ? "cut" : change.kind;
         try {
-            auto control = std::dynamic_pointer_cast<IInputsObjects>(nodes_.node(router)->node());
+            auto control = std::dynamic_pointer_cast<IInputsObjects>(nodes_.node(audio_router_)->node());
             if (!control) return;
             control->setObject("transition_ended",
                                {{"output", output}, {"kind", kind}, {"sources", transitionSources(change)},
                                 {"pts", pts_ns}});
         } catch (const std::exception& e) {
-            logstream << "mixer_pvw_follow: transition_ended to " << router << " failed: " << e.what();
+            logstream << "mixer_pvw_follow: transition_ended to " << audio_router_ << " failed: " << e.what();
         }
     }
 
@@ -202,11 +201,17 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
     }
 
 public:
+    static std::string copyAudioRouter(const std::shared_ptr<avp::mixer::MixerState>& state) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        return state->audio_router_node_name;
+    }
+
     MixerPvwFollow(std::shared_ptr<avp::mixer::MixerState> state, NodeManager& nodes, std::string name,
                    std::string compositor_name, const std::shared_ptr<NodeWrapper>& compositor,
                    avp::mixer::PreviewFollowTiming timing)
         : state_(std::move(state)), nodes_(nodes), name_(std::move(name)),
-          compositor_name_(std::move(compositor_name)), compositor_(compositor), timing_(timing) {
+          compositor_name_(std::move(compositor_name)), compositor_(compositor), timing_(timing),
+          audio_router_(copyAudioRouter(state_)) {
         ++state_->preview_followers;
     }
     // The last sample stays in the mixer's status: a bus is not removed while the mixer runs.
@@ -260,9 +265,10 @@ public:
                 status_ = std::move(status);
             } else if (dirty) {
                 // A new layout keeps the warm inputs; a settle still due stays due.
+                // AFV pts follows this apply, not the previous take's target tick.
                 apply(applied_, false);
                 const int64_t applied_at = avp::mixer::monotonicNs();
-                emitTransitionEnded(applied_, transitionPts(applied_, applied_at));
+                emitTransitionEnded(applied_, timing_.aux.time(timing_.tickDrawnAfter(applied_at)));
             } else if (settle_at_ && now >= *settle_at_) {
                 apply(applied_, true);   // warm inputs only; AFV sources unchanged
                 settle_at_.reset();

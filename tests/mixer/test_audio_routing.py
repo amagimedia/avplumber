@@ -59,21 +59,24 @@ def test_mixer_scene_carries_no_audio_fields(native_boundary):
     assert "audio_follow" not in scene_events[0]
 
 
-def test_no_cut_before_nodes_exist_then_a_startup_cut_after_start(native_boundary):
+def test_no_cut_before_nodes_exist_then_initial_gains_without_a_take(native_boundary):
     nodes, builder = native_boundary
     app = build_application(_audio_show(), MixerOptions(audio_router_node="audio_mixer"),
                             api=_api(nodes, builder))
-    # Regression guard: build() alone must never fire the cut -- live, it always
+    # Regression guard: build() alone must never fire a take -- live, an early cut
     # raced ahead of mixer_comp_a/b and audio_mixer construction and failed with
     # "node has no runtime controls", leaving AudioMixer's gains at their
-    # all-zero default forever.
+    # all-zero default forever. raise_initial_audio_gains sends transition_ended
+    # directly (no mixer.cut), so it does not swap slots or force a keyframe.
     assert not [e for e in app.avp.events if e.startswith("mixer.cut ")]
-    app.start()
-    cut_events = [e for e in app.avp.events if e.startswith("mixer.cut ")]
-    assert len(cut_events) == 1
-    assert '"scene": "full"' in cut_events[0]
-    # Only after the audio router node's owning group ("output") has started.
-    assert app.avp.events.index("start output") < app.avp.events.index(cut_events[0])
+    before = len(app.avp.events)
+    app.mixer.raise_initial_audio_gains()
+    assert not [e for e in app.avp.events[before:] if e.startswith("mixer.cut ")]
+    ended = [e for e in app.avp.events[before:] if "transition_ended" in e]
+    assert len(ended) == 1
+    assert ended[0].startswith("node.object.set audio_mixer transition_ended ")
+    assert '"output": "program"' in ended[0]
+    assert '"sources"' in ended[0]
 
 
 def test_sources_with_audio_bring_the_audio_mixer(native_boundary):
@@ -233,7 +236,8 @@ def test_unbuilt_audio_router_node_is_cleared_not_left_dangling(native_boundary)
     mixer.init: app.mixer.audio_router_node is what MixerApplication._warm_outputs
     waits on, and a node that is never built would hang preheat for
     preheat_timeout_sec (60s by default) before failing -- see application.py's
-    `elif options.audio_router_node and not audio_edges` branch."""
+    `elif options.audio_router_node and not audio_edges` branch. options is cleared
+    too so aux.build does not wire Janus audio to an edge nothing feeds."""
     nodes, builder = native_boundary
     cfg = mixer_config.parse({
         "canvas": CONFIG["canvas"], "sources": [CONFIG["sources"][0]],

@@ -994,8 +994,10 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         log.warning("audio_router_node=%r set but no has_audio sources; AFV will fire with nothing to mix",
                     options.audio_router_node)
         # Nothing was ever built under this name: clear it so _warm_outputs never
-        # waits on a node that will never start (see MixerApplication._wait_for_node).
+        # waits on a node that will never start (see MixerApplication._wait_for_node),
+        # and so aux.build(options) does not wire Janus audio to an unfed edge.
         mixer.audio_router_node = ""
+        options = replace(options, audio_router_node="")
     from pyplumber.mixer.aux import AuxBus, AuxBuses
     aux = AuxBuses(avp, [AuxBus(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses]) if cfg.aux_buses else None
     keyer = DownstreamKeyer(avp, api, mixer, cfg, group=OUTPUT_GROUP) if cfg.dsk_keys else None

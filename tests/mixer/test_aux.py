@@ -583,6 +583,27 @@ def test_bus_without_audio_port_builds_no_audio_leg(cfg, monkeypatch):
     assert legs == []
 
 
+def test_cleared_mixer_audio_router_skips_audio_leg_despite_options(cfg, monkeypatch):
+    """build_application clears mixer.audio_router_node when no has_audio sources exist;
+    a stale options.audio_router_node must not still wire Janus audio to an unfed edge."""
+    import pyplumber.mixer.janus as janus
+    legs = []
+    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: "listener")
+    monkeypatch.setattr(janus, "build_janus_audio_output", lambda *a, **kw: legs.append((a, kw)))
+    avp = SimpleNamespace(addNode=lambda node, **kw: None, edges=SimpleNamespace(planCapacity=lambda *a: None))
+    api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
+    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
+                            audio_router_node="",
+                            canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
+                            backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
+    options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="",
+                              audio_router_node="audio_mixer")
+    spec = bus_json(scenes=["repeat"], renditions=[{"id": "monitor", "port": 5010, "audio_port": 5016}])
+    bus = AuxBus(avp, api, mixer, cfg, parse_aux_buses([spec], cfg)[0])
+    bus.build(options)
+    assert legs == []
+
+
 class _Built(Exception):
     pass
 

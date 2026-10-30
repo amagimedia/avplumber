@@ -128,10 +128,15 @@ class AuxBus:
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
             hold=True)   # MixerApplication releases every output together once the show has settled
-        if r.audio_port and options.audio_router_node:
+        # Prefer the mixer's copy: build_application clears it when no has_audio sources
+        # remain, while a stale options.audio_router_node would still wire an unfed edge.
+        router = getattr(self.mixer, "audio_router_node", None)
+        if router is None:
+            router = getattr(options, "audio_router_node", None)
+        if r.audio_port and router:
             from .janus import JanusAudioConfig, build_janus_audio_output
             build_janus_audio_output(
-                self.avp, self.api, f"{options.audio_router_node}_{self.bus.id}",
+                self.avp, self.api, f"{router}_{self.bus.id}",
                 JanusAudioConfig(host=options.janus_host, audio_port=r.audio_port),
                 group=self.group, prefix=f"{self.prefix}_audio", failure_mode="off")
         self.avp.addNode(_PvwFollowNode({
