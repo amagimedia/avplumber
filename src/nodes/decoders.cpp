@@ -1,10 +1,18 @@
 #include "node_common.hpp"
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <optional>
 #include <system_error>
 #include "../avutils.hpp"
 #include <avcpp/codeccontext.h>
+#include "../cuda_array_format.hpp"
+#include "../decoder_surfaces.hpp"
 #include "../hwaccel.hpp"
+extern "C" {
+#include <libavutil/hwcontext.h>
+#include <libavutil/imgutils.h>
+}
 
 template<typename Child, typename DecoderContext, typename OutputFrame> class Decoder:
     public NodeSISO<av::Packet, OutputFrame>, public ReportsFinishByFlag, public IFlushable, public IDecoder, public ITimeBaseSource {
@@ -30,6 +38,14 @@ protected:
     bool decoder_at_eof_ = false;
     av::Timestamp flush_timeout_ts_ = NOTS;
     av::Timestamp flush_timeout_ = {500, {1, 1000}}; // 500ms
+    // CUarray output with unsafe_output: a fixed pool whose surfaces are the output frames.
+    std::unique_ptr<avp::DecoderSurfaceGate> surface_gate_;
+    std::optional<std::chrono::steady_clock::time_point> gate_paused_since_;
+    bool gate_overrun_ = false;
+    uint64_t gate_pauses_ = 0;
+    std::shared_ptr<avp::DecoderPoolLedger> pool_ledger_;
+    int64_t pool_budget_bytes_ = 0;
+    std::string pool_refused_;   // why get_format refused the pool: the node fails once, by name
     //AVBufferRef *out_frames_ref_ = nullptr;
     /* input_hold_ is a workaround to prevent StreamInput from being destroyed
      * when the shared_ptr is set to null in NodeWrapper
@@ -105,9 +121,68 @@ protected:
         }
         if (put) {
             setFrameTimestamps(frm);
+            if (surface_gate_ && !surface_gate_->track(frm.raw()))
+                logstream << "Warning: decoded frame has no free buffer slot; its surface is not counted";
             this->sink_->put(frm);
         }
         return true;
+    }
+    // A decode needs a free surface. While consumers hold limit() decoded frames the packet stays
+    // queued, and they repeat the frames they hold. A consumer that releases a frame only when a
+    // newer one arrives, a window larger than the pool, would wait forever: after a second,
+    // decoding goes on and the pool may run out, as without the gate.
+    bool admitPacket() {
+        using namespace std::chrono;
+        if (gate_overrun_) {
+            if (surface_gate_->held() >= surface_gate_->limit()) return true;
+            gate_overrun_ = false;
+        }
+        if (surface_gate_->wait(milliseconds(10))) {
+            if (gate_paused_since_ && (gate_pauses_ == 1 || gate_pauses_ % 100 == 0))
+                logstream << "decoder resumed after "
+                          << duration_cast<milliseconds>(steady_clock::now() - *gate_paused_since_).count()
+                          << " ms (" << gate_pauses_ << " pauses so far)";
+            gate_paused_since_.reset();
+            return true;
+        }
+        const auto now = steady_clock::now();
+        if (!gate_paused_since_) {
+            gate_paused_since_ = now;
+            if (++gate_pauses_ == 1 || gate_pauses_ % 100 == 0)
+                logstream << "decoder paused: consumers hold " << surface_gate_->held()
+                          << " decoded frames, the pool's spare surfaces (extra_hw_frames + 1); pause " << gate_pauses_;
+        } else if (now - *gate_paused_since_ > seconds(1)) {
+            logstream << "Warning: consumers have held " << surface_gate_->held()
+                      << " decoded frames for over a second; decoding on, the surface pool may run out: "
+                         "raise extra_hw_frames above what they hold";
+            gate_overrun_ = true;
+            gate_paused_since_.reset();
+            return true;
+        }
+        return false;
+    }
+    // Before FFmpeg allocates the pool: its size for this stream, whatever the codec (references,
+    // reorder delay, working surfaces and extra_hw_frames), against the instance's budget.
+    bool reservePool(AVCodecContext *cc) {
+        AVBufferRef *frames = nullptr;
+        const int r = avcodec_get_hw_frames_parameters(cc, cc->hw_device_ctx, AV_PIX_FMT_CUDA, &frames);
+        if (r < 0) {
+            logstream << "Warning: decoder pool size unknown (" << av::error2string(r) << "); not counted";
+            return true;
+        }
+        const auto *ctx = reinterpret_cast<const AVHWFramesContext *>(frames->data);
+        const int surface = av_image_get_buffer_size(ctx->sw_format, ctx->width, ctx->height, 1);
+        const int64_t bytes = int64_t(ctx->initial_pool_size) * std::max(surface, 0);
+        const int surfaces = ctx->initial_pool_size;
+        av_buffer_unref(&frames);
+        bool accepted = false;
+        const int64_t total = pool_ledger_->reserve(this, bytes, pool_budget_bytes_, accepted);
+        const std::string pools = "decoder pool " + std::to_string(surfaces) + " surfaces, " +
+            std::to_string(bytes >> 20) + " MiB; all decoder pools " + std::to_string(total >> 20) + " MiB" +
+            (pool_budget_bytes_ ? " of a " + std::to_string(pool_budget_bytes_ >> 20) + " MiB budget" : "");
+        if (!accepted) pool_refused_ = pools;
+        else logstream << pools;
+        return accepted;
     }
     bool drainFrame(const av::Packet &blocked_pkt) {
 #if API_AVCODEC_NEW_INIT_PACKET
@@ -171,6 +246,8 @@ public:
                 const enum AVPixelFormat *p;
                 for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
                     if (*p == self.pixel_format_) {
+                        if (self.pool_ledger_ && !self.reservePool(cc))
+                            return AV_PIX_FMT_NONE;
                         #if 0 // not really needed
                         if (self.hwaccel_) {
                             int r = avcodec_get_hw_frames_parameters(cc, self.hwaccel_->refDeviceContext(), *p, &cc->hw_frames_ctx);
@@ -201,6 +278,14 @@ public:
             };
         }
 
+        if (avp::cuda::isArrayFormat(pixel_format_)) {
+            const char *flags = options.get("hwaccel_flags");
+            if (flags && std::string(flags).find("unsafe_output") != std::string::npos) {
+                // An unspecified budget keeps FFmpeg's 16 extra surfaces (deps/ffmpeg/9/0012).
+                const char *extra = options.get("extra_hw_frames");
+                surface_gate_ = std::make_unique<avp::DecoderSurfaceGate>((extra ? std::max(0, std::atoi(extra)) : 16) + 1);
+            }
+        }
         dec_.open(options, codec_);
         logstream << "Opened decoder " << dec_.codec().name() << std::endl;
     };
@@ -312,6 +397,10 @@ public:
         {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             if ( (!pkt.isNull()) && pkt.isComplete() && !isEofMarker(pkt)) {
+                if (!pool_refused_.empty())
+                    throw Error("over the decoder pool budget: " + pool_refused_);
+                if (surface_gate_ && !admitPacket())
+                    return;   // the packet stays queued
                 if (decoder_at_eof_) {
                     avcodec_flush_buffers(dec_.raw());
                     decoder_at_eof_ = false;
@@ -392,6 +481,7 @@ public:
             dec_.close();
         } catch (std::exception &e) {
         }
+        if (pool_ledger_) pool_ledger_->release(this);
     }
     static std::shared_ptr<Child> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
@@ -446,6 +536,10 @@ public:
         }
         if (params.count("hold_at_eof")) {
             r->hold_at_eof_ = params["hold_at_eof"];
+        }
+        if (r->surface_gate_) {
+            r->pool_ledger_ = InstanceSharedObjects<avp::DecoderPoolLedger>::get(nci.instance, "decoder_pools");
+            r->pool_budget_bytes_ = params.value("pool_budget_mib", int64_t(0)) << 20;
         }
         return r;
     }

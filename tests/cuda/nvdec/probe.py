@@ -1,7 +1,9 @@
 """Finite AVP decode probe; run on the build host with a supplied video fixture.
 
 Compare --action pixels reports using --reference; --action hold keeps frame
-references without downloading or reading GPU pixels. CUDA is the copying
+references without downloading or reading GPU pixels. --action stall keeps every
+frame for --stall-ms, then releases them all: more than the CUarray pool holds, which
+the decoder must wait out rather than lose frames. CUDA is the copying
 baseline; CUARRAY uses native NVDEC unsafe_output. Memory samples are whole-GPU
 usage, including unrelated processes. Every run has a subprocess watchdog,
 including shutdown; timeout or native failure is never reported as success.
@@ -76,6 +78,8 @@ def worker(args):
         options["extra_hw_frames"] = args.extra_hw_frames
         if args.mode == "cuarray":
             options["hwaccel_flags"] = "unsafe_output"
+            if args.pool_budget_mib:
+                decode["pool_budget_mib"] = args.pool_budget_mib
     nodes = [Input({"name": "input", "url": str(args.input), "dst": "packets"}),
              Demux({"name": "demux", "src": "packets", "routing": {"v:0": "video_packets"}}),
              DecVideo({"name": "decode", **decode})]
@@ -90,7 +94,9 @@ def worker(args):
         node.parameters.update(group="probe", auto_restart="off", on_error="off")
         avp.addNode(node)
     edge = avp.getEdge(edge_name, "VideoFrame")
-    retained, records, samples = deque(maxlen=args.hold), [], []
+    # stall: keep every frame for --stall-ms, then let all go, more than the surface pool holds.
+    retained, records, samples = deque(maxlen=args.hold if args.action == "hold" else None), [], []
+    released_at = time.monotonic()
     stopped = threading.Event()
     sample_errors = []
 
@@ -121,6 +127,9 @@ def worker(args):
         deadline = start + max(1, args.timeout - 5)
         while time.monotonic() < deadline:
             assert not errors, errors
+            if args.action == "stall" and time.monotonic() - released_at >= args.stall_ms / 1000:
+                retained.clear()
+                released_at = time.monotonic()
             frame = edge.tryGet(100)
             if frame is None:
                 continue
@@ -171,12 +180,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
     parser.add_argument("--mode", choices=("cpu", "cuda", "cuarray"), required=True)
-    parser.add_argument("--action", choices=("pixels", "hold"), default="pixels")
+    parser.add_argument("--action", choices=("pixels", "hold", "stall"), default="pixels")
     parser.add_argument("--codec", choices=("h264", "hevc", "av1"))
     parser.add_argument("--sw-format", choices=("nv12", "p010le", "p210le"), default="nv12")
     parser.add_argument("--expected-frames", type=int, required=True)
     parser.add_argument("--extra-hw-frames", type=int, default=3)
     parser.add_argument("--hold", type=int, default=3)
+    parser.add_argument("--stall-ms", type=int, default=300, help="stall: how long every frame is kept")
+    parser.add_argument("--pool-budget-mib", type=int, help="cuarray: budget for the decoder pool; the decoder fails above it")
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--verbose", action="store_true", help="enable FFmpeg verbose logging")
