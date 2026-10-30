@@ -266,6 +266,21 @@ def test_build_audio_mixer_false_leaves_a_custom_router_name_alone(native_bounda
     assert '"audio_router_node": "dyremix"' in init_events[0]
 
 
+def test_build_audio_mixer_false_without_a_router_name_builds_nothing(native_boundary):
+    """build_audio_mixer=False with no caller-supplied audio_router_node must not
+    fall back to the in-tree "audio_mixer" name -- that name would then reach
+    _wait_for_node with nothing ever built under it (build_audio_mixer=False skips
+    wire_audio_mixer too), hanging the preheat for preheat_timeout_sec."""
+    nodes, builder = native_boundary
+    app = build_application(_audio_show(), MixerOptions(build_audio_mixer=False),
+                            api=_api(nodes, builder))
+    assert app.audio_edges
+    assert not app.mixer.audio_router_node
+    assert app.avp.nodes.get("audio_mixer") is None
+    init_events = [e for e in app.avp.events if e.startswith("mixer.init ")]
+    assert "audio_router_node" not in init_events[0]
+
+
 def test_janus_audio_limits_float_mix_before_s16_conversion():
     from pyplumber.mixer.janus import JanusAudioConfig, build_janus_audio_output
 

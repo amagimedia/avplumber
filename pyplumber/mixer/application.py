@@ -870,7 +870,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         options = replace(options, mixer_latency_ms=cfg.latency_ms)
     if options.mixer_input_poll_ms is None and cfg.input_poll_ms is not None:
         options = replace(options, mixer_input_poll_ms=cfg.input_poll_ms)
-    if not options.audio_router_node and any(s.has_audio for s in cfg.sources):
+    if options.build_audio_mixer and not options.audio_router_node and any(s.has_audio for s in cfg.sources):
         # A source's audio needs its reader: unread, its edge fills and holds the demux, and the video
         # with it. audio_router_node names another router instead.
         from .audio_mixer import AUDIO_MIXER
