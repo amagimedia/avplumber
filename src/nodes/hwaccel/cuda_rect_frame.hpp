@@ -30,7 +30,8 @@ inline CudaRectDraw::Canvas parseCanvas(const Parameters &params, const std::str
     if (canvas.sw_fmt == AV_PIX_FMT_NONE)
         throw Error(prefix + "unknown sw_format");
     if (!CudaRectDraw::canvasSupported(canvas.sw_fmt))
-        throw Error(prefix + "sw_format must be semiplanar YUV (nv12, p010le, p210le) or packed 8-bit RGB");
+        throw Error(prefix + "sw_format must be semiplanar YUV with Cb before Cr (nv12, p010le, p210le) "
+                             "or packed 8-bit RGB without alpha (rgb0, bgr0)");
     if (params.contains("color")) {
         const auto color = params.at("color").get<std::string>();
         canvas.transfer = graphicTransfer(color);

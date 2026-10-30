@@ -52,8 +52,8 @@ public:
     const Canvas &canvas() const { return canvas_; }
     int maxLayers() const { return max_layers_; }
 
-    /// Canvas formats the composite kernel writes: semiplanar YUV (NV12, P010, P210) and
-    /// packed 8-bit RGB without a separate alpha plane (rgb0, bgr0, rgba, bgra).
+    /// Canvas formats the composite kernel writes: semiplanar YUV with Cb before Cr (NV12, P010,
+    /// P210) and packed 8-bit RGB without alpha (rgb0, bgr0).
     static bool canvasSupported(AVPixelFormat sw_fmt);
 
     /// Make the device's CUDA context current on this thread; throws when the hwaccel is unusable.

@@ -76,12 +76,14 @@ AVPixelFormat CudaRectDraw::frameSwFormat(const av::VideoFrame &f) {
 
 bool CudaRectDraw::canvasSupported(AVPixelFormat sw_fmt) {
     const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(sw_fmt);
-    if (!d || (d->flags & AV_PIX_FMT_FLAG_BITSTREAM))
+    // No alpha: the canvas clear has no opaque-alpha pattern for it (planeClearValue).
+    if (!d || (d->flags & (AV_PIX_FMT_FLAG_BITSTREAM | AV_PIX_FMT_FLAG_ALPHA)))
         return false;
     const int planes = av_pix_fmt_count_planes(sw_fmt);
     if (d->flags & AV_PIX_FMT_FLAG_RGB)
         return planes == 1 && sampleBytes(sw_fmt) == 1 && plane0Lanes(sw_fmt) == 4;
-    return planes == 2 && d->nb_components == 3 && !(d->flags & AV_PIX_FMT_FLAG_ALPHA);
+    // The kernels write Cb before Cr in the chroma plane; NV21 and NV42 store Cr first.
+    return planes == 2 && d->nb_components == 3 && d->comp[1].offset < d->comp[2].offset;
 }
 
 void CudaRectDraw::ensureDevice() {
