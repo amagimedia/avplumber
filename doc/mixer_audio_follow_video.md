@@ -111,8 +111,10 @@ itself, only hands out the edges:
 ## Open-source consumer: `audio_mixer`
 
 In-tree node `audio_mixer` (`src/nodes/audio_mixer.cpp`) implements this
-protocol: multi-input fltp sum, multi-bus keyed by `output`, hard-sync gain at
-`pts`. With `MixerOptions.audio_router_node` set, `has_audio` sources, and
+protocol: multi-input fltp sum, multi-bus keyed by `output`, gain changes
+scheduled at `pts` and slewed over a few tens of milliseconds (so a
+frame-rate `transition_progress` staircase and a cut do not click). With
+`MixerOptions.audio_router_node` set, `has_audio` sources, and
 `MixerOptions.build_audio_mixer` left at its default `True`, `build_application`
 wires it via `pyplumber.mixer.audio_mixer.wire_audio_mixer` and can send the
 program bus to Janus Opus (`build_janus_audio_output`); it also wires the

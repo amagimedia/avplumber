@@ -365,16 +365,27 @@ class MixerGraphBuilder:
         self._current_pgm = scene
 
     def raise_initial_audio_gains(self) -> None:
-        """Re-run the initial-scene cut so audio_router_node (e.g. AudioMixer)
-        receives transition_ended and raises its PGM gains off their all-zero
-        construction default.
+        """Tell audio_router_node the initial PGM sources so it raises gains off
+        their all-zero construction default — via transition_ended only, not a
+        mixer.cut take (a cut would swap slots, disturb the configured preview,
+        and force a keyframe).
 
-        No-op without an audio_router_node. Call only once the compositor and
-        audio_router_node nodes actually exist (both are created lazily when
-        their owning groups start) — see MixerApplication._start().
+        No-op without an audio_router_node. Call only once the audio_router_node
+        actually exists (created lazily when its group starts) — see
+        MixerApplication._start().
         """
-        if self.audio_router_node:
-            self.cut(self._initial_pgm_scene)
+        if not self.audio_router_node or not self._initial_pgm_scene:
+            return
+        scene = self._scenes[self._initial_pgm_scene]
+        payload = {
+            "output": "program",
+            "kind": "cut",
+            "sources": list(scene.sources),
+            "pts": 0,
+        }
+        self.avp.executeCommandsFromString(
+            f"node.object.set {self.audio_router_node} transition_ended {json.dumps(payload)}"
+        )
 
     def preview(self, scene: str) -> None:
         """Preload *scene* into the hidden PVW slot without taking it to program."""
@@ -908,11 +919,9 @@ class MixerGraphBuilder:
         # Initial PGM video is wired above (slot/compositor active_inputs), not via
         # applyPostTransitionRouting. An audio_router_node still needs one
         # transition_ended to raise its PGM gains off their all-zero construction
-        # default, but the compositor and audio-router nodes a cut touches are
-        # created lazily when their groups start — strictly after build() returns.
-        # A cut fired here always races ahead of that and fails with "node has no
-        # runtime controls". raise_initial_audio_gains() does this instead, once
-        # a caller (see MixerApplication._start()) knows those nodes exist.
+        # default, but that node is created lazily when its group starts — strictly
+        # after build() returns. raise_initial_audio_gains() sends it once a caller
+        # (see MixerApplication._start()) knows the router exists.
 
     def _scene_command(self, scene_name: str, scene: MixerScene) -> str:
         scene_def = {"sources": scene.sources}

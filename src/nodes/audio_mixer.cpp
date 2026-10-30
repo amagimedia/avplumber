@@ -19,8 +19,8 @@ constexpr const char* kProgramSentinel = "program";
 constexpr float kGainEpsilon = 1e-6f;
 // A mix thread held up longer than this resumes at the current block instead of catching up.
 constexpr int64_t kMaxBehindNs = 1000000000;
-// How long a full 0..1 swing of an operator's set_source_gain takes to glide in; smaller
-// changes (a fader nudge) glide proportionally faster. Declicks a step change in the mix.
+// How long a full 0..1 swing takes to glide in (set_source_gain and AFV bus gains);
+// smaller changes glide proportionally faster. Declicks cuts and frame-rate AFV steps.
 constexpr float kGainRampSeconds = 0.03f;
 
 int channelCount(uint64_t layout) {
@@ -66,8 +66,12 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         std::string id;
         std::shared_ptr<Edge<av::AudioSamples>> edge;
         std::unique_ptr<Sink<av::AudioSamples>> sink;
+        // gains / program_gain are what the mix uses; they slew toward *_targets at
+        // gain_ramp_step_ so AFV steps (one per video frame) and cuts do not click.
         std::vector<float> gains;
+        std::vector<float> gain_targets;
         float program_gain = 0.f;
+        float program_gain_target = 0.f;
         std::deque<GainEvent> pending;
     };
 
@@ -92,7 +96,16 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
     std::unordered_map<std::string, size_t> bus_index_;
     std::vector<std::vector<float>> program_frame_;
     uint64_t blocks_ = 0, skipped_blocks_ = 0, output_drops_ = 0;
+    // mutex_ guards mix state (queues, buses, ramps). control_mutex_ only the inbound
+    // control queue: transition_progress from the video select path must not wait on a
+    // mix of many sources under mutex_.
     std::mutex mutex_;
+    std::mutex control_mutex_;
+    struct ControlMsg {
+        std::string key;
+        Parameters params;
+    };
+    std::deque<ControlMsg> control_q_;
 
     avp::audio_mixer::SampleQueue newQueue(int64_t first) const {
         const int64_t ms = sample_rate_ / 1000;
@@ -113,11 +126,8 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
 
     void ingest(SourceState& src, const av::AudioSamples& in) {
         if (!in.isComplete() || in.samplesCount() <= 0) return;
-        if (in.sampleFormat().get() != AV_SAMPLE_FMT_FLTP) {
-            logstream << "audio_mixer: ignoring non-fltp input on " << src.id;
-            return;
-        }
-        // A frame without a timestamp continues the previous one.
+        // A frame without a timestamp continues the previous one. Non-fltp / wrong rate /
+        // layout goes through the resampler below — do not drop before that path.
         const int64_t first = in.pts().isValid()
             ? avp::audio_mixer::sampleAt(in.pts().timestamp({1, 1000000000}), sample_rate_) : src.queue->end();
         AudioParameters cur(in);
@@ -151,11 +161,17 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         src.queue->write(first, planes);
     }
 
+    static float slewToward(float g, float target, float step) {
+        if (g < target) return std::min(target, g + step);
+        if (g > target) return std::max(target, g - step);
+        return g;
+    }
+
     void applyEvents(Bus& bus, int64_t sample) {
         while (!bus.pending.empty() && bus.pending.front().sample <= sample) {
             const GainEvent& e = bus.pending.front();
-            bus.gains = e.gains;
-            bus.program_gain = e.program_gain;
+            bus.gain_targets = e.gains;
+            bus.program_gain_target = e.program_gain;
             bus.pending.pop_front();
         }
     }
@@ -171,8 +187,9 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
                 bus.pending.pop_back();
         }
         if (ev.sample == 0) {
-            bus.gains = ev.gains;
-            bus.program_gain = ev.program_gain;
+            // Immediate: retarget only; mixBus slews gains toward these (declicks a cut).
+            bus.gain_targets = ev.gains;
+            bus.program_gain_target = ev.program_gain;
             return;
         }
         auto it = bus.pending.begin();
@@ -207,28 +224,45 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
             float* dp = reinterpret_cast<float*>(out.data(ch));
             std::fill(dp, dp + frame_samples_, 0.f);
         }
-        size_t begin = 0;
-        while (begin < frame_samples_) {
-            // Every event at or before this sample is applied, so the next one is after it.
-            applyEvents(bus, first + int64_t(begin));
-            const size_t end = bus.pending.empty() ? frame_samples_
-                : size_t(std::min<int64_t>(bus.pending.front().sample - first, int64_t(frame_samples_)));
+        // Per-sample AFV bus gains: events retarget; gains slew so a frame-rate staircase
+        // (transition_progress) and a cut (transition_ended) glide instead of stepping.
+        std::vector<std::vector<float>> bus_curve(sources_.size(), std::vector<float>(frame_samples_));
+        std::vector<float> prog_curve(frame_samples_, 0.f);
+        for (size_t k = 0; k < frame_samples_; ++k) {
+            applyEvents(bus, first + int64_t(k));
             for (size_t si = 0; si < sources_.size(); ++si) {
-                const float bus_gain = bus.gains[si];
-                if (bus_gain < kGainEpsilon) continue;
-                const float* curve = gain_ramp_[si].data();
+                bus.gains[si] = slewToward(bus.gains[si], bus.gain_targets[si], gain_ramp_step_);
+                bus_curve[si][k] = bus.gains[si];
+            }
+            bus.program_gain = slewToward(bus.program_gain, bus.program_gain_target, gain_ramp_step_);
+            prog_curve[k] = bus.program_gain;
+        }
+        std::vector<float> combined(frame_samples_);
+        for (size_t si = 0; si < sources_.size(); ++si) {
+            const float* base = gain_ramp_[si].data();
+            const float* bg = bus_curve[si].data();
+            float peak = 0.f;
+            for (size_t k = 0; k < frame_samples_; ++k) {
+                combined[k] = base[k] * bg[k];
+                peak = std::max(peak, combined[k]);
+            }
+            if (peak < kGainEpsilon) continue;
+            for (int ch = 0; ch < channels_; ++ch) {
+                float* dp = reinterpret_cast<float*>(out.data(ch));
+                avp::audio_mixer::addSamplesCurve(
+                    dp, sources_[si].block[size_t(ch)].data(), combined.data(), 0, frame_samples_, 1.f);
+            }
+        }
+        if (!is_program) {
+            float peak = 0.f;
+            for (float g : prog_curve) peak = std::max(peak, g);
+            if (peak >= kGainEpsilon) {
                 for (int ch = 0; ch < channels_; ++ch) {
                     float* dp = reinterpret_cast<float*>(out.data(ch));
-                    avp::audio_mixer::addSamplesCurve(dp, sources_[si].block[size_t(ch)].data(), curve, begin, end, bus_gain);
+                    avp::audio_mixer::addSamplesCurve(
+                        dp, program_frame_[size_t(ch)].data(), prog_curve.data(), 0, frame_samples_, 1.f);
                 }
             }
-            if (!is_program && bus.program_gain >= kGainEpsilon) {
-                for (int ch = 0; ch < channels_; ++ch) {
-                    float* dp = reinterpret_cast<float*>(out.data(ch));
-                    avp::audio_mixer::addSamples(dp, program_frame_[size_t(ch)].data(), begin, end, bus.program_gain);
-                }
-            }
-            begin = end;
         }
         if (is_program) {
             for (int ch = 0; ch < channels_; ++ch) {
@@ -247,8 +281,7 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
             const float target = base_gain_targets_[si];
             float* curve = gain_ramp_[si].data();
             for (size_t k = 0; k < frame_samples_; ++k) {
-                if (g < target) g = std::min(target, g + gain_ramp_step_);
-                else if (g > target) g = std::max(target, g - gain_ramp_step_);
+                g = slewToward(g, target, gain_ramp_step_);
                 curve[k] = g;
             }
             base_gains_[si] = g;
@@ -302,8 +335,8 @@ public:
     virtual av::SampleFormat sampleFormat() override { return av::SampleFormat(AV_SAMPLE_FMT_FLTP); }
     virtual uint64_t channelLayout() override { return channel_layout_; }
 
-    virtual void setObject(const std::string key, const Parameters& params) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+    /// Caller holds mutex_.
+    void applyControl(const std::string& key, const Parameters& params) {
         if (key == "set_source_gain") {
             if (!params.count("source")) return;
             auto it = source_index_.find(params["source"].get<std::string>());
@@ -341,6 +374,23 @@ public:
         insertEvent(bus, std::move(ev), key == "transition_ended");
     }
 
+    /// Caller holds mutex_. Drain control_q_ under control_mutex_ only for the swap.
+    void drainControls() {
+        std::deque<ControlMsg> local;
+        {
+            std::lock_guard<std::mutex> lock(control_mutex_);
+            local.swap(control_q_);
+        }
+        for (auto& msg : local) applyControl(msg.key, msg.params);
+    }
+
+    virtual void setObject(const std::string key, const Parameters& params) override {
+        if (key != "set_source_gain" && key != "transition_ended" && key != "transition_progress")
+            return;
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        control_q_.push_back({key, params});
+    }
+
     virtual Parameters getObject(const std::string key) override {
         if (key != "status") throw Error("audio_mixer: unknown object " + key);
         std::lock_guard<std::mutex> lock(mutex_);
@@ -363,6 +413,7 @@ public:
     virtual void process() override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            drainControls();
             mixDue(avp::mixer::monotonicNs());
             for (size_t i = 0; i < source_edges_.size(); ++i) {
                 while (av::AudioSamples* p = source_edges_[i]->peek()) {
@@ -438,6 +489,7 @@ public:
             bus.edge = edges.find<av::AudioSamples>(edge_name);
             bus.sink = make_unique<EdgeSink<av::AudioSamples>>(bus.edge);
             bus.gains.assign(node->sources_.size(), 0.f);
+            bus.gain_targets.assign(node->sources_.size(), 0.f);
             node->bus_index_[bus.id] = node->buses_.size();
             node->buses_.push_back(std::move(bus));
         }
