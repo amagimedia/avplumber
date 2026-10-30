@@ -165,8 +165,8 @@ void MixerOrchestrator::restoreProgramRouting(MixerState::TransitionMode dropped
     const bool picture_changed = dropped != MixerState::TransitionMode::Cut ||
                                  state_->blend_on_air || state_->wipe_on_air;
     switchProgramSelector(state_->pgm_is_slot_a);
-    applyPostTransitionRouting(state_->pgm_is_slot_a, state_->pgm_scene_name, picture_changed);
-    applySceneControls(state_->scenes.at(state_->pgm_scene_name));
+    applyPostTransitionRouting(state_->pgm_is_slot_a, state_->pgmScene(), picture_changed);
+    applySceneControls(state_->pgmScene());
     for (const auto& [name, key, value] : std::vector<std::tuple<std::string, std::string, int>>{
             {state_->wipe_selector_name, "active", 0}, {state_->wipe_otm_name, "outputs", 1}}) {
         if (name.empty()) continue;

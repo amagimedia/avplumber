@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -72,6 +73,11 @@ struct MixerState : public InstanceShared<MixerState> {
 
     bool pgm_is_slot_a = true;
     std::string pgm_scene_name;
+    /// The program scene as its slot draws it, when `scenes` holds a newer definition: a
+    /// redefinition of the program scene takes effect when that scene is next taken, so the
+    /// program's routing follows this one until then.
+    std::optional<SceneDefinition> pgm_definition;
+    const SceneDefinition& pgmScene() const { return pgm_definition ? *pgm_definition : scenes.at(pgm_scene_name); }
     /// The scene loaded in the PVW slot, "" while the slot is cold (after every completed or
     /// dropped transition: the old program slot's sources are routed away). A take reuses the
     /// slot only for this scene; anything else reloads it, so a swapped preview costs no GPU
@@ -143,6 +149,7 @@ struct MixerState : public InstanceShared<MixerState> {
         take_preview_published = false;
         pgm_is_slot_a = new_pgm_is_slot_a;
         pgm_scene_name = std::move(new_pgm);
+        pgm_definition.reset();
         pvw_slot_scene.clear();
         transition_mode = TransitionMode::Idle;
     }
