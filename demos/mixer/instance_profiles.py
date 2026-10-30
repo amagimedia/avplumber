@@ -154,7 +154,12 @@ INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["generated_decode"] = {
 }
 # These bounds and scheduling settings are part of the measured source capacities.
 # Setup Apply must generate the same runtime as the qualified show.
+# The 105-decode 1080p30 show above keeps 105 HEVC pools of 18 surfaces (53 MiB each, as its
+# decoders log them), 5.4 GiB, and used 18.3 GB of the L4's 23 GiB in all (2026-10-30). 9 GiB
+# for every decoder pool together leaves room for 70 more such pools, and stops a show that
+# would need more at decoder open instead of running the GPU out of memory.
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["canvas"] = {
     "raw_upload": "resident", "input_poll_ms": 16, "aux_input_poll_ms": 16,
     "source_fan_out": "event_loop", "decoded_frames_ahead": 1, "raw_pool_frames": 10,
+    "decoder_pool_budget_mib": 9216,
 }

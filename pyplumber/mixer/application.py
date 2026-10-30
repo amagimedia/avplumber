@@ -603,6 +603,15 @@ def infer_output_format(output: str, explicit_format: str | None = None) -> str:
     raise ValueError("cannot infer output format; pass --output-format")
 
 
+def _decoder_params(source: "mixer_config.Source", cfg: "mixer_config.MixerConfig") -> dict:
+    """A CUarray decoder whose pool would take the show's decoder pools past
+    canvas.decoder_pool_budget_mib fails at open, by name, before the device runs out of memory."""
+    params = source.decoder_params
+    if params and cfg.decoder_pool_budget_mib:
+        params = {**params, "pool_budget_mib": cfg.decoder_pool_budget_mib}
+    return params
+
+
 def _input_group(index: int) -> str:
     return f"input_{index}"
 
@@ -860,7 +869,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                     pool_frames=cfg.raw_pool_frames, color=source.color, **file_params)
             else:
                 edge = build_input(avp, api, str(index), source.location, continuous_loop=True,
-                                   decoder_params=source.decoder_params, decoded_ahead=cfg.decoded_frames_ahead,
+                                   decoder_params=_decoder_params(source, cfg),
+                                   decoded_ahead=cfg.decoded_frames_ahead,
                                    **file_params)
         if source.transform:
             transformed_edge = f"input_{index}_transformed"

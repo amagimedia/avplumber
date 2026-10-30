@@ -282,6 +282,7 @@ class MixerConfig:
     source_fan_out: str = "thread"       # canvas.source_fan_out: one of SOURCE_FAN_OUTS
     decoded_frames_ahead: Optional[int] = None   # canvas.decoded_frames_ahead: decoded frames queued before pacing
     raw_pool_frames: Optional[int] = None        # canvas.raw_pool_frames: device frames per direct/resident raw source
+    decoder_pool_budget_mib: Optional[int] = None  # canvas.decoder_pool_budget_mib: all CUarray decoder pools together
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBusConfig, ...] = ()
@@ -598,6 +599,7 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
         raise ConfigError(f"canvas.source_fan_out must be one of {', '.join(SOURCE_FAN_OUTS)}")
     raw_pool_frames = _optional_canvas_count(canvas, "raw_pool_frames", 1, "frames")
     decoded_frames_ahead = _optional_canvas_count(canvas, "decoded_frames_ahead", 1, "frames")
+    decoder_pool_budget_mib = _optional_canvas_count(canvas, "decoder_pool_budget_mib", 1, "MiB")
     input_poll_ms = _optional_canvas_count(canvas, "input_poll_ms", 0, "milliseconds")
     aux_input_poll_ms = _optional_canvas_count(canvas, "aux_input_poll_ms", 0, "milliseconds")
     try:
@@ -680,7 +682,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        initial_scene=initial, working_format=working_format, raw_upload=raw_upload, input_routing=input_routing,
                        latency_ms=latency_ms, input_poll_ms=input_poll_ms, aux_input_poll_ms=aux_input_poll_ms,
                        source_fan_out=source_fan_out, decoded_frames_ahead=decoded_frames_ahead,
-                       raw_pool_frames=raw_pool_frames, out_color=out_color,
+                       raw_pool_frames=raw_pool_frames, decoder_pool_budget_mib=decoder_pool_budget_mib,
+                       out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))

@@ -709,6 +709,25 @@ def test_array_decode_is_explicit_per_source_and_preserves_linear_defaults(tmp_p
     assert ("*", 3) in app.avp.edges.plans
 
 
+def test_decoder_pool_budget_reaches_cuarray_decoders_only(tmp_path):
+    camera = CONFIG["sources"][0]
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps({**CONFIG, "canvas": {**CONFIG["canvas"], "decoder_pool_budget_mib": 9216},
+                                "sources": [{**camera, "decode_storage": "cuarray"},
+                                            {**camera, "id": "linear", "path": "/media/linear.mp4"}],
+                                "wipes": [], "scenes": CONFIG["scenes"][:1], "initial_scene": "full"}))
+    app = build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
+    nodes = {node.parameters.get("name"): node.parameters for node in app.avp.nodes}
+    assert nodes["decode_0"]["pool_budget_mib"] == 9216
+    assert "pool_budget_mib" not in nodes["decode_1"]
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "8G"])
+def test_invalid_decoder_pool_budget_is_rejected(value):
+    with pytest.raises(mixer_config.ConfigError, match="decoder_pool_budget_mib"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "decoder_pool_budget_mib": value}})
+
+
 @pytest.mark.parametrize("field,value", [("decode_storage", "invalid"), ("extra_hw_frames", True),
                                         ("extra_hw_frames", -1), ("extra_hw_frames", 33)])
 def test_invalid_decode_storage_or_budget_is_rejected(field, value):
