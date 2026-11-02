@@ -7,6 +7,7 @@
 #include <thread>
 #include <chrono>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/streambuf.hpp>
@@ -773,6 +774,13 @@ public:
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             return MixerOrchestrator(manager_->shared_from_this(), state);
         };
+        // For queries: a status poll naming a mixer that mixer.init never set up must not create one.
+        auto existingMixerOrchestrator = [this](const std::string& mixer_name) {
+            auto state = InstanceSharedObjects<MixerState>::getIfExists(manager_->instanceData(), mixer_name);
+            if (!state)
+                throw Error("unknown mixer: " + mixer_name);
+            return MixerOrchestrator(manager_->shared_from_this(), state);
+        };
 
         auto mixerJsonRequest = [](const std::string& command, const std::string& arg) {
             json req = json::parse(arg);
@@ -1010,17 +1018,17 @@ public:
         quiet_commands_.insert("mixer.status");
         quiet_commands_.insert("mixer.lever");   // a fader streams positions; failures are still logged
         quiet_commands_.insert("mixer.scenes");
-        commands_["mixer.status"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
+        commands_["mixer.status"] = [this, existingMixerOrchestrator](ClientStream &cs, std::string &arg) {
             std::string mixer_name = strutils::trim(arg);
-            auto orch = mixerOrchestrator(mixer_name);
+            auto orch = existingMixerOrchestrator(mixer_name);
             cs << orch.status() << "\n";
         };
 
         // mixer.scenes <mixer_name>
         // Returns a JSON array of scene names registered with this mixer, sorted alphabetically.
-        commands_["mixer.scenes"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
+        commands_["mixer.scenes"] = [this, existingMixerOrchestrator](ClientStream &cs, std::string &arg) {
             std::string mixer_name = strutils::trim(arg);
-            auto orch = mixerOrchestrator(mixer_name);
+            auto orch = existingMixerOrchestrator(mixer_name);
             json arr = orch.sceneNames();
             cs << arr << "\n";
         };
@@ -1123,6 +1131,14 @@ class TcpControlServer: public ControlServerBase {
             auto self = shared_from_this();
             thread = start_thread("control", [self]() {
                 self->control.communicate(self->pipe);
+                // The thread removes its own client once communicate() has returned, so the
+                // io_service thread joins only a thread that is exiting. disconnect() must not
+                // join: a command that never returns (event.wait, queue.drain, retry) would
+                // block the io_service thread and with it every other control client.
+                boost::asio::post(self->io_service, [self]() {
+                    self->thread.join();
+                    self->server.clients_.erase(self->iter);
+                });
             });
         }
         void postToClient() {
@@ -1156,24 +1172,20 @@ class TcpControlServer: public ControlServerBase {
             } catch (std::exception &e) {
             }
         }
-        void closeAndRemove() {
+        void disconnect() {
             if (closing) {
                 return;
             }
             closing = true;
             closeSocket();
             pipe.from_client.emplace(ControlPacket::End);
-            if (thread.joinable()) {
-                thread.join();
-            }
-            server.clients_.erase(iter);
         }
         void receiveNextLine() {
             auto self = shared_from_this();
             boost::asio::async_read_until(socket, buff, '\n', [self](const boost::system::error_code& error, size_t size) {
                 if (error) {
                     logstream << "line receive error: " << error;
-                    self->closeAndRemove();
+                    self->disconnect();
                     return;
                 }
                 auto buff_begin = boost::asio::buffers_begin(self->buff.data());
@@ -1190,12 +1202,13 @@ class TcpControlServer: public ControlServerBase {
     boost::asio::io_context io_service_;
     tcp::acceptor acceptor_;
     // clients_ is mutated only from the io_service thread (net_thread_):
-    // accept() inserts, Client::closeAndRemove() erases via the saved iterator.
+    // accept() inserts, the handler a finished client thread posts (Client::start) erases via the saved iterator.
     // No mutex; if a future change ever calls into clients_ from another
     // thread (e.g. an external "kick all clients" command), that path must
     // post into io_service_ instead of touching clients_ directly.
     // ~TcpControlServer joins net_thread_ before iterating clients_, so its
-    // post-join loop is safe.
+    // post-join loop is safe. Clients whose removal never ran (thread still busy, or
+    // io_service_ already stopped) are still in clients_ and are joined there.
     std::list<std::shared_ptr<Client>> clients_;
     std::thread net_thread_;
 
@@ -1220,10 +1233,18 @@ class TcpControlServer: public ControlServerBase {
         nextConnection();
         io_service_.run();
     }
+    static boost::asio::ip::address parseBindAddress(const std::string &bind_address) {
+        boost::system::error_code error;
+        const auto address = boost::asio::ip::make_address(bind_address, error);
+        if (error) {
+            throw Error("invalid control server bind address '" + bind_address + "': " + error.message());
+        }
+        return address;
+    }
 public:
-    TcpControlServer(ControlImpl &control, uint16_t tcp_port):
+    TcpControlServer(ControlImpl &control, const std::string &bind_address, uint16_t tcp_port):
         control_(control),
-        acceptor_(io_service_, tcp::endpoint(tcp::v4(), tcp_port)),
+        acceptor_(io_service_, tcp::endpoint(parseBindAddress(bind_address), tcp_port)),
         net_thread_(start_thread("control net IO", [this]() { netThread(); }))
         {
     }
@@ -1455,11 +1476,11 @@ bool AVPlumber::obs_is_eof() {
 }
 #endif
 
-void AVPlumber::enableControlServer(const uint16_t tcp_port) {
+void AVPlumber::enableControlServer(const uint16_t tcp_port, const std::string& bind_address) {
     control_port_ = tcp_port;
     if (tcp_port) {
-        logstream << "Enabling control server on TCP port " << tcp_port;
-        impl_->createServer<TcpControlServer>(*impl_, tcp_port);
+        logstream << "Enabling control server on " << bind_address << " TCP port " << tcp_port;
+        impl_->createServer<TcpControlServer>(*impl_, bind_address, tcp_port);
     } // if port==0, then NOOP
 }
 

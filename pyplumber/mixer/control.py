@@ -32,13 +32,18 @@ class AvpConnection:
 
     async def connect(self) -> None:
         await self.disconnect()
-        # queues.json is one line and exceeds asyncio's 64 KiB default on larger mixers.
-        self.reader, self.writer = await asyncio.open_connection(
-            self.host, self.port, limit=4 * 1024 * 1024)
-        code, status, _ = await self._read_response()
-        if code != 100:
+        try:
+            # queues.json is one line and exceeds asyncio's 64 KiB default on larger mixers.
+            self.reader, self.writer = await asyncio.open_connection(
+                self.host, self.port, limit=4 * 1024 * 1024)
+            code, status, _ = await self._read_response()
+            if code != 100:
+                raise AvpProtocolError(f"unexpected greeting: {code} {status}")
+        except BaseException:
+            # A startup timeout can cancel the greeting. Its unread reply must never
+            # become the next command's answer on a half-connected socket.
             await self.disconnect()
-            raise AvpProtocolError(f"unexpected greeting: {code} {status}")
+            raise
 
     async def disconnect(self) -> None:
         if self.writer is not None:

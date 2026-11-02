@@ -50,6 +50,32 @@ def test_cancelled_tui_request_cannot_leave_a_reply_for_the_next_command():
     asyncio.run(exercise())
 
 
+def test_a_cancelled_greeting_leaves_no_half_connected_socket():
+    """Its unread reply would otherwise become the next command's answer."""
+    async def exercise():
+        closed = asyncio.Event()
+
+        async def serve(reader, writer):
+            await reader.read()   # never greets; returns when the client closes
+            closed.set()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        connection = AvpConnection("127.0.0.1", server.sockets[0].getsockname()[1])
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(connection.connect(), 0.05)
+            assert not connection.connected
+            await asyncio.wait_for(closed.wait(), 1)
+        finally:
+            await connection.disconnect()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(exercise())
+
+
 def test_mixer_command_uses_generic_json_payload():
     command = mixer_command("fade", "main", scene="grid_4_page_0", duration_sec=0.5)
     prefix, payload = command.split(" ", 1)

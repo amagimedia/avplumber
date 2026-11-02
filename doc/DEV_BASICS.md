@@ -13,7 +13,9 @@ Full reference: [README.md](../README.md) (don't waste time reading it unless yo
 ```bash
 # Docker
 docker build -t avplumber .
-docker run -p 20200:20200 avplumber -p 20200
+# Inside the container the control port must listen on 0.0.0.0 for the mapping to reach it;
+# the host side stays on loopback because the protocol has no authentication.
+docker run -p 127.0.0.1:20200:20200 avplumber -p 20200 --control-bind 0.0.0.0
 
 # Ubuntu (plain)
 apt install git gcc pkg-config make cmake \
