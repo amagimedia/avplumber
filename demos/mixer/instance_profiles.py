@@ -134,7 +134,7 @@ INSTANCE_PROFILES = {
     },
 }
 
-# Opt-in measured HEVC fixtures and fixed CUarray pools; the FFmpeg 8.1/linear
+# Opt-in measured HEVC fixtures and fixed CUarray pools; the linear
 # profiles retain their decoder contracts and capacities.
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY] = deepcopy(INSTANCE_PROFILES[InstanceType.NVIDIA_L4])
 # Moving 1080p windows, including cropped DSKs, in workers of at most ten.

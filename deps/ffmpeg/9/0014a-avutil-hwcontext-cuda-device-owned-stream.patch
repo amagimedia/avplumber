@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Mon, 2 Nov 2026 20:17:36 +0100
+Subject: [PATCH] avutil/hwcontext_cuda: support device-owned nonblocking
+ streams
+
+Allow a CUDA device wrapping an existing context to request an owned
+nonblocking stream during initialization. Keep stream allocation and
+destruction in the CUDA hwcontext while preserving ownership of supplied
+streams and contexts.
+
+Add a transfer roundtrip test that also verifies the borrowed context
+remains usable after the wrapper is destroyed.
+---
+ Changelog                        |  1 +
+ doc/APIchanges                   |  3 +++
+ libavutil/hwcontext_cuda.c       | 32 ++++++++++++++++++++++++++++++
+ libavutil/hwcontext_cuda.h       |  8 ++++++++
+ libavutil/tests/hwcontext_cuda.c | 34 ++++++++++++++++++++++++++++++++
+ libavutil/version.h              |  2 +-
+ 6 files changed, 79 insertions(+), 1 deletion(-)
+
+diff --git a/Changelog b/Changelog
+index aba49d2..7a39e27 100644
+--- a/Changelog
++++ b/Changelog
+@@ -4,6 +4,7 @@ releases are sorted from youngest to oldest.
+ version <next>:
+ - DTS:X height channels in the DCA decoder
+ - extra_hw_frames_only flag for NVDEC unsafe CUarray surface budgeting
++- device-owned non-blocking streams in the CUDA hardware context
+ 
+ version 9.1:
+ - ASTC image encoding and decoding via libastcenc, with .astc and KTX 1.0 muxers and demuxers
+diff --git a/doc/APIchanges b/doc/APIchanges
+index ff4c8b3..209dc04 100644
+--- a/doc/APIchanges
++++ b/doc/APIchanges
+@@ -2,6 +2,9 @@ The last version increases of all libraries were on 2026-06-23.
+ 
+ API changes, most recent first:
+ 
++2026-11-02 - xxxxxxxxxx - lavu 61.21.100 - hwcontext_cuda.h
++  Add AVCUDADeviceContext.create_stream for device-owned non-blocking streams.
++
+ 2026-11-02 - xxxxxxxxxx - lavc 63.26.100 - avcodec.h
+   Add AV_HWACCEL_FLAG_EXTRA_HW_FRAMES_ONLY.
+ 
+diff --git a/libavutil/hwcontext_cuda.c b/libavutil/hwcontext_cuda.c
+index bea4abd..cc27c60 100644
+--- a/libavutil/hwcontext_cuda.c
++++ b/libavutil/hwcontext_cuda.c
+@@ -42,6 +42,7 @@ typedef struct CUDAFramesContext {
+ typedef struct CUDADeviceContext {
+     AVCUDADeviceContext p;
+     AVCUDADeviceContextInternal internal;
++    CUstream owned_stream;
+ } CUDADeviceContext;
+ 
+ 
+@@ -742,6 +743,15 @@ static void cuda_device_uninit(AVHWDeviceContext *device_ctx)
+ 
+     if (hwctx->p.internal) {
+         CudaFunctions *cu = hwctx->internal.cuda_dl;
++        CUcontext dummy;
++
++        if (hwctx->owned_stream &&
++            CHECK_CU(cu->cuCtxPushCurrent(hwctx->p.cuda_ctx)) >= 0) {
++            CHECK_CU(cu->cuStreamSynchronize(hwctx->owned_stream));
++            CHECK_CU(cu->cuStreamDestroy(hwctx->owned_stream));
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++            hwctx->owned_stream = hwctx->p.stream = NULL;
++        }
+ 
+         if (hwctx->internal.is_allocated && hwctx->p.cuda_ctx) {
+             if (hwctx->internal.flags & AV_CUDA_USE_PRIMARY_CONTEXT)
+@@ -773,6 +783,28 @@ static int cuda_device_init(AVHWDeviceContext *ctx)
+         }
+     }
+ 
++    if (hwctx->p.create_stream && !hwctx->owned_stream) {
++        CudaFunctions *cu = hwctx->internal.cuda_dl;
++        CUcontext dummy;
++        int pop_ret;
++
++        if (!hwctx->p.cuda_ctx || hwctx->p.stream) {
++            av_log(ctx, AV_LOG_ERROR, "create_stream requires a CUDA context and no supplied stream.\n");
++            ret = AVERROR(EINVAL);
++            goto error;
++        }
++        ret = FF_CUDA_CHECK_DL(ctx, cu, cu->cuCtxPushCurrent(hwctx->p.cuda_ctx));
++        if (ret < 0)
++            goto error;
++        ret = FF_CUDA_CHECK_DL(ctx, cu, cu->cuStreamCreate(&hwctx->owned_stream, CU_STREAM_NON_BLOCKING));
++        pop_ret = FF_CUDA_CHECK_DL(ctx, cu, cu->cuCtxPopCurrent(&dummy));
++        if (ret >= 0)
++            ret = pop_ret;
++        if (ret < 0)
++            goto error;
++        hwctx->p.stream = hwctx->owned_stream;
++    }
++
+     return 0;
+ 
+ error:
+diff --git a/libavutil/hwcontext_cuda.h b/libavutil/hwcontext_cuda.h
+index 38e5369..ccdb143 100644
+--- a/libavutil/hwcontext_cuda.h
++++ b/libavutil/hwcontext_cuda.h
+@@ -45,6 +45,14 @@ typedef struct AVCUDADeviceContext {
+     CUcontext cuda_ctx;
+     CUstream stream;
+     AVCUDADeviceContextInternal *internal;
++
++    /**
++     * Create and own a non-blocking stream during av_hwdevice_ctx_init().
++     * Set before initialization, with cuda_ctx set and stream unset. The caller
++     * must keep cuda_ctx alive until device destruction. Do not replace stream
++     * after initialization. Zero (the default) preserves caller stream ownership.
++     */
++    int create_stream;
+ } AVCUDADeviceContext;
+ 
+ /**
+diff --git a/libavutil/tests/hwcontext_cuda.c b/libavutil/tests/hwcontext_cuda.c
+index 4a179b6..d9268f5 100644
+--- a/libavutil/tests/hwcontext_cuda.c
++++ b/libavutil/tests/hwcontext_cuda.c
+@@ -252,6 +252,33 @@ static int test_rejected(AVBufferRef *device_ref, enum AVPixelFormat fmt)
+     return ret >= 0 ? AVERROR(EINVAL) : 0;
+ }
+ 
++static int test_owned_stream(AVBufferRef *parent_ref)
++{
++    AVHWDeviceContext *parent = (AVHWDeviceContext *)parent_ref->data;
++    AVCUDADeviceContext *parent_cuda = parent->hwctx;
++    AVBufferRef *ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_CUDA);
++    AVCUDADeviceContext *cuda;
++    int ret;
++
++    if (!ref)
++        return AVERROR(ENOMEM);
++    cuda = ((AVHWDeviceContext *)ref->data)->hwctx;
++    cuda->cuda_ctx = parent_cuda->cuda_ctx;
++    cuda->create_stream = 1;
++    ret = av_hwdevice_ctx_init(ref);
++    if (ret < 0)
++        goto end;
++    if (!cuda->stream || cuda->stream == parent_cuda->stream) {
++        ret = AVERROR(EINVAL);
++        goto end;
++    }
++    ret = test_format(ref, AV_PIX_FMT_NV12, 0, 0);
++end:
++    av_buffer_unref(&ref);
++    /* Destroying the stream must leave the borrowed context usable. */
++    return ret < 0 ? ret : test_format(parent_ref, AV_PIX_FMT_NV12, 0, 0);
++}
++
+ int main(void)
+ {
+     AVBufferRef *device_ref = NULL;
+@@ -303,6 +330,13 @@ int main(void)
+         failures++;
+     }
+ 
++    total++;
++    ret = test_owned_stream(device_ref);
++    if (ret < 0) {
++        printf("fail: owned stream %s\n", av_err2str(ret));
++        failures++;
++    }
++
+     av_buffer_unref(&device_ref);
+ 
+     if (failures)
+diff --git a/libavutil/version.h b/libavutil/version.h
+index cbdd0ad..3a39a0b 100644
+--- a/libavutil/version.h
++++ b/libavutil/version.h
+@@ -79,7 +79,7 @@
+  */
+ 
+ #define LIBAVUTIL_VERSION_MAJOR  61
+-#define LIBAVUTIL_VERSION_MINOR  20
++#define LIBAVUTIL_VERSION_MINOR  21
+ #define LIBAVUTIL_VERSION_MICRO 100
+ 
+ #define LIBAVUTIL_VERSION_INT   AV_VERSION_INT(LIBAVUTIL_VERSION_MAJOR, \

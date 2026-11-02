@@ -77,7 +77,9 @@ def worker(args):
         decode.update(hwaccel="probe_gpu", pixel_format="cuarray" if args.mode == "cuarray" else "cuda")
         options["extra_hw_frames"] = args.extra_hw_frames
         if args.mode == "cuarray":
-            options["hwaccel_flags"] = "unsafe_output"
+            options["hwaccel_flags"] = "unsafe_output+private_stream"
+            if args.extra_hw_frames >= 0:
+                options["hwaccel_flags"] += "+extra_hw_frames_only"
             if args.pool_budget_mib:
                 decode["pool_budget_mib"] = args.pool_budget_mib
     nodes = [Input({"name": "input", "url": str(args.input), "dst": "packets"}),

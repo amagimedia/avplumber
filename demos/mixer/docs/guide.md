@@ -230,15 +230,12 @@ PLI/FIR feedback requests keyframes, limited by `--keyframe-min-interval-ms`.
 Compose builds the mixer and imports browser/Wayland/Janus service definitions
 from the shared [DMA-BUF stack](../../../docker-compose/dmabuf/compose.yaml).
 
-### The two images
+### The image
 
-| Dockerfile | Stack | Host |
-| --- | --- | --- |
-| `Dockerfile.fedora44` (default) | Fedora 44 / CUDA 13.4 / FFmpeg 8.1 | R615+ driver |
-| `Dockerfile` | Ubuntu 22.04 / CUDA 11.7 | Older compatible NVIDIA driver |
-
-Select the second with `MIXER_DOCKERFILE=Dockerfile`. The [L4 preset](../../../docker-compose/mixer/deploy/l4/README.md)
-pins its own FFmpeg build. Keep `media/.nv-cache` to reuse driver-compiled kernels.
+`Dockerfile.fedora44` builds Fedora 44, CUDA 13.4 and the FFmpeg 9 series pinned in
+[`deps/ffmpeg`](../../../deps/ffmpeg/README.md), and needs host driver R615 or newer. The
+[L4 preset](../../../docker-compose/mixer/deploy/l4/README.md) uses the same pin. Keep
+`media/.nv-cache` to reuse driver-compiled kernels.
 TensorRT is optional (`WITH_TENSORRT=1` and the `tensorrt_url` build secret in the
 Fedora image); the manual mixer needs no neural models.
 

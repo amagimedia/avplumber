@@ -1,8 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Fedora 44 / CUDA 13.4 build of the mixer image, the compose default.
-# ./Dockerfile (Ubuntu 22.04 / CUDA 11.7) builds the same /build layout,
-# entrypoint, ports and environment for a host whose driver is older than
-# R615; compose.yaml selects it with MIXER_DOCKERFILE=Dockerfile (docs/guide.md).
+# Fedora 44 / CUDA 13.4 build of the mixer image. It needs host driver R615 or newer.
 #
 # Build from the repository root:
 #   docker build -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44 .
@@ -76,7 +73,7 @@ ENV HARDENING_FLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fcf-protectio
 
 FROM base AS ffmpeg
 
-ARG FFMPEG_TAG=n8.1
+ARG FFMPEG_TAG=master-1bfb9160
 ARG BUILD_JOBS=4
 
 COPY deps/ffmpeg /build/deps/ffmpeg
@@ -93,8 +90,8 @@ RUN if [ "${FFMPEG_TAG}" = "$(. /build/deps/ffmpeg/9/bases.env; echo "$upstream_
         && git -C /tmp/ffmpeg fetch --quiet --depth 1 origin "$upstream_commit" \
         && git -C /tmp/ffmpeg checkout --quiet --detach FETCH_HEAD; \
     else \
-        git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
-            https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg; \
+        echo "unsupported FFMPEG_TAG=${FFMPEG_TAG}: this image builds only the pinned FFmpeg 9 base" >&2; \
+        exit 1; \
     fi \
     && bash /build/deps/ffmpeg/apply.sh /tmp/ffmpeg
 

@@ -30,7 +30,7 @@ def run(args, mixed):
     for codec in codecs:
         options = {"threads": 1, "extra_hw_frames": 3}
         if storage[codec] == "cuarray":
-            options["hwaccel_flags"] = "unsafe_output"
+            options["hwaccel_flags"] = "unsafe_output+extra_hw_frames_only+private_stream"
         nodes += [
             api.Input({"name": f"input_{codec}", "url": str(getattr(args, codec)),
                        "dst": f"packets_{codec}"}),

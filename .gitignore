@@ -38,7 +38,7 @@ superpowers/
 /neural-demo/.models_onnx.tgz
 /neural-demo/.tensorrt*.tgz
 
-# Local Compose choices, e.g. MIXER_DOCKERFILE=Dockerfile (demos/mixer/docs/guide.md).
+# Local Compose choices.
 /docker-compose/mixer/.env
 /docker-compose/mixer/deploy/l4/.env
 

@@ -281,7 +281,7 @@ public:
         if (avp::cuda::isArrayFormat(pixel_format_)) {
             const char *flags = options.get("hwaccel_flags");
             if (flags && std::string(flags).find("unsafe_output") != std::string::npos) {
-                // An unspecified budget keeps FFmpeg's 16 extra surfaces (deps/ffmpeg/9/0012).
+                // Without a budget FFmpeg keeps its 16 extra surfaces; extra_hw_frames_only requires one.
                 const char *extra = options.get("extra_hw_frames");
                 surface_gate_ = std::make_unique<avp::DecoderSurfaceGate>((extra ? std::max(0, std::atoi(extra)) : 16) + 1);
             }

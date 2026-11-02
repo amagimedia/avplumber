@@ -45,9 +45,7 @@ docker build -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:loca
 ```
 
 This is the image the mixer's Compose file builds under the same tag: Fedora 44
-with CUDA 13.4, which needs host driver R615 or newer. For an older driver build
-`docker-compose/mixer/Dockerfile` (Ubuntu 22.04 / CUDA 11.7) instead; the
-[mixer guide](mixer/docs/guide.md#the-two-images) compares the two.
+with CUDA 13.4, which needs host driver R615 or newer.
 
 Then follow [Mixer](mixer/README.md#run),
 [Playlist](playlist/README.md#run-in-docker), or

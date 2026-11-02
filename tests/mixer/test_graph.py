@@ -701,7 +701,8 @@ def test_array_decode_is_explicit_per_source_and_preserves_linear_defaults(tmp_p
     assert nodes["decode_0"]["pixel_format"] == "cuarray"
     assert nodes["decode_0"]["auto_restart"] == "off"
     assert nodes["decode_0"]["options"] == {
-        "threads": 1, "hwaccel_flags": "unsafe_output", "extra_hw_frames": 3 if budget is None else budget}
+        "threads": 1, "hwaccel_flags": "unsafe_output+extra_hw_frames_only+private_stream",
+        "extra_hw_frames": 3 if budget is None else budget}
     assert nodes["decode_1"]["pixel_format"] == "?cuda"
     assert nodes["decode_1"]["options"] == {"threads": 1}
     assert nodes["decode_1"]["auto_restart"] == "group"

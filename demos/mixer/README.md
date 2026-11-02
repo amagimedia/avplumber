@@ -46,8 +46,7 @@ see [host setup](../README.md#nvidia-host-setup).
 docker compose -f docker-compose/mixer/compose.yaml up --build
 ```
 
-The default Fedora/CUDA image requires driver R615 or newer. For the older
-Ubuntu/CUDA image, prefix every build/start with `MIXER_DOCKERFILE=Dockerfile`.
+The Fedora/CUDA image requires driver R615 or newer.
 The [L4 preset](../../docker-compose/mixer/deploy/l4/README.md) supplies a separate measured configuration.
 
 Open <http://127.0.0.1:7681/setup/>, choose sources, canvas and outputs, then

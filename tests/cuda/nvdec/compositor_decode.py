@@ -56,7 +56,7 @@ def run(args, storage):
     nodes = []
     options = {"threads": 1}
     if storage == "cuarray":
-        options.update(hwaccel_flags="unsafe_output", extra_hw_frames=3)
+        options.update(hwaccel_flags="unsafe_output+extra_hw_frames_only+private_stream", extra_hw_frames=3)
     graph = ("setparams=color_trc=bt709:color_primaries=bt709:colorspace=bt709:range=tv,"
              "scale_cuda=format=nv12")
     if args.filter_linear:
@@ -151,7 +151,7 @@ def main():
     parser.add_argument("--height", type=int, default=1080)
     parser.add_argument("--frames", type=int, default=50)
     parser.add_argument("--filter-linear", action="store_true", help="exercise private-stream linear pad/crop output")
-    parser.add_argument("--rounds", type=int, default=2, help="CUarray recreate rounds; 0 runs the FFmpeg 8 baseline only")
+    parser.add_argument("--rounds", type=int, default=2, help="CUarray recreate rounds; 0 runs the linear baseline only")
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
