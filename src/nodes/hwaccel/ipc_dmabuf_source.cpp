@@ -20,6 +20,7 @@ extern "C" {
 #include <memory>
 #include <new>
 #include "../../hwaccel.hpp"
+#include "../../timeline.hpp"
 #include "DmabufReleaseQueue.hpp"
 #include "TexInfoMessage.hpp"   // the wire format: TexInfo and its fd, documented in texinfo.h
 
@@ -289,6 +290,7 @@ public:
         }
         const TexInfo &ti = frame.info;
 
+        avp::timeline::mark("browser frame " + std::to_string(ti.frame_count));
         ++received_;
         uint64_t object_size = 0;
         if (!validateTexInfo(ti, object_size)) {

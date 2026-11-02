@@ -4,6 +4,7 @@
 #include "../node_common.hpp"
 #include "../../hwaccel.hpp"
 #include "../../avbuffer.hpp"
+#include "../../timeline.hpp"
 #include "../../output_mask.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
 #include "../../mixer/primitives/frame_subscription.hpp"
@@ -173,6 +174,7 @@ protected:
                            const av::VideoFrame *metadata_src, const std::vector<float> *opacity = nullptr,
                            const av::VideoFrame *base = nullptr) {
         const auto started = std::chrono::steady_clock::now();
+        avp::timeline::Scope issue("issue");
         draw_.ensureDevice();
         CUstream stream = draw_.stream();
 
@@ -224,8 +226,12 @@ protected:
                                                AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
         outf.setPts(pts);
 
+        issue.close();
         const auto issued = std::chrono::steady_clock::now();
-        draw_.synchronize(stream);
+        {
+            avp::timeline::Scope wait("gpu wait");
+            draw_.synchronize(stream);
+        }
         const auto done = std::chrono::steady_clock::now();
         issue_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(issued - started).count();
         gpu_wait_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(done - issued).count();

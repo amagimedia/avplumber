@@ -193,6 +193,7 @@ void MixerOrchestrator::applySceneControls(const SceneDefinition& scene) {
 }
 
 void MixerOrchestrator::preview(const std::string& scene_name) {
+    avp::timeline::mark("preview: " + scene_name);
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!state_->scenes.count(scene_name))
         throw Error("mixer.preview: unknown scene: " + scene_name);

@@ -209,6 +209,7 @@ protected:
             }
         }
         purgeImports(now_ms, false);
+        avp::timeline::Scope importing("dmabuf import");   // an allocation the cache has not seen
         if (imports_.size() >= max_imports_) {
             auto oldest = imports_.end();
             for (auto it = imports_.begin(); it != imports_.end(); ++it) {
@@ -218,12 +219,18 @@ protected:
             }
             // Never forget a registration still used by a frame: returning
             // allocations must find it rather than create a second registration.
-            if (oldest == imports_.end()) return nullptr;
+            if (oldest == imports_.end()) {
+                avp::timeline::mark("dmabuf import refused: all in use");
+                return nullptr;
+            }
             imports_.erase(oldest);
             ++evicted_imports_;
         }
         auto entry = cleanup_->tryMake(import_budget_, hwaccel_);
-        if (!entry) return nullptr; // process() releases the input and its browser slot.
+        if (!entry) {
+            avp::timeline::mark("dmabuf import refused: budget");
+            return nullptr; // process() releases the input and its browser slot.
+        }
         if (!ensureEGL()) return nullptr;
         ImportEntry &e = *entry;
         e.key = key;
@@ -440,7 +447,7 @@ public:
         // default stream, and the compositor orders its draw after each source frame's stream: on the
         // shared device that wait would cover all work on the legacy stream. A private non-blocking
         // stream, on which this node queues nothing, makes the wait free.
-        r->hwaccel_ = avp::mixer::makeCudaStreamDevice(shared);
+        r->hwaccel_ = avp::mixer::makeCudaStreamDevice(shared, params.value("name", std::string("drm_prime_to_cuda")));
         AVHWDeviceContext* devctx = (AVHWDeviceContext *)(r->hwaccel_->deviceContext()->data);
         r->cuda_dev_ctx_ = (AVCUDADeviceContext*)(devctx->hwctx);
         if (!r->cuda_dev_ctx_) {

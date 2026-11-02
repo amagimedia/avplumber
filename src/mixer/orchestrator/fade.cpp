@@ -7,6 +7,7 @@ namespace avp::mixer {
 void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
         FadeCurve curve, std::optional<std::array<uint8_t, 3>> dip, CutLatency::Clock::time_point received) {
     if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid fade duration");
+    avp::timeline::mark("fade pressed: " + scene_name);
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
     if (actOnTransitionOnAir(scene_name, MixerState::TransitionMode::Crossfade)) return;
@@ -33,6 +34,7 @@ void MixerOrchestrator::lever(double position, double duration_sec, FadeCurve cu
     if (!std::isfinite(position)) throw Error("mixer: invalid lever position");
     if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid fade duration");
     if (span_ms && !(*span_ms > 0 && std::isfinite(*span_ms))) throw Error("mixer: invalid lever span");
+    avp::timeline::mark("lever " + std::to_string(position));
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->lever_take = {duration_sec, curve, dip, wipe_file};
     leverTo(position, span_ms);
@@ -244,6 +246,7 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
             setNodeObject(state_->slot_b.post_otm_name, "outputs", Parameters(3u));
             state_->take_phase = MixerState::TakePhase::Fade;
             state_->blend_on_air = true;
+            avp::timeline::mark("fade on air");
         }
         const int blend = MixerState::transSourceSwitcherIndex();
         const auto blend_pts = pts(blend);

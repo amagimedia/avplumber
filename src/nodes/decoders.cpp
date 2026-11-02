@@ -5,6 +5,7 @@
 #include <optional>
 #include <system_error>
 #include "../avutils.hpp"
+#include "../timeline.hpp"
 #include <avcpp/codeccontext.h>
 #include "../cuda_array_format.hpp"
 #include "../decoder_surfaces.hpp"
@@ -138,6 +139,7 @@ protected:
             gate_overrun_ = false;
         }
         if (surface_gate_->wait(milliseconds(10))) {
+            if (gate_paused_since_) avp::timeline::mark("decoder resumed");
             if (gate_paused_since_ && (gate_pauses_ == 1 || gate_pauses_ % 100 == 0))
                 logstream << "decoder resumed after "
                           << duration_cast<milliseconds>(steady_clock::now() - *gate_paused_since_).count()
@@ -148,6 +150,7 @@ protected:
         const auto now = steady_clock::now();
         if (!gate_paused_since_) {
             gate_paused_since_ = now;
+            avp::timeline::mark("decoder paused: consumers hold " + std::to_string(surface_gate_->held()) + " frames");
             if (++gate_pauses_ == 1 || gate_pauses_ % 100 == 0)
                 logstream << "decoder paused: consumers hold " << surface_gate_->held()
                           << " decoded frames, the pool's spare surfaces (extra_hw_frames + 1); pause " << gate_pauses_;
@@ -155,6 +158,7 @@ protected:
             logstream << "Warning: consumers have held " << surface_gate_->held()
                       << " decoded frames for over a second; decoding on, the surface pool may run out: "
                          "raise extra_hw_frames above what they hold";
+            avp::timeline::mark("decoder gate gave up");
             gate_overrun_ = true;
             gate_paused_since_.reset();
             return true;

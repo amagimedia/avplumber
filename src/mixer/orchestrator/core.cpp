@@ -136,6 +136,8 @@ void MixerOrchestrator::interruptTransition(Interruption why) {
 }
 
 void MixerOrchestrator::dropTransition(MixerState::TransitionMode dropped) {
+    avp::timeline::mark("take dropped");
+    avp::timeline::end(std::exchange(state_->timeline_take, 0));
     auto cleanup = [](auto action) {
         try { action(); }
         catch (const std::exception& e) {
@@ -188,6 +190,7 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
 
 void MixerOrchestrator::finishTransition(bool new_pgm_is_slot_a, std::string new_pgm_scene, int64_t effective_ns) {
     state_->completeTransition(new_pgm_is_slot_a, std::move(new_pgm_scene), effective_ns);
+    avp::timeline::end(std::exchange(state_->timeline_take, 0));
     logstream << "mixer: program " << state_->pgm_scene_name << " on slot " << (new_pgm_is_slot_a ? 'A' : 'B')
               << ", preview " << (state_->preview.pvw.empty() ? "cleared" : state_->preview.pvw)
               << " from pts_ns=" << effective_ns;

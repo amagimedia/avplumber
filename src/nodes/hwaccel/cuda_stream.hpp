@@ -1,11 +1,13 @@
 #pragma once
 #include "cuda_rect_draw.hpp"
+#include "../../timeline.hpp"
 
 namespace avp::mixer {
 
 // FFmpeg filters use the stream attached to their input frames' device. Give
 // aux frames a device wrapper with a private stream and the same CUDA context.
-inline std::shared_ptr<HWAccelDevice> makeCudaStreamDevice(const std::shared_ptr<HWAccelDevice> &parent) {
+inline std::shared_ptr<HWAccelDevice> makeCudaStreamDevice(const std::shared_ptr<HWAccelDevice> &parent,
+                                                           const std::string &name) {
     AVBufferRef *ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_CUDA);
     if (!ref) throw Error("aux: cannot allocate CUDA device wrapper");
     auto *device = reinterpret_cast<AVHWDeviceContext *>(ref->data);
@@ -27,6 +29,7 @@ inline std::shared_ptr<HWAccelDevice> makeCudaStreamDevice(const std::shared_ptr
         av_buffer_unref(&ref);
         throw Error("aux: cannot initialize CUDA stream device");
     }
+    avp::timeline::nameCudaStream(cuda->stream, name);   // its row on the Nsight timeline
     return std::make_shared<HWAccelDevice>(ref);
 }
 

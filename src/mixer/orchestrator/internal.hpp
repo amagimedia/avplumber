@@ -6,6 +6,7 @@
 #include "../routing.hpp"
 #include "../primitives/TransitionGuard.hpp"
 #include "../../avutils.hpp"
+#include "../../timeline.hpp"
 #include "../../graph_interfaces.hpp"
 #include <algorithm>
 #include <chrono>

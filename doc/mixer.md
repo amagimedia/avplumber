@@ -186,6 +186,36 @@ Python boundaries are `gui.bridge` (AVP connection and command ordering),
 thread priority), and `gui.web` (HTTP and CLI). Existing public imports from
 `gui.web` remain available; new applications can use `pyplumber.mixer.gui`.
 
+## Profiling
+
+The engine marks its timeline with NVTX ([timeline.hpp](../src/timeline.hpp)). Without a
+profiler a marker costs one pointer check. Nsight attaches at launch, so start the mixer under
+[Nsight Systems](https://developer.nvidia.com/nsight-systems) and pick a delay that lands after
+the show is steady:
+
+```sh
+nsys profile --delay=120 --duration=30 --kill=sigkill --sample=none --cpuctxsw=none \
+    --trace=cuda,nvtx,nvvideo -o mixer -f true <mixer command>
+```
+
+Keep the trace short: on a 192-source show, OS runtime tracing and long captures did not finish
+writing. Tracing also slows the show and stalls it for its first second, so read the times as
+relative. [A 30 s trace of the L4 show](https://amagimedia.github.io/avplumber/demos/mixer/docs/nsight/)
+shows what comes out.
+
+- Each compositor thread shows `tick` (its payload is the output tick, so outputs line up on
+  it) holding `issue`, `gpu wait`, `put downstream` and `commit`, and `wait inputs` between ticks.
+- Every skipped tick is a mark with its cause: the time taken, the draw, the wait downstream and
+  for input, and the input that held it back.
+- AUX buses and browser sources draw on named CUDA streams. Program shares the default stream.
+- A take is a range from its start to Program changing, or to `take dropped`. Marks show
+  `cut pressed`, `fade pressed`, `wipe pressed`, `lever <position>`, `preview`, `fade on air`,
+  `wipe on air`, and key changes and keys following a take.
+- A decoder marks `decoder paused`, `decoder resumed` and `decoder gate gave up`; a browser source
+  marks each `browser frame <count>`, `dmabuf import` ranges and refused imports.
+
+Profiling adds load, so read its numbers for causes, not capacity.
+
 ## Native code layout
 
 | Module | Role |
