@@ -1,0 +1,87 @@
+name: Mixer images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: mixer-images
+  cancel-in-progress: false
+
+env:
+  MIXER_IMAGE_PREFIX: ${{ vars.MIXER_GAR_PREFIX }}
+  MIXER_GAR_MIRRORS: ${{ vars.MIXER_GAR_MIRRORS }}
+  BUILD_JOBS: "8"
+
+jobs:
+  publish:
+    runs-on: amagi-amd64-xlarge
+    timeout-minutes: 90
+    steps:
+      - name: Install Docker and Compose
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release git python3
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          sudo chmod 666 /var/run/docker.sock
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.MIXER_GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.MIXER_GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install crane
+        env:
+          CRANE_VERSION: v0.20.2
+          CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/crane.tgz" "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/crane.tgz" -C "$RUNNER_TEMP/bin" crane
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve Compose builds and registry credentials
+        run: |
+          python3 docker-compose/mixer/deploy/l4/publish.py prepare --output "$RUNNER_TEMP/mixer-release"
+          python3 - <<'PY'
+          import os, subprocess
+          prefixes = [os.environ['MIXER_IMAGE_PREFIX'], *os.environ['MIXER_GAR_MIRRORS'].split()]
+          hosts = sorted({prefix.split('/', 1)[0] for prefix in prefixes})
+          subprocess.run(['gcloud', 'auth', 'configure-docker', ','.join(hosts), '--quiet'], check=True)
+          PY
+
+      - name: Build and publish the stack
+        run: |
+          docker buildx bake \
+            -f "$RUNNER_TEMP/mixer-release/build.compose.yaml" \
+            -f "$RUNNER_TEMP/mixer-release/cache.json" \
+            --metadata-file "$RUNNER_TEMP/mixer-release/metadata.json" --push
+
+      - name: Mirror exact digests and write deployment pins
+        run: |
+          python3 docker-compose/mixer/deploy/l4/publish.py release --output "$RUNNER_TEMP/mixer-release"
+          echo 'Images published. Download mixer-release for Compose overrides pinned by digest. GPU playback needs validation on the deployment host.' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mixer-release-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/mixer-release/release.json
+            ${{ runner.temp }}/mixer-release/*-docker.pkg.dev--*.compose.yaml
+          if-no-files-found: error
