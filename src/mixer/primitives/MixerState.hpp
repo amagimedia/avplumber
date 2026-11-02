@@ -175,6 +175,7 @@ struct MixerState : public InstanceShared<MixerState> {
 
     enum class TransitionMode { Idle, Cut, Crossfade, Wipe };
     std::atomic<TransitionMode> transition_mode{TransitionMode::Idle};
+    uint64_t timeline_take = 0;   // the take's range on the Nsight timeline (timeline.hpp)
     /// The running take's kind as the followers report it; "" while idle.
     const char* takeKind() const {
         switch (transition_mode.load()) {

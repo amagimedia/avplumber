@@ -24,3 +24,6 @@
 	path = deps/pybind11_json
 	url = https://github.com/pybind/pybind11_json
 	branch = master
+[submodule "deps/nvtx"]
+	path = deps/nvtx
+	url = https://github.com/NVIDIA/NVTX

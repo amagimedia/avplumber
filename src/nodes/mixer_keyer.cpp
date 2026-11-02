@@ -84,6 +84,7 @@ class MixerKeyer : public CudaRectCompositor, public IReturnsObjects {
             if (clock.end == End::Cancelled) return;
             taken_ = prepared_;
             taken_on_ = active_inputs_ & taken_;
+            if (taken_.any()) avp::timeline::mark("keys follow take");
         }
         if (taken_.none()) return;
         if (clock.end == End::Cancelled || (clock.end == End::Completed && t_ns >= clock.end_ns)) {
@@ -96,6 +97,7 @@ class MixerKeyer : public CudaRectCompositor, public IReturnsObjects {
     }
 
     void endTake(bool completed) {
+        avp::timeline::mark(completed ? "keys landed with take" : "keys back: take cancelled");
         for (size_t i = 0; i < key_fade_.size(); ++i) {
             if (!taken_.test(int(i))) continue;
             const bool on = completed != taken_on_.test(int(i));
@@ -281,6 +283,7 @@ public:
             if (key == "prepare_inputs") {
                 prepared_ = affected;
             } else {
+                avp::timeline::mark("key change");
                 const auto target = avp::mixer::parseSourceMask(value.value("active_inputs", Parameters(0u)));
                 const double ms = value.value("duration_ms", 0.0);
                 if (!(ms >= 0 && ms <= 10000)) throw Error("mixer_keyer: duration_ms must be 0 to 10000");
@@ -299,6 +302,7 @@ public:
             // fade_inputs {"active_inputs": <mask>, "duration_ms": 0..10000, "curve": <name>}: the keys
             // the mask turns on or off fade over duration_ms, 0 cuts. active_inputs <mask> cuts.
             const bool fade = key == "fade_inputs";
+            avp::timeline::mark(fade ? "key fade" : "key cut");
             const auto new_mask = avp::mixer::parseSourceMask(fade ? value.at("active_inputs") : value);
             KeyChange change;
             if (fade) {
