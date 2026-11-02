@@ -47,7 +47,7 @@ def render(path, storage, consumer, layer, size):
     avp, errors = make_avp("crop_gpu")
     options = {"threads": 1}
     if storage == "cuarray":
-        options.update(hwaccel_flags="unsafe_output", extra_hw_frames=3)
+        options.update(hwaccel_flags="unsafe_output+extra_hw_frames_only+private_stream", extra_hw_frames=3)
     nodes = [
         api.Input({"name": "input", "url": str(path), "dst": "packets"}),
         api.Demux({"name": "demux", "src": "packets", "routing": {"v:0": "video_packets"}}),

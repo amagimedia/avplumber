@@ -5,7 +5,7 @@ libraries. Set `PYTHONPATH` to the checkout/module location and select the match
 libraries with the build's rpath or `LD_LIBRARY_PATH`. Keep the same CUDA, DRM/GL
 and optional neural feature flags between binary and Python-module builds.
 The CUarray tests require the pinned `deps/ffmpeg/9` series and its codec headers.
-Use a separate FFmpeg 8.1 build for the linear/CPU baseline.
+Run the same build's linear and CPU modes for the baseline.
 
 The scripts accept private fixture/report paths at runtime. Pixel checks download
 only at the explicit verification boundary; they are not production graphs or
@@ -52,3 +52,8 @@ requirements allocate different base pools. The finite probes' default three
 extra surfaces are not a full-mixer sizing recommendation. No timing comparison
 is valid if inputs stalled, output counts changed, compilation overlapped, or
 the two builds silently loaded different libraries than intended.
+
+CUarray checks enable `unsafe_output+private_stream`, plus `extra_hw_frames_only`
+with a nonnegative extra-frame budget. Where accepted, `--extra-hw-frames -1` tests
+upstream's default padding instead. The FFmpeg CLI adds its scheduler queue allowance
+even with the budget flag; API probes use the specified allowance directly.

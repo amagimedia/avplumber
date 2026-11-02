@@ -36,7 +36,7 @@ def run(args, storage, backend, *, filter_linear=False, unsupported=False, looka
     for index, pixel_format in enumerate(storages):
         options = {"threads": 1, "extra_hw_frames": (lookahead or 0) + 3}
         if pixel_format == "cuarray":
-            options["hwaccel_flags"] = "unsafe_output"
+            options["hwaccel_flags"] = "unsafe_output+extra_hw_frames_only+private_stream"
         source = f"decoded_{index}"
         nodes.extend([
             api.Input({"name": f"input_{index}", "url": str(path), "dst": f"packets_{index}"}),

@@ -1,0 +1,242 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Mon, 2 Nov 2026 20:17:51 +0100
+Subject: [PATCH] avcodec/nvdec: add opt-in private streams for unsafe CUarray
+ output
+
+Unsafe CUarray decoders inherit their device stream and synchronize the
+whole CUDA context at teardown. Add the private_stream hwaccel flag to
+isolate each decoder's work on a nonblocking stream in the same context.
+
+Use a CUDA device wrapper that retains the parent device and owns the
+stream. Expose it through output frames so consumers can order their
+reads; retain frames until those reads finish. Synchronize only the
+private stream at decoder teardown.
+
+Require cuvidDecodePictureAsync, unsafe CUarray output, and an internally
+allocated frame pool. Leave default behavior and surface budgeting intact.
+
+Tested on an NVIDIA L4: identical frame checksums and timestamps with and
+without the flag, distinct nonblocking streams for two decoders, output
+frames retained after decoder shutdown and parent-device release, and
+rejection of incompatible output modes and caller-supplied pools.
+---
+ Changelog                  |  1 +
+ doc/APIchanges             |  3 +++
+ libavcodec/avcodec.h       |  8 ++++++
+ libavcodec/nvdec.c         | 55 +++++++++++++++++++++++++++++++++++---
+ libavcodec/options_table.h |  1 +
+ libavcodec/version.h       |  2 +-
+ 6 files changed, 66 insertions(+), 4 deletions(-)
+
+diff --git a/Changelog b/Changelog
+index 7a39e27..e4d699c 100644
+--- a/Changelog
++++ b/Changelog
+@@ -5,6 +5,7 @@ version <next>:
+ - DTS:X height channels in the DCA decoder
+ - extra_hw_frames_only flag for NVDEC unsafe CUarray surface budgeting
+ - device-owned non-blocking streams in the CUDA hardware context
++- private_stream flag for NVDEC unsafe CUarray stream isolation
+ 
+ version 9.1:
+ - ASTC image encoding and decoding via libastcenc, with .astc and KTX 1.0 muxers and demuxers
+diff --git a/doc/APIchanges b/doc/APIchanges
+index 209dc04..5297bd6 100644
+--- a/doc/APIchanges
++++ b/doc/APIchanges
+@@ -2,6 +2,9 @@ The last version increases of all libraries were on 2026-06-23.
+ 
+ API changes, most recent first:
+ 
++2026-11-02 - xxxxxxxxxx - lavc 63.27.100 - avcodec.h
++  Add AV_HWACCEL_FLAG_PRIVATE_STREAM for opt-in NVDEC stream isolation.
++
+ 2026-11-02 - xxxxxxxxxx - lavu 61.21.100 - hwcontext_cuda.h
+   Add AVCUDADeviceContext.create_stream for device-owned non-blocking streams.
+ 
+diff --git a/libavcodec/avcodec.h b/libavcodec/avcodec.h
+index 510b1dd..b36d063 100644
+--- a/libavcodec/avcodec.h
++++ b/libavcodec/avcodec.h
+@@ -2064,6 +2064,14 @@ typedef struct AVHWAccel {
+  */
+ #define AV_HWACCEL_FLAG_EXTRA_HW_FRAMES_ONLY (1 << 4)
+ 
++/**
++ * Use a private non-blocking decode stream. Currently supported by NVDEC with
++ * CUarray unsafe output and internally allocated frame pools only. Requires
++ * cuvidDecodePictureAsync. Consumers must order reads against the stream in
++ * the output frame's CUDA device context and retain the frame until reads finish.
++ */
++#define AV_HWACCEL_FLAG_PRIVATE_STREAM (1 << 5)
++
+ /**
+  * @}
+  */
+diff --git a/libavcodec/nvdec.c b/libavcodec/nvdec.c
+index f54de06..c7b9e53 100644
+--- a/libavcodec/nvdec.c
++++ b/libavcodec/nvdec.c
+@@ -60,6 +60,7 @@ typedef struct NVDECDecoder {
+ 
+     int unsafe_output;
+     int opaque_output;
++    int private_stream;
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+     atomic_int *surface_in_use;
+     int          num_surfaces;
+@@ -192,7 +193,10 @@ static void nvdec_decoder_free(AVRefStructOpaque unused, void *obj)
+              * is purely a guard against a future regression of that invariant;
+              * it must never defer destruction (which would leak the decoder).
+              */
+-            decoder->cudl->cuCtxSynchronize();
++            if (decoder->private_stream)
++                CHECK_CU(decoder->cudl->cuStreamSynchronize(decoder->stream));
++            else
++                CHECK_CU(decoder->cudl->cuCtxSynchronize());
+             if (decoder->surface_in_use) {
+                 int busy = 0;
+                 for (int i = 0; i < decoder->num_surfaces; i++)
+@@ -401,6 +405,12 @@ void ff_nvdec_fill_cuarray_desc(CUDA_ARRAY3D_DESCRIPTOR *desc,
+ 
+ #endif
+ 
++static void nvdec_stream_device_free(AVHWDeviceContext *device)
++{
++    AVBufferRef *parent = device->user_opaque;
++    av_buffer_unref(&parent);
++}
++
+ int ff_nvdec_decode_init(AVCodecContext *avctx)
+ {
+     NVDECContext *ctx = avctx->internal->hwaccel_priv_data;
+@@ -408,6 +418,7 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+     NVDECDecoder        *decoder;
+     AVBufferRef         *decode_hw_frames_ref = NULL;
+     AVBufferRef         *real_hw_frames_ref = NULL;
++    AVBufferRef         *stream_device_ref = NULL;
+     NVDECFramePool      *pool;
+     AVHWFramesContext   *frames_ctx;
+     const AVPixFmtDescriptor *sw_desc;
+@@ -421,6 +432,7 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+ 
+     int unsafe_output = !!(avctx->hwaccel_flags & AV_HWACCEL_FLAG_UNSAFE_OUTPUT);
+     int explicit_budget = !!(avctx->hwaccel_flags & AV_HWACCEL_FLAG_EXTRA_HW_FRAMES_ONLY);
++    int private_stream = !!(avctx->hwaccel_flags & AV_HWACCEL_FLAG_PRIVATE_STREAM);
+ 
+     int opaque_output = 0;
+     int decode_pool_size;
+@@ -479,6 +491,12 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+     }
+ #endif
+ 
++    if (private_stream && (!opaque_output || !unsafe_output || !need_real_hwframes)) {
++        av_log(avctx, AV_LOG_ERROR,
++               "private_stream requires CUarray unsafe output and an internally allocated frame pool.\n");
++        return AVERROR(EINVAL);
++    }
++
+     decode_pool_size = frames_ctx->initial_pool_size;
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+     if (opaque_output) {
+@@ -551,13 +569,35 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+         return AVERROR(ENOSYS);
+     }
+ 
++    if (private_stream) {
++        AVHWDeviceContext *device;
++        AVCUDADeviceContext *cuda;
++
++        stream_device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_CUDA);
++        if (!stream_device_ref)
++            return AVERROR(ENOMEM);
++        device = (AVHWDeviceContext *)stream_device_ref->data;
++        device->free = nvdec_stream_device_free;
++        device->user_opaque = av_buffer_ref(frames_ctx->device_ref);
++        if (!device->user_opaque) {
++            ret = AVERROR(ENOMEM);
++            goto fail;
++        }
++        cuda = device->hwctx;
++        cuda->cuda_ctx = ((AVCUDADeviceContext *)frames_ctx->device_ctx->hwctx)->cuda_ctx;
++        cuda->create_stream = 1;
++        ret = av_hwdevice_ctx_init(stream_device_ref);
++        if (ret < 0)
++            goto fail;
++    }
++
+     if (need_real_hwframes) {
+         if (frames_ctx->format == AV_PIX_FMT_CUARRAY) {
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+             AVHWFramesContext *real_ctx;
+             AVCUDAFramesContext *cuda_priv;
+ 
+-            ret = avcodec_get_hw_frames_parameters(avctx, avctx->hw_device_ctx,
++            ret = avcodec_get_hw_frames_parameters(avctx, stream_device_ref ? stream_device_ref : avctx->hw_device_ctx,
+                                                    avctx->hwaccel->pix_fmt,
+                                                    &real_hw_frames_ref);
+             if (ret < 0)
+@@ -688,13 +728,15 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+     params.ulNumDecodeSurfaces = FFMIN(decode_pool_size, NVDEC_MAX_DECODE_SURFACES);
+     params.ulNumOutputSurfaces = opaque_output ? 0 : (unsafe_output ? FFMIN(frames_ctx->initial_pool_size, 64) : 1);
+ 
+-    ret = nvdec_decoder_create(&ctx->decoder, frames_ctx->device_ref, &params, avctx);
++    ret = nvdec_decoder_create(&ctx->decoder, stream_device_ref ? stream_device_ref : frames_ctx->device_ref,
++                              &params, avctx);
+     if (ret < 0)
+         goto fail;
+ 
+     decoder = ctx->decoder;
+     decoder->unsafe_output = unsafe_output;
+     decoder->opaque_output = opaque_output;
++    decoder->private_stream = private_stream;
+ 
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+     if (opaque_output) {
+@@ -704,6 +746,12 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+         CUVIDREGISTERDECODESURFACESINFO reg_info = { 0 };
+         CUcontext dummy;
+ 
++        if (private_stream && !decoder->cvdl->cuvidDecodePictureAsync) {
++            av_log(logctx, AV_LOG_ERROR, "private_stream requires driver support for cuvidDecodePictureAsync.\n");
++            ret = AVERROR(ENOSYS);
++            goto fail;
++        }
++
+         if (!decoder->cvdl->cuvidRegisterDecodeSurfaces) {
+             av_log(logctx, AV_LOG_ERROR, "Driver lacking CUarray output support.\n");
+             ret = AVERROR(ENOSYS);
+@@ -755,6 +803,7 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+     ret = 0;
+ 
+ fail:
++    av_buffer_unref(&stream_device_ref);
+     av_buffer_unref(&decode_hw_frames_ref);
+     av_buffer_unref(&real_hw_frames_ref);
+ 
+diff --git a/libavcodec/options_table.h b/libavcodec/options_table.h
+index cf3fbed..11434a1 100644
+--- a/libavcodec/options_table.h
++++ b/libavcodec/options_table.h
+@@ -414,6 +414,7 @@ static const AVOption avcodec_options[] = {
+ {"allow_profile_mismatch", "attempt to decode anyway if HW accelerated decoder's supported profiles do not exactly match the stream", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_ALLOW_PROFILE_MISMATCH }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
+ {"unsafe_output", "allow potentially unsafe hwaccel frame output that might require special care to process successfully", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_UNSAFE_OUTPUT }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
+ {"extra_hw_frames_only", "use only extra_hw_frames for additional decoder surfaces", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_EXTRA_HW_FRAMES_ONLY }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
++{"private_stream", "use a private decode stream (NVDEC CUarray unsafe output)", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_PRIVATE_STREAM }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
+ {"extra_hw_frames", "Number of extra hardware frames to allocate for the user", OFFSET(extra_hw_frames), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, V|D },
+ {"discard_damaged_percentage", "Percentage of damaged samples to discard a frame", OFFSET(discard_damaged_percentage), AV_OPT_TYPE_INT, {.i64 = 95 }, 0, 100, V|D },
+ {"side_data_prefer_packet", "Comma-separated list of side data types for which user-supplied (container) data is preferred over coded bytestream",
+diff --git a/libavcodec/version.h b/libavcodec/version.h
+index 26ee41e..735c8b8 100644
+--- a/libavcodec/version.h
++++ b/libavcodec/version.h
+@@ -29,7 +29,7 @@
+ 
+ #include "version_major.h"
+ 
+-#define LIBAVCODEC_VERSION_MINOR  26
++#define LIBAVCODEC_VERSION_MINOR  27
+ #define LIBAVCODEC_VERSION_MICRO 100
+ 
+ #define LIBAVCODEC_VERSION_INT  AV_VERSION_INT(LIBAVCODEC_VERSION_MAJOR, \

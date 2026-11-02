@@ -109,7 +109,7 @@ def run_decoded(ffmpeg: str, clip: Path, storage: tuple[str, ...], operation: st
         cmd += ["-hwaccel", "cuda", "-hwaccel_device", "gpu", "-hwaccel_output_format", layout,
                 "-extra_hw_frames", "3", "-threads", "1"]
         if layout == "cuarray":
-            cmd += ["-hwaccel_flags", "+unsafe_output"]
+            cmd += ["-hwaccel_flags", "+unsafe_output+extra_hw_frames_only+private_stream"]
         if index:
             cmd += ["-ss", "0.4"]
         cmd += ["-i", str(clip)]

@@ -154,7 +154,8 @@ class Source:
         if self.decode_storage != "cuarray":
             return {}
         return {"pixel_format": "cuarray", "auto_restart": "off", "options": {
-            "threads": 1, "hwaccel_flags": "unsafe_output", "extra_hw_frames": self.extra_hw_frames}}
+            "threads": 1, "hwaccel_flags": "unsafe_output+extra_hw_frames_only+private_stream",
+            "extra_hw_frames": self.extra_hw_frames}}
 
     @property
     def color(self):
