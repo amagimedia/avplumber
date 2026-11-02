@@ -43,8 +43,9 @@ python3 tests/cuda/nvdec/draw_arrays.py --input "$clip" --frames 50 --expect "$r
 ```
 
 The decoder-crop check covers identity `scale_cuda` passthrough before AVP's drawing nodes.
-It does not establish crop support in FFmpeg CUDA filters that process pixels. For those
-chains, apply the decoder crop in `cuda_transform` before the filter.
+Same-size filters (`scale_cuda=format=...`, `tonemap_cuda`) keep the crop fields accurate.
+Filters that change the picture's size or position (a resizing `scale_cuda`, `crop_cuda`)
+forward a stale left/top offset, so apply the decoder crop in `cuda_transform` before them.
 
 Use `--sw-format p010le` for Main10 probe fixtures. Different codecs and SPS
 requirements allocate different base pools. The finite probes' default three

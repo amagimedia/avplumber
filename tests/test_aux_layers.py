@@ -6,7 +6,7 @@ import pytest
 
 
 @pytest.mark.parametrize("name", ["test_aux_layers", "test_compositor_crop"])
-def test_aux_layers(cpp_binary, name):
+def test_layer_binary(cpp_binary, name):
     library = Path(__file__).resolve().parents[1] / "deps/avcpp/build/src/libavcpp.a"
     if not library.exists():
         pytest.skip("build avcpp first")

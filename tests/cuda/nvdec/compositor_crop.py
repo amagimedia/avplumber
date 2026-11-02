@@ -1,4 +1,4 @@
-"""Decoder crop + layer crop on linear CUDA and CUarray, through both rect consumers.
+"""Decoder crop + layer crop on linear CUDA and CUarray, through three rect consumers.
 
 Run on an NVIDIA build host: python3 tests/cuda/nvdec/compositor_crop.py --ffmpeg /path/to/ffmpeg
 The FFmpeg build needs h264_nvenc, h264_metadata and CUarray decode. CPU download is only

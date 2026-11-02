@@ -1165,7 +1165,8 @@ Parameters:
 -   `layers` (array of objects, required) - at most `max_layers`; each draws
     `input` (an index in `src`; omitted, the layer's position) at `dst_x`,
     `dst_y`, `dst_w`, `dst_h` (size omitted: the source's), optionally from
-    `crop` (`{"x", "y", "w", "h"}`), with `fit` `stretch` (default) or
+    `crop` (`{"x", "y", "w", "h"}`, in the picture left after the decoder's
+    own crop), with `fit` `stretch` (default) or
     `contain` (`source_canvas` `{"w", "h"}` letterboxes into a virtual source
     canvas), in `z` order (lower first), `blend` honouring the source's alpha.
     `filter` resamples a YUV source on a YUV canvas with `bilinear` (default),
