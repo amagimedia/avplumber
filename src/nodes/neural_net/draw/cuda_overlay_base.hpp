@@ -356,9 +356,12 @@ protected:
         if (ret < 0) {
             throw Error(std::string(nodeName()) + ": copying frame properties failed: " + av::error2string(ret));
         }
-        const auto ops = avp::mixer::resolveDrawOps({&frm}, {avp::mixer::LayerSpec{}},
-                                                    frm.width(), frm.height(), AV_PIX_FMT_NV12);
-        picture_draw_->draw(cuda_dev_ctx_->stream, ops, out.raw(), frm.raw());
+        // The whole storage, not its visible part (resolveDrawOps): the picture keeps the
+        // frame's crop fields, so it stays a copy of the frame for readers that apply them.
+        avp::mixer::DrawOp whole{&frm, frm.width(), frm.height(), {}};
+        whole.layer.crop_w = frm.width();
+        whole.layer.crop_h = frm.height();
+        picture_draw_->draw(cuda_dev_ctx_->stream, {whole}, out.raw(), frm.raw());
     }
 
     /// The geometry of the frame being processed, for the nodes' metadata readers.

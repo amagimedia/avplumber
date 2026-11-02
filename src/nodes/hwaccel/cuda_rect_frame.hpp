@@ -79,6 +79,8 @@ inline void copySourceProps(av::VideoFrame &outf, const av::VideoFrame &src, con
     const int cpy = av_frame_copy_props(outf.raw(), src.raw());
     if (cpy < 0)
         throw Error(type + ": av_frame_copy_props failed: " + av::error2string(cpy));
+    // The draw applied the source's crop; another reader must not apply it to the canvas again.
+    outf.raw()->crop_left = outf.raw()->crop_right = outf.raw()->crop_top = outf.raw()->crop_bottom = 0;
     // The output owns a new canvas; an imported source texture describes
     // only that source's storage, not these rendered pixels.
     if (textureFrameDesc(outf.raw()))

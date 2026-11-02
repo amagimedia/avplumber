@@ -15,6 +15,7 @@ performance benchmarks. Retention checks hold GPU references without pixel reads
 |---|---|
 | `probe.py` | Finite CPU/CUDA/CUarray decode; normalized pixel hashes, PTS, EOF, retained references and shutdown watchdog. Use `--reference` to compare saved reports across builds. |
 | `compositor_decode.py` | Real NVDEC through identity normalization and two compositors; array-handle passthrough, pixels/PTS and repeated teardown. `--filter-linear` inserts pad/crop to test ordering on linear frames from a private producer stream. `--rounds 0` works on FFmpeg 8.1. |
+| `compositor_crop.py` | Generates an H.264 crop fixture with `h264_metadata`; compares linear CUDA/CUarray through the compositor and `cuda_transform`, including layer crop, scaling, contain and cleared output crop metadata. Requires `h264_nvenc`; accepts `--ffmpeg`. |
 | `mixed_decode.py` | One shared device with HEVC CUarray plus H264/AV1 linear CUDA, compared against an all-linear canvas. Requires all three fixture paths. |
 | `camera_motion.py` | NV12 CUarray versus linear camera-motion metadata/PTS, original frame handles, private producer streams and repeated teardown. Requires `HAVE_NVOF=1`; the default GPU IRLS check also needs `HAVE_NVCC=1`. |
 | `luma_diff.py` | Linear/CUarray scores against a CPU oracle at lookahead 0/2/4/16, ring wrap, EOF tails and source-handle preservation. Both metric scripts support `--linear-only --report` and `--reference` for before/after linear checks. |
@@ -31,6 +32,7 @@ python3 tests/cuda/nvdec/probe.py "$clip" --mode cuda --expected-frames 50 --out
 python3 tests/cuda/nvdec/probe.py "$clip" --mode cuarray --expected-frames 50 --reference "$reports/linear.json" --output "$reports/array.json"
 python3 tests/cuda/nvdec/probe.py "$clip" --mode cuarray --action hold --hold 8 --expected-frames 50 --output "$reports/held.json"
 python3 tests/cuda/nvdec/compositor_decode.py --input "$clip" --report "$reports/compositor.json"
+python3 tests/cuda/nvdec/compositor_crop.py
 python3 tests/cuda/nvdec/camera_motion.py --input "$clip" --report "$reports/camera-motion.json"
 python3 tests/cuda/nvdec/luma_diff.py --input "$clip" --report "$reports/luma-diff.json"
 python3 tests/cuda/nvdec/filters.py --clip "$clip" --output "$reports/filters.json"
@@ -39,6 +41,10 @@ python3 tests/cuda/nvdec/draw_arrays.py --input "$clip" --frames 50 --report "$r
 python3 tests/cuda/nvdec/draw_arrays.py --input "$clip" --frames 50 --linear-only --report "$reports/draw_before.json"
 python3 tests/cuda/nvdec/draw_arrays.py --input "$clip" --frames 50 --expect "$reports/draw_before.json" --report "$reports/draw_arrays.json"
 ```
+
+The decoder-crop check covers identity `scale_cuda` passthrough before AVP's drawing nodes.
+It does not establish crop support in FFmpeg CUDA filters that process pixels. For those
+chains, apply the decoder crop in `cuda_transform` before the filter.
 
 Use `--sw-format p010le` for Main10 probe fixtures. Different codecs and SPS
 requirements allocate different base pools. The finite probes' default three

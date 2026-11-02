@@ -195,9 +195,31 @@ inline bool clipLayer(Rect &crop, Rect &dst, const Rect &bounds) {
     return true;
 }
 
-/// Resolve each layer against its source frame: crop/destination clipping, chroma alignment,
-/// fit/contain placement, then z-order. Missing sources and empty rectangles yield ops with
-/// src == nullptr; a placement rejected by geometry keeps a negative src_w so the log can name it.
+/// The part of `frame` its crop fields leave visible, in storage coordinates. For hardware
+/// frames av_frame_apply_cropping can apply only the right/bottom crop (it cannot move their
+/// data pointers), so crop_left/crop_top reach us. A crop that leaves nothing is ignored, as
+/// libavcodec ignores such a decoder crop (decode.c); `ignored`, when given, reports it.
+inline Rect visibleFrameRect(const AVFrame &frame, bool *ignored = nullptr) {
+    const Rect whole{0, 0, frame.width, frame.height};
+    if (ignored) *ignored = false;
+    if (!(frame.crop_left | frame.crop_right | frame.crop_top | frame.crop_bottom))
+        return whole;
+    const size_t w = std::max(frame.width, 0), h = std::max(frame.height, 0);
+    if (frame.crop_left >= w || frame.crop_right >= w - frame.crop_left ||
+        frame.crop_top >= h || frame.crop_bottom >= h - frame.crop_top) {
+        if (ignored) *ignored = true;
+        return whole;
+    }
+    // An origin off the chroma grid (only monochrome H.264/HEVC can signal one for a 4:2:0
+    // surface) keeps luma exact; plane rounding then shifts chroma by half a sample.
+    return {int(frame.crop_left), int(frame.crop_top), int(w - frame.crop_left - frame.crop_right),
+            int(h - frame.crop_top - frame.crop_bottom)};
+}
+
+/// Resolve each layer against the visible part of its source frame (visibleFrameRect):
+/// crop/destination clipping, chroma alignment, fit/contain placement, then z-order. Missing
+/// sources and empty rectangles yield ops with src == nullptr; a placement rejected by geometry
+/// keeps a negative src_w so the log can name it.
 inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame *> &sources,
                                           const std::vector<LayerSpec> &layers,
                                           int canvas_w, int canvas_h, AVPixelFormat canvas_fmt) {
@@ -210,15 +232,16 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
             ops.push_back({});
             continue;
         }
+        const Rect visible = visibleFrameRect(*srcp->raw());
         LayerSpec L = layers[i];
         if (L.dst_w > 0) {
             const Rect crop{L.crop_x, L.crop_y, L.crop_w, L.crop_h};
             const Rect box{L.dst_x, L.dst_y, L.dst_w, L.dst_h};
             const int ax = chromaXAlign(canvas_fmt), ay = chromaYAlign(canvas_fmt);
             auto placement = L.source_canvas_w > 0
-                ? placeInCanvas(srcp->width(), srcp->height(), crop, box,
+                ? placeInCanvas(visible.w, visible.h, crop, box,
                                 L.source_canvas_w, L.source_canvas_h, ax, ay)
-                : place(srcp->width(), srcp->height(), crop, box, L.fit, ax, ay);
+                : place(visible.w, visible.h, crop, box, L.fit, ax, ay);
             if (!placement || placement->destination.x >= canvas_w ||
                 placement->destination.y >= canvas_h ||
                 int64_t(placement->destination.x) + placement->destination.w <= 0 ||
@@ -241,9 +264,9 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
             continue;
         }
         // 0 means "remaining source extent from the crop origin".
-        if (L.crop_w <= 0) L.crop_w = srcp->width()  - L.crop_x;
-        if (L.crop_h <= 0) L.crop_h = srcp->height() - L.crop_y;
-        if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, srcp->width(), srcp->height()) ||
+        if (L.crop_w <= 0) L.crop_w = visible.w - L.crop_x;
+        if (L.crop_h <= 0) L.crop_h = visible.h - L.crop_y;
+        if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, visible.w, visible.h) ||
             !clipRect(L.dst_x, L.dst_y, L.crop_w, L.crop_h, canvas_w, canvas_h)) {
             ops.push_back({});
             continue;
@@ -254,7 +277,7 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         L.crop_y = alignCoord(L.crop_y, ay);
         L.dst_x = alignCoord(L.dst_x, ax);
         L.dst_y = alignCoord(L.dst_y, ay);
-        if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, srcp->width(), srcp->height()) ||
+        if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, visible.w, visible.h) ||
             !clipRect(L.dst_x, L.dst_y, L.crop_w, L.crop_h, canvas_w, canvas_h)) {
             ops.push_back({});
             continue;
@@ -282,6 +305,13 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         if (!clipLayer(crop, dst, t)) { op.src = nullptr; continue; }
         l.crop_x = crop.x; l.crop_y = crop.y; l.crop_w = crop.w; l.crop_h = crop.h;
         l.dst_x = dst.x; l.dst_y = dst.y; l.dst_w = dst.w; l.dst_h = dst.h;
+    }
+    // Up to here crops are in visible-picture coordinates; the draw samples storage.
+    for (auto &op : ops) {
+        if (!op.src) continue;
+        const Rect visible = visibleFrameRect(*op.src->raw());
+        op.layer.crop_x += visible.x;
+        op.layer.crop_y += visible.y;
     }
     // z decides who draws on top; equal z keeps source order (stable).
     std::stable_sort(ops.begin(), ops.end(),
@@ -324,6 +354,9 @@ inline std::string describeDrawOps(const std::vector<DrawOp> &ops) {
              << L.dst_w << "x" << L.dst_h << " z" << L.z;
         if (const ScaleFilter filter = drawFilter(L); filter != ScaleFilter::Bilinear)
             desc << " " << scaleFilterName(filter);
+        bool crop_ignored;
+        visibleFrameRect(*op.src->raw(), &crop_ignored);
+        if (crop_ignored) desc << " invalid frame crop ignored";
         desc << "]";
     }
     return desc.str();
