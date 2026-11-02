@@ -298,14 +298,16 @@ protected:
             frames = picture_frames_.get();
         }
         out.raw()->format = frm.raw()->format;
-        out.raw()->width = frm.width();
-        out.raw()->height = frm.height();
 
         int ret = av_hwframe_get_buffer(frames, out.raw(), 0);
         if (ret < 0) {
             logstream << nodeName() << ": av_hwframe_get_buffer failed: " << av::error2string(ret);
             return false;
         }
+        // A frame takes its pool's size. A decoder's pool has the coded size (1920x1088 for
+        // 1080p), larger than the frame it cropped; the copy is the frame's size.
+        out.raw()->width = frm.width();
+        out.raw()->height = frm.height();
 
         // Frames of two pools of one device, format and size hold the chroma plane at the same
         // pitch and distance behind luma: one copy then takes both planes and the rows between.

@@ -3,6 +3,10 @@
 Run on an NVIDIA build host: python3 tests/cuda/nvdec/compositor_crop.py --ffmpeg /path/to/ffmpeg
 The FFmpeg build needs h264_nvenc, h264_metadata and CUarray decode. CPU download is only
 the pixel-verification boundary. The fixture's crop is inserted without re-encoding.
+
+The draw_bbox consumer puts a NEURAL_NET draw node before the compositor: it reads a CUarray
+through its own linear copy, which must keep the whole surface and the decoder crop so that
+the compositor applies the crop once. --no-draw skips it for builds without NEURAL_NET.
 """
 import argparse
 import hashlib
@@ -49,11 +53,16 @@ def render(path, storage, consumer, layer, size):
         api.Demux({"name": "demux", "src": "packets", "routing": {"v:0": "video_packets"}}),
         api.DecVideo({"name": "decode", "src": "video_packets", "dst": "decoded",
                       "hwaccel": "crop_gpu", "pixel_format": storage, "options": options}),
-        # Identity scale_cuda forwards the original crop metadata, including on CUarray.
-        api.FilterVideo({"name": "normalize", "src": "decoded", "dst": "source",
-                         "hwaccel": "crop_gpu", "threads": 1, "defer_preliminary_init": True,
-                         "graph": "scale_cuda=format=nv12"}),
     ]
+    if consumer == "draw_bbox":
+        # No detections: the node only passes its picture of the frame on. It reads the
+        # decoder's format when created, which a deferred filter cannot give yet.
+        nodes.append(api.DrawBBox({"name": "overlay", "src": "decoded", "dst": "source"}))
+    else:
+        # Identity scale_cuda forwards the original crop metadata, including on CUarray.
+        nodes.append(api.FilterVideo({"name": "normalize", "src": "decoded", "dst": "source",
+                                      "hwaccel": "crop_gpu", "threads": 1, "defer_preliminary_init": True,
+                                      "graph": "scale_cuda=format=nv12"}))
     width, height = size
     canvas = {"width": width, "height": height, "sw_format": "nv12"}
     if consumer == "transform":
@@ -95,7 +104,9 @@ def render(path, storage, consumer, layer, size):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ffmpeg", default="ffmpeg")
+    parser.add_argument("--no-draw", action="store_true", help="skip draw_bbox (no NEURAL_NET build)")
     args = parser.parse_args()
+    consumers = ("compositor", "transform") + (() if args.no_draw else ("draw_bbox",))
     with tempfile.TemporaryDirectory(prefix="compositor-crop-") as temporary:
         base, cropped, software = fixture(args.ffmpeg, Path(temporary))
         cases = [
@@ -116,7 +127,7 @@ def main():
             if name == "visible":
                 assert [row[-1] for row in expected] == software, "GPU/reference software pixels differ"
             for storage in ("cuda", "cuarray"):
-                for consumer in ("compositor", "transform"):
+                for consumer in consumers:
                     actual = render(cropped, storage, consumer, layer, size)
                     assert actual == expected, (name, storage, consumer, "pixels/PTS differ")
                     print(f"PASS {name}: {storage} -> {consumer} -> compositor", flush=True)
