@@ -2,6 +2,7 @@
 #include "util.hpp"
 #include "avutils.hpp"
 #include <asm-generic/errno-base.h>
+#include <cerrno>
 #include <string>
 #include <fcntl.h>
 #include <sys/eventfd.h>
@@ -42,6 +43,7 @@ public:
         while (size > 0) {
             int ret = poll(pollfds_, 2, -1);
             if (ret<0) {
+                if (errno == EINTR) continue;   // stopped and resumed, or a signal handler ran
                 throw Error("wait: poll error");
             }
             if (pollfds_[PIPE_INDEX].revents & POLLIN) {
