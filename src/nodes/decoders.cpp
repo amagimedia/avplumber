@@ -1,5 +1,6 @@
 #include "node_common.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <optional>
@@ -45,6 +46,11 @@ protected:
     bool finish_after_flush_ = false;
     bool hold_at_eof_ = false;
     bool decoder_at_eof_ = false;
+    // The packet in front of the queue restarted the stream (takeStreamRestart): sent again after
+    // a surface shortage, it must not drain and reset the decoder a second time. Cleared when the
+    // packet leaves the queue.
+    bool restarted_for_front_ = false;
+    std::atomic<uint64_t> stream_restarts_{0};
     av::Timestamp flush_timeout_ts_ = NOTS;
     av::Timestamp flush_timeout_ = {500, {1, 1000}}; // 500ms
     // CUarray output with unsafe_output: a fixed pool whose surfaces are the output frames.
@@ -606,7 +612,8 @@ public:
         std::lock_guard<std::mutex> lock(health_mutex_);
         const auto &h = health_;
         Parameters result = {{"degraded", h.degraded}, {"reason", h.reason}, {"decode_errors", h.decode_errors},
-                             {"consecutive_errors", h.consecutive_errors}, {"frames", h.frames}};
+                             {"consecutive_errors", h.consecutive_errors}, {"frames", h.frames},
+                             {"stream_restarts", stream_restarts_.load()}};
         result["last_frame_age_ms"] = h.frames
             ? std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - h.last_frame).count() : -1;
         if (surface_gate_) {
@@ -720,6 +727,10 @@ public:
                     avcodec_flush_buffers(dec_.raw());
                     decoder_at_eof_ = false;
                 }
+                if (takeStreamRestart(pkt) && !restarted_for_front_) {
+                    restarted_for_front_ = true;
+                    restartStream(pkt);
+                }
                 int iter = 0;
                 bool packet_consumed = false;
                 do {
@@ -762,6 +773,7 @@ public:
                 } while (flush_magic_ && waiting_for_frame_ > 0);
                 if (packet_consumed) {
                     this->source_->pop();
+                    restarted_for_front_ = false;
                 }
             } else {
                 this->source_->pop();
@@ -785,6 +797,24 @@ public:
                 }
             }
         }
+    }
+    // The input started its stream again (a file looped): the pictures the decoder still holds
+    // end the last pass and go out, then the decoder forgets its references. FFmpeg then shows
+    // nothing it cannot decode without them: H.264 waits for an IDR or recovery point, HEVC for
+    // a random access point and skips the leading pictures that predict from before it.
+    void restartStream(const av::Packet &pkt) {
+        for (;;) {
+            OutputFrame frm;
+            try {
+                frm = dec_.decode(av::Packet());
+            } catch (const std::exception &) {
+                break;   // drained, or the last picture failed: nothing more to hand on
+            }
+            if (!frm) break;
+            handleFrame(frm, pkt);
+        }
+        avcodec_flush_buffers(dec_.raw());
+        ++stream_restarts_;
     }
     virtual void discardUntil(av::Timestamp pts) {
         logstream << "will wait for frame and discard until " << pts;

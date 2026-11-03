@@ -21,7 +21,14 @@ It has the same parameters as the `input` node and some additional
 -   `live_delay` (float, seconds) - time to delay between latest available packet and currently displayed in live mode (default `1`)
 -   `start_ts` (string) - start timestamp
 -   `stop_ts` (string) - stop timestamp
--   `loop` (bool) - if set to true, video will be played in a loop
+-   `loop` (bool) - if set to true, video will be played in a loop. A loop to the start seeks to the
+    first video packet's decode timestamp (a transport stream with B-frames seeks by decode time, so the
+    first picture's presentation time lies past the opening keyframe). A new pass that begins with a
+    picture that is not a keyframe (a transport stream cut mid-GOP) is marked as a stream restart
+    (packet side data): `dec_video` hands on the pictures it still holds, then resets, so no picture
+    of the new pass predicts from the last one; FFmpeg then shows nothing until a keyframe. A pass that
+    begins with a keyframe is not reset (an H.264 reset renegotiates the hardware decoder); after an
+    open-GOP keyframe (HEVC CRA, H.264 recovery point) its leading pictures still predict across the loop
 -   `loop_continuous_ts` (bool, default false) - with `loop`, shift each forward pass by the span of the previous one
     (earliest timestamp to latest timestamp + duration of the video stream, or of all streams in a file without video), so timestamps
     keep rising across loops instead of jumping back to the start. All streams get the same shift to stay in sync.
@@ -230,7 +237,8 @@ surface and fails later, the picture lost. After a lost picture nothing is shown
 keyframe.
 
 Objects (`node.object.get <name> status`): `degraded` with a `reason` (packets failing in a
-row, or the pool refused), `decode_errors`, `consecutive_errors`, `frames`,
+row, or the pool refused), `decode_errors`, `consecutive_errors`, `frames`, `stream_restarts`
+(an input's loops: see `input_rec` `loop`),
 `last_frame_age_ms`, and for CUarray decoders `surfaces`: `held`, `limit`, `pool`, `pauses`,
 `exhaustions` (episodes), `exhausted_now`, `retries` (packets sent while out of surfaces),
 `packets_dropped`, `pictures_lost`, `pictures_hidden`, `hiding`, `recoveries`, `repeats` (the
