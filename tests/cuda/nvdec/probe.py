@@ -77,7 +77,7 @@ def worker(args):
         decode.update(hwaccel="probe_gpu", pixel_format="cuarray" if args.mode == "cuarray" else "cuda")
         options["extra_hw_frames"] = args.extra_hw_frames
         if args.mode == "cuarray":
-            options["hwaccel_flags"] = "unsafe_output+private_stream"
+            options["hwaccel_flags"] = args.hwaccel_flags
             if args.extra_hw_frames >= 0:
                 options["hwaccel_flags"] += "+extra_hw_frames_only"
             if args.pool_budget_mib:
@@ -187,6 +187,9 @@ def main():
     parser.add_argument("--sw-format", choices=("nv12", "p010le", "p210le"), default="nv12")
     parser.add_argument("--expected-frames", type=int, required=True)
     parser.add_argument("--extra-hw-frames", type=int, default=3)
+    parser.add_argument("--hwaccel-flags", default="unsafe_output+private_stream",
+                        help="cuarray: the decoder's hwaccel_flags; a show on the develop FFmpeg series uses "
+                             "unsafe_output+extra_hw_frames_only+private_stream")
     parser.add_argument("--hold", type=int, default=3)
     parser.add_argument("--stall-ms", type=int, default=300, help="stall: how long every frame is kept")
     parser.add_argument("--pool-budget-mib", type=int, help="cuarray: budget for the decoder pool; the decoder fails above it")

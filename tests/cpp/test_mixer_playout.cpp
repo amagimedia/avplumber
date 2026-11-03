@@ -4,8 +4,190 @@
 #include <memory>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 #define CHECK(expr) do { if (!(expr)) throw std::runtime_error(#expr); } while (false)
+
+struct SourcedFrame { int source; int id; };
+
+// A playout that records what it hands over instead of dropping.
+static std::shared_ptr<std::vector<int>> retiringTo(avp::mixer::Playout<SourcedFrame> &mix) {
+    auto retired = std::make_shared<std::vector<int>>();
+    mix.setRetirement([](const SourcedFrame &a, const SourcedFrame &b) { return a.source == b.source; },
+                      [retired](SourcedFrame frame) { retired->push_back(frame.id); });
+    return retired;
+}
+
+void the_last_frame_of_a_source_is_retired_when_another_source_replaces_it() {
+    avp::mixer::Playout<SourcedFrame> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)));
+    auto retired = retiringTo(mix);
+    mix.push(0, {1, 10}, 0);
+    CHECK(mix.prepare(34000000));
+    mix.commit();
+    mix.push(0, {1, 11}, 17000000);
+    CHECK(mix.prepare(51000000));
+    mix.commit();
+    CHECK(retired->empty());                  // the same source: the usual replacement in place
+    mix.push(0, {2, 20}, 34000000);
+    CHECK(mix.prepare(68000000));
+    mix.commit();
+    CHECK(*retired == std::vector<int>{11});  // another decoder took over: its last frame leaves here
+}
+
+void frames_a_tick_skips_are_retired_when_another_source_follows_them() {
+    avp::mixer::Playout<SourcedFrame> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)));
+    auto retired = retiringTo(mix);
+    mix.push(0, {1, 10}, 0);
+    CHECK(mix.prepare(34000000));
+    mix.commit();
+    mix.push(0, {1, 11}, 17000000);
+    mix.push(0, {2, 20}, 34000000);
+    CHECK(mix.prepare(68000000));              // the tick shows the newest: 11 is never drawn
+    mix.commit();
+    CHECK((*retired == std::vector<int>{10, 11}));
+}
+
+void reset_retires_what_it_drops() {
+    avp::mixer::Playout<SourcedFrame> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)));
+    auto retired = retiringTo(mix);
+    mix.push(0, {1, 10}, 0);
+    CHECK(mix.prepare(34000000));
+    mix.commit();
+    mix.push(0, {1, 11}, 17000000);
+    mix.resetInput(0);                         // a removed source has no successor to compare with
+    CHECK((*retired == std::vector<int>{11, 10}));
+}
+
+void a_discontinuity_retires_the_queue_only_when_the_source_changed() {
+    const auto queued = [](int next_source) {
+        avp::mixer::Playout<SourcedFrame> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)), {},
+                                              avp::mixer::TimestampMode::Presentation);
+        auto retired = retiringTo(mix);
+        mix.push(0, {1, 10}, 1000000000);
+        mix.push(0, {1, 11}, 1017000000);
+        mix.push(0, {next_source, 20}, 0);     // far behind: the clock jumped back
+        return *retired;
+    };
+    CHECK(queued(1).empty());                  // a looping file keeps its decoder
+    CHECK((queued(2) == std::vector<int>{10, 11}));
+}
+
+void a_full_queue_retires_a_frame_only_when_its_successor_is_another_source() {
+    avp::mixer::Playout<SourcedFrame> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)));
+    auto retired = retiringTo(mix);
+    int64_t ts = 0;
+    for (int id = 0; id < 8; ++id, ts += 16666667) mix.push(0, {1, id}, ts);
+    mix.push(0, {1, 8}, ts);                   // evicts 0, whose successor is the same source
+    CHECK(retired->empty());
+}
+
+// The mixer's mode: a frame's slot is its timestamp's tick. Ticks are prepared one latency
+// (two ticks) after their time, with a millisecond to spare.
+static avp::mixer::Playout<int> liveShow(size_t inputs) {
+    return avp::mixer::Playout<int>(inputs, avp::mixer::TickGrid(av::Rational(60, 1)), {},
+                                    avp::mixer::TimestampMode::Presentation);
+}
+static const avp::mixer::TickGrid kGrid60(av::Rational(60, 1));
+static int64_t due(int64_t tick) { return kGrid60.time(tick + 2) + 1000000; }
+
+void a_released_input_neither_finishes_the_playout_nor_holds_a_tick() {
+    auto mix = liveShow(2);
+    mix.push(0, 100, kGrid60.time(0));
+    mix.push(1, 200, kGrid60.time(0));
+    CHECK(mix.prepare(due(0), true));
+    mix.commit();
+    mix.releaseInput(1);                       // the source left the show
+    mix.push(0, 101, kGrid60.time(1));
+    auto tick = mix.prepare(due(1), true);     // every active input must be ready: this one is not waited for
+    CHECK(tick && tick->index == 1 && *tick->frames[0] == 101 && tick->frames[1] == nullptr);
+    mix.commit();
+    CHECK(!mix.finished());                    // the show goes on without it
+    mix.endInput(0);
+    CHECK(mix.finished());                     // the streams that ended finish it; the released one does not count
+}
+
+void a_source_joining_a_running_output_does_not_delay_the_tick() {
+    auto mix = liveShow(2);
+    mix.push(0, 100, kGrid60.time(0));
+    mix.push(1, 200, kGrid60.time(0));
+    CHECK(mix.prepare(due(0), true));
+    mix.commit();
+    mix.releaseInput(1);
+    mix.push(0, 101, kGrid60.time(1));
+    mix.push(1, 250, kGrid60.time(4));         // back, its first frame stamped three ticks ahead
+    for (int64_t t = 1; t <= 3; ++t) {
+        if (t > 1) mix.push(0, 100 + int(t), kGrid60.time(t));
+        auto tick = mix.prepare(due(t), true);
+        CHECK(tick && tick->index == t);        // on time, not moved to the joining source's first frame
+        CHECK(*tick->frames[0] == 100 + int(t) && tick->frames[1] == nullptr);   // it shows nothing yet
+        mix.commit();
+    }
+    mix.push(0, 104, kGrid60.time(4));
+    auto tick = mix.prepare(due(4), true);
+    CHECK(tick && tick->index == 4 && *tick->frames[1] == 250);   // its frame shows at its own tick
+    mix.commit();
+    CHECK(mix.missedDeadlines() == 0 && mix.stats(1).discarded == 0);
+    mix.endInput(0);
+    CHECK(!mix.finished());                    // an input like any other again: it must end too
+    mix.endInput(1);
+    CHECK(mix.finished());
+}
+
+void a_cold_reset_input_still_holds_the_tick_for_its_first_frame() {
+    // A scene load at the start of a show waits for every input, as before.
+    auto mix = liveShow(2);
+    mix.push(0, 100, kGrid60.time(0));
+    mix.push(1, 200, kGrid60.time(0));
+    CHECK(mix.prepare(due(0), true));
+    mix.commit();
+    mix.resetInput(1);
+    mix.push(0, 101, kGrid60.time(1));
+    mix.push(1, 250, kGrid60.time(4));
+    CHECK(!mix.prepare(due(1), true));         // held until the reset input's first frame is due
+    CHECK(mix.heldBackBy() && *mix.heldBackBy() == 1);
+    auto tick = mix.prepare(due(4), true);
+    CHECK(tick && tick->index == 4 && *tick->frames[1] == 250);
+}
+
+void a_source_without_new_frames_repeats_while_its_neighbour_moves_and_catches_up() {
+    // What a decoder out of surfaces looks like to the playout: its frames stop for a while.
+    auto mix = liveShow(2);
+    for (int64_t t = 0; t <= 1; ++t) {
+        mix.push(0, 100 + int(t), kGrid60.time(t));
+        mix.push(1, 200 + int(t), kGrid60.time(t));
+        CHECK(mix.prepare(due(t), true));
+        mix.commit();
+    }
+    for (int64_t t = 2; t <= 5; ++t) {         // source 1 gives nothing; source 0 goes on
+        mix.push(0, 100 + int(t), kGrid60.time(t));
+        auto tick = mix.prepare(due(t), true);
+        CHECK(tick && tick->index == t && *tick->frames[0] == 100 + int(t) && *tick->frames[1] == 201);
+        mix.commit();
+    }
+    CHECK(mix.stats(1).repeats == 4 && mix.missedDeadlines() == 0);
+    for (int64_t t = 2; t <= 6; ++t) mix.push(1, 200 + int(t), kGrid60.time(t));   // it recovers, late frames and all
+    mix.push(0, 106, kGrid60.time(6));
+    auto tick = mix.prepare(due(6), true);
+    CHECK(tick && tick->index == 6 && *tick->frames[0] == 106 && *tick->frames[1] == 206);   // the newest, at once
+    mix.commit();
+    CHECK(mix.stats(1).discarded == 4 && mix.missedDeadlines() == 0);
+    mix.push(0, 107, kGrid60.time(7));
+    mix.push(1, 207, kGrid60.time(7));
+    tick = mix.prepare(due(7), true);
+    CHECK(tick && *tick->frames[0] == 107 && *tick->frames[1] == 207);
+    mix.commit();
+    CHECK(mix.stats(1).repeats == 4);
+}
+
+void a_playout_without_retirement_drops_frames_as_before() {
+    avp::mixer::Playout<int> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)));
+    mix.push(0, 10, 0);
+    CHECK(mix.prepare(34000000));
+    mix.commit();
+    mix.push(0, 11, 17000000);
+    mix.resetInput(0);
+    CHECK(mix.stats(0).discarded == 1);
+}
 
 void reset_counters_starts_them_again_without_moving_the_schedule() {
     avp::mixer::Playout<int> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)));
@@ -935,6 +1117,16 @@ int main(int argc, char **argv) {
         {"invalid_parameters_fail_early", invalid_parameters_fail_early},
         {"preserves_presentation_timestamps_for_rate_conversion", preserves_presentation_timestamps_for_rate_conversion},
         {"source_clock_gap_recovers_bounded_delay", source_clock_gap_recovers_bounded_delay},
+        {"the_last_frame_of_a_source_is_retired_when_another_source_replaces_it", the_last_frame_of_a_source_is_retired_when_another_source_replaces_it},
+        {"frames_a_tick_skips_are_retired_when_another_source_follows_them", frames_a_tick_skips_are_retired_when_another_source_follows_them},
+        {"reset_retires_what_it_drops", reset_retires_what_it_drops},
+        {"a_discontinuity_retires_the_queue_only_when_the_source_changed", a_discontinuity_retires_the_queue_only_when_the_source_changed},
+        {"a_full_queue_retires_a_frame_only_when_its_successor_is_another_source", a_full_queue_retires_a_frame_only_when_its_successor_is_another_source},
+        {"a_playout_without_retirement_drops_frames_as_before", a_playout_without_retirement_drops_frames_as_before},
+        {"a_released_input_neither_finishes_the_playout_nor_holds_a_tick", a_released_input_neither_finishes_the_playout_nor_holds_a_tick},
+        {"a_source_joining_a_running_output_does_not_delay_the_tick", a_source_joining_a_running_output_does_not_delay_the_tick},
+        {"a_cold_reset_input_still_holds_the_tick_for_its_first_frame", a_cold_reset_input_still_holds_the_tick_for_its_first_frame},
+        {"a_source_without_new_frames_repeats_while_its_neighbour_moves_and_catches_up", a_source_without_new_frames_repeats_while_its_neighbour_moves_and_catches_up},
         {"latency_and_backpressure", latency_and_backpressure},
         {"burst_keeps_every_frame", burst_keeps_every_frame},
         {"sixteen_independent_phases", sixteen_independent_phases},

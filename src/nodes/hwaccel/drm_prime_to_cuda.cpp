@@ -432,7 +432,9 @@ public:
             throw Error("drm_prime_to_cuda: max_imports must be positive and import_ttl_ms nonnegative (0 retains imports)");
         r->max_imports_ = size_t(max_imports);
         using CleanupObjects = InstanceSharedObjects<DeferredRelease<ImportEntry>>;
-        CleanupObjects::emplace(nci.instance, "drm_import_cleanup", CleanupObjects::PolicyIfExists::Ignore);
+        // One unregister per frame of 30 fps at most: each holds a driver lock for about 10 ms.
+        CleanupObjects::emplace(nci.instance, "drm_import_cleanup", CleanupObjects::PolicyIfExists::Ignore,
+                                std::chrono::milliseconds(33));
         r->cleanup_ = CleanupObjects::get(nci.instance, "drm_import_cleanup");
         // Include retired imports awaiting destruction, not just cache entries.
         r->import_budget_ = std::make_shared<DeferredRelease<ImportEntry>::Budget>(2 * r->max_imports_);

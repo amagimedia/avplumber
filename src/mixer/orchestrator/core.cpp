@@ -265,6 +265,8 @@ Parameters MixerOrchestrator::status() const {
         Parameters node_status;
         const auto node = nodes_->node_if_exists(name);
         if (!node || !node->getObjectTry("status", node_status) || !node_status.contains("playout")) continue;
+        // The show's decoders: every compositor carries the same block.
+        if (!s.contains("decoders") && node_status.contains("decoders")) s["decoders"] = node_status["decoders"];
         auto& counters = node_status["playout"];
         playout[slot] = {{"frames", counters["frames"]}, {"repeats", counters["repeats"]},
                          {"missed_deadlines", counters["missed_deadlines"]}};

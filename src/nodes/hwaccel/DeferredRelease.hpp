@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -8,7 +9,8 @@
 
 // Reserve capacity on the producer before allocating. The last consumer only
 // links an already allocated job. A producer denied capacity drops its frame
-// instead of waiting with buffers retained. Budgets include live and retired jobs.
+// instead of waiting with buffers retained. Budgets include live and retired jobs,
+// so one producer's retired jobs never refuse another's frames.
 template<class T> class DeferredRelease : public std::enable_shared_from_this<DeferredRelease<T>> {
 public:
     struct Budget {
@@ -40,7 +42,9 @@ private:
     std::shared_ptr<State> state_ = std::make_shared<State>();
     std::thread worker_;
 public:
-    DeferredRelease(): worker_([state = state_] {
+    /// `pace` is the rest after each job: a release can hold a lock every other thread needs,
+    /// so a batch of them must leave those threads room to work between one and the next.
+    explicit DeferredRelease(std::chrono::milliseconds pace = {}): worker_([state = state_, pace] {
         std::unique_lock<std::mutex> lock(state->mutex);
         for (;;) {
             state->changed.wait(lock, [&] { return state->head || (state->stopping && !state->outstanding); });
@@ -56,6 +60,8 @@ public:
             --state->outstanding;
             --state->pending;
             state->changed.notify_all();
+            if (pace.count())
+                state->changed.wait_for(lock, pace, [&] { return state->stopping; });
         }
     }) {}
     ~DeferredRelease() {
@@ -85,9 +91,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(state_->mutex);
             if (budget->closed) return {};
-            // Keep memory admission conservative without retaining a realtime
-            // input while another producer's retired allocations are released.
-            if (state_->pending || budget->used >= budget->limit) {
+            if (budget->used >= budget->limit) {
                 ++budget->declined;
                 return {};
             }

@@ -52,11 +52,16 @@ protected:
     std::unique_ptr<CudaPinnedUploader> uploader_;
     uint64_t next_ = 0;   // pictures emitted since start
     std::vector<bool> held_;   // resident: the pictures already in the block
-    // How long a picture waits for device memory before the node gives up: long enough for a
-    // large show to finish starting, during which every source allocates at once.
-    static constexpr int kDeviceMemoryWaitMs = 5000;
+    // A picture waits for a device frame for as long as it takes: the consumers hold this
+    // source's frames, and while they do its last picture stays on air, which is what a source
+    // short of frames looks like. Giving up instead would end the node, and a restart tears
+    // down and makes again what every thread using the device then waits for. The wait is
+    // logged this often, and counted for the operator.
+    static constexpr int kDeviceMemoryLogEveryMs = 5000;
     struct timespec modified_{};
     std::atomic<uint64_t> frames_{0}, file_reads_{0}, read_us_{0}, upload_us_{0};
+    std::atomic<uint64_t> frame_waits_{0}, longest_wait_ms_{0};
+    std::atomic<bool> waiting_{false};
 
     struct stat fileStatus() {
         struct stat st{};
@@ -123,16 +128,28 @@ public:
         }
         const auto was_read = Clock::now();
         av::VideoFrame frame;
-        bool waited = false;
-        if (!waitForDeviceMemory([&] { return uploader_->upload(frame, slot); },
-                                 [&](int ms) {
-                                     if (!std::exchange(waited, true))
-                                         logstream << "raw_video_file_cuda: " << path_ << ": no device frame free for a picture, waiting";
-                                     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-                                 },
-                                 kDeviceMemoryWaitMs, [&] { return bool(this->finished_); }))
-            throw Error("raw_video_file_cuda: " + path_ + ": no device frame free for a picture in " +
-                        std::to_string(kDeviceMemoryWaitMs / 1000) + " s");
+        int waited_ms = 0;
+        const auto attempt = [&] { return uploader_->upload(frame, slot); };
+        const auto sleep = [&](int ms) {
+            if (!waiting_.exchange(true)) {
+                ++frame_waits_;
+                logstream << "raw_video_file_cuda: " << path_ << ": no device frame free for a picture, waiting"
+                          << " (consumers hold all " << uploader_->framesAllocated() << "; wait " << frame_waits_.load() << ")";
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        };
+        const auto stopping = [&] { return bool(this->finished_); };
+        while (!waitForDeviceMemory(attempt, sleep, kDeviceMemoryLogEveryMs, stopping)) {
+            if (stopping()) return;
+            waited_ms += kDeviceMemoryLogEveryMs;
+            logstream << "raw_video_file_cuda: " << path_ << ": still no device frame free after " << waited_ms / 1000
+                      << " s; its last picture stays on air until one comes back";
+        }
+        if (waiting_.exchange(false)) {
+            const auto ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - was_read).count());
+            if (ms > longest_wait_ms_.load()) longest_wait_ms_ = ms;
+            logstream << "raw_video_file_cuda: " << path_ << ": device frame free again after " << ms << " ms";
+        }
         const auto uploaded = Clock::now();
 
         AVFrame *raw = frame.raw();
@@ -164,7 +181,11 @@ public:
         if (key != "stats") throw Error("raw_video_file_cuda: unknown object " + key);
         const uint64_t frames = frames_.load();
         return {{"frames", frames}, {"passes", index_ ? frames / uint64_t(index_->frames) : 0},
-                {"file_reads", file_reads_.load()}, {"frames_allocated", uploader_ ? uploader_->framesAllocated() : 0}, {"read_us", read_us_.load()}, {"upload_us", upload_us_.load()}};
+                {"file_reads", file_reads_.load()}, {"frames_allocated", uploader_ ? uploader_->framesAllocated() : 0},
+                {"read_us", read_us_.load()}, {"upload_us", upload_us_.load()},
+                // Device-frame shortages: how often a picture waited for one, whether one waits
+                // now (the source repeats its last picture), and the longest wait.
+                {"frame_waits", frame_waits_.load()}, {"waiting", waiting_.load()}, {"longest_wait_ms", longest_wait_ms_.load()}};
     }
 
     ~RawVideoFileCuda() {

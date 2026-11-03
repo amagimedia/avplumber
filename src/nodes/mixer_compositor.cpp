@@ -1,6 +1,8 @@
 #include "hwaccel/cuda_rect_compositor.hpp"
 #include "hwaccel/cuda_stream.hpp"
+#include "../decoder_surfaces.hpp"
 #include "../mixer/Playout.hpp"
+#include "../mixer/Retirement.hpp"
 #include "../mixer/primitives/MixerState.hpp"
 #include "../mixer/primitives/MonotonicClock.hpp"
 #include "../mixer/primitives/TickTimes.hpp"
@@ -65,6 +67,8 @@ class MixerCompositor : public CudaRectCompositor,
     }
 
     avp::mixer::SourceMask prewarm_inputs_;   // under masks_mutex_
+    std::vector<size_t> released_inputs_;     // under masks_mutex_; see "release_input"
+    const InstanceData *instance_ = nullptr;  // for the show's decoder counters in `status`
     std::pair<avp::mixer::SourceMask, avp::mixer::SourceMask> inputMasks() const {
         std::lock_guard<std::mutex> lock(masks_mutex_);
         return {active_inputs_, prewarm_inputs_};
@@ -283,6 +287,22 @@ public:
                                  {"downstream", timesObject(published_timing_.downstream)}};
             result["playout"] = playout;
         }
+        // The show's decoders, for the operator page: the same numbers from every compositor.
+        if (auto ledger = InstanceSharedObjects<avp::DecoderPoolLedger>::getIfExists(*instance_, "decoder_pools")) {
+            const auto [exhaustions, exhausted_now] = ledger->exhaustion();
+            Parameters decoders = {{"degraded_now", ledger->degradedNow()}, {"surface_exhaustions", exhaustions},
+                                   {"surface_exhausted_now", exhausted_now}, {"surface_repeats", ledger->repeats()},
+                                   {"pools_mib", ledger->total() >> 20}};
+            if (auto parking = InstanceSharedObjects<avp::DecoderParking>::getIfExists(*instance_, "decoder_parking")) {
+                const auto parked = parking->status();
+                decoders["parked"] = parked.parked;
+                decoders["parked_mib"] = parked.bytes >> 20;
+                decoders["parked_total"] = parked.parked_total;
+                decoders["parked_freed"] = parked.freed;
+                decoders["parked_reused"] = parked.reused;
+            }
+            result["decoders"] = decoders;
+        }
         if (aux_) {
             std::lock_guard<std::mutex> lock(layers_mutex_);
             result["composition_pending"] = pending_composition_.has_value() || composition_preparing_.load();
@@ -342,6 +362,14 @@ public:
             }
         }
         const int64_t now = avp::mixer::monotonicNs();
+        {
+            std::vector<size_t> released;
+            {
+                std::lock_guard<std::mutex> lock(masks_mutex_);
+                released.swap(released_inputs_);
+            }
+            for (const size_t input : released) playout_->releaseInput(input);
+        }
         auto [active, prewarm] = inputMasks();
         prewarm |= staging_inputs_;
         const auto generation = input_generation_.load(std::memory_order_acquire);
@@ -562,6 +590,21 @@ public:
                 prewarm_inputs_ = avp::mixer::parseSourceMask(value);
             }
             wake();
+        } else if (key == "release_input") {
+            // A source left the show: let go of its frames instead of holding the last picture.
+            if (!playout_) throw Error("mixer_compositor: release_input requires clocked playout");
+            const auto input = value.get<size_t>();
+            if (input >= source_edges_.size()) throw Error("mixer_compositor: invalid input index");
+            {
+                std::lock_guard<std::mutex> lock(masks_mutex_);
+                released_inputs_.push_back(input);
+            }
+            wake();
+        } else if (key == "free_parked_decoder") {
+            // One parked decoder (DecoderParking) is destroyed now, on the control thread: the
+            // operator picks a moment the show can afford the driver lock, one at a time.
+            auto parking = InstanceSharedObjects<avp::DecoderParking>::getIfExists(*instance_, "decoder_parking");
+            if (!parking || !parking->freeOne()) throw Error("mixer_compositor: no parked decoder to free");
         } else if (key == "warm_reset") {
             if (!playout_) throw Error("mixer_compositor: warm_reset requires clocked playout");
             const auto period = avp::mixer::TickGrid(frame_rate_).time(1);
@@ -589,6 +632,7 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
     }
     auto node = std::make_shared<MixerCompositor>(config);
     node->connect(nci);
+    node->instance_ = &nci.instance;
     node->aux_ = aux;
     node->frame_layers_ = !aux;
     if (!params.contains("fps") || params.contains("clock_input"))
@@ -601,6 +645,20 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
     node->control_wait_ = std::make_unique<MultiEventWait>(std::vector<Event *>{&node->stop_event_});
     node->playout_ = std::make_unique<avp::mixer::Playout<av::VideoFrame>>(
         config.inputs, avp::mixer::TickGrid(node->frame_rate_), latency_ms, avp::mixer::TimestampMode::Presentation);
+    // Sources restart and change while the show runs: their last frames must not cost a tick.
+    using Retirements = InstanceSharedObjects<avp::mixer::Retirement>;
+    Retirements::emplace(nci.instance, "frame_retirement", Retirements::PolicyIfExists::Ignore);
+    auto retirement = Retirements::get(nci.instance, "frame_retirement");
+    node->draw_.setRetirement(retirement);
+    node->playout_->setRetirement(
+        [](const av::VideoFrame &a, const av::VideoFrame &b) {
+            const auto producer = [](const av::VideoFrame &frame) {
+                const AVBufferRef *frames = frame.raw()->hw_frames_ctx;
+                return frames ? frames->data : nullptr;
+            };
+            return producer(a) == producer(b);
+        },
+        [retirement](av::VideoFrame frame) { retirement->retire(std::move(frame)); });
     node->input_generation_.store(1);
     node->timing_ = node->published_timing_ = TickTiming(avp::mixer::TickGrid(node->frame_rate_).time(1));
     logstream << "mixer_compositor: latency_ms=" << static_cast<double>(node->playout_->latencyNs()) / 1e6;

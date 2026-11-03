@@ -4,6 +4,7 @@
 // kernel launch from a rect table. Owns no scheduling state; the node decides
 // what to draw when.
 #include "../../hwaccel.hpp"
+#include "../../mixer/Retirement.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
 #include "cuda_rect_table.h"
 #include "cuda_rect_viewport.h"
@@ -40,6 +41,9 @@ public:
         // Off, such a layer is an error (hdrOnEightBitCanvas): it needs tone mapping first.
         bool allow_hdr_depth_reduction = false;
     };
+
+    /// Texture pools of sources no draw uses any more are destroyed here instead of in the draw.
+    void setRetirement(std::shared_ptr<avp::mixer::Retirement> retirement) { retirement_ = std::move(retirement); }
 
     // Stream completion is for callers that already synchronize each output;
     // asynchronous callers keep the finer-grained event protecting the table.
@@ -123,6 +127,7 @@ private:
     CUstream table_stream_ = nullptr;
     bool table_in_use_ = false;
     std::unique_ptr<RectArrayTextures> array_textures_;
+    std::shared_ptr<avp::mixer::Retirement> retirement_;
     CUevent producer_ready_ = nullptr;
     std::vector<CUstream> waited_streams_;
 
