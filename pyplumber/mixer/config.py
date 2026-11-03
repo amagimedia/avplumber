@@ -137,8 +137,8 @@ BROWSER_FRAME_QUEUE_MAX = 9
 
 def default_browser_frame_queue(fps):
     """Frames one browser window may have out at once, at any rate: all nine of the stock capture
-    pool. The mixer takes up to three of them to return frames one per new frame
-    (dmabuf_inputs.return_queue)."""
+    pool. The mixer keeps all but one of them out (dmabuf_inputs.hold_frames), so the browser
+    recycles a fixed set of buffers."""
     return BROWSER_FRAME_QUEUE_DEFAULT
 
 

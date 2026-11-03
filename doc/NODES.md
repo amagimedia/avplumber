@@ -917,17 +917,18 @@ Parameters:
 -   `socket` (string, required) - path to the UNIX domain socket
 -   `hwaccel` (string, optional) - name of `hwaccel` object; when set, a matching `hw_frames_ctx` is attached for downstream filters/encoders
 -   `fps` (rational string, optional) - publishes the sender's requested frame rate to downstream nodes; frame timestamps use a `1/1000000` time base
--   `return_queue` (integer 0 to 64, optional, default `0`) - frames that wait to go back to the sender.
-    `0` sends each release ACK when the graph lets its frame go. With `N`, a finished frame waits in the
-    return queue and one goes back per frame that arrives; only beyond `N` waiting does the oldest go at
-    once. Chromium's capture pool keeps two idle buffers and destroys the rest, so a consumer that lets
-    frames go in bunches makes it destroy and allocate buffers all the time, and every new allocation is
-    a new import (and a released one) downstream. One buffer back per buffer handed out keeps the pool on
-    a fixed set. Queued frames count against the sender's `ringSize`: open the window with the frames in
-    flight plus `N`.
+-   `hold_frames` (integer 0 to 63, optional, default `0`) - frames the sender always has out with this
+    node. `0` sends each release ACK when the graph lets its frame go. With `N`, a frame the graph lets go
+    waits until more than `N` are out, which the next arriving frame makes so: one buffer goes back per
+    buffer handed out, and frames let go together after a stall go back one per new frame. Chromium's
+    capture pool keeps two idle buffers, destroys the rest and allocates when it has none, so its size
+    follows how many frames the consumer holds; a constant `N` keeps it on a fixed set of buffers, and
+    downstream imports are never released or registered again. Set `N` below the sender's `ringSize`
+    (the mixer uses `ringSize` − 1) so the sender keeps delivering. Retiring a connection returns
+    everything at once. The removed `return_queue` parameter is refused.
 
 `node.object.get <node> frame_stats` reports the received-frame count, plus
-released frames, sent ACK messages, pending ACK messages and frames in the return queue (`returns_queued`) on the current
+released frames, sent ACK messages, pending ACK messages, frames let go and waiting (`returns_queued`) and frames out with this node (`outstanding`) on the current
 connection. ACK counters reset on reconnection; the received count does
 not. Lifecycle drain markers also count as sent messages. Pending ACKs distinguish
 frames already released by the graph from frames still referenced downstream.

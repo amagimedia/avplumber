@@ -283,9 +283,9 @@ def test_browser_frame_queue_is_at_most_nine(tmp_path):
         parse({**show, "browser_frame_queue": 10})
 
 
-def test_return_queue_is_part_of_the_frame_queue():
-    from pyplumber.mixer.dmabuf_inputs import return_queue
-    assert [return_queue(n) for n in (1, 3, 4, 5, 6, 9)] == [0, 0, 1, 2, 3, 3]
+def test_hold_leaves_one_frame_of_the_queue_to_the_browser():
+    from pyplumber.mixer.dmabuf_inputs import hold_frames
+    assert [hold_frames(n) for n in (1, 3, 6, 9)] == [0, 2, 5, 8]
 
 
 @pytest.mark.parametrize("size", [4, 6, 9])

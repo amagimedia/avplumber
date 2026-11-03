@@ -62,35 +62,44 @@ int main() {
     assert(recv(zero_pair[1], &byte, 1, 0) == 0);
     close(zero_pair[1]);
 
-    // With a return queue an acknowledgement waits for the next frame: one goes per arrival,
-    // the oldest goes at once beyond the queue's length, and retiring sends what still waits.
+    // With a hold of two the sender keeps two frames out here: a frame let go waits until a
+    // third is out, one goes back per arrival, a stall's frames let go together go back one
+    // per arrival instead of in a bunch, and retiring sends what still waits.
     int held_pair[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, held_pair) == 0);
     auto paced = std::make_shared<DmabufReleaseAckQueue>(held_pair[0], 2);
+    auto silent = [&] { assert(paced->flush()); assert(recv(held_pair[1], &byte, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN); };
+    paced->frameArrived();
+    paced->frameArrived();
     paced->enqueue(1);
     paced->enqueue(2);
-    assert(paced->flush());
-    assert(paced->stats().released == 2 && paced->stats().queued == 2 && paced->stats().sent == 0);
-    assert(recv(held_pair[1], &byte, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
-    paced->frameArrived();
+    silent();                // two out, both let go: they stay with the consumer
+    assert(paced->stats().released == 2 && paced->stats().queued == 2 && paced->stats().outstanding == 2);
+    paced->frameArrived();   // frame 3: one back
     assert(paced->flush());
     expectAck(held_pair[1], DmabufAckKind::Frame, 1);
-    assert(paced->stats().queued == 1);
-    paced->frameArrived();
-    paced->frameArrived();   // nothing queued any more: no acknowledgement is invented
+    assert(paced->stats().queued == 1 && paced->stats().outstanding == 2);
+    paced->frameArrived();   // frame 4: one back, and the consumer now holds 3 and 4
     assert(paced->flush());
     expectAck(held_pair[1], DmabufAckKind::Frame, 2);
-    assert(recv(held_pair[1], &byte, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
-    paced->enqueue(3);
-    paced->enqueue(4);
-    paced->enqueue(5);       // a third beyond the queue of two: the oldest goes at once
+    paced->frameArrived();   // frame 5 while the consumer stalls: nothing to give back
+    silent();
+    assert(paced->stats().queued == 0 && paced->stats().outstanding == 3);
+    paced->enqueue(3);       // the stall ends: the first frame let go brings the hold back to two
     assert(paced->flush());
     expectAck(held_pair[1], DmabufAckKind::Frame, 3);
-    assert(paced->stats().queued == 2);
-    paced->retire();
+    paced->enqueue(4);
+    paced->enqueue(5);       // the rest of the catch-up waits instead of going back together
+    silent();
+    assert(paced->stats().queued == 2 && paced->stats().outstanding == 2);
+    paced->frameArrived();   // frame 6: one back
+    assert(paced->flush());
     expectAck(held_pair[1], DmabufAckKind::Frame, 4);
+    silent();
+    paced->retire();
     expectAck(held_pair[1], DmabufAckKind::Frame, 5);
     expectAck(held_pair[1], DmabufAckKind::Drain);
+    assert(paced->stats().outstanding == 0);
     paced.reset();
     expectAck(held_pair[1], DmabufAckKind::Drained);
     close(held_pair[1]);

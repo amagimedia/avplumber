@@ -457,7 +457,7 @@ def test_a_browser_in_a_large_catalogue_cannot_share_a_declared_hdr_input_color(
             GraphOptions(inputs=inputs, output="p.mp4", input_color=color).validate()
 
 
-def test_browser_keeps_the_return_queue_and_expires_idle_imports():
+def test_browser_holds_all_but_one_frame_and_keeps_its_imports():
     from pyplumber.mixer import dmabuf_inputs
 
     nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
@@ -465,9 +465,9 @@ def test_browser_keeps_the_return_queue_and_expires_idle_imports():
         cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=9)
     receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
     importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
-    assert receive["return_queue"] == 3
-    assert importer["max_imports"] == 12
-    assert importer["import_ttl_ms"] == dmabuf_inputs.IMPORT_IDLE_MS
+    assert receive["hold_frames"] == 8 and "return_queue" not in receive
+    assert importer["max_imports"] == 13
+    assert importer["import_ttl_ms"] == 0
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
@@ -1329,11 +1329,11 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     opened = [o for o in opened if o[1] == "/window/open"]   # the capture-mode read follows the opens
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
                              "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}
-    # Three of the six frames of this show's queue are the return queue.
-    assert nodes["input_1_receive"]["return_queue"] == 3
-    assert nodes["input_1_to_cuda"]["max_imports"] == 9
-    # Ten idle seconds, not one: a page that paints now and then must find its allocations registered.
-    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 10000
+    # All but one of the six frames of this show's queue stay with the mixer.
+    assert nodes["input_1_receive"]["hold_frames"] == 5
+    assert nodes["input_1_to_cuda"]["max_imports"] == 10
+    # A fixed set of browser buffers: their registrations are never released on air.
+    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 0
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}
     assert mixer.parameters["canvas"] == (1920, 1080)
     assert application.wipe_files == ("/media/swoosh.mov",)

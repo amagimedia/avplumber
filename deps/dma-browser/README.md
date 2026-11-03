@@ -173,7 +173,7 @@ quarantined by the same release path. `/status` reports `releasedFrameCount` and
 Chromium's capture pool, which keeps at most two idle buffers
 and destroys the surplus when frames come back in bunches, allocating new DMA-BUFs later. A consumer that
 needs a stable set of allocations from Electron returns one frame for
-each frame it receives (avplumber's `ipc_dmabuf_source` `return_queue`).
+each frame it receives and keeps a constant number out (avplumber's `ipc_dmabuf_source` `hold_frames`).
 
 ## Layout
 
