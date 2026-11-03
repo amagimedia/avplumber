@@ -193,6 +193,8 @@ class MixerApplication:
     delivery_monitor: bool = False
     start_stable_sec: float = START_STABLE_SEC
     start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC
+    compositor_inputs: tuple[tuple[int, ...], ...] = ()   # a compositor's inputs per input_edges entry; routed: none
+    absent_inputs: tuple[str, ...] = field(default=(), init=False)   # edges of sources that gave no frame
     startup: dict | None = field(default=None, init=False)   # how going on air went; `mixer.startup` answers with it
     _startup_error: str | None = field(default=None, init=False, repr=False)
 
@@ -217,10 +219,38 @@ class MixerApplication:
                   f"{(time.monotonic() - started) * 1000:.0f} ms", flush=True)
         clipcache.require_cached(self.avp, MIXER_NAME, clips)
 
+    def _start_inputs(self) -> tuple[str, ...]:
+        """Starts every source. A source that cannot start stays out of the show, which goes on
+        without it; returns the edges of those. With none left there is no show to go on."""
+        failed = []
+        for group, edge in zip(self.input_groups, self.input_edges):
+            try:
+                self.avp.group(group).startNodes()
+            except Exception as exc:
+                log.warning("Source group %s did not start; the show goes on without it: %s", group, exc)
+                failed.append(edge)
+        if self.input_edges and len(failed) == len(self.input_edges):
+            raise RuntimeError(f"no source started; {len(failed)} failed")
+        return tuple(failed)
+
+    def _release_absent_inputs(self) -> None:
+        """No tick waits for a source that never gave a frame: scenes showing it draw the rest."""
+        if not self.absent_inputs or not self.compositor_inputs:   # a routed input has no fixed input
+            return
+        inputs = [i for edge in self.absent_inputs
+                  for i in self.compositor_inputs[self.input_edges.index(edge)]]
+        self.avp.executeCommandsFromString("\n".join(
+            f"node.object.set {node} release_input {i}"
+            for node in ("mixer_comp_a", "mixer_comp_b") for i in inputs))
+        log.warning("Going on air without %d source(s): %s", len(self.absent_inputs), ", ".join(self.absent_inputs))
+
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str, data_type: str | None = None,
                         *, browser_pages: dict[str, str] | None = None,
                         browser_before: dict | None = None,
-                        on_ready: Callable[[tuple[str, ...]], None] | None = None) -> None:
+                        on_ready: Callable[[tuple[str, ...]], None] | None = None,
+                        required: bool = True) -> tuple[str, ...]:
+        """Waits for a frame on each edge. Returns the edges without one, which only a wait that
+        is not `required` can leave: it gives up on them at the timeout instead of raising."""
         deadline = time.monotonic() + self.preheat_timeout_sec
         next_refresh = time.monotonic() + 1
         waiting = set(edges)
@@ -233,8 +263,10 @@ class MixerApplication:
                     on_ready(tuple(edge for edge in edges if edge in ready))
                     waiting.difference_update(ready)
             if not missing:
-                return
+                return ()
             if time.monotonic() >= deadline:
+                if not required and len(missing) < len(edges):
+                    return tuple(missing)
                 raise RuntimeError(
                     f"mixer preheat timed out during {phase}; "
                     f"{len(missing)}/{len(edges)} edges have no frame, first={missing[0]}"
@@ -297,15 +329,16 @@ class MixerApplication:
                         # The startup error stays the one reported.
                         log.warning("Browser painting did not resume after the failed start: %s", exc)
                 painting.push(resume_painting)
-            for group in self.input_groups:
-                self.avp.group(group).startNodes()
+            failed = self._start_inputs()
             if windows:
                 refresh_windows(self.dmabuf_rest, windows)
             # Freeze each page once its own first frame is usable; waiting for the
             # slowest decoder lets early pages churn through entire capture pools.
-            self._wait_for_edges(self.input_edges, "input readiness", browser_pages=pages,
-                                 browser_before=browser_before, on_ready=pause_ready if windows else None)
-            log.info("Inputs ready: %d in %.1f s", len(self.input_edges), time.monotonic() - started)
+            waiting = tuple(edge for edge in self.input_edges if edge not in failed)
+            silent = self._wait_for_edges(waiting, "input readiness", browser_pages=pages, required=False,
+                                          browser_before=browser_before, on_ready=pause_ready if windows else None)
+            self.absent_inputs = (*failed, *silent)
+            log.info("Inputs ready: %d in %.1f s", len(waiting) - len(silent), time.monotonic() - started)
             remaining = [name for name in windows if name not in paused]
             if remaining:
                 paint_windows(self.dmabuf_rest, remaining, False)
@@ -336,6 +369,7 @@ class MixerApplication:
             "mixer_out_sel_transition",
         ):
             self._wait_for_node(node)
+        self._release_absent_inputs()
         self.mixer.begin_transition_preheat()
         try:
             self._wait_for_edges(("mixer_trans_out",), "transition warm-up")
@@ -855,6 +889,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     blended_sources = {item.source for scene in cfg.scenes for item in scene.items if item.blend}
     blended_sources |= {key.source for key in cfg.dsk_keys}
     input_edges: list[str] = []
+    compositor_inputs: list[tuple[int, ...]] = []
+    next_input = 0
     demux = cfg.input_routing == "demux"
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
@@ -911,6 +947,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             if not isinstance(edge, str) or not edge.strip():
                 raise ValueError(f"process_source for {source.id!r} must return a non-empty video edge name")
         input_edges.append(edge)
+        compositor_inputs.append(tuple(range(next_input, next_input + aliases[source.id])))
+        next_input += aliases[source.id]
         for k in range(1, aliases[source.id] + 1):
             # The reusable builder shares conversion and fan-out for identical edges.
             mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=edge,
@@ -980,7 +1018,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         f"input_{index}_to_cuda" for index, source in enumerate(cfg.sources) if source.kind == "browser")
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend, held=held)
-    return _application(avp, mixer, options, input_edges, listener, routed_inputs=False, held_outputs=tuple(held), browser_importers=importers,
+    return _application(avp, mixer, options, input_edges, listener, compositor_inputs=tuple(compositor_inputs),
+                        routed_inputs=False, held_outputs=tuple(held), browser_importers=importers,
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers),
                         browser_input_edges=tuple(input_edges[i] for i, s in enumerate(cfg.sources) if s.kind == "browser"),
                         delivery_monitor=True,
