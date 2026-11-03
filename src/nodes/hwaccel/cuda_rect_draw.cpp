@@ -280,6 +280,9 @@ std::string CudaRectDraw::sourceProblem(const DrawOp &op, const AvpRectLayer &en
             return why.str();
         }
         if (textures) {
+            // A decoder surface's textures come from array_textures_, which made them and keeps
+            // them for at least this draw: asking the driver on every draw only queues behind it.
+            if (entry.yuv_texture) continue;
             CUDA_RESOURCE_DESC desc{};
             if (cuTexObjectGetResourceDesc(&desc, (CUtexObject)handle) != CUDA_SUCCESS) {
                 why << "texture " << p << " (" << handle << ") is not a live texture object";
