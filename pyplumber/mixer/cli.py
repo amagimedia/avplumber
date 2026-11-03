@@ -197,6 +197,7 @@ def _build(options: GraphOptions, api, on_error: ExitStack) -> MixerApplication:
     listener = _build_renditions(avp, api, options, _flag_renditions(options, *canvas), mixer.build(),
                                  canvas=canvas, working_format=options.working_format, backend=mixer.backend)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=routed_inputs,
+                        compositor_inputs=() if routed_inputs else tuple((i,) for i in range(len(input_edges))),
                         browser_windows=tuple(options.dmabuf_inputs))
 
 
