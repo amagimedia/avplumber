@@ -71,6 +71,14 @@ and AArch64 patches. Notes:
   expose that producer stream through their device context so consumers can order
   reads with events. This path requires `cuvidDecodePictureAsync`; it does not
   fall back to synchronous decoding.
+- `0023` lets a stream take over a closed decoder's session: with unsafe CUarray
+  output, `get_format()` may set `hwaccel_context` to an output frame of that
+  decoder, which is what keeps the session alive. A session that does not fit
+  (codec, coded size, format, fewer surfaces than needed) is ignored with a warning.
+  The surface indices stay with the session, so frames of the old stream that
+  consumers still hold keep their surfaces. It also adds
+  `AVCUDAFramesContext.cuarray_free_pace_us`, a rest between the surfaces of a pool
+  being freed, so that freeing one does not hold the driver lock end to end.
 
 - The HEVC decoder does not clear its five per-picture software tables
   (`horizontal_bs`, `vertical_bs`, `cbf_luma`, `is_pcm`, `tab_slice_address`,
