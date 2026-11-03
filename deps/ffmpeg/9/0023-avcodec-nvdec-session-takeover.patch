@@ -1,0 +1,224 @@
+From 16fb83a99c5385d324a51a4844e04b1c9887ee84 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Tue, 3 Nov 2026 01:57:58 +0100
+Subject: [PATCH] avcodec/nvdec: let a stream take over a closed decoder's
+ session
+
+A caller that changes streams while other threads share the CUDA context
+can now keep a closed decoder alive through one of its frames and hand
+that frame to the next stream's decoder in hwaccel_context, so neither a
+session create nor a destroy runs on air. The index pool stays with the
+session, so frames of the old stream that consumers still hold keep their
+surfaces.
+
+avutil/hwcontext_cuda: add cuarray_free_pace_us, a rest after each
+surface of a pool being freed, for the pools that do have to go.
+---
+ libavcodec/nvdec.c         | 96 ++++++++++++++++++++++++++++++++------
+ libavutil/hwcontext_cuda.c |  6 ++-
+ libavutil/hwcontext_cuda.h | 13 ++++++
+ 3 files changed, 100 insertions(+), 15 deletions(-)
+
+diff --git a/libavcodec/nvdec.c b/libavcodec/nvdec.c
+index c7b9e53167..3139deaa6e 100644
+--- a/libavcodec/nvdec.c
++++ b/libavcodec/nvdec.c
+@@ -64,6 +64,9 @@ typedef struct NVDECDecoder {
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+     atomic_int *surface_in_use;
+     int          num_surfaces;
++    /* What a later stream must match to take this session over. */
++    CUVIDDECODECREATEINFO params;
++    struct AVRefStructPool *index_pool;
+ #endif
+ } NVDECDecoder;
+ 
+@@ -215,6 +218,7 @@ static void nvdec_decoder_free(AVRefStructOpaque unused, void *obj)
+ 
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+     av_freep(&decoder->surface_in_use);
++    av_refstruct_pool_uninit(&decoder->index_pool);
+ #endif
+     av_buffer_unref(&decoder->decode_hw_frames_ref);
+     av_buffer_unref(&decoder->real_hw_frames_ref);
+@@ -405,6 +409,64 @@ void ff_nvdec_fill_cuarray_desc(CUDA_ARRAY3D_DESCRIPTOR *desc,
+ 
+ #endif
+ 
++#ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
++typedef struct NVDECOpaqueRelease {
++    NVDECDecoder  *decoder;
++    int            idx;
++    unsigned int  *idx_ref;     ///< RefStruct reference keeping the surface index locked
++} NVDECOpaqueRelease;
++
++/*
++ * With unsafe CUarray output a caller may set avctx->hwaccel_context in
++ * get_format() to an output frame of a closed decoder, which keeps that
++ * decoder's session alive through its frame. This decode then takes the session
++ * over instead of creating one, so a caller that changes streams while other
++ * threads share the CUDA context neither creates nor destroys a session: a
++ * destroy stalls every thread of the context for tens of milliseconds.
++ *
++ * The session needs no reset: CUVIDPICPARAMS names every surface of a picture.
++ * The session's indices come with it, so the old stream's frames that consumers
++ * still hold keep their surfaces until released.
++ *
++ * A frame of a session that does not fit is ignored, and a new one is created.
++ */
++static int nvdec_take_over(AVCodecContext *avctx, NVDECContext *ctx,
++                           const CUVIDDECODECREATEINFO *params, int decode_pool_size,
++                           int unsafe_output, int private_stream, CUcontext cuda_ctx)
++{
++    const AVFrame *frame = avctx->hwaccel_context;
++    NVDECOpaqueRelease *rel;
++    NVDECDecoder *decoder;
++
++    if (!unsafe_output || frame->format != AV_PIX_FMT_CUARRAY || !frame->buf[0])
++        return 0;
++    rel = av_buffer_get_opaque(frame->buf[0]);
++    decoder = rel->decoder;
++
++    if (!decoder->unsafe_output || !decoder->opaque_output || !decoder->index_pool ||
++        decoder->private_stream != private_stream ||
++        decoder->cuda_ctx != cuda_ctx ||
++        decoder->num_surfaces < decode_pool_size ||
++        decoder->params.CodecType != params->CodecType ||
++        decoder->params.ChromaFormat != params->ChromaFormat ||
++        decoder->params.OutputFormat != params->OutputFormat ||
++        decoder->params.bitDepthMinus8 != params->bitDepthMinus8 ||
++        decoder->params.ulWidth != params->ulWidth ||
++        decoder->params.ulHeight != params->ulHeight) {
++        av_log(avctx, AV_LOG_WARNING,
++               "This NVDEC session does not fit the stream (%d surfaces, %ux%u); creating a new one.\n",
++               decoder->num_surfaces, (unsigned)decoder->params.ulWidth, (unsigned)decoder->params.ulHeight);
++        return 0;
++    }
++
++    ctx->decoder      = av_refstruct_ref(decoder);
++    ctx->decoder_pool = av_refstruct_ref(decoder->index_pool);
++    av_log(avctx, AV_LOG_VERBOSE, "Taking over an NVDEC session of %d surfaces.\n",
++           decoder->num_surfaces);
++    return 1;
++}
++#endif
++
+ static void nvdec_stream_device_free(AVHWDeviceContext *device)
+ {
+     AVBufferRef *parent = device->user_opaque;
+@@ -569,6 +631,22 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+         return AVERROR(ENOSYS);
+     }
+ 
++    params.ulWidth             = avctx->coded_width;
++    params.ulHeight            = avctx->coded_height;
++    params.ulTargetWidth       = avctx->coded_width;
++    params.ulTargetHeight      = avctx->coded_height;
++    params.bitDepthMinus8      = sw_desc->comp[0].depth - 8;
++    params.OutputFormat        = output_format;
++    params.CodecType           = cuvid_codec_type;
++    params.ChromaFormat        = cuvid_chroma_format;
++
++#ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
++    if (avctx->hwaccel_context && opaque_output &&
++        nvdec_take_over(avctx, ctx, &params, decode_pool_size, unsafe_output, private_stream,
++                        ((AVCUDADeviceContext *)frames_ctx->device_ctx->hwctx)->cuda_ctx))
++        return 0;
++#endif
++
+     if (private_stream) {
+         AVHWDeviceContext *device;
+         AVCUDADeviceContext *cuda;
+@@ -684,14 +762,6 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+ #endif
+     }
+ 
+-    params.ulWidth             = avctx->coded_width;
+-    params.ulHeight            = avctx->coded_height;
+-    params.ulTargetWidth       = avctx->coded_width;
+-    params.ulTargetHeight      = avctx->coded_height;
+-    params.bitDepthMinus8      = sw_desc->comp[0].depth - 8;
+-    params.OutputFormat        = output_format;
+-    params.CodecType           = cuvid_codec_type;
+-    params.ChromaFormat        = cuvid_chroma_format;
+     /* Hwaccels that need every surface must not start with a capped pool, so
+      * reject the configuration and let format negotiation fall back.  The pool
+      * in use is not proof on its own: frame_params() never runs for a
+@@ -799,6 +869,10 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+         ret = AVERROR(ENOMEM);
+         goto fail;
+     }
++#ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
++    decoder->index_pool = av_refstruct_ref(ctx->decoder_pool);
++    decoder->params     = params;
++#endif
+ 
+     ret = 0;
+ 
+@@ -852,12 +926,6 @@ finish:
+ }
+ 
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+-typedef struct NVDECOpaqueRelease {
+-    NVDECDecoder  *decoder;
+-    int            idx;
+-    unsigned int  *idx_ref;     ///< RefStruct reference keeping the surface index locked
+-} NVDECOpaqueRelease;
+-
+ static void nvdec_opaque_release_slot(void *opaque, uint8_t *data)
+ {
+     NVDECOpaqueRelease *r = (NVDECOpaqueRelease *)opaque;
+diff --git a/libavutil/hwcontext_cuda.c b/libavutil/hwcontext_cuda.c
+index cc27c60a78..7bcedf71af 100644
+--- a/libavutil/hwcontext_cuda.c
++++ b/libavutil/hwcontext_cuda.c
+@@ -29,6 +29,7 @@
+ #include "pixdesc.h"
+ #include "pixfmt.h"
+ #include "imgutils.h"
++#include "time.h"
+ 
+ typedef struct CUDAFramesContext {
+     AVCUDAFramesContext p;
+@@ -248,8 +249,11 @@ static void cuda_frames_uninit(AVHWFramesContext *ctx)
+ 
+         // Make sure we don't free surfaces that have been adopted by the pool already
+         for (int i = priv->cuarray_num_surfaces_used; i < priv->p.cuarray_num_surfaces; i++)
+-            if (priv->p.cuarray_surfaces[i])
++            if (priv->p.cuarray_surfaces[i]) {
+                 CHECK_CU(cu->cuArrayDestroy(priv->p.cuarray_surfaces[i]));
++                if (priv->p.cuarray_free_pace_us > 0)
++                    av_usleep(priv->p.cuarray_free_pace_us);
++            }
+ 
+         CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+ 
+diff --git a/libavutil/hwcontext_cuda.h b/libavutil/hwcontext_cuda.h
+index ccdb143b06..e7c056d7fc 100644
+--- a/libavutil/hwcontext_cuda.h
++++ b/libavutil/hwcontext_cuda.h
+@@ -111,8 +111,21 @@ typedef struct AVCUDAFramesContext {
+      * Only applicable for AV_PIX_FMT_CUARRAY.
+      */
+     CUarray *cuarray_surfaces;
++
++    /**
++     * Microseconds to rest after each pre-allocated surface when the context
++     * is freed, for a caller that frees a pool while other threads use the same
++     * CUDA context: each cuArrayDestroy holds the driver lock, and a pool freed
++     * in one go stalls them for all of it. May be set at any time before the
++     * context is freed. 0: no rest.
++     *
++     * Only applicable for AV_PIX_FMT_CUARRAY.
++     */
++    int cuarray_free_pace_us;
+ } AVCUDAFramesContext;
+ 
++#define AV_CUDA_FRAMES_HAS_FREE_PACE 1
++
+ /**
+  * CUDA hardware pipeline configuration details.
+  *
+-- 
+2.55.0
+
