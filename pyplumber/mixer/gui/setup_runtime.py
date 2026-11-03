@@ -44,6 +44,9 @@ RECOVER_TIMEOUT_SEC = 180
 # Waits before restarting a mixer that exited on its own (a crash or a node panic). The
 # sequence starts over once a mixer has run for HEALTHY_RUN_SEC.
 RETRY_DELAYS_SEC = (2, 5, 15, 60)
+# At a host boot every container starts at once, and the mixer's show waits on Janus.
+JANUS_START_TIMEOUT_SEC = 60
+JANUS_RETRY_SEC = 2
 HEALTHY_RUN_SEC = 300
 
 
@@ -535,8 +538,15 @@ class SetupRuntime:
         if not self.janus_api:
             return
         try:
-            janus_mountpoints.sync(self.janus_api, janus_mountpoints.outputs(show, extra_aux),
-                                  prune=prune, replace=replace)
+            deadline = time.monotonic() + JANUS_START_TIMEOUT_SEC
+            while True:
+                try:
+                    janus_mountpoints.sync(self.janus_api, janus_mountpoints.outputs(show, extra_aux),
+                                          prune=prune, replace=replace)
+                    break
+                except OSError:
+                    if not replace or time.monotonic() >= deadline or self.closing.wait(JANUS_RETRY_SEC):
+                        raise
             self.janus_error = ""
             if prune:
                 self.extra_ports = _ports(show.get("aux_buses", [])[-extra_aux:]) if extra_aux else {}

@@ -16,10 +16,19 @@ const net = require('net');
 const WebSocket = require('ws');
 const { generationCounter, noteConnectionLost, noteHeartbeat, heartbeatExpired } = require('./instanceRestart');
 const { readOnlyCommand, isSafeId, allowedHostnames, upgradeAllowed, isJsonRequest } = require('./requestGuards');
+const { publicAddress } = require('./publicAddress');
 
 const HTTP_PORT = parseInt(process.env.WEBUI_PORT || process.env.PORT || '22222', 10);
 const BIND = process.env.WEBUI_BIND || '127.0.0.1';
 const ALLOWED_HOSTS = allowedHostnames(BIND, process.env.WEBUI_ALLOWED_HOSTS);
+// `auto` among the allowed hosts: this cloud VM's public address, read when the server starts.
+if (ALLOWED_HOSTS.delete('auto')) {
+  publicAddress().then((address) => {
+    if (address) ALLOWED_HOSTS.add(address);
+    console.log(address ? `WEBUI_ALLOWED_HOSTS auto: ${address} from the instance metadata`
+      : 'WEBUI_ALLOWED_HOSTS auto: no public address in GCE or AWS instance metadata');
+  });
+}
 const WS_MAX_PAYLOAD = 1024 * 1024;
 const AVP_HOST = process.env.AVPLUMBER_HOST || '127.0.0.1';
 const AVP_PORT = parseInt(process.env.AVPLUMBER_PORT || '0', 10);
