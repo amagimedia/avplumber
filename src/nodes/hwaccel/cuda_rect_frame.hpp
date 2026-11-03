@@ -65,12 +65,17 @@ inline avp::AvBufferRef allocCanvasFrames(HWAccelDevice &hw, const CudaRectDraw:
     return frames;
 }
 
+/// The canvas pool has no frame to give, as when the device is out of memory: the next tick may.
+struct NoCanvasFrame : Error {
+    using Error::Error;
+};
+
 /// A frame from the canvas pool, not drawn yet.
 inline av::VideoFrame canvasFrame(AVBufferRef *frames, const std::string &type) {
     av::VideoFrame outf;
     int r = av_hwframe_get_buffer(frames, outf.raw(), 0);
     if (r < 0)
-        throw Error(type + ": av_hwframe_get_buffer failed: " + av::error2string(r));
+        throw NoCanvasFrame(type + ": av_hwframe_get_buffer failed: " + av::error2string(r));
     outf.setComplete(true);   // av_hwframe_get_buffer set hw_frames_ctx, format and size
     return outf;
 }

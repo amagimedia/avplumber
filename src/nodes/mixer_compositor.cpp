@@ -37,6 +37,7 @@ class MixerCompositor : public CudaRectCompositor,
     std::string composition_revision_; // of the composition being drawn; protected by layers_mutex_
     bool aux_ = false;
     std::atomic<uint64_t> output_drops_{0};
+    int64_t no_canvas_logged_ns_ = 0;
     // Set by `reset_counters`; the output thread zeroes its counters before its next tick.
     std::atomic<bool> reset_counters_{false};
     // Playout counters snapshotted every 60 frames for the status object; the
@@ -148,7 +149,18 @@ class MixerCompositor : public CudaRectCompositor,
     void composite(av::Timestamp pts, const std::vector<const av::VideoFrame *> &sources,
                    const av::VideoFrame *metadata_src) {
         const int64_t started = avp::mixer::monotonicNs();
-        av::VideoFrame frame = compose(pts, sources, metadata_src);
+        av::VideoFrame frame;
+        try {
+            frame = compose(pts, sources, metadata_src);
+        } catch (const avp::mixer::NoCanvasFrame &e) {
+            // A full device costs this tick, not the output: a node that ended would stay dark.
+            ++output_drops_;
+            if (started - no_canvas_logged_ns_ > 1000000000) {
+                no_canvas_logged_ns_ = started;
+                logstream << "Warning: tick dropped, no canvas frame: " << e.what();
+            }
+            return;
+        }
         if (!aux_ && !composition_revision_.empty())
             av_dict_set(&frame.raw()->metadata, "avp.mixer.scene", composition_revision_.c_str(), 0);
         const int64_t composed = avp::mixer::monotonicNs();
