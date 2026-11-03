@@ -982,7 +982,9 @@ has finished starting. They count as `expired`.
 `node.object.get <node> import_stats` includes an `admission_dropped` frame
 counter, a `texture_failed` frame counter (an array import whose texture object
 could not be created; the frame is dropped) and instance-wide cleanup counts. These counters distinguish admission
-drops from EGL/CUDA import work without per-frame logs.
+drops from EGL/CUDA import work without per-frame logs. `allocations` counts the distinct producer
+allocations ever imported and `reimports` the registrations of one seen before (it had expired or
+been evicted): a producer recycling a fixed pool stops adding `allocations` once its pool is seen.
 
 ### `object_tracker`
 

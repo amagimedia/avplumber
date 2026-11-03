@@ -106,6 +106,12 @@ protected:
     int64_t import_ttl_ms_ = 3000;
     int64_t last_purge_ms_ = 0;
     std::atomic<uint64_t> cache_hits_{0}, fresh_imports_{0}, expired_imports_{0}, evicted_imports_{0};
+    // Every allocation the producer has shown, registered now or not: a registration of one seen
+    // before is a re-import (it expired or was evicted), of an unseen one a new allocation. A
+    // producer that recycles a fixed pool stops adding allocations once the pool is seen.
+    static constexpr size_t kSeenLimit = 4096;
+    std::vector<ImportKey> seen_;
+    std::atomic<uint64_t> allocations_{0}, reimports_{0};
     // An allocation whose texture cannot be created is not cached: each of its frames tries again.
     std::atomic<uint64_t> texture_failures_{0};
 
@@ -210,6 +216,12 @@ protected:
         }
         purgeImports(now_ms, false);
         avp::timeline::Scope importing("dmabuf import");   // an allocation the cache has not seen
+        if (std::find(seen_.begin(), seen_.end(), key) != seen_.end()) {
+            ++reimports_;
+        } else {
+            ++allocations_;
+            if (seen_.size() < kSeenLimit) seen_.push_back(key);
+        }
         if (imports_.size() >= max_imports_) {
             auto oldest = imports_.end();
             for (auto it = imports_.begin(); it != imports_.end(); ++it) {
@@ -349,6 +361,7 @@ public:
         const auto counts = cleanup_->counts();
         return {{"hits", cache_hits_.load()}, {"imports", fresh_imports_.load()},
                 {"expired", expired_imports_.load()}, {"evicted", evicted_imports_.load()},
+                {"allocations", allocations_.load()}, {"reimports", reimports_.load()},
                 {"instance_imports_alive", counts.first}, {"instance_cleanup_pending", counts.second},
                 {"admission_dropped", cleanup_->declined(import_budget_)}, {"texture_failed", texture_failures_.load()}};
     }
