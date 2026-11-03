@@ -150,7 +150,10 @@ hosts need that to register). The startup log prints the address it bound.
 A WebSocket handshake is accepted only when its `Host` names `localhost`,
 `127.0.0.1`, `::1`, the bind address, or a hostname in the comma-separated
 `WEBUI_ALLOWED_HOSTS`, which stops DNS rebinding; set it to the names viewers
-type, e.g. `WEBUI_BIND=0.0.0.0 WEBUI_ALLOWED_HOSTS=<host>`. A browser `Origin`
+type, e.g. `WEBUI_BIND=0.0.0.0 WEBUI_ALLOWED_HOSTS=<host>`. `auto` among them
+allows the cloud VM's public IPv4 address, read from the GCE or AWS instance
+metadata when the server starts: an ephemeral address changes when the VM stops
+and starts, and a container keeps its environment. A browser `Origin`
 must name the same hostname as `Host` (any port); clients without an `Origin`
 header, like the tests, are accepted. A reverse proxy must pass the browser's
 `Host` unchanged (nginx: `proxy_set_header Host $http_host;`). Messages over
