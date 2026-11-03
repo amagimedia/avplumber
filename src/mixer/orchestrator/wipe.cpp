@@ -71,6 +71,14 @@ void MixerOrchestrator::armWipe(const std::string& scene_name, const std::string
         }
         setNodeObject(state_->wipe_otm_name, "outputs", Parameters(3u));
         setNodeObject(state_->wipe_selector_name, "active", Parameters(0));
+        // take_duration_ns/take_manual are now at their final value regardless of which branch
+        // above ran (explicit duration, lever's clip-length duration, or decode-per-take).
+        // Curve is always Linear here: a wipe has no FadeCurve knob of its own (wipe()/armWipe()
+        // never take or set state_->take_curve, which stays whatever a previous crossfade left
+        // it at) -- its audio progress (selectWipe's rampAt()/linear clamp) is unrelated to
+        // fade_curve.hpp's easing and is not itself eased.
+        emitTransitionStart("wipe", state_->take_duration_ns, FadeCurve::Linear, state_->take_manual,
+                            state_->take_received_ns);
     } catch (...) {
         abortTransition(state_->transition_generation);
         throw;

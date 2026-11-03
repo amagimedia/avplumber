@@ -66,8 +66,16 @@ class MixerOrchestrator {
 
     /// Notify audio_router_node that program sources have committed (transition_ended).
     void emitTransitionEnded(const SceneDefinition& scene, int64_t pts_ns);
+    /// Notify audio_router_node that a fade/dip/wipe take has begun (transition_start
+    /// kind/from/to/duration_ms/curve/manual/pts), once, before any transition_progress for it --
+    /// so a downstream engine that owns its own ramp primitive can arm one closed-form ramp
+    /// instead of chasing a per-tick progress value.
+    void emitTransitionStart(const char* kind, int64_t duration_ns, FadeCurve curve, bool manual, int64_t pts_ns);
     /// Notify audio_router_node of fade/dip/wipe progress (transition_progress from/to/t/pts).
     void emitTransitionProgress(const char* kind, double t, int64_t pts_ns);
+    /// Notify audio_router_node that the take on air was paused or resumed by AUTO
+    /// (transition_paused paused/t/pts) -- toggleTakePause()'s only caller.
+    void emitTransitionPaused(bool paused, double t, int64_t pts_ns);
 
     void ensureIdle() const;
     /// Why a transition being prepared or running is dropped. `Replaced`: by the take that
@@ -95,8 +103,10 @@ class MixerOrchestrator {
     void abortTransition(uint64_t generation) noexcept;
     void beginTake(const std::string& scene_name, MixerState::TransitionMode mode);
     /// Caller holds state_->mutex. A mix to `scene_name` being prepared, as AUTO and the lever start one.
+    /// `manual`: the lever started it (own ownership of take_manual moved here from callers, so
+    /// emitTransitionStart below always sees the right value regardless of call order).
     void beginCrossfade(const std::string& scene_name, double duration_sec, FadeCurve curve,
-                        std::optional<std::array<uint8_t, 3>> dip, int64_t received_ns);
+                        std::optional<std::array<uint8_t, 3>> dip, int64_t received_ns, bool manual = false);
     /// Caller holds state_->mutex. A wipe of `wipe_file` to `scene_name` armed, on air with the
     /// clip's first overlay frame (selectWipe); `duration_sec` unset: the lever's wipe, its cached
     /// clip scrubbed by the lever.

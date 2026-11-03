@@ -148,6 +148,17 @@ void MixerOrchestrator::toggleTakePause() {
     applyTakeSchedule();
     logstream << "mixer: " << state_->takeKind() << " to " << state_->transition_scene_name
               << (state_->take_paused ? " paused" : " resumed");
+    emitTransitionPaused(state_->take_paused, state_->take_progress, at_ns);
+}
+
+void MixerOrchestrator::emitTransitionPaused(bool paused, double t, int64_t pts_ns) {
+    if (state_->audio_router_node_name.empty()) return;
+    try {
+        setNodeObject(state_->audio_router_node_name, "transition_paused",
+                      {{"output", "program"}, {"paused", paused}, {"t", t}, {"pts", pts_ns}});
+    } catch (const std::exception& e) {
+        logstream << "mixer: transition_paused failed: " << e.what();
+    }
 }
 
 } // namespace avp::mixer
