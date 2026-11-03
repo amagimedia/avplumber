@@ -197,6 +197,18 @@ protected:
             }
         }
         setCanvasColor(outf.raw());
+        // From the first launch on, a kernel may be reading the source frames. On an exception
+        // the playout that owns them can go first, and a decoder reuses its surfaces at once.
+        struct SynchronizeOnUnwind {
+            CudaRectDraw &draw;
+            CUstream stream;
+            bool drawn = false;
+            ~SynchronizeOnUnwind() {
+                if (drawn) return;
+                try { draw.synchronize(stream); }
+                catch (const std::exception &e) { logstream << "compose: synchronize while unwinding: " << e.what(); }
+            }
+        } unwinding{draw_, stream};
         // Background and every layer in one kernel launch; over a base, only where the other layers are.
         const AVFrame *color_src = hasCanvasColor() ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr);
         if (!base || !draw_.drawOver(stream, ops, outf.raw(), color_src, base->raw()))
@@ -230,6 +242,7 @@ protected:
         const auto issued = std::chrono::steady_clock::now();
         {
             avp::timeline::Scope wait("gpu wait");
+            unwinding.drawn = true;   // an exception from here on has nothing left to wait for
             draw_.synchronize(stream);
         }
         const auto done = std::chrono::steady_clock::now();
