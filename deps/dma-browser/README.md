@@ -32,6 +32,30 @@ not built. The shim is native to the host CPU architecture. `bin/run.sh` also
 applies the Wayland, EGL/GBM, and DRM settings; hardware video decoding stays
 disabled.
 
+The shim rewrites every `gbm_bo_create`, `gbm_bo_create_with_modifiers2` and
+`gbm_surface_create_with_modifiers2` request from Chromium's GPU process to
+`GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING` without `GBM_BO_USE_LINEAR`: the
+linear buffers Chromium asks for do not work with the NVIDIA GBM backend.
+Upstream status (November 2026):
+
+- [Chromium 8220427](https://chromium-review.googlesource.com/c/chromium/src/+/8220427),
+  merged 2026-09-15: the frame-sink video capture behind Electron's offscreen
+  `useSharedTexture` allocates non-CPU-mappable SCANOUT buffers on Linux, the
+  same request the shim makes.
+- [Chromium 8589742](https://chromium-review.googlesource.com/c/chromium/src/+/8589742),
+  merged 2026-10-26: those captures are delivered only after their GPU work
+  completes, since the NVIDIA driver attaches no implicit fence to the DMA-BUF.
+- NVIDIA's own allocation and import changes are still in review, for example
+  [8619987](https://chromium-review.googlesource.com/c/chromium/src/+/8619987)
+  (I420 GBM allocation),
+  [8426645](https://chromium-review.googlesource.com/c/chromium/src/+/8426645)
+  (X11 fallback when an optional usage cannot be allocated) and
+  [8622343](https://chromium-review.googlesource.com/c/chromium/src/+/8622343)
+  (Vulkan extensions for DMA-BUF import with modifiers).
+
+Once the Electron release in use carries both merged changes, the capture path
+may run without the shim; check before removing it.
+
 Two switches keep the GPU process stable, both on by default:
 
 - `DMA_BROWSER_WEBGPU_OPENGLES=0` turns off `--use-webgpu-adapter=opengles`.
