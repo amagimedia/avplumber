@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -44,6 +45,9 @@ private:
         std::optional<Cadence> cadence;
         std::optional<int64_t> valid_from_ns;
         bool ended = false;
+        // Its source left the show (releaseInput) and has shown nothing since: no tick waits for
+        // it and it does not keep the playout from finishing, until a tick shows its picture.
+        bool released = false;
         bool active = true;
         bool prewarm = false;
         int64_t offset_ticks = 0;   // configuration: survives resetInput
@@ -63,6 +67,17 @@ private:
     // The ticks before the first commit after a reset were held for warm-up or not
     // clocked at all (a node idles an inactive playout); they are not missed deadlines.
     bool reset_since_commit_ = false;
+    std::function<bool(const Frame &, const Frame &)> same_source_;   // see setRetirement()
+    std::function<void(Frame)> retire_;
+
+    // `frame` is about to be dropped and `next`, if any, takes its place.
+    void release(Frame &frame, const Frame *next) {
+        if (retire_ && !(next && same_source_(frame, *next))) retire_(std::move(frame));
+    }
+    void releaseQueue(Input &state, const Frame *next) {
+        for (auto &entry : state.queue) release(entry.frame, next);
+        state.queue.clear();
+    }
 
 public:
     Playout(size_t inputs, TickGrid rate, std::optional<double> latency_ms = {},
@@ -80,6 +95,16 @@ public:
         // larger delays would silently evict frames before their deadlines.
         if (latency_ns_ > rate_.time(kQueueCapacity - 2))
             throw std::invalid_argument("mixer latency_ms exceeds the six-frame buffer budget");
+    }
+
+    /// A source's last frame can own its decoder, whose teardown takes hundreds of milliseconds:
+    /// a frame not followed by one of its own source goes to `retire`, away from the thread
+    /// that ticks. Frames of a running source are dropped in place, so their surfaces go back
+    /// to the decoder at once. `same_source` tells whether two frames share their producer.
+    void setRetirement(std::function<bool(const Frame &, const Frame &)> same_source,
+                       std::function<void(Frame)> retire) {
+        same_source_ = std::move(same_source);
+        retire_ = std::move(retire);
     }
 
     // Presentation mode: treat this input's frames as `ticks` output ticks later than
@@ -109,7 +134,7 @@ public:
             slot = rate_.nearestIndex(timestamp_ns) + state.offset_ticks;
             if (state.next_index && slot < *state.next_index - 1) {
                 state.stats.discarded += state.queue.size();
-                state.queue.clear();
+                releaseQueue(state, &frame);
                 ++state.stats.discontinuities;
             }
             state.next_index = slot + 1;
@@ -119,7 +144,7 @@ public:
             slot = position.index;
             if (position.discontinuity) {
                 state.stats.discarded += state.queue.size();
-                state.queue.clear();
+                releaseQueue(state, &frame);
                 ++state.stats.discontinuities;
             } else if (position.phase_shift) {
                 for (auto &entry : state.queue) entry.index += position.phase_shift;
@@ -137,6 +162,7 @@ public:
             ++state.stats.phase_corrections;
         }
         while (state.queue.size() >= kQueueCapacity) {
+            release(state.queue.front().frame, &state.queue[1].frame);
             state.queue.pop_front();
             ++state.stats.overflow;
             ++state.stats.discarded;
@@ -153,7 +179,9 @@ public:
         if (require_all) {
             for (size_t i = 0; i < inputs_.size(); ++i) {
                 const auto &input = inputs_[i];
-                if (!input.active || input.held || input.ended) continue;
+                // A source joining a running output (released) must not move the tick to its
+                // first frame: it shows nothing until that frame's tick comes on its own.
+                if (!input.active || input.held || input.ended || input.released) continue;
                 if (input.queue.empty()) {
                     held_back_by_ = i;
                     return nullptr;
@@ -195,6 +223,7 @@ public:
         for (auto &state : inputs_) {
             const int64_t last_shown = state.cadence ? due - 1 : due;
             while (state.queue.size() >= 2 && state.queue[1].index <= last_shown) {
+                release(state.queue.front().frame, &state.queue[1].frame);
                 state.queue.pop_front();
                 ++state.stats.discarded;
             }
@@ -207,8 +236,13 @@ public:
             auto &input = inputs_[i];
             if (consume_[i]) {
                 input.stats.discarded += consume_[i] - 1;
-                input.held = std::move(input.queue[consume_[i] - 1].frame);
+                Frame &next = input.queue[consume_[i] - 1].frame;
+                if (input.held) release(*input.held, &next);
+                for (size_t skipped = 0; skipped + 1 < consume_[i]; ++skipped)
+                    release(input.queue[skipped].frame, &next);
+                input.held = std::move(next);
                 input.held_index = input.queue[consume_[i] - 1].index;
+                input.released = false;   // its picture is on air: an input like any other again
                 for (size_t count = consume_[i]; count; --count) input.queue.pop_front();
             } else if (input.held) {
                 ++input.stats.repeats;
@@ -248,11 +282,13 @@ public:
             // order: anything stamped after the held tick is newer.
             auto from = *valid_from_ns;
             if (state.held_index && rate_.time(*state.held_index + int64_t(kQueueCapacity)) < from) {
+                if (state.held) release(*state.held, nullptr);
                 state.held.reset();
                 state.held_index.reset();
             }
             if (state.held_index) from = std::min(from, rate_.time(*state.held_index) + 1);
             while (!state.queue.empty() && rate_.time(state.queue.front().index) < from) {
+                release(state.queue.front().frame, nullptr);
                 state.queue.pop_front();
                 ++state.stats.discarded;
             }
@@ -261,7 +297,8 @@ public:
             return;
         }
         state.stats.discarded += state.queue.size();
-        state.queue.clear();
+        releaseQueue(state, nullptr);
+        if (state.held) release(*state.held, nullptr);
         state.held.reset();
         state.held_index.reset();
         state.next_index.reset();
@@ -282,11 +319,20 @@ public:
         state.prewarm = prewarm;
         if (!prewarm && !state.active) resetInput(input);
     }
+    /// The source's stream ended: no tick waits for its next frame, and once every active input
+    /// has ended the playout is finished().
     void endInput(size_t input) { inputs_.at(input).ended = true; }
+    /// The source left the show, for now or for good: its frames go (as resetInput), no tick
+    /// waits for it, and it never finishes the playout, since a show goes on without it. When
+    /// it comes back, its frames show from their own ticks on; see prepare().
+    void releaseInput(size_t input) {
+        resetInput(input);
+        inputs_.at(input).released = true;
+    }
     bool finished() const {
         bool any_active = false;
         for (const auto &input : inputs_) {
-            if (!input.active) continue;
+            if (!input.active || (input.released && input.queue.empty())) continue;
             any_active = true;
             if (!input.ended || !input.queue.empty()) return false;
         }

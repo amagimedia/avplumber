@@ -405,7 +405,8 @@ int CudaRectDraw::fillTable(CUstream stream, const std::vector<DrawOp> &ops, con
                          "drawing it bilinear";
         ++n;
     }
-    if (array_textures_) array_textures_->prune();
+    if (array_textures_)
+        array_textures_->prune([this](auto pool) { if (retirement_) retirement_->retire(std::move(pool)); });
     return n;
 }
 

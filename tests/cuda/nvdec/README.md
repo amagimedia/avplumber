@@ -14,6 +14,7 @@ performance benchmarks. Retention checks hold GPU references without pixel reads
 | Script | Check |
 |---|---|
 | `probe.py` | Finite CPU/CUDA/CUarray decode; normalized pixel hashes, PTS, EOF, retained references and shutdown watchdog. Use `--reference` to compare saved reports across builds. |
+| `live_feeds.py` | Feed shapes the demo clips lack (B-frames, H.264, a high level, long GOPs with in-band parameter sets), generated with NVENC: CUarray against linear decode, then frames held as by a late output, with pool and exhaustion counts. |
 | `compositor_decode.py` | Real NVDEC through identity normalization and two compositors; array-handle passthrough, pixels/PTS and repeated teardown. `--filter-linear` inserts pad/crop to test ordering on linear frames from a private producer stream. `--rounds 0` works on FFmpeg 8.1. |
 | `compositor_crop.py` | Generates an H.264 crop fixture with `h264_metadata`; compares linear CUDA/CUarray through the compositor, `cuda_transform` and `draw_bbox` (a NEURAL_NET draw node's linear copy), including layer crop, scaling, contain and cleared output crop metadata. `--no-draw` without NEURAL_NET. Requires `h264_nvenc`; accepts `--ffmpeg`. |
 | `mixed_decode.py` | One shared device with HEVC CUarray plus H264/AV1 linear CUDA, compared against an all-linear canvas. Requires all three fixture paths. |
@@ -24,6 +25,8 @@ performance benchmarks. Retention checks hold GPU references without pixel reads
 | `filters.py` | Synthetic pad/crop/transition pixel matrix. `--clip` adds real HEVC decode cases; `--decode-only` limits the run to those cases. |
 | `capture.py` | Whole-GPU, per-thread CPU and mixer counter deltas on a running show. `--control-port` additionally proves decoded/paced/encoded edge progress. It records evidence rather than applying arbitrary pass thresholds. |
 | `aux_cycles.py` | Changes subscriptions on extra AUX buses advertising source pages, waits for applied compositions, then restores layouts/pages and checks scene assignments. Pair with `capture.py`; use only an exclusively controlled test show. |
+| `decoder_takeover.py` | Clips of one format in turn, with parking on: each must take over the parked decoder, on the first decoder's surfaces, hash exactly like a fresh decode, and leave the surfaces of the old clip's held frames alone. A clip of another format gets a decoder of its own. |
+| `surface_exhaustion.py` | Two CUarray decoders with little headroom; one consumer holds more frames than the pool for `--stall-ms` while the other keeps taking. The starved decoder must stay alive and count the episode in its `status`, the other must keep its rate, and the starved one must deliver again, not degraded, once its frames are released. Run it with an HEVC and an H.264 clip. |
 
 For example, with a 50-frame 1080p NV12 HEVC fixture and a writable report directory:
 

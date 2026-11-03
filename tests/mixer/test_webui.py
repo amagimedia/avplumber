@@ -758,6 +758,10 @@ def test_delivery_totals_are_the_pages_sums_or_nothing_while_a_bus_is_missing():
     assert delivery_totals({**state, "aux_buses": state["aux_buses"][:1]}) is None       # one bus has not reported
     assert delivery_totals({**state, "status": {}}) is None
     assert delivery_totals({"status": state["status"], "settings": {}}) == {"missed_deadlines": 1, "output_drops": 0}
+    # A mixer that reports its decoders adds the pictures they repeated short of surfaces; the gauges stay out.
+    decoders = {"surface_repeats": 12, "surface_exhausted_now": 1, "degraded_now": 0}
+    assert delivery_totals({**state, "status": {**state["status"], "decoders": decoders}}) == \
+        {"missed_deadlines": 3, "output_drops": 5, "surface_repeats": 12}
 
 
 class PlayoutBridge:

@@ -97,6 +97,79 @@ that patch leaves software decoding unchanged. `decoded_frames_ahead` bounds the
 queue before pacing, while `extra_hw_frames` supplies decoder surface headroom.
 They are separate limits: reducing the latter too far can exhaust decode surfaces.
 
+### CUarray decoder pools and real feeds
+
+A CUarray decoder (`decode_storage: "cuarray"`, flags `unsafe_output` and, on the
+`deps/ffmpeg/9` series since #53, `extra_hw_frames_only+private_stream`) gets one fixed
+pool of NVDEC surfaces, which are also its output frames. FFmpeg sizes it from the
+stream's own headers (`pyplumber.mixer.config.nvdec_pool_surfaces`):
+
+    pool = codec surfaces + 5 working surfaces + extra_hw_frames
+    H.264: codec surfaces = max_num_ref_frames + reorder depth
+           (VUI max_num_reorder_frames; without bitstream_restriction libavcodec takes the
+           level's MaxDpbMbs over the picture's macroblocks: 4 at 1080p for levels 4.0-4.2,
+           13 at 5.0, 15 at 5.1/5.2, and 0 for an intra-only stream)
+    HEVC:  codec surfaces = sps_max_dec_pic_buffering_minus1 + 2
+    AV1 16, VP9 8, MPEG-2 2 (fixed)
+
+NVDEC registers 32 surfaces at most, so a pool above 32 fails at decoder open with
+`Requested CUarray pool needs N surfaces, maximum is 32` and
+`Failed setup for format cuarray`; the source then decodes nothing (every packet is a
+decode error, the node ends after 200 of them) and the show goes on without it. The
+decoders' `decoder pool N surfaces` log and the `decoder_pool_budget_mib` ledger count
+`N = pool - 3`: FFmpeg's three base work surfaces are added after that query. At 1080p a
+surface is 3.0 MiB (NV12) or 6.0 MiB (P010); at 2160p 12 MiB or 24 MiB.
+
+With the L4 profile's `extra_hw_frames: 12`, 15 codec surfaces are the most a stream may
+claim: HEVC up to `sps_max_dec_pic_buffering_minus1` 13; H.264 references plus reorder up
+to 15, so 16 references open only with reorder 0 and `extra_hw_frames` 11 or less, a
+1080p stream without VUI opens with up to 11 references at levels 4.0-4.2 (reorder 4) and
+2 at level 5.0 (reorder 13), and one at level 5.1/5.2 (reorder 15) not at all; with
+`extra_hw_frames` 0 the latter opens with up to 12 references. The largest HEVC DPB
+(minus1 15) needs `extra_hw_frames` 10 or less; a 16-reference H.264 stream without VUI at
+level 5.1 (31 codec surfaces) never opens. `extra_hw_frames` is accepted up to 27 for that
+reason. NVDEC decodes 8-bit 4:2:0 H.264 only: High 10 and High 4:2:2 streams fail the same
+hwaccel setup and are refused the same way.
+
+When a decode finds no free surface (`No decoder surfaces left`) the picture is lost.
+H.264 conceals the gap with its previous reference (the hardware DPB entry points at that
+surface) and keeps showing pictures, drifting until the next IDR; HEVC refuses every
+picture that references the lost one (`Error constructing the frame RPS`) until the next
+IRAP, so the source freezes for the rest of its GOP, and a GOP longer than 200 pictures
+ends the decoder node. The surface gate (`extra_hw_frames` + 1 held frames) keeps the
+mixer from getting there.
+
+Interlaced sources: NVDEC never deinterlaces on this path (`vpp.progressive_frame = 1`,
+no CUarray deinterlacer exists, `bwdif_cuda`/`yadif_cuda` read linear CUDA frames only).
+An H.264 field-coded or MBAFF stream comes out as weaved frames flagged interlaced, which
+the compositor would show with combing on motion; declare the source `deinterlace: true`
+with `decoded_format`, which decodes it on linear CUDA and runs `bwdif_cuda` as its source
+filter. HEVC field-coded streams (`field_seq_flag`) arrive as half-height field pictures
+at field rate and are not handled; convert them upstream. What the array holds for a field
+picture is hardware behaviour a GPU test must confirm (`tests/cuda/nvdec/live_feeds.py
+--interlaced <sample>`).
+
+A decoder that does run out of surfaces (an output stalled long enough to hold more frames than
+the pool spares) costs that one source pictures and nothing else: the decoder keeps its packet
+until a consumer releases a frame, and the compositors repeat the source's last picture
+meanwhile (`Playout` repeats a held frame while an input gives nothing). The decoder counts the
+episode in its `status` object, and every compositor's `status` and `mixer.status` carry the
+show's totals under `decoders` (`surface_exhausted_now`, `degraded_now`, `surface_repeats`). The
+operator page's LAT tip shows the pictures repeated that way in the last ten minutes as
+"Surface repeats", with the sources short of surfaces now. A raw source short of device frames waits
+the same way, repeating its last picture, and counts it in `stats`.
+
+Sources come and go while the show runs. A compositor told `release_input` lets go of that
+source's frames and no tick waits for it, nor for its first frame when it comes back: it shows
+from that frame's own tick on. A decoder destroyed while the show runs would stall every thread
+using the device (its module and surfaces are destroyed under the driver lock); with `park` the
+decoder node keeps the session and pool alive in an instance-wide lot instead, bounded by
+`park_limit` and the pool budget, and a compositor frees one at a time on `free_parked_decoder`.
+The next source of that format takes the parked decoder over, so changing sources of one format
+creates and destroys nothing, and a show that shrinks keeps what it ran; decoders are only freed
+when sources of another format leave more than `park_limit` behind, or for the pool budget.
+See `dec_video` in [NODES.md](NODES.md).
+
 The `nvidia_l4_cuarray` profile selects `source_fan_out: "event_loop"`,
 `decoded_frames_ahead: 1`, and 8 ms Program/AUX input polling. Fan-out then runs
 on the source's pacing loop instead of a dedicated thread. Its nonblocking node

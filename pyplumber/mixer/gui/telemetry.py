@@ -234,9 +234,10 @@ def _encoder_totals(output):
 
 
 def delivery_totals(state: dict) -> dict | None:
-    """The page's two delivery counters from one mixer state: deadlines missed by the program
-    slots and the AUX buses, and frames the AUX outputs dropped. None while the state lacks a
-    count or a bus its settings name, as the page shows a dash then."""
+    """The page's delivery counters from one mixer state: deadlines missed by the program slots
+    and the AUX buses, frames the AUX outputs dropped and, from a mixer that reports its decoders,
+    the pictures sources repeated because their decoder had no surface free (`surface_repeats`).
+    None while the state lacks a count or a bus its settings name, as the page shows a dash then."""
     playout = list(((state.get("status") or {}).get("playout") or {}).values())
     aux = state.get("aux_buses") or []
     if not playout or len(aux) != len((state.get("settings") or {}).get("aux_buses") or []):
@@ -245,7 +246,12 @@ def delivery_totals(state: dict) -> dict | None:
     drops = [bus.get("output_drops") for bus in aux]
     if any(isinstance(n, bool) or not isinstance(n, int) for n in missed + drops):
         return None
-    return {"missed_deadlines": sum(missed), "output_drops": sum(drops)}
+    totals = {"missed_deadlines": sum(missed), "output_drops": sum(drops)}
+    # Only a counter that grows goes in: RecentCounts takes a fall for a mixer started again.
+    repeats = ((state.get("status") or {}).get("decoders") or {}).get("surface_repeats")
+    if isinstance(repeats, int) and not isinstance(repeats, bool):
+        totals["surface_repeats"] = repeats
+    return totals
 
 
 def startup_report(bridge) -> dict | None:

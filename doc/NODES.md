@@ -199,7 +199,46 @@ Recommended options for displaying live video:
     specified input stream codecs, useful because apparently setting
     `hw_device_ctx` in normally-software libavcodecs triggers frame
     corruption bugs
--   `options` (dictionary) - optional, options passed to libavcodec
+-   `options` (dictionary) - optional, options passed to libavcodec. For NVDEC CUarray output
+    (`pixel_format` `cuarray` with `hwaccel_flags` `unsafe_output`) the decoded frames are the
+    decoder's own fixed pool of surfaces, sized by the codec plus `extra_hw_frames`; the node
+    holds the next packet back while consumers hold `extra_hw_frames + 1` frames.
+-   `pool_budget_mib` (int, CUarray decoders) - all CUarray decoder pools of the instance,
+    parked ones included, must fit this many MiB; a pool that would not is refused and the
+    source shows nothing until one fits (`status` says `degraded`, with the reason).
+-   `park` (bool, default `false`, CUarray decoders) - when the node is destroyed, keep its NVDEC
+    session and pool alive instead of destroying them: that destruction takes a driver lock
+    every thread using the device waits on, in the middle of a show. One decoded frame per
+    parked decoder is held, in an instance-wide lot; its pool stays counted in the budget until
+    the decoder is taken over or freed. A new stream that fits a parked decoder (same codec,
+    coded size and pixel format, and no more surfaces than it has) takes it over instead of
+    creating one, as does a decoder whose stream changes parameters: `status` says `took_over`.
+    A `mixer_compositor` publishes the lot (`parked`, `parked_mib`, `parked_reused`) and frees
+    one at a time on `free_parked_decoder`.
+-   `park_limit` (int, default `8`) - how many decoders the lot keeps beyond the most the
+    instance ever ran at once: a show that shrinks keeps every decoder it ran, and only decoders
+    left behind by streams of another format count. Past it, and when a new pool would not fit
+    the budget beside them, the oldest are freed; each free stalls the device for about 50 ms.
+
+The node never ends over what its stream gives it: a packet that fails to decode, a refused
+pool or a surface shortage costs that source pictures, which its consumers repeat, while the
+next packet is tried, paced at the picture rate. A CUarray decoder out of surfaces ("No decoder
+surfaces left") sends each packet only once the consumers hold fewer than `extra_hw_frames + 1`
+frames again (or after 100 ms), until a picture is shown. HEVC reports the shortage, so the
+packet is kept and sent again, and dropped after a second of that; H.264 goes on without the
+surface and fails later, the picture lost. After a lost picture nothing is shown until a
+keyframe.
+
+Objects (`node.object.get <name> status`): `degraded` with a `reason` (packets failing in a
+row, or the pool refused), `decode_errors`, `consecutive_errors`, `frames`,
+`last_frame_age_ms`, and for CUarray decoders `surfaces`: `held`, `limit`, `pool`, `pauses`,
+`exhaustions` (episodes), `exhausted_now`, `retries` (packets sent while out of surfaces),
+`packets_dropped`, `pictures_lost`, `pictures_hidden`, `hiding`, `recoveries`, `repeats` (the
+episodes that ended, in the stream's picture periods from the first failure to the next picture
+shown: about the pictures the consumers repeated meanwhile). The instance's totals (`degraded_now`,
+`surface_exhaustions`, `surface_exhausted_now`, `surface_repeats` (also counting an episode cut
+short by its decoder closing), `pools_mib`, the lot) are in every `mixer_compositor`'s `status`
+under `decoders`, and in `mixer.status`.
 
 ### `extract_timestamps`
 
@@ -808,8 +847,11 @@ Parameters:
 -   `write_combined` (bool, default `false`) - allocate the page-locked memory write-combined.
     Whether that makes the read cheaper depends on the host; measure before using it.
 -   `pool_frames` (int, default `0`: no bound) - at most this many device frames. FFmpeg's pool
-    grows to the most frames ever out at once and keeps them; bounded, the node waits (up to five
-    seconds, as it does for device memory) until one comes back. `stats` reports `frames_allocated`.
+    grows to the most frames ever out at once and keeps them; bounded, the node waits until one
+    comes back, for as long as that takes (as it does for device memory): its last picture stays
+    on air meanwhile, and the wait is logged every five seconds. `stats` reports
+    `frames_allocated`, `frame_waits` (pictures that had to wait), `waiting` (one does now) and
+    `longest_wait_ms`.
 -   `resident` (bool, default `false`) - with `loop`: keep the file's pictures in the
     page-locked memory. Each is read when it is first shown and only transferred after that,
     so a pass after the first reads nothing. Where a pass starts the node compares the file's
@@ -1244,6 +1286,11 @@ Objects (`node.object.set`):
     without being drawn, so a switch to them is immediate
 -   `warm_reset` - reject frames stamped over a tick before the one being
     drawn; prewarmed inputs keep their held pictures
+-   `release_input` (input index) - the source left the show: its frames are let go of
+    instead of its last picture being held, no tick waits for it, and when it comes back it
+    shows from its first frame's own tick on, without delaying a tick for it
+-   `free_parked_decoder` - destroy one parked decoder (`dec_video` `park`) now, oldest
+    first, on the control thread; fails when none is parked
 -   `composition` (`aux_mode` only) - `{"layers": [...], "active_inputs": <mask>,
     "revision": "<string>"}`: applied on the tick its new inputs are ready; if
     they are not ready within max(250 ms, twice `latency_ms`), the previous
@@ -1257,7 +1304,10 @@ output edge; the bus keeps playing and draws again once it has room), `playout`
 misbehaves), with `aux_mode` `composition_pending`, `composition_error` and
 `composition_revision`, the revision of the composition being drawn (set when
 one is applied at once or a staged one becomes ready, unchanged when a staged
-one is dropped; empty for one without a revision).
+one is dropped; empty for one without a revision). `decoders`, the same from every
+compositor, is the show's decoder health (see `dec_video`): `degraded_now`,
+`surface_exhaustions`, `surface_exhausted_now`, `surface_repeats`, `pools_mib` and, with parking, `parked`,
+`parked_mib`, `parked_total`, `parked_freed`, `parked_reused`.
 
 `node.object.set <node> reset_counters true` starts `missed_deadlines`, the per-input counters,
 `output_drops` and `playout.timing` again from zero, for a caller that has finished starting the
