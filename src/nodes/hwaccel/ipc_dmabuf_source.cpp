@@ -34,7 +34,7 @@ protected:
     static constexpr size_t EVENT_INDEX = 1;
     bool connecting_ = false;
     std::atomic<bool> interrupted_{false};
-    size_t return_queue_ = 0;
+    size_t hold_frames_ = 0;
 
     void closeConnection() {
         if (conn_fd_ >= 0) ack_queue_->retire();
@@ -60,8 +60,8 @@ public:
         interrupted_.store(true);
         std::atomic_load(&ack_queue_)->interrupt();
     }
-    /// Applies to connections made from now on (DmabufReleaseAckQueue's return queue).
-    void setReturnQueue(size_t frames) { return_queue_ = frames; }
+    /// Applies to connections made from now on (DmabufReleaseAckQueue's hold).
+    void setHoldFrames(size_t frames) { hold_frames_ = frames; }
     void releaseFrame(uint64_t frame_count) {
         ack_queue_->enqueue(frame_count);
     }
@@ -92,7 +92,7 @@ public:
             close(fd);
             return false;
         }
-        std::atomic_store(&ack_queue_, std::make_shared<DmabufReleaseAckQueue>(fd, return_queue_));
+        std::atomic_store(&ack_queue_, std::make_shared<DmabufReleaseAckQueue>(fd, hold_frames_));
         conn_fd_ = fd;
         pollfds_[EVENT_INDEX].fd = ack_queue_->wakeFd();
         pollfds_[CONN_INDEX].fd = conn_fd_;
@@ -165,11 +165,18 @@ public:
                     // message is kept. A whole header still names the frame, which goes back so
                     // the sender's buffer is not lost before the connection is dropped.
                     logstream << "fdpass: " << texInfoRecvStatusText(status) << "; closing the connection";
-                    if (status != TexInfoRecvStatus::Short) ack_queue_->enqueue(frame.info.frame_count);
+                    if (status != TexInfoRecvStatus::Short) {
+                        ack_queue_->frameArrived();
+                        ack_queue_->enqueue(frame.info.frame_count);
+                    }
                     closeConnection();
                     return false;
                 }
+                // The return this arrival allows goes before the frame is handed on: with one
+                // frame of slack under the sender's limit it must reach the sender before its
+                // next paint. A failed send closes the connection on the next pass.
                 ack_queue_->frameArrived();
+                (void)ack_queue_->flush();
                 return true;
             }
             if (pollfds_[CONN_INDEX].revents & (POLLHUP | POLLERR | POLLNVAL)) {
@@ -276,7 +283,8 @@ public:
         if (key != "frame_stats") throw Error("ipc_dmabuf_source: unknown object " + key);
         const auto stats = receiver_.releaseQueue()->stats();
         return {{"received", received_.load()}, {"released", stats.released},
-                {"ack_sent", stats.sent}, {"ack_pending", stats.pending}, {"returns_queued", stats.queued}};
+                {"ack_sent", stats.sent}, {"ack_pending", stats.pending}, {"returns_queued", stats.queued},
+                {"outstanding", stats.outstanding}};
     }
     virtual void stop() {
         receiver_.interrupt();
@@ -403,9 +411,11 @@ public:
         if (params.count("fps")) {
             r->frame_rate_ = parseRatio(params["fps"]);
         }
-        const int64_t return_queue = params.value("return_queue", int64_t(0));
-        if (return_queue < 0 || return_queue > 64) throw Error("ipc_dmabuf_source: return_queue must be 0 to 64 frames");
-        r->receiver_.setReturnQueue(static_cast<size_t>(return_queue));
+        if (params.count("return_queue"))
+            throw Error("ipc_dmabuf_source: return_queue is replaced by hold_frames (frames kept out with the mixer)");
+        const int64_t hold_frames = params.value("hold_frames", int64_t(0));
+        if (hold_frames < 0 || hold_frames > 63) throw Error("ipc_dmabuf_source: hold_frames must be 0 to 63 frames");
+        r->receiver_.setHoldFrames(static_cast<size_t>(hold_frames));
         return r;
     }
     ~IPCDMABUFSource() {

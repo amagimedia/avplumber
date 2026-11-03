@@ -19,24 +19,19 @@ from typing import List, Tuple
 from .config import default_browser_frame_queue
 
 SCHEME = "dmabuf://"
-# How long an imported browser allocation stays registered without being used.
-IMPORT_IDLE_MS = 10_000
-# The return queue: frames the mixer has finished with wait here and go back to the browser one
-# per new frame (ipc_dmabuf_source `return_queue`), so the browser's pool gets one buffer back for
-# each it hands out and stops destroying and allocating buffers. It is part of the window's frame
-# queue, which the browser service counts as frames not yet returned (its `ringSize`), and which
-# must leave two buffers free in Chromium's capture pool: Chromium lends
-# eleven buffers per window and the browser needs two of them for the frame being delivered
-# and the one in its paint handler.
-RETURN_QUEUE = 3
-# Frames of the queue left to the mixer's own pipeline before any go to the return queue.
-MIN_FRAMES_IN_FLIGHT = 3
+# The mixer keeps all but one of a window's frame queue out of the browser (ipc_dmabuf_source
+# `hold_frames`): a frame it has finished with goes back only when the next one arrives. Chromium's
+# capture pool keeps two idle buffers, destroys the rest and allocates when it has none, so its size
+# follows how many frames the consumer holds; held constant, the pool stays on a fixed set of
+# buffers, the frames a stall held go back one per new frame instead of in a bunch, and no import
+# is ever released or registered again on air. The one frame of slack keeps the browser service
+# (which drops a paint at `ringSize` frames out) delivering.
+HOLD_SLACK = 1
 
 
-def return_queue(frame_queue: int) -> int:
-    """How much of a window's *frame_queue* is the return queue: three of the default nine, less
-    for a shorter queue, none for one of three frames or fewer."""
-    return max(0, min(RETURN_QUEUE, frame_queue - MIN_FRAMES_IN_FLIGHT))
+def hold_frames(frame_queue: int) -> int:
+    """Frames a window keeps out with the mixer: its *frame_queue* less one."""
+    return max(0, frame_queue - HOLD_SLACK)
 
 
 def is_dmabuf_url(url: str) -> bool:
@@ -74,25 +69,23 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
               "auto_restart": "group", "fps": f"{fps}/1"}
     if drm_hwaccel:
         source["hwaccel"] = drm_hwaccel
-    if return_queue(browser_frame_queue):
-        source["return_queue"] = return_queue(browser_frame_queue)
+    if hold_frames(browser_frame_queue):
+        source["hold_frames"] = hold_frames(browser_frame_queue)
     nodes = [
         api.IpcDmabufSource(source),
-        # The compositor samples the mapped DMA-BUF directly. Keep the recycling allocation
-        # pool registered, including live frames.
-        # The ring bounds outstanding frames, not retired Chromium allocations:
-        # expire idle imports instead of pinning them indefinitely. Lookups refresh
-        # returning allocations before expiry. A page that paints now and then returns
-        # to an allocation seconds later, not ring cycles later: an import dropped in
-        # between is registered again on its next use, and each release takes the CUDA
-        # library's context lock exclusively, stalling every other thread in the context.
-        # Three spare registrations cover pool rotation without retaining dozens of
-        # retired full-resolution allocations per page during startup.
+        # The compositor samples the mapped DMA-BUF directly. With the hold above the browser
+        # recycles a fixed set of buffers, so every registration is kept (import_ttl_ms 0): a
+        # release takes the CUDA library's context lock exclusively and stalls every other
+        # thread in the context, and a page that paints now and then comes back to the same
+        # buffers seconds later. Three registrations beyond the frame queue cover Chromium's
+        # own idle and delivering buffers and a fourth one that dies (a resize or reload) until
+        # it is evicted, so a full pool never churns. Start-up allocations are purged before
+        # going on air.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group",
-                            "max_imports": browser_frame_queue + 3,
-                            "import_ttl_ms": max(IMPORT_IDLE_MS, (4000 * browser_frame_queue + fps - 1) // fps)}),
+                            "max_imports": browser_frame_queue + 4,
+                            "import_ttl_ms": 0}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two
