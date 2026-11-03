@@ -1279,6 +1279,12 @@ Parameters, in addition:
     of wake-ups a second. Each input's queue must hold what arrives within one interval.
     `node.object.get <node> status` reports the setting and `input_passes`, how often
     the thread has looked.
+-   `gpu_handoff` (bool, default `true`) - hand each frame on once its draw is queued, without
+    waiting for the GPU: the next tick waits for the draw before it (normally long finished) and
+    the source frames a draw reads stay held until then. Consumers order on the frame's CUDA
+    stream (FFmpeg filters and NVENC use it, compositors wait for their producers' streams), so
+    a draw that the GPU starts late, behind another process's work, no longer lengthens the
+    tick. `false` waits for each draw before handing its frame on.
 -   `aux_mode` (bool, default `false`) - an AUX bus: a private CUDA stream,
     subscribed inputs, layers from `composition` only (no per-frame metadata
     layers), and frames dropped rather than waited for when the output edge is full
@@ -1329,7 +1335,7 @@ bounds of all buckets but the last: a quarter, a half, three quarters, one, one 
 one and a half, two and three frame periods) and four histograms, each with `counts` per bucket,
 `count`, `mean_ms` and `max_ms` since the node started: `draw` (the whole draw), `issue` (queueing
 it: the node's own work and the CUDA library's locking), `gpu_wait` (waiting for the GPU to finish
-it and the frames it reads) and `downstream` (waiting for room on the output edge). A draw in the
+it and the frames it reads; with `gpu_handoff`, the previous tick's draw) and `downstream` (waiting for room on the output edge). A draw in the
 first four buckets fitted its slot.
 
 ### `mixer_keyer`

@@ -245,6 +245,7 @@ public:
         for (auto &subscription : subscriptions_) subscription->close();
         draw_.ensureDevice();
         AVP_CHECK_CU(cuStreamSynchronize(draw_.stream()));
+        finishPreviousDraw();
         for (auto &edge : source_edges_) edge->clear();
         playout_.reset();
     }
@@ -625,6 +626,7 @@ public:
 std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) {
     const Parameters &params = nci.params;
     Config config = parseConfig(nci, "mixer_compositor");
+    config.hand_off = params.value("gpu_handoff", true);
     const bool aux = params.value("aux_mode", false);
     if (aux) {
         config.hw = avp::mixer::makeCudaStreamDevice(config.hw, params.value("name", params.at("output_hwaccel").get<std::string>()));

@@ -277,7 +277,8 @@ relative. [A 30 s trace of the L4 show](https://amagimedia.github.io/avplumber/d
 shows what comes out.
 
 - Each compositor thread shows `tick` (its payload is the output tick, so outputs line up on
-  it) holding `issue`, `gpu wait`, `put downstream` and `commit`, and `wait inputs` between ticks.
+  it) holding `gpu wait` (for the previous tick's draw, with `gpu_handoff`), `issue`,
+  `put downstream` and `commit`, and `wait inputs` between ticks.
 - Every skipped tick is a mark with its cause: the time taken, the draw, the wait downstream and
   for input, and the input that held it back.
 - AUX buses and browser sources draw on named CUDA streams. Program shares the default stream.
