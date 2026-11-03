@@ -1333,7 +1333,8 @@ show; `frames` keeps counting and the playout is not disturbed.
 `playout.timing` says where each drawn tick's time went: `period_ms`, `bounds_ms` (the upper
 bounds of all buckets but the last: a quarter, a half, three quarters, one, one and a quarter,
 one and a half, two and three frame periods) and four histograms, each with `counts` per bucket,
-`count`, `mean_ms` and `max_ms` since the node started: `draw` (the whole draw), `issue` (queueing
+`count`, `mean_ms` and `max_ms` since the node started, and `p95_ms` and `p99_ms` over the last
+`recent` ticks (at most 600): `draw` (the whole draw), `issue` (queueing
 it: the node's own work and the CUDA library's locking), `gpu_wait` (waiting for the GPU to finish
 it and the frames it reads; with `gpu_handoff`, the previous tick's draw) and `downstream` (waiting for room on the output edge). A draw in the
 first four buckets fitted its slot.

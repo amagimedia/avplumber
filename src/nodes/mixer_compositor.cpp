@@ -63,7 +63,10 @@ class MixerCompositor : public CudaRectCompositor,
         for (const auto count : times.counts()) counts.push_back(count);
         return {{"counts", counts}, {"count", times.count()},
                 {"mean_ms", times.count() ? static_cast<double>(times.sumNs()) / 1e6 / static_cast<double>(times.count()) : 0.0},
-                {"max_ms", static_cast<double>(times.maxNs()) / 1e6}};
+                {"max_ms", static_cast<double>(times.maxNs()) / 1e6},
+                {"recent", times.recentCount()},
+                {"p95_ms", static_cast<double>(times.recentQuantileNs(0.95)) / 1e6},
+                {"p99_ms", static_cast<double>(times.recentQuantileNs(0.99)) / 1e6}};
     }
 
     avp::mixer::SourceMask prewarm_inputs_;   // under masks_mutex_
