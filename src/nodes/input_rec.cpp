@@ -95,6 +95,14 @@ protected:
     av::Timestamp loop_offset_ = NOTS;
     av::Timestamp pass_start_ = NOTS; // earliest timestamp of the current pass, before loop_offset_
     av::Timestamp pass_end_ = NOTS;   // latest timestamp + duration of the current pass, before loop_offset_
+    // After a forward loop, the next video packet: when it is not a keyframe (a file that begins
+    // with predicted pictures, a transport stream cut mid-GOP), it is marked (markStreamRestart),
+    // so the decoder does not predict the new pass from the last pass's pictures. A pass that
+    // begins with a keyframe is left alone: resetting costs an H.264 decoder its hardware session.
+    bool restart_pending_ = false;
+    // The decode timestamp of the first video packet read from the file: where a loop back to the
+    // start seeks to (loopForward).
+    av::Timestamp first_video_dts_ = NOTS;
     std::atomic_bool notify_eof_ = false;
     std::atomic_bool eof_sent_ = false;
     bool send_eof_ = true;
@@ -621,7 +629,18 @@ public:
             loop_offset_ = loop_offset_.isValid() ? addTS(loop_offset_, span) : span;
             pass_start_ = pass_end_ = NOTS;
         }
-        seek(start_ts_);
+        restart_pending_ = true;
+        // Back to the start: to the first video packet's decode timestamp, not the stream's start
+        // time, which is a presentation time. A demuxer without an index (MPEG-TS) seeks by decode
+        // time, and with B-frames the first picture is presented several packets in: a seek to
+        // its presentation time landed past the opening keyframe, and every pass after the first
+        // lost its first GOP. (A recording's seek table and a set start keep their own target.)
+        bool to_first_packet = first_video_dts_.isValid() && start_ts_.isFrameAbsolute() && start_ts_.frame_number == 0;
+        if (to_first_packet) {
+            auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+            to_first_packet = seek_table_.empty();
+        }
+        seek(to_first_packet ? StreamTarget::from_timestamp(first_video_dts_) : start_ts_);
     }
     void continueLoopTimeline(av::Packet &pkt) {
         av::Timestamp ts = pkt.pts().isNoPts() ? pkt.dts() : pkt.pts();
@@ -894,6 +913,8 @@ public:
         av::Timestamp pkt_pts;
 
         if (!pkt.isNull()) {
+            if (!first_video_dts_.isValid() && pkt.streamIndex() == video_stream_ && !pkt.dts().isNoPts())
+                first_video_dts_ = pkt.dts();
 
             if (paused_read_ && (pkt.streamIndex() == video_stream_) && pkt.isKeyPacket()) {
                 // video frame read, do not read more packets
@@ -953,6 +974,10 @@ public:
         const av::Timestamp file_pts = pkt.pts();
         if (loop_continuous_ts_) {
             continueLoopTimeline(pkt);
+        }
+        if (restart_pending_ && !pkt.isNull() && pkt.streamIndex() == video_stream_) {
+            if (!pkt.isKeyPacket()) markStreamRestart(pkt);
+            restart_pending_ = false;
         }
         this->sink_->put(pkt);
 
