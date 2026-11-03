@@ -115,8 +115,53 @@ def test_hevc_recipe_preserves_decoder_selection(recipe, tmp_path):
     assert all("hevc_nvenc" in source["path"] for source in doc["sources"])
     assert all(source.decoder_params["pixel_format"] == "cuarray" for source in parse(doc).sources)
     recipe["inputs"][0]["storage"] = "nv12"
-    with pytest.raises(ValueError, match="codec applies only"):
+    with pytest.raises(ValueError, match="codec and gop apply only"):
         plan(recipe, tmp_path)
+
+
+def test_an_input_group_cycles_its_codecs_and_reference_structures_per_source(recipe, tmp_path, monkeypatch):
+    """A mix of decoders from one group: codecs and gops are lists the sources cycle through, like
+    patterns; a B-frame clip is a different cached asset from the low-delay one of the same id."""
+    recipe["source_count"] = 4
+    recipe["inputs"] = [{"id": "mix", "kind": "generated", "color": "sdr", "chroma": "420", "weight": 4,
+                         "codecs": ["hevc", "h264"], "gops": ["low_delay", "low_delay", "b_frames", "b_frames"]}]
+    doc, jobs, _ = plan(recipe, tmp_path)
+    clips = [Path(source["path"]).name for source in doc["sources"] if source["kind"] == "video"]
+    assert [("hevc" in clip, "b_frames" in clip) for clip in clips] == [(True, False), (False, False), (True, True), (False, True)]
+    from demos.mixer import sdr_patterns
+    options = []
+    monkeypatch.setattr(sdr_patterns.subprocess, "run", lambda command, **kwargs: options.append(command))
+    for path, writer in jobs.items():
+        if path.suffix == ".mp4":
+            writer(path)
+    encoders = [command[command.index("-c:v") + 1] for command in options]
+    assert encoders == ["hevc_nvenc", "h264_nvenc", "hevc_nvenc", "h264_nvenc"]
+    assert [command[command.index("-bf") + 1] for command in options] == ["0", "0", "3", "3"]
+    assert [command[command.index("-dpb_size") + 1] for command in options] == ["2", "2", "4", "4"]
+    for bad in ({"codec": "h264", "codecs": ["hevc"]}, {"gops": []}, {"gop": "long"}, {"codecs": ["vp9"]}):
+        recipe["inputs"][0] = {**recipe["inputs"][0], **bad}
+        with pytest.raises(ValueError):
+            plan(recipe, tmp_path)
+
+
+def test_an_interlaced_file_input_is_deinterlaced_on_a_linear_decoder(recipe, tmp_path):
+    clip = tmp_path / "1080i.ts"
+    clip.write_bytes(b"ts")
+    recipe["source_count"] = 1
+    recipe["inputs"] = [{"id": "field", "kind": "file", "path": "1080i.ts", "weight": 1, "interlaced": True}]
+    doc, _, _ = plan(recipe, tmp_path)
+    source = parse(doc).source("field_000")
+    assert (source.deinterlace, source.decode_storage, source.filter_graph, source.filter_output_format) == (
+        True, "cuda", "bwdif_cuda=mode=send_frame:parity=auto:deint=interlaced", "nv12")
+    recipe["inputs"][0]["decoded_format"] = "p010le"
+    assert parse(plan(recipe, tmp_path)[0]).source("field_000").filter_output_format == "p010le"
+    for bad in ({"decode_storage": "cuarray"}, {"interlaced": "tff"}):
+        with pytest.raises(ValueError, match="interlaced"):
+            plan({**recipe, "inputs": [{**recipe["inputs"][0], **bad}]}, tmp_path)
+    # NVENC codes frames only, so the recipe cannot generate one: it says what sample is needed.
+    generated = {"id": "field", "kind": "generated", "color": "sdr", "chroma": "420", "weight": 1, "interlaced": True}
+    with pytest.raises(ValueError, match="supply one as a file input"):
+        plan({**recipe, "inputs": [generated]}, tmp_path)
 
 
 def test_an_input_group_hands_its_transform_to_each_of_its_sources(recipe, tmp_path):

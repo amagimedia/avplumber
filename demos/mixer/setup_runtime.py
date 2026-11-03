@@ -17,7 +17,15 @@ DEMO_DIR = Path(__file__).resolve().parent
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
-                        encodes={}, dsk=[], clean_feed=False, extra_aux=0, browser_motion="static")
+                        encodes={}, dsk=[], clean_feed=False, extra_aux=0, browser_motion="static",
+                        decode_mix="profile")
+# What the SDR 4:2:0 group's clips are coded as: the profile's choice (the qualified show; HLG clips
+# are always HEVC), H.264 with the same low-delay references, or a mix of both codecs and reference
+# structures, cycled per source by prepare_demo (hevc and h264 low delay, then hevc and h264 with
+# B-frames). H.264 loads NVDEC about 2.3 times as much as HEVC per stream (2026-11-02, L4), so a
+# mix changes the decode capacity; the profiles' limits are measured with the profile's codec.
+DECODE_MIXES = {"profile": {}, "h264": {"codec": "h264"},
+                "mixed": {"codecs": ["hevc", "h264"], "gops": ["low_delay", "low_delay", "b_frames", "b_frames"]}}
 
 
 
@@ -45,7 +53,7 @@ def current_settings(profile, settings):
     encodes = {**programs, "extra": dict(defaults["aux"]), **encodes}
     encodes = {o: {"codec": "hevc_nvenc" if o == "hdr" else "h264_nvenc", **e} if isinstance(e, dict) else e
                for o, e in encodes.items()}
-    return {"extra_aux": 0, "browser_motion": "static",
+    return {"extra_aux": 0, "browser_motion": "static", "decode_mix": "profile",
             **{k: v for k, v in settings.items() if k not in ("browser_frame_queue", "browser_ring_size", "bitrate_kbps")},
             "encodes": encodes}
 
@@ -108,6 +116,7 @@ def recipe_for(profile, settings):
                          ("bit_depth", (8, 10)),
                          ("chroma", ("420", "422")),
                          ("browser_motion", prepare_demo.BROWSER_MOTIONS),
+                         ("decode_mix", tuple(DECODE_MIXES)),
                          ("layout", ("balanced", "grids", "fullscreen"))):
         if settings[key] not in choices or key in ("fps", "bit_depth") and type(settings[key]) is not int:
             raise ValueError(f"Unsupported {key}")
@@ -172,6 +181,10 @@ def recipe_for(profile, settings):
     recipe["generation"].update(width=width, height=height)
     for source in recipe["inputs"][:2]:
         source.update(profile.get("generated_decode", {}))
+    if DECODE_MIXES[settings["decode_mix"]]:
+        sdr420 = recipe["inputs"][0]
+        sdr420.pop("codec", None)   # the profile's codec gives way to the mix's codec or codecs
+        sdr420.update(DECODE_MIXES[settings["decode_mix"]])
     recipe["inputs"].append({"id": "sdr420_raw", "kind": "generated", "color": "sdr",
                              "chroma": "420", "storage": "nv12"})
     recipe["inputs"].append({"id": "hlg420_raw", "kind": "generated", "color": "hlg",
