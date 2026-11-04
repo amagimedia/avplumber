@@ -1,6 +1,6 @@
 # What the audio mixer costs — `mixer_audio` vs `mixer`, 96 sources
 
-Measured on the AWS Fedora demo host (`avplumber-lamus-2`, 8 vCPU, 30 GiB RAM,
+Measured on the AWS Fedora demo host (8 vCPU, 30 GiB RAM,
 NVIDIA Tesla T4 16 GiB, driver 615.71.09) on 2026-10-26, image
 `avplumber-mixer:local` built 14:47 UTC from `12b52a9`.
 
@@ -103,9 +103,9 @@ of magnitude.
 ## Reproducing it
 
 ```sh
-scp -i ~/.ssh/awsdev.pem demos/mixer_audio/scripts/sample_load.py fedora@<HOST>:~/loadcmp/
-ssh -i ~/.ssh/awsdev.pem fedora@<HOST>
-cd /home/fedora/audio-video-mixer/avplumber
+scp -i ~/.ssh/<key>.pem demos/mixer_audio/scripts/sample_load.py <user>@<host>:~/loadcmp/
+ssh -i ~/.ssh/<key>.pem <user>@<host>
+cd <repo>/avplumber
 # A: audio (default stack)
 python3 -I ~/loadcmp/sample_load.py --seconds 150 --label audio > ~/loadcmp/audio.json
 # B: same /media/demo.json, no audio. Same compose project name, so this swaps
@@ -114,7 +114,7 @@ docker compose -f docker-compose/mixer/compose.yaml up -d      # first run regen
 python3 -I ~/loadcmp/sample_load.py --seconds 150 --label video > ~/loadcmp/video.json
 ```
 
-Raw reports stayed on the host in `/home/fedora/loadcmp/` (`audio_a1.json`,
+Raw reports stayed on the host in `~/loadcmp/` (`audio_a1.json`,
 `video_b1.json`, `video_b2.json`) together with the generated
 `graph_audio.json` / `graph_video.json` recipes.
 
@@ -167,8 +167,8 @@ the commit). The live container had been patched with `docker cp`, and
 re-copying the single file the demo starts again:
 
 ```sh
-scp -i ~/.ssh/awsdev.pem pyplumber/mixer/application.py fedora@<HOST>:~/loadcmp/
-ssh -i ~/.ssh/awsdev.pem fedora@<HOST> \
+scp -i ~/.ssh/<key>.pem pyplumber/mixer/application.py <user>@<host>:~/loadcmp/
+ssh -i ~/.ssh/<key>.pem <user>@<host> \
   'docker cp ~/loadcmp/application.py avplumber-mixer-mixer-1:/build/pyplumber/mixer/application.py \
    && docker restart avplumber-mixer-mixer-1'
 ```

@@ -7,9 +7,9 @@ not have to rediscover them. Product docs stay in [`README.md`](README.md).
 
 | Item | Path / value |
 |------|----------------|
-| Workspace root | `/home/fedora/audio-video-mixer/` |
-| avplumber checkout | `/home/fedora/audio-video-mixer/avplumber` |
-| SSH | `ssh -i ~/.ssh/<your-key>.pem fedora@<HOST_IP>` |
+| Workspace root | `<repo>/` |
+| avplumber checkout | `<repo>/avplumber` |
+| SSH | `ssh -i ~/.ssh/<your-key>.pem <user>@<host>` |
 | Current IP | ask the team / check the ops channel — it changes whenever the instance is replaced |
 
 Test video **and** audio are fully synthetic — `prepare_demo.py` generates
@@ -20,7 +20,7 @@ be copied onto the host by hand.
 Compose is run from the `avplumber` checkout:
 
 ```sh
-cd /home/fedora/audio-video-mixer/avplumber
+cd <repo>/avplumber
 COMPOSE=docker-compose/mixer_audio/compose.yaml
 ```
 
@@ -42,8 +42,8 @@ No CI/registry — the image is always rebuilt directly on the host.
 ## Rebuild and redeploy
 
 ```sh
-ssh -i ~/.ssh/<your-key>.pem fedora@<HOST_IP>
-cd /home/fedora/audio-video-mixer/avplumber
+ssh -i ~/.ssh/<your-key>.pem <user>@<host>
+cd <repo>/avplumber
 docker compose -f docker-compose/mixer_audio/compose.yaml build mixer
 docker compose -f docker-compose/mixer_audio/compose.yaml up -d --force-recreate mixer
 docker logs avplumber-mixer-mixer-1 --tail 100
@@ -86,7 +86,7 @@ docker logs avplumber-mixer-mixer-1 --tail 100
    `prepare_demo` regenerated fresh assets under
    `/media/assets/synthetic_v6_*_300s/` (confirmed via `ffprobe`: `Duration:
    00:05:00.00`); the stale `*_2s/` cache directory is harmless leftover
-   (root-owned, `fedora` can't `rm` it, not worth `sudo` for 2.6 MB).
+   (root-owned, the login user can't `rm` it, not worth `sudo` for 2.6 MB).
 
    Ruled out before landing on this: the periodic `[resample_audio_N]
    output PTSes too large, dropping output, 256 samples` log line (every
