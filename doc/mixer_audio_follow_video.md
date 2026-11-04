@@ -81,8 +81,9 @@ Params: `{"output": "program", "kind": <kind>, "from": [<ids>], "to": [<ids>],
     sources on air). The router treats `"program"` as the program mix/bus.
 - **`pts`**: media time in nanoseconds on the same clock as `realtime(set_pts=True)`
   / compositor frame PTS (host monotonic after rebase). The video state described
-  by the event applies at this time. `0` means “as soon as the router can”
-  (e.g. interrupted restore with no future frame). Routers that can change gain
+  by the event applies at this time. `0` means “as soon as the router can”; the
+  in-tree orchestrator always sends a real pts, including when a take is
+  interrupted, so a router sees `0` only from another caller. Routers that can change gain
   mid-buffer should **schedule** the change at `pts`, not at `setObject` arrival.
 - **`latency_ns`** / **`program_delay_ns`** (AUX only): the bus compositor's
   playout latency, and how far back its `pgm` cell shows the program
