@@ -37,9 +37,7 @@ void MixerOrchestrator::beginCrossfade(const std::string& scene_name, double dur
 static bool resolveFadeFromTo(const MixerState& state, Parameters& from, Parameters& to) {
     const auto pgm_it = state.scenes.find(state.pgm_scene_name);
     if (pgm_it == state.scenes.end()) return false;
-    const std::string& incoming_name = state.audio_fade_incoming_scene.empty()
-        ? state.pvw_slot_scene : state.audio_fade_incoming_scene;
-    const auto in_it = state.scenes.find(incoming_name);
+    const auto in_it = state.scenes.find(state.pvw_slot_scene);
     if (in_it == state.scenes.end()) return false;
     from = Parameters::array();
     to = Parameters::array();

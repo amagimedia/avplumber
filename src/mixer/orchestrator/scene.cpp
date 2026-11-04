@@ -160,9 +160,8 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
                                                    const SceneDefinition& scene,
                                                    bool picture_changed, int64_t pts_ns) {
     const SourceMask active = state_->computeActiveInputsMask(scene);
-    auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
-    auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
-    state_->audio_fade_incoming_scene.clear();
+    const auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
+    const auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
     emitTransitionEnded(scene, pts_ns);
 
     // The encoder must not make the receiver wait for the next periodic keyframe:
@@ -200,10 +199,9 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
 
     const auto* pgm = &state_->pgmScene();
     publishSourceRoutes(is_slot_a ? &scene : pgm, is_slot_a ? pgm : &scene);
-    // Remember incoming scene for fade/dip/wipe progress; completeTake emits transition_ended.
-    state_->audio_fade_incoming_scene = scene_name;
+    // The incoming scene, which fade/dip/wipe progress reports as its "to"; completeTake emits
+    // transition_ended.
     state_->pvw_slot_scene = scene_name;
-    (void)slot;
 }
 
 void MixerOrchestrator::applySceneControls(const SceneDefinition& scene) {

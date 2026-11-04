@@ -873,6 +873,7 @@ public:
                 for (auto it = jdef["routes"].begin(); it != jdef["routes"].end(); ++it)
                     def.routes[it.key()] = it.value().get<int>();
             }
+
             auto orch = mixerOrchestrator(mixer_name);
             orch.defineScene(scene_name, def);
         };

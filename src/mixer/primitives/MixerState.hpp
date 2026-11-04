@@ -261,8 +261,6 @@ struct MixerState : public InstanceShared<MixerState> {
     /// some outputs, point this at a thin IInputsObjects forwarder — see
     /// doc/mixer_audio_follow_video.md.
     std::string audio_router_node_name;
-    /// Scene name whose video sources are the fade "to" set (PVW destination).
-    std::string audio_fade_incoming_scene;
     /// Optional force_keyframe node triggered when a transition reaches the output,
     /// so a WebRTC receiver can decode the new picture immediately instead of
     /// waiting for the next periodic keyframe.
