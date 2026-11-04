@@ -33,7 +33,20 @@ mute toggle. Set `audio_router_node` only to route to a different node.
 
 ## Events
 
-Both are `setObject(audio_router_node_name, <key>, <params>)`:
+All four are `setObject(audio_router_node_name, <key>, <params>)`.
+
+A cut sends `transition_ended` alone. A timed take (fade, dip or wipe) sends
+`transition_start` once, then `transition_progress` per program frame, with a
+`transition_paused` whenever it is held or let go again, and `transition_ended`
+when it commits. An AUX bus sends `transition_ended` only.
+
+A consumer that routes on committed sources needs `transition_ended` and
+nothing else; `transition_progress` adds the shape of a take in flight, and
+`transition_start` / `transition_paused` describe that take in closed form for
+an engine that would rather arm its own ramp than follow a per-frame value.
+Unhandled keys are dropped by the node, so implementing a subset is normal —
+the in-tree `audio_mixer` takes `transition_ended` and `transition_progress`
+and ignores `transition_start` and `transition_paused`.
 
 ### `transition_ended`
 
@@ -62,11 +75,45 @@ Params: `{"output": "program", "kind": <kind>, "from": [<ids>], "to": [<ids>],
   distinguish dip from mix.
 - For wipe, `t` is linear over the wipe duration (`take_duration_ns`).
 
+### `transition_start`
+
+One timed program take, described in full before it runs: a consumer that owns
+a ramp primitive can arm a single closed-form ramp from this instead of
+chasing the per-frame `transition_progress` staircase.
+
+Sent once when a fade, dip or wipe is armed, before any `transition_progress`
+for that take. Not sent for cuts (they have no duration) and not sent for AUX.
+Like `transition_progress`, it is skipped when the outgoing or incoming scene
+cannot be resolved yet.
+
+Params: `{"output": "program", "kind": <kind>, "from": [<ids>], "to": [<ids>],
+"duration_ms": <ms>, "curve": <curve>, "manual": <bool>, "pts": <ns>}`.
+
+### `transition_paused`
+
+The take on air is held, or let go again — AUTO pressed a second time for the
+scene already being taken, while a fade/dip or an armed wipe runs.
+
+Never for a take under the T-bar (`"manual": true`): AUTO there runs the take
+on from the lever instead of holding it, which is why `mixer.status` also
+reports `transition_paused` only when the take is not manual.
+
+It refers to the take `transition_start` already described, so it repeats
+neither `kind` nor `from`/`to`. Program only.
+
+Params: `{"output": "program", "paused": <bool>, "t": <0..1>, "pts": <ns>}`.
+
+A resume does not restart the take: the orchestrator moves the take's start
+forward by the time it was held, so `duration_ms * (1 - t)` of it is left to
+run from `pts`. A consumer holding a closed-form ramp should stop it at `t`
+and re-arm over that remainder, keeping the original `curve`.
+
 ## Fields
 
 - **`output`**: `"program"` for the main program path; an AUX bus id
   (`aux_buses[].id`) for that bus.
-- **`kind`**: `"cut"` | `"fade"` | `"dip"` | `"wipe"`.
+- **`kind`**: `"cut"` | `"fade"` | `"dip"` | `"wipe"`. `transition_start` and
+  `transition_progress` never carry `"cut"`; a cut only ever commits.
   - `"fade"` — mix A↔B (`Crossfade` without a dip colour).
   - `"dip"` — fade through colour (`Crossfade` with `take_dip` /
     `fade_color`); audio typically outs then ins, not a crossfade.
@@ -79,12 +126,32 @@ Params: `{"output": "program", "kind": <kind>, "from": [<ids>], "to": [<ids>],
   - **AUX:** `Source.id` from `slot` / `source` / `pvw` cells; a **`pgm` cell
     contributes the single sentinel `"program"`** (not the expanded list of
     sources on air). The router treats `"program"` as the program mix/bus.
+- **`t`** (`transition_progress`, `transition_paused`): how far the take has
+  got, `0`..`1`, on the scale described under `transition_progress`.
+- **`duration_ms`** (`transition_start`): the take's nominal length
+  (`take_duration_ns`) in milliseconds, as a double. What a ramp armed from
+  this event should span, measured from `pts`.
+- **`curve`** (`transition_start`): `"linear"` | `"ease-in"` | `"ease-out"` |
+  `"ease-in-out"` — the easing the video blend is using, so an audio ramp given
+  the same one tracks the picture without reading `t` per frame. Always
+  `"linear"` for a wipe: a wipe has no curve knob of its own and its progress
+  is not eased (whatever a previous crossfade left in `take_curve` does not
+  apply to it).
+- **`manual`** (`transition_start`): the take follows the T-bar, not a clock.
+  `duration_ms` is then a span, not a schedule — the lever can stop, reverse and
+  return — so follow `transition_progress` for these instead of arming a ramp.
+- **`paused`** (`transition_paused`): `true` holds the take at `t`, `false` runs
+  it on from `t`.
 - **`pts`**: media time in nanoseconds on the same clock as `realtime(set_pts=True)`
   / compositor frame PTS (host monotonic after rebase). The video state described
   by the event applies at this time. `0` means “as soon as the router can”; the
   in-tree orchestrator always sends a real pts, including when a take is
   interrupted, so a router sees `0` only from another caller. Routers that can change gain
   mid-buffer should **schedule** the change at `pts`, not at `setObject` arrival.
+  On `transition_start` it is the moment the take was received, which is what its
+  progress is measured from — the first blended frame, and so the first
+  `transition_progress`, lands at or after it. On `transition_paused` it is when
+  the hold or the resume takes effect.
 - **`latency_ns`** / **`program_delay_ns`** (AUX only): the bus compositor's
   playout latency, and how far back its `pgm` cell shows the program
   (`pgm_delay_frames` aux ticks; 0 without a `pgm` cell). Its follower sends them
@@ -121,7 +188,15 @@ itself, only hands out the edges:
 In-tree node `audio_mixer` (`src/nodes/audio_mixer.cpp`) implements this
 protocol: multi-input fltp sum, multi-bus keyed by `output`, gain changes
 scheduled at `pts` and slewed over a few tens of milliseconds (so a
-frame-rate `transition_progress` staircase and a cut do not click). With
+frame-rate `transition_progress` staircase and a cut do not click).
+
+It handles `transition_ended` and `transition_progress` only. Following
+progress per frame is all it needs, since the slew already smooths the
+staircase, so it has no use for `transition_start`'s duration and curve and
+nothing to hold on `transition_paused` — its `setObject` drops both keys
+without error, and a held take simply stops moving its gains. A consumer with
+its own ramp primitive, such as an external `dyremix_mixer`, is the case those
+two events exist for. With
 `MixerOptions.audio_router_node` set, `has_audio` sources, and
 `MixerOptions.build_audio_mixer` left at its default `True`, `build_application`
 wires it via `pyplumber.mixer.audio_mixer.wire_audio_mixer` and can send the
