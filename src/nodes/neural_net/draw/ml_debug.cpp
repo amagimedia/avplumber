@@ -2,6 +2,7 @@
 #include "draw_bbox_items.hpp"
 #include "draw_keypoint_items.hpp"
 #include "draw_label_items.hpp"
+#include "draw_skeleton_items.hpp"
 #include "draw_trail_items.hpp"
 #include "ml_debug_renderer.hpp"
 
@@ -15,11 +16,12 @@ using namespace cuda_overlay;
 
 // Everything a model says about a frame, drawn in one pass: `layers` are painted in the order
 // given, each read from frame metadata by the reader of the draw node of its kind (draw_bbox,
-// draw_bbox_labels, draw_keypoints, draw_trail) with that node's parameters. The frame comes out
+// draw_bbox_labels, draw_keypoints, draw_trail) with that node's parameters; a skeleton layer joins
+// a pose payload's points with bones. The frame comes out
 // as it would from a chain of those nodes in the same order, for one kernel launch that visits
 // only the 16x16-pixel tiles something is drawn in.
 class MlDebug : public CudaOverlayBase {
-    using Layer = std::variant<BBoxItems, LabelItems, KeypointItems, TrailItems>;
+    using Layer = std::variant<BBoxItems, LabelItems, KeypointItems, TrailItems, SkeletonItems>;
 
     std::vector<Layer> layers_;
     MlDebugRenderer renderer_;
@@ -57,6 +59,12 @@ class MlDebug : public CudaOverlayBase {
     }
 
     void collect(TrailItems& layer, FramePayloads& payloads) {
+        segments_.clear();
+        layer.collect(payloads, geometry(), frame_counter_, segments_);
+        for (const LineSegment& segment : segments_) renderer_.addSegment(segment, layer.thickness(), layer.color());
+    }
+
+    void collect(SkeletonItems& layer, FramePayloads& payloads) {
         segments_.clear();
         layer.collect(payloads, geometry(), frame_counter_, segments_);
         for (const LineSegment& segment : segments_) renderer_.addSegment(segment, layer.thickness(), layer.color());
@@ -122,7 +130,7 @@ public:
         std::vector<Layer> layers;
         for (const auto& layer : params["layers"]) {
             if (!layer.is_object() || !layer.contains("kind") || !layer["kind"].is_string()) {
-                throw Error("ml_debug: every layer needs a kind: boxes, labels, keypoints or trail");
+                throw Error("ml_debug: every layer needs a kind: boxes, labels, keypoints, skeleton or trail");
             }
             const std::string kind = layer["kind"].get<std::string>();
             const std::string name = "ml_debug " + kind + " layer " + std::to_string(layers.size());
@@ -130,7 +138,8 @@ public:
             else if (kind == "labels") layers.emplace_back(LabelItems::fromParams(layer, name));
             else if (kind == "keypoints") layers.emplace_back(KeypointItems::fromParams(layer, name));
             else if (kind == "trail") layers.emplace_back(TrailItems::fromParams(layer, name));
-            else throw Error("ml_debug: unknown layer kind " + kind + ": boxes, labels, keypoints or trail");
+            else if (kind == "skeleton") layers.emplace_back(SkeletonItems::fromParams(layer, name));
+            else throw Error("ml_debug: unknown layer kind " + kind + ": boxes, labels, keypoints, skeleton or trail");
         }
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<MlDebug>(
