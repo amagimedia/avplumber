@@ -34,6 +34,42 @@ def _planes(samples):
     return [list((ctypes.c_float * n).from_address(ptr)) for ptr in samples.data_ptr]
 
 
+MARK_SEC = 1.0
+
+
+def _marked(path, frequency, channels, rate=RATE, seconds=5):
+    """Silence until MARK_SEC, then a steady tone: one sharp edge at a known media time."""
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+        f"sine=frequency={frequency}:sample_rate={rate}:duration={seconds},"
+        # enable= is evaluated per sample against t; the comma inside lt() must be escaped
+        # so the filtergraph parser does not split the chain on it.
+        f"volume=volume=0:enable='lt(t\\,{MARK_SEC})'",
+        "-ac", str(channels), "-c:a", "pcm_s16le", str(path),
+    ], check=True, capture_output=True, timeout=120)
+
+
+def _onset(samples, frequency, window=BLOCK, hop=120, ratio=0.3):
+    """Index of the first window whose energy at `frequency` passes `ratio` of the peak.
+
+    One Goertzel-style correlation per window. The tones are pure and hundreds of Hz apart,
+    so each source's edge is located independently of the others in the same mix."""
+    w = 2 * math.pi * frequency / RATE
+    cos = [math.cos(w * n) for n in range(window)]
+    sin = [math.sin(w * n) for n in range(window)]
+    mags = []
+    for start in range(0, len(samples) - window, hop):
+        re = im = 0.0
+        for n in range(window):
+            v = samples[start + n]
+            re += v * cos[n]
+            im += v * sin[n]
+        mags.append((math.hypot(re, im) / window, start))
+    peak = max((m for m, _ in mags), default=0.0)
+    at = next((start for m, start in mags if m > ratio * peak), None)
+    return at, peak
+
+
 def test_a_stopped_source_never_holds_the_mix(tmp_path):
     # Source a plays 10 s of stereo; source b, mono, ends after 1 s and delivers nothing more.
     _tone(tmp_path / "a.wav", 440, 10, 2)
@@ -245,3 +281,77 @@ def test_an_aux_bus_hears_the_program_as_late_as_its_pgm_tile_shows_it(tmp_path)
     held = [at - block.pts.timestamp * 1_000_000_000 // RATE for block, at in blocks["aux"][10:]]
     assert min(held) > 98_000_000, min(held)
     assert sorted(held)[len(held) // 2] < 150_000_000
+
+
+# ingest() converts anything that is not already the mixer's own fltp/rate/layout. Each of these
+# reaches a different branch, and a general-purpose mixer must place all three on the same
+# timeline: the samples belong where their frame's timestamp says, not where the converter
+# happened to hand them over. The frequencies rotate between runs so the detector cannot be
+# what decides the answer.
+@pytest.mark.parametrize("rotate", [0, 1])
+def test_a_converted_source_lands_where_its_timestamps_say(tmp_path, rotate):
+    # copy: already fltp 48 kHz stereo, so ingest() copies it and is the reference.
+    # layout: mono - ResampleAudioForwardChannels passes the layout through (pyplumber/mixer/inputs.py).
+    # rate: delivered at 44.1 kHz, so ingest() resamples rather than only re-laying out.
+    tones = [440, 1000, 1600]
+    paths = {
+        "copy": (tones[rotate % 3], 2, RATE),
+        "layout": (tones[(rotate + 1) % 3], 1, RATE),
+        "rate": (tones[(rotate + 2) % 3], 2, 44100),
+    }
+    for tag, (frequency, channels, rate) in paths.items():
+        _marked(tmp_path / f"{tag}.wav", frequency, channels, rate=rate)
+    avp = AVPlumber()
+    errors = []
+    avp.on_exception = lambda *error: errors.append(error)
+    try:
+        for tag, (_, _, rate) in paths.items():
+            for cls, params in (
+                (Input, {"url": str(tmp_path / f"{tag}.wav"), "dst": f"{tag}_packets"}),
+                (Demux, {"src": f"{tag}_packets", "routing": {"a:0": f"{tag}_audio"}}),
+                (DecAudio, {"src": f"{tag}_audio", "dst": f"{tag}_decoded"}),
+                # Normalizing to the source's own rate leaves the mixer the rate conversion.
+                (ResampleAudioForwardChannels, {"src": f"{tag}_decoded", "dst": f"{tag}_resampled",
+                                                "dst_sample_rate": rate, "dst_sample_format": "fltp",
+                                                "compensation": 0}),
+                (Realtime, {"src": f"{tag}_resampled", "dst": f"{tag}_paced", "set_pts": True,
+                            "time_base": "1/120000", "negative_time_tolerance": .25,
+                            "discontinuity_threshold": 1.0}),
+            ):
+                avp.addNode(cls({"name": f"{cls.TYPE}_{tag}", "group": "audio", **params}))
+        avp.addNode(AudioMixer({
+            "name": "mix", "group": "audio",
+            "src": [f"{tag}_paced" for tag in paths], "source_ids": list(paths),
+            "outputs": {"program": "program"}, "fps": "25/1", "latency_ms": 80,
+        }))
+        program = avp.getEdge("program", "AudioSamples")
+        avp.group("audio").startNodes()
+        blocks = [program.get(3000)]
+        avp.executeCommandsFromString("node.object.set mix transition_ended " + json.dumps(
+            {"output": "program", "sources": list(paths), "pts": 0}))
+        blocks += [program.get(3000) for _ in range(199)]
+        status = avp.node("mix").getObject("status")
+        assert not errors, errors
+    finally:
+        avp.shutdown()
+
+    assert all(block is not None and block.samplesCount == BLOCK for block in blocks)
+    left = [sample for block in blocks for sample in _planes(block)[0]]
+    found = {tag: _onset(left, frequency) for tag, (frequency, _, _) in paths.items()}
+    detail = ", ".join(f"{tag} {paths[tag][0]} Hz at {at} (peak {peak:.4f})"
+                       for tag, (at, peak) in found.items())
+    assert all(at is not None for at, _ in found.values()), f"a tone was never detected: {detail}"
+    # Every source carries the same edge at the same media time, so every onset is the same
+    # sample of the mix. One detector window of slack covers the inputs' start jitter.
+    reference = found["copy"][0]
+    for tag, (at, _) in found.items():
+        offset = at - reference
+        assert abs(offset) <= BLOCK, (
+            f"{tag} is {offset} samples ({1000.0 * offset / RATE:.1f} ms) off the copy path: {detail}")
+    # Converted audio arrives per frame, not withheld into batches: a source whose samples are
+    # held back until a 4096-sample buffer fills reads as missing for that long at the start.
+    sources = {s["id"]: s for s in status["sources"]}
+    for tag in paths:
+        assert sources[tag]["missing"] < RATE // 50, f"{tag}: {sources[tag]}"
+        assert sources[tag]["dropped"] == 0 and sources[tag]["jumps"] == 0, f"{tag}: {sources[tag]}"
+    assert status["output_drops"] == 0

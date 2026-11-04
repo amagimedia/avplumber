@@ -158,6 +158,9 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
             src.queue->write(first, planes);
             return;
         }
+        // A frame has to say what rate it is at: no converter can be built without one, and the
+        // read size below is measured in it. AudioParameters leaves it -1 when the frame omits it.
+        if (cur.sample_rate <= 0) return;
         if (!src.resampler || src.last_in != cur) {
             av::Dictionary opts;
             src.resampler = make_unique<av::AudioResampler>(
@@ -166,13 +169,24 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
             src.last_in = cur;
         }
         src.resampler->push(in);
+        // Take everything the converter holds, every frame, and ask for it by the amount this
+        // frame is worth. pop(dst, false) answers nothing until it holds dst.samplesCount() +
+        // filter_size / 2 (deps/avcpp/src/audioresampler.cpp): asked for a fixed block it keeps
+        // the first frames entirely, then hands over a backlog that began frames ago, which goes
+        // in under *this* frame's timestamp and so lands as far late as the block is long. Asking
+        // with getall leaves only the converter's own filter delay, a fraction of a frame.
+        const size_t want = size_t(int64_t(in.samplesCount()) * int64_t(sample_rate_)
+                                   / int64_t(cur.sample_rate)) + 64;
         while (true) {
-            av::AudioSamples conv(av::SampleFormat(AV_SAMPLE_FMT_FLTP), 4096, channel_layout_, sample_rate_);
-            if (!src.resampler->pop(conv, false) || conv.samplesCount() <= 0) break;
+            av::AudioSamples conv(av::SampleFormat(AV_SAMPLE_FMT_FLTP), int(want), channel_layout_, sample_rate_);
+            if (!src.resampler->pop(conv, true) || conv.samplesCount() <= 0) break;
             for (int ch = 0; ch < channels_; ++ch) {
                 const float* sp = reinterpret_cast<const float*>(conv.data(ch));
                 planes[size_t(ch)].insert(planes[size_t(ch)].end(), sp, sp + conv.samplesCount());
             }
+            // A full buffer may have left more behind; anything short means it is empty. Bounds
+            // the loop whatever the converter reports, and drains a backlog over several reads.
+            if (size_t(conv.samplesCount()) < want) break;
         }
         src.queue->write(first, planes);
     }
