@@ -67,6 +67,9 @@ void MixerOrchestrator::defineScene(const std::string& name, const SceneDefiniti
             (!canPrewarmScene(def) || (state_->computeActiveInputsMask(def) & ~state_->prewarm_source_mask).any()))
         state_->prewarm_cut_scenes.erase(name); // Edited source identity takes the ordinary cold path.
     state_->scenes[name] = def;
+    // The AFV source arrays are held against the two scene names: an edited definition under an
+    // unchanged name is the one way their contents can go stale (see resolveFadeFromTo).
+    state_->afv_sets_valid = false;
 }
 
 bool MixerOrchestrator::canPrewarmScene(const SceneDefinition& scene) const {

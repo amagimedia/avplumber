@@ -70,6 +70,10 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         // gain_ramp_step_ so AFV steps (one per video frame) and cuts do not click.
         std::vector<float> gains;
         std::vector<float> gain_targets;
+        // This block's per-sample curves, by source and for the program mix this bus adds.
+        // Sized once with the bus: the mix runs 50 times a second per bus, under mutex_.
+        std::vector<std::vector<float>> curve;
+        std::vector<float> program_curve;
         float program_gain = 0.f;
         float program_gain_target = 0.f;
         std::deque<GainEvent> pending;
@@ -99,9 +103,11 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
     std::vector<float> base_gains_;
     std::vector<float> base_gain_targets_;
     std::vector<std::vector<float>> gain_ramp_;   // this block's per-sample curve, by source
+    std::vector<float> combined_;                 // base_gain * bus gain, per sample, one source
     float gain_ramp_step_ = 0.f;
     std::vector<Bus> buses_;
     std::unordered_map<std::string, size_t> bus_index_;
+    std::vector<av::AudioSamples> block_frames_;   // this block's mix, by bus
     std::vector<std::vector<float>> program_frame_;
     std::optional<avp::audio_mixer::SampleHistory> program_history_;   // program_frame_ of the last blocks
     std::vector<std::vector<float>> delayed_program_;                  // a bus's program_history_ read
@@ -239,8 +245,8 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         }
         // Per-sample AFV bus gains: events retarget; gains slew so a frame-rate staircase
         // (transition_progress) and a cut (transition_ended) glide instead of stepping.
-        std::vector<std::vector<float>> bus_curve(sources_.size(), std::vector<float>(frame_samples_));
-        std::vector<float> prog_curve(frame_samples_, 0.f);
+        std::vector<std::vector<float>>& bus_curve = bus.curve;
+        std::vector<float>& prog_curve = bus.program_curve;
         for (size_t k = 0; k < frame_samples_; ++k) {
             applyEvents(bus, first + int64_t(k));
             for (size_t si = 0; si < sources_.size(); ++si) {
@@ -250,7 +256,7 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
             bus.program_gain = slewToward(bus.program_gain, bus.program_gain_target, gain_ramp_step_);
             prog_curve[k] = bus.program_gain;
         }
-        std::vector<float> combined(frame_samples_);
+        std::vector<float>& combined = combined_;
         for (size_t si = 0; si < sources_.size(); ++si) {
             const float* base = gain_ramp_[si].data();
             const float* bg = bus_curve[si].data();
@@ -305,11 +311,12 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         const int64_t first = block * int64_t(frame_samples_);
         for (auto& src : sources_) src.queue->read(frame_samples_, src.block);
         updateGainRamps();
-        program_frame_.assign(size_t(channels_), std::vector<float>(frame_samples_, 0.f));
+        for (auto& plane : program_frame_) std::fill(plane.begin(), plane.end(), 0.f);
         size_t program_bi = SIZE_MAX;
         auto pit = bus_index_.find(kProgramSentinel);
         if (pit != bus_index_.end()) program_bi = pit->second;
-        std::vector<av::AudioSamples> frames(buses_.size());
+        // Every bus writes its own entry below, so last block's (moved-from) frames never show.
+        std::vector<av::AudioSamples>& frames = block_frames_;
         if (program_bi != SIZE_MAX)
             frames[program_bi] = mixBus(buses_[program_bi], true, first, program_frame_);
         program_history_->write(first, program_frame_);
@@ -546,6 +553,8 @@ public:
         node->base_gains_.assign(node->sources_.size(), 1.f);
         node->base_gain_targets_.assign(node->sources_.size(), 1.f);
         node->gain_ramp_.assign(node->sources_.size(), std::vector<float>(node->frame_samples_, 1.f));
+        node->combined_.assign(node->frame_samples_, 0.f);
+        node->program_frame_.assign(size_t(node->channels_), std::vector<float>(node->frame_samples_, 0.f));
         node->gain_ramp_step_ = 1.f / (kGainRampSeconds * float(node->sample_rate_));
         // A bus's program delay stays within its compositor's six-frame history (under 0.5 s).
         node->program_history_.emplace(size_t(node->channels_), size_t(node->sample_rate_) + node->frame_samples_);
@@ -560,9 +569,12 @@ public:
             bus.sink = make_unique<EdgeSink<av::AudioSamples>>(bus.edge);
             bus.gains.assign(node->sources_.size(), 0.f);
             bus.gain_targets.assign(node->sources_.size(), 0.f);
+            bus.curve.assign(node->sources_.size(), std::vector<float>(node->frame_samples_, 0.f));
+            bus.program_curve.assign(node->frame_samples_, 0.f);
             node->bus_index_[bus.id] = node->buses_.size();
             node->buses_.push_back(std::move(bus));
         }
+        node->block_frames_.resize(node->buses_.size());
         return node;
     }
 };

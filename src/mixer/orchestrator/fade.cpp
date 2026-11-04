@@ -33,27 +33,37 @@ void MixerOrchestrator::beginCrossfade(const std::string& scene_name, double dur
 
 /// Shared by emitTransitionStart/emitTransitionProgress: the outgoing program's and incoming
 /// (PVW destination) scene's source names, as `from`/`to` JSON arrays. False if either scene
-/// can't be resolved yet (nothing to report).
-static bool resolveFadeFromTo(const MixerState& state, Parameters& from, Parameters& to) {
-    const auto pgm_it = state.scenes.find(state.pgm_scene_name);
-    if (pgm_it == state.scenes.end()) return false;
-    const auto in_it = state.scenes.find(state.pvw_slot_scene);
-    if (in_it == state.scenes.end()) return false;
-    from = Parameters::array();
-    to = Parameters::array();
-    for (const auto& kv : pgm_it->second.sources) from.push_back(kv.first);
-    for (const auto& kv : in_it->second.sources) to.push_back(kv.first);
+/// can't be resolved yet (nothing to report). Held in the state between calls, keyed by the two
+/// scene names: a take asks once per program frame and the names are the whole input, so the
+/// arrays are rebuilt only when one of them changes.
+static bool resolveFadeFromTo(MixerState& state, const Parameters*& from, const Parameters*& to) {
+    if (!state.afv_sets_valid || state.afv_from_scene != state.pgm_scene_name
+            || state.afv_to_scene != state.pvw_slot_scene) {
+        const auto pgm_it = state.scenes.find(state.pgm_scene_name);
+        if (pgm_it == state.scenes.end()) return false;
+        const auto in_it = state.scenes.find(state.pvw_slot_scene);
+        if (in_it == state.scenes.end()) return false;
+        state.afv_from = Parameters::array();
+        state.afv_to = Parameters::array();
+        for (const auto& kv : pgm_it->second.sources) state.afv_from.push_back(kv.first);
+        for (const auto& kv : in_it->second.sources) state.afv_to.push_back(kv.first);
+        state.afv_from_scene = state.pgm_scene_name;
+        state.afv_to_scene = state.pvw_slot_scene;
+        state.afv_sets_valid = true;
+    }
+    from = &state.afv_from;
+    to = &state.afv_to;
     return true;
 }
 
 void MixerOrchestrator::emitTransitionStart(const char* kind, int64_t duration_ns, FadeCurve curve,
                                             bool manual, int64_t pts_ns) {
     if (state_->audio_router_node_name.empty()) return;
-    Parameters from, to;
+    const Parameters *from, *to;
     if (!resolveFadeFromTo(*state_, from, to)) return;
     try {
         setNodeObject(state_->audio_router_node_name, "transition_start",
-                      {{"output", "program"}, {"kind", kind}, {"from", from}, {"to", to},
+                      {{"output", "program"}, {"kind", kind}, {"from", *from}, {"to", *to},
                        {"duration_ms", double(duration_ns) / 1e6}, {"curve", fadeCurveName(curve)},
                        {"manual", manual}, {"pts", pts_ns}});
     } catch (const std::exception& e) {
@@ -63,11 +73,11 @@ void MixerOrchestrator::emitTransitionStart(const char* kind, int64_t duration_n
 
 void MixerOrchestrator::emitTransitionProgress(const char* kind, double t, int64_t pts_ns) {
     if (state_->audio_router_node_name.empty()) return;
-    Parameters from, to;
+    const Parameters *from, *to;
     if (!resolveFadeFromTo(*state_, from, to)) return;
     try {
         setNodeObject(state_->audio_router_node_name, "transition_progress",
-                      {{"output", "program"}, {"kind", kind}, {"from", from}, {"to", to},
+                      {{"output", "program"}, {"kind", kind}, {"from", *from}, {"to", *to},
                        {"t", t}, {"pts", pts_ns}});
     } catch (const std::exception& e) {
         logstream << "mixer: transition_progress failed: " << e.what();

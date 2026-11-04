@@ -261,6 +261,13 @@ struct MixerState : public InstanceShared<MixerState> {
     /// some outputs, point this at a thin IInputsObjects forwarder — see
     /// doc/mixer_audio_follow_video.md.
     std::string audio_router_node_name;
+    /// The `from`/`to` source arrays last built for AFV, with the scene names they came from:
+    /// a take sends one transition_progress per program frame, all with the same two scenes, and
+    /// the names are the whole input, so a change of either rebuilds them (see resolveFadeFromTo).
+    /// A scene cannot be redefined while it is being taken, so its contents cannot go stale here.
+    std::string afv_from_scene, afv_to_scene;
+    Parameters afv_from, afv_to;
+    bool afv_sets_valid = false;
     /// Optional force_keyframe node triggered when a transition reaches the output,
     /// so a WebRTC receiver can decode the new picture immediately instead of
     /// waiting for the next periodic keyframe.
