@@ -1046,6 +1046,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
     program_audio_edge = None
+    gain_controller = None
     if options.audio_router_node and audio_edges:
         router = options.audio_router_node
         if options.build_audio_mixer:
@@ -1110,6 +1111,11 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     # The show's settings and what the GPU decodes and encodes for it: the page's DEC and ENC figures.
     settings = {**cfg.settings(), "encode_by_codec": mixer_config.encode_by_codec(
         [*renditions, *(r for bus in cfg.aux_buses for r in bus.renditions)], cfg.working_format)}
+    if gain_controller is None and settings.get("audio_sources"):
+        # audio_sources is what makes a page poll mixer.audio_gain_status, and that command only
+        # exists alongside the controller: a show whose audio goes to someone else's router has
+        # the sources but not the command, and the failed poll costs every page the whole state.
+        del settings["audio_sources"]
     try:
         settings["decode"] = mixer_config.decode_load(cfg.sources)
     except Exception as exc:   # a missing ffprobe or an unreadable header must not stop the show
