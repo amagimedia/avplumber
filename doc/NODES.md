@@ -512,6 +512,73 @@ Join metadata from an auxiliary stream into a primary stream by exact timestamp 
 
 Useful for running heavy processing (e.g. neural network inference) on downscaled frames and merge produced metadata back onto original-resolution frames.
 
+### `soft_join_metadata_frame` / `soft_join_video_frame`
+
+Hold-last join of auxiliary `MetadataFrame` streams onto a primary stream. The two nodes
+share parameters and timing rules; they differ only by **primary and output** type:
+
+| Type | Primary + output | Aux |
+|------|------------------|-----|
+| `soft_join_metadata_frame` | `MetadataFrame` | `MetadataFrame…` |
+| `soft_join_video_frame` | `av::VideoFrame` | `MetadataFrame…` |
+
+Alias: `soft_join_metadata` → `soft_join_metadata_frame`.
+
+Primary PTS drives emission; auxiliaries may use other timebases and unequal PTS
+(e.g. audio events). Empty auxiliary queues do **not** block.
+
+Shared parameters:
+
+-   `src`: `[primary, aux1, aux2, ...]` — at least one auxiliary
+-   `dst`: output queue (same edge type as primary)
+-   `into` (optional): string (one aux) or array parallel to auxiliaries.
+    Each entry is a nest key, or `null` for flat merge of that aux's held object.
+    Prefer nest keys so producers cannot clobber each other (`event`/`engine`/`pts`/`sec`).
+-   `max_age` (optional float, seconds): clear an aux's held state when
+    `primary_sec - held_pts_sec` exceeds this; omit to keep held forever
+
+Behaviour (both):
+
+-   wait only for primary
+-   when primary is ready, drain every usable aux frame with `pts_aux <= pts_primary` into that aux's held snapshot (replace)
+-   emit primary with each held blob applied; leave later aux frames at the head
+-   aux EOF: keep emitting primary with last held; primary EOF: drop remaining aux, then EOF
+-   PTS compared in seconds (cross-timebase safe)
+
+How held data is written:
+
+-   **metadata_frame:** nest/flat merge into the JSON `Parameters` object
+-   **video_frame:** `AVDictionary` on the frame — with `into`, the whole held object is
+    `json.dumps`'d under that key (eka-style); flat merge writes each top-level key as a
+    string (JSON-encoded if not already a string)
+
+Example (`MetadataFrame` primary):
+
+```json
+{
+  "type": "soft_join_metadata_frame",
+  "src": ["video_md", "asr_events", "tagging_events"],
+  "dst": "joined_md",
+  "into": ["asr", "tags"]
+}
+```
+
+Primary `{"hls_chunk_index": 42}` with held ASR/tags becomes
+`{"hls_chunk_index": 42, "asr": {...}, "tags": {...}}`.
+
+Example (`VideoFrame` primary, before a MetadataEmitter):
+
+```json
+{
+  "type": "soft_join_video_frame",
+  "src": ["pictures", "asr_events"],
+  "dst": "pictures_with_asr",
+  "into": ["asr"]
+}
+```
+
+Downstream reads `frame.metadata["asr"]` as a JSON string.
+
 ### `crop_metadata_cuda`
 
 Metadata-driven CUDA crop. Reads a bounding-box from per-frame metadata (e.g. produced by a detection node) and crops the frame to that region using an FFmpeg CUDA filter graph. Intended for reframing workflows such as face-detection crop.

@@ -212,6 +212,19 @@ class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 
 
+class SoftJoinMetadataFrame(InternalNode):
+    TYPE = "soft_join_metadata_frame"
+
+
+class SoftJoinMetadata(SoftJoinMetadataFrame):
+    """Backward-compatible alias for soft_join_metadata_frame. """
+    TYPE = "soft_join_metadata"
+
+
+class SoftJoinVideoFrame(InternalNode):
+    TYPE = "soft_join_video_frame"
+
+
 class ObjectTracker(InternalNode):
     TYPE = "object_tracker"
 
