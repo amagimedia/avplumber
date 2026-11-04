@@ -300,6 +300,53 @@ def test_audio_router_node_is_refused_without_a_config():
     GraphOptions(config="show.json", audio_router_node="audio_mixer").validate()
 
 
+class _GainAvp:
+    """The node is unreachable, as it is mid-startup: _rendered() degrades to the cache."""
+    def __init__(self):
+        self.sent = []
+
+    def node(self, _name):
+        raise RuntimeError("no node yet")
+
+    def executeCommandsFromString(self, command):
+        self.sent.append(command)
+
+
+def test_a_rejected_gain_leaves_every_other_source_alone():
+    """The values were checked one at a time as they were sent, so a request carrying one bad
+    gain put the sources named before it on air at their new volume and still answered with an
+    error -- which half of it applied depended on the order the keys arrived in."""
+    from pyplumber.mixer.audio_gain import AudioGainController
+    avp = _GainAvp()
+    controller = AudioGainController(avp, "audio_mixer", ["cam", "idle"])
+    with pytest.raises(mixer_config.ConfigError, match="finite number"):
+        controller.set({"gains": {"cam": -6.0, "idle": "loud"}})
+    assert avp.sent == []
+    assert controller.state() == [{"id": "cam", "gain_db": 0.0}, {"id": "idle", "gain_db": 0.0}]
+
+
+@pytest.mark.parametrize("bad", (True, False, float("nan"), float("inf")))
+def test_a_gain_must_be_a_finite_number(bad):
+    """A bool passes isinstance(x, int), so true would have been accepted as +1 dB; a
+    non-finite one clamps to itself and reaches the node as bare NaN, which is not JSON."""
+    from pyplumber.mixer.audio_gain import AudioGainController
+    avp = _GainAvp()
+    controller = AudioGainController(avp, "audio_mixer", ["cam"])
+    with pytest.raises(mixer_config.ConfigError, match="finite number"):
+        controller.set({"gains": {"cam": bad}})
+    assert avp.sent == []
+
+
+def test_a_valid_gain_is_clamped_and_sent_once():
+    from pyplumber.mixer.audio_gain import AudioGainController
+    avp = _GainAvp()
+    controller = AudioGainController(avp, "audio_mixer", ["cam"])
+    assert controller.set({"gains": {"cam": -200.0}}) == [{"id": "cam", "gain_db": -70.0}]
+    assert len(avp.sent) == 1 and "set_source_gain" in avp.sent[0]
+    controller.set({"gains": {"cam": -70.0}})   # already there: nothing to send
+    assert len(avp.sent) == 1
+
+
 def test_janus_audio_limits_float_mix_before_s16_conversion():
     from pyplumber.mixer.janus import JanusAudioConfig, build_janus_audio_output
 

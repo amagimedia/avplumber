@@ -44,11 +44,16 @@ class AudioGainController:
             raise ConfigError("audio_gain needs a non-empty gains object")
         if any(sid not in self.gains_db for sid in gains):
             raise ConfigError("audio_gain: unknown source id")
+        # The whole request is checked before any of it is sent: a value rejected halfway
+        # through would leave the sources named ahead of it at their new gain and still answer
+        # with an error. A bool is not a gain (True would otherwise read as +1 dB), and a
+        # non-finite one clamps to itself and reaches the node as bare NaN, which is not JSON.
+        if any(isinstance(db, bool) or not isinstance(db, (int, float)) or not math.isfinite(db)
+               for db in gains.values()):
+            raise ConfigError("audio_gain: gain_db must be a finite number")
         with self.lock:
             self._rendered()   # another controller may have changed a gain since the last poll
             for source_id, db in gains.items():
-                if not isinstance(db, (int, float)):
-                    raise ConfigError("audio_gain: gain_db must be a number")
                 db = max(DB_MIN, min(DB_MAX, float(db)))
                 if self.gains_db[source_id] == db:
                     continue
