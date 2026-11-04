@@ -133,14 +133,14 @@ def test_audio_port_rendition_duplicates_the_program_bus_via_a_split(native_boun
                         "audio_port": 5012}],
     })
     app = build_application(cfg, MixerOptions(janus_output=True), api=_api(nodes, builder))
-    # audio_mixer declares its bus edges under "outputs", not "dst", so the graph's dependency sort
-    # never learns it produces audio_mixer_program; a Split reading that edge directly can be built
-    # before audio_mixer exists and fail. The no-op relay has a plain "dst", so Split's dependency
-    # on it (not on audio_mixer) is one the sort does track.
-    relay = app.avp.nodes["program_audio_relay"]
-    assert relay["src"] == "audio_mixer_program"
+    # The Split reads the bus edge itself: audio_mixer mirrors its "outputs" into "dst", which is
+    # what the dependency sort reads (NodeGroupUtils::offers), so the sort knows the Split has to
+    # wait for audio_mixer. Before that mirror this needed a no-op anull relay in between, whose
+    # plain "dst" was the only thing making the dependency visible.
+    assert "program_audio_relay" not in app.avp.nodes
+    assert set(app.avp.nodes["audio_mixer"]["dst"]) == {"audio_mixer_program"}
     split = app.avp.nodes["split_program_audio"]
-    assert split["src"] == "audio_mixer_program_relay"
+    assert split["src"] == "audio_mixer_program"
     assert set(split["dst"]) == {"audio_mixer_program_split", "janus_audio_hdr_src"}
     # The legacy leg now reads the split's own branch, not the raw bus edge.
     assert app.avp.nodes["janus_audio_limiter"]["src"] == "audio_mixer_program_split"
@@ -204,6 +204,9 @@ def test_aux_bus_with_audio_port_gets_its_own_outputs_entry(native_boundary, mon
     app = build_application(cfg, MixerOptions(audio_router_node="audio_mixer"), api=_api(nodes, builder))
     outputs = app.avp.nodes["audio_mixer"]["outputs"]
     assert outputs == {"program": "audio_mixer_program", "aux1": "audio_mixer_aux1"}
+    # Every bus edge is mirrored into "dst" so the dependency sort knows who produces it: the aux
+    # leg reads audio_mixer_aux1 with nothing in between, so the sort is all that orders them.
+    assert set(app.avp.nodes["audio_mixer"]["dst"]) == set(outputs.values())
 
 
 def test_video_only_show_is_unaffected(native_boundary):

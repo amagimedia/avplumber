@@ -57,6 +57,11 @@ def wire_audio_mixer(
         "src": src,
         "source_ids": source_ids,
         "outputs": dict(outputs),
+        # The node reads its bus edges from "outputs"; the graph's dependency sort reads only
+        # "routing" or "dst" (NodeGroupUtils::offers, graph_mgmt.cpp), so without this it never
+        # learns which edges this node produces and a reader of one can be built first and fail
+        # ATD with "Node factory returned nullptr". Derived here, never passed in.
+        "dst": list(outputs.values()),
         "dst_channel_layout": dst_channel_layout,
         "dst_sample_rate": dst_sample_rate,
         "frame_samples": frame_samples,

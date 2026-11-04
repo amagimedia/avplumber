@@ -1136,20 +1136,11 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         # distinguishes them from an AUX bus, which has its own compositor and its own bus above).
         duplicates = [r for r in cfg.renditions if r.audio_port]
         if duplicates:
-            # AudioMixer declares its bus edges under "outputs" (a dict), not "dst", so the graph's
-            # dependency sort (NodeGroupUtils::offers/needs, graph_mgmt.cpp) never learns it produces
-            # program_audio_edge; a Split reading it directly can be built before audio_mixer exists
-            # and fail ATD with "Node factory returned nullptr". This no-op relay has a plain "dst",
-            # so Split's "src" dependency on *it* (not on audio_mixer) is one the sorter does track.
-            relay_edge = program_audio_edge + "_relay"
-            avp.addNode(api.FilterAudio({
-                "name": "program_audio_relay", "src": program_audio_edge, "dst": relay_edge,
-                "graph": "anull", "dst_sample_rate": 48_000, "dst_channel_layout": "stereo",
-                "dst_sample_format": "fltp", "group": OUTPUT_GROUP,
-            }))
+            # Reading the bus edge directly is safe because wire_audio_mixer mirrors "outputs"
+            # into the node's "dst", which is what the dependency sort tracks.
             branches = [f"janus_audio_{r.id}_src" for r in duplicates]
             avp.addNode(api.Split({
-                "name": "split_program_audio", "src": relay_edge,
+                "name": "split_program_audio", "src": program_audio_edge,
                 "dst": [program_audio_edge + "_split", *branches], "group": OUTPUT_GROUP, "on_error": "panic",
             }))
             program_audio_edge = program_audio_edge + "_split"
