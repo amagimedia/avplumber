@@ -246,7 +246,7 @@ def build_janus_audio_output(avp, api, src_edge: str, janus: JanusAudioConfig, *
     in front of the encoder. The limiter is enabled by default at this float-to-integer
     boundary and can be disabled in ``JanusAudioConfig``. Requires FFmpeg built with
     ``--enable-libopus`` (see
-    demos/audio_video_mixer/docker/Dockerfile). Unlike :func:`build_janus_output`,
+    docker-compose/mixer/Dockerfile.fedora44). Unlike :func:`build_janus_output`,
     this does *not* set ``rtpflags: "skip_rtcp"``: the video RTP output already
     omits RTCP SR (no shared clock risk flagged separately), so leaving audio's
     RTCP on is the one lip-sync anchor the WebRTC path has.

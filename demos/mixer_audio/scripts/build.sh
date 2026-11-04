@@ -4,9 +4,8 @@
 # Launched detached (nohup+setsid+disown) and then polled over fresh ssh
 # connections, rather than held open as one blocking `docker compose build`:
 # a dropped SSH/VPN session kills a foreground build with it (SIGHUP to the
-# buildkit client), silently -- see demos/audio_video_mixer/OPS.md's
-# detached-build section for how this was found. The CUDA avplumber binary
-# compiles the full C++ sources; a cold build can run well past 10 minutes.
+# buildkit client), silently. The CUDA avplumber binary compiles the full C++
+# sources; a cold build can run well past 10 minutes.
 #
 # Completion is detected via an explicit `EXITCODE:N` sentinel line appended
 # to the log after the build exits, not by grepping the build host's process
