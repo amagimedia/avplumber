@@ -419,11 +419,14 @@ class MixerApplication:
         finally:
             self.mixer.finish_transition_preheat()
         self.mixer.start_output()
+        # From here the router reads the per-source audio itself, and an audio edge has one
+        # reader: clearing it from this thread once the router's own thread exists races its
+        # peek/pop over the same queue. Stop before the group that holds the router starts,
+        # not after it reports working -- the router drains the backlog on its first block.
+        self._audio_preheat_drain = ()
         self.avp.group(OUTPUT_GROUP).startNodes()
         if self.mixer.audio_router_node:
             self._wait_for_node(self.mixer.audio_router_node)
-            # From here the router reads the per-source audio itself.
-            self._audio_preheat_drain = ()
             self.mixer.raise_initial_audio_gains()
         self._wait_for_edges(("mixer_final_out",), "program output")
         if self.wipe_cache_mb:
@@ -526,10 +529,15 @@ class MixerApplication:
             f"node.object.set {node} purge_idle {idle_ms}" for node in self.browser_importers))
         if not wait:
             return 0
+        # Every wait inside the preheat keeps the audio queues empty while it blocks: this one
+        # runs with the inputs already feeding, so leaving them unread for the settle timeout
+        # fills them and stops each source's demuxer -- and its video with it.
+        self._drain_preheat_audio()
         time.sleep(0.3)   # an importer looks for a request four times a second
         deadline = time.monotonic() + SETTLE_TIMEOUT_SEC
         while time.monotonic() < deadline:
             self._check_startup()
+            self._drain_preheat_audio()
             if not any(s.get("instance_cleanup_pending") for s in stats()[:1]):
                 break
             time.sleep(PREHEAT_POLL_INTERVAL_SEC)
