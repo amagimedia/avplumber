@@ -473,6 +473,19 @@ blocks, skipped blocks, output drops and, per source, `dropped` (late),
 `missing` (filled with silence) and `jumps` (timestamp discontinuities); per bus,
 `program_delay_ms` and `extra_latency_ms`.
 
+`set_source_gain`, `{"source": <id>, "gain": <linear>}`, is a persistent
+operator volume for one source, kept apart from the gains a take moves: it
+multiplies into them, so a crossfade still ends with each source at its own
+level rather than at 1. Negative values are clamped to zero and there is no
+ceiling; an unknown id is ignored. Like an AFV event it is queued and applied
+on the mix thread, and the applied value glides to the new one over the same
+few tens of milliseconds, so a change does not click.
+
+`status.sources[]` reports it as `gain`, linear. That is the level last asked
+for, not the one in force at that instant — a glide still on its way is not
+visible there. `pyplumber.mixer.audio_gain` is the controller built on these
+two, converting to and from dB and treating this `gain` as its stored state.
+
 -   `src` (list of edges) and `source_ids` (same length; logical mixer source ids)
 -   `outputs` (object: bus id → output edge), e.g. `{"program": "audio_mixer_program"}`
 -   `dst_channel_layout` (string, default `stereo`), `dst_sample_rate` (default 48000),
