@@ -166,6 +166,42 @@ def test_aux_bus_audio_port_is_surfaced_in_preview_outputs():
     assert "audio" not in previews["aux2"]
 
 
+def test_only_a_buss_first_rendition_can_claim_its_audio():
+    """A bus's audio leg, its audio_mixer bus and its port check are all renditions[0]'s
+    (aux.py, application.py), so a later rendition's audio_port must not paint a mute button
+    the operator's click could never reach. parse rejects a second aux rendition today, so
+    this pins the settings rule rather than a reachable config."""
+    from dataclasses import replace as dc_replace
+    cfg = mixer_config.parse({
+        "canvas": CONFIG["canvas"], "sources": [{**CONFIG["sources"][0], "has_audio": True}],
+        "scenes": [{"id": "full", "items": CONFIG["scenes"][0]["items"]}],
+        "renditions": [{"id": "record", "target": "program.ts"}],
+        "aux_buses": [{"id": "aux1", "renditions": [{"id": "aux1_sdr", "port": 5010}]}],
+    })
+    bus = cfg.aux_buses[0]
+    second = dc_replace(bus.renditions[0], id="aux1_extra", port=5020, audio_port=5022)
+    cfg = dc_replace(cfg, aux_buses=(dc_replace(bus, renditions=(bus.renditions[0], second)),))
+    previews = {o["rendition"]: o for o in cfg.settings()["preview_outputs"]}
+    assert "audio" not in previews["aux1_sdr"]     # renditions[0], no audio_port of its own
+    assert "audio" not in previews["aux1_extra"]   # has one, but nothing is wired to it
+
+
+def test_a_show_without_audio_leaves_the_legacy_audio_ports_free():
+    """5002/5003 are reserved for the legacy single audio leg because any has_audio source
+    claims them at runtime -- but a show with no audio never builds that leg, and had no
+    reason to refuse a video rendition on those ports."""
+    def show(port, has_audio):
+        return mixer_config.parse({
+            "canvas": CONFIG["canvas"], "sources": [{**CONFIG["sources"][0], "has_audio": has_audio}],
+            "scenes": [{"id": "full", "items": CONFIG["scenes"][0]["items"]}],
+            "renditions": [{"id": "sdr", "target": "janus", "port": port}],
+            "aux_buses": [],
+        })
+    assert show(5002, False).renditions[0].port == 5002
+    with pytest.raises(mixer_config.ConfigError, match="distinct RTP/RTCP"):
+        show(5002, True)
+
+
 def test_aux_bus_with_audio_port_gets_its_own_outputs_entry(native_boundary, monkeypatch):
     """The AuxBus/AuxBuses themselves (their own audio leg) are covered in test_aux.py; this
     isolates the one line in application.py that decides audio_mixer's outputs map, by faking

@@ -40,7 +40,7 @@ def outputs(show, extra_aux=0):
     extra_ids = {b.id for b in cfg.aux_buses[-extra_aux:]} if extra_aux else set()
     result = {}
 
-    def add(key, rendition, aux=False, extra=False):
+    def add(key, rendition, aux=False, extra=False, with_audio=True):
         codec = rendition.codec or default_codec(cfg.working_format)
         hevc = "hevc" in codec
         color = rendition_color(cfg.out_color, codec, rendition.color or None, rendition.tonemap)
@@ -49,7 +49,7 @@ def outputs(show, extra_aux=0):
         fmtp = f"profile-id={2 if profile == 'main10' else 1}" if hevc else (
             f"profile-level-id={'640028' if profile == 'high' else '4d0028' if profile == 'main' else '42e028'};packetization-mode=1")
         result[key] = _create(key, rendition.port or 5004, "h265" if hevc else "h264", fmtp, extra=extra)
-        if rendition.audio_port:
+        if rendition.audio_port and with_audio:
             result[key].update(_audio(audio=JanusAudioConfig(audio_port=rendition.audio_port)))
         elif not aux and rendition.id == cfg.audio_rendition:
             result[key].update(_audio())
@@ -58,8 +58,11 @@ def outputs(show, extra_aux=0):
         if rendition.target == "janus" and (rendition.feed != "clean" or cfg.dsk_keys):
             add(rendition.id, rendition)
     for bus in cfg.aux_buses:
-        for rendition in bus.renditions:
-            add(f"{bus.id}:{rendition.id}", rendition, aux=True, extra=bus.id in extra_ids)
+        # Only renditions[0] carries the bus's audio leg (aux.py), so only it gets an audio
+        # mountpoint, however many renditions a bus grows.
+        for index, rendition in enumerate(bus.renditions):
+            add(f"{bus.id}:{rendition.id}", rendition, aux=True, extra=bus.id in extra_ids,
+                with_audio=index == 0)
     ids = [spec["id"] for spec in result.values()]
     if len(ids) != len(set(ids)):
         raise ValueError("Janus outputs must have distinct RTP ports and mountpoint IDs")

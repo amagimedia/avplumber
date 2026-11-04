@@ -110,6 +110,14 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
             "name": f"decode_audio_{tag}", "src": edge("audio_packets"), "dst": edge("audio_decoded"),
             "group": group, **restart,
         }))
+        # audio_mixer's ingest() would convert rate, format and layout itself, so this node is
+        # not needed for correctness. It is here for where the work runs: the mixer ingests
+        # every source on one thread, inside the mutex its block deadlines and gain commands
+        # also wait on, so a show of 48 sources would serialize 48 resamplers in that critical
+        # section. One node per source keeps them off it, in parallel. (It converts rate and
+        # format only -- the layout passes through, see ResampleAudioForwardChannels -- so for
+        # a mono or 5.1 source ingest() still resamples, and for a 48 kHz fltp stereo source
+        # it already takes its copy-only path.)
         avp.addNode(api.ResampleAudioForwardChannels({
             "name": f"resample_audio_{tag}", "src": edge("audio_decoded"), "dst": edge("audio_resampled"),
             "dst_sample_rate": audio_sample_rate,

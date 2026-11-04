@@ -397,10 +397,12 @@ class MixerConfig:
             if r.feed == "clean" and r.target == "janus":
                 output = preview(r)
                 previews.append({"bus": f"clean_{r.id}", "label": f"Program clean · {output['color'].upper()}", **output})
+        # Only renditions[0] of a bus gets an audio leg (aux.py) and a mixer bus
+        # (application.py), so only its audio_port may show a mute button.
         previews += [{"bus": b.id, "label": aux_label(b.id, b.label, b.layout),
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
                       "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps,
-                      **({"audio": True} if r.audio_port else {})}
+                      **({"audio": True} if b.renditions[0].audio_port else {})}
                      for b in self.aux_buses for r in b.renditions]
         aliases = self.alias_counts
         return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
@@ -600,14 +602,16 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
     return rendition
 
 
-def check_janus_ports(renditions, default_port: int = 5004, default_audio_port: int = 5002) -> None:
+def check_janus_ports(renditions, default_port: int = 5004, default_audio_port: int = 5002,
+                      reserve_audio: bool = True) -> None:
     """Janus renditions need distinct RTP ports whose RTCP port (RTP + 1) is free too; port 0 is
     the mixer's --janus-video-port, 5004 by default. A rendition's audio_port (if set) needs the
     same, against the same pool: it shares the UDP port space with every video leg, and with the
-    legacy single audio leg's default port (--janus-audio-port, 5002), reserved whether or not a
-    rendition opts into it, since any has_audio source claims it at runtime. parse_aux_buses checks
-    the main renditions together with the aux ones."""
-    used = {default_audio_port, default_audio_port + 1}
+    legacy single audio leg's default port (--janus-audio-port, 5002), which `reserve_audio`
+    reserves whether or not a rendition opts into it, since any has_audio source claims it at
+    runtime. A show with no audio at all claims neither and may use those ports for video.
+    parse_aux_buses checks the main renditions together with the aux ones."""
+    used = {default_audio_port, default_audio_port + 1} if reserve_audio else set()
     for r in renditions:
         if r.target != "janus":
             continue
@@ -910,7 +914,10 @@ def parse_aux_buses(values, cfg):
             raise ConfigError(f"aux {bid}: label must be a string")
         result.append(AuxBusConfig(bid, tuple(scenes), (r,), layouts[0], tuple(layouts), max_layers,
                                    label=obj.get("label", ""), **timing))
-    check_janus_ports([*cfg.renditions, *(b.renditions[0] for b in result)])
+    # The legacy audio leg's default ports are only claimed where a source actually has audio;
+    # audio_rendition is None exactly then, and is what decides whether that leg is built.
+    check_janus_ports([*cfg.renditions, *(b.renditions[0] for b in result)],
+                      reserve_audio=cfg.audio_rendition is not None)
     return tuple(result)
 
 
