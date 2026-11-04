@@ -283,9 +283,9 @@ def test_browser_frame_queue_is_at_most_nine(tmp_path):
         parse({**show, "browser_frame_queue": 10})
 
 
-def test_return_queue_is_part_of_the_frame_queue():
-    from pyplumber.mixer.dmabuf_inputs import return_queue
-    assert [return_queue(n) for n in (1, 3, 4, 5, 6, 9)] == [0, 0, 1, 2, 3, 3]
+def test_hold_leaves_one_frame_of_the_queue_to_the_browser():
+    from pyplumber.mixer.dmabuf_inputs import hold_frames
+    assert [hold_frames(n) for n in (1, 3, 6, 9)] == [0, 2, 5, 8]
 
 
 @pytest.mark.parametrize("size", [4, 6, 9])
@@ -1508,6 +1508,29 @@ def test_cuarray_profile_only_changes_encoded_generated_inputs():
         assert all("decode_storage" not in source for source in recipe_for(INSTANCE_PROFILES[instance], DEFAULT_SETTINGS)["inputs"])
 
 
+def test_decode_mix_changes_the_sdr_clips_codec_and_nothing_else(tmp_path):
+    """The qualified show stays as it is ("profile", also what settings saved before the option
+    mean); h264 and mixed change the SDR 4:2:0 group only, HLG clips stay HEVC."""
+    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]
+    qualified = recipe_for(profile, DEFAULT_SETTINGS)
+    assert recipe_for(profile, {k: v for k, v in DEFAULT_SETTINGS.items() if k != "decode_mix"}) == qualified
+    assert qualified["inputs"][0]["codec"] == "hevc" and qualified["setup"]["decode_mix"] == "profile"
+    h264 = recipe_for(profile, {**DEFAULT_SETTINGS, "decode_mix": "h264"})
+    assert h264["inputs"][0] == {**qualified["inputs"][0], "codec": "h264"}
+    mixed = recipe_for(profile, {**DEFAULT_SETTINGS, "decode_mix": "mixed"})
+    assert mixed["inputs"][0] == {**{k: v for k, v in qualified["inputs"][0].items() if k != "codec"},
+                                  "codecs": ["hevc", "h264"], "gops": ["low_delay", "low_delay", "b_frames", "b_frames"]}
+    for recipe in (h264, mixed):
+        assert recipe["inputs"][1:] == qualified["inputs"][1:]
+        show, _, _ = prepare_demo.plan(recipe, tmp_path)
+        hlg = [s for s in show["sources"] if s["id"].startswith("hlg420_") and s["kind"] == "video"]
+        assert hlg and all("hevc_nvenc" in s["path"] for s in hlg)
+    sdr = [s["path"] for s in prepare_demo.plan(mixed, tmp_path)[0]["sources"] if s["id"].startswith("sdr420_0")]
+    assert [("h264" in path, "b_frames" in path) for path in sdr[:4]] == [(False, False), (True, False), (False, True), (True, True)]
+    with pytest.raises(ValueError, match="decode_mix"):
+        recipe_for(profile, {**DEFAULT_SETTINGS, "decode_mix": "av1"})
+
+
 @pytest.mark.parametrize("fps", [25, 30, 50, 60])
 @pytest.mark.parametrize("depth,chroma", [(8, "420"), (10, "420"), (10, "422")])
 def test_setup_keeps_capacity_profile_runtime_bounds(tmp_path, fps, depth, chroma):
@@ -1562,6 +1585,22 @@ def test_extra_aux_budget_uses_selected_codec(tmp_path, extra_codec, expected):
     show, _, _ = prepare_demo.plan(recipe, tmp_path)
     cfg = parse({**show, "aux_buses": own_aux(preset="p1")})
     assert extra_aux_limit(T4, cfg, recipe["setup"]["encodes"]) == expected
+
+
+def test_a_show_start_waits_for_janus_at_a_host_boot(runtime, monkeypatch):
+    runtime.janus_api = "http://127.0.0.1:8088/janus"
+    monkeypatch.setattr("pyplumber.mixer.gui.setup_runtime.JANUS_RETRY_SEC", 0)
+    monkeypatch.setattr(runtime, "_stop", lambda **kwargs: None)
+    monkeypatch.setattr(runtime, "_start", lambda path: None)
+    calls = []
+    def sync(api, specs, prune=False, replace=False):
+        calls.append(replace)
+        if len(calls) == 1:
+            raise ConnectionResetError(104, "Connection reset by peer")
+    monkeypatch.setattr("pyplumber.mixer.gui.setup_runtime.janus_mountpoints.sync", sync)
+    apply_and_wait(runtime, KEYED)
+    assert runtime.status()["phase"] == "running"
+    assert calls[:2] == [True, True]
 
 
 def test_janus_codec_replacement_happens_stopped_and_restores_before_rollback(runtime, monkeypatch):

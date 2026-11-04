@@ -5,6 +5,7 @@ namespace avp::mixer {
 
 void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec) {
     if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid wipe duration");
+    avp::timeline::mark("wipe pressed: " + scene_name);
     const auto check = [&] {
         if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
         if (!state_->wipeSubgraph()) throw Error("mixer: wipe requires the wipe subgraph");
@@ -99,6 +100,7 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
             state_->take_start_ns = overlay;
             state_->take_phase = MixerState::TakePhase::Wipe;
             state_->wipe_on_air = true;
+            avp::timeline::mark("wipe on air");
             if (state_->take_request) {
                 // The keys going with the lever's wipe switch where its background does, both ways.
                 // Its clip followed the lever below the switch point (leverTo) and goes on to the

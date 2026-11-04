@@ -48,6 +48,48 @@ FADE_CURVES = ("linear", "ease-in", "ease-out", "ease-in-out")
 DEFAULT_FADE_CURVE = "linear"
 MAX_KEY_FADE_SECONDS = 10.0   # mixer_keyer rejects fade_inputs duration_ms above 10000
 MAX_DPB_SIZE = 16             # H.264/HEVC allow at most 16 reference frames
+# A CUarray decoder's pool (decode_storage "cuarray"): NVDEC registers at most 32 surfaces, and
+# FFmpeg's nvdec hwaccel asks for the stream's own surfaces (nvdec_codec_surfaces) plus five working
+# ones (two in ff_nvdec_frame_params, three base work surfaces in ff_decode_get_hw_frames_ctx) plus
+# extra_hw_frames. A pool above 32 fails at decoder open (deps/ffmpeg/9/0012); the decoder logs
+# the pool without the three base surfaces ("decoder pool N surfaces": avcodec_get_hw_frames_parameters).
+NVDEC_MAX_SURFACES = 32
+NVDEC_WORKING_SURFACES = 5
+MAX_EXTRA_HW_FRAMES = NVDEC_MAX_SURFACES - NVDEC_WORKING_SURFACES   # 27: more never opens, whatever the stream
+# The deinterlacer of a `deinterlace` source: one frame per input frame, field order from the frame,
+# frames the decoder did not flag interlaced pass unchanged. It reads linear CUDA frames only.
+DEINTERLACE_FILTER = "bwdif_cuda=mode=send_frame:parity=auto:deint=interlaced"
+# libavcodec/h264_ps.c level_max_dpb_mbs: MaxDpbMbs per level_idc, which bounds the reorder depth
+# an H.264 SPS without VUI bitstream_restriction gets (H264_MAX_DPB_FRAMES - 1 = 15 at most).
+H264_LEVEL_MAX_DPB_MBS = {10: 396, 11: 900, 12: 2376, 13: 2376, 20: 2376, 21: 4752, 22: 8100, 30: 8100,
+                          31: 18000, 32: 20480, 40: 32768, 41: 32768, 42: 34816, 50: 110400, 51: 184320,
+                          52: 184320}
+
+
+def h264_level_reorder(level_idc: int, width: int, height: int) -> int:
+    """The reorder depth libavcodec derives for an H.264 SPS without bitstream_restriction (and with
+    references): MaxDpbMbs of the level over the picture's macroblocks, at most 15; 15 for a level it
+    does not know. 4 at 1080p for levels 4.0-4.2, 13 at 5.0, 15 at 5.1 and 5.2."""
+    macroblocks = -(-width // 16) * -(-height // 16)
+    return min(H264_LEVEL_MAX_DPB_MBS.get(level_idc, 15 * macroblocks) // macroblocks, 15)
+
+
+def nvdec_codec_surfaces(codec: str, *, refs: int = 0, reorder: int = 0, max_dec_pic_buffering: int = 0) -> int:
+    """The surfaces a stream's own parameters claim in FFmpeg's nvdec hwaccel, before the working
+    surfaces and extra_hw_frames: H.264 max_num_ref_frames + num_reorder_frames (from the VUI, or
+    h264_level_reorder without one), HEVC sps_max_dec_pic_buffering + 1 (the SPS codes it minus one;
+    *max_dec_pic_buffering* is the value, minus1 + 1), AV1 16, VP9 8, MPEG-1/2 2."""
+    if codec == "h264":
+        return refs + reorder
+    if codec == "hevc":
+        return max_dec_pic_buffering + 1
+    return {"av1": 16, "vp9": 8, "mpeg1video": 2, "mpeg2video": 2}[codec]
+
+
+def nvdec_pool_surfaces(codec_surfaces: int, extra_hw_frames: int) -> int:
+    """The CUarray pool FFmpeg allocates for a stream claiming *codec_surfaces*: it fails to open
+    above NVDEC_MAX_SURFACES."""
+    return codec_surfaces + NVDEC_WORKING_SURFACES + extra_hw_frames
 
 
 def fade_curve(value: Any, where: str) -> str:
@@ -95,8 +137,8 @@ BROWSER_FRAME_QUEUE_MAX = 9
 
 def default_browser_frame_queue(fps):
     """Frames one browser window may have out at once, at any rate: all nine of the stock capture
-    pool. The mixer takes up to three of them to return frames one per new frame
-    (dmabuf_inputs.return_queue)."""
+    pool. The mixer keeps all but one of them out (dmabuf_inputs.hold_frames), so the browser
+    recycles a fixed set of buffers."""
     return BROWSER_FRAME_QUEUE_DEFAULT
 
 
@@ -147,6 +189,13 @@ class Source:
     # storage with the source's colour matching the canvas, the source needs no colour filter.
     decoded_format: str = ""
     extra_hw_frames: int = 3       # CUarray application headroom, beyond codec/working surfaces
+    # Field-coded or MBAFF video: decoded on linear CUDA (the CUDA deinterlacers read no CUarray) and
+    # deinterlaced by DEINTERLACE_FILTER as its source filter, which keeps the decoder's storage.
+    deinterlace: bool = False
+    # canvas.decoder_park_limit, on a CUarray source: a closed decoder is parked (its pool kept) for
+    # the next source of that format, instead of destroyed under the driver lock in the middle of
+    # the show; the oldest beyond this many more than the show's peak go.
+    park_limit: int = 0
     capture_cadence: str = "continuous"  # browser: "on_change" permits intentional static holds
     has_audio: bool = False        # demux/decode an audio track alongside video (kind == "video" only)
 
@@ -155,7 +204,9 @@ class Source:
         if self.decode_storage != "cuarray":
             return {}
         return {"pixel_format": "cuarray", "auto_restart": "off", "options": {
-            "threads": 1, "hwaccel_flags": "unsafe_output", "extra_hw_frames": self.extra_hw_frames}}
+            "threads": 1, "hwaccel_flags": "unsafe_output+extra_hw_frames_only+private_stream",
+            "extra_hw_frames": self.extra_hw_frames},
+            **({"park": True, "park_limit": self.park_limit} if self.park_limit else {})}
 
     @property
     def color(self):
@@ -287,6 +338,8 @@ class MixerConfig:
     source_fan_out: str = "thread"       # canvas.source_fan_out: one of SOURCE_FAN_OUTS
     decoded_frames_ahead: Optional[int] = None   # canvas.decoded_frames_ahead: decoded frames queued before pacing
     raw_pool_frames: Optional[int] = None        # canvas.raw_pool_frames: device frames per direct/resident raw source
+    decoder_pool_budget_mib: Optional[int] = None  # canvas.decoder_pool_budget_mib: all CUarray decoder pools together
+    decoder_park_limit: Optional[int] = None       # canvas.decoder_park_limit: closed CUarray decoders kept, not destroyed
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBusConfig, ...] = ()
@@ -455,11 +508,22 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     storage, extra = s.get("decode_storage", "cuda"), s.get("extra_hw_frames", 3)
     if storage not in ("cuda", "cuarray") or kind != "video" and ("decode_storage" in s or "extra_hw_frames" in s):
         raise ConfigError(f"{where}: decode_storage applies to video sources and must be cuda or cuarray")
-    if type(extra) is not int or not 0 <= extra <= 32:
-        raise ConfigError(f"{where}: extra_hw_frames must be an integer from 0 to 32")
+    if type(extra) is not int or not 0 <= extra <= MAX_EXTRA_HW_FRAMES:
+        raise ConfigError(f"{where}: extra_hw_frames must be an integer from 0 to {MAX_EXTRA_HW_FRAMES}: a CUarray pool "
+                          f"holds at most {NVDEC_MAX_SURFACES} surfaces, {NVDEC_WORKING_SURFACES} of them FFmpeg's working ones")
     decoded_format = s.get("decoded_format", "")
     if decoded_format not in ("", "nv12", "p010le") or decoded_format and (kind != "video" or source_filter):
         raise ConfigError(f"{where}: decoded_format is nv12 or p010le, on a video source without a filter")
+    deinterlace = s.get("deinterlace", False)
+    if not isinstance(deinterlace, bool) or deinterlace and kind != "video":
+        raise ConfigError(f"{where}: deinterlace must be a boolean on a video source")
+    if deinterlace:
+        # The deinterlacer is the source filter; it reads linear CUDA frames and keeps their storage,
+        # so the decoder's storage is what the filter outputs.
+        if source_filter or storage != "cuda" or not decoded_format:
+            raise ConfigError(f"{where}: deinterlace needs decode_storage cuda, decoded_format (nv12 or p010le) "
+                              "and no filter of its own")
+        source_filter, filter_format, decoded_format = DEINTERLACE_FILTER, decoded_format, ""
     cadence = s.get("capture_cadence", "continuous")
     if cadence not in ("continuous", "on_change") or "capture_cadence" in s and kind != "browser":
         raise ConfigError(f"{where}: capture_cadence must be continuous or on_change on a browser source")
@@ -486,7 +550,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
-                  has_audio=has_audio,
+                  has_audio=has_audio, deinterlace=deinterlace,
                   decoded_format=decoded_format,
                   transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,
                   **(color.tags if color else {}))
@@ -623,6 +687,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
         raise ConfigError(f"canvas.source_fan_out must be one of {', '.join(SOURCE_FAN_OUTS)}")
     raw_pool_frames = _optional_canvas_count(canvas, "raw_pool_frames", 1, "frames")
     decoded_frames_ahead = _optional_canvas_count(canvas, "decoded_frames_ahead", 1, "frames")
+    decoder_pool_budget_mib = _optional_canvas_count(canvas, "decoder_pool_budget_mib", 1, "MiB")
+    decoder_park_limit = _optional_canvas_count(canvas, "decoder_park_limit", 1, "decoders")
     input_poll_ms = _optional_canvas_count(canvas, "input_poll_ms", 0, "milliseconds")
     aux_input_poll_ms = _optional_canvas_count(canvas, "aux_input_poll_ms", 0, "milliseconds")
     try:
@@ -645,6 +711,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             raise ConfigError(f"{where}: '{key[1]}' already declared as '{locations[key][0]}'; "
                               "reference that id instead, or mark both independent for separate input chains")
         locations[key] = (sources[-1].id, independent)
+    if decoder_park_limit:
+        # Only a CUarray decoder has a pool to park; the decoder node refuses `park` on any other.
+        sources = [replace(s, park_limit=decoder_park_limit) if s.decode_storage == "cuarray" else s for s in sources]
     if not sources:
         raise ConfigError("sources must not be empty")
     if len(sources) > MAX_SOURCES:
@@ -705,7 +774,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        initial_scene=initial, working_format=working_format, raw_upload=raw_upload, input_routing=input_routing,
                        latency_ms=latency_ms, input_poll_ms=input_poll_ms, aux_input_poll_ms=aux_input_poll_ms,
                        source_fan_out=source_fan_out, decoded_frames_ahead=decoded_frames_ahead,
-                       raw_pool_frames=raw_pool_frames, out_color=out_color,
+                       raw_pool_frames=raw_pool_frames, decoder_pool_budget_mib=decoder_pool_budget_mib,
+                       decoder_park_limit=decoder_park_limit, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))

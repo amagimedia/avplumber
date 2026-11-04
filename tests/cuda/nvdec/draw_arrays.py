@@ -169,7 +169,9 @@ def run(args, name, storage, chain=(), payloads=nothing, counters=True):
     avp, errors = make_avp("draw_gpu", capacity=3)
     options = {"threads": 1}
     if storage == "cuarray":
-        options.update(hwaccel_flags="unsafe_output", extra_hw_frames=args.extra_hw_frames)
+        options.update(hwaccel_flags="unsafe_output+private_stream", extra_hw_frames=args.extra_hw_frames)
+        if args.extra_hw_frames >= 0:
+            options["hwaccel_flags"] += "+extra_hw_frames_only"
     nodes = [
         api.Input({"name": "input", "url": str(args.input), "dst": "packets"}),
         api.Demux({"name": "demux", "src": "packets", "routing": {"v:0": "video_packets"}}),

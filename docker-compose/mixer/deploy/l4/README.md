@@ -47,7 +47,9 @@ proportions. Per-type controls enforce the remaining total, shared NVDEC, HDR
 surface, browser/DSK and weighted upload budgets. Rate or format changes reduce
 custom counts where necessary, keeping disabled types at zero.
 Allow the public proxy port and `JANUS_RTP_PORT_RANGE` (UDP 20000–20100 by
-default). Set `MIXER_HTPASSWD` or use an authenticated reverse proxy.
+default). On a cloud VM keep `JANUS_NAT_1_1="auto"` (`.env.example`): Janus and the
+graph viewer read the public address from the instance metadata at every start, so
+a new ephemeral address after a stop and start needs no change. Set `MIXER_HTPASSWD` or use an authenticated reverse proxy.
 The included proxy forwards HTTP and WebSocket paths.
 
 The [current demo recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/)

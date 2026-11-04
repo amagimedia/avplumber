@@ -12,9 +12,10 @@ Server (avplumber) responds with line with status code and information:
 * `500 ERROR: ...`
 * `BYE` and connection close - special response for `bye` command
 
-The control port listens on every IPv4 interface and has no authentication. Any
+The control port listens on `127.0.0.1` unless started with `--control-bind` (see
+[Control methods](../README.md#control-methods)) and has no authentication. Any
 client that reaches it can run every command, including creating nodes that read
-and write files, so the deployment must restrict access to it (e.g. a firewall).
+and write files, so a deployment that opens it must restrict access (e.g. a firewall).
 
 ## Commands
 
@@ -253,7 +254,7 @@ Subscribe to statistics. JSON object structure:
 {
   "url":"",         // URL to put statistics using HTTP POST. Empty to write them to console.
   "name":"qwerty",  // opaque
-  "interval":1,     // refresh interval, in seconds
+  "interval":1,     // refresh interval, in seconds, from 0.001 to 86400; other values are rejected with 500 ERROR
   "streams":{
     "audio":[
       {

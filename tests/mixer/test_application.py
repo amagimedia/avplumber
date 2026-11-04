@@ -259,9 +259,9 @@ def test_startup_waits_for_processed_frames_and_aux_shares_them(native_boundary,
         monkeypatch.setattr("time.monotonic", lambda: next(ticks))
     try:
         if missing_frame:
-            with pytest.raises(RuntimeError, match="input readiness.*processed_cam"):
-                app.start()
-            assert not app.avp.ready
+            app.start()   # the show goes on without that source
+            assert app.avp.ready
+            assert app.absent_inputs == ("processed_cam",)
         else:
             app.start()
             assert app.avp.ready
@@ -536,3 +536,84 @@ def test_program_delivery_and_explicit_static_cadence():
 def test_production_api_exposes_program_delivery_node(native_boundary):
     from pyplumber.mixer.application import load_avp_api
     assert load_avp_api().MixerDelivery.TYPE == "mixer_delivery"
+
+
+def test_options_the_show_overrides_are_refused_instead_of_ignored():
+    cfg = show()   # 60 fps canvas, a recording rendition
+    with pytest.raises(ValueError) as error:
+        build_application(cfg, MixerOptions(fps=25, max_compositor_layers=7, output="other.mp4",
+                                            codec="hevc_nvenc", bitrate="20M"), api=fake_api())
+    for option in ("fps=25", "max_compositor_layers=7", "output='other.mp4'", "codec='hevc_nvenc'", "bitrate='20M'"):
+        assert option in str(error.value)
+    # Defaults, and values equal to the show's, are not conflicts.
+    build_application(cfg, MixerOptions(fps=cfg.fps, max_compositor_layers=cfg.max_compositor_layers), api=fake_api())
+    build_application(cfg, MixerOptions(), api=fake_api())
+
+
+class _Group:
+    def __init__(self, avp, name):
+        self.avp, self.name = avp, name
+
+    def startNodes(self):
+        if self.name in self.avp.broken:
+            raise RuntimeError("decoder did not open")
+        self.avp.started.append(self.name)
+
+
+class _SourcesAvp:
+    """Sources that start, sources that refuse to, and edges that see frames or do not."""
+
+    def __init__(self, broken=(), silent=()):
+        self.broken, self.silent, self.started, self.commands = set(broken), set(silent), [], []
+
+    def group(self, name):
+        return _Group(self, name)
+
+    def getEdge(self, edge, data_type=None):
+        return type("Edge", (), {"enqueued_total": 0 if edge in self.silent else 1})()
+
+    def executeCommandsFromString(self, text):
+        self.commands.extend(text.splitlines())
+
+
+def _sources_app(avp, sources=3, aliases=1):
+    return mixer_application.MixerApplication(
+        avp=avp, mixer=None, routed_inputs=False, preheat_timeout_sec=0.01,
+        input_groups=tuple(f"input_{i}" for i in range(sources)), input_edges=tuple(f"edge_{i}" for i in range(sources)),
+        compositor_inputs=tuple(tuple(range(i * aliases, (i + 1) * aliases)) for i in range(sources)))
+
+
+def test_a_source_that_cannot_start_stays_out_and_the_others_start():
+    avp = _SourcesAvp(broken={"input_1"})
+    app = _sources_app(avp)
+    assert app._start_inputs() == ("edge_1",)
+    assert avp.started == ["input_0", "input_2"]
+
+
+def test_a_show_with_no_source_left_does_not_start():
+    with pytest.raises(RuntimeError, match="no source started"):
+        _sources_app(_SourcesAvp(broken={"input_0", "input_1", "input_2"}))._start_inputs()
+
+
+def test_a_silent_source_is_given_up_at_the_timeout_when_others_gave_frames():
+    avp = _SourcesAvp(silent={"edge_2"})
+    assert _sources_app(avp)._wait_for_edges(("edge_0", "edge_2"), "input readiness", required=False) == ("edge_2",)
+
+
+def test_every_edge_silent_is_still_a_failed_start():
+    avp = _SourcesAvp(silent={"edge_0", "edge_1"})
+    with pytest.raises(RuntimeError, match="preheat timed out"):
+        _sources_app(avp)._wait_for_edges(("edge_0", "edge_1"), "input readiness", required=False)
+
+
+def test_a_required_edge_still_fails_the_start():
+    with pytest.raises(RuntimeError, match="preheat timed out"):
+        _sources_app(_SourcesAvp(silent={"edge_1"}))._wait_for_edges(("edge_0", "edge_1"), "warm-up")
+
+
+def test_no_tick_waits_for_an_absent_source_on_any_of_its_aliases():
+    avp = _SourcesAvp()
+    app = _sources_app(avp, aliases=2)
+    app.absent_inputs = ("edge_1",)
+    app._release_absent_inputs()
+    assert avp.commands == [f"node.object.set mixer_comp_{slot} release_input {i}" for slot in "ab" for i in (2, 3)]

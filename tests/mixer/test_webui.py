@@ -758,6 +758,10 @@ def test_delivery_totals_are_the_pages_sums_or_nothing_while_a_bus_is_missing():
     assert delivery_totals({**state, "aux_buses": state["aux_buses"][:1]}) is None       # one bus has not reported
     assert delivery_totals({**state, "status": {}}) is None
     assert delivery_totals({"status": state["status"], "settings": {}}) == {"missed_deadlines": 1, "output_drops": 0}
+    # A mixer that reports its decoders adds the pictures they repeated short of surfaces; the gauges stay out.
+    decoders = {"surface_repeats": 12, "surface_exhausted_now": 1, "degraded_now": 0}
+    assert delivery_totals({**state, "status": {**state["status"], "decoders": decoders}}) == \
+        {"missed_deadlines": 3, "output_drops": 5, "surface_repeats": 12}
 
 
 class PlayoutBridge:
@@ -1093,6 +1097,7 @@ def test_bridge_never_resends_a_command_the_mixer_answered_or_may_have_run():
     with pytest.raises(TimeoutError):
         bridge.command("slow")
     time.sleep(0.6)   # past the slow reply: a resend would have arrived
+    bridge.timeout = 5   # the control port serves one connection at a time; it may still be on the slow one
     bridge.command("next")   # on a new connection: the slow reply cannot answer it
     assert received == [(0, "rejected"), (0, "slow"), (1, "next")]
 

@@ -29,9 +29,17 @@ def rate(kbps: int) -> list:
     return ["-b:v", f"{kbps}k", "-maxrate", f"{PEAK_KBPS}k", "-bufsize", f"{2 * kbps}k"]
 
 
-def encoding_options(encoder: str, kbps: int, fps: int) -> list:
+# The reference structure of an encoded fixture: what its decoder's pool holds beyond FFmpeg's working
+# surfaces and extra_hw_frames (pyplumber.mixer.config.nvdec_pool_surfaces). low_delay is the qualified
+# show's shape (two references, no B-frames); b_frames a contribution-like one (three B-frames in a
+# pyramid over four references, reorder depth two).
+GOP_SHAPES = {"low_delay": ["-bf", "0", "-dpb_size", "2"],
+              "b_frames": ["-bf", "3", "-b_ref_mode", "middle", "-dpb_size", "4"]}
+
+
+def encoding_options(encoder: str, kbps: int, fps: int, gop: str = "low_delay") -> list:
     # Bound each demo decoder's reference surfaces without reducing its playout buffer.
-    references = ["-bf", "0", "-dpb_size", "2"] if encoder in ("h264_nvenc", "hevc_nvenc") else []
+    references = GOP_SHAPES[gop] if encoder in ("h264_nvenc", "hevc_nvenc") else []
     return [*rate(kbps), "-g", str(fps), *references]
 
 
@@ -48,9 +56,10 @@ GENERATORS = {
 
 
 def render(directory: pathlib.Path, name: str, graph: str, size: str, fps: int, seconds: int,
-           encoder: str, ffmpeg: str, overlay=None, kbps: int = INPUT_KBPS[-1]) -> pathlib.Path:
+           encoder: str, ffmpeg: str, overlay=None, kbps: int = INPUT_KBPS[-1],
+           gop: str = "low_delay") -> pathlib.Path:
     """*overlay* is (extra FFmpeg input arguments, filter_complex over [0:v] and [1:v],
-    stdin bytes for that input), e.g. prepare_demo.id_overlay()."""
+    stdin bytes for that input), e.g. prepare_demo.id_overlay(); *gop* one of GOP_SHAPES."""
     raw = encoder == "rawvideo"
     out = directory / f"{name}.{'nv12' if raw else 'mp4'}"
     source = f"{graph}{':' if '=' in graph else '='}size={size}:rate={fps},{GRAIN}"
@@ -59,7 +68,7 @@ def render(directory: pathlib.Path, name: str, graph: str, size: str, fps: int, 
                     *(["-filter_complex", graph_filter] if graph_filter else []), "-t", str(seconds),
                     "-c:v", encoder,
                     *(["-f", "rawvideo", "-pix_fmt", "nv12"] if raw else
-                      [*encoding_options(encoder, kbps, fps), "-pix_fmt", "yuv420p"]), str(out)],
+                      [*encoding_options(encoder, kbps, fps, gop), "-pix_fmt", "yuv420p"]), str(out)],
                    input=data, check=True)
     return out
 

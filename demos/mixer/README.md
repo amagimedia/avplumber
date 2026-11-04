@@ -46,8 +46,7 @@ see [host setup](../README.md#nvidia-host-setup).
 docker compose -f docker-compose/mixer/compose.yaml up --build
 ```
 
-The default Fedora/CUDA image requires driver R615 or newer. For the older
-Ubuntu/CUDA image, prefix every build/start with `MIXER_DOCKERFILE=Dockerfile`.
+The Fedora/CUDA image requires driver R615 or newer.
 The [L4 preset](../../docker-compose/mixer/deploy/l4/README.md) supplies a separate measured configuration.
 
 Open <http://127.0.0.1:7681/setup/>, choose sources, canvas and outputs, then
@@ -56,8 +55,8 @@ player at <http://127.0.0.1:8080>. Select SDR if HEVC playback is unavailable.
 
 For a remote host set `JANUS_HOST_IP=<host>`; allow TCP 7681/8080 and UDP
 20000–20100. Stop with `docker compose -f docker-compose/mixer/compose.yaml down`.
-The page and the mixer's control port 7777 have no authentication: allow them
-only from trusted networks, or use the L4 preset's proxy with `MIXER_HTPASSWD`.
+The page has no authentication: allow it only from trusted networks, or use the
+L4 preset's proxy with `MIXER_HTPASSWD`. The mixer's control port 7777 stays on loopback.
 `MIXER_BIND=127.0.0.1` keeps the page local.
 
 Setup saves settings and generated assets in `media/`; applying changes pauses

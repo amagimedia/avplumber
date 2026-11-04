@@ -155,3 +155,49 @@ av::Packet createEofPacket(int streamIndex)
     p.setStreamIndex(streamIndex);
     return p;
 }
+
+static const char *const kStreamRestartKey = "avplumber_stream_restart";
+
+// The packet's string metadata side data as a dictionary (empty without one); the caller frees it.
+static AVDictionary *packetStrings(const av::Packet &p)
+{
+    AVDictionary *dict = nullptr;
+    size_t size = 0;
+    if (const uint8_t *data = av_packet_get_side_data(p.raw(), AV_PKT_DATA_STRINGS_METADATA, &size))
+        av_packet_unpack_dictionary(data, size, &dict);
+    return dict;
+}
+
+// Replaces the packet's string metadata with `dict`, or removes it when `dict` is empty.
+static void setPacketStrings(av::Packet &p, const AVDictionary *dict)
+{
+    AVPacket *pkt = p.raw();
+    if (!av_dict_count(dict)) {
+        av_packet_side_data_remove(pkt->side_data, &pkt->side_data_elems, AV_PKT_DATA_STRINGS_METADATA);
+        return;
+    }
+    size_t size = 0;
+    uint8_t *data = av_packet_pack_dictionary(const_cast<AVDictionary *>(dict), &size);
+    if (data && av_packet_add_side_data(pkt, AV_PKT_DATA_STRINGS_METADATA, data, size) < 0)
+        av_free(data);
+}
+
+void markStreamRestart(av::Packet &p)
+{
+    AVDictionary *dict = packetStrings(p);
+    av_dict_set(&dict, kStreamRestartKey, "1", 0);
+    setPacketStrings(p, dict);
+    av_dict_free(&dict);
+}
+
+bool takeStreamRestart(av::Packet &p)
+{
+    AVDictionary *dict = packetStrings(p);
+    const bool marked = av_dict_get(dict, kStreamRestartKey, nullptr, 0) != nullptr;
+    if (marked) {
+        av_dict_set(&dict, kStreamRestartKey, nullptr, 0);
+        setPacketStrings(p, dict);
+    }
+    av_dict_free(&dict);
+    return marked;
+}

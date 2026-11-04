@@ -15,10 +15,10 @@ Subject: [PATCH] avfilter: port band_blur_cuda
  create mode 100644 libavfilter/vf_band_blur_cuda.cu
 
 diff --git a/configure b/configure
-index 75d6192..eb3a41c 100755
+index fe0eb27..069c974 100755
 --- a/configure
 +++ b/configure
-@@ -3549,6 +3549,7 @@ bilateral_cuda_filter_deps="ffnvcodec"
+@@ -3547,6 +3547,7 @@ bilateral_cuda_filter_deps="ffnvcodec"
  bilateral_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
  chromakey_cuda_filter_deps="ffnvcodec"
  chromakey_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
@@ -27,10 +27,10 @@ index 75d6192..eb3a41c 100755
  colorspace_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
  crop_cuda_filter_deps="ffnvcodec"
 diff --git a/doc/filters.texi b/doc/filters.texi
-index 0d1cffe..d8151d6 100644
+index 6b256df..0167152 100644
 --- a/doc/filters.texi
 +++ b/doc/filters.texi
-@@ -28334,6 +28334,52 @@ For the alpha plane, a 3x3 box radius will be run 7 times.
+@@ -28453,6 +28453,52 @@ For the alpha plane, a 3x3 box radius will be run 7 times.
  @end example
  @end itemize
  
@@ -84,10 +84,10 @@ index 0d1cffe..d8151d6 100644
  RGB colorspace color keying.
  
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index f690fb2..31ee838 100644
+index 2104a70..a4bd8ef 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
-@@ -205,6 +205,8 @@ OBJS-$(CONFIG_AVGBLUR_OPENCL_FILTER)         += vf_avgblur_opencl.o opencl.o \
+@@ -204,6 +204,8 @@ OBJS-$(CONFIG_AVGBLUR_OPENCL_FILTER)         += vf_avgblur_opencl.o opencl.o \
  OBJS-$(CONFIG_AVGBLUR_VULKAN_FILTER)         += vf_avgblur_vulkan.o vulkan.o vulkan_filter.o
  OBJS-$(CONFIG_BACKGROUNDKEY_FILTER)          += vf_backgroundkey.o
  OBJS-$(CONFIG_BBOX_FILTER)                   += bbox.o vf_bbox.o
@@ -95,7 +95,7 @@ index f690fb2..31ee838 100644
 +                                                cuda/load_helper.o
  OBJS-$(CONFIG_BENCH_FILTER)                  += f_bench.o
  OBJS-$(CONFIG_BILATERAL_FILTER)              += vf_bilateral.o
- OBJS-$(CONFIG_BILATERAL_CUDA_FILTER)         += vf_bilateral_cuda.o vf_bilateral_cuda.ptx.o
+ OBJS-$(CONFIG_BILATERAL_CUDA_FILTER)         += vf_bilateral_cuda.o vf_bilateral_cuda.ptx.o \
 diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
 index 8c6384e..db8e87d 100644
 --- a/libavfilter/allfilters.c
@@ -796,6 +796,3 @@ index 0000000..9aeabe1
 +}
 +
 +}
--- 
-2.55.0
-

@@ -15,19 +15,21 @@
 // is stopped/reconnected, so neither the socket nor its ACKs can outlive/reach
 // the wrong generation. Drained is sent only after the last frame lets go.
 //
-// With a return queue, an acknowledgement is not sent when its frame is let go but when the
-// next frame arrives, one for one, and at once only beyond `return_queue` waiting ones. The
-// sender's buffer pool (Chromium's capture pool keeps two idle buffers and destroys the
-// rest) then sees one buffer come back for each one it hands out, however unevenly the
-// consumer lets frames go, and settles on a fixed set of buffers instead of destroying
-// and allocating them.
+// With a hold of N, the sender always has N frames out with this consumer: a frame let go
+// waits until more than N are out, which happens when the next frame arrives, so one buffer
+// goes back for each one the sender hands out. A consumer that holds more for a while (a
+// stall) takes the sender to its own limit, and the frames it then lets go in a bunch wait
+// instead of going back together. The sender's buffer pool (Chromium's capture pool keeps two
+// idle buffers and destroys the rest, and allocates when it has none) then stays on a fixed
+// set of N plus its own few. Retiring a connection still returns everything at once.
 class DmabufReleaseAckQueue {
     int socket_fd_;
     int wake_fd_;
     mutable std::mutex mutex_;
     std::deque<std::array<uint8_t, DMABUF_RELEASE_ACK_BYTES>> pending_;
-    std::deque<uint64_t> queued_;   // the return queue: let go by the consumer, waiting for a new frame
-    size_t return_queue_ = 0;       // how many may wait; 0 returns each frame at once
+    std::deque<uint64_t> queued_;   // let go by the consumer, waiting until more than hold_ are out
+    size_t hold_ = 0;               // frames kept out with this consumer; 0 returns each frame at once
+    size_t outstanding_ = 0;        // arrived and not yet acknowledged
     size_t front_offset_ = 0;
     bool retired_ = false;
     uint64_t released_frames_ = 0, sent_messages_ = 0;
@@ -37,14 +39,25 @@ class DmabufReleaseAckQueue {
         pending_.emplace_back();
         dmabufEncodeReleaseAck(pending_.back().data(), frame, kind);
     }
+    // Acknowledge waiting frames while more than hold_ are out. Caller holds mutex_.
+    bool returnBeyondHold() {
+        bool sent = false;
+        while (outstanding_ > hold_ && !queued_.empty()) {
+            append(queued_.front(), DmabufAckKind::Frame);
+            queued_.pop_front();
+            --outstanding_;
+            sent = true;
+        }
+        return sent;
+    }
     void wake() const {
         const uint64_t value = 1;
         (void)::write(wake_fd_, &value, sizeof(value));
     }
 
 public:
-    explicit DmabufReleaseAckQueue(int socket_fd = -1, size_t return_queue = 0)
-        : socket_fd_(socket_fd), wake_fd_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)), return_queue_(return_queue) {
+    explicit DmabufReleaseAckQueue(int socket_fd = -1, size_t hold = 0)
+        : socket_fd_(socket_fd), wake_fd_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)), hold_(hold) {
         if (wake_fd_ < 0) {
             if (socket_fd_ >= 0) ::close(socket_fd_);
             throw std::runtime_error("eventfd() failed for DMA-BUF release acknowledgements");
@@ -72,10 +85,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return !pending_.empty();
     }
-    struct Stats { uint64_t released, sent; size_t pending, queued; };
+    struct Stats { uint64_t released, sent; size_t pending, queued, outstanding; };
     Stats stats() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return {released_frames_, sent_messages_, pending_.size(), queued_.size()};
+        return {released_frames_, sent_messages_, pending_.size(), queued_.size(), outstanding_};
     }
     void enqueue(uint64_t frame) {
         bool retired, send = true;
@@ -83,27 +96,24 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             ++released_frames_;
             retired = retired_;
-            if (retired || !return_queue_) {
+            if (retired || !hold_) {
                 append(frame, DmabufAckKind::Frame);
+                if (outstanding_) --outstanding_;
             } else {
                 queued_.push_back(frame);
-                send = queued_.size() > return_queue_;
-                while (queued_.size() > return_queue_) {
-                    append(queued_.front(), DmabufAckKind::Frame);
-                    queued_.pop_front();
-                }
+                send = returnBeyondHold();
             }
         }
         if (retired) flush(); // The receiver no longer services this connection.
         else if (send) wake();
     }
-    /// The sender handed out a buffer for a new frame: one queued return may go.
-    /// Called by the receiver, which flushes on its next pass.
+    /// The sender handed out a buffer for a new frame: one more is out, so one waiting
+    /// frame may go back. Called by the receiver, which then flushes.
     void frameArrived() {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (queued_.empty() || retired_) return;
-        append(queued_.front(), DmabufAckKind::Frame);
-        queued_.pop_front();
+        if (retired_) return;
+        ++outstanding_;
+        returnBeyondHold();
     }
     void retire() {
         {
@@ -112,6 +122,7 @@ public:
             retired_ = true;
             for (const uint64_t frame : queued_) append(frame, DmabufAckKind::Frame);
             queued_.clear();
+            outstanding_ = 0;
             append(0, DmabufAckKind::Drain);
         }
         flush();

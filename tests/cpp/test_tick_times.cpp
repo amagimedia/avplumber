@@ -27,8 +27,24 @@ void counts_sum_and_maximum_follow_what_was_added() {
     CHECK(times.sumNs() == 605000000 && times.maxNs() == 500000000);
 }
 
+void percentiles_cover_the_most_recent_durations() {
+    TickTimes times(40000000);
+    CHECK(times.recentCount() == 0 && times.recentQuantileNs(0.99) == 0);
+    for (int64_t ms = 1; ms <= 100; ++ms) times.add(ms * 1000000);
+    CHECK(times.recentCount() == 100);
+    CHECK(times.recentQuantileNs(0.95) == 96000000 && times.recentQuantileNs(0.99) == 100000000);
+    CHECK(times.recentQuantileNs(1.0) == 100000000);
+    // 1000 durations: only the last 600 (401 to 1000 ms) count, the maximum still covers all.
+    for (int64_t ms = 101; ms <= 1000; ++ms) times.add(ms * 1000000);
+    CHECK(times.recentCount() == TickTimes::kRecent);
+    CHECK(times.recentQuantileNs(0.0) == 401000000);
+    CHECK(times.recentQuantileNs(0.95) == 971000000 && times.recentQuantileNs(0.99) == 995000000);
+    CHECK(times.maxNs() == 1000000000);
+}
+
 int main() {
     a_duration_falls_into_the_first_bucket_whose_bound_it_does_not_exceed();
     counts_sum_and_maximum_follow_what_was_added();
+    percentiles_cover_the_most_recent_durations();
     std::cout << "tick times OK\n";
 }

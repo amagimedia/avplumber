@@ -6,6 +6,7 @@
 #include "../../util.hpp"
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <map>
 #include <memory>
 
@@ -22,15 +23,19 @@ class ArrayTextures {
     static_assert(PlaneCount == 1 || PlaneCount == 2);
 public:
     // Called only after the previous draw's stream synchronization.
-    void begin() {
-        for (auto &[key, pool] : pools_) pool->used = false;
-    }
+    void begin() { ++draw_; }
 
-    void prune() {
+    /// Hands `retire` the pools of sources no draw used for kIdleDraws: a pool can hold the last
+    /// reference to its frames context, whose surfaces are slow to destroy. A source that merely
+    /// left this output's scene for a while keeps its textures: remaking them costs a driver lock.
+    template<class Retire> void prune(Retire &&retire) {
         for (auto it = pools_.begin(); it != pools_.end();)
-            if (!it->second->used) it = pools_.erase(it);
-            else ++it;
+            if (draw_ - it->second->last_draw > kIdleDraws) {
+                retire(std::move(it->second));
+                it = pools_.erase(it);
+            } else ++it;
     }
+    void prune() { prune([](auto) {}); }
 
     const std::array<CUtexObject, PlaneCount> &get(const AVFrame *frame, CUcontext context) {
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(61, 5, 100)
@@ -56,7 +61,7 @@ public:
         if (it == pools_.end())
             it = pools_.emplace(frames, std::make_unique<Pool>(frame->hw_frames_ctx, device)).first;
         Pool &pool = *it->second;
-        pool.used = true;
+        pool.last_draw = draw_;
         auto &textures = pool.textures[array];
         if (!textures) textures = std::make_unique<Planes>(array, frame, frames->sw_format);
         return textures->handles;
@@ -108,7 +113,7 @@ private:
     struct Pool {
         AVBufferRef *frames_ref = nullptr;
         CUcontext context = nullptr;
-        bool used = false;
+        uint64_t last_draw = 0;
         std::map<CUarray, std::unique_ptr<Planes>> textures;
 
         Pool(AVBufferRef *frames, const AVCUDADeviceContext *device) : context(device->cuda_ctx) {
@@ -126,6 +131,8 @@ private:
         }
     };
 
+    static constexpr uint64_t kIdleDraws = 900;   // 30 s at 30 fps
+    uint64_t draw_ = 0;
     std::map<AVHWFramesContext *, std::unique_ptr<Pool>> pools_;
 };
 

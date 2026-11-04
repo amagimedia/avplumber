@@ -152,6 +152,15 @@ bool isEofMarker(const MetadataFrame& f);
 
 av::Packet createEofPacket(int streamIndex = -1);
 
+/// Marks `p` as the start of the stream again, as a looping file input marks a new pass that
+/// begins with a predicted picture: a decoder drains what it holds and resets before decoding
+/// it, so nothing of the new pass is predicted from the pictures of the last. The mark is packet
+/// side data (AV_PKT_DATA_STRINGS_METADATA), which every other consumer passes on or ignores.
+void markStreamRestart(av::Packet &p);
+/// Whether `p` carries markStreamRestart(); the mark is taken off `p`, so a decoder does not
+/// copy it into the decoded frame's metadata.
+bool takeStreamRestart(av::Packet &p);
+
 template<typename T> T createEofMarker() {
     return T();
 }

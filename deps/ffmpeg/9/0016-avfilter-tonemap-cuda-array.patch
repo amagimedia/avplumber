@@ -177,6 +177,3 @@ index ccfc54d..b9d0a27 100644
          float3 c = rgb_to_yuv(convert_rgb(yuv_to_rgb(code, cb[r], cr[r], input_depth, transfer),
                                            transfer, transfer_out, sdr_white, hdr_peak, op, param, desat),
                                transfer_out);
--- 
-2.55.0
-

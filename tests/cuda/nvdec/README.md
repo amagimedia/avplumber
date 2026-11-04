@@ -5,7 +5,7 @@ libraries. Set `PYTHONPATH` to the checkout/module location and select the match
 libraries with the build's rpath or `LD_LIBRARY_PATH`. Keep the same CUDA, DRM/GL
 and optional neural feature flags between binary and Python-module builds.
 The CUarray tests require the pinned `deps/ffmpeg/9` series and its codec headers.
-Use a separate FFmpeg 8.1 build for the linear/CPU baseline.
+Run the same build's linear and CPU modes for the baseline.
 
 The scripts accept private fixture/report paths at runtime. Pixel checks download
 only at the explicit verification boundary; they are not production graphs or
@@ -14,7 +14,9 @@ performance benchmarks. Retention checks hold GPU references without pixel reads
 | Script | Check |
 |---|---|
 | `probe.py` | Finite CPU/CUDA/CUarray decode; normalized pixel hashes, PTS, EOF, retained references and shutdown watchdog. Use `--reference` to compare saved reports across builds. |
+| `live_feeds.py` | Feed shapes the demo clips lack (B-frames, H.264, a high level, long GOPs with in-band parameter sets), generated with NVENC: CUarray against linear decode, then frames held as by a late output, with pool and exhaustion counts. |
 | `compositor_decode.py` | Real NVDEC through identity normalization and two compositors; array-handle passthrough, pixels/PTS and repeated teardown. `--filter-linear` inserts pad/crop to test ordering on linear frames from a private producer stream. `--rounds 0` works on FFmpeg 8.1. |
+| `compositor_crop.py` | Generates an H.264 crop fixture with `h264_metadata`; compares linear CUDA/CUarray through the compositor, `cuda_transform` and `draw_bbox` (a NEURAL_NET draw node's linear copy), including layer crop, scaling, contain and cleared output crop metadata. `--no-draw` without NEURAL_NET. Requires `h264_nvenc`; accepts `--ffmpeg`. |
 | `mixed_decode.py` | One shared device with HEVC CUarray plus H264/AV1 linear CUDA, compared against an all-linear canvas. Requires all three fixture paths. |
 | `camera_motion.py` | NV12 CUarray versus linear camera-motion metadata/PTS, original frame handles, private producer streams and repeated teardown. Requires `HAVE_NVOF=1`; the default GPU IRLS check also needs `HAVE_NVCC=1`. |
 | `luma_diff.py` | Linear/CUarray scores against a CPU oracle at lookahead 0/2/4/16, ring wrap, EOF tails and source-handle preservation. Both metric scripts support `--linear-only --report` and `--reference` for before/after linear checks. |
@@ -23,6 +25,9 @@ performance benchmarks. Retention checks hold GPU references without pixel reads
 | `filters.py` | Synthetic pad/crop/transition pixel matrix. `--clip` adds real HEVC decode cases; `--decode-only` limits the run to those cases. |
 | `capture.py` | Whole-GPU, per-thread CPU and mixer counter deltas on a running show. `--control-port` additionally proves decoded/paced/encoded edge progress. It records evidence rather than applying arbitrary pass thresholds. |
 | `aux_cycles.py` | Changes subscriptions on extra AUX buses advertising source pages, waits for applied compositions, then restores layouts/pages and checks scene assignments. Pair with `capture.py`; use only an exclusively controlled test show. |
+| `decoder_takeover.py` | Clips of one format in turn, with parking on: each must take over the parked decoder, on the first decoder's surfaces, hash exactly like a fresh decode, and leave the surfaces of the old clip's held frames alone. A clip of another format gets a decoder of its own. |
+| `loop_restart.py` | Each clip loops, as it is and with its first packet cut off (a pass that begins with a predicted picture resets the decoder). Every pass must show the same pictures at the same times, from a decoder that never ends: progressive clips on CUarray (parking on) and linear CUDA, and an interlaced clip, required on every run, on linear CUDA with the mixer's deinterlacer. |
+| `surface_exhaustion.py` | Two CUarray decoders with little headroom; one consumer holds more frames than the pool for `--stall-ms` while the other keeps taking. The starved decoder must stay alive and count the episode in its `status`, the other must keep its rate, and the starved one must deliver again, not degraded, once its frames are released. Run it with an HEVC and an H.264 clip. |
 
 For example, with a 50-frame 1080p NV12 HEVC fixture and a writable report directory:
 
@@ -31,6 +36,7 @@ python3 tests/cuda/nvdec/probe.py "$clip" --mode cuda --expected-frames 50 --out
 python3 tests/cuda/nvdec/probe.py "$clip" --mode cuarray --expected-frames 50 --reference "$reports/linear.json" --output "$reports/array.json"
 python3 tests/cuda/nvdec/probe.py "$clip" --mode cuarray --action hold --hold 8 --expected-frames 50 --output "$reports/held.json"
 python3 tests/cuda/nvdec/compositor_decode.py --input "$clip" --report "$reports/compositor.json"
+python3 tests/cuda/nvdec/compositor_crop.py
 python3 tests/cuda/nvdec/camera_motion.py --input "$clip" --report "$reports/camera-motion.json"
 python3 tests/cuda/nvdec/luma_diff.py --input "$clip" --report "$reports/luma-diff.json"
 python3 tests/cuda/nvdec/filters.py --clip "$clip" --output "$reports/filters.json"
@@ -40,8 +46,18 @@ python3 tests/cuda/nvdec/draw_arrays.py --input "$clip" --frames 50 --linear-onl
 python3 tests/cuda/nvdec/draw_arrays.py --input "$clip" --frames 50 --expect "$reports/draw_before.json" --report "$reports/draw_arrays.json"
 ```
 
+The decoder-crop check covers identity `scale_cuda` passthrough before AVP's drawing nodes.
+Same-size filters (`scale_cuda=format=...`, `tonemap_cuda`) keep the crop fields accurate.
+Filters that change the picture's size or position (a resizing `scale_cuda`, `crop_cuda`)
+forward a stale left/top offset, so apply the decoder crop in `cuda_transform` before them.
+
 Use `--sw-format p010le` for Main10 probe fixtures. Different codecs and SPS
 requirements allocate different base pools. The finite probes' default three
 extra surfaces are not a full-mixer sizing recommendation. No timing comparison
 is valid if inputs stalled, output counts changed, compilation overlapped, or
 the two builds silently loaded different libraries than intended.
+
+CUarray checks enable `unsafe_output+private_stream`, plus `extra_hw_frames_only`
+with a nonnegative extra-frame budget. Where accepted, `--extra-hw-frames -1` tests
+upstream's default padding instead. The FFmpeg CLI adds its scheduler queue allowance
+even with the budget flag; API probes use the specified allowance directly.

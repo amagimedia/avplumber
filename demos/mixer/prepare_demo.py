@@ -24,7 +24,7 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 
-from demos.mixer.sdr_patterns import GENERATORS, input_kbps, encoding_options, render
+from demos.mixer.sdr_patterns import GENERATORS, GOP_SHAPES, input_kbps, encoding_options, render
 from demos.mixer.demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic
 from demos.mixer.hdr_patterns import write_hlg
 from pyplumber.mixer.config import MAX_SOURCES, default_browser_frame_queue, earlier_browser_ring_size, parse
@@ -140,7 +140,8 @@ def id_overlay(source_id, width, height, seconds):
 HLG_PATTERNS = ".hlg-patterns"
 
 
-def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, source_id, pattern_dir, kbps):
+def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, source_id, pattern_dir, kbps,
+               gop="low_delay"):
     # Offline conversion of a native HLG signal, not SDR samples tagged as HDR. The pattern
     # depends only on its variant and geometry, and building it in Python is most of the cost,
     # so it is built once per run and every source of the variant encodes it with its own id.
@@ -153,7 +154,7 @@ def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, sour
     inputs, graph, data = id_overlay(source_id, width, height, seconds)
     pixel_format = "yuv422p10le" if encoder == "v210" else "p010le"
     options = (["-f", "rawvideo"] if encoder in ("rawvideo", "v210") else
-               ["-profile:v", "main10", *encoding_options(encoder, kbps, fps)])
+               ["-profile:v", "main10", *encoding_options(encoder, kbps, fps, gop)])
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-f", "v210", "-video_size", f"{width}x{height}",
                     "-framerate", str(fps), "-i", str(raw), *inputs, "-an", "-filter_complex",
                     graph + ",setparams=range=limited:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
@@ -176,6 +177,26 @@ def positive_int(value, name):
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def per_source(spec, name, index, choices):
+    """*spec*'s `name` for source *index* of its input group: one value, or `name + "s"`, a list the
+    group's sources cycle through (as `patterns`), so one group mixes codecs or reference structures.
+    None when the recipe says nothing."""
+    plural = name + "s"
+    if name in spec and plural in spec:
+        raise ValueError(f"{spec['id']}: use {name} or {plural}, not both")
+    values = spec.get(plural, [spec[name]] if name in spec else [])
+    if not isinstance(values, list) or any(v not in choices for v in values) or plural in spec and not values:
+        raise ValueError(f"{spec['id']}: {name} must be one of {', '.join(choices)}")
+    return values[index % len(values)] if values else None
+
+
+# NVENC codes frames only: FFmpeg's h264_nvenc and hevc_nvenc set no field or MBAFF mode, and no
+# bitstream filter turns a progressive stream into a field-coded one.
+INTERLACED_SAMPLE = ("interlaced inputs cannot be generated here: supply one as a file input with "
+                     "\"interlaced\": true, for example a 1080i50 H.264 transport stream from a broadcast "
+                     "encoder, or x264 --interlaced --tff (MBAFF), with its SPS and PPS in band")
 
 
 def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
@@ -247,11 +268,14 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 pattern = spec.get("pattern", pool[index % len(pool)])
                 if pattern not in patterns:
                     raise ValueError(f"{name}: pattern must be one of {patterns}")
-                codec = spec.get("codec", "h264" if color == "sdr" else "hevc")
-                if codec not in ("h264", "hevc") or color == "hlg" and codec != "hevc":
+                if spec.get("interlaced"):
+                    raise ValueError(f"{name}: {INTERLACED_SAMPLE}")
+                codec = per_source(spec, "codec", index, ("h264", "hevc")) or ("h264" if color == "sdr" else "hevc")
+                if color == "hlg" and codec != "hevc":
                     raise ValueError(f"{name}: codec must be h264 or hevc; HLG requires hevc")
-                if "codec" in spec and (raw or chroma == "422"):
-                    raise ValueError(f"{name}: codec applies only to encoded 4:2:0 inputs")
+                gop = per_source(spec, "gop", index, tuple(GOP_SHAPES)) or "low_delay"
+                if any(key in spec for key in ("codec", "codecs", "gop", "gops")) and (raw or chroma == "422"):
+                    raise ValueError(f"{name}: codec and gop apply only to encoded 4:2:0 inputs")
                 encoder = f"{codec}_nvenc"
                 storage = raw or ("v210" if chroma == "422" else encoder)
                 # Version cache names when changing generation semantics. Every
@@ -260,20 +284,21 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 # all that shapes the content, so re-applying reuses the file.
                 extension = raw or ("v210" if chroma == "422" else "mp4")
                 version = 5 if extension == "mp4" else 4   # low-DPB encodes; raw pixels are unchanged
+                shape = f"_{input_kbps(index)}k" + ("" if gop == "low_delay" else f"_{gop}") if extension == "mp4" else ""
                 path = (media_dir / "assets" / f"synthetic_v{version}_{size}_{fps}fps_{seconds}s" /
-                        f"{source['id']}_{color}_{chroma}_{pattern}_{storage}{f'_{input_kbps(index)}k' if extension == 'mp4' else ''}.{extension}")
+                        f"{source['id']}_{color}_{chroma}_{pattern}_{storage}{shape}.{extension}")
                 encoder = "v210" if chroma == "422" else "rawvideo" if raw else encoder
                 if color == "hlg":
-                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"], kbps=input_kbps(index): render_hlg(
+                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"], kbps=input_kbps(index), gop=gop: render_hlg(
                         out, asset_width, asset_height, fps, seconds, int(pattern), encoder, ffmpeg, sid,
-                        media_dir / "assets" / HLG_PATTERNS, kbps)
+                        media_dir / "assets" / HLG_PATTERNS, kbps, gop)
                 elif chroma == "422":
                     writer = lambda out, pattern=pattern, sid=source["id"]: render_sdr422(
                         out, asset_width, asset_height, fps, seconds, int(pattern), ffmpeg, sid)
                 else:
-                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"], kbps=input_kbps(index): render(
+                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"], kbps=input_kbps(index), gop=gop: render(
                         out.parent, out.stem, GENERATORS[pattern], size, fps, seconds, encoder, ffmpeg,
-                        id_overlay(sid, asset_width, asset_height, seconds), kbps)
+                        id_overlay(sid, asset_width, asset_height, seconds), kbps, gop)
                 jobs[path] = writer
                 source.update(kind=raw or ("v210" if chroma == "422" else "video"),
                               path=runtime_path(path), width=asset_width, height=asset_height)
@@ -310,6 +335,14 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                     raise ValueError(f"{name}: a download or file feeds one source only (weight 1, unique clip)")
                 clips.add(path)
                 source.update(kind="video", path=runtime_path(path))
+                if spec.get("interlaced"):
+                    if spec["interlaced"] is not True or spec.get("decode_storage", "cuda") != "cuda":
+                        raise ValueError(f"{name}: interlaced is true on a file or download input decoded on linear CUDA")
+                    # Field-coded or MBAFF video: decoded on linear CUDA and deinterlaced as its source
+                    # filter (config.md: deinterlace); decoded_format names the decoder's storage.
+                    source.update(deinterlace=True, decoded_format=spec.get("decoded_format", "nv12"))
+            if spec.get("interlaced") and kind == "browser":
+                raise ValueError(f"{name}: interlaced applies to file and download inputs")
             source.update({key: spec[key] for key in ("decode_storage", "extra_hw_frames", "transform") if key in spec})
             sources.append(source)
     # Graphics need fewer pixels than the program; the compositor scales them

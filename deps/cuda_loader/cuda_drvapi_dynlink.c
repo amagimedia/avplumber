@@ -242,6 +242,7 @@ tcuSurfObjectDestroy             *cuSurfObjectDestroy;
 /* Texture object API */
 tcuTexObjectCreate               *cuTexObjectCreate;
 tcuTexObjectDestroy              *cuTexObjectDestroy;
+tcuTexObjectGetResourceDesc      *cuTexObjectGetResourceDesc;
 
 #define STRINGIFY(X) #X
 
@@ -601,6 +602,7 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC(cuSurfObjectDestroy);
         GET_PROC(cuTexObjectCreate);
         GET_PROC(cuTexObjectDestroy);
+        GET_PROC(cuTexObjectGetResourceDesc);
         GET_PROC(cuProfilerStop);
     }
 

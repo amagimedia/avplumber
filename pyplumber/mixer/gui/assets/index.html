@@ -2398,12 +2398,16 @@ function renderLatency() {
   const complete = pgm.length > 0 && aux.length === (settings().aux_buses || []).length;
   // Two short tables: delivery (cut latency, misses, drops, the other inputs) and the browser sources.
   const recent = state?.recent, span = recent ? recentSpan(recent) : "total", inputs = recent?.inputs || {};
+  const decoders = state?.status?.decoders;
   const pair = (g) => g ? `${metric(g.repeats)} / ${metric(g.dropped)}` : "—";
   const delivery = [
     [`Cut p95 · ${cuts.length}`, metric(cuts[Math.ceil(cuts.length * .95) - 1], 1, " ms")],
     ["Deadline misses", metric(recent ? recent.missed_deadlines : complete ? total([...pgm, ...aux.map((a) => a.playout)], "missed_deadlines") : null)],
     ["AUX drops", metric(recent ? recent.output_drops : complete ? total(aux, "output_drops") : null)],
     ...(inputs.other ? [["PGM video repeats / skips", pair(inputs.other)]] : []),
+    // Pictures sources repeated because their decoder had no surface free, and how many are short now.
+    ...(decoders ? [["Surface repeats", metric(recent ? recent.surface_repeats : decoders.surface_repeats)
+      + (decoders.surface_exhausted_now > 0 ? ` · ${decoders.surface_exhausted_now} short now` : "")]] : []),
   ];
   const b = inputs.browser, worst = b?.worst;
   const browser = b?.sources ? [

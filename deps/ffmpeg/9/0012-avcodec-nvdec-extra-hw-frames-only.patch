@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Mon, 2 Nov 2026 13:52:05 +0100
+Subject: [PATCH] avcodec/nvdec: add opt-in control of unsafe CUarray surface
+ padding
+
+Unsafe CUarray output adds sixteen decode surfaces after the codec,
+threading and extra_hw_frames requirements have been calculated. Callers
+with bounded downstream frame retention cannot reduce this padding with
+extra_hw_frames, even when GPU memory limits their workload.
+
+Add the extra_hw_frames_only hwaccel flag to omit this padding and use
+the existing pool calculation. Require a nonnegative extra_hw_frames
+value and reject totals exceeding the registered-surface limit rather
+than silently truncating the requested budget. Validate the extra count
+before it is added to the base pool.
+
+Keep the existing allocation and capping behavior without the flag. In
+particular, the ffmpeg CLI adds its queue allowance to extra_hw_frames
+even when the user did not set that option; a nonnegative value alone
+cannot distinguish a request to reduce the pool.
+
+Restrict the flag to internally allocated unsafe CUarray pools. Reject
+caller-supplied pools and incompatible NVDEC output modes instead of
+changing their allocation contracts. Callers opting in remain responsible
+for providing enough surfaces for downstream retention.
+
+Tested on NVIDIA L4 with H.264, 10-bit HEVC and AV1: actual surface counts,
+unchanged decoded-frame checksums, frame threading, frames retained past
+decoder teardown, exact-limit allocations, over-limit and INT_MAX
+requests, caller-supplied pools, copying output and linear CUDA output.
+CLI defaults and opt-in allocations produce identical frame checksums
+and timestamps. No private-stream or application-specific patches are
+required.
+
+The configured sample-free FATE suite passes on the same build.
+---
+ Changelog                  |  1 +
+ doc/APIchanges             |  3 +++
+ libavcodec/avcodec.h       | 14 ++++++++++++++
+ libavcodec/nvdec.c         | 29 ++++++++++++++++++++++++++++-
+ libavcodec/options_table.h |  1 +
+ libavcodec/version.h       |  4 ++--
+ 6 files changed, 49 insertions(+), 3 deletions(-)
+
+diff --git a/Changelog b/Changelog
+index 08a79e9..aba49d2 100644
+--- a/Changelog
++++ b/Changelog
+@@ -3,6 +3,7 @@ releases are sorted from youngest to oldest.
+ 
+ version <next>:
+ - DTS:X height channels in the DCA decoder
++- extra_hw_frames_only flag for NVDEC unsafe CUarray surface budgeting
+ 
+ version 9.1:
+ - ASTC image encoding and decoding via libastcenc, with .astc and KTX 1.0 muxers and demuxers
+diff --git a/doc/APIchanges b/doc/APIchanges
+index a037323..ff4c8b3 100644
+--- a/doc/APIchanges
++++ b/doc/APIchanges
+@@ -2,6 +2,9 @@ The last version increases of all libraries were on 2026-06-23.
+ 
+ API changes, most recent first:
+ 
++2026-11-02 - xxxxxxxxxx - lavc 63.26.100 - avcodec.h
++  Add AV_HWACCEL_FLAG_EXTRA_HW_FRAMES_ONLY.
++
+ 2026-10-xx - xxxxxxxxxx - lavfi 12.12.100 - avfilter.h
+   Deprecate AVFilterGraph.max_buffered_frames in favor of
+   avfilter_graph_set_max_buffered_frames().
+diff --git a/libavcodec/avcodec.h b/libavcodec/avcodec.h
+index bb654ec..510b1dd 100644
+--- a/libavcodec/avcodec.h
++++ b/libavcodec/avcodec.h
+@@ -2050,6 +2050,20 @@ typedef struct AVHWAccel {
+  */
+ #define AV_HWACCEL_FLAG_UNSAFE_OUTPUT (1 << 3)
+ 
++/**
++ * Use extra_hw_frames as the only additional surface allowance beyond the
++ * decoder's base pool, without optional backend padding. Codec and
++ * frame-threading requirements remain included.
++ *
++ * Currently supported by NVDEC with unsafe CUarray output and an internally
++ * allocated frame pool. extra_hw_frames must be nonnegative. Initialization
++ * fails if the resulting pool exceeds the hardware surface limit.
++ *
++ * The caller must budget for all downstream frame retention. An undersized
++ * pool can cause decoding failures when no free surface remains.
++ */
++#define AV_HWACCEL_FLAG_EXTRA_HW_FRAMES_ONLY (1 << 4)
++
+ /**
+  * @}
+  */
+diff --git a/libavcodec/nvdec.c b/libavcodec/nvdec.c
+index d928e3c..f54de06 100644
+--- a/libavcodec/nvdec.c
++++ b/libavcodec/nvdec.c
+@@ -420,6 +420,7 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+     int need_real_hwframes = 0;
+ 
+     int unsafe_output = !!(avctx->hwaccel_flags & AV_HWACCEL_FLAG_UNSAFE_OUTPUT);
++    int explicit_budget = !!(avctx->hwaccel_flags & AV_HWACCEL_FLAG_EXTRA_HW_FRAMES_ONLY);
+ 
+     int opaque_output = 0;
+     int decode_pool_size;
+@@ -441,6 +442,22 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+     }
+     chroma_444 = ctx->supports_444 && cuvid_chroma_format == cudaVideoChromaFormat_444;
+ 
++    if (explicit_budget) {
++        if (!unsafe_output || avctx->hwaccel->pix_fmt != AV_PIX_FMT_CUARRAY ||
++            avctx->hw_frames_ctx) {
++            av_log(avctx, AV_LOG_ERROR,
++                   "extra_hw_frames_only requires unsafe CUarray output and an internally allocated frame pool.\n");
++            return AVERROR(EINVAL);
++        }
++        if (avctx->extra_hw_frames < 0 ||
++            avctx->extra_hw_frames > NVDEC_MAX_DECODE_SURFACES) {
++            av_log(avctx, AV_LOG_ERROR,
++                   "extra_hw_frames_only requires extra_hw_frames between 0 and %d.\n",
++                   NVDEC_MAX_DECODE_SURFACES);
++            return AVERROR(EINVAL);
++        }
++    }
++
+     if (!avctx->hw_frames_ctx) {
+         ret = nvdec_init_hwframes(avctx, &avctx->hw_frames_ctx, 1);
+         if (ret < 0)
+@@ -466,7 +483,17 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
+ #ifdef NVDEC_HAVE_OPAQUE_OUTPUT_SUPPORT
+     if (opaque_output) {
+         if (unsafe_output) {
+-            decode_pool_size = FFMIN(frames_ctx->initial_pool_size + 16, MAX_NUM_REGISTERED_DECODE_SURFACES);
++            if (explicit_budget) {
++                /* The pool already includes codec, threading and caller requirements. */
++                if (decode_pool_size > MAX_NUM_REGISTERED_DECODE_SURFACES) {
++                    av_log(avctx, AV_LOG_ERROR,
++                           "Requested CUarray pool needs %d surfaces, maximum is %d.\n",
++                           decode_pool_size, MAX_NUM_REGISTERED_DECODE_SURFACES);
++                    return AVERROR(EINVAL);
++                }
++            } else {
++                decode_pool_size = FFMIN(frames_ctx->initial_pool_size + 16, MAX_NUM_REGISTERED_DECODE_SURFACES);
++            }
+             av_log(avctx, AV_LOG_VERBOSE, "unsafe_output + cuarray: %d decode surfaces (pool=%d, max=%d)\n",
+                    decode_pool_size, frames_ctx->initial_pool_size, MAX_NUM_REGISTERED_DECODE_SURFACES);
+         } else if (avctx->extra_hw_frames > 0) {
+diff --git a/libavcodec/options_table.h b/libavcodec/options_table.h
+index 862b450..cf3fbed 100644
+--- a/libavcodec/options_table.h
++++ b/libavcodec/options_table.h
+@@ -413,6 +413,7 @@ static const AVOption avcodec_options[] = {
+ {"allow_high_depth", "allow to output YUV pixel formats with a different chroma sampling than 4:2:0 and/or other than 8 bits per component", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_ALLOW_HIGH_DEPTH }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
+ {"allow_profile_mismatch", "attempt to decode anyway if HW accelerated decoder's supported profiles do not exactly match the stream", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_ALLOW_PROFILE_MISMATCH }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
+ {"unsafe_output", "allow potentially unsafe hwaccel frame output that might require special care to process successfully", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_UNSAFE_OUTPUT }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
++{"extra_hw_frames_only", "use only extra_hw_frames for additional decoder surfaces", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_EXTRA_HW_FRAMES_ONLY }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
+ {"extra_hw_frames", "Number of extra hardware frames to allocate for the user", OFFSET(extra_hw_frames), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, V|D },
+ {"discard_damaged_percentage", "Percentage of damaged samples to discard a frame", OFFSET(discard_damaged_percentage), AV_OPT_TYPE_INT, {.i64 = 95 }, 0, 100, V|D },
+ {"side_data_prefer_packet", "Comma-separated list of side data types for which user-supplied (container) data is preferred over coded bytestream",
+diff --git a/libavcodec/version.h b/libavcodec/version.h
+index aa3a484..26ee41e 100644
+--- a/libavcodec/version.h
++++ b/libavcodec/version.h
+@@ -29,8 +29,8 @@
+ 
+ #include "version_major.h"
+ 
+-#define LIBAVCODEC_VERSION_MINOR  25
+-#define LIBAVCODEC_VERSION_MICRO 101
++#define LIBAVCODEC_VERSION_MINOR  26
++#define LIBAVCODEC_VERSION_MICRO 100
+ 
+ #define LIBAVCODEC_VERSION_INT  AV_VERSION_INT(LIBAVCODEC_VERSION_MAJOR, \
+                                                LIBAVCODEC_VERSION_MINOR, \

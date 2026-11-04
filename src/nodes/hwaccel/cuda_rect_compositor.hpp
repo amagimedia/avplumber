@@ -4,6 +4,7 @@
 #include "../node_common.hpp"
 #include "../../hwaccel.hpp"
 #include "../../avbuffer.hpp"
+#include "../../timeline.hpp"
 #include "../../output_mask.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
 #include "../../mixer/primitives/frame_subscription.hpp"
@@ -52,6 +53,10 @@ public:
         std::shared_ptr<Edge<av::VideoFrame>> output;
         std::string metadata_key;
         int debug_log_every_n = 0;
+        // compose() returns once the draw is queued: the next compose() waits for it to finish and
+        // holds the frames it reads until then. Consumers order on the canvas frames' stream
+        // (FFmpeg filters and NVENC use it; compositors wait for their producers' streams).
+        bool hand_off = false;
     };
 
     /// `type` is the node type, the prefix of errors and logs.
@@ -71,9 +76,25 @@ protected:
     std::string metadata_key_;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
-    // The last compose(): queueing the draw (our work plus the CUDA library's own locking), then
-    // waiting for the GPU to finish it and the source frames it reads.
+    // The last compose(): queueing the draw (our work plus the CUDA library's own locking), and
+    // waiting for the GPU to finish a draw and the source frames it reads: this one, or with
+    // Config::hand_off the previous one.
     int64_t issue_ns_ = 0, gpu_wait_ns_ = 0;
+
+    // Config::hand_off: the queued draw's completion and the frames it reads, held until a later
+    // compose() or flush finds it finished. A source let go early would go back to its decoder or
+    // browser while a kernel still reads it.
+    const bool hand_off_;
+    CUevent draw_done_ = nullptr;
+    bool draw_pending_ = false;
+    std::vector<av::VideoFrame> in_flight_;
+    void finishPreviousDraw() {
+        if (!draw_pending_) return;
+        if (AVP_CHECK_CU(cuEventSynchronize(draw_done_)))
+            throw Error(std::string(type_) + ": waiting for the previous draw failed");
+        in_flight_.clear();
+        draw_pending_ = false;
+    }
 
     std::string last_ops_desc_;
     bool sent_eof_ = false;
@@ -164,7 +185,8 @@ protected:
             throw Error(std::string(type_) + ": input hw sw_format mismatch node sw_format");
     }
 
-    /// Draws the output frame stamped `pts` and waits for the GPU. `sources` holds a frame per
+    /// Draws the output frame stamped `pts` and waits for the GPU (Config::hand_off: for the
+    /// previous draw, before this one is queued). `sources` holds a frame per
     /// input, null where none is drawn; `metadata_src` gives the frame its properties and
     /// per-frame layers; `opacity`, when given, holds a weight per input (see LayerSpec::opacity).
     /// `base`, when given, is the source the bottom layer draws; where that layer is the frame
@@ -174,6 +196,12 @@ protected:
                            const av::VideoFrame *base = nullptr) {
         const auto started = std::chrono::steady_clock::now();
         draw_.ensureDevice();
+        if (hand_off_) {
+            avp::timeline::Scope wait("gpu wait");
+            finishPreviousDraw();
+        }
+        const auto waited = std::chrono::steady_clock::now();
+        avp::timeline::Scope issue("issue");
         CUstream stream = draw_.stream();
 
         av::VideoFrame outf = avp::mixer::canvasFrame(out_frames_ref_.get(), type_);
@@ -195,6 +223,18 @@ protected:
             }
         }
         setCanvasColor(outf.raw());
+        // From the first launch on, a kernel may be reading the source frames. On an exception
+        // the playout that owns them can go first, and a decoder reuses its surfaces at once.
+        struct SynchronizeOnUnwind {
+            CudaRectDraw &draw;
+            CUstream stream;
+            bool drawn = false;
+            ~SynchronizeOnUnwind() {
+                if (drawn) return;
+                try { draw.synchronize(stream); }
+                catch (const std::exception &e) { logstream << "compose: synchronize while unwinding: " << e.what(); }
+            }
+        } unwinding{draw_, stream};
         // Background and every layer in one kernel launch; over a base, only where the other layers are.
         const AVFrame *color_src = hasCanvasColor() ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr);
         if (!base || !draw_.drawOver(stream, ops, outf.raw(), color_src, base->raw()))
@@ -224,11 +264,28 @@ protected:
                                                AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
         outf.setPts(pts);
 
+        if (hand_off_) {
+            if (!draw_done_ && AVP_CHECK_CU(cuEventCreate(&draw_done_, CU_EVENT_DISABLE_TIMING)))
+                throw Error(std::string(type_) + ": cannot create the draw completion event");
+            if (AVP_CHECK_CU(cuEventRecord(draw_done_, stream)))
+                throw Error(std::string(type_) + ": cannot record the draw completion event");
+            for (const auto &op : ops)
+                if (op.src) in_flight_.push_back(*op.src);
+            if (base) in_flight_.push_back(*base);
+            draw_pending_ = true;
+            unwinding.drawn = true;   // the held frames outlive the draw from here on
+        }
+        issue.close();
         const auto issued = std::chrono::steady_clock::now();
-        draw_.synchronize(stream);
+        if (!hand_off_) {
+            avp::timeline::Scope wait("gpu wait");
+            unwinding.drawn = true;   // an exception from here on has nothing left to wait for
+            draw_.synchronize(stream);
+        }
         const auto done = std::chrono::steady_clock::now();
-        issue_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(issued - started).count();
-        gpu_wait_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(done - issued).count();
+        const auto ns = [](auto d) { return std::chrono::duration_cast<std::chrono::nanoseconds>(d).count(); };
+        issue_ns_ = ns(issued - waited);
+        gpu_wait_ns_ = hand_off_ ? ns(waited - started) : ns(done - issued);
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0)
             logstream << type_ << ": out frame=" << frame_counter_;
@@ -270,15 +327,24 @@ public:
         : NodeSingleOutput<av::VideoFrame>(make_unique<EdgeSink<av::VideoFrame>>(config.output)),
           type_(type),
           output_edge_(config.output),
-          draw_(config.hw, config.canvas, config.max_layers, CudaRectDraw::TableCompletion::Stream),
+          draw_(config.hw, config.canvas, config.max_layers,
+                config.hand_off ? CudaRectDraw::TableCompletion::Event : CudaRectDraw::TableCompletion::Stream),
           default_layers_(config.layers),
           metadata_key_(config.metadata_key),
-          debug_log_every_n_(config.debug_log_every_n) {
+          debug_log_every_n_(config.debug_log_every_n),
+          hand_off_(config.hand_off) {
         out_frames_ref_ = avp::mixer::allocCanvasFrames(*config.hw, config.canvas, type_);
         this->auto_eof_ = false;
     }
 
     ~CudaRectCompositor() override {
+        if (draw_done_) {
+            try {
+                draw_.ensureDevice();
+                finishPreviousDraw();
+            } catch (const std::exception &e) { logstream << type_ << ": finishing the last draw: " << e.what(); }
+            cuEventDestroy(draw_done_);
+        }
         draw_.unload();
         out_frames_ref_.reset();
     }

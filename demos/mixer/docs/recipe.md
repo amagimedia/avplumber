@@ -54,8 +54,19 @@ Every entry has an `id`, `kind` and `weight`.
 
 Generated 4:2:0 media defaults to H.264 for SDR and HEVC for HLG. Set `codec`
 to select encoded storage, or `storage: "nv12"` / `"p010"` for raw uploads.
-Generated 4:2:2 uses v210. Encoded entries may select `decode_storage: "cuarray"`
-and `extra_hw_frames`; see [decoder requirements](config.md#sources).
+`codecs` (a list, like `patterns`) gives the group's sources codecs in turn, and
+`gop` or `gops` their reference structure: `low_delay` (the default: two references,
+no B-frames) or `b_frames` (three B-frames in a pyramid over four references). Setup's
+`decode_mix` setting uses these on the SDR 4:2:0 group (`h264`, or `mixed` for both
+codecs and both structures); HLG clips stay HEVC. Generated 4:2:2 uses v210. Encoded
+entries may select `decode_storage: "cuarray"` and `extra_hw_frames`; see
+[decoder requirements](config.md#sources).
+
+Interlaced inputs cannot be generated: NVENC codes frames only. A `file` or
+`download` entry with `interlaced: true` (and optionally `decoded_format`, `nv12` by
+default) is decoded on linear CUDA and deinterlaced per source (`deinterlace` in
+[sources](config.md#sources)); a 1080i H.264 transport stream from a broadcast encoder,
+or `x264 --interlaced --tff`, with its parameter sets in band, is the sample to supply.
 
 ## Generated media
 

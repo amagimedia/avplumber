@@ -1,5 +1,6 @@
 #pragma once
 #include <cerrno>
+#include <chrono>
 #include <vector>
 #include <stdexcept>
 #include <sys/epoll.h>
@@ -45,9 +46,16 @@ public:
     // events that were; an event listed more than once is reported at its first place.
     bool wait(int timeout_ms = -1, std::vector<uint32_t> *signalled = nullptr) {
         if (signalled) signalled->clear();
-        int ret = epoll_wait(epoll_fd_, ready_.data(), static_cast<int>(ready_.size()), timeout_ms);
-        if (ret<0) {
-            throw Error("wait: poll error");
+        // A process stopped and resumed (SIGSTOP, a debugger, a frozen container) or a signal handler
+        // makes epoll_wait return EINTR, and it is never restarted: wait out the rest of the timeout.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        int ret;
+        while ((ret = epoll_wait(epoll_fd_, ready_.data(), static_cast<int>(ready_.size()), timeout_ms)) < 0) {
+            if (errno != EINTR) throw Error("wait: poll error");
+            if (timeout_ms > 0) {
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+                timeout_ms = left > 0 ? static_cast<int>(left) : 0;
+            }
         }
         int64_t blackhole;
         for (int i=0; i<ret; i++) {

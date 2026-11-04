@@ -1,0 +1,41 @@
+From 445895721f2a2f8b299a70539c0dbb7082d7b8c3 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Tue, 3 Nov 2026 02:52:48 +0100
+Subject: [PATCH] avutil/cuda_check: do not print error names the driver did
+ not give
+
+cuGetErrorName and cuGetErrorString leave their output unset for a code
+they do not know, and nvcuvid calls can return one, so reporting a failed
+cuvidCreateDecoder read two uninitialised pointers and crashed the process
+instead of failing that one decoder. Print the number instead.
+---
+ libavutil/cuda_check.h | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/libavutil/cuda_check.h b/libavutil/cuda_check.h
+index f5a9234eaf..a80494787b 100644
+--- a/libavutil/cuda_check.h
++++ b/libavutil/cuda_check.h
+@@ -33,8 +33,8 @@ static inline int ff_cuda_check(void *avctx,
+                                 void *cuGetErrorName_fn, void *cuGetErrorString_fn,
+                                 CUresult err, const char *func)
+ {
+-    const char *err_name;
+-    const char *err_string;
++    const char *err_name = NULL;
++    const char *err_string = NULL;
+ 
+     av_log(avctx, AV_LOG_TRACE, "Calling %s\n", func);
+ 
+@@ -47,6 +47,8 @@ static inline int ff_cuda_check(void *avctx,
+     av_log(avctx, AV_LOG_ERROR, "%s failed", func);
+     if (err_name && err_string)
+         av_log(avctx, AV_LOG_ERROR, " -> %s: %s", err_name, err_string);
++    else
++        av_log(avctx, AV_LOG_ERROR, " -> error %d", (int)err);
+     av_log(avctx, AV_LOG_ERROR, "\n");
+ 
+     return AVERROR_EXTERNAL;
+-- 
+2.55.0
+

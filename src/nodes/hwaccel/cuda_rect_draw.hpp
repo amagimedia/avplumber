@@ -4,6 +4,7 @@
 // kernel launch from a rect table. Owns no scheduling state; the node decides
 // what to draw when.
 #include "../../hwaccel.hpp"
+#include "../../mixer/Retirement.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
 #include "cuda_rect_table.h"
 #include "cuda_rect_viewport.h"
@@ -16,6 +17,7 @@ extern "C" {
 }
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace avp::mixer {
@@ -40,6 +42,9 @@ public:
         bool allow_hdr_depth_reduction = false;
     };
 
+    /// Texture pools of sources no draw uses any more are destroyed here instead of in the draw.
+    void setRetirement(std::shared_ptr<avp::mixer::Retirement> retirement) { retirement_ = std::move(retirement); }
+
     // Stream completion is for callers that already synchronize each output;
     // asynchronous callers keep the finer-grained event protecting the table.
     enum class TableCompletion { Event, Stream };
@@ -52,8 +57,8 @@ public:
     const Canvas &canvas() const { return canvas_; }
     int maxLayers() const { return max_layers_; }
 
-    /// Canvas formats the composite kernel writes: semiplanar YUV (NV12, P010, P210) and
-    /// packed 8-bit RGB without a separate alpha plane (rgb0, bgr0, rgba, bgra).
+    /// Canvas formats the composite kernel writes: semiplanar YUV with Cb before Cr (NV12, P010,
+    /// P210) and packed 8-bit RGB without alpha (rgb0, bgr0).
     static bool canvasSupported(AVPixelFormat sw_fmt);
 
     /// Make the device's CUDA context current on this thread; throws when the hwaccel is unusable.
@@ -111,6 +116,7 @@ private:
     CUfunction composite_filter_kernel_ = nullptr;            // any layer kind, fade, storage and filter
     bool opacity_warned_ = false;   // an op with opacity < 1 on a kind that cannot blend, logged once
     bool filter_warned_ = false;    // an op naming a filter on a kind drawn bilinear, logged once
+    uint64_t bad_sources_ = 0;      // layers left out because the driver did not know a plane (sourceProblem)
     // Rect table: pinned host staging + device copy, one entry per op, reused every frame. The
     // upload reads the pinned staging when the stream reaches it, not when it is queued, so the
     // staging is not written again until the last draw's event or stream has completed.
@@ -121,6 +127,7 @@ private:
     CUstream table_stream_ = nullptr;
     bool table_in_use_ = false;
     std::unique_ptr<RectArrayTextures> array_textures_;
+    std::shared_ptr<avp::mixer::Retirement> retirement_;
     CUevent producer_ready_ = nullptr;
     std::vector<CUstream> waited_streams_;
 
@@ -137,6 +144,7 @@ private:
                 const AVFrame *color_src, const RectViewport &view);
     bool baseCoversCanvas(const DrawOp &op, const AVFrame *base) const;
     void fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out);
+    std::string sourceProblem(const DrawOp &op, const AvpRectLayer &entry) const;
     void waitForProducer(const AVFrame *src, CUstream stream);
     void validateSourceColor(const av::VideoFrame &src, bool packed_rgb, const AVFrame *canvas) const;
 };

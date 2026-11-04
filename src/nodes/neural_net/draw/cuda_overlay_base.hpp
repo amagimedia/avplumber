@@ -298,14 +298,16 @@ protected:
             frames = picture_frames_.get();
         }
         out.raw()->format = frm.raw()->format;
-        out.raw()->width = frm.width();
-        out.raw()->height = frm.height();
 
         int ret = av_hwframe_get_buffer(frames, out.raw(), 0);
         if (ret < 0) {
             logstream << nodeName() << ": av_hwframe_get_buffer failed: " << av::error2string(ret);
             return false;
         }
+        // A frame takes its pool's size. A decoder's pool has the coded size (1920x1088 for
+        // 1080p), larger than the frame it cropped; the copy is the frame's size.
+        out.raw()->width = frm.width();
+        out.raw()->height = frm.height();
 
         // Frames of two pools of one device, format and size hold the chroma plane at the same
         // pitch and distance behind luma: one copy then takes both planes and the rows between.
@@ -356,9 +358,12 @@ protected:
         if (ret < 0) {
             throw Error(std::string(nodeName()) + ": copying frame properties failed: " + av::error2string(ret));
         }
-        const auto ops = avp::mixer::resolveDrawOps({&frm}, {avp::mixer::LayerSpec{}},
-                                                    frm.width(), frm.height(), AV_PIX_FMT_NV12);
-        picture_draw_->draw(cuda_dev_ctx_->stream, ops, out.raw(), frm.raw());
+        // The whole storage, not its visible part (resolveDrawOps): the picture keeps the
+        // frame's crop fields, so it stays a copy of the frame for readers that apply them.
+        avp::mixer::DrawOp whole{&frm, frm.width(), frm.height(), {}};
+        whole.layer.crop_w = frm.width();
+        whole.layer.crop_h = frm.height();
+        picture_draw_->draw(cuda_dev_ctx_->stream, {whole}, out.raw(), frm.raw());
     }
 
     /// The geometry of the frame being processed, for the nodes' metadata readers.

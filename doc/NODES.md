@@ -21,7 +21,14 @@ It has the same parameters as the `input` node and some additional
 -   `live_delay` (float, seconds) - time to delay between latest available packet and currently displayed in live mode (default `1`)
 -   `start_ts` (string) - start timestamp
 -   `stop_ts` (string) - stop timestamp
--   `loop` (bool) - if set to true, video will be played in a loop
+-   `loop` (bool) - if set to true, video will be played in a loop. A loop to the start seeks to the
+    first video packet's decode timestamp (a transport stream with B-frames seeks by decode time, so the
+    first picture's presentation time lies past the opening keyframe). A new pass that begins with a
+    picture that is not a keyframe (a transport stream cut mid-GOP) is marked as a stream restart
+    (packet side data): `dec_video` hands on the pictures it still holds, then resets, so no picture
+    of the new pass predicts from the last one; FFmpeg then shows nothing until a keyframe. A pass that
+    begins with a keyframe is not reset (an H.264 reset renegotiates the hardware decoder); after an
+    open-GOP keyframe (HEVC CRA, H.264 recovery point) its leading pictures still predict across the loop
 -   `loop_continuous_ts` (bool, default false) - with `loop`, shift each forward pass by the span of the previous one
     (earliest timestamp to latest timestamp + duration of the video stream, or of all streams in a file without video), so timestamps
     keep rising across loops instead of jumping back to the start. All streams get the same shift to stay in sync.
@@ -199,7 +206,47 @@ Recommended options for displaying live video:
     specified input stream codecs, useful because apparently setting
     `hw_device_ctx` in normally-software libavcodecs triggers frame
     corruption bugs
--   `options` (dictionary) - optional, options passed to libavcodec
+-   `options` (dictionary) - optional, options passed to libavcodec. For NVDEC CUarray output
+    (`pixel_format` `cuarray` with `hwaccel_flags` `unsafe_output`) the decoded frames are the
+    decoder's own fixed pool of surfaces, sized by the codec plus `extra_hw_frames`; the node
+    holds the next packet back while consumers hold `extra_hw_frames + 1` frames.
+-   `pool_budget_mib` (int, CUarray decoders) - all CUarray decoder pools of the instance,
+    parked ones included, must fit this many MiB; a pool that would not is refused and the
+    source shows nothing until one fits (`status` says `degraded`, with the reason).
+-   `park` (bool, default `false`, CUarray decoders) - when the node is destroyed, keep its NVDEC
+    session and pool alive instead of destroying them: that destruction takes a driver lock
+    every thread using the device waits on, in the middle of a show. One decoded frame per
+    parked decoder is held, in an instance-wide lot; its pool stays counted in the budget until
+    the decoder is taken over or freed. A new stream that fits a parked decoder (same codec,
+    coded size and pixel format, and no more surfaces than it has) takes it over instead of
+    creating one, as does a decoder whose stream changes parameters: `status` says `took_over`.
+    A `mixer_compositor` publishes the lot (`parked`, `parked_mib`, `parked_reused`) and frees
+    one at a time on `free_parked_decoder`.
+-   `park_limit` (int, default `8`) - how many decoders the lot keeps beyond the most the
+    instance ever ran at once: a show that shrinks keeps every decoder it ran, and only decoders
+    left behind by streams of another format count. Past it, and when a new pool would not fit
+    the budget beside them, the oldest are freed; each free stalls the device for about 50 ms.
+
+The node never ends over what its stream gives it: a packet that fails to decode, a refused
+pool or a surface shortage costs that source pictures, which its consumers repeat, while the
+next packet is tried, paced at the picture rate. A CUarray decoder out of surfaces ("No decoder
+surfaces left") sends each packet only once the consumers hold fewer than `extra_hw_frames + 1`
+frames again (or after 100 ms), until a picture is shown. HEVC reports the shortage, so the
+packet is kept and sent again, and dropped after a second of that; H.264 goes on without the
+surface and fails later, the picture lost. After a lost picture nothing is shown until a
+keyframe.
+
+Objects (`node.object.get <name> status`): `degraded` with a `reason` (packets failing in a
+row, or the pool refused), `decode_errors`, `consecutive_errors`, `frames`, `stream_restarts`
+(an input's loops: see `input_rec` `loop`),
+`last_frame_age_ms`, and for CUarray decoders `surfaces`: `held`, `limit`, `pool`, `pauses`,
+`exhaustions` (episodes), `exhausted_now`, `retries` (packets sent while out of surfaces),
+`packets_dropped`, `pictures_lost`, `pictures_hidden`, `hiding`, `recoveries`, `repeats` (the
+episodes that ended, in the stream's picture periods from the first failure to the next picture
+shown: about the pictures the consumers repeated meanwhile). The instance's totals (`degraded_now`,
+`surface_exhaustions`, `surface_exhausted_now`, `surface_repeats` (also counting an episode cut
+short by its decoder closing), `pools_mib`, the lot) are in every `mixer_compositor`'s `status`
+under `decoders`, and in `mixer.status`.
 
 ### `extract_timestamps`
 
@@ -835,8 +882,11 @@ Parameters:
 -   `write_combined` (bool, default `false`) - allocate the page-locked memory write-combined.
     Whether that makes the read cheaper depends on the host; measure before using it.
 -   `pool_frames` (int, default `0`: no bound) - at most this many device frames. FFmpeg's pool
-    grows to the most frames ever out at once and keeps them; bounded, the node waits (up to five
-    seconds, as it does for device memory) until one comes back. `stats` reports `frames_allocated`.
+    grows to the most frames ever out at once and keeps them; bounded, the node waits until one
+    comes back, for as long as that takes (as it does for device memory): its last picture stays
+    on air meanwhile, and the wait is logged every five seconds. `stats` reports
+    `frames_allocated`, `frame_waits` (pictures that had to wait), `waiting` (one does now) and
+    `longest_wait_ms`.
 -   `resident` (bool, default `false`) - with `loop`: keep the file's pictures in the
     page-locked memory. Each is read when it is first shown and only transferred after that,
     so a pass after the first reads nothing. Where a pass starts the node compares the file's
@@ -894,17 +944,18 @@ Parameters:
 -   `socket` (string, required) - path to the UNIX domain socket
 -   `hwaccel` (string, optional) - name of `hwaccel` object; when set, a matching `hw_frames_ctx` is attached for downstream filters/encoders
 -   `fps` (rational string, optional) - publishes the sender's requested frame rate to downstream nodes; frame timestamps use a `1/1000000` time base
--   `return_queue` (integer 0 to 64, optional, default `0`) - frames that wait to go back to the sender.
-    `0` sends each release ACK when the graph lets its frame go. With `N`, a finished frame waits in the
-    return queue and one goes back per frame that arrives; only beyond `N` waiting does the oldest go at
-    once. Chromium's capture pool keeps two idle buffers and destroys the rest, so a consumer that lets
-    frames go in bunches makes it destroy and allocate buffers all the time, and every new allocation is
-    a new import (and a released one) downstream. One buffer back per buffer handed out keeps the pool on
-    a fixed set. Queued frames count against the sender's `ringSize`: open the window with the frames in
-    flight plus `N`.
+-   `hold_frames` (integer 0 to 63, optional, default `0`) - frames the sender always has out with this
+    node. `0` sends each release ACK when the graph lets its frame go. With `N`, a frame the graph lets go
+    waits until more than `N` are out, which the next arriving frame makes so: one buffer goes back per
+    buffer handed out, and frames let go together after a stall go back one per new frame. Chromium's
+    capture pool keeps two idle buffers, destroys the rest and allocates when it has none, so its size
+    follows how many frames the consumer holds; a constant `N` keeps it on a fixed set of buffers, and
+    downstream imports are never released or registered again. Set `N` below the sender's `ringSize`
+    (the mixer uses `ringSize` − 1) so the sender keeps delivering. Retiring a connection returns
+    everything at once. The removed `return_queue` parameter is refused.
 
 `node.object.get <node> frame_stats` reports the received-frame count, plus
-released frames, sent ACK messages, pending ACK messages and frames in the return queue (`returns_queued`) on the current
+released frames, sent ACK messages, pending ACK messages, frames let go and waiting (`returns_queued`) and frames out with this node (`outstanding`) on the current
 connection. ACK counters reset on reconnection; the received count does
 not. Lifecycle drain markers also count as sent messages. Pending ACKs distinguish
 frames already released by the graph from frames still referenced downstream.
@@ -959,7 +1010,9 @@ has finished starting. They count as `expired`.
 `node.object.get <node> import_stats` includes an `admission_dropped` frame
 counter, a `texture_failed` frame counter (an array import whose texture object
 could not be created; the frame is dropped) and instance-wide cleanup counts. These counters distinguish admission
-drops from EGL/CUDA import work without per-frame logs.
+drops from EGL/CUDA import work without per-frame logs. `allocations` counts the distinct producer
+allocations ever imported and `reimports` the registrations of one seen before (it had expired or
+been evicted): a producer recycling a fixed pool stops adding `allocations` once its pool is seen.
 
 ### `object_tracker`
 
@@ -1192,7 +1245,8 @@ Parameters:
 -   `layers` (array of objects, required) - at most `max_layers`; each draws
     `input` (an index in `src`; omitted, the layer's position) at `dst_x`,
     `dst_y`, `dst_w`, `dst_h` (size omitted: the source's), optionally from
-    `crop` (`{"x", "y", "w", "h"}`), with `fit` `stretch` (default) or
+    `crop` (`{"x", "y", "w", "h"}`, in the picture left after the decoder's
+    own crop), with `fit` `stretch` (default) or
     `contain` (`source_canvas` `{"w", "h"}` letterboxes into a virtual source
     canvas), in `z` order (lower first), `blend` honouring the source's alpha.
     `filter` resamples a YUV source on a YUV canvas with `bilinear` (default),
@@ -1252,6 +1306,12 @@ Parameters, in addition:
     of wake-ups a second. Each input's queue must hold what arrives within one interval.
     `node.object.get <node> status` reports the setting and `input_passes`, how often
     the thread has looked.
+-   `gpu_handoff` (bool, default `true`) - hand each frame on once its draw is queued, without
+    waiting for the GPU: the next tick waits for the draw before it (normally long finished) and
+    the source frames a draw reads stay held until then. Consumers order on the frame's CUDA
+    stream (FFmpeg filters and NVENC use it, compositors wait for their producers' streams), so
+    a draw that the GPU starts late, behind another process's work, no longer lengthens the
+    tick. `false` waits for each draw before handing its frame on.
 -   `aux_mode` (bool, default `false`) - an AUX bus: a private CUDA stream,
     subscribed inputs, layers from `composition` only (no per-frame metadata
     layers), and frames dropped rather than waited for when the output edge is full
@@ -1270,6 +1330,11 @@ Objects (`node.object.set`):
     without being drawn, so a switch to them is immediate
 -   `warm_reset` - reject frames stamped over a tick before the one being
     drawn; prewarmed inputs keep their held pictures
+-   `release_input` (input index) - the source left the show: its frames are let go of
+    instead of its last picture being held, no tick waits for it, and when it comes back it
+    shows from its first frame's own tick on, without delaying a tick for it
+-   `free_parked_decoder` - destroy one parked decoder (`dec_video` `park`) now, oldest
+    first, on the control thread; fails when none is parked
 -   `composition` (`aux_mode` only) - `{"layers": [...], "active_inputs": <mask>,
     "revision": "<string>"}`: applied on the tick its new inputs are ready; if
     they are not ready within max(250 ms, twice `latency_ms`), the previous
@@ -1283,7 +1348,10 @@ output edge; the bus keeps playing and draws again once it has room), `playout`
 misbehaves), with `aux_mode` `composition_pending`, `composition_error` and
 `composition_revision`, the revision of the composition being drawn (set when
 one is applied at once or a staged one becomes ready, unchanged when a staged
-one is dropped; empty for one without a revision).
+one is dropped; empty for one without a revision). `decoders`, the same from every
+compositor, is the show's decoder health (see `dec_video`): `degraded_now`,
+`surface_exhaustions`, `surface_exhausted_now`, `surface_repeats`, `pools_mib` and, with parking, `parked`,
+`parked_mib`, `parked_total`, `parked_freed`, `parked_reused`.
 
 `node.object.set <node> reset_counters true` starts `missed_deadlines`, the per-input counters,
 `output_drops` and `playout.timing` again from zero, for a caller that has finished starting the
@@ -1292,9 +1360,10 @@ show; `frames` keeps counting and the playout is not disturbed.
 `playout.timing` says where each drawn tick's time went: `period_ms`, `bounds_ms` (the upper
 bounds of all buckets but the last: a quarter, a half, three quarters, one, one and a quarter,
 one and a half, two and three frame periods) and four histograms, each with `counts` per bucket,
-`count`, `mean_ms` and `max_ms` since the node started: `draw` (the whole draw), `issue` (queueing
+`count`, `mean_ms` and `max_ms` since the node started, and `p95_ms` and `p99_ms` over the last
+`recent` ticks (at most 600): `draw` (the whole draw), `issue` (queueing
 it: the node's own work and the CUDA library's locking), `gpu_wait` (waiting for the GPU to finish
-it and the frames it reads) and `downstream` (waiting for room on the output edge). A draw in the
+it and the frames it reads; with `gpu_handoff`, the previous tick's draw) and `downstream` (waiting for room on the output edge). A draw in the
 first four buckets fitted its slot.
 
 ### `mixer_keyer`

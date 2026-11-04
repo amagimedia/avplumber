@@ -30,7 +30,8 @@ inline CudaRectDraw::Canvas parseCanvas(const Parameters &params, const std::str
     if (canvas.sw_fmt == AV_PIX_FMT_NONE)
         throw Error(prefix + "unknown sw_format");
     if (!CudaRectDraw::canvasSupported(canvas.sw_fmt))
-        throw Error(prefix + "sw_format must be semiplanar YUV (nv12, p010le, p210le) or packed 8-bit RGB");
+        throw Error(prefix + "sw_format must be semiplanar YUV with Cb before Cr (nv12, p010le, p210le) "
+                             "or packed 8-bit RGB without alpha (rgb0, bgr0)");
     if (params.contains("color")) {
         const auto color = params.at("color").get<std::string>();
         canvas.transfer = graphicTransfer(color);
@@ -64,12 +65,17 @@ inline avp::AvBufferRef allocCanvasFrames(HWAccelDevice &hw, const CudaRectDraw:
     return frames;
 }
 
+/// The canvas pool has no frame to give, as when the device is out of memory: the next tick may.
+struct NoCanvasFrame : Error {
+    using Error::Error;
+};
+
 /// A frame from the canvas pool, not drawn yet.
 inline av::VideoFrame canvasFrame(AVBufferRef *frames, const std::string &type) {
     av::VideoFrame outf;
     int r = av_hwframe_get_buffer(frames, outf.raw(), 0);
     if (r < 0)
-        throw Error(type + ": av_hwframe_get_buffer failed: " + av::error2string(r));
+        throw NoCanvasFrame(type + ": av_hwframe_get_buffer failed: " + av::error2string(r));
     outf.setComplete(true);   // av_hwframe_get_buffer set hw_frames_ctx, format and size
     return outf;
 }
@@ -79,6 +85,12 @@ inline void copySourceProps(av::VideoFrame &outf, const av::VideoFrame &src, con
     const int cpy = av_frame_copy_props(outf.raw(), src.raw());
     if (cpy < 0)
         throw Error(type + ": av_frame_copy_props failed: " + av::error2string(cpy));
+    // The draw applied the source's crop; another reader must not apply it to the canvas again.
+    outf.raw()->crop_left = outf.raw()->crop_right = outf.raw()->crop_top = outf.raw()->crop_bottom = 0;
+    // A rendered picture is not the source's coded one. A source I-frame's type would make NVENC
+    // code every composite showing it as an intra frame: one per canvas tick it is repeated on.
+    outf.setPictureType(AV_PICTURE_TYPE_NONE);
+    outf.setKeyFrame(false);
     // The output owns a new canvas; an imported source texture describes
     // only that source's storage, not these rendered pixels.
     if (textureFrameDesc(outf.raw()))

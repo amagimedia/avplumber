@@ -554,7 +554,8 @@ namespace {
 PYBIND11_MODULE(_avplumber, m) {
     py::class_<AVPlumber>(m, "AVPlumber")
         .def(py::init<>())
-        .def("enableControlServer", &AVPlumber::enableControlServer)
+        .def("enableControlServer", &AVPlumber::enableControlServer,
+             py::arg("tcp_port"), py::arg("bind_address") = AVPlumber::DEFAULT_CONTROL_BIND)
         .def("registerWithWebUI", &AVPlumber::registerWithWebUI)
         // Release the GIL while executing control commands: a command such as
         // node.add / group.start makes the NodeManager create nodes, and a

@@ -15,10 +15,10 @@ Subject: [PATCH] avfilter: port tonemap_cuda HDR and SDR conversion
  create mode 100644 libavfilter/vf_tonemap_cuda.cu
 
 diff --git a/configure b/configure
-index 7dd57d4..75d6192 100755
+index 50e2a0c..fe0eb27 100755
 --- a/configure
 +++ b/configure
-@@ -3556,6 +3556,7 @@ crop_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+@@ -3554,6 +3554,7 @@ crop_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
  hwupload_cuda_filter_deps="ffnvcodec"
  scale_cuda_filter_deps="ffnvcodec"
  scale_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
@@ -27,10 +27,10 @@ index 7dd57d4..75d6192 100755
  thumbnail_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
  transpose_cuda_filter_deps="ffnvcodec"
 diff --git a/doc/filters.texi b/doc/filters.texi
-index 43dd30f..0d1cffe 100644
+index d1d3743..6b256df 100644
 --- a/doc/filters.texi
 +++ b/doc/filters.texi
-@@ -27985,6 +27985,67 @@ scale_cuda=passthrough=0
+@@ -28104,6 +28104,67 @@ scale_cuda=-2:720:format=bgra
  @end example
  @end itemize
  
@@ -99,10 +99,10 @@ index 43dd30f..0d1cffe 100644
  
  Select the most representative frame in a given sequence of consecutive frames using CUDA.
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index 6f32d8a..f690fb2 100644
+index a824c09..2104a70 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
-@@ -547,6 +547,8 @@ OBJS-$(CONFIG_TMEDIAN_FILTER)                += vf_xmedian.o framesync.o
+@@ -548,6 +548,8 @@ OBJS-$(CONFIG_TMEDIAN_FILTER)                += vf_xmedian.o framesync.o
  OBJS-$(CONFIG_TMIDEQUALIZER_FILTER)          += vf_tmidequalizer.o
  OBJS-$(CONFIG_TMIX_FILTER)                   += vf_mix.o framesync.o
  OBJS-$(CONFIG_TONEMAP_FILTER)                += vf_tonemap.o
@@ -983,6 +983,3 @@ index 0000000..ccfc54d
 +        write_code(dst_uv, dst_uv_linesize, x + 1, yi, output_depth, 224.0f * ((v[0] + v[1]) * 0.25f) + 128.0f);
 +    }
 +}
--- 
-2.55.0
-

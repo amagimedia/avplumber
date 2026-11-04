@@ -1,4 +1,4 @@
-From afe32e1f6b4b2aba51d75edb30b81c32e9109161 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Tue, 6 Oct 2026 14:49:45 +0200
 Subject: [PATCH] avfilter/hwupload_cuda: preserve RGBA alpha in pinned uploads
@@ -9,10 +9,10 @@ Subject: [PATCH] avfilter/hwupload_cuda: preserve RGBA alpha in pinned uploads
  2 files changed, 4 insertions(+), 3 deletions(-)
 
 diff --git a/doc/filters.texi b/doc/filters.texi
-index 3f2b22e825..0f4c904690 100644
+index 6478de0..a8642e0 100644
 --- a/doc/filters.texi
 +++ b/doc/filters.texi
-@@ -16108,7 +16108,8 @@ It accepts the following optional parameters:
+@@ -16166,7 +16166,8 @@ It accepts the following optional parameters:
  The number of the CUDA device to use
  @item pinned
  Use reusable pinned host staging and a private nonblocking CUDA stream for
@@ -23,7 +23,7 @@ index 3f2b22e825..0f4c904690 100644
  output frame is forwarded; this option does not eliminate CPU waits.
  
 diff --git a/libavfilter/vf_hwupload_cuda.c b/libavfilter/vf_hwupload_cuda.c
-index 2df767e0ca..e39f62f5e4 100644
+index 112e441..22468d2 100644
 --- a/libavfilter/vf_hwupload_cuda.c
 +++ b/libavfilter/vf_hwupload_cuda.c
 @@ -260,7 +260,7 @@ static int cudaupload_query_formats(const AVFilterContext *ctx,
@@ -44,6 +44,3 @@ index 2df767e0ca..e39f62f5e4 100644
      { "device", "Number of the device to use", OFFSET(device_idx), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
      { "output_format", "Output frame format", OFFSET(output_format), AV_OPT_TYPE_INT, { .i64 = CUDAUPLOAD_FMT_CUDA }, 0, CUDAUPLOAD_FMT_NB - 1, FLAGS, .unit = "output_format" },
          { "cuda",    "Pitch-linear device memory (default)", 0, AV_OPT_TYPE_CONST, { .i64 = CUDAUPLOAD_FMT_CUDA },    .flags = FLAGS, .unit = "output_format" },
--- 
-2.55.0
-

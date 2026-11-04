@@ -462,7 +462,7 @@ def test_a_browser_in_a_large_catalogue_cannot_share_a_declared_hdr_input_color(
             GraphOptions(inputs=inputs, output="p.mp4", input_color=color).validate()
 
 
-def test_browser_keeps_the_return_queue_and_expires_idle_imports():
+def test_browser_holds_all_but_one_frame_and_keeps_its_imports():
     from pyplumber.mixer import dmabuf_inputs
 
     nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
@@ -470,9 +470,9 @@ def test_browser_keeps_the_return_queue_and_expires_idle_imports():
         cuda_hwaccel="gpu", source_group="g", processing_group="g", browser_frame_queue=9)
     receive = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_receive")
     importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
-    assert receive["return_queue"] == 3
-    assert importer["max_imports"] == 12
-    assert importer["import_ttl_ms"] == dmabuf_inputs.IMPORT_IDLE_MS
+    assert receive["hold_frames"] == 8 and "return_queue" not in receive
+    assert importer["max_imports"] == 13
+    assert importer["import_ttl_ms"] == 0
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
@@ -637,7 +637,7 @@ def test_wipe_file_preloads_into_the_clip_cache_at_start(monkeypatch):
     FakeMixer.instances.clear()
     application = build_application(
         GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_file="/media/wipe.mov", wipe_cache_mb=256), api=fake_api())
-    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: ())
     monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
     application.start()
     # Caching opted in: the clip is armed on the loader and decoded once into the
@@ -653,7 +653,7 @@ def test_wipe_file_preloads_into_the_clip_cache_at_start(monkeypatch):
 def test_a_wipe_that_does_not_cache_whole_fails_the_start(monkeypatch):
     application = build_application(
         GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_file="/media/wipe.mov", wipe_cache_mb=256), api=fake_api())
-    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: ())
     monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
     application.avp.wipes.script = [{"decoded": 120, "cached": 2}] * 2
     with pytest.raises(RuntimeError, match="/media/wipe.mov: 2 frames cached, 120 frames decoded"):
@@ -662,7 +662,7 @@ def test_a_wipe_that_does_not_cache_whole_fails_the_start(monkeypatch):
 
     FakeMixer.instances.clear()
     plain = build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
-    monkeypatch.setattr(plain, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(plain, "_wait_for_edges", lambda *a, **k: ())
     monkeypatch.setattr(plain, "_wait_for_node", lambda *a, **k: None)
     plain.start()
     assert not any("node.param.set" in c for c in plain.avp.commands)
@@ -707,7 +707,8 @@ def test_array_decode_is_explicit_per_source_and_preserves_linear_defaults(tmp_p
     assert nodes["decode_0"]["pixel_format"] == "cuarray"
     assert nodes["decode_0"]["auto_restart"] == "off"
     assert nodes["decode_0"]["options"] == {
-        "threads": 1, "hwaccel_flags": "unsafe_output", "extra_hw_frames": 3 if budget is None else budget}
+        "threads": 1, "hwaccel_flags": "unsafe_output+extra_hw_frames_only+private_stream",
+        "extra_hw_frames": 3 if budget is None else budget}
     assert nodes["decode_1"]["pixel_format"] == "?cuda"
     assert nodes["decode_1"]["options"] == {"threads": 1}
     assert nodes["decode_1"]["auto_restart"] == "group"
@@ -715,12 +716,115 @@ def test_array_decode_is_explicit_per_source_and_preserves_linear_defaults(tmp_p
     assert ("*", 3) in app.avp.edges.plans
 
 
+def test_decoder_pool_budget_reaches_cuarray_decoders_only(tmp_path):
+    camera = CONFIG["sources"][0]
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps({**CONFIG, "canvas": {**CONFIG["canvas"], "decoder_pool_budget_mib": 9216},
+                                "sources": [{**camera, "decode_storage": "cuarray"},
+                                            {**camera, "id": "linear", "path": "/media/linear.mp4"}],
+                                "wipes": [], "scenes": CONFIG["scenes"][:1], "initial_scene": "full"}))
+    app = build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
+    nodes = {node.parameters.get("name"): node.parameters for node in app.avp.nodes}
+    assert nodes["decode_0"]["pool_budget_mib"] == 9216
+    assert "pool_budget_mib" not in nodes["decode_1"]
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "8G"])
+def test_invalid_decoder_pool_budget_is_rejected(value):
+    with pytest.raises(mixer_config.ConfigError, match="decoder_pool_budget_mib"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "decoder_pool_budget_mib": value}})
+
+
 @pytest.mark.parametrize("field,value", [("decode_storage", "invalid"), ("extra_hw_frames", True),
-                                        ("extra_hw_frames", -1), ("extra_hw_frames", 33)])
+                                        ("extra_hw_frames", -1), ("extra_hw_frames", 28), ("extra_hw_frames", 33)])
 def test_invalid_decode_storage_or_budget_is_rejected(field, value):
     with pytest.raises(mixer_config.ConfigError, match=field):
         mixer_config.parse({**CONFIG, "sources": [{**CONFIG["sources"][0], field: value},
                                                   CONFIG["sources"][1]]})
+
+
+def test_extra_hw_frames_is_bounded_by_what_a_cuarray_pool_can_hold():
+    # 27 is the most that ever opens: a stream claiming no surface of its own still needs FFmpeg's
+    # five working ones, and NVDEC registers 32 at most.
+    assert mixer_config.MAX_EXTRA_HW_FRAMES == 27
+    source = {**CONFIG["sources"][0], "decode_storage": "cuarray", "extra_hw_frames": 27}
+    assert mixer_config.parse({**CONFIG, "sources": [source, CONFIG["sources"][1]]}).source("cam").extra_hw_frames == 27
+
+
+@pytest.mark.parametrize("codec,stream,extra,pool", [
+    # The live show's HEVC clips (NVENC -dpb_size 2: sps_max_dec_pic_buffering_minus1 2) with the L4
+    # profile's 12: 21 surfaces, which the decoder logs as 18 (the log leaves out the three base
+    # work surfaces); minus1 4 is 23, logged as 20.
+    ("hevc", {"max_dec_pic_buffering": 3}, 12, 21),
+    ("hevc", {"max_dec_pic_buffering": 5}, 12, 23),
+    ("hevc", {"max_dec_pic_buffering": 16}, 12, 34),     # the largest HEVC DPB fails with 12 ...
+    ("hevc", {"max_dec_pic_buffering": 16}, 10, 32),     # ... and opens with 10
+    ("h264", {"refs": 2, "reorder": 4}, 12, 23),         # NVENC low delay, no VUI: the level-4.x reorder
+    ("h264", {"refs": 4, "reorder": 2}, 12, 23),         # x264 B3 ref4, VUI
+    ("h264", {"refs": 16, "reorder": 0}, 12, 33),        # 16 references, no reorder: fails with 12 ...
+    ("h264", {"refs": 16, "reorder": 0}, 11, 32),        # ... and opens with 11
+    ("h264", {"refs": 16, "reorder": 15}, 0, 36),        # 16 references at level 5.1 without VUI: never
+    ("av1", {}, 12, 33),
+    ("vp9", {}, 12, 25),
+])
+def test_nvdec_pool_model_follows_ffmpeg(codec, stream, extra, pool):
+    surfaces = mixer_config.nvdec_pool_surfaces(mixer_config.nvdec_codec_surfaces(codec, **stream), extra)
+    assert surfaces == pool
+    assert (surfaces <= mixer_config.NVDEC_MAX_SURFACES) == (pool <= 32)
+
+
+@pytest.mark.parametrize("level,reorder", [(40, 4), (41, 4), (42, 4), (50, 13), (51, 15), (52, 15), (31, 2), (99, 15)])
+def test_h264_reorder_without_bitstream_restriction_follows_the_level_at_1080p(level, reorder):
+    assert mixer_config.h264_level_reorder(level, 1920, 1080) == reorder
+
+
+def _video_only_show(tmp_path, *sources, **canvas):
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps({**CONFIG, "canvas": {**CONFIG["canvas"], **canvas}, "sources": list(sources),
+                                "wipes": [], "scenes": CONFIG["scenes"][:1], "initial_scene": "full"}))
+    return build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
+
+
+@pytest.mark.parametrize("limit", [None, 4])
+def test_decoder_parking_reaches_cuarray_decoders_only(tmp_path, limit):
+    camera = CONFIG["sources"][0]
+    app = _video_only_show(tmp_path, {**camera, "decode_storage": "cuarray"},
+                           {**camera, "id": "linear", "path": "/media/linear.mp4"},
+                           **({} if limit is None else {"decoder_park_limit": limit}))
+    nodes = {node.parameters.get("name"): node.parameters for node in app.avp.nodes}
+    if limit is None:
+        assert "park" not in nodes["decode_0"]
+    else:
+        assert (nodes["decode_0"]["park"], nodes["decode_0"]["park_limit"]) == (True, limit)
+    assert "park" not in nodes["decode_1"]   # a linear decoder has no pool to park; the node refuses `park`
+    with pytest.raises(mixer_config.ConfigError, match="decoder_park_limit"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "decoder_park_limit": 0}})
+
+
+def test_a_deinterlaced_source_decodes_linear_and_filters_with_bwdif(tmp_path):
+    camera = {**CONFIG["sources"][0], "deinterlace": True, "decoded_format": "nv12"}
+    app = _video_only_show(tmp_path, camera)
+    nodes = {node.parameters.get("name"): node.parameters for node in app.avp.nodes}
+    assert nodes["decode_0"]["pixel_format"] == "?cuda"           # the CUDA deinterlacers read no CUarray
+    assert nodes["source_filter_0"]["graph"] == mixer_config.DEINTERLACE_FILTER == \
+        "bwdif_cuda=mode=send_frame:parity=auto:deint=interlaced"
+    assert nodes["source_filter_0"]["src"] == "input_0_realtime"
+    source = dict(FakeMixer.instances[-1].sources)["cam"]
+    assert source["pre_otm_edge"] == "input_0_filtered" and source["pixel_format"] == "nv12"
+
+
+@pytest.mark.parametrize("changes,message", [
+    ({"deinterlace": "yes"}, "deinterlace must be a boolean"),
+    ({"deinterlace": True}, "decoded_format"),
+    ({"deinterlace": True, "decoded_format": "nv12", "decode_storage": "cuarray"}, "decode_storage cuda"),
+    ({"deinterlace": True, "decoded_format": "nv12", "filter": "hflip_cuda", "filter_output_format": "nv12"},
+     "decoded_format"),
+])
+def test_deinterlace_needs_a_linear_decoder_of_known_storage_and_no_other_filter(changes, message):
+    with pytest.raises(mixer_config.ConfigError, match=message):
+        mixer_config.parse({**CONFIG, "sources": [{**CONFIG["sources"][0], **changes}, CONFIG["sources"][1]]})
+    with pytest.raises(mixer_config.ConfigError, match="deinterlace must be a boolean on a video source"):
+        mixer_config.parse({**CONFIG, "sources": [CONFIG["sources"][0], {**CONFIG["sources"][1], "deinterlace": True}]})
 
 
 def _raw_420_nodes(tmp_path, kind, color, *, source_options=None, process_source=None, **canvas):
@@ -1231,16 +1335,16 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     opened = [o for o in opened if o[1] == "/window/open"]   # the capture-mode read follows the opens
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1920, "height": 1080,
                              "fps": 60, "audio": False, "ringSize": 6, "holdLastFrame": True}
-    # Three of the six frames of this show's queue are the return queue.
-    assert nodes["input_1_receive"]["return_queue"] == 3
-    assert nodes["input_1_to_cuda"]["max_imports"] == 9
-    # Ten idle seconds, not one: a page that paints now and then must find its allocations registered.
-    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 10000
+    # All but one of the six frames of this show's queue stay with the mixer.
+    assert nodes["input_1_receive"]["hold_frames"] == 5
+    assert nodes["input_1_to_cuda"]["max_imports"] == 10
+    # A fixed set of browser buffers: their registrations are never released on air.
+    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 0
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}
     assert mixer.parameters["canvas"] == (1920, 1080)
     assert application.wipe_files == ("/media/swoosh.mov",)
     assert application.browser_windows == ("page",)
-    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: ())
     monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
     del opened[:]
     application.start()

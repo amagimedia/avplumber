@@ -3,6 +3,7 @@
 namespace avp::mixer {
 
 void MixerOrchestrator::prepareScene(const std::string& scene_name) {
+    avp::timeline::Scope prepare("prepare scene");
     if (state_->pvw_slot_scene != scene_name)
         loadSceneIntoSlot(!state_->pgm_is_slot_a, scene_name, true);
     setNodeObject(state_->pvwSlot().post_otm_name, "outputs", Parameters(1u));
@@ -13,6 +14,7 @@ void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::Tra
     interruptTransition(Interruption::Replaced);
     state_->graph = nodes_;
     state_->transition_mode = mode;
+    state_->timeline_take = avp::timeline::start(std::string(state_->takeKind()) + " " + scene_name);
     ++state_->transition_generation;
     state_->transition_scene_name = scene_name;
     state_->take_phase = MixerState::TakePhase::Ready;
@@ -54,6 +56,7 @@ void MixerOrchestrator::completeTake(int64_t pts_ns) {
 }
 
 void MixerOrchestrator::cut(const std::string& scene_name, CutLatency::Clock::time_point received) {
+    avp::timeline::mark("cut pressed: " + scene_name);   // before the lock: its wait shows
     std::lock_guard<std::mutex> lock(state_->mutex);
     const bool preloaded = state_->pvw_slot_scene == scene_name;
     if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);

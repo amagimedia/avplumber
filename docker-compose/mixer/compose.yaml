@@ -3,9 +3,8 @@ name: avplumber-mixer
 x-mixer-image: &mixer-image
   build:
     context: ../..
-    # Fedora 44 / CUDA 13.4, which needs host driver R615 or newer. On an older driver
-    # MIXER_DOCKERFILE=Dockerfile selects the Ubuntu 22.04 / CUDA 11.7 image (docs/guide.md).
-    dockerfile: docker-compose/mixer/${MIXER_DOCKERFILE:-Dockerfile.fedora44}
+    # Fedora 44 / CUDA 13.4, which needs host driver R615 or newer.
+    dockerfile: docker-compose/mixer/Dockerfile.fedora44
   image: avplumber-mixer:local
 
 services:

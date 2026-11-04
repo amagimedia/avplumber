@@ -1,6 +1,8 @@
 #include "hwaccel/cuda_rect_compositor.hpp"
 #include "hwaccel/cuda_stream.hpp"
+#include "../decoder_surfaces.hpp"
 #include "../mixer/Playout.hpp"
+#include "../mixer/Retirement.hpp"
 #include "../mixer/primitives/MixerState.hpp"
 #include "../mixer/primitives/MonotonicClock.hpp"
 #include "../mixer/primitives/TickTimes.hpp"
@@ -37,6 +39,7 @@ class MixerCompositor : public CudaRectCompositor,
     std::string composition_revision_; // of the composition being drawn; protected by layers_mutex_
     bool aux_ = false;
     std::atomic<uint64_t> output_drops_{0};
+    int64_t no_canvas_logged_ns_ = 0;
     // Set by `reset_counters`; the output thread zeroes its counters before its next tick.
     std::atomic<bool> reset_counters_{false};
     // Playout counters snapshotted every 60 frames for the status object; the
@@ -60,10 +63,15 @@ class MixerCompositor : public CudaRectCompositor,
         for (const auto count : times.counts()) counts.push_back(count);
         return {{"counts", counts}, {"count", times.count()},
                 {"mean_ms", times.count() ? static_cast<double>(times.sumNs()) / 1e6 / static_cast<double>(times.count()) : 0.0},
-                {"max_ms", static_cast<double>(times.maxNs()) / 1e6}};
+                {"max_ms", static_cast<double>(times.maxNs()) / 1e6},
+                {"recent", times.recentCount()},
+                {"p95_ms", static_cast<double>(times.recentQuantileNs(0.95)) / 1e6},
+                {"p99_ms", static_cast<double>(times.recentQuantileNs(0.99)) / 1e6}};
     }
 
     avp::mixer::SourceMask prewarm_inputs_;   // under masks_mutex_
+    std::vector<size_t> released_inputs_;     // under masks_mutex_; see "release_input"
+    const InstanceData *instance_ = nullptr;  // for the show's decoder counters in `status`
     std::pair<avp::mixer::SourceMask, avp::mixer::SourceMask> inputMasks() const {
         std::lock_guard<std::mutex> lock(masks_mutex_);
         return {active_inputs_, prewarm_inputs_};
@@ -122,16 +130,19 @@ class MixerCompositor : public CudaRectCompositor,
     void logSkippedTicks(int64_t tick) {
         const int64_t now = avp::mixer::monotonicNs();
         if (const int64_t skipped = playout_->skippedByPending()) {
+            std::ostringstream cause;
+            cause << std::fixed << std::setprecision(1) << "skipped " << skipped
+                  << " tick(s) before tick " << tick << ": " << (now - taken_up_ns_) / 1e6
+                  << " ms since the previous tick was taken up; its draw took " << compose_ns_ / 1e6
+                  << " ms, its wait for room downstream " << put_ns_ / 1e6
+                  << " ms, the longest wait for input since " << longest_input_wait_ns_ / 1e6 << " ms";
+            if (const auto input = playout_->heldBackBy()) cause << "; held back by input " << *input;
+            avp::timeline::mark(cause.str());   // every one: the log below is limited to one a second
             if (now - skip_logged_ns_ < 1000000000) {
                 skips_unlogged_ += skipped;
             } else {
                 std::ostringstream line;
-                line << std::fixed << std::setprecision(1) << "mixer_compositor: skipped " << skipped
-                     << " tick(s) before tick " << tick << ": " << (now - taken_up_ns_) / 1e6
-                     << " ms since the previous tick was taken up; its draw took " << compose_ns_ / 1e6
-                     << " ms, its wait for room downstream " << put_ns_ / 1e6
-                     << " ms, the longest wait for input since " << longest_input_wait_ns_ / 1e6 << " ms";
-                if (const auto input = playout_->heldBackBy()) line << "; held back by input " << *input;
+                line << "mixer_compositor: " << cause.str();
                 if (skips_unlogged_) line << " (" << skips_unlogged_ << " more since the last line, not logged)";
                 logstream << line.str();
                 skip_logged_ns_ = now;
@@ -145,11 +156,25 @@ class MixerCompositor : public CudaRectCompositor,
     void composite(av::Timestamp pts, const std::vector<const av::VideoFrame *> &sources,
                    const av::VideoFrame *metadata_src) {
         const int64_t started = avp::mixer::monotonicNs();
-        av::VideoFrame frame = compose(pts, sources, metadata_src);
+        av::VideoFrame frame;
+        try {
+            frame = compose(pts, sources, metadata_src);
+        } catch (const avp::mixer::NoCanvasFrame &e) {
+            // A full device costs this tick, not the output: a node that ended would stay dark.
+            ++output_drops_;
+            if (started - no_canvas_logged_ns_ > 1000000000) {
+                no_canvas_logged_ns_ = started;
+                logstream << "Warning: tick dropped, no canvas frame: " << e.what();
+            }
+            return;
+        }
         if (!aux_ && !composition_revision_.empty())
             av_dict_set(&frame.raw()->metadata, "avp.mixer.scene", composition_revision_.c_str(), 0);
         const int64_t composed = avp::mixer::monotonicNs();
-        if (!this->sink_->put(frame, aux_)) ++output_drops_;
+        {
+            avp::timeline::Scope put("put downstream");
+            if (!this->sink_->put(frame, aux_)) ++output_drops_;
+        }
         compose_ns_ = composed - started;
         put_ns_ = avp::mixer::monotonicNs() - composed;
         timing_.draw.add(compose_ns_);
@@ -223,6 +248,7 @@ public:
         for (auto &subscription : subscriptions_) subscription->close();
         draw_.ensureDevice();
         AVP_CHECK_CU(cuStreamSynchronize(draw_.stream()));
+        finishPreviousDraw();
         for (auto &edge : source_edges_) edge->clear();
         playout_.reset();
     }
@@ -264,6 +290,22 @@ public:
                                  {"gpu_wait", timesObject(published_timing_.gpu_wait)},
                                  {"downstream", timesObject(published_timing_.downstream)}};
             result["playout"] = playout;
+        }
+        // The show's decoders, for the operator page: the same numbers from every compositor.
+        if (auto ledger = InstanceSharedObjects<avp::DecoderPoolLedger>::getIfExists(*instance_, "decoder_pools")) {
+            const auto [exhaustions, exhausted_now] = ledger->exhaustion();
+            Parameters decoders = {{"degraded_now", ledger->degradedNow()}, {"surface_exhaustions", exhaustions},
+                                   {"surface_exhausted_now", exhausted_now}, {"surface_repeats", ledger->repeats()},
+                                   {"pools_mib", ledger->total() >> 20}};
+            if (auto parking = InstanceSharedObjects<avp::DecoderParking>::getIfExists(*instance_, "decoder_parking")) {
+                const auto parked = parking->status();
+                decoders["parked"] = parked.parked;
+                decoders["parked_mib"] = parked.bytes >> 20;
+                decoders["parked_total"] = parked.parked_total;
+                decoders["parked_freed"] = parked.freed;
+                decoders["parked_reused"] = parked.reused;
+            }
+            result["decoders"] = decoders;
         }
         if (aux_) {
             std::lock_guard<std::mutex> lock(layers_mutex_);
@@ -324,6 +366,14 @@ public:
             }
         }
         const int64_t now = avp::mixer::monotonicNs();
+        {
+            std::vector<size_t> released;
+            {
+                std::lock_guard<std::mutex> lock(masks_mutex_);
+                released.swap(released_inputs_);
+            }
+            for (const size_t input : released) playout_->releaseInput(input);
+        }
         auto [active, prewarm] = inputMasks();
         prewarm |= staging_inputs_;
         const auto generation = input_generation_.load(std::memory_order_acquire);
@@ -407,12 +457,14 @@ public:
                 // Inputs that never warmed restart like a load into an idle slot.
                 staging_inputs_.reset();
                 applySlotComposition(*staged_composition_, ready);
+                avp::timeline::mark(ready ? "scene loaded" : "scene loaded, inputs not warm");
                 if (ready) active = staged_mask_;
                 staged_composition_.reset();
                 composition_preparing_ = false;
             } else if (ready || now_ns >= staged_deadline_ns_) {
                 if (ready) {
                     applyAuxComposition(*staged_composition_, staged_mask_);
+                    avp::timeline::mark("aux layout applied");
                     active = staged_mask_;
                 } else {
                     auxInputs(active);
@@ -443,12 +495,15 @@ public:
             // The pass above took in every input, so there is nothing to look for: sleep until
             // a source signals a frame or the next deadline. An event keeps its signal until it
             // is read, so a frame that arrived after the pass ends the wait at once.
-            if (!more_queued && !stopping_)
+            if (!more_queued && !stopping_) {
+                avp::timeline::Scope wait("wait inputs");
                 waitForFrames(avp::mixer::waitMilliseconds(playout_->nextDeadline(), waiting));
+            }
             longest_input_wait_ns_ = std::max(longest_input_wait_ns_, avp::mixer::monotonicNs() - waiting);
             return;
         }
         logSkippedTicks(decision->index);
+        avp::timeline::Scope tick(int64_t(decision->index));
         std::vector<const av::VideoFrame *> sources;
         const av::VideoFrame *metadata = nullptr;
         for (size_t i = 0; i < decision->frames.size(); ++i) {
@@ -467,7 +522,10 @@ public:
             else
                 composite(av::Timestamp(decision->index, av_inv_q(frame_rate_.getValue())), sources, metadata);
         }
-        playout_->commit();
+        {
+            avp::timeline::Scope commit("commit");
+            playout_->commit();
+        }
         // Every 60 frames, and at once when a deadline was missed: a reader waiting for the
         // start-up to settle must not see a two-second-old zero.
         if (frame_counter_ % 60 == 0 || playout_->missedDeadlines() != published_missed_deadlines_) {
@@ -536,6 +594,21 @@ public:
                 prewarm_inputs_ = avp::mixer::parseSourceMask(value);
             }
             wake();
+        } else if (key == "release_input") {
+            // A source left the show: let go of its frames instead of holding the last picture.
+            if (!playout_) throw Error("mixer_compositor: release_input requires clocked playout");
+            const auto input = value.get<size_t>();
+            if (input >= source_edges_.size()) throw Error("mixer_compositor: invalid input index");
+            {
+                std::lock_guard<std::mutex> lock(masks_mutex_);
+                released_inputs_.push_back(input);
+            }
+            wake();
+        } else if (key == "free_parked_decoder") {
+            // One parked decoder (DecoderParking) is destroyed now, on the control thread: the
+            // operator picks a moment the show can afford the driver lock, one at a time.
+            auto parking = InstanceSharedObjects<avp::DecoderParking>::getIfExists(*instance_, "decoder_parking");
+            if (!parking || !parking->freeOne()) throw Error("mixer_compositor: no parked decoder to free");
         } else if (key == "warm_reset") {
             if (!playout_) throw Error("mixer_compositor: warm_reset requires clocked playout");
             const auto period = avp::mixer::TickGrid(frame_rate_).time(1);
@@ -556,13 +629,15 @@ public:
 std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) {
     const Parameters &params = nci.params;
     Config config = parseConfig(nci, "mixer_compositor");
+    config.hand_off = params.value("gpu_handoff", true);
     const bool aux = params.value("aux_mode", false);
     if (aux) {
-        config.hw = avp::mixer::makeCudaStreamDevice(config.hw);
+        config.hw = avp::mixer::makeCudaStreamDevice(config.hw, params.value("name", params.at("output_hwaccel").get<std::string>()));
         InstanceSharedObjects<HWAccelDevice>::put(nci.instance, params.at("output_hwaccel"), config.hw);
     }
     auto node = std::make_shared<MixerCompositor>(config);
     node->connect(nci);
+    node->instance_ = &nci.instance;
     node->aux_ = aux;
     node->frame_layers_ = !aux;
     if (!params.contains("fps") || params.contains("clock_input"))
@@ -575,6 +650,20 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
     node->control_wait_ = std::make_unique<MultiEventWait>(std::vector<Event *>{&node->stop_event_});
     node->playout_ = std::make_unique<avp::mixer::Playout<av::VideoFrame>>(
         config.inputs, avp::mixer::TickGrid(node->frame_rate_), latency_ms, avp::mixer::TimestampMode::Presentation);
+    // Sources restart and change while the show runs: their last frames must not cost a tick.
+    using Retirements = InstanceSharedObjects<avp::mixer::Retirement>;
+    Retirements::emplace(nci.instance, "frame_retirement", Retirements::PolicyIfExists::Ignore);
+    auto retirement = Retirements::get(nci.instance, "frame_retirement");
+    node->draw_.setRetirement(retirement);
+    node->playout_->setRetirement(
+        [](const av::VideoFrame &a, const av::VideoFrame &b) {
+            const auto producer = [](const av::VideoFrame &frame) {
+                const AVBufferRef *frames = frame.raw()->hw_frames_ctx;
+                return frames ? frames->data : nullptr;
+            };
+            return producer(a) == producer(b);
+        },
+        [retirement](av::VideoFrame frame) { retirement->retire(std::move(frame)); });
     node->input_generation_.store(1);
     node->timing_ = node->published_timing_ = TickTiming(avp::mixer::TickGrid(node->frame_rate_).time(1));
     logstream << "mixer_compositor: latency_ms=" << static_cast<double>(node->playout_->latencyNs()) / 1e6;

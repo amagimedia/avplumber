@@ -285,7 +285,7 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
         // Draw on a private stream of the same CUDA context and publish that device under this
         // name. Filters follow their input frames' device and an encoder can name it, so the
         // whole branch leaves the parent's stream and its work no longer delays nodes there.
-        config.hw = avp::mixer::makeCudaStreamDevice(config.hw);
+        config.hw = avp::mixer::makeCudaStreamDevice(config.hw, params.value("name", params.at("output_hwaccel").get<std::string>()));
         InstanceSharedObjects<HWAccelDevice>::put(nci.instance, params.at("output_hwaccel"), config.hw);
     }
     auto node = std::make_shared<CudaRectOverlay>(config);

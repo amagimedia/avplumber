@@ -340,7 +340,8 @@
   }
 
   // Program compose time from the mixer's own tick timing (mixer.status, playout.<program slot>.timing.draw): the mean
-  // over the frames drawn since the previous poll, against the frame period. Only for graphs with a mixer.
+  // over the frames drawn since the previous poll and p95/p99 over the mixer's last ticks (at most 600), against the
+  // frame period. Only for graphs with a mixer.
   $: mixerName = (Array.isArray(nodes) ? nodes : []).find((n) => n?.type === 'mixer_compositor' && n.params?.mixer)?.params.mixer || null;
   let compose = null, composePrev = null;
   async function refreshCompose() {
@@ -354,6 +355,7 @@
       const now = { slot, count: draw.count, sum: draw.mean_ms * draw.count };
       const prev = composePrev?.slot === slot && now.count > composePrev.count ? composePrev : null;  // not across a cut or a counter reset
       compose = { ms: prev ? (now.sum - prev.sum) / (now.count - prev.count) : draw.mean_ms,
+                  p95Ms: draw.p95_ms ?? null, p99Ms: draw.p99_ms ?? null, recent: draw.recent ?? 0,
                   budgetMs: status.playout[slot].timing.period_ms, maxMs: draw.max_ms };
       composePrev = now;
     } catch {

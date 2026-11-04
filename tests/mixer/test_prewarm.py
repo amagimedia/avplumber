@@ -344,14 +344,9 @@ def test_direct_cut_prewarm_wildcard_uses_the_current_catalogue(native_boundary)
     assert json.loads(command.partition(" ")[2])["scenes"] == app.mixer.scenes()
 
 
-@pytest.mark.parametrize("phase", ["input", "transition"])
-def test_missing_prewarm_frame_never_publishes_ready(native_boundary, monkeypatch, phase):
+def test_missing_transition_frame_never_publishes_ready(native_boundary, monkeypatch):
     app = application(native_boundary, preheat_timeout_sec=0.01)
-    edge = {
-        "input": app.input_edges[-1],
-        "transition": "mixer_trans_out",
-    }[phase]
-    app.avp.missing.add(edge)
+    app.avp.missing.add("mixer_trans_out")
     # Advance only the clock boundary, without sleeping or native GPU work.
     ticks = iter(range(10000))
     monkeypatch.setattr("pyplumber.mixer.cli.time.monotonic", lambda: next(ticks))
@@ -359,9 +354,21 @@ def test_missing_prewarm_frame_never_publishes_ready(native_boundary, monkeypatc
         app.start()
     assert not app.avp.ready
     assert "output" not in app.avp.started
-    if phase == "transition":
-        for slot in ("a", "b"):
-            assert f"node.object.set mixer_otm_scene_{slot} outputs 1" in app.avp.events
+    for slot in ("a", "b"):
+        assert f"node.object.set mixer_otm_scene_{slot} outputs 1" in app.avp.events
+
+
+def test_a_source_without_a_frame_stays_out_and_the_show_goes_on_air(native_boundary, monkeypatch):
+    app = application(native_boundary, preheat_timeout_sec=0.01)
+    silent = len(app.input_edges) - 1
+    app.avp.missing.add(app.input_edges[silent])
+    ticks = iter(range(10000))
+    monkeypatch.setattr("pyplumber.mixer.cli.time.monotonic", lambda: next(ticks))
+    app.start()
+    assert app.avp.ready
+    assert app.absent_inputs == (app.input_edges[silent],)
+    for slot in ("a", "b"):   # no tick of a scene showing it waits for it
+        assert f"node.object.set mixer_comp_{slot} release_input {silent}" in app.avp.events
 
 
 def test_both_slots_share_rate_and_delay_without_second_resampler(native_boundary):

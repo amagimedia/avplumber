@@ -10,7 +10,7 @@
   export let nodes = [];
   export let queues = [];
   export let selected = null;  // {kind: 'node' | 'group', id, queue?} or null
-  export let compose = null;   // the mixer's program compose time: {ms, budgetMs, maxMs} or null
+  export let compose = null;   // the mixer's program compose time: {ms, p95Ms, p99Ms, recent, budgetMs, maxMs} or null
   export let fresh = true;
 
   const dispatch = createEventDispatcher();
@@ -135,7 +135,7 @@
       {/if}
       <span><b>{model.nodeCount.toLocaleString()}</b> nodes</span><span><b>{model.edges.length.toLocaleString()}</b> queues</span>
       <span data-tip="Frames handed from node to node per second, summed over all queues"><b>{fresh ? fmtK(throughput) : '–'}</b> frames/s</span>
-      {#if compose && fresh}<span data-tip="Time the mixer takes to compose one program frame (CPU issue and GPU work), mean over the last 2 s, against the frame period; worst frame since start {compose.maxMs.toFixed(1)} ms">compose <b>{compose.ms.toFixed(1)}</b> / {compose.budgetMs.toFixed(1)} ms</span>{/if}
+      {#if compose && fresh}<span data-tip="Time the mixer takes to compose one program frame, against the frame period: mean over the last 2 s{compose.p99Ms != null ? `, p95 and p99 over its last ${compose.recent} frames` : ''}; worst frame since start {compose.maxMs.toFixed(1)} ms">compose <b>{compose.ms.toFixed(1)}</b>{#if compose.p99Ms != null} · p95 <b>{compose.p95Ms.toFixed(1)}</b> · p99 <b>{compose.p99Ms.toFixed(1)}</b>{/if} / {compose.budgetMs.toFixed(1)} ms</span>{/if}
     </div>
     {#if !noGl}
       <div class="gv-zoomctl">
