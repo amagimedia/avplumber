@@ -15,6 +15,10 @@ from pyplumber.node import AudioMixer, DecAudio, Demux, Input, Realtime, Resampl
 
 RATE = 48000
 BLOCK = 960
+# A gain change glides in over kGainRampSeconds (src/nodes/audio_mixer.cpp): a cut or a
+# frame-rate AFV step declicks instead of stepping, so a gain is only fully applied this
+# many samples after the event's.
+GAIN_RAMP = math.ceil(0.03 * RATE)
 
 
 def _tone(path, frequency, seconds, channels):
@@ -96,7 +100,10 @@ def test_a_stopped_source_never_holds_the_mix(tmp_path):
     mute = math.ceil(mute_ns * RATE / 1e9) - starts[0]
     assert 2 * RATE < mute < len(left)
     assert max(abs(sample) for sample in left[mute - 2 * BLOCK:mute]) > 0.05   # a alone (its sine peaks at 1/8 -3 dB), long after b ended
-    assert all(sample == 0.0 for sample in left[mute:])
+    # The mute lands on `mute` and glides out over GAIN_RAMP; past the ramp the source's peak is
+    # below kGainEpsilon and the mixer stops reading it at all, so the mix is exactly zero.
+    assert max(abs(sample) for sample in left[mute + GAIN_RAMP // 2:mute + GAIN_RAMP]) < 0.05
+    assert all(sample == 0.0 for sample in left[mute + GAIN_RAMP:])
 
 
 def test_an_interrupted_crossfade_does_not_revert_to_a_stale_progress_event(tmp_path):
@@ -153,10 +160,12 @@ def test_an_interrupted_crossfade_does_not_revert_to_a_stale_progress_event(tmp_
     starts = [block.pts.timestamp for block in blocks]
     left = [sample for block in blocks for sample in _planes(block)[0]]
     stale_at = math.ceil(stale_ns * RATE / 1e9) - starts[0]
-    assert 2 * RATE < stale_at < len(left) - 2 * RATE
+    assert 2 * RATE < stale_at < len(left) - GAIN_RAMP - 2 * BLOCK
 
     before = max(abs(sample) for sample in left[stale_at - 2 * BLOCK:stale_at])
-    after = max(abs(sample) for sample in left[stale_at:stale_at + 2 * BLOCK])
+    # Past the ramp: a gain the stale event aimed at (a: 1.0 -> 0.5) needs GAIN_RAMP samples to
+    # arrive, so a window starting at the event would still read as full gain either way.
+    after = max(abs(sample) for sample in left[stale_at + GAIN_RAMP:stale_at + GAIN_RAMP + 2 * BLOCK])
     assert before > 0.05
     # The stale progress event, if not purged by the interrupt, fires here and halves the gain
     # back toward the abandoned crossfade (a: 1.0 -> 0.5): the mix must stay at full gain on a.

@@ -232,6 +232,8 @@ class MixerApplication:
         for frames that can no longer arrive. The pre-roll discarded here is pre-roll
         the output gate (`start_output`) would drop anyway.
         """
+        if not self._audio_preheat_drain:
+            return   # no audio to hold back: every preheat poll would otherwise ask for the edges
         edges = self.avp.edges
         for name in self._audio_preheat_drain:
             # Only ever touch an edge the audio chain has already created: asking for one
