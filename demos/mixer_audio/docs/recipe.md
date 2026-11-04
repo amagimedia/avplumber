@@ -24,7 +24,7 @@ NumPy and FFmpeg with NVENC. `--runtime-media-dir /media` writes container paths
 | `generation` | `seconds` (default 2), optional source `width` and `height` |
 | `alpha_background` | Allocated video source used behind transparent pages |
 | `renditions`, `clean_rendition`, `aux_buses`, `dsk` | Output/key settings copied into the show |
-| `browser_frame_queue` | Frames one browser window may have out at once: 1–9, default 9, the most Chromium's capture pool gives out. Not a set of buffers: those are Chromium's. The mixer uses up to three of the queue to return frames one per new frame, which keeps Chromium on a fixed set of buffers. Formerly `browser_ring_size`, still read |
+| `browser_frame_queue` | Ordinary capture's outstanding-frame limit: 1–9, default 9. Formerly `browser_ring_size`, still read. See [configuration](config.md) |
 
 Largest-remainder rounding makes the weighted allocations sum to the total;
 ties follow recipe order. Weights summing to `source_count` give exact counts.
@@ -48,21 +48,34 @@ Every entry has an `id`, `kind` and `weight`.
 | Kind | Fields |
 | --- | --- |
 | `generated` | `color`: `sdr`/`hlg`; `chroma`: `420`/`422`; optional `pattern` or `patterns` |
-| `browser` | `url` or `pattern: "alpha"`; optional `width`, `height` |
+| `browser` | `url` or `pattern: "alpha"`; optional `width`, `height`. The alpha pattern defaults to a centered static transparent card; `motion: "dynamic"` enables the moving preset (`"static"` restores the default). `motion: "half"` alternates six seconds moving and six seconds paused, resuming at the held position. Intentional holds use `on_change` delivery accounting. |
 | `file` | `path` relative to media directory; optional `color` |
 | `download` | Direct media-file `url`; optional `color` |
 
 Generated 4:2:0 media defaults to H.264 for SDR and HEVC for HLG. Set `codec`
 to select encoded storage, or `storage: "nv12"` / `"p010"` for raw uploads.
-Generated 4:2:2 uses v210. Encoded entries may select `decode_storage: "cuarray"`
-and `extra_hw_frames`; see [decoder requirements](config.md#sources).
+`codecs` (a list, like `patterns`) gives the group's sources codecs in turn, and
+`gop` or `gops` their reference structure: `low_delay` (the default: two references,
+no B-frames) or `b_frames` (three B-frames in a pyramid over four references). Setup's
+`decode_mix` setting uses these on the SDR 4:2:0 group (`h264`, or `mixed` for both
+codecs and both structures); HLG clips stay HEVC. Generated 4:2:2 uses v210. Encoded
+entries may select `decode_storage: "cuarray"` and `extra_hw_frames`; see
+[decoder requirements](config.md#sources).
+
+Interlaced inputs cannot be generated: NVENC codes frames only. A `file` or
+`download` entry with `interlaced: true` (and optionally `decoded_format`, `nv12` by
+default) is decoded on linear CUDA and deinterlaced per source (`deinterlace` in
+[sources](config.md#sources)); a 1080i H.264 transport stream from a broadcast encoder,
+or `x264 --interlaced --tff`, with its parameter sets in band, is the sample to supply.
 
 ## Generated media
 
 Each generated source has a separate file with its ID burned into moving frames.
 Assets and two alpha wipes are cached under `media/`. Scene-only changes reuse
 assets; changing dimensions, rate or storage generates new ones. Unused assets
-are not pruned. Raw loops consume disk/cache space and upload bandwidth every frame.
+are not pruned. Raw loops consume disk/cache space and upload bandwidth every frame;
+`resident` additionally retains each loop in page-locked host memory to avoid
+repeated file reads after the first pass.
 
 ## Scene compositions
 

@@ -4,6 +4,23 @@ Measured on the AWS Fedora demo host (8 vCPU, 30 GiB RAM,
 NVIDIA Tesla T4 16 GiB, driver 615.71.09) on 2026-10-26, image
 `avplumber-mixer:local` built 14:47 UTC from `12b52a9`.
 
+> **Still valid on this host; read the caveat before quoting these on an L4
+> (checked 2026-11-04).** Bringing this demo up to `demos/mixer` added the
+> per-instance `canvas` block that Setup now pushes into the recipe — but that block
+> exists only for `nvidia_l4_cuarray`. This host is a Tesla T4 and the stack runs
+> `--instance-type tesla_t4`, so nothing is overridden and the runs above still
+> describe how it behaves. The recipe's `canvas.raw_upload` also moved from `pinned`
+> to `direct` in the same change, which is likewise inert here: `raw_upload` governs
+> raw NV12/P010 file sources and `demo.example.json` declares none (its 4:2:2 v210
+> sources always upload via `pinned`). It takes effect only on a Setup-generated
+> show, which does add `sdr420_raw`/`hlg420_raw` inputs.
+>
+> On an `nvidia_l4_cuarray` host the same show instead runs with `raw_upload:
+> resident`, 16 ms program and AUX input polling, `event_loop` source fan-out,
+> `decoded_frames_ahead: 1` and the CUarray decoder pool budget — so the absolute
+> CPU numbers here would not carry over. The A-vs-B *difference* would, since both
+> demos apply the same profile.
+
 Both runs used the **same** `/media/demo.json`, so the source configuration is
 identical: 96 sources (72 h264 1080p files + 24 v210 raw), 24 scenes, 1920×1080
 HLG `p210le` canvas at 30 fps, two program renditions (SDR h264_nvenc `p3`

@@ -10,12 +10,24 @@ The original [demos/mixer](../mixer) stays video-only.
 Protocol: [Audio-follow-video](../../doc/mixer_audio_follow_video.md). Node:
 `src/nodes/audio_mixer.cpp`.
 
+Everything else tracks [`demos/mixer`](../mixer): the setup page, instance
+profiles, patterns and docs are kept in step with it, so only the files listed
+below carry audio changes.
+
 ## Differences from `demos/mixer`
 
 - `prepare_demo` marks `kind: video` MP4/file sources `has_audio: true` and
-  regenerates synthetic MP4s (cache `synthetic_v6_*`) with AAC sine tones.
+  regenerates synthetic MP4s (cache `synthetic_v6_*`, one ahead of the video
+  demo's `v5`) with AAC sine tones.
 - The mixer wires `audio_mixer` for those sources by itself (doc/mixer_audio_follow_video.md).
 - `build_application` adds `build_janus_audio_output` with Janus output.
+- `audio_port` on a rendition ([docs/config.md](docs/config.md#renditions)):
+  on the program it duplicates the program mix (the HDR output in
+  `demo.example.json`), on an AUX bus's rendition it gives that bus its own
+  independently mixed `audio_mixer` bus. `demo.example.json` ships three AUX
+  buses, two of them with audio and one carrying Preview.
+- `webui.py` defaults `--audio-router-node audio_mixer`, and the Compose stack
+  enables `JANUS_AUDIO_ENABLED` on Janus.
 
 ## Run
 
@@ -47,4 +59,14 @@ gives more flash/beep cycles to judge before the clip loops.
 
 Same docs as the video demo under [docs/](docs/) and the shared
 [mixer base API](../../doc/mixer.md). Fan-out notes:
-[mixer_audio_follow_video.md](../../doc/mixer_audio_follow_video.md).
+[mixer_audio_follow_video.md](../../doc/mixer_audio_follow_video.md); the
+`audio_port` field is the one addition to [docs/config.md](docs/config.md).
+
+## Operating this demo
+
+- [OPS.md](OPS.md) — cheat sheet for the demo host: bring-up, the fast
+  Python-only iteration loop, and the traps around recreating containers.
+- [docs/audio_load_cost.md](docs/audio_load_cost.md) — what the audio mixer
+  costs next to `demos/mixer` at the same source count.
+- [scripts/](scripts/) — `build.sh`, `start.sh`, `stop-audio-video-mixer.sh`,
+  `status.sh`, `sync.sh` and `sample_load.py` for the measurements.

@@ -24,12 +24,14 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 
-from demos.mixer.sdr_patterns import GENERATORS, GRAIN, input_kbps, encoding_options, render as render_video_only
+from demos.mixer.sdr_patterns import (GENERATORS, GOP_SHAPES, GRAIN, INPUT_KBPS, input_kbps, encoding_options,
+                                      render as render_video_only)
 from demos.mixer.demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic
 from demos.mixer.hdr_patterns import write_hlg
 from pyplumber.mixer.config import MAX_SOURCES, default_browser_frame_queue, earlier_browser_ring_size, parse
 
 DEMO_DIR = Path(__file__).resolve().parent
+BROWSER_MOTIONS = ("static", "dynamic", "half")
 
 # Janus RTP port of the clean SDR program; 5004/5006 carry the keyed program and
 # 5008 the multiview. The clean feed is SDR, with an independent codec.
@@ -85,17 +87,17 @@ def _tone_hz(source_id: str) -> int:
     return 220 + (sum(ord(c) for c in source_id) % 40) * 20
 
 
-def render(*args, source_id: str = "", **kwargs):
+# The signature mirrors demos.mixer.sdr_patterns.render exactly, including the positional
+# order its callers use, so a parameter added there cannot be mistaken for another here.
+def render(directory: Path, name: str, graph: str, size: str, fps: int, seconds: int,
+           encoder: str, ffmpeg: str, overlay=None, kbps: int = INPUT_KBPS[-1],
+           gop: str = "low_delay", *, source_id: str = "") -> Path:
     """Like demos.mixer SDR render, but encoded MP4 gets a stereo sine for AFV."""
-    encoder = args[6] if len(args) > 6 else kwargs.get("encoder", "")
     if encoder == "rawvideo" or not source_id:
-        return render_video_only(*args, **kwargs)
-    directory, name, graph, size, fps, seconds, encoder, ffmpeg = args[:8]
-    overlay = args[8] if len(args) > 8 else kwargs.get("overlay")
-    kbps = args[9] if len(args) > 9 else kwargs.get("kbps", 6000)
+        return render_video_only(directory, name, graph, size, fps, seconds, encoder, ffmpeg,
+                                 overlay, kbps, gop)
     out = directory / f"{name}.mp4"
-    source = f"{graph}{':' if '=' in graph else '='}size={size}:rate={fps}"
-    source = f"{source},{GRAIN}"
+    source = f"{graph}{':' if '=' in graph else '='}size={size}:rate={fps},{GRAIN}"
     inputs, graph_filter, data = overlay or ([], None, None)
     tone = f"sine=frequency={_tone_hz(source_id)}:sample_rate=48000:duration={seconds}"
     cmd = [ffmpeg, "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", source, *inputs,
@@ -107,7 +109,7 @@ def render(*args, source_id: str = "", **kwargs):
                 "-map", "[vout]", "-map", f"{audio_idx}:a"]
     else:
         cmd += ["-map", "0:v", "-map", "1:a"]
-    cmd += ["-t", str(seconds), "-c:v", encoder, *encoding_options(encoder, kbps, fps),
+    cmd += ["-t", str(seconds), "-c:v", encoder, *encoding_options(encoder, kbps, fps, gop),
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-ar", "48000", str(out)]
     subprocess.run(cmd, input=data, check=True)
     return out
@@ -119,11 +121,11 @@ def render(*args, source_id: str = "", **kwargs):
 # whole second as a short beep. Two markers, so a mis-synced render/transport stage
 # can be spotted on either without needing a second clip to compare against.
 LIPSYNC_MARKERS = {"synctest_a": {"flash": "white", "hz": 1000},
-                    "synctest_b": {"flash": "cyan", "hz": 1600}}
+                   "synctest_b": {"flash": "cyan", "hz": 1600}}
 
 
 def render_lipsync(path: Path, width: int, height: int, fps: int, seconds: int, marker_id: str,
-                    ffmpeg: str, source_id: str, kbps: int) -> None:
+                   ffmpeg: str, source_id: str, kbps: int) -> None:
     marker = LIPSYNC_MARKERS[marker_id]
     base = f"color=c=0x202020:size={width}x{height}:rate={fps},{GRAIN}"
     inputs, overlay, data = id_overlay(source_id, width, height, seconds)
@@ -200,7 +202,8 @@ def id_overlay(source_id, width, height, seconds):
 HLG_PATTERNS = ".hlg-patterns"
 
 
-def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, source_id, pattern_dir, kbps):
+def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, source_id, pattern_dir, kbps,
+               gop="low_delay"):
     # Offline conversion of a native HLG signal, not SDR samples tagged as HDR. The pattern
     # depends only on its variant and geometry, and building it in Python is most of the cost,
     # so it is built once per run and every source of the variant encodes it with its own id.
@@ -213,7 +216,7 @@ def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, sour
     inputs, graph, data = id_overlay(source_id, width, height, seconds)
     pixel_format = "yuv422p10le" if encoder == "v210" else "p010le"
     options = (["-f", "rawvideo"] if encoder in ("rawvideo", "v210") else
-               ["-profile:v", "main10", *encoding_options(encoder, kbps, fps)])
+               ["-profile:v", "main10", *encoding_options(encoder, kbps, fps, gop)])
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-f", "v210", "-video_size", f"{width}x{height}",
                     "-framerate", str(fps), "-i", str(raw), *inputs, "-an", "-filter_complex",
                     graph + ",setparams=range=limited:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
@@ -236,6 +239,26 @@ def positive_int(value, name):
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def per_source(spec, name, index, choices):
+    """*spec*'s `name` for source *index* of its input group: one value, or `name + "s"`, a list the
+    group's sources cycle through (as `patterns`), so one group mixes codecs or reference structures.
+    None when the recipe says nothing."""
+    plural = name + "s"
+    if name in spec and plural in spec:
+        raise ValueError(f"{spec['id']}: use {name} or {plural}, not both")
+    values = spec.get(plural, [spec[name]] if name in spec else [])
+    if not isinstance(values, list) or any(v not in choices for v in values) or plural in spec and not values:
+        raise ValueError(f"{spec['id']}: {name} must be one of {', '.join(choices)}")
+    return values[index % len(values)] if values else None
+
+
+# NVENC codes frames only: FFmpeg's h264_nvenc and hevc_nvenc set no field or MBAFF mode, and no
+# bitstream filter turns a progressive stream into a field-coded one.
+INTERLACED_SAMPLE = ("interlaced inputs cannot be generated here: supply one as a file input with "
+                     "\"interlaced\": true, for example a 1080i50 H.264 transport stream from a broadcast "
+                     "encoder, or x264 --interlaced --tff (MBAFF), with its SPS and PPS in band")
 
 
 def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
@@ -310,11 +333,14 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 pattern = spec.get("pattern", pool[index % len(pool)])
                 if pattern not in patterns:
                     raise ValueError(f"{name}: pattern must be one of {patterns}")
-                codec = spec.get("codec", "h264" if color == "sdr" else "hevc")
-                if codec not in ("h264", "hevc") or color == "hlg" and codec != "hevc":
+                if spec.get("interlaced"):
+                    raise ValueError(f"{name}: {INTERLACED_SAMPLE}")
+                codec = per_source(spec, "codec", index, ("h264", "hevc")) or ("h264" if color == "sdr" else "hevc")
+                if color == "hlg" and codec != "hevc":
                     raise ValueError(f"{name}: codec must be h264 or hevc; HLG requires hevc")
-                if "codec" in spec and (raw or chroma == "422"):
-                    raise ValueError(f"{name}: codec applies only to encoded 4:2:0 inputs")
+                gop = per_source(spec, "gop", index, tuple(GOP_SHAPES)) or "low_delay"
+                if any(key in spec for key in ("codec", "codecs", "gop", "gops")) and (raw or chroma == "422"):
+                    raise ValueError(f"{name}: codec and gop apply only to encoded 4:2:0 inputs")
                 encoder = f"{codec}_nvenc"
                 storage = raw or ("v210" if chroma == "422" else encoder)
                 # Version cache names when changing generation semantics. Every
@@ -322,32 +348,44 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 # no two inputs share decode input or page cache; the name holds
                 # all that shapes the content, so re-applying reuses the file.
                 extension = raw or ("v210" if chroma == "422" else "mp4")
-                # v6 mp4: per-source sine track for audio_mixer AFV demo
-                version = 6 if extension == "mp4" else 4
+                # v6 mp4: per-source sine track for the audio_mixer AFV demo. One ahead of
+                # demos/mixer's v5, and the suffix below is identical for low_delay, so the
+                # clips this demo has already generated keep their names.
+                version = 6 if extension == "mp4" else 4   # low-DPB encodes; raw pixels are unchanged
+                shape = f"_{input_kbps(index)}k" + ("" if gop == "low_delay" else f"_{gop}") if extension == "mp4" else ""
                 path = (media_dir / "assets" / f"synthetic_v{version}_{size}_{fps}fps_{seconds}s" /
-                        f"{source['id']}_{color}_{chroma}_{pattern}_{storage}{f'_{input_kbps(index)}k' if extension == 'mp4' else ''}.{extension}")
+                        f"{source['id']}_{color}_{chroma}_{pattern}_{storage}{shape}.{extension}")
                 encoder = "v210" if chroma == "422" else "rawvideo" if raw else encoder
                 if color == "hlg":
-                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"], kbps=input_kbps(index): render_hlg(
+                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"], kbps=input_kbps(index), gop=gop: render_hlg(
                         out, asset_width, asset_height, fps, seconds, int(pattern), encoder, ffmpeg, sid,
-                        media_dir / "assets" / HLG_PATTERNS, kbps)
+                        media_dir / "assets" / HLG_PATTERNS, kbps, gop)
                 elif chroma == "422":
                     writer = lambda out, pattern=pattern, sid=source["id"]: render_sdr422(
                         out, asset_width, asset_height, fps, seconds, int(pattern), ffmpeg, sid)
                 else:
-                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"], kbps=input_kbps(index): render(
+                    writer = lambda out, pattern=pattern, encoder=encoder, sid=source["id"], kbps=input_kbps(index), gop=gop: render(
                         out.parent, out.stem, GENERATORS[pattern], size, fps, seconds, encoder, ffmpeg,
-                        id_overlay(sid, asset_width, asset_height, seconds), kbps, source_id=sid)
+                        id_overlay(sid, asset_width, asset_height, seconds), kbps, gop, source_id=sid)
                 jobs[path] = writer
                 source.update(kind=raw or ("v210" if chroma == "422" else "video"),
                               path=runtime_path(path), width=asset_width, height=asset_height)
+                if source["kind"] == "video":
+                    # These clips are ours: 8-bit SDR or 10-bit HLG, 4:2:0, which NVDEC hands out as
+                    # NV12 or P010. Saying so lets a source that matches the canvas skip its colour filter.
+                    source["decoded_format"] = "nv12" if color == "sdr" else "p010le"
                 if extension == "mp4":
+                    # Only the encoded clips carry the sine track; v210 and raw hold no audio.
                     source["has_audio"] = True
             elif kind == "browser":
                 if "pattern" in spec:
                     if spec["pattern"] != "alpha" or "url" in spec:
                         raise ValueError(f"{name}: browser pattern must be alpha, without a url")
-                    url = page_url(DEMO_DIR / "browser_alpha.html", source=source["id"])
+                    motion = spec.get("motion", "static")
+                    if motion not in BROWSER_MOTIONS:
+                        raise ValueError(f"{name}: browser motion must be {', '.join(BROWSER_MOTIONS)}")
+                    url = page_url(DEMO_DIR / "browser_alpha.html", source=source["id"], motion=motion)
+                    source["capture_cadence"] = "continuous" if motion == "dynamic" else "on_change"
                 else:
                     url = spec["url"]
                 source.update(kind="browser", url=url, width=spec.get("width", width), height=spec.get("height", height), color="sdr")
@@ -367,7 +405,16 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if path in clips:
                     raise ValueError(f"{name}: a download or file feeds one source only (weight 1, unique clip)")
                 clips.add(path)
+                # A supplied clip is assumed to carry audio: this demo exists to mix it.
                 source.update(kind="video", path=runtime_path(path), has_audio=True)
+                if spec.get("interlaced"):
+                    if spec["interlaced"] is not True or spec.get("decode_storage", "cuda") != "cuda":
+                        raise ValueError(f"{name}: interlaced is true on a file or download input decoded on linear CUDA")
+                    # Field-coded or MBAFF video: decoded on linear CUDA and deinterlaced as its source
+                    # filter (config.md: deinterlace); decoded_format names the decoder's storage.
+                    source.update(deinterlace=True, decoded_format=spec.get("decoded_format", "nv12"))
+            if spec.get("interlaced") and kind == "browser":
+                raise ValueError(f"{name}: interlaced applies to file and download inputs")
             source.update({key: spec[key] for key in ("decode_storage", "extra_hw_frames", "transform") if key in spec})
             sources.append(source)
     if lipsync_test:
@@ -377,9 +424,10 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                     f"{source_id}_sdr_420_{marker_id}_h264_nvenc_{input_kbps(0)}k.mp4")
             jobs[path] = lambda out, marker_id=marker_id, sid=source_id: render_lipsync(
                 out, asset_width, asset_height, fps, seconds, marker_id, ffmpeg, sid, input_kbps(0))
+            # 8-bit SDR 4:2:0 out of h264_nvenc, so NVDEC hands these out as NV12 too.
             sources.append({"id": source_id, "independent": True, "color": "sdr", "kind": "video",
-                             "path": runtime_path(path), "width": asset_width, "height": asset_height,
-                             "has_audio": True})
+                            "path": runtime_path(path), "width": asset_width, "height": asset_height,
+                            "decoded_format": "nv12", "has_audio": True})
     # Graphics need fewer pixels than the program; the compositor scales them
     # in its draw pass. Bound decode/upload cost independently of canvas size.
     wipe_scale = min(1, 960 / max(width, height))
@@ -399,8 +447,10 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     for page in pages:
         x, y, w, h = rects[page]
         window_w, window_h = DSK_WINDOWS[page]
+        # The clock and lower third hold still between updates; only the ticker and left bug animate continuously.
         sources.append({"id": f"dsk_{page}", "kind": "browser", "url": page_url(DEMO_DIR / "dsk" / f"{page}.html", fps=fps),
-                        "width": window_w, "height": window_h, "color": "sdr"})
+                        "width": window_w, "height": window_h, "color": "sdr",
+                        "capture_cadence": "on_change" if page in ("lower_third", "bug_right") else "continuous"})
         # Each window is its graphic and nothing else, so its rectangle is all the keyer needs to compose.
         keys.append({"id": page, "source": f"dsk_{page}", "dst": {"x": x, "y": y, "w": w, "h": h}, "bounded": True})
     renditions = recipe["renditions"]

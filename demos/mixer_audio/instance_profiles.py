@@ -134,17 +134,40 @@ INSTANCE_PROFILES = {
     },
 }
 
-# Opt-in measured HEVC fixtures and fixed CUarray pools; the FFmpeg 8.1/linear
+# Opt-in measured HEVC fixtures and fixed CUarray pools; the linear
 # profiles retain their decoder contracts and capacities.
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY] = deepcopy(INSTANCE_PROFILES[InstanceType.NVIDIA_L4])
+# Moving 1080p windows, including cropped DSKs, in workers of at most ten.
+# Measured in short transition checks on the since-removed fixed nine-buffer browser build (with a copy
+# on import) and CUDA queues 32/8; not yet re-measured with Chromium's ordinary capture.
+INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["browser_windows_by_fps"] = {25: 40, 30: 40, 50: 40, 60: 30}
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["sources"][25] = 192
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["nvdec_decodes"][25] = 120
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["raw_upload_units"][25] = 32
 # 30 fps carries the same 192 sources with fewer decodes and more raw uploads: 105 NVDEC, 40
 # browser and 47 NV12 ran 40 minutes at 1080p30 with 24 encodes and no missed deadline or AUX
-# drop (2026-10-12), once browser frames were returned one per new frame (return_queue).
+# drop (2026-10-12), once browser frames were returned one per new frame (then return_queue, now hold_frames).
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["sources"][30] = 192
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["nvdec_decodes"][30] = 105
 INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["generated_decode"] = {
     "codec": "hevc", "decode_storage": "cuarray", "extra_hw_frames": 12,
+}
+# These bounds and scheduling settings are part of the measured source capacities.
+# Setup Apply must generate the same runtime as the qualified show.
+# The 105-decode 1080p30 show above keeps 105 HEVC pools logged as 18 surfaces (53 MiB each)
+# and used 18.3 GB of the L4's 23 GiB in all (2026-10-30). The log (avcodec_get_hw_frames_parameters)
+# leaves out the three base work surfaces FFmpeg adds when it allocates: the clips' DPB of 4
+# (sps_max_dec_pic_buffering_minus1 2, NVENC -dpb_size 2) + 5 working + 12 = 21 surfaces, 63 MiB
+# at 1080p NV12, 6.5 GiB for the show (config.nvdec_pool_surfaces); H.264 and B-frame clips of the
+# decode_mix setting claim more. 9 GiB for every decoder pool together, as the decoders count
+# them, stops a show that would need more at decoder open instead of running the GPU out of memory.
+INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["canvas"] = {
+    "raw_upload": "resident", "input_poll_ms": 16, "aux_input_poll_ms": 16,
+    "source_fan_out": "event_loop", "decoded_frames_ahead": 1, "raw_pool_frames": 10,
+    "decoder_pool_budget_mib": 9216,
+    # A removed source's decoder is parked, not destroyed, for the next source of that format:
+    # destroying one stalls every thread on the driver. Parked decoders beyond the show's peak
+    # cost memory it never used: at about 30 of them this show ran the L4 out of memory inside
+    # the budget.
+    "decoder_park_limit": 12,
 }
