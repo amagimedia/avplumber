@@ -90,6 +90,41 @@ static void farFutureAndSkip() {
     assert(q.counts().missing == 0);
 }
 
+static void historyReadsBackAtAnyDelay() {
+    // Blocks of 960 written in order; a delay of 1601 samples (one 29.97 fps frame) is no
+    // multiple of the block, and a read spans two of them.
+    SampleHistory h(1, 9600);
+    for (int64_t block = 0; block < 6; ++block) {
+        Planes planes(1, std::vector<float>(960));
+        for (size_t k = 0; k < 960; ++k) planes[0][k] = float(block * 960 + int64_t(k));
+        h.write(10000 + block * 960, planes);
+    }
+    Planes out;
+    h.read(10000 + 5 * 960 - 1601, 960, out);
+    for (size_t k = 0; k < 960; ++k) assert(out[0][k] == float(5 * 960 - 1601 + int64_t(k)));
+    // Delay 0: the block just written.
+    h.read(10000 + 5 * 960, 960, out);
+    for (size_t k = 0; k < 960; ++k) assert(out[0][k] == float(5 * 960 + int64_t(k)));
+    // Before the first block written, and further back than the capacity: silence.
+    h.read(10000 - 10, 20, out);
+    for (size_t k = 0; k < 10; ++k) assert(out[0][k] == 0.f);
+    assert(out[0][10] == 0.f && out[0][11] == 1.f);
+    for (int64_t block = 6; block < 16; ++block) h.write(10000 + block * 960, constant(960, 7.f));
+    h.read(10000, 960, out);
+    for (float v : out[0]) assert(v == 0.f);
+}
+
+static void historyForgetsAcrossASkip() {
+    SampleHistory h(1, 4800);
+    h.write(0, constant(960, 1.f));
+    h.write(960, constant(960, 1.f));
+    h.write(100000, constant(960, 2.f));   // the mixer skipped ahead: what came before is gone
+    Planes out;
+    h.read(100000 - 960, 1920, out);
+    for (size_t k = 0; k < 960; ++k) assert(out[0][k] == 0.f);
+    for (size_t k = 960; k < 1920; ++k) assert(out[0][k] == 2.f);
+}
+
 int main() {
     std::vector<float> gains;
     float program_gain = 0.f;
@@ -120,4 +155,6 @@ int main() {
     lateFrameDroppedThenRampsIn();
     gapInsideTheQueueIsFilled();
     farFutureAndSkip();
+    historyReadsBackAtAnyDelay();
+    historyForgetsAcrossASkip();
 }

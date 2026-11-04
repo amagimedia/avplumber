@@ -158,9 +158,13 @@ class MixerPvwFollow : public Node, public IStoppable, public IInputsObjects, pu
         try {
             auto control = std::dynamic_pointer_cast<IInputsObjects>(nodes_.node(audio_router_)->node());
             if (!control) return;
+            // The bus's own timing goes with every change, its first one included, so the audio
+            // router never mixes this bus on the program's: the PGM tile is the program frame
+            // pgm_delay_frames aux ticks back, and the bus leaves at its own latency.
             control->setObject("transition_ended",
                                {{"output", output}, {"kind", kind}, {"sources", transitionSources(change)},
-                                {"pts", pts_ns}});
+                                {"pts", pts_ns}, {"latency_ns", timing_.aux_latency_ns},
+                                {"program_delay_ns", timing_.aux.time(timing_.pgm_delay_ticks)}});
         } catch (const std::exception& e) {
             logstream << "mixer_pvw_follow: transition_ended to " << audio_router_ << " failed: " << e.what();
         }

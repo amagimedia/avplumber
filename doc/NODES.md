@@ -465,9 +465,13 @@ Clocked by the program's video ticks, never by its inputs: each block of
 sample (tick time + `latency_ms`), with that tick's picture, stamped with its
 media time. Inputs are placed by their `realtime` `set_pts` timestamps; a source
 that is late or gone is silence in the block (faded out and back in over 3 ms),
-so it never holds the other sources or the buses back. The `status` object
-counts blocks, skipped blocks, output drops and, per source, `dropped` (late),
-`missing` (filled with silence) and `jumps` (timestamp discontinuities).
+so it never holds the other sources or the buses back. An AUX bus takes its own
+timing from its follower's `transition_ended` (`latency_ns`, `program_delay_ns`):
+its `"program"` audio is the program mix that far back, as its `pgm` cell is, and
+its blocks are held until its own, later deadline. The `status` object counts
+blocks, skipped blocks, output drops and, per source, `dropped` (late),
+`missing` (filled with silence) and `jumps` (timestamp discontinuities); per bus,
+`program_delay_ms` and `extra_latency_ms`.
 
 -   `src` (list of edges) and `source_ids` (same length; logical mixer source ids)
 -   `outputs` (object: bus id → output edge), e.g. `{"program": "audio_mixer_program"}`

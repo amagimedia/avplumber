@@ -161,3 +161,78 @@ def test_an_interrupted_crossfade_does_not_revert_to_a_stale_progress_event(tmp_
     # The stale progress event, if not purged by the interrupt, fires here and halves the gain
     # back toward the abandoned crossfade (a: 1.0 -> 0.5): the mix must stay at full gain on a.
     assert after > before * 0.9
+
+
+def test_an_aux_bus_hears_the_program_as_late_as_its_pgm_tile_shows_it(tmp_path):
+    # An AUX bus whose PGM tile is the program frame one aux tick back (40 ms at 25 fps), and
+    # whose compositor leaves 40 ms after the program's: its "program" audio is the program mix
+    # 1920 samples back, and each of its blocks leaves 40 ms after the program's block.
+    delay_ns, extra_ns = 40_000_000, 40_000_000
+    _tone(tmp_path / "a.wav", 440, 10, 2)
+    avp = AVPlumber()
+    errors = []
+    avp.on_exception = lambda *error: errors.append(error)
+    try:
+        for cls, params in (
+            (Input, {"url": str(tmp_path / "a.wav"), "dst": "a_packets"}),
+            (Demux, {"src": "a_packets", "routing": {"a:0": "a_audio"}}),
+            (DecAudio, {"src": "a_audio", "dst": "a_decoded"}),
+            (Realtime, {"src": "a_decoded", "dst": "a_paced", "set_pts": True, "time_base": "1/120000",
+                        "negative_time_tolerance": .25, "discontinuity_threshold": 1.0}),
+        ):
+            avp.addNode(cls({"name": cls.TYPE, "group": "audio", **params}))
+        avp.addNode(AudioMixer({
+            "name": "mix", "group": "audio", "src": ["a_paced"], "source_ids": ["a"],
+            "outputs": {"program": "program", "aux": "aux"}, "fps": "25/1", "latency_ms": 80,
+        }))
+        edges = {"program": avp.getEdge("program", "AudioSamples"), "aux": avp.getEdge("aux", "AudioSamples")}
+        avp.group("audio").startNodes()
+
+        def event(output, sources, pts, **timing):
+            avp.executeCommandsFromString("node.object.set mix transition_ended " + json.dumps(
+                {"output": output, "sources": sources, "pts": pts, **timing}))
+
+        first = edges["program"].get(2000)
+        event("program", ["a"], 0)
+        event("aux", ["program"], 0, latency_ns=80_000_000 + extra_ns, program_delay_ns=delay_ns)
+        # Both edges in turn, block by block, with when each block arrived.
+        blocks = {"program": [], "aux": []}
+        mute_ns = None
+        for i in range(120):
+            for name, edge in edges.items():
+                block = edge.get(2000)
+                blocks[name].append((block, time.monotonic_ns()))
+            if i == 60:
+                mute_ns = time.monotonic_ns() + 500_000_000
+                event("program", [], mute_ns)   # the program goes silent: the AUX a frame later
+        status = avp.node("mix").getObject("status")
+        assert not errors, errors
+    finally:
+        avp.shutdown()
+
+    assert first is not None
+    assert all(block is not None and block.samplesCount == BLOCK for name in blocks for block, _ in blocks[name])
+    buses = {b["id"]: b for b in status["buses"]}
+    assert buses["aux"]["program_delay_ms"] == 40 and buses["aux"]["extra_latency_ms"] == 40
+    assert buses["program"]["program_delay_ms"] == 0 and status["output_drops"] == 0
+
+    def first_silent(name):
+        """The first sample of the silence the mute starts: 100 zeros in a row, past the mute."""
+        start = blocks[name][0][0].pts.timestamp
+        left = [v for block, _ in blocks[name] for v in _planes(block)[0]]
+        run = 0
+        for i in range(math.ceil(mute_ns * RATE / 1e9) - start, len(left)):
+            run = run + 1 if left[i] == 0.0 else 0
+            if run == 100:
+                return start + i - 99
+        raise AssertionError(f"{name} never went silent")
+
+    # The program's mute shows up on the AUX bus exactly 40 ms of samples later.
+    assert first_silent("aux") - first_silent("program") == RATE * delay_ns // 1_000_000_000
+
+    # A program block leaves 60-100 ms after its first sample (80 ms after the tick holding its
+    # last one); an AUX block 40 ms after that. Each aux get() is the one waiting, so its time is
+    # when the block left; the program's blocks are already queued by then.
+    held = [at - block.pts.timestamp * 1_000_000_000 // RATE for block, at in blocks["aux"][10:]]
+    assert min(held) > 98_000_000, min(held)
+    assert sorted(held)[len(held) // 2] < 150_000_000

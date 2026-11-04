@@ -176,4 +176,48 @@ private:
     Counts counts_;
 };
 
+/// The last `capacity` samples of a mix by sample index, for buses that use it some samples late:
+/// an AUX bus's PGM tile shows the program a few frames back, so its "program" audio is read back
+/// as far. A sample never written, or overwritten since, reads as silence.
+class SampleHistory {
+public:
+    SampleHistory(size_t channels, size_t capacity)
+        : lanes_(channels, std::vector<float>(capacity, 0.f)), capacity_(int64_t(capacity)) {}
+
+    int64_t capacity() const { return capacity_; }
+
+    /// `planes`: one vector per channel, the block's first sample at index `first`. A block that
+    /// does not continue the previous one (the mixer skipped ahead) forgets what came before.
+    void write(int64_t first, const std::vector<std::vector<float>>& planes) {
+        const size_t n = planes.empty() ? 0 : planes[0].size();
+        if (!n) return;
+        if (first != end_) valid_from_ = first;
+        for (size_t ch = 0; ch < lanes_.size(); ++ch)
+            for (size_t k = 0; k < n; ++k)
+                lanes_[ch][slot(first + int64_t(k))] = ch < planes.size() && k < planes[ch].size() ? planes[ch][k] : 0.f;
+        end_ = first + int64_t(n);
+    }
+
+    /// The `n` samples from index `first` into `out` (one vector per channel).
+    void read(int64_t first, size_t n, std::vector<std::vector<float>>& out) const {
+        out.resize(lanes_.size());
+        const int64_t from = std::max(valid_from_, end_ - capacity_);
+        for (size_t ch = 0; ch < lanes_.size(); ++ch) {
+            out[ch].resize(n);
+            for (size_t k = 0; k < n; ++k) {
+                const int64_t i = first + int64_t(k);
+                out[ch][k] = i >= from && i < end_ ? lanes_[ch][slot(i)] : 0.f;
+            }
+        }
+    }
+
+private:
+    size_t slot(int64_t i) const { return size_t(((i % capacity_) + capacity_) % capacity_); }
+
+    std::vector<std::vector<float>> lanes_;   // [channel], a ring indexed by sample % capacity_
+    int64_t capacity_;
+    int64_t end_ = 0;          // one past the last sample written
+    int64_t valid_from_ = 0;   // the first sample of the current unbroken run
+};
+
 }  // namespace avp::audio_mixer

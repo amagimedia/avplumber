@@ -46,7 +46,8 @@ Sent when:
 - an AUX bus applies a new composition (layout, slot assignment, page, or a
   preview follow tied to a program take).
 
-Params: `{"output": <id>, "kind": <kind>, "sources": [<ids>], "pts": <ns>}`.
+Params: `{"output": <id>, "kind": <kind>, "sources": [<ids>], "pts": <ns>}`; an
+AUX bus's adds its own timing, `"latency_ns"` and `"program_delay_ns"` (see Fields).
 
 ### `transition_progress`
 
@@ -83,6 +84,12 @@ Params: `{"output": "program", "kind": <kind>, "from": [<ids>], "to": [<ids>],
   by the event applies at this time. `0` means “as soon as the router can”
   (e.g. interrupted restore with no future frame). Routers that can change gain
   mid-buffer should **schedule** the change at `pts`, not at `setObject` arrival.
+- **`latency_ns`** / **`program_delay_ns`** (AUX only): the bus compositor's
+  playout latency, and how far back its `pgm` cell shows the program
+  (`pgm_delay_frames` aux ticks; 0 without a `pgm` cell). Its follower sends them
+  with every change, its first composition included. A router plays the bus's
+  `"program"` audio that much later than the program bus, and its blocks
+  `latency_ns` after their media time, so the AUX audio stays with its picture.
 
 ## Feeding the node its audio
 

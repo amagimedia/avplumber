@@ -73,6 +73,14 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         float program_gain = 0.f;
         float program_gain_target = 0.f;
         std::deque<GainEvent> pending;
+        // An AUX bus's own timing, from its mixer_pvw_follow's transition_ended: its "program"
+        // audio is the program mix this many samples back, as its PGM tile is the program frame
+        // pgm_delay_frames back; and it leaves `extra_latency_ns` after the program's blocks,
+        // when its compositor's latency is longer than the program's.
+        int64_t program_delay = 0;
+        int64_t extra_latency_ns = 0;
+        int64_t program_delay_ns = 0, latency_ns = -1;   // as last sent, so a warning is logged once
+        std::deque<std::pair<int64_t, av::AudioSamples>> held;   // (when it leaves, block)
     };
 
     int sample_rate_ = 48000;
@@ -95,6 +103,8 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
     std::vector<Bus> buses_;
     std::unordered_map<std::string, size_t> bus_index_;
     std::vector<std::vector<float>> program_frame_;
+    std::optional<avp::audio_mixer::SampleHistory> program_history_;   // program_frame_ of the last blocks
+    std::vector<std::vector<float>> delayed_program_;                  // a bus's program_history_ read
     uint64_t blocks_ = 0, skipped_blocks_ = 0, output_drops_ = 0;
     // mutex_ guards mix state (queues, buses, ramps). control_mutex_ only the inbound
     // control queue: transition_progress from the video select path must not wait on a
@@ -214,7 +224,10 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         return idx;
     }
 
-    av::AudioSamples mixBus(Bus& bus, bool is_program, int64_t first) {
+    /// `program_in`: the program mix this bus adds where its sources name "program"; unused for the
+    /// program bus itself.
+    av::AudioSamples mixBus(Bus& bus, bool is_program, int64_t first,
+                            const std::vector<std::vector<float>>& program_in) {
         av::AudioSamples out(av::SampleFormat(AV_SAMPLE_FMT_FLTP), int(frame_samples_),
                              channel_layout_, sample_rate_);
         out.setTimeBase({1, sample_rate_});
@@ -260,7 +273,7 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
                 for (int ch = 0; ch < channels_; ++ch) {
                     float* dp = reinterpret_cast<float*>(out.data(ch));
                     avp::audio_mixer::addSamplesCurve(
-                        dp, program_frame_[size_t(ch)].data(), prog_curve.data(), 0, frame_samples_, 1.f);
+                        dp, program_in[size_t(ch)].data(), prog_curve.data(), 0, frame_samples_, 1.f);
                 }
             }
         }
@@ -298,13 +311,61 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         if (pit != bus_index_.end()) program_bi = pit->second;
         std::vector<av::AudioSamples> frames(buses_.size());
         if (program_bi != SIZE_MAX)
-            frames[program_bi] = mixBus(buses_[program_bi], true, first);
-        for (size_t bi = 0; bi < buses_.size(); ++bi)
-            if (bi != program_bi) frames[bi] = mixBus(buses_[bi], false, first);
-        // Never waits for a consumer: a full output edge loses this block.
-        for (size_t bi = 0; bi < frames.size(); ++bi)
-            if (!buses_[bi].sink->put(frames[bi], true)) ++output_drops_;
+            frames[program_bi] = mixBus(buses_[program_bi], true, first, program_frame_);
+        program_history_->write(first, program_frame_);
+        for (size_t bi = 0; bi < buses_.size(); ++bi) {
+            if (bi == program_bi) continue;
+            Bus& bus = buses_[bi];
+            if (bus.program_delay) program_history_->read(first - bus.program_delay, frame_samples_, delayed_program_);
+            frames[bi] = mixBus(bus, false, first, bus.program_delay ? delayed_program_ : program_frame_);
+        }
+        const int64_t deadline = blockDeadline(block);
+        for (size_t bi = 0; bi < frames.size(); ++bi) {
+            Bus& bus = buses_[bi];
+            if (bus.extra_latency_ns || !bus.held.empty()) bus.held.emplace_back(deadline + bus.extra_latency_ns, std::move(frames[bi]));
+            else send(bus, frames[bi]);
+        }
         ++blocks_;
+    }
+
+    /// Never waits for a consumer: a full output edge loses this block.
+    void send(Bus& bus, av::AudioSamples& frame) {
+        if (!bus.sink->put(frame, true)) ++output_drops_;
+    }
+
+    /// Sends the held blocks due at `now`; returns when the next one is due (INT64_MAX: none held).
+    int64_t sendHeld(int64_t now) {
+        int64_t next = INT64_MAX;
+        for (auto& bus : buses_) {
+            while (!bus.held.empty() && bus.held.front().first <= now) {
+                send(bus, bus.held.front().second);
+                bus.held.pop_front();
+            }
+            if (!bus.held.empty()) next = std::min(next, bus.held.front().first);
+        }
+        return next;
+    }
+
+    /// An AUX bus's timing as its follower sends it: `program_delay_ns`, how far back its PGM tile
+    /// shows the program, and `latency_ns`, its compositor's playout latency. Caller holds mutex_.
+    void applyBusTiming(Bus& bus, const Parameters& params) {
+        const int64_t delay_ns = std::max<int64_t>(0, params.value("program_delay_ns", bus.program_delay_ns));
+        if (delay_ns != bus.program_delay_ns) {
+            const int64_t limit = program_history_->capacity() - int64_t(frame_samples_);
+            const int64_t delay = av_rescale(delay_ns, sample_rate_, 1000000000);
+            if (delay > limit)
+                logstream << "audio_mixer: bus " << bus.id << " program delay held to " << limit << " samples";
+            bus.program_delay = std::min(delay, limit);
+            bus.program_delay_ns = delay_ns;
+        }
+        const int64_t latency = params.value("latency_ns", bus.latency_ns);
+        if (latency >= 0 && latency != bus.latency_ns) {
+            // A block is mixed at the program's deadline: it cannot leave before it.
+            if (latency < latency_ns_)
+                logstream << "audio_mixer: bus " << bus.id << " latency below the program's; it leaves with the program";
+            bus.extra_latency_ns = std::max<int64_t>(0, latency - latency_ns_);
+            bus.latency_ns = latency;
+        }
     }
 
     void mixDue(int64_t now) {
@@ -350,6 +411,7 @@ public:
         auto bit = bus_index_.find(output);
         if (bit == bus_index_.end()) return;
         Bus& bus = buses_[bit->second];
+        if (output != kProgramSentinel) applyBusTiming(bus, params);
         const int64_t pts_ns = params.value("pts", int64_t(0));
         const std::string kind = params.value("kind", std::string("cut"));
         GainEvent ev;
@@ -406,11 +468,16 @@ public:
             }
             sources.push_back(s);
         }
+        Parameters buses = Parameters::array();
+        for (const auto& bus : buses_)
+            buses.push_back({{"id", bus.id}, {"program_delay_ms", double(bus.program_delay) * 1000.0 / sample_rate_},
+                             {"extra_latency_ms", double(bus.extra_latency_ns) / 1e6}});
         return {{"blocks", blocks_}, {"skipped_blocks", skipped_blocks_},
-                {"output_drops", output_drops_}, {"sources", sources}};
+                {"output_drops", output_drops_}, {"sources", sources}, {"buses", buses}};
     }
 
     virtual void process() override {
+        int64_t held_due;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             drainControls();
@@ -422,9 +489,10 @@ public:
                 }
             }
             mixDue(avp::mixer::monotonicNs());
+            held_due = sendHeld(avp::mixer::monotonicNs());
         }
-        // Sleeps until the next block is due or a source delivers.
-        waitForInput(avp::mixer::waitMilliseconds(blockDeadline(next_block_), avp::mixer::monotonicNs()));
+        // Sleeps until the next block or held block is due, or a source delivers.
+        waitForInput(avp::mixer::waitMilliseconds(std::min(blockDeadline(next_block_), held_due), avp::mixer::monotonicNs()));
     }
 
     virtual void init(EdgeManager&, const Parameters&) override {
@@ -479,6 +547,8 @@ public:
         node->base_gain_targets_.assign(node->sources_.size(), 1.f);
         node->gain_ramp_.assign(node->sources_.size(), std::vector<float>(node->frame_samples_, 1.f));
         node->gain_ramp_step_ = 1.f / (kGainRampSeconds * float(node->sample_rate_));
+        // A bus's program delay stays within its compositor's six-frame history (under 0.5 s).
+        node->program_history_.emplace(size_t(node->channels_), size_t(node->sample_rate_) + node->frame_samples_);
 
         if (!params.count("outputs") || !params["outputs"].is_object() || params["outputs"].empty())
             throw Error("audio_mixer: outputs object required (e.g. {\"program\": \"edge\"})");
