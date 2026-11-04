@@ -24,7 +24,7 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 
-from demos.mixer.sdr_patterns import GENERATORS, input_kbps, encoding_options, render as render_video_only
+from demos.mixer.sdr_patterns import GENERATORS, GRAIN, input_kbps, encoding_options, render as render_video_only
 from demos.mixer.demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic
 from demos.mixer.hdr_patterns import write_hlg
 from pyplumber.mixer.config import MAX_SOURCES, default_browser_frame_queue, earlier_browser_ring_size, parse
@@ -95,7 +95,6 @@ def render(*args, source_id: str = "", **kwargs):
     kbps = args[9] if len(args) > 9 else kwargs.get("kbps", 6000)
     out = directory / f"{name}.mp4"
     source = f"{graph}{':' if '=' in graph else '='}size={size}:rate={fps}"
-    from demos.mixer.sdr_patterns import GRAIN
     source = f"{source},{GRAIN}"
     inputs, graph_filter, data = overlay or ([], None, None)
     tone = f"sine=frequency={_tone_hz(source_id)}:sample_rate=48000:duration={seconds}"
@@ -112,6 +111,34 @@ def render(*args, source_id: str = "", **kwargs):
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-ar", "48000", str(out)]
     subprocess.run(cmd, input=data, check=True)
     return out
+
+
+# Lip-sync test sources, enabled via recipe["lipsync_test"]. AFV's per-source pitch
+# only tells a viewer *which* source they're hearing; these additionally mark *when*
+# audio and video should coincide, with a brief full-frame flash landing on the same
+# whole second as a short beep. Two markers, so a mis-synced render/transport stage
+# can be spotted on either without needing a second clip to compare against.
+LIPSYNC_MARKERS = {"synctest_a": {"flash": "white", "hz": 1000},
+                    "synctest_b": {"flash": "cyan", "hz": 1600}}
+
+
+def render_lipsync(path: Path, width: int, height: int, fps: int, seconds: int, marker_id: str,
+                    ffmpeg: str, source_id: str, kbps: int) -> None:
+    marker = LIPSYNC_MARKERS[marker_id]
+    base = f"color=c=0x202020:size={width}x{height}:rate={fps},{GRAIN}"
+    inputs, overlay, data = id_overlay(source_id, width, height, seconds)
+    tone = f"sine=frequency={marker['hz']}:sample_rate=48000:duration={seconds}"
+    # enable='...' is evaluated per frame against t (seconds); literal commas in the
+    # expression must be escaped so the filtergraph parser doesn't split on them.
+    flash = f"drawbox=x=0:y=0:w=iw:h=ih:color={marker['flash']}:t=fill:enable='lt(mod(t\\,1)\\,0.05)'"
+    mute = "volume=volume=0:enable='gte(mod(t\\,1)\\,0.05)'"
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", base, *inputs,
+           "-f", "lavfi", "-i", tone,
+           "-filter_complex", f"{overlay}[ov];[ov]{flash}[vout];[2:a]{mute}[aout]",
+           "-map", "[vout]", "-map", "[aout]", "-t", str(seconds),
+           "-c:v", "h264_nvenc", *encoding_options("h264_nvenc", kbps, fps),
+           "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-ar", "48000", str(path)]
+    subprocess.run(cmd, input=data, check=True)
 
 
 def render_wipe(path: Path, size: str, fps: int, ffmpeg: str, pattern: str = "diagonal") -> None:
@@ -231,6 +258,9 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     seed = recipe.get("seed", 1)
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("seed must be an integer")
+    lipsync_test = recipe.get("lipsync_test", False)
+    if not isinstance(lipsync_test, bool):
+        raise ValueError("lipsync_test must be a boolean")
     runtime = Path(runtime_media_dir) if runtime_media_dir else media_dir
     if not runtime.is_absolute():
         raise ValueError("--runtime-media-dir must be absolute")
@@ -340,6 +370,16 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 source.update(kind="video", path=runtime_path(path), has_audio=True)
             source.update({key: spec[key] for key in ("decode_storage", "extra_hw_frames", "transform") if key in spec})
             sources.append(source)
+    if lipsync_test:
+        for marker_id in LIPSYNC_MARKERS:
+            source_id = f"{marker_id}_000"
+            path = (media_dir / "assets" / f"synthetic_v6_{size}_{fps}fps_{seconds}s" /
+                    f"{source_id}_sdr_420_{marker_id}_h264_nvenc_{input_kbps(0)}k.mp4")
+            jobs[path] = lambda out, marker_id=marker_id, sid=source_id: render_lipsync(
+                out, asset_width, asset_height, fps, seconds, marker_id, ffmpeg, sid, input_kbps(0))
+            sources.append({"id": source_id, "independent": True, "color": "sdr", "kind": "video",
+                             "path": runtime_path(path), "width": asset_width, "height": asset_height,
+                             "has_audio": True})
     # Graphics need fewer pixels than the program; the compositor scales them
     # in its draw pass. Bound decode/upload cost independently of canvas size.
     wipe_scale = min(1, 960 / max(width, height))

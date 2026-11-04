@@ -2,6 +2,7 @@
   "source_count": 48,
   "scene_count": 86,
   "seed": 7,
+  "lipsync_test": true,
   "canvas": {
     "width": 1920, "height": 1080, "fps": 30,
     "working_format": "p210le", "color": "hlg",
