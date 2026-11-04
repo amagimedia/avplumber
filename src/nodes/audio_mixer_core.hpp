@@ -4,6 +4,7 @@ extern "C" {
 #include <libavutil/mathematics.h>
 }
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -48,10 +49,20 @@ inline void gainsForProgress(const std::string& kind, double t,
         }
         return;
     }
-    set_many(from_idx, float(1.0 - t), false);
-    set_many(to_idx, float(t), true);
-    if (from_has_program && !to_has_program) program_gain = float(1.0 - t);
-    if (to_has_program && !from_has_program) program_gain = float(t);
+    // Equal power across the overlap, for the takes whose two sides are heard together (fade and
+    // wipe; `dip` has returned above, having gone through real silence instead). What leaves and
+    // what arrives is different material, so their powers add rather than their amplitudes:
+    // linear 1-t and t sum to half the power halfway through, a 3 dB sag in the middle of every
+    // transition, where cos and sin hold the sum at one. The video keeps its own law -- alpha is
+    // linear in `t`, which is already eased by the take's curve -- because a picture mixes by
+    // amplitude where loudness follows power. A source named on both sides is pinned at 1 above
+    // and left out of both ramps, so none is lifted to cos + sin (+3 dB) here.
+    constexpr double kHalfPi = 1.57079632679489661923;
+    const double leaving = std::cos(t * kHalfPi), arriving = std::sin(t * kHalfPi);
+    set_many(from_idx, float(leaving), false);
+    set_many(to_idx, float(arriving), true);
+    if (from_has_program && !to_has_program) program_gain = float(leaving);
+    if (to_has_program && !from_has_program) program_gain = float(arriving);
 }
 
 /// The first sample of video tick `tick`. Ticks and samples share no period (1601.6 samples a

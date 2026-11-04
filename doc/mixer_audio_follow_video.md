@@ -75,6 +75,17 @@ Params: `{"output": "program", "kind": <kind>, "from": [<ids>], "to": [<ids>],
   distinguish dip from mix.
 - For wipe, `t` is linear over the wipe duration (`take_duration_ns`).
 
+`t` is the take's progress, not a gain. A consumer turning it into one should
+mind that two sources heard at once add their *powers*: gains of `1 - t` and
+`t` sum to half the power at the midpoint, a 3 dB sag through every fade and
+wipe, where `cos(t·π/2)` and `sin(t·π/2)` hold it flat. The picture has the
+opposite requirement — alpha is linear in `t`, since a mix of images is a mix
+of amplitudes — so the two laws differing is correct, not a mismatch. A source
+on both sides of the take is not in transition at all and should simply stay
+up. `audio_mixer` does all of this in `gainsForProgress`
+(`src/nodes/audio_mixer_core.hpp`); `dip` is the exception, and stays linear
+because it passes through real silence rather than overlapping.
+
 ### `transition_start`
 
 One timed program take, described in full before it runs: a consumer that owns

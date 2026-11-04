@@ -12,6 +12,12 @@ static Planes constant(size_t n, float value) {
     return Planes(1, std::vector<float>(n, value));
 }
 
+/// Gains off a trigonometric curve are not exact binary fractions, and an end of one lands on
+/// cos/sin's own rounding (1e-17, far under the mixer's 1e-6 gain epsilon) rather than on zero.
+static bool near(float value, float expected) {
+    return std::abs(value - expected) < 1e-6f;
+}
+
 static void tickMath() {
     // 25 fps: 1920 samples a tick; 29.97: no common period, ticks of 1601 or 1602 samples.
     assert(tickSample(1, 48000, 25, 1) == 1920);
@@ -128,8 +134,34 @@ static void historyForgetsAcrossASkip() {
 int main() {
     std::vector<float> gains;
     float program_gain = 0.f;
+    // Halfway through a fade, what leaves and what arrives are each at cos/sin of a quarter turn,
+    // not at 0.5: their powers add, so equal amplitudes would sag 3 dB. Source 1, named on both
+    // sides, stays up throughout and is not part of either ramp.
     gainsForProgress("fade", 0.5, {0, 1}, {1, 2}, 3, gains, program_gain, false, false);
-    assert(gains == std::vector<float>({0.5f, 1.f, 0.5f}));
+    assert(near(gains.at(0), 0.70710678f) && gains.at(1) == 1.f && near(gains.at(2), 0.70710678f));
+
+    // The property that law is for: one source out, a different one in, constant power all the
+    // way across -- and the ends are still exactly one source at full gain.
+    for (int step = 0; step <= 20; ++step) {
+        const double t = step / 20.0;
+        gainsForProgress("fade", t, {0}, {1}, 2, gains, program_gain, false, false);
+        const double power = double(gains.at(0)) * gains.at(0) + double(gains.at(1)) * gains.at(1);
+        assert(std::abs(power - 1.0) < 1e-6);
+    }
+    gainsForProgress("fade", 0.0, {0}, {1}, 2, gains, program_gain, false, false);
+    assert(gains.at(0) == 1.f && near(gains.at(1), 0.f));
+    gainsForProgress("fade", 1.0, {0}, {1}, 2, gains, program_gain, false, false);
+    assert(near(gains.at(0), 0.f) && gains.at(1) == 1.f);
+
+    // A wipe is heard the same way: both sides are on air together, so it shares the fade's law.
+    gainsForProgress("wipe", 0.5, {0}, {1}, 2, gains, program_gain, false, false);
+    assert(near(gains.at(0), 0.70710678f) && near(gains.at(1), 0.70710678f));
+
+    // An AUX bus crossfading into or out of the program follows it too.
+    gainsForProgress("fade", 0.5, {}, {}, 0, gains, program_gain, true, false);
+    assert(near(program_gain, 0.70710678f));
+    gainsForProgress("fade", 0.5, {}, {}, 0, gains, program_gain, false, true);
+    assert(near(program_gain, 0.70710678f));
 
     gainsForProgress("fade", 0.25, {}, {}, 0, gains, program_gain, true, true);
     assert(program_gain == 1.f);

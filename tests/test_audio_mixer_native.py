@@ -199,12 +199,13 @@ def test_an_interrupted_crossfade_does_not_revert_to_a_stale_progress_event(tmp_
     assert 2 * RATE < stale_at < len(left) - GAIN_RAMP - 2 * BLOCK
 
     before = max(abs(sample) for sample in left[stale_at - 2 * BLOCK:stale_at])
-    # Past the ramp: a gain the stale event aimed at (a: 1.0 -> 0.5) needs GAIN_RAMP samples to
-    # arrive, so a window starting at the event would still read as full gain either way.
+    # Past the ramp: a gain the stale event aimed at (a: 1.0 -> 0.707, equal power at t = 0.5)
+    # needs GAIN_RAMP samples to arrive, so a window starting at the event would still read as
+    # full gain either way.
     after = max(abs(sample) for sample in left[stale_at + GAIN_RAMP:stale_at + GAIN_RAMP + 2 * BLOCK])
     assert before > 0.05
-    # The stale progress event, if not purged by the interrupt, fires here and halves the gain
-    # back toward the abandoned crossfade (a: 1.0 -> 0.5): the mix must stay at full gain on a.
+    # The stale progress event, if not purged by the interrupt, fires here and pulls the gain back
+    # toward the abandoned crossfade (a: 1.0 -> 0.707): the mix must stay at full gain on a.
     assert after > before * 0.9
 
 
