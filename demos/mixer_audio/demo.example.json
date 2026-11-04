@@ -44,6 +44,14 @@
      ]},
      "renditions": [
        {"id": "aux2_sdr", "port": 5018, "audio_port": 5020, "bitrate_kbps": 2000, "preset": "p3"}
+     ]},
+    {"id": "aux3",
+     "label": "Preview",
+     "layout": {"cells": [
+       {"role": "pvw", "x": 0, "y": 0, "w": 1920, "h": 1080}
+     ]},
+     "renditions": [
+       {"id": "aux3_pvw", "port": 5022, "audio_port": 5024, "bitrate_kbps": 2000, "preset": "p3"}
      ]}
   ]
 }
