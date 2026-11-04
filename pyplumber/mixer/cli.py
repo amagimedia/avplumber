@@ -60,6 +60,11 @@ class GraphOptions(MixerOptions):
             raise ValueError("at least one input is required")
         if not self.config and not self.output and not self.janus_output:
             raise ValueError("--output or --janus-output is required")
+        if self.audio_router_node and not self.config:
+            # --input sources carry no audio: _build_input drops the demuxer's audio leg, so
+            # nothing is ever built under this name and the preheat would wait on a node that
+            # cannot appear. Only a config declares has_audio sources to feed a router.
+            raise ValueError("--audio-router-node needs --config; --input sources have no audio")
         if self.input_color and self.input_color not in TRANSFER_TAGS:
             raise ValueError("--input-color must be sdr, hlg or pq")
         if any(v <= 0 for v in self.dmabuf_size):

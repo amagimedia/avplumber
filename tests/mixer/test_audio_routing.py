@@ -7,6 +7,8 @@ produces the commands the C++ side is contracted to understand.
 """
 from types import SimpleNamespace
 
+import pytest
+
 from pyplumber.mixer import config as mixer_config
 from pyplumber.mixer.application import MixerOptions, build_application
 from test_graph import CONFIG, fake_api
@@ -283,6 +285,19 @@ def test_build_audio_mixer_false_without_a_router_name_builds_nothing(native_bou
     assert app.avp.nodes.get("audio_mixer") is None
     init_events = [e for e in app.avp.events if e.startswith("mixer.init ")]
     assert "audio_router_node" not in init_events[0]
+
+
+def test_audio_router_node_is_refused_without_a_config():
+    """--input mode never builds an audio router: _build_input drops the demuxer's audio leg
+    and only the config path calls wire_audio_mixer. The name still reached mixer.init and
+    _warm_outputs, where avp.node() raises for a node that was never created -- the show died
+    at the first preheat poll instead of at the argument it came from."""
+    from pyplumber.mixer.cli import GraphOptions
+    with pytest.raises(ValueError, match="audio-router-node"):
+        GraphOptions(inputs=("camera.mp4",), output="program.ts",
+                     audio_router_node="audio_mixer").validate()
+    # A config declares has_audio sources, so there the name is the caller's to use.
+    GraphOptions(config="show.json", audio_router_node="audio_mixer").validate()
 
 
 def test_janus_audio_limits_float_mix_before_s16_conversion():
