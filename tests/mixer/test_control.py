@@ -7,6 +7,38 @@ from pyplumber.mixer.control import (AvpConnection, mixer_command, parse_mixer_s
                               parse_scene_list)
 
 
+def test_cancelled_greeting_does_not_leave_connection_ready_for_commands():
+    async def exercise():
+        accepted = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def serve(reader, writer):
+            accepted.set()
+            try:
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                closed.set()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        connection = AvpConnection("127.0.0.1", server.sockets[0].getsockname()[1])
+        try:
+            connecting = asyncio.create_task(connection.connect())
+            await asyncio.wait_for(accepted.wait(), 1)
+            connecting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await connecting
+            assert not connection.connected
+            await asyncio.wait_for(closed.wait(), 1)
+        finally:
+            await connection.disconnect()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(exercise())
+
+
 def test_cancelled_tui_request_cannot_leave_a_reply_for_the_next_command():
     """Exclusive TUI workers can be cancelled while a TCP reply is pending."""
     async def exercise():
