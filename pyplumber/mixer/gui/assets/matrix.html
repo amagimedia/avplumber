@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AVPlumber matrix</title>
+<!-- webui.py fills in its options for the page; the file holds the defaults. -->
+<script id="config" type="application/json">{}</script>
+<style>
+  /* Dark-only, in the mixer page's tokens (index.html). Read-only: the cells are the mixer's
+     connections, which are fixed until it restarts. */
+  :root {
+    color-scheme: dark;
+    --bg: #0a0c0f; --well: #0c0f13; --edge: #222a33; --groove: #1a2028;
+    --text: #e8edf2; --muted: #8b98a5; --faint: #56616d;
+    --pgm: #e5484d; --led: #38d67f; --accent: #f5a524;
+  }
+  html, body { height: 100%; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); overflow: hidden;
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; gap: 12px; padding: 12px 16px;
+  }
+  header { display: flex; align-items: center; gap: 14px; }
+  h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
+  .link { color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+  .link:hover { color: var(--accent); }
+  #conn { margin-left: auto; color: var(--pgm); font-size: 12px; }
+  #empty { color: var(--muted); font-size: 13px; }
+  .legend { display: flex; gap: 16px; color: var(--muted); font-size: 12px; }
+  .legend b { font-weight: 650; }
+  .sheet { flex: 1; min-height: 0; overflow: auto; }
+  table { border-collapse: separate; border-spacing: 0; }
+  th, td { padding: 7px 12px; text-align: center; white-space: nowrap; border-bottom: 1px solid var(--edge); }
+  th { position: sticky; top: 0; background: var(--bg); z-index: 1; font-weight: 650; font-size: 12px; }
+  th .bus { font: 650 12px ui-monospace, monospace; color: var(--text); }
+  th .mode { display: block; margin-top: 2px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+  th.manual .mode { color: var(--accent); }
+  td.source, th.corner { position: sticky; left: 0; background: var(--bg); text-align: left; z-index: 1; }
+  th.corner { z-index: 2; }
+  td.source { font: 600 12px ui-monospace, monospace; color: var(--muted); }
+  td.afv { color: var(--led); }
+  td.fixed { color: var(--accent); font-weight: 650; }
+  td.off { color: var(--faint); }
+  td.auto { color: var(--faint); }
+  aside { display: flex; flex-direction: column; gap: 8px; }
+  aside h2 { font-size: 12px; font-weight: 650; letter-spacing: .14em; text-transform: uppercase; margin: 0; color: var(--muted); }
+  aside p { margin: 0; color: var(--muted); font-size: 12px; }
+  pre { margin: 0; background: var(--well); box-shadow: inset 0 0 0 1px var(--edge); border-radius: 8px;
+        padding: 10px 12px; font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+
+<header>
+  <h1>AVPlumber matrix</h1>
+  <a class="link" href="/">Mixer</a>
+  <a class="link" href="/levels">Levels</a>
+  <span id="conn" role="status" hidden></span>
+</header>
+<p id="empty" hidden>No audio sources in this show.</p>
+<div class="legend">
+  <span><b>automatic</b> every input follows the picture</span>
+  <span class="afv" style="color: var(--led)">AFV</span> follows this output's takes
+  <span class="fixed" style="color: var(--accent)">fixed</span> full level, whatever is on air
+  <span class="off" style="color: var(--faint)">off</span> not connected
+</div>
+<aside aria-label="Current configuration">
+  <h2>Configuration</h2>
+  <p id="note"></p>
+  <pre id="json"></pre>
+</aside>
+<div class="sheet">
+  <table id="matrix" aria-label="Audio connections">
+    <thead id="head"></thead>
+    <tbody id="body"></tbody>
+  </table>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// Outputs the mixer has a bus for: program, then each AUX bus with its own audio. The clean
+// program carries the program mix and is not a bus of its own.
+function outputsOf(settings) {
+  const outs = [{id: "program", label: "program"}];
+  const seen = new Set(["program"]);
+  for (const p of settings.preview_outputs || []) {
+    if (!p.audio || !p.bus || p.bus.startsWith("clean_") || seen.has(p.bus)) continue;
+    seen.add(p.bus);
+    outs.push({id: p.bus, label: p.label || p.bus});
+  }
+  return outs;
+}
+
+function cellOf(manual, connections, source, output) {
+  if (!manual.has(output)) return "auto";
+  const found = connections.find((c) => c.input === source && c.output === output);
+  if (!found) return "off";
+  return found.afv ? "afv" : "fixed";
+}
+
+const LABEL = {auto: "AFV", afv: "AFV", fixed: "fixed", off: "off"};
+
+function render(state) {
+  const settings = state.settings || {};
+  const sources = settings.audio_sources || [];
+  $("empty").hidden = sources.length > 0;
+  $("matrix").hidden = sources.length === 0;
+  if (!sources.length) {
+    $("note").textContent = "";
+    $("json").textContent = "";
+    return;
+  }
+  const connections = settings.audio_connections || [];
+  const manual = new Set(connections.map((c) => c.output));
+  const outputs = outputsOf(settings);
+  $("head").replaceChildren(header(outputs, manual));
+  $("body").replaceChildren(...sources.map((source) => {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td");
+    name.className = "source";
+    name.textContent = source;
+    tr.append(name);
+    for (const output of outputs) {
+      const kind = cellOf(manual, connections, source, output.id);
+      const td = document.createElement("td");
+      td.className = kind;
+      td.textContent = LABEL[kind];
+      tr.append(td);
+    }
+    return tr;
+  }));
+  $("note").textContent = connections.length
+    ? "An output this list does not name is automatic: every input follows its picture."
+    : "No connections. Every output is automatic: every input follows its picture.";
+  $("json").textContent = JSON.stringify({audio: connections.length ? {connections} : {}}, null, 2);
+}
+
+function header(outputs, manual) {
+  const tr = document.createElement("tr");
+  const corner = document.createElement("th");
+  corner.className = "corner";
+  tr.append(corner);
+  for (const output of outputs) {
+    const cell = document.createElement("th");
+    const isManual = manual.has(output.id);
+    cell.classList.toggle("manual", isManual);
+    const bus = document.createElement("span");
+    bus.className = "bus";
+    bus.textContent = output.id;
+    const mode = document.createElement("span");
+    mode.className = "mode";
+    const name = output.label !== output.id ? `${output.label} · ` : "";
+    mode.textContent = name + (isManual ? "manual" : "automatic");
+    cell.append(bus, mode);
+    tr.append(cell);
+  }
+  return tr;
+}
+
+let polling = false;
+async function refresh() {
+  if (polling) return;
+  polling = true;
+  try {
+    const response = await fetch("/api/state"), state = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(state.error || `${response.status} ${response.statusText}`);
+    $("conn").hidden = true;
+    render(state);
+  } catch (exc) {
+    $("conn").textContent = exc.message || String(exc);
+    $("conn").hidden = false;
+  } finally {
+    polling = false;
+  }
+}
+
+refresh();
+setInterval(refresh, 2000);
+addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
+</html>

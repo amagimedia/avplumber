@@ -7,6 +7,7 @@ mixer needs no HTTP server of its own and the pages need no build step:
     GET  /              the page
     GET  /wall          every output side by side, nothing to control
     GET  /levels        one vertical fader per has_audio source, nothing else to control
+    GET  /matrix        the audio connections, one column per output, nothing to change
     GET  /outputs.js    the output list both pages play from
     GET  /api/state     status + scenes + settings in one round trip
     GET  /api/lever     a WebSocket for the lever: text messages {"position": 0..1, "duration_sec"?, "curve"?,
@@ -86,6 +87,7 @@ from .telemetry import (BrowserCpuStats, GpuStats, HostStats, RecentCounts, comp
 PAGE = Path(__file__).with_name("assets") / "index.html"
 WALL = PAGE.with_name("wall.html")
 LEVELS = PAGE.with_name("levels.html")
+MATRIX = PAGE.with_name("matrix.html")
 OUTPUTS_JS = PAGE.with_name("outputs.js")
 # The page reads the backend's options from this script before its first request; the file holds `{}`, the defaults.
 CONFIG_SCRIPT = '<script id="config" type="application/json">%s</script>'
@@ -251,6 +253,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, page(self.config, WALL), "text/html; charset=utf-8")
         elif path in ("/levels", "/levels/"):
             self._send(200, page(self.config, LEVELS), "text/html; charset=utf-8")
+        elif path in ("/matrix", "/matrix/"):
+            self._send(200, page(self.config, MATRIX), "text/html; charset=utf-8")
         elif path in ("/outputs.js", "/setup.js"):
             self._send(200, PAGE.with_name(path[1:]).read_bytes(), "text/javascript; charset=utf-8")
         elif path in ("/setup", "/setup/") and self.setup_manager:

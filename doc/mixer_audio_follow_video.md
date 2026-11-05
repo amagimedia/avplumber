@@ -239,6 +239,9 @@ them and adds instructions to them.
 - An unknown input or output, or the same pair twice, stops the build.
 - The operator gain (`/levels`) applies to connected inputs as before. An AUX
   bus's `"program"` audio, from its PGM tile, still follows that tile.
+- `/matrix` draws this: one column per output, one row per input. An automatic
+  column follows video throughout. A manual one shows each input as AFV, fixed or
+  off. It only displays the configuration.
 
 `channels` entries name one of these channels and add instructions to it. For
 now the only instruction is `processors` on an output, and the only processor
