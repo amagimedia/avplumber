@@ -141,5 +141,22 @@ if (typeof document !== "undefined") {
       meter = new CutLatencyMeter(config, render);
       meter.start();
     })
-    .catch(error => render(null, error.message));
+    .catch(() => {
+      // Embedded mixer deployments expose status through the existing same-origin proxy,
+      // without a graph-UI WebSocket registration or metrics.json.
+      async function pollState() {
+        if (stopped) return;
+        try {
+          const response = await fetch("mixer-state", {cache: "no-store", signal: AbortSignal.timeout(3000)});
+          if (!response.ok) throw Error("Measurements not configured");
+          const sample = (await response.json())?.status?.cut_latency;
+          if (!sample || sample.endpoint !== "encoder_output") throw Error("Mixer not instrumented");
+          if (!stopped) render(sample, "No cut measured yet");
+        } catch (error) {
+          if (!stopped) render(null, error.message);
+        }
+        if (!stopped) setTimeout(pollState, 1000);
+      }
+      pollState();
+    });
 }
