@@ -114,6 +114,35 @@ def draws_program(cfg, specs):
     return any(count(layout_cells(cfg, spec), "pgm") for spec in specs)
 
 
+PROGRAM_SENTINEL = "program"  # AUX pgm cell → one id meaning the program mix, not on-air sources
+
+
+def _scene_source_ids(cfg, scene):
+    """Logical Source.id values drawn by *scene* (aliases stripped to the physical source id)."""
+    return list(dict.fromkeys(name.split("#", 1)[0] for name in scene_layers(cfg, scene)))
+
+
+def base_sources(cfg, cells, scenes):
+    """Unique Source.id / program sentinel for slot, source and pgm cells (not pvw)."""
+    definitions = {s.id: s for s in cfg.scenes}
+    ids = []
+    for cell in cells:
+        if cell["role"] == "source":
+            ids.append(cfg.sources[cell["source"]].id)
+        elif cell["role"] == "slot" and scenes[cell["slot"]]:
+            ids.extend(_scene_source_ids(cfg, definitions[scenes[cell["slot"]]]))
+        elif cell["role"] == "pgm":
+            ids.append(PROGRAM_SENTINEL)
+    return list(dict.fromkeys(ids))
+
+
+def pvw_sources(cfg, cells):
+    """Map scene id → Source.id list for that scene in every pvw cell; empty when none."""
+    if not count(cells, "pvw"):
+        return {}
+    return {scene.id: _scene_source_ids(cfg, scene) for scene in cfg.scenes}
+
+
 def _layout(layers):
     return {"layers": layers, "active_inputs": source_mask_param(sum(1 << i for i in {l["input"] for l in layers}))}
 

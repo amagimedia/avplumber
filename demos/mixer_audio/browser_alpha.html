@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mixer browser overlay</title>
+<style>
+  :root { --phase: 0s; --cycle: 12s; }
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  body { color: #f4f7fb; font-family: system-ui, sans-serif; }
+
+  #marker { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+            width: 36vw; height: 17vw; box-sizing: border-box; padding: 2.1vw 2.4vw;
+            border: 1px solid #ffffff30; border-radius: 1.5vw;
+            background: linear-gradient(135deg, #253448d9, #0d1728b3);
+            box-shadow: 0 1vw 2.4vw #00000030, inset 0 1px #ffffff14; }
+  /* Opt-in motion follows a closed path without stepped or reversing endpoints. */
+  [data-motion="dynamic"] #marker, [data-motion="half"] #marker {
+    left: 10%; top: calc(38% - 8.5vw); will-change: transform;
+    animation: motion var(--cycle) linear var(--phase) infinite;
+  }
+  @keyframes motion {
+    0%, 100% { transform: translate(0, 0); }
+    40% { transform: translate(44vw, 0); }
+    50% { transform: translate(44vw, 24vh); }
+    90% { transform: translate(0, 24vh); }
+  }
+
+  .eyebrow { display: flex; align-items: center; justify-content: space-between;
+             color: #b8c8dc; font-size: .8vw; font-weight: 600; letter-spacing: .17em; }
+  .live { display: flex; align-items: center; gap: .5vw; color: #a4ebda;
+          padding: .35vw .65vw; border: 1px solid #a4ebda33; border-radius: 10vw;
+          background: #75d6be0d; font-size: .65vw; letter-spacing: .12em; }
+  .live::before { content: ''; width: .35vw; height: .35vw; border-radius: 50%; background: #8fe4cc; }
+  h1 { margin: 1.1vw 0 .35vw; font-size: 3.1vw; font-weight: 550; line-height: 1.15;
+       letter-spacing: -.045em; }
+  p { margin: 0; color: #c4d0e0; font-size: 1vw; letter-spacing: .025em; }
+  footer { display: flex; align-items: center; gap: .8vw; margin-top: 1.65vw;
+           color: #9aadc5; font-size: .7vw; letter-spacing: .08em; }
+  footer::before { content: ''; width: 3vw; height: .15vw; border-radius: 1vw;
+                   background: linear-gradient(90deg, #8fe4cc, #8fe4cc30); }
+</style>
+<article id="marker" aria-label="Browser overlay">
+  <div class="eyebrow"><span>BROWSER OVERLAY</span><span class="live">LIVE</span></div>
+  <h1>Browser 000</h1>
+  <p id="mode">Centered &middot; transparency</p>
+  <footer id="source">ALPHA OVER VIDEO</footer>
+</article>
+<script>
+  // prepare_demo embeds the source id; stagger windows along the same continuous path.
+  const source = document.documentElement.dataset.source;
+  const index = Number(source?.match(/\d+$/)?.[0] ?? 0);
+  document.querySelector('h1').textContent = `Browser ${String(index).padStart(3, '0')}`;
+  const motion = document.documentElement.dataset.motion;
+  if (motion === 'dynamic' || motion === 'half') {
+    document.getElementById('mode').textContent = 'Motion · transparency';
+  }
+  if (motion === 'half') {
+    document.getElementById('mode').textContent = '6 s moving / 6 s still · transparency';
+    const marker = document.getElementById('marker');
+    let moving = true;
+    setInterval(() => {
+      moving = !moving;
+      marker.style.animationPlayState = moving ? 'running' : 'paused';
+    }, 6000);
+  }
+  if (source) document.getElementById('source').textContent = source;
+  document.documentElement.style.setProperty('--phase', `-${((index * 0.6180339887) % 1) * 12}s`);
+</script>
+</html>

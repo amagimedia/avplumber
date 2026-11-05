@@ -100,7 +100,7 @@ struct MixerState : public InstanceShared<MixerState> {
         int64_t published_ns = 0;  // when it was published (monotonic ns)
         int64_t received_ns = 0;   // when the take that ended in it was received (monotonic ns;
                                    // 0: not a take), for the followers' latency from the command
-        std::string kind;          // the take: "cut", "fade", "wipe"; "" for a preview or a clear
+        std::string kind;          // the take: "cut", "fade", "dip", "wipe"; "" for a preview or a clear
     };
     std::mutex preview_mutex;
     PreviewChange preview;
@@ -176,11 +176,12 @@ struct MixerState : public InstanceShared<MixerState> {
     enum class TransitionMode { Idle, Cut, Crossfade, Wipe };
     std::atomic<TransitionMode> transition_mode{TransitionMode::Idle};
     uint64_t timeline_take = 0;   // the take's range on the Nsight timeline (timeline.hpp)
-    /// The running take's kind as the followers report it; "" while idle.
+    /// The running take's kind as the followers and transition events report it; "" while idle.
+    /// Crossfade with take_dip is "dip", otherwise "fade".
     const char* takeKind() const {
         switch (transition_mode.load()) {
             case TransitionMode::Cut: return "cut";
-            case TransitionMode::Crossfade: return "fade";
+            case TransitionMode::Crossfade: return take_dip ? "dip" : "fade";
             case TransitionMode::Wipe: return "wipe";
             default: return "";
         }
@@ -254,6 +255,19 @@ struct MixerState : public InstanceShared<MixerState> {
     };
     SlotNodes slot_a, slot_b;
     std::string source_switcher_name;  // "out_sel"
+    /// Optional audio-router node (any IInputsObjects impl). Orchestrator and AUX followers
+    /// emit transition_ended / transition_progress to this single name; the node maps them to
+    /// its own mix model (e.g. multi-bus audio_mixer). To fan out to several consumers or drop
+    /// some outputs, point this at a thin IInputsObjects forwarder — see
+    /// doc/mixer_audio_follow_video.md.
+    std::string audio_router_node_name;
+    /// The `from`/`to` source arrays last built for AFV, with the scene names they came from:
+    /// a take sends one transition_progress per program frame, all with the same two scenes, and
+    /// the names are the whole input, so a change of either rebuilds them (see resolveFadeFromTo).
+    /// A scene cannot be redefined while it is being taken, so its contents cannot go stale here.
+    std::string afv_from_scene, afv_to_scene;
+    Parameters afv_from, afv_to;
+    bool afv_sets_valid = false;
     /// Optional force_keyframe node triggered when a transition reaches the output,
     /// so a WebRTC receiver can decode the new picture immediately instead of
     /// waiting for the next periodic keyframe.

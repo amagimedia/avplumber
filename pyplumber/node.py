@@ -212,6 +212,19 @@ class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 
 
+class SoftJoinMetadataFrame(InternalNode):
+    TYPE = "soft_join_metadata_frame"
+
+
+class SoftJoinMetadata(SoftJoinMetadataFrame):
+    """Backward-compatible alias for soft_join_metadata_frame. """
+    TYPE = "soft_join_metadata"
+
+
+class SoftJoinVideoFrame(InternalNode):
+    TYPE = "soft_join_video_frame"
+
+
 class ObjectTracker(InternalNode):
     TYPE = "object_tracker"
 
@@ -325,10 +338,14 @@ class Input(InternalNode):
     TYPE = "input"
 class ResampleAudio(InternalNode):
     TYPE = "resample_audio"
+class ResampleAudioForwardChannels(InternalNode):
+    TYPE = "resample_audio_forward_channels"
 class FilterAudio(InternalNode):
     TYPE = "filter_audio"
 class EncAudio(InternalNode):
     TYPE = "enc_audio"
+class AudioMixer(InternalNode):
+    TYPE = "audio_mixer"
 class WriteAudioEnvelope(InternalNode):
     TYPE = "write_audio_envelope"
 

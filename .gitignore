@@ -51,3 +51,5 @@ superpowers/
 /demos/dmabuf-browser/docs/dmabuf-demo.mp4
 /demos/dmabuf-browser/docs/dmabuf-demo.jpg
 /demos/dmabuf-browser/docs/dmabuf-graph.png
+
+/demos/mixer_audio/scripts/.dev.env

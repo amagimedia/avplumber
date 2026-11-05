@@ -72,6 +72,14 @@ void MixerOrchestrator::armWipe(const std::string& scene_name, const std::string
         }
         setNodeObject(state_->wipe_otm_name, "outputs", Parameters(3u));
         setNodeObject(state_->wipe_selector_name, "active", Parameters(0));
+        // take_duration_ns/take_manual are now at their final value regardless of which branch
+        // above ran (explicit duration, lever's clip-length duration, or decode-per-take).
+        // Curve is always Linear here: a wipe has no FadeCurve knob of its own (wipe()/armWipe()
+        // never take or set state_->take_curve, which stays whatever a previous crossfade left
+        // it at) -- its audio progress (selectWipe's rampAt()/linear clamp) is unrelated to
+        // fade_curve.hpp's easing and is not itself eased.
+        emitTransitionStart("wipe", state_->take_duration_ns, FadeCurve::Linear, state_->take_manual,
+                            state_->take_received_ns);
     } catch (...) {
         abortTransition(state_->transition_generation);
         throw;
@@ -109,9 +117,13 @@ int MixerOrchestrator::selectWipe(const std::vector<const av::VideoFrame*>& fram
     // the lever's (or AUTO running it on) on its schedule. That frame's tick may be out already: the
     // overlay's frame of a tick usually comes first (below).
     const auto direct = pts(0);
-    if (direct >= last_ns && direct > 0 && (state_->take_request || state_->take_duration_ns > 0))
+    if (direct >= last_ns && direct > 0 && (state_->take_request || state_->take_duration_ns > 0)) {
         state_->take_progress = state_->take_request ? rampAt(state_->take_schedule, direct)
             : std::clamp(double(direct - state_->take_start_ns) / double(state_->take_duration_ns), 0.0, 1.0);
+        // Audio crossfades over the wipe at its progress: the clip gives video no alpha to follow.
+        if (state_->take_phase == MixerState::TakePhase::Wipe)
+            emitTransitionProgress("wipe", state_->take_progress, direct);
+    }
     // The overlay's frame of a tick can reach this selector before the direct frame of that tick
     // on every tick (2026-10-15 on the L4 show: wipes completed 3 to 8 s late, when timing jitter
     // let a direct frame through first). The equal tick completes the take without being emitted.

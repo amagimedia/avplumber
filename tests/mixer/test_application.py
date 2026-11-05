@@ -222,6 +222,24 @@ def test_settings_report_what_every_decoder_and_encoder_of_the_show_does(native_
     assert "Decode load unknown" in caplog.text
 
 
+def test_audio_sources_are_reported_only_where_their_gain_can_be_set(native_boundary):
+    """audio_sources is what makes an operator page poll mixer.audio_gain_status, and that
+    command is registered only alongside the in-tree audio_mixer. A show handing its audio to
+    a router the caller builds has the sources but not the command, and the poll's failure
+    costs /api/state its whole answer -- every page loses the show, not just its faders."""
+    def settings(options):
+        api = fake_api()
+        api.MixerGraphBuilder = native_boundary[1]
+        return json.loads(build_application(show(has_audio=True), options,
+                                            api=api).avp.commands_registered["mixer.settings"](""))
+    assert settings(MixerOptions(audio_router_node="audio_mixer"))["audio_sources"] == ["cam", "idle"]
+    assert "audio_sources" not in settings(
+        MixerOptions(audio_router_node="dyremix", build_audio_mixer=False))
+    # A show with no audio at all keeps reporting the empty list it always did.
+    assert json.loads(build_application(show(), api=fake_api())
+                      .avp.commands_registered["mixer.settings"](""))["audio_sources"] == []
+
+
 @pytest.mark.parametrize("missing_frame", [False, True])
 def test_startup_waits_for_processed_frames_and_aux_shares_them(native_boundary, monkeypatch, missing_frame):
     class Engine(NativeEngine):
