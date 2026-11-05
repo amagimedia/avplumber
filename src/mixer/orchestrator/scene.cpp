@@ -67,6 +67,9 @@ void MixerOrchestrator::defineScene(const std::string& name, const SceneDefiniti
             (!canPrewarmScene(def) || (state_->computeActiveInputsMask(def) & ~state_->prewarm_source_mask).any()))
         state_->prewarm_cut_scenes.erase(name); // Edited source identity takes the ordinary cold path.
     state_->scenes[name] = def;
+    // The AFV source arrays are held against the two scene names: an edited definition under an
+    // unchanged name is the one way their contents can go stale (see resolveFadeFromTo).
+    state_->afv_sets_valid = false;
 }
 
 bool MixerOrchestrator::canPrewarmScene(const SceneDefinition& scene) const {
@@ -139,12 +142,30 @@ void MixerOrchestrator::switchProgramSelector(bool new_pgm_is_slot_a) {
                   Parameters(new_pgm_is_slot_a ? 0 : 1));
 }
 
+void MixerOrchestrator::emitTransitionEnded(const SceneDefinition& scene, int64_t pts_ns) {
+    if (state_->audio_router_node_name.empty()) return;
+    Parameters sources = Parameters::array();
+    for (const auto& kv : scene.sources)
+        sources.push_back(kv.first);
+    const char* kind = state_->takeKind();
+    try {
+        setNodeObject(state_->audio_router_node_name, "transition_ended",
+                      {{"output", "program"},
+                       {"kind", kind && *kind ? kind : "cut"},
+                       {"sources", sources},
+                       {"pts", pts_ns}});
+    } catch (const std::exception& e) {
+        logstream << "mixer: transition_ended failed: " << e.what();
+    }
+}
+
 void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
                                                    const SceneDefinition& scene,
-                                                   bool picture_changed) {
+                                                   bool picture_changed, int64_t pts_ns) {
     const SourceMask active = state_->computeActiveInputsMask(scene);
     const auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
     const auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
+    emitTransitionEnded(scene, pts_ns);
 
     // The encoder must not make the receiver wait for the next periodic keyframe:
     // a cut changes the whole picture, and a P-frame carrying it can exceed what
@@ -181,6 +202,8 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
 
     const auto* pgm = &state_->pgmScene();
     publishSourceRoutes(is_slot_a ? &scene : pgm, is_slot_a ? pgm : &scene);
+    // The incoming scene, which fade/dip/wipe progress reports as its "to"; completeTake emits
+    // transition_ended.
     state_->pvw_slot_scene = scene_name;
 }
 

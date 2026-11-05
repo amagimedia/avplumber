@@ -452,6 +452,83 @@ FPS** (see `force_fps` node)
 -   `flags` (list of strings) - list of possible flags:
     <https://www.ffmpeg.org/doxygen/3.2/swscale_8h_source.html#l00057>
 
+### `audio_mixer`
+
+Multi-input AFV consumer for the mixer’s `transition_ended` /
+`transition_progress` events (`doc/mixer_audio_follow_video.md`). Sums
+`av::AudioSamples` (fltp) with per-bus gains scheduled at event `pts`. The
+floating-point output is not clipped; consumers converting it to an integer
+sample format should apply their required limiter first.
+
+Clocked by the program's video ticks, never by its inputs: each block of
+`frame_samples` leaves at the deadline of the video tick holding its last
+sample (tick time + `latency_ms`), with that tick's picture, stamped with its
+media time. Inputs are placed by their `realtime` `set_pts` timestamps; a source
+that is late or gone is silence in the block (faded out and back in over 3 ms),
+so it never holds the other sources or the buses back. An AUX bus takes its own
+timing from its follower's `transition_ended` (`latency_ns`, `program_delay_ns`):
+its `"program"` audio is the program mix that far back, as its `pgm` cell is, and
+its blocks are held until its own, later deadline. The `status` object counts
+blocks, skipped blocks, output drops and, per source, `dropped` (late),
+`missing` (filled with silence) and `jumps` (timestamp discontinuities); per bus,
+`program_delay_ms` and `extra_latency_ms`.
+
+`set_source_gain`, `{"source": <id>, "gain": <linear>}`, is a persistent
+operator volume for one source, kept apart from the gains a take moves: it
+multiplies into them, so a crossfade still ends with each source at its own
+level rather than at 1. Negative values are clamped to zero and there is no
+ceiling; an unknown id is ignored. Like an AFV event it is queued and applied
+on the mix thread, and the applied value glides to the new one over the same
+few tens of milliseconds, so a change does not click.
+
+`status.sources[]` reports it as `gain`, linear. That is the level last asked
+for, not the one in force at that instant — a glide still on its way is not
+visible there. `pyplumber.mixer.audio_gain` is the controller built on these
+two, converting to and from dB and treating this `gain` as its stored state.
+
+`connections` fixes what a bus carries. A bus without an entry carries every
+source, each following that bus's takes (AFV). A bus with an entry carries only
+the sources it lists. A source with `"afv": true` (the default) follows the takes
+as before. A source with `"afv": false` plays at full level, times
+`set_source_gain`, whatever is on air. Takes still move the other connected
+sources and the AUX `"program"` audio. `status.buses[].connections` reports
+`"auto"` or the list.
+
+`processors` puts sidechain duckers on buses. A ducker lowers its `target`
+sources on that bus by `depth_db` while the sum of its `sidechain` sources
+peaks at or above `threshold_db`, and for `hold_ms` after. Its gain moves
+linearly in dB, the full depth in `attack_ms` down and in `release_ms` back,
+and multiplies into the targets' gains on that bus only. With
+`"sidechain_tap": "post"` (the default) the sidechain is heard as that bus mixes
+it, after the take's gains and `set_source_gain`, so a target alone on air plays
+in full. With `"pre"`, only `set_source_gain` applies, whether the sidechain is on
+air or not. Every sidechain on a bus is read before any target is lowered, so
+duckers do not chain. An AUX bus's `"program"` audio was ducked on the program
+bus and is not ducked again. `set_processor`, `{"output", "id", ...}`, changes
+`enabled` and the five dynamics of an existing ducker on the mix thread. Which
+duckers exist is fixed at creation. `status.buses[].processors[]` reports each
+one's parameters and its current `gain_db` (0 when not ducking).
+`pyplumber.mixer.audio_processors` builds this parameter from a show's `audio`
+section.
+
+-   `src` (list of edges) and `source_ids` (same length; logical mixer source ids)
+-   `outputs` (object: bus id → output edge), e.g. `{"program": "audio_mixer_program"}`
+-   `processors` (optional object: bus id → list of
+    `{"id", "type": "ducker", "target": [source ids], "sidechain": [source ids],
+    "sidechain_tap": "post"|"pre", "enabled", "threshold_db", "depth_db",
+    "attack_ms", "hold_ms", "release_ms"}`). Defaults: post, enabled, -40 dB,
+    -20 dB, 10 ms, 300 ms, 500 ms. An unknown bus or source is an error.
+-   `connections` (optional object: bus id → non-empty list of
+    `{"source": <id>, "afv": <bool, default true>}`). An unknown bus or source,
+    or a source listed twice for one bus, is an error.
+-   `dst_channel_layout` (string, default `stereo`), `dst_sample_rate` (default 48000),
+    `frame_samples` (default 960; 20 ms at 48 kHz for Opus)
+-   `fps` (string, e.g. `30000/1001`) and `latency_ms`: the program compositor's;
+    `latency_ms` must exceed one video frame
+
+Wire via `pyplumber.mixer.audio_mixer.wire_audio_mixer` /
+`MixerOptions.audio_router_node`.
+
 ### `resample_audio`
 
 Dynamic audio resampler, maintains continuity of output stream even if

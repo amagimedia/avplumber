@@ -6,6 +6,8 @@ mixer needs no HTTP server of its own and the pages need no build step:
 
     GET  /              the page
     GET  /wall          every output side by side, nothing to control
+    GET  /levels        one vertical fader per has_audio source, nothing else to control
+    GET  /matrix        the audio connections, one column per output, nothing to change
     GET  /outputs.js    the output list both pages play from
     GET  /api/state     status + scenes + settings in one round trip
     GET  /api/lever     a WebSocket for the lever: text messages {"position": 0..1, "duration_sec"?, "curve"?,
@@ -13,6 +15,8 @@ mixer needs no HTTP server of its own and the pages need no build step:
                         POST /api/command "lever" is; one connection keeps a fader's positions in order and
                         off the page's other requests
     GET  /api/keys      small cached rendered-key and fade-to-black tally, sampled separately from show telemetry
+    GET  /api/audio_processors  {"processors": [...]}: the show's audio processors, their parameters and
+                        current gain_db, small enough for a meter to poll
     GET  /api/banks     the source banks: {"banks": [[scene|null, ...x9], x3] | null}, shared by every controller
     POST /api/banks     {"banks": [[...], [...], [...]]}: replaces them (kept with the show's settings)
     GET  /api/outputs   the show's settings and the GPU figures alone, for player pages
@@ -41,6 +45,11 @@ mixer needs no HTTP server of its own and the pages need no build step:
                         the same end. "t_ms", when the controller sampled the position on its own clock,
                         paces positions against network jitter; "seq" numbered per "client", a late one is
                         dropped
+                        {"command": "audio_gain", "gains": {source_id: gain_db, ...}}
+                        a persistent per-source volume, independent of AFV; -70 to +10 dB
+                        {"command": "audio_processor", "output": bus, "id": processor, "enabled"?: bool,
+                        "threshold_db"?, "depth_db"?, "attack_ms"?, "hold_ms"?, "release_ms"?}
+                        a live change to one of the show's audio.channels processors (audio_processors.py)
                         A cut, fade or wipe superseded by a newer one before it reached
                         the mixer answers {"ok": true, "superseded": true}.
 
@@ -77,6 +86,8 @@ from .telemetry import (BrowserCpuStats, GpuStats, HostStats, RecentCounts, comp
 
 PAGE = Path(__file__).with_name("assets") / "index.html"
 WALL = PAGE.with_name("wall.html")
+LEVELS = PAGE.with_name("levels.html")
+MATRIX = PAGE.with_name("matrix.html")
 OUTPUTS_JS = PAGE.with_name("outputs.js")
 # The page reads the backend's options from this script before its first request; the file holds `{}`, the defaults.
 CONFIG_SCRIPT = '<script id="config" type="application/json">%s</script>'
@@ -240,6 +251,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, page(self.config), "text/html; charset=utf-8")
         elif path in ("/wall", "/wall/"):
             self._send(200, page(self.config, WALL), "text/html; charset=utf-8")
+        elif path in ("/levels", "/levels/"):
+            self._send(200, page(self.config, LEVELS), "text/html; charset=utf-8")
+        elif path in ("/matrix", "/matrix/"):
+            self._send(200, page(self.config, MATRIX), "text/html; charset=utf-8")
         elif path in ("/outputs.js", "/setup.js"):
             self._send(200, PAGE.with_name(path[1:]).read_bytes(), "text/javascript; charset=utf-8")
         elif path in ("/setup", "/setup/") and self.setup_manager:
@@ -267,6 +282,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(503, {"error": str(exc)})
         elif path == "/api/banks":
             self._send_json(200, {"banks": self.banks.get()})
+        elif path == "/api/audio_processors":
+            try:
+                self._send_json(200, {"processors": self.bridge.audio_processors()})
+            except Exception as exc:
+                self._send_json(503, {"error": str(exc)})
         elif path in ("/api/state", "/api/status"):
             if self.setup_manager:
                 status = self.setup_manager.status()

@@ -25,12 +25,20 @@
   .link:hover { color: var(--accent); }
   #conn { margin-left: auto; color: var(--pgm); font-size: 12px; }
   /* layout() sets the columns and rows; --cap is the label's height, which it also reads. */
-  #wall { flex: 1; min-height: 0; display: grid; gap: 12px; place-content: start center; --cap: 24px; }
+  #wall { flex: 1; min-height: 0; display: grid; gap: 12px; place-content: start center; --cap: 28px; }
   /* Each cell centres a tile as wide as the output's aspect (--ar) allows under its label. */
   .cell { min-width: 0; min-height: 0; container-type: size; display: grid; place-items: center; }
   .tile { margin: 0; width: min(100cqw, (100cqh - var(--cap)) * var(--ar)); }
-  .tile figcaption { height: var(--cap); font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
-                     font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* The label and, for an output with audio, a mute button -- same icons and postMessage protocol
+     as the mixer page's viewer, for a consistent look; this page keeps no state across polls, so a
+     tile always starts muted, like the embedded player's own default. */
+  .tile figcaption { height: var(--cap); display: flex; align-items: center; gap: 6px; }
+  .tile figcaption > span { flex: 1 1 auto; min-width: 0; font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+                            color: var(--muted); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mini { border: 0; background: var(--edge); color: var(--muted); border-radius: 6px; width: 26px; height: 26px; cursor: pointer;
+          padding: 1px 6px; box-sizing: border-box; flex: none; }
+  .mute svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .mute[aria-pressed="true"] { color: var(--accent); }
   .screen { position: relative; aspect-ratio: var(--ar); background: #050607; border-radius: 8px; outline: 1px solid var(--edge); overflow: hidden; }
   /* As on the mixer page: a layer over the player, whose <video controls> would pause on a click, and a
      frame --chrome taller than the screen and wide enough for one footer line, so the picture fills
@@ -60,13 +68,39 @@ function outputs(state) {
   return [...programOptions(s, Boolean(state.dsk?.length)), ...(s.preview_outputs || []).map(previewOption)]
     .map((o) => ({...o, size: canvasSize(s, buses.find((aux) => aux.id === o.value))}));
 }
+// Same icons and postMessage protocol as the mixer page's viewer (index.html); unlike there, this
+// page keeps no mute state across polls, so a fresh tile always starts muted, matching the embedded
+// player's own default -- no initial message is needed, only one on an actual click.
+function muteButton(frame) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "mini mute";
+  let muted = true;
+  const paint = () => {
+    button.setAttribute("aria-pressed", String(muted));
+    button.title = muted ? "Audio is muted here — click to unmute" : "Click to mute";
+    button.setAttribute("aria-label", muted ? "Unmute audio" : "Mute audio");
+    button.innerHTML = muted
+      ? '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 4.5h2L6 2v8L3 7.5H1z"/><path d="M8 4l3 4M11 4l-3 4"/></svg>'
+      : '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 4.5h2L6 2v8L3 7.5H1z"/><path d="M8 3.3c1.4 1.1 1.4 4.3 0 5.4M9.6 1.8c2.6 2 2.6 6.4 0 8.4"/></svg>';
+  };
+  paint();
+  button.onclick = () => {
+    muted = !muted;
+    paint();
+    frame.contentWindow?.postMessage({type: "avp-preview-mute", muted}, "*");
+  };
+  return button;
+}
 function tile(o) {
   const cell = document.createElement("div"), fig = document.createElement("figure"), cap = document.createElement("figcaption");
+  const label = document.createElement("span");
   const screen = document.createElement("div");
   cell.className = "cell";
   cell.style.setProperty("--ar", o.size[0] / o.size[1]);
   fig.className = "tile";
-  cap.textContent = cap.title = o.label;
+  label.textContent = label.title = o.label;
+  cap.append(label);
   screen.className = "screen";
   if (o.unplayable) screen.append(Object.assign(document.createElement("p"), {textContent: "This browser cannot play H.265"}));
   else {
@@ -74,6 +108,7 @@ function tile(o) {
     frame.setAttribute("allow", "autoplay");
     frame.style.setProperty("--chrome", `${o.chrome}px`);
     screen.append(frame);
+    if (o.audio) cap.append(muteButton(frame));
   }
   fig.append(cap, screen);
   cell.append(fig);

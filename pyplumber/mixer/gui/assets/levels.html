@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AVPlumber levels</title>
+<!-- webui.py fills in its options for the page; the file holds the defaults. -->
+<script id="config" type="application/json">{}</script>
+<style>
+  /* Dark-only, in the mixer page's tokens (index.html). */
+  :root {
+    color-scheme: dark;
+    --bg: #0a0c0f; --well: #0c0f13; --edge: #222a33; --groove: #1a2028;
+    --text: #e8edf2; --muted: #8b98a5; --faint: #56616d;
+    --pgm: #e5484d; --led: #38d67f; --accent: #f5a524;
+  }
+  html, body { height: 100%; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); overflow: hidden;
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; gap: 12px; padding: 12px 16px;
+  }
+  header { display: flex; align-items: center; gap: 14px; }
+  h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
+  .link { color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+  .link:hover { color: var(--accent); }
+  #conn { margin-left: auto; color: var(--pgm); font-size: 12px; }
+  #empty { color: var(--muted); font-size: 13px; }
+  #levels { flex: 1; min-height: 0; display: flex; gap: 22px; align-items: stretch; overflow-x: auto; padding: 4px 2px; }
+  .ch { display: grid; grid-template-rows: auto auto 1fr auto; justify-items: center; gap: 8px; min-width: 64px; }
+  .ch .id { font: 600 11px/1.3 ui-monospace, monospace; letter-spacing: .02em; color: var(--muted); text-align: center;
+           max-width: 110px; overflow-wrap: anywhere; }
+  .ch .db { font: 700 12px ui-monospace, monospace; font-variant-numeric: tabular-nums; color: var(--text); }
+  .fader { position: relative; flex: 1; width: 40px; min-height: 160px; }
+  .fader .fill { position: absolute; left: 50%; bottom: 0; width: 6px; margin-left: -3px; border-radius: 3px;
+                background: var(--led); box-shadow: 0 0 8px rgb(56 214 127 / .55); height: calc(var(--v, 0.78) * 100%); pointer-events: none; }
+  /* 0 dB sits at (0 - DB_MIN) / (DB_MAX - DB_MIN) = 70/80 of the fader's travel. */
+  .fader .zero { position: absolute; left: 4px; right: 4px; height: 1px; background: var(--faint); bottom: 87.5%; pointer-events: none; }
+  .fader input[type="range"] {
+    position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; appearance: none; -webkit-appearance: none;
+    background: var(--well); border-radius: 6px; box-shadow: inset 0 0 0 1px var(--edge);
+    writing-mode: vertical-lr; direction: rtl; cursor: grab; touch-action: none;
+  }
+  .fader input[type="range"]::-webkit-slider-runnable-track { background: transparent; }
+  .fader input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 34px; height: 16px; border-radius: 4px; cursor: grab;
+    background: linear-gradient(0deg, #8e99a6, #e9edf1 45%, #f7f9fb 55%, #9aa5b2);
+    box-shadow: 0 2px 6px rgb(0 0 0 / .65), inset 0 0 0 1px rgb(255 255 255 / .35);
+  }
+  .fader input[type="range"]::-moz-range-thumb {
+    width: 34px; height: 16px; border: 0; border-radius: 4px; cursor: grab;
+    background: linear-gradient(0deg, #8e99a6, #e9edf1 45%, #f7f9fb 55%, #9aa5b2);
+  }
+  .ch .roles { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; max-width: 110px; min-height: 16px; }
+  .badge { font: 600 10px/1.4 ui-monospace, monospace; padding: 0 5px; border-radius: 3px; border: 1px solid var(--edge); color: var(--muted); }
+  .badge.target { color: var(--accent); border-color: rgb(245 165 36 / .45); }
+  .badge.sidechain { color: var(--led); border-color: rgb(56 214 127 / .45); }
+  #processors { max-height: 46%; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+  #processors h2 { font-size: 12px; font-weight: 650; letter-spacing: .14em; text-transform: uppercase; margin: 0; color: var(--muted);
+                   display: flex; align-items: center; gap: 12px; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; }
+  .card { background: var(--well); box-shadow: inset 0 0 0 1px var(--edge); border-radius: 8px; padding: 10px 12px;
+          display: grid; gap: 8px; min-width: 300px; flex: 1 1 340px; max-width: 520px; }
+  .card .head { display: flex; align-items: center; gap: 10px; }
+  .card .name { font: 650 13px ui-monospace, monospace; }
+  .card .route { color: var(--muted); font-size: 12px; }
+  .card label.toggle { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .param { display: grid; grid-template-columns: 92px 1fr 72px; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .param output { font: 700 12px ui-monospace, monospace; font-variant-numeric: tabular-nums; color: var(--text); text-align: right; }
+  .param input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .gr { display: grid; grid-template-columns: 92px 1fr 72px; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .gr .bar { position: relative; height: 8px; border-radius: 4px; background: var(--groove); overflow: hidden; }
+  .gr .bar span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); width: 0; transition: width 80ms linear; }
+  .gr output { font: 700 12px ui-monospace, monospace; font-variant-numeric: tabular-nums; text-align: right; color: var(--text); }
+  button.small { font: 600 11px ui-sans-serif, system-ui, sans-serif; color: var(--text); background: var(--groove);
+                 border: 1px solid var(--edge); border-radius: 4px; padding: 2px 8px; cursor: pointer; letter-spacing: 0; text-transform: none; }
+  button.small:hover { border-color: var(--accent); }
+  #json { width: 100%; min-height: 120px; background: var(--well); color: var(--text); border: 1px solid var(--edge); border-radius: 6px;
+          font: 12px/1.4 ui-monospace, monospace; padding: 8px; }
+</style>
+
+<header>
+  <h1>AVPlumber levels</h1>
+  <a class="link" href="/">Mixer</a>
+  <a class="link" href="/matrix">Matrix</a>
+  <span id="conn" role="status" hidden></span>
+</header>
+<p id="empty" hidden>No audio sources in this show.</p>
+<main id="levels" aria-label="Per-source audio levels"></main>
+<section id="processors" aria-label="Audio processors" hidden>
+  <h2>Ducking <button class="small" id="copy" type="button" title="The show document's audio section with the values below">Copy JSON</button>
+    <span id="copied" class="route" role="status"></span></h2>
+  <div class="cards" id="cards"></div>
+  <textarea id="json" readonly hidden aria-label="audio section JSON"></textarea>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const DB_MIN = -70, DB_MAX = 10;
+const fracOf = (db) => (db - DB_MIN) / (DB_MAX - DB_MIN);
+let signature = "", dragging = null;   // the source id currently being dragged, so the poll does not fight it
+
+function commit(id, db) {
+  return fetch("/api/command", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({command: "audio_gain", gains: {[id]: db}}),
+  }).catch(() => {});
+}
+
+function channel(id, db, roles) {
+  const ch = document.createElement("div"), fader = document.createElement("div");
+  const rolesEl = document.createElement("div");
+  rolesEl.className = "roles";
+  for (const [role, where] of roles) {
+    const b = document.createElement("span");
+    b.className = `badge ${role}`;
+    b.textContent = role === "target" ? "ducked" : "key";
+    b.title = role === "target" ? `Ducked by ${where}` : `Keys ${where}`;
+    rolesEl.append(b);
+  }
+  const fill = document.createElement("div"), zero = document.createElement("div");
+  const input = document.createElement("input"), idEl = document.createElement("div"), dbEl = document.createElement("div");
+  ch.className = "ch";
+  idEl.className = "id"; idEl.textContent = idEl.title = id;
+  fader.className = "fader";
+  fill.className = "fill"; zero.className = "zero";
+  input.type = "range"; input.min = DB_MIN; input.max = DB_MAX; input.step = 0.5; input.value = db;
+  input.setAttribute("aria-label", `${id} volume, dB`);
+  dbEl.className = "db";
+  const paint = (value) => {
+    fader.style.setProperty("--v", fracOf(value));
+    dbEl.textContent = `${value > 0 ? "+" : ""}${value.toFixed(1)} dB`;
+  };
+  paint(db);
+  // Sends on every change while dragging, not just on release, like a real fader; a send still
+  // in flight holds the newest value rather than queuing one request per pointer move.
+  let lastSent = db, inFlight = false, pending = null;
+  const send = (value) => {
+    if (value === lastSent) return;
+    lastSent = value;
+    if (inFlight) { pending = value; return; }
+    inFlight = true;
+    commit(id, value).finally(() => {
+      inFlight = false;
+      if (pending !== null) { const v = pending; pending = null; send(v); }
+    });
+  };
+  input.oninput = () => {
+    dragging = id;
+    const value = Number(input.value);
+    paint(value);
+    send(value);
+  };
+  const release = () => { dragging = null; send(Number(input.value)); };
+  input.onpointerup = release;
+  input.onblur = release;
+  input.onchange = release;   // keyboard adjustment: no pointerup/blur to fall back on
+  fader.append(input, fill, zero);
+  ch.append(idEl, rolesEl, fader, dbEl);
+  return ch;
+}
+
+function rolesOf(id, processors) {
+  const roles = [];
+  for (const p of processors) {
+    const where = `${p.output} · ${p.id}`;
+    if (p.target.includes(id)) roles.push(["target", where]);
+    if (p.sidechain.includes(id)) roles.push(["sidechain", where]);
+  }
+  return roles;
+}
+
+function render(state) {
+  const sources = (state.settings || {}).audio_sources || [];
+  const gains = state.audio_gain || [];
+  const processors = (state.settings || {}).audio_processors || [];
+  connections = (state.settings || {}).audio_connections || [];
+  $("empty").hidden = sources.length > 0;
+  renderProcessors(processors, state.audio_processors || []);
+  if (dragging || !sources.length) return;
+  const next = JSON.stringify([sources, gains, processors.map((p) => [p.output, p.id, p.target, p.sidechain])]);
+  if (next === signature) return;
+  signature = next;
+  $("levels").replaceChildren(...sources.map((id) => {
+    const row = gains.find((g) => g.id === id);
+    return channel(id, row ? row.gain_db : 0, rolesOf(id, processors));
+  }));
+}
+
+// Processors: the show document's audio.channels; which exist is fixed, their parameters are live.
+// Slider ranges are what a demo tunes by ear; the document may hold wider values (audio_processors.py).
+const PARAMS = [
+  {key: "threshold_db", label: "Threshold", min: -90, max: 0, step: 1, unit: "dB"},
+  {key: "depth_db", label: "Depth", min: -60, max: 0, step: 1, unit: "dB"},
+  {key: "attack_ms", label: "Attack", min: 0, max: 500, step: 1, unit: "ms"},
+  {key: "hold_ms", label: "Hold", min: 0, max: 3000, step: 10, unit: "ms"},
+  {key: "release_ms", label: "Release", min: 0, max: 5000, step: 10, unit: "ms"},
+];
+const keyOf = (p) => `${p.output}/${p.id}`;
+let procSignature = "", procDragging = null, procRows = new Map(), meterTimer = null, connections = [];
+const procCards = new Map();   // keyOf -> {inputs: {param: [input, output]}, toggle, bar, value}
+
+function sendProcessor(p, change) {
+  return fetch("/api/command", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({command: "audio_processor", output: p.output, id: p.id, ...change}),
+  }).catch(() => {});
+}
+
+function card(p) {
+  const el = document.createElement("div");
+  el.className = "card";
+  const head = document.createElement("div");
+  head.className = "head";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = `${p.output} · ${p.id}`;
+  const toggle = document.createElement("input");
+  toggle.type = "checkbox";
+  const toggleLabel = document.createElement("label");
+  toggleLabel.className = "toggle";
+  toggleLabel.append(toggle, "On");
+  toggle.onchange = () => {
+    procRows.get(keyOf(p)).enabled = toggle.checked;
+    sendProcessor(p, {enabled: toggle.checked});
+  };
+  head.append(name, toggleLabel);
+  const route = document.createElement("div");
+  route.className = "route";
+  route.textContent = `Ducks ${p.target.join(", ")} while ${p.sidechain.join(", ")} ${p.sidechain_tap === "pre" ? "carry signal" : "are heard here"}`;
+  el.append(head, route);
+  const inputs = {};
+  for (const spec of PARAMS) {
+    const row = document.createElement("label");
+    row.className = "param";
+    const input = document.createElement("input"), out = document.createElement("output");
+    input.type = "range"; input.min = spec.min; input.max = spec.max; input.step = spec.step;
+    const paint = (v) => { out.textContent = `${v} ${spec.unit}`; };
+    // Coalesced like a fader: one request in flight, the newest value waiting behind it.
+    let inFlight = false, pending = null;
+    const send = (value) => {
+      if (inFlight) { pending = value; return; }
+      inFlight = true;
+      sendProcessor(p, {[spec.key]: value}).finally(() => {
+        inFlight = false;
+        if (pending !== null) { const v = pending; pending = null; send(v); }
+      });
+    };
+    input.oninput = () => {
+      procDragging = `${keyOf(p)}/${spec.key}`;
+      const value = Number(input.value);
+      procRows.get(keyOf(p))[spec.key] = value;
+      paint(value);
+      send(value);
+    };
+    const release = () => { procDragging = null; };
+    input.onpointerup = release;
+    input.onblur = release;
+    row.append(spec.label, input, out);
+    inputs[spec.key] = [input, paint];
+    el.append(row);
+  }
+  const gr = document.createElement("div");
+  gr.className = "gr";
+  const bar = document.createElement("div"), fill = document.createElement("span"), value = document.createElement("output");
+  bar.className = "bar";
+  bar.append(fill);
+  gr.append("Reduction", bar, value);
+  el.append(gr);
+  procCards.set(keyOf(p), {inputs, toggle, fill, value});
+  return el;
+}
+
+function paintProcessor(row) {
+  const c = procCards.get(keyOf(row));
+  if (!c) return;
+  if (document.activeElement !== c.toggle) c.toggle.checked = row.enabled;
+  for (const spec of PARAMS) {
+    if (procDragging === `${keyOf(row)}/${spec.key}` || row[spec.key] === undefined) continue;
+    const [input, paint] = c.inputs[spec.key];
+    input.value = row[spec.key];
+    paint(row[spec.key]);
+  }
+  paintMeter(row);
+}
+
+function paintMeter(row) {
+  const c = procCards.get(keyOf(row));
+  if (!c) return;
+  const gain = row.gain_db || 0, depth = Math.min(-1, row.depth_db ?? -20);
+  c.fill.style.width = `${Math.min(100, (gain / depth) * 100)}%`;
+  c.value.textContent = `${gain.toFixed(1)} dB`;
+}
+
+function renderProcessors(processors, live) {
+  $("processors").hidden = !processors.length;
+  const next = JSON.stringify(processors.map((p) => [p.output, p.id, p.target, p.sidechain, p.sidechain_tap]));
+  if (next !== procSignature) {
+    procSignature = next;
+    procCards.clear();
+    procRows = new Map(processors.map((p) => [keyOf(p), {...p}]));
+    $("cards").replaceChildren(...processors.map(card));
+    clearInterval(meterTimer);
+    // The meters want more than the page's 1 s state poll; this endpoint is small.
+    meterTimer = processors.length ? setInterval(pollMeters, 250) : null;
+  }
+  for (const row of live.length ? live : processors) {
+    if (!procRows.has(keyOf(row))) continue;
+    Object.assign(procRows.get(keyOf(row)), row);
+    paintProcessor(procRows.get(keyOf(row)));
+  }
+}
+
+let meterPolling = false;
+async function pollMeters() {
+  if (meterPolling || document.hidden) return;
+  meterPolling = true;
+  try {
+    const response = await fetch("/api/audio_processors");
+    if (!response.ok) return;
+    for (const row of (await response.json()).processors || []) {
+      const mine = procRows.get(keyOf(row));
+      if (mine) { mine.gain_db = row.gain_db; paintMeter(mine); }
+    }
+  } catch (_) {
+  } finally {
+    meterPolling = false;
+  }
+}
+
+function audioSection() {
+  const channels = [];
+  for (const row of procRows.values()) {
+    const {output, gain_db, ...processor} = row;
+    let ch = channels.find((c) => c.id === output);
+    if (!ch) channels.push(ch = {id: output, type: "output", processors: []});
+    ch.processors.push(processor);
+  }
+  // Connections are not live: copied as the document has them, so pasting the section keeps them.
+  return JSON.stringify({audio: {channels, ...(connections.length ? {connections} : {})}}, null, 2);
+}
+
+$("copy").onclick = async () => {
+  const text = audioSection(), box = $("json");
+  box.value = text;
+  try {
+    await navigator.clipboard.writeText(text);   // a secure context only (https or localhost)
+    $("copied").textContent = "Copied";
+    box.hidden = true;
+  } catch (_) {
+    box.hidden = false;
+    box.select();
+    $("copied").textContent = document.execCommand("copy") ? "Copied" : "Select and copy the JSON below";
+  }
+  setTimeout(() => { $("copied").textContent = ""; }, 2500);
+};
+
+let polling = false;
+async function refresh() {
+  if (polling) return;
+  polling = true;
+  try {
+    const response = await fetch("/api/state"), state = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(state.error || `${response.status} ${response.statusText}`);
+    $("conn").hidden = true;
+    render(state);
+  } catch (exc) {
+    $("conn").textContent = exc.message || String(exc);
+    $("conn").hidden = false;
+  } finally {
+    polling = false;
+  }
+}
+
+refresh();
+setInterval(refresh, 1000);
+addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
+</html>

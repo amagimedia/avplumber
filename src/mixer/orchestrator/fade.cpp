@@ -11,20 +11,76 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
     if (actOnTransitionOnAir(scene_name, MixerState::TransitionMode::Crossfade)) return;
-    beginCrossfade(scene_name, duration_sec, curve, dip, monotonicNs(received));
+    beginCrossfade(scene_name, duration_sec, curve, dip, monotonicNs(received), /*manual=*/false);
 }
 
 void MixerOrchestrator::beginCrossfade(const std::string& scene_name, double duration_sec, FadeCurve curve,
-                                       std::optional<std::array<uint8_t, 3>> dip, int64_t received_ns) {
+                                       std::optional<std::array<uint8_t, 3>> dip, int64_t received_ns,
+                                       bool manual) {
     try {
         beginTake(scene_name, MixerState::TransitionMode::Crossfade);
         state_->take_received_ns = received_ns;
         state_->take_duration_ns = int64_t(duration_sec * 1000000000);
         state_->take_curve = curve;
         state_->take_dip = dip;
+        state_->take_manual = manual;
+        emitTransitionStart(state_->takeKind(), state_->take_duration_ns, curve, manual, received_ns);
     } catch (...) {
         abortTransition(state_->transition_generation);
         throw;
+    }
+}
+
+/// Shared by emitTransitionStart/emitTransitionProgress: the outgoing program's and incoming
+/// (PVW destination) scene's source names, as `from`/`to` JSON arrays. False if either scene
+/// can't be resolved yet (nothing to report). Held in the state between calls, keyed by the two
+/// scene names: a take asks once per program frame and the names are the whole input, so the
+/// arrays are rebuilt only when one of them changes.
+static bool resolveFadeFromTo(MixerState& state, const Parameters*& from, const Parameters*& to) {
+    if (!state.afv_sets_valid || state.afv_from_scene != state.pgm_scene_name
+            || state.afv_to_scene != state.pvw_slot_scene) {
+        const auto pgm_it = state.scenes.find(state.pgm_scene_name);
+        if (pgm_it == state.scenes.end()) return false;
+        const auto in_it = state.scenes.find(state.pvw_slot_scene);
+        if (in_it == state.scenes.end()) return false;
+        state.afv_from = Parameters::array();
+        state.afv_to = Parameters::array();
+        for (const auto& kv : pgm_it->second.sources) state.afv_from.push_back(kv.first);
+        for (const auto& kv : in_it->second.sources) state.afv_to.push_back(kv.first);
+        state.afv_from_scene = state.pgm_scene_name;
+        state.afv_to_scene = state.pvw_slot_scene;
+        state.afv_sets_valid = true;
+    }
+    from = &state.afv_from;
+    to = &state.afv_to;
+    return true;
+}
+
+void MixerOrchestrator::emitTransitionStart(const char* kind, int64_t duration_ns, FadeCurve curve,
+                                            bool manual, int64_t pts_ns) {
+    if (state_->audio_router_node_name.empty()) return;
+    const Parameters *from, *to;
+    if (!resolveFadeFromTo(*state_, from, to)) return;
+    try {
+        setNodeObject(state_->audio_router_node_name, "transition_start",
+                      {{"output", "program"}, {"kind", kind}, {"from", *from}, {"to", *to},
+                       {"duration_ms", double(duration_ns) / 1e6}, {"curve", fadeCurveName(curve)},
+                       {"manual", manual}, {"pts", pts_ns}});
+    } catch (const std::exception& e) {
+        logstream << "mixer: transition_start failed: " << e.what();
+    }
+}
+
+void MixerOrchestrator::emitTransitionProgress(const char* kind, double t, int64_t pts_ns) {
+    if (state_->audio_router_node_name.empty()) return;
+    const Parameters *from, *to;
+    if (!resolveFadeFromTo(*state_, from, to)) return;
+    try {
+        setNodeObject(state_->audio_router_node_name, "transition_progress",
+                      {{"output", "program"}, {"kind", kind}, {"from", *from}, {"to", *to},
+                       {"t", t}, {"pts", pts_ns}});
+    } catch (const std::exception& e) {
+        logstream << "mixer: transition_progress failed: " << e.what();
     }
 }
 
@@ -60,8 +116,7 @@ void MixerOrchestrator::leverTo(double position, std::optional<double> span_ms) 
             }
             const auto& take = state_->lever_take;
             if (take.wipe_file.empty()) {
-                beginCrossfade(scene, take.duration_sec, take.curve, take.dip, monotonicNs());
-                state_->take_manual = true;
+                beginCrossfade(scene, take.duration_sec, take.curve, take.dip, monotonicNs(), /*manual=*/true);
             } else {
                 // Checked before the take begins: a take that fails clears the Preview.
                 if (!state_->wipeSubgraph() || !state_->wipeChainStaysRunning() ||
@@ -252,6 +307,9 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
         const auto blend_pts = pts(blend);
         if (blend_pts > last_ns && blend_pts >= state_->take_start_ns) {
             state_->take_progress = state_->clock()->progress(blend_pts);
+            // Audio follows the mix at the same progress, the lever's included: an audio router has no
+            // per-frame alpha of its own, so it is told once per program frame of the mix.
+            emitTransitionProgress(state_->takeKind(), state_->take_progress, blend_pts);
             // A paused mix holds, a manual one until the lever's ramp to one of its ends reaches
             // this frame; a replaced preset completes only once its picture is there. This frame
             // goes out either way: at a cancel it is Program alone, at the end entirely the

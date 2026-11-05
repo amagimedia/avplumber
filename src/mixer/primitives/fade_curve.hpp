@@ -26,6 +26,19 @@ inline FadeCurve parseFadeCurve(const std::string& name) {
     throw Error("unknown fade curve '" + name + "' (expected linear, ease-in, ease-out or ease-in-out)");
 }
 
+/// Inverse of parseFadeCurve(): the name a downstream consumer (e.g. an audio_router_node
+/// told a transition's duration/curve so it can hand a closed-form ramp to its own engine
+/// instead of chasing per-tick progress) should see for `curve`.
+inline std::string fadeCurveName(FadeCurve curve) {
+    switch (curve) {
+        case FadeCurve::EaseIn: return "ease-in";
+        case FadeCurve::EaseOut: return "ease-out";
+        case FadeCurve::EaseInOut: return "ease-in-out";
+        case FadeCurve::Linear: break;
+    }
+    return "linear";
+}
+
 /// y(x) with x clamped to [0, 1]; NaN counts as 0. The arithmetic matches
 /// fadeCurveExpression term for term, so both give bit-identical results.
 inline double fadeCurveAt(FadeCurve curve, double x) {

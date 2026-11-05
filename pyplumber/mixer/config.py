@@ -15,7 +15,7 @@ import math
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, fields, replace
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
@@ -197,6 +197,7 @@ class Source:
     # the show; the oldest beyond this many more than the show's peak go.
     park_limit: int = 0
     capture_cadence: str = "continuous"  # browser: "on_change" permits intentional static holds
+    has_audio: bool = False        # demux/decode an audio track alongside video (kind == "video" only)
 
     @property
     def decoder_params(self):
@@ -227,6 +228,10 @@ class Rendition:
     profile: str = ""                # "" lets the encoder pick main/main10/baseline
     preset: str = "p7"               # NVENC quality preset
     port: int = 0                    # janus target: 0 keeps the configured port
+    # 0: no dedicated audio leg. On a top-level rendition, a Janus Opus RTP pair here duplicates
+    # the "program" audio_mixer bus (same content as the audio_rendition). On an AUX bus's
+    # rendition, it registers that bus's own id as a second, independently-mixed audio_mixer bus.
+    audio_port: int = 0
     # An explicit operator requests SDR. Otherwise codec/color select the target
     # and automatic HDR-to-SDR conversion uses clip to preserve SDR reference white.
     tonemap: str = ""
@@ -343,6 +348,7 @@ class MixerConfig:
     dsk_fade_curve: str = DEFAULT_FADE_CURVE
     browser_frame_queue: Optional[int] = None
     max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS
+    audio: Any = None   # audio_processors.AudioSection: routing and extras for audio_mixer's own channels
 
     def __post_init__(self):
         if type(self.max_compositor_layers) is not int or not 1 <= self.max_compositor_layers <= 2_147_483_647:
@@ -354,6 +360,14 @@ class MixerConfig:
 
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
+
+    @property
+    def audio_rendition(self) -> Optional[str]:
+        """The Janus program rendition carrying the program audio when a source has audio: the first
+        dirty one, since the audio has one RTP port (janus.JanusAudioConfig)."""
+        if not any(s.has_audio for s in self.sources):
+            return None
+        return next((r.id for r in self.renditions if r.target == "janus" and r.feed == "dirty"), None)
 
     def settings(self) -> Dict[str, Any]:
         """Canvas format, source counts, operator settings and preview outputs for control surfaces."""
@@ -370,6 +384,7 @@ class MixerConfig:
                 "dsk_fade_seconds": self.dsk_fade_seconds, "dsk_fade_curve": self.dsk_fade_curve} if self.dsk_keys else {}
         # The keyer splits off the clean feed, so it exists only with keys.
         from .janus import janus_mountpoint_id
+        from .audio_processors import processors_settings
 
         def preview(r):
             color = "sdr" if rendition_color(self.out_color, codec(r), r.color or None, r.tonemap).transfer == "sdr" else "hdr"
@@ -377,15 +392,19 @@ class MixerConfig:
             return {"rendition": r.id, "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
                     "port": port, "mountpoint": janus_mountpoint_id(port), "fps": r.fps}
 
-        programs = [preview(r) for r in self.renditions if r.target == "janus" and r.feed == "dirty"]
+        programs = [{**preview(r), **({"audio": True} if r.id == self.audio_rendition or r.audio_port else {})}
+                    for r in self.renditions if r.target == "janus" and r.feed == "dirty"]
         previews = []
         for r in self.renditions if self.dsk_keys else ():
             if r.feed == "clean" and r.target == "janus":
                 output = preview(r)
                 previews.append({"bus": f"clean_{r.id}", "label": f"Program clean · {output['color'].upper()}", **output})
+        # Only renditions[0] of a bus gets an audio leg (aux.py) and a mixer bus
+        # (application.py), so only its audio_port may show a mute button.
         previews += [{"bus": b.id, "label": aux_label(b.id, b.label, b.layout),
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
-                      "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps}
+                      "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps,
+                      **({"audio": True} if b.renditions[0].audio_port else {})}
                      for b in self.aux_buses for r in b.renditions]
         aliases = self.alias_counts
         return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
@@ -396,6 +415,11 @@ class MixerConfig:
                 # [source id, kind] per compositor input, in the order of the inputs: each source once
                 # per alias (application.py builds them so); telemetry deduplicates physical source IDs.
                 "inputs": [[s.id, s.kind] for s in self.sources for _ in range(aliases[s.id])],
+                "audio_sources": [s.id for s in self.sources if s.has_audio],
+                **({"audio_processors": processors_settings(self.audio.channels)}
+                   if self.audio and any(ch.processors for ch in self.audio.channels) else {}),
+                **({"audio_connections": [asdict(c) for c in self.audio.connections]}
+                   if self.audio and self.audio.connections else {}),
                 # Of the "video" inputs, those declared HDR; an undeclared one counts as SDR.
                 "hdr_video": sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"]) for s in self.sources),
                 "direct": self.direct,
@@ -514,6 +538,9 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     hold_last_frame = s.get("hold_last_frame", True)
     if not isinstance(hold_last_frame, bool) or "hold_last_frame" in s and kind != "browser":
         raise ConfigError(f"{where}: hold_last_frame must be a boolean on a browser source")
+    has_audio = s.get("has_audio", False)
+    if not isinstance(has_audio, bool) or has_audio and kind != "video":
+        raise ConfigError(f"{where}: has_audio must be a boolean, and only applies to kind video")
     try:
         color = declared_color(s)
         if kind != "video" and color is None:
@@ -531,7 +558,8 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
-                  deinterlace=deinterlace, decoded_format=decoded_format,
+                  has_audio=has_audio, deinterlace=deinterlace,
+                  decoded_format=decoded_format,
                   transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,
                   **(color.tags if color else {}))
 
@@ -580,18 +608,25 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
     return rendition
 
 
-def check_janus_ports(renditions, default_port: int = 5004) -> None:
+def check_janus_ports(renditions, default_port: int = 5004, default_audio_port: int = 5002,
+                      reserve_audio: bool = True) -> None:
     """Janus renditions need distinct RTP ports whose RTCP port (RTP + 1) is free too; port 0 is
-    the mixer's --janus-video-port, 5004 by default. parse_aux_buses checks the main renditions
-    together with the aux ones."""
-    used = set()
+    the mixer's --janus-video-port, 5004 by default. A rendition's audio_port (if set) needs the
+    same, against the same pool: it shares the UDP port space with every video leg, and with the
+    legacy single audio leg's default port (--janus-audio-port, 5002), which `reserve_audio`
+    reserves whether or not a rendition opts into it, since any has_audio source claims it at
+    runtime. A show with no audio at all claims neither and may use those ports for video.
+    parse_aux_buses checks the main renditions together with the aux ones."""
+    used = {default_audio_port, default_audio_port + 1} if reserve_audio else set()
     for r in renditions:
         if r.target != "janus":
             continue
-        port = r.port or default_port
-        if not 1 <= port < 65535 or used.intersection((port, port + 1)):
-            raise ConfigError("Janus renditions need distinct RTP/RTCP port pairs in 1..65535")
-        used.update((port, port + 1))
+        for port in (r.port or default_port, r.audio_port):
+            if not port:
+                continue
+            if not 1 <= port < 65535 or used.intersection((port, port + 1)):
+                raise ConfigError("Janus renditions need distinct RTP/RTCP port pairs in 1..65535")
+            used.update((port, port + 1))
 
 
 def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:
@@ -752,7 +787,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        raw_pool_frames=raw_pool_frames, decoder_pool_budget_mib=decoder_pool_budget_mib,
                        decoder_park_limit=decoder_park_limit, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
+    from .audio_processors import parse_audio   # it raises this module's ConfigError
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
+                   audio=parse_audio(doc.get("audio")),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))
 
 
@@ -885,7 +922,10 @@ def parse_aux_buses(values, cfg):
             raise ConfigError(f"aux {bid}: label must be a string")
         result.append(AuxBusConfig(bid, tuple(scenes), (r,), layouts[0], tuple(layouts), max_layers,
                                    label=obj.get("label", ""), **timing))
-    check_janus_ports([*cfg.renditions, *(b.renditions[0] for b in result)])
+    # The legacy audio leg's default ports are only claimed where a source actually has audio;
+    # audio_rendition is None exactly then, and is what decides whether that leg is built.
+    check_janus_ports([*cfg.renditions, *(b.renditions[0] for b in result)],
+                      reserve_audio=cfg.audio_rendition is not None)
     return tuple(result)
 
 
