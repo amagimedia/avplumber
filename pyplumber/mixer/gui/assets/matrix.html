@@ -28,27 +28,29 @@
   .link:hover { color: var(--accent); }
   #conn { margin-left: auto; color: var(--pgm); font-size: 12px; }
   #empty { color: var(--muted); font-size: 13px; }
-  .legend { display: flex; gap: 16px; color: var(--muted); font-size: 12px; }
+  .legend { display: flex; gap: 16px; color: var(--muted); font-size: 12px; flex-shrink: 0; }
   .legend b { font-weight: 650; }
-  .sheet { flex: 1; min-height: 0; overflow: auto; }
+  main { flex: 1; min-height: 0; display: flex; gap: 24px; align-items: flex-start; }
+  .sheet { flex: 0 1 auto; max-width: calc(100% - 384px); max-height: 100%; min-width: 0; min-height: 0; overflow: auto; border-radius: 8px; background: var(--well); box-shadow: inset 0 0 0 1px var(--edge); }
   table { border-collapse: separate; border-spacing: 0; }
-  th, td { padding: 7px 12px; text-align: center; white-space: nowrap; border-bottom: 1px solid var(--edge); }
-  th { position: sticky; top: 0; background: var(--bg); z-index: 1; font-weight: 650; font-size: 12px; }
+  th, td { padding: 8px 16px; text-align: center; white-space: nowrap; border-bottom: 1px solid var(--edge); }
+  th { position: sticky; top: 0; background: var(--well); z-index: 1; font-weight: 650; font-size: 12px; }
   th .bus { font: 650 12px ui-monospace, monospace; color: var(--text); }
   th .mode { display: block; margin-top: 2px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
   th.manual .mode { color: var(--accent); }
-  td.source, th.corner { position: sticky; left: 0; background: var(--bg); text-align: left; z-index: 1; }
+  td.source, th.corner { position: sticky; left: 0; background: var(--well); text-align: left; z-index: 1; }
   th.corner { z-index: 2; }
   td.source { font: 600 12px ui-monospace, monospace; color: var(--muted); }
   td.afv { color: var(--led); }
   td.fixed { color: var(--accent); font-weight: 650; }
   td.off { color: var(--faint); }
   td.auto { color: var(--faint); }
-  aside { display: flex; flex-direction: column; gap: 8px; }
-  aside h2 { font-size: 12px; font-weight: 650; letter-spacing: .14em; text-transform: uppercase; margin: 0; color: var(--muted); }
-  aside p { margin: 0; color: var(--muted); font-size: 12px; }
+  aside { width: 360px; max-width: 42%; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  aside h2 { font-size: 12px; font-weight: 650; letter-spacing: .14em; text-transform: uppercase; margin: 0; color: var(--muted); flex-shrink: 0; }
+  aside p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; flex-shrink: 0; }
   pre { margin: 0; background: var(--well); box-shadow: inset 0 0 0 1px var(--edge); border-radius: 8px;
-        padding: 10px 12px; font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+        padding: 10px 12px; font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+        overflow: auto; flex: 1; min-height: 0; }
 </style>
 
 <header>
@@ -64,17 +66,19 @@
   <span class="fixed" style="color: var(--accent)">fixed</span> full level, whatever is on air
   <span class="off" style="color: var(--faint)">off</span> not connected
 </div>
-<aside aria-label="Current configuration">
-  <h2>Configuration</h2>
-  <p id="note"></p>
-  <pre id="json"></pre>
-</aside>
-<div class="sheet">
-  <table id="matrix" aria-label="Audio connections">
-    <thead id="head"></thead>
-    <tbody id="body"></tbody>
-  </table>
-</div>
+<main>
+  <div class="sheet">
+    <table id="matrix" aria-label="Audio connections">
+      <thead id="head"></thead>
+      <tbody id="body"></tbody>
+    </table>
+  </div>
+  <aside aria-label="Current configuration">
+    <h2>Configuration</h2>
+    <p id="note"></p>
+    <pre id="json"></pre>
+  </aside>
+</main>
 
 <script>
 const $ = (id) => document.getElementById(id);
