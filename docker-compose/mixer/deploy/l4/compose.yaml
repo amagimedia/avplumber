@@ -37,6 +37,10 @@ services:
 
   janus-preview:
     image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-preview:${MIXER_RELEASE}
+    environment:
+      # mixer/compose.yaml points the players at /api/outputs, which omits per-bus state. A bus with
+      # its own audio gets a mute button, so they poll /api/state. stack.sh sets MIXER_HTTP_PORT.
+      MIXER_STATE_URL: http://127.0.0.1:${MIXER_HTTP_PORT:-17681}/api/state
 
   dma-browser:
     image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-browser:${MIXER_RELEASE}
