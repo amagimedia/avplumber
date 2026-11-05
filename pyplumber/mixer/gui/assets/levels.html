@@ -174,6 +174,7 @@ function render(state) {
   const sources = (state.settings || {}).audio_sources || [];
   const gains = state.audio_gain || [];
   const processors = (state.settings || {}).audio_processors || [];
+  connections = (state.settings || {}).audio_connections || [];
   $("empty").hidden = sources.length > 0;
   renderProcessors(processors, state.audio_processors || []);
   if (dragging || !sources.length) return;
@@ -196,7 +197,7 @@ const PARAMS = [
   {key: "release_ms", label: "Release", min: 0, max: 5000, step: 10, unit: "ms"},
 ];
 const keyOf = (p) => `${p.output}/${p.id}`;
-let procSignature = "", procDragging = null, procRows = new Map(), meterTimer = null;
+let procSignature = "", procDragging = null, procRows = new Map(), meterTimer = null, connections = [];
 const procCards = new Map();   // keyOf -> {inputs: {param: [input, output]}, toggle, bar, value}
 
 function sendProcessor(p, change) {
@@ -335,7 +336,8 @@ function audioSection() {
     if (!ch) channels.push(ch = {id: output, type: "output", processors: []});
     ch.processors.push(processor);
   }
-  return JSON.stringify({audio: {channels}}, null, 2);
+  // Connections are not live: copied as the document has them, so pasting the section keeps them.
+  return JSON.stringify({audio: {channels, ...(connections.length ? {connections} : {})}}, null, 2);
 }
 
 $("copy").onclick = async () => {

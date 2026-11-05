@@ -3,8 +3,15 @@ creates on its own.
 
 audio_mixer makes an input channel per ``has_audio`` source (named by the source id) and an output
 channel per bus (``program``, and each AUX bus with an ``audio_port``, named by the bus id). This
-section creates none of them: an entry names one of those channels and adds to it. For now that is
-``processors`` on an output, and the one processor type is a sidechain ``ducker``::
+section creates none of them: it routes and adds to them.
+
+``connections`` say which inputs an output carries. An output no connection names is automatic:
+every input, following its video (AFV). An output named by any connection carries only those
+inputs, each following its video with ``afv`` true (the default) or at full level with it false::
+
+    "audio": {"connections": [{"input": "rene", "output": "program", "afv": false}]}
+
+A channel entry adds ``processors`` to an output; the one processor type is a sidechain ``ducker``::
 
     "audio": {"channels": [
       {"id": "program", "type": "output", "processors": [
@@ -24,7 +31,7 @@ import json
 import math
 import threading
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import ConfigError
 
@@ -61,6 +68,19 @@ class AudioChannel:
     id: str
     type: str
     processors: Tuple[Ducker, ...] = ()
+
+
+@dataclass(frozen=True)
+class Connection:
+    input: str
+    output: str
+    afv: bool = True
+
+
+@dataclass(frozen=True)
+class AudioSection:
+    channels: Tuple[AudioChannel, ...] = ()
+    connections: Tuple[Connection, ...] = ()
 
 
 def ducker_params(obj: Dict[str, Any], where: str) -> Dict[str, Any]:
@@ -109,12 +129,32 @@ def _parse_ducker(p: Any, where: str) -> Ducker:
     return Ducker(p["id"], target, sidechain, tap, **ducker_params(p, where))
 
 
-def parse_audio(raw: Any) -> Tuple[AudioChannel, ...]:
-    """The section's shape. Whether its channels exist is resolve()'s, once audio_mixer's are known."""
+def _parse_connections(entries: Any) -> Tuple[Connection, ...]:
+    if not isinstance(entries, list):
+        raise ConfigError("audio.connections must be a list")
+    out: List[Connection] = []
+    for i, c in enumerate(entries):
+        where = f"audio.connections[{i}]"
+        if not isinstance(c, dict) or not all(isinstance(c.get(k), str) and c[k] for k in ("input", "output")):
+            raise ConfigError(f"{where}: input and output channel ids required")
+        if set(c) - {"input", "output", "afv"}:
+            raise ConfigError(f"{where}: unknown keys {', '.join(sorted(set(c) - {'input', 'output', 'afv'}))}")
+        if not isinstance(c.get("afv", True), bool):
+            raise ConfigError(f"{where}: afv must be a boolean")
+        conn = Connection(c["input"], c["output"], c.get("afv", True))
+        if any((o.input, o.output) == (conn.input, conn.output) for o in out):
+            raise ConfigError(f"{where}: {conn.input} is connected to {conn.output} twice")
+        out.append(conn)
+    return tuple(out)
+
+
+def parse_audio(raw: Any) -> Optional[AudioSection]:
+    """The section's shape, None without one. Whether its channels exist is resolve()'s, once
+    audio_mixer's are known."""
     if raw is None:
-        return ()
-    if not isinstance(raw, dict) or set(raw) - {"channels"}:
-        raise ConfigError("audio must be an object with channels")
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"channels", "connections"}:
+        raise ConfigError("audio must be an object with channels and connections")
     entries = raw.get("channels", [])
     if not isinstance(entries, list):
         raise ConfigError("audio.channels must be a list")
@@ -136,26 +176,35 @@ def parse_audio(raw: Any) -> Tuple[AudioChannel, ...]:
         if len({p.id for p in parsed}) != len(parsed):
             raise ConfigError(f"{where}: processor ids must be unique")
         channels.append(AudioChannel(c["id"], c["type"], parsed))
-    return tuple(channels)
+    return AudioSection(tuple(channels), _parse_connections(raw.get("connections", [])))
 
 
-def resolve(channels: Sequence[AudioChannel], inputs: Sequence[str], outputs: Sequence[str]) -> Dict[str, list]:
-    """audio_mixer's `processors` parameter, {output id: [processor, ...]}, for the channels it
-    created: `inputs` (source ids) and `outputs` (bus ids). A channel the section names that does
-    not exist is an error: a typo must not quietly do nothing."""
+def resolve(section: AudioSection, inputs: Sequence[str], outputs: Sequence[str]) -> Tuple[Dict[str, list], Dict[str, list]]:
+    """audio_mixer's `processors` and `connections` parameters, each {output id: [...]}, for the
+    channels it created: `inputs` (source ids) and `outputs` (bus ids). A channel the section names
+    that does not exist is an error: a typo must not quietly do nothing."""
     created = {"input": set(inputs), "output": set(outputs)}
-    out: Dict[str, list] = {}
-    for ch in channels:
-        if ch.id not in created[ch.type]:
-            raise ConfigError(f"audio.channels: no {ch.type} channel {ch.id!r} (the mixer has "
-                              f"{', '.join(sorted(created[ch.type])) or 'none'})")
+
+    def known(kind: str, id: str, where: str) -> None:
+        if id not in created[kind]:
+            raise ConfigError(f"{where}: no {kind} channel {id!r} (the mixer has "
+                              f"{', '.join(sorted(created[kind])) or 'none'})")
+
+    connections: Dict[str, list] = {}
+    for c in section.connections:
+        known("input", c.input, "audio.connections")
+        known("output", c.output, "audio.connections")
+        connections.setdefault(c.output, []).append({"source": c.input, "afv": c.afv})
+    processors: Dict[str, list] = {}
+    for ch in section.channels:
+        known(ch.type, ch.id, "audio.channels")
         for p in ch.processors:
             missing = sorted(set(p.target + p.sidechain) - created["input"])
             if missing:
                 raise ConfigError(f"audio.channels {ch.id} processor {p.id}: no input channel {', '.join(missing)}")
         if ch.processors:
-            out[ch.id] = [p.document() for p in ch.processors]
-    return out
+            processors[ch.id] = [p.document() for p in ch.processors]
+    return processors, connections
 
 
 def processors_settings(channels: Sequence[AudioChannel]) -> List[Dict[str, Any]]:

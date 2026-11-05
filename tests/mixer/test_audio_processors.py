@@ -18,16 +18,16 @@ def _audio(*processors, channel="program"):
 
 
 def test_a_ducker_takes_defaults_and_resolves_to_the_node_parameter():
-    channels = parse_audio(_audio(_ducker(threshold_db=-30)))
-    assert resolve(channels, ["rene", "denise", "leo"], ["program", "aux2"]) == {"program": [{
+    section = parse_audio(_audio(_ducker(threshold_db=-30)))
+    assert resolve(section, ["rene", "denise", "leo"], ["program", "aux2"])[0] == {"program": [{
         "id": "duck", "type": "ducker", "target": ["rene"], "sidechain": ["denise", "leo"],
         "sidechain_tap": "post", "enabled": True, "threshold_db": -30.0, "depth_db": -20.0,
         "attack_ms": 10.0, "hold_ms": 300.0, "release_ms": 500.0}]}
 
 
 def test_no_section_adds_nothing():
-    assert parse_audio(None) == ()
-    assert resolve((), ["rene"], ["program"]) == {}
+    assert parse_audio(None) is None
+    assert resolve(parse_audio({}), ["rene"], ["program"]) == ({}, {})
 
 
 @pytest.mark.parametrize("bad, match", [
@@ -58,12 +58,42 @@ def test_a_channel_the_mixer_did_not_create_is_an_error():
         resolve(parse_audio(_audio(_ducker())), ["rene", "denise"], ["program"])
 
 
+def test_connections_resolve_by_output_and_afv_defaults_on():
+    section = parse_audio({"connections": [{"input": "rene", "output": "program", "afv": False},
+                                           {"input": "leo", "output": "aux2"}]})
+    assert resolve(section, ["rene", "leo"], ["program", "aux2", "aux3"]) == ({}, {
+        "program": [{"source": "rene", "afv": False}], "aux2": [{"source": "leo", "afv": True}]})
+
+
+@pytest.mark.parametrize("bad, match", [
+    ({"input": "rene"}, "input and output channel ids required"),
+    ({"input": "rene", "output": "program", "afv": "no"}, "afv must be a boolean"),
+    ({"input": "rene", "output": "program", "mute": False}, "unknown keys mute"),
+])
+def test_a_bad_connection_is_a_config_error(bad, match):
+    with pytest.raises(mixer_config.ConfigError, match=match):
+        parse_audio({"connections": [bad]})
+
+
+def test_a_connection_made_twice_or_to_a_missing_channel_is_an_error():
+    twice = {"input": "rene", "output": "program"}
+    with pytest.raises(mixer_config.ConfigError, match="rene is connected to program twice"):
+        parse_audio({"connections": [twice, {**twice, "afv": False}]})
+    with pytest.raises(mixer_config.ConfigError, match="no input channel 'genaro'"):
+        resolve(parse_audio({"connections": [{"input": "genaro", "output": "program"}]}), ["rene"], ["program"])
+    with pytest.raises(mixer_config.ConfigError, match="no output channel 'aux1'"):
+        resolve(parse_audio({"connections": [{"input": "rene", "output": "aux1"}]}), ["rene"], ["program"])
+
+
 def test_the_document_carries_it_into_settings():
     camera = {**CONFIG["sources"][0], "has_audio": True}
-    cfg = mixer_config.parse({**CONFIG, "sources": [camera, *CONFIG["sources"][1:]], "audio": _audio(
-        {"id": "d", "type": "ducker", "target": [camera["id"]], "sidechain": ["other"]})})
+    connection = {"input": camera["id"], "output": "program", "afv": False}
+    cfg = mixer_config.parse({**CONFIG, "sources": [camera, *CONFIG["sources"][1:]], "audio": {
+        **_audio({"id": "d", "type": "ducker", "target": [camera["id"]], "sidechain": ["other"]}),
+        "connections": [connection]}})
     rows = cfg.settings()["audio_processors"]
     assert [(r["output"], r["id"], r["target"]) for r in rows] == [("program", "d", [camera["id"]])]
+    assert cfg.settings()["audio_connections"] == [connection]
 
 
 class _Avp:
@@ -84,7 +114,7 @@ class _Avp:
 
 def test_the_controller_checks_the_whole_request_before_sending():
     avp = _Avp()
-    controller = AudioProcessorController(avp, "audio_mixer", parse_audio(_audio(_ducker())))
+    controller = AudioProcessorController(avp, "audio_mixer", parse_audio(_audio(_ducker())).channels)
     for bad in ({"output": "program", "id": "nope", "depth_db": -10},
                 {"output": "program", "id": "duck", "depth_db": -10, "hold_ms": float("nan")},
                 {"output": "program", "id": "duck"}):
@@ -102,6 +132,6 @@ def test_the_controller_checks_the_whole_request_before_sending():
 def test_the_controller_reports_what_the_node_applies():
     avp = _Avp({"buses": [{"id": "program", "processors": [
         {"id": "duck", "type": "ducker", "enabled": True, "threshold_db": -35.0, "gain_db": -7.5}]}]})
-    controller = AudioProcessorController(avp, "audio_mixer", parse_audio(_audio(_ducker())))
+    controller = AudioProcessorController(avp, "audio_mixer", parse_audio(_audio(_ducker())).channels)
     (row,) = controller.state()
     assert row["threshold_db"] == -35.0 and row["gain_db"] == -7.5 and row["output"] == "program"

@@ -90,16 +90,34 @@ def test_sources_with_audio_bring_the_audio_mixer(native_boundary):
     assert app.avp.nodes["audio_mixer"]["source_ids"] == ["cam"]
 
 
-def _ducked_show(output="program"):
+def _two_camera_show(audio):
     camera = {**CONFIG["sources"][0], "has_audio": True}
     return mixer_config.parse({
         "canvas": CONFIG["canvas"],
         "sources": [camera, {**camera, "id": "guest", "path": "/media/guest.mp4"}],
         "scenes": [{"id": "full", "items": CONFIG["scenes"][0]["items"]}],
         "renditions": [{"id": "record", "target": "program.ts"}],
-        "audio": {"channels": [{"id": output, "type": "output", "processors": [
-            {"id": "duck", "type": "ducker", "target": ["cam"], "sidechain": ["guest"]}]}]},
+        "audio": audio,
     })
+
+
+def _ducked_show(output="program"):
+    return _two_camera_show({"channels": [{"id": output, "type": "output", "processors": [
+        {"id": "duck", "type": "ducker", "target": ["cam"], "sidechain": ["guest"]}]}]})
+
+
+def test_connections_reach_the_mixer_and_other_outputs_stay_automatic(native_boundary):
+    nodes, builder = native_boundary
+    show = _two_camera_show({"connections": [{"input": "guest", "output": "program", "afv": False}]})
+    params = build_application(show, MixerOptions(), api=_api(nodes, builder)).avp.nodes["audio_mixer"]
+    assert params["connections"] == {"program": [{"source": "guest", "afv": False}]}
+    assert "processors" not in params
+
+
+def test_no_audio_section_leaves_every_output_automatic(native_boundary):
+    nodes, builder = native_boundary
+    params = build_application(_two_camera_show(None), MixerOptions(), api=_api(nodes, builder)).avp.nodes["audio_mixer"]
+    assert "connections" not in params and "processors" not in params
 
 
 def test_the_audio_section_puts_processors_on_the_mixers_own_channels(native_boundary):

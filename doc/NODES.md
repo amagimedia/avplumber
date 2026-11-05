@@ -486,6 +486,14 @@ for, not the one in force at that instant — a glide still on its way is not
 visible there. `pyplumber.mixer.audio_gain` is the controller built on these
 two, converting to and from dB and treating this `gain` as its stored state.
 
+`connections` fixes what a bus carries. A bus without an entry carries every
+source, each following that bus's takes (AFV). A bus with an entry carries only
+the sources it lists. A source with `"afv": true` (the default) follows the takes
+as before. A source with `"afv": false` plays at full level, times
+`set_source_gain`, whatever is on air. Takes still move the other connected
+sources and the AUX `"program"` audio. `status.buses[].connections` reports
+`"auto"` or the list.
+
 `processors` puts sidechain duckers on buses. A ducker lowers its `target`
 sources on that bus by `depth_db` while the sum of its `sidechain` sources
 peaks at or above `threshold_db`, and for `hold_ms` after. Its gain moves
@@ -510,6 +518,9 @@ section.
     "sidechain_tap": "post"|"pre", "enabled", "threshold_db", "depth_db",
     "attack_ms", "hold_ms", "release_ms"}`). Defaults: post, enabled, -40 dB,
     -20 dB, 10 ms, 300 ms, 500 ms. An unknown bus or source is an error.
+-   `connections` (optional object: bus id → non-empty list of
+    `{"source": <id>, "afv": <bool, default true>}`). An unknown bus or source,
+    or a source listed twice for one bus, is an error.
 -   `dst_channel_layout` (string, default `stereo`), `dst_sample_rate` (default 48000),
     `frame_samples` (default 960; 20 ms at 48 kHz for Opus)
 -   `fps` (string, e.g. `30000/1001`) and `latency_ms`: the program compositor's;

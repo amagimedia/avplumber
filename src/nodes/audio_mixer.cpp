@@ -86,6 +86,11 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
     struct Bus {
         std::string id;
         std::vector<BusDucker> duckers;
+        // By source: afv 1 follows this bus's transitions; afv 0 stays at `fixed` (1 connected, 0
+        // not). All 1 on a bus with no `connections` entry; `connected` says it has one.
+        std::vector<uint8_t> afv;
+        std::vector<float> fixed;
+        bool connected = false;
         std::shared_ptr<Edge<av::AudioSamples>> edge;
         std::unique_ptr<Sink<av::AudioSamples>> sink;
         // gains / program_gain are what the mix uses; they slew toward *_targets at
@@ -510,6 +515,8 @@ public:
                 kind, t, from_idx, to_idx, sources_.size(), ev.gains, ev.program_gain,
                 from_prog, to_prog);
         }
+        for (size_t si = 0; si < sources_.size(); ++si)
+            if (!bus.afv[si]) ev.gains[si] = bus.fixed[si];
         insertEvent(bus, std::move(ev), key == "transition_ended");
     }
 
@@ -556,9 +563,16 @@ public:
                                       {"attack_ms", p.attack_ms}, {"hold_ms", p.hold_ms},
                                       {"release_ms", p.release_ms}, {"gain_db", d.ducker.gainDb()}});
             }
+            Parameters connections = "auto";
+            if (bus.connected) {
+                connections = Parameters::array();
+                for (size_t si = 0; si < sources_.size(); ++si)
+                    if (bus.afv[si] || bus.fixed[si] > 0.f)
+                        connections.push_back({{"source", sources_[si].id}, {"afv", bool(bus.afv[si])}});
+            }
             buses.push_back({{"id", bus.id}, {"program_delay_ms", double(bus.program_delay) * 1000.0 / sample_rate_},
                              {"extra_latency_ms", double(bus.extra_latency_ns) / 1e6},
-                             {"processors", processors}});
+                             {"connections", connections}, {"processors", processors}});
         }
         return {{"blocks", blocks_}, {"skipped_blocks", skipped_blocks_},
                 {"output_drops", output_drops_}, {"sources", sources}, {"buses", buses}};
@@ -651,14 +665,43 @@ public:
             bus.sink = make_unique<EdgeSink<av::AudioSamples>>(bus.edge);
             bus.gains.assign(node->sources_.size(), 0.f);
             bus.gain_targets.assign(node->sources_.size(), 0.f);
+            bus.afv.assign(node->sources_.size(), 1);
+            bus.fixed.assign(node->sources_.size(), 0.f);
             bus.curve.assign(node->sources_.size(), std::vector<float>(node->frame_samples_, 0.f));
             bus.program_curve.assign(node->frame_samples_, 0.f);
             node->bus_index_[bus.id] = node->buses_.size();
             node->buses_.push_back(std::move(bus));
         }
         node->block_frames_.resize(node->buses_.size());
+        if (params.count("connections")) node->createConnections(params["connections"]);
         if (params.count("processors")) node->createProcessors(params["processors"]);
         return node;
+    }
+
+    /// `connections`: {bus id: [{"source", "afv": bool}]}. A bus named here carries only its listed
+    /// sources: afv ones follow its transitions, the others stay at full level. Others: all, AFV.
+    void createConnections(const Parameters& connections) {
+        if (!connections.is_object()) throw Error("audio_mixer: connections must be an object by output");
+        for (auto it = connections.begin(); it != connections.end(); ++it) {
+            auto bit = bus_index_.find(it.key());
+            if (bit == bus_index_.end()) throw Error("audio_mixer: connections for unknown output " + it.key());
+            Bus& bus = buses_[bit->second];
+            const std::string where = "audio_mixer: " + bus.id + " connections";
+            if (!it.value().is_array() || it.value().empty()) throw Error(where + " must be a non-empty array");
+            bus.connected = true;
+            bus.afv.assign(sources_.size(), 0);
+            bus.fixed.assign(sources_.size(), 0.f);
+            for (const auto& c : it.value()) {
+                auto sit = source_index_.find(c.value("source", std::string()));
+                if (sit == source_index_.end()) throw Error(where + ": unknown source " + c.value("source", std::string()));
+                const size_t si = sit->second;
+                if (bus.afv[si] || bus.fixed[si] > 0.f) throw Error(where + ": " + sources_[si].id + " connected twice");
+                if (c.value("afv", true)) bus.afv[si] = 1;
+                else bus.fixed[si] = 1.f;
+            }
+            for (size_t si = 0; si < sources_.size(); ++si)
+                if (!bus.afv[si]) bus.gains[si] = bus.gain_targets[si] = bus.fixed[si];
+        }
     }
 
     /// `processors`: {bus id: [{"id", "type": "ducker", "target": [source ids], "sidechain": [...],

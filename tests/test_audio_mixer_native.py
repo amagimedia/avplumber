@@ -365,6 +365,73 @@ def test_a_ducker_lowers_its_target_where_its_sidechain_is_heard(tmp_path):
     assert program["depth_db"] == -6 and program["enabled"] is False
 
 
+def test_connections_fix_what_an_output_carries_and_others_stay_automatic(tmp_path):
+    # Two steady tones, "mix" and "cam". Every bus takes cam, then mix. program carries only mix,
+    # not following video: heard through both takes, cam never. manual carries only cam,
+    # following video: heard on its take only. auto has no entry: each source on its own take.
+    tones = {"mix": 440, "cam": 1000}
+    for tag, frequency in tones.items():
+        _tone(tmp_path / f"{tag}.wav", frequency, 10, 2)
+    avp = AVPlumber()
+    errors = []
+    avp.on_exception = lambda *error: errors.append(error)
+    buses = ("program", "manual", "auto")
+    try:
+        for tag in tones:
+            for cls, params in (
+                (Input, {"url": str(tmp_path / f"{tag}.wav"), "dst": f"{tag}_packets"}),
+                (Demux, {"src": f"{tag}_packets", "routing": {"a:0": f"{tag}_audio"}}),
+                (DecAudio, {"src": f"{tag}_audio", "dst": f"{tag}_decoded"}),
+                (Realtime, {"src": f"{tag}_decoded", "dst": f"{tag}_paced", "set_pts": True,
+                            "time_base": "1/120000", "negative_time_tolerance": .25,
+                            "discontinuity_threshold": 1.0}),
+            ):
+                avp.addNode(cls({"name": f"{cls.TYPE}_{tag}", "group": "audio", **params}))
+        avp.addNode(AudioMixer({
+            "name": "mix", "group": "audio", "src": ["mix_paced", "cam_paced"], "source_ids": ["mix", "cam"],
+            "outputs": {bus: bus for bus in buses}, "fps": "25/1", "latency_ms": 80,
+            "connections": {"program": [{"source": "mix", "afv": False}],
+                            "manual": [{"source": "cam", "afv": True}]},
+        }))
+        edges = {bus: avp.getEdge(bus, "AudioSamples") for bus in buses}
+        avp.group("audio").startNodes()
+
+        def take(sources):
+            for bus in buses:
+                avp.executeCommandsFromString("node.object.set mix transition_ended " + json.dumps(
+                    {"output": bus, "sources": sources, "pts": 0}))
+
+        blocks = {bus: [] for bus in buses}
+        for i in range(200):
+            for bus, edge in edges.items():
+                blocks[bus].append(edge.get(2000))
+            if i == 0:
+                take(["cam"])
+            if i == 100:
+                take(["mix"])
+        status = avp.node("mix").getObject("status")
+        assert not errors, errors
+    finally:
+        avp.shutdown()
+
+    for bus in buses:
+        assert all(block is not None and block.samplesCount == BLOCK for block in blocks[bus])
+    heard = {}
+    for bus in buses:
+        left = [v for block in blocks[bus] for v in _planes(block)[0]]
+        # Well inside the cam take (blocks 20-60) and the mix take (140-180). lavfi's sine is at
+        # 1/8 full scale, so a tone heard in full measures 1/16.
+        heard[bus] = {(tag, take): _level(left, frequency, start * BLOCK, 40 * BLOCK) > 0.02
+                      for tag, frequency in tones.items() for take, start in (("cam", 20), ("mix", 140))}
+    on = lambda *pairs: {(tag, take): (tag, take) in pairs for tag in tones for take in ("cam", "mix")}
+    assert heard["program"] == on(("mix", "cam"), ("mix", "mix")), heard
+    assert heard["manual"] == on(("cam", "cam")), heard
+    assert heard["auto"] == on(("cam", "cam"), ("mix", "mix")), heard
+    connections = {b["id"]: b["connections"] for b in status["buses"]}
+    assert connections == {"program": [{"source": "mix", "afv": False}],
+                           "manual": [{"source": "cam", "afv": True}], "auto": "auto"}
+
+
 # ingest() converts anything that is not already the mixer's own fltp/rate/layout. Each of these
 # reaches a different branch, and a general-purpose mixer must place all three on the same
 # timeline: the samples belong where their frame's timestamp says, not where the converter

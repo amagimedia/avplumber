@@ -15,7 +15,7 @@ import math
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, fields, replace
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
@@ -348,7 +348,7 @@ class MixerConfig:
     dsk_fade_curve: str = DEFAULT_FADE_CURVE
     browser_frame_queue: Optional[int] = None
     max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS
-    audio_channels: Tuple[Any, ...] = ()   # audio.channels: audio_processors.AudioChannel, extras for audio_mixer's own
+    audio: Any = None   # audio_processors.AudioSection: routing and extras for audio_mixer's own channels
 
     def __post_init__(self):
         if type(self.max_compositor_layers) is not int or not 1 <= self.max_compositor_layers <= 2_147_483_647:
@@ -416,8 +416,10 @@ class MixerConfig:
                 # per alias (application.py builds them so); telemetry deduplicates physical source IDs.
                 "inputs": [[s.id, s.kind] for s in self.sources for _ in range(aliases[s.id])],
                 "audio_sources": [s.id for s in self.sources if s.has_audio],
-                **({"audio_processors": processors_settings(self.audio_channels)}
-                   if any(ch.processors for ch in self.audio_channels) else {}),
+                **({"audio_processors": processors_settings(self.audio.channels)}
+                   if self.audio and any(ch.processors for ch in self.audio.channels) else {}),
+                **({"audio_connections": [asdict(c) for c in self.audio.connections]}
+                   if self.audio and self.audio.connections else {}),
                 # Of the "video" inputs, those declared HDR; an undeclared one counts as SDR.
                 "hdr_video": sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"]) for s in self.sources),
                 "direct": self.direct,
@@ -787,7 +789,7 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     from .audio_processors import parse_audio   # it raises this module's ConfigError
     return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg),
-                   audio_channels=parse_audio(doc.get("audio")),
+                   audio=parse_audio(doc.get("audio")),
                    **_parse_dsk(doc.get("dsk", {}), ids, canvas_w, canvas_h))
 
 

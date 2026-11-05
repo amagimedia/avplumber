@@ -34,6 +34,7 @@ def wire_audio_mixer(
     name: str = AUDIO_MIXER,
     outputs: Optional[Mapping[str, str]] = None,
     processors: Optional[Mapping[str, list]] = None,
+    connections: Optional[Mapping[str, list]] = None,
     dst_channel_layout: str = "stereo",
     dst_sample_rate: int = 48_000,
     frame_samples: int = 960,
@@ -46,7 +47,8 @@ def wire_audio_mixer(
     a single ``program`` bus named ``{name}_program``. ``fps`` and ``latency_ms`` are the
     program compositor's: each block of ``frame_samples`` leaves at the deadline of the video
     tick holding its last sample, with that tick's picture. ``processors`` maps bus id to the
-    processors on it, as ``audio_processors.resolve`` returns them.
+    processors on it, ``connections`` to the sources it carries (a bus without an entry carries
+    every source, following its video), both as ``audio_processors.resolve`` returns them.
     """
     if not audio_edges:
         raise ValueError("wire_audio_mixer: audio_edges is empty (set has_audio on video sources)")
@@ -70,6 +72,7 @@ def wire_audio_mixer(
         "fps": fps,
         "latency_ms": latency_ms,
         **({"processors": dict(processors)} if processors else {}),
+        **({"connections": dict(connections)} if connections else {}),
         "group": group,
     }))
     return name

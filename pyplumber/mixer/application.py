@@ -1048,8 +1048,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     program_audio_edge = None
     gain_controller = None
     processor_controller = None
-    if cfg.audio_channels and not (options.audio_router_node and audio_edges and options.build_audio_mixer):
-        raise mixer_config.ConfigError("audio.channels adds to audio_mixer's channels: it needs has_audio "
+    if cfg.audio and not (options.audio_router_node and audio_edges and options.build_audio_mixer):
+        raise mixer_config.ConfigError("audio routes and adds to audio_mixer's channels: it needs has_audio "
                                        "sources and the built-in audio_mixer")
     if options.audio_router_node and audio_edges:
         router = options.audio_router_node
@@ -1060,15 +1060,16 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             # own mixer_pvw_follow (aux.py stamps "output": bus.id on every layout it sends).
             aux_outputs = {bus.id: f"{router}_{bus.id}" for bus in cfg.aux_buses if bus.renditions[0].audio_port}
             outputs = {"program": f"{router}_program", **aux_outputs}
-            processors = resolve(cfg.audio_channels, [sid for sid, _ in audio_edges], list(outputs))
+            processors, connections = (resolve(cfg.audio, [sid for sid, _ in audio_edges], list(outputs))
+                                       if cfg.audio else ({}, {}))
             wire_audio_mixer(avp, api, audio_edges, name=router,
                              fps=f"{mixer.fps_num}/{mixer.fps_den}", latency_ms=mixer.latency_ms,
-                             outputs=outputs, processors=processors, group=OUTPUT_GROUP)
+                             outputs=outputs, processors=processors, connections=connections, group=OUTPUT_GROUP)
             program_audio_edge = f"{router}_program"
             gain_controller = AudioGainController(avp, options.audio_router_node, [sid for sid, _ in audio_edges])
             register_audio_gain_commands(avp, gain_controller)
             if processors:
-                processor_controller = AudioProcessorController(avp, router, cfg.audio_channels)
+                processor_controller = AudioProcessorController(avp, router, cfg.audio.channels)
                 register_audio_processor_commands(avp, processor_controller)
         # else: the caller builds and wires its own IInputsObjects node named `router`,
         # including any Janus program audio and {router}_{bus.id} aux legs it wants;

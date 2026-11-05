@@ -215,15 +215,35 @@ program bus to Janus Opus (`build_janus_audio_output`); it also wires the
 per-source gain controller (`audio_gain.py`), which speaks `audio_mixer`'s own
 `set_source_gain` control command.
 
-### The show's `audio` section: processors on the mixer's channels
+### The show's `audio` section: connections and processors on the mixer's channels
 
 `audio_mixer`'s channels are made automatically. There is an input per
 `has_audio` source, named by the source id, and an output per bus: `program`,
 plus each AUX bus whose first rendition has an `audio_port`, named by the bus id.
-The show document's optional `audio` section creates none of them. Each entry
-names one of these channels and adds instructions to it. For now the only
-instruction is `processors` on an output, and the only processor type is a
-sidechain `ducker` (see `audio_mixer` in `doc/NODES.md` for what it does):
+The show document's optional `audio` section creates none of them. It routes
+them and adds instructions to them.
+
+`connections` says which inputs an output carries:
+
+```json
+"audio": {"connections": [
+  {"input": "rene", "output": "program", "afv": false}]}
+```
+
+- An output that no connection names is automatic: every input, following its
+  video. A show with no `audio` section is automatic everywhere.
+- An output named by any connection carries only its connected inputs.
+  `"afv": true` (the default) follows that output's takes. `"afv": false` stays at
+  full level whatever is on air, for example a source that is already a complete
+  mix.
+- An unknown input or output, or the same pair twice, stops the build.
+- The operator gain (`/levels`) applies to connected inputs as before. An AUX
+  bus's `"program"` audio, from its PGM tile, still follows that tile.
+
+`channels` entries name one of these channels and add instructions to it. For
+now the only instruction is `processors` on an output, and the only processor
+type is a sidechain `ducker` (see `audio_mixer` in `doc/NODES.md` for what it
+does):
 
 ```json
 "audio": {"channels": [
@@ -247,7 +267,8 @@ sidechain `ducker` (see `audio_mixer` in `doc/NODES.md` for what it does):
 registers the `mixer.audio_processor` / `mixer.audio_processor_status` control
 commands. The web UI's `/levels` page shows each ducker with live parameters, a
 gain-reduction meter and "Copy JSON", which returns the section with the current
-values. Changes made there last until the mixer restarts.
+values and the connections as the document has them. Changes made there last
+until the mixer restarts.
 
 To put a different `IInputsObjects` impl in this slot instead (e.g.
 `dyremix_mixer`), set `MixerOptions.build_audio_mixer = False`:
