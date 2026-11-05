@@ -35,6 +35,17 @@ int channelCount(uint64_t layout) {
 #endif
 }
 
+/// `d` with whatever `p` sets of it.
+avp::audio_mixer::DuckerParams duckerParams(const Parameters& p, avp::audio_mixer::DuckerParams d) {
+    d.enabled = p.value("enabled", d.enabled);
+    d.threshold_db = p.value("threshold_db", d.threshold_db);
+    d.depth_db = p.value("depth_db", d.depth_db);
+    d.attack_ms = p.value("attack_ms", d.attack_ms);
+    d.hold_ms = p.value("hold_ms", d.hold_ms);
+    d.release_ms = p.value("release_ms", d.release_ms);
+    return d;
+}
+
 struct GainEvent {
     int64_t sample = 0;   // the first sample it applies to; 0: the next one mixed
     std::vector<float> gains;
@@ -62,8 +73,19 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         std::vector<std::vector<float>> block;                   // [ch], the block being mixed
     };
 
+    /// A ducker on one bus: lowers `targets` while `sidechain` is heard. "post" hears the sidechain
+    /// as this bus mixes it (AFV, operator gain); "pre" by the operator gain alone, on air or not.
+    struct BusDucker {
+        std::string id;
+        std::vector<size_t> targets, sidechain;
+        bool post = true;
+        avp::audio_mixer::Ducker ducker;
+        std::vector<float> key, curve;   // this block's sidechain peak and gain, frame_samples_ each
+    };
+
     struct Bus {
         std::string id;
+        std::vector<BusDucker> duckers;
         std::shared_ptr<Edge<av::AudioSamples>> edge;
         std::unique_ptr<Sink<av::AudioSamples>> sink;
         // gains / program_gain are what the mix uses; they slew toward *_targets at
@@ -103,7 +125,8 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
     std::vector<float> base_gains_;
     std::vector<float> base_gain_targets_;
     std::vector<std::vector<float>> gain_ramp_;   // this block's per-sample curve, by source
-    std::vector<float> combined_;                 // base_gain * bus gain, per sample, one source
+    std::vector<std::vector<float>> combined_;    // base_gain * bus gain (* duckers), per sample, by source
+    std::vector<float> sidechain_sum_;            // one channel of a ducker's sidechain
     float gain_ramp_step_ = 0.f;
     std::vector<Bus> buses_;
     std::unordered_map<std::string, size_t> bus_index_;
@@ -244,8 +267,30 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
         return idx;
     }
 
+    /// Each ducker's gain for this block, multiplied into its targets' combined_ curves. Every
+    /// sidechain is read before any target is lowered, so duckers on one bus do not chain.
+    void runDuckers(Bus& bus) {
+        std::vector<float>& sum = sidechain_sum_;
+        for (auto& d : bus.duckers) {
+            std::fill(d.key.begin(), d.key.end(), 0.f);
+            for (int ch = 0; ch < channels_; ++ch) {
+                std::fill(sum.begin(), sum.end(), 0.f);
+                for (size_t si : d.sidechain) {
+                    const float* gain = d.post ? combined_[si].data() : gain_ramp_[si].data();
+                    avp::audio_mixer::addSamplesCurve(
+                        sum.data(), sources_[si].block[size_t(ch)].data(), gain, 0, frame_samples_, 1.f);
+                }
+                for (size_t k = 0; k < frame_samples_; ++k) d.key[k] = std::max(d.key[k], std::fabs(sum[k]));
+            }
+            d.ducker.process(d.key.data(), frame_samples_, d.curve.data());
+        }
+        for (const auto& d : bus.duckers)
+            for (size_t si : d.targets)
+                for (size_t k = 0; k < frame_samples_; ++k) combined_[si][k] *= d.curve[k];
+    }
+
     /// `program_in`: the program mix this bus adds where its sources name "program"; unused for the
-    /// program bus itself.
+    /// program bus itself. The program mix is not ducked again: the program bus's duckers did it.
     av::AudioSamples mixBus(Bus& bus, bool is_program, int64_t first,
                             const std::vector<std::vector<float>>& program_in) {
         av::AudioSamples out(av::SampleFormat(AV_SAMPLE_FMT_FLTP), int(frame_samples_),
@@ -270,20 +315,22 @@ class AudioMixer: public NodeMultiInput<av::AudioSamples>,
             bus.program_gain = slewToward(bus.program_gain, bus.program_gain_target, gain_ramp_step_);
             prog_curve[k] = bus.program_gain;
         }
-        std::vector<float>& combined = combined_;
         for (size_t si = 0; si < sources_.size(); ++si) {
             const float* base = gain_ramp_[si].data();
             const float* bg = bus_curve[si].data();
+            float* combined = combined_[si].data();
+            for (size_t k = 0; k < frame_samples_; ++k) combined[k] = base[k] * bg[k];
+        }
+        if (!bus.duckers.empty()) runDuckers(bus);
+        for (size_t si = 0; si < sources_.size(); ++si) {
+            const float* combined = combined_[si].data();
             float peak = 0.f;
-            for (size_t k = 0; k < frame_samples_; ++k) {
-                combined[k] = base[k] * bg[k];
-                peak = std::max(peak, combined[k]);
-            }
+            for (size_t k = 0; k < frame_samples_; ++k) peak = std::max(peak, combined[k]);
             if (peak < kGainEpsilon) continue;
             for (int ch = 0; ch < channels_; ++ch) {
                 float* dp = reinterpret_cast<float*>(out.data(ch));
                 avp::audio_mixer::addSamplesCurve(
-                    dp, sources_[si].block[size_t(ch)].data(), combined.data(), 0, frame_samples_, 1.f);
+                    dp, sources_[si].block[size_t(ch)].data(), combined, 0, frame_samples_, 1.f);
             }
         }
         if (!is_program) {
@@ -426,6 +473,15 @@ public:
             base_gain_targets_[it->second] = std::max(0.f, params.value("gain", 1.0f));
             return;
         }
+        if (key == "set_processor") {
+            // Changes an existing processor's parameters; which ones exist is fixed at creation.
+            auto bit = bus_index_.find(params.value("output", std::string()));
+            if (bit == bus_index_.end()) return;
+            const std::string id = params.value("id", std::string());
+            for (auto& d : buses_[bit->second].duckers)
+                if (d.id == id) d.ducker.setParams(duckerParams(params, d.ducker.params()));
+            return;
+        }
         if (key != "transition_ended" && key != "transition_progress") return;
         if (!params.count("output")) return;
         const std::string output = params["output"].get<std::string>();
@@ -468,7 +524,8 @@ public:
     }
 
     virtual void setObject(const std::string key, const Parameters& params) override {
-        if (key != "set_source_gain" && key != "transition_ended" && key != "transition_progress")
+        if (key != "set_source_gain" && key != "set_processor" && key != "transition_ended" &&
+            key != "transition_progress")
             return;
         std::lock_guard<std::mutex> lock(control_mutex_);
         control_q_.push_back({key, params});
@@ -490,9 +547,19 @@ public:
             sources.push_back(s);
         }
         Parameters buses = Parameters::array();
-        for (const auto& bus : buses_)
+        for (const auto& bus : buses_) {
+            Parameters processors = Parameters::array();
+            for (const auto& d : bus.duckers) {
+                const auto& p = d.ducker.params();
+                processors.push_back({{"id", d.id}, {"type", "ducker"}, {"enabled", p.enabled},
+                                      {"threshold_db", p.threshold_db}, {"depth_db", p.depth_db},
+                                      {"attack_ms", p.attack_ms}, {"hold_ms", p.hold_ms},
+                                      {"release_ms", p.release_ms}, {"gain_db", d.ducker.gainDb()}});
+            }
             buses.push_back({{"id", bus.id}, {"program_delay_ms", double(bus.program_delay) * 1000.0 / sample_rate_},
-                             {"extra_latency_ms", double(bus.extra_latency_ns) / 1e6}});
+                             {"extra_latency_ms", double(bus.extra_latency_ns) / 1e6},
+                             {"processors", processors}});
+        }
         return {{"blocks", blocks_}, {"skipped_blocks", skipped_blocks_},
                 {"output_drops", output_drops_}, {"sources", sources}, {"buses", buses}};
     }
@@ -567,7 +634,8 @@ public:
         node->base_gains_.assign(node->sources_.size(), 1.f);
         node->base_gain_targets_.assign(node->sources_.size(), 1.f);
         node->gain_ramp_.assign(node->sources_.size(), std::vector<float>(node->frame_samples_, 1.f));
-        node->combined_.assign(node->frame_samples_, 0.f);
+        node->combined_.assign(node->sources_.size(), std::vector<float>(node->frame_samples_, 0.f));
+        node->sidechain_sum_.assign(node->frame_samples_, 0.f);
         node->program_frame_.assign(size_t(node->channels_), std::vector<float>(node->frame_samples_, 0.f));
         node->gain_ramp_step_ = 1.f / (kGainRampSeconds * float(node->sample_rate_));
         // A bus's program delay stays within its compositor's six-frame history (under 0.5 s).
@@ -589,7 +657,41 @@ public:
             node->buses_.push_back(std::move(bus));
         }
         node->block_frames_.resize(node->buses_.size());
+        if (params.count("processors")) node->createProcessors(params["processors"]);
         return node;
+    }
+
+    /// `processors`: {bus id: [{"id", "type": "ducker", "target": [source ids], "sidechain": [...],
+    /// "sidechain_tap": "post" | "pre", ...DuckerParams}]}.
+    void createProcessors(const Parameters& processors) {
+        if (!processors.is_object()) throw Error("audio_mixer: processors must be an object by output");
+        auto indexes = [this](const Parameters& ids, const std::string& where) {
+            std::vector<size_t> idx;
+            if (!ids.is_array() || ids.empty()) throw Error(where + " must be a non-empty array of source ids");
+            for (const auto& id : ids) {
+                auto it = source_index_.find(id.get<std::string>());
+                if (it == source_index_.end()) throw Error(where + ": unknown source " + id.get<std::string>());
+                idx.push_back(it->second);
+            }
+            return idx;
+        };
+        for (auto it = processors.begin(); it != processors.end(); ++it) {
+            auto bit = bus_index_.find(it.key());
+            if (bit == bus_index_.end()) throw Error("audio_mixer: processors for unknown output " + it.key());
+            Bus& bus = buses_[bit->second];
+            for (const auto& p : it.value()) {
+                const std::string where = "audio_mixer: " + bus.id + " processor " + p.value("id", std::string());
+                if (p.value("type", std::string()) != "ducker") throw Error(where + ": type must be ducker");
+                const std::string tap = p.value("sidechain_tap", std::string("post"));
+                if (tap != "post" && tap != "pre") throw Error(where + ": sidechain_tap must be post or pre");
+                BusDucker d{p.value("id", std::string()), indexes(p.value("target", Parameters()), where + " target"),
+                            indexes(p.value("sidechain", Parameters()), where + " sidechain"), tap == "post",
+                            avp::audio_mixer::Ducker(sample_rate_),
+                            std::vector<float>(frame_samples_, 0.f), std::vector<float>(frame_samples_, 1.f)};
+                d.ducker.setParams(duckerParams(p, {}));
+                bus.duckers.push_back(std::move(d));
+            }
+        }
     }
 };
 

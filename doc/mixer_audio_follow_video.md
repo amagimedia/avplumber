@@ -215,6 +215,40 @@ program bus to Janus Opus (`build_janus_audio_output`); it also wires the
 per-source gain controller (`audio_gain.py`), which speaks `audio_mixer`'s own
 `set_source_gain` control command.
 
+### The show's `audio` section: processors on the mixer's channels
+
+`audio_mixer`'s channels are made automatically. There is an input per
+`has_audio` source, named by the source id, and an output per bus: `program`,
+plus each AUX bus whose first rendition has an `audio_port`, named by the bus id.
+The show document's optional `audio` section creates none of them. Each entry
+names one of these channels and adds instructions to it. For now the only
+instruction is `processors` on an output, and the only processor type is a
+sidechain `ducker` (see `audio_mixer` in `doc/NODES.md` for what it does):
+
+```json
+"audio": {"channels": [
+  {"id": "program", "type": "output", "processors": [
+    {"id": "program-duck", "type": "ducker",
+     "target": ["rene", "genaro"], "sidechain": ["denise", "leo", "ray", "sergio"],
+     "sidechain_tap": "post", "enabled": true,
+     "threshold_db": -40, "depth_db": -20, "attack_ms": 10, "hold_ms": 300, "release_ms": 500}]}]}
+```
+
+- `id` and `type` name an existing channel. An entry for a channel the mixer did
+  not make, such as a typo or an AUX bus without audio, stops the build.
+- `target` and `sidechain` name input channels. Both are required and must not
+  overlap. Every other field has the default shown above.
+- To duck on several outputs, give each output its own entry with its own
+  parameters.
+- The section needs the built-in `audio_mixer`: it is an error with
+  `build_audio_mixer = False`.
+
+`pyplumber.mixer.audio_processors` parses and resolves the section. It also
+registers the `mixer.audio_processor` / `mixer.audio_processor_status` control
+commands. The web UI's `/levels` page shows each ducker with live parameters, a
+gain-reduction meter and "Copy JSON", which returns the section with the current
+values. Changes made there last until the mixer restarts.
+
 To put a different `IInputsObjects` impl in this slot instead (e.g.
 `dyremix_mixer`), set `MixerOptions.build_audio_mixer = False`:
 `build_application` then leaves `audio_router_node` untouched instead of

@@ -90,6 +90,31 @@ def test_sources_with_audio_bring_the_audio_mixer(native_boundary):
     assert app.avp.nodes["audio_mixer"]["source_ids"] == ["cam"]
 
 
+def _ducked_show(output="program"):
+    camera = {**CONFIG["sources"][0], "has_audio": True}
+    return mixer_config.parse({
+        "canvas": CONFIG["canvas"],
+        "sources": [camera, {**camera, "id": "guest", "path": "/media/guest.mp4"}],
+        "scenes": [{"id": "full", "items": CONFIG["scenes"][0]["items"]}],
+        "renditions": [{"id": "record", "target": "program.ts"}],
+        "audio": {"channels": [{"id": output, "type": "output", "processors": [
+            {"id": "duck", "type": "ducker", "target": ["cam"], "sidechain": ["guest"]}]}]},
+    })
+
+
+def test_the_audio_section_puts_processors_on_the_mixers_own_channels(native_boundary):
+    nodes, builder = native_boundary
+    app = build_application(_ducked_show(), MixerOptions(), api=_api(nodes, builder))
+    (ducker,) = app.avp.nodes["audio_mixer"]["processors"]["program"]
+    assert (ducker["target"], ducker["sidechain"], ducker["sidechain_tap"]) == (["cam"], ["guest"], "post")
+
+
+def test_the_audio_section_naming_a_channel_the_mixer_lacks_stops_the_build(native_boundary):
+    nodes, builder = native_boundary
+    with pytest.raises(mixer_config.ConfigError, match="no output channel 'aux1'"):
+        build_application(_ducked_show("aux1"), MixerOptions(), api=_api(nodes, builder))
+
+
 def test_the_program_audio_is_on_one_janus_output_and_in_its_settings():
     import pyplumber.mixer.tools.janus_mountpoints as janus_mountpoints
     show = {"canvas": CONFIG["canvas"], "sources": [{**CONFIG["sources"][0], "has_audio": True}],

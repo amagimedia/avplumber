@@ -486,8 +486,30 @@ for, not the one in force at that instant — a glide still on its way is not
 visible there. `pyplumber.mixer.audio_gain` is the controller built on these
 two, converting to and from dB and treating this `gain` as its stored state.
 
+`processors` puts sidechain duckers on buses. A ducker lowers its `target`
+sources on that bus by `depth_db` while the sum of its `sidechain` sources
+peaks at or above `threshold_db`, and for `hold_ms` after. Its gain moves
+linearly in dB, the full depth in `attack_ms` down and in `release_ms` back,
+and multiplies into the targets' gains on that bus only. With
+`"sidechain_tap": "post"` (the default) the sidechain is heard as that bus mixes
+it, after the take's gains and `set_source_gain`, so a target alone on air plays
+in full. With `"pre"`, only `set_source_gain` applies, whether the sidechain is on
+air or not. Every sidechain on a bus is read before any target is lowered, so
+duckers do not chain. An AUX bus's `"program"` audio was ducked on the program
+bus and is not ducked again. `set_processor`, `{"output", "id", ...}`, changes
+`enabled` and the five dynamics of an existing ducker on the mix thread. Which
+duckers exist is fixed at creation. `status.buses[].processors[]` reports each
+one's parameters and its current `gain_db` (0 when not ducking).
+`pyplumber.mixer.audio_processors` builds this parameter from a show's `audio`
+section.
+
 -   `src` (list of edges) and `source_ids` (same length; logical mixer source ids)
 -   `outputs` (object: bus id → output edge), e.g. `{"program": "audio_mixer_program"}`
+-   `processors` (optional object: bus id → list of
+    `{"id", "type": "ducker", "target": [source ids], "sidechain": [source ids],
+    "sidechain_tap": "post"|"pre", "enabled", "threshold_db", "depth_db",
+    "attack_ms", "hold_ms", "release_ms"}`). Defaults: post, enabled, -40 dB,
+    -20 dB, 10 ms, 300 ms, 500 ms. An unknown bus or source is an error.
 -   `dst_channel_layout` (string, default `stereo`), `dst_sample_rate` (default 48000),
     `frame_samples` (default 960; 20 ms at 48 kHz for Opus)
 -   `fps` (string, e.g. `30000/1001`) and `latency_ms`: the program compositor's;

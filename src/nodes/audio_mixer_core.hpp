@@ -231,4 +231,58 @@ private:
     int64_t valid_from_ = 0;   // the first sample of the current unbroken run
 };
 
+struct DuckerParams {
+    bool enabled = true;
+    float threshold_db = -40.f;   // on the sidechain's peak, dBFS
+    float depth_db = -20.f;       // the gain while ducked; 0 or below
+    float attack_ms = 10.f;       // time to reach the full depth
+    float hold_ms = 300.f;        // ducked this long after the sidechain falls under the threshold
+    float release_ms = 500.f;     // time to come back from the full depth
+};
+
+/// A sidechain ducker: lowers its targets by `depth_db` while the sidechain's peak is at or above
+/// the threshold, and for `hold_ms` after. The gain moves linearly in dB, the full depth in
+/// attack_ms down and release_ms up, so a change of depth or a disable glides instead of clicking.
+class Ducker {
+public:
+    explicit Ducker(int sample_rate) : sample_rate_(sample_rate) { setParams(DuckerParams{}); }
+
+    const DuckerParams& params() const { return params_; }
+    void setParams(const DuckerParams& p) {
+        params_ = p;
+        params_.depth_db = std::min(0.f, p.depth_db);
+        threshold_ = std::pow(10.f, p.threshold_db / 20.f);
+        hold_ = int64_t(std::llround(std::max(0.f, p.hold_ms) * 1e-3 * sample_rate_));
+        // A shallower depth set mid-duck still comes back within release_ms.
+        const float range = std::max({1.f, -params_.depth_db, -gain_db_});
+        down_ = range / std::max(1.f, p.attack_ms * 1e-3f * float(sample_rate_));
+        up_ = range / std::max(1.f, p.release_ms * 1e-3f * float(sample_rate_));
+    }
+
+    /// The gain now, in dB: 0 when not ducking.
+    float gainDb() const { return gain_db_; }
+
+    /// `key`: the sidechain's peak magnitude per sample, `n` of them; `gain`: the targets' linear
+    /// gain per sample, written.
+    void process(const float* key, size_t n, float* gain) {
+        for (size_t k = 0; k < n; ++k) {
+            if (!params_.enabled) held_ = 0;
+            else if (key[k] >= threshold_) held_ = hold_ + 1;
+            const bool ducking = held_ > 0;
+            if (held_ > 0) --held_;
+            const float target = ducking ? params_.depth_db : 0.f;
+            if (gain_db_ > target) gain_db_ = std::max(target, gain_db_ - down_);
+            else if (gain_db_ < target) gain_db_ = std::min(target, gain_db_ + up_);
+            gain[k] = gain_db_ < 0.f ? std::pow(10.f, gain_db_ / 20.f) : 1.f;
+        }
+    }
+
+private:
+    int sample_rate_;
+    DuckerParams params_;
+    float threshold_ = 0.f, down_ = 0.f, up_ = 0.f;
+    int64_t hold_ = 0, held_ = 0;
+    float gain_db_ = 0.f;
+};
+
 }  // namespace avp::audio_mixer

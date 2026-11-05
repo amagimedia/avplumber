@@ -52,6 +52,32 @@
     width: 34px; height: 16px; border: 0; border-radius: 4px; cursor: grab;
     background: linear-gradient(0deg, #8e99a6, #e9edf1 45%, #f7f9fb 55%, #9aa5b2);
   }
+  .ch .roles { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; max-width: 110px; min-height: 16px; }
+  .badge { font: 600 10px/1.4 ui-monospace, monospace; padding: 0 5px; border-radius: 3px; border: 1px solid var(--edge); color: var(--muted); }
+  .badge.target { color: var(--accent); border-color: rgb(245 165 36 / .45); }
+  .badge.sidechain { color: var(--led); border-color: rgb(56 214 127 / .45); }
+  #processors { max-height: 46%; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+  #processors h2 { font-size: 12px; font-weight: 650; letter-spacing: .14em; text-transform: uppercase; margin: 0; color: var(--muted);
+                   display: flex; align-items: center; gap: 12px; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; }
+  .card { background: var(--well); box-shadow: inset 0 0 0 1px var(--edge); border-radius: 8px; padding: 10px 12px;
+          display: grid; gap: 8px; min-width: 300px; flex: 1 1 340px; max-width: 520px; }
+  .card .head { display: flex; align-items: center; gap: 10px; }
+  .card .name { font: 650 13px ui-monospace, monospace; }
+  .card .route { color: var(--muted); font-size: 12px; }
+  .card label.toggle { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .param { display: grid; grid-template-columns: 92px 1fr 72px; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .param output { font: 700 12px ui-monospace, monospace; font-variant-numeric: tabular-nums; color: var(--text); text-align: right; }
+  .param input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .gr { display: grid; grid-template-columns: 92px 1fr 72px; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .gr .bar { position: relative; height: 8px; border-radius: 4px; background: var(--groove); overflow: hidden; }
+  .gr .bar span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); width: 0; transition: width 80ms linear; }
+  .gr output { font: 700 12px ui-monospace, monospace; font-variant-numeric: tabular-nums; text-align: right; color: var(--text); }
+  button.small { font: 600 11px ui-sans-serif, system-ui, sans-serif; color: var(--text); background: var(--groove);
+                 border: 1px solid var(--edge); border-radius: 4px; padding: 2px 8px; cursor: pointer; letter-spacing: 0; text-transform: none; }
+  button.small:hover { border-color: var(--accent); }
+  #json { width: 100%; min-height: 120px; background: var(--well); color: var(--text); border: 1px solid var(--edge); border-radius: 6px;
+          font: 12px/1.4 ui-monospace, monospace; padding: 8px; }
 </style>
 
 <header>
@@ -61,6 +87,12 @@
 </header>
 <p id="empty" hidden>No audio sources in this show.</p>
 <main id="levels" aria-label="Per-source audio levels"></main>
+<section id="processors" aria-label="Audio processors" hidden>
+  <h2>Ducking <button class="small" id="copy" type="button" title="The show document's audio section with the values below">Copy JSON</button>
+    <span id="copied" class="route" role="status"></span></h2>
+  <div class="cards" id="cards"></div>
+  <textarea id="json" readonly hidden aria-label="audio section JSON"></textarea>
+</section>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -75,8 +107,17 @@ function commit(id, db) {
   }).catch(() => {});
 }
 
-function channel(id, db) {
+function channel(id, db, roles) {
   const ch = document.createElement("div"), fader = document.createElement("div");
+  const rolesEl = document.createElement("div");
+  rolesEl.className = "roles";
+  for (const [role, where] of roles) {
+    const b = document.createElement("span");
+    b.className = `badge ${role}`;
+    b.textContent = role === "target" ? "ducked" : "key";
+    b.title = role === "target" ? `Ducked by ${where}` : `Keys ${where}`;
+    rolesEl.append(b);
+  }
   const fill = document.createElement("div"), zero = document.createElement("div");
   const input = document.createElement("input"), idEl = document.createElement("div"), dbEl = document.createElement("div");
   ch.className = "ch";
@@ -115,23 +156,202 @@ function channel(id, db) {
   input.onblur = release;
   input.onchange = release;   // keyboard adjustment: no pointerup/blur to fall back on
   fader.append(input, fill, zero);
-  ch.append(idEl, fader, dbEl);
+  ch.append(idEl, rolesEl, fader, dbEl);
   return ch;
+}
+
+function rolesOf(id, processors) {
+  const roles = [];
+  for (const p of processors) {
+    const where = `${p.output} · ${p.id}`;
+    if (p.target.includes(id)) roles.push(["target", where]);
+    if (p.sidechain.includes(id)) roles.push(["sidechain", where]);
+  }
+  return roles;
 }
 
 function render(state) {
   const sources = (state.settings || {}).audio_sources || [];
   const gains = state.audio_gain || [];
+  const processors = (state.settings || {}).audio_processors || [];
   $("empty").hidden = sources.length > 0;
+  renderProcessors(processors, state.audio_processors || []);
   if (dragging || !sources.length) return;
-  const next = JSON.stringify([sources, gains]);
+  const next = JSON.stringify([sources, gains, processors.map((p) => [p.output, p.id, p.target, p.sidechain])]);
   if (next === signature) return;
   signature = next;
   $("levels").replaceChildren(...sources.map((id) => {
     const row = gains.find((g) => g.id === id);
-    return channel(id, row ? row.gain_db : 0);
+    return channel(id, row ? row.gain_db : 0, rolesOf(id, processors));
   }));
 }
+
+// Processors: the show document's audio.channels; which exist is fixed, their parameters are live.
+// Slider ranges are what a demo tunes by ear; the document may hold wider values (audio_processors.py).
+const PARAMS = [
+  {key: "threshold_db", label: "Threshold", min: -90, max: 0, step: 1, unit: "dB"},
+  {key: "depth_db", label: "Depth", min: -60, max: 0, step: 1, unit: "dB"},
+  {key: "attack_ms", label: "Attack", min: 0, max: 500, step: 1, unit: "ms"},
+  {key: "hold_ms", label: "Hold", min: 0, max: 3000, step: 10, unit: "ms"},
+  {key: "release_ms", label: "Release", min: 0, max: 5000, step: 10, unit: "ms"},
+];
+const keyOf = (p) => `${p.output}/${p.id}`;
+let procSignature = "", procDragging = null, procRows = new Map(), meterTimer = null;
+const procCards = new Map();   // keyOf -> {inputs: {param: [input, output]}, toggle, bar, value}
+
+function sendProcessor(p, change) {
+  return fetch("/api/command", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({command: "audio_processor", output: p.output, id: p.id, ...change}),
+  }).catch(() => {});
+}
+
+function card(p) {
+  const el = document.createElement("div");
+  el.className = "card";
+  const head = document.createElement("div");
+  head.className = "head";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = `${p.output} · ${p.id}`;
+  const toggle = document.createElement("input");
+  toggle.type = "checkbox";
+  const toggleLabel = document.createElement("label");
+  toggleLabel.className = "toggle";
+  toggleLabel.append(toggle, "On");
+  toggle.onchange = () => {
+    procRows.get(keyOf(p)).enabled = toggle.checked;
+    sendProcessor(p, {enabled: toggle.checked});
+  };
+  head.append(name, toggleLabel);
+  const route = document.createElement("div");
+  route.className = "route";
+  route.textContent = `Ducks ${p.target.join(", ")} while ${p.sidechain.join(", ")} ${p.sidechain_tap === "pre" ? "carry signal" : "are heard here"}`;
+  el.append(head, route);
+  const inputs = {};
+  for (const spec of PARAMS) {
+    const row = document.createElement("label");
+    row.className = "param";
+    const input = document.createElement("input"), out = document.createElement("output");
+    input.type = "range"; input.min = spec.min; input.max = spec.max; input.step = spec.step;
+    const paint = (v) => { out.textContent = `${v} ${spec.unit}`; };
+    // Coalesced like a fader: one request in flight, the newest value waiting behind it.
+    let inFlight = false, pending = null;
+    const send = (value) => {
+      if (inFlight) { pending = value; return; }
+      inFlight = true;
+      sendProcessor(p, {[spec.key]: value}).finally(() => {
+        inFlight = false;
+        if (pending !== null) { const v = pending; pending = null; send(v); }
+      });
+    };
+    input.oninput = () => {
+      procDragging = `${keyOf(p)}/${spec.key}`;
+      const value = Number(input.value);
+      procRows.get(keyOf(p))[spec.key] = value;
+      paint(value);
+      send(value);
+    };
+    const release = () => { procDragging = null; };
+    input.onpointerup = release;
+    input.onblur = release;
+    row.append(spec.label, input, out);
+    inputs[spec.key] = [input, paint];
+    el.append(row);
+  }
+  const gr = document.createElement("div");
+  gr.className = "gr";
+  const bar = document.createElement("div"), fill = document.createElement("span"), value = document.createElement("output");
+  bar.className = "bar";
+  bar.append(fill);
+  gr.append("Reduction", bar, value);
+  el.append(gr);
+  procCards.set(keyOf(p), {inputs, toggle, fill, value});
+  return el;
+}
+
+function paintProcessor(row) {
+  const c = procCards.get(keyOf(row));
+  if (!c) return;
+  if (document.activeElement !== c.toggle) c.toggle.checked = row.enabled;
+  for (const spec of PARAMS) {
+    if (procDragging === `${keyOf(row)}/${spec.key}` || row[spec.key] === undefined) continue;
+    const [input, paint] = c.inputs[spec.key];
+    input.value = row[spec.key];
+    paint(row[spec.key]);
+  }
+  paintMeter(row);
+}
+
+function paintMeter(row) {
+  const c = procCards.get(keyOf(row));
+  if (!c) return;
+  const gain = row.gain_db || 0, depth = Math.min(-1, row.depth_db ?? -20);
+  c.fill.style.width = `${Math.min(100, (gain / depth) * 100)}%`;
+  c.value.textContent = `${gain.toFixed(1)} dB`;
+}
+
+function renderProcessors(processors, live) {
+  $("processors").hidden = !processors.length;
+  const next = JSON.stringify(processors.map((p) => [p.output, p.id, p.target, p.sidechain, p.sidechain_tap]));
+  if (next !== procSignature) {
+    procSignature = next;
+    procCards.clear();
+    procRows = new Map(processors.map((p) => [keyOf(p), {...p}]));
+    $("cards").replaceChildren(...processors.map(card));
+    clearInterval(meterTimer);
+    // The meters want more than the page's 1 s state poll; this endpoint is small.
+    meterTimer = processors.length ? setInterval(pollMeters, 250) : null;
+  }
+  for (const row of live.length ? live : processors) {
+    if (!procRows.has(keyOf(row))) continue;
+    Object.assign(procRows.get(keyOf(row)), row);
+    paintProcessor(procRows.get(keyOf(row)));
+  }
+}
+
+let meterPolling = false;
+async function pollMeters() {
+  if (meterPolling || document.hidden) return;
+  meterPolling = true;
+  try {
+    const response = await fetch("/api/audio_processors");
+    if (!response.ok) return;
+    for (const row of (await response.json()).processors || []) {
+      const mine = procRows.get(keyOf(row));
+      if (mine) { mine.gain_db = row.gain_db; paintMeter(mine); }
+    }
+  } catch (_) {
+  } finally {
+    meterPolling = false;
+  }
+}
+
+function audioSection() {
+  const channels = [];
+  for (const row of procRows.values()) {
+    const {output, gain_db, ...processor} = row;
+    let ch = channels.find((c) => c.id === output);
+    if (!ch) channels.push(ch = {id: output, type: "output", processors: []});
+    ch.processors.push(processor);
+  }
+  return JSON.stringify({audio: {channels}}, null, 2);
+}
+
+$("copy").onclick = async () => {
+  const text = audioSection(), box = $("json");
+  box.value = text;
+  try {
+    await navigator.clipboard.writeText(text);   // a secure context only (https or localhost)
+    $("copied").textContent = "Copied";
+    box.hidden = true;
+  } catch (_) {
+    box.hidden = false;
+    box.select();
+    $("copied").textContent = document.execCommand("copy") ? "Copied" : "Select and copy the JSON below";
+  }
+  setTimeout(() => { $("copied").textContent = ""; }, 2500);
+};
 
 let polling = false;
 async function refresh() {

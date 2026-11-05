@@ -14,6 +14,8 @@ mixer needs no HTTP server of its own and the pages need no build step:
                         POST /api/command "lever" is; one connection keeps a fader's positions in order and
                         off the page's other requests
     GET  /api/keys      small cached rendered-key and fade-to-black tally, sampled separately from show telemetry
+    GET  /api/audio_processors  {"processors": [...]}: the show's audio processors, their parameters and
+                        current gain_db, small enough for a meter to poll
     GET  /api/banks     the source banks: {"banks": [[scene|null, ...x9], x3] | null}, shared by every controller
     POST /api/banks     {"banks": [[...], [...], [...]]}: replaces them (kept with the show's settings)
     GET  /api/outputs   the show's settings and the GPU figures alone, for player pages
@@ -44,6 +46,9 @@ mixer needs no HTTP server of its own and the pages need no build step:
                         dropped
                         {"command": "audio_gain", "gains": {source_id: gain_db, ...}}
                         a persistent per-source volume, independent of AFV; -70 to +10 dB
+                        {"command": "audio_processor", "output": bus, "id": processor, "enabled"?: bool,
+                        "threshold_db"?, "depth_db"?, "attack_ms"?, "hold_ms"?, "release_ms"?}
+                        a live change to one of the show's audio.channels processors (audio_processors.py)
                         A cut, fade or wipe superseded by a newer one before it reached
                         the mixer answers {"ok": true, "superseded": true}.
 
@@ -273,6 +278,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(503, {"error": str(exc)})
         elif path == "/api/banks":
             self._send_json(200, {"banks": self.banks.get()})
+        elif path == "/api/audio_processors":
+            try:
+                self._send_json(200, {"processors": self.bridge.audio_processors()})
+            except Exception as exc:
+                self._send_json(503, {"error": str(exc)})
         elif path in ("/api/state", "/api/status"):
             if self.setup_manager:
                 status = self.setup_manager.status()

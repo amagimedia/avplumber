@@ -284,6 +284,87 @@ def test_an_aux_bus_hears_the_program_as_late_as_its_pgm_tile_shows_it(tmp_path)
     assert sorted(held)[len(held) // 2] < 150_000_000
 
 
+def _level(samples, frequency, start, length):
+    """The magnitude of `frequency` over samples[start:start + length]."""
+    w = 2 * math.pi * frequency / RATE
+    re = sum(samples[start + n] * math.cos(w * n) for n in range(length))
+    im = sum(samples[start + n] * math.sin(w * n) for n in range(length))
+    return math.hypot(re, im) / length
+
+
+def test_a_ducker_lowers_its_target_where_its_sidechain_is_heard(tmp_path):
+    # "mix" plays a steady tone throughout; "key" is silent for MARK_SEC, then a tone. Every bus
+    # ducks "mix" by "key". On program both are on air: ducked once key starts. On solo only mix
+    # is on air: a post sidechain hears nothing there, so mix plays in full. On solo_pre the
+    # sidechain is tapped before the take's gains: ducked although key is off air.
+    _tone(tmp_path / "mix.wav", 440, 10, 2)
+    _marked(tmp_path / "key.wav", 1000, 2)
+    avp = AVPlumber()
+    errors = []
+    avp.on_exception = lambda *error: errors.append(error)
+    ducker = {"type": "ducker", "target": ["mix"], "sidechain": ["key"], "threshold_db": -40,
+              "depth_db": -20, "attack_ms": 10, "hold_ms": 300, "release_ms": 500}
+    buses = ("program", "solo", "solo_pre")
+    try:
+        for tag in ("mix", "key"):
+            for cls, params in (
+                (Input, {"url": str(tmp_path / f"{tag}.wav"), "dst": f"{tag}_packets"}),
+                (Demux, {"src": f"{tag}_packets", "routing": {"a:0": f"{tag}_audio"}}),
+                (DecAudio, {"src": f"{tag}_audio", "dst": f"{tag}_decoded"}),
+                (Realtime, {"src": f"{tag}_decoded", "dst": f"{tag}_paced", "set_pts": True,
+                            "time_base": "1/120000", "negative_time_tolerance": .25,
+                            "discontinuity_threshold": 1.0}),
+            ):
+                avp.addNode(cls({"name": f"{cls.TYPE}_{tag}", "group": "audio", **params}))
+        avp.addNode(AudioMixer({
+            "name": "mix", "group": "audio", "src": ["mix_paced", "key_paced"], "source_ids": ["mix", "key"],
+            "outputs": {bus: bus for bus in buses}, "fps": "25/1", "latency_ms": 80,
+            "processors": {"program": [{"id": "d", **ducker}], "solo": [{"id": "d", **ducker}],
+                           "solo_pre": [{"id": "d", **ducker, "sidechain_tap": "pre"}]},
+        }))
+        edges = {bus: avp.getEdge(bus, "AudioSamples") for bus in buses}
+        avp.group("audio").startNodes()
+
+        def event(output, sources):
+            avp.executeCommandsFromString("node.object.set mix transition_ended " + json.dumps(
+                {"output": output, "sources": sources, "pts": 0}))
+
+        blocks = {bus: [] for bus in buses}
+        for i in range(200):
+            for bus, edge in edges.items():
+                blocks[bus].append(edge.get(2000))
+            if i == 0:
+                event("program", ["mix", "key"])
+                event("solo", ["mix"])
+                event("solo_pre", ["mix"])
+        status = avp.node("mix").getObject("status")
+        avp.executeCommandsFromString("node.object.set mix set_processor " + json.dumps(
+            {"output": "program", "id": "d", "depth_db": -6, "enabled": False}))
+        edges["program"].get(2000)   # the change applies on the mix thread
+        changed = avp.node("mix").getObject("status")
+        assert not errors, errors
+    finally:
+        avp.shutdown()
+
+    for bus in buses:
+        assert all(block is not None and block.samplesCount == BLOCK for block in blocks[bus])
+    level = {}
+    for bus in buses:
+        left = [v for block in blocks[bus] for v in _planes(block)[0]]
+        # Before the key's edge (0.2-0.6 s in) and long after it (3-3.8 s in).
+        level[bus] = (_level(left, 440, 10 * BLOCK, 20 * BLOCK), _level(left, 440, 150 * BLOCK, 40 * BLOCK))
+    ratio = {bus: after / before for bus, (before, after) in level.items()}
+    assert 0.07 < ratio["program"] < 0.14, ratio     # -20 dB is 0.1
+    assert 0.9 < ratio["solo"] < 1.1, ratio
+    assert 0.07 < ratio["solo_pre"] < 0.14, ratio
+
+    applied = {b["id"]: b["processors"][0] for b in status["buses"]}
+    assert applied["program"]["gain_db"] == -20 and applied["solo_pre"]["gain_db"] == -20
+    assert applied["solo"]["gain_db"] == 0
+    program = next(b for b in changed["buses"] if b["id"] == "program")["processors"][0]
+    assert program["depth_db"] == -6 and program["enabled"] is False
+
+
 # ingest() converts anything that is not already the mixer's own fltp/rate/layout. Each of these
 # reaches a different branch, and a general-purpose mixer must place all three on the same
 # timeline: the samples belong where their frame's timestamp says, not where the converter

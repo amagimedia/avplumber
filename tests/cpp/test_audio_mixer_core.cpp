@@ -131,6 +131,45 @@ static void historyForgetsAcrossASkip() {
     for (size_t k = 960; k < 1920; ++k) assert(out[0][k] == 2.f);
 }
 
+static void duckerFollowsItsSidechain() {
+    // 1 kHz: 10 samples a ms. Full depth -20 dB in 10 ms down, 50 ms back, 20 ms of hold.
+    Ducker d(1000 * 10);
+    d.setParams({true, -40.f, -20.f, 10.f, 20.f, 50.f});
+    std::vector<float> key(1000, 0.f), gain(1000, 0.f);
+    d.process(key.data(), key.size(), gain.data());
+    for (float g : gain) assert(g == 1.f);                  // silence: untouched
+
+    std::fill(key.begin(), key.end(), 0.1f);                // -20 dBFS, above the threshold
+    d.process(key.data(), 50, gain.data());
+    assert(gain[0] < 1.f && std::abs(d.gainDb() + 10.f) < 1e-3f);        // halfway down after 5 ms
+    d.process(key.data(), 100, gain.data());
+    assert(d.gainDb() == -20.f && std::abs(gain[99] - 0.1f) < 1e-6f);    // at depth from 10 ms on
+
+    std::fill(key.begin(), key.end(), 0.f);
+    d.process(key.data(), 200, gain.data());                // the 20 ms hold
+    assert(d.gainDb() == -20.f);
+    d.process(key.data(), 250, gain.data());                // then halfway back after 25 ms
+    assert(std::abs(d.gainDb() + 10.f) < 0.05f);
+    d.process(key.data(), 300, gain.data());
+    assert(d.gainDb() == 0.f && gain[299] == 1.f);
+
+    // Under the threshold, nothing happens; disabled, it lets go at the release rate.
+    std::fill(key.begin(), key.end(), 0.005f);             // -46 dBFS
+    d.process(key.data(), 1000, gain.data());
+    assert(d.gainDb() == 0.f);
+    std::fill(key.begin(), key.end(), 1.f);
+    d.process(key.data(), 200, gain.data());
+    assert(d.gainDb() == -20.f);
+    d.setParams({false, -40.f, -20.f, 10.f, 20.f, 50.f});
+    d.process(key.data(), 250, gain.data());
+    assert(std::abs(d.gainDb() + 10.f) < 0.05f);           // no hold once disabled
+
+    // A depth above 0 dB is no boost: held to 0.
+    d.setParams({true, -40.f, 6.f, 10.f, 20.f, 50.f});
+    d.process(key.data(), 1000, gain.data());
+    assert(d.gainDb() == 0.f && gain[999] == 1.f);
+}
+
 int main() {
     std::vector<float> gains;
     float program_gain = 0.f;
@@ -189,4 +228,5 @@ int main() {
     farFutureAndSkip();
     historyReadsBackAtAnyDelay();
     historyForgetsAcrossASkip();
+    duckerFollowsItsSidechain();
 }
