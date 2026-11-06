@@ -205,8 +205,10 @@ endif
 endif
 
 # CudaCameraMotion node — NVOF dense optical-flow camera path (Phase 2).
-# Built when HAVE_NVOF=1 + CUDA + the dense-API headers are vendored. Links the
-# driver-provided libnvidia-opticalflow.
+# Built when HAVE_NVOF=1 + CUDA + the dense-API headers are vendored.
+# libnvidia-opticalflow.so is driver-provided and dlopen'd lazily at runtime
+# (see cuda_camera_motion.cpp) rather than linked, so the built binary/module
+# still loads and runs on non-GPU hosts (NO_GPU).
 HAVE_NVOF ?= 0
 HAVE_OPENCV ?= 0
 NVOF_DENSE_HEADERS = $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface/nvOpticalFlowCuda.h
@@ -214,7 +216,6 @@ ifeq ($(HAVE_CUDA)$(HAVE_NVOF),11)
 ifneq (,$(wildcard $(NVOF_DENSE_HEADERS)))
 NODES_SRC += $(SRCDIR)/nodes/scene_cut/cuda_camera_motion.cpp
 override CXXFLAGS += -DHAVE_NVOF=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface
-override LIBS_FLAGS += -lnvidia-opticalflow
 ifeq ($(HAVE_NVCC),1)
 override CXXFLAGS += -DHAVE_CCM_GPU_IRLS=1
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/scene_cut/cuda_camera_motion.cu,avpl_camera_motion_ptx,objs/src/nodes/scene_cut/cuda_camera_motion.o))

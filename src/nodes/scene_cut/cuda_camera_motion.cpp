@@ -20,6 +20,7 @@
 #include "../../hwaccel.hpp"
 #include "cuda_frame_helpers.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
+#include <dlfcn.h>
 
 extern "C" {
 #include <libavutil/dict.h>
@@ -175,7 +176,10 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
     CUcontext cu_ctx_ = nullptr;
     CUstream stream_ = nullptr;
 
-    // NVOF API + session state.
+    // NVOF API + session state. libnvidia-opticalflow.so is driver-provided and
+    // absent on non-GPU hosts, so it's dlopen'd lazily here instead of being a
+    // link-time dependency (DT_NEEDED) of the whole binary/extension module.
+    void* nvof_lib_ = nullptr;
     NV_OF_CUDA_API_FUNCTION_LIST of_{};
     NvOFHandle hOF_ = nullptr;
     NvOFGPUBufferHandle inBuf_ = nullptr;    // current frame luma
@@ -265,9 +269,29 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         return true;
     }
 
+    typedef NV_OF_STATUS (NVOFAPI *PFNNVOFAPICREATEINSTANCECUDA)(uint32_t apiVer, NV_OF_CUDA_API_FUNCTION_LIST *functionList);
+
+    bool loadNvofLibrary() {
+        if (nvof_lib_) return true;
+        nvof_lib_ = dlopen("libnvidia-opticalflow.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (!nvof_lib_) {
+            logstream << "cuda_camera_motion: dlopen libnvidia-opticalflow.so.1 failed: "
+                      << (dlerror() ? dlerror() : "unknown");
+            return false;
+        }
+        return true;
+    }
+
     bool initOF() {
         if (hOF_) return true;
-        if (CCM_CHECK_OF(NvOFAPICreateInstanceCuda(NV_OF_API_VERSION, &of_))) return false;
+        if (!loadNvofLibrary()) return false;
+        auto create_instance = (PFNNVOFAPICREATEINSTANCECUDA)dlsym(nvof_lib_, "NvOFAPICreateInstanceCuda");
+        if (!create_instance) {
+            logstream << "cuda_camera_motion: dlsym NvOFAPICreateInstanceCuda failed: "
+                      << (dlerror() ? dlerror() : "unknown");
+            return false;
+        }
+        if (CCM_CHECK_OF(create_instance(NV_OF_API_VERSION, &of_))) return false;
         if (CCM_CHECK_OF(of_.nvCreateOpticalFlowCuda(cu_ctx_, &hOF_))) return false;
         if (CCM_CHECK_OF(of_.nvOFSetIOCudaStreams(hOF_, (CUstream)stream_, (CUstream)stream_))) return false;
         return true;
@@ -872,6 +896,10 @@ public:
         }
         in_flight_ = av::VideoFrame();
         destroyOFSession();
+        if (nvof_lib_) {
+            dlclose(nvof_lib_);
+            nvof_lib_ = nullptr;
+        }
 #if HAVE_CCM_GPU_IRLS
         releaseGpuIrlsBuffers();
         if (gpu_irls_module_) {
