@@ -43,8 +43,6 @@ class MixerOrchestrator {
     void retireWipeChain();
 
     void loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name, bool warm_cut = false);
-    /// The zoom spec JSON for a cut to `scene_name` (layer_zoom.hpp), or null with `why`.
-    Parameters planCutZoom(const std::string& scene_name, const ZoomRequest& request, uint64_t generation, std::string& why);
     bool canPrewarmScene(const SceneDefinition& scene) const;
     void applySceneControls(const SceneDefinition& scene);
 
@@ -198,6 +196,8 @@ public:
              avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now(),
              std::optional<ZoomRequest> zoom = std::nullopt);
     void definePicture(const std::string& source, const Parameters& picture);
+    /// The zoom spec JSON for a cut to `scene_name` (layer_zoom.hpp), or null with `why`.
+    Parameters planCutZoom(const std::string& scene_name, const ZoomRequest& request, uint64_t generation, std::string& why);
     void enableCutMeasurements(const std::string& mixer_name, const std::string& encoder_name);
     void prewarmCuts(const std::vector<std::string>& scenes);
     /// A set `dip` (opaque SDR RGB) fades through that colour instead of mixing.
