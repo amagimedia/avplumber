@@ -506,6 +506,11 @@ public:
         //   { "name": "videoin", "capacity": 256, "occupied": 12, "free": 244, "last_ts_seconds": 0.123 },
         //   ...
         // ]
+        // Read-only queries the web UI and the apps poll every few seconds: no log line per call
+        // (failures are still logged).
+        for (const char *polled : {"queues.json", "sync_groups.json", "correction_groups.json", "nodes.json",
+                                   "node.object.get"})
+            quiet_commands_.insert(polled);
         commands_["queues.json"] = [this](ClientStream &cs, std::string&) {
             json j = manager_->edges()->edgesStatsJson();
             std::map<std::string, bool> subscriptions;

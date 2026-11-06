@@ -1191,10 +1191,9 @@ def run_application(application: MixerApplication, *, webui_url: str = "") -> No
             application.avp.registerWithWebUI(webui_url, "mixer", "")
         application.start()
         _startup_result()
+        # No heartbeat() queue dump: the web UI reads queues.json itself.
         while application.avp.manager.shouldWork:
             time.sleep(1)
-            if webui_url:
-                application.avp.heartbeat()
         sys.exit("Mixer graph shut down after a node failure (auto_restart panic); exiting")
     except KeyboardInterrupt:
         pass
