@@ -331,6 +331,18 @@ public:
     void setReady() {
         server_ready_.unlock();
     }
+    std::unordered_map<std::string, uint64_t> logged_drops_;   // logQueueDrops: last dropped_total per queue
+    void logQueueDrops(const std::string &period) {
+        const nlohmann::json stats = manager_->edges()->edgesStatsJson();
+        std::ostringstream line;
+        for (const auto &q : stats) {
+            const uint64_t dropped = q.value("dropped_total", uint64_t(0));
+            uint64_t &last = logged_drops_[q.value("name", std::string())];
+            if (dropped > last) line << ' ' << q.value("name", std::string()) << '+' << dropped - last;
+            last = dropped;
+        }
+        if (line.tellp() > 0) logstream << "queue drops" << (period.empty() ? "" : " " + period) << ':' << line.str();
+    }
     void printAllQueues() {
         std::ostringstream ost;
         ost << "Queues: ";
@@ -1633,4 +1645,8 @@ void AVPlumber::stopMainLoop() {
 
 void AVPlumber::heartbeat() {
     impl_->printAllQueues();
+}
+
+void AVPlumber::logQueueDrops(const std::string &period) {
+    impl_->logQueueDrops(period);
 }

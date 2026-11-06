@@ -96,10 +96,13 @@ protected:
         draw_pending_ = false;
     }
 
-    // The layer log: the configured layers and the draw shape it last reported. Geometry that only
-    // per-frame metadata moved (face framing, every frame) is not logged; status objects carry it.
+    // The layer log: the configured layers, draw shape and ops it last reported. A scene, composition
+    // or shape change logs at once; geometry that only per-frame metadata moved (face framing moves
+    // crops every frame) logs at most once a minute, when it differs from the last line.
     std::vector<LayerSpec> logged_layers_;
     std::vector<avp::mixer::DrawOpShape> logged_shape_;
+    std::vector<DrawOp> logged_ops_;
+    std::chrono::steady_clock::time_point logged_at_{};
     bool sent_eof_ = false;
 
     // The pad mask does not fit a lock-free atomic, and the input masks are read once per frame: one
@@ -225,9 +228,13 @@ protected:
             // Log the resolved layer set when a scene or composition sets new layers or what is drawn
             // changes, not when per-frame metadata moves a crop.
             std::vector<avp::mixer::DrawOpShape> shape = avp::mixer::drawOpsShape(ops);
-            if (configured_changed || shape != logged_shape_) {
+            const bool changed = configured_changed || shape != logged_shape_;
+            if (changed || (waited - logged_at_ >= std::chrono::minutes(1) && !(ops == logged_ops_))) {
+                logstream << type_ << (changed ? " layers:" : " layers (moved, sampled each minute):")
+                          << avp::mixer::describeDrawOps(ops);
                 logged_shape_ = std::move(shape);
-                logstream << type_ << " layers:" << avp::mixer::describeDrawOps(ops);
+                logged_ops_ = ops;
+                logged_at_ = waited;
             }
         }
         setCanvasColor(outf.raw());
