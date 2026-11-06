@@ -4,6 +4,7 @@
 #include "MixerOrchestrator.hpp"
 #include "../graph_ops.hpp"
 #include "../routing.hpp"
+#include "../primitives/layer_zoom.hpp"
 #include "../primitives/TransitionGuard.hpp"
 #include "../../avutils.hpp"
 #include "../../timeline.hpp"

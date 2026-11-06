@@ -195,10 +195,12 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
 
     const SourceMask active_mask = state_->computeActiveInputsMask(scene);
     slot.revision = std::to_string(++state_->scene_revision);
-    setNodeObject(slot.compositor_name, "composition", {
+    Parameters composition = {
         {"layers", compositorLayersFromScene(*state_, scene)},
         {"active_inputs", toParameters(active_mask)}, {"revision", slot.revision},
-        {"warm", warm_cut && state_->prewarm_cut_scenes.count(scene_name) && canPrewarmScene(scene)}});
+        {"warm", warm_cut && state_->prewarm_cut_scenes.count(scene_name) && canPrewarmScene(scene)}};
+    if (!state_->pending_zoom.is_null()) composition["zoom"] = state_->pending_zoom;   // the cut being prepared
+    setNodeObject(slot.compositor_name, "composition", composition);
 
     const auto* pgm = &state_->pgmScene();
     publishSourceRoutes(is_slot_a ? &scene : pgm, is_slot_a ? pgm : &scene);

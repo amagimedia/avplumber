@@ -224,6 +224,7 @@ Parameters MixerOrchestrator::status() const {
     std::unique_lock<std::mutex> lock(state_->mutex);
     Parameters s;
     s["pgm_scene"] = state_->pgm_scene_name;
+    s["zoom"] = state_->last_zoom;
     s["pvw_slot_scene"] = state_->pvw_slot_scene;
     s["preview_followers"] = state_->preview_followers.load();
     s["pgm_slot"] = state_->pgm_is_slot_a ? "A" : "B";

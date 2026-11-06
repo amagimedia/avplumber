@@ -932,8 +932,25 @@ public:
             std::string scene_name = req.at("scene").get<std::string>();
             if (req.contains("start_pts_ms"))
                 throw Error("mixer: future-scheduled takes were removed; takes are immediate");
+            std::optional<MixerOrchestrator::ZoomRequest> zoom;
+            if (req.contains("zoom") && !req.at("zoom").is_null()) {
+                const auto& z = req.at("zoom");
+                const double seconds = z.at("duration_sec").get<double>();
+                if (!(seconds >= 0.1 && seconds <= 10.)) throw Error("mixer.cut: zoom duration_sec must be in [0.1, 10]");
+                zoom = MixerOrchestrator::ZoomRequest{seconds, avp::mixer::parseFadeCurve(z.value("curve", std::string("ease-in-out")))};
+            }
             auto orch = mixerOrchestrator(mixer_name);
-            orch.cut(scene_name, CommandTiming::received());
+            orch.cut(scene_name, CommandTiming::received(), zoom);
+        };
+
+        // mixer.source_picture {"mixer", "name", "reference": {x, y, w, h}, "metadata_key", "mapped": [inputs]}:
+        // the source's picture for layer zooms (layer_zoom.hpp).
+        commands_["mixer.source_picture"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.source_picture", arg);
+            auto orch = mixerOrchestrator(req.at("mixer").get<std::string>());
+            json picture = {{"reference", req.at("reference")}, {"metadata_key", req.at("metadata_key")},
+                            {"mapped", req.value("mapped", json::array())}};
+            orch.definePicture(req.at("name").get<std::string>(), picture);
         };
 
         // Opt-in observers only; no node replacement or graph rewiring.

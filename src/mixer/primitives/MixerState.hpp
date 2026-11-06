@@ -58,6 +58,9 @@ struct MixerState : public InstanceShared<MixerState> {
         std::string route_output_label_b;
         int route_output_a = -1;
         int route_output_b = -1;
+        /// mixer.source_picture: where the source's picture is 1:1 and its framings' metadata key
+        /// (layer_zoom.hpp SourcePicture as JSON); null when undeclared, so no layer zooms.
+        Parameters picture;
     };
     std::unordered_map<std::string, SourceInfo> sources;
 
@@ -113,6 +116,12 @@ struct MixerState : public InstanceShared<MixerState> {
     /// Receipt (monotonic ns) of the take command being prepared or running, 0 without one;
     /// publishTakePreview hands it to the followers.
     int64_t take_received_ns = 0;
+    /// Layer zoom (layer_zoom.hpp ZoomSpec as JSON). pending_zoom: what the cut being prepared puts
+    /// in the destination's composition; take_zoom: the running take's zoom, sent on air by
+    /// completeTake when its generation matches; pgm_zoom: the glide on air with its start, until
+    /// pgm_zoom_end_ns (monotonic) or the next take. last_zoom: the last zoom request's outcome.
+    Parameters pending_zoom, take_zoom, pgm_zoom, last_zoom;
+    int64_t pgm_zoom_end_ns = 0;
     /// The running take published its preview already (publishTakePreview), so
     /// completeTransition does not publish a second revision.
     bool take_preview_published = false;
