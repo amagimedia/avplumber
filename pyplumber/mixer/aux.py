@@ -99,7 +99,11 @@ class AuxBus:
         # straight to the encoder chain without a setparams-only thread and queue.
         needs_conversion = self.cfg.out_color.transfer != "sdr" or self.cfg.working_format != "nv12"
         converted = f"{self.prefix}_sdr" if needs_conversion else self.output_edge
-        for edge in [*inputs, self.output_edge, converted]:
+        # Inputs hold 3: the compositor takes frames between ticks and Playout picks each tick by
+        # time, so the depth absorbs bunched sources without adding latency.
+        for edge in inputs:
+            self.avp.edges.planCapacity(edge, 3)
+        for edge in [self.output_edge, converted]:
             self.avp.edges.planCapacity(edge, 1)
         initial = self.layout_object()
         self.avp.addNode(self.mixer.canvas_compositor({
