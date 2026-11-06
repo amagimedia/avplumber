@@ -162,8 +162,7 @@ struct BilinearFilter {
 // A = -param already applied by the host. A = 0, scale_cuda's default, leaves the outer taps
 // without weight: a 2x2 interpolation with Hermite (smoothstep) weights.
 struct CubicTaps { int i[4]; float w[4]; };
-__device__ __forceinline__ CubicTaps cubic_taps(int s0, int sn, int o, int dn, float A) {
-    const float f = source_coord(o, sn, dn);
+__device__ __forceinline__ CubicTaps cubic_taps_at(int s0, int sn, float f, float A) {
     const int first = int(floorf(f));
     const float x = f - first;
     CubicTaps t;
@@ -175,6 +174,9 @@ __device__ __forceinline__ CubicTaps cubic_taps(int s0, int sn, int o, int dn, f
     t.w[3] = 1.f - t.w[0] - t.w[1] - t.w[2];
     return t;
 }
+__device__ __forceinline__ CubicTaps cubic_taps(int s0, int sn, int o, int dn, float A) {
+    return cubic_taps_at(s0, sn, source_coord(o, sn, dn), A);
+}
 
 // 4x4 cubic without a prefilter: when shrinking it reads the same 4x4 samples and aliases.
 // The row taps are computed once per thread, the column taps once per lane group.
@@ -183,6 +185,7 @@ struct CubicFilter {
     float A;
     __device__ __forceinline__ CubicFilter(const LanePlane &P, int oy, int dh, float param)
         : rows(cubic_taps(P.sy, P.sh, oy, dh, param)), A(param) {}
+    __device__ __forceinline__ CubicFilter(CubicTaps r, float param) : rows(r), A(param) {}   // affine entries
     __device__ __forceinline__ CubicTaps column(const LanePlane &P, int ox, int dw) const {
         return cubic_taps(P.sx, P.sw, ox, dw, A);
     }
@@ -204,12 +207,16 @@ struct CubicFilter {
 struct CubicA0Filter {
     RowTaps rows;
     __device__ __forceinline__ static RowTaps taps(int s0, int sn, int o, int dn) {
-        RowTaps t = row_taps(s0, sn, o, dn);
+        return taps_at(s0, sn, source_coord(o, sn, dn));
+    }
+    __device__ __forceinline__ static RowTaps taps_at(int s0, int sn, float f) {
+        RowTaps t = row_taps_at(s0, sn, f);
         const float x = t.ty;
         t.ty = (2.f * (1.f - x) - 3.f) * (1.f - x) * (1.f - x) + 1.f;
         return t;
     }
     __device__ __forceinline__ CubicA0Filter(const LanePlane &P, int oy, int dh) : rows(taps(P.sy, P.sh, oy, dh)) {}
+    __device__ __forceinline__ explicit CubicA0Filter(RowTaps r) : rows(r) {}   // affine entries
     // The column pair of a lane group, in the row structure: y0, y1 are x0, x1 and ty its weight.
     __device__ __forceinline__ RowTaps column(const LanePlane &P, int ox, int dw) const {
         return taps(P.sx, P.sw, ox, dw);
@@ -231,8 +238,10 @@ template <int kN>
 struct MultisampleFilter {
     float fy, gx, gy;
     __device__ __forceinline__ MultisampleFilter(const LanePlane &P, int oy, int dw, int dh)
-        : fy(source_coord(oy, P.sh, dh)) {
-        const float xs = float(P.sw) / dw, ys = float(P.sh) / dh;
+        : MultisampleFilter(source_coord(oy, P.sh, dh), float(P.sw) / dw, float(P.sh) / dh) {}
+    // Row coordinate `fy` and `xs`, `ys` source units per destination sample (the affine entries
+    // pass the layer's footprint along u and v).
+    __device__ __forceinline__ MultisampleFilter(float row, float xs, float ys) : fy(row) {
         if (kN == 4) {
             const float wx = min(max(0.5f * (xs - 1.f), 0.f), 1.f), wy = min(max(0.5f * (ys - 1.f), 0.f), 1.f);
             gx = wx / (0.5f + wx);
@@ -327,6 +336,8 @@ __device__ __forceinline__ float sample_alpha_tex(unsigned long long tex, int sx
     return ((a00 + tx * (a01 - a00)) + ty * ((a10 + tx * (a11 - a10)) - (a00 + tx * (a01 - a00)))) / 255.f;
 }
 
+#include "cuda_rect_affine.cuh"
+
 // Each thread owns AVP_RECT_PX consecutive lane groups of one row (4 luma samples, or 2 chroma
 // pairs): layer geometry is fetched once per thread and the results leave in one vector store.
 // kRgb=false compiles a lean YUV-only body (no transfer math, far fewer registers) for scenes
@@ -338,8 +349,10 @@ __device__ __forceinline__ float sample_alpha_tex(unsigned long long tex, int sx
 // also draws layers whose table `filter` is not bilinear and DEMOTE layers; only the *_filter
 // entries set it. 1 compiles what the scaler's defaults use (the limited bilinear of DEMOTE, the
 // cubic at A = 0, 4 samples); 2 adds the 4x4 cubic and 8 samples, whose registers would
-// otherwise slow every path of the lean entries.
-template <bool kRgb, int kLanes, bool kChroma, bool kOpacity = false, bool kArrays = false, int kFilters = 0>
+// otherwise slow every path of the lean entries. kAffine=true also draws layers whose table entry
+// has `affine` set (draw_affine_*); only the *_affine entries set it.
+template <bool kRgb, int kLanes, bool kChroma, bool kOpacity = false, bool kArrays = false, int kFilters = 0,
+          bool kAffine = false>
 __device__ __forceinline__ void composite_body(
     const AvpRectLayer *__restrict__ layers, int n,
     unsigned char *dst_y, int y_pitch, unsigned char *dst_uv, int uv_pitch,
@@ -388,6 +401,20 @@ __device__ __forceinline__ void composite_body(
             const int ldx = L.dx[plane], ldy = L.dy[plane], ldw = L.dw[plane], ldh = L.dh[plane];
             const int oy = Y - ldy;
             if (oy < 0 || oy >= ldh || X0 + px <= ldx || X0 >= ldx + ldw) continue;
+
+            if (kAffine && L.affine) {
+                if (L.kind == AVP_RECT_KIND_YUV || L.kind == AVP_RECT_KIND_PROMOTE || L.kind == AVP_RECT_KIND_DEMOTE) {
+                    const bool same = L.kind == AVP_RECT_KIND_YUV;
+                    const LanePlane P = {L.src[plane], kArrays && L.yuv_texture, L.src_pitch[plane], L.sx[plane], L.sy[plane],
+                                         L.sw[plane], L.sh[plane], lanes, same ? dst_sb : L.src_bytes,
+                                         same ? dst_shift : L.src_shift};
+                    draw_affine_yuv<px, lanes>(acc, L, P, plane, X0, Y, ldx, ldw, same ? 1.f : L.mul, maxv);
+                } else if (kRgb) {
+                    draw_affine_rgb<px, lanes, kChroma, kOpacity>(acc, L, X0, Y, ldx, ldw, sub_x, sub_y, canvas_w, canvas_h,
+                                                                  transfer, white, peak, dst_scale, maxv);
+                }
+                continue;
+            }
 
             if (L.kind == AVP_RECT_KIND_YUV || L.kind == AVP_RECT_KIND_PROMOTE ||
                 (kFilters && L.kind == AVP_RECT_KIND_DEMOTE)) {
@@ -628,4 +655,18 @@ extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv_array_fil
 extern "C" __global__ void __launch_bounds__(256) composite_planes_filter(AVP_COMPOSITE_ARGS) {
     if (blockIdx.z) composite_body<true, 2, true, true, true, 2>(AVP_COMPOSITE_PASS);
     else composite_body<true, 1, false, true, true, 2>(AVP_COMPOSITE_PASS);
+}
+
+// Tables holding a transformed layer (sub-pixel crop or rotation, table `affine`); the host launches
+// these only for such tables, so every entry above keeps its code. A layer without `affine` draws
+// here exactly as on composite_planes_filter.
+// Lean: YUV/PROMOTE/DEMOTE layers from linear buffers, every filter (the smooth zoom's case).
+extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv_affine(AVP_COMPOSITE_ARGS) {
+    if (blockIdx.z) composite_body<false, 2, true, false, false, 2, true>(AVP_COMPOSITE_PASS);
+    else composite_body<false, 1, false, false, false, 2, true>(AVP_COMPOSITE_PASS);
+}
+// Everything: packed RGB(A) layers and keys, fades, arrays, every filter.
+extern "C" __global__ void __launch_bounds__(256) composite_planes_affine(AVP_COMPOSITE_ARGS) {
+    if (blockIdx.z) composite_body<true, 2, true, true, true, 2, true>(AVP_COMPOSITE_PASS);
+    else composite_body<true, 1, false, true, true, 2, true>(AVP_COMPOSITE_PASS);
 }

@@ -46,4 +46,14 @@ struct AvpRectLayer {
     int step, r_off, g_off, b_off, a_off, premultiplied;   // RGB(A)
     int filter;                       // YUV/PROMOTE/DEMOTE: AVP_RECT_FILTER_*
     float filter_param;               // BICUBIC: the cubic's A (0: Hermite, -0.5: Catmull-Rom)
+    // Appended for the affine entries only (composite_planes_yuv_affine, composite_planes_affine;
+    // compositor_affine.hpp computes them): with `affine` set, plane p maps destination continuous
+    // coordinates (canvas-absolute, plane units) to source ones, u = m0 x + m1 y + m2,
+    // v = m3 x + m4 y + m5; sx..sh are the taps' rect, dx..dh the soft-edged quad's bounds. Packed
+    // RGB(A) sources use plane 0's values for every luma position.
+    int affine;
+    float m[2][6];
+    float edge[2][4];                 // u0, v0, u1, v1: the crop's edges for the coverage
+    float aa[2][2];                   // destination samples per source unit across a u- and a v-edge
+    float footprint[2][2];            // source units per destination sample along u and v (multisample)
 };

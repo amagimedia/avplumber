@@ -2,6 +2,7 @@
 // rotation/pivot/sub-pixel crop, and how resolveDrawOps keeps a transformed layer whole.
 #include "mixer/primitives/compositor_affine.hpp"
 #include "mixer/primitives/compositor_layers.hpp"
+#include "nodes/hwaccel/cuda_rect_entries.h"
 #include <cassert>
 #include <cmath>
 #include <stdexcept>
@@ -190,7 +191,29 @@ static void transformed_op_never_copies_the_whole_frame(const av::VideoFrame &fr
     assert(ops[0].transform && !copiesWholeFrame(ops, 1920, 1080));
 }
 
+// Today's chain (cuda_rect_draw.cpp launch()), verbatim: tables without an affine layer keep it.
+static CompositeEntry before(const TableKinds &k, int planes) {
+    return planes == 1 ? CompositeEntry::Packed4
+        : k.filter ? (k.rgb || k.wide ? CompositeEntry::Filter
+                      : k.array ? CompositeEntry::YuvArrayFilter : CompositeEntry::YuvFilter)
+        : k.fade ? (k.array ? CompositeEntry::OpacityArray : CompositeEntry::Opacity)
+        : k.rgb ? (k.array ? CompositeEntry::Array : CompositeEntry::Full)
+        : k.array ? CompositeEntry::YuvArray : CompositeEntry::Yuv;
+}
+
+static void entry_selection() {
+    for (int bits = 0; bits < 32; ++bits) {
+        TableKinds k;
+        k.rgb = bits & 1; k.fade = bits & 2; k.array = bits & 4; k.filter = bits & 8; k.wide = bits & 16;
+        for (int planes : {1, 2}) assert(compositeEntry(k, planes) == before(k, planes));
+        k.affine = true;
+        assert(compositeEntry(k, 1) == CompositeEntry::Packed4);
+        assert(compositeEntry(k, 2) == (!k.rgb && !k.array && !k.fade ? CompositeEntry::YuvAffine : CompositeEntry::Affine));
+    }
+}
+
 int main() {
+    entry_selection();
     identity_is_the_unit_matrix();
     subpixel_crop_scales_and_offsets();
     quarter_turns_are_exact();
