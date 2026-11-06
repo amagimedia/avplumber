@@ -267,7 +267,8 @@ protected:
             };
             const auto r = bounds(op.layer);
             const bool covered = std::any_of(ops.begin() + i + 1, ops.end(), [&](const DrawOp& above) {
-                if (!above.src || above.layer.blend || above.layer.opacity <= 0) return false;
+                // A transformed layer's rect is its bounds, not what it covers.
+                if (!above.src || above.layer.blend || above.transform || above.layer.opacity <= 0) return false;
                 const auto a = bounds(above.layer);
                 return a.x <= r.x && a.y <= r.y && a.x + a.w >= r.x + r.w && a.y + a.h >= r.y + r.h;
             });
