@@ -20,6 +20,10 @@ JANUS_REST = os.environ.get(
 JANUS_WS = os.environ.get("JANUS_WS", f"ws://127.0.0.1:{os.environ.get('JANUS_WS_PORT', '8188')}")
 MIXER_STATE_URL = os.environ.get("MIXER_STATE_URL", "")
 PREVIEW_PORT = int(os.environ.get("JANUS_PREVIEW_PORT", "8080"))
+# The mixer's state is served from its last good reply for this long while the mixer restarts
+# (a deploy or a new setup), so players keep their outputs and latency instead of 502/503s.
+MIXER_STATE_STALE_S = float(os.environ.get("MIXER_STATE_STALE_S", "120"))
+PREVIEW_BIND = os.environ.get("JANUS_PREVIEW_BIND", "0.0.0.0")
 
 
 class ReceiverSamples:
@@ -77,6 +81,28 @@ class ReceiverSamples:
 receiver_samples = ReceiverSamples()
 
 
+class LastGood:
+    """The last successful reply of an upstream, for riding out its restarts."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.reply = None                       # (at, content type, payload)
+
+    def keep(self, content_type, payload):
+        with self.lock:
+            self.reply = (self.clock(), content_type, payload)
+
+    def get(self, max_age):
+        with self.lock:
+            if self.reply is None or self.clock() - self.reply[0] > max_age:
+                return None
+            return self.reply[1], self.reply[2], self.clock() - self.reply[0]
+
+
+mixer_state = LastGood()
+
+
 class PreviewHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
@@ -84,7 +110,13 @@ class PreviewHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/mixer-state" and MIXER_STATE_URL:
-            self._proxy(MIXER_STATE_URL, timeout=3)
+            self._mixer_state()
+            return
+        if self.path == "/metrics.json" and MIXER_STATE_URL:
+            # Embedded in the mixer: no graph-UI measurements to configure. No content tells the
+            # player to read the mixer's state instead, without a 404 on every page load.
+            self.send_response(204)
+            self.end_headers()
             return
         if self.path == "/receiver-stats":
             payload = json.dumps(receiver_samples.snapshot(), allow_nan=False).encode()
@@ -120,6 +152,35 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._proxy_janus()
             return
         self.send_error(404, "File not found")
+
+    def _mixer_state(self):
+        """The mixer's state, or while it restarts its last good state marked stale."""
+        try:
+            with urllib.request.urlopen(MIXER_STATE_URL, timeout=3) as response:
+                payload = response.read()
+                content_type = response.headers.get("content-type", "application/json")
+                mixer_state.keep(content_type, payload)
+                self._send_payload(response.status, content_type, payload)
+                return
+        except urllib.error.HTTPError as error:
+            failure = (error.code, error.headers.get("content-type", "text/plain"), error.read())
+        except Exception as error:
+            failure = (502, "text/plain", str(error).encode())
+        kept = mixer_state.get(MIXER_STATE_STALE_S) if failure[0] >= 500 else None
+        if kept is None:
+            self._send_payload(*failure)
+            return
+        content_type, payload, age = kept
+        self._send_payload(200, content_type, payload, {"X-Mixer-State": f"stale; age={age:.0f}"})
+
+    def _send_payload(self, status, content_type, payload, headers=None):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _proxy_janus(self):
         suffix = self.path[len("/janus"):]
@@ -200,4 +261,4 @@ class PreviewHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", PREVIEW_PORT), PreviewHandler).serve_forever()
+    ThreadingHTTPServer((PREVIEW_BIND, PREVIEW_PORT), PreviewHandler).serve_forever()
