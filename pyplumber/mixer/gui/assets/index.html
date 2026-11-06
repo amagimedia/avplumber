@@ -2109,6 +2109,7 @@ function addViewer(out) {
   v.frame = el("iframe");
   v.frame.setAttribute("allow", "autoplay; fullscreen; picture-in-picture");
   v.frame.allowFullscreen = true;
+  v.frame.addEventListener("load", () => { if (v.src) v.setMuted(v.muted); });
   v.frame.tabIndex = -1;   // like the click layer: Tab would reach the player's controls and end the shortcuts
   v.ovl = el("div", "ovl");
   v.fit = el("div", "fit");
@@ -2163,11 +2164,8 @@ function refreshViewer(v, options) {
   v.mute.hidden = !opt.audio;
   const src = !v.el.hidden && !opt.unplayable && (state || isProgramValue(v.out)) ? opt.url : "";
   if (v.src !== src) {
-    v.src = src; v.stats = null; v.frame.src = src || "about:blank"; v.frame.hidden = !src;   // about:blank is white
-    renderStream(v);   // a new source drops the previous one's stats
-    // A new src reloads the iframe, resetting the player's <video> to its HTML-default muted="true";
-    // re-send the last choice once that fresh document is up.
-    if (src) v.frame.addEventListener("load", () => v.setMuted(v.muted), {once: true});
+    v.src = src;
+    loadViewer(v);
   }
   v.open.href = opt.url;
   v.open.hidden = !src;
@@ -2320,6 +2318,24 @@ for (const b of $("viewer-count").children) b.onclick = () => {
 // per second, and its viewer shows them under the screen. The cut latency is the program encoder's, the
 // same whichever player measured it, so the top bar shows it once for the pipeline.
 const STREAM_STALE_MS = 3000;
+const PLAYER_TIMEOUT_MS = 30000;
+function loadViewer(v) {
+  v.stats = null;
+  v.playerWaitAt = performance.now();
+  v.frame.hidden = !v.src;
+  v.frame.src = v.src || "about:blank";
+  renderStream(v);
+}
+function recoverViewer(v) {
+  // A failed iframe navigation or module load cannot run the player's own media
+  // watchdog. Its heartbeat must come from JS, not merely the iframe load event.
+  const now = performance.now();
+  if (document.hidden || v.el.hidden || !v.src) { v.playerWaitAt = now; return; }
+  if (now - Math.max(v.playerWaitAt, v.stats?.at ?? v.playerWaitAt) >= PLAYER_TIMEOUT_MS) loadViewer(v);
+}
+document.addEventListener("visibilitychange", () => {
+  for (const v of viewers) v.playerWaitAt = performance.now();
+});
 // Each figure's tip: its name and what it means.
 const STREAM_MEANING = {
   rtt: ["RTT", "WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms."],
@@ -2607,6 +2623,6 @@ restFocus();
 renderLatency(); renderHint();
 refresh();
 setInterval(refresh, 1000);
-setInterval(() => { viewers.forEach(renderStream); renderLatency(); }, 1000);   // a player that stopped posting shows "—" after STREAM_STALE_MS
+setInterval(() => { viewers.forEach(v => { recoverViewer(v); renderStream(v); }); renderLatency(); }, 1000);
 addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>

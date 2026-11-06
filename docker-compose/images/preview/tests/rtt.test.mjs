@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
+import { playerOutputs } from "../output-selection.mjs";
+import { createMediaWatchdog } from "../media-watchdog.mjs";
 
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
@@ -10,16 +12,20 @@ const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
 const elements = new Map();
 const timers = new Map();
 let timerId = 0;
+let clock = 0;
+const imports = {playerOutputs, Option: class { constructor(text, value) { Object.assign(this, {text, value}); } }};
 const context = createContext({
+  ...imports,
   fixtureState: null, setTimeout() {},
   createReceiverMonitor: () => ({ update() {}, stop() {} }),
   URL,
   location: { origin: "http://127.0.0.1", href: "http://127.0.0.1/?codec=h265" },
   document: {
     readyState: "loading",
+    addEventListener() {}, removeEventListener() {},
     querySelector() { return this.getElementById("codec-label"); },
     getElementById(id) {
-      if (!elements.has(id)) elements.set(id, { options: [{value:"h264"}, {value:"h265"}], dataset: {}, setAttribute() {}, addEventListener() {} });
+      if (!elements.has(id)) elements.set(id, { currentTime: 0, options: [{value:"h264"}, {value:"h265"}], dataset: {}, setAttribute() {}, addEventListener() {}, removeEventListener() {}, replaceChildren(...options) { this.options = options; } });
       return elements.get(id);
     },
   },
@@ -29,6 +35,9 @@ const context = createContext({
     clearTimeout(id) { timers.delete(id); },
   },
 });
+context.createMediaWatchdog = (video, options) => createMediaWatchdog(video, {
+  ...options, now: () => clock, timers: context.window, visibility: context.document,
+});
 runInContext(script, context);
 assert.equal(runInContext("MOUNTPOINT_ID", context), 2);
 assert.equal(elements.get("codec").value, "h265");
@@ -36,6 +45,7 @@ assert.equal(elements.get("codec").value, "h265");
 assert.equal(runInContext("serverUrl", context), "http://127.0.0.1/janus");
 {
   const proxied = createContext({
+    ...imports,
     fixtureState: null, setTimeout() {},
     URL, location: { origin: "http://127.0.0.1", href: "http://127.0.0.1/preview/?codec=h264" },
     document: context.document, window: context.window,
@@ -59,6 +69,7 @@ context.renderGpuStats(null);
 assert.equal(elements.get("gpu-stats").innerHTML, "GPU —");
 for (const suffix of ["", "?codec=h264", "?codec=invalid"]) {
   const other = createContext({
+    ...imports,
     fixtureState: null, setTimeout() {},
     URL, location: { origin: "http://127.0.0.1", href: `http://127.0.0.1/${suffix}` },
     document: context.document, window: context.window,
@@ -70,6 +81,7 @@ for (const suffix of ["", "?codec=h264", "?codec=invalid"]) {
 
 for (const codecs of [["h264"], ["h264", "h265"]]) {
   const other = createContext({
+    ...imports,
     fixtureState: {settings: {preview_codecs: codecs}, setup_revision: 1}, setTimeout() {},
     URL, location: {origin: "http://127.0.0.1", href: "http://127.0.0.1/?codec=h265"},
     document: context.document, window: context.window,
@@ -165,7 +177,8 @@ await context.sendTrickle(null);
 assert.equal(JSON.stringify(requests.at(-1)),
   JSON.stringify({ janus: "trickle", handle_id: 22, candidate: { completed: true } }));
 await socket.onEvent({ janus: "webrtcup" });
-assert.equal(elements.get("status").textContent, "WebRTC connected");
+assert.equal(elements.get("status").textContent, "Connected; waiting for video");
+assert.equal(elements.get("status").hidden, false);
 socket.onError(Error("Janus connection lost"));
 assert.equal(socket.closed, true);
 assert.equal(runInContext("janus", context), null);
@@ -175,11 +188,47 @@ await context.sendTrickle(null);
 assert.equal(requests.length, 4, "nothing is sent without a connection");
 timers.clear();
 
+// Exercise the actual peer handlers, including an old frame retained in readyState.
+let connection, frameCallback;
+context.RTCPeerConnection = class {
+  constructor() { connection = this; this.connectionState = "connected"; }
+  async getStats() { return report(0.04); }
+  async setRemoteDescription() {}
+  async createAnswer() { return {}; }
+  async setLocalDescription() {}
+  close() { this.closed = true; }
+};
+const video = elements.get("preview");
+video.readyState = 4;
+video.paused = false;
+video.play = async () => {};
+video.requestVideoFrameCallback = callback => { frameCallback = callback; return 1; };
+video.cancelVideoFrameCallback = () => {};
+await context.connect();
+await context.startPeerConnection({type: "offer"});
+connection.onconnectionstatechange();
+assert.equal(elements.get("status").textContent, "Connected; waiting for video");
+connection.ontrack({streams: [{}]});
+frameCallback();
+assert.equal(elements.get("status").textContent, "Playing");
+assert.equal(elements.get("status").hidden, true);
+const staleFrame = frameCallback;
+clock += 8000;
+[...timers.values()].find(fn => fn.name === "check")();
+assert.equal(connection.closed, true);
+assert.equal(socket.closed, true);
+assert.equal(elements.get("status").textContent, "Video stalled for 8 seconds; retrying");
+assert.equal(timers.size, 1, "a media stall closes the old peer and schedules one reconnect");
+staleFrame();
+assert.equal(elements.get("status").textContent, "Video stalled for 8 seconds; retrying");
+timers.clear();
+
 const recovered = [];
 context.recover = error => recovered.push(error.message);
 context.watchConnection();
 context.watchConnection();
 assert.equal(timers.size, 1, "rearming must replace the previous connection deadline");
+clock += 12000;
 await [...timers.values()][0]();
 assert.deepEqual(recovered, ["No video received within 12 seconds"]);
 console.log("Connection deadline and Janus failure recovery checks passed");

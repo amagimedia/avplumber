@@ -145,6 +145,7 @@
     import { createReceiverMonitor } from "./receiver-stats.mjs";
     import { JanusSocket } from "./janus-socket.mjs";
     import { playerOutputs } from "./output-selection.mjs";
+    import { createMediaWatchdog } from "./media-watchdog.mjs";
     // Registered before any await below (mixerState's fetch can take seconds): the embedding page
     // sends avp-preview-mute right on this iframe's "load", which can fire well before a listener
     // declared after an awaited step exists -- postMessage does not queue for a listener that
@@ -232,7 +233,7 @@
     let handleId = null;
     let peer = null;
     let retryTimer = null;
-    let connectionTimer = null;
+    let mediaWatchdog = null;
     let connecting = false;
     let stopping = false;
     let rttTimer = null;
@@ -291,12 +292,19 @@
     function setStatus(message, isError = false) {
       statusEl.textContent = message;
       statusEl.className = isError ? "error" : "";
-      statusEl.hidden = message === "WebRTC connected" && !isError;
+      statusEl.hidden = message === "Playing" && !isError;
     }
 
     function watchConnection() {
-      window.clearTimeout(connectionTimer);
-      connectionTimer = window.setTimeout(() => recover(new Error("No video received within 12 seconds")), 12000);
+      mediaWatchdog?.stop();
+      mediaWatchdog = createMediaWatchdog(preview, {
+        onPlaying: () => setStatus("Playing"),
+        onStall: error => recover(error),
+      });
+    }
+
+    function connectedStatus() {
+      setStatus(mediaWatchdog?.playing ? "Playing" : "Connected; waiting for video");
     }
 
     async function attachStreamingPlugin(transport) {
@@ -333,6 +341,7 @@
         if (preview.srcObject !== stream) {
           preview.srcObject = stream;
         }
+        mediaWatchdog?.attach();
         // A mute message can arrive before real media exists (postMessage carries no user gesture
         // into this frame, so play() with muted already false here can be silently refused). Always
         // (re)start from the markup's safe muted=true, exactly like a fresh document, then flip to
@@ -340,14 +349,11 @@
         // element the mute listener below can toggle without a fresh gesture.
         preview.muted = true;
         preview.play().then(() => {
-          preview.muted = desiredMuted;
+          if (peer === connection) preview.muted = desiredMuted;
         }).catch(error => {
-          if (error.name !== "AbortError") {
+          if (peer === connection && error.name !== "AbortError") {
             setStatus(error.message, true);
           }
-        });
-        preview.requestVideoFrameCallback(() => {
-          if (peer === connection) window.clearTimeout(connectionTimer);
         });
       };
       peer.onicecandidate = event => {
@@ -357,12 +363,10 @@
       };
       peer.onconnectionstatechange = () => {
         if (peer !== connection) return;
-        setStatus(`WebRTC ${peer.connectionState}`);
+        if (peer.connectionState === "connected") connectedStatus();
+        else setStatus(`WebRTC ${peer.connectionState}`);
         if (peer.connectionState !== "connected") renderRtt(null);
         if (peer.connectionState === "failed") recover(new Error("WebRTC connection failed"));
-        else if (peer.connectionState === "disconnected") watchConnection();
-        else if (peer.connectionState === "connected" && preview.readyState >= 2)
-          window.clearTimeout(connectionTimer);
       };
       startRttMeter(peer);
       await connection.setRemoteDescription(offer);
@@ -386,7 +390,7 @@
       } else if (event.janus === "trickle" && peer) {
         await peer.addIceCandidate(event.candidate?.completed ? null : event.candidate);
       } else if (event.janus === "webrtcup") {
-        setStatus("WebRTC connected");
+        connectedStatus();
       } else if (event.janus === "hangup" || event.janus === "timeout" || event.janus === "detached") {
         throw new Error(event.reason || `Janus ${event.janus}`);
       } else if (event.janus === "error") {
@@ -447,7 +451,8 @@
       stopping = true;
       connecting = false;
       window.clearTimeout(retryTimer);
-      window.clearTimeout(connectionTimer);
+      mediaWatchdog?.stop();
+      mediaWatchdog = null;
       stopRttMeter();
       if (peer) {
         peer.close();
@@ -497,7 +502,7 @@
       stopping = true;
       stopRttMeter();
       window.clearTimeout(retryTimer);
-      window.clearTimeout(connectionTimer);
+      mediaWatchdog?.stop();
       if (peer) peer.close();
       janus?.close();
     });

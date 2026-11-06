@@ -10,6 +10,7 @@ COPY cut-latency.mjs ./
 COPY receiver-stats.mjs ./
 COPY janus-socket.mjs ./
 COPY output-selection.mjs ./
+COPY media-watchdog.mjs ./
 COPY preview-server.py ./
 
 # Python handles SIGINT as PID 1, so stopping the player closes its WebSockets promptly.
