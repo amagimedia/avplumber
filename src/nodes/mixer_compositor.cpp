@@ -267,7 +267,7 @@ public:
         const int64_t pts_ns = pts.timestamp({1, 1000000000});
         {
             std::lock_guard<std::mutex> lock(layers_mutex_);
-            if (zoom_on_air_) zoom_.onAir(zoom_on_air_->first, zoom_on_air_->second);
+            if (zoom_on_air_) zoom_.onAir(zoom_on_air_->first, zoom_on_air_->second, pts_ns);
             if (!zoom_.spec) return;
         }
         const uint64_t generation = zoom_.spec->generation;
@@ -283,7 +283,9 @@ public:
         }
         std::lock_guard<std::mutex> lock(layers_mutex_);
         zoom_status_ = {{"generation", generation}, {"progress", zoom_.spec ? zoom_.progress(pts_ns) : 1.},
-                        {"held_metadata", zoom_.state.held}, {"error", zoom_.error}};
+                        {"held_metadata", zoom_.state.held}, {"error", zoom_.error}, {"tick_ns", pts_ns},
+                        {"on_air_ns", zoom_on_air_ ? zoom_on_air_->second : 0},
+                        {"start_ns", zoom_.spec && zoom_.spec->start_ns ? *zoom_.spec->start_ns : 0}};
     }
 
     Parameters getObject(const std::string key) override {

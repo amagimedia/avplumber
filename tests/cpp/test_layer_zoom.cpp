@@ -200,9 +200,9 @@ static void hook_state_machine() {
     auto layers = sceneLayer();
     assert(slot.apply(layers, sources, 5'000'000'000) && slot.progress(5'000'000'000) == 0);   // not on air yet
     assert(layers[0].crop_x == 480 && !layers[0].crop_exact);
-    slot.onAir(6, 6'000'000'000);                    // another generation: ignored
+    slot.onAir(6, 6'000'000'000, 0);                    // another generation: ignored
     assert(slot.progress(6'500'000'000) == 0);
-    slot.onAir(7, 6'000'000'000);
+    slot.onAir(7, 6'000'000'000, 0);
     layers = sceneLayer();
     assert(slot.apply(layers, sources, 6'400'000'000) && slot.progress(6'400'000'000) > 0 && layers[0].crop_exact);
     layers = sceneLayer();
@@ -213,7 +213,25 @@ static void hook_state_machine() {
     assert(!slot.apply(layers, sources, 0) && layers[0] == sceneLayer()[0]);
 }
 
+// The slot draws ahead of where the take completes: an on-air pts already in the slot's past
+// starts the glide at the slot's next tick, never part-way through.
+static void late_on_air_starts_at_the_slots_tick() {
+    const auto frame = sheet();
+    const std::vector<const av::VideoFrame *> sources{&frame};
+    SlotZoom slot;
+    slot.set(spec(1'500'000'000));
+    slot.onAir(7, 1'000'000'000, 4'000'000'000);     // completed at 1 s; the slot is at 4 s
+    assert(*slot.spec->start_ns == 4'000'000'000);
+    auto layers = sceneLayer();
+    assert(slot.apply(layers, sources, 4'500'000'000) && slot.progress(4'500'000'000) > 0 && slot.progress(4'500'000'000) < 1);
+    SlotZoom early;
+    early.set(spec(1'500'000'000));
+    early.onAir(7, 5'000'000'000, 4'000'000'000);    // on-air pts still ahead of the slot: kept
+    assert(*early.spec->start_ns == 5'000'000'000);
+}
+
 int main() {
+    late_on_air_starts_at_the_slots_tick();
     hook_state_machine();
     geometry();
     picture_rect_maps_tile_crops();

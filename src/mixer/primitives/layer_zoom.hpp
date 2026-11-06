@@ -229,9 +229,11 @@ struct SlotZoom {
         state = {};
         error.clear();
     }
-    /// The take of `generation` went on air with its first frame at `start_ns`.
-    void onAir(uint64_t generation, int64_t start_ns) {
-        if (spec && spec->generation == generation && !spec->start_ns) spec->start_ns = start_ns;
+    /// The take of `generation` went on air with its first frame at `start_ns`. The slot draws
+    /// ahead of where takes complete, so a start already behind its tick `now_ns` starts there:
+    /// the frames drawn meanwhile show the from-framing, which is what Program showed.
+    void onAir(uint64_t generation, int64_t start_ns, int64_t now_ns) {
+        if (spec && spec->generation == generation && !spec->start_ns) spec->start_ns = std::max(start_ns, now_ns);
     }
     double progress(int64_t pts_ns) const { return spec ? zoomProgress(*spec, pts_ns) : 1.; }
     /// Rewrites the zooming layer for this tick; false (and the zoom dropped once it is over) when
