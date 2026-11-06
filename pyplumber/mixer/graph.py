@@ -176,7 +176,7 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
-        color_tagged=False, fan_out_loop=None,
+        color_tagged=False, fan_out_loop=None, picture=None,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -223,7 +223,7 @@ class MixerGraphBuilder:
                                                color=color, color_tagged=color_tagged,
                                                pixel_format=pixel_format, packed_rgb=packed_rgb,
                                                premultiplied_alpha=premultiplied_alpha,
-                                               fan_out_loop=fan_out_loop))
+                                               fan_out_loop=fan_out_loop, picture=picture))
         self._source_index[name] = idx
         return self
 
@@ -362,9 +362,10 @@ class MixerGraphBuilder:
     # Runtime control
     # ------------------------------------------------------------------
 
-    def cut(self, scene: str) -> None:
-        """Hard cut to *scene*."""
-        cmd = {"mixer": self.name, "scene": scene}
+    def cut(self, scene: str, zoom: Optional[dict] = None) -> None:
+        """Hard cut to *scene*; with *zoom* ({"duration_sec", "curve"}) one person's layer glides
+        from Program's framing instead, when the engine finds both scenes zoomable."""
+        cmd = {"mixer": self.name, "scene": scene, **({"zoom": zoom} if zoom else {})}
         self.avp.executeCommandsFromString(f"mixer.cut {json.dumps(cmd)}")
         self._current_pgm = scene
 
@@ -898,6 +899,8 @@ class MixerGraphBuilder:
                     f"mixer.source {self.name} {src.name}"
                     f" {self._n('otm_' + src.name)} {idx}"
                 )
+                if src.picture:
+                    lines.append("mixer.source_picture " + json.dumps({"mixer": self.name, "name": src.name, **src.picture}))
             else:
                 lines.append(
                     "mixer.routed_source "

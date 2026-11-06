@@ -198,6 +198,9 @@ class Source:
     park_limit: int = 0
     capture_cadence: str = "continuous"  # browser: "on_change" permits intentional static holds
     has_audio: bool = False        # demux/decode an audio track alongside video (kind == "video" only)
+    # Layer zoom (avplumber layer_zoom.hpp): where the source's picture is 1:1 on its frames, the
+    # metadata key of its per-frame framings and which framing layers (by input) map it.
+    picture: Optional[Dict[str, Any]] = None
 
     @property
     def decoder_params(self):
@@ -461,6 +464,25 @@ def protocol_name(value: Any, what: str) -> str:
     return value
 
 
+def _parse_picture(p: Any, source: Dict[str, Any], where: str) -> Dict[str, Any]:
+    """A source's `picture`: {"reference": {x, y, w, h}, "metadata_key": str, "mapped": [inputs]}."""
+    if not isinstance(p, dict) or set(p) - {"reference", "metadata_key", "mapped"}:
+        raise ConfigError(f"{where}: picture must be an object of reference, metadata_key and mapped")
+    ref = p.get("reference")
+    if not isinstance(ref, dict) or any(type(ref.get(k)) is not int for k in "xywh") or ref["w"] <= 0 or ref["h"] <= 0 \
+            or ref["x"] < 0 or ref["y"] < 0:
+        raise ConfigError(f"{where}: picture reference must be {{x, y, w, h}} in pixels")
+    width, height = int(source.get("width", 0)), int(source.get("height", 0))
+    if width and height and (ref["x"] + ref["w"] > width or ref["y"] + ref["h"] > height):
+        raise ConfigError(f"{where}: picture reference lies outside the {width}x{height} source")
+    if not isinstance(p.get("metadata_key"), str) or not p["metadata_key"]:
+        raise ConfigError(f"{where}: picture metadata_key must be a string")
+    mapped = p.get("mapped", [])
+    if not isinstance(mapped, list) or any(type(m) is not int or m < 0 for m in mapped):
+        raise ConfigError(f"{where}: picture mapped must list input indices")
+    return {"reference": dict(ref), "metadata_key": p["metadata_key"], "mapped": list(mapped)}
+
+
 def _finite_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
@@ -573,7 +595,8 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
                 raise ValueError(f"{kind} input needs positive even width and height")
     except ValueError as e:
         raise ConfigError(f"{where}: {e}") from e
-    return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)),
+    picture = _parse_picture(s["picture"], s, where) if "picture" in s else None
+    return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)), picture=picture,
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,

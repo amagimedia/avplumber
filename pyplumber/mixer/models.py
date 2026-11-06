@@ -19,6 +19,7 @@ class MixerSource:
     packed_rgb: bool = False
     premultiplied_alpha: bool = False
     color_tagged: bool = False
+    picture: Optional[dict] = None   # mixer.source_picture: a layer zoom's picture (config.Source.picture)
     # Set by the builder: the colour fields this source's fan-out stamps on every frame, when
     # that is all its colour stage would do.
     frame_color: Optional[Dict[str, str]] = None
