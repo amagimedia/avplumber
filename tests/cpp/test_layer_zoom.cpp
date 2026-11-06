@@ -190,7 +190,31 @@ static void plan_refuses_with_a_reason() {
     assert(!planZoom(bare, layer, 0, 0, &pic, why) && why.find("tile") != std::string::npos);
 }
 
+// hook_state_machine: a slot's zoom draws its from-framing until the take is on air, then glides,
+// and is dropped at its end or by a composition without one.
+static void hook_state_machine() {
+    const auto frame = sheet();
+    const std::vector<const av::VideoFrame *> sources{&frame};
+    SlotZoom slot;
+    slot.set(spec());
+    auto layers = sceneLayer();
+    assert(slot.apply(layers, sources, 5'000'000'000) && slot.progress(5'000'000'000) == 0);   // not on air yet
+    assert(layers[0].crop_x == 480 && !layers[0].crop_exact);
+    slot.onAir(6, 6'000'000'000);                    // another generation: ignored
+    assert(slot.progress(6'500'000'000) == 0);
+    slot.onAir(7, 6'000'000'000);
+    layers = sceneLayer();
+    assert(slot.apply(layers, sources, 6'400'000'000) && slot.progress(6'400'000'000) > 0 && layers[0].crop_exact);
+    layers = sceneLayer();
+    assert(!slot.apply(layers, sources, 7'000'000'000) && !slot.spec && layers[0] == sceneLayer()[0]);   // over: dropped
+    slot.set(spec());
+    slot.set(std::nullopt);                          // a composition without a zoom
+    layers = sceneLayer();
+    assert(!slot.apply(layers, sources, 0) && layers[0] == sceneLayer()[0]);
+}
+
 int main() {
+    hook_state_machine();
     geometry();
     picture_rect_maps_tile_crops();
     progress_waits_for_on_air_and_eases();

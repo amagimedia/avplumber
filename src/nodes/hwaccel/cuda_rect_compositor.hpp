@@ -161,6 +161,9 @@ protected:
     }
 
     /// `configured_changed`: the configured layers differ from those the layer log last reported.
+    /// A subclass's per-tick change to the merged layers (the mixer slots' zoom), on the render thread.
+    virtual void adjustLayers(std::vector<LayerSpec> &, av::Timestamp, const std::vector<const av::VideoFrame *> &) {}
+
     std::vector<LayerSpec> mergeLayersForTick(const av::VideoFrame *metadata_source, bool &configured_changed) {
         std::vector<LayerSpec> layers;
         {
@@ -217,6 +220,7 @@ protected:
 
         bool configured_changed = false;
         std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src, configured_changed);
+        adjustLayers(layers, pts, sources);
         if (opacity)
             for (size_t i = 0; i < layers.size(); ++i) {
                 const size_t input = layers[i].sourceIndex(i);

@@ -217,6 +217,39 @@ inline bool applyLayerZoom(std::vector<LayerSpec> &layers, const ZoomSpec &z, co
     return true;
 }
 
+/// A scene slot's zoom, on its render thread: set with the composition that carries it, started by
+/// the take's on-air message, applied every tick, dropped at its end.
+struct SlotZoom {
+    std::optional<ZoomSpec> spec;
+    ZoomFrameState state;
+    std::string error;   // why the last tick drew the scene's own layer instead
+
+    void set(std::optional<ZoomSpec> z) {
+        spec = std::move(z);
+        state = {};
+        error.clear();
+    }
+    /// The take of `generation` went on air with its first frame at `start_ns`.
+    void onAir(uint64_t generation, int64_t start_ns) {
+        if (spec && spec->generation == generation && !spec->start_ns) spec->start_ns = start_ns;
+    }
+    double progress(int64_t pts_ns) const { return spec ? zoomProgress(*spec, pts_ns) : 1.; }
+    /// Rewrites the zooming layer for this tick; false (and the zoom dropped once it is over) when
+    /// the layers stay the scene's.
+    bool apply(std::vector<LayerSpec> &layers, const std::vector<const av::VideoFrame *> &sources, int64_t pts_ns) {
+        if (!spec) return false;
+        if (zoomProgress(*spec, pts_ns) >= 1.) {
+            spec.reset();
+            return false;
+        }
+        const av::VideoFrame *source = spec->input >= 0 && size_t(spec->input) < sources.size() ? sources[spec->input] : nullptr;
+        std::string why;
+        const bool drawn = applyLayerZoom(layers, *spec, source, pts_ns, state, &why);
+        if (!why.empty()) error = why;
+        return drawn;
+    }
+};
+
 inline Parameters zoomSpecJson(const ZoomSpec &z) {
     const auto rect = [](const Rect &r) { return Parameters{{"x", r.x}, {"y", r.y}, {"w", r.w}, {"h", r.h}}; };
     Parameters out{{"input", z.input},
