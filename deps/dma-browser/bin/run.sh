@@ -29,7 +29,15 @@ if [[ -z "${DMA_BROWSER_WORKER_INDEX:-}" && "${DMA_BROWSER_PROCESS_COUNT:-1}" !=
   exec "$node_bin" "$PROJECT_ROOT/dist/main/supervisor/index.js"
 fi
 
-electron_args=(--no-sandbox)
+if [[ -n "${DMA_BROWSER_ISOLATED_SCENE_URL:-}" && $# -ne 0 ]]; then
+  echo "dma-browser: isolated scenes do not accept extra launch arguments" >&2
+  exit 1
+fi
+
+electron_args=()
+if [[ -z "${DMA_BROWSER_ISOLATED_SCENE_URL:-}" ]]; then
+  electron_args+=(--no-sandbox)
+fi
 
 if [[ -n "${DMA_BROWSER_USER_DATA_DIR:-}" ]]; then
   mkdir -p -- "$DMA_BROWSER_USER_DATA_DIR"

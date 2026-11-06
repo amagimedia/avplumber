@@ -40,7 +40,8 @@ export class HwAccelConfigurator {
 
   public apply(): readonly AppliedSwitch[] {
     this.appendSwitch('enable-gpu');
-    this.appendSwitch('no-sandbox');
+    const isolated = Boolean(this.env.DMA_BROWSER_ISOLATED_SCENE_URL);
+    if (!isolated) this.appendSwitch('no-sandbox');
     this.appendSwitch('run-all-compositor-stages-before-draw');
 
     const glBackend = envString(this.env, 'DMA_BROWSER_GL_BACKEND', 'angle');
@@ -66,6 +67,13 @@ export class HwAccelConfigurator {
       this.appendSwitch('disable-gpu-process-crash-limit');
     }
 
+    if (
+      isolated &&
+      (envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES').length > 0 ||
+        envList(this.env, 'DMA_BROWSER_CHROMIUM_DISABLE_FEATURES').length > 0)
+    ) {
+      throw new Error('Isolated scenes do not accept Chromium feature overrides');
+    }
     const enabled = HwAccelConfigurator.dedupe(
       envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES'),
     );
@@ -96,7 +104,7 @@ export class HwAccelConfigurator {
     this.appendSwitch('force-device-scale-factor', '1');
     this.appendSwitch('disable-http-cache');
     this.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-    this.appendSwitch('disable-web-security');
+    if (!isolated) this.appendSwitch('disable-web-security');
 
     return this.appliedSwitches;
   }
