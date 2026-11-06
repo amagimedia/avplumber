@@ -275,6 +275,8 @@ class Item:
     fit: str = "contain"
     crop: Optional[Rect] = None
     blend: bool = False           # honour source alpha, e.g. transparent browser graphics
+    rotation: float = 0.0         # degrees, clockwise, about `pivot` (the box's centre when None)
+    pivot: Optional[Tuple[float, float]] = None   # scene-canvas pixels
 
 
 @dataclass(frozen=True)
@@ -457,6 +459,23 @@ def protocol_name(value: Any, what: str) -> str:
     if not isinstance(value, str) or not value or any(c.isspace() or not c.isprintable() for c in value):
         raise ConfigError(f"{what} must be a non-empty name without spaces or control characters, not {value!r}")
     return value
+
+
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _rotation(item: Dict[str, Any], where: str) -> Tuple[float, Optional[Tuple[float, float]]]:
+    """An item's `rotation` (degrees, clockwise) and optional `pivot` [x, y] in scene pixels."""
+    rotation = item.get("rotation", 0)
+    if not _finite_number(rotation):
+        raise ConfigError(f"{where}: rotation must be a finite number of degrees")
+    pivot = item.get("pivot")
+    if pivot is not None:
+        if not isinstance(pivot, (list, tuple)) or len(pivot) != 2 or not all(map(_finite_number, pivot)):
+            raise ConfigError(f"{where}: pivot must be [x, y] in scene pixels")
+        pivot = (float(pivot[0]), float(pivot[1]))
+    return float(rotation), pivot
 
 
 def _rect(obj: Any, where: str) -> Rect:
@@ -766,7 +785,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             blend = it.get("blend", False)
             if not isinstance(blend, bool):
                 raise ConfigError(f"{iw}: blend must be a boolean")
-            items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop, blend))
+            rotation, pivot = _rotation(it, iw)
+            items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop, blend, rotation, pivot))
         scenes.append(Scene(protocol_name(str(sc["id"]), f"{where}: id"), tuple(items)))
         _unique(scenes, where, "scene id")
     if not scenes:
@@ -1068,5 +1088,9 @@ def scene_layers(cfg: MixerConfig, scene: Scene) -> Dict[str, Dict[str, Any]]:
             layer["fit"] = item.fit
         if crop is not None:
             layer["crop"] = {"x": crop.x, "y": crop.y, "w": crop.w, "h": crop.h}
+        if item.rotation:   # only when set: unrotated compositions keep their JSON and revision
+            layer["rotation_deg"] = item.rotation
+            if item.pivot is not None:
+                layer["pivot_x"], layer["pivot_y"] = item.pivot
         layers[name] = layer
     return layers

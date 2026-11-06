@@ -2412,3 +2412,29 @@ def test_dsk_tally_is_rendered_state_independent_of_requested_target(tmp_path, m
     rows = json.loads(app.avp.commands_registered["mixer.dsk_status"](""))
     assert rows[0]["on"] is False and rows[0]["on_air"] is True and rows[0]["phase"] == "fading-out"
     assert rows[1]["on"] is True and rows[1]["on_air"] is False and rows[1]["pending"] is True
+
+
+def test_scene_item_rotation_reaches_the_layer():
+    item = {**CONFIG["scenes"][0]["items"][0], "rotation": 12.5, "pivot": [960, 540]}
+    cfg = mixer_config.parse({**CONFIG, "scenes": [{"id": "rot", "items": [item]}], "initial_scene": "rot"})
+    layer = mc.scene_layers(cfg, cfg.scenes[0])["cam"]
+    assert layer["rotation_deg"] == 12.5 and layer["pivot_x"] == 960 and layer["pivot_y"] == 540
+    plain = {**CONFIG["scenes"][0]["items"][0], "rotation": 30}
+    cfg = mixer_config.parse({**CONFIG, "scenes": [{"id": "rot", "items": [plain]}], "initial_scene": "rot"})
+    layer = mc.scene_layers(cfg, cfg.scenes[0])["cam"]
+    assert layer["rotation_deg"] == 30 and "pivot_x" not in layer
+
+
+def test_unrotated_scene_layers_are_unchanged():
+    cfg = mc.parse(CONFIG)
+    for scene in cfg.scenes:
+        for layer in mc.scene_layers(cfg, scene).values():
+            assert not {"rotation_deg", "pivot_x", "pivot_y"} & set(layer)
+
+
+@pytest.mark.parametrize("extra", [{"rotation": float("nan")}, {"rotation": "12"}, {"rotation": True},
+                                   {"pivot": [1]}, {"pivot": [1, "2"]}, {"pivot": {"x": 1, "y": 2}}])
+def test_bad_rotation_is_rejected(extra):
+    scene = {"id": "rot", "items": [{**CONFIG["scenes"][0]["items"][0], **extra}]}
+    with pytest.raises(mixer_config.ConfigError, match="rotation|pivot"):
+        mixer_config.parse({**CONFIG, "scenes": [scene], "initial_scene": "rot"})
