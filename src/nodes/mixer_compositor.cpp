@@ -6,6 +6,7 @@
 #include "../mixer/primitives/MixerState.hpp"
 #include "../mixer/primitives/MonotonicClock.hpp"
 #include "../mixer/primitives/TickTimes.hpp"
+#include "../mixer/primitives/layer_move.hpp"
 #include "../mixer/primitives/layer_zoom.hpp"
 
 #include <algorithm>
@@ -44,6 +45,11 @@ class MixerCompositor : public CudaRectCompositor,
     std::optional<std::pair<uint64_t, int64_t>> zoom_on_air_;   // (generation, start_ns), layers_mutex_
     Parameters zoom_status_;                                     // published, under layers_mutex_
     int64_t zoom_error_logged_ns_ = 0;
+    // The slot's move transition (layer_move.hpp): set with its composition, drawn on the render
+    // thread from the mixer's published take clock (`mixer`, the keyer's source of it too).
+    avp::mixer::SlotMove move_;
+    std::shared_ptr<avp::mixer::MixerState> mixer_;
+    Parameters move_status_;                                     // published, under layers_mutex_
     bool aux_ = false;
     std::atomic<uint64_t> output_drops_{0};
     int64_t no_canvas_logged_ns_ = 0;
@@ -226,6 +232,8 @@ class MixerCompositor : public CudaRectCompositor,
             composition_revision_ = value.at("revision").get<std::string>();
             // A composition carries its zoom or clears the last one, in the same step as its layers.
             zoom_.set(value.contains("zoom") ? std::optional(avp::mixer::parseZoomSpec(value.at("zoom"))) : std::nullopt);
+            move_.set(value.contains("move") ? std::optional(avp::mixer::parseMoveSpec(value.at("move"))) : std::nullopt);
+            if (!move_.spec) move_status_ = Parameters();
         }
         if (staged_warm) {
             // Promote the warmed inputs without discarding their eligible frames, as auxInputs does.
@@ -265,6 +273,28 @@ public:
     void adjustLayers(std::vector<LayerSpec> &layers, av::Timestamp pts,
                       const std::vector<const av::VideoFrame *> &sources) override {
         const int64_t pts_ns = pts.timestamp({1, 1000000000});
+        adjustZoom(layers, pts_ns, sources);
+        if (move_.spec) adjustMove(layers, pts_ns, sources);
+    }
+
+    /// The move's layers for this tick; a failure draws the scene's own layers and drops the move.
+    void adjustMove(std::vector<LayerSpec> &layers, int64_t pts_ns, const std::vector<const av::VideoFrame *> &sources) {
+        const uint64_t generation = move_.spec->generation;
+        const auto clock = mixer_ ? mixer_->clock() : nullptr;
+        std::string error;
+        try {
+            move_.apply(layers, clock.get(), pts_ns, sources, draw_.canvas().sw_fmt);
+        } catch (const std::exception &e) {
+            error = e.what();
+            move_.set(std::nullopt);
+            logstream << type_ << " move: " << error;
+        }
+        std::lock_guard<std::mutex> lock(layers_mutex_);
+        move_status_ = {{"generation", generation}, {"progress", move_.spec ? move_.drawn : 1.},
+                        {"running", bool(move_.spec)}, {"error", error}, {"tick_ns", pts_ns}};
+    }
+
+    void adjustZoom(std::vector<LayerSpec> &layers, int64_t pts_ns, const std::vector<const av::VideoFrame *> &sources) {
         {
             std::lock_guard<std::mutex> lock(layers_mutex_);
             if (zoom_on_air_) zoom_.onAir(zoom_on_air_->first, zoom_on_air_->second, pts_ns);
@@ -345,6 +375,7 @@ public:
         if (!aux_) {
             std::lock_guard<std::mutex> lock(layers_mutex_);
             if (!zoom_status_.is_null()) result["zoom"] = zoom_status_;
+            if (!move_status_.is_null()) result["move"] = move_status_;
         }
         if (aux_) {
             std::lock_guard<std::mutex> lock(layers_mutex_);
@@ -611,6 +642,15 @@ public:
             for (size_t i = 0; i < layers.size(); ++i)
                 if ((aux_ && layers[i].input < 0) || layers[i].sourceIndex(i) >= source_edges_.size())
                     throw Error("mixer_compositor: invalid input index");
+            if (value.contains("move")) {
+                // Scene A's layers draw beside B's while the move runs.
+                if (aux_ || !mixer_) throw Error("mixer_compositor: a move needs a scene slot with `mixer`");
+                const auto move = avp::mixer::parseMoveSpec(value.at("move"));
+                for (size_t i = 0; i < move.from.size(); ++i)
+                    if (move.from[i].sourceIndex(i) >= source_edges_.size()) throw Error("move: invalid input index");
+                if (layers.size() + move.from.size() > size_t(draw_.maxLayers()))
+                    throw Error("move: scene A's and B's layers together exceed max_layers");
+            }
             for (int i = static_cast<int>(source_edges_.size()); i < avp::mixer::kSourceMaskBits; ++i)
                 if (mask.test(i)) throw Error("aux: active input out of range");
             {
@@ -720,6 +760,8 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
             throw Error(std::string("mixer_compositor: pgm_delay_frames: ") + e.what());
         }
     }
+    if (!aux && params.contains("mixer"))
+        node->mixer_ = InstanceSharedObjects<avp::mixer::MixerState>::get(nci.instance, params.at("mixer"));
     if (aux) {
         if (params.contains("mixer")) {
             const auto state = InstanceSharedObjects<avp::mixer::MixerState>::get(nci.instance, params.at("mixer"));

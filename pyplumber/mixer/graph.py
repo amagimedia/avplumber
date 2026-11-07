@@ -650,6 +650,7 @@ class MixerGraphBuilder:
             is_program = slot.upper() == self._initial_pgm_slot
             self.avp.addNode(self.canvas_compositor({
                 "name": self._n(f"comp_{slot}"),
+                "mixer": self.name,   # the take clock a move transition follows
                 "src": [self._source_slot_edge(source, slot) for source in self._sources],
                 "dst": self._e(f"scene_{slot}_composite"),
                 "max_layers": self.max_compositor_layers,

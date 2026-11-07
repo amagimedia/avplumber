@@ -125,6 +125,68 @@ static void json_round_trip() {
     assert(threw);
 }
 
+// The slot's move against the published take clock: progress 0 until its take is on air, the
+// clock's progress while it runs, dropped once the take ends or a later take is on air.
+static TakeClock clockAt(uint64_t generation, int64_t start_ns, int64_t duration_ns) {
+    TakeClock c;
+    c.generation = generation;
+    c.schedule = RampHistory({start_ns, duration_ns});
+    c.on_air_ns = start_ns;
+    return c;
+}
+
+static void slot_move_follows_the_take_clock(const Sources &src) {
+    const auto a = layers(kFull), b = layers(kSplit);
+    SlotMove m;
+    MoveSpec spec;
+    spec.generation = 5;
+    spec.from = a;
+    m.set(spec);
+    auto drawn = b;
+    assert(m.apply(drawn, nullptr, 0, src.all(), AV_PIX_FMT_NV12) && drawn == a && m.drawn == 0);   // no clock yet
+    const TakeClock before = clockAt(4, 0, 1000);
+    drawn = b;
+    assert(m.apply(drawn, &before, 500, src.all(), AV_PIX_FMT_NV12) && drawn == a);
+    const TakeClock on = clockAt(5, 1000, 1000);
+    drawn = b;
+    assert(m.apply(drawn, &on, 500, src.all(), AV_PIX_FMT_NV12) && drawn == a);   // before its first frame
+    drawn = b;
+    assert(m.apply(drawn, &on, 1500, src.all(), AV_PIX_FMT_NV12) && near(m.drawn, 0.5));
+    assert(drawn == moveLayers(a, b, 0.5, src.all(), AV_PIX_FMT_NV12, "fade"));
+    // Progress 1 while the take still runs draws B (a lever at its end), and keeps the move.
+    drawn = b;
+    assert(m.apply(drawn, &on, 2500, src.all(), AV_PIX_FMT_NV12) && drawn == b && m.spec);
+    TakeClock done = on;
+    done.end = TakeClock::End::Completed;
+    done.end_ns = 2000;
+    drawn = b;
+    assert(m.apply(drawn, &done, 1900, src.all(), AV_PIX_FMT_NV12) && m.spec);   // a tick before the end
+    drawn = b;
+    assert(!m.apply(drawn, &done, 2000, src.all(), AV_PIX_FMT_NV12) && !m.spec && drawn == b);
+    // A slot at rest does nothing.
+    assert(!m.apply(drawn, &done, 2100, src.all(), AV_PIX_FMT_NV12) && drawn == b);
+}
+
+static void slot_move_drops_on_cancel_and_later_takes(const Sources &src) {
+    const auto a = layers(kFull), b = layers(kSplit);
+    MoveSpec spec;
+    spec.generation = 5;
+    spec.from = a;
+    SlotMove m;
+    m.set(spec);
+    TakeClock cancelled = clockAt(5, 1000, 1000);
+    cancelled.end = TakeClock::End::Cancelled;
+    cancelled.end_ns = 1400;
+    auto drawn = b;
+    assert(m.apply(drawn, &cancelled, 1300, src.all(), AV_PIX_FMT_NV12) && m.spec);
+    drawn = b;
+    assert(!m.apply(drawn, &cancelled, 1400, src.all(), AV_PIX_FMT_NV12) && !m.spec && drawn == b);
+    m.set(spec);
+    const TakeClock later = clockAt(6, 0, 1000);   // its end was missed: a later take is on air
+    drawn = b;
+    assert(!m.apply(drawn, &later, 100, src.all(), AV_PIX_FMT_NV12) && !m.spec && drawn == b);
+}
+
 int main() {
     const Sources src;
     endpoints_verbatim(src);
@@ -135,5 +197,7 @@ int main() {
     unmatched_fade_and_cut(src);
     faded_out_layers_are_dropped(src);
     json_round_trip();
+    slot_move_follows_the_take_clock(src);
+    slot_move_drops_on_cancel_and_later_takes(src);
     return 0;
 }

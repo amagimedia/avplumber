@@ -8,6 +8,7 @@
 // fractional (crop_exact, dst_exact) and draw through the affine entry. A layer in only one scene
 // fades (its opacity, the affine entry's transparency for a camera) or cuts at the half. Pure: the
 // slot reads progress from the take clock and calls moveLayers per tick.
+#include "TakeClock.hpp"
 #include "layer_zoom.hpp"
 #include <algorithm>
 #include <cmath>
@@ -151,5 +152,42 @@ inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, con
     }
     return out;
 }
+
+/// A scene slot's move, on its render thread: set with the composition that carries it. Each tick
+/// draws scene A at progress 0 until the move's take is on air, then at the published take clock's
+/// progress; the move is dropped at the take's end (completed or cancelled) or once a later take
+/// is on air, and the slot draws its own scene again.
+struct SlotMove {
+    std::optional<MoveSpec> spec;
+    double drawn = 0;     // the progress the last tick drew
+    std::string error;    // why the last tick drew the scene's own layers
+
+    void set(std::optional<MoveSpec> m) {
+        spec = std::move(m);
+        drawn = 0;
+        error.clear();
+    }
+    /// Rewrites `layers` (scene B's) for the tick at `pts_ns`; false, with them unchanged, when no
+    /// move runs. `clock`: the mixer's published take clock, nullptr before the first take.
+    bool apply(std::vector<LayerSpec> &layers, const TakeClock *clock, int64_t pts_ns,
+               const std::vector<const av::VideoFrame *> &sources, AVPixelFormat fmt) {
+        if (!spec) return false;
+        double s = 0;
+        if (clock && clock->generation > spec->generation) {
+            spec.reset();
+            return false;
+        }
+        if (clock && clock->generation == spec->generation) {
+            if (clock->end != TakeClock::End::Running && pts_ns >= clock->end_ns) {
+                spec.reset();
+                return false;
+            }
+            s = clock->progress(pts_ns);
+        }
+        drawn = s;
+        layers = moveLayers(spec->from, layers, s, sources, fmt, spec->unmatched);
+        return true;
+    }
+};
 
 }
