@@ -1173,6 +1173,7 @@ def test_takes_reach_the_mixer_as_control_commands(client):
     assert post(url, {"command": "fade", "scene": "two_up", "duration_sec": 0.8, "curve": "ease-in"})[0] == 200
     assert post(url, {"command": "fade", "scene": "two_up", "duration_sec": 0.8, "color": "#ffffff"})[0] == 200
     assert post(url, {"command": "wipe", "scene": "two_up", "wipe_file": "/media/w.mov"})[0] == 200
+    assert post(url, {"command": "move", "scene": "two_up", "duration_sec": 0.8, "unmatched": "cut"})[0] == 200
     assert post(url, {"command": "interrupt"})[0] == 200
 
     assert bridge.sent == [
@@ -1182,6 +1183,7 @@ def test_takes_reach_the_mixer_as_control_commands(client):
         'mixer.fade {"scene":"two_up","duration_sec":0.8,"curve":"ease-in","mixer":"mixer"}',
         'mixer.fade {"scene":"two_up","duration_sec":0.8,"color":"#ffffff","mixer":"mixer"}',
         'mixer.wipe {"scene":"two_up","wipe_file":"/media/w.mov","mixer":"mixer"}',
+        'mixer.move {"scene":"two_up","duration_sec":0.8,"unmatched":"cut","mixer":"mixer"}',
         'mixer.interrupt {"mixer":"mixer"}',
     ]
 

@@ -67,7 +67,7 @@ from pyplumber.node import (
 
 
 from .color import Color
-from .config import (DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, default_latency_ms, fade_color, fade_curve,
+from .config import (MOVE_UNMATCHED, DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, default_latency_ms, fade_color, fade_curve,
                      protocol_name)
 from .backend import mixer_backend
 from .control import source_mask_param
@@ -413,6 +413,26 @@ class MixerGraphBuilder:
         if color is not None:
             cmd["color"] = color
         self.avp.executeCommandsFromString(f"mixer.fade {json.dumps(cmd)}")
+        self._current_pgm = scene
+
+    def move(
+        self,
+        scene: str,
+        duration_sec: float = 1.0,
+        curve: str = DEFAULT_FADE_CURVE,
+        unmatched: str = "fade",
+    ) -> None:
+        """Move transition to *scene*: a source in both scenes glides from Program's placement to
+        the scene's over *duration_sec* seconds, eased by *curve*; a source in one of them fades,
+        or with *unmatched* "cut" switches at the half. The engine fades when it cannot glide."""
+        if unmatched not in MOVE_UNMATCHED:
+            raise ValueError("move: unmatched sources fade or cut")
+        cmd: Dict[str, Any] = {"mixer": self.name, "scene": scene, "duration_sec": duration_sec}
+        if fade_curve(curve, "move curve") != DEFAULT_FADE_CURVE:
+            cmd["curve"] = curve
+        if unmatched != "fade":
+            cmd["unmatched"] = unmatched
+        self.avp.executeCommandsFromString(f"mixer.move {json.dumps(cmd)}")
         self._current_pgm = scene
 
     def wipe(

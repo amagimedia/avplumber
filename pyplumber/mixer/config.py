@@ -22,7 +22,9 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from .color import Color, declared_color, default_codec, rendition_color, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
 
 FITS = ("stretch", "contain", "cover")
-TRANSITIONS = ("cut", "fade", "wipe")
+TRANSITIONS = ("cut", "fade", "wipe", "move")
+# What a move does with a source in only one of its two scenes (layer_move.hpp).
+MOVE_UNMATCHED = ("fade", "cut")
 # Compositor/transition working formats: the semiplanar family only. NV12 is the
 # 8-bit default; P010/P210 are 10-bit 4:2:0/4:2:2. Planar layouts are excluded on
 # purpose: the compositor cannot promote 8-bit sources or draw the RGBA wipe
@@ -332,6 +334,7 @@ class MixerConfig:
     fade_seconds: float = DEFAULT_FADE_SECONDS
     fade_curve: str = DEFAULT_FADE_CURVE   # what an M/E fade eases with unless a take picks its own
     fade_color: Optional[str] = None       # "#rrggbb": what an M/E fade dips through unless a take picks; None mixes
+    move_unmatched: str = "fade"           # a move's sources in one scene only: "fade" or "cut" at the half
     transition: str = DEFAULT_TRANSITION   # what a pick takes with in direct mode
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
@@ -429,7 +432,7 @@ class MixerConfig:
                 "hdr_video": sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"]) for s in self.sources),
                 "direct": self.direct,
                 "fade_seconds": self.fade_seconds, "fade_curve": self.fade_curve,
-                "fade_color": self.fade_color,
+                "fade_color": self.fade_color, "move_unmatched": self.move_unmatched,
                 "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
                 "wipes": wipes, **keys,
@@ -685,11 +688,14 @@ def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:
     fade_seconds = float(control.get("fade_seconds", DEFAULT_FADE_SECONDS))
     if fade_seconds <= 0:
         raise ConfigError("control.fade_seconds must be positive")
+    move_unmatched = control.get("move_unmatched", "fade")
+    if move_unmatched not in MOVE_UNMATCHED:
+        raise ConfigError("control.move_unmatched must be fade or cut")
     return {"direct": bool(control.get("direct", True)),
             "fade_seconds": fade_seconds,
             "fade_curve": fade_curve(control.get("fade_curve", DEFAULT_FADE_CURVE), "control.fade_curve"),
             "fade_color": fade_color(control.get("fade_color"), "control.fade_color"),
-            "transition": transition, "default_wipe": default_wipe}
+            "move_unmatched": move_unmatched, "transition": transition, "default_wipe": default_wipe}
 
 
 def _unique(items: List[Any], where: str, label: str = "id") -> None:

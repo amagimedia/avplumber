@@ -322,6 +322,11 @@
   .dips { display: flex; align-items: center; gap: 3px; padding: 0 6px 0 2px; }
   .dips button { width: 16px; height: 16px; padding: 0; border-radius: 50%; border: 0; cursor: pointer; box-shadow: 0 0 0 1px var(--faint); }
   .dips button[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--accent); }
+  /* A move's sources in one scene only: fade or cut; dim unless Move is selected. */
+  .unmatched { display: flex; align-items: center; gap: 2px; padding: 0 6px 0 2px; }
+  .unmatched:not(.on) { opacity: .45; }
+  .unmatched button { padding: 2px 6px; font-size: 10.5px; border-radius: 4px; }
+  .unmatched button[aria-pressed="true"] { color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .dips .custom, .dips .custom[aria-pressed="true"] { position: relative; overflow: hidden; background: conic-gradient(#e5484d, #f5a524, #30a46c, #6e8bf5, #c56ef5, #e5484d); }
   /* The native picker opens from the swatch's click (Safari opens none that is display: none) and never takes the focus. */
   .dips input { position: absolute; inset: 0; opacity: 0; pointer-events: none; }
@@ -528,6 +533,8 @@
           <button id="fade" type="button" aria-pressed="false" title="Select fade for Auto (F)" aria-keyshortcuts="F">Fade<kbd class="k">F</kbd></button>
           <button id="dip" type="button" aria-pressed="false" title="Select dip for Auto (D)" aria-keyshortcuts="D"><span class="swatch" aria-hidden="true"></span>Dip<kbd class="k">D</kbd></button>
           <span class="dips" id="dips" role="group" aria-label="Dip colour"><button type="button" aria-pressed="false" data-dip="#000000" style="background:#000" title="Dip to black"></button><button type="button" aria-pressed="false" data-dip="#ffffff" style="background:#fff" title="Dip to white"></button><button class="custom" type="button" aria-pressed="false" data-dip="custom" title="Dip to a colour you pick"><input type="color" tabindex="-1" aria-hidden="true"></button></span>
+          <button id="move" type="button" aria-pressed="false" title="Select move for Auto (M): what both scenes show glides to its new place; the rest fades or cuts" aria-keyshortcuts="M">Move<kbd class="k">M</kbd></button>
+          <span class="unmatched" id="move-unmatched" role="group" aria-label="A move's sources in one scene only"><button type="button" aria-pressed="false" data-unmatched="fade" title="A move fades what only one scene shows">fade</button><button type="button" aria-pressed="false" data-unmatched="cut" title="A move cuts what only one scene shows, at the half">cut</button></span>
           <span class="wipes"><b class="grp">Wipe<kbd class="k" title="W selects a wipe; again: the next one">W</kbd></b><span class="list" id="wipes"></span>
             <label id="wipe-custom" hidden><input id="wipe-file" type="text" placeholder="wipe clip path on the mixer host" aria-label="Wipe clip path on the mixer host"></label></span>
         </div>
@@ -604,6 +611,8 @@ let selected = "";               // scene the take buttons act on
 let direct = false;              // a pick goes straight to program
 let directTouched = false;       // once the operator toggles it, stop following the config
 let currentTransition = "cut";   // what a pick uses in direct mode; the config may change it
+// What a move does with a source in one scene only: this viewer's choice, remembered, else the show's.
+let moveUnmatched = ["fade", "cut"].includes(store.get("moveUnmatched", null)) ? store.get("moveUnmatched") : "fade";
 let tookTransition = false;      // once the operator takes one, stop following the config
 // Stop polling from overwriting typing, or a curve the operator picked.
 const touched = {fade: false, wipe: false, fadeCurve: false};
@@ -709,19 +718,22 @@ const endedHere = () => mix?.ended > 0 && mix.drawn >= 1 && takeMix(state?.statu
 let takeScene = null;
 function take(kind, scene = (endedHere() ? state.status.pgm_scene : state?.status?.pvw_scene) || selected, wipe = currentWipe) {
   const payload = {command: kind, scene};
-  if (kind === "fade" || kind === "wipe") takeScene = scene;
-  if (kind === "fade") {
+  if (kind === "fade" || kind === "wipe" || kind === "move") takeScene = scene;
+  if (kind === "fade" || kind === "move") {
     payload.duration_sec = fadeSeconds();
     if (payload.duration_sec === null) return;
     if (curves.fade.value !== "linear") payload.curve = curves.fade.value;   // linear: today's command
-    if (fadeColor.hex()) payload.color = fadeColor.hex();                  // mix: no colour
+    if (kind === "fade" && fadeColor.hex()) payload.color = fadeColor.hex();  // mix: no colour
+    if (kind === "move") Object.assign(payload, {unmatched: moveUnmatched});
   }
   if (kind === "wipe") {
     payload.wipe_file = wipe ? wipe.path : $("wipe-file").value.trim();
     if (!payload.wipe_file) return showError("Enter a wipe clip path on the mixer host");
     if (wipe?.duration_seconds) payload.duration_sec = wipe.duration_seconds;
   }
+  // A move draws on the T-bar as a fade does: its progress is the curve's (TakeClock).
   const took = kind === "fade" ? {transition: "crossfade", name: payload.color ? "dip" : "fade"}
+    : kind === "move" ? {transition: "crossfade", name: "move"}
     : kind === "wipe" ? {transition: "wipe", name: (wipe?.name || "wipe").toLowerCase()} : null;
   const halted = pressTake(kind), pressedAt = takePressedAt;
   // A press made since is the T-bar's: this acceptance no longer starts or runs on a mix.
@@ -787,17 +799,21 @@ function selectWipe() {
 }
 // What Auto runs, with a fade's rate: "fade 15f", "dip 1:15", a wipe's name or "cut".
 function autoLabel() {
-  const rate = currentTransition === "fade" && parseRate($("fade-s").value);
+  const rate = (currentTransition === "fade" || currentTransition === "move") && parseRate($("fade-s").value);
   return `${transitionLabel()}${rate ? ` ${formatRate(rate)}` : ""}`;
 }
 function transitionLabel() {
   if (currentTransition === "fade") return fadeColor.hex() ? "dip" : "fade";
   if (currentTransition === "wipe") return currentWipe?.name || "wipe";
+  if (currentTransition === "move") return "move";
   return "cut";
 }
 function renderTransition() {
   $("fade").setAttribute("aria-pressed", String(currentTransition === "fade" && !fadeColor.hex()));
   $("dip").setAttribute("aria-pressed", String(currentTransition === "fade" && !!fadeColor.hex()));
+  $("move").setAttribute("aria-pressed", String(currentTransition === "move"));
+  $("move-unmatched").classList.toggle("on", currentTransition === "move");
+  for (const button of $("move-unmatched").children) button.setAttribute("aria-pressed", String(button.dataset.unmatched === moveUnmatched));
   for (const button of $("wipes").children)
     button.setAttribute("aria-pressed", String(currentTransition === "wipe" && button.dataset.clip === (currentWipe?.id ?? "")));
   // As wide as its rate, as the panel's readout: "10:00" needs a fifth character.
@@ -855,6 +871,7 @@ function applySettings(s) {
   if (s.fade_curve && !touched.fadeCurve) curves.fade.set(s.fade_curve);
   if (store.get("fadeColor", null) === null) fadeColor.seed(s.fade_color || null);
   if (s.transition && !tookTransition) currentTransition = s.transition;
+  if (["fade", "cut"].includes(s.move_unmatched) && store.get("moveUnmatched", null) === null) moveUnmatched = s.move_unmatched;
   if (s.wipe_file && !touched.wipe && !wipes.length) $("wipe-file").value = s.wipe_file;
   renderTransition();
 }
@@ -907,7 +924,8 @@ const clock = {offset: Infinity, at: 0, pts: -Infinity}, CLOCK_DRIFT = 1e-4;
 let mix = null, takePressedAt = -Infinity, takeAcceptedAt = -Infinity, takeRuns = false, gripBack = null, gripShown = 0;
 const mixOn = () => mix !== null && !mix.ended;
 // The take's mix a status shows (an Auto's or a wipe's, not the lever's): "crossfade", "wipe" or null.
-const takeMix = (s) => (s && ["crossfade", "wipe"].includes(s.transition) && !s.transition_manual ? s.transition : null);
+const mixKind = (transition) => (transition === "move" ? "crossfade" : transition);   // a move draws as a fade
+const takeMix = (s) => (s && ["crossfade", "wipe", "move"].includes(s.transition) && !s.transition_manual ? mixKind(s.transition) : null);
 // A take of the mixer's not on air yet (a wipe getting ready): the lever is only recorded, as under a mix.
 const takeWaiting = () => !!takeMix(state?.status) && !state.status.transition_on_air;
 const takeOwns = () => mixOn() || takeWaiting();
@@ -1055,7 +1073,7 @@ function mixDrawn(t) {
 // press on a held mix runs it on once the mixer has it (resuming, acceptTake); pressed again before that, it holds it
 // again.
 function pressTake(kind) {
-  if (!["cut", "fade", "wipe"].includes(kind)) return false;
+  if (!["cut", "fade", "wipe", "move"].includes(kind)) return false;
   takePressedAt = performance.now();
   // Any Auto holds the mixer's mix, and a wipe of its clip cache (a wipe decoded per take runs to its end).
   const holding = kind !== "cut" && mixOn() && (mix.kind === "crossfade" || !!state?.status?.wipe_cache);
@@ -1069,7 +1087,7 @@ function pressTake(kind) {
 // Accepted: a held mix runs on from its hold, a new Auto starts a frame on (the mixer's Ready), from where the lever's
 // mix is.
 function acceptTake(kind, {duration_sec: seconds, curve, color}, halted) {
-  if (!["cut", "fade", "wipe"].includes(kind)) return;
+  if (!["cut", "fade", "wipe", "move"].includes(kind)) return;
   const t = performance.now();
   takeAcceptedAt = t;
   if (kind === "cut" && !lever.engaged) parkLever(1 - lever.origin);   // the Cut ended the lever's own take midway
@@ -1084,7 +1102,7 @@ function acceptTake(kind, {duration_sec: seconds, curve, color}, halted) {
   }
   // A wipe decoded per take, or of unknown length, is drawn once the mixer has its clip on air (observe).
   if (kind === "wipe" && !(seconds > 0 && state?.status?.wipe_cache)) return;
-  const mixKind = kind === "fade" ? "crossfade" : "wipe", duration = seconds * 1000;
+  const mixKind = kind === "wipe" ? "wipe" : "crossfade", duration = seconds * 1000;
   const x = lever.progress() > K_END ? lever.progress() : 0;
   lever.release();
   mix = startMix(mixKind, guessStart(t, x, duration, mixKind), duration, takeShape(mixKind, {curve, color}), x);
@@ -1102,7 +1120,7 @@ function shownTake(frame) {
   }
   if (lever.progress() > K_END) return {kind: lever.kind, progress: lever.progress(), lever: true};
   const s = state?.status || {};
-  return theirLever(s) ? {kind: s.transition, progress: s.transition_progress || 0, lever: true} : null;
+  return theirLever(s) ? {kind: mixKind(s.transition), progress: s.transition_progress || 0, lever: true} : null;
 }
 // The LEDs and the trail fill from the end the lever started at, so they grow toward the grip whichever way
 // the lever runs; under AUTO they fill the same way at the mix's progress, the grip runs with them, and it goes
@@ -1114,7 +1132,8 @@ function renderProgramState(take) {
   const transition = take?.kind || "idle";
   if (tookAs?.transition === transition) tookAs.seen = true;
   else if (tookAs?.seen) tookAs = null;
-  const name = tookAs?.transition === transition ? tookAs.name : transition === "crossfade" ? "fade" : transition;
+  const name = tookAs?.transition === transition ? tookAs.name : state?.status?.transition === "move" ? "move"
+    : transition === "crossfade" ? "fade" : transition;
   const how = take?.lever ? " · lever" : take?.held ? " · held" : "";
   const black = {"fading-in": " · fading to black", on: " · black", "fading-out": " · fading from black"}[state?.ftb?.phase] || "";
   const text = (take ? `on air · ${name} ${Math.round(take.progress * 100)}%${how}` : state?.status?.transition === "cut" ? "on air · cut" : "on air") + black;
@@ -1242,7 +1261,9 @@ function sendPark() {
   shipLever({position: parking.position, ...leverTake(fadeSeconds() ?? FADE_SECONDS, leverWipe() || null)});
 }
 // What a position carries: the mix it runs (the fade rate, curve and colour, or the wipe).
-const leverTake = (duration_sec, wipe_file) => ({duration_sec, curve: curves.fade.value, color: fadeColor.hex() || null, wipe_file});
+const leverTake = (duration_sec, wipe_file) => (currentTransition === "move" && !wipe_file
+  ? {duration_sec, curve: curves.fade.value, color: null, wipe_file, move: true, unmatched: moveUnmatched}
+  : {duration_sec, curve: curves.fade.value, color: fadeColor.hex() || null, wipe_file});
 // A position goes over the socket, numbered; as a request until the socket is open.
 // t_ms: when the position was sampled; the bridge spaces the positions by it, whatever the network did to them.
 function shipLever(position) {
@@ -1278,7 +1299,7 @@ function sendLever() {
   lever.move(value);
   renderLever();
   // Program's state names the lever's mix as a take's; a new object on every move would never be seen, so never cleared.
-  const name = wipe_file ? (currentWipe?.name || "wipe").toLowerCase() : position.color ? "dip" : "fade";
+  const name = wipe_file ? (currentWipe?.name || "wipe").toLowerCase() : position.move ? "move" : position.color ? "dip" : "fade";
   if (tookAs?.transition !== lever.kind || tookAs.name !== name) tookAs = {transition: lever.kind, name};
   shipLever(position);
 }
@@ -2507,6 +2528,11 @@ const selectFade = () => { fadeColor.mix(); selectTransition("fade"); };
 $("fade").onclick = selectFade;
 const selectDip = () => { fadeColor.dip(); selectTransition("fade"); };
 $("dip").onclick = selectDip;
+// Move: Auto and the lever glide what both scenes show; its unmatched choice is this viewer's, remembered.
+const selectMove = () => selectTransition("move");
+$("move").onclick = selectMove;
+for (const button of $("move-unmatched").children)
+  button.onclick = () => { store.set("moveUnmatched", moveUnmatched = button.dataset.unmatched); renderTransition(); restFocus(); };
 $("ftb").onclick = toggleFtb;
 $("direct").onclick = () => { directTouched = true; setDirect(!direct); };
 $("fade-s").oninput = () => { touched.fade = true; renderTransition(); };
@@ -2590,6 +2616,7 @@ addEventListener("keydown", (e) => {
   else if (k === "c") takeButton("cut");
   else if (k === "f") selectFade();
   else if (k === "w") selectWipe();
+  else if (k === "m") selectMove();
   else if (k === "d" && e.shiftKey) $("direct").click();   // Shift, not the letter's case: D with Caps Lock still dips
   else if (k === "d") selectDip();
   else if (flip) flipPage(flip);

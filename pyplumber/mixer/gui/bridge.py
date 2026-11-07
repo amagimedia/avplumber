@@ -10,8 +10,8 @@ import time
 
 from pyplumber.mixer.control import AvpConnection, AvpProtocolError, mixer_command
 
-TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")
-PROGRAM_TAKES = ("cut", "fade", "wipe")
+TAKE_COMMANDS = ("cut", "fade", "wipe", "move", "preview", "interrupt")
+PROGRAM_TAKES = ("cut", "fade", "wipe", "move")
 AUX_COMMANDS = ("aux", "aux_layout", "aux_page")
 STATE_TTL_S = 0.2
 # What a show fixes when it is built (its settings, its scenes, the layouts its AUX buses offer) is

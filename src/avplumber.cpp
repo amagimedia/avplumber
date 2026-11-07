@@ -988,14 +988,30 @@ public:
             orch.fade(scene_name, duration_sec, curve, dip, CommandTiming::received());
         };
 
+        // mixer.move {"mixer":"mixer","scene":"scene_name","duration_sec":1.0,"curve":"ease-in-out",
+        //             "unmatched":"fade"}: layers of a source in both scenes glide from Program's
+        //             placement to the scene's; the others fade (default) or cut at the half. It
+        //             fades when it cannot glide; mixer.status "move" says why.
+        commands_["mixer.move"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.move", arg);
+            const double duration_sec = req.value("duration_sec", 1.0);
+            if (!(duration_sec > 0))
+                throw Error("mixer.move: duration_sec must be > 0");
+            const auto curve = avp::mixer::parseFadeCurve(req.value("curve", std::string("linear")));
+            mixerOrchestrator(req.at("mixer").get<std::string>()).move(
+                req.at("scene").get<std::string>(), duration_sec, curve, req.value("unmatched", std::string("fade")),
+                CommandTiming::received());
+        };
+
         // mixer.lever {"mixer":"mixer","position":0.4,"duration_sec":1.0,"curve":"linear","color":null,
-        //             "wipe_file":null,"span_ms":16.7}:
+        //             "wipe_file":null,"span_ms":16.7,"move":false,"unmatched":"fade"}:
         // the lever arm (T-bar) at a fader position in [0, 1]; it mixes to Preview from the end it
         // rests at, the other end completes, its start cancels. duration_sec, curve and color are
         // the mix's, for AUTO to run it on from the lever. A wipe_file (null or "" mixes) wipes with
         // that cached clip instead, its frame following the lever. span_ms (> 0, applied within one
         // frame..200 ms): the time the picture takes to reach this position, the controller's own
-        // spacing of its positions.
+        // spacing of its positions. move: the lever's take is a move (mixer.move), its unmatched
+        // sources fading or cutting.
         commands_["mixer.lever"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.lever", arg);
             const double position = req.at("position").get<double>();
@@ -1018,7 +1034,8 @@ public:
                     throw Error("mixer.lever: span_ms must be > 0");
             }
             mixerOrchestrator(req.at("mixer").get<std::string>()).lever(position, duration_sec, curve, dip,
-                                                                       wipe_file, span_ms);
+                                                                       wipe_file, span_ms, req.value("move", false),
+                                                                       req.value("unmatched", std::string("fade")));
         };
 
         // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0}
