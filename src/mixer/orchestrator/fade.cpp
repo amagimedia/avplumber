@@ -86,25 +86,28 @@ void MixerOrchestrator::emitTransitionProgress(const char* kind, double t, int64
 
 void MixerOrchestrator::lever(double position, double duration_sec, FadeCurve curve,
                               std::optional<std::array<uint8_t, 3>> dip, const std::string& wipe_file,
-                              std::optional<double> span_ms) {
+                              std::optional<double> span_ms, bool move, const std::string& unmatched) {
     if (!std::isfinite(position)) throw Error("mixer: invalid lever position");
     if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid fade duration");
     if (span_ms && !(*span_ms > 0 && std::isfinite(*span_ms))) throw Error("mixer: invalid lever span");
+    if (move && (!wipe_file.empty() || dip)) throw Error("mixer: the lever's move has no wipe or dip");
+    if (unmatched != "fade" && unmatched != "cut") throw Error("mixer: a move's unmatched sources fade or cut");
     avp::timeline::mark("lever " + std::to_string(position));
     std::lock_guard<std::mutex> lock(state_->mutex);
-    state_->lever_take = {duration_sec, curve, dip, wipe_file};
+    state_->lever_take = {duration_sec, curve, dip, wipe_file, move, unmatched};
     leverTo(position, span_ms);
 }
 
 void MixerOrchestrator::leverTo(double position, std::optional<double> span_ms) {
     const auto mode = state_->transition_mode.load();
     const bool manual = state_->take_manual && (mode == MixerState::TransitionMode::Crossfade ||
-                                                mode == MixerState::TransitionMode::Wipe);
+                                                mode == MixerState::TransitionMode::Wipe ||
+                                                mode == MixerState::TransitionMode::Move);
     // An AUTO, cut or wipe on air owns the program; once the lever reached an end, its positions
     // wait for the picture to get there: a late or repeated one never undoes that end.
     const auto step = leverStep(state_->lever, position, mode == MixerState::TransitionMode::Idle, manual,
                                 manual && state_->take_lever_end != LeverEnd::None,
-                                state_->blend_on_air || state_->wipe_on_air);
+                                state_->takeOnAir());
     switch (step.kind) {
         case LeverStep::Kind::Ignore: return;
         case LeverStep::Kind::Drop: cancelLeverTake(); return;
@@ -115,7 +118,9 @@ void MixerOrchestrator::leverTo(double position, std::optional<double> span_ms) 
                 return;
             }
             const auto& take = state_->lever_take;
-            if (take.wipe_file.empty()) {
+            if (take.move) {
+                beginMove(scene, take.duration_sec, take.curve, take.unmatched, monotonicNs(), /*manual=*/true);
+            } else if (take.wipe_file.empty()) {
                 beginCrossfade(scene, take.duration_sec, take.curve, take.dip, monotonicNs(), /*manual=*/true);
             } else {
                 // Checked before the take begins: a take that fails clears the Preview.
@@ -128,7 +133,7 @@ void MixerOrchestrator::leverTo(double position, std::optional<double> span_ms) 
                 }
                 armWipe(scene, take.wipe_file, std::nullopt);
             }
-            logstream << "mixer: lever " << (take.wipe_file.empty() ? "mixes" : "wipes with " + take.wipe_file)
+            logstream << "mixer: lever " << (take.move ? "moves" : take.wipe_file.empty() ? "mixes" : "wipes with " + take.wipe_file)
                       << " to " << scene;
             break;
         }
@@ -139,7 +144,7 @@ void MixerOrchestrator::leverTo(double position, std::optional<double> span_ms) 
     // The take follows the lever once on air; selectProgram (a mix) and selectWipe bring it up there.
     // A wipe's clip follows it from the arm, so its overlay comes up where the lever is, not at its
     // first frame; below its switch point until on air, the background still Program.
-    if (state_->blend_on_air || state_->wipe_on_air)
+    if (state_->takeOnAir())
         moveLever(step.progress, span_ms);
     else if (state_->transition_mode == MixerState::TransitionMode::Wipe &&
              state_->take_phase == MixerState::TakePhase::WipeReady)
@@ -208,7 +213,7 @@ void MixerOrchestrator::applyTakeSchedule() {
     const FadeRequest& request = *state_->take_request;
     if (state_->transition_mode == MixerState::TransitionMode::Wipe)
         setNodeObject(state_->wipe_input_node_name, "scrub", scrubSchedule(rampTimesNs(request)));
-    else
+    else if (state_->transition_mode != MixerState::TransitionMode::Move)   // a move's slot reads the clock
         sendAlpha(request);
     clampTakeClock();
 }
@@ -253,6 +258,7 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
     const auto on_air = [&] {
         if (state_->blend_on_air) return MixerState::transSourceSwitcherIndex();
         if (state_->wipe_on_air && state_->wipe_switched) return target;
+        if (state_->move_on_air) return target;   // a cut under a move waits on the glide
         return state_->pgmSourceSwitcherIndex();
     };
     // A destination frame of the tick program has already shown completes a take without being
@@ -269,6 +275,8 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
         endTakeClock(TakeClock::End::Completed, keys_ns);
         completeTake(target_pts);
         return target_pts == last_ns ? -1 : target;
+    } else if (mode == MixerState::TransitionMode::Move) {
+        return selectMove(frames, target, last_ns);
     } else if (mode == MixerState::TransitionMode::Crossfade) {
         if (state_->take_phase == MixerState::TakePhase::Ready) {
             // Preview can arrive behind program. Keep selecting the live program
@@ -377,6 +385,8 @@ int MixerOrchestrator::selectFrame(bool wipe, const std::vector<const av::VideoF
             // A blend whose replaced preset never renders does not keep the take alive.
             if (pts > last_ns && state_->destination_ready &&
                 ((mode == MixerState::TransitionMode::Crossfade && selected == 2) ||
+                 (mode == MixerState::TransitionMode::Move && state_->move_on_air &&
+                  selected == state_->pvwSourceSwitcherIndex()) ||
                                  (mode == MixerState::TransitionMode::Wipe && wipe && selected == 1)))
                 state_->take_deadline_ns = monotonicNs() + kTakeReadyTimeoutMs * 1000000;
         }

@@ -103,7 +103,7 @@ struct MixerState : public InstanceShared<MixerState> {
         int64_t published_ns = 0;  // when it was published (monotonic ns)
         int64_t received_ns = 0;   // when the take that ended in it was received (monotonic ns;
                                    // 0: not a take), for the followers' latency from the command
-        std::string kind;          // the take: "cut", "fade", "dip", "wipe"; "" for a preview or a clear
+        std::string kind;          // the take: "cut", "fade", "dip", "wipe", "move"; "" for a preview or a clear
     };
     std::mutex preview_mutex;
     PreviewChange preview;
@@ -122,6 +122,10 @@ struct MixerState : public InstanceShared<MixerState> {
     /// pgm_zoom_end_ns (monotonic) or the next take. last_zoom: the last zoom request's outcome.
     Parameters pending_zoom, take_zoom, pgm_zoom, last_zoom;
     int64_t pgm_zoom_end_ns = 0;
+    /// Move transition (layer_move.hpp MoveSpec as JSON). pending_move: what the move being
+    /// prepared puts in the destination's composition, with the inputs and routes of both scenes
+    /// (move_plan.hpp); take_move: the running move's; last_move: the last move request's outcome.
+    Parameters pending_move, take_move, last_move;
     /// The running take published its preview already (publishTakePreview), so
     /// completeTransition does not publish a second revision.
     bool take_preview_published = false;
@@ -182,16 +186,17 @@ struct MixerState : public InstanceShared<MixerState> {
     /// The compositors' canvas transfer (mixer.init "color"); a dip colour is converted for it.
     AVColorTransferCharacteristic canvas_transfer = AVCOL_TRC_BT709;
 
-    enum class TransitionMode { Idle, Cut, Crossfade, Wipe };
+    enum class TransitionMode { Idle, Cut, Crossfade, Wipe, Move };
     std::atomic<TransitionMode> transition_mode{TransitionMode::Idle};
     uint64_t timeline_take = 0;   // the take's range on the Nsight timeline (timeline.hpp)
     /// The running take's kind as the followers and transition events report it; "" while idle.
-    /// Crossfade with take_dip is "dip", otherwise "fade".
+    /// Crossfade with take_dip is "dip", otherwise "fade"; Move is "move".
     const char* takeKind() const {
         switch (transition_mode.load()) {
             case TransitionMode::Cut: return "cut";
             case TransitionMode::Crossfade: return take_dip ? "dip" : "fade";
             case TransitionMode::Wipe: return "wipe";
+            case TransitionMode::Move: return "move";
             default: return "";
         }
     }
@@ -215,6 +220,9 @@ struct MixerState : public InstanceShared<MixerState> {
     // a take acts on that transition, as a switcher's CUT and AUTO do, and never starts another.
     bool blend_on_air = false;
     bool wipe_on_air = false;
+    // A move on air: program shows the destination slot, which draws the glide (layer_move.hpp).
+    bool move_on_air = false;
+    bool takeOnAir() const { return blend_on_air || wipe_on_air || move_on_air; }
     // The crossfade on air, kept to re-send its alpha when AUTO pauses or resumes it; for a wipe
     // the lever started, the schedule its clip, its background and its keys follow.
     std::optional<FadeRequest> take_request;
@@ -242,6 +250,8 @@ struct MixerState : public InstanceShared<MixerState> {
         FadeCurve curve = FadeCurve::Linear;
         std::optional<std::array<uint8_t, 3>> dip;
         std::string wipe_file;   // empty: a mix
+        bool move = false;       // a move instead of a mix (no wipe_file)
+        std::string unmatched = "fade";
     } lever_take;
     bool take_manual = false;
     double take_lever = 0;

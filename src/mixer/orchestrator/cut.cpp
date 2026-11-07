@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "../move_plan.hpp"
 
 namespace avp::mixer {
 
@@ -52,7 +53,8 @@ void MixerOrchestrator::completeTake(int64_t pts_ns) {
         setNodeObject(state_->wipe_otm_name, "outputs", Parameters(1u));
         retireWipeChain();
     }
-    state_->blend_on_air = state_->wipe_on_air = state_->take_paused = false;
+    state_->blend_on_air = state_->wipe_on_air = state_->move_on_air = state_->take_paused = false;
+    state_->take_move = nullptr;   // the slot drops it at the clock's end
     state_->take_request.reset();
     endTakeClock(TakeClock::End::Completed, pts_ns);
     // A take the lever completed leaves it engaged at that end: moving it back starts the next.
@@ -76,7 +78,7 @@ void MixerOrchestrator::cut(const std::string& scene_name, CutLatency::Clock::ti
     const uint64_t generation = state_->transition_generation + 1;   // beginTake's
     if (zoom) {
         std::string why;
-        Parameters spec = state_->blend_on_air || state_->wipe_on_air
+        Parameters spec = state_->takeOnAir()
             ? Parameters(nullptr) : planCutZoom(scene_name, *zoom, generation, why);
         if (spec.is_null() && why.empty()) why = "a transition is on air";
         state_->last_zoom = {{"generation", generation}, {"scene", scene_name}, {"result", spec.is_null() ? "cut" : "zoom"},
@@ -152,10 +154,14 @@ void MixerOrchestrator::definePicture(const std::string& source, const Parameter
 }
 
 bool MixerOrchestrator::actOnTransitionOnAir(const std::string& scene_name, MixerState::TransitionMode pressed) {
-    if (!state_->blend_on_air && !state_->wipe_on_air) return false;
+    if (!state_->takeOnAir()) return false;
     if (state_->cut_latency) state_->cut_latency->timing.cancel();
     const bool same_scene = scene_name == state_->transition_scene_name;
-    if (!same_scene) replacePreset(scene_name);
+    const bool cut_under_move = pressed == MixerState::TransitionMode::Cut &&
+                                state_->transition_mode == MixerState::TransitionMode::Move;
+    // A cut under a move lands on the scene itself: its slot reloads without the glide, and the
+    // first frame of that revision completes it (selectProgram's cut branch).
+    if (!same_scene || cut_under_move) replacePreset(scene_name, /*keep_move=*/!cut_under_move);
     if (pressed == MixerState::TransitionMode::Cut) {
         // selectProgram's cut branch takes the preset's next ready frame; until then the
         // transition stays on air as it is, both sources moving.
@@ -170,6 +176,7 @@ bool MixerOrchestrator::actOnTransitionOnAir(const std::string& scene_name, Mixe
     } else if (same_scene && state_->take_manual) {
         runOnFromLever();
     } else if (same_scene && (state_->transition_mode == MixerState::TransitionMode::Crossfade ||
+                              state_->transition_mode == MixerState::TransitionMode::Move ||
                               (state_->transition_mode == MixerState::TransitionMode::Wipe && state_->take_request))) {
         toggleTakePause();
     } else if (same_scene) {
@@ -179,8 +186,23 @@ bool MixerOrchestrator::actOnTransitionOnAir(const std::string& scene_name, Mixe
     return true;
 }
 
-void MixerOrchestrator::replacePreset(const std::string& scene_name) {
-    loadSceneIntoSlot(!state_->pgm_is_slot_a, scene_name, true);
+void MixerOrchestrator::replacePreset(const std::string& scene_name, bool keep_move) {
+    if (state_->transition_mode == MixerState::TransitionMode::Move && keep_move && !state_->take_move.is_null()) {
+        // The glide goes on to the new preset on the clock on air; a plan that cannot run shows
+        // the preset as it is for the rest of the take.
+        std::string why;
+        state_->pending_move = planMove(*state_, state_->pgmScene(), state_->scenes.at(scene_name),
+                                        state_->take_move.at("generation").get<uint64_t>(),
+                                        state_->take_move.at("unmatched").get<std::string>(), why);
+        if (!why.empty()) state_->last_move = {{"scene", scene_name}, {"result", "preset"}, {"reason", why}};
+    }
+    try {
+        loadSceneIntoSlot(!state_->pgm_is_slot_a, scene_name, true);
+    } catch (...) {
+        state_->pending_move = nullptr;
+        throw;
+    }
+    state_->take_move = std::exchange(state_->pending_move, Parameters(nullptr));
     state_->transition_scene_name = scene_name;
     // Only a frame of the new revision completes the transition; one that never comes ends it
     // through the take deadline like any unready destination.

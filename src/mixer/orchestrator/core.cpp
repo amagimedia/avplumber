@@ -121,7 +121,7 @@ void MixerOrchestrator::interruptTransition(Interruption why) {
     if (state_->cut_latency) state_->cut_latency->timing.cancel();
     if (state_->transition_mode == MixerState::TransitionMode::Idle) return;
     const auto previous_mode = state_->transition_mode.load();
-    const bool was_on_air = state_->blend_on_air || state_->wipe_on_air;
+    const bool was_on_air = state_->takeOnAir();
     const auto generation = ++state_->transition_generation;
     TransitionGuard guard([&] { abortTransition(generation); });
     // Back to the program as it was before the transition, like a switcher's transition cut
@@ -149,7 +149,8 @@ void MixerOrchestrator::dropTransition(MixerState::TransitionMode dropped) {
         // A resident chain parks at once. Group management retires a per-take decoder
         // independently: waiting here would add teardown time to every correction.
         cleanup([&] { retireWipeChain(); });
-    state_->blend_on_air = state_->wipe_on_air = state_->take_paused = false;
+    state_->blend_on_air = state_->wipe_on_air = state_->move_on_air = state_->take_paused = false;
+    state_->take_move = nullptr;   // the slot drops it at the clock's end
     state_->take_request.reset();
     endTakeClock(TakeClock::End::Cancelled, 0);   // keys going with it return to their state
     // A take the lever cancelled leaves it engaged where it is: moving it on starts the next.
@@ -165,7 +166,7 @@ void MixerOrchestrator::restoreProgramRouting(MixerState::TransitionMode dropped
     // A cut that had not landed left program untouched, unless it was completing a transition
     // on air; everything else showed something that the program picture now replaces.
     const bool picture_changed = dropped != MixerState::TransitionMode::Cut ||
-                                 state_->blend_on_air || state_->wipe_on_air;
+                                 state_->takeOnAir();
     switchProgramSelector(state_->pgm_is_slot_a);
     // An interrupted restore has no dedicated future frame, but it still lands on one: the
     // earliest program tick this control thread can reach, which is what every other emitter
@@ -246,8 +247,10 @@ Parameters MixerOrchestrator::status() const {
         case MixerState::TransitionMode::Cut: s["transition"] = "cut"; break;
         case MixerState::TransitionMode::Crossfade: s["transition"] = "crossfade"; break;
         case MixerState::TransitionMode::Wipe: s["transition"] = "wipe"; break;
+        case MixerState::TransitionMode::Move: s["transition"] = "move"; break;
     }
-    s["transition_on_air"] = state_->blend_on_air || state_->wipe_on_air;
+    s["transition_on_air"] = state_->takeOnAir();
+    s["move"] = state_->last_move;
     s["transition_paused"] = state_->take_paused && !state_->take_manual;
     s["transition_manual"] = state_->take_manual;
     s["transition_progress"] = state_->take_progress;

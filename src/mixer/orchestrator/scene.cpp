@@ -1,6 +1,7 @@
 // Sources, scenes and slot loading: what a scene means in node parameters and
 // how the PVW slot is prepared before a transition.
 #include "internal.hpp"
+#include "../move_plan.hpp"
 
 namespace avp::mixer {
 
@@ -193,17 +194,26 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     // The compositor resets stale input on its own render thread.
     state_->pvw_slot_scene.clear();
 
-    const SourceMask active_mask = state_->computeActiveInputsMask(scene);
+    // A move being prepared draws both scenes: the slot takes the inputs and routes of both.
+    std::optional<SceneDefinition> together;
+    if (!state_->pending_move.is_null()) {
+        std::string why;
+        together = moveUnionScene(state_->pgmScene(), scene, why);
+        if (!together) throw Error("mixer: move: " + why);
+    }
+    const SceneDefinition& drawn = together ? *together : scene;
+    const SourceMask active_mask = state_->computeActiveInputsMask(drawn);
     slot.revision = std::to_string(++state_->scene_revision);
     Parameters composition = {
         {"layers", compositorLayersFromScene(*state_, scene)},
         {"active_inputs", toParameters(active_mask)}, {"revision", slot.revision},
         {"warm", warm_cut && state_->prewarm_cut_scenes.count(scene_name) && canPrewarmScene(scene)}};
     if (!state_->pending_zoom.is_null()) composition["zoom"] = state_->pending_zoom;   // the cut being prepared
+    if (!state_->pending_move.is_null()) composition["move"] = state_->pending_move;   // the move being prepared
     setNodeObject(slot.compositor_name, "composition", composition);
 
     const auto* pgm = &state_->pgmScene();
-    publishSourceRoutes(is_slot_a ? &scene : pgm, is_slot_a ? pgm : &scene);
+    publishSourceRoutes(is_slot_a ? &drawn : pgm, is_slot_a ? pgm : &drawn);
     // The incoming scene, which fade/dip/wipe progress reports as its "to"; completeTake emits
     // transition_ended.
     state_->pvw_slot_scene = scene_name;
@@ -222,7 +232,7 @@ void MixerOrchestrator::preview(const std::string& scene_name) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!state_->scenes.count(scene_name))
         throw Error("mixer.preview: unknown scene: " + scene_name);
-    if (state_->blend_on_air || state_->wipe_on_air) {
+    if (state_->takeOnAir()) {
         // A preset selection during a transition changes its incoming picture, as on a switcher.
         if (scene_name != state_->transition_scene_name) replacePreset(scene_name);
         return;
