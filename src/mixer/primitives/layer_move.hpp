@@ -83,15 +83,18 @@ inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, con
     if (!(s > 0)) return from;
     if (s >= 1) return to;
     const auto frame = [&](size_t input) { return input < sources.size() ? sources[input] : nullptr; };
-    struct Item { double key; LayerSpec layer; };
+    // `weight` < 0: a matched layer; else a layer in one scene only, faded by its scene's share
+    // (1 - s for A, s for B) once the stacking is known; `box` its placed box (none: unplaced).
+    struct Item { double key; LayerSpec layer; double weight = -1; bool from_a = false; std::optional<RectF> box; };
     std::vector<Item> items;
     const bool cut = unmatched == "cut";
-    // A layer in one scene only: `weight` is its scene's share (1 - s for A, s for B).
     const auto alone = [&](LayerSpec l, size_t input, double weight, bool from_a) {
         if (cut ? (from_a ? s >= 0.5 : s < 0.5) : false) return;
         l.input = int(input);
-        if (!cut) l.opacity = float(l.opacity * weight);
-        items.push_back({double(l.z), std::move(l)});
+        std::optional<RectF> box;
+        if (const auto pose = placedPose(l, frame(input), fmt)) box = pose->box;
+        const double key = l.z;
+        items.push_back({key, std::move(l), cut ? -1. : weight, from_a, box});
     };
     std::vector<bool> used(from.size(), false);
     std::vector<bool> placed_b(to.size(), false);
@@ -134,16 +137,32 @@ inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, con
             l.pivot_y = pa.second + (pb.second - pa.second) * s;
         }
         l.opacity = float(from[i].opacity + (to[j].opacity - from[i].opacity) * s);
-        items.push_back({from[i].z + (to[j].z - from[i].z) * s, std::move(l)});
+        items.push_back({from[i].z + (to[j].z - from[i].z) * s, std::move(l), -1., false, std::nullopt});
     }
     for (size_t j = 0; j < to.size(); ++j)
         if (!placed_b[j]) alone(to[j], to[j].sourceIndex(j), s, false);
     for (size_t i = 0; i < from.size(); ++i)
         if (!used[i]) alone(from[i], from[i].sourceIndex(i), 1 - s, true);
+    std::stable_sort(items.begin(), items.end(), [](const Item &x, const Item &y) { return x.key < y.key; });
+    // A fading layer wholly under an opaque fading layer of the other scene stays whole: the upper
+    // one alone carries the mix, as a fade's (1-s)A + sB, never through black.
+    const auto covers = [](const RectF &o, const RectF &u) {
+        return o.x <= u.x && o.y <= u.y && o.x + o.w >= u.x + u.w && o.y + o.h >= u.y + u.h;
+    };
+    for (size_t i = 0; i < items.size(); ++i) {
+        Item &u = items[i];
+        if (u.weight < 0) continue;
+        bool whole = false;
+        for (size_t j = i + 1; j < items.size() && !whole && u.box; ++j) {
+            const Item &o = items[j];
+            whole = o.weight >= 0 && o.from_a != u.from_a && !o.layer.blend && o.layer.opacity >= 1.f && !o.layer.rotation_deg &&
+                    o.box && covers(*o.box, *u.box);
+        }
+        if (!whole) u.layer.opacity = float(u.layer.opacity * u.weight);
+    }
     items.erase(std::remove_if(items.begin(), items.end(), [](const Item &it) {
         return !(it.layer.opacity > 0) || (it.layer.dst_exact && !(it.layer.dst_exact->w > 0 && it.layer.dst_exact->h > 0));
     }), items.end());
-    std::stable_sort(items.begin(), items.end(), [](const Item &x, const Item &y) { return x.key < y.key; });
     std::vector<LayerSpec> out;
     out.reserve(items.size());
     for (auto &it : items) {

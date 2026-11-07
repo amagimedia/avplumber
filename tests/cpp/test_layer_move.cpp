@@ -187,6 +187,21 @@ static void slot_move_drops_on_cancel_and_later_takes(const Sources &src) {
     assert(!m.apply(drawn, &later, 100, src.all(), AV_PIX_FMT_NV12) && !m.spec && drawn == b);
 }
 
+// Two backgrounds that differ crossfade as a fade does, never through black: the incoming one stays
+// whole under the outgoing one, which alone fades.
+static void covered_background_stays_whole(const Sources &src) {
+    const auto a = layers(R"([{"input":0,"dst_w":1920,"dst_h":1080},{"input":1,"dst_x":1400,"dst_w":480,"dst_h":270,"z":1}])");
+    const auto b = layers(R"([{"input":3,"dst_w":1920,"dst_h":1080},{"input":1,"dst_x":100,"dst_w":480,"dst_h":270,"z":1}])");
+    const auto out = move(a, b, 0.5, src);
+    const auto at = [&](int input) { for (size_t i = 0; i < out.size(); ++i) if (out[i].input == input) return int(i); return -1; };
+    assert(at(3) >= 0 && at(0) > at(3));                      // the outgoing background draws above
+    assert(near(byInput(out, 3)->opacity, 1) && near(byInput(out, 0)->opacity, 0.5));
+    // A blended key does not cover: the layer under it still fades.
+    auto keyed = a;
+    keyed[0].blend = true;
+    assert(near(byInput(move(keyed, b, 0.5, src), 3)->opacity, 0.5));
+}
+
 int main() {
     const Sources src;
     endpoints_verbatim(src);
@@ -196,6 +211,7 @@ int main() {
     contain_is_placed_before_the_glide(src);
     unmatched_fade_and_cut(src);
     faded_out_layers_are_dropped(src);
+    covered_background_stays_whole(src);
     json_round_trip();
     slot_move_follows_the_take_clock(src);
     slot_move_drops_on_cancel_and_later_takes(src);
