@@ -166,8 +166,9 @@ void CudaRectDraw::validateSourceColor(const av::VideoFrame &src, bool packed_rg
 }
 
 // A transformed layer's plane `p` in its table entry (the affine entries read these).
-static void setAffine(const avp::mixer::AffinePlane &plane, int p, AvpRectLayer &out) {
+static void setAffine(const avp::mixer::AffinePlane &plane, int p, const LayerSpec &L, AvpRectLayer &out) {
     out.affine = 1;
+    out.transparency = L.opacity < 1.f && !L.blend ? 1.f - L.opacity : 0.f;
     std::copy(plane.m, plane.m + 6, out.m[p]);
     std::copy(plane.edge, plane.edge + 4, out.edge[p]);
     std::copy(plane.aa, plane.aa + 2, out.aa[p]);
@@ -184,7 +185,9 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
             logstream << "cuda_rect_overlay: rotation and sub-pixel crops need a YUV canvas; drawing it plain";
         DrawOp plain = op;
         plain.transform.reset();
-        Rect crop{op.layer.crop_x, op.layer.crop_y, op.layer.crop_w, op.layer.crop_h}, dst = op.transform->box;
+        const auto &b = op.transform->box;
+        Rect crop{op.layer.crop_x, op.layer.crop_y, op.layer.crop_w, op.layer.crop_h};
+        Rect dst{int(std::lround(b.x)), int(std::lround(b.y)), int(std::lround(b.w)), int(std::lround(b.h))};
         if (!avp::mixer::clipLayer(crop, dst, op.transform->clip)) { out = AvpRectLayer{}; return; }
         plain.layer.crop_x = crop.x; plain.layer.crop_y = crop.y; plain.layer.crop_w = crop.w; plain.layer.crop_h = crop.h;
         plain.layer.dst_x = dst.x; plain.layer.dst_y = dst.y; plain.layer.dst_w = dst.w; plain.layer.dst_h = dst.h;
@@ -243,7 +246,7 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
             // already hold the bounds and taps.
             const auto plane = avp::mixer::affinePlane(*op.transform, 0, 0, 0, 0);
             if (!plane) { out = AvpRectLayer{}; return; }
-            setAffine(*plane, 0, out);
+            setAffine(*plane, 0, op.layer, out);
         }
         return;
     }
@@ -294,7 +297,7 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
             const auto plane = avp::mixer::affinePlane(*op.transform, p ? dd->log2_chroma_w : 0, p ? dd->log2_chroma_h : 0,
                                                        p ? gd->log2_chroma_w : 0, p ? gd->log2_chroma_h : 0);
             if (!plane) { out = AvpRectLayer{}; return; }
-            setAffine(*plane, p, out);
+            setAffine(*plane, p, op.layer, out);
             out.sx[p] = plane->taps.x; out.sy[p] = plane->taps.y; out.sw[p] = plane->taps.w; out.sh[p] = plane->taps.h;
             out.dx[p] = plane->bounds.x; out.dy[p] = plane->bounds.y; out.dw[p] = plane->bounds.w; out.dh[p] = plane->bounds.h;
         }
@@ -435,7 +438,7 @@ int CudaRectDraw::fillTable(CUstream stream, const std::vector<DrawOp> &ops, con
         const bool fades = entry.kind >= AVP_RECT_KIND_RGB && entry.mul < 1.f;   // only a blended RGBA mul is below 1
         kinds.fade = kinds.fade || fades;
         // Not an error: a key without alpha (or on a packed canvas) still cuts cleanly.
-        if (op.layer.opacity < 1.f && !fades && !std::exchange(opacity_warned_, true))
+        if (op.layer.opacity < 1.f && !fades && !entry.affine && !std::exchange(opacity_warned_, true))
             logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
         // A demoted layer needs the filter entries' code limit whatever its filter.
         kinds.filter = kinds.filter || entry.filter != AVP_RECT_FILTER_BILINEAR || entry.kind == AVP_RECT_KIND_DEMOTE;

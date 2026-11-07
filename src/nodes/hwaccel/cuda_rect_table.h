@@ -56,4 +56,5 @@ struct AvpRectLayer {
     float edge[2][4];                 // u0, v0, u1, v1: the crop's edges for the coverage
     float aa[2][2];                   // destination samples per source unit across a u- and a v-edge
     float footprint[2][2];            // source units per destination sample along u and v (multisample)
+    float transparency;               // 1 - opacity of a faded non-blend layer: scales the coverage (0: opaque)
 };

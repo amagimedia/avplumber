@@ -13,8 +13,9 @@ using namespace avp::mixer;
 
 static bool near(double a, double b, double eps = 1e-4) { return std::fabs(a - b) <= eps; }
 static bool sameRect(const Rect &a, const Rect &b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; }
+static bool sameBox(const RectF &a, const Rect &b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; }
 
-static LayerTransform transform(RectF crop, Rect box, double deg = 0, Rect clip = {0, 0, 1920, 1080}) {
+static LayerTransform transform(RectF crop, RectF box, double deg = 0, Rect clip = {0, 0, 1920, 1080}) {
     LayerTransform t;
     t.crop = t.edges = crop;
     t.box = box;
@@ -74,7 +75,8 @@ static void quarter_turns_are_exact() {
 }
 
 static void pivot_default_is_the_box_centre() {
-    const Rect box{600, 600, 512, 512}, clip{0, 0, 3000, 3000};
+    const RectF box{600, 600, 512, 512};
+    const Rect clip{0, 0, 3000, 3000};
     assert(sameRect(luma(transform({0, 0, 512, 512}, box, 180, clip)).bounds, {599, 599, 514, 514}));
     auto t = transform({0, 0, 512, 512}, box, 180, clip);
     t.pivot_x = 600;
@@ -99,7 +101,7 @@ static void plane_matrices_conjugate_subsampling() {
 }
 
 static void bounds_clip_to_the_clip_rect() {
-    const Rect box{-200, 300, 800, 450};
+    const RectF box{-200, 300, 800, 450};
     const auto t = transform({0, 0, 1920, 1080}, box, 30);
     const auto p = luma(t);
     assert(p.bounds.x >= 0 && p.bounds.y >= 0 && p.bounds.x + p.bounds.w <= 1920 && p.bounds.y + p.bounds.h <= 1080);
@@ -158,7 +160,7 @@ static void rotated_layer_keeps_its_crop_whole(const av::VideoFrame &frame) {
     assert(ops[0].src && ops[0].transform);
     const auto &t = *ops[0].transform;
     assert(t.crop.x == 0 && t.crop.y == 0 && t.crop.w == 1920 && t.crop.h == 1080);
-    assert(sameRect(t.box, {-480, 0, 960, 540}) && t.rotation_deg == 45);
+    assert(sameBox(t.box, {-480, 0, 960, 540}) && t.rotation_deg == 45);
     const auto &l = ops[0].layer;
     assert(l.dst_x == 0 && l.dst_y >= 0 && l.dst_w > 0 && l.dst_x + l.dst_w <= 1920);
     // The same layer unrotated is cut in proportion as before: half the box, half the source.
@@ -174,7 +176,7 @@ static void rotated_tile_layer_clips_to_its_tile(const av::VideoFrame &frame) {
     assert(ops[0].src && ops[0].transform);
     const auto &t = *ops[0].transform;
     assert(sameRect(t.clip, {960, 0, 960, 540}));
-    assert(sameRect(t.box, {960, 0, 960, 540}));
+    assert(sameBox(t.box, {960, 0, 960, 540}));
     assert(near(t.pivot_x, 1440) && near(t.pivot_y, 270));
     const auto &l = ops[0].layer;
     assert(l.dst_x >= 960 && l.dst_y >= 0 && l.dst_x + l.dst_w <= 1920 && l.dst_y + l.dst_h <= 540);
@@ -212,8 +214,29 @@ static void entry_selection() {
     }
 }
 
+// A box at a fractional position maps by the fraction: the move's sub-pixel motion.
+static void subpixel_box_moves_continuously() {
+    const auto at = luma(transform({0, 0, 960, 540}, {100, 50, 480, 270}));
+    const auto shifted = luma(transform({0, 0, 960, 540}, {100.25, 50, 480, 270}));
+    assert(near(shifted.m[2], at.m[2] - 0.25 * 2) && shifted.m[0] == at.m[0]);
+}
+
+static void needs_transform_for_faded_yuv() {
+    LayerSpec l;
+    assert(!needsTransform(l));
+    l.opacity = .5f;
+    assert(needsTransform(l));
+    l.blend = true;                       // a blended key fades by its table mul, on the plain entries
+    assert(!needsTransform(l));
+    LayerSpec box;
+    box.dst_exact = RectF{10.5, 0, 100, 100};
+    assert(needsTransform(box));
+}
+
 int main() {
     entry_selection();
+    subpixel_box_moves_continuously();
+    needs_transform_for_faded_yuv();
     identity_is_the_unit_matrix();
     subpixel_crop_scales_and_offsets();
     quarter_turns_are_exact();

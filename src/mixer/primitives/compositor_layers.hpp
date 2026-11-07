@@ -49,6 +49,9 @@ struct LayerSpec {
     bool pivot_set = false;
     double pivot_x = 0, pivot_y = 0;
     std::optional<RectF> crop_exact;
+    // A box with a fractional value, the twin of crop_exact, whose enclosing rect is in dst_*.
+    // Written by the move transition (layer_move.hpp), never parsed from JSON.
+    std::optional<RectF> dst_exact;
 
     /// The source this layer draws: `input`, or its position in the legacy one-layer-per-input order.
     size_t sourceIndex(size_t position) const { return input < 0 ? position : size_t(input); }
@@ -63,13 +66,15 @@ struct LayerSpec {
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
                source_canvas_w == other.source_canvas_w && source_canvas_h == other.source_canvas_h &&
                rotation_deg == other.rotation_deg && pivot_set == other.pivot_set && pivot_x == other.pivot_x &&
-               pivot_y == other.pivot_y && crop_exact == other.crop_exact;
+               pivot_y == other.pivot_y && crop_exact == other.crop_exact && dst_exact == other.dst_exact;
     }
 };
 
-/// Whether a layer draws through the affine entry: rotated, or cropped at a fraction of a pixel.
+/// Whether a layer draws through the affine entry: rotated, cropped or placed at a fraction of a
+/// pixel, or a faded layer that is not a blended key (a blended key fades by its table mul).
 inline bool needsTransform(const LayerSpec &l) {
-    return normalizedRotation(l.rotation_deg) != 0. || l.crop_exact.has_value();
+    return normalizedRotation(l.rotation_deg) != 0. || l.crop_exact.has_value() || l.dst_exact.has_value() ||
+           (l.opacity < 1.f && !l.blend);
 }
 
 struct DrawOp {
@@ -279,7 +284,7 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         const bool transformed = needsTransform(L);
         // A transformed layer keeps its crop and box whole: rotation and the quad test decide what
         // is drawn, and `clip` (the canvas, or the AUX tile below) where.
-        const auto withTransform = [&](DrawOp op, Rect box) {
+        const auto withTransform = [&](DrawOp op, RectF box) {
             LayerTransform t;
             t.crop = L.crop_exact ? *L.crop_exact : RectF{double(L.crop_x), double(L.crop_y), double(L.crop_w), double(L.crop_h)};
             t.box = box;
@@ -314,7 +319,9 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
                 L.crop_w = p.source.w; L.crop_h = p.source.h;
                 L.dst_x = p.destination.x; L.dst_y = p.destination.y;
                 L.dst_w = p.destination.w; L.dst_h = p.destination.h;
-                ops.push_back(withTransform({srcp, srcp->width(), srcp->height(), L}, p.destination));
+                const RectF placed = L.dst_exact ? *L.dst_exact
+                    : RectF{double(p.destination.x), double(p.destination.y), double(p.destination.w), double(p.destination.h)};
+                ops.push_back(withTransform({srcp, srcp->width(), srcp->height(), L}, placed));
                 continue;
             }
             // A box partly off the canvas draws its visible part: plane regions cannot start
@@ -336,7 +343,8 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
             const Rect box{L.dst_x, L.dst_y, int(std::lround(w)), int(std::lround(h))};
             if (box.w <= 0 || box.h <= 0) { ops.push_back({}); continue; }
             L.dst_w = box.w; L.dst_h = box.h;
-            ops.push_back(withTransform({srcp, srcp->width(), srcp->height(), L}, box));
+            ops.push_back(withTransform({srcp, srcp->width(), srcp->height(), L},
+                                        {double(box.x), double(box.y), double(box.w), double(box.h)}));
             continue;
         }
         if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, visible.w, visible.h) ||
@@ -376,7 +384,12 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         if (op.transform) {
             // The box and pivot map into the tile; the tile clips the bounds, not the source.
             auto &tr = *op.transform;
-            tr.box = {x, y, right - x, bottom - y};
+            if (l.dst_exact) {   // a fractional box maps exactly: no chroma alignment on the affine path
+                const double kx = double(t.w) / l.scene_w, ky = double(t.h) / l.scene_h;
+                tr.box = {t.x + tr.box.x * kx, t.y + tr.box.y * ky, tr.box.w * kx, tr.box.h * ky};
+            } else {
+                tr.box = {double(x), double(y), double(right - x), double(bottom - y)};
+            }
             tr.clip = t;
             if (!std::isnan(tr.pivot_x)) {
                 tr.pivot_x = t.x + tr.pivot_x * t.w / l.scene_w;
@@ -412,7 +425,8 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         const auto plane = t.edges.w > 0 && t.edges.h > 0 ? affinePlane(t, 0, 0, 0, 0) : std::nullopt;
         if (!plane) { op.src = nullptr; continue; }
         // The scale of crop to box decides `auto` once; rotation does not change it.
-        l.filter.mode = resolveScaleFilter(l.filter, int(std::lround(t.crop.w)), int(std::lround(t.crop.h)), t.box.w, t.box.h);
+        l.filter.mode = resolveScaleFilter(l.filter, int(std::lround(t.crop.w)), int(std::lround(t.crop.h)),
+                                           int(std::lround(t.box.w)), int(std::lround(t.box.h)));
         l.crop_x = plane->taps.x; l.crop_y = plane->taps.y; l.crop_w = plane->taps.w; l.crop_h = plane->taps.h;
         l.dst_x = plane->bounds.x; l.dst_y = plane->bounds.y; l.dst_w = plane->bounds.w; l.dst_h = plane->bounds.h;
     }

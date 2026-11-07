@@ -20,14 +20,15 @@ struct RectF {
 struct LayerTransform {
     RectF crop;                  // exact source rect, storage pixels; the affine maps it onto `box`
     RectF edges;                 // `crop` within the visible picture: the quad test and coverage
-    Rect box;                    // placed destination box before rotation, canvas pixels, unclipped
+    RectF box;                   // placed destination box before rotation, canvas pixels, unclipped;
+                                 // fractional for a move's sub-pixel glide
     double rotation_deg = 0;     // clockwise about the pivot, (-180, 180]
     double pivot_x = 0, pivot_y = 0;   // canvas pixels
     Rect clip;                   // the canvas, or the AUX tile the layer is drawn into
 
     bool operator==(const LayerTransform &o) const {
         auto same = [](const Rect &a, const Rect &b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; };
-        return crop == o.crop && edges == o.edges && same(box, o.box) && rotation_deg == o.rotation_deg &&
+        return crop == o.crop && edges == o.edges && box == o.box && rotation_deg == o.rotation_deg &&
                pivot_x == o.pivot_x && pivot_y == o.pivot_y && same(clip, o.clip);
     }
 };

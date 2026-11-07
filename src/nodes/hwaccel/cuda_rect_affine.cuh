@@ -60,7 +60,7 @@ __device__ __forceinline__ void draw_affine_yuv(float (*acc)[kLanes], const AvpR
         const int X = X0 + p;
         if (X < ldx || X >= ldx + ldw) continue;
         const float x = X + 0.5f, u = __fmaf_rn(m[0], x, uy), v = __fmaf_rn(m[3], x, vy);
-        const float cov = affine_coverage(u, v, L.edge[plane], L.aa[plane]);
+        const float cov = affine_coverage(u, v, L.edge[plane], L.aa[plane]) * (1.f - L.transparency);
         if (!(cov > 0.f)) continue;
         float s[kLanes];
         // The samplers take positions relative to the taps' rect, as the plain path does.
@@ -91,7 +91,7 @@ __device__ __forceinline__ void draw_affine_rgb(float (*acc)[kLanes], const AvpR
     auto weight = [&](int lx, int ly, float *rgb) -> float {
         const float x = lx + 0.5f, y = ly + 0.5f;
         const float u = __fmaf_rn(m[0], x, __fmaf_rn(m[1], y, m[2])), v = __fmaf_rn(m[3], x, __fmaf_rn(m[4], y, m[5]));
-        const float cov = affine_coverage(u, v, L.edge[0], L.aa[0]);
+        const float cov = affine_coverage(u, v, L.edge[0], L.aa[0]) * (1.f - L.transparency);
         if (!(cov > 0.f)) return 0.f;
         const float fx = u - 0.5f - sx, fy = v - 0.5f - sy;   // relative to the taps' rect
         const float a = !blend ? 1.f : (textured ? sample_alpha_tex(tex, sx, sy, sw, sh, L.a_off, fx, fy)

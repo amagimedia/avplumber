@@ -26,7 +26,7 @@ using avp::mixer::RectF;
 struct AffineDraw {
     const Frame *source;
     RectF crop;
-    Rect box;
+    RectF box;
     double deg = 0;
     int filter = AVP_RECT_FILTER_BILINEAR;
     float param = 0.f;
@@ -84,7 +84,7 @@ static float coverage(const AvpRectLayer &L, int p, int X, int Y, float &u, floa
     v = std::fmaf(m[3], x, std::fmaf(m[4], y, m[5]));
     const float cu = saturate(std::fmaf(std::fmin(u - e[0], e[2] - u), L.aa[p][0], 0.5f));
     const float cv = saturate(std::fmaf(std::fmin(v - e[1], e[3] - v), L.aa[p][1], 0.5f));
-    return cu * cv;
+    return cu * cv * (1.f - L.transparency);
 }
 
 // The unrounded value an affine YUV layer gives lane `c` of (X, Y) over `below`; false where it
@@ -152,7 +152,7 @@ static Kernel affineKernel(bool arrays) { return arrays ? composite_planes_affin
 
 // Sources 240x144 on a 512x288 canvas.
 static void arbitrary_angles_match_the_reference(const Frame &source, const Format &canvas_format) {
-    struct Case { const char *name; RectF crop; Rect box; double deg; };
+    struct Case { const char *name; RectF crop; RectF box; double deg; };
     const Case cases[] = {
         {"17 deg 1:1", {0, 0, 240, 144}, {136, 72, 240, 144}, 17},
         {"33.3 deg 0.6x", {0, 0, 240, 144}, {184, 100, 144, 86}, 33.3},
@@ -183,7 +183,7 @@ static void arbitrary_angles_match_the_reference(const Frame &source, const Form
 
 static void quarter_turns_are_exact_copies(const Frame &source, const Format &canvas_format) {
     const RectF crop{40, 8, 128, 128};
-    const Rect box{180, 80, 128, 128};
+    const RectF box{180, 80, 128, 128};
     for (double deg : {90., 180., 270.}) {
         const AvpRectLayer layer = affineEntry({&source, crop, box, deg}, canvas_format, 512, 288, false);
         Canvas out(canvas_format, 512, 288);
@@ -196,7 +196,7 @@ static void quarter_turns_are_exact_copies(const Frame &source, const Format &ca
         if (deg == 90.)   // clockwise: destination (X, Y) is source (col Y - by, row 127 - (X - bx))
             for (int y = 0; y < 128; ++y)
                 for (int x = 0; x < 128; ++x)
-                    if (out.code(0, box.x + x, box.y + y, 0) !=
+                    if (out.code(0, int(box.x) + x, int(box.y) + y, 0) !=
                         std::min(int(source.code(0, int(crop.x) + y, int(crop.y) + 127 - x, 0) * layer.mul + 0.5f),
                                  (256 << (canvas_format.depth - 8)) - 1))
                         throw std::runtime_error("90 deg is not the clockwise transpose");
@@ -425,6 +425,21 @@ static void rotated_rgba_key_matches_reference(std::mt19937 &rng, const Frame &s
     std::printf("PASS rotated RGBA key over %s: coverage x alpha, straight and premultiplied, opacity 1 and 0.4\n", canvas_format.name);
 }
 
+// A YUV layer faded by `transparency` in the affine entry: transparency 0.6 over a full layer.
+static void yuv_opacity_in_affine_entry(const Frame &source, const Format &canvas_format) {
+    const Draw base{&source, 0, 0, 240, 144, 0, 0, 512, 288};
+    const AvpRectLayer under = entry(base, canvas_format, false);
+    AvpRectLayer layer = affineEntry({&source, {20, 10, 200, 120}, {100, 50, 300, 180}}, canvas_format, 512, 288, false);
+    layer.transparency = 0.6f;
+    Canvas below(canvas_format, 512, 288), out(canvas_format, 512, 288);
+    below.draw(composite_planes_yuv_filter, {under});
+    out.draw(composite_planes_yuv_affine, {under, layer});
+    Tally tally;
+    compareAffine(out, &below, layer, source, "faded to 0.4", tally);
+    if (tally.edge < tally.samples / 2) throw std::runtime_error("a faded layer should blend everywhere");
+    std::printf("PASS YUV opacity %s -> %s: %zu samples blended at 0.4\n", source.format.name, canvas_format.name, tally.samples);
+}
+
 static void timeLayers(const char *label, const Format &format, int cw, int ch, Kernel kernel, const std::vector<AvpRectLayer> &layers) {
     Canvas canvas(format, cw, ch);
     canvas.upload(layers);
@@ -491,6 +506,7 @@ int main(int argc, char **argv) {
                     subpixel_offset_is_bilinear_of_the_shift(*source, *canvas);
                     outside_the_quad_is_untouched(*source, *canvas);
                     identity_affine_matches_plain_entries(*source, *canvas);
+                    yuv_opacity_in_affine_entry(*source, *canvas);
                 }
                 for (const Format *format : {&NV12, &P010, &P210}) no_reads_outside_the_crop(rng, *format);
                 affine_entry_draws_plain_tables_like_the_filter_entry(nv12, nv12, NV12, key);
