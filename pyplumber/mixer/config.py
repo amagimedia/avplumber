@@ -970,7 +970,7 @@ def parse_aux_buses(values, cfg):
         # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
         r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
                              f"aux {bid}", cfg.canvas_w, cfg.canvas_h, fps)
-        expected = (thumbnail.WIDTH, thumbnail.HEIGHT, thumbnail.FPS) if thumbnails else (cfg.canvas_w, cfg.canvas_h, fps)
+        expected = (*thumbnail.size_of(layouts[0]), thumbnail.FPS) if thumbnails else (cfg.canvas_w, cfg.canvas_h, fps)
         if thumbnails and (r.codec != "h264_nvenc" or r.profile != "baseline" or getattr(r, "audio_port", 0)):
             raise ConfigError("thumbnail banks require silent H.264 baseline video")
         if (r.target != "janus" or r.codec not in ("h264_nvenc", "hevc_nvenc") or r.color != "sdr" or

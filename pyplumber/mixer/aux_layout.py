@@ -81,11 +81,16 @@ def parse_layout(cfg, spec):
     preset = spec.get("preset") if isinstance(spec, dict) else None
     if preset == "pgm_pvw_grid" and set(spec) == {"preset"}:
         return {"preset": preset}
-    if preset == thumbnail.PRESET and set(spec) <= {"preset", "page"}:
+    if preset == thumbnail.PRESET and set(spec) <= {"preset", "page", "size"}:
         page = spec.get("page", 0)
         if not (_integer(page) and 0 <= page < thumbnail.BANKS):
             raise ConfigError("source_thumbnails page must be 0, 1 or 2")
-        return {"preset": preset, "page": page}
+        if "size" not in spec:
+            return {"preset": preset, "page": page}
+        try:
+            return {"preset": preset, "page": page, "size": thumbnail.check_size(spec["size"])}
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
     if preset == "source_pages" and set(spec) <= {"preset", "page"}:
         page = spec.get("page", 0)
         if not (_integer(page) and 0 <= page < page_count(cfg)):
@@ -108,7 +113,7 @@ def layout_cells(cfg, spec, page=0):
     if spec["preset"] == "pgm_pvw_grid":
         return grid_cells(cfg)
     if spec["preset"] == thumbnail.PRESET:
-        return thumbnail.cells(cfg, spec.get("page", 0))
+        return thumbnail.cells(cfg, spec.get("page", 0), thumbnail.size_of(spec))
     grid = page_grid(cfg)
     first = page * len(grid)
     return [{"role": "source", "source": first + i, **rect} for i, rect in enumerate(grid[:len(cfg.sources) - first])]

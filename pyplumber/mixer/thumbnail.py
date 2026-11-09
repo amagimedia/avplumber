@@ -13,10 +13,25 @@ def is_thumbnail(bus):
     return isinstance(bus.get("layout"), dict) and bus["layout"].get("preset") == PRESET
 
 
-def cells(cfg, page):
-    first = page * PER_BANK
-    return [{"role": "source", "source": i, "x": (i - first) % 8 * 128,
-             "y": (i - first) // 8 * 72, "w": 128, "h": 72}
+def size_of(spec):
+    """A bank's frame: its layout's `size` [w, h], or the 1024x576 the 192-input demo's clients expect."""
+    return tuple(spec.get("size", (WIDTH, HEIGHT)))
+
+
+def check_size(size):
+    """A bank's frame fills an 8x8 grid of 16:9 cells exactly: 16:9, both sides a multiple of 8, up to 4K."""
+    ok = (isinstance(size, (list, tuple)) and len(size) == 2 and all(type(v) is int for v in size)
+          and size[0] % 8 == 0 and size[1] % 8 == 0 and size[0] * 9 == size[1] * 16 and 512 <= size[0] <= 3840)
+    if not ok:
+        raise ValueError("source_thumbnails size must be [w, h], 16:9, multiples of 8, 512 to 3840 wide")
+    return list(size)
+
+
+def cells(cfg, page, size=(WIDTH, HEIGHT)):
+    """The bank's 8x8 grid: 64 sources from page * 64, cells of a 64th of the frame, no space lost."""
+    first, w, h = page * PER_BANK, size[0] // 8, size[1] // 8
+    return [{"role": "source", "source": i, "x": (i - first) % 8 * w,
+             "y": (i - first) // 8 * h, "w": w, "h": h}
             for i in range(first, min(first + PER_BANK, len(cfg.sources)))]
 
 

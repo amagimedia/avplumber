@@ -54,3 +54,19 @@ def test_a_face_sheet_shows_its_camera_picture_shrunk_without_aliasing():
     assert leo["crop"] == {"x": 1920, "y": 0, "w": 1920, "h": 1080}         # the camera, not the whole sheet
     assert "crop" not in gfx                                                 # a plain source: its whole frame
     assert leo["filter"] == gfx["filter"] == "auto" and leo["samples"] == 8  # multisample for a 15x shrink
+
+
+def test_a_bank_can_be_bigger_and_its_cells_grow_with_it():
+    cfg = config(63)
+    big = bank(width=1920, height=1080)
+    big["layout"]["size"] = [1920, 1080]
+    (bus,) = parse_aux_buses([big], cfg)
+    cells = layout_cells(cfg, bus.layout, 0)
+    assert {(c["w"], c["h"]) for c in cells} == {(240, 135)} and (cells[63 - 1]["x"], cells[63 - 1]["y"]) == (1440, 945)
+    for size in ([1920, 1000], [1001, 563], [8000, 4500]):                   # not 16:9, not /8, too big
+        wrong = bank(width=size[0], height=size[1])
+        wrong["layout"]["size"] = size
+        with pytest.raises(ConfigError):
+            parse_aux_buses([wrong], cfg)
+    with pytest.raises(ConfigError):                                         # the rendition must match its layout
+        parse_aux_buses([bank(width=1920, height=1080)], cfg)
