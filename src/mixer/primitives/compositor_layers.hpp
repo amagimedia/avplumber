@@ -102,18 +102,19 @@ inline void parseFilterFromJson(const Parameters &obj, FilterSpec &out) {
         const auto known = std::find_if(std::begin(kScaleFilters), std::end(kScaleFilters),
                                         [&](ScaleFilter f) { return name == scaleFilterName(f); });
         if (known == std::end(kScaleFilters))
-            throw Error("cuda_rect_overlay: filter must be auto, bilinear, bicubic or multisample");
+            throw Error("cuda_rect_overlay: filter must be auto, bilinear, bicubic, multisample or area");
         out.mode = *known;
     }
     out.bicubic_param = obj.value("bicubic_param", out.bicubic_param);
     out.samples = obj.value("samples", out.samples);
     out.bicubic_above = obj.value("bicubic_above", out.bicubic_above);
     out.multisample_above = obj.value("multisample_above", out.multisample_above);
+    out.area_above = obj.value("area_above", out.area_above);
     if (out.samples != 4 && out.samples != 8)
         throw Error("cuda_rect_overlay: samples must be 4 or 8");
     // Negated comparisons so that NaN fails too.
-    if (!(out.bicubic_above >= 1.) || !(out.multisample_above >= 1.))
-        throw Error("cuda_rect_overlay: bicubic_above and multisample_above must be at least 1");
+    if (!(out.bicubic_above >= 1.) || !(out.multisample_above >= 1.) || !(out.area_above >= 1.))
+        throw Error("cuda_rect_overlay: bicubic_above, multisample_above and area_above must be at least 1");
     if (!std::isfinite(out.bicubic_param))
         throw Error("cuda_rect_overlay: bicubic_param must be a finite number");
 }

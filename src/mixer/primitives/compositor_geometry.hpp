@@ -61,15 +61,16 @@ inline std::optional<Placement> placeInCanvas(int width, int height, Rect crop, 
 }
 
 /// How a layer is resampled. `Auto` chooses among the other three by the layer's scale.
-enum class ScaleFilter { Auto, Bilinear, Bicubic, Multisample };
+enum class ScaleFilter { Auto, Bilinear, Bicubic, Multisample, Area };
 inline constexpr ScaleFilter kScaleFilters[] = {ScaleFilter::Auto, ScaleFilter::Bilinear, ScaleFilter::Bicubic,
-                                                ScaleFilter::Multisample};
+                                                ScaleFilter::Multisample, ScaleFilter::Area};
 
 inline const char *scaleFilterName(ScaleFilter filter) {
     switch (filter) {
     case ScaleFilter::Auto: return "auto";
     case ScaleFilter::Bicubic: return "bicubic";
     case ScaleFilter::Multisample: return "multisample";
+    case ScaleFilter::Area: return "area";
     default: return "bilinear";
     }
 }
@@ -84,10 +85,12 @@ struct FilterSpec {
     int samples = 4;                // multisample: 4 or 8 bilinear samples per output sample
     double bicubic_above = 1.3;     // auto: bicubic when a layer enlarges by more than this
     double multisample_above = 2.;  // auto: multisample when a layer shrinks by more than this
+    double area_above = 4.;         // auto: area (every source pixel counts) when it shrinks by more than this
 
     bool operator==(const FilterSpec &other) const {
         return mode == other.mode && bicubic_param == other.bicubic_param && samples == other.samples &&
-               bicubic_above == other.bicubic_above && multisample_above == other.multisample_above;
+               bicubic_above == other.bicubic_above && multisample_above == other.multisample_above &&
+               area_above == other.area_above;
     }
 };
 
@@ -98,7 +101,9 @@ struct FilterSpec {
 inline ScaleFilter resolveScaleFilter(const FilterSpec &spec, int sw, int sh, int dw, int dh) {
     if (spec.mode != ScaleFilter::Auto) return spec.mode;
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return ScaleFilter::Bilinear;
-    if (std::max(double(sw) / dw, double(sh) / dh) > spec.multisample_above) return ScaleFilter::Multisample;
+    const double shrink = std::max(double(sw) / dw, double(sh) / dh);
+    if (shrink > std::max(spec.area_above, spec.multisample_above)) return ScaleFilter::Area;   // never below multisample's own limit
+    if (shrink > spec.multisample_above) return ScaleFilter::Multisample;
     if (std::max(double(dw) / sw, double(dh) / sh) > spec.bicubic_above) return ScaleFilter::Bicubic;
     return ScaleFilter::Bilinear;
 }

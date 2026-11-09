@@ -38,6 +38,7 @@ static bool reference(const AvpRectLayer &layer, const Frame &source, const Form
     case AVP_RECT_FILTER_BICUBIC_A0: value = bicubic(view, fx, fy, 0., c); break;   // the same cubic, all 16 taps
     case AVP_RECT_FILTER_MULTISAMPLE4: value = multisample(view, fx, fy, xs, ys, 4, c); break;
     case AVP_RECT_FILTER_MULTISAMPLE8: value = multisample(view, fx, fy, xs, ys, 8, c); break;
+    case AVP_RECT_FILTER_AREA: value = area(view, fx, fy, xs, ys, c); break;
     default: value = bilinear(view, fx, fy, c);
     }
     if (layer.kind != AVP_RECT_KIND_YUV) value *= layer.mul;   // promoted or demoted codes
@@ -90,6 +91,7 @@ static const Geometry geometries[] = {
     {"crop, 3:1 shrink, off the top left", 36, 20, 180, 108, -20, -12, 60, 36},
     {"2x enlarge, off the bottom right", 0, 0, 240, 144, 300, 200, 480, 288},
     {"wider and flatter", 0, 0, 240, 144, 0, 100, 400, 48},
+    {"8:1 shrink", 0, 0, 240, 144, 10, 10, 30, 18},
 };
 static const Filter filters[] = {
     {"bilinear", AVP_RECT_FILTER_BILINEAR, 0.f},
@@ -99,12 +101,14 @@ static const Filter filters[] = {
     {"bicubic A=-0.75", AVP_RECT_FILTER_BICUBIC, -0.75f},
     {"multisample 4", AVP_RECT_FILTER_MULTISAMPLE4, 0.f},
     {"multisample 8", AVP_RECT_FILTER_MULTISAMPLE8, 0.f},
+    {"area", AVP_RECT_FILTER_AREA, 0.f},
 };
 
 // The entry CudaRectDraw::draw launches for a table of YUV layers holding this filter: the lean
 // pair has the filters the scaler's defaults use, the full entry also the 4x4 cubic and 8 samples.
 static Kernel filterKernel(const Filter &filter, bool arrays) {
-    if (filter.code == AVP_RECT_FILTER_BICUBIC || filter.code == AVP_RECT_FILTER_MULTISAMPLE8) return composite_planes_filter;
+    if (filter.code == AVP_RECT_FILTER_BICUBIC || filter.code == AVP_RECT_FILTER_MULTISAMPLE8 || filter.code == AVP_RECT_FILTER_AREA)
+        return composite_planes_filter;
     return arrays ? composite_planes_yuv_array_filter : composite_planes_yuv_filter;
 }
 

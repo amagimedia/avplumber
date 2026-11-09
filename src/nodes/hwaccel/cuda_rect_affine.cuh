@@ -42,6 +42,10 @@ __device__ __forceinline__ void affine_lanes(const AvpRectLayer &L, const LanePl
         const MultisampleFilter<8> F(fy, L.footprint[plane][0], L.footprint[plane][1]);
 #pragma unroll
         for (int c = 0; c < kLanes; ++c) out[c] = F.sample(P, fx, c);
+    } else if (L.filter == AVP_RECT_FILTER_AREA) {
+        const AreaFilter F(fy, L.footprint[plane][0], L.footprint[plane][1]);
+#pragma unroll
+        for (int c = 0; c < kLanes; ++c) out[c] = F.sample(P, fx, c);
     } else {
         const RowTaps rows = row_taps_at(P.sy, P.sh, fy);
 #pragma unroll

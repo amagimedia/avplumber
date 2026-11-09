@@ -1,5 +1,6 @@
 #include "mixer/primitives/compositor_geometry.hpp"
 #include <cassert>
+#include <string>
 #include <limits>
 using namespace avp::mixer;
 int main() {
@@ -47,7 +48,7 @@ int main() {
     // The filter of a layer. A named filter is kept whatever the scale; the default is bilinear.
     FilterSpec spec;
     assert(resolveScaleFilter(spec, 1280, 720, 1920, 1080) == ScaleFilter::Bilinear);
-    for (ScaleFilter named : {ScaleFilter::Bilinear, ScaleFilter::Bicubic, ScaleFilter::Multisample}) {
+    for (ScaleFilter named : {ScaleFilter::Bilinear, ScaleFilter::Bicubic, ScaleFilter::Multisample, ScaleFilter::Area}) {
         spec.mode = named;
         assert(resolveScaleFilter(spec, 1920, 1080, 640, 360) == named);
         assert(resolveScaleFilter(spec, 1280, 720, 1920, 1080) == named);
@@ -64,6 +65,10 @@ int main() {
     assert(resolveScaleFilter(spec, 1920, 1080, 960, 540) == ScaleFilter::Bilinear);      // exactly 2:1
     assert(resolveScaleFilter(spec, 1920, 1080, 958, 538) == ScaleFilter::Multisample);
     assert(resolveScaleFilter(spec, 1920, 1080, 640, 360) == ScaleFilter::Multisample);   // 3:1
+    // area above 4x shrinking: every source pixel under a thumbnail's sample counts.
+    assert(resolveScaleFilter(spec, 1920, 1080, 480, 270) == ScaleFilter::Multisample);   // exactly 4:1
+    assert(resolveScaleFilter(spec, 1920, 1080, 240, 135) == ScaleFilter::Area);          // 8:1
+    assert(std::string(scaleFilterName(ScaleFilter::Area)) == "area");
     // The axis with the larger factor decides.
     assert(resolveScaleFilter(spec, 1000, 1000, 1200, 1400) == ScaleFilter::Bicubic);
     assert(resolveScaleFilter(spec, 1000, 1000, 800, 400) == ScaleFilter::Multisample);
@@ -73,10 +78,12 @@ int main() {
     // The thresholds are the layer's.
     spec.bicubic_above = 2.;
     spec.multisample_above = 4.;
+    spec.area_above = 8.;
     assert(resolveScaleFilter(spec, 1280, 720, 1920, 1080) == ScaleFilter::Bilinear);
     assert(resolveScaleFilter(spec, 640, 360, 1920, 1080) == ScaleFilter::Bicubic);
     assert(resolveScaleFilter(spec, 1920, 1080, 640, 360) == ScaleFilter::Bilinear);
     assert(resolveScaleFilter(spec, 1920, 1080, 320, 180) == ScaleFilter::Multisample);
+    assert(resolveScaleFilter(spec, 1920, 1080, 192, 108) == ScaleFilter::Area);          // 10:1
     // An empty rect has no scale.
     assert(resolveScaleFilter(spec, 0, 0, 320, 180) == ScaleFilter::Bilinear);
 }

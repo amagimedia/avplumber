@@ -243,6 +243,23 @@ static double bicubic(const PlaneView &v, float fx, float fy, double A, int c) {
     return value;
 }
 
+// The area filter: an nx x ny grid of bilinear taps about two source pixels apart over the area one
+// output sample covers (n = ceil(scale / 2), 1..16 per axis), each offset an exact multiple of the
+// rounded step, as the kernel's AreaFilter.
+static double area(const PlaneView &v, float fx, float fy, float xs, float ys, int c) {
+    const int nx = std::min(std::max(int(std::ceil(xs * 0.5f)), 1), 16), ny = std::min(std::max(int(std::ceil(ys * 0.5f)), 1), 16);
+    volatile float sx = xs / float(nx), sy = ys / float(ny);
+    double sum = 0;
+    for (int j = 0; j < ny; ++j) {
+        volatile float oy = (float(j) - 0.5f * float(ny - 1)) * sy;
+        for (int i = 0; i < nx; ++i) {
+            volatile float ox = (float(i) - 0.5f * float(nx - 1)) * sx;
+            sum += bilinear(v, fx + ox, fy + oy, c);
+        }
+    }
+    return sum / (nx * ny);
+}
+
 static double multisample(const PlaneView &v, float fx, float fy, float xs, float ys, int samples, int c) {
     float dx[8], dy[8];
     if (samples == 4) {

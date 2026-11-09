@@ -50,6 +50,8 @@ int tableFilter(const LayerSpec &layer) {
         return layer.filter.bicubic_param == 0.f ? AVP_RECT_FILTER_BICUBIC_A0 : AVP_RECT_FILTER_BICUBIC;
     case ScaleFilter::Multisample:
         return layer.filter.samples == 8 ? AVP_RECT_FILTER_MULTISAMPLE8 : AVP_RECT_FILTER_MULTISAMPLE4;
+    case ScaleFilter::Area:
+        return AVP_RECT_FILTER_AREA;
     default:
         return AVP_RECT_FILTER_BILINEAR;
     }
@@ -442,11 +444,12 @@ int CudaRectDraw::fillTable(CUstream stream, const std::vector<DrawOp> &ops, con
             logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
         // A demoted layer needs the filter entries' code limit whatever its filter.
         kinds.filter = kinds.filter || entry.filter != AVP_RECT_FILTER_BILINEAR || entry.kind == AVP_RECT_KIND_DEMOTE;
-        // The 4x4 cubic and the 8 samples are compiled into the full filter entry only.
-        kinds.wide = kinds.wide || entry.filter == AVP_RECT_FILTER_BICUBIC || entry.filter == AVP_RECT_FILTER_MULTISAMPLE8;
+        // The 4x4 cubic, the 8 samples and the area are compiled into the full filter entry only.
+        kinds.wide = kinds.wide || entry.filter == AVP_RECT_FILTER_BICUBIC || entry.filter == AVP_RECT_FILTER_MULTISAMPLE8 ||
+                     entry.filter == AVP_RECT_FILTER_AREA;
         // Not an error either; `auto` is not named here, it simply finds nothing to choose.
         const ScaleFilter asked = op.layer.filter.mode;
-        if ((asked == ScaleFilter::Bicubic || asked == ScaleFilter::Multisample) &&
+        if ((asked == ScaleFilter::Bicubic || asked == ScaleFilter::Multisample || asked == ScaleFilter::Area) &&
             entry.filter == AVP_RECT_FILTER_BILINEAR && !std::exchange(filter_warned_, true))
             logstream << "cuda_rect_overlay: a layer's filter applies to YUV sources on YUV canvases only; "
                          "drawing it bilinear";

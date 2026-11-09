@@ -33,6 +33,7 @@
 #define AVP_RECT_FILTER_BICUBIC_A0 2     // the cubic at A = 0: its outer taps weigh nothing, so 2x2 taps
 #define AVP_RECT_FILTER_MULTISAMPLE4 3   // mean of 4 bilinear samples, 2x2 grid over the pixel's source area
 #define AVP_RECT_FILTER_MULTISAMPLE8 4   // mean of 8 bilinear samples, Direct3D 8-sample pattern
+#define AVP_RECT_FILTER_AREA 5           // box mean: bilinear taps about 2 source pixels apart over the whole area
 
 struct AvpRectLayer {
     unsigned long long src[2];   // device pointers, or texture handles when yuv_texture / *_TEX is set

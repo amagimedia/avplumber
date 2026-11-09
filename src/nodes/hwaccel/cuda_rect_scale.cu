@@ -271,6 +271,39 @@ struct MultisampleFilter {
     }
 };
 
+// Box mean over the source area one destination sample covers: an nx x ny grid of bilinear taps
+// about two source pixels apart (n = ceil(scale / 2) per axis, 1..16: up to a 32:1 shrink), each tap
+// the mean of a 2x2 block, so every source pixel under a thumbnail's sample counts and thin
+// strokes do not alias. Each offset is an exact multiple of the once-rounded step, so a CPU
+// reference reproduces the tap positions. Runtime loops: it only draws layers that shrink a lot.
+struct AreaFilter {
+    float fy, sx, sy;
+    int nx, ny;
+    __device__ __forceinline__ AreaFilter(const LanePlane &P, int oy, int dw, int dh)
+        : AreaFilter(source_coord(oy, P.sh, dh), float(P.sw) / dw, float(P.sh) / dh) {}
+    // Row coordinate `fy` and `xs`, `ys` source units per destination sample (the affine entries
+    // pass the layer's footprint along u and v).
+    __device__ __forceinline__ AreaFilter(float row, float xs, float ys) : fy(row) {
+        nx = min(max(int(ceilf(xs * 0.5f)), 1), 16);
+        ny = min(max(int(ceilf(ys * 0.5f)), 1), 16);
+        sx = __fdiv_rn(xs, float(nx));
+        sy = __fdiv_rn(ys, float(ny));
+    }
+    __device__ __forceinline__ float column(const LanePlane &P, int ox, int dw) const {
+        return source_coord(ox, P.sw, dw);
+    }
+    __device__ __forceinline__ float sample(const LanePlane &P, float fx, int c) const {
+        float sum = 0.f;
+        for (int j = 0; j < ny; ++j) {
+            const float oy = __fmul_rn(float(j) - 0.5f * float(ny - 1), sy);
+            const RowTaps rows = row_taps_at(P.sy, P.sh, fy + oy);
+            for (int i = 0; i < nx; ++i)
+                sum += P.bilinear(fx + __fmul_rn(float(i) - 0.5f * float(nx - 1), sx), rows, c);
+        }
+        return sum / float(nx * ny);
+    }
+};
+
 // The lane groups of one thread from such a layer: sample, promote or demote (`gain`), limit to
 // the canvas codes (a cubic overshoots, and a demoted 1023 would round to 256) and round as a
 // stored sample.
@@ -436,6 +469,8 @@ __device__ __forceinline__ void composite_body(
                         draw_filtered<px, lanes>(acc, P, MultisampleFilter<4>(P, oy, ldw, ldh), X0, ldx, ldw, gain, maxv);
                     else if (kFilters > 1 && L.filter == AVP_RECT_FILTER_BICUBIC)
                         draw_filtered<px, lanes>(acc, P, CubicFilter(P, oy, ldh, L.filter_param), X0, ldx, ldw, gain, maxv);
+                    else if (kFilters > 1 && L.filter == AVP_RECT_FILTER_AREA)
+                        draw_filtered<px, lanes>(acc, P, AreaFilter(P, oy, ldw, ldh), X0, ldx, ldw, gain, maxv);
                     else if (kFilters > 1)
                         draw_filtered<px, lanes>(acc, P, MultisampleFilter<8>(P, oy, ldw, ldh), X0, ldx, ldw, gain, maxv);
                     continue;
