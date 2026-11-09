@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from .config import ConfigError, scene_layers
 from .control import source_mask_param
+from . import thumbnail
 
 PRESETS = ("pgm_pvw_grid", "source_pages")
 ROLES = {"pvw": (), "pgm": (), "slot": ("slot",), "source": ("source",)}   # role: its keys besides the rect
@@ -80,6 +81,11 @@ def parse_layout(cfg, spec):
     preset = spec.get("preset") if isinstance(spec, dict) else None
     if preset == "pgm_pvw_grid" and set(spec) == {"preset"}:
         return {"preset": preset}
+    if preset == thumbnail.PRESET and set(spec) <= {"preset", "page"}:
+        page = spec.get("page", 0)
+        if not (_integer(page) and 0 <= page < thumbnail.BANKS):
+            raise ConfigError("source_thumbnails page must be 0, 1 or 2")
+        return {"preset": preset, "page": page}
     if preset == "source_pages" and set(spec) <= {"preset", "page"}:
         page = spec.get("page", 0)
         if not (_integer(page) and 0 <= page < page_count(cfg)):
@@ -101,6 +107,8 @@ def layout_cells(cfg, spec, page=0):
         return spec["cells"]
     if spec["preset"] == "pgm_pvw_grid":
         return grid_cells(cfg)
+    if spec["preset"] == thumbnail.PRESET:
+        return thumbnail.cells(cfg, spec.get("page", 0))
     grid = page_grid(cfg)
     first = page * len(grid)
     return [{"role": "source", "source": first + i, **rect} for i, rect in enumerate(grid[:len(cfg.sources) - first])]

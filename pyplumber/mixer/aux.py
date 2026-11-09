@@ -10,7 +10,8 @@ import uuid
 from ..node import InternalNode
 from .aux_layout import (base_composition, base_sources, check_assignments, count, draws_program, layout_cells,
                          page_count, page_grid, parse_layout, pvw_layouts, pvw_sources)
-from .config import ConfigError, aux_fps
+from .config import ConfigError
+from . import thumbnail
 
 
 class _PvwFollowNode(InternalNode):
@@ -32,7 +33,8 @@ class AuxBus:
 
     def __init__(self, avp, api, mixer, cfg, bus):
         self.avp, self.api, self.mixer, self.cfg, self.bus = avp, api, mixer, cfg, bus
-        self.fps = aux_fps(cfg.fps, bus.full_rate)
+        self.rendition = bus.renditions[0]
+        self.fps = self.rendition.fps
         self.prefix = f"aux_{bus.id}"
         self.group = self.prefix
         self.node_name = f"{self.prefix}_comp"
@@ -108,7 +110,8 @@ class AuxBus:
         initial = self.layout_object()
         self.avp.addNode(self.mixer.canvas_compositor({
             "name": self.node_name, "src": inputs, "dst": self.output_edge,
-            "fps": str(fps), "latency_ms": latency, "warmup_timeout_ms": 250,
+            "fps": str(fps), "width": self.rendition.width, "height": self.rendition.height,
+            "latency_ms": latency, "warmup_timeout_ms": 250,
             "output_hwaccel": self.hwaccel,
             "aux_mode": True, "subscriptions": inputs, "mixer": self.mixer.name,
             "max_layers": self.bus.max_layers,
@@ -131,7 +134,8 @@ class AuxBus:
             self.avp, self.api, converted,
             JanusVideoConfig(host=options.janus_host, video_port=r.port,
                              bitrate_kbps=r.bitrate_kbps, ssrc=options.janus_video_ssrc + r.port,
-                             rtcp_bind=options.janus_rtcp_bind, rtcp_port=0),
+                             rtcp_bind=options.janus_rtcp_bind, rtcp_port=0,
+                             **({"keyframe_interval_sec": 1} if thumbnail.is_thumbnail({"layout": self.layout}) else {})),
             fps=fps, width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
@@ -213,7 +217,7 @@ class AuxBus:
             # the change, and the compositor stages it until its new inputs have frames.
             pending = status.get("composition_pending", False) or status.get("composition_revision") != self.revision
             return {"id": self.bus.id, "error": self.error, "cells": cells,
-                    "max_layers": self.bus.max_layers, "canvas": {"w": self.cfg.canvas_w, "h": self.cfg.canvas_h},
+                    "max_layers": self.bus.max_layers, "canvas": {"w": self.rendition.width, "h": self.rendition.height},
                     "fps": self.fps, "latency_ms": self.latency_ms(), "pvw_align": self.bus.pvw_align,
                     "pgm_delay_frames": self.pgm_delay_frames, "follower": self.follower_status,
                     "pvw_scene": self.follower_status.get("pvw_scene", ""), **self._live(), **status,
@@ -238,7 +242,11 @@ class AuxBus:
     def set_layout(self, request):
         """Switch to ``layout``, validated and within the layer budget; assignments keep their slots."""
         with self.lock:
+            if self.bus.layout.get("preset") == thumbnail.PRESET:
+                raise ConfigError("thumbnail banks have a fixed source mapping")
             layout = parse_layout(self.cfg, request.get("layout"))
+            if layout.get("preset") == thumbnail.PRESET:
+                raise ConfigError("source_thumbnails requires a dedicated thumbnail bus")
             if not self.pgm_edge and draws_program(self.cfg, [layout]):
                 raise ConfigError(f"aux {self.bus.id} has no PGM pad for a pgm cell: neither its layout nor its layouts have one")
             cells = layout_cells(self.cfg, layout, layout.get("page", 0))

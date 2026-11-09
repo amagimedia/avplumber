@@ -636,7 +636,7 @@ let editViewer = null;
 const showsSlots = (v) => v && viewers.includes(v) && !v.el.hidden && v.grid;
 const gridViewer = () => (showsSlots(editViewer) ? editViewer : viewers.find(showsSlots)) || null;
 const gridAux = () => auxById(gridViewer()?.grid) || auxBuses().find((aux) => slotsOf(aux).length) || null;
-const LAYOUT_NAMES = {pgm_pvw_grid: "PVW · PGM grid", source_pages: "Source pages"};
+const LAYOUT_NAMES = {pgm_pvw_grid: "PVW · PGM grid", source_pages: "Source pages", source_thumbnails: "Thumbnails"};
 function layoutName(spec) {
   if (spec.preset) return LAYOUT_NAMES[spec.preset] || spec.preset;
   const n = (role) => spec.cells.filter((cell) => cell.role === role).length;
@@ -2056,7 +2056,7 @@ function outputOptions() {
       : pages ? [`${aux.total} sources`, `${aux.pages} pages`, rateText(o)]
       : [["PGM", "PVW"].filter((role) => cellsOf(aux, role.toLowerCase()).length).join(" · "),
          slots && `${slots} scene slots`, sources && `${sources} sources`, rateText(o)];
-    return {...previewOption(o), group: aux ? "Monitoring" : "Program", layout: o.layout,
+    return {...previewOption(o), group: o.group || (aux ? "Monitoring" : "Program"), layout: o.layout,
             dot: !aux ? "var(--pgm)" : pages ? "var(--accent)" : "var(--pvw)", meta: meta.filter(Boolean).join(" · ")};
   })];
 }

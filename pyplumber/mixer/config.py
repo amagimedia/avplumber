@@ -412,7 +412,9 @@ class MixerConfig:
         previews += [{"bus": b.id, "label": aux_label(b.id, b.label, b.layout),
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
                       "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps,
-                      **({"audio": True} if b.renditions[0].audio_port else {})}
+                      **({"audio": True} if b.renditions[0].audio_port else {}),
+                      **({"group": "Thumbnails", "width": r.width, "height": r.height}
+                         if b.layout.get("preset") == "source_thumbnails" else {})}
                      for b in self.aux_buses for r in b.renditions]
         aliases = self.alias_counts
         return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
@@ -923,6 +925,7 @@ def parse_aux_buses(values, cfg):
     switch to (by default the presets, pgm_pvw_grid only when `layout` has a pgm cell itself), its
     slot assignments `scenes`, and the layer budget `max_layers`, max_compositor_layers by default.
     The bus gets the PGM pad only when `layout` or `layouts` has a pgm cell."""
+    from . import thumbnail
     from .aux_layout import PRESETS, check_assignments, count, draws_program, layout_cells, parse_layout, same_kind
     if not isinstance(values, list) or len(values) > 30:
         raise ConfigError("aux_buses must be a list of at most 30 buses")
@@ -935,10 +938,15 @@ def parse_aux_buses(values, cfg):
             raise ConfigError("aux bus IDs must be unique identifiers")
         ids.add(bid)
         layouts = [parse_layout(cfg, obj.get("layout", DEFAULT_AUX_LAYOUT))]
-        offered = obj.get("layouts", [{"preset": p} for p in PRESETS
+        thumbnails = thumbnail.is_thumbnail(obj)
+        offered = obj.get("layouts", [] if thumbnails else [{"preset": p} for p in PRESETS
                                       if draws_program(cfg, layouts) or not draws_program(cfg, [{"preset": p}])])
         if not isinstance(offered, list) or len(offered) > 16:
             raise ConfigError(f"aux {bid}: layouts must be a list of at most 16 layouts")
+        if thumbnails and offered:
+            raise ConfigError("thumbnail banks have a fixed layout")
+        if not thumbnails and any(thumbnail.is_thumbnail({"layout": spec}) for spec in offered):
+            raise ConfigError("source_thumbnails requires a dedicated thumbnail bus")
         for spec in (parse_layout(cfg, spec) for spec in offered):
             if not any(same_kind(spec, known) for known in layouts):
                 layouts.append(spec)
@@ -962,8 +970,11 @@ def parse_aux_buses(values, cfg):
         # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
         r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
                              f"aux {bid}", cfg.canvas_w, cfg.canvas_h, fps)
+        expected = (thumbnail.WIDTH, thumbnail.HEIGHT, thumbnail.FPS) if thumbnails else (cfg.canvas_w, cfg.canvas_h, fps)
+        if thumbnails and (r.codec != "h264_nvenc" or r.profile != "baseline" or getattr(r, "audio_port", 0)):
+            raise ConfigError("thumbnail banks require silent H.264 baseline video")
         if (r.target != "janus" or r.codec not in ("h264_nvenc", "hevc_nvenc") or r.color != "sdr" or
-                (r.width, r.height, r.fps) != (cfg.canvas_w, cfg.canvas_h, fps)):
+                (r.width, r.height, r.fps) != expected):
             raise ConfigError("aux rendition must be SDR H.264 or HEVC at canvas size and the aux frame rate")
         if not r.port:
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
