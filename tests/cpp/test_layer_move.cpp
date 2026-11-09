@@ -202,6 +202,30 @@ static void covered_background_stays_whole(const Sources &src) {
     assert(near(byInput(move(keyed, b, 0.5, src), 3)->opacity, 0.5));
 }
 
+// A layer in one scene only keeps its place against that scene's gliding layers for the whole move,
+// never jumping over or under one half-way through its fade.
+static int at(const std::vector<LayerSpec> &out, int input) {
+    for (size_t i = 0; i < out.size(); ++i) if (out[i].input == input) return int(i);
+    return -1;
+}
+static void unmatched_keeps_its_place(const Sources &src) {
+    // A's lower third (1) over A's full-screen camera (0); in B, 0 is a picture-in-picture at z 5
+    // over B's own background (2).
+    const auto a = layers(R"([{"input":0,"dst_w":1920,"dst_h":1080},{"input":1,"dst_y":800,"dst_w":1920,"dst_h":280,"z":1}])");
+    const auto b = layers(R"([{"input":2,"dst_w":1920,"dst_h":1080},{"input":0,"dst_x":960,"dst_y":540,"dst_w":960,"dst_h":540,"z":5}])");
+    for (double s : {0.1, 0.3, 0.5, 0.7, 0.9}) {
+        const auto out = move(a, b, s, src);
+        assert(at(out, 1) > at(out, 0) && at(out, 2) >= 0 && at(out, 2) < at(out, 0));
+    }
+    // B's caption (2) over B's camera (0), which A stacks at z 5 above its background (1).
+    const auto c = layers(R"([{"input":0,"dst_w":960,"dst_h":540,"z":5},{"input":1,"dst_w":1920,"dst_h":1080}])");
+    const auto d = layers(R"([{"input":1,"dst_w":1920,"dst_h":1080},{"input":0,"dst_x":960,"dst_w":960,"dst_h":540,"z":1},{"input":2,"dst_x":1000,"dst_w":400,"dst_h":300,"z":2}])");
+    for (double s : {0.1, 0.3, 0.5, 0.7, 0.9}) {
+        const auto out = move(c, d, s, src);
+        assert(at(out, 2) > at(out, 0) && at(out, 0) > at(out, 1));
+    }
+}
+
 int main() {
     const Sources src;
     endpoints_verbatim(src);
@@ -212,6 +236,7 @@ int main() {
     unmatched_fade_and_cut(src);
     faded_out_layers_are_dropped(src);
     covered_background_stays_whole(src);
+    unmatched_keeps_its_place(src);
     json_round_trip();
     slot_move_follows_the_take_clock(src);
     slot_move_drops_on_cancel_and_later_takes(src);

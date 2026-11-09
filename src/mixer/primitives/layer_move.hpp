@@ -6,12 +6,16 @@
 // its crop and box scale geometrically between the two (zoomRect), its rotation takes the shortest
 // arc and its z is a float key: overlapping layers swap where their keys cross. Interior frames are
 // fractional (crop_exact, dst_exact) and draw through the affine entry. A layer in only one scene
-// fades (its opacity, the affine entry's transparency for a camera) or cuts at the half. Pure: the
+// fades (its opacity, the affine entry's transparency for a camera) or cuts at the half, stacked
+// right above the gliding layer under it in its own scene (at the bottom without one), so it never
+// jumps over or under a gliding layer half-way through its fade. Pure: the
 // slot reads progress from the take clock and calls moveLayers per tick.
 #include "TakeClock.hpp"
 #include "layer_zoom.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <tuple>
 #include <optional>
 #include <string>
 #include <utility>
@@ -83,21 +87,43 @@ inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, con
     if (!(s > 0)) return from;
     if (s >= 1) return to;
     const auto frame = [&](size_t input) { return input < sources.size() ? sources[input] : nullptr; };
-    // `weight` < 0: a matched layer; else a layer in one scene only, faded by its scene's share
-    // (1 - s for A, s for B) once the stacking is known; `box` its placed box (none: unplaced).
-    struct Item { double key; LayerSpec layer; double weight = -1; bool from_a = false; std::optional<RectF> box; };
+    // Stacked by (key, tier, own): a gliding layer is (its lerped z, 0, 0); a layer in one scene only
+    // is (the key of the gliding layer under it in its scene, or -inf, 1, its z). `weight` < 0: drawn
+    // as is; else faded by its scene's share (1 - s for A, s for B) once the stacking is known; `box`
+    // its placed box (none: unplaced).
+    struct Item {
+        double key; LayerSpec layer; double weight = -1; bool from_a = false; std::optional<RectF> box;
+        int tier = 0; double own = 0;
+    };
     std::vector<Item> items;
     const bool cut = unmatched == "cut";
-    const auto alone = [&](LayerSpec l, size_t input, double weight, bool from_a) {
+    std::vector<int> glide_a(from.size(), -1), glide_b(to.size(), -1);   // the item gliding each layer
+    // The key of the gliding layer right under scene[k] in its scene's stacking (z, then position).
+    const auto under = [&](const std::vector<LayerSpec> &scene, const std::vector<int> &glide, size_t k) {
+        double key = -std::numeric_limits<double>::infinity();
+        std::optional<std::pair<int, size_t>> best;
+        for (size_t m = 0; m < scene.size(); ++m) {
+            const auto pos = std::make_pair(scene[m].z, m);
+            if (glide[m] >= 0 && pos < std::make_pair(scene[k].z, k) && (!best || pos > *best)) {
+                best = pos;
+                key = items[size_t(glide[m])].key;
+            }
+        }
+        return key;
+    };
+    const auto alone = [&](size_t k, bool from_a) {
+        const auto &scene = from_a ? from : to;
+        LayerSpec l = scene[k];
+        const size_t input = l.sourceIndex(k);
         if (cut ? (from_a ? s >= 0.5 : s < 0.5) : false) return;
         l.input = int(input);
         std::optional<RectF> box;
         if (const auto pose = placedPose(l, frame(input), fmt)) box = pose->box;
-        const double key = l.z;
-        items.push_back({key, std::move(l), cut ? -1. : weight, from_a, box});
+        const double key = under(scene, from_a ? glide_a : glide_b, k), own = l.z;
+        items.push_back({key, std::move(l), cut ? -1. : (from_a ? 1 - s : s), from_a, box, 1, own});
     };
     std::vector<bool> used(from.size(), false);
-    std::vector<bool> placed_b(to.size(), false);
+    std::vector<bool> placed_b(to.size(), false), alone_pair(to.size(), false);
     for (size_t j = 0; j < to.size(); ++j) {
         const size_t input = to[j].sourceIndex(j);
         size_t i = 0;
@@ -108,8 +134,8 @@ inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, con
         if (!src || !src->raw()) continue;   // nothing to draw either end from
         const auto a = placedPose(from[i], src, fmt), b = placedPose(to[j], src, fmt);
         if (!a || !b) {   // a tile or an unplaceable end: the two fade (or cut) instead
-            alone(from[i], input, 1 - s, true);
-            alone(to[j], input, s, false);
+            used[i] = false;
+            alone_pair[j] = true;
             continue;
         }
         LayerSpec l = to[j];
@@ -137,13 +163,16 @@ inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, con
             l.pivot_y = pa.second + (pb.second - pa.second) * s;
         }
         l.opacity = float(from[i].opacity + (to[j].opacity - from[i].opacity) * s);
+        glide_a[i] = glide_b[j] = int(items.size());
         items.push_back({from[i].z + (to[j].z - from[i].z) * s, std::move(l), -1., false, std::nullopt});
     }
     for (size_t j = 0; j < to.size(); ++j)
-        if (!placed_b[j]) alone(to[j], to[j].sourceIndex(j), s, false);
+        if (!placed_b[j] || alone_pair[j]) alone(j, false);
     for (size_t i = 0; i < from.size(); ++i)
-        if (!used[i]) alone(from[i], from[i].sourceIndex(i), 1 - s, true);
-    std::stable_sort(items.begin(), items.end(), [](const Item &x, const Item &y) { return x.key < y.key; });
+        if (!used[i]) alone(i, true);
+    std::stable_sort(items.begin(), items.end(), [](const Item &x, const Item &y) {
+        return std::tie(x.key, x.tier, x.own) < std::tie(y.key, y.tier, y.own);
+    });
     // A fading layer wholly under an opaque fading layer of the other scene stays whole: the upper
     // one alone carries the mix, as a fade's (1-s)A + sB, never through black.
     const auto covers = [](const RectF &o, const RectF &u) {
