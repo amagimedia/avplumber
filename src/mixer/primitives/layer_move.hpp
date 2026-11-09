@@ -2,10 +2,15 @@
 // Move transition: Program's scene A glides into scene B on B's slot, in the slot's one launch.
 //
 // Layers are matched by source (the k-th layer of a source in A with the k-th in B). A matched
-// layer is placed at both ends against its frame (contain and source_canvas resolved there), then
-// its crop and box scale geometrically between the two (zoomRect), its rotation takes the shortest
-// arc and its z is a float key: overlapping layers swap where their keys cross. Interior frames are
-// fractional (crop_exact, dst_exact) and draw through the affine entry. A layer in only one scene
+// layer is placed at both ends against its frame (contain and source_canvas resolved there). Its
+// camera picture then moves as one picture: the whole picture's place on the canvas glides
+// geometrically from A's to B's (zoomRect) and the box glides on its own, clipping it, so nothing
+// pans or zooms inside the box. A face sheet's tiles are framings of one picture: through the
+// frame's per-tile layers (layer_zoom.hpp PictureMap) both ends are read in the camera picture and
+// interior frames draw from its reference tile, never a neighbouring one; without those layers the
+// pair fades. Its rotation takes the shortest arc and its z is a float key: overlapping layers swap
+// where their keys cross. Interior frames are fractional (crop_exact, dst_exact) and draw through
+// the affine entry. A layer in only one scene
 // fades (its opacity, the affine entry's transparency for a camera) or cuts at the half, stacked
 // right above the gliding layer under it in its own scene (at the bottom without one), so it never
 // jumps over or under a gliding layer half-way through its fade. Pure: the
@@ -15,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <tuple>
 #include <optional>
 #include <string>
@@ -28,6 +34,14 @@ struct MoveSpec {
     std::vector<LayerSpec> from;    // scene A's layers
     Parameters from_json;           // as received: the round trip without a LayerSpec serializer
     std::string unmatched = "fade"; // "fade" | "cut"
+    std::map<int, SourcePicture> pictures;   // by input: sources that are face sheets of one picture
+};
+
+/// The face sheets a move draws from: what each declares, and the per-tile layers last read from
+/// its frames.
+struct MovePictures {
+    std::map<int, SourcePicture> declared;
+    std::map<int, std::vector<PictureMap>> maps;
 };
 
 inline MoveSpec parseMoveSpec(const Parameters &p, ScaleFilter default_filter = ScaleFilter::Bilinear) {
@@ -37,11 +51,28 @@ inline MoveSpec parseMoveSpec(const Parameters &p, ScaleFilter default_filter = 
     m.from = parseLayersArray(m.from_json, default_filter);
     m.unmatched = p.value("unmatched", std::string("fade"));
     if (m.unmatched != "fade" && m.unmatched != "cut") throw Error("move: unmatched must be fade or cut");
+    if (p.contains("pictures"))
+        for (const auto &e : p.at("pictures")) {
+            const auto &pic = e.at("picture"), &r = pic.at("reference");
+            m.pictures[e.at("input").get<int>()] = SourcePicture{{r.at("x"), r.at("y"), r.at("w"), r.at("h")},
+                                                                 pic.at("metadata_key").get<std::string>(),
+                                                                 pic.value("mapped", std::vector<int>{})};
+        }
     return m;
 }
 
 inline Parameters moveSpecJson(const MoveSpec &m) {
-    return {{"generation", m.generation}, {"from", m.from_json}, {"unmatched", m.unmatched}};
+    Parameters out{{"generation", m.generation}, {"from", m.from_json}, {"unmatched", m.unmatched}};
+    if (!m.pictures.empty()) {
+        Parameters list = Parameters::array();
+        for (const auto &[input, pic] : m.pictures) {
+            const Rect &r = pic.reference;
+            list.push_back({{"input", input}, {"picture", {{"reference", {{"x", r.x}, {"y", r.y}, {"w", r.w}, {"h", r.h}}},
+                                                           {"metadata_key", pic.metadata_key}, {"mapped", pic.mapped}}}});
+        }
+        out["pictures"] = std::move(list);
+    }
+    return out;
 }
 
 /// A layer placed against its frame: the visible-picture crop drawn into the canvas box.
@@ -83,7 +114,7 @@ inline std::optional<MovePose> placedPose(const LayerSpec &l, const av::VideoFra
 /// `s >= 1` is `to`, verbatim. Every layer out names its input and has z = its position.
 inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, const std::vector<LayerSpec> &to, double s,
                                          const std::vector<const av::VideoFrame *> &sources, AVPixelFormat fmt,
-                                         const std::string &unmatched) {
+                                         const std::string &unmatched, const MovePictures *pictures = nullptr) {
     if (!(s > 0)) return from;
     if (s >= 1) return to;
     const auto frame = [&](size_t input) { return input < sources.size() ? sources[input] : nullptr; };
@@ -133,17 +164,59 @@ inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, con
         const av::VideoFrame *src = frame(input);
         if (!src || !src->raw()) continue;   // nothing to draw either end from
         const auto a = placedPose(from[i], src, fmt), b = placedPose(to[j], src, fmt);
-        if (!a || !b) {   // a tile or an unplaceable end: the two fade (or cut) instead
+        // The picture both ends show, and each end's crop of it in frame pixels: the visible frame,
+        // or a face sheet's reference tile with the ends read through the frame's tile layers.
+        const Rect visible = visibleFrameRect(*src->raw());
+        RectF ref{double(visible.x), double(visible.y), double(visible.w), double(visible.h)};
+        std::optional<RectF> ca, cb;
+        if (a && b) { ca = a->crop; cb = b->crop; }
+        const SourcePicture *declared = nullptr;
+        if (pictures)
+            if (const auto it = pictures->declared.find(int(input)); it != pictures->declared.end()) declared = &it->second;
+        if (ca && declared) {
+            const Rect &r = declared->reference;
+            const auto maps = pictures->maps.find(int(input));
+            const auto whole = [](const RectF &c) {
+                return Rect{int(std::lround(c.x)), int(std::lround(c.y)), int(std::lround(c.w)), int(std::lround(c.h))};
+            };
+            const auto pa = maps != pictures->maps.end() ? pictureRect(maps->second, whole(*ca)) : std::nullopt;
+            const auto pb = maps != pictures->maps.end() ? pictureRect(maps->second, whole(*cb)) : std::nullopt;
+            if (pa && pb) {
+                ref = {double(r.x), double(r.y), double(r.w), double(r.h)};
+                ca = RectF{r.x + pa->first.x, r.y + pa->first.y, pa->first.w, pa->first.h};
+                cb = RectF{r.x + pb->first.x, r.y + pb->first.y, pb->first.w, pb->first.h};
+            } else {
+                ca.reset();   // tiles without their framings: never slide across the sheet
+            }
+        }
+        if (!ca) {   // a tile or an unplaceable end, or a sheet without framings: the two fade (or cut)
             used[i] = false;
             alone_pair[j] = true;
             continue;
         }
+        // Where the whole picture sits on the canvas at each end, gliding as one; the box clips it.
+        const auto onCanvas = [&](const RectF &c, const RectF &box) {
+            const double kx = box.w / c.w, ky = box.h / c.h;
+            return RectF{box.x - (c.x - ref.x) * kx, box.y - (c.y - ref.y) * ky, ref.w * kx, ref.h * ky};
+        };
+        const RectF pic = zoomRect(onCanvas(*ca, a->box), onCanvas(*cb, b->box), s);
+        RectF bx = zoomRect(a->box, b->box, s);
+        const double kx = pic.w / ref.w, ky = pic.h / ref.h;
+        // The box's crop of the picture, kept inside it; the box loses the same share.
+        const double x0 = std::max(ref.x + (bx.x - pic.x) / kx, ref.x), y0 = std::max(ref.y + (bx.y - pic.y) / ky, ref.y);
+        const double x1 = std::min(ref.x + (bx.x + bx.w - pic.x) / kx, ref.x + ref.w);
+        const double y1 = std::min(ref.y + (bx.y + bx.h - pic.y) / ky, ref.y + ref.h);
+        if (!(x1 > x0) || !(y1 > y0)) {   // the box left the picture: nothing of it to draw this tick
+            used[i] = false;
+            alone_pair[j] = true;
+            continue;
+        }
+        bx = {pic.x + (x0 - ref.x) * kx, pic.y + (y0 - ref.y) * ky, (x1 - x0) * kx, (y1 - y0) * ky};
         LayerSpec l = to[j];
         l.input = int(input);
         l.fit = false;
         l.source_canvas_w = l.source_canvas_h = 0;
-        setLayerCrop(l, zoomRect(a->crop, b->crop, s));
-        const RectF bx = zoomRect(a->box, b->box, s);
+        setLayerCrop(l, {x0, y0, x1 - x0, y1 - y0});
         l.dst_exact = bx;
         l.dst_x = int(std::floor(bx.x));
         l.dst_y = int(std::floor(bx.y));
@@ -209,11 +282,14 @@ struct SlotMove {
     std::optional<MoveSpec> spec;
     double drawn = 0;     // the progress the last tick drew
     std::string error;    // why the last tick drew the scene's own layers
+    MovePictures pictures;   // the sheets' framings, held across ticks whose frame lacks them
 
     void set(std::optional<MoveSpec> m) {
         spec = std::move(m);
         drawn = 0;
         error.clear();
+        pictures = {};
+        if (spec) pictures.declared = spec->pictures;
     }
     /// Rewrites `layers` (scene B's) for the tick at `pts_ns`; false, with them unchanged, when no
     /// move runs. `clock`: the mixer's published take clock, nullptr before the first take.
@@ -233,7 +309,14 @@ struct SlotMove {
             s = clock->progress(pts_ns);
         }
         drawn = s;
-        layers = moveLayers(spec->from, layers, s, sources, fmt, spec->unmatched);
+        for (const auto &[input, pic] : pictures.declared) {
+            const av::VideoFrame *f = input >= 0 && size_t(input) < sources.size() ? sources[size_t(input)] : nullptr;
+            const AVDictionaryEntry *e = f && f->raw() ? av_dict_get(f->raw()->metadata, pic.metadata_key.c_str(), nullptr, 0) : nullptr;
+            if (!e || !e->value) continue;
+            auto maps = parsePictureMaps(e->value, pic);
+            if (!maps.empty()) pictures.maps[input] = std::move(maps);
+        }
+        layers = moveLayers(spec->from, layers, s, sources, fmt, spec->unmatched, &pictures);
         return true;
     }
 };

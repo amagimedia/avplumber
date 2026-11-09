@@ -3,6 +3,7 @@
 #include "mixer/primitives/layer_move.hpp"
 #include <cassert>
 #include <cmath>
+#include <algorithm>
 #include <stdexcept>
 
 void print_stack_trace() {}
@@ -226,6 +227,53 @@ static void unmatched_keeps_its_place(const Sources &src) {
     }
 }
 
+// The camera picture moves as one picture: at every step one scale and one offset take it onto the
+// canvas, gliding from where it sits in A to where it sits in B; the box only clips it.
+static RectF projected(const LayerSpec &l, double ref_x = 0, double ref_y = 0, double ref_w = 1920, double ref_h = 1080) {
+    const RectF c = crop(l), b = box(l);
+    const double kx = b.w / c.w, ky = b.h / c.h;
+    return {b.x - (c.x - ref_x) * kx, b.y - (c.y - ref_y) * ky, ref_w * kx, ref_h * ky};
+}
+static void content_moves_as_one_picture(const Sources &src) {
+    // A: camera 1 full screen; B: its centre half 1:1 as a picture-in-picture at the bottom right.
+    const auto a = layers(R"([{"input":1,"dst_w":1920,"dst_h":1080}])");
+    const auto b = layers(R"([{"input":1,"crop":{"x":480,"y":270,"w":960,"h":540},"dst_x":960,"dst_y":540,"dst_w":960,"dst_h":540}])");
+    for (double s : {0.25, 0.5, 0.75}) {
+        const auto out = move(a, b, s, src);
+        assert(out.size() == 1);
+        assert(nearRect(projected(out[0]), zoomRect({0, 0, 1920, 1080}, {480, 270, 1920, 1080}, s), 1e-6));
+        const RectF c = crop(out[0]);
+        assert(c.x >= -1e-9 && c.y >= -1e-9 && c.x + c.w <= 1920 + 1e-9 && c.y + c.h <= 1080 + 1e-9);
+    }
+}
+
+// A face sheet: the raw picture 1:1 at (0, 0), the "ms" framing of camera rect (480, 120, 960, 540) at
+// (1920, 0). A move between scenes on different tiles glides in the camera picture, read from the
+// reference, never sliding across the sheet's neighbouring tiles.
+static const char *kSheet = R"({"layers":[
+ {"input":0,"crop":{"x":0,"y":0,"w":1920,"h":1080},"dst_x":0,"dst_y":0,"dst_w":1920,"dst_h":1080},
+ {"input":1,"crop":{"x":480,"y":120,"w":960,"h":540},"dst_x":1920,"dst_y":0,"dst_w":1920,"dst_h":1080}]})";
+static void tiles_glide_in_the_camera_picture() {
+    av::VideoFrame sheet(AV_PIX_FMT_NV12, 3840, 1080);
+    const std::vector<const av::VideoFrame *> frames{&sheet};
+    MovePictures pictures;
+    pictures.declared[0] = SourcePicture{{0, 0, 1920, 1080}, "face_normalize_layers_v1", {0, 1}};
+    const auto a = layers(R"([{"input":0,"crop":{"x":1920,"y":0,"w":1920,"h":1080},"dst_w":1920,"dst_h":1080}])");
+    const auto b = layers(R"([{"input":0,"crop":{"x":0,"y":0,"w":1920,"h":1080},"dst_x":960,"dst_y":540,"dst_w":960,"dst_h":540}])");
+    // a_tile_change_without_framings_fades
+    auto out = moveLayers(a, b, 0.5, frames, AV_PIX_FMT_NV12, "fade", &pictures);
+    assert(std::count_if(out.begin(), out.end(), [](const LayerSpec &l) { return l.input == 0; }) == 2);
+    pictures.maps[0] = parsePictureMaps(kSheet, pictures.declared[0]);
+    const RectF qa{-960, -240, 3840, 2160}, qb{960, 540, 960, 540};   // the picture on the canvas in A and in B
+    for (double s : {0.25, 0.5, 0.75}) {
+        out = moveLayers(a, b, s, frames, AV_PIX_FMT_NV12, "fade", &pictures);
+        assert(out.size() == 1);
+        const RectF c = crop(out[0]);
+        assert(c.x >= -1e-9 && c.y >= -1e-9 && c.x + c.w <= 1920 + 1e-9 && c.y + c.h <= 1080 + 1e-9);   // the reference only
+        assert(nearRect(projected(out[0]), zoomRect(qa, qb, s), 1e-6));
+    }
+}
+
 int main() {
     const Sources src;
     endpoints_verbatim(src);
@@ -237,6 +285,8 @@ int main() {
     faded_out_layers_are_dropped(src);
     covered_background_stays_whole(src);
     unmatched_keeps_its_place(src);
+    content_moves_as_one_picture(src);
+    tiles_glide_in_the_camera_picture();
     json_round_trip();
     slot_move_follows_the_take_clock(src);
     slot_move_drops_on_cancel_and_later_takes(src);

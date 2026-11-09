@@ -1,6 +1,7 @@
 // Planning a move take: the destination slot draws B plus A's sources B lacks, with their routes; a
 // routed source both scenes route differently falls back to a fade with the reason.
 #include "mixer/move_plan.hpp"
+#include "mixer/primitives/layer_move.hpp"
 #include <cassert>
 #include <stdexcept>
 
@@ -74,10 +75,25 @@ static void unmatched_is_fade_or_cut() {
     assert(threw);
 }
 
+static void spec_carries_the_sheets_pictures() {
+    MixerState st;
+    fill(st);
+    st.sources["cam1"].picture = Parameters{{"reference", {{"x", 1920}, {"y", 0}, {"w", 1920}, {"h", 1080}}},
+                                            {"metadata_key", "face_normalize_layers_v1"}, {"mapped", {0, 1, 2}}};
+    const auto a = scene("a", {{"cam1", 0}, {"gfx", 0}}), b = scene("b", {{"cam1", 960}, {"cam2", 0}});
+    std::string why;
+    const Parameters spec = planMove(st, a, b, 4, "fade", why);
+    const auto m = parseMoveSpec(spec);
+    assert(m.pictures.size() == 1 && m.pictures.count(0));            // cam1 is input 0; the others declare none
+    assert(m.pictures.at(0).reference.x == 1920 && m.pictures.at(0).metadata_key == "face_normalize_layers_v1");
+    assert(parseMoveSpec(moveSpecJson(m)).pictures.at(0).mapped == std::vector<int>({0, 1, 2}));   // round trip
+}
+
 int main() {
     union_adds_a_only_sources_with_their_routes();
     spec_carries_a_layers_by_input();
     routed_change_falls_back_to_fade();
     unmatched_is_fade_or_cut();
+    spec_carries_the_sheets_pictures();
     return 0;
 }

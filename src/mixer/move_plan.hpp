@@ -30,12 +30,23 @@ inline std::optional<SceneDefinition> moveUnionScene(const SceneDefinition& a, c
 }
 
 /// The move spec (layer_move.hpp MoveSpec as JSON) for a take from `a` to `b` that the take clock's
-/// `generation` runs, or null with `why`, for which the take fades instead.
+/// `generation` runs, with the face sheets' pictures by input, or null with `why`, for which the
+/// take fades instead.
 inline Parameters planMove(const MixerState& st, const SceneDefinition& a, const SceneDefinition& b, uint64_t generation,
                            const std::string& unmatched, std::string& why) {
     if (unmatched != "fade" && unmatched != "cut") throw Error("mixer: a move's unmatched sources fade or cut");
-    if (!moveUnionScene(a, b, why)) return nullptr;
-    return {{"generation", generation}, {"from", compositorLayersFromScene(st, a)}, {"unmatched", unmatched}};
+    const auto together = moveUnionScene(a, b, why);
+    if (!together) return nullptr;
+    Parameters spec{{"generation", generation}, {"from", compositorLayersFromScene(st, a)}, {"unmatched", unmatched}};
+    // The face sheets among both scenes' sources: their tiles glide in the camera picture.
+    Parameters pictures = Parameters::array();
+    for (const auto& [name, layer] : together->sources) {
+        const auto source = st.sources.find(name);
+        if (source != st.sources.end() && !source->second.picture.is_null())
+            pictures.push_back({{"input", source->second.input_index}, {"picture", source->second.picture}});
+    }
+    if (!pictures.empty()) spec["pictures"] = std::move(pictures);
+    return spec;
 }
 
 }
