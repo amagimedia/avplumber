@@ -155,10 +155,17 @@ def _layout(layers):
     return {"layers": layers, "active_inputs": source_mask_param(sum(1 << i for i in {l["input"] for l in layers}))}
 
 
-def _tile(index, rect, z):
-    """Input *index* contained in *rect*."""
-    return {"input": index, "dst_x": rect["x"], "dst_y": rect["y"], "dst_w": rect["w"], "dst_h": rect["h"],
-            "fit": "contain", "z": z}
+def _tile(index, rect, z, cfg=None):
+    """Input *index* contained in *rect*: a face sheet's camera picture (the reference its source
+    declares), else its whole frame, with the filter its scale calls for (auto: multisample, 8
+    samples, when it shrinks a lot, as a thumbnail does)."""
+    layer = {"input": index, "dst_x": rect["x"], "dst_y": rect["y"], "dst_w": rect["w"], "dst_h": rect["h"],
+             "fit": "contain", "z": z, "filter": "auto", "samples": 8}
+    source = cfg.sources[index] if cfg is not None and index < len(cfg.sources) else None
+    reference = (source.picture or {}).get("reference") if source is not None else None
+    if reference:
+        layer["crop"] = {k: reference[k] for k in ("x", "y", "w", "h")}
+    return layer
 
 
 def _cell_layers(cfg, scene, cell, first_z):
@@ -193,7 +200,7 @@ def base_composition(cfg, cells, scenes):
     layers = []
     for cell in [c for c in cells if c["role"] in ("slot", "source")] + [c for c in cells if c["role"] == "pgm"]:
         if cell["role"] != "slot":
-            layers.append(_tile(len(cfg.sources) if cell["role"] == "pgm" else cell["source"], cell, first + len(layers)))
+            layers.append(_tile(len(cfg.sources) if cell["role"] == "pgm" else cell["source"], cell, first + len(layers), cfg))
         elif scenes[cell["slot"]]:
             layers.extend(_cell_layers(cfg, definitions[scenes[cell["slot"]]], cell, first + len(layers)))
     return _layout(layers)

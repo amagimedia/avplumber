@@ -40,3 +40,17 @@ def test_other_buses_cannot_switch_to_a_bank_layout():
                  "renditions": [{"id": "monitor", "port": 5010}]}
     with pytest.raises(ConfigError):
         parse_aux_buses([multiview], config(8))
+
+
+def test_a_face_sheet_shows_its_camera_picture_shrunk_without_aliasing():
+    from pyplumber.mixer.aux_layout import base_composition
+    picture = {"reference": {"x": 1920, "y": 0, "w": 1920, "h": 1080}, "metadata_key": "face_normalize_layers_v1",
+               "mapped": [0, 1]}
+    sources = (Source("leo", "video", "leo.mp4", 5760, 3240, picture=picture), Source("gfx", "browser", "http://x", 1920, 1080))
+    cfg = MixerConfig(1080, 1920, 30, sources, (Scene("full", (Item("leo", Rect(0, 0, 1920, 1080)),)),))
+    (bus,) = parse_aux_buses([bank()], cfg)
+    layers = base_composition(cfg, layout_cells(cfg, bus.layout, 0), [])["layers"]
+    leo, gfx = layers[0], layers[1]
+    assert leo["crop"] == {"x": 1920, "y": 0, "w": 1920, "h": 1080}         # the camera, not the whole sheet
+    assert "crop" not in gfx                                                 # a plain source: its whole frame
+    assert leo["filter"] == gfx["filter"] == "auto" and leo["samples"] == 8  # multisample for a 15x shrink
