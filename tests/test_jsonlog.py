@@ -1,7 +1,8 @@
 """The vendored OTel JSON log line format (``pyplumber.jsonlog``).
 
-Same contract as eka-recorder-ai's ``tests/manager/test_jsonlog.py``, including the
-default: JSON on stdout unless ``RECORDER_LOG_FORMAT=text`` selects the legacy line.
+Same contract as eka-recorder-ai's ``tests/manager/test_jsonlog.py``; the one
+difference is the default format: plain text here, JSON only with
+``RECORDER_LOG_FORMAT=json``.
 """
 
 from __future__ import annotations
@@ -27,14 +28,14 @@ def _record(msg: str, *args: object, level: int = logging.INFO) -> logging.LogRe
     return logging.LogRecord("pyplumber.test", level, "p", 1, msg, args, None)
 
 
-def test_json_is_the_default_format(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_text_is_the_default_format(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RECORDER_LOG_FORMAT", raising=False)
-    assert isinstance(formatter_from_env(), JsonFormatter)
-
-
-def test_text_format_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RECORDER_LOG_FORMAT", "text")
     assert isinstance(formatter_from_env(), TextFormatter)
+
+
+def test_json_format_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RECORDER_LOG_FORMAT", "json")
+    assert isinstance(formatter_from_env(), JsonFormatter)
 
 
 def test_json_line_carries_the_standard_fields() -> None:

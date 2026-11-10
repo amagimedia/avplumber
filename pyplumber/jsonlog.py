@@ -9,8 +9,8 @@ same line is parsed identically by Loki's ``| json``, by an OTel Collector
 Vendored from eka-recorder-ai's ``ai-recorder/recorder/jsonlog.py`` (the avplumber
 and avplumber-nodes repos do not depend on the recorder package). Keep the two in
 sync: the field contract is the "Log Format Standard for OpenTelemetry with JSON
-Structure and Requirements". The defaults match: JSON on stdout, plain text only
-when ``RECORDER_LOG_FORMAT=text`` is set.
+Structure and Requirements". The defaults differ on purpose: these repos log plain
+text unless ``RECORDER_LOG_FORMAT=json``.
 
 
 The existing ``event=... key=value`` message convention is kept at the call sites:
@@ -111,8 +111,8 @@ _SERVICE_NAME = "service.name"
 _SERVICE_VERSION = "service.version"
 _DEPLOYMENT_ENVIRONMENT = "deployment.environment"
 
-#: ``RECORDER_LOG_FORMAT``: ``json`` (the default, the standard's wire format) or
-#: ``text`` (the legacy human-readable line, for local debugging runs).
+#: ``RECORDER_LOG_FORMAT``: ``text`` (the default in these repos, the legacy
+#: human-readable line) or ``json`` (the standard's wire format).
 _FORMAT_VAR = "RECORDER_LOG_FORMAT"
 
 
@@ -370,10 +370,10 @@ class TextFormatter(logging.Formatter):
 
 
 def formatter_from_env() -> logging.Formatter:
-    """The formatter the deployment asked for: ``json`` (default) or ``text``."""
-    if os.environ.get(_FORMAT_VAR, "").strip().lower() == "text":
-        return TextFormatter()
-    return JsonFormatter()
+    """The formatter the deployment asked for: ``text`` (default) or ``json``."""
+    if os.environ.get(_FORMAT_VAR, "").strip().lower() == "json":
+        return JsonFormatter()
+    return TextFormatter()
 
 
 def configure_logging(*, level: int = logging.INFO, stream: Any = None) -> None:

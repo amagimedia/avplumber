@@ -295,8 +295,8 @@ def parse_size(text: str) -> tuple[int, int]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    # RECORDER_LOG_FORMAT: json (the default) for the OTel JSON log line
-    # (pyplumber.jsonlog), text for the legacy human-readable line.
+    # RECORDER_LOG_FORMAT: text (the default here) or the OTel JSON log line
+    # (pyplumber.jsonlog); one JSON object per line when json is selected.
     configure_logging()
     options = parse_args(argv)
     started = time.monotonic()
