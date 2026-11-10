@@ -18,6 +18,7 @@ import threading
 import time
 
 from .storage import write_atomic
+from ..thumbnail import is_thumbnail, reserve_buses
 from pyplumber.mixer.tools.extra_aux import aux_encode, extra_buses
 import pyplumber.mixer.tools.janus_mountpoints as janus_mountpoints
 from pyplumber.mixer.color import default_codec
@@ -248,7 +249,8 @@ class SetupRuntime:
         stored = json.loads(self.recipe_path.read_text()) if self.recipe_path.exists() else previous
         own, extra = _split_aux((previous or stored).get("aux_buses", []), stored)
         self.aux_buses = [{"id": b["id"], "label": aux_label(b["id"], b.get("label", ""), b.get("layout")),
-                           "full_rate": b.get("full_rate", False)} for b in own]
+                           "full_rate": b.get("full_rate", False),
+                           **({"thumbnail": True} if is_thumbnail(b) else {})} for b in own]
         self.extra_ports = _ports(extra)
         return previous, own, extra
 
@@ -262,7 +264,12 @@ class SetupRuntime:
             recipe["max_compositor_layers"] = show["max_compositor_layers"] = previous["max_compositor_layers"]
         wanted, encodes = recipe["setup"]["extra_aux"], recipe["setup"]["encodes"]
         extra = extra[:wanted]   # fewer drops the last ones
+        if recipe.get("source_thumbnails"):
+            reserved = reserve_buses({**show, "aux_buses": own + extra}, len(extra))
+            own = [b for b in own if not is_thumbnail(b)] + [b for b in reserved if is_thumbnail(b)]
         for bus in own:
+            if is_thumbnail(bus):
+                continue
             bus["renditions"][0].update(aux_encode(encodes.get(bus["id"]) or self.profile["nvenc"]["defaults"]["aux"]))
         live = {}
         if (own or extra) and self.process and self.process.poll() is None:
@@ -277,6 +284,8 @@ class SetupRuntime:
         scene_ids = {s.id for s in cfg.scenes}
         unpaged = lambda spec: {k: v for k, v in spec.items() if k != "page"}   # pages follow the new sources
         for bus in own + extra:
+            if is_thumbnail(bus):
+                continue
             for rendition in bus["renditions"]:
                 rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=aux_fps(cfg.fps, bus.get("full_rate", False)))
             state = live.get(bus["id"], bus)

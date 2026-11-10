@@ -437,7 +437,7 @@ def parse_args(argv: list[str] | None = None, *, configure=None) -> argparse.Nam
     parser.add_argument("--graph-url", default=os.environ.get("MIXER_GRAPH_URL", ""),
                         help="Where the AVPlumber graph view is, a path on the page's own origin such as /graph/ "
                              "or a URL; the page links to it. Default: no link. Env: MIXER_GRAPH_URL")
-    parser.add_argument("--transition", choices=("cut", "fade", "wipe"),
+    parser.add_argument("--transition", choices=("cut", "fade", "wipe", "move"),
                         help="Override the page's initial transition without changing the running mixer")
     parser.add_argument("--compute-price", type=Path, default=os.environ.get("MIXER_COMPUTE_PRICE") or None,
                         help="JSON file with public hourly_usd, label, as_of and source_url for compute + GPU; "

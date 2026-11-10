@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "../move_plan.hpp"
 
 namespace avp::mixer {
 
@@ -35,12 +36,25 @@ bool MixerOrchestrator::destinationReady(const av::VideoFrame* frame) const {
 
 void MixerOrchestrator::completeTake(int64_t pts_ns) {
     const bool destination_a = !state_->pgm_is_slot_a;
+    // The glide starts on the take's first on-air frame; any other take ends a glide on air.
+    const Parameters zoom = std::exchange(state_->take_zoom, Parameters(nullptr));
+    if (!zoom.is_null() && zoom.value("generation", uint64_t(0)) == state_->transition_generation) {
+        setNodeObject((destination_a ? state_->slot_a : state_->slot_b).compositor_name, "zoom_on_air",
+                      {{"generation", zoom.at("generation")}, {"start_ns", pts_ns}});
+        state_->pgm_zoom = zoom;
+        state_->pgm_zoom["start_ns"] = pts_ns;
+        state_->pgm_zoom_end_ns = monotonicNs() + zoom.at("duration_ns").get<int64_t>();
+        state_->last_zoom["start_ns"] = pts_ns;
+    } else {
+        state_->pgm_zoom = nullptr;
+    }
     const std::string scene = state_->transition_scene_name;
     if (state_->wipe_on_air) {
         setNodeObject(state_->wipe_otm_name, "outputs", Parameters(1u));
         retireWipeChain();
     }
-    state_->blend_on_air = state_->wipe_on_air = state_->take_paused = false;
+    state_->blend_on_air = state_->wipe_on_air = state_->move_on_air = state_->take_paused = false;
+    state_->take_move = nullptr;   // the slot drops it at the clock's end
     state_->take_request.reset();
     endTakeClock(TakeClock::End::Completed, pts_ns);
     // A take the lever completed leaves it engaged at that end: moving it back starts the next.
@@ -55,30 +69,99 @@ void MixerOrchestrator::completeTake(int64_t pts_ns) {
     finishTransition(destination_a, scene, pts_ns);
 }
 
-void MixerOrchestrator::cut(const std::string& scene_name, CutLatency::Clock::time_point received) {
+void MixerOrchestrator::cut(const std::string& scene_name, CutLatency::Clock::time_point received,
+                            std::optional<ZoomRequest> zoom) {
     avp::timeline::mark("cut pressed: " + scene_name);   // before the lock: its wait shows
     std::lock_guard<std::mutex> lock(state_->mutex);
     const bool preloaded = state_->pvw_slot_scene == scene_name;
     if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
+    const uint64_t generation = state_->transition_generation + 1;   // beginTake's
+    if (zoom) {
+        std::string why;
+        Parameters spec = state_->takeOnAir()
+            ? Parameters(nullptr) : planCutZoom(scene_name, *zoom, generation, why);
+        if (spec.is_null() && why.empty()) why = "a transition is on air";
+        state_->last_zoom = {{"generation", generation}, {"scene", scene_name}, {"result", spec.is_null() ? "cut" : "zoom"},
+                             {"reason", why}};
+        state_->pending_zoom = std::move(spec);
+    }
     if (actOnTransitionOnAir(scene_name, MixerState::TransitionMode::Cut)) return;
+    // A zoom travels in the destination's composition: reload even a preloaded Preview, or a frame
+    // of the composition without it could complete the take showing the bare target framing.
+    if (!state_->pending_zoom.is_null()) state_->pvw_slot_scene.clear();
     try {
         beginTake(scene_name, MixerState::TransitionMode::Cut);
+        state_->take_zoom = std::exchange(state_->pending_zoom, Parameters(nullptr));
         state_->take_received_ns = monotonicNs(received);
         if (state_->cut_latency) {
             state_->cut_latency->timing.begin(scene_name, preloaded, state_->pvwSourceSwitcherIndex(), received);
             state_->cut_latency->timing.arm();
         }
     } catch (...) {
+        state_->pending_zoom = nullptr;
         abortTransition(state_->transition_generation);
         throw;
     }
 }
 
+Parameters MixerOrchestrator::planCutZoom(const std::string& scene_name, const ZoomRequest& request, uint64_t generation,
+                                          std::string& why) {
+    const auto& from = state_->pgmScene();
+    const auto& to = state_->scenes.at(scene_name);
+    if (from.sources.size() != 1 || to.sources.size() != 1) {
+        why = "a zoom needs one layer in each scene";
+        return nullptr;
+    }
+    const auto& [from_name, from_layer] = *from.sources.begin();
+    const auto& [to_name, to_layer] = *to.sources.begin();
+    const auto from_source = state_->sources.find(from_name), to_source = state_->sources.find(to_name);
+    if (from_source == state_->sources.end() || to_source == state_->sources.end()) {
+        why = "a scene layer names no source";
+        return nullptr;
+    }
+    std::optional<SourcePicture> picture;
+    if (const Parameters& p = to_source->second.picture; !p.is_null()) {
+        const auto& r = p.at("reference");
+        picture = SourcePicture{{r.at("x"), r.at("y"), r.at("w"), r.at("h")}, p.at("metadata_key").get<std::string>(),
+                                p.value("mapped", std::vector<int>{})};
+    }
+    auto spec = planZoom(from_layer, to_layer, from_source->second.input_index, to_source->second.input_index,
+                         picture ? &*picture : nullptr, why);
+    if (!spec) return nullptr;
+    // From a glide still on air: its own schedule is the from-endpoint; never a third level.
+    if (!state_->pgm_zoom.is_null() && monotonicNs() < state_->pgm_zoom_end_ns) {
+        if (state_->pgm_zoom.contains("from_zoom")) {
+            why = "glide on glide";
+            return nullptr;
+        }
+        spec->from_zoom = std::make_shared<ZoomSpec>(parseZoomSpec(state_->pgm_zoom));
+    }
+    spec->duration_ns = int64_t(request.duration_sec * 1e9);
+    spec->curve = request.curve;
+    spec->generation = generation;
+    return zoomSpecJson(*spec);
+}
+
+void MixerOrchestrator::definePicture(const std::string& source, const Parameters& picture) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto found = state_->sources.find(source);
+    if (found == state_->sources.end()) throw Error("mixer.source_picture: unknown source " + source);
+    // Validate by parsing it as a zoom would.
+    const auto& r = picture.at("reference");
+    if (r.at("w").get<int>() <= 0 || r.at("h").get<int>() <= 0 || !picture.at("metadata_key").is_string())
+        throw Error("mixer.source_picture: reference {x, y, w, h} and metadata_key required");
+    found->second.picture = picture;
+}
+
 bool MixerOrchestrator::actOnTransitionOnAir(const std::string& scene_name, MixerState::TransitionMode pressed) {
-    if (!state_->blend_on_air && !state_->wipe_on_air) return false;
+    if (!state_->takeOnAir()) return false;
     if (state_->cut_latency) state_->cut_latency->timing.cancel();
     const bool same_scene = scene_name == state_->transition_scene_name;
-    if (!same_scene) replacePreset(scene_name);
+    const bool cut_under_move = pressed == MixerState::TransitionMode::Cut &&
+                                state_->transition_mode == MixerState::TransitionMode::Move;
+    // A cut under a move lands on the scene itself: its slot reloads without the glide, and the
+    // first frame of that revision completes it (selectProgram's cut branch).
+    if (!same_scene || cut_under_move) replacePreset(scene_name, /*keep_move=*/!cut_under_move);
     if (pressed == MixerState::TransitionMode::Cut) {
         // selectProgram's cut branch takes the preset's next ready frame; until then the
         // transition stays on air as it is, both sources moving.
@@ -93,6 +176,7 @@ bool MixerOrchestrator::actOnTransitionOnAir(const std::string& scene_name, Mixe
     } else if (same_scene && state_->take_manual) {
         runOnFromLever();
     } else if (same_scene && (state_->transition_mode == MixerState::TransitionMode::Crossfade ||
+                              state_->transition_mode == MixerState::TransitionMode::Move ||
                               (state_->transition_mode == MixerState::TransitionMode::Wipe && state_->take_request))) {
         toggleTakePause();
     } else if (same_scene) {
@@ -102,8 +186,23 @@ bool MixerOrchestrator::actOnTransitionOnAir(const std::string& scene_name, Mixe
     return true;
 }
 
-void MixerOrchestrator::replacePreset(const std::string& scene_name) {
-    loadSceneIntoSlot(!state_->pgm_is_slot_a, scene_name, true);
+void MixerOrchestrator::replacePreset(const std::string& scene_name, bool keep_move) {
+    if (state_->transition_mode == MixerState::TransitionMode::Move && keep_move && !state_->take_move.is_null()) {
+        // The glide goes on to the new preset on the clock on air; a plan that cannot run shows
+        // the preset as it is for the rest of the take.
+        std::string why;
+        state_->pending_move = planMove(*state_, state_->pgmScene(), state_->scenes.at(scene_name),
+                                        state_->take_move.at("generation").get<uint64_t>(),
+                                        state_->take_move.at("unmatched").get<std::string>(), why);
+        if (!why.empty()) state_->last_move = {{"scene", scene_name}, {"result", "preset"}, {"reason", why}};
+    }
+    try {
+        loadSceneIntoSlot(!state_->pgm_is_slot_a, scene_name, true);
+    } catch (...) {
+        state_->pending_move = nullptr;
+        throw;
+    }
+    state_->take_move = std::exchange(state_->pending_move, Parameters(nullptr));
     state_->transition_scene_name = scene_name;
     // Only a frame of the new revision completes the transition; one that never comes ends it
     // through the take deadline like any unready destination.

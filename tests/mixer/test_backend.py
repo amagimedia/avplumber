@@ -96,6 +96,8 @@ def test_bus_without_a_pgm_layout_skips_the_program_tap_and_labels_outputs(nativ
     assert [layer["input"] for layer in pages["layers"]] == list(range(12))
     assert pages["latency_ms"] == 80
     assert pages["max_layers"] == 640 and graph["mixer_wipe_overlay"]["max_layers"] == 2
+    # Scene slots read the take clock for a move transition, as the keyer does.
+    assert graph["mixer_comp_a"]["mixer"] == graph["mixer_comp_b"]["mixer"] == "mixer"
     # Monitors keep one NVENC reference frame; the program output leaves it to NVENC.
     assert graph["aux_mv2_encoder"]["options"]["dpb_size"] == 1
     assert "dpb_size" not in graph["janus_encoder"]["options"]

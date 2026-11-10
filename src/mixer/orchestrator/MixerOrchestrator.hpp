@@ -120,7 +120,16 @@ class MixerOrchestrator {
     bool actOnTransitionOnAir(const std::string& scene_name, MixerState::TransitionMode pressed);
     /// Load `scene_name` into the preset slot under the transition on air, like a preset-bus
     /// selection: the incoming picture changes as soon as the slot renders it.
-    void replacePreset(const std::string& scene_name);
+    /// `keep_move`: a move on air glides on to the new preset (re-planned on its clock), else the
+    /// preset loads plain (a cut under a move).
+    void replacePreset(const std::string& scene_name, bool keep_move = true);
+    /// Caller holds state_->mutex. A move take to `scene_name` (orchestrator/move.cpp), or a
+    /// crossfade when the move cannot run (last_move says why).
+    void beginMove(const std::string& scene_name, double duration_sec, FadeCurve curve, const std::string& unmatched,
+                   int64_t received_ns, bool manual);
+    /// selectProgram's branch for a move: the destination slot's direct frames, on air from its
+    /// first ready frame, the take clock started there.
+    int selectMove(const std::vector<const av::VideoFrame*>& frames, int target, int64_t last_ns);
     void toggleTakePause();
     /// Caller holds state_->mutex. The lever at `position`, moving there over `span_ms` (lever()),
     /// for the take state_->lever_take describes.
@@ -188,8 +197,16 @@ public:
     void initializeRoutedRoutes();
 
     void preview(const std::string& scene_name);
+    /// A cut with `zoom` glides one person's layer from Program's framing to the scene's when both
+    /// scenes draw one layer of the same source with a declared picture; otherwise it cuts, and
+    /// mixer.status `zoom` says why (layer_zoom.hpp).
+    struct ZoomRequest { double duration_sec; FadeCurve curve; };
     void cut(const std::string& scene_name,
-             avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now());
+             avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now(),
+             std::optional<ZoomRequest> zoom = std::nullopt);
+    void definePicture(const std::string& source, const Parameters& picture);
+    /// The zoom spec JSON for a cut to `scene_name` (layer_zoom.hpp), or null with `why`.
+    Parameters planCutZoom(const std::string& scene_name, const ZoomRequest& request, uint64_t generation, std::string& why);
     void enableCutMeasurements(const std::string& mixer_name, const std::string& encoder_name);
     void prewarmCuts(const std::vector<std::string>& scenes);
     /// A set `dip` (opaque SDR RGB) fades through that colour instead of mixing.
@@ -197,14 +214,23 @@ public:
               FadeCurve curve = FadeCurve::Linear, std::optional<std::array<uint8_t, 3>> dip = std::nullopt,
               avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now());
     void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec);
+    /// A move transition (layer_move.hpp): layers of a source in both scenes glide from Program's
+    /// placement to the scene's over `duration_sec` on `curve`; the others fade, or cut at the
+    /// half (`unmatched`: "fade" | "cut"). A routed source on another route, or a destination
+    /// refusing the layers, makes it a fade; mixer.status `move` says why.
+    void move(const std::string& scene_name, double duration_sec, FadeCurve curve = FadeCurve::Linear,
+              const std::string& unmatched = "fade",
+              avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now());
     /// The lever arm (T-bar) at `position` in [0, 1] (mixer.lever). From its rest it starts a
     /// manual mix to Preview with AUTO's `duration_sec`, `curve` and `dip`, or with a `wipe_file`
     /// a wipe of that cached clip, whose frame follows the lever; held at the lever's progress,
     /// moving there over `span_ms` when set. The far end completes it, the start cancels it with
     /// Program unchanged, each once the picture got there; AUTO runs it on from there (a wipe at
     /// its clip's rate). An AUTO, cut or other take on air ignores it; see Lever for pickup.
+    /// With `move`, the lever's take is a move (unmatched sources: `unmatched`).
     void lever(double position, double duration_sec, FadeCurve curve, std::optional<std::array<uint8_t, 3>> dip,
-               const std::string& wipe_file, std::optional<double> span_ms);
+               const std::string& wipe_file, std::optional<double> span_ms, bool move = false,
+               const std::string& unmatched = "fade");
     /// Run the wipe subgraph once on *wipe_file* with the output kept on the
     /// direct branch, so file open, decoder and GPU filter initialisation (PTX
     /// compilation included) happen before the first real wipe. Blocks until

@@ -91,8 +91,9 @@ int main() {
     assert(drawFilter(auto_ops[3].layer) == ScaleFilter::Bilinear);   // its own limit is 5.5
     assert(drawFilter(resolveDrawOps(sources, plain, 640, 360, AV_PIX_FMT_NV12)[0].layer) == ScaleFilter::Bilinear);
     auto shrinking = parseLayersArray(Parameters::parse(R"([{"input":0,"dst_w":80,"dst_h":44}])"), ScaleFilter::Auto);
-    assert(drawFilter(resolveDrawOps(sources, shrinking, 640, 360, AV_PIX_FMT_NV12)[0].layer) == ScaleFilter::Multisample);
-    assert(describeDrawOps(resolveDrawOps(sources, shrinking, 640, 360, AV_PIX_FMT_NV12)).find("multisample") != std::string::npos);
+    // 4.09x: beyond the area limit (4) every source pixel counts.
+    assert(drawFilter(resolveDrawOps(sources, shrinking, 640, 360, AV_PIX_FMT_NV12)[0].layer) == ScaleFilter::Area);
+    assert(describeDrawOps(resolveDrawOps(sources, shrinking, 640, 360, AV_PIX_FMT_NV12)).find("area") != std::string::npos);
     assert(describeDrawOps(resolveDrawOps(sources, plain, 640, 360, AV_PIX_FMT_NV12)).find("bilinear") == std::string::npos);
     // Per-frame metadata moves a layer and keeps the filter it does not name.
     auto configured = parseLayersArray(Parameters::parse(R"([{"input":0,"filter":"multisample","samples":8,"dst_w":80,"dst_h":44}])"));
