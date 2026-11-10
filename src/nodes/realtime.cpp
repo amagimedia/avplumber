@@ -200,6 +200,7 @@ public:
                 if (fixed) {
                     offset_ = team_->fixedOffset();
                     ready_ = true;
+                    team_->watchClock();
                 } else if (emit && team_) {
                     if (ready_) {
                         offset_ = team_->getOffset(offset_);
@@ -477,6 +478,7 @@ public:
             res["offset_ts"] = offset_;
             res["offset_fixed"] = team_ && team_->hasFixedOffset();
             res["late_drops"] = fixed_late_drops_.load();
+            res["clock_drift_ns"] = team_ ? team_->clockDriftNs() : 0;
             return res;
         } else if (name == "sync_trace") {
             // [source timestamp, released at (monotonic ns), stamped timestamp], oldest first; the

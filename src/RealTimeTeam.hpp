@@ -3,6 +3,7 @@
 #include <mutex>
 #include "instance_shared.hpp"
 #include "avutils.hpp"
+#include "ClockOrigin.hpp"
 
 class RealTimeTeam: public InstanceShared<RealTimeTeam>, public IFlushAndSeek, public ILinkableTeam<RealTimeTeam> {
 protected:
@@ -12,6 +13,8 @@ protected:
     // arrives when, so that a second host given the matching number releases the same frame at
     // the same instant. A late frame is dropped and an early one waits; nothing re-anchors.
     std::atomic<AVTS> fixed_offset_{AV_NOPTS_VALUE};
+    std::atomic<int64_t> clock_checked_ns_{0};
+    std::atomic<int64_t> clock_drift_ns_{0};
     std::mutex busy_;
     std::unique_lock<decltype(busy_)> getLock() {
         return std::unique_lock<decltype(busy_)>(busy_);
@@ -141,6 +144,22 @@ public:
         offset_.store(offset, std::memory_order_release);
         logstream << "realtime team offset fixed at " << offset;
     }
+    /// A fixed offset is only as good as the system clock it was derived from: a step of that
+    /// clock after start (the monotonic clock does not follow one) leaves this host apart from
+    /// the other by the step. Checked every few seconds by whichever member runs; reported, not
+    /// corrected, since correcting means a jump in the picture.
+    void watchClock() {
+        if (!avp::clockOriginEnabled()) return;
+        const int64_t now = avp::monotonicNowNs();
+        int64_t last = clock_checked_ns_.load(std::memory_order_relaxed);
+        if (now - last < 5000000000LL || !clock_checked_ns_.compare_exchange_strong(last, now)) return;
+        const int64_t drift = avp::clockOriginDriftNs();
+        clock_drift_ns_.store(drift, std::memory_order_relaxed);
+        if (drift > 1000000 || drift < -1000000)
+            logstream << "ERROR: the system clock moved by " << drift / 1000 << " us against the monotonic clock "
+                      << "since start; this host's fixed realtime offset is off by that much";
+    }
+    int64_t clockDriftNs() const { return clock_drift_ns_.load(std::memory_order_relaxed); }
     void clearFixedOffset() {
         fixed_offset_.store(AV_NOPTS_VALUE, std::memory_order_release);
         logstream << "realtime team offset no longer fixed";
