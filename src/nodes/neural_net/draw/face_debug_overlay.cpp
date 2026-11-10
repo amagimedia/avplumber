@@ -33,6 +33,8 @@
 extern "C" {
 #include <libavutil/dict.h>
 #include <libavutil/frame.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
 #include <libavutil/pixfmt.h>
 }
 
@@ -241,10 +243,14 @@ class FaceDebugOverlay : public avp::mixer::DebugOverlay {
         ctx_ = nullptr;
     }
 
-    void ensureKernel() {
-        CUcontext current = nullptr;
-        if (CUDA_OVERLAY_CHECK_CU(cuCtxGetCurrent(&current)) || !current)
-            throw Error("debug overlay: no current CUDA context");
+    /// Loads the kernel under the context of `canvas`, which the compositor has made current.
+    void ensureKernel(const AVFrame* canvas) {
+        const AVHWFramesContext* frames =
+            canvas->hw_frames_ctx ? (const AVHWFramesContext*)canvas->hw_frames_ctx->data : nullptr;
+        const AVCUDADeviceContext* device =
+            frames && frames->device_ctx ? (const AVCUDADeviceContext*)frames->device_ctx->hwctx : nullptr;
+        CUcontext current = device ? device->cuda_ctx : nullptr;
+        if (!current) throw Error("debug overlay: the canvas frame has no CUDA context");
         if (kernel_ && current == ctx_) return;
         if (ctx_ && current != ctx_) {
             unload();                       // under the context it was loaded in
@@ -478,7 +484,7 @@ public:
         for (const avp::mixer::DebugOverlayTile& tile : tiles) collect(tile, canvas->width, canvas->height);
         last_items_ = renderer_.itemCount();
         if (!last_items_) return;
-        ensureKernel();
+        ensureKernel(canvas);
         if (!renderer_.draw(ctx_, (CUstream)stream, kernel_, canvas, "debug overlay", false))
             throw Error("debug overlay: failed to draw");
         last_tiles_ = renderer_.tileCount();
