@@ -71,6 +71,7 @@ struct Person {
 struct Model {
     std::string layers_key;
     bool has_face = false;
+    bool speaking = false;
     double face[4] = {0, 0, 0, 0};
     std::vector<float> points;      // x, y, ...
     std::vector<Person> people;
@@ -99,6 +100,7 @@ Model parseModel(const char* text) {
         const Parameters j = Parameters::parse(text);
         if (!j.is_object()) return m;
         if (j.contains("layers") && j["layers"].is_string()) m.layers_key = j["layers"].get<std::string>();
+        if (j.contains("speaking") && j["speaking"].is_boolean()) m.speaking = j["speaking"].get<bool>();
         if (j.contains("face") && numbers(j["face"], 4)) {
             for (size_t i = 0; i < 4; ++i) m.face[i] = j["face"][i].get<double>();
             m.has_face = m.face[2] > m.face[0] && m.face[3] > m.face[1];
@@ -332,7 +334,7 @@ class FaceDebugOverlay : public avp::mixer::DebugOverlay {
     }
 
     /// The lines of `labels` stacked from `top` down, centred on `centre`, kept inside the rectangle.
-    void labels(const Placement& p, const std::vector<std::string>& lines, double centre, double top, bool large) {
+    void labels(const Placement& p, const std::vector<std::string>& lines, double centre, double top, bool large, bool speaking = false) {
         if (lines.empty()) return;
         const GlyphPreset preset = large ? GlyphPreset::k10x14 : GlyphPreset::k5x7;
         const int advance = glyphAdvance(preset), glyph_h = glyphBaseHeight(preset);
@@ -362,9 +364,10 @@ class FaceDebugOverlay : public avp::mixer::DebugOverlay {
             label.bg_h = line_h;
             label.draw_background = 1;
             label.background_opacity = .7f;
-            label.text_y = kWhite.y;
-            label.text_u = kWhite.u;
-            label.text_v = kWhite.v;
+            const DrawColor& text_color = speaking && i == 0 ? kRed : kWhite;
+            label.text_y = text_color.y;
+            label.text_u = text_color.u;
+            label.text_v = text_color.v;
             label.bg_y_color = 16;
             label.bg_u = 128;
             label.bg_v = 128;
@@ -395,11 +398,11 @@ class FaceDebugOverlay : public avp::mixer::DebugOverlay {
 
         if (!m.has_face) {
             // No face to hang them on: the labels at the top left of the layer.
-            labels(p, m.labels, p.x0 + p.width() / 2., p.y0 + 4, large);
+            labels(p, m.labels, p.x0 + p.width() / 2., p.y0 + 4, large, m.speaking);
             return;
         }
         const double x0 = p.x(m.face[0]), y0 = p.y(m.face[1]), x1 = p.x(m.face[2]), y1 = p.y(m.face[3]);
-        box(p, x0, y0, x1, y1, line, kGreen);
+        box(p, x0, y0, x1, y1, m.speaking ? line + 1 : line, m.speaking ? kRed : kGreen);
         const double unit = std::max(x1 - x0, 24.);        // the face width, as shown
         const double centre = (x0 + x1) / 2;
 
@@ -431,7 +434,7 @@ class FaceDebugOverlay : public avp::mixer::DebugOverlay {
                 segment(p, x, bottom, x, bottom - .76 * step, radius, color);
             }
         }
-        labels(p, m.labels, centre, below, large);
+        labels(p, m.labels, centre, below, large, m.speaking);
     }
 
     void collect(const avp::mixer::DebugOverlayTile& tile, int canvas_w, int canvas_h) {
