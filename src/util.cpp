@@ -50,7 +50,7 @@ static std::string env_or(const char *primary, const char *secondary, const char
 LogLineFormat log_line_format() {
     static const LogLineFormat format = []{
         const char *value = getenv("RECORDER_LOG_FORMAT");
-        return (value && std::string(value) == "json") ? LogLineFormat::Json : LogLineFormat::Text;
+        return (value && std::string(value) == "text") ? LogLineFormat::Text : LogLineFormat::Json;
     }();
     return format;
 }

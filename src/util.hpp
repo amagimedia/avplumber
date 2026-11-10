@@ -68,9 +68,9 @@ std::string now_utc_rfc3339();
 
 enum class LogLineFormat { Text, Json };
 
-/// The line format for ``logstream`` output: ``RECORDER_LOG_FORMAT=json`` selects the
-/// OTel JSON log line (one object per line, field names of the OTel log data model),
-/// anything else keeps the legacy ``<local time> [thread] message`` text. Read once,
+/// The line format for ``logstream`` output: ``RECORDER_LOG_FORMAT=text`` selects the
+/// legacy ``<local time> [thread] message`` text; the default is the OTel JSON log
+/// line (one object per line, field names of the OTel log data model). Read once,
 /// on first use: the format of a running process does not change.
 LogLineFormat log_line_format();
 
