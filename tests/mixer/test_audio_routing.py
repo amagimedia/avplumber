@@ -254,6 +254,7 @@ def test_aux_bus_with_audio_port_gets_its_own_outputs_entry(native_boundary, mon
     class FakeAuxBus:
         def __init__(self, avp, api, mixer, cfg, bus):
             self.bus, self.pgm_edge = bus, None
+            self.node_name = f"aux_{bus.id}_comp"
 
         def build(self, options):
             pass

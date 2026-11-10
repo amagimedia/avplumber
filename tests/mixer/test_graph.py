@@ -88,6 +88,7 @@ class FakeAvp:
 class FakeMixer:
     instances = []
     canvas_compositor = MixerGraphBuilder.canvas_compositor
+    _n = MixerGraphBuilder._n
 
     def __init__(self, avp, **parameters):
         self.avp = avp

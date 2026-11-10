@@ -8,6 +8,7 @@
 #include "../mixer/primitives/TickTimes.hpp"
 #include "../mixer/primitives/layer_move.hpp"
 #include "../mixer/primitives/layer_zoom.hpp"
+#include "../mixer/primitives/source_picture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -277,6 +278,8 @@ public:
         const int64_t pts_ns = pts.timestamp({1, 1000000000});
         adjustZoom(layers, pts_ns, sources);
         if (move_.spec) adjustMove(layers, pts_ns, sources);
+        avp::mixer::applySourcePictures(layers, sources,
+            zoom_.spec && zoom_.error.empty() ? zoom_.spec->input : -1);
     }
 
     /// The move's layers for this tick; a failure draws the scene's own layers and drops the move.
