@@ -13,6 +13,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+from pyplumber.jsonlog import configure_logging
 from pyplumber.mixer.application import (
     DEFAULT_FPS, FPS_DEN, HWACCEL, ROUTER_GROUP, JANUS_DEFAULT_HOST, JANUS_DEFAULT_VIDEO_PORT, JANUS_DEFAULT_VIDEO_PT,
     JANUS_DEFAULT_VIDEO_SSRC, JANUS_DEFAULT_VIDEO_BITRATE_KBPS,
@@ -26,6 +27,7 @@ from pyplumber.mixer.dmabuf_inputs import (
 )
 from pyplumber.mixer.inputs import build_input
 from pyplumber.mixer.janus import DEFAULT_KEYFRAME_MIN_INTERVAL_MS
+from pyplumber.jsonlog import configure_logging
 from pyplumber.transform import transform_output, transform_params
 
 from .tools.layouts import (
@@ -293,7 +295,9 @@ def parse_size(text: str) -> tuple[int, int]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
+    # RECORDER_LOG_FORMAT: text (the default here) or the OTel JSON log line
+    # (pyplumber.jsonlog); one JSON object per line when json is selected.
+    configure_logging()
     options = parse_args(argv)
     started = time.monotonic()
     try:

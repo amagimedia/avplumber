@@ -62,6 +62,26 @@ namespace {
 void set_thread_name(const std::string &name);
 std::string now_str();
 
+/// RFC 3339 UTC with milliseconds (``2026-11-09T10:00:00.123Z``), never local time:
+/// the timestamp field of the OTel JSON log line format.
+std::string now_utc_rfc3339();
+
+enum class LogLineFormat { Text, Json };
+
+/// The line format for ``logstream`` output: ``RECORDER_LOG_FORMAT=json`` selects the
+/// OTel JSON log line (one object per line, field names of the OTel log data model),
+/// anything else keeps the legacy ``<local time> [thread] message`` text. Read once,
+/// on first use: the format of a running process does not change.
+LogLineFormat log_line_format();
+
+/// One log line in the selected format. ``timestamp`` comes from :ca:`now_str` or
+/// :c:`now_utc_rfc3339` as the format requires; the JSON form carries the standard's
+/// fields (severity INFO: ``logstream`` has no levels; the service identity from the
+/// environment; the engine's own lines travel as ``body``).
+std::string format_log_line(
+    const std::string &timestamp, const std::string &thread_name,
+    const std::string &message);
+
 std::list< std::string > jsonToStringList(const Parameters& jitem);
 
 class Logger {
@@ -93,20 +113,24 @@ std::thread start_thread(const std::string name, std::function<void()> whattodo)
 
 class LogLine {
 protected:
+    std::string timestamp_;
+    std::string thread_name_;
     std::ostringstream ss_;
     Logger* logger_;
 public:
     LogLine(Logger* logger): logger_(logger) {
-        ss_ << now_str() << " [" << current_thread.name << "] ";
+        timestamp_ = (log_line_format() == LogLineFormat::Json) ? now_utc_rfc3339() : now_str();
+        thread_name_ = current_thread.name;
     }
     std::ostringstream& stream() {
         return ss_;
     }
     ~LogLine() {
+        std::string line = format_log_line(timestamp_, thread_name_, ss_.str());
         if (logger_) {
-            logger_->log(ss_.str());
+            logger_->log(line);
         } else {
-            std::cerr << ss_.str() << std::endl;
+            std::cerr << line << std::endl;
         }
     }
 };

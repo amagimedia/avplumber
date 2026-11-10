@@ -8,6 +8,7 @@
 #include "avplumber.hpp"
 #include "app_version.hpp"
 #include "instance_shared.hpp"
+#include "otel.hpp"
 
 std::shared_ptr<AVPlumber> avp_ptr = nullptr;
 
@@ -57,6 +58,9 @@ int main(int argc, char **argv) {
     signal(SIGTERM, &stop_handler);
     
     
+    // OpenTelemetry (metrics later): a no-op unless the binary builds with
+    // HAVE_OTEL=1, in which case the deployment's env vars configure it.
+    avplumber_otel::init();
     avp_ptr = std::make_shared<AVPlumber>();
     AVPlumber &avp = *avp_ptr;
     avp.setLogFile(log_path);

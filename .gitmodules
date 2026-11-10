@@ -27,3 +27,6 @@
 [submodule "deps/nvtx"]
 	path = deps/nvtx
 	url = https://github.com/NVIDIA/NVTX
+[submodule "deps/opentelemetry-cpp"]
+	path = deps/opentelemetry-cpp
+	url = https://github.com/open-telemetry/opentelemetry-cpp.git

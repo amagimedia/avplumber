@@ -1,5 +1,6 @@
 #include "util.hpp"
 #include <cassert>
+#include <cstdlib>
 #include <thread>
 #include <sys/prctl.h>
 #include <sys/time.h>
@@ -23,6 +24,58 @@ std::string now_str() {
     sprintf(s+20, "%06ld", tv.tv_usec);
     s[26] = ' '; // sprintf will store null terminator, restore the space
     return {s};
+}
+
+std::string now_utc_rfc3339() {
+    struct tm timeinfo;
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    gmtime_r(&tv.tv_sec, &timeinfo);
+    char s[32];
+    strftime(s, sizeof(s)-1, "%Y-%m-%dT%H:%M:%S", &timeinfo);
+    char out[40];
+    assert(tv.tv_usec < 1000000);
+    snprintf(out, sizeof(out), "%s.%03ldZ", s, static_cast<long>(tv.tv_usec / 1000));
+    return {out};
+}
+
+static std::string env_or(const char *primary, const char *secondary, const char *fallback) {
+    const char *value = getenv(primary);
+    if (value && *value) return {value};
+    value = getenv(secondary);
+    if (value && *value) return {value};
+    return {fallback};
+}
+
+LogLineFormat log_line_format() {
+    static const LogLineFormat format = []{
+        const char *value = getenv("RECORDER_LOG_FORMAT");
+        return (value && std::string(value) == "json") ? LogLineFormat::Json : LogLineFormat::Text;
+    }();
+    return format;
+}
+
+std::string format_log_line(
+    const std::string &timestamp, const std::string &thread_name,
+    const std::string &message
+) {
+    if (log_line_format() == LogLineFormat::Text) {
+        return timestamp + " [" + thread_name + "] " + message;
+    }
+    // The OTel JSON log line, the same contract the recorder's Python side emits
+    // (recorder/jsonlog.py in eka-recorder-ai). The engine's logstream has no
+    // levels, so every line is INFO; the legacy local-time stamp is not carried.
+    nlohmann::json fields;
+    fields["timestamp"] = timestamp;
+    fields["severity_text"] = "INFO";
+    fields["severity_number"] = 9;
+    fields["body"] = message;
+    fields["service.name"] = env_or("OTEL_SERVICE_NAME", "", "avplumber");
+    fields["service.version"] = env_or("OTEL_SERVICE_VERSION", "RECORDER_VERSION", "unknown");
+    fields["deployment.environment"] = env_or("DEPLOYMENT_ENVIRONMENT", "OTEL_DEPLOYMENT_ENVIRONMENT", "unknown");
+    fields["logger"] = "avplumber";
+    fields["thread"] = thread_name;
+    return fields.dump();
 }
 
 void set_thread_name_internal(const char* name) {
