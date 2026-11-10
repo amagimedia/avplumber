@@ -88,4 +88,8 @@ public:
     void mainLoop();
     void stopMainLoop();
     void heartbeat();
+    /// One compact log line naming the queues that dropped frames since the previous call and how
+    /// many ("queue drops 60s: a+3 b+1"); nothing when none did. Cheap enough to call every minute,
+    /// so a log read after the fact shows where frames were lost without a per-second dump.
+    void logQueueDrops(const std::string &period = "");
 };

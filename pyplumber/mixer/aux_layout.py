@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from .config import ConfigError, scene_layers
 from .control import source_mask_param
+from . import thumbnail
 
 PRESETS = ("pgm_pvw_grid", "source_pages")
 ROLES = {"pvw": (), "pgm": (), "slot": ("slot",), "source": ("source",)}   # role: its keys besides the rect
@@ -80,6 +81,16 @@ def parse_layout(cfg, spec):
     preset = spec.get("preset") if isinstance(spec, dict) else None
     if preset == "pgm_pvw_grid" and set(spec) == {"preset"}:
         return {"preset": preset}
+    if preset == thumbnail.PRESET and set(spec) <= {"preset", "page", "size"}:
+        page = spec.get("page", 0)
+        if not (_integer(page) and 0 <= page < thumbnail.BANKS):
+            raise ConfigError("source_thumbnails page must be 0, 1 or 2")
+        if "size" not in spec:
+            return {"preset": preset, "page": page}
+        try:
+            return {"preset": preset, "page": page, "size": thumbnail.check_size(spec["size"])}
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
     if preset == "source_pages" and set(spec) <= {"preset", "page"}:
         page = spec.get("page", 0)
         if not (_integer(page) and 0 <= page < page_count(cfg)):
@@ -101,6 +112,8 @@ def layout_cells(cfg, spec, page=0):
         return spec["cells"]
     if spec["preset"] == "pgm_pvw_grid":
         return grid_cells(cfg)
+    if spec["preset"] == thumbnail.PRESET:
+        return thumbnail.cells(cfg, spec.get("page", 0), thumbnail.size_of(spec))
     grid = page_grid(cfg)
     first = page * len(grid)
     return [{"role": "source", "source": first + i, **rect} for i, rect in enumerate(grid[:len(cfg.sources) - first])]
@@ -147,10 +160,17 @@ def _layout(layers):
     return {"layers": layers, "active_inputs": source_mask_param(sum(1 << i for i in {l["input"] for l in layers}))}
 
 
-def _tile(index, rect, z):
-    """Input *index* contained in *rect*."""
-    return {"input": index, "dst_x": rect["x"], "dst_y": rect["y"], "dst_w": rect["w"], "dst_h": rect["h"],
-            "fit": "contain", "z": z}
+def _tile(index, rect, z, cfg=None):
+    """Input *index* contained in *rect*: a face sheet's camera picture (the reference its source
+    declares), else its whole frame, with the filter its scale calls for (auto: multisample, 8
+    samples, when it shrinks a lot, as a thumbnail does)."""
+    layer = {"input": index, "dst_x": rect["x"], "dst_y": rect["y"], "dst_w": rect["w"], "dst_h": rect["h"],
+             "fit": "contain", "z": z, "filter": "auto", "samples": 8}
+    source = cfg.sources[index] if cfg is not None and index < len(cfg.sources) else None
+    reference = (source.picture or {}).get("reference") if source is not None else None
+    if reference:
+        layer["crop"] = {k: reference[k] for k in ("x", "y", "w", "h")}
+    return layer
 
 
 def _cell_layers(cfg, scene, cell, first_z):
@@ -185,7 +205,7 @@ def base_composition(cfg, cells, scenes):
     layers = []
     for cell in [c for c in cells if c["role"] in ("slot", "source")] + [c for c in cells if c["role"] == "pgm"]:
         if cell["role"] != "slot":
-            layers.append(_tile(len(cfg.sources) if cell["role"] == "pgm" else cell["source"], cell, first + len(layers)))
+            layers.append(_tile(len(cfg.sources) if cell["role"] == "pgm" else cell["source"], cell, first + len(layers), cfg))
         elif scenes[cell["slot"]]:
             layers.extend(_cell_layers(cfg, definitions[scenes[cell["slot"]]], cell, first + len(layers)))
     return _layout(layers)

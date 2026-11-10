@@ -22,7 +22,9 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from .color import Color, declared_color, default_codec, rendition_color, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
 
 FITS = ("stretch", "contain", "cover")
-TRANSITIONS = ("cut", "fade", "wipe")
+TRANSITIONS = ("cut", "fade", "wipe", "move")
+# What a move does with a source in only one of its two scenes (layer_move.hpp).
+MOVE_UNMATCHED = ("fade", "cut")
 # Compositor/transition working formats: the semiplanar family only. NV12 is the
 # 8-bit default; P010/P210 are 10-bit 4:2:0/4:2:2. Planar layouts are excluded on
 # purpose: the compositor cannot promote 8-bit sources or draw the RGBA wipe
@@ -198,6 +200,9 @@ class Source:
     park_limit: int = 0
     capture_cadence: str = "continuous"  # browser: "on_change" permits intentional static holds
     has_audio: bool = False        # demux/decode an audio track alongside video (kind == "video" only)
+    # Layer zoom (avplumber layer_zoom.hpp): where the source's picture is 1:1 on its frames, the
+    # metadata key of its per-frame framings and which framing layers (by input) map it.
+    picture: Optional[Dict[str, Any]] = None
 
     @property
     def decoder_params(self):
@@ -275,6 +280,8 @@ class Item:
     fit: str = "contain"
     crop: Optional[Rect] = None
     blend: bool = False           # honour source alpha, e.g. transparent browser graphics
+    rotation: float = 0.0         # degrees, clockwise, about `pivot` (the box's centre when None)
+    pivot: Optional[Tuple[float, float]] = None   # scene-canvas pixels
 
 
 @dataclass(frozen=True)
@@ -327,6 +334,7 @@ class MixerConfig:
     fade_seconds: float = DEFAULT_FADE_SECONDS
     fade_curve: str = DEFAULT_FADE_CURVE   # what an M/E fade eases with unless a take picks its own
     fade_color: Optional[str] = None       # "#rrggbb": what an M/E fade dips through unless a take picks; None mixes
+    move_unmatched: str = "fade"           # a move's sources in one scene only: "fade" or "cut" at the half
     transition: str = DEFAULT_TRANSITION   # what a pick takes with in direct mode
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
@@ -404,7 +412,9 @@ class MixerConfig:
         previews += [{"bus": b.id, "label": aux_label(b.id, b.label, b.layout),
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
                       "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps,
-                      **({"audio": True} if b.renditions[0].audio_port else {})}
+                      **({"audio": True} if b.renditions[0].audio_port else {}),
+                      **({"group": "Thumbnails", "width": r.width, "height": r.height}
+                         if b.layout.get("preset") == "source_thumbnails" else {})}
                      for b in self.aux_buses for r in b.renditions]
         aliases = self.alias_counts
         return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
@@ -424,7 +434,7 @@ class MixerConfig:
                 "hdr_video": sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"]) for s in self.sources),
                 "direct": self.direct,
                 "fade_seconds": self.fade_seconds, "fade_curve": self.fade_curve,
-                "fade_color": self.fade_color,
+                "fade_color": self.fade_color, "move_unmatched": self.move_unmatched,
                 "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
                 "wipes": wipes, **keys,
@@ -457,6 +467,42 @@ def protocol_name(value: Any, what: str) -> str:
     if not isinstance(value, str) or not value or any(c.isspace() or not c.isprintable() for c in value):
         raise ConfigError(f"{what} must be a non-empty name without spaces or control characters, not {value!r}")
     return value
+
+
+def _parse_picture(p: Any, source: Dict[str, Any], where: str) -> Dict[str, Any]:
+    """A source's `picture`: {"reference": {x, y, w, h}, "metadata_key": str, "mapped": [inputs]}."""
+    if not isinstance(p, dict) or set(p) - {"reference", "metadata_key", "mapped"}:
+        raise ConfigError(f"{where}: picture must be an object of reference, metadata_key and mapped")
+    ref = p.get("reference")
+    if not isinstance(ref, dict) or any(type(ref.get(k)) is not int for k in "xywh") or ref["w"] <= 0 or ref["h"] <= 0 \
+            or ref["x"] < 0 or ref["y"] < 0:
+        raise ConfigError(f"{where}: picture reference must be {{x, y, w, h}} in pixels")
+    width, height = int(source.get("width", 0)), int(source.get("height", 0))
+    if width and height and (ref["x"] + ref["w"] > width or ref["y"] + ref["h"] > height):
+        raise ConfigError(f"{where}: picture reference lies outside the {width}x{height} source")
+    if not isinstance(p.get("metadata_key"), str) or not p["metadata_key"]:
+        raise ConfigError(f"{where}: picture metadata_key must be a string")
+    mapped = p.get("mapped", [])
+    if not isinstance(mapped, list) or any(type(m) is not int or m < 0 for m in mapped):
+        raise ConfigError(f"{where}: picture mapped must list input indices")
+    return {"reference": dict(ref), "metadata_key": p["metadata_key"], "mapped": list(mapped)}
+
+
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _rotation(item: Dict[str, Any], where: str) -> Tuple[float, Optional[Tuple[float, float]]]:
+    """An item's `rotation` (degrees, clockwise) and optional `pivot` [x, y] in scene pixels."""
+    rotation = item.get("rotation", 0)
+    if not _finite_number(rotation):
+        raise ConfigError(f"{where}: rotation must be a finite number of degrees")
+    pivot = item.get("pivot")
+    if pivot is not None:
+        if not isinstance(pivot, (list, tuple)) or len(pivot) != 2 or not all(map(_finite_number, pivot)):
+            raise ConfigError(f"{where}: pivot must be [x, y] in scene pixels")
+        pivot = (float(pivot[0]), float(pivot[1]))
+    return float(rotation), pivot
 
 
 def _rect(obj: Any, where: str) -> Rect:
@@ -554,7 +600,8 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
                 raise ValueError(f"{kind} input needs positive even width and height")
     except ValueError as e:
         raise ConfigError(f"{where}: {e}") from e
-    return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)),
+    picture = _parse_picture(s["picture"], s, where) if "picture" in s else None
+    return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)), picture=picture,
                   height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
@@ -643,11 +690,14 @@ def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:
     fade_seconds = float(control.get("fade_seconds", DEFAULT_FADE_SECONDS))
     if fade_seconds <= 0:
         raise ConfigError("control.fade_seconds must be positive")
+    move_unmatched = control.get("move_unmatched", "fade")
+    if move_unmatched not in MOVE_UNMATCHED:
+        raise ConfigError("control.move_unmatched must be fade or cut")
     return {"direct": bool(control.get("direct", True)),
             "fade_seconds": fade_seconds,
             "fade_curve": fade_curve(control.get("fade_curve", DEFAULT_FADE_CURVE), "control.fade_curve"),
             "fade_color": fade_color(control.get("fade_color"), "control.fade_color"),
-            "transition": transition, "default_wipe": default_wipe}
+            "move_unmatched": move_unmatched, "transition": transition, "default_wipe": default_wipe}
 
 
 def _unique(items: List[Any], where: str, label: str = "id") -> None:
@@ -766,7 +816,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             blend = it.get("blend", False)
             if not isinstance(blend, bool):
                 raise ConfigError(f"{iw}: blend must be a boolean")
-            items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop, blend))
+            rotation, pivot = _rotation(it, iw)
+            items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop, blend, rotation, pivot))
         scenes.append(Scene(protocol_name(str(sc["id"]), f"{where}: id"), tuple(items)))
         _unique(scenes, where, "scene id")
     if not scenes:
@@ -874,6 +925,7 @@ def parse_aux_buses(values, cfg):
     switch to (by default the presets, pgm_pvw_grid only when `layout` has a pgm cell itself), its
     slot assignments `scenes`, and the layer budget `max_layers`, max_compositor_layers by default.
     The bus gets the PGM pad only when `layout` or `layouts` has a pgm cell."""
+    from . import thumbnail
     from .aux_layout import PRESETS, check_assignments, count, draws_program, layout_cells, parse_layout, same_kind
     if not isinstance(values, list) or len(values) > 30:
         raise ConfigError("aux_buses must be a list of at most 30 buses")
@@ -886,10 +938,15 @@ def parse_aux_buses(values, cfg):
             raise ConfigError("aux bus IDs must be unique identifiers")
         ids.add(bid)
         layouts = [parse_layout(cfg, obj.get("layout", DEFAULT_AUX_LAYOUT))]
-        offered = obj.get("layouts", [{"preset": p} for p in PRESETS
+        thumbnails = thumbnail.is_thumbnail(obj)
+        offered = obj.get("layouts", [] if thumbnails else [{"preset": p} for p in PRESETS
                                       if draws_program(cfg, layouts) or not draws_program(cfg, [{"preset": p}])])
         if not isinstance(offered, list) or len(offered) > 16:
             raise ConfigError(f"aux {bid}: layouts must be a list of at most 16 layouts")
+        if thumbnails and offered:
+            raise ConfigError("thumbnail banks have a fixed layout")
+        if not thumbnails and any(thumbnail.is_thumbnail({"layout": spec}) for spec in offered):
+            raise ConfigError("source_thumbnails requires a dedicated thumbnail bus")
         for spec in (parse_layout(cfg, spec) for spec in offered):
             if not any(same_kind(spec, known) for known in layouts):
                 layouts.append(spec)
@@ -913,8 +970,11 @@ def parse_aux_buses(values, cfg):
         # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
         r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
                              f"aux {bid}", cfg.canvas_w, cfg.canvas_h, fps)
+        expected = (*thumbnail.size_of(layouts[0]), thumbnail.FPS) if thumbnails else (cfg.canvas_w, cfg.canvas_h, fps)
+        if thumbnails and (r.codec != "h264_nvenc" or r.profile != "baseline" or getattr(r, "audio_port", 0)):
+            raise ConfigError("thumbnail banks require silent H.264 baseline video")
         if (r.target != "janus" or r.codec not in ("h264_nvenc", "hevc_nvenc") or r.color != "sdr" or
-                (r.width, r.height, r.fps) != (cfg.canvas_w, cfg.canvas_h, fps)):
+                (r.width, r.height, r.fps) != expected):
             raise ConfigError("aux rendition must be SDR H.264 or HEVC at canvas size and the aux frame rate")
         if not r.port:
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
@@ -1068,5 +1128,9 @@ def scene_layers(cfg: MixerConfig, scene: Scene) -> Dict[str, Dict[str, Any]]:
             layer["fit"] = item.fit
         if crop is not None:
             layer["crop"] = {"x": crop.x, "y": crop.y, "w": crop.w, "h": crop.h}
+        if item.rotation:   # only when set: unrotated compositions keep their JSON and revision
+            layer["rotation_deg"] = item.rotation
+            if item.pivot is not None:
+                layer["pivot_x"], layer["pivot_y"] = item.pivot
         layers[name] = layer
     return layers

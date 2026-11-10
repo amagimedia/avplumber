@@ -3,12 +3,14 @@
 // overrides, and the resolution of layers against the actual source frames into
 // an ordered list of draw operations. No CUDA here.
 #include "../../util.hpp"
+#include "compositor_affine.hpp"
 #include "compositor_geometry.hpp"
 #include "pixel_layout.hpp"
 #include <avcpp/frame.h>
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -39,6 +41,17 @@ struct LayerSpec {
     // How the layer is resampled (`filter`, `bicubic_param`, `samples`, `bicubic_above`,
     // `multisample_above`). Bilinear unless the layer or its node's default says otherwise.
     FilterSpec filter;
+    // Layer transform (compositor_affine.hpp). Geometry rule: omitted in a layer object means
+    // none, per-frame metadata included. rotation_deg clockwise, (-180, 180]; the pivot in scene
+    // canvas pixels, the centre of the placed box when unset. crop_exact: a crop with a
+    // fractional value, whose enclosing rect is in crop_*.
+    double rotation_deg = 0;
+    bool pivot_set = false;
+    double pivot_x = 0, pivot_y = 0;
+    std::optional<RectF> crop_exact;
+    // A box with a fractional value, the twin of crop_exact, whose enclosing rect is in dst_*.
+    // Written by the move transition (layer_move.hpp), never parsed from JSON.
+    std::optional<RectF> dst_exact;
 
     /// The source this layer draws: `input`, or its position in the legacy one-layer-per-input order.
     size_t sourceIndex(size_t position) const { return input < 0 ? position : size_t(input); }
@@ -51,20 +64,32 @@ struct LayerSpec {
                crop_x == other.crop_x && crop_y == other.crop_y &&
                crop_w == other.crop_w && crop_h == other.crop_h &&
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
-               source_canvas_w == other.source_canvas_w && source_canvas_h == other.source_canvas_h;
+               source_canvas_w == other.source_canvas_w && source_canvas_h == other.source_canvas_h &&
+               rotation_deg == other.rotation_deg && pivot_set == other.pivot_set && pivot_x == other.pivot_x &&
+               pivot_y == other.pivot_y && crop_exact == other.crop_exact && dst_exact == other.dst_exact;
     }
 };
+
+/// Whether a layer draws through the affine entry: rotated, cropped or placed at a fraction of a
+/// pixel, or a faded layer that is not a blended key (a blended key fades by its table mul).
+inline bool needsTransform(const LayerSpec &l) {
+    return normalizedRotation(l.rotation_deg) != 0. || l.crop_exact.has_value() || l.dst_exact.has_value() ||
+           (l.opacity < 1.f && !l.blend);
+}
 
 struct DrawOp {
     const av::VideoFrame *src = nullptr;
     int src_w = 0;
     int src_h = 0;
     LayerSpec layer;
+    // A transformed layer's geometry; its layer.dst_* then hold the luma bounds and layer.crop_*
+    // the integer source rect its taps read.
+    std::optional<LayerTransform> transform;
 
     bool operator==(const DrawOp &other) const {
         return (src != nullptr) == (other.src != nullptr) &&
                src_w == other.src_w && src_h == other.src_h &&
-               layer == other.layer;
+               layer == other.layer && transform == other.transform;
     }
 };
 
@@ -77,18 +102,19 @@ inline void parseFilterFromJson(const Parameters &obj, FilterSpec &out) {
         const auto known = std::find_if(std::begin(kScaleFilters), std::end(kScaleFilters),
                                         [&](ScaleFilter f) { return name == scaleFilterName(f); });
         if (known == std::end(kScaleFilters))
-            throw Error("cuda_rect_overlay: filter must be auto, bilinear, bicubic or multisample");
+            throw Error("cuda_rect_overlay: filter must be auto, bilinear, bicubic, multisample or area");
         out.mode = *known;
     }
     out.bicubic_param = obj.value("bicubic_param", out.bicubic_param);
     out.samples = obj.value("samples", out.samples);
     out.bicubic_above = obj.value("bicubic_above", out.bicubic_above);
     out.multisample_above = obj.value("multisample_above", out.multisample_above);
+    out.area_above = obj.value("area_above", out.area_above);
     if (out.samples != 4 && out.samples != 8)
         throw Error("cuda_rect_overlay: samples must be 4 or 8");
     // Negated comparisons so that NaN fails too.
-    if (!(out.bicubic_above >= 1.) || !(out.multisample_above >= 1.))
-        throw Error("cuda_rect_overlay: bicubic_above and multisample_above must be at least 1");
+    if (!(out.bicubic_above >= 1.) || !(out.multisample_above >= 1.) || !(out.area_above >= 1.))
+        throw Error("cuda_rect_overlay: bicubic_above, multisample_above and area_above must be at least 1");
     if (!std::isfinite(out.bicubic_param))
         throw Error("cuda_rect_overlay: bicubic_param must be a finite number");
 }
@@ -109,6 +135,14 @@ inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     out.dst_w = obj.value("dst_w", 0);
     out.dst_h = obj.value("dst_h", 0);
     out.z = obj.value("z", 0);
+    out.rotation_deg = normalizedRotation(obj.value("rotation_deg", 0.));
+    out.pivot_set = obj.contains("pivot_x");
+    if (out.pivot_set != obj.contains("pivot_y"))
+        throw Error("cuda_rect_overlay: pivot_x and pivot_y go together");
+    out.pivot_x = out.pivot_set ? obj.at("pivot_x").get<double>() : 0.;
+    out.pivot_y = out.pivot_set ? obj.at("pivot_y").get<double>() : 0.;
+    if (!std::isfinite(out.pivot_x) || !std::isfinite(out.pivot_y))
+        throw Error("cuda_rect_overlay: pivot must be finite");
     out.blend = obj.value("blend", false);
     const std::string fit = obj.value("fit", std::string("stretch"));
     if (fit != "stretch" && fit != "contain")
@@ -126,11 +160,25 @@ inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
         throw Error("cuda_rect_overlay: dst_w and dst_h must both be positive or both omitted");
     if (obj.contains("crop") && obj["crop"].is_object()) {
         const auto &c = obj["crop"];
-        out.crop_x = c.value("x", 0);
-        out.crop_y = c.value("y", 0);
-        // 0 means "use remaining source width/height from crop_x/crop_y" (resolved per-frame in resolveDrawOps).
-        out.crop_w = c.value("w", 0);
-        out.crop_h = c.value("h", 0);
+        const double x = c.value("x", 0.), y = c.value("y", 0.), w = c.value("w", 0.), h = c.value("h", 0.);
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h))
+            throw Error("cuda_rect_overlay: crop must be finite");
+        if (x != std::floor(x) || y != std::floor(y) || w != std::floor(w) || h != std::floor(h)) {
+            // A sub-pixel crop draws through the affine entry; the integer fields enclose it.
+            if (!(w > 0) || !(h > 0)) throw Error("cuda_rect_overlay: a fractional crop needs w and h");
+            out.crop_exact = RectF{x, y, w, h};
+            out.crop_x = int(std::floor(x));
+            out.crop_y = int(std::floor(y));
+            out.crop_w = int(std::ceil(x + w)) - out.crop_x;
+            out.crop_h = int(std::ceil(y + h)) - out.crop_y;
+        } else {
+            out.crop_exact.reset();
+            out.crop_x = int(x);
+            out.crop_y = int(y);
+            // 0 means "use remaining source width/height from crop_x/crop_y" (resolved per-frame in resolveDrawOps).
+            out.crop_w = int(w);
+            out.crop_h = int(h);
+        }
     }
     // No crop object → crop_x/y/w/h all stay 0 (full source frame from origin).
     parseFilterFromJson(obj, out.filter);
@@ -234,6 +282,20 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         }
         const Rect visible = visibleFrameRect(*srcp->raw());
         LayerSpec L = layers[i];
+        const bool transformed = needsTransform(L);
+        // A transformed layer keeps its crop and box whole: rotation and the quad test decide what
+        // is drawn, and `clip` (the canvas, or the AUX tile below) where.
+        const auto withTransform = [&](DrawOp op, RectF box) {
+            LayerTransform t;
+            t.crop = L.crop_exact ? *L.crop_exact : RectF{double(L.crop_x), double(L.crop_y), double(L.crop_w), double(L.crop_h)};
+            t.box = box;
+            t.rotation_deg = normalizedRotation(L.rotation_deg);
+            t.pivot_x = L.pivot_set ? L.pivot_x : NAN;   // NAN: the box's centre, once the box is final
+            t.pivot_y = L.pivot_set ? L.pivot_y : NAN;
+            t.clip = {0, 0, canvas_w, canvas_h};
+            op.transform = t;
+            return op;
+        };
         if (L.dst_w > 0) {
             const Rect crop{L.crop_x, L.crop_y, L.crop_w, L.crop_h};
             const Rect box{L.dst_x, L.dst_y, L.dst_w, L.dst_h};
@@ -242,10 +304,10 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
                 ? placeInCanvas(visible.w, visible.h, crop, box,
                                 L.source_canvas_w, L.source_canvas_h, ax, ay)
                 : place(visible.w, visible.h, crop, box, L.fit, ax, ay);
-            if (!placement || placement->destination.x >= canvas_w ||
+            if (!placement || (!transformed && (placement->destination.x >= canvas_w ||
                 placement->destination.y >= canvas_h ||
                 int64_t(placement->destination.x) + placement->destination.w <= 0 ||
-                int64_t(placement->destination.y) + placement->destination.h <= 0) {
+                int64_t(placement->destination.y) + placement->destination.h <= 0))) {
                 DrawOp rejected;
                 rejected.src_w = -srcp->width(); rejected.src_h = srcp->height();   // marks "rejected" in the log
                 rejected.layer = L;
@@ -253,6 +315,16 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
                 continue;
             }
             auto p = *placement;
+            if (transformed) {
+                L.crop_x = p.source.x; L.crop_y = p.source.y;
+                L.crop_w = p.source.w; L.crop_h = p.source.h;
+                L.dst_x = p.destination.x; L.dst_y = p.destination.y;
+                L.dst_w = p.destination.w; L.dst_h = p.destination.h;
+                const RectF placed = L.dst_exact ? *L.dst_exact
+                    : RectF{double(p.destination.x), double(p.destination.y), double(p.destination.w), double(p.destination.h)};
+                ops.push_back(withTransform({srcp, srcp->width(), srcp->height(), L}, placed));
+                continue;
+            }
             // A box partly off the canvas draws its visible part: plane regions cannot start
             // left of or above the canvas. A tile layer is clipped to its tile below.
             if (!L.tile.w) clipLayer(p.source, p.destination, {0, 0, canvas_w, canvas_h});
@@ -266,6 +338,16 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         // 0 means "remaining source extent from the crop origin".
         if (L.crop_w <= 0) L.crop_w = visible.w - L.crop_x;
         if (L.crop_h <= 0) L.crop_h = visible.h - L.crop_y;
+        if (transformed) {
+            // 1:1: the box is the crop's size at dst.
+            const double w = L.crop_exact ? L.crop_exact->w : L.crop_w, h = L.crop_exact ? L.crop_exact->h : L.crop_h;
+            const Rect box{L.dst_x, L.dst_y, int(std::lround(w)), int(std::lround(h))};
+            if (box.w <= 0 || box.h <= 0) { ops.push_back({}); continue; }
+            L.dst_w = box.w; L.dst_h = box.h;
+            ops.push_back(withTransform({srcp, srcp->width(), srcp->height(), L},
+                                        {double(box.x), double(box.y), double(box.w), double(box.h)}));
+            continue;
+        }
         if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, visible.w, visible.h) ||
             !clipRect(L.dst_x, L.dst_y, L.crop_w, L.crop_h, canvas_w, canvas_h)) {
             ops.push_back({});
@@ -300,6 +382,22 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         const int y = t.y + map(l.dst_y, t.h, l.scene_h, ay);
         const int right = t.x + map(l.dst_x + w, t.w, l.scene_w, ax);
         const int bottom = t.y + map(l.dst_y + h, t.h, l.scene_h, ay);
+        if (op.transform) {
+            // The box and pivot map into the tile; the tile clips the bounds, not the source.
+            auto &tr = *op.transform;
+            if (l.dst_exact) {   // a fractional box maps exactly: no chroma alignment on the affine path
+                const double kx = double(t.w) / l.scene_w, ky = double(t.h) / l.scene_h;
+                tr.box = {t.x + tr.box.x * kx, t.y + tr.box.y * ky, tr.box.w * kx, tr.box.h * ky};
+            } else {
+                tr.box = {double(x), double(y), double(right - x), double(bottom - y)};
+            }
+            tr.clip = t;
+            if (!std::isnan(tr.pivot_x)) {
+                tr.pivot_x = t.x + tr.pivot_x * t.w / l.scene_w;
+                tr.pivot_y = t.y + tr.pivot_y * t.h / l.scene_h;
+            }
+            continue;
+        }
         // Clip after fitting in the original scene, before drawing into its tile.
         Rect crop{l.crop_x, l.crop_y, l.crop_w, l.crop_h}, dst{x, y, right - x, bottom - y};
         if (!clipLayer(crop, dst, t)) { op.src = nullptr; continue; }
@@ -312,6 +410,26 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         const Rect visible = visibleFrameRect(*op.src->raw());
         op.layer.crop_x += visible.x;
         op.layer.crop_y += visible.y;
+        if (!op.transform) continue;
+        auto &t = *op.transform;
+        auto &l = op.layer;
+        t.crop.x += visible.x;
+        t.crop.y += visible.y;
+        const double ex0 = std::max(t.crop.x, double(visible.x)), ey0 = std::max(t.crop.y, double(visible.y));
+        const double ex1 = std::min(t.crop.x + t.crop.w, double(visible.x) + visible.w);
+        const double ey1 = std::min(t.crop.y + t.crop.h, double(visible.y) + visible.h);
+        t.edges = {ex0, ey0, ex1 - ex0, ey1 - ey0};
+        if (std::isnan(t.pivot_x)) {
+            t.pivot_x = t.box.x + t.box.w / 2.;
+            t.pivot_y = t.box.y + t.box.h / 2.;
+        }
+        const auto plane = t.edges.w > 0 && t.edges.h > 0 ? affinePlane(t, 0, 0, 0, 0) : std::nullopt;
+        if (!plane) { op.src = nullptr; continue; }
+        // The scale of crop to box decides `auto` once; rotation does not change it.
+        l.filter.mode = resolveScaleFilter(l.filter, int(std::lround(t.crop.w)), int(std::lround(t.crop.h)),
+                                           int(std::lround(t.box.w)), int(std::lround(t.box.h)));
+        l.crop_x = plane->taps.x; l.crop_y = plane->taps.y; l.crop_w = plane->taps.w; l.crop_h = plane->taps.h;
+        l.dst_x = plane->bounds.x; l.dst_y = plane->bounds.y; l.dst_w = plane->bounds.w; l.dst_h = plane->bounds.h;
     }
     // z decides who draws on top; equal z keeps source order (stable).
     std::stable_sort(ops.begin(), ops.end(),
@@ -327,13 +445,39 @@ inline ScaleFilter drawFilter(const LayerSpec &l) {
 /// Whether drawing `ops` on a canvas of this size would only repeat one source frame: a single
 /// unblended layer that takes the whole frame to the whole canvas at 1:1.
 inline bool copiesWholeFrame(const std::vector<DrawOp> &ops, int canvas_w, int canvas_h) {
-    if (ops.size() != 1 || !ops[0].src)
+    if (ops.size() != 1 || !ops[0].src || ops[0].transform)
         return false;
     const LayerSpec &l = ops[0].layer;
     const int dst_w = l.dst_w ? l.dst_w : l.crop_w, dst_h = l.dst_h ? l.dst_h : l.crop_h;
     return !l.blend && ops[0].src_w == canvas_w && ops[0].src_h == canvas_h &&
            l.crop_x == 0 && l.crop_y == 0 && l.crop_w == canvas_w && l.crop_h == canvas_h &&
            l.dst_x == 0 && l.dst_y == 0 && dst_w == canvas_w && dst_h == canvas_h;
+}
+
+/// What one resolved op draws, without its geometry: whether it draws, from which input and source
+/// size, in which order and how. Per-frame layer metadata (face framing) moves crops every frame;
+/// a change of shape is a scene load, a source appearing or resizing, or a layer left out.
+struct DrawOpShape {
+    bool drawn = false;
+    int src_w = 0, src_h = 0;   // negative src_w: placement rejected (resolveDrawOps)
+    int input = -1, z = 0;
+    bool blend = false;
+    ScaleFilter filter = ScaleFilter::Bilinear;
+
+    bool operator==(const DrawOpShape &o) const {
+        return drawn == o.drawn && src_w == o.src_w && src_h == o.src_h && input == o.input && z == o.z &&
+               blend == o.blend && filter == o.filter;
+    }
+    bool operator!=(const DrawOpShape &o) const { return !(*this == o); }
+};
+
+inline std::vector<DrawOpShape> drawOpsShape(const std::vector<DrawOp> &ops) {
+    std::vector<DrawOpShape> shape;
+    shape.reserve(ops.size());
+    for (const DrawOp &op : ops)
+        shape.push_back({op.src != nullptr, op.src_w, op.src_h, op.layer.input, op.layer.z, op.layer.blend,
+                         op.layer.filter.mode});
+    return shape;
 }
 
 /// One-line description of a resolved op list, for change-triggered logging.
@@ -354,6 +498,10 @@ inline std::string describeDrawOps(const std::vector<DrawOp> &ops) {
              << L.dst_w << "x" << L.dst_h << " z" << L.z;
         if (const ScaleFilter filter = drawFilter(L); filter != ScaleFilter::Bilinear)
             desc << " " << scaleFilterName(filter);
+        if (op.transform) {
+            if (op.transform->rotation_deg != 0.) desc << " rot " << op.transform->rotation_deg;
+            if (L.crop_exact) desc << " subpixel";
+        }
         bool crop_ignored;
         visibleFrameRect(*op.src->raw(), &crop_ignored);
         if (crop_ignored) desc << " invalid frame crop ignored";

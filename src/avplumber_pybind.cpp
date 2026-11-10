@@ -623,6 +623,7 @@ PYBIND11_MODULE(_avplumber, m) {
         .def("mainLoop", &AVPlumber::mainLoop)
         .def("stopMainLoop", &AVPlumber::stopMainLoop)
         .def("heartbeat", &AVPlumber::heartbeat)
+        .def("logQueueDrops", &AVPlumber::logQueueDrops, py::arg("period") = "")
         .def_property_readonly("manager", &AVPlumber::manager)
     ;
 

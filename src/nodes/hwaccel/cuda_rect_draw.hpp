@@ -6,6 +6,7 @@
 #include "../../hwaccel.hpp"
 #include "../../mixer/Retirement.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
+#include "cuda_rect_entries.h"
 #include "cuda_rect_table.h"
 #include "cuda_rect_viewport.h"
 #include "graphic_color.h"
@@ -114,6 +115,10 @@ private:
     CUfunction composite_yuv_filter_kernel_ = nullptr;        // no packed-RGB layers, linear sources
     CUfunction composite_yuv_array_filter_kernel_ = nullptr;  // no packed-RGB layers, some arrays
     CUfunction composite_filter_kernel_ = nullptr;            // any layer kind, fade, storage and filter
+    // Tables with a transformed layer (sub-pixel crop, rotation): YUV from linear buffers, and everything.
+    CUfunction composite_yuv_affine_kernel_ = nullptr;
+    CUfunction composite_affine_kernel_ = nullptr;
+    bool transform_warned_ = false; // a transformed layer on a packed canvas, drawn plain, logged once
     bool opacity_warned_ = false;   // an op with opacity < 1 on a kind that cannot blend, logged once
     bool filter_warned_ = false;    // an op naming a filter on a kind drawn bilinear, logged once
     uint64_t bad_sources_ = 0;      // layers left out because the driver did not know a plane (sourceProblem)
@@ -131,10 +136,8 @@ private:
     CUevent producer_ready_ = nullptr;
     std::vector<CUstream> waited_streams_;
 
-    // Which kernel entry a table needs.
-    struct TableKinds {
-        bool rgb = false, fade = false, array = false, filter = false, wide = false;
-    };
+    // Which kernel entry a table needs (cuda_rect_entries.h).
+    using TableKinds = avp::mixer::TableKinds;
     std::vector<RectViewport> over_views_;   // drawOver's last rectangles, logged when they change
 
     void waitForTable();

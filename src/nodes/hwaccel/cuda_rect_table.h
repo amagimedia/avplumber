@@ -33,6 +33,7 @@
 #define AVP_RECT_FILTER_BICUBIC_A0 2     // the cubic at A = 0: its outer taps weigh nothing, so 2x2 taps
 #define AVP_RECT_FILTER_MULTISAMPLE4 3   // mean of 4 bilinear samples, 2x2 grid over the pixel's source area
 #define AVP_RECT_FILTER_MULTISAMPLE8 4   // mean of 8 bilinear samples, Direct3D 8-sample pattern
+#define AVP_RECT_FILTER_AREA 5           // box mean: bilinear taps about 2 source pixels apart over the whole area
 
 struct AvpRectLayer {
     unsigned long long src[2];   // device pointers, or texture handles when yuv_texture / *_TEX is set
@@ -46,4 +47,15 @@ struct AvpRectLayer {
     int step, r_off, g_off, b_off, a_off, premultiplied;   // RGB(A)
     int filter;                       // YUV/PROMOTE/DEMOTE: AVP_RECT_FILTER_*
     float filter_param;               // BICUBIC: the cubic's A (0: Hermite, -0.5: Catmull-Rom)
+    // Appended for the affine entries only (composite_planes_yuv_affine, composite_planes_affine;
+    // compositor_affine.hpp computes them): with `affine` set, plane p maps destination continuous
+    // coordinates (canvas-absolute, plane units) to source ones, u = m0 x + m1 y + m2,
+    // v = m3 x + m4 y + m5; sx..sh are the taps' rect, dx..dh the soft-edged quad's bounds. Packed
+    // RGB(A) sources use plane 0's values for every luma position.
+    int affine;
+    float m[2][6];
+    float edge[2][4];                 // u0, v0, u1, v1: the crop's edges for the coverage
+    float aa[2][2];                   // destination samples per source unit across a u- and a v-edge
+    float footprint[2][2];            // source units per destination sample along u and v (multisample)
+    float transparency;               // 1 - opacity of a faded non-blend layer: scales the coverage (0: opaque)
 };

@@ -50,6 +50,8 @@ int tableFilter(const LayerSpec &layer) {
         return layer.filter.bicubic_param == 0.f ? AVP_RECT_FILTER_BICUBIC_A0 : AVP_RECT_FILTER_BICUBIC;
     case ScaleFilter::Multisample:
         return layer.filter.samples == 8 ? AVP_RECT_FILTER_MULTISAMPLE8 : AVP_RECT_FILTER_MULTISAMPLE4;
+    case ScaleFilter::Area:
+        return AVP_RECT_FILTER_AREA;
     default:
         return AVP_RECT_FILTER_BILINEAR;
     }
@@ -113,7 +115,9 @@ void CudaRectDraw::ensureKernels() {
         AVP_CHECK_CU(cuModuleGetFunction(&composite_opacity_array_kernel_, module_, "composite_planes_opacity_array")) ||
         AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_filter_kernel_, module_, "composite_planes_yuv_filter")) ||
         AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_array_filter_kernel_, module_, "composite_planes_yuv_array_filter")) ||
-        AVP_CHECK_CU(cuModuleGetFunction(&composite_filter_kernel_, module_, "composite_planes_filter")))
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_filter_kernel_, module_, "composite_planes_filter")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_affine_kernel_, module_, "composite_planes_yuv_affine")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_affine_kernel_, module_, "composite_planes_affine")))
         throw Error("cuda_rect_overlay: cannot load the composite kernel");
     int shared_limit = 0;
     CUdevice device;
@@ -163,10 +167,34 @@ void CudaRectDraw::validateSourceColor(const av::VideoFrame &src, bool packed_rg
                     "declare source color and normalize to the canvas before compositing");
 }
 
+// A transformed layer's plane `p` in its table entry (the affine entries read these).
+static void setAffine(const avp::mixer::AffinePlane &plane, int p, const LayerSpec &L, AvpRectLayer &out) {
+    out.affine = 1;
+    out.transparency = L.opacity < 1.f && !L.blend ? 1.f - L.opacity : 0.f;
+    std::copy(plane.m, plane.m + 6, out.m[p]);
+    std::copy(plane.edge, plane.edge + 4, out.edge[p]);
+    std::copy(plane.aa, plane.aa + 2, out.aa[p]);
+    std::copy(plane.footprint, plane.footprint + 2, out.footprint[p]);
+}
+
 // One table entry from a resolved op. Per-plane geometry goes through lumaRectToPlaneRegion in
 // bytes and then lane groups.
 void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out) {
     const AVPixelFormat sw_fmt = canvas_.sw_fmt;
+    if (op.transform && av_pix_fmt_count_planes(sw_fmt) == 1) {
+        // Packed canvases have no affine entry: the box, unrotated, from the enclosing crop.
+        if (!std::exchange(transform_warned_, true))
+            logstream << "cuda_rect_overlay: rotation and sub-pixel crops need a YUV canvas; drawing it plain";
+        DrawOp plain = op;
+        plain.transform.reset();
+        const auto &b = op.transform->box;
+        Rect crop{op.layer.crop_x, op.layer.crop_y, op.layer.crop_w, op.layer.crop_h};
+        Rect dst{int(std::lround(b.x)), int(std::lround(b.y)), int(std::lround(b.w)), int(std::lround(b.h))};
+        if (!avp::mixer::clipLayer(crop, dst, op.transform->clip)) { out = AvpRectLayer{}; return; }
+        plain.layer.crop_x = crop.x; plain.layer.crop_y = crop.y; plain.layer.crop_w = crop.w; plain.layer.crop_h = crop.h;
+        plain.layer.dst_x = dst.x; plain.layer.dst_y = dst.y; plain.layer.dst_w = dst.w; plain.layer.dst_h = dst.h;
+        return fillTableEntry(plain, canvas, out);
+    }
     const LayerSpec &L = op.layer;
     const AVFrame *src = op.src->raw();
     const AVPixelFormat src_sw_fmt = frameSwFormat(*op.src);
@@ -215,6 +243,13 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
         out.dh[1] = (L.dst_y + dsth + bh - 1) / bh - out.dy[1];
         if (L.dst_x + dstw <= 0) out.dw[1] = 0;
         if (L.dst_y + dsth <= 0) out.dh[1] = 0;
+        if (op.transform) {
+            // Every luma position maps through plane 0, chroma blocks included; dst and crop
+            // already hold the bounds and taps.
+            const auto plane = avp::mixer::affinePlane(*op.transform, 0, 0, 0, 0);
+            if (!plane) { out = AvpRectLayer{}; return; }
+            setAffine(*plane, 0, op.layer, out);
+        }
         return;
     }
 
@@ -258,6 +293,16 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
         out.src_pitch[p] = array ? 0 : src->linesize[p];
         out.sx[p] = sx; out.sy[p] = sy; out.sw[p] = sw; out.sh[p] = sh;
         out.dx[p] = dx; out.dy[p] = dy; out.dw[p] = dw; out.dh[p] = dh;
+        if (op.transform) {
+            // The plane's own map, taps and bounds (compositor_affine.hpp), in its units.
+            const AVPixFmtDescriptor *gd = av_pix_fmt_desc_get(geometry_fmt);
+            const auto plane = avp::mixer::affinePlane(*op.transform, p ? dd->log2_chroma_w : 0, p ? dd->log2_chroma_h : 0,
+                                                       p ? gd->log2_chroma_w : 0, p ? gd->log2_chroma_h : 0);
+            if (!plane) { out = AvpRectLayer{}; return; }
+            setAffine(*plane, p, op.layer, out);
+            out.sx[p] = plane->taps.x; out.sy[p] = plane->taps.y; out.sw[p] = plane->taps.w; out.sh[p] = plane->taps.h;
+            out.dx[p] = plane->bounds.x; out.dy[p] = plane->bounds.y; out.dw[p] = plane->bounds.w; out.dh[p] = plane->bounds.h;
+        }
     }
 }
 
@@ -390,19 +435,21 @@ int CudaRectDraw::fillTable(CUstream stream, const std::vector<DrawOp> &ops, con
             continue;
         }
         kinds.array = kinds.array || entry.yuv_texture;
+        kinds.affine = kinds.affine || entry.affine;
         kinds.rgb = kinds.rgb || entry.kind >= AVP_RECT_KIND_RGB;
         const bool fades = entry.kind >= AVP_RECT_KIND_RGB && entry.mul < 1.f;   // only a blended RGBA mul is below 1
         kinds.fade = kinds.fade || fades;
         // Not an error: a key without alpha (or on a packed canvas) still cuts cleanly.
-        if (op.layer.opacity < 1.f && !fades && !std::exchange(opacity_warned_, true))
+        if (op.layer.opacity < 1.f && !fades && !entry.affine && !std::exchange(opacity_warned_, true))
             logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
         // A demoted layer needs the filter entries' code limit whatever its filter.
         kinds.filter = kinds.filter || entry.filter != AVP_RECT_FILTER_BILINEAR || entry.kind == AVP_RECT_KIND_DEMOTE;
-        // The 4x4 cubic and the 8 samples are compiled into the full filter entry only.
-        kinds.wide = kinds.wide || entry.filter == AVP_RECT_FILTER_BICUBIC || entry.filter == AVP_RECT_FILTER_MULTISAMPLE8;
+        // The 4x4 cubic, the 8 samples and the area are compiled into the full filter entry only.
+        kinds.wide = kinds.wide || entry.filter == AVP_RECT_FILTER_BICUBIC || entry.filter == AVP_RECT_FILTER_MULTISAMPLE8 ||
+                     entry.filter == AVP_RECT_FILTER_AREA;
         // Not an error either; `auto` is not named here, it simply finds nothing to choose.
         const ScaleFilter asked = op.layer.filter.mode;
-        if ((asked == ScaleFilter::Bicubic || asked == ScaleFilter::Multisample) &&
+        if ((asked == ScaleFilter::Bicubic || asked == ScaleFilter::Multisample || asked == ScaleFilter::Area) &&
             entry.filter == AVP_RECT_FILTER_BILINEAR && !std::exchange(filter_warned_, true))
             logstream << "cuda_rect_overlay: a layer's filter applies to YUV sources on YUV canvases only; "
                          "drawing it bilinear";
@@ -447,13 +494,23 @@ void CudaRectDraw::launch(CUstream stream, const TableKinds &kinds, CUdeviceptr 
                     &canvas_w, &canvas_h, &chroma_w, &chroma_h,
                     &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y,
                     &clear0_i, &clear1_i, &transfer, &sdr_white, &hdr_peak};
-    // A table without a filtered or demoted layer takes the entries it always took.
-    const CUfunction kernel = planes == 1 ? composite_packed_kernel_
-        : kinds.filter ? (kinds.rgb || kinds.wide ? composite_filter_kernel_
-                          : kinds.array ? composite_yuv_array_filter_kernel_ : composite_yuv_filter_kernel_)
-        : kinds.fade ? (kinds.array ? composite_opacity_array_kernel_ : composite_opacity_kernel_)
-        : kinds.rgb ? (kinds.array ? composite_array_kernel_ : composite_kernel_)
-        : kinds.array ? composite_yuv_array_kernel_ : composite_yuv_kernel_;
+    // A table without a transformed, filtered or demoted layer takes the entries it always took.
+    using Entry = avp::mixer::CompositeEntry;
+    CUfunction kernel = nullptr;
+    switch (avp::mixer::compositeEntry(kinds, planes)) {
+    case Entry::Packed4: kernel = composite_packed_kernel_; break;
+    case Entry::Yuv: kernel = composite_yuv_kernel_; break;
+    case Entry::YuvArray: kernel = composite_yuv_array_kernel_; break;
+    case Entry::Full: kernel = composite_kernel_; break;
+    case Entry::Array: kernel = composite_array_kernel_; break;
+    case Entry::Opacity: kernel = composite_opacity_kernel_; break;
+    case Entry::OpacityArray: kernel = composite_opacity_array_kernel_; break;
+    case Entry::YuvFilter: kernel = composite_yuv_filter_kernel_; break;
+    case Entry::YuvArrayFilter: kernel = composite_yuv_array_filter_kernel_; break;
+    case Entry::Filter: kernel = composite_filter_kernel_; break;
+    case Entry::YuvAffine: kernel = composite_yuv_affine_kernel_; break;
+    case Entry::Affine: kernel = composite_affine_kernel_; break;
+    }
     // 128x8 luma tiles per block; gridDim.z spans the planes.
     if (AVP_CHECK_CU(cuLaunchKernel(kernel,
                                     (canvas_w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas_h + 7) / 8,
@@ -491,6 +548,8 @@ bool CudaRectDraw::drawOver(CUstream stream, const std::vector<DrawOp> &ops, AVF
     const AVPixelFormat sw_fmt = canvas_.sw_fmt;
     const int planes = av_pix_fmt_count_planes(sw_fmt);
     if (planes != 2 || !base || !base->data[0] || !base->data[1]) return false;
+    // A transformed layer's viewport would need its map shifted (viewportLayer): one launch instead.
+    if (std::any_of(ops.begin(), ops.end(), [](const DrawOp &op) { return op.src && op.transform; })) return false;
     // The base is the bottom layer and is an exact copy of its frame: the same format, the whole
     // frame on the whole canvas, unscaled. Bilinear sampling at 1:1 returns each sample as stored.
     std::vector<RectViewport> views;

@@ -67,7 +67,7 @@ from pyplumber.node import (
 
 
 from .color import Color
-from .config import (DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, default_latency_ms, fade_color, fade_curve,
+from .config import (MOVE_UNMATCHED, DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, default_latency_ms, fade_color, fade_curve,
                      protocol_name)
 from .backend import mixer_backend
 from .control import source_mask_param
@@ -176,7 +176,7 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
-        color_tagged=False, fan_out_loop=None,
+        color_tagged=False, fan_out_loop=None, picture=None,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -223,7 +223,7 @@ class MixerGraphBuilder:
                                                color=color, color_tagged=color_tagged,
                                                pixel_format=pixel_format, packed_rgb=packed_rgb,
                                                premultiplied_alpha=premultiplied_alpha,
-                                               fan_out_loop=fan_out_loop))
+                                               fan_out_loop=fan_out_loop, picture=picture))
         self._source_index[name] = idx
         return self
 
@@ -362,9 +362,10 @@ class MixerGraphBuilder:
     # Runtime control
     # ------------------------------------------------------------------
 
-    def cut(self, scene: str) -> None:
-        """Hard cut to *scene*."""
-        cmd = {"mixer": self.name, "scene": scene}
+    def cut(self, scene: str, zoom: Optional[dict] = None) -> None:
+        """Hard cut to *scene*; with *zoom* ({"duration_sec", "curve"}) one person's layer glides
+        from Program's framing instead, when the engine finds both scenes zoomable."""
+        cmd = {"mixer": self.name, "scene": scene, **({"zoom": zoom} if zoom else {})}
         self.avp.executeCommandsFromString(f"mixer.cut {json.dumps(cmd)}")
         self._current_pgm = scene
 
@@ -412,6 +413,26 @@ class MixerGraphBuilder:
         if color is not None:
             cmd["color"] = color
         self.avp.executeCommandsFromString(f"mixer.fade {json.dumps(cmd)}")
+        self._current_pgm = scene
+
+    def move(
+        self,
+        scene: str,
+        duration_sec: float = 1.0,
+        curve: str = DEFAULT_FADE_CURVE,
+        unmatched: str = "fade",
+    ) -> None:
+        """Move transition to *scene*: a source in both scenes glides from Program's placement to
+        the scene's over *duration_sec* seconds, eased by *curve*; a source in one of them fades,
+        or with *unmatched* "cut" switches at the half. The engine fades when it cannot glide."""
+        if unmatched not in MOVE_UNMATCHED:
+            raise ValueError("move: unmatched sources fade or cut")
+        cmd: Dict[str, Any] = {"mixer": self.name, "scene": scene, "duration_sec": duration_sec}
+        if fade_curve(curve, "move curve") != DEFAULT_FADE_CURVE:
+            cmd["curve"] = curve
+        if unmatched != "fade":
+            cmd["unmatched"] = unmatched
+        self.avp.executeCommandsFromString(f"mixer.move {json.dumps(cmd)}")
         self._current_pgm = scene
 
     def wipe(
@@ -649,6 +670,7 @@ class MixerGraphBuilder:
             is_program = slot.upper() == self._initial_pgm_slot
             self.avp.addNode(self.canvas_compositor({
                 "name": self._n(f"comp_{slot}"),
+                "mixer": self.name,   # the take clock a move transition follows
                 "src": [self._source_slot_edge(source, slot) for source in self._sources],
                 "dst": self._e(f"scene_{slot}_composite"),
                 "max_layers": self.max_compositor_layers,
@@ -898,6 +920,8 @@ class MixerGraphBuilder:
                     f"mixer.source {self.name} {src.name}"
                     f" {self._n('otm_' + src.name)} {idx}"
                 )
+                if src.picture:
+                    lines.append("mixer.source_picture " + json.dumps({"mixer": self.name, "name": src.name, **src.picture}))
             else:
                 lines.append(
                     "mixer.routed_source "

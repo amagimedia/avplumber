@@ -96,7 +96,13 @@ protected:
         draw_pending_ = false;
     }
 
-    std::string last_ops_desc_;
+    // The layer log: the configured layers, draw shape and ops it last reported. A scene, composition
+    // or shape change logs at once; geometry that only per-frame metadata moved (face framing moves
+    // crops every frame) logs at most once a minute, when it differs from the last line.
+    std::vector<LayerSpec> logged_layers_;
+    std::vector<avp::mixer::DrawOpShape> logged_shape_;
+    std::vector<DrawOp> logged_ops_;
+    std::chrono::steady_clock::time_point logged_at_{};
     bool sent_eof_ = false;
 
     // The pad mask does not fit a lock-free atomic, and the input masks are read once per frame: one
@@ -154,11 +160,17 @@ protected:
         frame->color_range = AVCOL_RANGE_MPEG;
     }
 
-    std::vector<LayerSpec> mergeLayersForTick(const av::VideoFrame *metadata_source) {
+    /// `configured_changed`: the configured layers differ from those the layer log last reported.
+    /// A subclass's per-tick change to the merged layers (the mixer slots' zoom), on the render thread.
+    virtual void adjustLayers(std::vector<LayerSpec> &, av::Timestamp, const std::vector<const av::VideoFrame *> &) {}
+
+    std::vector<LayerSpec> mergeLayersForTick(const av::VideoFrame *metadata_source, bool &configured_changed) {
         std::vector<LayerSpec> layers;
         {
             std::lock_guard<std::mutex> lock(layers_mutex_);
             layers = default_layers_;
+            configured_changed = default_layers_ != logged_layers_;
+            if (configured_changed) logged_layers_ = default_layers_;
         }
         if (!frame_layers_ || !metadata_source || !metadata_source->raw() || !metadata_source->raw()->metadata)
             return layers;
@@ -206,7 +218,9 @@ protected:
 
         av::VideoFrame outf = avp::mixer::canvasFrame(out_frames_ref_.get(), type_);
 
-        std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src);
+        bool configured_changed = false;
+        std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src, configured_changed);
+        adjustLayers(layers, pts, sources);
         if (opacity)
             for (size_t i = 0; i < layers.size(); ++i) {
                 const size_t input = layers[i].sourceIndex(i);
@@ -215,11 +229,16 @@ protected:
         const CudaRectDraw::Canvas &cv = draw_.canvas();
         std::vector<DrawOp> ops = avp::mixer::resolveDrawOps(sources, layers, cv.width, cv.height, cv.sw_fmt);
         {
-            // Log the resolved layer set whenever it changes (scene switches), not per tick.
-            std::string desc = avp::mixer::describeDrawOps(ops);
-            if (desc != last_ops_desc_) {
-                last_ops_desc_ = std::move(desc);
-                logstream << type_ << " layers:" << last_ops_desc_;
+            // Log the resolved layer set when a scene or composition sets new layers or what is drawn
+            // changes, not when per-frame metadata moves a crop.
+            std::vector<avp::mixer::DrawOpShape> shape = avp::mixer::drawOpsShape(ops);
+            const bool changed = configured_changed || shape != logged_shape_;
+            if (changed || (waited - logged_at_ >= std::chrono::minutes(1) && !(ops == logged_ops_))) {
+                logstream << type_ << (changed ? " layers:" : " layers (moved, sampled each minute):")
+                          << avp::mixer::describeDrawOps(ops);
+                logged_shape_ = std::move(shape);
+                logged_ops_ = ops;
+                logged_at_ = waited;
             }
         }
         setCanvasColor(outf.raw());
@@ -252,7 +271,8 @@ protected:
             };
             const auto r = bounds(op.layer);
             const bool covered = std::any_of(ops.begin() + i + 1, ops.end(), [&](const DrawOp& above) {
-                if (!above.src || above.layer.blend || above.layer.opacity <= 0) return false;
+                // A transformed layer's rect is its bounds, not what it covers.
+                if (!above.src || above.layer.blend || above.transform || above.layer.opacity <= 0) return false;
                 const auto a = bounds(above.layer);
                 return a.x <= r.x && a.y <= r.y && a.x + a.w >= r.x + r.w && a.y + a.h >= r.y + r.h;
             });
