@@ -2,6 +2,7 @@
 #include "../instance_shared.hpp"
 #include "../EventLoop.hpp"
 #include "../RealTimeTeam.hpp"
+#include "../ClockOrigin.hpp"
 #include "../mixer/primitives/SourceDelivery.hpp"
 
 template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset, public IFrameNumber, public IFrameTimestamp, public IInputsObjects, public IReturnsObjects {
@@ -69,6 +70,11 @@ protected:
     AVTS last_user_delay_seen_ = 0;
     AVTS catchup_remaining_ = 0;              // in timebase_ units
     AVTS catchup_prev_pkt_ts_ = AV_NOPTS_VALUE; // last consumed pkt_ts (rescaled), used to estimate how much timeline we skipped
+    // With a fixed team offset: frames dropped for arriving after their release time, and the
+    // last time one was reported (at most one line a second).
+    std::atomic<uint64_t> fixed_late_drops_{0};
+    AVTS fixed_last_report_ = AV_NOPTS_VALUE;
+    avp::SyncTrace sync_trace_;   // source timestamp -> release, when AVP_SYNC_TRACE=1
 
     AVTS secondsToTs(float seconds) const {
         return AVTS(seconds * (float)timebase_.den / (float)timebase_.num + 0.5f);
@@ -163,13 +169,15 @@ public:
 
             AVTS now_ts = now_ts_;
             AVTS new_pts = now_ts;
+            // A fixed team offset is never re-derived from what arrived when.
+            const bool fixed = team_ && team_->hasFixedOffset();
             av::Timestamp pkt_ts_with_tb = TSGetter<T>::getWithTB(data);
             AVTS pkt_ts = rescaleTS(pkt_ts_with_tb, tb_to_rescale_ts_).timestamp();
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (input_ts_queue_ != nullptr) {
                     av::Timestamp input_ts = input_ts_queue_->lastTS();
 
-                    if (input_ts.isValid() && team_) {
+                    if (input_ts.isValid() && team_ && !fixed) {
                         float buffered = anythingBuffered() ? addTS(input_ts, negateTS(pkt_ts_with_tb)).seconds() : 0;
                         float user_delay_sec = tsToSeconds(getUserDelay());
                         float sec_min = min_buffered_ + user_delay_sec;
@@ -189,7 +197,10 @@ public:
                         }
                     }
                 }
-                if (emit && team_) {
+                if (fixed) {
+                    offset_ = team_->fixedOffset();
+                    ready_ = true;
+                } else if (emit && team_) {
                     if (ready_) {
                         offset_ = team_->getOffset(offset_);
                     } else {
@@ -222,7 +233,22 @@ public:
                             process_next = true;
                         }
                     } else
-                    if ((!woken_too_late_) && (diff < negative_time_tolerance_)) {
+                    if (fixed && (diff < negative_time_tolerance_)) {
+                        // Too late for its release time: gone, like a frame the network lost. The
+                        // offset stays, so the source is back in step with the next frame in time.
+                        ++fixed_late_drops_;
+                        if (fixed_last_report_ == AV_NOPTS_VALUE || now_ts - fixed_last_report_ >= secondsToTs(1.0f)) {
+                            logstream << "fixed offset: frame late by " << printDuration(-diff) << ", dropped ("
+                                      << fixed_late_drops_.load() << " so far)";
+                            fixed_last_report_ = now_ts;
+                        }
+                        emit = false;
+                        if (!ticks) {
+                            this->yieldAndProcess();
+                        } else {
+                            process_next = true;
+                        }
+                    } else if ((!woken_too_late_) && (diff < negative_time_tolerance_)) {
                         logstream << "negative time to wait " << printDuration(diff) << ", resyncing.";
                         ready_ = false;
                     } else if ((!woken_too_late_) && (diff < negative_time_discard_)) {
@@ -232,8 +258,9 @@ public:
                             // process next packet
                             this->yieldAndProcess();
                         }
-                    } else if (diff < discontinuity_threshold_) {
-                        if (now_ts - last_wait_ < max_no_wait_period_) {
+                    } else if (fixed || diff < discontinuity_threshold_) {
+                        // With a fixed offset a frame far ahead of its release time simply waits.
+                        if (fixed || now_ts - last_wait_ < max_no_wait_period_) {
                             if (no_wait_notified_) {
                                 logstream << "input no longer queued, returning to realtime mode.";
                                 no_wait_notified_ = false;
@@ -267,7 +294,7 @@ public:
                         if (team_) team_->setFirst(true);
                     }
                 }
-                if ((!ready_) && consume) {
+                if ((!ready_) && consume && !fixed) {
                     // offset_ must be set only when consuming, because it marks sync point
                     offset_ = (pkt_ts - now_ts) - ((team_ && team_->isFirst()) ? initial_jitter_margin_ : jitter_margin_);
                     if (team_) team_->setFirst(false);
@@ -316,6 +343,8 @@ public:
                 } else {
                     if (!marker) {
                         setLastFrame(dataptr);
+                        if (avp::SyncTrace::enabled() && stamp && pkt_ts != AV_NOPTS_VALUE)
+                            sync_trace_.add(pkt_ts, avp::clock_origin_detail::readNs(CLOCK_MONOTONIC), {new_pts});
                     }
                     if (!ticks && iter >= 8) {
                         // Bound catch-up work so other sources on the loop get a turn.
@@ -446,6 +475,19 @@ public:
             res["timebase"] = std::to_string(timebase_.num) + "/" + std::to_string(timebase_.den);
             res["ready"] = ready_;
             res["offset_ts"] = offset_;
+            res["offset_fixed"] = team_ && team_->hasFixedOffset();
+            res["late_drops"] = fixed_late_drops_.load();
+            return res;
+        } else if (name == "sync_trace") {
+            // [source timestamp, released at (monotonic ns), stamped timestamp], oldest first; the
+            // timestamps in "timebase" units. Empty unless AVP_SYNC_TRACE=1.
+            Parameters res;
+            res["timebase"] = std::to_string(timebase_.num) + "/" + std::to_string(timebase_.den);
+            res["offset_ts"] = offset_;
+            Parameters rows = Parameters::array();
+            for (const auto &entry : sync_trace_.snapshot())
+                rows.push_back({entry.key, entry.at_ns, entry.detail.empty() ? int64_t(0) : entry.detail[0]});
+            res["released"] = rows;
             return res;
         } else if (name == "delay") {
             Parameters res;

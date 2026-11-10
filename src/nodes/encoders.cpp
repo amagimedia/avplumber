@@ -5,6 +5,7 @@
 #include "../hwaccel.hpp"
 #include "../hdr_metadata.hpp"
 #include "../mixer/primitives/CutLatencyProbe.hpp"
+#include "../ClockOrigin.hpp"
 
 template<typename Child, typename EncoderContext, typename InputFrame> class Encoder: public NodeSISO<InputFrame, av::Packet>, public IEncoder, public ReportsFinishByFlag, public IFlushable, public avp::mixer::CutLatencyObserver {
 protected:
@@ -19,8 +20,11 @@ protected:
     Parameters hdr_metadata_;   // optional static HDR side data, serialised verbatim (see hdr_metadata.hpp)
     av::Timestamp prev_ts_ = NOTS;
     std::shared_ptr<HWAccelDevice> hwaccel_;
+    std::shared_ptr<avp::SyncTrace> sync_trace_;   // "sync_trace": label, read with sync.trace
     void emitPacket(const av::Packet& pkt) {
         this->sink_->put(pkt);
+        if (sync_trace_ && pkt.pts().isValid())
+            sync_trace_->add(pkt.pts().timestamp({1, 1000000000}), avp::monotonicNowNs());
         const auto emitted = avp::mixer::CutLatency::Clock::now();
         if (auto probe = this->cutLatencyProbe(); probe && pkt.pts().isValid())
             probe->timing.encoderOutput(pkt.pts().timestamp(enc_.timeBase()), emitted);
@@ -201,6 +205,9 @@ public:
         auto r = std::make_shared<Child>(src_edge->makeSource(), dst_edge->makeSink(), av::findEncodingCodec(codecname), hwaccel);
         if (params.count("options") > 0) {
             r->options() = parametersToDict(params["options"]);
+        }
+        if (params.count("sync_trace") > 0 && avp::SyncTrace::enabled()) {
+            r->sync_trace_ = avp::namedSyncTrace(params["sync_trace"].template get<std::string>());
         }
         if (params.count("timestamps_passthrough") > 0) {
             r->timestamps_passthrough_ = params["timestamps_passthrough"];

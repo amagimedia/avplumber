@@ -40,6 +40,7 @@ using avp::mixer::MixerState;
 using avp::mixer::SceneControl;
 using avp::mixer::SceneDefinition;
 #include "CommandTiming.hpp"
+#include "ClockOrigin.hpp"
 #include <libavformat/avformat.h>
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
@@ -778,6 +779,49 @@ public:
             std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_name);
             team->setUserDelay(delay_sec);
         };
+        // realtime.team.set_offset <team> <offset>: fix the team's offset (source timestamp minus
+        // release time on this host's clock, in the team's time base, as node.object.get
+        // <realtime> info reports it in "offset_ts"). The team then never re-derives it from
+        // arrival: a late frame is dropped, an early one waits. realtime.team.clear_offset undoes it.
+        commands_["realtime.team.set_offset"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string team_name;
+            long long offset;
+            if (!(ss >> team_name >> offset)) throw Error("realtime.team.set_offset <team> <offset>");
+            InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_name)->setFixedOffset(offset);
+        };
+        commands_["realtime.team.clear_offset"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string team_name;
+            ss >> team_name;
+            InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_name)->clearFixedOffset();
+        };
+        // clock.info: how this host's monotonic clock maps to the shared show time, and whether
+        // the kernel calls its clock synchronised. origin_ns is zero unless AVP_CLOCK_ORIGIN=tai.
+        commands_["clock.info"] = [](ClientStream &cs, std::string&) {
+            const auto kernel = avp::kernelClockState();
+            json info = {{"enabled", avp::clockOriginEnabled()},
+                         {"origin_ns", avp::clockOriginNs()},
+                         {"drift_ns", avp::clockOriginDriftNs()},
+                         {"monotonic_ns", avp::clock_origin_detail::readNs(CLOCK_MONOTONIC)},
+                         {"show_epoch_s", avp::kShowEpochSeconds},
+                         {"synchronized", kernel.synchronized},
+                         {"tai_offset_s", kernel.tai_offset},
+                         {"est_error_us", kernel.est_error_us},
+                         {"max_error_us", kernel.max_error_us}};
+            cs << info.dump() << "\n";
+        };
+        no_lock_commands_.insert("clock.info");
+        // sync.trace <label>: [timestamp in ns, passed at (monotonic ns)] of the encoder or output
+        // created with "sync_trace": "<label>", oldest first.
+        commands_["sync.trace"] = [](ClientStream &cs, std::string &arg) {
+            const auto trace = avp::namedSyncTrace(strutils::trim(arg), /*create=*/false);
+            json rows = json::array();
+            if (trace)
+                for (const auto &entry : trace->snapshot()) rows.push_back({entry.key, entry.at_ns});
+            cs << rows.dump() << "\n";
+        };
+        no_lock_commands_.insert("sync.trace");
         commands_["speed.set"] = [this](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
             std::string team_name;

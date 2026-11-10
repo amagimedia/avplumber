@@ -21,6 +21,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "../ClockOrigin.hpp"
 
 /// The mixer's clocked compositor: the scene slots, the wipe overlay and, with `aux_mode`, the
 /// AUX buses. Live, monotonic-PTS inputs go through a shared Playout, which picks each input's
@@ -61,6 +62,7 @@ class MixerCompositor : public CudaRectCompositor,
     std::vector<std::array<uint64_t, 3>> playout_stats_published_;   // repeats, discarded, overflow
     uint64_t published_missed_deadlines_ = 0;
     uint64_t published_frames_ = 0;
+    avp::SyncTrace sync_trace_;   // per tick: which input frames it showed, when AVP_SYNC_TRACE=1
     // Where each drawn tick's time went, for the status object: the whole draw; its two halves,
     // queueing it (our work and the CUDA library's locking) and waiting for the GPU; and the
     // wait for room downstream. Counted on the output thread, published with the counters above.
@@ -319,6 +321,15 @@ public:
     }
 
     Parameters getObject(const std::string key) override {
+        if (key == "sync_trace") {
+            // [tick index, handed on at (monotonic ns), [timestamp in ns of each input's frame
+            // shown, -1 for none]], oldest first. Empty unless AVP_SYNC_TRACE=1.
+            Parameters rows = Parameters::array();
+            for (const auto &entry : sync_trace_.snapshot())
+                rows.push_back({entry.key, entry.at_ns, entry.detail});
+            return {{"fps", std::to_string(frame_rate_.getNumerator()) + "/" + std::to_string(frame_rate_.getDenominator())},
+                    {"ticks", rows}};
+        }
         if (key == "per_input") {
             // Which input repeats, discards or overflows: a question for a diagnosis, not for a
             // page that polls the status of every bus several times a second.
@@ -591,6 +602,13 @@ public:
                 ++output_drops_;
             else
                 composite(av::Timestamp(decision->index, av_inv_q(frame_rate_.getValue())), sources, metadata);
+            if (avp::SyncTrace::enabled()) {
+                std::vector<int64_t> shown;
+                shown.reserve(decision->frames.size());
+                for (const auto &frame : decision->frames)
+                    shown.push_back(frame && frame->pts().isValid() ? frame->pts().timestamp({1, 1000000000}) : -1);
+                sync_trace_.add(decision->index, avp::monotonicNowNs(), std::move(shown));
+            }
         }
         {
             avp::timeline::Scope commit("commit");

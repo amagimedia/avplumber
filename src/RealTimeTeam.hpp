@@ -8,6 +8,10 @@ class RealTimeTeam: public InstanceShared<RealTimeTeam>, public IFlushAndSeek, p
 protected:
     std::atomic<AVTS> offset_{AV_NOPTS_VALUE};
     std::atomic<AVTS> user_delay_{0};  // user-configurable delay in timebase units
+    // Set from outside (realtime.team.set_offset): the team then keeps this offset whatever
+    // arrives when, so that a second host given the matching number releases the same frame at
+    // the same instant. A late frame is dropped and an early one waits; nothing re-anchors.
+    std::atomic<AVTS> fixed_offset_{AV_NOPTS_VALUE};
     std::mutex busy_;
     std::unique_lock<decltype(busy_)> getLock() {
         return std::unique_lock<decltype(busy_)>(busy_);
@@ -32,6 +36,7 @@ public:
     }
     AVTS updateOffsetNonRecursive(AVTS local_offset) {
         auto lock = getLock();
+        if (hasFixedOffset()) return fixedOffset();
         AVTS offset = offset_.load(std::memory_order_relaxed);
         // std::memory_order_relaxed because mutexed anyway
         if (offset == AV_NOPTS_VALUE) {
@@ -61,6 +66,7 @@ public:
     }
     void resetNonRecursive() {
         auto lock = getLock();
+        if (hasFixedOffset()) return;
         offset_.store(AV_NOPTS_VALUE, std::memory_order_relaxed);
         first_ = true;
         logstream << "realtime team reset";
@@ -103,6 +109,7 @@ public:
         return true;
     }
     AVTS getOffset(AVTS local_offset = AV_NOPTS_VALUE) {
+        if (hasFixedOffset()) return fixedOffset();
         AVTS r = offset_.load(std::memory_order_acquire);
         if ((local_offset != AV_NOPTS_VALUE) && (r != AV_NOPTS_VALUE)) {
             if (r < local_offset) {
@@ -122,6 +129,21 @@ public:
     }
     bool isFlushing() {
         return flushing_;
+    }
+    bool hasFixedOffset() const {
+        return fixed_offset_.load(std::memory_order_acquire) != AV_NOPTS_VALUE;
+    }
+    AVTS fixedOffset() const {
+        return fixed_offset_.load(std::memory_order_acquire);
+    }
+    void setFixedOffset(AVTS offset) {
+        fixed_offset_.store(offset, std::memory_order_release);
+        offset_.store(offset, std::memory_order_release);
+        logstream << "realtime team offset fixed at " << offset;
+    }
+    void clearFixedOffset() {
+        fixed_offset_.store(AV_NOPTS_VALUE, std::memory_order_release);
+        logstream << "realtime team offset no longer fixed";
     }
     AVTS getUserDelayTS() const {
         return user_delay_.load(std::memory_order_acquire);
@@ -198,7 +220,7 @@ public:
         if (synchronize) {
             flushAndSeek(StreamTarget::now());
         }
-        offset_ = AV_NOPTS_VALUE;
+        if (!hasFixedOffset()) offset_ = AV_NOPTS_VALUE;
     }
 
     virtual void flushAndSeek(StreamTarget seek_target) override {

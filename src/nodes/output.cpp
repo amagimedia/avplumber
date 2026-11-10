@@ -2,6 +2,7 @@
 #include "node_common.hpp"
 #include <atomic>
 #include <fstream>
+#include "../ClockOrigin.hpp"
 
 #pragma pack(push)
 #pragma pack(1)
@@ -16,6 +17,8 @@ struct SeekTableEntry {
 
 class StreamOutput: public NodeSingleInput<av::Packet>, public IFlushable, public ReportsFinishByFlag,
                     public IInputsObjects {
+public:
+    std::shared_ptr<avp::SyncTrace> sync_trace_;   // "sync_trace": label, read with sync.trace
 protected:
     av::FormatContext octx_;
     // `hold`: packets are taken and not written, so the chain before the output runs (an encoder
@@ -118,7 +121,11 @@ public:
                         publishCurrentSeekTables();
                     }
                 }
+                // The timestamp is read first: writing hands the packet's data to the muxer.
+                const int64_t trace_key = sync_trace_ && pkt.pts().isValid()
+                    ? pkt.pts().timestamp({1, 1000000000}) : INT64_MIN;
                 octx_.writePacket(pkt);
+                if (trace_key != INT64_MIN) sync_trace_->add(trace_key, avp::monotonicNowNs());
                 errors_ = 0;
             } catch (std::exception &e) {
                 // FFmpeg's paced UDP sender (bitrate=, fifo_size=) reports its full send queue as
@@ -174,6 +181,9 @@ public:
         std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["src"]);
         auto r = std::make_shared<StreamOutput>(make_unique<EdgeSource<av::Packet>>(edge));
         av::FormatContext &octx = r->ctx();
+        if (params.count("sync_trace") > 0 && avp::SyncTrace::enabled()) {
+            r->sync_trace_ = avp::namedSyncTrace(params["sync_trace"].get<std::string>());
+        }
         std::string format;
         if (params.count("format") > 0) {
             format = params["format"];
