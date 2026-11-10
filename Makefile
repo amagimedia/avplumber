@@ -29,7 +29,7 @@ NEURAL_NET ?= $(if $(filter 1,$(NEURAL_NET_COMMON) $(NEURAL_NET_SPECIFIC)),1,0)
 # -DBUILD_TESTING=OFF -DWITH_ABI_VERSION_1=OFF ... see doc/DEVELOPING or the
 # upstream README); the link list below covers api+sdk+metrics+trace+logs+common
 # +resources. The engine never writes OTel output to stdout: the log lines stay
-# RECORDER_LOG_FORMAT-controlled text/JSON on stderr.
+# AVPLUMBER_LOG_FORMAT-controlled text/JSON on stderr.
 HAVE_OTEL ?= 0
 OPENTELEMETRY_ROOT ?= deps/opentelemetry-cpp
 OPENTELEMETRY_LIB_DIR ?= /usr/local/lib

@@ -6,11 +6,13 @@ line longer than 16 KB.  Field names follow the OpenTelemetry log data model so 
 same line is parsed identically by Loki's ``| json``, by an OTel Collector
 ``json_parser`` and by Kloudfuse.
 
-Vendored from eka-recorder-ai's ``ai-recorder/recorder/jsonlog.py`` (the avplumber
-and avplumber-nodes repos do not depend on the recorder package). Keep the two in
-sync: the field contract is the "Log Format Standard for OpenTelemetry with JSON
-Structure and Requirements". The defaults differ on purpose: these repos log plain
-text unless ``RECORDER_LOG_FORMAT=json``.
+Implements the same field contract across this repository's processes: the
+engine's ``logstream`` JSON form (``src/util.cpp``) and the Python processes below
+carry identical fields, so the same line is parsed identically whichever side
+emitted it.
+
+The default format here is plain text (the legacy human-readable line); ``json``
+opts into the standard's wire format.
 
 
 The existing ``event=... key=value`` message convention is kept at the call sites:
@@ -111,9 +113,9 @@ _SERVICE_NAME = "service.name"
 _SERVICE_VERSION = "service.version"
 _DEPLOYMENT_ENVIRONMENT = "deployment.environment"
 
-#: ``RECORDER_LOG_FORMAT``: ``text`` (the default in these repos, the legacy
-#: human-readable line) or ``json`` (the standard's wire format).
-_FORMAT_VAR = "RECORDER_LOG_FORMAT"
+#: ``AVPLUMBER_LOG_FORMAT``: ``text`` (the default, the legacy human-readable
+#: line) or ``json`` (the standard's wire format).
+_FORMAT_VAR = "AVPLUMBER_LOG_FORMAT"
 
 
 def severity_of(level: int) -> tuple[str, int]:
@@ -167,11 +169,7 @@ def service_fields() -> dict[str, str]:
     """
     return {
         _SERVICE_NAME: os.environ.get("OTEL_SERVICE_NAME") or "avplumber",
-        _SERVICE_VERSION: (
-            os.environ.get("OTEL_SERVICE_VERSION")
-            or os.environ.get("RECORDER_VERSION")
-            or "unknown"
-        ),
+        _SERVICE_VERSION: os.environ.get("OTEL_SERVICE_VERSION") or "unknown",
         _DEPLOYMENT_ENVIRONMENT: (
             os.environ.get("DEPLOYMENT_ENVIRONMENT")
             or os.environ.get("OTEL_DEPLOYMENT_ENVIRONMENT")
@@ -272,8 +270,8 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "thread": record.threadName,
         }
-        # The ambient span's ids (recorder.otelsetup), or ones a filter stamped;
-        # absent otherwise, which keeps the lines identical to the pre-OTel format.
+        # The ambient span's ids when a tracer is installed, absent otherwise,
+        # which keeps the lines identical to the no-tracing format.
         trace_id, span_id = _ambient_span_ids()
         trace_id = getattr(record, "trace_id", None) or trace_id
         span_id = getattr(record, "span_id", None) or span_id
@@ -347,7 +345,7 @@ def wrap_line(line: str, *, logger: str, severity_text: str = "INFO") -> str:
 
 
 class TextFormatter(logging.Formatter):
-    """Human-readable alternative for ``RECORDER_LOG_FORMAT=text`` (local debugging).
+    """Human-readable alternative for ``AVPLUMBER_LOG_FORMAT=text`` (local debugging).
 
     Same content as the JSON line, minus the framing: UTC stamp, severity, logger,
     the full interpolated message, and a multi-line exception — plain text mode is for
@@ -379,7 +377,7 @@ def formatter_from_env() -> logging.Formatter:
 def configure_logging(*, level: int = logging.INFO, stream: Any = None) -> None:
     """Point the root logger at one handler in the configured format and stop there.
 
-    The format comes from ``RECORDER_LOG_FORMAT`` (``json`` by default). Replaces
+    The format comes from ``AVPLUMBER_LOG_FORMAT`` (``text`` by default). Replaces
     every existing handler (the standard's rule 1: everything on stdout is JSON; a
     text handler alongside a JSON one guarantees broken lines). Uncaught exceptions
     in the main thread and in threads are logged instead of printed bare to stderr

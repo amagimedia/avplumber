@@ -8,7 +8,7 @@
 // OpenTelemetry headers is included, so the dependency stays optional.
 //
 // Log lines are NOT routed through OpenTelemetry: the engine's logstream output is
-// RECORDER_LOG_FORMAT-controlled text or OTel JSON on stderr (src/util.cpp), and the
+// AVPLUMBER_LOG_FORMAT-controlled text or OTel JSON on stderr (src/util.cpp), and the
 // standard forbids non-JSON lines on stdout. Only metrics (and later traces, if any)
 // go through the SDK, and only to the configured endpoint -- never to stdout.
 
@@ -37,6 +37,8 @@ inline void init() {
 #include <memory>
 #include <string>
 
+#include "app_version.hpp"
+
 namespace avplumber_otel {
 
 inline std::string env_or(const char *primary, const char *secondary, const char *fallback) {
@@ -47,12 +49,12 @@ inline std::string env_or(const char *primary, const char *secondary, const char
     return {fallback};
 }
 
-// The service identity matches the log lines (the JSON form of logstream output and
-// recorder/jsonlog.py in eka-recorder-ai carry the same three fields).
+// The service identity matches the log lines (the JSON form of logstream output
+// carries the same three fields).
 inline opentelemetry::sdk::resource::Resource resource() {
     return opentelemetry::sdk::resource::Resource::Create(
         {{"service.name", env_or("OTEL_SERVICE_NAME", "", "avplumber")},
-         {"service.version", env_or("OTEL_SERVICE_VERSION", "RECORDER_VERSION", "unknown")},
+         {"service.version", env_or("OTEL_SERVICE_VERSION", "", APP_VERSION)},
          {"deployment.environment", env_or("DEPLOYMENT_ENVIRONMENT", "OTEL_DEPLOYMENT_ENVIRONMENT", "unknown")}});
 }
 

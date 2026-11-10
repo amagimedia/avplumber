@@ -1,4 +1,7 @@
 #include "util.hpp"
+
+#include "app_version.hpp"
+
 #include <cassert>
 #include <cstdlib>
 #include <thread>
@@ -49,7 +52,7 @@ static std::string env_or(const char *primary, const char *secondary, const char
 
 LogLineFormat log_line_format() {
     static const LogLineFormat format = []{
-        const char *value = getenv("RECORDER_LOG_FORMAT");
+        const char *value = getenv("AVPLUMBER_LOG_FORMAT");
         return (value && std::string(value) == "json") ? LogLineFormat::Json : LogLineFormat::Text;
     }();
     return format;
@@ -62,16 +65,16 @@ std::string format_log_line(
     if (log_line_format() == LogLineFormat::Text) {
         return timestamp + " [" + thread_name + "] " + message;
     }
-    // The OTel JSON log line, the same contract the recorder's Python side emits
-    // (recorder/jsonlog.py in eka-recorder-ai). The engine's logstream has no
-    // levels, so every line is INFO; the legacy local-time stamp is not carried.
+    // The OTel JSON log line: one object per line with the field names of the
+    // OTel log data model. The engine's logstream has no levels, so every line is
+    // INFO; the legacy local-time stamp is not carried.
     nlohmann::json fields;
     fields["timestamp"] = timestamp;
     fields["severity_text"] = "INFO";
     fields["severity_number"] = 9;
     fields["body"] = message;
     fields["service.name"] = env_or("OTEL_SERVICE_NAME", "", "avplumber");
-    fields["service.version"] = env_or("OTEL_SERVICE_VERSION", "RECORDER_VERSION", "unknown");
+    fields["service.version"] = env_or("OTEL_SERVICE_VERSION", "", APP_VERSION);
     fields["deployment.environment"] = env_or("DEPLOYMENT_ENVIRONMENT", "OTEL_DEPLOYMENT_ENVIRONMENT", "unknown");
     fields["logger"] = "avplumber";
     fields["thread"] = thread_name;

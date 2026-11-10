@@ -555,8 +555,8 @@ namespace {
     
 PYBIND11_MODULE(_avplumber, m) {
     // OpenTelemetry (metrics later): a no-op unless the image builds with
-    // HAVE_OTEL=1, in which case the deployment's env vars configure it
-    // (recorder/otelsetup.py's contract: RECORDER_OTEL_ENABLED, OTEL_* endpoints).
+    // HAVE_OTEL=1, in which case the deployment's OTEL_* environment variables
+    // configure it (endpoint, export interval).
     avplumber_otel::init();
     py::class_<AVPlumber>(m, "AVPlumber")
         .def(py::init<>())
