@@ -621,6 +621,13 @@ public:
             r->team_ = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["team"]);
             r->team_->checkTimeBase(timebase);
             r->team_->addSeekTarget(r);
+            // "sync": {"fps": "30", "offset": <shared offset>}: the same as realtime.team.sync with
+            // that offset, for a graph built from a script. Every member may carry it; it must agree.
+            if (params.count("sync")) {
+                const auto &sync = params["sync"];
+                r->team_->syncHosts(parseRatio(sync.at("fps").get<std::string>()),
+                                    std::optional<AVTS>(sync.at("offset").get<AVTS>()));
+            }
         }
         if (params.count("master")) {
             r->is_master_ = params["master"];

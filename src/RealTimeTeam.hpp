@@ -1,6 +1,8 @@
 #pragma once
 #include <atomic>
 #include <mutex>
+#include <optional>
+#include <cstdlib>
 #include "instance_shared.hpp"
 #include "avutils.hpp"
 #include "ClockOrigin.hpp"
@@ -160,6 +162,40 @@ public:
                       << "since start; this host's fixed realtime offset is off by that much";
     }
     int64_t clockDriftNs() const { return clock_drift_ns_.load(std::memory_order_relaxed); }
+    /// Make this host release the team's frames in step with another host (realtime.team.sync,
+    /// or a realtime node's "sync" parameter). Without `shared` the team keeps the offset it
+    /// found on arrival and fixes it; with it, the offset is fixed to match. Returns the offset
+    /// as the number that means the same on every host. See the command for the reasoning.
+    AVTS syncHosts(AVRational fps, std::optional<AVTS> shared) {
+        if (fps.num <= 0 || fps.den <= 0) throw Error("realtime sync: fps must be a positive ratio");
+        if (!avp::clockOriginEnabled()) throw Error("realtime sync needs AVP_CLOCK_ORIGIN=tai in the environment");
+        const auto kernel = avp::kernelClockState();
+        if (!kernel.synchronized) throw Error("realtime sync: the kernel reports the system clock unsynchronised");
+        const char *expected_tai = std::getenv("AVP_TAI_OFFSET");
+        const int tai_offset = expected_tai ? std::atoi(expected_tai) : 0;
+        if (kernel.tai_offset != tai_offset)
+            throw Error("realtime sync: kernel TAI offset is " + std::to_string(kernel.tai_offset) + " s, expected " +
+                        std::to_string(tai_offset) + " (AVP_TAI_OFFSET); hosts that disagree would be that far apart");
+        const AVRational tb = getTimebase();
+        if (tb.num <= 0 || tb.den <= 0) throw Error("realtime sync: no realtime node has joined the team");
+        // Whole ticks between this host's monotonic zero and the show epoch, in time base units.
+        const __int128 origin = avp::clockOriginNs();
+        const __int128 tick_den = static_cast<__int128>(fps.den) * 1000000000;
+        __int128 ticks = origin * fps.num / tick_den;
+        if ((origin * fps.num) % tick_den < 0) --ticks;
+        const __int128 fold_num = ticks * fps.den * tb.den, fold_den = static_cast<__int128>(fps.num) * tb.num;
+        if (fold_num % fold_den != 0)
+            throw Error("realtime sync: a tick at this fps is not a whole number of the team's time base units");
+        const AVTS fold = static_cast<AVTS>(fold_num / fold_den);
+        if (shared) {
+            setFixedOffset(*shared + fold);
+            return *shared;
+        }
+        const AVTS local = offset_.load(std::memory_order_acquire);
+        if (local == AV_NOPTS_VALUE) throw Error("realtime sync: the team has not released a frame yet");
+        setFixedOffset(local);
+        return local - fold;
+    }
     void clearFixedOffset() {
         fixed_offset_.store(AV_NOPTS_VALUE, std::memory_order_release);
         logstream << "realtime team offset no longer fixed";

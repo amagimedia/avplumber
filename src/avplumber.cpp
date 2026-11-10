@@ -806,36 +806,8 @@ public:
             if (!(ss >> team_name >> fps_text)) throw Error("realtime.team.sync <team> <fps> [<shared offset>]");
             long long shared = 0;
             const bool follow = static_cast<bool>(ss >> shared);
-            const AVRational fps = parseRatio(fps_text);
-            if (fps.num <= 0 || fps.den <= 0) throw Error("realtime.team.sync: fps must be a positive ratio");
-            if (!avp::clockOriginEnabled()) throw Error("realtime.team.sync needs AVP_CLOCK_ORIGIN=tai in the environment");
-            const auto kernel = avp::kernelClockState();
-            if (!kernel.synchronized) throw Error("realtime.team.sync: the kernel reports the system clock unsynchronised");
-            const char *expected_tai = std::getenv("AVP_TAI_OFFSET");
-            const int tai_offset = expected_tai ? std::atoi(expected_tai) : 0;
-            if (kernel.tai_offset != tai_offset)
-                throw Error("realtime.team.sync: kernel TAI offset is " + std::to_string(kernel.tai_offset) + " s, expected " +
-                            std::to_string(tai_offset) + " (AVP_TAI_OFFSET); hosts that disagree would be that far apart");
             auto team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_name);
-            const AVRational tb = team->getTimebase();
-            if (tb.num <= 0 || tb.den <= 0) throw Error("realtime.team.sync: no realtime node has joined team " + team_name);
-            // Whole ticks between this host's monotonic zero and the show epoch, in team time base units.
-            const __int128 origin = avp::clockOriginNs();
-            const __int128 tick_den = static_cast<__int128>(fps.den) * 1000000000;
-            __int128 ticks = origin * fps.num / tick_den;
-            if ((origin * fps.num) % tick_den < 0) --ticks;
-            const __int128 fold_num = ticks * fps.den * tb.den, fold_den = static_cast<__int128>(fps.num) * tb.num;
-            if (fold_num % fold_den != 0)
-                throw Error("realtime.team.sync: a tick at " + fps_text + " is not a whole number of the team's time base units");
-            const AVTS fold = static_cast<AVTS>(fold_num / fold_den);
-            if (follow) {
-                team->setFixedOffset(static_cast<AVTS>(shared) + fold);
-            } else {
-                const AVTS local = team->getOffset();
-                if (local == AV_NOPTS_VALUE) throw Error("realtime.team.sync: team " + team_name + " has not released a frame yet");
-                team->setFixedOffset(local);
-                shared = local - fold;
-            }
+            shared = team->syncHosts(parseRatio(fps_text), follow ? std::optional<AVTS>(shared) : std::nullopt);
             cs << shared << "\n";
         };
         commands_["realtime.team.clear_offset"] = [this](ClientStream &cs, std::string &arg) {
