@@ -340,6 +340,8 @@ public:
                 per_input.push_back({{"repeats", st[0]}, {"discarded", st[1]}, {"overflow", st[2]}});
             return per_input;
         }
+        // The debug overlay: whether it is on, the frames it drew on, the last frame's items and tiles.
+        if (key == "debug_overlay") return debugOverlayStatus();
         if (key != "status") throw Error("mixer_compositor: unknown object " + key);
         Parameters result = {{"output_drops", output_drops_.load()}};
         {

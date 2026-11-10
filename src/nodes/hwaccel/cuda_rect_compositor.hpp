@@ -7,6 +7,7 @@
 #include "../../timeline.hpp"
 #include "../../output_mask.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
+#include "../../mixer/primitives/debug_overlay.hpp"
 #include "../../mixer/primitives/frame_subscription.hpp"
 #include "../../mixer/primitives/source_mask.hpp"
 #include "../../mixer/primitives/SourceDelivery.hpp"
@@ -14,6 +15,7 @@
 #include "cuda_rect_frame.hpp"
 #include "cuda_rect_texture.h"
 
+#include <atomic>
 #include <chrono>
 
 extern "C" {
@@ -94,6 +96,55 @@ protected:
             throw Error(std::string(type_) + ": waiting for the previous draw failed");
         in_flight_.clear();
         draw_pending_ = false;
+    }
+
+    // The debug overlay (debug_overlay.hpp) of the layers that ask for it with `"debug": true`.
+    // `debug_overlay` (setObject) switches it while the show runs: off, a frame costs one atomic
+    // read; on, a frame with no such layer costs a pass over its ops and nothing on the GPU.
+    std::atomic<bool> debug_overlay_enabled_{true};
+    std::unique_ptr<avp::mixer::DebugOverlay> debug_overlay_;   // render thread; made at the first use
+    std::vector<avp::mixer::DebugOverlayTile> debug_tiles_;     // scratch of one frame
+    // Frames it drew on, and the items and 16x16 tiles of the last one, for the status.
+    std::atomic<uint64_t> debug_overlay_frames_{0}, debug_overlay_items_{0}, debug_overlay_tiles_{0};
+    Parameters debugOverlayStatus() const {
+        return {{"enabled", debug_overlay_enabled_.load()}, {"frames", debug_overlay_frames_.load()},
+                {"items", debug_overlay_items_.load()}, {"tiles", debug_overlay_tiles_.load()}};
+    }
+    std::chrono::steady_clock::time_point debug_overlay_logged_{};
+
+    /// Queues the overlay of every `debug` layer of `ops` on `stream`, after their draw.
+    void drawDebugOverlay(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas) {
+        debug_tiles_.clear();
+        for (const DrawOp &op : ops) {
+            // A transformed layer (rotation, a glide's sub-pixel crop, a fade) shows no overlay.
+            if (!op.src || !op.src->raw() || !op.layer.debug || op.transform || op.layer.opacity <= 0) continue;
+            const LayerSpec &l = op.layer;
+            const int w = l.dst_w ? l.dst_w : l.crop_w, h = l.dst_h ? l.dst_h : l.crop_h;
+            if (w <= 0 || h <= 0 || l.crop_w <= 0 || l.crop_h <= 0 || !op.src->raw()->metadata) continue;
+            debug_tiles_.push_back({op.src->raw(), double(l.crop_x), double(l.crop_y), double(l.crop_w),
+                                    double(l.crop_h), l.dst_x, l.dst_y, w, h});
+        }
+        if (debug_tiles_.empty()) return;
+        const auto complain = [&](const std::string &why) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - debug_overlay_logged_ < std::chrono::minutes(1)) return;
+            debug_overlay_logged_ = now;
+            logstream << type_ << ": no debug overlay: " << why;
+        };
+        if (draw_.canvas().sw_fmt != AV_PIX_FMT_NV12) return complain("the canvas is not NV12");
+        if (!debug_overlay_) {
+            const auto factory = avp::mixer::debugOverlayFactory();
+            if (!factory) return complain("this build has no neural-net draw code (NEURAL_NET=1)");
+            debug_overlay_ = factory();
+        }
+        try {
+            debug_overlay_->draw(stream, canvas, debug_tiles_);
+            debug_overlay_items_ = debug_overlay_->lastItems();
+            debug_overlay_tiles_ = debug_overlay_->lastTiles();
+            if (debug_overlay_->lastTiles()) ++debug_overlay_frames_;
+        } catch (const std::exception &e) {
+            complain(e.what());   // the frame goes out without it
+        }
     }
 
     // The layer log: the configured layers, draw shape and ops it last reported. A scene, composition
@@ -258,6 +309,7 @@ protected:
         const AVFrame *color_src = hasCanvasColor() ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr);
         if (!base || !draw_.drawOver(stream, ops, outf.raw(), color_src, base->raw()))
             draw_.draw(stream, ops, outf.raw(), color_src);
+        if (debug_overlay_enabled_.load(std::memory_order_relaxed)) drawDebugOverlay(stream, ops, outf.raw());
 
         if (metadata_src && metadata_src->raw())
             avp::mixer::copySourceProps(outf, *metadata_src, type_);
@@ -365,6 +417,14 @@ public:
             } catch (const std::exception &e) { logstream << type_ << ": finishing the last draw: " << e.what(); }
             cuEventDestroy(draw_done_);
         }
+        if (debug_overlay_) {
+            try {
+                draw_.ensureDevice();
+                draw_.synchronize(draw_.stream());
+                debug_overlay_->release();
+            } catch (const std::exception &e) { logstream << type_ << ": releasing the debug overlay: " << e.what(); }
+            debug_overlay_.reset();
+        }
         draw_.unload();
         out_frames_ref_.reset();
     }
@@ -397,6 +457,11 @@ public:
             if (new_layers.size() > size_t(draw_.maxLayers())) throw Error(std::string(type_) + ": too many layers");
             std::lock_guard<std::mutex> lock(layers_mutex_);
             default_layers_ = std::move(new_layers);
+        } else if (key == "debug_overlay") {
+            // true/false, or {"enabled": bool}: whether layers with `"debug": true` get their overlay.
+            const Parameters &enabled = value.is_object() ? value.at("enabled") : value;
+            if (!enabled.is_boolean()) throw Error(std::string(type_) + ": debug_overlay must be true or false");
+            debug_overlay_enabled_.store(enabled.get<bool>(), std::memory_order_relaxed);
         } else if (key == "composition" || key == "prewarm_inputs" || key == "warm_reset" || key == "fade_inputs") {
             // Another compositor node's control: fail rather than ignore it like an unknown key.
             throw Error(std::string(type_) + ": " + key + " is not supported by this node");

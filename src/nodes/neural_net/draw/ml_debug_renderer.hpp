@@ -197,7 +197,10 @@ public:
 
     /// Draws the listed items on the NV12 frame `out`: one upload, one launch of `kernel`, one wait
     /// for `stream`. Nothing is uploaded or launched when no item touches the frame.
-    bool draw(CUcontext ctx, CUstream stream, CUfunction kernel, AVFrame* out, const char* node) {
+    /// With `wait` false the draw is only queued: the caller waits for `stream` (or an event it
+    /// records on it) before the frame is read and before the next begin(), since the upload reads
+    /// the pinned staging when the stream reaches it.
+    bool draw(CUcontext ctx, CUstream stream, CUfunction kernel, AVFrame* out, const char* node, bool wait = true) {
         if (cover_.empty()) {
             tiles_.clear();
             return true;
@@ -264,7 +267,7 @@ public:
             return false;
         }
         // The frame goes to the next node complete, as every draw node hands it on.
-        return CUDA_OVERLAY_CHECK_CU(cuStreamSynchronize(stream)) == 0;
+        return !wait || CUDA_OVERLAY_CHECK_CU(cuStreamSynchronize(stream)) == 0;
     }
 };
 

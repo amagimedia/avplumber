@@ -1134,6 +1134,28 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         log.warning("Decode load unknown: %s", exc)
     settings = json.dumps(settings, separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True, True)   # polled: not logged
+    # The debug overlay of scene items with "debug": true, switched while the show runs:
+    # mixer.debug_overlay {"enabled": bool, "output": "program" | <aux bus id>} (every output when
+    # none is named); without "enabled" it only reports. Off, a compositor reads one flag a frame.
+    overlay_nodes = {"program": [mixer._n("comp_a"), mixer._n("comp_b")],
+                     **{bus.bus.id: [bus.node_name] for bus in aux or ()}}
+    overlay_on = dict.fromkeys(overlay_nodes, True)
+
+    def debug_overlay(arg):
+        request = json.loads(arg) if arg and arg.strip() else {}
+        if "enabled" in request:
+            enabled = request["enabled"]
+            outputs = [request["output"]] if request.get("output") is not None else list(overlay_nodes)
+            if not isinstance(enabled, bool) or any(output not in overlay_nodes for output in outputs):
+                raise mixer_config.ConfigError(
+                    f"mixer.debug_overlay: enabled must be a boolean and output one of {sorted(overlay_nodes)}")
+            for output in outputs:
+                for node in overlay_nodes[output]:
+                    avp.executeCommandsFromString(f"node.object.set {node} debug_overlay {json.dumps(enabled)}")
+                overlay_on[output] = enabled
+        return json.dumps({"outputs": overlay_on}) + "\n"
+
+    avp.registerControlCommand("mixer.debug_overlay", debug_overlay, True)
     held = []
     # Purge idle imports left by the capture pool's start-up churn.
     importers = tuple(

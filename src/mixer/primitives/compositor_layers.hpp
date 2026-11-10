@@ -52,6 +52,10 @@ struct LayerSpec {
     // A box with a fractional value, the twin of crop_exact, whose enclosing rect is in dst_*.
     // Written by the move transition (layer_move.hpp), never parsed from JSON.
     std::optional<RectF> dst_exact;
+    // Draw the compositor's debug overlay (debug_overlay.hpp) over this layer, from its source
+    // frame's metadata. Part of a layer's description (parseLayersArray); per-frame metadata,
+    // which re-parses the geometry, cannot change it.
+    bool debug = false;
 
     /// The source this layer draws: `input`, or its position in the legacy one-layer-per-input order.
     size_t sourceIndex(size_t position) const { return input < 0 ? position : size_t(input); }
@@ -66,7 +70,8 @@ struct LayerSpec {
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
                source_canvas_w == other.source_canvas_w && source_canvas_h == other.source_canvas_h &&
                rotation_deg == other.rotation_deg && pivot_set == other.pivot_set && pivot_x == other.pivot_x &&
-               pivot_y == other.pivot_y && crop_exact == other.crop_exact && dst_exact == other.dst_exact;
+               pivot_y == other.pivot_y && crop_exact == other.crop_exact && dst_exact == other.dst_exact &&
+               debug == other.debug;
     }
 };
 
@@ -195,6 +200,7 @@ inline std::vector<LayerSpec> parseLayersArray(const Parameters &arr, ScaleFilte
         LayerSpec s;
         s.filter.mode = default_filter;
         parseLayerFromJson(item, s);
+        s.debug = item.value("debug", false);
         layers.push_back(s);
     }
     return layers;

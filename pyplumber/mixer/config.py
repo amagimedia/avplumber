@@ -282,6 +282,7 @@ class Item:
     blend: bool = False           # honour source alpha, e.g. transparent browser graphics
     rotation: float = 0.0         # degrees, clockwise, about `pivot` (the box's centre when None)
     pivot: Optional[Tuple[float, float]] = None   # scene-canvas pixels
+    debug: bool = False           # draw the compositor's debug overlay over this item, from its source's metadata
 
 
 @dataclass(frozen=True)
@@ -817,7 +818,10 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             if not isinstance(blend, bool):
                 raise ConfigError(f"{iw}: blend must be a boolean")
             rotation, pivot = _rotation(it, iw)
-            items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop, blend, rotation, pivot))
+            debug = it.get("debug", False)
+            if not isinstance(debug, bool):
+                raise ConfigError(f"{iw}: debug must be a boolean")
+            items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop, blend, rotation, pivot, debug))
         scenes.append(Scene(protocol_name(str(sc["id"]), f"{where}: id"), tuple(items)))
         _unique(scenes, where, "scene id")
     if not scenes:
@@ -1132,5 +1136,7 @@ def scene_layers(cfg: MixerConfig, scene: Scene) -> Dict[str, Dict[str, Any]]:
             layer["rotation_deg"] = item.rotation
             if item.pivot is not None:
                 layer["pivot_x"], layer["pivot_y"] = item.pivot
+        if item.debug:      # only when set, like rotation
+            layer["debug"] = True
         layers[name] = layer
     return layers
