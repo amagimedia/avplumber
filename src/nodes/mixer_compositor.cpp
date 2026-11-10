@@ -322,8 +322,9 @@ public:
 
     Parameters getObject(const std::string key) override {
         if (key == "sync_trace") {
-            // [tick index, handed on at (monotonic ns), [timestamp in ns of each input's frame
-            // shown, -1 for none]], oldest first. Empty unless AVP_SYNC_TRACE=1.
+            // [tick index, handed on at (monotonic ns), [per input: the timestamp in ns of its
+            // frame when on air, -2 - timestamp when held warm off air, -1 for none]], oldest
+            // first. Empty unless AVP_SYNC_TRACE=1.
             Parameters rows = Parameters::array();
             for (const auto &entry : sync_trace_.snapshot())
                 rows.push_back({entry.key, entry.at_ns, entry.detail});
@@ -605,8 +606,14 @@ public:
             if (avp::SyncTrace::enabled()) {
                 std::vector<int64_t> shown;
                 shown.reserve(decision->frames.size());
-                for (const auto &frame : decision->frames)
-                    shown.push_back(frame && frame->pts().isValid() ? frame->pts().timestamp({1, 1000000000}) : -1);
+                // On air: the frame's timestamp. Present but not in the picture (kept warm for
+                // a cut): -2 - timestamp, so a change of sign between ticks is a cut.
+                for (size_t i = 0; i < decision->frames.size(); ++i) {
+                    const auto &frame = decision->frames[i];
+                    if (!frame || !frame->pts().isValid()) { shown.push_back(-1); continue; }
+                    const int64_t ns = frame->pts().timestamp({1, 1000000000});
+                    shown.push_back(active.test((int)i) ? ns : -2 - ns);
+                }
                 sync_trace_.add(decision->index, avp::monotonicNowNs(), std::move(shown));
             }
         }
