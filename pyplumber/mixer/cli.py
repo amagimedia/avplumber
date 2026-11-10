@@ -295,7 +295,7 @@ def parse_size(text: str) -> tuple[int, int]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    # AVPLUMBER_LOG_FORMAT: text (the default) or the OTel JSON log line
+    # AVP_LOG_FORMAT: text (the default) or the OTel JSON log line
     # (pyplumber.jsonlog); one JSON object per line when json is selected.
     configure_logging()
     options = parse_args(argv)

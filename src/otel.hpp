@@ -8,7 +8,7 @@
 // OpenTelemetry headers is included, so the dependency stays optional.
 //
 // Log lines are NOT routed through OpenTelemetry: the engine's logstream output is
-// AVPLUMBER_LOG_FORMAT-controlled text or OTel JSON on stderr (src/util.cpp), and the
+// AVP_LOG_FORMAT-controlled text or OTel JSON on stderr (src/util.cpp), and the
 // standard forbids non-JSON lines on stdout. Only metrics (and later traces, if any)
 // go through the SDK, and only to the configured endpoint -- never to stdout.
 

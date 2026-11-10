@@ -1,6 +1,6 @@
 """The vendored OTel JSON log line format (``pyplumber.jsonlog``).
 
-JSON on stdout unless ``AVPLUMBER_LOG_FORMAT=text`` selects the legacy
+JSON on stdout unless ``AVP_LOG_FORMAT=text`` selects the legacy
 human-readable line; the field contract is the "Log Format Standard for OpenTelemetry
 with JSON Structure and Requirements".
 """
@@ -29,12 +29,12 @@ def _record(msg: str, *args: object, level: int = logging.INFO) -> logging.LogRe
 
 
 def test_text_is_the_default_format(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AVPLUMBER_LOG_FORMAT", raising=False)
+    monkeypatch.delenv("AVP_LOG_FORMAT", raising=False)
     assert isinstance(formatter_from_env(), TextFormatter)
 
 
 def test_json_format_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AVPLUMBER_LOG_FORMAT", "json")
+    monkeypatch.setenv("AVP_LOG_FORMAT", "json")
     assert isinstance(formatter_from_env(), JsonFormatter)
 
 
@@ -61,7 +61,7 @@ def test_text_line_keeps_the_plain_shape() -> None:
 def test_configure_logging_selects_the_format(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("AVPLUMBER_LOG_FORMAT", "json")
+    monkeypatch.setenv("AVP_LOG_FORMAT", "json")
     stream = io.StringIO()
     root = logging.getLogger()
     old_handlers = root.handlers[:]

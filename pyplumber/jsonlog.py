@@ -113,9 +113,9 @@ _SERVICE_NAME = "service.name"
 _SERVICE_VERSION = "service.version"
 _DEPLOYMENT_ENVIRONMENT = "deployment.environment"
 
-#: ``AVPLUMBER_LOG_FORMAT``: ``text`` (the default, the legacy human-readable
+#: ``AVP_LOG_FORMAT``: ``text`` (the default, the legacy human-readable
 #: line) or ``json`` (the standard's wire format).
-_FORMAT_VAR = "AVPLUMBER_LOG_FORMAT"
+_FORMAT_VAR = "AVP_LOG_FORMAT"
 
 
 def severity_of(level: int) -> tuple[str, int]:
@@ -345,7 +345,7 @@ def wrap_line(line: str, *, logger: str, severity_text: str = "INFO") -> str:
 
 
 class TextFormatter(logging.Formatter):
-    """Human-readable alternative for ``AVPLUMBER_LOG_FORMAT=text`` (local debugging).
+    """Human-readable alternative for ``AVP_LOG_FORMAT=text`` (local debugging).
 
     Same content as the JSON line, minus the framing: UTC stamp, severity, logger,
     the full interpolated message, and a multi-line exception — plain text mode is for
@@ -377,7 +377,7 @@ def formatter_from_env() -> logging.Formatter:
 def configure_logging(*, level: int = logging.INFO, stream: Any = None) -> None:
     """Point the root logger at one handler in the configured format and stop there.
 
-    The format comes from ``AVPLUMBER_LOG_FORMAT`` (``text`` by default). Replaces
+    The format comes from ``AVP_LOG_FORMAT`` (``text`` by default). Replaces
     every existing handler (the standard's rule 1: everything on stdout is JSON; a
     text handler alongside a JSON one guarantees broken lines). Uncaught exceptions
     in the main thread and in threads are logged instead of printed bare to stderr
