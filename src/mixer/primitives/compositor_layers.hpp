@@ -336,6 +336,32 @@ inline bool copiesWholeFrame(const std::vector<DrawOp> &ops, int canvas_w, int c
            l.dst_x == 0 && l.dst_y == 0 && dst_w == canvas_w && dst_h == canvas_h;
 }
 
+/// What one resolved op draws, without its geometry: whether it draws, from which input and source
+/// size, in which order and how. Per-frame layer metadata (face framing) moves crops every frame;
+/// a change of shape is a scene load, a source appearing or resizing, or a layer left out.
+struct DrawOpShape {
+    bool drawn = false;
+    int src_w = 0, src_h = 0;   // negative src_w: placement rejected (resolveDrawOps)
+    int input = -1, z = 0;
+    bool blend = false;
+    ScaleFilter filter = ScaleFilter::Bilinear;
+
+    bool operator==(const DrawOpShape &o) const {
+        return drawn == o.drawn && src_w == o.src_w && src_h == o.src_h && input == o.input && z == o.z &&
+               blend == o.blend && filter == o.filter;
+    }
+    bool operator!=(const DrawOpShape &o) const { return !(*this == o); }
+};
+
+inline std::vector<DrawOpShape> drawOpsShape(const std::vector<DrawOp> &ops) {
+    std::vector<DrawOpShape> shape;
+    shape.reserve(ops.size());
+    for (const DrawOp &op : ops)
+        shape.push_back({op.src != nullptr, op.src_w, op.src_h, op.layer.input, op.layer.z, op.layer.blend,
+                         op.layer.filter.mode});
+    return shape;
+}
+
 /// One-line description of a resolved op list, for change-triggered logging.
 inline std::string describeDrawOps(const std::vector<DrawOp> &ops) {
     std::ostringstream desc;

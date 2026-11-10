@@ -92,4 +92,23 @@ int main() {
     const auto unchanged = resolve(R"([{}])", 1920, 1080);
     assert(unchanged[0].layer.crop_w == 1920 && unchanged[0].layer.crop_h == 1080);
     assert(copiesWholeFrame(unchanged, 1920, 1080));
+
+    // The layer log reports what is drawn, not where: per-frame metadata moving a crop keeps the
+    // shape; another source size, order, layer count, filter, blend or a layer left out changes it.
+    {
+        av::VideoFrame small(AV_PIX_FMT_NV12, 320, 192), large(AV_PIX_FMT_NV12, 640, 360);
+        const auto shape = [](const char *json, const av::VideoFrame &source) {
+            return drawOpsShape(resolveDrawOps({&source}, parseLayersArray(Parameters::parse(json)), 608, 360,
+                                               AV_PIX_FMT_NV12));
+        };
+        const auto still = shape(R"([{"crop":{"x":20,"y":10,"w":100,"h":60}}])", small);
+        assert(still.size() == 1);
+        assert(still == shape(R"([{"crop":{"x":22,"y":12,"w":96,"h":58},"dst_x":4,"dst_w":200,"dst_h":120}])", small));
+        assert(still != shape(R"([{"crop":{"x":20,"y":10,"w":100,"h":60}}])", large));
+        assert(still != shape(R"([{"z":1}])", small));
+        assert(still != shape(R"([{},{"input":0}])", small));
+        assert(still != shape(R"([{"filter":"bicubic"}])", small));
+        assert(still != shape(R"([{"blend":true}])", small));
+        assert(still != shape(R"([{"crop":{"x":400}}])", small));
+    }
 }

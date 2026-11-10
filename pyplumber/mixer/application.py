@@ -1191,10 +1191,15 @@ def run_application(application: MixerApplication, *, webui_url: str = "") -> No
             application.avp.registerWithWebUI(webui_url, "mixer", "")
         application.start()
         _startup_result()
+        # No heartbeat() queue dump: the web UI reads queues.json itself. Once a minute, one line
+        # names the queues that dropped frames, for reading the log after the fact.
+        last_drops = time.monotonic()
         while application.avp.manager.shouldWork:
             time.sleep(1)
-            if webui_url:
-                application.avp.heartbeat()
+            if time.monotonic() - last_drops >= 60:
+                last_drops = time.monotonic()
+                with suppress(Exception):
+                    application.avp.logQueueDrops("60s")
         sys.exit("Mixer graph shut down after a node failure (auto_restart panic); exiting")
     except KeyboardInterrupt:
         pass
