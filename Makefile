@@ -22,6 +22,22 @@ HAVE_NVJPEG ?= 0
 NEURAL_NET_COMMON ?= 0
 NEURAL_NET_SPECIFIC ?= 0
 NEURAL_NET ?= $(if $(filter 1,$(NEURAL_NET_COMMON) $(NEURAL_NET_SPECIFIC)),1,0)
+# Optional OpenTelemetry C++ API/SDK, for the metrics work. Off by default: nothing
+# in the engine uses it yet. When 1, the source tree must exist at
+# $(OPENTELEMETRY_ROOT) (deps/opentelemetry-cpp) and its libraries must be built
+# into $(OPENTELEMETRY_LIB_DIR) (build with its own CMake:
+# -DBUILD_TESTING=OFF -DWITH_ABI_VERSION_1=OFF ... see doc/DEVELOPING or the
+# upstream README); the link list below covers api+sdk+metrics+trace+logs+common
+# +resources. The engine never writes OTel output to stdout: the log lines stay
+# AVP_LOG_FORMAT-controlled text/JSON on stderr.
+HAVE_OTEL ?= 0
+OPENTELEMETRY_ROOT ?= deps/opentelemetry-cpp
+OPENTELEMETRY_LIB_DIR ?= /usr/local/lib
+ifeq ($(HAVE_OTEL),1)
+override CXXFLAGS += -DHAVE_OTEL=1 -I$(OPENTELEMETRY_ROOT)/api/include -I$(OPENTELEMETRY_ROOT)/sdk/include -I$(OPENTELEMETRY_ROOT)/exporters/ostream/include
+override LFLAGS += -L$(OPENTELEMETRY_LIB_DIR) -Wl,-rpath,$(OPENTELEMETRY_LIB_DIR)
+override LIBS_FLAGS += -lopentelemetry_api -lopentelemetry_sdk -lopentelemetry_common -lopentelemetry_resources -lopentelemetry_trace -lopentelemetry_metrics -lopentelemetry_logs -lopentelemetry_exporter_ostream_metrics -lopentelemetry_exporter_ostream_logs -lopentelemetry_exporter_ostream_trace
+endif
 NVCC ?= /usr/local/cuda/bin/nvcc
 ifeq ($(HAVE_VAAPI),1)
 HAVE_GL = 1

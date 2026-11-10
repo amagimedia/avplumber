@@ -7,6 +7,8 @@
 #include <memory>
 #include <vector>
 
+#include "otel.hpp"
+
 extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
@@ -552,6 +554,10 @@ namespace {
 }  // namespace
     
 PYBIND11_MODULE(_avplumber, m) {
+    // OpenTelemetry (metrics later): a no-op unless the image builds with
+    // HAVE_OTEL=1, in which case the deployment's OTEL_* environment variables
+    // configure it (endpoint, export interval).
+    avplumber_otel::init();
     py::class_<AVPlumber>(m, "AVPlumber")
         .def(py::init<>())
         .def("enableControlServer", &AVPlumber::enableControlServer,
