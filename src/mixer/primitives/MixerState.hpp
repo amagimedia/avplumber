@@ -208,6 +208,12 @@ struct MixerState : public InstanceShared<MixerState> {
     TakePhase take_phase = TakePhase::Ready;
     std::shared_ptr<MixerGraph> graph;
     int64_t take_deadline_ns = 0;
+    /// A take that must not reach program before a given tick (mixer.cut/fade/move "at_show_tick",
+    /// for two hosts cutting on the same frame): next_take_not_before_ns is set by the command just
+    /// before the take, beginTake moves it to take_not_before_ns (local monotonic ns of that tick's
+    /// frame); selectProgram holds the take until a destination frame of that tick or later. 0: none.
+    int64_t next_take_not_before_ns = 0;
+    int64_t take_not_before_ns = 0;
     int64_t take_start_ns = 0;
     int64_t take_duration_ns = 0;
     int64_t wipe_first_ns = 0;

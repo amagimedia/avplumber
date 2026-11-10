@@ -261,6 +261,16 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
         if (state_->move_on_air) return target;   // a cut under a move waits on the glide
         return state_->pgmSourceSwitcherIndex();
     };
+    // A take for a given show tick (at_show_tick) waits for a destination frame of that tick,
+    // showing what program shows while any take waits.
+    if (state_->take_not_before_ns && state_->take_phase == MixerState::TakePhase::Ready &&
+        mode != MixerState::TransitionMode::Wipe) {
+        if (target_pts + 1000 < state_->take_not_before_ns) return on_air();
+        const int64_t late = target_pts - state_->take_not_before_ns;
+        if (late > av_rescale(1000000000, state_->fps_den, state_->fps_num) / 2)
+            logstream << "mixer: take at a show tick reached program " << late / 1000000 << " ms after its tick";
+        state_->take_not_before_ns = 0;
+    }
     // A destination frame of the tick program has already shown completes a take without being
     // emitted (-1): the program slot's frame of a tick can reach the selector first on every
     // tick, so waiting for a strictly newer destination frame might never end.

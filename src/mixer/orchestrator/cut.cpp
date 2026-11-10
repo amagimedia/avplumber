@@ -25,7 +25,28 @@ void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::Tra
     state_->wipe_switched = false;
     state_->destination_ready = false;
     state_->take_deadline_ns = monotonicNs() + kTakeReadyTimeoutMs * 1000000;
+    state_->take_not_before_ns = std::exchange(state_->next_take_not_before_ns, 0);
+    // A take held for its tick has its full ready time from that tick on.
+    if (state_->take_not_before_ns)
+        state_->take_deadline_ns = std::max(state_->take_deadline_ns,
+                                            state_->take_not_before_ns + kTakeReadyTimeoutMs * 1000000);
     prepareScene(scene_name);
+}
+
+void MixerOrchestrator::takeNotBeforeShowTick(std::optional<int64_t> show_tick) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->next_take_not_before_ns = 0;
+    if (!show_tick) return;
+    if (!avp::clockOriginEnabled())
+        throw Error("mixer: at_show_tick needs AVP_CLOCK_ORIGIN=tai in the environment");
+    // Show tick = this host's tick + the whole ticks between its monotonic zero and the show epoch.
+    const __int128 origin = avp::clockOriginNs();
+    const __int128 den = __int128(state_->fps_den) * 1000000000;
+    __int128 zero = origin * state_->fps_num / den;
+    if ((origin * state_->fps_num) % den < 0) --zero;
+    const int64_t local_tick = int64_t(*show_tick - zero);
+    if (local_tick <= 0) throw Error("mixer: at_show_tick is before this host's clock started");
+    state_->next_take_not_before_ns = av_rescale(local_tick, int64_t(state_->fps_den) * 1000000000, state_->fps_num);
 }
 
 bool MixerOrchestrator::destinationReady(const av::VideoFrame* frame) const {

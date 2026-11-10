@@ -7,6 +7,7 @@
 #include "../primitives/layer_zoom.hpp"
 #include "../primitives/TransitionGuard.hpp"
 #include "../../avutils.hpp"
+#include "../../ClockOrigin.hpp"
 #include "../../timeline.hpp"
 #include "../../graph_interfaces.hpp"
 #include <algorithm>

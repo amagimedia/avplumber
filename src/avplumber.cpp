@@ -1004,6 +1004,9 @@ public:
                 zoom = MixerOrchestrator::ZoomRequest{seconds, avp::mixer::parseFadeCurve(z.value("curve", std::string("ease-in-out")))};
             }
             auto orch = mixerOrchestrator(mixer_name);
+            // "at_show_tick": reach program no earlier than this show tick (two hosts, one frame).
+            orch.takeNotBeforeShowTick(req.contains("at_show_tick")
+                ? std::optional<int64_t>(req.at("at_show_tick").get<int64_t>()) : std::nullopt);
             orch.cut(scene_name, CommandTiming::received(), zoom);
         };
 
@@ -1049,6 +1052,8 @@ public:
             if (req.contains("color") && !req.at("color").is_null())
                 dip = avp::mixer::parseDipColor(req.at("color").get<std::string>());
             auto orch = mixerOrchestrator(mixer_name);
+            orch.takeNotBeforeShowTick(req.contains("at_show_tick")
+                ? std::optional<int64_t>(req.at("at_show_tick").get<int64_t>()) : std::nullopt);
             orch.fade(scene_name, duration_sec, curve, dip, CommandTiming::received());
         };
 
@@ -1062,9 +1067,11 @@ public:
             if (!(duration_sec > 0))
                 throw Error("mixer.move: duration_sec must be > 0");
             const auto curve = avp::mixer::parseFadeCurve(req.value("curve", std::string("linear")));
-            mixerOrchestrator(req.at("mixer").get<std::string>()).move(
-                req.at("scene").get<std::string>(), duration_sec, curve, req.value("unmatched", std::string("fade")),
-                CommandTiming::received());
+            auto orch = mixerOrchestrator(req.at("mixer").get<std::string>());
+            orch.takeNotBeforeShowTick(req.contains("at_show_tick")
+                ? std::optional<int64_t>(req.at("at_show_tick").get<int64_t>()) : std::nullopt);
+            orch.move(req.at("scene").get<std::string>(), duration_sec, curve, req.value("unmatched", std::string("fade")),
+                      CommandTiming::received());
         };
 
         // mixer.lever {"mixer":"mixer","position":0.4,"duration_sec":1.0,"curve":"linear","color":null,

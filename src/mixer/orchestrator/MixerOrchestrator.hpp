@@ -201,6 +201,9 @@ public:
     /// scenes draw one layer of the same source with a declared picture; otherwise it cuts, and
     /// mixer.status `zoom` says why (layer_zoom.hpp).
     struct ZoomRequest { double duration_sec; FadeCurve curve; };
+    /// The next cut, fade or move reaches program no earlier than this show tick (at_show_tick);
+    /// nullopt: as soon as it is ready, as always. Needs AVP_CLOCK_ORIGIN=tai.
+    void takeNotBeforeShowTick(std::optional<int64_t> show_tick);
     void cut(const std::string& scene_name,
              avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now(),
              std::optional<ZoomRequest> zoom = std::nullopt);
