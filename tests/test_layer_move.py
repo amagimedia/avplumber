@@ -5,9 +5,11 @@ import subprocess
 import pytest
 
 
-def test_layer_move(cpp_binary):
+@pytest.mark.parametrize("name", ["test_layer_move", "test_layer_move_offscreen"])
+def test_layer_move(cpp_binary, name):
     library = Path(__file__).resolve().parents[1] / "deps/avcpp/build/src/libavcpp.a"
     if not library.exists():
         pytest.skip("build avcpp first")
-    binary = cpp_binary("test_layer_move", sources=(str(library),), libs=("libavutil", "libavcodec", "libavformat"))
+    binary = cpp_binary(name, sources=(str(library),),
+                        libs=("libavutil", "libavcodec", "libavformat", "libavdevice", "libavfilter", "libswscale"))
     subprocess.run([str(binary)], check=True, timeout=10)

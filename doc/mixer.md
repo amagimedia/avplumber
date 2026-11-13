@@ -54,6 +54,37 @@ edge's first frame. A callback exception or invalid edge name shuts down the
 partially built engine. Face policy and inference construction belong to the
 calling application; this callback does not implement bounding-box rendering.
 
+## Source-paced compositions
+
+`pyplumber.mixer.source_compositor(params)` uses the same CUDA drawing backend
+when the application owns pacing, timestamps and EOF (for example, a buffered
+single-input reframer). It builds `cuda_rect_overlay`, without a separate output
+clock. Ordinary `metadata_key` layer updates retain their existing behaviour.
+
+For a move, set `move_metadata_key` and attach JSON from a `SourceMove` to that
+key on each source frame. `move_metadata_input` selects the input carrying it
+(default 0). The endpoints are complete layer arrays, including any backdrop.
+
+```python
+import json
+from pyplumber.mixer import SourceMove
+
+take = SourceMove(old_layers, new_layers, start=source_pts_seconds,
+                  duration=0.8, curve="ease-in-out")
+# For each frame during this take:
+frame.metadata["composition_move"] = json.dumps(take.at(frame_pts_seconds))
+```
+
+Create the take once: its endpoint snapshots remain fixed as detections change.
+The native renderer reuses the mixer's `moveLayers` and `fadeCurveAt`, including
+`linear`, `ease-in`, `ease-out` and `ease-in-out`. Input identities must remain
+stable across both endpoints. Several pads may refer to the same CUDA frame
+when its crops need independent identities. To slide a layer out, retain it in
+the destination with an off-canvas rectangle, then omit it after the take.
+Do not attach a move request to EOF. Once finished, remove the metadata key and
+supply the destination through the ordinary layer metadata. Shot-cut policy,
+layout stabilisation and selection of endpoints belong to the caller.
+
 ## Pacing loops and redundant colour tags
 
 File-source `realtime` and browser `smooth_timestamps` callbacks are distributed

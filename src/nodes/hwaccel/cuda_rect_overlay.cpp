@@ -1,5 +1,6 @@
 #include "cuda_rect_compositor.hpp"
 #include "cuda_stream.hpp"
+#include "../../mixer/primitives/frame_move.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -13,13 +14,29 @@ class CudaRectOverlay : public CudaRectCompositor {
     std::vector<bool> input_eof_;
     std::vector<av::VideoFrame> held_;
     std::vector<bool> held_valid_;
+    std::string move_metadata_key_;
+    size_t move_metadata_input_ = 0;
+
+    void adjustLayers(std::vector<LayerSpec> &layers, av::Timestamp,
+                      const std::vector<const av::VideoFrame *> &sources) override {
+        if (move_metadata_key_.empty() || move_metadata_input_ >= sources.size()) return;
+        const auto *frame = sources[move_metadata_input_];
+        if (!frame || !frame->raw()) return;
+        const auto *entry = av_dict_get(frame->raw()->metadata, move_metadata_key_.c_str(), nullptr, 0);
+        if (!entry) return;
+        // A request is self-contained and attached to this PTS. No retained take or
+        // wall clock can advance it while inference or upstream pacing waits.
+        layers = avp::mixer::frameMoveLayers(Parameters::parse(entry->value), sources, draw_.canvas().sw_fmt);
+    }
 
 public:
-    explicit CudaRectOverlay(const Config &config)
+    explicit CudaRectOverlay(const Config &config, std::string move_key = {}, size_t move_input = 0)
         : CudaRectCompositor("cuda_rect_overlay", config),
           input_eof_(config.inputs),
           held_(config.inputs),
-          held_valid_(config.inputs) {}
+          held_valid_(config.inputs),
+          move_metadata_key_(std::move(move_key)),
+          move_metadata_input_(move_input) {}
 
     void process() override {
         if (parkedAfterEof()) return;   // until an active_inputs change resets it
@@ -288,7 +305,12 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
         config.hw = avp::mixer::makeCudaStreamDevice(config.hw, params.value("name", params.at("output_hwaccel").get<std::string>()));
         InstanceSharedObjects<HWAccelDevice>::put(nci.instance, params.at("output_hwaccel"), config.hw);
     }
-    auto node = std::make_shared<CudaRectOverlay>(config);
+    const int move_input = params.value("move_metadata_input", 0);
+    const auto move_key = params.value("move_metadata_key", std::string());
+    if ((!move_key.empty() || params.contains("move_metadata_input")) &&
+        (move_input < 0 || size_t(move_input) >= config.inputs))
+        throw Error("cuda_rect_overlay: move_metadata_input must name an input");
+    auto node = std::make_shared<CudaRectOverlay>(config, move_key, size_t(move_input));
     node->connect(nci);
     return node;
 }
