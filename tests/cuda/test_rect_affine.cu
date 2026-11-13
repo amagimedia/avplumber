@@ -30,6 +30,7 @@ struct AffineDraw {
     double deg = 0;
     int filter = AVP_RECT_FILTER_BILINEAR;
     float param = 0.f;
+    std::optional<RectF> source_clip;
 };
 
 static int kindFor(const Frame &source, const Format &canvas) {
@@ -45,6 +46,12 @@ static AvpRectLayer affineEntry(const AffineDraw &d, const Format &canvas, int c
     const double x0 = std::max(d.crop.x, 0.), y0 = std::max(d.crop.y, 0.);
     t.edges = {x0, y0, std::min(d.crop.x + d.crop.w, double(source.width)) - x0,
                std::min(d.crop.y + d.crop.h, double(source.height)) - y0};
+    if (d.source_clip) {
+        const auto &c = *d.source_clip;
+        const double x = std::max(t.edges.x, c.x), y = std::max(t.edges.y, c.y);
+        t.edges = {x, y, std::min(t.edges.x + t.edges.w, c.x + c.w) - x,
+                         std::min(t.edges.y + t.edges.h, c.y + c.h) - y};
+    }
     t.box = d.box;
     t.rotation_deg = avp::mixer::normalizedRotation(d.deg);
     t.pivot_x = d.box.x + d.box.w / 2.;
@@ -245,14 +252,23 @@ static void no_reads_outside_the_crop(std::mt19937 &rng, const Format &format) {
                                 format.bytes);
             }
     for (int p = 0; p < 2; ++p) check(cuMemcpyHtoD(b.linear[p], b.host[p].data(), b.host[p].size()), "upload");
-    const auto draw = [&](const Frame &f) {
+    const auto draw = [&](const Frame &f, bool clipped) {
         Canvas out(format, 512, 288);
-        out.draw(composite_planes_yuv_affine, {affineEntry({&f, {40, 30, 160, 84}, {120, 60, 300, 158}, 37, AVP_RECT_FILTER_BICUBIC, -0.5f},
-                                                           format, 512, 288, false)});
+        AffineDraw d{&f, {40, 30, 160, 84}, {120, 60, 300, 158}, 37, AVP_RECT_FILTER_BICUBIC, -0.5f};
+        if (clipped) {
+            // The mapping includes neighbouring content; only coverage/taps exclude it.
+            d.crop = {20.5, 10.25, 200, 120};
+            d.source_clip = RectF{40, 30, 160, 84};
+        }
+        const auto layer = affineEntry(d, format, 512, 288, false);
+        out.draw(composite_planes_yuv_affine, {layer});
+        Tally tally;
+        compareAffine(out, nullptr, layer, f, "bounded bicubic source", tally);
         return out.pixels;
     };
-    if (draw(a) != draw(b)) throw std::runtime_error("the affine draw read outside its crop");
-    std::printf("PASS %s: a rotated bicubic layer reads only its crop\n", format.name);
+    for (bool clipped : {false, true})
+        if (draw(a, clipped) != draw(b, clipped)) throw std::runtime_error("the affine draw read outside its source boundary");
+    std::printf("PASS %s: rotated bicubic crop and source-clip boundaries exclude neighbour pixels\n", format.name);
 }
 
 static void affine_entry_draws_plain_tables_like_the_filter_entry(const Frame &left, const Frame &right, const Format &canvas_format,

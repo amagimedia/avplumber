@@ -95,6 +95,16 @@ keeps the affine sampling path at every position. Ordinary integer crops retain
 legacy alignment. Unchanged layers keep their original sampling path during
 another layer's move, avoiding unnecessary backdrop resampling changes.
 
+A layer can constrain its sampled content with `source_clip: {x, y, w, h}` in
+visible-source pixels. Unlike changing `crop`, this clips coverage and filter
+taps without rescaling or moving the picture inside the destination. This keeps
+an eased crop from revealing neighbouring broadcast insets. Fractional bounds
+are supported; width and height must be positive. An empty intersection draws
+nothing. Omitted or null `source_clip` clears it on a metadata override. The
+existing CUDA affine sampler applies the boundary without a CPU image copy.
+During a move between matched layers, the destination layer's source boundary
+applies; entering and exiting layers retain their own boundary.
+
 An NV12 layer can set `yuv_lut` to three 256-entry integer arrays (Y, U, V;
 each code in 0..255). The existing CUDA sampler maps each source texel before
 interpolation, preserving effects that quantize before enlargement. For example,

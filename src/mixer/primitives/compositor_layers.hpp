@@ -50,6 +50,9 @@ struct LayerSpec {
     bool pivot_set = false;
     double pivot_x = 0, pivot_y = 0;
     std::optional<RectF> crop_exact;
+    // Allowed source content in visible-picture pixels. Clips coverage and filter taps
+    // without changing the crop-to-destination map (for moving broadcast insets).
+    std::optional<RectF> source_clip;
     // A box with a fractional value, the twin of crop_exact, whose enclosing rect is in dst_*.
     // Written by the move transition (layer_move.hpp), never parsed from JSON.
     std::optional<RectF> dst_exact;
@@ -77,7 +80,7 @@ struct LayerSpec {
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
                source_canvas_w == other.source_canvas_w && source_canvas_h == other.source_canvas_h &&
                rotation_deg == other.rotation_deg && pivot_set == other.pivot_set && pivot_x == other.pivot_x &&
-               pivot_y == other.pivot_y && crop_exact == other.crop_exact && dst_exact == other.dst_exact &&
+               pivot_y == other.pivot_y && crop_exact == other.crop_exact && source_clip == other.source_clip && dst_exact == other.dst_exact &&
                debug == other.debug && move_id == other.move_id && yuv_lut == other.yuv_lut;
     }
 };
@@ -85,7 +88,7 @@ struct LayerSpec {
 /// Whether a layer draws through the affine entry: rotated, cropped or placed at a fraction of a
 /// pixel, or a faded layer that is not a blended key (a blended key fades by its table mul).
 inline bool needsTransform(const LayerSpec &l) {
-    return normalizedRotation(l.rotation_deg) != 0. || l.crop_exact.has_value() || l.dst_exact.has_value() ||
+    return normalizedRotation(l.rotation_deg) != 0. || l.crop_exact.has_value() || l.source_clip.has_value() || l.dst_exact.has_value() ||
            (l.opacity < 1.f && !l.blend);
 }
 
@@ -188,6 +191,16 @@ inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     }
     if (out.dst_w < 0 || out.dst_h < 0 || (out.dst_w == 0) != (out.dst_h == 0))
         throw Error("cuda_rect_overlay: dst_w and dst_h must both be positive or both omitted");
+    out.source_clip.reset();
+    if (obj.contains("source_clip") && !obj.at("source_clip").is_null()) {
+        const auto &c = obj.at("source_clip");
+        const RectF r{c.at("x").get<double>(), c.at("y").get<double>(),
+                      c.at("w").get<double>(), c.at("h").get<double>()};
+        if (!std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.w) || !std::isfinite(r.h) ||
+            !std::isfinite(r.x + r.w) || !std::isfinite(r.y + r.h) || !(r.w > 0) || !(r.h > 0))
+            throw Error("cuda_rect_overlay: source_clip needs finite coordinates and positive dimensions");
+        out.source_clip = r;
+    }
     if (obj.contains("crop") && obj["crop"].is_object()) {
         const auto &c = obj["crop"];
         const double x = c.value("x", 0.), y = c.value("y", 0.), w = c.value("w", 0.), h = c.value("h", 0.);
@@ -446,9 +459,16 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         auto &l = op.layer;
         t.crop.x += visible.x;
         t.crop.y += visible.y;
-        const double ex0 = std::max(t.crop.x, double(visible.x)), ey0 = std::max(t.crop.y, double(visible.y));
-        const double ex1 = std::min(t.crop.x + t.crop.w, double(visible.x) + visible.w);
-        const double ey1 = std::min(t.crop.y + t.crop.h, double(visible.y) + visible.h);
+        double ex0 = std::max(t.crop.x, double(visible.x)), ey0 = std::max(t.crop.y, double(visible.y));
+        double ex1 = std::min(t.crop.x + t.crop.w, double(visible.x) + visible.w);
+        double ey1 = std::min(t.crop.y + t.crop.h, double(visible.y) + visible.h);
+        if (l.source_clip) {
+            const auto &c = *l.source_clip;
+            ex0 = std::max(ex0, c.x + visible.x);
+            ey0 = std::max(ey0, c.y + visible.y);
+            ex1 = std::min(ex1, c.x + c.w + visible.x);
+            ey1 = std::min(ey1, c.y + c.h + visible.y);
+        }
         t.edges = {ex0, ey0, ex1 - ex0, ey1 - ey0};
         if (std::isnan(t.pivot_x)) {
             t.pivot_x = t.box.x + t.box.w / 2.;
