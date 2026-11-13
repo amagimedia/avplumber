@@ -207,6 +207,13 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     const int dst_bytes = sampleBytes(sw_fmt);
     const int planes = av_pix_fmt_count_planes(sw_fmt);
     out = AvpRectLayer{};
+    if (L.yuv_lut) {
+        if (src_sw_fmt != AV_PIX_FMT_NV12 || sw_fmt != AV_PIX_FMT_NV12)
+            throw Error("cuda_rect_overlay: yuv_lut requires NV12 source and canvas");
+        out.yuv_lut = 1;
+        for (size_t p = 0; p < 3; ++p)
+            std::copy((*L.yuv_lut)[p].begin(), (*L.yuv_lut)[p].end(), out.lut[p]);
+    }
     const bool array = avp::cuda::isArrayFormat(static_cast<AVPixelFormat>(src->format));
     if (array && packed_rgb)
         throw Error("cuda_rect_overlay: CUarray input must be semiplanar YUV");
@@ -443,7 +450,7 @@ int CudaRectDraw::fillTable(CUstream stream, const std::vector<DrawOp> &ops, con
         if (op.layer.opacity < 1.f && !fades && !entry.affine && !std::exchange(opacity_warned_, true))
             logstream << "cuda_rect_overlay: a faded layer is not a blended RGBA source; drawing it opaque";
         // A demoted layer needs the filter entries' code limit whatever its filter.
-        kinds.filter = kinds.filter || entry.filter != AVP_RECT_FILTER_BILINEAR || entry.kind == AVP_RECT_KIND_DEMOTE;
+        kinds.filter = kinds.filter || entry.yuv_lut || entry.filter != AVP_RECT_FILTER_BILINEAR || entry.kind == AVP_RECT_KIND_DEMOTE;
         // The 4x4 cubic, the 8 samples and the area are compiled into the full filter entry only.
         kinds.wide = kinds.wide || entry.filter == AVP_RECT_FILTER_BICUBIC || entry.filter == AVP_RECT_FILTER_MULTISAMPLE8 ||
                      entry.filter == AVP_RECT_FILTER_AREA;

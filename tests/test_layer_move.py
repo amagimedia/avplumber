@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 
-@pytest.mark.parametrize("name", ["test_layer_move", "test_layer_move_offscreen"])
+@pytest.mark.parametrize("name", ["test_layer_move", "test_layer_move_offscreen", "test_layer_move_smoothness"])
 def test_layer_move(cpp_binary, name):
     library = Path(__file__).resolve().parents[1] / "deps/avcpp/build/src/libavcpp.a"
     if not library.exists():

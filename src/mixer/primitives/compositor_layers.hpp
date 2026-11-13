@@ -8,6 +8,7 @@
 #include "pixel_layout.hpp"
 #include <avcpp/frame.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iterator>
 #include <optional>
@@ -56,6 +57,12 @@ struct LayerSpec {
     // frame's metadata. Part of a layer's description (parseLayersArray); per-frame metadata,
     // which re-parses the geometry, cannot change it.
     bool debug = false;
+    // Optional identity for independent framings of the same input. Legacy
+    // scenes omit it and retain occurrence-order matching in moveLayers.
+    std::string move_id;
+    // Optional source-code LUT, before resampling. NV12 only; Y, U, V tables
+    // of 256 exact codes keep a quantized effect identical under any filter.
+    std::optional<std::array<std::array<uint8_t, 256>, 3>> yuv_lut;
 
     /// The source this layer draws: `input`, or its position in the legacy one-layer-per-input order.
     size_t sourceIndex(size_t position) const { return input < 0 ? position : size_t(input); }
@@ -71,7 +78,7 @@ struct LayerSpec {
                source_canvas_w == other.source_canvas_w && source_canvas_h == other.source_canvas_h &&
                rotation_deg == other.rotation_deg && pivot_set == other.pivot_set && pivot_x == other.pivot_x &&
                pivot_y == other.pivot_y && crop_exact == other.crop_exact && dst_exact == other.dst_exact &&
-               debug == other.debug;
+               debug == other.debug && move_id == other.move_id && yuv_lut == other.yuv_lut;
     }
 };
 
@@ -126,6 +133,24 @@ inline void parseFilterFromJson(const Parameters &obj, FilterSpec &out) {
 
 inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     out.input = obj.value("input", out.input);
+    out.move_id = obj.value("move_id", out.move_id);
+    if (obj.contains("yuv_lut")) {
+        const auto &lut = obj.at("yuv_lut");
+        if (lut.is_null()) out.yuv_lut.reset();
+        else {
+            if (!lut.is_array() || lut.size() != 3) throw Error("yuv_lut: need Y, U and V tables");
+            std::array<std::array<uint8_t, 256>, 3> codes{};
+            for (size_t p = 0; p < 3; ++p) {
+                if (!lut[p].is_array() || lut[p].size() != 256) throw Error("yuv_lut: each table needs 256 codes");
+                for (size_t i = 0; i < 256; ++i) {
+                    const auto &v = lut[p][i];
+                    if (!v.is_number_integer() || v < 0 || v > 255) throw Error("yuv_lut: codes must be integers in 0..255");
+                    codes[p][i] = v.get<uint8_t>();
+                }
+            }
+            out.yuv_lut = std::move(codes);
+        }
+    }
     if (out.input < -1) throw Error("cuda_rect_overlay: invalid input index");
     if (obj.contains("tile")) {
         const auto &t = obj.at("tile");
@@ -168,7 +193,7 @@ inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
         const double x = c.value("x", 0.), y = c.value("y", 0.), w = c.value("w", 0.), h = c.value("h", 0.);
         if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h))
             throw Error("cuda_rect_overlay: crop must be finite");
-        if (x != std::floor(x) || y != std::floor(y) || w != std::floor(w) || h != std::floor(h)) {
+        if (obj.value("crop_subpixel", false) || x != std::floor(x) || y != std::floor(y) || w != std::floor(w) || h != std::floor(h)) {
             // A sub-pixel crop draws through the affine entry; the integer fields enclose it.
             if (!(w > 0) || !(h > 0)) throw Error("cuda_rect_overlay: a fractional crop needs w and h");
             out.crop_exact = RectF{x, y, w, h};
@@ -455,7 +480,7 @@ inline bool copiesWholeFrame(const std::vector<DrawOp> &ops, int canvas_w, int c
         return false;
     const LayerSpec &l = ops[0].layer;
     const int dst_w = l.dst_w ? l.dst_w : l.crop_w, dst_h = l.dst_h ? l.dst_h : l.crop_h;
-    return !l.blend && ops[0].src_w == canvas_w && ops[0].src_h == canvas_h &&
+    return !l.blend && !l.yuv_lut && ops[0].src_w == canvas_w && ops[0].src_h == canvas_h &&
            l.crop_x == 0 && l.crop_y == 0 && l.crop_w == canvas_w && l.crop_h == canvas_h &&
            l.dst_x == 0 && l.dst_y == 0 && dst_w == canvas_w && dst_h == canvas_h;
 }

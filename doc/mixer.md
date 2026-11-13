@@ -78,12 +78,30 @@ frame.metadata["composition_move"] = json.dumps(take.at(frame_pts_seconds))
 Create the take once: its endpoint snapshots remain fixed as detections change.
 The native renderer reuses the mixer's `moveLayers` and `fadeCurveAt`, including
 `linear`, `ease-in`, `ease-out` and `ease-in-out`. Input identities must remain
-stable across both endpoints. Several pads may refer to the same CUDA frame
-when its crops need independent identities. To slide a layer out, retain it in
+stable across both endpoints. Set `move_id` on each independently framed layer:
+layers match by `(input, move_id)`, so several crops may read input 0 without
+swapping when their list order changes. Omitted IDs retain occurrence-order matching.
+To slide a layer out, retain it in
 the destination with an off-canvas rectangle, then omit it after the take.
 Do not attach a move request to EOF. Once finished, remove the metadata key and
 supply the destination through the ordinary layer metadata. Shot-cut policy,
 layout stabilisation and selection of endpoints belong to the caller.
+
+Continuous moves preserve exact source coordinates even at integral odd pixels;
+they never briefly revert to chroma-aligned integer placement. A caller supplying
+its own continuous crop trajectory (for example an L1 viewport node) should set
+`crop_subpixel: true` on that layer. It requires a positive crop width/height and
+keeps the affine sampling path at every position. Ordinary integer crops retain
+legacy alignment. Unchanged layers keep their original sampling path during
+another layer's move, avoiding unnecessary backdrop resampling changes.
+
+An NV12 layer can set `yuv_lut` to three 256-entry integer arrays (Y, U, V;
+each code in 0..255). The existing CUDA sampler maps each source texel before
+interpolation, preserving effects that quantize before enlargement. For example,
+a white-wash lookup table can replace a CPU `lutyuv` round trip. The table is
+static layer configuration; no video pixels cross to the CPU. Omit it to retain
+the configured effect on a metadata override, or use `null` to clear it. It is
+rejected for other source/canvas formats rather than silently changing colors.
 
 ## Pacing loops and redundant colour tags
 

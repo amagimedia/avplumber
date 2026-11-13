@@ -94,6 +94,36 @@ int main() {
     const av::VideoFrame frame(AV_PIX_FMT_NV12, 1920, 1080);
     exits_keep_their_picture_and_opacity(frame);
     two_crops_of_one_frame_keep_their_identity(frame);
+    // A single input's named crops can change list order without swapping people.
+    auto named_a = parseLayersArray(Parameters::parse(R"([
+      {"input":0,"move_id":"left","crop":{"x":0,"y":0,"w":608,"h":1080},"dst_w":540,"dst_h":960},
+      {"input":0,"move_id":"right","crop":{"x":960,"y":0,"w":608,"h":1080},"dst_x":540,"dst_w":540,"dst_h":960}
+    ])"));
+    auto named_b = named_a;
+    std::reverse(named_b.begin(), named_b.end());
+    named_b[0].dst_x = 0;
+    named_b[0].dst_w = 1080;
+    named_b[0].dst_h = 1920;
+    named_b[1].dst_x = -540;
+    for (const double s : {.01, .25, .5, .75, .99}) {
+        const auto out = moveLayers(named_a, named_b, s, {&frame}, AV_PIX_FMT_NV12, "fade");
+        assert(out.size() == 2);
+        for (const auto &l : out) {
+            assert(l.input == 0);
+            assert(near(crop(l).x, l.move_id == "left" ? 0 : 960));
+        }
+    }
+    // Another layer's motion cannot switch a stationary background to the affine
+    // resampler for one take, which could shimmer despite identical geometry.
+    auto background = named_a[0];
+    background.move_id = "background";
+    background.z = -1;
+    named_a.push_back(background);
+    named_b.push_back(background);
+    const auto mid = moveLayers(named_a, named_b, .5, {&frame}, AV_PIX_FMT_NV12, "fade");
+    const auto bg = std::find_if(mid.begin(), mid.end(), [](const LayerSpec &l) { return l.move_id == "background"; });
+    assert(bg != mid.end() && !needsTransform(*bg));
+    assert(bg->filter == background.filter && near(crop(*bg).x, background.crop_x));
     for (const auto &curve : {"linear", "ease-in", "ease-out", "ease-in-out"}) {
         const Parameters from = {{{"input",0}, {"dst_w",1080}, {"dst_h",1920}}};
         const Parameters to = {{{"input",0}, {"dst_x",-1080}, {"dst_w",1080}, {"dst_h",1920}}};
