@@ -793,13 +793,16 @@ public:
         // realtime.team.sync <team> <fps> [<shared offset>]: make this host release the team's
         // frames in step with another host. Needs AVP_CLOCK_ORIGIN=tai and a synchronised clock.
         //   Without an offset (the leader): keeps the offset the team found on arrival, fixes it,
-        //   and prints it as a number that means the same on every host.
+        //   and prints it as a number that means the same on every host: 1/120000 s units,
+        //   whatever time base the team counts in (avp::kShareTimeBase).
         //   With that number (a follower, or both hosts when it comes from configuration): fixes
         //   the team's offset to match.
-        // <fps> is the output rate the frames are slotted to ("30" or "30000/1001"). Hosts differ
-        // by where their monotonic clock's zero lies; the difference is folded in as a whole
-        // number of ticks at that rate, so both hosts slot the same integers and put the same
-        // frame in the same tick. The ticks themselves stay on each host's own grid.
+        // <fps> is the program's rate, exactly: "30" or "30000/1001", never "29.97" (that is
+        // 2997/100, a different rate). Hosts differ by where their monotonic clock's zero lies;
+        // the difference is folded in as a whole number of ticks at that rate, so both hosts slot
+        // the same integers and put the same frame in the same tick. The ticks themselves stay on
+        // each host's own grid. mixer at_show_tick counts in the same ticks, so the rate must be
+        // the program's: a different one is refused (avp::registerShowRate).
         commands_["realtime.team.sync"] = [this](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
             std::string team_name, fps_text;
@@ -807,7 +810,7 @@ public:
             long long shared = 0;
             const bool follow = static_cast<bool>(ss >> shared);
             auto team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_name);
-            shared = team->syncHosts(parseRatio(fps_text), follow ? std::optional<AVTS>(shared) : std::nullopt);
+            shared = team->syncHosts(avp::parseShowRate(fps_text), follow ? std::optional<AVTS>(shared) : std::nullopt);
             cs << shared << "\n";
         };
         commands_["realtime.team.clear_offset"] = [this](ClientStream &cs, std::string &arg) {

@@ -163,11 +163,13 @@ public:
     }
     int64_t clockDriftNs() const { return clock_drift_ns_.load(std::memory_order_relaxed); }
     /// Make this host release the team's frames in step with another host (realtime.team.sync,
-    /// or a realtime node's "sync" parameter). Without `shared` the team keeps the offset it
-    /// found on arrival and fixes it; with it, the offset is fixed to match. Returns the offset
-    /// as the number that means the same on every host. See the command for the reasoning.
+    /// or a realtime node's "sync" parameter). *fps* is the program's rate (avp::parseShowRate:
+    /// whole or N/1001); *shared* and the result are in avp::kShareTimeBase (1/120000 s) whatever
+    /// the team counts in. Without `shared` the team keeps the offset it found on arrival and fixes
+    /// it; with it, the offset is fixed to match. See the command for the reasoning.
     AVTS syncHosts(AVRational fps, std::optional<AVTS> shared) {
-        if (fps.num <= 0 || fps.den <= 0) throw Error("realtime sync: fps must be a positive ratio");
+        if (fps.num <= 0 || fps.den <= 0 || (fps.den != 1 && fps.den != 1001))
+            throw Error("realtime sync: fps must be a whole rate or N/1001, such as 30000/1001");
         if (!avp::clockOriginEnabled()) throw Error("realtime sync needs AVP_CLOCK_ORIGIN=tai in the environment");
         const auto kernel = avp::kernelClockState();
         if (!kernel.synchronized) throw Error("realtime sync: the kernel reports the system clock unsynchronised");
@@ -178,23 +180,52 @@ public:
                         std::to_string(tai_offset) + " (AVP_TAI_OFFSET); hosts that disagree would be that far apart");
         const AVRational tb = getTimebase();
         if (tb.num <= 0 || tb.den <= 0) throw Error("realtime sync: no realtime node has joined the team");
-        // Whole ticks between this host's monotonic zero and the show epoch, in time base units.
+        // One frame must be a whole number of the team's units, checked before anything that
+        // depends on when this host booted: otherwise the fold below is whole on some hosts and
+        // not on others. 1/120000 (pyplumber's native-rate time base) is whole at every show rate.
+        const __int128 tick_num = static_cast<__int128>(fps.den) * tb.den, tick_den = static_cast<__int128>(fps.num) * tb.num;
+        if (tick_num % tick_den != 0)
+            throw Error("realtime sync: one frame at " + std::to_string(fps.num) + "/" + std::to_string(fps.den) +
+                        " fps is not a whole number of the team's time base " + std::to_string(tb.num) + "/" +
+                        std::to_string(tb.den) + "; give its realtime nodes time_base 1/120000");
+        const AVTS tick = static_cast<AVTS>(tick_num / tick_den);
+        // The shared number is in 1/120000 s on every host; this team's units must convert exactly.
+        const __int128 share_num = static_cast<__int128>(avp::kShareTimeBase.den) * tb.num,
+                       share_den = static_cast<__int128>(avp::kShareTimeBase.num) * tb.den;
+        auto toShare = [&](AVTS team_units) -> AVTS {
+            const __int128 v = static_cast<__int128>(team_units) * share_num;
+            if (v % share_den != 0)
+                throw Error("realtime sync: the team's time base " + std::to_string(tb.num) + "/" + std::to_string(tb.den) +
+                            " does not convert exactly to the shared 1/120000; give its realtime nodes time_base 1/120000");
+            return static_cast<AVTS>(v / share_den);
+        };
+        auto fromShare = [&](AVTS share_units) -> AVTS {
+            const __int128 v = static_cast<__int128>(share_units) * share_den;
+            if (v % share_num != 0)
+                throw Error("realtime sync: the shared offset is not a whole number of the team's time base " +
+                            std::to_string(tb.num) + "/" + std::to_string(tb.den) + "; give its realtime nodes time_base 1/120000");
+            return static_cast<AVTS>(v / share_num);
+        };
+        try {
+            avp::registerShowRate(fps, "realtime.team.sync");
+        } catch (const std::exception &e) {
+            throw Error(std::string("realtime sync: ") + e.what());
+        }
+        // Whole ticks between this host's monotonic zero and the show epoch, as team units.
         const __int128 origin = avp::clockOriginNs();
-        const __int128 tick_den = static_cast<__int128>(fps.den) * 1000000000;
-        __int128 ticks = origin * fps.num / tick_den;
-        if ((origin * fps.num) % tick_den < 0) --ticks;
-        const __int128 fold_num = ticks * fps.den * tb.den, fold_den = static_cast<__int128>(fps.num) * tb.num;
-        if (fold_num % fold_den != 0)
-            throw Error("realtime sync: a tick at this fps is not a whole number of the team's time base units");
-        const AVTS fold = static_cast<AVTS>(fold_num / fold_den);
+        const __int128 per_tick_ns = static_cast<__int128>(fps.den) * 1000000000;
+        __int128 ticks = origin * fps.num / per_tick_ns;
+        if ((origin * fps.num) % per_tick_ns < 0) --ticks;
+        const AVTS fold = static_cast<AVTS>(ticks * tick);
         if (shared) {
-            setFixedOffset(*shared + fold);
+            setFixedOffset(fromShare(*shared) + fold);
             return *shared;
         }
         const AVTS local = offset_.load(std::memory_order_acquire);
         if (local == AV_NOPTS_VALUE) throw Error("realtime sync: the team has not released a frame yet");
+        const AVTS result = toShare(local - fold);
         setFixedOffset(local);
-        return local - fold;
+        return result;
     }
     void clearFixedOffset() {
         fixed_offset_.store(AV_NOPTS_VALUE, std::memory_order_release);

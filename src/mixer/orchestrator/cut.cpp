@@ -39,6 +39,12 @@ void MixerOrchestrator::takeNotBeforeShowTick(std::optional<int64_t> show_tick) 
     if (!show_tick) return;
     if (!avp::clockOriginEnabled())
         throw Error("mixer: at_show_tick needs AVP_CLOCK_ORIGIN=tai in the environment");
+    // Show ticks count at the program's rate; realtime.team.sync must have folded at the same one.
+    try {
+        avp::registerShowRate(AVRational{int(state_->fps_num), int(state_->fps_den)}, "mixer at_show_tick");
+    } catch (const std::exception &e) {
+        throw Error(std::string("mixer: ") + e.what());
+    }
     // Show tick = this host's tick + the whole ticks between its monotonic zero and the show epoch.
     const __int128 origin = avp::clockOriginNs();
     const __int128 den = __int128(state_->fps_den) * 1000000000;

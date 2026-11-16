@@ -476,6 +476,19 @@ def test_browser_holds_all_but_one_frame_and_keeps_its_imports():
     assert importer["import_ttl_ms"] == 0
 
 
+def test_browser_chain_stays_on_its_whole_paint_rate_on_an_ntsc_canvas():
+    """30 paints numbered on a 29.97 grid drifted and resynced every ~20 s; on their own 30 grid
+    the compositor slots them by timestamp and drops one every 33 s, the same tick on every host."""
+    from fractions import Fraction
+    from pyplumber.mixer import dmabuf_inputs
+
+    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
+        fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=Fraction(30000, 1001), drm_hwaccel=None,
+        cuda_hwaccel="gpu", source_group="g", processing_group="g", hold=True)
+    rates = {n.parameters["name"]: n.parameters.get("fps") for n in nodes}
+    assert rates["input_0_receive"] == rates["input_0_smooth"] == rates["input_0_hold"] == "30/1"
+
+
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
 

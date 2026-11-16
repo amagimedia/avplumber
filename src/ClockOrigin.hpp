@@ -12,8 +12,13 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+extern "C" {
+#include <libavutil/rational.h>
+}
 
 // The process's clocks stay on CLOCK_MONOTONIC: it runs at the NTP-disciplined rate, and nothing
 // in the graph has to change domain. What differs between two hosts is only where that clock's
@@ -158,5 +163,51 @@ inline std::shared_ptr<SyncTrace> namedSyncTrace(const std::string &label, bool 
 }
 
 inline int64_t monotonicNowNs() { return clock_origin_detail::readNs(CLOCK_MONOTONIC); }
+
+/// The unit two hosts exchange realtime offsets in (realtime.team.sync, a realtime node's "sync"):
+/// 1/120000 s. Every rate a show runs at is a whole number of these per frame (25: 4800,
+/// 29.97: 4004, 30: 4000, 50: 2400, 59.94: 2002, 60: 2000, 23.976: 5005), and so is a 1024-sample
+/// 48 kHz audio frame (2560), so the number crosses hosts exactly whatever unit each team counts in.
+/// Nanoseconds would not do: a 29.97 frame is 33366666.67 ns, and a rounded offset can move a frame
+/// that sits on a half-tick boundary (60 fps into 30, 59.94 into 29.97) to the other tick on one host.
+constexpr AVRational kShareTimeBase{1, 120000};
+
+/// A show's frame rate as written for host sync: a whole rate ("30") or an exact NTSC rate
+/// ("30000/1001"). A decimal is refused: av_parse_ratio would read "29.97" as 2997/100, a different
+/// rate whose ticks drift from the program's, so two hosts would slot frames a tick apart.
+inline AVRational parseShowRate(const std::string &text) {
+    const auto slash = text.find('/');
+    const std::string num_text = text.substr(0, slash), den_text = slash == std::string::npos ? "1" : text.substr(slash + 1);
+    auto digits = [](const std::string &s) { return !s.empty() && s.size() <= 9 && s.find_first_not_of("0123456789") == std::string::npos; };
+    if (!digits(num_text) || !digits(den_text))
+        throw std::invalid_argument("show rate \"" + text + "\" must be a whole rate (\"30\") or an exact NTSC rate (\"30000/1001\")");
+    AVRational rate{std::stoi(num_text), std::stoi(den_text)};
+    if (rate.num <= 0 || rate.den <= 0) throw std::invalid_argument("show rate \"" + text + "\" must be positive");
+    av_reduce(&rate.num, &rate.den, rate.num, rate.den, INT32_MAX);
+    if (rate.den != 1 && rate.den != 1001)
+        throw std::invalid_argument("show rate \"" + text + "\" must be a whole rate or N/1001 (\"30000/1001\", \"60000/1001\")");
+    return rate;
+}
+
+/// The one rate this process's show ticks count at. realtime.team.sync folds the hosts' clock
+/// difference in ticks of its rate and mixer at_show_tick turns show ticks into the program's
+/// ticks: both must be the program's rate, or two hosts put a frame in different ticks (a sync given
+/// "30" for a 30000/1001 program). The first to register sets it; a different rate is refused.
+inline void registerShowRate(AVRational rate, const std::string &who) {
+    static std::mutex mutex;
+    static AVRational registered{0, 0};
+    static std::string registered_by;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (registered.den == 0) {
+        registered = rate;
+        registered_by = who;
+        return;
+    }
+    if (av_cmp_q(registered, rate) != 0)
+        throw std::invalid_argument(who + " runs at " + std::to_string(rate.num) + "/" + std::to_string(rate.den) +
+                                    " fps but the show ticks at " + std::to_string(registered.num) + "/" +
+                                    std::to_string(registered.den) + " (" + registered_by +
+                                    "); host sync and at_show_tick need the program's rate");
+}
 
 } // namespace avp
