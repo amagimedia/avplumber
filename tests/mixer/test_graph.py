@@ -316,6 +316,17 @@ def test_host_sync_stamps_record_outputs_on_show_time(monkeypatch):
     assert "show_time" not in {n.parameters["name"]: n.parameters for n in mp4.avp.nodes}["program_mux"]
 
 
+def test_host_sync_inputs_keep_the_source_timestamps(monkeypatch):
+    """Two hosts join a live stream at different moments; started at zero, the same picture would
+    carry different timestamps on each and land in different show ticks."""
+    options = GraphOptions(inputs=("udp://127.0.0.1:6400",), output="program.ts", fps="30000/1001")
+    plain = build_application(options, api=fake_api())
+    assert "keep_source_ts" not in {n.parameters["name"]: n.parameters for n in plain.avp.nodes}["input_0"]
+    monkeypatch.setenv("AVP_CLOCK_ORIGIN", "tai")
+    synced = build_application(options, api=fake_api())
+    assert {n.parameters["name"]: n.parameters for n in synced.avp.nodes}["input_0"]["keep_source_ts"] is True
+
+
 def test_janus_only_output_builds_video_rtp_and_feedback():
     application = build_application(
         GraphOptions(inputs=("input.mp4",), janus_output=True),

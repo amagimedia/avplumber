@@ -64,6 +64,10 @@ protected:
     av::Timestamp node_stop_ts_ = NOTS;
     av::Timestamp stop_delay_ = {0, {1, 1}};
     av::Timestamp first_video_ts_;
+    // "keep_source_ts": pass the source's own timestamps on instead of starting them at zero. Two
+    // hosts that join one live stream at different moments must label a picture alike for host
+    // sync to put the same picture in the same tick (first_video_ts_ still serves seeks).
+    bool keep_source_ts_ = false;
     StreamTarget start_ts_ = StreamTarget::from_frames_absolute(0);
     StreamTarget stop_ts_ = StreamTarget::end();
     std::shared_ptr<PauseControlTeam> pause_team_;
@@ -934,7 +938,7 @@ public:
                 }
             }
 
-            if (first_video_ts_.isValid() && (first_video_ts_.timestamp() != 0)) {
+            if (!keep_source_ts_ && first_video_ts_.isValid() && (first_video_ts_.timestamp() != 0)) {
                 pkt.setDts(addTS(pkt.dts(), negateTS(first_video_ts_)));
                 pkt.setPts(addTS(pkt.pts(), negateTS(first_video_ts_)));
             }
@@ -1287,6 +1291,9 @@ public:
         }
         if (params.count("loop_continuous_ts") > 0) {
             loop_continuous_ts_ = params["loop_continuous_ts"];
+        }
+        if (params.count("keep_source_ts") > 0) {
+            keep_source_ts_ = params["keep_source_ts"];
         }
         if (params.count("send_eof") > 0) {
             send_eof_ = params["send_eof"];

@@ -17,6 +17,7 @@ Per-source audio and video share one team so lip-sync keeps a single offset.
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Sequence
 
 from .color import Color
@@ -101,6 +102,10 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     sync = {} if sync_team is None else {"sync_team": sync_team}
     _add_packet_input(avp, api, tag, {
         "url": url, "loop": loop, "loop_continuous_ts": loop and continuous_loop,
+        # Host sync (AVP_CLOCK_ORIGIN=tai): keep the source's own timestamps. Started at zero, they
+        # count from when this host joined the stream, and two hosts would put different pictures
+        # in the same show tick.
+        **({"keep_source_ts": True} if os.environ.get("AVP_CLOCK_ORIGIN") == "tai" else {}),
         **_frame_metadata(frame_metadata), **(input_params or {}),
     }, group=group, routing={"?v:0": edge("video_packets"), **({"?a:0": edge("audio_packets")} if has_audio else {})},
        demux=demux, restart=restart)
