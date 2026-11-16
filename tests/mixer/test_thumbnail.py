@@ -70,3 +70,26 @@ def test_a_bank_can_be_bigger_and_its_cells_grow_with_it():
             parse_aux_buses([wrong], cfg)
     with pytest.raises(ConfigError):                                         # the rendition must match its layout
         parse_aux_buses([bank(width=1920, height=1080)], cfg)
+
+
+def test_reserved_banks_take_the_recipe_size_bitrate_and_preset():
+    cfg = config(130)
+    show = {"aux_buses": [], "renditions": [{"port": 5004}]}
+    opts = thumbnail.encode_options({"size": [1920, 1080], "bitrate_kbps": 3500, "preset": "p5"})
+    banks = thumbnail.reserve_buses(show, 0, opts)
+    assert [b["id"] for b in banks] == ["thumbnails1", "thumbnails2", "thumbnails3"]
+    r = banks[0]["renditions"][0]
+    assert (r["width"], r["height"], r["fps"], r["bitrate_kbps"], r["preset"]) == (1920, 1080, 15, 3500, "p5")
+    assert banks[0]["layout"]["size"] == [1920, 1080]
+    parsed = parse_aux_buses(banks, cfg)
+    assert {(c["w"], c["h"]) for c in layout_cells(cfg, parsed[0].layout, 0)} == {(240, 135)}
+    # A rebuilt bank keeps its port but takes the new size, so a stored show never pins the old one.
+    again = thumbnail.reserve_buses({"aux_buses": banks, "renditions": show["renditions"]}, 0, thumbnail.encode_options(True))
+    assert again[0]["renditions"][0]["port"] == r["port"] and again[0]["renditions"][0]["width"] == 1024
+    assert "size" not in again[0]["layout"] and again[0]["renditions"][0]["preset"] == "p1"
+
+
+@pytest.mark.parametrize("bad", [{"size": [1920, 1000]}, {"bitrate_kbps": 3.5}, {"preset": "p9"}, {"fps": 30}])
+def test_thumbnail_options_are_checked(bad):
+    with pytest.raises(ValueError):
+        thumbnail.encode_options(bad)

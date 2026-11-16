@@ -18,7 +18,7 @@ import threading
 import time
 
 from .storage import write_atomic
-from ..thumbnail import is_thumbnail, reserve_buses
+from ..thumbnail import encode_options, is_thumbnail, reserve_buses
 from pyplumber.mixer.tools.extra_aux import aux_encode, extra_buses
 import pyplumber.mixer.tools.janus_mountpoints as janus_mountpoints
 from pyplumber.mixer.color import default_codec
@@ -265,7 +265,8 @@ class SetupRuntime:
         wanted, encodes = recipe["setup"]["extra_aux"], recipe["setup"]["encodes"]
         extra = extra[:wanted]   # fewer drops the last ones
         if recipe.get("source_thumbnails"):
-            reserved = reserve_buses({**show, "aux_buses": own + extra}, len(extra))
+            reserved = reserve_buses({**show, "aux_buses": own + extra}, len(extra),
+                                      encode_options(recipe["source_thumbnails"]))
             own = [b for b in own if not is_thumbnail(b)] + [b for b in reserved if is_thumbnail(b)]
         for bus in own:
             if is_thumbnail(bus):

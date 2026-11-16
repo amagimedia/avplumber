@@ -209,9 +209,11 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                 # one-pass, no-lookahead, no-reordering encode, so the extra quality
                 # costs GPU time rather than latency. B-frames stay off: they need
                 # reordering, which WebRTC's jitter budget will not absorb.
+                # Spatial AQ stays off (owner, 2026-11-13): on the 192-input L4 demo turning it off
+                # took the GPU from 80.5 to 77.8 % and NVENC from 64 to 72 %, with no recorded reason to keep it.
                 "preset": preset, "profile": profile, "tune": "ull", "rc": "cbr",
                 "rc-lookahead": 0, "zerolatency": 1, "delay": 0, "forced-idr": 1,
-                "no-scenecut": 1, "strict_gop": 1, "aud": 1, "spatial-aq": 1, "temporal-aq": 0,
+                "no-scenecut": 1, "strict_gop": 1, "aud": 1, "spatial-aq": 0, "temporal-aq": 0,
                 **dpb_options(dpb_size), **(color or {}),
             },
         }),

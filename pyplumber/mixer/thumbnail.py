@@ -35,8 +35,30 @@ def cells(cfg, page, size=(WIDTH, HEIGHT)):
             for i in range(first, min(first + PER_BANK, len(cfg.sources)))]
 
 
-def reserve_buses(show, extra_count=0):
-    """Keep stable ports and put the reserved banks before the managed extra-AUX tail."""
+BITRATE_KBPS, ENC_PRESET = 1500, "p1"
+
+
+def encode_options(value):
+    """A recipe's `source_thumbnails`: true for the defaults, or {"size": [w, h], "bitrate_kbps": n,
+    "preset": "p1".."p7"} for sharper banks (the 192-input demo airs [1920, 1080], 3500 kbps, p5)."""
+    value = value if isinstance(value, dict) else {}
+    unknown = set(value) - {"size", "bitrate_kbps", "preset"}
+    if unknown:
+        raise ValueError(f"source_thumbnails takes size, bitrate_kbps and preset, not {sorted(unknown)}")
+    bitrate, preset = value.get("bitrate_kbps", BITRATE_KBPS), value.get("preset", ENC_PRESET)
+    if type(bitrate) is not int or not 100 <= bitrate <= 50000:
+        raise ValueError("source_thumbnails bitrate_kbps must be an integer from 100 to 50000")
+    if not re.fullmatch(r"p[1-7]", str(preset)):
+        raise ValueError("source_thumbnails preset must be p1 to p7")
+    return {"size": tuple(check_size(value["size"])) if "size" in value else (WIDTH, HEIGHT),
+            "bitrate_kbps": bitrate, "preset": preset}
+
+
+def reserve_buses(show, extra_count=0, options=None):
+    """Keep stable ports and put the reserved banks before the managed extra-AUX tail. *options* are
+    encode_options(): a bank is rebuilt at that size and encode on every setup, keeping only its port."""
+    opts = options or encode_options(True)
+    (width, height) = opts["size"]
     buses = deepcopy(show.get("aux_buses", []))
     previous = {b["id"]: b for b in buses if is_thumbnail(b)}
     ordinary = [b for b in buses if not is_thumbnail(b)]
@@ -57,8 +79,11 @@ def reserve_buses(show, extra_count=0):
             port = (port + 3) // 4 * 4 + 4
             assigned = port
         reserved.append({"id": bid, "label": f"Thumbnails {page + 1}",
-                         "layout": {"preset": PRESET, "page": page}, "layouts": [], "max_layers": PER_BANK,
-                         "renditions": [{"id": "monitor", "port": assigned, "width": WIDTH, "height": HEIGHT,
+                         "layout": {"preset": PRESET, "page": page,
+                                    **({"size": [width, height]} if (width, height) != (WIDTH, HEIGHT) else {})},
+                         "layouts": [], "max_layers": PER_BANK,
+                         "renditions": [{"id": "monitor", "port": assigned, "width": width, "height": height,
                                          "fps": FPS, "codec": "h264_nvenc", "profile": "baseline", "color": "sdr",
-                                         "preset": "p1", "bitrate_kbps": 1500, "dpb_size": 1}]})
+                                         "preset": opts["preset"], "bitrate_kbps": opts["bitrate_kbps"],
+                                         "dpb_size": 1}]})
     return ordinary[:split] + reserved + ordinary[split:]
