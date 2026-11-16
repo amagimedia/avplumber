@@ -789,6 +789,13 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
     name = lambda suffix: f"{r.id}_{suffix}"  # noqa: E731
     bitrate = f"{r.bitrate_kbps}k"
     profile = r.profile or (("main10" if enc_format in TEN_BIT_FORMATS else "main") if "hevc" in codec else "high")
+    gop = max(1, round(r.fps)) * 2
+    # Host sync (AVP_CLOCK_ORIGIN=tai): an MPEG-TS stream (SRT, UDP, .ts) is stamped on the shared
+    # show timeline and keyframed on the same show frames as the other host's (mux show_time,
+    # enc_video show_keyframes; forced-idr makes NVENC's forced picture an IDR). MPEG-TS wraps the
+    # large show timestamps the same way on both hosts; an MP4 or FLV would start months in.
+    show = (os.environ.get("AVP_CLOCK_ORIGIN") == "tai" and
+            infer_output_format(r.target, output_format) == "mpegts")
     add_nodes(avp, api, [
         ("ForceFPS", {"name": name("fps"), "src": edge, "dst": name("fps"), "fps": mixer_config.rate_text(r.fps)}),
         ("AssumeVideoFormat", {"name": name("format"), "src": name("fps"), "dst": name("video"),
@@ -797,10 +804,13 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
         ("EncVideo", {"name": name("encoder"), "src": name("video"), "dst": name("encoded"),
                       "codec": codec, "hwaccel": HWACCEL,
                       **({"hdr_metadata": hdr_metadata} if hdr_metadata else {}),
+                      **({"show_keyframes": {"every": gop, "rate": mixer_config.rate_text(r.fps)}} if show else {}),
                       "options": {"b": bitrate, "maxrate": bitrate, "bufsize": bitrate,
-                                  "g": max(1, round(r.fps)) * 2, "bf": 0, "preset": r.preset,
-                                  "tune": "ll", "profile": profile, **dpb_options(r.dpb_size), **color}}),
-        ("Mux", {"name": name("mux"), "src": [name("encoded")], "dst": name("muxed"), "ts_sort_wait": 0}),
+                                  "g": gop, "bf": 0, "preset": r.preset,
+                                  "tune": "ll", "profile": profile, **dpb_options(r.dpb_size), **color,
+                                  **({"forced-idr": 1} if show else {})}}),
+        ("Mux", {"name": name("mux"), "src": [name("encoded")], "dst": name("muxed"), "ts_sort_wait": 0,
+                 **({"show_time": True} if show else {})}),
         ("Output", {"name": name("output"), "src": name("muxed"), "url": r.target,
                     "format": infer_output_format(r.target, output_format), "auto_restart": "panic"}),
     ], group=OUTPUT_GROUP)

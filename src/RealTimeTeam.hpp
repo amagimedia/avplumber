@@ -3,6 +3,9 @@
 #include <mutex>
 #include <optional>
 #include <cstdlib>
+#include <map>
+#include <memory>
+#include <string>
 #include "instance_shared.hpp"
 #include "avutils.hpp"
 #include "ClockOrigin.hpp"
@@ -15,6 +18,21 @@ protected:
     // arrives when, so that a second host given the matching number releases the same frame at
     // the same instant. A late frame is dropped and an early one waits; nothing re-anchors.
     std::atomic<AVTS> fixed_offset_{AV_NOPTS_VALUE};
+    // Host sync (syncHosts): the show this team is synced for, and one frame of its rate in the
+    // team's units.
+    std::shared_ptr<avp::ShowSync> show_;
+    std::atomic<AVTS> sync_tick_{0};
+public:
+    /// A source's own correction on top of the fixed offset, after its timestamps jumped (an
+    /// encoder restart, a playlist's next item): its frames continue one step after the last one
+    /// before the jump, later by whole seconds of show frames if they arrived after that. The
+    /// source's video node (master) computes it; its audio node adopts it by generation, so the
+    /// pair keeps its lip sync. Team units.
+    /// `manual`: set by realtime.team.source_shift, applied by every node of the source at once.
+    struct SourceShift { AVTS shift = 0; uint64_t generation = 0; bool manual = false; };
+protected:
+    std::mutex shifts_mutex_;
+    std::map<std::string, SourceShift> shifts_;
     std::atomic<int64_t> clock_checked_ns_{0};
     std::atomic<int64_t> clock_drift_ns_{0};
     std::mutex busy_;
@@ -142,6 +160,10 @@ public:
         return fixed_offset_.load(std::memory_order_acquire);
     }
     void setFixedOffset(AVTS offset) {
+        {
+            std::lock_guard<std::mutex> lock(shifts_mutex_);
+            shifts_.clear();
+        }
         fixed_offset_.store(offset, std::memory_order_release);
         offset_.store(offset, std::memory_order_release);
         logstream << "realtime team offset fixed at " << offset;
@@ -162,14 +184,38 @@ public:
                       << "since start; this host's fixed realtime offset is off by that much";
     }
     int64_t clockDriftNs() const { return clock_drift_ns_.load(std::memory_order_relaxed); }
+    /// Team units <-> the shared unit two hosts exchange (avp::kShareTimeBase, 1/120000 s);
+    /// exact or refused.
+    AVTS toShare(AVTS team_units) {
+        const AVRational tb = getTimebase();
+        const __int128 num = static_cast<__int128>(avp::kShareTimeBase.den) * tb.num,
+                       den = static_cast<__int128>(avp::kShareTimeBase.num) * tb.den;
+        const __int128 v = static_cast<__int128>(team_units) * num;
+        if (den == 0 || v % den != 0)
+            throw Error("realtime sync: the team's time base " + std::to_string(tb.num) + "/" + std::to_string(tb.den) +
+                        " does not convert exactly to the shared 1/120000; give its realtime nodes time_base 1/120000");
+        return static_cast<AVTS>(v / den);
+    }
+    AVTS fromShare(AVTS share_units) {
+        const AVRational tb = getTimebase();
+        const __int128 num = static_cast<__int128>(avp::kShareTimeBase.den) * tb.num,
+                       den = static_cast<__int128>(avp::kShareTimeBase.num) * tb.den;
+        const __int128 v = static_cast<__int128>(share_units) * den;
+        if (num == 0 || v % num != 0)
+            throw Error("realtime sync: a shared value is not a whole number of the team's time base " +
+                        std::to_string(tb.num) + "/" + std::to_string(tb.den) + "; give its realtime nodes time_base 1/120000");
+        return static_cast<AVTS>(v / num);
+    }
     /// Make this host release the team's frames in step with another host (realtime.team.sync,
     /// or a realtime node's "sync" parameter). *fps* is the program's rate (avp::parseShowRate:
-    /// whole or N/1001); *shared* and the result are in avp::kShareTimeBase (1/120000 s) whatever
-    /// the team counts in. Without `shared` the team keeps the offset it found on arrival and fixes
-    /// it; with it, the offset is fixed to match. See the command for the reasoning.
-    AVTS syncHosts(AVRational fps, std::optional<AVTS> shared) {
+    /// whole or N/1001), registered in *show*; *shared* and the result are in avp::kShareTimeBase
+    /// (1/120000 s) whatever the team counts in. Without `shared` the team keeps the offset it found
+    /// on arrival and fixes it; with it, the offset is fixed to match. See the command for the
+    /// reasoning; checkPeer compares what else must match.
+    AVTS syncHosts(AVRational fps, std::optional<AVTS> shared, std::shared_ptr<avp::ShowSync> show) {
         if (fps.num <= 0 || fps.den <= 0 || (fps.den != 1 && fps.den != 1001))
             throw Error("realtime sync: fps must be a whole rate or N/1001, such as 30000/1001");
+        if (!show) throw Error("realtime sync: no show to register the rate in");
         if (!avp::clockOriginEnabled()) throw Error("realtime sync needs AVP_CLOCK_ORIGIN=tai in the environment");
         const auto kernel = avp::kernelClockState();
         if (!kernel.synchronized) throw Error("realtime sync: the kernel reports the system clock unsynchronised");
@@ -189,45 +235,95 @@ public:
                         " fps is not a whole number of the team's time base " + std::to_string(tb.num) + "/" +
                         std::to_string(tb.den) + "; give its realtime nodes time_base 1/120000");
         const AVTS tick = static_cast<AVTS>(tick_num / tick_den);
-        // The shared number is in 1/120000 s on every host; this team's units must convert exactly.
-        const __int128 share_num = static_cast<__int128>(avp::kShareTimeBase.den) * tb.num,
-                       share_den = static_cast<__int128>(avp::kShareTimeBase.num) * tb.den;
-        auto toShare = [&](AVTS team_units) -> AVTS {
-            const __int128 v = static_cast<__int128>(team_units) * share_num;
-            if (v % share_den != 0)
-                throw Error("realtime sync: the team's time base " + std::to_string(tb.num) + "/" + std::to_string(tb.den) +
-                            " does not convert exactly to the shared 1/120000; give its realtime nodes time_base 1/120000");
-            return static_cast<AVTS>(v / share_den);
-        };
-        auto fromShare = [&](AVTS share_units) -> AVTS {
-            const __int128 v = static_cast<__int128>(share_units) * share_den;
-            if (v % share_num != 0)
-                throw Error("realtime sync: the shared offset is not a whole number of the team's time base " +
-                            std::to_string(tb.num) + "/" + std::to_string(tb.den) + "; give its realtime nodes time_base 1/120000");
-            return static_cast<AVTS>(v / share_num);
-        };
         try {
-            avp::registerShowRate(fps, "realtime.team.sync");
+            show->registerRate(fps, "realtime.team.sync");
         } catch (const std::exception &e) {
             throw Error(std::string("realtime sync: ") + e.what());
         }
         // Whole ticks between this host's monotonic zero and the show epoch, as team units.
-        const __int128 origin = avp::clockOriginNs();
-        const __int128 per_tick_ns = static_cast<__int128>(fps.den) * 1000000000;
-        __int128 ticks = origin * fps.num / per_tick_ns;
-        if ((origin * fps.num) % per_tick_ns < 0) --ticks;
-        const AVTS fold = static_cast<AVTS>(ticks * tick);
+        const AVTS fold = avp::showZeroTicks(fps) * tick;
+        AVTS fixed, result;
         if (shared) {
-            setFixedOffset(fromShare(*shared) + fold);
-            return *shared;
+            fixed = fromShare(*shared) + fold;
+            result = *shared;
+        } else {
+            const AVTS local = offset_.load(std::memory_order_acquire);
+            if (local == AV_NOPTS_VALUE) throw Error("realtime sync: the team has not released a frame yet");
+            fixed = local;
+            result = toShare(local - fold);
         }
-        const AVTS local = offset_.load(std::memory_order_acquire);
-        if (local == AV_NOPTS_VALUE) throw Error("realtime sync: the team has not released a frame yet");
-        const AVTS result = toShare(local - fold);
-        setFixedOffset(local);
+        show_ = show;
+        sync_tick_.store(tick, std::memory_order_release);
+        setFixedOffset(fixed);
         return result;
     }
+    /// What the other host must match, as the leader prints it after its offset:
+    /// "fps=30000/1001 latency_us=66733 delay=0" (latency only once a program compositor exists,
+    /// delay in 1/120000 s).
+    std::string syncTerms(const avp::ShowSync &show, AVRational fps) {
+        const AVRational tb = getTimebase();
+        if (tb.num <= 0 || tb.den <= 0) throw Error("realtime sync: no realtime node has joined the team");
+        std::string terms = "fps=" + std::to_string(fps.num) + "/" + std::to_string(fps.den);
+        if (show.latencyNs() >= 0) terms += " latency_us=" + std::to_string(show.latencyNs() / 1000);
+        return terms + " delay=" + std::to_string(toShare(getUserDelayTS()));
+    }
+    std::string syncTerms() {
+        if (!show_) throw Error("realtime sync: the team is not synced");
+        return syncTerms(*show_, show_->rate());
+    }
+    /// Refuse a sync whose other host differs in what decides where a frame lands: the program
+    /// rate, its playout latency, the team delay. *peer* holds the leader's syncTerms; a term only
+    /// one of the two has is a difference too, unless *unset_here_ok* (a graph built from a script
+    /// syncs its realtime nodes before the program compositor that registers the latency exists).
+    void checkPeer(const std::map<std::string, std::string> &peer, const avp::ShowSync &show, AVRational fps,
+                   bool unset_here_ok = false) {
+        std::map<std::string, std::string> own;
+        std::istringstream terms(syncTerms(show, fps));
+        for (std::string term; terms >> term;) {
+            const auto eq = term.find('=');
+            own[term.substr(0, eq)] = term.substr(eq + 1);
+        }
+        for (const auto &key : {"fps", "latency_us", "delay"}) {
+            const auto mine = own.find(key), theirs = peer.find(key);
+            if (theirs == peer.end() && mine == own.end()) continue;
+            if (mine == own.end() && unset_here_ok) continue;
+            if (theirs == peer.end() || mine == own.end() || theirs->second != mine->second)
+                throw Error(std::string("realtime sync: ") + key + " differs between the hosts: here " +
+                            (mine == own.end() ? "unset" : mine->second) + ", on the other host " +
+                            (theirs == peer.end() ? "unset" : theirs->second));
+        }
+    }
+    AVTS syncTick() const { return sync_tick_.load(std::memory_order_acquire); }
+    SourceShift sourceShift(const std::string &source) {
+        std::lock_guard<std::mutex> lock(shifts_mutex_);
+        auto it = shifts_.find(source);
+        return it == shifts_.end() ? SourceShift{} : it->second;
+    }
+    /// A new correction for *source*; returns its generation.
+    uint64_t publishSourceShift(const std::string &source, AVTS shift, bool manual = false) {
+        std::lock_guard<std::mutex> lock(shifts_mutex_);
+        auto &entry = shifts_[source];
+        entry.shift = shift;
+        entry.manual = manual;
+        return ++entry.generation;
+    }
+    /// Every source's correction in 1/120000 s, as the other host is given it.
+    std::map<std::string, AVTS> sourceShiftsShared() {
+        std::map<std::string, SourceShift> copy;
+        {
+            std::lock_guard<std::mutex> lock(shifts_mutex_);
+            copy = shifts_;
+        }
+        std::map<std::string, AVTS> out;
+        for (const auto &[source, entry] : copy) out[source] = toShare(entry.shift);
+        return out;
+    }
     void clearFixedOffset() {
+        {
+            std::lock_guard<std::mutex> lock(shifts_mutex_);
+            shifts_.clear();
+        }
+        sync_tick_.store(0, std::memory_order_release);
         fixed_offset_.store(AV_NOPTS_VALUE, std::memory_order_release);
         logstream << "realtime team offset no longer fixed";
     }
@@ -250,6 +346,10 @@ public:
         user_delay_.store(delay_ts, std::memory_order_release);
     }
     void setUserDelay(float delay_sec) {
+        // The delay is part of host sync (checkPeer): changed on one host after it, the hosts
+        // drift apart by the change with nothing to say so.
+        if (hasFixedOffset())
+            throw Error("realtime team delay is part of host sync: clear the offset, set the delay on both hosts, sync again");
         setUserDelayNonRecursive(delay_sec);
         {
             for (auto team: getLinkedTeams()) {

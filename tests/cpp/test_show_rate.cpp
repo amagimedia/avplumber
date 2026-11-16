@@ -35,20 +35,33 @@ void every_show_rate_is_whole_in_the_shared_unit() {
 }
 
 void the_show_ticks_at_one_rate() {
-    avp::registerShowRate({30000, 1001}, "realtime.team.sync");
-    avp::registerShowRate({30000, 1001}, "mixer at_show_tick");   // the same rate: fine
+    avp::ShowSync show;
+    CHECK(show.rate().den == 0 && show.latencyNs() == -1);
+    show.registerRate({30000, 1001}, "mixer mixer");
+    show.registerRate({30000, 1001}, "realtime.team.sync");   // the same rate: fine
     bool threw = false;
     try {
-        avp::registerShowRate({30, 1}, "mixer at_show_tick");      // a sync given "30" for a 29.97 program
+        show.registerRate({30, 1}, "realtime.team.sync");    // a sync given "30" for a 29.97 program
     } catch (const std::invalid_argument &) {
         threw = true;
     }
     CHECK(threw);
+    show.registerLatency(66733333);
+    show.registerLatency(50000000);                           // the first program compositor's stays
+    CHECK(show.latencyNs() == 66733333);
+    avp::ShowSync other;                                      // per instance: another show is unaffected
+    other.registerRate({60, 1}, "mixer other");
+    CHECK(other.rate().num == 60);
+}
+
+void show_ticks_are_zero_without_a_clock_origin() {
+    CHECK(avp::showZeroTicks({30000, 1001}) == 0);            // AVP_CLOCK_ORIGIN unset in the test
 }
 
 int main() {
     exact_rates_parse_and_decimals_are_refused();
     every_show_rate_is_whole_in_the_shared_unit();
     the_show_ticks_at_one_rate();
+    show_ticks_are_zero_without_a_clock_origin();
     std::cout << "show rate tests passed\n";
 }

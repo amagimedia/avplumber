@@ -33,24 +33,19 @@ void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::Tra
     prepareScene(scene_name);
 }
 
-void MixerOrchestrator::takeNotBeforeShowTick(std::optional<int64_t> show_tick) {
+void MixerOrchestrator::takeNotBeforeShowTick(std::optional<int64_t> show_tick, const avp::ShowSync *show) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->next_take_not_before_ns = 0;
     if (!show_tick) return;
     if (!avp::clockOriginEnabled())
         throw Error("mixer: at_show_tick needs AVP_CLOCK_ORIGIN=tai in the environment");
     // Show ticks count at the program's rate; realtime.team.sync must have folded at the same one.
-    try {
-        avp::registerShowRate(AVRational{int(state_->fps_num), int(state_->fps_den)}, "mixer at_show_tick");
-    } catch (const std::exception &e) {
-        throw Error(std::string("mixer: ") + e.what());
-    }
+    const AVRational rate{int(state_->fps_num), int(state_->fps_den)};
+    if (show && show->rate().den != 0 && av_cmp_q(show->rate(), rate) != 0)
+        throw Error("mixer: at_show_tick counts at the program's " + std::to_string(rate.num) + "/" + std::to_string(rate.den) +
+                    " fps but the show was synced at " + std::to_string(show->rate().num) + "/" + std::to_string(show->rate().den));
     // Show tick = this host's tick + the whole ticks between its monotonic zero and the show epoch.
-    const __int128 origin = avp::clockOriginNs();
-    const __int128 den = __int128(state_->fps_den) * 1000000000;
-    __int128 zero = origin * state_->fps_num / den;
-    if ((origin * state_->fps_num) % den < 0) --zero;
-    const int64_t local_tick = int64_t(*show_tick - zero);
+    const int64_t local_tick = *show_tick - avp::showZeroTicks(rate);
     if (local_tick <= 0) throw Error("mixer: at_show_tick is before this host's clock started");
     state_->next_take_not_before_ns = av_rescale(local_tick, int64_t(state_->fps_den) * 1000000000, state_->fps_num);
 }

@@ -3,6 +3,7 @@
 #include "../MixerGraph.hpp"
 #include "../../graph_mgmt.hpp"
 #include "../../instance_shared.hpp"
+#include "../../ClockOrigin.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -203,7 +204,7 @@ public:
     struct ZoomRequest { double duration_sec; FadeCurve curve; };
     /// The next cut, fade or move reaches program no earlier than this show tick (at_show_tick);
     /// nullopt: as soon as it is ready, as always. Needs AVP_CLOCK_ORIGIN=tai.
-    void takeNotBeforeShowTick(std::optional<int64_t> show_tick);
+    void takeNotBeforeShowTick(std::optional<int64_t> show_tick, const avp::ShowSync *show = nullptr);
     void cut(const std::string& scene_name,
              avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now(),
              std::optional<ZoomRequest> zoom = std::nullopt);

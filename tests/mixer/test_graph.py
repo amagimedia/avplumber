@@ -292,6 +292,28 @@ def test_input_keeps_native_rate_and_outputs_use_configured_fps():
     assert nodes["janus_encoder"]["options"]["g"] == 180
     assert "level" not in nodes["janus_encoder"]["options"]
     assert FakeMixer.instances[-1].parameters["fps"] == (60, 1)
+    # One source for a camera's realtime nodes: a timestamp jump under host sync moves them together.
+    assert nodes["realtime_0"]["sync_source"] == "input_0"
+    # Without host sync the outputs keep the compositor's own timestamps and keyframes.
+    assert "show_time" not in nodes["program_mux"] and "show_keyframes" not in nodes["program_encoder"]
+
+
+def test_host_sync_stamps_record_outputs_on_show_time(monkeypatch):
+    """AVP_CLOCK_ORIGIN=tai: record outputs carry the show timeline and its keyframe grid, so two
+    hosts write the same timestamps and keyframes for the same frame. Janus RTP is left alone."""
+    monkeypatch.setenv("AVP_CLOCK_ORIGIN", "tai")
+    application = build_application(
+        GraphOptions(inputs=("input.mp4",), output="program.ts", janus_output=True, fps="30000/1001"),
+        api=fake_api(),
+    )
+    nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
+    assert nodes["program_mux"]["show_time"] is True
+    assert nodes["program_encoder"]["show_keyframes"] == {"every": 60, "rate": "30000/1001"}
+    assert nodes["program_encoder"]["options"]["forced-idr"] == 1 and nodes["program_encoder"]["options"]["g"] == 60
+    assert "show_keyframes" not in nodes["janus_encoder"]
+    # An MP4 would start months into its timeline: only MPEG-TS outputs take show time.
+    mp4 = build_application(GraphOptions(inputs=("input.mp4",), output="program.mp4", fps=30), api=fake_api())
+    assert "show_time" not in {n.parameters["name"]: n.parameters for n in mp4.avp.nodes}["program_mux"]
 
 
 def test_janus_only_output_builds_video_rtp_and_feedback():

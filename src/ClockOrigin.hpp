@@ -189,25 +189,56 @@ inline AVRational parseShowRate(const std::string &text) {
     return rate;
 }
 
-/// The one rate this process's show ticks count at. realtime.team.sync folds the hosts' clock
-/// difference in ticks of its rate and mixer at_show_tick turns show ticks into the program's
-/// ticks: both must be the program's rate, or two hosts put a frame in different ticks (a sync given
-/// "30" for a 30000/1001 program). The first to register sets it; a different rate is refused.
-inline void registerShowRate(AVRational rate, const std::string &who) {
-    static std::mutex mutex;
-    static AVRational registered{0, 0};
-    static std::string registered_by;
-    std::lock_guard<std::mutex> lock(mutex);
-    if (registered.den == 0) {
-        registered = rate;
-        registered_by = who;
-        return;
-    }
-    if (av_cmp_q(registered, rate) != 0)
-        throw std::invalid_argument(who + " runs at " + std::to_string(rate.num) + "/" + std::to_string(rate.den) +
-                                    " fps but the show ticks at " + std::to_string(registered.num) + "/" +
-                                    std::to_string(registered.den) + " (" + registered_by +
-                                    "); host sync and at_show_tick need the program's rate");
+/// Whole ticks at *rate* between this host's monotonic zero and the show epoch: show tick =
+/// local tick + this. Zero when the clock origin is off.
+inline int64_t showZeroTicks(AVRational rate) {
+    const __int128 origin = clockOriginNs();
+    const __int128 per_tick_ns = static_cast<__int128>(rate.den) * 1000000000;
+    __int128 ticks = origin * rate.num / per_tick_ns;
+    if ((origin * rate.num) % per_tick_ns < 0) --ticks;
+    return static_cast<int64_t>(ticks);
 }
+
+/// What two hosts of one show must agree on, per avplumber instance (InstanceSharedObjects
+/// <avp::ShowSync>, id "show_sync"): the rate show ticks count at and the program's playout
+/// latency. realtime.team.sync folds the hosts' clock difference in ticks of its rate, mixer
+/// at_show_tick turns show ticks into the program's, outputs stamp show time: all must use the
+/// program's rate, or two hosts put a frame in different ticks (a sync given "30" for a
+/// 30000/1001 program). mixer.init registers the program's rate; a different one is refused.
+class ShowSync {
+    mutable std::mutex mutex_;
+    AVRational rate_{0, 0};
+    std::string rate_by_;
+    int64_t latency_ns_ = -1;
+public:
+    void registerRate(AVRational rate, const std::string &who) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (rate_.den == 0) {
+            rate_ = rate;
+            rate_by_ = who;
+            return;
+        }
+        if (av_cmp_q(rate_, rate) != 0)
+            throw std::invalid_argument(who + " runs at " + std::to_string(rate.num) + "/" + std::to_string(rate.den) +
+                                        " fps but the show ticks at " + std::to_string(rate_.num) + "/" +
+                                        std::to_string(rate_.den) + " (" + rate_by_ +
+                                        "); host sync, at_show_tick and show-time outputs need the program's rate");
+    }
+    /// {0, 0} until registered.
+    AVRational rate() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return rate_;
+    }
+    /// The program compositor's playout latency; -1 until registered. Two hosts with different
+    /// latencies show every frame that many ns apart, so host sync compares it.
+    void registerLatency(int64_t ns) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (latency_ns_ < 0) latency_ns_ = ns;
+    }
+    int64_t latencyNs() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return latency_ns_;
+    }
+};
 
 } // namespace avp

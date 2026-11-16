@@ -21,6 +21,30 @@ protected:
     av::Timestamp prev_ts_ = NOTS;
     std::shared_ptr<HWAccelDevice> hwaccel_;
     std::shared_ptr<avp::SyncTrace> sync_trace_;   // "sync_trace": label, read with sync.trace
+    // "show_keyframes": {"every": N, "rate": "30000/1001"}: a keyframe on every frame whose index
+    // on the show timeline (at this output's rate) is a multiple of N, so two hosts of one show put
+    // keyframes on the same frames. Needs host sync on (avp::ShowSync); an H.264/HEVC NVENC encoder
+    // also needs "forced-idr": 1 for the forced picture to be an IDR.
+    std::shared_ptr<avp::ShowSync> show_;
+    AVRational show_keyframe_rate_{0, 0};
+    int64_t show_keyframe_every_ = 0;
+    int64_t show_zero_ns_ = INT64_MIN;
+    void markShowKeyframe(av::VideoFrame &frame) {
+        if (show_zero_ns_ == INT64_MIN) {
+            const AVRational program = show_->rate();
+            if (program.den == 0)
+                throw Error("enc_video show_keyframes: no program rate registered (AVP_CLOCK_ORIGIN=tai and mixer.init first)");
+            show_zero_ns_ = av_rescale(avp::showZeroTicks(program), int64_t(program.den) * 1000000000, program.num);
+        }
+        const int64_t show_ns = frame.pts().timestamp({1, 1000000000}) + show_zero_ns_;
+        const int64_t index = av_rescale_rnd(show_ns, show_keyframe_rate_.num, int64_t(show_keyframe_rate_.den) * 1000000000,
+                                             AV_ROUND_NEAR_INF);
+        // Set either way: a repeated frame reuses its picture, and a keyframe mark left on it
+        // would put a keyframe off the show's grid.
+        const bool key = index % show_keyframe_every_ == 0;   // marked as force_keyframe marks it
+        frame.setPictureType(key ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE);
+        frame.setKeyFrame(key);
+    }
     void emitPacket(const av::Packet& pkt) {
         this->sink_->put(pkt);
         if (sync_trace_ && pkt.pts().isValid())
@@ -168,6 +192,7 @@ public:
                     return;
                 }
                 if constexpr (std::is_same_v<InputFrame, av::VideoFrame>) {
+                    if (show_ && frame.pts().isValid()) markShowKeyframe(frame);
                     if (auto probe = this->cutLatencyProbe(); probe && frame.pts().isValid())
                         probe->timing.encoderInput(probe->frameToken(frame), frame.pts().timestamp(enc_.timeBase()));
                 }
@@ -208,6 +233,16 @@ public:
         }
         if (params.count("sync_trace") > 0 && avp::SyncTrace::enabled()) {
             r->sync_trace_ = avp::namedSyncTrace(params["sync_trace"].template get<std::string>());
+        }
+        if (params.count("show_keyframes") > 0) {
+            if constexpr (!std::is_same_v<InputFrame, av::VideoFrame>)
+                throw Error("show_keyframes applies to enc_video only");
+            if (!avp::clockOriginEnabled()) throw Error("enc_video show_keyframes needs AVP_CLOCK_ORIGIN=tai in the environment");
+            const auto &keyframes = params["show_keyframes"];
+            r->show_keyframe_every_ = keyframes.at("every").template get<int64_t>();
+            if (r->show_keyframe_every_ <= 0) throw Error("enc_video show_keyframes: every must be positive");
+            r->show_keyframe_rate_ = avp::parseShowRate(keyframes.at("rate").template get<std::string>());
+            r->show_ = InstanceSharedObjects<avp::ShowSync>::get(nci.instance, "show_sync");
         }
         if (params.count("timestamps_passthrough") > 0) {
             r->timestamps_passthrough_ = params["timestamps_passthrough"];

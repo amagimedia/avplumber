@@ -182,6 +182,8 @@ def _pace_audio(avp, api, tag: str, src: str, *, group: str,
     avp.addNode(api.Realtime({
         "name": f"realtime_audio_{tag}", "src": src, "dst": f"input_{tag}_audio_realtime",
         "set_pts": True, "master": False, "group": group, **loop,
+        # One source with the video node: a timestamp jump under host sync moves both together.
+        "sync_source": f"input_{tag}",
         **({} if sync_team is None else {"team": sync_team}),
         **_realtime_timing(native_rate), **(realtime_params or {}),
     }))
@@ -202,7 +204,7 @@ def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
     master_param = {} if master is None else {"master": master}
     avp.addNode(api.Realtime({
         "name": f"realtime_{tag}", "src": src, "dst": f"input_{tag}_realtime",
-        "set_pts": True, "group": group, **loop, **master_param,
+        "set_pts": True, "group": group, **loop, **master_param, "sync_source": f"input_{tag}",
         **({"capture_identity": True} if native_rate else {}),
         **({} if sync_team is None else {"team": sync_team}),
         **_realtime_timing(native_rate), **(realtime_params or {}),

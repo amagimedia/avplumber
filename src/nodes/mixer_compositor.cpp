@@ -792,6 +792,18 @@ std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) 
     }
     if (!aux && params.contains("mixer"))
         node->mixer_ = InstanceSharedObjects<avp::mixer::MixerState>::get(nci.instance, params.at("mixer"));
+    // With host sync on, the program's rate and playout latency are what two hosts must agree on
+    // (RealTimeTeam::checkPeer): a different latency shows every frame that much later.
+    if (!aux && params.contains("mixer") && avp::clockOriginEnabled()) {
+        auto show = InstanceSharedObjects<avp::ShowSync>::get(nci.instance, "show_sync");
+        try {
+            show->registerRate(AVRational{node->frame_rate_.getNumerator(), node->frame_rate_.getDenominator()},
+                               "mixer_compositor " + params.value("name", std::string("program")));
+        } catch (const std::exception &e) {
+            throw Error(std::string("mixer_compositor: ") + e.what());
+        }
+        show->registerLatency(node->playout_->latencyNs());
+    }
     if (aux) {
         if (params.contains("mixer")) {
             const auto state = InstanceSharedObjects<avp::mixer::MixerState>::get(nci.instance, params.at("mixer"));

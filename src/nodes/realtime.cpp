@@ -75,6 +75,88 @@ protected:
     std::atomic<uint64_t> fixed_late_drops_{0};
     AVTS fixed_last_report_ = AV_NOPTS_VALUE;
     avp::SyncTrace sync_trace_;   // source timestamp -> release, when AVP_SYNC_TRACE=1
+    // With a fixed team offset, a source whose timestamps jump (an encoder restart, a playlist's
+    // next item) gets its own correction on top of it (RealTimeTeam::SourceShift), keyed by
+    // "sync_source" so a camera's video and audio nodes share one. Team units.
+    std::string sync_source_;
+    AVTS shift_ = 0;
+    uint64_t shift_generation_ = 0;
+    AVTS fixed_seen_ = AV_NOPTS_VALUE;       // the team's fixed offset the state below belongs to
+    AVTS fixed_prev_pkt_ts_ = AV_NOPTS_VALUE;
+    AVTS fixed_step_ = 0;                    // the last ordinary step between two frames
+    AVTS jump_handled_at_ = AV_NOPTS_VALUE;  // the frame whose jump is already handled
+    AVTS shift_wait_since_ = AV_NOPTS_VALUE;
+
+    /// Follow a jump in this source's timestamps under a fixed team offset. Returns true while a
+    /// follower (an audio node) waits for its master's correction for the same jump.
+    bool followSourceJump(AVTS pkt_ts, AVTS now_ts, bool ticks) {
+        const AVTS fixed = team_->fixedOffset();
+        if (fixed != fixed_seen_) {   // synced anew: corrections start over
+            fixed_seen_ = fixed;
+            shift_ = 0;
+            shift_generation_ = 0;
+            fixed_prev_pkt_ts_ = AV_NOPTS_VALUE;
+            jump_handled_at_ = AV_NOPTS_VALUE;
+        }
+        const auto published = team_->sourceShift(sync_source_);
+        // A correction set by command (a host that started after the jump) applies at once.
+        if (published.manual && published.generation != shift_generation_) {
+            shift_ = published.shift;
+            shift_generation_ = published.generation;
+        }
+        if (fixed_prev_pkt_ts_ == AV_NOPTS_VALUE) return false;
+        const AVTS step = pkt_ts - fixed_prev_pkt_ts_;
+        // From the source's own timestamps, never from lateness: a network stall on one host must
+        // not move that host alone. A step back is always a jump. A step forward is one only when
+        // the frame lies far in the future under the current correction: after lost packets or a
+        // stall the next frame is due now or overdue (the timeline did not move; late frames are
+        // dropped as before), after a jump ahead it is due about the jump later.
+        const AVTS due_in = (pkt_ts - (fixed + shift_)) - now_ts;
+        const bool jumped = step < 0 || (step > discontinuity_threshold_ && due_in > discontinuity_threshold_);
+        if (!jumped) {
+            if (step > 0) fixed_step_ = step;
+            shift_wait_since_ = AV_NOPTS_VALUE;
+            return false;
+        }
+        if (jump_handled_at_ == pkt_ts) return false;
+        if (!is_master_) {
+            if (published.generation != shift_generation_) {   // the master's correction for this jump
+                shift_ = published.shift;
+                shift_generation_ = published.generation;
+                jump_handled_at_ = pkt_ts;
+                shift_wait_since_ = AV_NOPTS_VALUE;
+                logstream << "fixed offset: timestamps jumped by " << printDuration(step) << ", took the source's correction "
+                          << printDuration(shift_);
+                return false;
+            }
+            if (shift_wait_since_ == AV_NOPTS_VALUE) shift_wait_since_ = now_ts;
+            if (now_ts - shift_wait_since_ < secondsToTs(1.0f)) {
+                if (!ticks || tick_period_ == 0) this->scheduleProcess(av::Timestamp(now_ts + secondsToTs(0.01f), timebase_));
+                return true;
+            }
+            logstream << "fixed offset: no correction from the source's master within 1 s, following the jump alone";
+        }
+        // Continue one ordinary step after the previous frame: exact when no time passed (a wrap,
+        // a loop). Frames that arrive later than that (a restart takes seconds) are moved later by
+        // whole seconds of show frames; that part depends on when they arrived here, so two hosts
+        // agree unless their arrivals straddle a second. Published for the other host either way.
+        AVTS shift = shift_ + step - fixed_step_;
+        const AVTS margin = secondsToTs(0.1f);
+        const AVTS release = pkt_ts - (fixed + shift);
+        if (release < now_ts + margin) {
+            const AVTS tick = team_->syncTick() > 0 ? team_->syncTick() : 1;
+            const AVTS quantum = std::max<AVTS>(1, (secondsToTs(1.0f) + tick / 2) / tick) * tick;
+            const AVTS behind = now_ts + margin - release;
+            shift -= (behind + quantum - 1) / quantum * quantum;
+        }
+        shift_ = shift;
+        jump_handled_at_ = pkt_ts;
+        shift_wait_since_ = AV_NOPTS_VALUE;
+        if (is_master_) shift_generation_ = team_->publishSourceShift(sync_source_, shift);
+        logstream << "fixed offset: timestamps of " << sync_source_ << " jumped by " << printDuration(step)
+                  << ", correction " << printDuration(shift) << " (realtime.team.source_shift gives it to the other host)";
+        return false;
+    }
 
     AVTS secondsToTs(float seconds) const {
         return AVTS(seconds * (float)timebase_.den / (float)timebase_.num + 0.5f);
@@ -197,8 +279,10 @@ public:
                         }
                     }
                 }
+                bool waiting_for_shift = false;
                 if (fixed) {
-                    offset_ = team_->fixedOffset();
+                    waiting_for_shift = followSourceJump(pkt_ts, now_ts, ticks);
+                    offset_ = team_->fixedOffset() + shift_;
                     ready_ = true;
                     team_->watchClock();
                 } else if (emit && team_) {
@@ -209,7 +293,10 @@ public:
                     }
                     ready_ = offset_ != AV_NOPTS_VALUE; // if offset was initialized by a member of our team, trust it
                 }
-                if (ready_) {
+                if (waiting_for_shift) {
+                    emit = false;
+                    consume = false;
+                } else if (ready_) {
                     AVTS user_delay = getUserDelay();
 
                     // If user_delay decreased since last time, enter bounded "catch-up" mode.
@@ -376,6 +463,8 @@ public:
                         catchup_prev_pkt_ts_ = AV_NOPTS_VALUE;
                     }
                 }
+                if (team_ && team_->hasFixedOffset() && pkt_ts != AV_NOPTS_VALUE && pkt_ts != (AV_NOPTS_VALUE + 1))
+                    fixed_prev_pkt_ts_ = pkt_ts;
                 this->source_->pop();
 
                 // check whether there is next packet in the input queue 
@@ -624,15 +713,28 @@ public:
             // "sync": {"fps": "30000/1001", "offset": <shared offset>}: the same as realtime.team.sync
             // with that offset, for a graph built from a script. The offset is in 1/120000 s and fps is
             // the program's exact rate. Every member may carry it; it must agree.
+            // Any other keys are the leader's terms (latency_us, delay), checked as the command does.
             if (params.count("sync")) {
                 const auto &sync = params["sync"];
-                r->team_->syncHosts(avp::parseShowRate(sync.at("fps").get<std::string>()),
-                                    std::optional<AVTS>(sync.at("offset").get<AVTS>()));
+                const AVRational fps = avp::parseShowRate(sync.at("fps").get<std::string>());
+                auto show = InstanceSharedObjects<avp::ShowSync>::get(nci.instance, "show_sync");
+                std::map<std::string, std::string> peer;
+                for (const auto &[key, value] : sync.items())
+                    if (key != "fps" && key != "offset")
+                        peer[key] = value.is_string() ? value.template get<std::string>() : value.dump();
+                if (!peer.empty()) {
+                    peer["fps"] = std::to_string(fps.num) + "/" + std::to_string(fps.den);
+                    r->team_->checkPeer(peer, *show, fps, true);
+                }
+                r->team_->syncHosts(fps, std::optional<AVTS>(sync.at("offset").get<AVTS>()), show);
             }
         }
         if (params.count("master")) {
             r->is_master_ = params["master"];
         }
+        // "sync_source": the source this node paces, shared by its video and audio nodes so a
+        // timestamp jump moves both by one correction (followSourceJump). Default: the node.
+        r->sync_source_ = params.value("sync_source", params.value("name", std::string("realtime")));
         if (params.count("input_ts_queue")) {
             r->input_ts_queue_ = edges.findAny(params["input_ts_queue"]);
             if (r->input_ts_queue_ == nullptr) {

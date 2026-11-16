@@ -790,28 +790,65 @@ public:
             if (!(ss >> team_name >> offset)) throw Error("realtime.team.set_offset <team> <offset>");
             InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_name)->setFixedOffset(offset);
         };
-        // realtime.team.sync <team> <fps> [<shared offset>]: make this host release the team's
-        // frames in step with another host. Needs AVP_CLOCK_ORIGIN=tai and a synchronised clock.
+        // realtime.team.sync <team> <fps> [<shared offset> [<terms>...]]: make this host release
+        // the team's frames in step with another host. Needs AVP_CLOCK_ORIGIN=tai and a
+        // synchronised clock.
         //   Without an offset (the leader): keeps the offset the team found on arrival, fixes it,
         //   and prints it as a number that means the same on every host: 1/120000 s units,
-        //   whatever time base the team counts in (avp::kShareTimeBase).
-        //   With that number (a follower, or both hosts when it comes from configuration): fixes
-        //   the team's offset to match.
+        //   whatever time base the team counts in (avp::kShareTimeBase), followed by the terms the
+        //   other host must match: "fps=30000/1001 latency_us=66733 delay=0".
+        //   With that line (a follower, or both hosts when it comes from configuration): fixes the
+        //   team's offset to match, after checking the terms (RealTimeTeam::checkPeer). A bare
+        //   offset is still accepted; then nothing but the rate is compared.
         // <fps> is the program's rate, exactly: "30" or "30000/1001", never "29.97" (that is
         // 2997/100, a different rate). Hosts differ by where their monotonic clock's zero lies;
         // the difference is folded in as a whole number of ticks at that rate, so both hosts slot
         // the same integers and put the same frame in the same tick. The ticks themselves stay on
         // each host's own grid. mixer at_show_tick counts in the same ticks, so the rate must be
-        // the program's: a different one is refused (avp::registerShowRate).
+        // the program's: a different one is refused (avp::ShowSync).
         commands_["realtime.team.sync"] = [this](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
             std::string team_name, fps_text;
-            if (!(ss >> team_name >> fps_text)) throw Error("realtime.team.sync <team> <fps> [<shared offset>]");
+            if (!(ss >> team_name >> fps_text)) throw Error("realtime.team.sync <team> <fps> [<shared offset> [<terms>...]]");
             long long shared = 0;
             const bool follow = static_cast<bool>(ss >> shared);
+            std::map<std::string, std::string> peer;
+            for (std::string term; ss >> term;) {
+                const auto eq = term.find('=');
+                if (eq == std::string::npos) throw Error("realtime.team.sync: a term is key=value, not " + term);
+                peer[term.substr(0, eq)] = term.substr(eq + 1);
+            }
             auto team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_name);
-            shared = team->syncHosts(avp::parseShowRate(fps_text), follow ? std::optional<AVTS>(shared) : std::nullopt);
-            cs << shared << "\n";
+            auto show = InstanceSharedObjects<avp::ShowSync>::get(manager_->instanceData(), "show_sync");
+            const AVRational fps = avp::parseShowRate(fps_text);
+            // A follower given the leader's terms compares them before changing anything.
+            if (!peer.empty()) {
+                if (!follow) throw Error("realtime.team.sync: terms come after the shared offset");
+                if (peer.count("fps")) peer["fps"] = [&] {
+                    const AVRational theirs = avp::parseShowRate(peer.at("fps"));
+                    return std::to_string(theirs.num) + "/" + std::to_string(theirs.den);
+                }();
+                team->checkPeer(peer, *show, fps);
+            }
+            shared = team->syncHosts(fps, follow ? std::optional<AVTS>(shared) : std::nullopt, show);
+            cs << shared << (follow ? "" : " " + team->syncTerms()) << "\n";
+        };
+        // realtime.team.source_shift <team> [<source> <shift>]: the per-source corrections a team
+        // made after a source's timestamps jumped (RealTimeTeam::SourceShift), in 1/120000 s, as
+        // JSON {source: shift}; with a source and a value, sets that source's (a host that started
+        // after the jump is given the other host's).
+        commands_["realtime.team.source_shift"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string team_name, source;
+            if (!(ss >> team_name)) throw Error("realtime.team.source_shift <team> [<source> <shift>]");
+            auto team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_name);
+            long long shift = 0;
+            if (ss >> source) {
+                if (!(ss >> shift)) throw Error("realtime.team.source_shift <team> <source> <shift>");
+                if (!team->hasFixedOffset()) throw Error("realtime.team.source_shift: the team is not synced");
+                team->publishSourceShift(source, team->fromShare(shift), true);
+            }
+            cs << json(team->sourceShiftsShared()).dump() << "\n";
         };
         commands_["realtime.team.clear_offset"] = [this](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
@@ -1009,7 +1046,8 @@ public:
             auto orch = mixerOrchestrator(mixer_name);
             // "at_show_tick": reach program no earlier than this show tick (two hosts, one frame).
             orch.takeNotBeforeShowTick(req.contains("at_show_tick")
-                ? std::optional<int64_t>(req.at("at_show_tick").get<int64_t>()) : std::nullopt);
+                ? std::optional<int64_t>(req.at("at_show_tick").get<int64_t>()) : std::nullopt,
+                InstanceSharedObjects<avp::ShowSync>::getIfExists(manager_->instanceData(), "show_sync").get());
             orch.cut(scene_name, CommandTiming::received(), zoom);
         };
 
@@ -1056,7 +1094,8 @@ public:
                 dip = avp::mixer::parseDipColor(req.at("color").get<std::string>());
             auto orch = mixerOrchestrator(mixer_name);
             orch.takeNotBeforeShowTick(req.contains("at_show_tick")
-                ? std::optional<int64_t>(req.at("at_show_tick").get<int64_t>()) : std::nullopt);
+                ? std::optional<int64_t>(req.at("at_show_tick").get<int64_t>()) : std::nullopt,
+                InstanceSharedObjects<avp::ShowSync>::getIfExists(manager_->instanceData(), "show_sync").get());
             orch.fade(scene_name, duration_sec, curve, dip, CommandTiming::received());
         };
 
@@ -1072,7 +1111,8 @@ public:
             const auto curve = avp::mixer::parseFadeCurve(req.value("curve", std::string("linear")));
             auto orch = mixerOrchestrator(req.at("mixer").get<std::string>());
             orch.takeNotBeforeShowTick(req.contains("at_show_tick")
-                ? std::optional<int64_t>(req.at("at_show_tick").get<int64_t>()) : std::nullopt);
+                ? std::optional<int64_t>(req.at("at_show_tick").get<int64_t>()) : std::nullopt,
+                InstanceSharedObjects<avp::ShowSync>::getIfExists(manager_->instanceData(), "show_sync").get());
             orch.move(req.at("scene").get<std::string>(), duration_sec, curve, req.value("unmatched", std::string("fade")),
                       CommandTiming::received());
         };
@@ -1174,6 +1214,16 @@ public:
             if (cfg.contains("hwaccel")) state->hwaccel_name = cfg["hwaccel"].get<std::string>();
             if (cfg.contains("fps_num")) state->fps_num = cfg["fps_num"].get<int>();
             if (cfg.contains("fps_den")) state->fps_den = cfg["fps_den"].get<int>();
+            // With host sync on, the program's rate is the rate show ticks count at (only a
+            // config that names it: the defaults are not a rate anyone chose).
+            if (avp::clockOriginEnabled() && (cfg.contains("fps_num") || cfg.contains("fps_den"))) {
+                try {
+                    InstanceSharedObjects<avp::ShowSync>::get(manager_->instanceData(), "show_sync")
+                        ->registerRate(AVRational{state->fps_num, state->fps_den}, "mixer " + mixer_name);
+                } catch (const std::exception &e) {
+                    throw Error(std::string("mixer.init: ") + e.what());
+                }
+            }
             if (cfg.contains("color")) {
                 // The compositors' canvas color (sdr, hlg, pq): a dip colour is converted for it.
                 const auto transfer = avp::mixer::graphicTransfer(cfg["color"].get<std::string>());
