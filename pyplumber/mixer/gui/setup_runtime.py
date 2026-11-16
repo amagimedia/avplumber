@@ -24,7 +24,7 @@ import pyplumber.mixer.tools.janus_mountpoints as janus_mountpoints
 from pyplumber.mixer.color import default_codec
 from pyplumber.mixer.control import AvpProtocolError
 from pyplumber.mixer.aux_layout import parse_layout
-from pyplumber.mixer.config import ConfigError, aux_fps, aux_label, parse, parse_aux_buses
+from pyplumber.mixer.config import ConfigError, aux_fps, aux_label, parse, parse_aux_buses, rate_json, rate_weight
 
 # Phase markers with durations: restart timings are read from the container log.
 log = logging.getLogger("setup")
@@ -64,16 +64,17 @@ def extra_aux_limit(profile, cfg, encodes, *, reserve_clean=False):
     nvenc = profile["nvenc"]
     mode = for_mode(profile, 8 if cfg.working_format == "nv12" else 10,
                     "422" if cfg.working_format == "p210le" else "420")
+    # 29.97 and 59.94 are weighed as 30 and 60 (config.rate_weight), as the profiles measured them.
     def share(width, height, fps, codec, preset):
-        return fps * width * height / (1920 * 1080) * nvenc["pct_per_fps"]["hevc" if "hevc" in codec else "h264"][preset]
+        return rate_weight(fps) * width * height / (1920 * 1080) * nvenc["pct_per_fps"]["hevc" if "hevc" in codec else "h264"][preset]
     encoded = [(r.width, r.height, r.fps, r.codec or default_codec(cfg.working_format), r.preset) for r in cfg.renditions]
     if reserve_clean and not any(r.feed == "clean" for r in cfg.renditions):
         encoded.append((cfg.canvas_w, cfg.canvas_h, cfg.fps,
                         encodes["sdr_clean"].get("codec", "h264_nvenc"), encodes["sdr_clean"]["preset"]))
     encoded += [(r.width, r.height, r.fps, r.codec, r.preset) for b in cfg.aux_buses for r in b.renditions]
     used = sum(share(*e) for e in encoded)
-    budget = mode.get("nvenc_budget_pct", {}).get(cfg.fps, nvenc["budget_pct"])
-    max_outputs = mode.get("nvenc_max_outputs", {}).get(cfg.fps, nvenc.get("max_outputs", math.inf))
+    budget = mode.get("nvenc_budget_pct", {}).get(rate_weight(cfg.fps), nvenc["budget_pct"])
+    max_outputs = mode.get("nvenc_max_outputs", {}).get(rate_weight(cfg.fps), nvenc.get("max_outputs", math.inf))
     output_slots = max_outputs - len(encoded)
     if output_slots < 0:
         raise ValueError(f"The instance supports at most {max_outputs} encoded outputs, including programs")
@@ -288,7 +289,7 @@ class SetupRuntime:
             if is_thumbnail(bus):
                 continue
             for rendition in bus["renditions"]:
-                rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=aux_fps(cfg.fps, bus.get("full_rate", False)))
+                rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=rate_json(aux_fps(cfg.fps, bus.get("full_rate", False))))
             state = live.get(bus["id"], bus)
             if "layout" in state:
                 bus["layout"] = unpaged(state["layout"])

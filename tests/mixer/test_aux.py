@@ -1,4 +1,5 @@
 from dataclasses import replace
+from fractions import Fraction
 import json
 from types import SimpleNamespace
 import threading
@@ -99,7 +100,9 @@ def reachable(avp, bus, **compositor):
     avp.statuses[bus.node_name] = {"composition_pending": False, "composition_revision": bus.revision, **compositor}
 
 
-@pytest.mark.parametrize("program,aux", [(25, 25), (30, 30), (50, 25), (60, 30)])
+@pytest.mark.parametrize("program,aux", [(25, 25), (30, 30), (50, 25), (60, 30),
+                                         (Fraction(30000, 1001), Fraction(30000, 1001)),
+                                         (Fraction(60000, 1001), Fraction(30000, 1001))])
 def test_aux_cadence(program, aux):
     assert aux_fps(program) == aux
     assert aux_fps(program, full_rate=True) == program   # opt-in: the canvas rate, twice the work at 50/60
@@ -714,3 +717,17 @@ def test_bus_compositor_wakes_for_every_frame_unless_told_how_often_to_look(cfg,
     assert _built_compositor(replace(cfg, aux_input_poll_ms=8), monkeypatch)["input_poll_ms"] == 8
     # The program compositors' interval is theirs alone.
     assert "input_poll_ms" not in _built_compositor(replace(cfg, input_poll_ms=8), monkeypatch)
+
+
+def test_exact_rates_parse_and_print():
+    from pyplumber.mixer.config import (ConfigError, parse_rate, paint_rate, rate_json, rate_number, rate_text,
+                                        rate_weight)
+    ntsc = parse_rate("30000/1001")
+    assert ntsc == Fraction(30000, 1001) and parse_rate(30) == 30 and type(parse_rate("60")) is int
+    assert (rate_text(ntsc), rate_json(ntsc), rate_number(ntsc), rate_weight(ntsc), paint_rate(ntsc)) == \
+        ("30000/1001", "30000/1001", 29.97, 30, 30)
+    assert (rate_text(60), rate_json(60), rate_number(60), rate_weight(60), paint_rate(60)) == ("60/1", 60, 60, 60, 60)
+    assert rate_number(parse_rate("60000/1001")) == 59.94
+    for wrong in (29.97, "29.97", "30000/1002", "30/0", 0, 241, True, None):
+        with pytest.raises(ConfigError):
+            parse_rate(wrong)

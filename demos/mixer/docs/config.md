@@ -18,7 +18,7 @@ HLG/PQ require 10-bit storage. Browser graphics are SDR; the compositor converts
 | field | default | meaning |
 | --- | --- | --- |
 | `width`, `height` | — | the program raster the compositor draws into |
-| `fps` | `30` | **how often the compositor renders**, and the clock the whole mixer runs on: inputs are re-timed to it and browser pages are asked to paint at it |
+| `fps` | `30` | **how often the compositor renders**, and the clock the whole mixer runs on: inputs are re-timed to it and browser pages are asked to paint at it. A whole number, or an exact NTSC rate as a string: `"30000/1001"` (29.97), `"60000/1001"` (59.94); decimals such as `29.97` are rejected. Browser pages paint at the next whole rate (30 for 29.97) |
 | `working_format` | `nv12` | compositor and transition pixel storage: `nv12` (8-bit 4:2:0), `p010le` (10-bit 4:2:0) or `p210le` (10-bit 4:2:2). 8-bit sources are promoted onto a 10-bit canvas; `p210le` keeps 4:2:2 through conversion and compositing. Renditions are 4:2:0 for NVENC, subsampled once |
 | `raw_upload` | `hwupload` | `hwupload`, `pinned` (`hwupload_cuda=pinned=1`, requires the FFmpeg patch), `direct` (one `raw_video_file_cuda` node per source: the file is read into page-locked memory and uploaded from there, no staging copy) or `resident` (as `direct`, and a looped file's pictures stay in that memory after their first showing, so later passes read nothing; the memory is the size of the file and is not swappable). Setup uses `resident` for `nvidia_l4_cuarray`, otherwise `direct`. Every mode still uploads each displayed raw frame to the GPU. [Details](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/raw-uploads.html) |
 | `input_routing` | `input` | which node hands a file's video stream to its decoder: `input` (the reading node sends it to the decoder's edge itself) or `demux` (a `demux` node per source between the two, the earlier wiring: one more thread and two more hand-offs per packet) |
@@ -42,7 +42,7 @@ The program is composited once. Each rendition adds an encode. With no rendition
 | `target` | `"janus"` | `"janus"` for the WebRTC RTP output, or a file path to record |
 | `width`, `height` | canvas size | when they differ, both must be even; scaled on the GPU by `cuda_transform`, stretched to the given size (bilinear over four neighbours, as the compositor: a large reduction can alias). Renditions of one size and feed share one scaled picture; color conversion follows on that smaller picture |
 | `aspect` | — | optional, e.g. `"9:16"`; checked against `width:height` |
-| `fps` | canvas fps | may only re-time **downwards**; a higher rate is rejected |
+| `fps` | canvas fps | may only re-time **downwards**; a higher rate is rejected. Whole or exact NTSC, as `canvas.fps` |
 | `bitrate_kbps` | `3000` | CBR target, also the `maxrate` and `bufsize` |
 | `codec` | from canvas depth | `h264_nvenc` for 8-bit or `hevc_nvenc` for 10-bit by default; applies to Janus and file targets |
 | `profile` | from codec/depth | HEVC `main`/`main10`; H.264 `baseline` for Janus, `high` for files. No B-frames |
@@ -74,7 +74,7 @@ One source ID opens one decoder or browser window; scenes and aliases reuse it. 
 | `width`, `height` | v210, nv12, p010 | required: raw bytes carry no header; NV12/P010 dimensions must be positive and even |
 | `color` | browser, v210, nv12, p010 | required color contract (`sdr`, `hlg`, `pq`); browser and NV12 sources must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
 | `url`, `width`, `height` | browser | page and the window it is rendered in (all three required) |
-| `fps` | browser | paint rate; defaults to the canvas rate |
+| `fps` | browser | the rate its frames are numbered at, whole or exact NTSC; defaults to the canvas rate. The window paints at the next whole rate |
 | `capture_cadence` | browser | `continuous` (default) checks repeated captures on program; `on_change` records intentional static holds separately. Does not alter capture or pacing |
 | `hold_last_frame` | browser | default `true`: while a failed or crashed page reloads, repeat its last frame. `false` shows Chromium's empty error page (transparent or black) instead |
 | `width`, `height` | video | optional; probed with ffprobe at load when absent |
@@ -174,7 +174,7 @@ separate key-only Auto behavior and the distinction between ALL and NEXT.
 
 ## aux_buses
 
-Each bus has an `id`, layouts, scene assignments and Janus renditions (`port`, optional `codec`, `preset`, `bitrate_kbps`). It reuses source frames and drops output rather than blocking Program. SDR only; half canvas rate above 30 fps unless `full_rate`. Commands: `mixer.aux_layout`, `mixer.aux`, `mixer.aux_page`, `mixer.aux_status`. Assignment updates include the current `expected_revision`. Layout changes stage new sources; status exposes `composition_pending` and `composition_error`. See [timing details](../../../doc/mixer.md#aux-bus-follower).
+Each bus has an `id`, layouts, scene assignments and Janus renditions (`port`, optional `codec`, `preset`, `bitrate_kbps`). It reuses source frames and drops output rather than blocking Program. SDR only; half canvas rate above 30 fps unless `full_rate` (`60000/1001` halves to `30000/1001`). Canvas rates: 25, 30000/1001, 30, 50, 60000/1001 and 60. Commands: `mixer.aux_layout`, `mixer.aux`, `mixer.aux_page`, `mixer.aux_status`. Assignment updates include the current `expected_revision`. Layout changes stage new sources; status exposes `composition_pending` and `composition_error`. See [timing details](../../../doc/mixer.md#aux-bus-follower).
 
 | role | draws |
 | --- | --- |

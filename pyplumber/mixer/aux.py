@@ -10,7 +10,7 @@ import uuid
 from ..node import InternalNode
 from .aux_layout import (base_composition, base_sources, check_assignments, count, draws_program, layout_cells,
                          page_count, page_grid, parse_layout, pvw_layouts, pvw_sources)
-from .config import ConfigError
+from .config import ConfigError, rate_number, rate_pair
 from . import thumbnail
 
 
@@ -83,16 +83,17 @@ class AuxBus:
         """The bus's nodes, all in its own group: compositor, follower, conversion, encoder, Janus output."""
         from .janus import JanusVideoConfig, build_janus_output
         fps = self.fps
+        frame_ms = 1000 / float(fps)
         latency = self.latency_ms()
         # Playout::setInputOffset's budget: the PGM delay is history the compositor keeps as well.
-        if latency + self.pgm_delay_frames * 1000 / fps > 6000 / fps:
+        if latency + self.pgm_delay_frames * frame_ms > 6 * frame_ms:
             raise ConfigError("main plus aux latency exceeds the six-frame aux history budget")
         # The program frame leaves the main compositor at its deadline, main latency after its
         # pts, and is drawn here pgm_delay_frames aux ticks plus the bus latency after it. That
         # margin carries it through the output chain (pts gate, selectors, keyer, tap) to the bus:
         # below one program frame a pgm cell repeats or runs a tick late on every take.
-        floor = 1000 / self.cfg.fps
-        if self.pgm_edge and self.pgm_delay_frames * 1000 / fps + latency - self.main_latency_ms() < floor - 1e-6:
+        floor = 1000 / float(self.cfg.fps)
+        if self.pgm_edge and self.pgm_delay_frames * frame_ms + latency - self.main_latency_ms() < floor - 1e-6:
             raise ConfigError(f"aux {self.bus.id}: pgm_delay_frames * aux frame + latency_ms must exceed the main "
                               f"latency_ms ({self.main_latency_ms():g}) by a program frame ({floor:.1f} ms) at least, "
                               f"for the program frame to reach the bus in time")
@@ -136,7 +137,7 @@ class AuxBus:
                              bitrate_kbps=r.bitrate_kbps, ssrc=options.janus_video_ssrc + r.port,
                              rtcp_bind=options.janus_rtcp_bind, rtcp_port=0,
                              **({"keyframe_interval_sec": 1} if thumbnail.is_thumbnail({"layout": self.layout}) else {})),
-            fps=fps, width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
+            fps=rate_pair(fps)[0], fps_den=rate_pair(fps)[1], width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
             hold=True)   # MixerApplication releases every output together once the show has settled
@@ -218,7 +219,7 @@ class AuxBus:
             pending = status.get("composition_pending", False) or status.get("composition_revision") != self.revision
             return {"id": self.bus.id, "error": self.error, "cells": cells,
                     "max_layers": self.bus.max_layers, "canvas": {"w": self.rendition.width, "h": self.rendition.height},
-                    "fps": self.fps, "latency_ms": self.latency_ms(), "pvw_align": self.bus.pvw_align,
+                    "fps": rate_number(self.fps), "latency_ms": self.latency_ms(), "pvw_align": self.bus.pvw_align,
                     "pgm_delay_frames": self.pgm_delay_frames, "follower": self.follower_status,
                     "pvw_scene": self.follower_status.get("pvw_scene", ""), **self._live(), **status,
                     "running": running, "composition_pending": pending}

@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("mixer")
 DEFAULT_FPS = 30
-FPS_DEN = 1
 # Instance-owned: a global (@) device survives shutdown until CUDA static teardown.
 HWACCEL = "mixer_gpu"
 # Nothing in a show reads what input_rec stamps on decoded frames (realtime's frame counters serve
@@ -86,7 +85,7 @@ class MixerOptions:
     codec: str = "h264_nvenc"
     working_format: str = "nv12"   # compositor/transition sw_format; p210le keeps 10-bit 4:2:2
     bitrate: str = "8M"
-    fps: int = DEFAULT_FPS
+    fps: Any = DEFAULT_FPS          # config.parse_rate: an int, or a Fraction such as 30000/1001
     mixer_latency_ms: float | None = None
     mixer_input_poll_ms: int | None = None   # canvas.input_poll_ms; None: compositors wake for every frame
     janus_output: bool = False
@@ -132,8 +131,7 @@ class MixerOptions:
             raise ValueError("--wipe-color supports sdr only; HDR alpha wipes are unsupported")
         if not self.codec.endswith("_nvenc"):
             raise ValueError("--codec must be an NVENC encoder for zero-copy output")
-        if not 1 <= self.fps <= 240:
-            raise ValueError("--fps must be between 1 and 240")
+        object.__setattr__(self, "fps", mixer_config.parse_rate(self.fps, "--fps"))
         if not 0 <= self.remote_control_port <= 65535:
             raise ValueError("remote_control_port must be between 0 and 65535")
         if not 0 <= self.janus_rtcp_port <= 65535:
@@ -178,7 +176,7 @@ class SourceContext:
     edge: str
     group: str
     hwaccel: str
-    fps: int
+    fps: Any
 
 
 @dataclass
@@ -754,7 +752,7 @@ def _make_builder(avp, api, options, *, canvas, fps, working_format, color: Colo
     """The mixer builder, configured identically for both build paths (canvas,
     rate and working_format are the only per-path differences)."""
     return api.MixerGraphBuilder(
-        avp, name=MIXER_NAME, canvas=canvas, fps=(fps, FPS_DEN),
+        avp, name=MIXER_NAME, canvas=canvas, fps=mixer_config.rate_pair(fps),
         latency_ms=options.mixer_latency_ms, input_poll_ms=options.mixer_input_poll_ms,
         hwaccel=HWACCEL, enable_wipe=True,
         max_compositor_layers=options.max_compositor_layers or mixer_config.DEFAULT_MAX_COMPOSITOR_LAYERS,
@@ -792,7 +790,7 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
     bitrate = f"{r.bitrate_kbps}k"
     profile = r.profile or (("main10" if enc_format in TEN_BIT_FORMATS else "main") if "hevc" in codec else "high")
     add_nodes(avp, api, [
-        ("ForceFPS", {"name": name("fps"), "src": edge, "dst": name("fps"), "fps": f"{r.fps}/{FPS_DEN}"}),
+        ("ForceFPS", {"name": name("fps"), "src": edge, "dst": name("fps"), "fps": mixer_config.rate_text(r.fps)}),
         ("AssumeVideoFormat", {"name": name("format"), "src": name("fps"), "dst": name("video"),
                                "width": r.width, "height": r.height, "pixel_format": "cuda",
                                "real_pixel_format": enc_format}),
@@ -800,7 +798,7 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
                       "codec": codec, "hwaccel": HWACCEL,
                       **({"hdr_metadata": hdr_metadata} if hdr_metadata else {}),
                       "options": {"b": bitrate, "maxrate": bitrate, "bufsize": bitrate,
-                                  "g": max(1, round(r.fps / FPS_DEN)) * 2, "bf": 0, "preset": r.preset,
+                                  "g": max(1, round(r.fps)) * 2, "bf": 0, "preset": r.preset,
                                   "tune": "ll", "profile": profile, **dpb_options(r.dpb_size), **color}}),
         ("Mux", {"name": name("mux"), "src": [name("encoded")], "dst": name("muxed"), "ts_sort_wait": 0}),
         ("Output", {"name": name("output"), "src": name("muxed"), "url": r.target,
@@ -885,7 +883,7 @@ def _build_renditions(avp, api, options: MixerOptions, renditions, feeds, *,
                 bitrate_kbps=r.bitrate_kbps, keyframe_min_interval_ms=options.keyframe_min_interval_ms,
                 rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port if not listeners else 0,
             ),
-            fps=r.fps, fps_den=FPS_DEN, width=r.width, height=r.height, hwaccel=HWACCEL, group=OUTPUT_GROUP,
+            fps=mixer_config.rate_pair(r.fps)[0], fps_den=mixer_config.rate_pair(r.fps)[1], width=r.width, height=r.height, hwaccel=HWACCEL, group=OUTPUT_GROUP,
             codec=codec, profile=r.profile, preset=r.preset, enc_format=enc_format, color=target.tags,
             hdr_metadata=_hdr_metadata(r, target), prefix="janus" if not listeners else f"janus_{r.id}",
             dpb_size=r.dpb_size, hold=held is not None))
@@ -947,7 +945,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     browsers = [s for s in cfg.sources if s.kind == "browser"]
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
-                                            "height": s.height, "fps": s.fps or cfg.fps,
+                                            "height": s.height, "fps": mixer_config.paint_rate(s.fps or cfg.fps),
                                             "ringSize": cfg.browser_frame_queue,
                                             "holdLastFrame": s.hold_last_frame} for s in browsers])
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
@@ -979,7 +977,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             for node in nodes:
                 avp.addNode(node)
         else:
-            file_params = dict(group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
+            fps_num, fps_den = mixer_config.rate_pair(cfg.fps)
+            file_params = dict(group=group, fps=fps_num, fps_den=fps_den, hwaccel=HWACCEL, loop=source.loop,
                                event_loop=_pacing_loop(index), native_rate=True,
                                frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
             if source.kind == "v210":
@@ -1097,11 +1096,11 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     # same program cadence when the keyer or output pipeline falls behind.
     avp.addNode(api.ForceFPS({
         "name": "program_fps", "src": feeds["dirty"], "dst": "program_clocked",
-        "fps": f"{cfg.fps}/1", "group": OUTPUT_GROUP,
+        "fps": mixer_config.rate_text(cfg.fps), "group": OUTPUT_GROUP,
     }))
     avp.addNode(api.MixerDelivery({
         "name": "mixer_delivery", "src": "program_clocked", "dst": monitored,
-        "fps": f"{cfg.fps}/1", "group": OUTPUT_GROUP,
+        "fps": mixer_config.rate_text(cfg.fps), "group": OUTPUT_GROUP,
         "on_change_sources": [s.id for s in cfg.sources if s.capture_cadence == "on_change"],
     }))
     feeds = {name: monitored if edge == feeds["dirty"] else edge for name, edge in feeds.items()}

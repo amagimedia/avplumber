@@ -8,6 +8,9 @@ Setup admits what [instance_profiles.py](../instance_profiles.py) allows for the
 rate and format, the outputs and their encoder presets. A profile is measured on its own GPU; do
 not scale one GPU's numbers to another. All figures are 1080p inputs and include four browser keys.
 
+29.97 fps (`30000/1001`) and 59.94 fps (`60000/1001`) use the 30 and 60 fps rows: no profile is
+measured at the NTSC rates, and they run 0.1 % fewer frames than the rows they borrow.
+
 [Demo recording](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
 [Source-limit cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/source-limits.html) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)

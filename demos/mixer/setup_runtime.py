@@ -7,7 +7,7 @@ from . import prepare_demo
 from .demo_recipe import allocate, validate_dsk
 from .instance_profiles import INSTANCE_PROFILES, InstanceType
 from pyplumber.mixer.color import TRANSFER_TAGS
-from pyplumber.mixer.config import parse
+from pyplumber.mixer.config import CANVAS_RATES, parse, parse_rate, rate_number, rate_weight
 from pyplumber.mixer.gui.setup_runtime import (
     SetupRuntime as BaseSetupRuntime, for_mode, extra_aux_limit as output_limit,
 )
@@ -63,7 +63,7 @@ def extra_aux_limit(profile, cfg, encodes):
 
 
 def browser_limit(profile, fps):
-    return profile.get("browser_windows_by_fps", {}).get(fps, profile["browser_windows"])
+    return profile.get("browser_windows_by_fps", {}).get(rate_weight(fps), profile["browser_windows"])
 
 
 def source_limit(profile, fps, bit_depth=8, chroma="420"):
@@ -71,6 +71,7 @@ def source_limit(profile, fps, bit_depth=8, chroma="420"):
     browser and upload caps carry together (v210 inputs only on a 4:2:2 canvas). An unsupported
     pair (8-bit 4:2:2) is refused by the mode checks in recipe_for."""
     profile = for_mode(profile, bit_depth, chroma)
+    fps = rate_weight(fps)
     total = int(profile["sources"][fps] * profile["mode_share"].get(f"{bit_depth}:{chroma}", 1.0))
     return min(total, profile["nvdec_decodes"][fps] + browser_limit(profile, fps) + profile["raw_upload_units"][fps]
                + (profile["hlg_v210"] if chroma == "422" else 0))
@@ -80,6 +81,7 @@ def source_limit(profile, fps, bit_depth=8, chroma="420"):
 def source_counts(profile, total, weights, fps=25, reserved_browsers=0):
     """*reserved_browsers* are downstream-key pages: browser inputs outside the weighted mix."""
     counts = allocate(total, weights)
+    fps = rate_weight(fps)
     # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
     for indices, costs, limit, name in (
             ((2, 3), (1, 1), profile["hlg_v210"], "4:2:2 upload"),
@@ -112,13 +114,14 @@ def recipe_for(profile, settings):
     if not isinstance(settings, dict) or set(settings) != set(DEFAULT_SETTINGS):
         raise ValueError("Expected orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
     for key, choices in (("orientation", ("portrait", "landscape")),
-                         ("fps", (25, 30, 50, 60)),
+                         ("fps", CANVAS_RATES),   # the NTSC rates use the 30/60 fps capacity (rate_weight)
                          ("bit_depth", (8, 10)),
                          ("chroma", ("420", "422")),
                          ("browser_motion", prepare_demo.BROWSER_MOTIONS),
                          ("decode_mix", tuple(DECODE_MIXES)),
                          ("layout", ("balanced", "grids", "fullscreen"))):
-        if settings[key] not in choices or key in ("fps", "bit_depth") and type(settings[key]) is not int:
+        if (not any(type(settings[key]) is type(c) and settings[key] == c for c in choices)
+                if key == "fps" else settings[key] not in choices or key == "bit_depth" and type(settings[key]) is not int):
             raise ValueError(f"Unsupported {key}")
     dsk = settings["dsk"]
     validate_dsk(dsk, settings["clean_feed"])
@@ -217,9 +220,9 @@ def recipe_for(profile, settings):
 
 
 def _check_hdr_decodes(profile, count, fps):
-    maximum = profile.get("nvdec_hdr_decodes", {}).get(fps, math.inf)
+    maximum = profile.get("nvdec_hdr_decodes", {}).get(rate_weight(parse_rate(fps)), math.inf)
     if count > maximum:
-        raise ValueError(f"HDR NVDEC inputs are limited to {maximum} at {fps} fps to reserve VRAM")
+        raise ValueError(f"HDR NVDEC inputs are limited to {maximum} at {rate_number(parse_rate(fps))} fps to reserve VRAM")
 
 
 

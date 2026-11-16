@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from typing import List, Tuple
 
-from .config import default_browser_frame_queue
+from .config import default_browser_frame_queue, paint_rate, rate_text
 
 SCHEME = "dmabuf://"
 # The mixer keeps all but one of a window's frame queue out of the browser (ipc_dmabuf_source
@@ -47,7 +47,7 @@ def window_id(url: str) -> str:
 
 def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
                             # Unused (geometry comes from each frame); kept for downstream callers.
-                            width: int | None = None, height: int | None = None, fps: int,
+                            width: int | None = None, height: int | None = None, fps,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
                             processing_group: str, hold: bool = False,
                             preserve_alpha: bool = False, browser_frame_queue: int | None = None,
@@ -59,14 +59,15 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
     *preserve_alpha* retains alpha-bearing DRM formats for blended scene items. Chromium's
     alpha is premultiplied; the consumer tags it (the mixer does in its colour node).
     Geometry and format come from each frame, and ``smooth_timestamps`` already stamps
-    in 1/*fps*, so the chain has no format or time-base nodes of its own.
+    in 1/*fps*, so the chain has no format or time-base nodes of its own. *fps* is the canvas
+    rate (config.parse_rate), 30000/1001 included; the window paints at its whole paint_rate.
     *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted).
     """
     if browser_frame_queue is None:
         browser_frame_queue = default_browser_frame_queue(fps)
     drm_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
-              "auto_restart": "group", "fps": f"{fps}/1"}
+              "auto_restart": "group", "fps": rate_text(fps)}
     if drm_hwaccel:
         source["hwaccel"] = drm_hwaccel
     if hold_frames(browser_frame_queue):
@@ -97,14 +98,14 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         # round_up: number the first paint (and any resync) to the next canvas tick,
         # not the nearest, so a paint always precedes the tick it is shown at.
         api.SmoothTimestamps({
-            "fps": f"{fps}/1", "discontinuity_threshold": 0.1, "round_up": True,
+            "fps": rate_text(fps), "discontinuity_threshold": 0.1, "round_up": True,
             "src": raw_edge, "dst": cuda_edge, "group": processing_group,
             "name": f"{prefix}_smooth", "auto_restart": "panic",
             **({} if event_loop is None else {"event_loop": event_loop})}),
     ]
     if hold:
         held_edge = f"{prefix}_held"
-        nodes.append(api.RepeatLastFrame({"src": cuda_edge, "dst": held_edge, "fps": f"{fps}/1",
+        nodes.append(api.RepeatLastFrame({"src": cuda_edge, "dst": held_edge, "fps": rate_text(fps),
                                           "group": processing_group, "name": f"{prefix}_hold",
                                           "auto_restart": "group"}))
         return nodes, held_edge
@@ -128,11 +129,11 @@ def rest_request(base_url: str, method: str, path: str, body=None, timeout: floa
 
 
 def open_browser_windows(base_url: str, ids: List[str], page_url: str, width: int, height: int,
-                         fps: int, browser_frame_queue: int | None = None) -> None:
+                         fps, browser_frame_queue: int | None = None) -> None:
     """Ensure the named windows match the requested page and capture settings."""
     if browser_frame_queue is None:
         browser_frame_queue = default_browser_frame_queue(fps)
-    open_windows(base_url, [{"id": name, "url": page_url, "width": width, "height": height, "fps": fps,
+    open_windows(base_url, [{"id": name, "url": page_url, "width": width, "height": height, "fps": paint_rate(fps),
                             "ringSize": browser_frame_queue, "holdLastFrame": True}
                             for name in ids])
 
