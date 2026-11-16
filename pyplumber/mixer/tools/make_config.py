@@ -68,8 +68,8 @@ def generate(argv=None) -> dict:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("sources", nargs="+")
     parser.add_argument("--canvas", default=f"{layouts.CANVAS_WIDTH}x{layouts.CANVAS_HEIGHT}")
-    parser.add_argument("--fps", type=int, default=mixer_config.DEFAULT_FPS,
-                        help="rate the compositor renders at (default: %(default)s)")
+    parser.add_argument("--fps", type=mixer_config.parse_rate, default=mixer_config.DEFAULT_FPS,
+                        help="rate the compositor renders at, whole or exact NTSC such as 30000/1001 (default: %(default)s)")
     parser.add_argument("--wipe", action="append", default=[], metavar="PATH")
     parser.add_argument("--fade-seconds", type=float, default=mixer_config.DEFAULT_FADE_SECONDS)
     parser.add_argument("--transition", default=mixer_config.DEFAULT_TRANSITION,
@@ -77,7 +77,7 @@ def generate(argv=None) -> dict:
                         help="what a direct-mode scene pick takes with (default: %(default)s)")
     parser.add_argument("--bitrate-kbps", type=int, default=2700,
                         help="program rendition bitrate (default: %(default)s)")
-    parser.add_argument("--rendition-fps", type=int, default=0, metavar="FPS",
+    parser.add_argument("--rendition-fps", type=mixer_config.parse_rate, default=0, metavar="FPS",
                         help="program rendition rate; 0 keeps the canvas rate")
     parser.add_argument("--profile", default="", help="NVENC profile of the program rendition (default: from depth)")
     parser.add_argument("--program-port", type=int, default=0,
@@ -115,7 +115,7 @@ def generate(argv=None) -> dict:
     rendition_fps = args.rendition_fps or args.fps
     program = {"id": "program", "target": "janus", "width": width, "height": height,
                "aspect": mixer_config.Rendition("program", width=width, height=height).aspect,
-               "fps": rendition_fps, "bitrate_kbps": args.bitrate_kbps,
+               "fps": mixer_config.rate_json(rendition_fps), "bitrate_kbps": args.bitrate_kbps,
                "profile": args.profile or ("main10" if ten_bit else "baseline"), "preset": args.preset,
                **({"codec": "hevc_nvenc"} if ten_bit else {}),
                **({"port": args.program_port} if args.program_port else {})}
@@ -123,7 +123,7 @@ def generate(argv=None) -> dict:
     if args.sdr_port:
         renditions.append({**program, "id": "sdr", "port": args.sdr_port, "codec": "h264_nvenc",
                            "profile": "baseline", "tonemap": args.sdr_tonemap, "tonemap_param": args.sdr_knee})
-    canvas = {"width": width, "height": height, "fps": args.fps,
+    canvas = {"width": width, "height": height, "fps": mixer_config.rate_json(args.fps),
               **({"working_format": args.working_format} if args.working_format else {}),
               **({"color": args.color} if args.color else {})}
     doc = {

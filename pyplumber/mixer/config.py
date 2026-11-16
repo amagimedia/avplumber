@@ -39,6 +39,65 @@ RAW_UPLOADS = ("hwupload", "pinned", "direct", "resident")
 INPUT_ROUTINGS = ("input", "demux")   # which node sends a file's video stream to its decoder
 SOURCE_FAN_OUTS = ("thread", "event_loop")   # what hands a source's frames to the compositors
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
+MAX_FPS = 240
+# Frame rates are whole numbers or the NTSC rates N*1000/1001, written exactly ("30000/1001",
+# "60000/1001"), never as decimals: 29.97 is not 30000/1001, and the native nodes, encoders and
+# sources all count in the exact rational.
+NTSC_DEN = 1001
+# The canvas rates setup pages offer, as a show document writes them (rate_json).
+CANVAS_RATES = (25, "30000/1001", 30, 50, "60000/1001", 60)
+
+
+def parse_rate(value, where="fps"):
+    """A frame rate as an int (25, 30, 50, 60) or, for NTSC rates, a Fraction (30000/1001,
+    60000/1001). Accepts an int, a whole-number string or an exact "N/1001" string."""
+    if isinstance(value, Fraction):
+        rate = value
+    elif isinstance(value, int) and not isinstance(value, bool):
+        rate = Fraction(value)
+    elif isinstance(value, str) and re.fullmatch(r"\s*\d+\s*(/\s*[1-9]\d*\s*)?", value):
+        rate = Fraction(value.replace(" ", ""))
+    else:
+        raise ConfigError(f"{where} must be a whole number of frames per second or an exact NTSC rate "
+                          "such as \"30000/1001\" or \"60000/1001\"")
+    if rate.denominator not in (1, NTSC_DEN) or not 0 < rate <= MAX_FPS:
+        raise ConfigError(f"{where} must be a whole rate from 1 to {MAX_FPS} or N/1001 such as \"30000/1001\"")
+    return rate.numerator if rate.denominator == 1 else rate
+
+
+def rate_text(rate):
+    """The native nodes' rational: "30/1", "30000/1001"."""
+    rate = Fraction(rate)
+    return f"{rate.numerator}/{rate.denominator}"
+
+
+def rate_pair(rate):
+    """(numerator, denominator): (30, 1), (30000, 1001)."""
+    rate = Fraction(rate)
+    return rate.numerator, rate.denominator
+
+
+def rate_json(rate):
+    """A rate as a configuration document writes it: 30, or "30000/1001"."""
+    rate = Fraction(rate)
+    return rate.numerator if rate.denominator == 1 else f"{rate.numerator}/{rate.denominator}"
+
+
+def rate_number(rate):
+    """A rate for pages and labels: 30, or 29.97 and 59.94."""
+    rate = Fraction(rate)
+    return rate.numerator if rate.denominator == 1 else round(float(rate), 3)
+
+
+def rate_weight(rate):
+    """The whole rate whose capacity weights a rate uses: 29.97 counts as 30, 59.94 as 60."""
+    return round(Fraction(rate))
+
+
+def paint_rate(rate):
+    """A browser window's whole paint rate for a rate: 30 for 29.97, 60 for 59.94. The compositor
+    takes the newest page frame at each tick, so the page never lags the canvas."""
+    return math.ceil(Fraction(rate))
 DEFAULT_MAX_COMPOSITOR_LAYERS = 640
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
@@ -121,7 +180,7 @@ def default_latency_ms(fps):
     """Playout deadline: 2 output frames up to 30 fps (80 ms at 25, 67 at 29.97/30), 3 at 50/60
     (60/50 ms). Two 60 fps frames left 17 ms of slack for a late source or pass and missed
     deadlines under load; two frames at 25/30 fps held the measured shows cleanly."""
-    return (2 if fps < 40 else 3) * 1000 / fps
+    return (2 if fps < 40 else 3) * 1000 / float(fps)
 
 
 def earlier_browser_ring_size(value):
@@ -171,7 +230,7 @@ class Source:
     location: str                  # browser URL or media path (v210/nv12/p010 are raw files)
     width: int = 0
     height: int = 0
-    fps: int = 0                   # browser paint rate; 0 = canvas fps
+    fps: Any = 0                   # browser source rate (parse_rate); 0 = canvas fps
     loop: bool = True
     hold_last_frame: bool = True   # browser: repeat the last frame while a failed page reloads
     # Empty fields require complete decoded frame metadata. Raw inputs must
@@ -224,7 +283,7 @@ class Rendition:
     target: str = "janus"            # "janus" or a file path
     width: int = 0                   # 0 keeps the canvas size
     height: int = 0
-    fps: int = 0                     # 0 keeps the canvas rate
+    fps: Any = 0                     # parse_rate; 0 keeps the canvas rate
     bitrate_kbps: int = 3000
     codec: str = ""                  # "" auto-selects: HEVC for a 10-bit program, else H.264
     profile: str = ""                # "" lets the encoder pick main/main10/baseline
@@ -322,7 +381,7 @@ class AuxBusConfig:
 class MixerConfig:
     canvas_w: int
     canvas_h: int
-    fps: int
+    fps: Any                       # parse_rate: an int, or a Fraction for 30000/1001 and 60000/1001
     sources: Tuple[Source, ...]
     scenes: Tuple[Scene, ...]
     wipes: Tuple[Wipe, ...] = ()
@@ -396,7 +455,7 @@ class MixerConfig:
             color = "sdr" if rendition_color(self.out_color, codec(r), r.color or None, r.tonemap).transfer == "sdr" else "hdr"
             port = r.port or 5004
             return {"rendition": r.id, "codec": "h265" if "hevc" in codec(r) else "h264", "color": color,
-                    "port": port, "mountpoint": janus_mountpoint_id(port), "fps": r.fps}
+                    "port": port, "mountpoint": janus_mountpoint_id(port), "fps": rate_number(r.fps)}
 
         programs = [{**preview(r), **({"audio": True} if r.id == self.audio_rendition or r.audio_port else {})}
                     for r in self.renditions if r.target == "janus" and r.feed == "dirty"]
@@ -409,7 +468,7 @@ class MixerConfig:
         # (application.py), so only its audio_port may show a mute button.
         previews += [{"bus": b.id, "label": aux_label(b.id, b.label, b.layout),
                       "layout": b.layout.get("preset", "cells"), "rendition": r.id,
-                      "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": r.fps,
+                      "codec": "h265" if "hevc" in r.codec else "h264", "color": "sdr", "port": r.port, "mountpoint": janus_mountpoint_id(r.port), "fps": rate_number(r.fps),
                       **({"audio": True} if b.renditions[0].audio_port else {}),
                       **({"group": "Thumbnails", "width": r.width, "height": r.height}
                          if b.layout.get("preset") == "source_thumbnails" else {})}
@@ -417,7 +476,7 @@ class MixerConfig:
         aliases = self.alias_counts
         return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
                 "preview_codecs": preview_codecs, **({"program_outputs": programs} if programs else {}),
-                "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
+                "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": rate_number(self.fps),
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources) for kind in _SOURCE_KEYS},
                 # [source id, kind] per compositor input, in the order of the inputs: each source once
@@ -600,7 +659,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
         raise ConfigError(f"{where}: {e}") from e
     picture = _parse_picture(s["picture"], s, where) if "picture" in s else None
     return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)), picture=picture,
-                  height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
+                  height=int(s.get("height", 0)), fps=parse_rate(s.get("fps", fps), f"{where}.fps") if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
                   has_audio=has_audio, deinterlace=deinterlace,
@@ -616,7 +675,9 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
     base = Rendition(rid, width=canvas_w, height=canvas_h, fps=fps)
     # Every other key coerces to its field's type; unknown keys are ignored.
     rendition = replace(base, **{f.name: type(getattr(base, f.name))(r[f.name])
-                                 for f in fields(Rendition) if f.name in r and f.name != "id"})
+                                 for f in fields(Rendition) if f.name in r and f.name not in ("id", "fps")})
+    if "fps" in r:
+        rendition = replace(rendition, fps=parse_rate(r["fps"], f"{where}.fps"))
     if rendition.tonemap and rendition.tonemap not in OPERATORS:
         raise ConfigError(f"{where}: unsupported tone-map operator")
     if rendition.color:
@@ -644,7 +705,7 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
     if not 0 <= rendition.dpb_size <= MAX_DPB_SIZE:
         raise ConfigError(f"{where}: dpb_size must be from 0 (NVENC decides) to {MAX_DPB_SIZE}")
     if rendition.fps > fps:
-        raise ConfigError(f"{where}: fps {rendition.fps} exceeds the canvas rate {fps}; "
+        raise ConfigError(f"{where}: fps {rate_json(rendition.fps)} exceeds the canvas rate {rate_json(fps)}; "
                           "a rendition can only re-time the program downwards")
     wanted = str(r.get("aspect", ""))
     if wanted and wanted != rendition.aspect:
@@ -718,11 +779,11 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     try:
         # fps is how often the compositor renders; renditions re-time from it.
         canvas_w, canvas_h = int(canvas["width"]), int(canvas["height"])
-        fps = int(canvas.get("fps", DEFAULT_FPS))
     except (KeyError, TypeError, ValueError):
-        raise ConfigError("canvas needs integer width, height and fps") from None
-    if canvas_w <= 0 or canvas_h <= 0 or fps <= 0:
-        raise ConfigError("canvas width, height and fps must be positive")
+        raise ConfigError("canvas needs integer width and height") from None
+    fps = parse_rate(canvas.get("fps", DEFAULT_FPS), "canvas.fps")
+    if canvas_w <= 0 or canvas_h <= 0:
+        raise ConfigError("canvas width and height must be positive")
     working_format = str(canvas.get("working_format", "nv12"))
     if working_format not in WORKING_FORMATS:
         raise ConfigError(f"canvas.working_format must be one of {WORKING_FORMATS}")
@@ -739,7 +800,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
         except (TypeError, ValueError):
             raise ConfigError("canvas.latency_ms must be a number of milliseconds") from None
         if not 0 <= latency_ms < 6000 / fps:
-            raise ConfigError(f"canvas.latency_ms must be at least 0 and below six frames ({6000 / fps:.1f} ms at {fps} fps)")
+            raise ConfigError(f"canvas.latency_ms must be at least 0 and below six frames "
+                              f"({6000 / float(fps):.1f} ms at {rate_number(fps)} fps)")
     source_fan_out = canvas.get("source_fan_out", "thread")
     if source_fan_out not in SOURCE_FAN_OUTS:
         raise ConfigError(f"canvas.source_fan_out must be one of {', '.join(SOURCE_FAN_OUTS)}")
@@ -885,9 +947,13 @@ def aux_label(bus_id, label="", layout=None):
         (layout or DEFAULT_AUX_LAYOUT).get("preset"), f"Aux {bus_id}")
 
 
+AUX_CANVAS_RATES = tuple(parse_rate(rate) for rate in CANVAS_RATES)
+
+
 def aux_fps(fps, full_rate=False):
-    """A bus runs at half the canvas rate at 50/60 fps unless it opts into the full rate."""
-    return fps // 2 if fps in (50, 60) and not full_rate else fps
+    """A bus runs at half the canvas rate at 50/60 fps (59.94 halves to 29.97) unless it opts into
+    the full rate."""
+    return parse_rate(Fraction(fps) / 2) if rate_weight(fps) in (50, 60) and not full_rate else fps
 
 
 PVW_ALIGNMENTS = ("program", "pgm_tile")
@@ -930,8 +996,8 @@ def parse_aux_buses(values, cfg):
     from .aux_layout import PRESETS, check_assignments, count, draws_program, layout_cells, parse_layout, same_kind
     if not isinstance(values, list) or len(values) > 30:
         raise ConfigError("aux_buses must be a list of at most 30 buses")
-    if values and cfg.fps not in (25, 30, 50, 60):
-        raise ConfigError("aux buses support program rates 25, 30, 50 and 60")
+    if values and cfg.fps not in AUX_CANVAS_RATES:
+        raise ConfigError("aux buses support program rates 25, 30000/1001, 30, 50, 60000/1001 and 60")
     result, ids = [], set()
     for obj in values:
         bid = obj.get("id", "")
@@ -1086,7 +1152,7 @@ def _by_codec(streams, count_key: str) -> List[Dict[str, Any]]:
     for codec, fps in streams:
         count, total = totals.get(codec, (0, 0))
         totals[codec] = (count + 1, total + fps)
-    return [{"codec": codec, count_key: count, "fps": round(fps, 2)}
+    return [{"codec": codec, count_key: count, "fps": round(float(fps), 2)}
             for codec, (count, fps) in sorted(totals.items(), key=lambda item: (-item[1][0], item[0]))]
 
 

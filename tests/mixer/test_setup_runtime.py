@@ -38,10 +38,20 @@ def test_generic_setups_expand(tmp_path, count, fps):
 
 @pytest.mark.parametrize('changes', [{'source_count': 0}, {'scene_count': 0}, {'scene_count': 193}, {'fps': 24},
     {'weights': [0] * 5}, {'weights': [True] * 5}, {'resolution': '../../file'}, {'command': 'id'},
-    {'fps': 25.0}, {'bit_depth': 10.0}, {'browser_motion': 'unknown'}])
+    {'fps': 25.0}, {'fps': 29.97}, {'fps': '29.97'}, {'fps': '30'}, {'fps': '30000/1000'},
+    {'bit_depth': 10.0}, {'browser_motion': 'unknown'}])
 def test_reject_unbounded_settings(changes):
     with pytest.raises(ValueError):
         recipe_for(T4, {**DEFAULT_SETTINGS, **changes})
+
+
+@pytest.mark.parametrize("ntsc, whole", [("30000/1001", 30), ("60000/1001", 60)])
+def test_ntsc_rates_are_exact_and_use_the_whole_rate_capacity(ntsc, whole):
+    """29.97 and 59.94 are offered as exact rationals and admit what 30 and 60 fps admit."""
+    for depth, chroma in ((8, "420"), (10, "420"), (10, "422")):
+        assert source_limit(T4, ntsc, depth, chroma) == source_limit(T4, whole, depth, chroma)
+    recipe = recipe_for(T4, {**DEFAULT_SETTINGS, "fps": ntsc})
+    assert recipe["canvas"]["fps"] == ntsc
 
 
 @pytest.mark.parametrize("motion", [None, "static", "dynamic", "half"])

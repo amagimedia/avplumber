@@ -157,6 +157,13 @@ const { chromium } = require('playwright');
     assert.equal(await sources.inputValue(), '80', 'above the maximum is the maximum');
     await page.locator('#fps').selectOption('60');
     assert.equal(await sources.inputValue(), '54', 'and follows it again');
+    // 59.94 is the exact 60000/1001: the 60 fps limits, its own label, and the exact value applied.
+    await page.locator('#fps').selectOption('60000/1001');
+    assert.equal(await sources.inputValue(), '54', '59.94 admits what 60 does');
+    assert.ok((await rows()).some(row => row.startsWith('Program |') && row.includes('· 59.94 fps ·')), 'the program shows 59.94');
+    assert.ok((await rows()).some(row => row.includes('· 29.97 fps ·')), 'the AUX run at half, 29.97');
+    assert.equal((await apply()).fps, '60000/1001');
+    await page.locator('#fps').selectOption('60');
     await reset({...edited, fps: 30, bit_depth: 8, chroma: '420', source_count: 40, dsk: []});
     assert.equal(await sources.inputValue(), '40', 'a saved lower total loads');
     await reset({...edited, fps: 30, bit_depth: 8, chroma: '420', source_count: 110, dsk: []});

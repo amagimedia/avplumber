@@ -27,7 +27,8 @@ import numpy as np
 from demos.mixer.sdr_patterns import GENERATORS, GOP_SHAPES, input_kbps, encoding_options, render
 from demos.mixer.demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic
 from demos.mixer.hdr_patterns import write_hlg
-from pyplumber.mixer.config import MAX_SOURCES, default_browser_frame_queue, earlier_browser_ring_size, parse
+from pyplumber.mixer.config import (MAX_SOURCES, default_browser_frame_queue, earlier_browser_ring_size, paint_rate, parse,
+                                    parse_rate, rate_number)
 
 DEMO_DIR = Path(__file__).resolve().parent
 BROWSER_MOTIONS = ("static", "dynamic", "half")
@@ -145,11 +146,11 @@ def render_hlg(path, width, height, fps, seconds, variant, encoder, ffmpeg, sour
     # Offline conversion of a native HLG signal, not SDR samples tagged as HDR. The pattern
     # depends only on its variant and geometry, and building it in Python is most of the cost,
     # so it is built once per run and every source of the variant encodes it with its own id.
-    raw = pattern_dir / f"{variant}_{width}x{height}_{fps}fps_{seconds}s.v210"
+    raw = pattern_dir / f"{variant}_{width}x{height}_{rate_number(fps)}fps_{seconds}s.v210"
     if not raw.is_file():
         pattern_dir.mkdir(parents=True, exist_ok=True)
         staged = raw.with_name(raw.name + ".partial")
-        write_hlg(staged, width, height, fps * seconds, source=variant)
+        write_hlg(staged, width, height, round(fps * seconds), source=variant)
         staged.replace(raw)
     inputs, graph, data = id_overlay(source_id, width, height, seconds)
     pixel_format = "yuv422p10le" if encoder == "v210" else "p010le"
@@ -207,7 +208,8 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     scene_count = positive_int(recipe["scene_count"], "scene_count")
     canvas = recipe["canvas"]
     width, height = (positive_int(canvas[k], f"canvas.{k}") for k in ("width", "height"))
-    fps = positive_int(canvas.get("fps", 30), "canvas.fps")
+    fps = parse_rate(canvas.get("fps", 30), "canvas.fps")   # an int, or a Fraction for 30000/1001
+    fps_name = f"{rate_number(fps)}fps"                   # cache names: 30fps, 29.97fps
     if width < 64 or height < 64 or width % 2 or height % 2:
         raise ValueError("canvas dimensions must be even and at least 64")
     generation = recipe.get("generation", {})
@@ -285,7 +287,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 extension = raw or ("v210" if chroma == "422" else "mp4")
                 version = 5 if extension == "mp4" else 4   # low-DPB encodes; raw pixels are unchanged
                 shape = f"_{input_kbps(index)}k" + ("" if gop == "low_delay" else f"_{gop}") if extension == "mp4" else ""
-                path = (media_dir / "assets" / f"synthetic_v{version}_{size}_{fps}fps_{seconds}s" /
+                path = (media_dir / "assets" / f"synthetic_v{version}_{size}_{fps_name}_{seconds}s" /
                         f"{source['id']}_{color}_{chroma}_{pattern}_{storage}{shape}.{extension}")
                 encoder = "v210" if chroma == "422" else "rawvideo" if raw else encoder
                 if color == "hlg":
@@ -351,7 +353,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     wipe_size = f"{max(2, round(width * wipe_scale / 2) * 2)}x{max(2, round(height * wipe_scale / 2) * 2)}"
     wipes = []
     for pattern, name in WIPE_NAMES.items():
-        wipe = media_dir / "media_wipes" / f"synthetic_v2_{pattern}_{wipe_size}_{fps}fps.mov"
+        wipe = media_dir / "media_wipes" / f"synthetic_v2_{pattern}_{wipe_size}_{fps_name}.mov"
         jobs[wipe] = lambda out, pattern=pattern: render_wipe(out, wipe_size, fps, ffmpeg, pattern)
         wipes.append({"id": pattern, "name": name, "path": runtime_path(wipe), "duration_seconds": 2})
     scene_list = scenes(sources, width, height, scene_count, recipe["layouts"], seed,
@@ -365,7 +367,7 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
         x, y, w, h = rects[page]
         window_w, window_h = DSK_WINDOWS[page]
         # The clock and lower third hold still between updates; only the ticker and left bug animate continuously.
-        sources.append({"id": f"dsk_{page}", "kind": "browser", "url": page_url(DEMO_DIR / "dsk" / f"{page}.html", fps=fps),
+        sources.append({"id": f"dsk_{page}", "kind": "browser", "url": page_url(DEMO_DIR / "dsk" / f"{page}.html", fps=paint_rate(fps)),
                         "width": window_w, "height": window_h, "color": "sdr",
                         "capture_cadence": "on_change" if page in ("lower_third", "bug_right") else "continuous"})
         # Each window is its graphic and nothing else, so its rectangle is all the keyer needs to compose.

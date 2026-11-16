@@ -40,7 +40,7 @@ GOP_SHAPES = {"low_delay": ["-bf", "0", "-dpb_size", "2"],
 def encoding_options(encoder: str, kbps: int, fps: int, gop: str = "low_delay") -> list:
     # Bound each demo decoder's reference surfaces without reducing its playout buffer.
     references = GOP_SHAPES[gop] if encoder in ("h264_nvenc", "hevc_nvenc") else []
-    return [*rate(kbps), "-g", str(fps), *references]
+    return [*rate(kbps), "-g", str(round(fps)), *references]   # one second; 30 at 30000/1001
 
 
 GENERATORS = {

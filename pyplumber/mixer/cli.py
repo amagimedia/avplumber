@@ -12,10 +12,11 @@ from contextlib import ExitStack
 import logging
 import time
 from dataclasses import dataclass
+from fractions import Fraction
 
 from pyplumber.jsonlog import configure_logging
 from pyplumber.mixer.application import (
-    DEFAULT_FPS, FPS_DEN, HWACCEL, ROUTER_GROUP, JANUS_DEFAULT_HOST, JANUS_DEFAULT_VIDEO_PORT, JANUS_DEFAULT_VIDEO_PT,
+    DEFAULT_FPS, HWACCEL, ROUTER_GROUP, JANUS_DEFAULT_HOST, JANUS_DEFAULT_VIDEO_PORT, JANUS_DEFAULT_VIDEO_PT,
     JANUS_DEFAULT_VIDEO_SSRC, JANUS_DEFAULT_VIDEO_BITRATE_KBPS,
     MixerOptions, MixerApplication, load_avp_api, run_application, _input_group, _pacing_loop, _init_avp, _make_builder, _flag_renditions,
     _build_renditions, _application, build_application as build_config_application,
@@ -27,7 +28,6 @@ from pyplumber.mixer.dmabuf_inputs import (
 )
 from pyplumber.mixer.inputs import build_input
 from pyplumber.mixer.janus import DEFAULT_KEYFRAME_MIN_INTERVAL_MS
-from pyplumber.jsonlog import configure_logging
 from pyplumber.transform import transform_output, transform_params
 
 from .tools.layouts import (
@@ -81,7 +81,7 @@ class GraphOptions(MixerOptions):
 
 
 def _build_input(
-    avp, api, index: int, url: str, *, loop: bool, fps: int, normalize: bool,
+    avp, api, index: int, url: str, *, loop: bool, fps, normalize: bool,
     options: GraphOptions,
 ) -> str:
     group = _input_group(index)
@@ -98,8 +98,9 @@ def _build_input(
         for node in nodes:
             avp.addNode(node)
     else:
-        fps_edge, _audio_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
-                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop, continuous_loop=True,
+        fps_num, fps_den = mixer_config.rate_pair(fps)
+        fps_edge, _audio_edge = build_input(avp, api, str(index), url, group=group, fps=fps_num,
+                               fps_den=fps_den, hwaccel=HWACCEL, loop=loop, continuous_loop=True,
                                event_loop=_pacing_loop(index), native_rate=True)
     if not normalize:
         return fps_edge
@@ -118,7 +119,7 @@ def _build_input(
     return normalized_edge
 
 
-def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int, color: str = "") -> bool:
+def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps, color: str = "") -> bool:
     # Keep the legacy --input routing threshold: larger catalogues use a small
     # router selecting the 16 visible positions, without per-layout branches.
     if len(input_edges) <= DIRECT_INPUT_LIMIT:
@@ -134,7 +135,7 @@ def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int
         "routes": [-1] * len(edges), "labels": labels,
         "width": CANONICAL_SOURCE_WIDTH, "height": CANONICAL_SOURCE_HEIGHT,
         "pixel_format": "cuda", "real_pixel_format": "nv12",
-        "frame_rate": f"{fps}/{FPS_DEN}", "timebase": f"{FPS_DEN}/{fps}",
+        "frame_rate": mixer_config.rate_text(fps), "timebase": mixer_config.rate_text(1 / Fraction(fps)),
         "group": ROUTER_GROUP,
     }))
     for index in range(16):
@@ -223,7 +224,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--output-format", help="Muxer format when it cannot be inferred from the output")
     add("--codec", default="h264_nvenc")
     add("--bitrate", default="8M")
-    add("--fps", type=int, default=DEFAULT_FPS, help=f"Mixer and output frame rate (default: {DEFAULT_FPS})")
+    add("--fps", type=mixer_config.parse_rate, default=DEFAULT_FPS,
+        help=f"Mixer and output frame rate: whole, or exact NTSC such as 30000/1001 (default: {DEFAULT_FPS})")
     add("--wipe-color", default="", choices=("sdr",),
         help="Override wipe color tags as SDR (default: preserve tags, assume SDR for missing tags)")
     add("--input-color", default="", choices=("", "sdr", "hlg", "pq"),
