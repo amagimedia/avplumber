@@ -10,5 +10,6 @@ def test_compositor_affine(cpp_binary):
     if not library.exists():
         pytest.skip("build avcpp first")
     binary = cpp_binary("test_compositor_affine", sources=(str(library),),
-                        libs=("libavutil", "libavcodec", "libavformat"))
+                        libs=("libavutil", "libavcodec", "libavformat", "libavdevice",
+                              "libavfilter", "libswscale", "libswresample"))
     subprocess.run([str(binary)], check=True, timeout=10)

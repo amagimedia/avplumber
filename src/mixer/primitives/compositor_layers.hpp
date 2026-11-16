@@ -8,6 +8,7 @@
 #include "pixel_layout.hpp"
 #include <avcpp/frame.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iterator>
 #include <optional>
@@ -49,6 +50,9 @@ struct LayerSpec {
     bool pivot_set = false;
     double pivot_x = 0, pivot_y = 0;
     std::optional<RectF> crop_exact;
+    // Allowed source content in visible-picture pixels. Clips coverage and filter taps
+    // without changing the crop-to-destination map (for moving broadcast insets).
+    std::optional<RectF> source_clip;
     // A box with a fractional value, the twin of crop_exact, whose enclosing rect is in dst_*.
     // Written by the move transition (layer_move.hpp), never parsed from JSON.
     std::optional<RectF> dst_exact;
@@ -56,6 +60,12 @@ struct LayerSpec {
     // frame's metadata. Part of a layer's description (parseLayersArray); per-frame metadata,
     // which re-parses the geometry, cannot change it.
     bool debug = false;
+    // Optional identity for independent framings of the same input. Legacy
+    // scenes omit it and retain occurrence-order matching in moveLayers.
+    std::string move_id;
+    // Optional source-code LUT, before resampling. NV12 only; Y, U, V tables
+    // of 256 exact codes keep a quantized effect identical under any filter.
+    std::optional<std::array<std::array<uint8_t, 256>, 3>> yuv_lut;
 
     /// The source this layer draws: `input`, or its position in the legacy one-layer-per-input order.
     size_t sourceIndex(size_t position) const { return input < 0 ? position : size_t(input); }
@@ -70,15 +80,15 @@ struct LayerSpec {
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
                source_canvas_w == other.source_canvas_w && source_canvas_h == other.source_canvas_h &&
                rotation_deg == other.rotation_deg && pivot_set == other.pivot_set && pivot_x == other.pivot_x &&
-               pivot_y == other.pivot_y && crop_exact == other.crop_exact && dst_exact == other.dst_exact &&
-               debug == other.debug;
+               pivot_y == other.pivot_y && crop_exact == other.crop_exact && source_clip == other.source_clip && dst_exact == other.dst_exact &&
+               debug == other.debug && move_id == other.move_id && yuv_lut == other.yuv_lut;
     }
 };
 
 /// Whether a layer draws through the affine entry: rotated, cropped or placed at a fraction of a
 /// pixel, or a faded layer that is not a blended key (a blended key fades by its table mul).
 inline bool needsTransform(const LayerSpec &l) {
-    return normalizedRotation(l.rotation_deg) != 0. || l.crop_exact.has_value() || l.dst_exact.has_value() ||
+    return normalizedRotation(l.rotation_deg) != 0. || l.crop_exact.has_value() || l.source_clip.has_value() || l.dst_exact.has_value() ||
            (l.opacity < 1.f && !l.blend);
 }
 
@@ -126,6 +136,24 @@ inline void parseFilterFromJson(const Parameters &obj, FilterSpec &out) {
 
 inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     out.input = obj.value("input", out.input);
+    out.move_id = obj.value("move_id", out.move_id);
+    if (obj.contains("yuv_lut")) {
+        const auto &lut = obj.at("yuv_lut");
+        if (lut.is_null()) out.yuv_lut.reset();
+        else {
+            if (!lut.is_array() || lut.size() != 3) throw Error("yuv_lut: need Y, U and V tables");
+            std::array<std::array<uint8_t, 256>, 3> codes{};
+            for (size_t p = 0; p < 3; ++p) {
+                if (!lut[p].is_array() || lut[p].size() != 256) throw Error("yuv_lut: each table needs 256 codes");
+                for (size_t i = 0; i < 256; ++i) {
+                    const auto &v = lut[p][i];
+                    if (!v.is_number_integer() || v < 0 || v > 255) throw Error("yuv_lut: codes must be integers in 0..255");
+                    codes[p][i] = v.get<uint8_t>();
+                }
+            }
+            out.yuv_lut = std::move(codes);
+        }
+    }
     if (out.input < -1) throw Error("cuda_rect_overlay: invalid input index");
     if (obj.contains("tile")) {
         const auto &t = obj.at("tile");
@@ -163,12 +191,22 @@ inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     }
     if (out.dst_w < 0 || out.dst_h < 0 || (out.dst_w == 0) != (out.dst_h == 0))
         throw Error("cuda_rect_overlay: dst_w and dst_h must both be positive or both omitted");
+    out.source_clip.reset();
+    if (obj.contains("source_clip") && !obj.at("source_clip").is_null()) {
+        const auto &c = obj.at("source_clip");
+        const RectF r{c.at("x").get<double>(), c.at("y").get<double>(),
+                      c.at("w").get<double>(), c.at("h").get<double>()};
+        if (!std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.w) || !std::isfinite(r.h) ||
+            !std::isfinite(r.x + r.w) || !std::isfinite(r.y + r.h) || !(r.w > 0) || !(r.h > 0))
+            throw Error("cuda_rect_overlay: source_clip needs finite coordinates and positive dimensions");
+        out.source_clip = r;
+    }
     if (obj.contains("crop") && obj["crop"].is_object()) {
         const auto &c = obj["crop"];
         const double x = c.value("x", 0.), y = c.value("y", 0.), w = c.value("w", 0.), h = c.value("h", 0.);
         if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h))
             throw Error("cuda_rect_overlay: crop must be finite");
-        if (x != std::floor(x) || y != std::floor(y) || w != std::floor(w) || h != std::floor(h)) {
+        if (obj.value("crop_subpixel", false) || x != std::floor(x) || y != std::floor(y) || w != std::floor(w) || h != std::floor(h)) {
             // A sub-pixel crop draws through the affine entry; the integer fields enclose it.
             if (!(w > 0) || !(h > 0)) throw Error("cuda_rect_overlay: a fractional crop needs w and h");
             out.crop_exact = RectF{x, y, w, h};
@@ -421,9 +459,16 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
         auto &l = op.layer;
         t.crop.x += visible.x;
         t.crop.y += visible.y;
-        const double ex0 = std::max(t.crop.x, double(visible.x)), ey0 = std::max(t.crop.y, double(visible.y));
-        const double ex1 = std::min(t.crop.x + t.crop.w, double(visible.x) + visible.w);
-        const double ey1 = std::min(t.crop.y + t.crop.h, double(visible.y) + visible.h);
+        double ex0 = std::max(t.crop.x, double(visible.x)), ey0 = std::max(t.crop.y, double(visible.y));
+        double ex1 = std::min(t.crop.x + t.crop.w, double(visible.x) + visible.w);
+        double ey1 = std::min(t.crop.y + t.crop.h, double(visible.y) + visible.h);
+        if (l.source_clip) {
+            const auto &c = *l.source_clip;
+            ex0 = std::max(ex0, c.x + visible.x);
+            ey0 = std::max(ey0, c.y + visible.y);
+            ex1 = std::min(ex1, c.x + c.w + visible.x);
+            ey1 = std::min(ey1, c.y + c.h + visible.y);
+        }
         t.edges = {ex0, ey0, ex1 - ex0, ey1 - ey0};
         if (std::isnan(t.pivot_x)) {
             t.pivot_x = t.box.x + t.box.w / 2.;
@@ -455,7 +500,7 @@ inline bool copiesWholeFrame(const std::vector<DrawOp> &ops, int canvas_w, int c
         return false;
     const LayerSpec &l = ops[0].layer;
     const int dst_w = l.dst_w ? l.dst_w : l.crop_w, dst_h = l.dst_h ? l.dst_h : l.crop_h;
-    return !l.blend && ops[0].src_w == canvas_w && ops[0].src_h == canvas_h &&
+    return !l.blend && !l.yuv_lut && ops[0].src_w == canvas_w && ops[0].src_h == canvas_h &&
            l.crop_x == 0 && l.crop_y == 0 && l.crop_w == canvas_w && l.crop_h == canvas_h &&
            l.dst_x == 0 && l.dst_y == 0 && dst_w == canvas_w && dst_h == canvas_h;
 }

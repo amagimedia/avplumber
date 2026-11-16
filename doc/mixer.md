@@ -54,6 +54,65 @@ edge's first frame. A callback exception or invalid edge name shuts down the
 partially built engine. Face policy and inference construction belong to the
 calling application; this callback does not implement bounding-box rendering.
 
+## Source-paced compositions
+
+`pyplumber.mixer.source_compositor(params)` uses the same CUDA drawing backend
+when the application owns pacing, timestamps and EOF (for example, a buffered
+single-input reframer). It builds `cuda_rect_overlay`, without a separate output
+clock. Ordinary `metadata_key` layer updates retain their existing behaviour.
+
+For a move, set `move_metadata_key` and attach JSON from a `SourceMove` to that
+key on each source frame. `move_metadata_input` selects the input carrying it
+(default 0). The endpoints are complete layer arrays, including any backdrop.
+
+```python
+import json
+from pyplumber.mixer import SourceMove
+
+take = SourceMove(old_layers, new_layers, start=source_pts_seconds,
+                  duration=0.8, curve="ease-in-out")
+# For each frame during this take:
+frame.metadata["composition_move"] = json.dumps(take.at(frame_pts_seconds))
+```
+
+Create the take once: its endpoint snapshots remain fixed as detections change.
+The native renderer reuses the mixer's `moveLayers` and `fadeCurveAt`, including
+`linear`, `ease-in`, `ease-out` and `ease-in-out`. Input identities must remain
+stable across both endpoints. Set `move_id` on each independently framed layer:
+layers match by `(input, move_id)`, so several crops may read input 0 without
+swapping when their list order changes. Omitted IDs retain occurrence-order matching.
+To slide a layer out, retain it in
+the destination with an off-canvas rectangle, then omit it after the take.
+Do not attach a move request to EOF. Once finished, remove the metadata key and
+supply the destination through the ordinary layer metadata. Shot-cut policy,
+layout stabilisation and selection of endpoints belong to the caller.
+
+Continuous moves preserve exact source coordinates even at integral odd pixels;
+they never briefly revert to chroma-aligned integer placement. A caller supplying
+its own continuous crop trajectory (for example an L1 viewport node) should set
+`crop_subpixel: true` on that layer. It requires a positive crop width/height and
+keeps the affine sampling path at every position. Ordinary integer crops retain
+legacy alignment. Unchanged layers keep their original sampling path during
+another layer's move, avoiding unnecessary backdrop resampling changes.
+
+A layer can constrain its sampled content with `source_clip: {x, y, w, h}` in
+visible-source pixels. Unlike changing `crop`, this clips coverage and filter
+taps without rescaling or moving the picture inside the destination. This keeps
+an eased crop from revealing neighbouring broadcast insets. Fractional bounds
+are supported; width and height must be positive. An empty intersection draws
+nothing. Omitted or null `source_clip` clears it on a metadata override. The
+existing CUDA affine sampler applies the boundary without a CPU image copy.
+During a move between matched layers, the destination layer's source boundary
+applies; entering and exiting layers retain their own boundary.
+
+An NV12 layer can set `yuv_lut` to three 256-entry integer arrays (Y, U, V;
+each code in 0..255). The existing CUDA sampler maps each source texel before
+interpolation, preserving effects that quantize before enlargement. For example,
+a white-wash lookup table can replace a CPU `lutyuv` round trip. The table is
+static layer configuration; no video pixels cross to the CPU. Omit it to retain
+the configured effect on a metadata override, or use `null` to clear it. It is
+rejected for other source/canvas formats rather than silently changing colors.
+
 ## Pacing loops and redundant colour tags
 
 File-source `realtime` and browser `smooth_timestamps` callbacks are distributed

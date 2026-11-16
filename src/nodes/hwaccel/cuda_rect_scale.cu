@@ -136,13 +136,25 @@ struct LanePlane {
     unsigned long long src;
     bool textured;
     int pitch, sx, sy, sw, sh, lanes, bytes, shift;
+    const unsigned char *lut = nullptr; // Y table or the adjacent U/V tables
     __device__ __forceinline__ float load(int x, int y, int c) const {
-        return load_lane(src, textured, pitch, x, y, lanes, c, bytes, shift);
+        const float code = load_lane(src, textured, pitch, x, y, lanes, c, bytes, shift);
+        return lut ? float(lut[c * 256 + int(code)]) : code;
     }
     __device__ __forceinline__ float blend(int x0, int x1, float tx, RowTaps rows, int c) const {
+        if (lut) {
+            const float a = load(x0, rows.y0, c), b = load(x1, rows.y0, c);
+            const float d = load(x0, rows.y1, c), e = load(x1, rows.y1, c);
+            const float top = a + tx * (b - a), bottom = d + tx * (e - d);
+            return top + rows.ty * (bottom - top);
+        }
         return blend_lane(src, textured, pitch, lanes, c, bytes, shift, x0, x1, tx, rows);
     }
     __device__ __forceinline__ float bilinear(float fx, RowTaps rows, int c) const {
+        if (lut) {
+            const int ix = int(floorf(fx));
+            return blend(sx + max(0, min(ix, sw - 1)), sx + max(0, min(ix + 1, sw - 1)), fx - ix, rows, c);
+        }
         return sample_lane_at(src, textured, pitch, sx, sw, lanes, c, bytes, shift, fx, rows);
     }
 };
@@ -440,7 +452,7 @@ __device__ __forceinline__ void composite_body(
                     const bool same = L.kind == AVP_RECT_KIND_YUV;
                     const LanePlane P = {L.src[plane], kArrays && L.yuv_texture, L.src_pitch[plane], L.sx[plane], L.sy[plane],
                                          L.sw[plane], L.sh[plane], lanes, same ? dst_sb : L.src_bytes,
-                                         same ? dst_shift : L.src_shift};
+                                         same ? dst_shift : L.src_shift, L.yuv_lut ? L.lut[plane] : nullptr};
                     draw_affine_yuv<px, lanes>(acc, L, P, plane, X0, Y, ldx, ldw, same ? 1.f : L.mul, maxv);
                 } else if (kRgb) {
                     draw_affine_rgb<px, lanes, kChroma, kOpacity>(acc, L, X0, Y, ldx, ldw, sub_x, sub_y, canvas_w, canvas_h,
@@ -457,9 +469,10 @@ __device__ __forceinline__ void composite_body(
                 const int bytes = L.kind == AVP_RECT_KIND_YUV ? dst_sb : L.src_bytes;
                 const int shift = L.kind == AVP_RECT_KIND_YUV ? dst_shift : L.src_shift;
                 const float mul = L.mul;
-                if (kFilters && (L.filter != AVP_RECT_FILTER_BILINEAR || L.kind == AVP_RECT_KIND_DEMOTE)) {
+                if (kFilters && (L.yuv_lut || L.filter != AVP_RECT_FILTER_BILINEAR || L.kind == AVP_RECT_KIND_DEMOTE)) {
                     // One branch per layer and thread; the sample loops below it are fixed.
-                    const LanePlane P = {src, kArrays && L.yuv_texture, pitch, sx, sy, sw, sh, lanes, bytes, shift};
+                    const LanePlane P = {src, kArrays && L.yuv_texture, pitch, sx, sy, sw, sh, lanes, bytes, shift,
+                                         L.yuv_lut ? L.lut[plane] : nullptr};
                     const float gain = L.kind == AVP_RECT_KIND_YUV ? 1.f : mul;
                     if (L.filter == AVP_RECT_FILTER_BILINEAR)
                         draw_filtered<px, lanes>(acc, P, BilinearFilter(P, oy, ldh), X0, ldx, ldw, gain, maxv);

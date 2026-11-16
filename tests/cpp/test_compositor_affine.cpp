@@ -193,6 +193,47 @@ static void transformed_op_never_copies_the_whole_frame(const av::VideoFrame &fr
     assert(ops[0].transform && !copiesWholeFrame(ops, 1920, 1080));
 }
 
+static void source_boundary_keeps_the_mapping(const av::VideoFrame &frame) {
+    for (double angle : {0., 30., 90.}) {
+        auto layer = parse(R"({"crop":{"x":100.25,"y":20,"w":1400,"h":900},
+            "dst_w":1080,"dst_h":720,"crop_subpixel":true})");
+        layer.rotation_deg = angle;
+        const auto whole = resolveDrawOps({&frame}, {layer}, 1080, 1920, AV_PIX_FMT_NV12);
+        layer.source_clip = RectF{800.5, 100.25, 600, 600};
+        const auto clipped = resolveDrawOps({&frame}, {layer}, 1080, 1920, AV_PIX_FMT_NV12);
+        assert(clipped[0].src && clipped[0].transform);
+        const auto &t = *clipped[0].transform;
+        assert(t.crop == whole[0].transform->crop && t.box == whole[0].transform->box);
+        assert((t.edges == RectF{800.5, 100.25, 600, 600}));
+        for (int sub : {0, 1}) {
+            const auto a = *affinePlane(*whole[0].transform, sub, sub, sub, sub);
+            const auto b = *affinePlane(t, sub, sub, sub, sub);
+            for (int i = 0; i < 6; ++i) assert(a.m[i] == b.m[i]);
+            assert(b.edge[0] == float(800.5 / (1 << sub)));
+            assert(b.edge[3] == float(700.25 / (1 << sub)));
+        }
+        assert(!(whole[0] == clipped[0]));
+    }
+    assert(!resolve(R"([{"source_clip":{"x":2000,"y":0,"w":100,"h":100}}])", frame)[0].src);
+    const auto bounded = resolve(R"([{"source_clip":{"x":-100,"y":-100,"w":3000,"h":2000}}])", frame);
+    assert((bounded[0].transform->edges == RectF{0, 0, 1920, 1080}));
+    assert(!copiesWholeFrame(bounded, 1920, 1080));
+    auto clipped = parse(R"({"source_clip":{"x":800,"y":100,"w":600,"h":600}})");
+    assert(needsTransform(clipped));
+    assert(!parse("{}", clipped).source_clip);
+    assert(!parse(R"({"source_clip":null})", clipped).source_clip);
+    assert(throws(R"({"source_clip":{"x":0,"y":0,"w":0,"h":10}})"));
+    assert(throws(R"({"source_clip":{"x":0,"y":0,"w":10,"h":-1}})"));
+    assert(throws(R"({"source_clip":{"x":1e308,"y":0,"w":1e308,"h":1}})"));
+    assert(throws(R"({"source_clip":{"x":0,"y":0}})"));
+
+    av::VideoFrame padded(AV_PIX_FMT_NV12, 1920, 1080);
+    padded.raw()->crop_left = 16;
+    padded.raw()->crop_top = 8;
+    const auto visible = resolve(R"([{"source_clip":{"x":800,"y":100,"w":600,"h":600}}])", padded);
+    assert((visible[0].transform->edges == RectF{816, 108, 600, 600}));
+}
+
 // Today's chain (cuda_rect_draw.cpp launch()), verbatim: tables without an affine layer keep it.
 static CompositeEntry before(const TableKinds &k, int planes) {
     return planes == 1 ? CompositeEntry::Packed4
@@ -251,4 +292,5 @@ int main() {
     rotated_tile_layer_clips_to_its_tile(frame);
     drawop_equality_sees_the_transform(frame);
     transformed_op_never_copies_the_whole_frame(frame);
+    source_boundary_keeps_the_mapping(frame);
 }

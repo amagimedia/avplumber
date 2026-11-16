@@ -58,4 +58,6 @@ struct AvpRectLayer {
     float aa[2][2];                   // destination samples per source unit across a u- and a v-edge
     float footprint[2][2];            // source units per destination sample along u and v (multisample)
     float transparency;               // 1 - opacity of a faded non-blend layer: scales the coverage (0: opaque)
+    int yuv_lut;                       // NV12 source codes transformed BEFORE resampling
+    unsigned char lut[3][256];          // Y, U, V; unused unless yuv_lut is set
 };

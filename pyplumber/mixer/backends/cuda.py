@@ -15,6 +15,11 @@ class CudaMixerBackend:
             from pyplumber import node as api
         return (api.MixerKeyer if keyer else api.MixerCompositor)(params)
 
+    def source_compositor(self, params, *, api=None):
+        if api is None:
+            from pyplumber import node as api
+        return api.CudaRectOverlay(params)
+
     def transition(self, params):
         from pyplumber.node import FilterVideo
         return FilterVideo({"graph": "transition_cuda=alpha='0':eval=frame:metadata_prefix=avp.source.", "threads": self.graph_threads, **params})

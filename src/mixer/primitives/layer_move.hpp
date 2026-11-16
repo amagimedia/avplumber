@@ -1,7 +1,8 @@
 #pragma once
 // Move transition: Program's scene A glides into scene B on B's slot, in the slot's one launch.
 //
-// Layers are matched by source (the k-th layer of a source in A with the k-th in B). A matched
+// Layers are matched by source and optional move_id (without ids, the k-th occurrence in A
+// matches the k-th in B). A matched
 // layer is placed at both ends against its frame (contain and source_canvas resolved there). Its
 // camera picture then moves as one picture: the whole picture's place on the canvas glides
 // geometrically from A's to B's (zoomRect) and the box glides on its own, clipping it, so nothing
@@ -158,11 +159,22 @@ inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, con
     for (size_t j = 0; j < to.size(); ++j) {
         const size_t input = to[j].sourceIndex(j);
         size_t i = 0;
-        while (i < from.size() && (used[i] || from[i].sourceIndex(i) != input)) ++i;
+        while (i < from.size() && (used[i] || from[i].sourceIndex(i) != input ||
+                                  from[i].move_id != to[j].move_id)) ++i;
         if (i == from.size()) continue;
         used[i] = placed_b[j] = true;
         const av::VideoFrame *src = frame(input);
         if (!src || !src->raw()) continue;   // nothing to draw either end from
+        if (from[i] == to[j]) {
+            // A stationary backdrop must keep its original sampling path. Routing
+            // it through affine interpolation for another layer's move can change
+            // its pixels despite identical endpoints.
+            LayerSpec l = to[j];
+            l.input = int(input);
+            glide_a[i] = glide_b[j] = int(items.size());
+            items.push_back({double(l.z), std::move(l), -1, false, std::nullopt});
+            continue;
+        }
         const auto a = placedPose(from[i], src, fmt), b = placedPose(to[j], src, fmt);
         // The picture both ends show, and each end's crop of it in frame pixels: the visible frame,
         // or a face sheet's reference tile with the ends read through the frame's tile layers.
@@ -217,6 +229,10 @@ inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, con
         l.fit = false;
         l.source_canvas_w = l.source_canvas_h = 0;
         setLayerCrop(l, {x0, y0, x1 - x0, y1 - y0});
+        // A continuous move also passes through integral ODD coordinates. Keep
+        // those exact: placement's legacy chroma alignment would snap them back
+        // to even pixels for one tick, then return to the fractional path.
+        l.crop_exact = RectF{x0, y0, x1 - x0, y1 - y0};
         l.dst_exact = bx;
         l.dst_x = int(std::floor(bx.x));
         l.dst_y = int(std::floor(bx.y));
