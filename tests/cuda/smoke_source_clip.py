@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 from _harness import drain, finish, make_avp, nv12_planes, start
 from pyplumber import node as api
-from pyplumber.mixer import source_compositor
+from pyplumber.composition import source_compositor
 
 W, H, FRAMES = 384, 216, 48
 

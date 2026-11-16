@@ -56,7 +56,8 @@ calling application; this callback does not implement bounding-box rendering.
 
 ## Source-paced compositions
 
-`pyplumber.mixer.source_compositor(params)` uses the same CUDA drawing backend
+The [public composition API](composition.md) is shared by the mixer and standalone callers.
+`pyplumber.composition.source_compositor(params)` uses the same CUDA drawing backend
 when the application owns pacing, timestamps and EOF (for example, a buffered
 single-input reframer). It builds `cuda_rect_overlay`, without a separate output
 clock. Ordinary `metadata_key` layer updates retain their existing behaviour.
@@ -67,7 +68,7 @@ key on each source frame. `move_metadata_input` selects the input carrying it
 
 ```python
 import json
-from pyplumber.mixer import SourceMove
+from pyplumber.composition import SourceMove
 
 take = SourceMove(old_layers, new_layers, start=source_pts_seconds,
                   duration=0.8, curve="ease-in-out")

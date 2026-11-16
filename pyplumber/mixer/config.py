@@ -19,12 +19,13 @@ from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
+from pyplumber.composition.motion import DEFAULT_FADE_CURVE, FADE_CURVES as FADE_CURVES, MOVE_UNMATCHED, validate_curve
+from pyplumber.composition.nodes import MAX_INPUTS as MAX_SOURCES
+
 from .color import Color, declared_color, default_codec, rendition_color, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
 
 FITS = ("stretch", "contain", "cover")
 TRANSITIONS = ("cut", "fade", "wipe", "move")
-# What a move does with a source in only one of its two scenes (layer_move.hpp).
-MOVE_UNMATCHED = ("fade", "cut")
 # Compositor/transition working formats: the semiplanar family only. NV12 is the
 # 8-bit default; P010/P210 are 10-bit 4:2:0/4:2:2. Planar layouts are excluded on
 # purpose: the compositor cannot promote 8-bit sources or draw the RGBA wipe
@@ -38,16 +39,11 @@ RAW_UPLOADS = ("hwupload", "pinned", "direct", "resident")
 INPUT_ROUTINGS = ("input", "demux")   # which node sends a file's video stream to its decoder
 SOURCE_FAN_OUTS = ("thread", "event_loop")   # what hands a source's frames to the compositors
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
-MAX_SOURCES = 193         # mixer_compositor active_inputs is a 193-bit pad mask (SourceMask, kSourceMaskBits)
 DEFAULT_MAX_COMPOSITOR_LAYERS = 640
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
 FEEDS = ("dirty", "clean")
 MAX_DSK_KEYS = 4          # the downstream keyer stays one small pass: program + up to four keys
-# Fade easing presets, the names src/mixer/primitives/fade_curve.hpp parses; linear is what fades
-# did before curves existed.
-FADE_CURVES = ("linear", "ease-in", "ease-out", "ease-in-out")
-DEFAULT_FADE_CURVE = "linear"
 MAX_KEY_FADE_SECONDS = 10.0   # mixer_keyer rejects fade_inputs duration_ms above 10000
 MAX_DPB_SIZE = 16             # H.264/HEVC allow at most 16 reference frames
 # A CUarray decoder's pool (decode_storage "cuarray"): NVDEC registers at most 32 surfaces, and
@@ -96,9 +92,10 @@ def nvdec_pool_surfaces(codec_surfaces: int, extra_hw_frames: int) -> int:
 
 def fade_curve(value: Any, where: str) -> str:
     """A fade curve preset name; *where* names the field or command in the error."""
-    if not isinstance(value, str) or value not in FADE_CURVES:
-        raise ConfigError(f"{where} must be one of {', '.join(FADE_CURVES)}")
-    return value
+    try:
+        return validate_curve(value, where)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
 
 
 def fade_color(value: Any, where: str) -> Optional[str]:
