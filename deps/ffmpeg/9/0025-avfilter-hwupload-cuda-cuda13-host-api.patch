@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Mon, 16 Nov 2026 14:40:00 +0100
+Subject: [PATCH] avfilter/hwupload_cuda: guard pinned staging on nv-codec-headers >= 13.1
+
+CUDA 13.0 (driver 595.x) dropped cuMemHostAlloc/cuMemFreeHost from the driver
+API; 13.1 restored them. Compile the pinned-staging opt-in only when the
+headers provide the calls, and refuse the option otherwise. The recorder
+pipeline is GPU-native and never enables pinned upload, so the default path
+is unaffected.
+---
+ libavfilter/vf_hwupload_cuda.c | 23 +++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+@@ -113,8 +113,12 @@ static void pinned_uninit(AVFilterContext *ctx)
+         CHECK_CU(cu->cuModuleUnload(s->module));
+     s->packed = 0;
+     s->module = NULL;
++#if defined(NVENCAPI_MAJOR_VERSION) && (NVENCAPI_MAJOR_VERSION > 13 \
++    || (NVENCAPI_MAJOR_VERSION == 13 && NVENCAPI_MINOR_VERSION >= 1))
++    /* CUDA 13.0 dropped the legacy host-pin driver APIs; 13.1 restored them. */
+     if (s->staging)
+         CHECK_CU(cu->cuMemFreeHost(s->staging));
++#endif
+     if (s->readers_done)
+         CHECK_CU(cu->cuEventDestroy(s->readers_done));
+     if (s->upload_stream)
+@@ -146,8 +150,19 @@ static int pinned_init(AVFilterContext *ctx, AVHWFramesContext *frames)
+     ret = CHECK_CU(cu->cuStreamCreate(&s->upload_stream, CU_STREAM_NON_BLOCKING));
+     if (ret >= 0)
+         ret = CHECK_CU(cu->cuEventCreate(&s->readers_done, CU_EVENT_DISABLE_TIMING));
++#if defined(NVENCAPI_MAJOR_VERSION) && (NVENCAPI_MAJOR_VERSION > 13 \
++    || (NVENCAPI_MAJOR_VERSION == 13 && NVENCAPI_MINOR_VERSION >= 1))
++    /* CUDA 13.0 dropped the legacy host-pin driver APIs; 13.1 restored them.
++     * The recorder pipeline is GPU-native and never enables pinned upload, so
++     * refusing the option on older headers keeps the default path intact. */
+     if (ret >= 0)
+         ret = CHECK_CU(cu->cuMemHostAlloc((void **)&s->staging, size, 0));
++#else
++    if (s->pinned) {
++        av_log(ctx, AV_LOG_ERROR, "pinned staging needs nv-codec-headers >= 13.1\n");
++        ret = AVERROR(ENOSYS);
++    }
++#endif
+ #if CONFIG_CUDA_NVCC || CONFIG_CUDA_LLVM
+     if (ret >= 0 && s->v210_width) {
+         extern const unsigned char ff_vf_hwupload_cuda_ptx_data[];
