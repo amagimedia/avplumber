@@ -9,8 +9,10 @@ headers provide the calls, and refuse the option otherwise. The recorder
 pipeline is GPU-native and never enables pinned upload, so the default path
 is unaffected.
 ---
- libavfilter/vf_hwupload_cuda.c | 23 +++++++++++++++++++++--
- 1 file changed, 21 insertions(+), 2 deletions(-)
+diff --git a/libavfilter/vf_hwupload_cuda.c b/libavfilter/vf_hwupload_cuda.c
+index 22468d2..36b7c0a 100644
+--- a/libavfilter/vf_hwupload_cuda.c
++++ b/libavfilter/vf_hwupload_cuda.c
 @@ -113,8 +113,12 @@ static void pinned_uninit(AVFilterContext *ctx)
          CHECK_CU(cu->cuModuleUnload(s->module));
      s->packed = 0;
