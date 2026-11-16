@@ -251,7 +251,7 @@ private:
         if (pkt.message_type == avp_fabric::MSG_FRAME_STATUS) {
             timeline_.ingestStatus(media, pkt.receiver_wallclock_ns, controlSender());
         } else if (pkt.message_type == avp_fabric::MSG_MEDIA) {
-            timeline_.ingestMedia(media, pkt.packet.data(), pkt.packet.size(), pkt.receiver_wallclock_ns);
+            timeline_.ingestMedia(media, pkt.packet, pkt.receiver_wallclock_ns);
         }
         received_++;
     }
@@ -476,7 +476,7 @@ private:
         out.receiver_wallclock_ns = avp_fabric::monotonicNs();
         out.raw_pts = candidate.media.pts;
         out.raw_dts = candidate.media.dts;
-        out.packet = av::Packet(candidate.payload);
+        out.packet = candidate.payload;
         out.complete = true;
         applyPacketTiming(out);
         return out;

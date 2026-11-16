@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <poll.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,6 +25,7 @@ class FabricSourceNode: public NodeSingleOutput<FabricPacket>,
     std::string addr_file_;
     size_t max_payload_bytes_ = 4 * 1024 * 1024;
     size_t queue_depth_ = 64;
+    size_t rx_buffers_ = 16;
     av::FormatContext format_ctx_;
     av::Stream stream_;
     std::vector<std::unique_ptr<avp_fabric::RdmReceiver>> receivers_;
@@ -53,6 +55,9 @@ public:
         addr_file_ = params.value("addr_file", std::string());
         max_payload_bytes_ = params.value("max_payload_bytes", max_payload_bytes_);
         queue_depth_ = params.value("queue_depth", queue_depth_);
+        // Receive buffers posted per port. Packets downstream hold theirs until freed, so this must
+        // exceed the output queue plus what the selector and decoder hold.
+        rx_buffers_ = params.value("rx_buffers", rx_buffers_);
 
         if (params.count("reference_url")) {
             av::Dictionary opts;
@@ -109,7 +114,7 @@ public:
         for (size_t i = 0; i < bind_ports_.size(); ++i) {
             const std::string addr_file = i == 0 ? addr_file_ : std::string();
             receivers_.push_back(std::make_unique<avp_fabric::RdmReceiver>(
-                provider_, bind_host_, bind_ports_[i], addr_file, max_msg, queue_depth_, "fabric_source"));
+                provider_, bind_host_, bind_ports_[i], addr_file, max_msg, rx_buffers_, "fabric_source"));
         }
     }
 
@@ -149,38 +154,59 @@ public:
     }
 
 private:
-    bool receiveOne(FabricPacket &out) {
+    // Waits on every port at once: its completion queue (where the provider has a descriptor)
+    // and its wake eventfd (returned buffers, stop).
+    bool nextMessage(size_t &receiver_idx, avp_fabric::RdmReceiver::Message &m) {
         if (receivers_.empty()) throw Error("fabric_source has no receivers");
-        size_t receiver_idx = 0;
-        size_t len = 0;
-        if (receivers_.size() == 1) {
-            if (!receivers_[0]->recvOne(len)) return false;
-        } else {
-            while (!stopping_.load(std::memory_order_acquire)) {
-                for (size_t i = 0; i < receivers_.size(); ++i) {
-                    const size_t idx = (next_receiver_ + i) % receivers_.size();
-                    if (receivers_[idx]->tryRecvOne(len)) {
-                        receiver_idx = idx;
-                        next_receiver_ = (idx + 1) % receivers_.size();
-                        goto got_record;
-                    }
+        while (!stopping_.load(std::memory_order_acquire)) {
+            for (size_t i = 0; i < receivers_.size(); ++i) {
+                const size_t idx = (next_receiver_ + i) % receivers_.size();
+                if (receivers_[idx]->tryNext(m)) {
+                    receiver_idx = idx;
+                    next_receiver_ = (idx + 1) % receivers_.size();
+                    return true;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            return false;
+            std::vector<pollfd> fds;
+            bool can_block = true;
+            bool all_fd = true;
+            for (auto &r: receivers_) {
+                can_block = r->addWaitFds(fds) && can_block;
+                all_fd = all_fd && r->hasWaitFd();
+            }
+            if (!can_block) continue;
+            ::poll(fds.data(), fds.size(), all_fd ? 100 : 1);
+            for (auto &r: receivers_) r->consumeWake();
         }
-got_record:
-        const avp_fabric::RdmReceiver *receiver = receivers_[receiver_idx].get();
+        return false;
+    }
+
+    bool receiveOne(FabricPacket &out) {
+        size_t receiver_idx = 0;
+        avp_fabric::RdmReceiver::Message msg;
+        if (!nextMessage(receiver_idx, msg)) return false;
+        avp_fabric::RdmReceiver *receiver = receivers_[receiver_idx].get();
+        const size_t len = msg.len;
         if (len < sizeof(avp_fabric::WireHeader) + sizeof(avp_fabric::MediaHeader)) {
+            receiver->release(msg);
             throw Error("fabric_source received message shorter than AVP headers");
         }
 
-        const auto *wire = reinterpret_cast<const avp_fabric::WireHeader *>(receiver->data());
+        const auto *wire = reinterpret_cast<const avp_fabric::WireHeader *>(msg.data);
         const auto *media = reinterpret_cast<const avp_fabric::MediaHeader *>(
-            receiver->data() + sizeof(avp_fabric::WireHeader));
-        avp_fabric::validateWireRecord(*wire, len, max_payload_bytes_, "fabric_source");
+            msg.data + sizeof(avp_fabric::WireHeader));
+        try {
+            avp_fabric::validateWireRecord(*wire, len, max_payload_bytes_, "fabric_source");
+        } catch (...) {
+            receiver->release(msg);
+            throw;
+        }
 
-        const uint8_t *payload = receiver->data() + wire->header_bytes;
+        // Everything is read from the buffer before takePayload: under buffer pressure it copies
+        // the payload and reposts the buffer, which the provider may then overwrite.
+        const uint16_t message_type = wire->message_type;
+        const uint16_t header_bytes = wire->header_bytes;
+        const uint32_t payload_bytes = wire->payload_bytes;
         out = FabricPacket();
         out.message_type = wire->message_type;
         out.stream_id_hash = media->stream_id_hash;
@@ -203,29 +229,33 @@ got_record:
         out.receiver_wallclock_ns = avp_fabric::monotonicNs();
         out.complete = true;
 
-        if (wire->message_type == avp_fabric::MSG_MEDIA) {
-            out.packet = av::Packet(std::vector<uint8_t>(payload, payload + wire->payload_bytes));
-            out.packet.setTimeBase(av::Rational(media->time_base_num, media->time_base_den));
+        if (message_type == avp_fabric::MSG_MEDIA) {
+            // References the receive buffer: no copy unless receive buffers are running low.
+            out.packet = receiver->takePayload(msg, header_bytes, payload_bytes);
+            out.packet.setTimeBase(av::Rational(out.time_base_num, out.time_base_den));
             out.packet.setPts(out.pts());
             out.packet.setDts(out.dts());
-            out.packet.setDuration(static_cast<int>(media->duration));
+            out.packet.setDuration(static_cast<int>(out.duration));
             out.packet.setStreamIndex(0);
-            out.packet.setKeyPacket((media->packet_flags & avp_fabric::FLAG_KEYFRAME) != 0);
+            out.packet.setKeyPacket((out.packet_flags & avp_fabric::FLAG_KEYFRAME) != 0);
             out.packet.setComplete(true);
         }
 
         if (frames_received_ < 5) {
             logstream << "fabric_source received"
-                      << " type=" << (wire->message_type == avp_fabric::MSG_MEDIA ? "media" : "status")
+                      << " type=" << (message_type == avp_fabric::MSG_MEDIA ? "media" : "status")
                       << " replica_id=" << out.replica_id
                       << " generation=" << out.generation
                       << " pts=" << out.raw_pts
                       << " message_bytes=" << len
-                      << " payload_bytes=" << wire->payload_bytes
-                      << " payload_prefix=" << avp_fabric::hexPrefix(payload, wire->payload_bytes);
+                      << " payload_bytes=" << payload_bytes
+                      << " payload_prefix=" << avp_fabric::hexPrefix(out.packet.data(), out.packet.size());
+        }
+        if (message_type != avp_fabric::MSG_MEDIA) {
+            receiver->release(msg);     // nothing downstream references a status message
         }
         frames_received_++;
-        bytes_received_ += wire->payload_bytes;
+        bytes_received_ += payload_bytes;
         reportThroughput();
         return true;
     }

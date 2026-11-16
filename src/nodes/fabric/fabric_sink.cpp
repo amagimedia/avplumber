@@ -3,6 +3,7 @@
 #if HAVE_LIBFABRIC
 
 #include "fabric_protocol.hpp"
+#include "fabric_wait.hpp"
 
 #include <rdma/fabric.h>
 #include <rdma/fi_cm.h>
@@ -15,6 +16,7 @@
 #include <deque>
 #include <fcntl.h>
 #include <fstream>
+#include <sys/uio.h>
 #include <iomanip>
 #include <memory>
 #include <netinet/in.h>
@@ -34,6 +36,8 @@ constexpr uint32_t AVPF_CODEC_JPEG = 2;
 constexpr uint32_t AVPF_PACKET_FORMAT_PASSTHROUGH = 1;
 constexpr uint32_t AVPF_FLAG_KEYFRAME = 1u << 0;
 constexpr uint32_t AVPF_FLAG_EOF = 1u << 1;
+
+namespace {
 
 uint64_t fnv1a64(const std::string &s) {
     uint64_t h = 1469598103934665603ull;
@@ -95,6 +99,26 @@ std::vector<char> readBinaryFile(const std::string &path) {
     return bytes;
 }
 
+} // namespace
+
+// One message in flight: its header, a reference to the payload's packet (held until the
+// provider reports completion), and a contiguous copy for providers without scatter-gather.
+struct TxOp {
+    fi_context2 ctx;            // first member: the completion's op_context is this op
+    uint8_t header[sizeof(avp_fabric::WireHeader) + sizeof(avp_fabric::MediaHeader)];
+    av::Packet payload;
+    std::vector<uint8_t> copy;
+    size_t message_bytes = 0;
+
+    size_t payloadBytes() const {
+        return message_bytes - sizeof(header);
+    }
+    void clear() {
+        payload = av::Packet();
+        message_bytes = 0;
+    }
+};
+
 class FabricRdmSender {
     fi_info *info_ = nullptr;
     fid_fabric *fabric_ = nullptr;
@@ -102,8 +126,10 @@ class FabricRdmSender {
     fid_av *av_ = nullptr;
     fid_cq *cq_ = nullptr;
     fid_ep *ep_ = nullptr;
+    avp_fabric::CqWaiter waiter_;
     fi_addr_t peer_ = FI_ADDR_UNSPEC;
     size_t max_msg_size_ = 0;
+    size_t iov_limit_ = 1;
 
     static void check(int ret, const std::string &what) {
         if (ret < 0) {
@@ -123,6 +149,7 @@ public:
             throw Error("fi_allocinfo failed");
         }
         hints->caps = FI_MSG;
+        hints->mode = FI_CONTEXT | FI_CONTEXT2;
         hints->ep_attr->type = FI_EP_RDM;
         hints->fabric_attr->prov_name = strdup(provider.c_str());
         hints->tx_attr->size = queue_depth;
@@ -140,6 +167,7 @@ public:
             throw Error("fabric_sink max_payload/header size " + std::to_string(required_msg_size) +
                         " exceeds provider max_msg_size " + std::to_string(max_msg_size_));
         }
+        iov_limit_ = info_->tx_attr && info_->tx_attr->iov_limit ? info_->tx_attr->iov_limit : 1;
 
         check(fi_fabric(info_->fabric_attr, &fabric_, nullptr), "fi_fabric");
         check(fi_domain(fabric_, info_, &domain_, nullptr), "fi_domain");
@@ -147,7 +175,8 @@ public:
         fi_cq_attr cq_attr = {};
         cq_attr.format = FI_CQ_FORMAT_MSG;
         cq_attr.size = queue_depth;
-        check(fi_cq_open(domain_, &cq_attr, &cq_, nullptr), "fi_cq_open");
+        bool has_fd = false;
+        cq_ = avp_fabric::CqWaiter::open(domain_, cq_attr, has_fd);
 
         fi_av_attr av_attr = {};
         av_attr.type = FI_AV_TABLE;
@@ -158,6 +187,7 @@ public:
         check(fi_ep_bind(ep_, &cq_->fid, FI_SEND | FI_RECV), "fi_ep_bind cq");
         check(fi_ep_bind(ep_, &av_->fid, 0), "fi_ep_bind av");
         check(fi_enable(ep_), "fi_enable");
+        waiter_.attach(fabric_, cq_, has_fd);
 
         std::vector<char> remote_addr;
         const void *dest_addr = info_->dest_addr;
@@ -179,11 +209,14 @@ public:
             throw Error("fi_av_insert inserted " + std::to_string(inserted) + " addresses");
         }
 
-        logstream << "fabric_sink opened provider=" << provider
+        logstream << "fabric_sink opened provider=" << info_->fabric_attr->prov_name
+                  << " fabric_version=" << FI_MAJOR(fi_version()) << "." << FI_MINOR(fi_version())
                   << " host=" << host
                   << " port=" << port
                   << " remote_addr_file=" << (remote_addr_file.empty() ? "-" : remote_addr_file)
-                  << " max_msg_size=" << max_msg_size_;
+                  << " max_msg_size=" << max_msg_size_
+                  << " iov_limit=" << iov_limit_
+                  << " wait=" << (has_fd ? "fd" : "poll");
     }
 
     ~FabricRdmSender() {
@@ -195,43 +228,62 @@ public:
         if (info_) fi_freeinfo(info_);
     }
 
-    void send(const void *data, size_t size) {
+    bool scatterGather() const {
+        return iov_limit_ >= 2;
+    }
+
+    // Posts one message. Returns false when the provider has no room yet (-FI_EAGAIN).
+    bool tryPost(TxOp &op) {
         int ret;
-        do {
-            ret = fi_send(ep_, data, size, nullptr, peer_, nullptr);
-            if (ret == -FI_EAGAIN) {
-                progress();
-            }
-        } while (ret == -FI_EAGAIN);
+        if (scatterGather() && op.payload.size()) {
+            iovec iov[2] = {
+                {op.header, sizeof(op.header)},
+                {const_cast<uint8_t *>(op.payload.data()), op.payload.size()},
+            };
+            ret = fi_sendv(ep_, iov, nullptr, 2, peer_, &op.ctx);
+        } else if (op.payload.size()) {
+            op.copy.resize(op.message_bytes);
+            std::memcpy(op.copy.data(), op.header, sizeof(op.header));
+            std::memcpy(op.copy.data() + sizeof(op.header), op.payload.data(), op.payload.size());
+            ret = fi_send(ep_, op.copy.data(), op.copy.size(), nullptr, peer_, &op.ctx);
+        } else {
+            ret = fi_send(ep_, op.header, sizeof(op.header), nullptr, peer_, &op.ctx);
+        }
+        if (ret == -FI_EAGAIN) return false;
         check(ret, "fi_send");
+        return true;
     }
 
-    bool reapOne(bool block) {
-        fi_cq_msg_entry entry = {};
-        int ret = fi_cq_read(cq_, &entry, 1);
-        if (ret == 1) return true;
-        if (ret == -FI_EAGAIN && !block) return false;
-        while (ret == -FI_EAGAIN && block) {
-            Wallclock::sleepms(1);
-            ret = fi_cq_read(cq_, &entry, 1);
-        }
-        if (ret == 1) return true;
-        if (ret < 0) {
-            fi_cq_err_entry err = {};
-            int err_ret = fi_cq_readerr(cq_, &err, 0);
-            if (err_ret >= 0) {
-                throw Error(std::string("fi_cq_read failed: ") + fi_strerror(err.err));
+    // Reads completions and hands each finished op to done(). With timeout_ms > 0 and nothing
+    // ready, waits for one at most that long. A failed send throws after its op is returned.
+    template<typename Done> size_t reap(Done &&done, int timeout_ms) {
+        size_t n = readCompletions(done);
+        if (n || timeout_ms <= 0) return n;
+        waiter_.wait(timeout_ms);
+        return readCompletions(done);
+    }
+
+private:
+    template<typename Done> size_t readCompletions(Done &done) {
+        size_t total = 0;
+        fi_cq_msg_entry entries[16];
+        for (;;) {
+            int ret = fi_cq_read(cq_, entries, 16);
+            if (ret == -FI_EAGAIN) return total;
+            if (ret == -FI_EAVAIL) {
+                fi_cq_err_entry err = {};
+                int err_ret = fi_cq_readerr(cq_, &err, 0);
+                if (err_ret < 0) check(err_ret, "fi_cq_readerr");
+                if (err.op_context) done(static_cast<TxOp *>(err.op_context));
+                throw Error(std::string("fabric_sink send failed: ") + fi_strerror(err.err) + " (" +
+                            fi_cq_strerror(cq_, err.prov_errno, err.err_data, nullptr, 0) + ")");
             }
-            throw Error(std::string("fi_cq_read failed: ") + fi_strerror(-ret));
+            check(ret, "fi_cq_read");
+            for (int i = 0; i < ret; ++i) done(static_cast<TxOp *>(entries[i].op_context));
+            total += ret;
+            if (ret < 16) return total;
         }
-        return false;
     }
-
-    void progress() {
-        fi_cq_read(cq_, nullptr, 0);
-        Wallclock::sleepms(1);
-    }
-
 };
 
 class FabricPacketSink: public NodeSingleInput<av::Packet>, public ReportsFinishByFlag {
@@ -254,10 +306,10 @@ class FabricPacketSink: public NodeSingleInput<av::Packet>, public ReportsFinish
     bool payload_crc_ = false;
     size_t max_payload_bytes_ = 4 * 1024 * 1024;
     size_t queue_depth_ = 64;
-    size_t completion_batch_ = 16;
     std::string backpressure_ = "block";
     std::string redundancy_mode_ = "active";
     size_t repair_window_frames_ = 120;
+    int send_timeout_ms_ = 2000;
     int control_fd_ = -1;
     uint16_t control_port_ = 0;
     int64_t promote_from_pts_ = INT64_MAX;
@@ -269,13 +321,17 @@ class FabricPacketSink: public NodeSingleInput<av::Packet>, public ReportsFinish
     uint64_t report_last_frames_ = 0;
     std::unique_ptr<FabricRdmSender> sender_;
 
-    struct SendBuffer {
-        std::vector<uint8_t> bytes;
+    std::vector<std::unique_ptr<TxOp>> ops_;
+    std::vector<TxOp *> free_;
+    size_t inflight_ = 0;
+
+    // A frame kept for REPAIR: its MEDIA header and a reference to its packet, not a copy.
+    struct RepairFrame {
+        uint8_t header[sizeof(TxOp::header)];
+        av::Packet payload;
     };
-    std::deque<std::unique_ptr<SendBuffer>> free_;
-    std::deque<std::unique_ptr<SendBuffer>> inflight_;
     std::deque<int64_t> repair_order_;
-    std::unordered_map<int64_t, std::vector<uint8_t>> repair_store_;
+    std::unordered_map<int64_t, RepairFrame> repair_store_;
 
 public:
     FabricPacketSink(std::unique_ptr<Source<av::Packet>> &&source,
@@ -305,17 +361,20 @@ public:
         header_crc_ = params.value("header_crc", true);
         payload_crc_ = params.value("payload_crc", false);
         max_payload_bytes_ = params.value("max_payload_bytes", max_payload_bytes_);
-        queue_depth_ = params.value("queue_depth", queue_depth_);
-        completion_batch_ = params.value("completion_batch", completion_batch_);
+        queue_depth_ = std::max<size_t>(params.value("queue_depth", queue_depth_), 1);
         backpressure_ = params.value("backpressure", backpressure_);
         redundancy_mode_ = params.value("redundancy_mode", params.value("mode", redundancy_mode_));
         repair_window_frames_ = params.value("repair_window_frames", repair_window_frames_);
+        send_timeout_ms_ = params.value("send_timeout_ms", send_timeout_ms_);
         control_port_ = params.value("control_port", 0);
         if (backpressure_ != "block" && backpressure_ != "fail") {
             throw Error("fabric_sink unsupported backpressure policy for MVP: " + backpressure_);
         }
         if (redundancy_mode_ != "active" && redundancy_mode_ != "standby" && redundancy_mode_ != "hot_hot") {
             throw Error("fabric_sink unsupported redundancy_mode: " + redundancy_mode_);
+        }
+        if (send_timeout_ms_ <= 0) {
+            throw Error("fabric_sink send_timeout_ms must be positive");
         }
         if (video_md) {
             width_ = video_md->width();
@@ -334,11 +393,10 @@ public:
             throw Error("fabric_sink requires pixel_format parameter or upstream IVideoFormatSource");
         }
 
-        const size_t max_msg = sizeof(avp_fabric::WireHeader) + sizeof(avp_fabric::MediaHeader) + max_payload_bytes_;
+        const size_t max_msg = sizeof(TxOp::header) + max_payload_bytes_;
         for (size_t i = 0; i < queue_depth_; ++i) {
-            auto b = std::make_unique<SendBuffer>();
-            b->bytes.reserve(max_msg);
-            free_.push_back(std::move(b));
+            ops_.push_back(std::make_unique<TxOp>());
+            free_.push_back(ops_.back().get());
         }
         sender_ = std::make_unique<FabricRdmSender>(provider_, remote_host_, remote_port_, remote_addr_file_, max_msg, queue_depth_);
         if (control_port_) openControlSocket();
@@ -346,11 +404,7 @@ public:
 
     virtual void process() override {
         pollControl();
-        for (size_t i = 0; i < completion_batch_ && !inflight_.empty(); ++i) {
-            if (!sender_->reapOne(false)) break;
-            free_.push_back(std::move(inflight_.front()));
-            inflight_.pop_front();
-        }
+        reap(0);
 
         av::Packet pkt = this->source_->get();
         if (isEofMarker(pkt)) {
@@ -369,39 +423,32 @@ public:
             throw Error("fabric_sink require_keyframes=true but packet is not keyframe");
         }
 
-        while (free_.empty()) {
-            if (backpressure_ == "fail") {
-                throw Error("fabric_sink send buffer pool exhausted");
-            }
-            sender_->reapOne(true);
-            free_.push_back(std::move(inflight_.front()));
-            inflight_.pop_front();
+        if (free_.empty() && backpressure_ == "fail") {
+            reap(0);
+            if (free_.empty()) throw Error("fabric_sink send buffer pool exhausted");
         }
-
-        auto buf = std::move(free_.front());
-        free_.pop_front();
-        const int64_t pts = fillBuffer(*buf, pkt, AVPF_MSG_MEDIA);
-        storeRepairFrame(pts, buf->bytes);
+        TxOp *op = acquireOp();
+        const int64_t pts = fillHeader(op->header, pkt, AVPF_MSG_MEDIA);
+        storeRepairFrame(pts, op->header, pkt);
         const bool send_media = redundancy_mode_ == "active" ||
                                 redundancy_mode_ == "hot_hot" ||
                                 pts >= promote_from_pts_;
-        if (!send_media) {
-            fillBuffer(*buf, pkt, AVPF_MSG_FRAME_STATUS);
+        if (send_media) {
+            op->payload = pkt;
+            op->message_bytes = sizeof(op->header) + pkt.size();
+        } else {
+            fillHeader(op->header, pkt, AVPF_MSG_FRAME_STATUS);
+            op->message_bytes = sizeof(op->header);
         }
         if (frames_sent_ < 5) {
             logstream << "fabric_sink sending"
                       << " pts=" << pts
                       << " type=" << (send_media ? "media" : "status")
-                      << " message_bytes=" << buf->bytes.size()
+                      << " message_bytes=" << op->message_bytes
                       << " payload_bytes=" << (send_media ? pkt.size() : 0)
                       << " payload_prefix=" << hexPrefix(pkt.data(), pkt.size());
         }
-        sender_->send(buf->bytes.data(), buf->bytes.size());
-        if (frames_sent_ < 5) {
-            logstream << "fabric_sink posted"
-                      << " message_bytes=" << buf->bytes.size();
-        }
-        inflight_.push_back(std::move(buf));
+        post(op);
         frames_sent_++;
         if (send_media) bytes_sent_ += pkt.size();
         reportThroughput();
@@ -414,19 +461,22 @@ public:
     virtual ~FabricPacketSink() {
         if (control_fd_ >= 0) close(control_fd_);
         try {
-            while (!inflight_.empty()) {
-                sender_->reapOne(true);
-                inflight_.pop_front();
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(send_timeout_ms_);
+            while (inflight_ && avp_fabric::remainingMs(deadline) > 0) {
+                reap(static_cast<int>(std::min<int64_t>(avp_fabric::remainingMs(deadline), 100)));
             }
             logstream << "fabric_sink summary"
                       << " stream_id=" << stream_id_
                       << " replica_id=" << replica_id_
                       << " generation=" << generation_
                       << " frames_sent=" << frames_sent_
-                      << " bytes_sent=" << bytes_sent_;
+                      << " bytes_sent=" << bytes_sent_
+                      << " unfinished_sends=" << inflight_;
         } catch (std::exception &e) {
             logstream << "fabric_sink shutdown warning: " << e.what();
         }
+        // Closing the endpoint cancels what is still in flight before the ops are freed.
+        sender_.reset();
     }
 
     static std::shared_ptr<FabricPacketSink> create(NodeCreationInfo &nci) {
@@ -438,7 +488,47 @@ public:
     }
 
 private:
-    int64_t fillBuffer(SendBuffer &buf, const av::Packet &pkt, uint16_t message_type) {
+    void release(TxOp *op) {
+        op->clear();
+        free_.push_back(op);
+        --inflight_;
+    }
+
+    void reap(int timeout_ms) {
+        sender_->reap([this](TxOp *op) { release(op); }, timeout_ms);
+    }
+
+    // A free op; with none free, waits for completions up to send_timeout_ms.
+    TxOp *acquireOp() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(send_timeout_ms_);
+        while (free_.empty()) {
+            const int64_t left = avp_fabric::remainingMs(deadline);
+            if (left == 0) {
+                throw Error("fabric_sink timed out after " + std::to_string(send_timeout_ms_) +
+                            " ms waiting for send completions");
+            }
+            reap(static_cast<int>(std::min<int64_t>(left, 100)));
+        }
+        TxOp *op = free_.back();
+        free_.pop_back();
+        return op;
+    }
+
+    void post(TxOp *op) {
+        ++inflight_;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(send_timeout_ms_);
+        while (!sender_->tryPost(*op)) {
+            const int64_t left = avp_fabric::remainingMs(deadline);
+            if (left == 0) {
+                release(op);
+                throw Error("fabric_sink timed out after " + std::to_string(send_timeout_ms_) +
+                            " ms posting a send");
+            }
+            reap(static_cast<int>(std::min<int64_t>(left, 10)));
+        }
+    }
+
+    int64_t fillHeader(uint8_t *dst, const av::Packet &pkt, uint16_t message_type) {
         avp_fabric::WireHeader wire = {};
         avp_fabric::MediaHeader media = {};
         wire.magic = AVPF_MAGIC;
@@ -468,24 +558,22 @@ private:
             wire.payload_crc = crc32_ieee(pkt.data(), pkt.size());
         }
 
-        buf.bytes.resize(sizeof(wire) + sizeof(media) + wire.payload_bytes);
-        std::memcpy(buf.bytes.data(), &wire, sizeof(wire));
-        std::memcpy(buf.bytes.data() + sizeof(wire), &media, sizeof(media));
-        if (wire.payload_bytes) {
-            std::memcpy(buf.bytes.data() + sizeof(wire) + sizeof(media), pkt.data(), pkt.size());
-        }
+        std::memcpy(dst, &wire, sizeof(wire));
+        std::memcpy(dst + sizeof(wire), &media, sizeof(media));
         if (header_crc_) {
-            auto *wirep = reinterpret_cast<avp_fabric::WireHeader *>(buf.bytes.data());
+            auto *wirep = reinterpret_cast<avp_fabric::WireHeader *>(dst);
             wirep->header_crc = 0;
-            wirep->header_crc = crc32_ieee(buf.bytes.data(), sizeof(wire) + sizeof(media));
+            wirep->header_crc = crc32_ieee(dst, sizeof(wire) + sizeof(media));
         }
         return media.pts;
     }
 
-    void storeRepairFrame(int64_t pts, const std::vector<uint8_t> &bytes) {
+    void storeRepairFrame(int64_t pts, const uint8_t *media_header, const av::Packet &pkt) {
         if (!repair_window_frames_) return;
         if (!repair_store_.count(pts)) repair_order_.push_back(pts);
-        repair_store_[pts] = bytes;
+        RepairFrame &frame = repair_store_[pts];
+        std::memcpy(frame.header, media_header, sizeof(frame.header));
+        frame.payload = pkt;
         while (repair_order_.size() > repair_window_frames_) {
             repair_store_.erase(repair_order_.front());
             repair_order_.pop_front();
@@ -514,17 +602,11 @@ private:
                       << " replica_id=" << replica_id_;
             return;
         }
-        while (free_.empty()) {
-            if (inflight_.empty()) return;
-            sender_->reapOne(true);
-            free_.push_back(std::move(inflight_.front()));
-            inflight_.pop_front();
-        }
-        auto buf = std::move(free_.front());
-        free_.pop_front();
-        buf->bytes = it->second;
-        sender_->send(buf->bytes.data(), buf->bytes.size());
-        inflight_.push_back(std::move(buf));
+        TxOp *op = acquireOp();
+        std::memcpy(op->header, it->second.header, sizeof(op->header));
+        op->payload = it->second.payload;
+        op->message_bytes = sizeof(op->header) + op->payload.size();
+        post(op);
         logstream << "fabric_sink repair sent pts=" << pts
                   << " replica_id=" << replica_id_;
     }

@@ -16,7 +16,7 @@ namespace avp_fabric {
 
 struct SourceCandidate {
     MediaHeader media = {};
-    std::vector<uint8_t> payload;
+    av::Packet payload;     // a reference to the received buffer, not a copy
     int64_t normalized_frame_id = 0;
 };
 
@@ -93,8 +93,7 @@ public:
     }
 
     int64_t ingestMedia(const MediaHeader &media,
-                        const uint8_t *payload,
-                        size_t payload_bytes,
+                        const av::Packet &payload,
                         uint64_t received_ns) {
         handleGeneration(media);
         const int64_t normalized_frame_id = normalizeFrameId(media, received_ns);
@@ -106,7 +105,7 @@ public:
 
         SourceCandidate candidate;
         candidate.media = media;
-        candidate.payload.assign(payload, payload + payload_bytes);
+        candidate.payload = payload;
         candidate.normalized_frame_id = normalized_frame_id;
         frame_slots_[normalized_frame_id].media_by_replica[media.replica_id] = std::move(candidate);
 
