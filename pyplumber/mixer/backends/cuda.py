@@ -1,5 +1,7 @@
 """CUDA construction policy; routing and timing belong to the mixer builders."""
 
+from pyplumber.composition import compositor, source_compositor, transition
+
 from ..color import Color, SEMIPLANAR_FORMATS, validate_conversion
 
 
@@ -11,18 +13,13 @@ class CudaMixerBackend:
     graph_threads = 1
 
     def compositor(self, params, *, keyer=False, api=None):
-        if api is None:
-            from pyplumber import node as api
-        return (api.MixerKeyer if keyer else api.MixerCompositor)(params)
+        return compositor(params, timing="clock", keyer=keyer, api=api)
 
     def source_compositor(self, params, *, api=None):
-        if api is None:
-            from pyplumber import node as api
-        return api.CudaRectOverlay(params)
+        return source_compositor(params, api=api)
 
     def transition(self, params):
-        from pyplumber.node import FilterVideo
-        return FilterVideo({"graph": "transition_cuda=alpha='0':eval=frame:metadata_prefix=avp.source.", "threads": self.graph_threads, **params})
+        return transition(params, threads=self.graph_threads)
 
     def scale(self, *, width=None, height=None, pixel_format=None, interpolation=None):
         values = {"w": width, "h": height, "interp_algo": interpolation, "format": pixel_format}

@@ -4,6 +4,7 @@ avplumber is a graph-based real-time processing framework. Graph can be reconfig
 
 ## Highlights
 
+* [Generic GPU composition](doc/composition.md): source-paced and clocked layers, geometry, effects and moves, with no AI dependency.
 * [GPU video mixer](demos/mixer/README.md) with Preview/Program, T-bar transitions, per-key DSK fades and AUX monitors. [Watch the 192-input demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/).
 * [WebGL graph viewer](tools/web-ui/README.md) built with Sigma.js: zoom from grouped inputs to individual nodes, inspect live queue statistics, subscriptions and node parameters. [Watch the demo and explore four zoom levels](https://amagimedia.github.io/avplumber/).
 * [DMA-BUF input from Chromium](doc/dmabuf.md): import browser graphics into CUDA through EGL, preserving alpha for overlays and keys.

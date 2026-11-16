@@ -14,6 +14,7 @@ import numpy as np
 
 from _harness import finish, make_avp, wait_for
 from pyplumber import node as api
+from pyplumber.composition import compositor as make_compositor
 from pyplumber.mixer.color import Color
 from pyplumber.mixer.inputs import build_raw420_input
 
@@ -40,14 +41,14 @@ def check(directory, poll_ms):
                                     fps=FPS, group="probe", hwaccel="wait_gpu", loop=True, direct=True,
                                     color=Color("sdr"), native_rate=True) for i in range(SOURCES)]
         rows = -(-SOURCES // COLUMNS)
-        compositor = api.MixerCompositor({
+        compositor = make_compositor({
             "name": "compose", "src": edges, "dst": "composed", "group": "probe", "hwaccel": "wait_gpu",
             "width": WIDTH * COLUMNS, "height": HEIGHT * rows, "sw_format": "nv12", "color": "sdr",
             "fps": f"{FPS}/1", "active_inputs": (1 << SOURCES) - 1,
             "layers": [{"input": i, "dst_x": WIDTH * (i % COLUMNS), "dst_y": HEIGHT * (i // COLUMNS),
                         "dst_w": WIDTH, "dst_h": HEIGHT} for i in range(SOURCES)],
             **({} if poll_ms is None else {"input_poll_ms": poll_ms}),
-        })
+        }, timing="clock", api=api)
         sink = api.NullSink({"name": "sink", "src": "composed", "group": "probe"})
         for node in (compositor, sink):
             nodes.append(node)
