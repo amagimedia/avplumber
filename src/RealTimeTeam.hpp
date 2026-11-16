@@ -284,7 +284,8 @@ public:
             own[term.substr(0, eq)] = term.substr(eq + 1);
         }
         for (const auto &key : {"fps", "latency_us", "delay"}) {
-            const auto mine = own.find(key), theirs = peer.find(key);
+            const auto mine = own.find(key);
+            const auto theirs = peer.find(key);
             if (theirs == peer.end() && mine == own.end()) continue;
             if (mine == own.end() && unset_here_ok) continue;
             if (theirs == peer.end() || mine == own.end() || theirs->second != mine->second)
