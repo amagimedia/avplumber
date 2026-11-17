@@ -834,6 +834,13 @@ def _build_renditions(avp, api, options: MixerOptions, renditions, feeds, *,
     the constant rate. *feeds* maps a rendition feed (dirty/clean) to its program
     edge; a plain edge serves every feed. With a list as *held*, the Janus outputs are built held and
     their prefixes appended to it, for the application to release when the show has settled.
+
+    A rendition is optional to the show: whatever hands the program to one drops the frame its
+    edge has no room for instead of waiting, so a rendition whose nodes are stopped, or too slow,
+    loses its own frames and holds back neither the program nor another rendition. That is the
+    split and the transform here; a feed with one reader is read from its producer: the aux tap
+    and the keyer's split_clean drop the same way, and mixer_delivery waits with only itself and
+    program_fps behind it, which drops.
     """
     backend = mixer_backend(backend)
     if isinstance(feeds, str):
@@ -854,13 +861,13 @@ def _build_renditions(avp, api, options: MixerOptions, renditions, feeds, *,
             readers = [feeds[feed]]
         elif readers:
             avp.addNode(api.Split({"name": "split_renditions" + suffix, "src": feeds[feed], "dst": readers,
-                                   "group": OUTPUT_GROUP, "on_error": "panic"}))
+                                   "drop": True, "group": OUTPUT_GROUP, "on_error": "panic"}))
         edges.update((r.id, edge) for r, edge in zip(direct, readers))
         if sized:
             # No per-output fps: one draw then serves renditions of any rate, and each
             # rendition's force_fps picks and repeats frames as its encoder needs.
             avp.addNode(api.CudaTransform(transform_params(
-                readers[-1], [transform_output(dst, width, height, sw_format=working_format)
+                readers[-1], [transform_output(dst, width, height, sw_format=working_format, drop=True)
                               for (width, height), dst in sized.items()],
                 hwaccel=HWACCEL, name="transform_renditions" + suffix, group=OUTPUT_GROUP, on_error="panic")))
     listeners = []
@@ -1116,11 +1123,13 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     feeds = {name: monitored if edge == feeds["dirty"] else edge for name, edge in feeds.items()}
     pgm_taps = [b.pgm_edge for b in aux or () if b.pgm_edge]
     if pgm_taps:
-        # An aux pgm cell shows what goes to air: the keyed program.
+        # An aux pgm cell shows what goes to air: the keyed program. The tap never waits for the
+        # renditions it passes the program on to (drop): waiting would hold back the cells too.
         tapped = "program_after_aux_tap"
         avp.addNode(api.OneToMany({
             "name": "program_aux_tap", "src": feeds["dirty"], "dst": [tapped, *pgm_taps],
-            "outputs": 1, "subscribed_outputs": {edge: edge for edge in pgm_taps}, "group": OUTPUT_GROUP,
+            "outputs": 1, "drop": True, "subscribed_outputs": {edge: edge for edge in pgm_taps},
+            "group": OUTPUT_GROUP,
         }))
         feeds["dirty"] = tapped
     if aux:
@@ -1185,6 +1194,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             avp.addNode(api.Split({
                 "name": "split_program_audio", "src": program_audio_edge,
                 "dst": [program_audio_edge + "_split", *branches], "group": OUTPUT_GROUP, "on_error": "panic",
+                "drop": True,   # a stopped audio output loses its own audio and holds back no other
             }))
             program_audio_edge = program_audio_edge + "_split"
             for r, branch in zip(duplicates, branches):

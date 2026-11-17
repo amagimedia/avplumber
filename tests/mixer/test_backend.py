@@ -103,6 +103,9 @@ def test_bus_without_a_pgm_layout_skips_the_program_tap_and_labels_outputs(nativ
     assert "dpb_size" not in graph["janus_encoder"]["options"]
     if scene_view:
         assert graph["program_aux_tap"]["dst"][1:] == ["aux_mv_pgm"]
+        # The tap does not wait for the renditions behind its first output: a stopped one would
+        # hold back the program cell with it.
+        assert graph["program_aux_tap"]["drop"] is True
         # Same playout latency; the PGM pad (after the 13 sources) is shown one tick later instead.
         assert graph["aux_mv_comp"]["latency_ms"] == 80
         assert graph["aux_mv_comp"]["pgm_delay_frames"] == 1

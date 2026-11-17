@@ -185,6 +185,7 @@ def test_audio_port_rendition_duplicates_the_program_bus_via_a_split(native_boun
     split = app.avp.nodes["split_program_audio"]
     assert split["src"] == "audio_mixer_program"
     assert set(split["dst"]) == {"audio_mixer_program_split", "janus_audio_hdr_src"}
+    assert split["drop"] is True   # a stopped audio output does not hold back the other
     # The legacy leg now reads the split's own branch, not the raw bus edge.
     assert app.avp.nodes["janus_audio_limiter"]["src"] == "audio_mixer_program_split"
     assert app.avp.nodes["janus_audio_hdr_limiter"]["src"] == "janus_audio_hdr_src"
