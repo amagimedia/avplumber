@@ -28,10 +28,12 @@ def check_size(size):
 
 
 def cells(cfg, page, size=(WIDTH, HEIGHT)):
-    """The bank's 8x8 grid: 64 sources from page * 64, cells of a 64th of the frame, no space lost."""
+    """The bank's 8x8 grid: 64 sources from page * 64, cells of a 64th of the frame, no space lost.
+    Its cells ask for filter auto (area or multisample by scale): a bank's 8-15:1 shrink aliases thin
+    strokes and text with bilinear, and a bank is drawn at 15 fps."""
     first, w, h = page * PER_BANK, size[0] // 8, size[1] // 8
     return [{"role": "source", "source": i, "x": (i - first) % 8 * w,
-             "y": (i - first) // 8 * h, "w": w, "h": h}
+             "y": (i - first) // 8 * h, "w": w, "h": h, "filter": "auto"}
             for i in range(first, min(first + PER_BANK, len(cfg.sources)))]
 
 

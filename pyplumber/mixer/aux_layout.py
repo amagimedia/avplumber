@@ -162,10 +162,12 @@ def _layout(layers):
 
 def _tile(index, rect, z, cfg=None):
     """Input *index* contained in *rect*: a face sheet's camera picture (the reference its source
-    declares), else its whole frame, with the filter its scale calls for (auto: multisample, 8
-    samples, when it shrinks a lot, as a thumbnail does)."""
+    declares), else its whole frame. Bilinear unless the cell asks for a filter: thumbnail banks
+    do (thumbnail.cells). An area or multisample layer moves the whole bus to the compositor's
+    filter entry, which made 18 extra AUX at 60 fps run the L4 at its power cap (2026-11-17), so
+    monitoring pages stay bilinear."""
     layer = {"input": index, "dst_x": rect["x"], "dst_y": rect["y"], "dst_w": rect["w"], "dst_h": rect["h"],
-             "fit": "contain", "z": z, "filter": "auto", "samples": 8}
+             "fit": "contain", "z": z, **({"filter": rect["filter"], "samples": 8} if rect.get("filter") else {})}
     source = cfg.sources[index] if cfg is not None and index < len(cfg.sources) else None
     reference = (source.picture or {}).get("reference") if source is not None else None
     if reference:

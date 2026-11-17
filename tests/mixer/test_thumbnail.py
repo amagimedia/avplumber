@@ -93,3 +93,15 @@ def test_reserved_banks_take_the_recipe_size_bitrate_and_preset():
 def test_thumbnail_options_are_checked(bad):
     with pytest.raises(ValueError):
         thumbnail.encode_options(bad)
+
+
+def test_only_bank_cells_are_filtered_monitoring_pages_stay_bilinear():
+    """Area/multisample on a page of source cells moved every extra AUX to the heaviest compositor
+    entry; only the thumbnail banks need it."""
+    from pyplumber.mixer.aux_layout import base_composition
+    cfg = config(63)
+    (bus,) = parse_aux_buses([bank()], cfg)
+    banked = base_composition(cfg, layout_cells(cfg, bus.layout, 0), [])["layers"]
+    page = base_composition(cfg, layout_cells(cfg, {"preset": "source_pages"}, 0), [])["layers"]
+    assert banked and all(l["filter"] == "auto" and l["samples"] == 8 for l in banked)
+    assert page and all("filter" not in l and "samples" not in l for l in page)
