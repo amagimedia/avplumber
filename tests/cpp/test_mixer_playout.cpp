@@ -742,6 +742,79 @@ void stalled_input_does_not_block_healthy_inputs_or_replay_late_burst() {
     CHECK(mix.missedDeadlines() == 0);
 }
 
+// A browser page at 60 fps behind a four-frame playout latency, its paints four ticks ahead of
+// the output. A paint is its own tick's number; -n is a copy of paint n that the page's hold
+// (repeat_last_frame) emitted while the page was quiet, numbered on from the last stamp.
+static avp::mixer::Playout<int> pageAtFourFrames() {
+    return avp::mixer::Playout<int>(1, kGrid60, 4000.0 / 60, avp::mixer::TimestampMode::Presentation);
+}
+static void showsItsOwnPaint(avp::mixer::Playout<int> &mix, int tick) {
+    const auto *decision = mix.prepare(kGrid60.time(tick) + mix.latencyNs() + 1000000);
+    CHECK(decision && decision->index == tick && *decision->frames[0] == tick);
+    mix.commit();
+}
+
+void paints_delivered_late_supersede_only_the_copies_numbered_past_them() {
+    // Paints 11 to 13 are delivered three periods late, together, still before their ticks.
+    // Meanwhile the hold emitted copies of paint 10 for ticks 11 and 12. Paint 11 then arrives
+    // stamped before the copy for tick 12: that copy goes, and nothing else. Dropping the whole
+    // queue also dropped paints 9 and 10, in time but four ticks from being shown: ticks 9 and
+    // 10 repeated paint 8.
+    auto mix = pageAtFourFrames();
+    for (int paint = 0; paint < 4; ++paint) mix.push(0, paint, kGrid60.time(paint));
+    for (int tick = 0; tick < 20; ++tick) {
+        const int paint = tick + 4;
+        if (paint < 11 || paint > 13) mix.push(0, paint, kGrid60.time(paint));
+        if (tick == 8) mix.push(0, -10, kGrid60.time(11));
+        if (tick == 9) {
+            mix.push(0, -10, kGrid60.time(12));
+            for (int late = 11; late <= 13; ++late) mix.push(0, late, kGrid60.time(late));
+            CHECK(mix.queued(0) == 6);   // paints 9 and 10, the copy for tick 11, paints 11 to 13
+        }
+        showsItsOwnPaint(mix, tick);
+    }
+    CHECK(mix.stats(0).repeats == 0 && mix.missedDeadlines() == 0 && mix.stats(0).overflow == 0);
+    CHECK(mix.stats(0).discarded == 2);   // the two copies: one superseded, one replaced on its tick
+    CHECK(mix.stats(0).discontinuities == 1);
+}
+
+void a_copy_numbered_three_slots_ahead_costs_no_paint() {
+    // The hold re-aligned its copy of paint 10 to the slot of its emission, tick 13, and paint
+    // 11 came right after it, late by half a period. Only the copy goes.
+    auto mix = pageAtFourFrames();
+    for (int paint = 0; paint < 4; ++paint) mix.push(0, paint, kGrid60.time(paint));
+    for (int tick = 0; tick < 20; ++tick) {
+        if (tick == 7) mix.push(0, -10, kGrid60.time(13));
+        mix.push(0, tick + 4, kGrid60.time(tick + 4));
+        showsItsOwnPaint(mix, tick);
+    }
+    CHECK(mix.stats(0).repeats == 0 && mix.stats(0).discarded == 1 && mix.stats(0).discontinuities == 1);
+}
+
+void a_clock_that_jumps_far_back_still_drops_everything_queued() {
+    auto mix = liveShow(1);
+    mix.push(0, 100, kGrid60.time(600));
+    mix.push(0, 101, kGrid60.time(601));
+    mix.push(0, 5, kGrid60.time(3));           // the source restarted: all that was queued is later
+    CHECK(mix.queued(0) == 1 && mix.stats(0).discarded == 2 && mix.stats(0).discontinuities == 1);
+    const auto *tick = mix.prepare(due(3));
+    CHECK(tick && tick->index == 3 && *tick->frames[0] == 5);
+    mix.commit();
+}
+
+void a_clock_that_steps_back_keeps_the_frames_due_before_it() {
+    auto mix = liveShow(1);
+    for (int frame = 0; frame <= 5; ++frame) mix.push(0, frame, kGrid60.time(frame));
+    mix.push(0, 100, kGrid60.time(3));         // back by two ticks: frames 4 and 5 are older pictures
+    CHECK(mix.queued(0) == 5 && mix.stats(0).discarded == 2 && mix.stats(0).discontinuities == 1);
+    for (int t = 0; t <= 3; ++t) {
+        const auto *tick = mix.prepare(due(t));
+        CHECK(tick && tick->index == t && *tick->frames[0] == (t < 3 ? t : 100));   // then the new one on its tick
+        mix.commit();
+    }
+    CHECK(mix.stats(0).repeats == 0 && mix.stats(0).discarded == 3);   // frame 3, replaced on its tick
+}
+
 void route_reset_rejects_old_frames_still_in_upstream_edges() {
     avp::mixer::Playout<int> mix(1, avp::mixer::TickGrid(av::Rational(60, 1)), {}, avp::mixer::TimestampMode::Presentation);
     mix.push(0, 10, 0);
@@ -1105,6 +1178,10 @@ int main(int argc, char **argv) {
         {"resumed_source_is_live_after_an_eof_marker", resumed_source_is_live_after_an_eof_marker},
         {"presentation_phase_on_half_tick_keeps_every_frame", presentation_phase_on_half_tick_keeps_every_frame},
         {"route_reset_rejects_old_frames_still_in_upstream_edges", route_reset_rejects_old_frames_still_in_upstream_edges},
+        {"paints_delivered_late_supersede_only_the_copies_numbered_past_them", paints_delivered_late_supersede_only_the_copies_numbered_past_them},
+        {"a_copy_numbered_three_slots_ahead_costs_no_paint", a_copy_numbered_three_slots_ahead_costs_no_paint},
+        {"a_clock_that_jumps_far_back_still_drops_everything_queued", a_clock_that_jumps_far_back_still_drops_everything_queued},
+        {"a_clock_that_steps_back_keeps_the_frames_due_before_it", a_clock_that_steps_back_keeps_the_frames_due_before_it},
         {"prewarmed_slots_share_frame_ids_and_output_ticks", prewarmed_slots_share_frame_ids_and_output_ticks},
         {"scene_reload_discards_prewarm_frames_before_first_visible_frame", scene_reload_discards_prewarm_frames_before_first_visible_frame},
         {"stalled_input_does_not_block_healthy_inputs_or_replay_late_burst", stalled_input_does_not_block_healthy_inputs_or_replay_late_burst},

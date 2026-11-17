@@ -60,7 +60,7 @@ class MixerCompositor : public CudaRectCompositor,
     // Playout counters snapshotted every 60 frames for the status object; the
     // control thread never touches playout_ itself.
     std::mutex playout_stats_mutex_;
-    std::vector<std::array<uint64_t, 3>> playout_stats_published_;   // repeats, discarded, overflow
+    std::vector<std::array<uint64_t, 4>> playout_stats_published_;   // repeats, discarded, overflow, discontinuities
     uint64_t published_missed_deadlines_ = 0;
     uint64_t published_frames_ = 0;
     avp::SyncTrace sync_trace_;   // per tick: which input frames it showed, when AVP_SYNC_TRACE=1
@@ -336,11 +336,14 @@ public:
         }
         if (key == "per_input") {
             // Which input repeats, discards or overflows: a question for a diagnosis, not for a
-            // page that polls the status of every bus several times a second.
+            // page that polls the status of every bus several times a second. discontinuities:
+            // the times a frame was stamped before the one that came ahead of it (a clock that
+            // jumped back, or a paint delivered after the held copies numbered past it).
             std::lock_guard<std::mutex> lock(playout_stats_mutex_);
             Parameters per_input = Parameters::array();
             for (const auto &st : playout_stats_published_)
-                per_input.push_back({{"repeats", st[0]}, {"discarded", st[1]}, {"overflow", st[2]}});
+                per_input.push_back({{"repeats", st[0]}, {"discarded", st[1]}, {"overflow", st[2]},
+                                     {"discontinuities", st[3]}});
             return per_input;
         }
         // The debug overlay: whether it is on, the frames it drew on, the last frame's items and tiles.
@@ -629,11 +632,11 @@ public:
         // Every 60 frames, and at once when a deadline was missed: a reader waiting for the
         // start-up to settle must not see a two-second-old zero.
         if (frame_counter_ % 60 == 0 || playout_->missedDeadlines() != published_missed_deadlines_) {
-            std::vector<std::array<uint64_t, 3>> snapshot;
+            std::vector<std::array<uint64_t, 4>> snapshot;
             snapshot.reserve(sources.size());
             for (size_t i = 0; i < sources.size(); ++i) {
                 const auto &st = playout_->stats(i);
-                snapshot.push_back({st.repeats, st.discarded, st.overflow});
+                snapshot.push_back({st.repeats, st.discarded, st.overflow, st.discontinuities});
             }
             std::lock_guard<std::mutex> lock(playout_stats_mutex_);
             playout_stats_published_ = std::move(snapshot);

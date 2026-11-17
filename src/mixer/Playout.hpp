@@ -133,8 +133,18 @@ public:
         if (timestamp_mode_ == TimestampMode::Presentation) {
             slot = rate_.nearestIndex(timestamp_ns) + state.offset_ticks;
             if (state.next_index && slot < *state.next_index - 1) {
-                state.stats.discarded += state.queue.size();
-                releaseQueue(state, &frame);
+                // The stamps went back. Arrival order is content order, so whatever is queued
+                // for a later slot is an older picture and goes: the frames of a clock that
+                // jumped back, or the copies a hold numbered on while this paint was on its
+                // way. Frames queued for this slot or an earlier one are still due before it
+                // and stay; dropping them too left their ticks without a picture (a repeat)
+                // and lost paints that had arrived in time, as many as the latency is deep.
+                // The queue is in slot order, as this rule keeps it.
+                auto later = state.queue.end();
+                while (later != state.queue.begin() && (later - 1)->index > slot) --later;
+                for (auto entry = later; entry != state.queue.end(); ++entry) release(entry->frame, &frame);
+                state.stats.discarded += state.queue.end() - later;
+                state.queue.erase(later, state.queue.end());
                 ++state.stats.discontinuities;
             }
             state.next_index = slot + 1;
