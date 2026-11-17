@@ -10,7 +10,8 @@ void MixerOrchestrator::prepareScene(const std::string& scene_name) {
     setNodeObject(state_->pvwSlot().post_otm_name, "outputs", Parameters(1u));
 }
 
-void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::TransitionMode mode) {
+void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::TransitionMode mode,
+                                  bool at_staged_tick) {
     if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
     interruptTransition(Interruption::Replaced);
     state_->graph = nodes_;
@@ -25,7 +26,11 @@ void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::Tra
     state_->wipe_switched = false;
     state_->destination_ready = false;
     state_->take_deadline_ns = monotonicNs() + kTakeReadyTimeoutMs * 1000000;
-    state_->take_not_before_ns = std::exchange(state_->next_take_not_before_ns, 0);
+    // Only the command that staged a tick takes it: a lever or wipe take never does, so a tick
+    // left staged by a command that never began its take (one on air, a refusal) times nothing.
+    // Every command that may be timed stages its own (takeNotBeforeShowTick) first.
+    state_->take_not_before_ns = at_staged_tick ? std::exchange(state_->next_take_not_before_ns, 0) : 0;
+    state_->take_tick_wait_until_ns = state_->take_tick_destination_ns = 0;
     // A take held for its tick has its full ready time from that tick on.
     if (state_->take_not_before_ns)
         state_->take_deadline_ns = std::max(state_->take_deadline_ns,
@@ -112,7 +117,7 @@ void MixerOrchestrator::cut(const std::string& scene_name, CutLatency::Clock::ti
     // of the composition without it could complete the take showing the bare target framing.
     if (!state_->pending_zoom.is_null()) state_->pvw_slot_scene.clear();
     try {
-        beginTake(scene_name, MixerState::TransitionMode::Cut);
+        beginTake(scene_name, MixerState::TransitionMode::Cut, /*at_staged_tick=*/true);
         state_->take_zoom = std::exchange(state_->pending_zoom, Parameters(nullptr));
         state_->take_received_ns = monotonicNs(received);
         if (state_->cut_latency) {

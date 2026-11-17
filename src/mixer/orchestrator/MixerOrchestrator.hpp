@@ -102,7 +102,10 @@ class MixerOrchestrator {
     /// the dropped transition left in the state. Cleanup failures are logged, never thrown.
     void dropTransition(MixerState::TransitionMode dropped);
     void abortTransition(uint64_t generation) noexcept;
-    void beginTake(const std::string& scene_name, MixerState::TransitionMode mode);
+    /// `at_staged_tick`: the take of the command that staged next_take_not_before_ns (mixer.cut,
+    /// mixer.fade, mixer.move, and a move's fade instead), which it takes as its tick; any other
+    /// take (the lever's, a wipe) leaves it and has none.
+    void beginTake(const std::string& scene_name, MixerState::TransitionMode mode, bool at_staged_tick);
     /// Caller holds state_->mutex. A mix to `scene_name` being prepared, as AUTO and the lever start one.
     /// `manual`: the lever started it (own ownership of take_manual moved here from callers, so
     /// emitTransitionStart below always sees the right value regardless of call order).
@@ -184,9 +187,16 @@ public:
     MixerOrchestrator(std::shared_ptr<NodeManager> nodes, std::shared_ptr<MixerState> state);
     MixerOrchestrator(std::shared_ptr<MixerGraph> nodes, std::shared_ptr<MixerState> state);
     // Called with state.mutex held, on the selector's consumer thread before
-    // publishing a frame. Returns exactly one selected input for this tick.
+    // publishing a frame. Returns exactly one selected input for this tick, -1 for none
+    // (the heads are consumed), or kWaitForDestination.
     int selectFrame(bool wipe, const std::vector<const av::VideoFrame*>& frames,
                     int active, int64_t last_ns);
+    /// The program selector's "not yet": a take for a show tick waits for the destination's
+    /// frame of program's tick (MixerState::take_tick_wait_until_ns). Nothing goes out. A
+    /// destination head there would never go out and is consumed alone; with none, the selector
+    /// waits for an input, a command or stop until that time, without the mutex, then selects
+    /// again (MixerSourceSwitcher::holdForInput).
+    static constexpr int kWaitForDestination = -2;
 
 
     void defineSource(const std::string& name, const std::string& otm_node, int input_index);

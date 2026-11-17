@@ -27,13 +27,15 @@ void MixerOrchestrator::beginMove(const std::string& scene_name, double duration
     };
     // The slot follows the take clock this take starts on air: the next one.
     const uint64_t generation = state_->clock()->generation + 1;
+    // beginTake takes the command's show tick (at_show_tick); a fade instead keeps it.
+    const int64_t staged_tick = state_->next_take_not_before_ns;
     std::string why;
     Parameters spec = planMove(*state_, state_->pgmScene(), state_->scenes.at(scene_name), generation, unmatched, why);
     if (spec.is_null()) return fadeInstead(why);
     state_->pending_move = std::move(spec);
     state_->pvw_slot_scene.clear();   // a preloaded Preview has no move in its composition
     try {
-        beginTake(scene_name, MixerState::TransitionMode::Move);
+        beginTake(scene_name, MixerState::TransitionMode::Move, /*at_staged_tick=*/!manual);
         state_->take_move = std::exchange(state_->pending_move, Parameters(nullptr));
         state_->take_received_ns = received_ns;
         state_->take_duration_ns = int64_t(duration_sec * 1000000000);
@@ -47,6 +49,7 @@ void MixerOrchestrator::beginMove(const std::string& scene_name, double duration
         // The destination refused the composition (max_layers for both scenes' layers): fade.
         state_->pending_move = nullptr;
         abortTransition(state_->transition_generation);
+        state_->next_take_not_before_ns = staged_tick;
         fadeInstead(e.what());
     }
 }

@@ -18,7 +18,7 @@ void MixerOrchestrator::beginCrossfade(const std::string& scene_name, double dur
                                        std::optional<std::array<uint8_t, 3>> dip, int64_t received_ns,
                                        bool manual) {
     try {
-        beginTake(scene_name, MixerState::TransitionMode::Crossfade);
+        beginTake(scene_name, MixerState::TransitionMode::Crossfade, /*at_staged_tick=*/!manual);
         state_->take_received_ns = received_ns;
         state_->take_duration_ns = int64_t(duration_sec * 1000000000);
         state_->take_curve = curve;
@@ -261,19 +261,52 @@ int MixerOrchestrator::selectProgram(const std::vector<const av::VideoFrame*>& f
         if (state_->move_on_air) return target;   // a cut under a move waits on the glide
         return state_->pgmSourceSwitcherIndex();
     };
-    // A take for a given show tick (at_show_tick) waits for a destination frame of that tick,
-    // showing what program shows while any take waits.
+    // A take for a given show tick (at_show_tick) waits for a ready destination frame of that
+    // tick or later, showing what program shows while any take waits. It is taken where the take
+    // can land: no older than what went out last (the branches below take nothing older either).
     if (state_->take_not_before_ns && state_->take_phase == MixerState::TakePhase::Ready &&
         mode != MixerState::TransitionMode::Wipe) {
-        if (target_pts + 1000 < state_->take_not_before_ns) return on_air();
-        const int64_t late = target_pts - state_->take_not_before_ns;
-        if (late > av_rescale(1000000000, state_->fps_den, state_->fps_num) / 2)
+        const int64_t period_ns = av_rescale(1000000000, state_->fps_den, state_->fps_num);
+        if (frames[target] && target_pts > state_->take_tick_destination_ns)
+            state_->take_tick_destination_ns = target_pts;
+        if (!destinationReady(frames[target]) || target_pts + 1000 < state_->take_not_before_ns ||
+            target_pts < last_ns) {
+            // Program's frame of a tick from the take's on is here and the destination's of it
+            // not yet. Which compositor finishes a tick first is luck: putting program's out
+            // would land the take a tick late (the -1 below), on one host and not on the other.
+            // So nothing goes out (kWaitForDestination) until the destination's frame of the tick
+            // comes, half a frame at most; a destination head of an earlier tick, which would
+            // never go out, is consumed alone meanwhile. A frame of the tick that is not ready
+            // (the slot still on its previous composition) ends the wait without landing: program's
+            // goes out and the next tick waits again. A wait that runs out (a destination
+            // stalled or gone) is the last: the take lands late, as it did before.
+            const int64_t tick_ns = pts(on_air());
+            if (tick_ns + 1000 >= state_->take_not_before_ns && state_->take_tick_wait_until_ns >= 0 &&
+                state_->take_tick_destination_ns + 1000 < tick_ns) {
+                const int64_t now = monotonicNs();
+                if (!state_->take_tick_wait_until_ns) state_->take_tick_wait_until_ns = now + period_ns / 2;
+                if (now < state_->take_tick_wait_until_ns) return kWaitForDestination;
+                state_->take_tick_wait_until_ns = -1;
+                logstream << "mixer: take at a show tick: no destination frame of tick pts_ns=" << tick_ns
+                          << " within half a frame, it reaches program late";
+            } else if (state_->take_tick_wait_until_ns > 0) {
+                state_->take_tick_wait_until_ns = 0;   // the destination's frame of the tick came
+            }
+            return on_air();
+        }
+        // Where the take lands: a cut on a destination frame of the tick program already showed
+        // on the next tick (-1 below); a mix or a move starts its clock on the frame's own tick.
+        const int64_t landed_ns = mode == MixerState::TransitionMode::Cut && target_pts == last_ns
+            ? target_pts + period_ns : target_pts;
+        const int64_t late = landed_ns - state_->take_not_before_ns;
+        if (late > period_ns / 2)
             logstream << "mixer: take at a show tick reached program " << late / 1000000 << " ms after its tick";
-        state_->take_not_before_ns = 0;
+        state_->take_not_before_ns = state_->take_tick_wait_until_ns = 0;
     }
     // A destination frame of the tick program has already shown completes a take without being
     // emitted (-1): the program slot's frame of a tick can reach the selector first on every
-    // tick, so waiting for a strictly newer destination frame might never end.
+    // tick, so waiting for a strictly newer destination frame might never end. Only a take for
+    // a show tick waits for the destination's frame (above).
     if (mode == MixerState::TransitionMode::Cut) {
         if (!destinationReady(frames[target]) || target_pts < last_ns) return on_air();
         // The keys going with the cut switch on the first frame of the new program: the next
