@@ -1,0 +1,136 @@
+{
+  "assets": [
+    {
+      "name": "engineering-20261117-17-mixer-ui-cover-46f90ffbb4.gif",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-17-mixer-ui-cover-46f90ffbb4.gif",
+      "sha256": "46f90ffbb461e7dae11b59702bd6670ea35b102d26206b512ec3d3ca6e748f5b",
+      "bytes": 8197218
+    },
+    {
+      "name": "engineering-20261117-16-sigma-zoom-2184bd4f22.gif",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-16-sigma-zoom-2184bd4f22.gif",
+      "sha256": "2184bd4f22f76eaba7261da0ce6c0763ee14bdfd785daeb0d8a9504147bc125f",
+      "bytes": 5072491
+    },
+    {
+      "name": "engineering-20261117-11-hardware-comparison-light-d545aa9d22.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-11-hardware-comparison-light-d545aa9d22.png",
+      "sha256": "d545aa9d22abaa841c8d30a48babcf9d143539025bc25f2f3390abcc82b923c4",
+      "bytes": 1477761
+    },
+    {
+      "name": "engineering-20261117-11-hardware-comparison-dark-1ef819301f.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-11-hardware-comparison-dark-1ef819301f.png",
+      "sha256": "1ef819301f66da8ca59b0bdae2d768d2aaa861dbce952edb085b72fa1bab6928",
+      "bytes": 1480141
+    },
+    {
+      "name": "engineering-20261117-01-architecture-light-adc88ab2a1.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-01-architecture-light-adc88ab2a1.png",
+      "sha256": "adc88ab2a149e9811a460e1604d7bf9d93067a2087882039db7d2f72454adc12",
+      "bytes": 229742
+    },
+    {
+      "name": "engineering-20261117-01-architecture-dark-3e83213b0e.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-01-architecture-dark-3e83213b0e.png",
+      "sha256": "3e83213b0e2d1f69fc9f07c6d5f6b2b2c2816af8e0dfbc88f9b682e513351f6e",
+      "bytes": 222967
+    },
+    {
+      "name": "engineering-20261117-02-surfaces-light-79c090dd41.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-02-surfaces-light-79c090dd41.png",
+      "sha256": "79c090dd419d96c48b0289ba8821df5b83f80318dda21b963e1eded0e0525a5e",
+      "bytes": 257560
+    },
+    {
+      "name": "engineering-20261117-02-surfaces-dark-fc1e43873d.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-02-surfaces-dark-fc1e43873d.png",
+      "sha256": "fc1e43873d03e6d9bc77670fbba660cc0bace2de30fa6dfac28e71d83500d33f",
+      "bytes": 259636
+    },
+    {
+      "name": "engineering-20261117-03-graphics-light-2891ed1d49.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-03-graphics-light-2891ed1d49.png",
+      "sha256": "2891ed1d499a35ac7fa38dacd5d2bf5e6f45e543f27ba915ccce00b43633acbc",
+      "bytes": 192802
+    },
+    {
+      "name": "engineering-20261117-03-graphics-dark-20e535731d.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-03-graphics-dark-20e535731d.png",
+      "sha256": "20e535731d701424a277fc6e63831ad22c22b95dff5ded42c506ae30f2649d66",
+      "bytes": 195252
+    },
+    {
+      "name": "engineering-20261117-04-parallelism-light-4a125b8b20.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-04-parallelism-light-4a125b8b20.png",
+      "sha256": "4a125b8b2075edf05d35f88ee99bddb500be2b69dcb5ad19abcfeaca4b152a2e",
+      "bytes": 287591
+    },
+    {
+      "name": "engineering-20261117-04-parallelism-dark-548b7b93a8.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-04-parallelism-dark-548b7b93a8.png",
+      "sha256": "548b7b93a8dd5477093abb1b1fc41e818b73276d777267fe2cc6611a6d1de30e",
+      "bytes": 286772
+    },
+    {
+      "name": "engineering-20261117-12-open-source-comparison-light-06405dd78e.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-12-open-source-comparison-light-06405dd78e.png",
+      "sha256": "06405dd78e8bdc47b80439fba2ea86f612ba50dd63c896a53b83d1cdd9f8990c",
+      "bytes": 396625
+    },
+    {
+      "name": "engineering-20261117-12-open-source-comparison-dark-bee35a3118.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-12-open-source-comparison-dark-bee35a3118.png",
+      "sha256": "bee35a311880236d04c912be6b9be64d543ee36356e967753df4796dc72724aa",
+      "bytes": 404866
+    },
+    {
+      "name": "engineering-20261117-14-cut-latency-light-53c7505f96.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-14-cut-latency-light-53c7505f96.png",
+      "sha256": "53c7505f96c39e6980faecb77b584f65b88fc4cd1ee90917dc47aadf98ecba1e",
+      "bytes": 167068
+    },
+    {
+      "name": "engineering-20261117-14-cut-latency-dark-de488451ef.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-14-cut-latency-dark-de488451ef.png",
+      "sha256": "de488451efa365c9d2c4b2a82d4eaf0140e26405af97350e604268d6bd7bfea7",
+      "bytes": 170279
+    },
+    {
+      "name": "engineering-20261117-13-code-size-light-5257e71817.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-13-code-size-light-5257e71817.png",
+      "sha256": "5257e71817ac8b8c4c843a42a015380885a35f0c6af9ce5aa5d3617326830051",
+      "bytes": 225906
+    },
+    {
+      "name": "engineering-20261117-13-code-size-dark-693c0b3f8b.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-13-code-size-dark-693c0b3f8b.png",
+      "sha256": "693c0b3f8b73bddf9c595681be377895343c022ad93fcb39e7d14254d1ac3b44",
+      "bytes": 228687
+    },
+    {
+      "name": "engineering-20261117-06-synchronization-light-0b32f6e7e8.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-06-synchronization-light-0b32f6e7e8.png",
+      "sha256": "0b32f6e7e8af8b8c1f20617181c047024d7fc3db0cdf0a451423ac5c450e7031",
+      "bytes": 313556
+    },
+    {
+      "name": "engineering-20261117-06-synchronization-dark-5bed958509.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-06-synchronization-dark-5bed958509.png",
+      "sha256": "5bed958509ff75892301766876173c271146ea353a1a382ede9b86b6eda0f709",
+      "bytes": 312955
+    },
+    {
+      "name": "engineering-20261117-07-sharing-light-da1dd0c08e.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-07-sharing-light-da1dd0c08e.png",
+      "sha256": "da1dd0c08e196fdb98f16e5a2d413098675094b7514eb629aba4b2260894c560",
+      "bytes": 174744
+    },
+    {
+      "name": "engineering-20261117-07-sharing-dark-28e65d1017.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-07-sharing-dark-28e65d1017.png",
+      "sha256": "28e65d1017a5969f51607ed52ba4595a93328c1ebcf9de66fea403b58e1c7f5a",
+      "bytes": 171402
+    }
+  ]
+}
