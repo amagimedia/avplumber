@@ -59,9 +59,16 @@ __device__ __forceinline__ uint8_t blendLabelBackground(float opacity, uint8_t s
      ((uint64_t)(r3) << 15) | ((uint64_t)(r4) << 20) | ((uint64_t)(r5) << 25) | \
      ((uint64_t)(r6) << 30))
 
+/// The atlas holds upper case, digits and a few punctuation marks only; lower case
+/// folds onto its upper case glyph so a label template can pass detector class names
+/// (``fielder``, ``batter``) unsanitized and still render.
+__device__ __forceinline__ char glyphFoldCase(char c) {
+    return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+}
+
 __device__ __forceinline__ uint8_t glyphRowBits(char c, int row) {
     uint64_t packed = 0;
-    switch (c) {
+    switch (glyphFoldCase(c)) {
     case 'A': packed = PACK7(0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11); break;
     case 'B': packed = PACK7(0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E); break;
     case 'C': packed = PACK7(0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E); break;
