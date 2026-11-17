@@ -339,6 +339,8 @@ class Item:
     rotation: float = 0.0         # degrees, clockwise, about `pivot` (the box's centre when None)
     pivot: Optional[Tuple[float, float]] = None   # scene-canvas pixels
     debug: bool = False           # draw the compositor's debug overlay over this item, from its source's metadata
+    flip_h: bool = False          # mirrored left to right in its box, before the rotation
+    flip_v: bool = False          # mirrored top to bottom (both flips: a half turn)
 
 
 @dataclass(frozen=True)
@@ -880,7 +882,11 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             debug = it.get("debug", False)
             if not isinstance(debug, bool):
                 raise ConfigError(f"{iw}: debug must be a boolean")
-            items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop, blend, rotation, pivot, debug))
+            flips = {key: it.get(key, False) for key in ("flip_h", "flip_v")}
+            if not all(isinstance(v, bool) for v in flips.values()):
+                raise ConfigError(f"{iw}: flip_h and flip_v must be booleans")
+            items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop, blend, rotation, pivot, debug,
+                              **flips))
         scenes.append(Scene(protocol_name(str(sc["id"]), f"{where}: id"), tuple(items)))
         _unique(scenes, where, "scene id")
     if not scenes:
@@ -1201,5 +1207,8 @@ def scene_layers(cfg: MixerConfig, scene: Scene) -> Dict[str, Dict[str, Any]]:
                 layer["pivot_x"], layer["pivot_y"] = item.pivot
         if item.debug:      # only when set, like rotation
             layer["debug"] = True
+        for key in ("flip_h", "flip_v"):
+            if getattr(item, key):
+                layer[key] = True
         layers[name] = layer
     return layers

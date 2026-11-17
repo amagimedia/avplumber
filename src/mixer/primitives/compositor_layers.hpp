@@ -49,6 +49,9 @@ struct LayerSpec {
     double rotation_deg = 0;
     bool pivot_set = false;
     double pivot_x = 0, pivot_y = 0;
+    // A mirror image of the crop in its box, before the rotation: flip_h left to right, flip_v top
+    // to bottom (both: a half turn). Drawn through the affine entry.
+    bool flip_h = false, flip_v = false;
     std::optional<RectF> crop_exact;
     // Allowed source content in visible-picture pixels. Clips coverage and filter taps
     // without changing the crop-to-destination map (for moving broadcast insets).
@@ -80,7 +83,8 @@ struct LayerSpec {
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
                source_canvas_w == other.source_canvas_w && source_canvas_h == other.source_canvas_h &&
                rotation_deg == other.rotation_deg && pivot_set == other.pivot_set && pivot_x == other.pivot_x &&
-               pivot_y == other.pivot_y && crop_exact == other.crop_exact && source_clip == other.source_clip && dst_exact == other.dst_exact &&
+               pivot_y == other.pivot_y && flip_h == other.flip_h && flip_v == other.flip_v &&
+               crop_exact == other.crop_exact && source_clip == other.source_clip && dst_exact == other.dst_exact &&
                debug == other.debug && move_id == other.move_id && yuv_lut == other.yuv_lut;
     }
 };
@@ -88,7 +92,7 @@ struct LayerSpec {
 /// Whether a layer draws through the affine entry: rotated, cropped or placed at a fraction of a
 /// pixel, or a faded layer that is not a blended key (a blended key fades by its table mul).
 inline bool needsTransform(const LayerSpec &l) {
-    return normalizedRotation(l.rotation_deg) != 0. || l.crop_exact.has_value() || l.source_clip.has_value() || l.dst_exact.has_value() ||
+    return normalizedRotation(l.rotation_deg) != 0. || l.flip_h || l.flip_v || l.crop_exact.has_value() || l.source_clip.has_value() || l.dst_exact.has_value() ||
            (l.opacity < 1.f && !l.blend);
 }
 
@@ -176,6 +180,11 @@ inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     out.pivot_y = out.pivot_set ? obj.at("pivot_y").get<double>() : 0.;
     if (!std::isfinite(out.pivot_x) || !std::isfinite(out.pivot_y))
         throw Error("cuda_rect_overlay: pivot must be finite");
+    for (const auto &[key, flip] : {std::pair{"flip_h", &out.flip_h}, std::pair{"flip_v", &out.flip_v}}) {
+        if (obj.contains(key) && !obj.at(key).is_boolean())
+            throw Error(std::string("cuda_rect_overlay: ") + key + " must be a boolean");
+        *flip = obj.value(key, false);
+    }
     out.blend = obj.value("blend", false);
     const std::string fit = obj.value("fit", std::string("stretch"));
     if (fit != "stretch" && fit != "contain")
@@ -336,6 +345,8 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
             t.rotation_deg = normalizedRotation(L.rotation_deg);
             t.pivot_x = L.pivot_set ? L.pivot_x : NAN;   // NAN: the box's centre, once the box is final
             t.pivot_y = L.pivot_set ? L.pivot_y : NAN;
+            t.flip_h = L.flip_h;
+            t.flip_v = L.flip_v;
             t.clip = {0, 0, canvas_w, canvas_h};
             op.transform = t;
             return op;
@@ -551,6 +562,8 @@ inline std::string describeDrawOps(const std::vector<DrawOp> &ops) {
             desc << " " << scaleFilterName(filter);
         if (op.transform) {
             if (op.transform->rotation_deg != 0.) desc << " rot " << op.transform->rotation_deg;
+            if (op.transform->flip_h) desc << " flip_h";
+            if (op.transform->flip_v) desc << " flip_v";
             if (L.crop_exact) desc << " subpixel";
         }
         bool crop_ignored;

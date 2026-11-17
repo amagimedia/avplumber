@@ -99,6 +99,19 @@ static void unmatched_fade_and_cut(const Sources &src) {
     assert(!byInput(late, 1) && byInput(late, 3) && near(byInput(late, 3)->opacity, 1));
 }
 
+static void a_mirror_image_fades_instead_of_gliding(const Sources &src) {
+    const auto a = layers(R"([{"input":0,"dst_w":960,"dst_h":540}])");
+    const auto b = layers(R"([{"input":0,"dst_x":960,"dst_w":960,"dst_h":540,"flip_h":true}])");
+    const auto out = move(a, b, 0.25, src);
+    assert(out.size() == 2);
+    for (const auto &l : out) assert(!l.dst_exact || nearRect(box(l), {0, 0, 960, 540}) || nearRect(box(l), {960, 0, 960, 540}));
+    assert(near(out[0].opacity + out[1].opacity, 1) && out[0].flip_h != out[1].flip_h);
+    // The same flip at both ends glides, keeping it.
+    const auto both = layers(R"([{"input":0,"dst_w":960,"dst_h":540,"flip_h":true}])");
+    const auto glide = move(both, b, 0.5, src);
+    assert(glide.size() == 1 && glide[0].flip_h && glide[0].dst_exact && nearRect(box(glide[0]), {480, 0, 960, 540}));
+}
+
 static void faded_out_layers_are_dropped(const Sources &src) {
     auto a = layers(kFull);
     a[1].opacity = 0;   // a key already faded out
@@ -282,6 +295,7 @@ int main() {
     stacking_crosses_at_the_keys(src);
     contain_is_placed_before_the_glide(src);
     unmatched_fade_and_cut(src);
+    a_mirror_image_fades_instead_of_gliding(src);
     faded_out_layers_are_dropped(src);
     covered_background_stays_whole(src);
     unmatched_keeps_its_place(src);

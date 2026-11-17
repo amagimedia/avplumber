@@ -1,6 +1,6 @@
 #pragma once
 // Layer transform geometry: a layer drawn through a float inverse affine per canvas plane, for a
-// sub-pixel source crop (a smooth zoom), rotation about a pivot and a soft 1-sample edge. Pure host
+// sub-pixel source crop (a smooth zoom), a mirror image, rotation about a pivot and a soft 1-sample edge. Pure host
 // math, no CUDA; the rect table carries the result (cuda_rect_table.h) and the affine kernel entry
 // draws it. Rotation is in degrees, clockwise on the y-down canvas.
 #include "compositor_geometry.hpp"
@@ -24,12 +24,15 @@ struct LayerTransform {
                                  // fractional for a move's sub-pixel glide
     double rotation_deg = 0;     // clockwise about the pivot, (-180, 180]
     double pivot_x = 0, pivot_y = 0;   // canvas pixels
+    // The crop drawn mirrored in the box, left to right and top to bottom, before the rotation.
+    bool flip_h = false, flip_v = false;
     Rect clip;                   // the canvas, or the AUX tile the layer is drawn into
 
     bool operator==(const LayerTransform &o) const {
         auto same = [](const Rect &a, const Rect &b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; };
         return crop == o.crop && edges == o.edges && box == o.box && rotation_deg == o.rotation_deg &&
-               pivot_x == o.pivot_x && pivot_y == o.pivot_y && same(clip, o.clip);
+               pivot_x == o.pivot_x && pivot_y == o.pivot_y && flip_h == o.flip_h && flip_v == o.flip_v &&
+               same(clip, o.clip);
     }
 };
 
@@ -74,8 +77,12 @@ inline std::optional<AffinePlane> affinePlane(const LayerTransform &t, int dst_s
     rotationSinCos(t.rotation_deg, s, c);
     const double sx = t.crop.w / t.box.w, sy = t.crop.h / t.box.h, px = t.pivot_x, py = t.pivot_y;
     // Undo the rotation about the pivot, then the box-to-crop scale.
-    const double L[6] = {sx * c, sx * s, t.crop.x + sx * (px - t.box.x - c * px - s * py),
-                         -sy * s, sy * c, t.crop.y + sy * (py - t.box.y + s * px - c * py)};
+    double L[6] = {sx * c, sx * s, t.crop.x + sx * (px - t.box.x - c * px - s * py),
+                   -sy * s, sy * c, t.crop.y + sy * (py - t.box.y + s * px - c * py)};
+    // A flip mirrors the crop about its own centre: u -> 2 crop.x + crop.w - u (v alike). The edges,
+    // bounds and footprints do not change; only the direction the box reads the crop in does.
+    if (t.flip_h) { L[0] = -L[0]; L[1] = -L[1]; L[2] = 2 * t.crop.x + t.crop.w - L[2]; }
+    if (t.flip_v) { L[3] = -L[3]; L[4] = -L[4]; L[5] = 2 * t.crop.y + t.crop.h - L[5]; }
     const double ksx = std::ldexp(1., -src_sub_x), ksy = std::ldexp(1., -src_sub_y);
     const double kdx = std::ldexp(1., -dst_sub_x), kdy = std::ldexp(1., -dst_sub_y);
     AffinePlane p{};
