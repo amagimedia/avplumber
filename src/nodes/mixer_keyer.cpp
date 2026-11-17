@@ -1,9 +1,9 @@
 #include "hwaccel/cuda_rect_compositor.hpp"
 #include "../mixer/primitives/key_fade.hpp"
+#include "../mixer/primitives/KeyQueue.hpp"
 #include "../mixer/primitives/MixerState.hpp"
 
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -17,13 +17,14 @@
 class MixerKeyer : public CudaRectCompositor, public IReturnsObjects {
     size_t clock_input_ = 0;
     av::Rational frame_rate_{0, 1};   // the clock input's grid for key timestamps and fades
-    // Key frames waiting for the program tick they are stamped for. They arrive
-    // about one playout latency ahead of that program frame; the bound stops a key
-    // on an unrelated clock from retaining its producer's frames indefinitely.
+    // Key frames waiting for the program tick they are stamped for, and each key's newest
+    // frame at or before the current tick. They arrive about one playout latency ahead of
+    // that program frame; the bound stops a key on an unrelated clock from retaining its
+    // producer's frames indefinitely. A frame supersedes the queued ones stamped at or
+    // after it (KeyQueue): held copies numbered ahead of a paint that was delivered late.
     static constexpr size_t kKeyQueue = 6;
-    std::vector<std::deque<av::VideoFrame>> key_queue_;
-    std::vector<av::VideoFrame> held_;   // each key's newest frame at or before the current tick
-    std::vector<bool> held_valid_;
+    using KeyFrames = avp::mixer::KeyQueue<av::VideoFrame, av::Timestamp>;
+    std::vector<KeyFrames> key_queue_;
     bool keys_subscribed_ = false;   // render thread: every key subscription enabled once
     // Key fades. The control thread records, per key, how the latest command that
     // flipped it asked for the change; the render thread reads that as it steps one
@@ -42,6 +43,7 @@ class MixerKeyer : public CudaRectCompositor, public IReturnsObjects {
         bool known = false, available = false, target = false, moving = false;
         double opacity = 0;
         int64_t pts_ns = 0;
+        KeyFrames::Stats frames;
     };
     std::vector<KeyTally> tally_; // last emitted program frame, under masks_mutex_
     // Next Transition: the keys a background take carries (prepare_inputs). The orchestrator
@@ -145,9 +147,7 @@ class MixerKeyer : public CudaRectCompositor, public IReturnsObjects {
 public:
     explicit MixerKeyer(const Config &config)
         : CudaRectCompositor("mixer_keyer", config),
-          key_queue_(config.inputs),
-          held_(config.inputs),
-          held_valid_(config.inputs),
+          key_queue_(config.inputs, KeyFrames(kKeyQueue)),
           key_change_(config.inputs),
           key_opacity_(config.inputs, 1.f),
           bounded_input_(config.inputs, false), tally_(config.inputs) {}
@@ -191,13 +191,7 @@ public:
             while (auto *frame = source_edges_[i]->peek()) {
                 if (frameUsable(*frame)) {
                     requireDrawable(*frame);
-                    auto &queue = key_queue_[i];
-                    queue.push_back(*frame);
-                    if (queue.size() > kKeyQueue) {
-                        held_[i] = std::move(queue.front());
-                        held_valid_[i] = true;
-                        queue.pop_front();
-                    }
+                    key_queue_[i].push(*frame, frame->pts());
                 }
                 source_edges_[i]->pop();
             }
@@ -223,14 +217,9 @@ public:
         bool keyed = false, bounded = true;   // bounded: every key drawn on this frame allows it
         for (size_t i = 0; i < sources.size(); ++i) {
             if (i == clock) continue;
-            auto &queue = key_queue_[i];
-            while (!queue.empty() && queue.front().pts() < tick_end) {
-                held_[i] = std::move(queue.front());
-                held_valid_[i] = true;
-                queue.pop_front();
-            }
-            if (!held_valid_[i] || !(key_opacity_[i] > 0.f)) continue;
-            sources[i] = &held_[i];
+            const av::VideoFrame *key = key_queue_[i].at(tick_end);
+            if (!key || !(key_opacity_[i] > 0.f)) continue;
+            sources[i] = key;
             keyed = true;
             bounded = bounded && bounded_input_[i];
         }
@@ -245,8 +234,9 @@ public:
             for (size_t i = 0; i < tally_.size(); ++i) {
                 if (i == clock) continue;
                 const bool taken = taken_.test(int(i));
-                tally_[i] = {true, held_valid_[i], taken ? !taken_on_.test(int(i)) : key_fade_[i].target(),
-                             taken || key_fade_[i].moving(), key_opacity_[i], frame.pts().timestamp({1, 1000000000})};
+                tally_[i] = {true, key_queue_[i].shown() != nullptr, taken ? !taken_on_.test(int(i)) : key_fade_[i].target(),
+                             taken || key_fade_[i].moving(), key_opacity_[i], frame.pts().timestamp({1, 1000000000}),
+                             key_queue_[i].stats()};
             }
         }
     }
@@ -264,6 +254,13 @@ public:
                 {"on_air", t.known ? Parameters(t.available && t.opacity > 0) : Parameters()},
                 {"phase", phase}, {"opacity", t.known ? Parameters(t.opacity) : Parameters()},
                 {"available", t.available}, {"pts_ns", t.pts_ns},
+                // Since the start. superseded: queued frames dropped for a later arrival stamped before
+                // them (held copies numbered past a paint delivered late; each one used to keep paints
+                // from their ticks). replaced: the same for an equal stamp (a copy and then its paint;
+                // the paint was shown before too). shown_early: frames shown ahead of their tick because
+                // the queue was full; every two of them between two program frames skip a frame.
+                {"superseded", t.frames.superseded}, {"replaced", t.frames.replaced},
+                {"shown_early", t.frames.early},
                 {"pending", !t.known || active_inputs_.test(int(i)) != t.target},
                 {"next_take", prepared_.test(int(i))}});
         }
@@ -374,8 +371,7 @@ std::shared_ptr<MixerKeyer> MixerKeyer::create(NodeCreationInfo &nci) {
         if (ftb < 0 || size_t(ftb) >= node->source_edges_.size() || ftb == clock)
             throw Error("mixer_keyer: ftb_input names a key input");
         node->ftb_input_ = size_t(ftb);
-        node->held_[size_t(ftb)] = blackFrame(*config.hw);   // nothing feeds this input: held for good
-        node->held_valid_[size_t(ftb)] = true;
+        node->key_queue_[size_t(ftb)].show(blackFrame(*config.hw));   // nothing feeds this input: shown for good
     }
     // The clock input is an ordinary edge: its empty name subscribes nothing.
     // A held copy can arrive before the live paint for the same timestamp. Let
