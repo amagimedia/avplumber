@@ -28,10 +28,12 @@ def check_size(size):
 
 
 def cells(cfg, page, size=(WIDTH, HEIGHT)):
-    """The bank's 8x8 grid: 64 sources from page * 64, cells of a 64th of the frame, no space lost."""
+    """The bank's 8x8 grid: 64 sources from page * 64, cells of a 64th of the frame, no space lost.
+    Its cells ask for filter auto (area or multisample by scale): a bank's 8-15:1 shrink aliases thin
+    strokes and text with bilinear, and a bank is drawn at 15 fps."""
     first, w, h = page * PER_BANK, size[0] // 8, size[1] // 8
     return [{"role": "source", "source": i, "x": (i - first) % 8 * w,
-             "y": (i - first) // 8 * h, "w": w, "h": h}
+             "y": (i - first) // 8 * h, "w": w, "h": h, "filter": "auto"}
             for i in range(first, min(first + PER_BANK, len(cfg.sources)))]
 
 
@@ -69,7 +71,10 @@ def reserve_buses(show, extra_count=0, options=None):
                 *(r.get("audio_port", 0) for r in show.get("renditions", [])),
                 *(r.get(k, 0) for b in buses for r in b["renditions"] for k in ("port", "audio_port"))])
     reserved = []
-    for page in range(BANKS):
+    # One bank per 64 sources, never an empty one: a bank with no source draws nothing, so its encoder
+    # never gets a frame and the mixer's start times out (85 sources at 59.94 asked for a third bank).
+    banks = max(1, min(BANKS, -(-len(show["sources"]) // PER_BANK))) if "sources" in show else BANKS
+    for page in range(banks):
         bid = f"thumbnails{page + 1}"
         if any(b["id"] == bid for b in ordinary):
             raise ValueError(f"{bid} is reserved for source thumbnails")
