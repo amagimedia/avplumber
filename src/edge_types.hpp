@@ -4,9 +4,11 @@
 #include <avcpp/frame.h>
 #include "hwaccel/EglImageFrame.hpp"
 #include "metadata_frame.hpp"
+#include "fabric_packet.hpp"
 
 // Central registry of queue data types
 #define EDGE_DATA_TYPES(X) \
+	X(FabricPacket) \
 	X(av::Packet) \
 	X(av::VideoFrame) \
 	X(av::AudioSamples) \
@@ -20,6 +22,7 @@
 
 // Comma-separated application over all data types (useful for base class lists)
 #define EDGE_DATA_TYPES_AS_BASES(APPLY) \
+	APPLY(FabricPacket), \
 	APPLY(av::Packet), \
 	APPLY(av::VideoFrame), \
 	APPLY(av::AudioSamples), \
@@ -33,6 +36,7 @@ template<typename T> constexpr const char* edgeTypeName();
 	template<> inline constexpr const char* edgeTypeName<T>() { return name_literal; }
 
 EDGE_TYPE_NAME_SPEC(av::Packet, "av::Packet")
+EDGE_TYPE_NAME_SPEC(FabricPacket, "FabricPacket")
 EDGE_TYPE_NAME_SPEC(av::VideoFrame, "av::VideoFrame")
 EDGE_TYPE_NAME_SPEC(av::AudioSamples, "av::AudioSamples")
 EDGE_TYPE_NAME_SPEC(EglImageFrame, "EglImageFrame")

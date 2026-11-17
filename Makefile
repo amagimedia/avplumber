@@ -21,6 +21,8 @@ HAVE_NVJPEG ?= 0
 # The old split flags remain aliases for downstream build compatibility.
 NEURAL_NET_COMMON ?= 0
 NEURAL_NET_SPECIFIC ?= 0
+# Build only the CUDA draw/overlay nodes (static_text_overlay for the fabric examples).
+NEURAL_NET_DRAW ?= 0
 NEURAL_NET ?= $(if $(filter 1,$(NEURAL_NET_COMMON) $(NEURAL_NET_SPECIFIC)),1,0)
 # Optional OpenTelemetry C++ API/SDK, for the metrics work. Off by default: nothing
 # in the engine uses it yet. When 1, the source tree must exist at
@@ -38,6 +40,8 @@ override CXXFLAGS += -DHAVE_OTEL=1 -I$(OPENTELEMETRY_ROOT)/api/include -I$(OPENT
 override LFLAGS += -L$(OPENTELEMETRY_LIB_DIR) -Wl,-rpath,$(OPENTELEMETRY_LIB_DIR)
 override LIBS_FLAGS += -lopentelemetry_api -lopentelemetry_sdk -lopentelemetry_common -lopentelemetry_resources -lopentelemetry_trace -lopentelemetry_metrics -lopentelemetry_logs -lopentelemetry_exporter_ostream_metrics -lopentelemetry_exporter_ostream_logs -lopentelemetry_exporter_ostream_trace
 endif
+# Build libfabric-backed fabric_source/fabric_sink implementations.
+HAVE_LIBFABRIC ?= 0
 NVCC ?= /usr/local/cuda/bin/nvcc
 ifeq ($(HAVE_VAAPI),1)
 HAVE_GL = 1
@@ -71,6 +75,8 @@ PYTHON_NODE_SRCS = $(shell find $(SRCDIR)/nodes/python -maxdepth 1 -name '*.cpp'
 ifneq ($(filter python_module,$(MAKECMDGOALS)),)
 NODES_SRC += $(PYTHON_NODE_SRCS)
 endif
+# Fabric transport nodes (fabric_source/fabric_sink fall back to stubs without HAVE_LIBFABRIC).
+NODES_SRC += $(shell find $(SRCDIR)/nodes/fabric -maxdepth 1 -name '*.cpp')
 # Optional module: decoded clips held in GPU memory (media wipe playback).
 NODES_SRC += $(SRCDIR)/nodes/clip_cache/clip_cache.cpp
 
@@ -102,6 +108,13 @@ DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
 # Boost.System is header-only since Boost 1.69; Fedora 44 (Boost 1.90) ships no libboost_system stub to link.
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz
+
+ifeq ($(HAVE_LIBFABRIC),1)
+override CXXFLAGS += -DHAVE_LIBFABRIC=1
+override LIBS_FLAGS += -lfabric
+else
+override CXXFLAGS += -DHAVE_LIBFABRIC=0
+endif
 
 ifeq ($(HAVE_JACK),1)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/jack -maxdepth 1 -name '*.cpp')
@@ -156,17 +169,21 @@ NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_to_egl_image.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/yuv_to_rgba_surface.cu,avpl_yuv_rgba_ptx,objs/src/nodes/hwaccel/cuda_to_egl_image.o))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET),11)
+DRAW_NODES_ENABLED := $(if $(filter 1,$(NEURAL_NET) $(NEURAL_NET_DRAW)),1,0)
+
+ifeq ($(HAVE_CUDA)$(DRAW_NODES_ENABLED),11)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/cuda_overlay_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox_labels.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_segmask.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_text.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_trail.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/ml_debug.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/face_debug_overlay.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/static_text_overlay.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_bbox.cu,avpl_draw_bbox_ptx,objs/src/nodes/neural_net/draw/draw_bbox.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o objs/src/nodes/neural_net/draw/draw_bbox_labels.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o objs/src/nodes/neural_net/draw/draw_bbox_labels.o objs/src/nodes/neural_net/draw/static_text_overlay.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_segmask.cu,avpl_draw_segmask_ptx,objs/src/nodes/neural_net/draw/draw_segmask.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_draw_keypoints_ptx,objs/src/nodes/neural_net/draw/draw_keypoints.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
