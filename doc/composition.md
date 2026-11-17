@@ -77,8 +77,10 @@ performs pixel operations on CUDA; Python builds parameters and the static LUT.
 existing even-aligned NV12 metadata contract, with configurable pad count.
 `geometry.source_crop`, `scaling.center_crop` and `scaling.cuda_scale` provide
 standalone geometry/scaling helpers. Fractional crops, offscreen destinations,
-rotation, effects and source clipping can be supplied directly as native layer
-fields; they are not restricted by the normalized-placement convenience helper.
+rotation, mirror images (`flip_h`, `flip_v`), effects and source clipping can be
+supplied directly as native layer fields; they are not restricted by the
+normalized-placement convenience helper. A flip mirrors the layer's crop in its
+box before the rotation; both flips together are a half turn.
 
 ```python
 import json
