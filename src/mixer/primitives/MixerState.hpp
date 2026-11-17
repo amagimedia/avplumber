@@ -210,10 +210,18 @@ struct MixerState : public InstanceShared<MixerState> {
     int64_t take_deadline_ns = 0;
     /// A take that must not reach program before a given tick (mixer.cut/fade/move "at_show_tick",
     /// for two hosts cutting on the same frame): next_take_not_before_ns is set by the command just
-    /// before the take, beginTake moves it to take_not_before_ns (local monotonic ns of that tick's
-    /// frame); selectProgram holds the take until a destination frame of that tick or later. 0: none.
+    /// before the take, and only that command's beginTake moves it to take_not_before_ns (local
+    /// monotonic ns of that tick's frame); selectProgram holds the take until a ready destination
+    /// frame of that tick or later is taken. 0: none.
     int64_t next_take_not_before_ns = 0;
     int64_t take_not_before_ns = 0;
+    /// Program's frame of a tick from that one on waits for the destination's (selectProgram)
+    /// until this monotonic ns: half a frame from the wait's start. 0: not waiting; -1: a wait
+    /// ran out, the take lands late and never waits again.
+    int64_t take_tick_wait_until_ns = 0;
+    /// The newest destination frame (pts ns) selectProgram saw while the take waited for its tick:
+    /// a frame of program's tick already came and went, ready or not, so nothing waits for it.
+    int64_t take_tick_destination_ns = 0;
     int64_t take_start_ns = 0;
     int64_t take_duration_ns = 0;
     int64_t wipe_first_ns = 0;

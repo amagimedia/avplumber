@@ -292,6 +292,39 @@ def test_input_keeps_native_rate_and_outputs_use_configured_fps():
     assert nodes["janus_encoder"]["options"]["g"] == 180
     assert "level" not in nodes["janus_encoder"]["options"]
     assert FakeMixer.instances[-1].parameters["fps"] == (60, 1)
+    # One source for a camera's realtime nodes: a timestamp jump under host sync moves them together.
+    assert nodes["realtime_0"]["sync_source"] == "input_0"
+    # Without host sync the outputs keep the compositor's own timestamps and keyframes.
+    assert "show_time" not in nodes["program_mux"] and "show_keyframes" not in nodes["program_encoder"]
+
+
+def test_host_sync_stamps_record_outputs_on_show_time(monkeypatch):
+    """AVP_CLOCK_ORIGIN=tai: record outputs carry the show timeline and its keyframe grid, so two
+    hosts write the same timestamps and keyframes for the same frame. Janus RTP is left alone."""
+    monkeypatch.setenv("AVP_CLOCK_ORIGIN", "tai")
+    application = build_application(
+        GraphOptions(inputs=("input.mp4",), output="program.ts", janus_output=True, fps="30000/1001"),
+        api=fake_api(),
+    )
+    nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
+    assert nodes["program_mux"]["show_time"] is True
+    assert nodes["program_encoder"]["show_keyframes"] == {"every": 60, "rate": "30000/1001"}
+    assert nodes["program_encoder"]["options"]["forced-idr"] == 1 and nodes["program_encoder"]["options"]["g"] == 60
+    assert "show_keyframes" not in nodes["janus_encoder"]
+    # An MP4 would start months into its timeline: only MPEG-TS outputs take show time.
+    mp4 = build_application(GraphOptions(inputs=("input.mp4",), output="program.mp4", fps=30), api=fake_api())
+    assert "show_time" not in {n.parameters["name"]: n.parameters for n in mp4.avp.nodes}["program_mux"]
+
+
+def test_host_sync_inputs_keep_the_source_timestamps(monkeypatch):
+    """Two hosts join a live stream at different moments; started at zero, the same picture would
+    carry different timestamps on each and land in different show ticks."""
+    options = GraphOptions(inputs=("udp://127.0.0.1:6400",), output="program.ts", fps="30000/1001")
+    plain = build_application(options, api=fake_api())
+    assert "keep_source_ts" not in {n.parameters["name"]: n.parameters for n in plain.avp.nodes}["input_0"]
+    monkeypatch.setenv("AVP_CLOCK_ORIGIN", "tai")
+    synced = build_application(options, api=fake_api())
+    assert {n.parameters["name"]: n.parameters for n in synced.avp.nodes}["input_0"]["keep_source_ts"] is True
 
 
 def test_janus_only_output_builds_video_rtp_and_feedback():
@@ -474,6 +507,19 @@ def test_browser_holds_all_but_one_frame_and_keeps_its_imports():
     assert receive["hold_frames"] == 8 and "return_queue" not in receive
     assert importer["max_imports"] == 13
     assert importer["import_ttl_ms"] == 0
+
+
+def test_browser_chain_stays_on_its_whole_paint_rate_on_an_ntsc_canvas():
+    """30 paints numbered on a 29.97 grid drifted and resynced every ~20 s; on their own 30 grid
+    the compositor slots them by timestamp and drops one every 33 s, the same tick on every host."""
+    from fractions import Fraction
+    from pyplumber.mixer import dmabuf_inputs
+
+    nodes, _ = dmabuf_inputs.dmabuf_cuda_input_nodes(
+        fake_api(), prefix="input_0", socket="/tmp/page_00.sock", fps=Fraction(30000, 1001), drm_hwaccel=None,
+        cuda_hwaccel="gpu", source_group="g", processing_group="g", hold=True)
+    rates = {n.parameters["name"]: n.parameters.get("fps") for n in nodes}
+    assert rates["input_0_receive"] == rates["input_0_smooth"] == rates["input_0_hold"] == "30/1"
 
 
 def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):

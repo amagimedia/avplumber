@@ -60,14 +60,18 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
     alpha is premultiplied; the consumer tags it (the mixer does in its colour node).
     Geometry and format come from each frame, and ``smooth_timestamps`` already stamps
     in 1/*fps*, so the chain has no format or time-base nodes of its own. *fps* is the canvas
-    rate (config.parse_rate), 30000/1001 included; the window paints at its whole paint_rate.
+    rate (config.parse_rate); the chain runs at its whole paint_rate, the rate the window paints
+    at: 30 on a 30000/1001 canvas. Numbering 30 paints on a 29.97 grid drifted 1 ms a second and
+    resynced every ~20 s; on their own 30 grid the compositor, which slots every input by its
+    timestamp, drops one paint every 33 s at the same tick on every host.
     *event_loop* names the loop that runs ``smooth_timestamps`` (``"default"`` when omitted).
     """
     if browser_frame_queue is None:
         browser_frame_queue = default_browser_frame_queue(fps)
+    paint = rate_text(paint_rate(fps))
     drm_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "cuda_raw", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
-              "auto_restart": "group", "fps": rate_text(fps)}
+              "auto_restart": "group", "fps": paint}
     if drm_hwaccel:
         source["hwaccel"] = drm_hwaccel
     if hold_frames(browser_frame_queue):
@@ -87,7 +91,7 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
                             "auto_restart": "group",
                             "max_imports": browser_frame_queue + 4,
                             "import_ttl_ms": 0}),
-        # Number paints on the canvas grid instead of rounding each arrival time to it.
+        # Number paints on the paint grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two
         # paints in one tick and none in the next (one discard plus one repeat, up to
@@ -95,17 +99,17 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
         # previous slot plus one and resyncs only when the average drift passes 20 ms.
         # A paint gap longer than 100 ms (a page that stopped painting) resyncs at once,
         # so the next paint is not stamped late and discarded as stale.
-        # round_up: number the first paint (and any resync) to the next canvas tick,
+        # round_up: number the first paint (and any resync) to the next paint tick,
         # not the nearest, so a paint always precedes the tick it is shown at.
         api.SmoothTimestamps({
-            "fps": rate_text(fps), "discontinuity_threshold": 0.1, "round_up": True,
+            "fps": paint, "discontinuity_threshold": 0.1, "round_up": True,
             "src": raw_edge, "dst": cuda_edge, "group": processing_group,
             "name": f"{prefix}_smooth", "auto_restart": "panic",
             **({} if event_loop is None else {"event_loop": event_loop})}),
     ]
     if hold:
         held_edge = f"{prefix}_held"
-        nodes.append(api.RepeatLastFrame({"src": cuda_edge, "dst": held_edge, "fps": rate_text(fps),
+        nodes.append(api.RepeatLastFrame({"src": cuda_edge, "dst": held_edge, "fps": paint,
                                           "group": processing_group, "name": f"{prefix}_hold",
                                           "auto_restart": "group"}))
         return nodes, held_edge

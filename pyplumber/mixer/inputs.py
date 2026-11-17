@@ -17,6 +17,7 @@ Per-source audio and video share one team so lip-sync keeps a single offset.
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Sequence
 
 from .color import Color
@@ -101,6 +102,10 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     sync = {} if sync_team is None else {"sync_team": sync_team}
     _add_packet_input(avp, api, tag, {
         "url": url, "loop": loop, "loop_continuous_ts": loop and continuous_loop,
+        # Host sync (AVP_CLOCK_ORIGIN=tai): keep the source's own timestamps. Started at zero, they
+        # count from when this host joined the stream, and two hosts would put different pictures
+        # in the same show tick.
+        **({"keep_source_ts": True} if os.environ.get("AVP_CLOCK_ORIGIN") == "tai" else {}),
         **_frame_metadata(frame_metadata), **(input_params or {}),
     }, group=group, routing={"?v:0": edge("video_packets"), **({"?a:0": edge("audio_packets")} if has_audio else {})},
        demux=demux, restart=restart)
@@ -182,6 +187,8 @@ def _pace_audio(avp, api, tag: str, src: str, *, group: str,
     avp.addNode(api.Realtime({
         "name": f"realtime_audio_{tag}", "src": src, "dst": f"input_{tag}_audio_realtime",
         "set_pts": True, "master": False, "group": group, **loop,
+        # One source with the video node: a timestamp jump under host sync moves both together.
+        "sync_source": f"input_{tag}",
         **({} if sync_team is None else {"team": sync_team}),
         **_realtime_timing(native_rate), **(realtime_params or {}),
     }))
@@ -202,7 +209,7 @@ def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
     master_param = {} if master is None else {"master": master}
     avp.addNode(api.Realtime({
         "name": f"realtime_{tag}", "src": src, "dst": f"input_{tag}_realtime",
-        "set_pts": True, "group": group, **loop, **master_param,
+        "set_pts": True, "group": group, **loop, **master_param, "sync_source": f"input_{tag}",
         **({"capture_identity": True} if native_rate else {}),
         **({} if sync_team is None else {"team": sync_team}),
         **_realtime_timing(native_rate), **(realtime_params or {}),

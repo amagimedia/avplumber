@@ -34,7 +34,7 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
 void MixerOrchestrator::armWipe(const std::string& scene_name, const std::string& wipe_file,
                                 std::optional<double> duration_sec) {
     try {
-        beginTake(scene_name, MixerState::TransitionMode::Wipe);
+        beginTake(scene_name, MixerState::TransitionMode::Wipe, /*at_staged_tick=*/false);
         state_->take_received_ns = monotonicNs();
         state_->take_duration_ns = int64_t(duration_sec.value_or(0) * 1000000000);
         state_->take_deadline_ns = monotonicNs() + kWipeReadyTimeoutMs * 1000000;

@@ -1,6 +1,7 @@
 #pragma once
 #include "../nodes/node_common.hpp"
 #include "primitives/CutLatencyProbe.hpp"
+#include <mutex>
 
 template <typename T>
 class MixerSourceSwitcher : public NodeMultiInput<T>, public NodeSingleOutput<T>,
@@ -134,6 +135,25 @@ public:
                 this->source_edges_[i]->pop();
             }
         }
+    }
+
+    // A selection that puts nothing out yet (the program selector's MixerOrchestrator::
+    // kWaitForDestination: a take at a show tick waiting for the destination's frame of program's
+    // tick). The other heads stay. A `target` head among those examined, which would never go
+    // out, is consumed alone so the next can come up; with none, wait without `lock` (commands
+    // take it) for any input, a command (setObject "active" signals every input) or stop(), for
+    // `wait_ns` at most. Either way the caller returns and selects again, which re-checks the
+    // wait under the lock: a take replaced or aborted meanwhile holds nothing. An input whose
+    // frame came before this wait wakes it at once (its signal is unread: a selection that finds a
+    // head does not wait), which costs one more selection.
+    void holdForInput(const std::vector<const T*>& frames, int target, int64_t wait_ns,
+                      std::unique_lock<std::mutex>& lock) {
+        if (frames.at(target)) {
+            this->source_edges_.at(target)->pop();
+            return;
+        }
+        lock.unlock();
+        if (wait_ns > 0 && !this->stopping_) this->waitForInput(int((wait_ns + 999999) / 1000000));
     }
 
     void setObject(const std::string key, const Parameters& value) override {

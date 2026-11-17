@@ -1,5 +1,6 @@
 #include "node_common.hpp"
 #include "../MultiEventWait.hpp"
+#include "../ClockOrigin.hpp"
 
 class StreamMuxer: public NodeSingleOutput<av::Packet>, public IStoppable, public IMuxer, public NodeDoesNotBuffer {
 private:
@@ -25,6 +26,23 @@ private:
     bool fix_timestamps_ = false;
     bool allow_no_encoder_ = false;
     av::Timestamp global_shift_ = {0, {1, 1}};
+    // "show_time": stamp every stream on the shared show timeline (two hosts of one show write the
+    // same timestamps for the same frame): shifted by the whole show frames between this host's
+    // monotonic zero and the show epoch, the same amount for every stream. Needs host sync on and
+    // the program's rate registered (avp::ShowSync).
+    std::shared_ptr<avp::ShowSync> show_;
+    av::Timestamp show_shift_ = NOTS;
+    void stampShowTime(av::Packet &pkt) {
+        if (show_shift_.isNoPts()) {
+            const AVRational rate = show_->rate();
+            if (rate.den == 0)
+                throw Error("mux show_time: no program rate registered (AVP_CLOCK_ORIGIN=tai and mixer.init first)");
+            show_shift_ = av::Timestamp(avp::showZeroTicks(rate) * rate.den, av::Rational(1, rate.num));
+            logstream << "mux show_time: timestamps shifted by " << show_shift_ << " onto the show timeline";
+        }
+        if (pkt.dts().isValid()) pkt.setDts(addTSSameTB(pkt.dts(), rescaleTS(show_shift_, pkt.dts().timebase())));
+        if (pkt.pts().isValid()) pkt.setPts(addTSSameTB(pkt.pts(), rescaleTS(show_shift_, pkt.pts().timebase())));
+    }
     void calculateGlobalShift() {
         bool severe = false;
         for (StreamInfo &s: streams_) {
@@ -257,6 +275,7 @@ public:
                         s.prev_dts = pkt->dts();
                         calculateGlobalShift();
                     }
+                    if (show_) stampShowTime(*pkt);
                     pkt->setStreamIndex(s.stream_index);
                     //logstream << "mux out: stream " << s.stream_index << ", PTS = " << pkt->pts() << std::endl;
                     sink_->put(*pkt);
@@ -326,6 +345,10 @@ public:
         }
         if (params.count("allow_no_encoder")) {
             r->allow_no_encoder_ = params["allow_no_encoder"];
+        }
+        if (params.value("show_time", false)) {
+            if (!avp::clockOriginEnabled()) throw Error("mux show_time needs AVP_CLOCK_ORIGIN=tai in the environment");
+            r->show_ = InstanceSharedObjects<avp::ShowSync>::get(nci.instance, "show_sync");
         }
         for (std::string sname: params["src"]) {
             std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(sname);

@@ -10,7 +10,8 @@ void MixerOrchestrator::prepareScene(const std::string& scene_name) {
     setNodeObject(state_->pvwSlot().post_otm_name, "outputs", Parameters(1u));
 }
 
-void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::TransitionMode mode) {
+void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::TransitionMode mode,
+                                  bool at_staged_tick) {
     if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
     interruptTransition(Interruption::Replaced);
     state_->graph = nodes_;
@@ -25,7 +26,11 @@ void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::Tra
     state_->wipe_switched = false;
     state_->destination_ready = false;
     state_->take_deadline_ns = monotonicNs() + kTakeReadyTimeoutMs * 1000000;
-    state_->take_not_before_ns = std::exchange(state_->next_take_not_before_ns, 0);
+    // Only the command that staged a tick takes it: a lever or wipe take never does, so a tick
+    // left staged by a command that never began its take (one on air, a refusal) times nothing.
+    // Every command that may be timed stages its own (takeNotBeforeShowTick) first.
+    state_->take_not_before_ns = at_staged_tick ? std::exchange(state_->next_take_not_before_ns, 0) : 0;
+    state_->take_tick_wait_until_ns = state_->take_tick_destination_ns = 0;
     // A take held for its tick has its full ready time from that tick on.
     if (state_->take_not_before_ns)
         state_->take_deadline_ns = std::max(state_->take_deadline_ns,
@@ -33,18 +38,19 @@ void MixerOrchestrator::beginTake(const std::string& scene_name, MixerState::Tra
     prepareScene(scene_name);
 }
 
-void MixerOrchestrator::takeNotBeforeShowTick(std::optional<int64_t> show_tick) {
+void MixerOrchestrator::takeNotBeforeShowTick(std::optional<int64_t> show_tick, const avp::ShowSync *show) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->next_take_not_before_ns = 0;
     if (!show_tick) return;
     if (!avp::clockOriginEnabled())
         throw Error("mixer: at_show_tick needs AVP_CLOCK_ORIGIN=tai in the environment");
+    // Show ticks count at the program's rate; realtime.team.sync must have folded at the same one.
+    const AVRational rate{int(state_->fps_num), int(state_->fps_den)};
+    if (show && show->rate().den != 0 && av_cmp_q(show->rate(), rate) != 0)
+        throw Error("mixer: at_show_tick counts at the program's " + std::to_string(rate.num) + "/" + std::to_string(rate.den) +
+                    " fps but the show was synced at " + std::to_string(show->rate().num) + "/" + std::to_string(show->rate().den));
     // Show tick = this host's tick + the whole ticks between its monotonic zero and the show epoch.
-    const __int128 origin = avp::clockOriginNs();
-    const __int128 den = __int128(state_->fps_den) * 1000000000;
-    __int128 zero = origin * state_->fps_num / den;
-    if ((origin * state_->fps_num) % den < 0) --zero;
-    const int64_t local_tick = int64_t(*show_tick - zero);
+    const int64_t local_tick = *show_tick - avp::showZeroTicks(rate);
     if (local_tick <= 0) throw Error("mixer: at_show_tick is before this host's clock started");
     state_->next_take_not_before_ns = av_rescale(local_tick, int64_t(state_->fps_den) * 1000000000, state_->fps_num);
 }
@@ -111,7 +117,7 @@ void MixerOrchestrator::cut(const std::string& scene_name, CutLatency::Clock::ti
     // of the composition without it could complete the take showing the bare target framing.
     if (!state_->pending_zoom.is_null()) state_->pvw_slot_scene.clear();
     try {
-        beginTake(scene_name, MixerState::TransitionMode::Cut);
+        beginTake(scene_name, MixerState::TransitionMode::Cut, /*at_staged_tick=*/true);
         state_->take_zoom = std::exchange(state_->pending_zoom, Parameters(nullptr));
         state_->take_received_ns = monotonicNs(received);
         if (state_->cut_latency) {

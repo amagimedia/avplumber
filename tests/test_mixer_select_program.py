@@ -1,4 +1,5 @@
-"""The program selector after a lever take ends into an armed wipe, against the whole library."""
+"""The program selector after a lever take ends into an armed wipe, and a take for a show tick
+landing on that tick whichever slot's frame of it comes first, against the whole library."""
 import subprocess
 
 
