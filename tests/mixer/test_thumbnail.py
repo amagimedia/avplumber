@@ -105,3 +105,13 @@ def test_only_bank_cells_are_filtered_monitoring_pages_stay_bilinear():
     page = base_composition(cfg, layout_cells(cfg, {"preset": "source_pages"}, 0), [])["layers"]
     assert banked and all(l["filter"] == "auto" and l["samples"] == 8 for l in banked)
     assert page and all("filter" not in l and "samples" not in l for l in page)
+
+
+@pytest.mark.parametrize("sources, banks", [(0, 1), (64, 1), (65, 2), (85, 2), (128, 2), (129, 3), (192, 3), (300, 3)])
+def test_only_banks_with_sources_are_reserved(sources, banks):
+    """A show that lists its sources gets one bank per 64; one that does not keeps all three."""
+    show = {"sources": [{"id": f"s{i}"} for i in range(sources)], "aux_buses": []}
+    reserved = [b for b in thumbnail.reserve_buses(show) if thumbnail.is_thumbnail(b)]
+    assert [b["id"] for b in reserved] == [f"thumbnails{p + 1}" for p in range(banks)]
+    assert len([b for b in thumbnail.reserve_buses({"aux_buses": []}) if thumbnail.is_thumbnail(b)]) == thumbnail.BANKS
+

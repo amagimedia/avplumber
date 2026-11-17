@@ -71,7 +71,10 @@ def reserve_buses(show, extra_count=0, options=None):
                 *(r.get("audio_port", 0) for r in show.get("renditions", [])),
                 *(r.get(k, 0) for b in buses for r in b["renditions"] for k in ("port", "audio_port"))])
     reserved = []
-    for page in range(BANKS):
+    # One bank per 64 sources, never an empty one: a bank with no source draws nothing, so its encoder
+    # never gets a frame and the mixer's start times out (85 sources at 59.94 asked for a third bank).
+    banks = max(1, min(BANKS, -(-len(show["sources"]) // PER_BANK))) if "sources" in show else BANKS
+    for page in range(banks):
         bid = f"thumbnails{page + 1}"
         if any(b["id"] == bid for b in ordinary):
             raise ValueError(f"{bid} is reserved for source thumbnails")
