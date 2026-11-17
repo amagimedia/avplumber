@@ -256,6 +256,10 @@ class Source:
     park_limit: int = 0
     capture_cadence: str = "continuous"  # browser: "on_change" permits intentional static holds
     has_audio: bool = False        # demux/decode an audio track alongside video (kind == "video" only)
+    # Video with an alpha channel (QuickTime Animation, ProRes 4444, PNG...): decoded on the CPU to
+    # straight RGBA and uploaded, the way wipe clips are, then composited as packed RGB like a
+    # browser page, so a scene item with blend draws it over what is beneath. SDR only.
+    alpha: bool = False
     # Layer zoom (avplumber layer_zoom.hpp): where the source's picture is 1:1 on its frames, the
     # metadata key of its per-frame framings and which framing layers (by input) map it.
     picture: Optional[Dict[str, Any]] = None
@@ -644,8 +648,18 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     has_audio = s.get("has_audio", False)
     if not isinstance(has_audio, bool) or has_audio and kind != "video":
         raise ConfigError(f"{where}: has_audio must be a boolean, and only applies to kind video")
+    alpha = s.get("alpha", False)
+    if not isinstance(alpha, bool) or alpha and kind != "video":
+        raise ConfigError(f"{where}: alpha must be a boolean, and only applies to kind video")
+    if alpha and (source_filter or "transform" in s or storage != "cuda" or decoded_format or deinterlace):
+        raise ConfigError(f"{where}: an alpha source is decoded to RGBA on the CPU: no filter, transform, "
+                          "cuarray storage, decoded_format or deinterlace")
     try:
         color = declared_color(s)
+        if alpha and color not in (None, Color()):
+            raise ValueError("alpha input supports SDR only")
+        if alpha:
+            color = Color()     # RGB frames carry no colour tags for the packed-RGB stage to read
         if kind != "video" and color is None:
             raise ValueError("raw input has no color metadata; declare an explicit color setting")
         if kind == "browser" and color != Color():
@@ -662,7 +676,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
                   height=int(s.get("height", 0)), fps=parse_rate(s.get("fps", fps), f"{where}.fps") if kind == "browser" else 0,
                   loop=bool(s.get("loop", True)), capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
-                  has_audio=has_audio, deinterlace=deinterlace,
+                  has_audio=has_audio, deinterlace=deinterlace, alpha=alpha,
                   decoded_format=decoded_format,
                   transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,
                   **(color.tags if color else {}))

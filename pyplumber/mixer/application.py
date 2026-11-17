@@ -39,6 +39,9 @@ log = logging.getLogger("mixer")
 DEFAULT_FPS = 30
 # Instance-owned: a global (@) device survives shutdown until CUDA static teardown.
 HWACCEL = "mixer_gpu"
+# An alpha source's frames to the GPU as RGBA. Not pinned: pinned staging needs
+# nv-codec-headers >= 13.1, which the FFmpeg 9 build (n13.0) does not have.
+ALPHA_UPLOAD = "format=rgba,hwupload_cuda"
 # Nothing in a show reads what input_rec stamps on decoded frames (realtime's frame counters serve
 # its teams and the OBS embedding, speed nodes read frame_ts); stamping costs every hop a copy.
 SOURCE_FRAME_METADATA: list = []
@@ -1006,11 +1009,22 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             else:
                 edge, audio_edge = build_input(
                     avp, api, str(index), source.location, continuous_loop=True,
-                    decoder_params=_decoder_params(source, cfg), decoded_ahead=cfg.decoded_frames_ahead,
+                    # NVDEC drops alpha: an alpha source decodes in software, in its codec's own
+                    # format (argb, yuva444p12...), and is uploaded as RGBA after its chain.
+                    decoder_params={**_decoder_params(source, cfg), **({"hwaccel_only_for_codecs": []} if source.alpha else {})},
+                    decoded_ahead=cfg.decoded_frames_ahead,
                     has_audio=source.has_audio, sync_team=(f"input_{index}_av_sync" if source.has_audio else None),
                     **file_params)
                 if audio_edge:
                     audio_edges.append((source.id, audio_edge))
+                if source.alpha:
+                    # After pacing, not between decoder and pacing: a seek walks up from the realtime
+                    # node to the decoder, and a filter in that path stops it.
+                    avp.addNode(api.FilterVideo({
+                        "name": f"alpha_upload_{index}", "src": edge, "dst": f"input_{index}_rgba",
+                        "graph": ALPHA_UPLOAD, "hwaccel": HWACCEL, "group": group, "auto_restart": "group",
+                    }))
+                    edge = f"input_{index}_rgba"
         if source.transform:
             transformed_edge = f"input_{index}_transformed"
             # pass_arrays: the color stage and the compositors read arrays, so a frame that already
@@ -1046,9 +1060,10 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                              # User filters/hooks can change them, so keep normalization there.
                              color_tagged=(source.kind in ("nv12", "p010", "v210") and
                                            not source.filter_graph and process_source is None),
-                             packed_rgb=source.kind == "browser",
+                             packed_rgb=source.kind == "browser" or source.alpha,
+                             # Decoded alpha is straight; only browser pages arrive premultiplied.
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
-                             pixel_format=source.filter_output_format or
+                             pixel_format="rgba" if source.alpha else source.filter_output_format or
                              (source.transform.sw_format if source.transform
                               else source.decoded_format or mixer_config.RAW_STORAGE.get(source.kind)))
     for scene in cfg.scenes:
