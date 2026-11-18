@@ -1,6 +1,11 @@
 // Text shared by the graph view's canvas labels, hover cards and inspector.
 
 export const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const nodeTypeLabels = new Map([
+  ['cuda_ipc_source', 'CUDA VMM source'],
+  ['cuda_ipc_sink', 'CUDA VMM sink'],
+]);
+export const nodeTypeLabel = type => nodeTypeLabels.get(type) ?? type;
 export const kindClass = k => 's-' + k.toLowerCase();  // a source kind's colour (graph.css)
 export const fmtK = v => v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0);
 export const compact = v => new Intl.NumberFormat('en', {notation: 'compact', maximumFractionDigits: 1}).format(v);

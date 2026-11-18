@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import {nodeTypeLabel} from './format.mjs';
 import {CW, buildGraphModel, updateQueueStats, nodePath, groupPath, groupInputs, summarizeInstance, searchEntries, search, graphModel} from './model.mjs';
 
 // A small mixer-shaped graph: 16 numbered inputs fanning out (non-blocking) to a program compositor and eight AUX
@@ -115,7 +116,7 @@ test('tile names: mixer hints, numbered members by number, generic fallback stri
 test('source kinds: numbered inputs by their nodes\' types, first match wins, nothing for other groups', () => {
   const nodes = [];
   const node = (name, type, group, params = {}) => nodes.push({name, type, params: {name, type, group, ...params}});
-  const kinds = ['dec_video', 'ipc_dmabuf_source', 'raw_video_file_cuda', 'ipc_dmabuf_source', 'filter_video', 'dec_video', 'raw_video_file_cuda', 'ipc_dmabuf_source', 'dec_video'];
+  const kinds = ['dec_video', 'ipc_dmabuf_source', 'raw_video_file_cuda', 'ipc_dmabuf_source', 'cuda_ipc_source', 'dec_video', 'raw_video_file_cuda', 'ipc_dmabuf_source', 'dec_video'];
   kinds.forEach((t, i) => {
     node(`src_${i}`, t, `cam_${i}`, {dst: `cam_${i}_out`});
     node(`fan_${i}`, 'one_to_many_nb', `cam_${i}`, {src: `cam_${i}_out`, dst: `mix_${i}`});
@@ -124,14 +125,41 @@ test('source kinds: numbered inputs by their nodes\' types, first match wins, no
   node('clip', 'dec_video', 'clip_load', {dst: 'clip_out'});
   node('comp', 'mixer_compositor', 'program', {src: [...kinds.map((_, i) => `mix_${i}`), 'cam_8_raw', 'clip_out']});
   const m = buildGraphModel({nodes, queues: []}), src = g => m.groups.get(g).src;
-  assert.deepEqual(kinds.map((_, i) => src(`cam_${i}`)), ['NVDEC', 'browser', 'raw', 'browser', undefined, 'NVDEC', 'raw', 'browser', 'NVDEC']);
+  assert.deepEqual(kinds.map((_, i) => src(`cam_${i}`)), ['NVDEC', 'browser', 'raw', 'browser', 'VMM', 'NVDEC', 'raw', 'browser', 'NVDEC']);
   assert.equal(m.groups.get('clip_load').d, 'inputs');
   assert.equal(src('clip_load'), undefined, 'a source group outside the numbered family has no kind');
   assert.equal(src('program'), undefined);
   const z = m.areaById.get('inputs');
   assert.equal(z.count, '9 sources');
-  assert.deepEqual(z.kinds, [['NVDEC', 3], ['browser', 3], ['raw', 2]]);
+  assert.deepEqual(z.kinds, [['NVDEC', 3], ['browser', 3], ['VMM', 1], ['raw', 2]]);
   assert.equal(m.areaById.get('core').kinds, undefined);
+});
+
+test('CUDA VMM transport nodes have readable labels and the sink is an output', () => {
+  const nodes = synthetic();
+  const sink = nodes.find(n => n.name === 'sink');
+  sink.type = sink.params.type = 'cuda_ipc_sink';
+  const model = buildGraphModel({nodes});
+  assert.equal(model.meta.get('sink').zone, 'out');
+  assert.equal(nodeTypeLabel('cuda_ipc_source'), 'CUDA VMM source');
+  assert.equal(nodeTypeLabel('cuda_ipc_sink'), 'CUDA VMM sink');
+  assert.equal(nodeTypeLabel('output'), 'output');
+});
+
+test('small playout mixer: numbered deck inputs get their own section and source labels', () => {
+  const node = (name, type, group, params) => ({name, type, params: {group, ...params}});
+  const inputs = range(5).map(i => node(`deck_${i}`, 'dec_video', `input_${i}`, {dst: `frame_${i}`}));
+  const render = node('compositor', 'mixer_compositor', 'mixer', {src: range(5).map(i => `frame_${i}`), dst: 'rendered'});
+  const sink = node('program_vmm', 'cuda_ipc_sink', 'output', {src: 'rendered'});
+  const m = buildGraphModel({nodes: [...inputs, render, sink]});
+  const area = m.areaById.get('inputs');
+  assert.deepEqual(area.groups.map(g => [g.id, g.name]), range(5).map(i => [`input_${i}`, String(i)]));
+  assert.deepEqual(area.kinds, [['NVDEC', 5]]);
+  assert.deepEqual(m.areaById.get('core').groups.map(g => g.id), ['mixer', 'output']);
+  assert.equal(m.meta.get('program_vmm').zone, 'out');
+
+  const generic = buildGraphModel({nodes: [...inputs, {...render, params: {...render.params, group: 'render'}}, sink]});
+  assert.equal(generic.areaById.has('inputs'), false, 'small generic families retain the generic layout');
 });
 
 test('tiles: one square tile per group inside its area frame, no overlaps', () => {

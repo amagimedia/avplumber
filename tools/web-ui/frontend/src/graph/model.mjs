@@ -2,8 +2,8 @@
 //
 // Layout (computed once per nodes.json): every node gets a column (its longest path from a source) and a row. Groups
 // become group bands; groups are gathered into areas:
-// - "inputs": a numbered group family (FAMILY_MIN or more members such as input_0 … input_191) whose members take no
-//   queue from another group, plus every other such source group. Laid out as one row per group in bands side by side.
+// - "inputs": a numbered source family plus other source groups, laid out in bands side by side. A family usually
+//   needs FAMILY_MIN members. Known mixer inputs can form a smaller family, as in a playout worker.
 // - one area per other numbered family, keyed by the family's first name token (aux_aux0 … → "aux"); unnumbered
 //   groups with that token join it (aux_mv).
 // - "core": all remaining groups, stacked right of the inputs.
@@ -24,7 +24,7 @@ const GROUP_HINTS = {
 const MIXER_CORE = {group: 'mixer', title: 'Program core', tag: 'mixer'};  // used when the graph has a "mixer" group
 const AREA_TITLES = {inputs: 'Inputs', core: 'Core', aux: 'AUX + multiview'};
 // Source kind (g.src) of a numbered input group by its nodes' types, the first match winning; other groups have none.
-export const SOURCE_KINDS = [['dec_video', 'NVDEC'], ['ipc_dmabuf_source', 'browser'], ['raw_video_file_cuda', 'raw']];
+export const SOURCE_KINDS = [['dec_video', 'NVDEC'], ['ipc_dmabuf_source', 'browser'], ['cuda_ipc_source', 'VMM'], ['raw_video_file_cuda', 'raw']];
 
 const NB_FANOUT = 'one_to_many_nb';  // drops by design when a consumer still holds a newer frame
 const NEAR_FULL = 0.9;               // average fill of capacity
@@ -131,17 +131,20 @@ export function buildGraphModel({nodes = [], queues = []} = {}, previous = null)
   const isSource = g => !crossIn.has(g);
   const families = new Map();
   for (const g of groupNodes.keys()) if (familyIndex(g) >= 0) push(families, familyKey(g), g);
-  const bigTokens = new Map();  // token -> member groups of its big families
-  for (const members of families.values()) if (members.length >= FAMILY_MIN) for (const g of members) push(bigTokens, tokenOf(g), g);
+  const mixerInputs = families.get('input_#') || [];
+  const hasMixerInputs = groupNodes.has(MIXER_CORE.group) && mixerInputs.filter(isSource).length * 2 > mixerInputs.length;
+  const isLayoutFamily = members => members.length >= FAMILY_MIN || (hasMixerInputs && members === mixerInputs);
+  const familyTokens = new Map();  // token -> member groups of its layout families
+  for (const members of families.values()) if (isLayoutFamily(members)) for (const g of members) push(familyTokens, tokenOf(g), g);
   let sourceToken = null, sourceScore = 0;
-  for (const [tok, members] of bigTokens) {
+  for (const [tok, members] of familyTokens) {
     const s = members.filter(isSource).length;
     if (s * 2 > members.length && s > sourceScore) { sourceToken = tok; sourceScore = s; }
   }
   const areaOf = g => {
     const tok = tokenOf(g);
     if (sourceToken && tok === sourceToken) return 'inputs';
-    if (bigTokens.has(tok)) return tok;
+    if (familyTokens.has(tok)) return tok;
     if (sourceToken && isSource(g) && crossOut.has(g)) return 'inputs';
     return 'core';
   };
@@ -198,11 +201,11 @@ export function buildGraphModel({nodes = [], queues = []} = {}, previous = null)
   });
   const areaById = new Map(areas.map(z => [z.d, z]));
   for (const g of groups.values()) {
-    const z = areaById.get(g.d), idx = familyIndex(g.id), member = idx >= 0 && (families.get(familyKey(g.id))?.length || 0) >= FAMILY_MIN;
+    const z = areaById.get(g.d), idx = familyIndex(g.id), member = idx >= 0 && isLayoutFamily(families.get(familyKey(g.id)));
     const stripped = g.id.startsWith(z.tag + '_') ? g.id.slice(z.tag.length + 1) : g.id;
     g.name = GROUP_HINTS[g.id]?.name || (member ? (g.d === 'inputs' ? String(idx) : `${z.tag.toUpperCase()} ${idx}`) : stripped);
     g.member = member;
-    g.zone = g.d === 'core' && g.nodes.some(n => meta.get(n).t === 'output') ? 'out' : z.zone;
+    g.zone = g.d === 'core' && g.nodes.some(n => ['output', 'cuda_ipc_sink'].includes(meta.get(n).t)) ? 'out' : z.zone;
     for (const n of g.nodes) { const m = meta.get(n); m.d = g.d; m.zone = g.zone; }
   }
 
@@ -407,6 +410,7 @@ export function search(entries, text, limit = 10) {
 // nodes.json keeps the previous drop counters, so the first sample after it still has deltas.
 const shared = new WeakMap(), NONE = [];
 let lastShared = null;
+export function resetGraphHistory() { lastShared = null; }
 export function graphModel(nodes, queues) {
   nodes = Array.isArray(nodes) ? nodes : NONE;
   let model = shared.get(nodes);

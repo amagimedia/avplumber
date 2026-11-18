@@ -24,6 +24,15 @@
   $: if (stage) sync(model);
   $: if (stage && shownModel) stage.setSelection(selected);
 
+  export function getCamera() { return stage?.getCamera(); }
+  export function restoreCamera(camera) { stage?.restoreCamera(camera); }
+  export function resetView() {
+    query = '';
+    suggOpen = false;
+    stage?.clearKindPin();
+    restoreCamera();
+  }
+
   function sync(m) {
     if (m !== shownModel) { stage.setModel(m); shownModel = m; }
     else if (m.version !== shownVersion) stage.statsChanged();

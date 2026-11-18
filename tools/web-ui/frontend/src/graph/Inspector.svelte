@@ -3,7 +3,7 @@
   import { createEventDispatcher } from 'svelte';
   import './graph.css';
   import { graphModel, selectionPath, nodeInputs, nodeOutputs, groupInputs } from './model.mjs';
-  import { fillPct, fillClass, framesText, dropText, trimParams, kindClass, subscriptionText } from './format.mjs';
+  import { fillPct, fillClass, framesText, dropText, trimParams, kindClass, subscriptionText, nodeTypeLabel } from './format.mjs';
 
   export let nodes = [];
   export let queues = [];
@@ -52,7 +52,9 @@
     </div>
     {#if node}
       <dl class="gv-kv">
-        <dt>Type</dt><dd><code>{node.t}</code></dd>
+        <dt>Type</dt><dd>
+          {#if nodeTypeLabel(node.t) !== node.t}{nodeTypeLabel(node.t)} · {/if}<code>{node.t}</code>
+        </dd>
         <dt>Group</dt><dd><button class="icon-btn" style="padding:2px 8px" on:click={() => pickGroup(node.g)}>{node.g}</button></dd>
         {#if src}<dt>Source</dt><dd class="gv-src"><i class={kindClass(src)}></i>{src}</dd>{/if}
         <dt>Path</dt><dd>{path.nodes.size} nodes · {path.edges.size} flowing queues</dd>
