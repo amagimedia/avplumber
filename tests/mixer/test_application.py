@@ -78,6 +78,33 @@ def test_a_declared_decoded_format_lets_the_fanout_tag_the_frames(native_boundar
         config.parse({**CONFIG, "sources": [CONFIG["sources"][0], {**CONFIG["sources"][1], "decoded_format": "nv12"}]})
 
 
+def test_an_alpha_source_reaches_the_canvas_as_straight_rgba(native_boundary):
+    """NVDEC and the NV12 colour stage both drop alpha. An alpha source decodes in software, is
+    converted to RGBA and uploaded, and is composited as packed RGB, so a blended item draws it with
+    its alpha. Its alpha is straight, unlike a browser page's."""
+    api = fake_api()
+    api.MixerGraphBuilder = native_boundary[1]
+    app = build_application(show(alpha=True), api=api)
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    assert nodes["decode_0"]["hwaccel_only_for_codecs"] == []
+    # Uploaded after the chain's pacing, so seeks still reach the decoder.
+    upload = nodes["alpha_upload_0"]
+    assert upload["graph"] == "format=rgba,hwupload_cuda" and upload["hwaccel"] == "mixer_gpu"
+    assert upload["src"] == "input_0_realtime" and "filter_0" not in nodes
+    assert app.input_edges[0] == "input_0_rgba"
+    (cam,) = [s for s in app.mixer._sources if s.name == "cam"]
+    assert cam.packed_rgb and not cam.premultiplied_alpha and cam.pixel_format == "rgba"
+    # No colour filter: the fan-out tags the frames, and nothing converts them to NV12.
+    assert "mixer_color_cam" not in nodes
+    assert nodes["mixer_color_alias_cam"]["frame_color"]["colorspace"] == "bt709"
+    for bad in ({"alpha": "yes"}, {"alpha": True, "decode_storage": "cuarray"},
+                {"alpha": True, "filter": "hflip_cuda", "filter_output_format": "nv12"}):
+        with pytest.raises(config.ConfigError, match="alpha"):
+            show(**bad)
+    with pytest.raises(config.ConfigError, match="SDR only"):
+        show(alpha=True, color="hlg")
+
+
 def test_config_renditions_do_not_need_cli_output_flags(tmp_path):
     cfg = show()
     app = build_application(cfg, api=fake_api())
