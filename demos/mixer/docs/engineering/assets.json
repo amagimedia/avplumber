@@ -13,18 +13,6 @@
       "bytes": 5072491
     },
     {
-      "name": "engineering-20261117-18-architecture-cost-light-8f4b5cfa1b.png",
-      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-18-architecture-cost-light-8f4b5cfa1b.png",
-      "sha256": "8f4b5cfa1b9b3069c3a5b71cd2ce90d5bb5e0bdc56e1272718417d86f59042e1",
-      "bytes": 219824
-    },
-    {
-      "name": "engineering-20261117-18-architecture-cost-dark-969e56ae02.png",
-      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-18-architecture-cost-dark-969e56ae02.png",
-      "sha256": "969e56ae02b472223e7e733be973b4192a37228816fb954c72193ac60d5d6364",
-      "bytes": 222087
-    },
-    {
       "name": "engineering-20261117-11-hardware-comparison-light-d545aa9d22.png",
       "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-11-hardware-comparison-light-d545aa9d22.png",
       "sha256": "d545aa9d22abaa841c8d30a48babcf9d143539025bc25f2f3390abcc82b923c4",
@@ -35,6 +23,18 @@
       "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-11-hardware-comparison-dark-1ef819301f.png",
       "sha256": "1ef819301f66da8ca59b0bdae2d768d2aaa861dbce952edb085b72fa1bab6928",
       "bytes": 1480141
+    },
+    {
+      "name": "engineering-20261117-18-architecture-cost-light-a28414e0d5.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-18-architecture-cost-light-a28414e0d5.png",
+      "sha256": "a28414e0d50be457954cc33d2f7074f2c963a589bd8a456a5d21aeb2d28621e4",
+      "bytes": 256658
+    },
+    {
+      "name": "engineering-20261117-18-architecture-cost-dark-1818496ff0.png",
+      "url": "https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-10/engineering-20261117-18-architecture-cost-dark-1818496ff0.png",
+      "sha256": "1818496ff00935b326e3be60cb9ff2e023d9309a23e7e2eb0eee3876f251ac1c",
+      "bytes": 261209
     },
     {
       "name": "engineering-20261117-01-architecture-light-adc88ab2a1.png",
