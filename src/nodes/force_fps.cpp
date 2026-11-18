@@ -62,7 +62,7 @@ public:
 
             if (isEofMarker(pkt)) {
                 // EOF
-                if (!this->sink_->put(pkt, true)) {
+                if (!this->edgeSink()->tryPutForRetry(pkt)) {
                     if (!ticks) {
                         // retry when we have space in sink
                         this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
@@ -121,7 +121,7 @@ public:
                             }
                             last_frame_.setPts(next_ts_);
 
-                            if (!this->sink_->put(last_frame_, true)) {
+                            if (!this->edgeSink()->tryPutForRetry(last_frame_)) {
                                 if (!ticks) {
                                     // retry when we have space in sink
                                     this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
@@ -183,7 +183,7 @@ public:
             pkt.setPts(in_ts);
             
 
-            if (!this->sink_->put(pkt, true)) {
+            if (!this->edgeSink()->tryPutForRetry(pkt)) {
                 if (!ticks) {
                     // retry when we have space in sink
                     this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());

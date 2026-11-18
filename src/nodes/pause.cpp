@@ -39,7 +39,7 @@ public:
             T &pkt = *dataptr;
 
             // put it in the sink queue:
-            if (this->sink_->put(pkt, true)) {
+            if (this->edgeSink()->tryPutForRetry(pkt)) {
                 // put returned true, success, remove this packet from the source queue
                 av::Timestamp pkt_ts = pkt.pts();
                 this->source_->pop();

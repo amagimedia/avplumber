@@ -429,14 +429,14 @@ public:
 	{
 		// Emit pending frames first (backpressure-safe)
 		if (stage_ == Stage::EmitInterp) {
-			if (this->sink_->put(pending_interp_, true)) {
+			if (this->edgeSink()->tryPutForRetry(pending_interp_)) {
 				stage_ = Stage::EmitInput;
 			} else {
 				return;
 			}
 		}
 		if (stage_ == Stage::EmitInput) {
-			if (this->sink_->put(pending_in_, true)) {
+			if (this->edgeSink()->tryPutForRetry(pending_in_)) {
 				// Done with this input
 				pending_in_ = av::VideoFrame();
 				pending_interp_ = av::VideoFrame();
@@ -457,7 +457,7 @@ public:
 
 		if (isEofMarker(in)) {
 			// Flush: pass EOF through and reset internal state.
-			if (!this->sink_->put(in, true)) return;
+			if (!this->edgeSink()->tryPutForRetry(in)) return;
 			this->source_->pop();
 			have_prev_pts_ = false;
 			prev_pts_ = NOTS;
@@ -468,7 +468,7 @@ public:
 		// Only operate on CUDA NV12; otherwise pass through.
 		if (in.raw()->format != AV_PIX_FMT_CUDA) {
 			if (passthrough_on_fail_) {
-				if (!this->sink_->put(in, true)) return;
+				if (!this->edgeSink()->tryPutForRetry(in)) return;
 				this->source_->pop();
 			}
 			return;
@@ -477,7 +477,7 @@ public:
 		if (swfmt != AV_PIX_FMT_NV12) {
 			logstream << "nvof_fruc: unsupported CUDA sw_format " << swfmt << " (need NV12), passthrough";
 			if (passthrough_on_fail_) {
-				if (!this->sink_->put(in, true)) return;
+				if (!this->edgeSink()->tryPutForRetry(in)) return;
 				this->source_->pop();
 			}
 			return;
@@ -487,14 +487,14 @@ public:
 		const int h = in.height();
 		if (!ensure_hw_frames_ctx(w, h)) {
 			if (passthrough_on_fail_) {
-				if (!this->sink_->put(in, true)) return;
+				if (!this->edgeSink()->tryPutForRetry(in)) return;
 				this->source_->pop();
 			}
 			return;
 		}
 		if (!ensure_fruc(w, h)) {
 			if (passthrough_on_fail_) {
-				if (!this->sink_->put(in, true)) return;
+				if (!this->edgeSink()->tryPutForRetry(in)) return;
 				this->source_->pop();
 			}
 			return;
@@ -504,7 +504,7 @@ public:
 		if (!in_pts.isValid()) {
 			// Without timestamps we can't schedule interpolation; passthrough.
 			if (passthrough_on_fail_) {
-				if (!this->sink_->put(in, true)) return;
+				if (!this->edgeSink()->tryPutForRetry(in)) return;
 				this->source_->pop();
 			}
 			return;
@@ -515,7 +515,7 @@ public:
 			if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) {
 				logstream << "nvof_fruc: cuCtxPushCurrent failed (prime)";
 				if (passthrough_on_fail_) {
-					if (!this->sink_->put(in, true)) return;
+					if (!this->edgeSink()->tryPutForRetry(in)) return;
 					this->source_->pop();
 				}
 				return;
@@ -539,7 +539,7 @@ public:
 			CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
 
 			// Emit the original frame only.
-			if (!this->sink_->put(in, true)) return;
+			if (!this->edgeSink()->tryPutForRetry(in)) return;
 			this->source_->pop();
 			have_prev_pts_ = true;
 			prev_pts_ = in_pts;
@@ -551,7 +551,7 @@ public:
 		av::Timestamp out_pts = midpoint_pts(prev_pts_, in_pts);
 		if (!run_fruc_for_frame(in, in_pts, out_pts)) {
 			if (passthrough_on_fail_) {
-				if (!this->sink_->put(in, true)) return;
+				if (!this->edgeSink()->tryPutForRetry(in)) return;
 				this->source_->pop();
 				prev_pts_ = in_pts;
 				return;
@@ -562,7 +562,7 @@ public:
 		av::VideoFrame interp;
 		if (!make_interp_frame_from_buffer(in, out_pts, interp)) {
 			if (passthrough_on_fail_) {
-				if (!this->sink_->put(in, true)) return;
+				if (!this->edgeSink()->tryPutForRetry(in)) return;
 				this->source_->pop();
 				prev_pts_ = in_pts;
 				return;

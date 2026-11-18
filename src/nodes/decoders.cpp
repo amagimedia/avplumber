@@ -664,7 +664,7 @@ public:
         // try to put frames to sink
         while (!flush_frames_.empty()) {
             OutputFrame frame = flush_frames_.front();
-            if (!this->sink_->put(frame, true)) {
+            if (!this->edgeSink()->tryPutForRetry(frame)) {
                 break;
             }
             flush_frames_.pop_front();
@@ -675,6 +675,11 @@ public:
         } else {
             if (flush_timeout_ts_.isValid() && (wallclock.absolute_ts() > flush_timeout_ts_)) {
                 logstream << "Flush timeout " << flush_timeout_ts_ << " exceeded, finishing decoder";
+                for (const auto &frame: flush_frames_) {
+                    if (!isEofMarker(frame)) {
+                        this->edgeSink()->edge()->countDrop();
+                    }
+                }
                 flush_frames_.clear();
                 flush_timeout_ts_ = NOTS;
             }

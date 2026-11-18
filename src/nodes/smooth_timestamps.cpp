@@ -150,7 +150,7 @@ public:
 
             // EOF marker: pass through untouched
             if (isEofMarker(frame)) {
-                if (!this->sink_->put(frame, true)) {
+                if (!this->edgeSink()->tryPutForRetry(frame)) {
                     if (!ticks) {
                         this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
                     }
@@ -236,7 +236,7 @@ public:
             frame.setTimeBase(av::Rational());
             frame.setPts(out_pts);
 
-            if (!this->sink_->put(frame, true)) {
+            if (!this->edgeSink()->tryPutForRetry(frame)) {
                 // restore if backpressure; we'll re-process same frame later
                 frame.setTimeBase(av::Rational());
                 frame.setPts(orig_pts);

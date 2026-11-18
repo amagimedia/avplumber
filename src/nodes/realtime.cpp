@@ -417,7 +417,7 @@ public:
                     data.setTimeBase(av::Rational());
                     data.setPts({new_pts, timebase_});
                 }
-                if (!this->sink_->put(data, true)) {
+                if (!this->edgeSink()->tryPutForRetry(data)) {
                     if (stamp) {
                         // putting failed, restore original PTS because we will process this frame next time
                         data.setTimeBase(av::Rational());
