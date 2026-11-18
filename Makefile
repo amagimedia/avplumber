@@ -102,7 +102,14 @@ NODES_SRC += $(shell find $(SRCDIR)/nodes/debug -maxdepth 1 -name '*.cpp')
 override CXXFLAGS += -DSYNCMETER=1
 endif
 
+# The python_module goal lists the Python nodes too (NODES_SRC above). It gets its own list so a
+# plain build and the module in one tree, in either order, never reuse each other's list: the
+# module built after `make build` used to come out without python_node_so and the other Python nodes.
+ifneq ($(filter python_module,$(MAKECMDGOALS)),)
+nodes_list_file = graph_factory.python.generated.cpp
+else
 nodes_list_file = graph_factory.generated.cpp
+endif
 CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp mixer/graph_ops.cpp mixer/orchestrator/core.cpp mixer/orchestrator/scene.cpp mixer/orchestrator/cut.cpp mixer/orchestrator/fade.cpp mixer/orchestrator/wipe.cpp mixer/orchestrator/move.cpp mixer/transition_control.cpp mixer/backends/cuda/transition_control.cpp
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
@@ -394,7 +401,7 @@ install: build
 	cp "$(EXE)" "$(DESTDIR)/apps/tools/"
 
 clean:
-	rm $(EXE) $(STATIC_LIBRARY) $(PYTHON_MODULE) $(BUILD_DATE_FILE) $(nodes_list_file) compile_flags.txt || true
+	rm $(EXE) $(STATIC_LIBRARY) $(PYTHON_MODULE) $(BUILD_DATE_FILE) graph_factory.generated.cpp graph_factory.python.generated.cpp compile_flags.txt || true
 	rm -r objs || true
 
 clean_deps:
