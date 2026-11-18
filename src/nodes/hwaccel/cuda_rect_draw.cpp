@@ -184,7 +184,7 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     if (op.transform && av_pix_fmt_count_planes(sw_fmt) == 1) {
         // Packed canvases have no affine entry: the box, unrotated, from the enclosing crop.
         if (!std::exchange(transform_warned_, true))
-            logstream << "cuda_rect_overlay: rotation and sub-pixel crops need a YUV canvas; drawing it plain";
+            logstream << "cuda_rect_overlay: rotation, flips and sub-pixel crops need a YUV canvas; drawing it plain";
         DrawOp plain = op;
         plain.transform.reset();
         const auto &b = op.transform->box;

@@ -9,7 +9,7 @@
 // pans or zooms inside the box. A face sheet's tiles are framings of one picture: through the
 // frame's per-tile layers (layer_zoom.hpp PictureMap) both ends are read in the camera picture and
 // interior frames draw from its reference tile, never a neighbouring one; without those layers the
-// pair fades. Its rotation takes the shortest arc and its z is a float key: overlapping layers swap
+// pair fades, as does a pair one end of which is a mirror image of the other. Its rotation takes the shortest arc and its z is a float key: overlapping layers swap
 // where their keys cross. Interior frames are fractional (crop_exact, dst_exact) and draw through
 // the affine entry. A layer in only one scene
 // fades (its opacity, the affine entry's transparency for a camera) or cuts at the half, stacked
@@ -173,6 +173,12 @@ inline std::vector<LayerSpec> moveLayers(const std::vector<LayerSpec> &from, con
             l.input = int(input);
             glide_a[i] = glide_b[j] = int(items.size());
             items.push_back({double(l.z), std::move(l), -1, false, std::nullopt});
+            continue;
+        }
+        if (from[i].flip_h != to[j].flip_h || from[i].flip_v != to[j].flip_v) {
+            // A picture cannot glide into its own mirror image: the two fade (or cut).
+            used[i] = false;
+            alone_pair[j] = true;
             continue;
         }
         const auto a = placedPose(from[i], src, fmt), b = placedPose(to[j], src, fmt);

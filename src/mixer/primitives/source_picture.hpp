@@ -37,6 +37,8 @@ inline void applySourcePictures(std::vector<LayerSpec> &layers,
             layer.pivot_set = original.pivot_set;
             layer.pivot_x = original.pivot_x;
             layer.pivot_y = original.pivot_y;
+            layer.flip_h = original.flip_h;
+            layer.flip_v = original.flip_v;
         } else {
             // Logical sheet pixels do not exist on this source: never sample an unrelated region.
             layer.dst_w = layer.dst_h = 0;

@@ -74,6 +74,32 @@ static void quarter_turns_are_exact() {
     }
 }
 
+static void flips_mirror_the_crop_about_its_centre() {
+    // The crop 100..300 x 50..150 drawn 1:1 at the origin: flipped, the box's left reads the crop's right.
+    auto t = transform({100, 50, 200, 100}, {0, 0, 200, 100});
+    t.flip_h = true;
+    auto p = luma(t);
+    assert(at(p, 0, 0) == std::make_pair(299.5, 50.5) && at(p, 199, 99) == std::make_pair(100.5, 149.5));
+    assert(p.aa[0] == 1 && p.aa[1] == 1 && sameRect(p.bounds, {0, 0, 201, 101}) && sameRect(p.taps, {100, 50, 200, 100}));
+    t.flip_h = false;
+    t.flip_v = true;
+    p = luma(t);
+    assert(at(p, 0, 0) == std::make_pair(100.5, 149.5));
+    // Both flips are the half turn about the box's centre.
+    t.flip_h = true;
+    const auto both = luma(t), turned = luma(transform({100, 50, 200, 100}, {0, 0, 200, 100}, 180));
+    for (int i = 0; i < 6; ++i) assert(near(both.m[i], turned.m[i]));
+    // The flip is of the picture, before the rotation: a quarter turn of the mirror image puts the
+    // crop's top-right corner, not its top-left, at the box's top-right.
+    auto q = transform({0, 0, 512, 512}, {100, 100, 512, 512}, 90);
+    q.flip_h = true;
+    assert(at(luma(q), 611, 100) == std::make_pair(511.5, .5));
+    // Chroma planes conjugate the flipped map as they do any other.
+    const auto y = luma(q), nv12 = *affinePlane(q, 1, 1, 1, 1);
+    for (int i : {0, 1, 3, 4}) assert(nv12.m[i] == y.m[i]);
+    assert(near(nv12.m[2], y.m[2] / 2) && near(nv12.m[5], y.m[5] / 2));
+}
+
 static void pivot_default_is_the_box_centre() {
     const RectF box{600, 600, 512, 512};
     const Rect clip{0, 0, 3000, 3000};
@@ -129,6 +155,8 @@ static void needs_transform_only_for_rotation_or_fractions() {
     assert(needsTransform(parse(R"({"rotation_deg":-180})")));
     assert(needsTransform(parse(R"({"rotation_deg":0.001})")));
     assert(needsTransform(parse(R"({"crop":{"x":100.5,"y":0,"w":10,"h":10}})")));
+    assert(needsTransform(parse(R"({"flip_h":true})")) && needsTransform(parse(R"({"flip_v":true})")));
+    assert(!needsTransform(parse(R"({"flip_h":false,"flip_v":false})")));
 }
 
 static void parse_follows_the_geometry_rule() {
@@ -149,10 +177,26 @@ static void parse_follows_the_geometry_rule() {
     assert(exact.crop_exact && exact.crop_exact->x == 100.5 && exact.crop_exact->w == 10);
     assert(!parse(R"({"crop":{"x":100,"y":2,"w":10,"h":4}})").crop_exact);
     assert(throws(R"({"crop":{"x":100.5,"y":2}})"));   // a fractional crop needs its size
+    const auto flipped = parse(R"({"flip_h":true,"flip_v":true})");
+    assert(flipped.flip_h && flipped.flip_v && !(flipped == LayerSpec{}));
+    const auto unflipped = parse(R"({"dst_x":4})", flipped);   // omitted: none
+    assert(!unflipped.flip_h && !unflipped.flip_v);
+    assert(throws(R"({"flip_h":1})") && throws(R"({"flip_v":"yes"})"));
 }
+
 
 static std::vector<DrawOp> resolve(const char *json, const av::VideoFrame &frame, int w = 1920, int h = 1080) {
     return resolveDrawOps({&frame}, parseLayersArray(Parameters::parse(json)), w, h, AV_PIX_FMT_NV12);
+}
+
+static void flipped_layer_resolves_through_the_transform(const av::VideoFrame &frame) {
+    const auto ops = resolve(R"([{"dst_x":960,"dst_y":0,"dst_w":960,"dst_h":540,"flip_h":true}])", frame);
+    assert(ops[0].src && ops[0].transform && ops[0].transform->flip_h && !ops[0].transform->flip_v);
+    const auto &t = *ops[0].transform;
+    assert(sameBox(t.box, {960, 0, 960, 540}) && t.crop.w == 1920 && t.rotation_deg == 0);
+    const auto plain = resolve(R"([{"dst_x":960,"dst_y":0,"dst_w":960,"dst_h":540}])", frame);
+    assert(!plain[0].transform && !(ops[0] == plain[0]));
+    assert(describeDrawOps(ops).find("flip_h") != std::string::npos);
 }
 
 static void rotated_layer_keeps_its_crop_whole(const av::VideoFrame &frame) {
@@ -281,6 +325,7 @@ int main() {
     identity_is_the_unit_matrix();
     subpixel_crop_scales_and_offsets();
     quarter_turns_are_exact();
+    flips_mirror_the_crop_about_its_centre();
     pivot_default_is_the_box_centre();
     plane_matrices_conjugate_subsampling();
     bounds_clip_to_the_clip_rect();
@@ -293,4 +338,5 @@ int main() {
     drawop_equality_sees_the_transform(frame);
     transformed_op_never_copies_the_whole_frame(frame);
     source_boundary_keeps_the_mapping(frame);
+    flipped_layer_resolves_through_the_transform(frame);
 }
