@@ -17,14 +17,31 @@ protected:
     std::condition_variable cv_;
 
     void pauseNonRecursive(bool synchonize_nodes = true) {
+        const bool was_paused = paused_;
+        const AVTS was_resume_at = resume_at_;
         paused_ = true;
         resume_at_ = AV_NOPTS_VALUE; // an explicit pause cancels a scheduled resume
         if (synchonize_nodes) {
-            for (auto& p: sync_objs_) {
-                auto obj = p.lock();
-                if (obj) {
-                    obj->flushAndSeek(StreamTarget::from_frames_relative(0));
+            try {
+                for (auto& p: sync_objs_) {
+                    auto obj = p.lock();
+                    if (obj) {
+                        obj->flushAndSeek(StreamTarget::from_frames_relative(0));
+                    }
                 }
+            } catch (...) {
+                // A pause that fails leaves the team as it was. Synchronizing fails when no frame
+                // has been shown yet ("Can not determine current time"): left paused, the input
+                // (which waits on this team) would stop reading, the frame would never come, and
+                // every later pause would fail the same way.
+                paused_ = was_paused;
+                resume_at_ = was_resume_at;
+                if (!was_paused) {
+                    // A pause node that went to sleep meanwhile waits for a resume: wake it.
+                    std::lock_guard<decltype(mutex_)> lock(mutex_);
+                    cv_.notify_all();
+                }
+                throw;
             }
         }
     }

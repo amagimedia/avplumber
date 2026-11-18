@@ -268,6 +268,15 @@ bool NodeWrapper::stop(bool inhibit_actions) {
         // node is destroyed in thread function only if it was started, so a special case for not-yet-started nodes
         // and non-blocking nodes is necessary:
         if (node_ != nullptr) {
+            // A non-blocking node runs on its event loop, from callbacks that hold it only while they
+            // run. Dropping node_ does not stop one that is running or already queued, and a group
+            // started again feeds the same edges to its new nodes: for a moment two consumers share a
+            // queue, and the old one reads a frame the new one has popped (a use-after-free). Wait for
+            // a running callback to return, and turn the queued ones into no-ops, before letting go.
+            std::shared_ptr<NonBlockingNodeBase> node_nonblocking = std::dynamic_pointer_cast<NonBlockingNodeBase>(node_);
+            if (node_nonblocking) {
+                node_nonblocking->prohibitProcessNonBlocking();
+            }
             std::shared_ptr<IFlushable> node_flushable = std::dynamic_pointer_cast<IFlushable>(node_);
             if (node_flushable) {
                 logstream << "Flushing node " << name_ << " from stop()";
