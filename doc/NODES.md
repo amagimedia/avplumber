@@ -963,6 +963,33 @@ The renderer needs to:
 6. if the read time resolution was greater than resolution of the waveform to be displayed, compute maximum or RMS of waveform values that correspond to the same “pixel” on the resulting image
 
 
+### `cuda_ipc_sink` and `cuda_ipc_source`
+
+Share linear CUDA video frames between Linux processes on the same GPU. Use
+`src` on the sink, `dst` on the source, and the same absolute `socket` path
+on both. Set `hwaccel` to the CUDA device name in each graph. For containers,
+mount the socket directory in both and assign the same GPU UUID.
+
+The sink accepts NV12, P010LE and RGBA from the CUDA VMM allocator. Set
+`vmm_slots` to a capacity from 2 to 32 on a CUDA `mixer_compositor` to render to
+this allocator. Size the pool to cover frames held by both graphs. If every
+slot is busy, the compositor drops the current tick. The sink rejects frames
+from the default CUDA allocator.
+
+The Unix socket transfers allocation descriptors and frame metadata. The source
+publishes read-only CUDA frames. Nodes that submit asynchronous reads must
+retain the frame until their GPU work completes. A release acknowledgement
+permits the sink to reuse the slot. Reconnection creates a new allocation
+generation and old frames retain their mappings until released.
+
+With the Python module built, run this example in two shells (or two containers
+with the same GPU and a shared, writable socket directory):
+
+```sh
+PYTHONPATH=. python3 tests/cuda/smoke_cuda_ipc.py producer /tmp/frames.sock --duration 15
+PYTHONPATH=. python3 tests/cuda/smoke_cuda_ipc.py consumer /tmp/frames.sock
+```
+
 ### `ipc_cuda_source`
 
 Get video frames from CUDA IPC memory. Frame pointer and parameters are read from named pipe. See `src/nodes/cuda/ipc_cuda_source.cpp` for structure.

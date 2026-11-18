@@ -13,6 +13,7 @@
 #include "../../mixer/primitives/SourceDelivery.hpp"
 #include "cuda_rect_draw.hpp"
 #include "cuda_rect_frame.hpp"
+#include "CudaVmmFrames.hpp"
 #include "cuda_rect_texture.h"
 
 #include <atomic>
@@ -59,6 +60,8 @@ public:
         // holds the frames it reads until then. Consumers order on the canvas frames' stream
         // (FFmpeg filters and NVENC use it; compositors wait for their producers' streams).
         bool hand_off = false;
+        unsigned vmm_slots = 0;
+        std::shared_ptr<avp::vmm::FramePool> vmm_pool;
     };
 
     /// `type` is the node type, the prefix of errors and logs.
@@ -68,6 +71,7 @@ protected:
     const char *const type_;
     std::shared_ptr<Edge<av::VideoFrame>> output_edge_;
     avp::AvBufferRef out_frames_ref_;
+    std::shared_ptr<avp::vmm::FramePool> vmm_pool_;
     CudaRectDraw draw_;   // owns the canvas geometry, format and color contract
 
     std::vector<LayerSpec> default_layers_;
@@ -267,7 +271,9 @@ protected:
         avp::timeline::Scope issue("issue");
         CUstream stream = draw_.stream();
 
-        av::VideoFrame outf = avp::mixer::canvasFrame(out_frames_ref_.get(), type_);
+        av::VideoFrame outf = vmm_pool_ ? vmm_pool_->acquire()
+                                       : avp::mixer::canvasFrame(out_frames_ref_.get(), type_);
+        if (outf.isNull()) throw avp::mixer::NoCanvasFrame("CUDA VMM pool is full");
 
         bool configured_changed = false;
         std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src, configured_changed);
@@ -405,7 +411,13 @@ public:
           metadata_key_(config.metadata_key),
           debug_log_every_n_(config.debug_log_every_n),
           hand_off_(config.hand_off) {
-        out_frames_ref_ = avp::mixer::allocCanvasFrames(*config.hw, config.canvas, type_);
+        if (config.vmm_slots) {
+            if (config.hand_off) throw Error("vmm_slots requires synchronous compositor output");
+            vmm_pool_ = config.vmm_pool ? config.vmm_pool : std::make_shared<avp::vmm::FramePool>(
+                config.hw, config.canvas.sw_fmt, config.canvas.width, config.canvas.height, config.vmm_slots);
+        } else {
+            out_frames_ref_ = avp::mixer::allocCanvasFrames(*config.hw, config.canvas, type_);
+        }
         this->auto_eof_ = false;
     }
 
@@ -498,6 +510,9 @@ inline CudaRectCompositor::Config CudaRectCompositor::parseConfig(NodeCreationIn
         throw Error(prefix + "failed to resolve hwaccel");
 
     config.canvas = avp::mixer::parseCanvas(params, prefix);
+    config.vmm_slots = params.value("vmm_slots", 0u);
+    if (config.vmm_slots && std::string_view(type) != "mixer_compositor")
+        throw Error(prefix + "vmm_slots is supported by mixer_compositor");
 
     config.output = nci.edges.find<av::VideoFrame>(params["dst"]);
     config.metadata_key = params.value("metadata_key", std::string("rect_overlay_v1"));

@@ -742,11 +742,22 @@ public:
 std::shared_ptr<MixerCompositor> MixerCompositor::create(NodeCreationInfo &nci) {
     const Parameters &params = nci.params;
     Config config = parseConfig(nci, "mixer_compositor");
-    config.hand_off = params.value("gpu_handoff", true);
+    config.hand_off = params.value("gpu_handoff", config.vmm_slots == 0);
     const bool aux = params.value("aux_mode", false);
     if (aux) {
         config.hw = avp::mixer::makeCudaStreamDevice(config.hw, params.value("name", params.at("output_hwaccel").get<std::string>()));
         InstanceSharedObjects<HWAccelDevice>::put(nci.instance, params.at("output_hwaccel"), config.hw);
+    }
+    if (params.contains("vmm_pool")) {
+        const auto name = params.at("vmm_pool").get<std::string>();
+        if (!config.vmm_slots || name.empty() || name.front() == '@')
+            throw Error("mixer_compositor: vmm_pool needs a local name and vmm_slots");
+        using Pools = InstanceSharedObjects<avp::vmm::FramePool>;
+        const auto &canvas = config.canvas;
+        Pools::emplace(nci.instance, name, Pools::PolicyIfExists::Ignore,
+                       config.hw, canvas.sw_fmt, canvas.width, canvas.height, config.vmm_slots);
+        config.vmm_pool = Pools::get(nci.instance, name);
+        config.vmm_pool->requireLayout(config.hw, canvas.sw_fmt, canvas.width, canvas.height, config.vmm_slots);
     }
     auto node = std::make_shared<MixerCompositor>(config);
     node->connect(nci);

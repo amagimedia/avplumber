@@ -213,6 +213,10 @@ endif
 CUDA_ROOT ?= /usr/local/cuda
 ifeq ($(HAVE_CUDA),1)
 NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_ipc.cpp
+override CPPSRC += nodes/hwaccel/CudaVmmMemory.cpp
+# The VMM adapter uses the CUDA SDK headers, while existing nodes use the bundled loader.
+objs/src/nodes/hwaccel/CudaVmmMemory.o: override CXXFLAGS += -fno-lto
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/raw_video_file_cuda.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_rect_overlay.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_transform.cpp
