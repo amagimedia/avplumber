@@ -37,9 +37,10 @@ protected:
                 paused_ = was_paused;
                 resume_at_ = was_resume_at;
                 if (!was_paused) {
-                    // A pause node that went to sleep meanwhile waits for a resume: wake it.
+                    // Whatever went to sleep meanwhile waits for a resume: wake it as resume does.
+                    // A pause node sleeps until resetInput(), not on the condition variable.
                     std::lock_guard<decltype(mutex_)> lock(mutex_);
-                    cv_.notify_all();
+                    wakeWaitersLocked();
                 }
                 throw;
             }
@@ -59,14 +60,19 @@ protected:
         resume_at_ = AV_NOPTS_VALUE;
         {
             std::lock_guard<decltype(mutex_)> lock(mutex_);
-            for (auto &wptr: nodes_to_resume_) {
-                std::shared_ptr<IInputReset> node = wptr.lock();
-                if (node) {
-                    node->resetInput();
-                }
-            }
-            cv_.notify_all();
+            wakeWaitersLocked();
         }
+    }
+    /// Wake the team's waiters: pause nodes through resetInput(), waitForResume() through cv_.
+    /// The caller holds mutex_.
+    void wakeWaitersLocked() {
+        for (auto &wptr: nodes_to_resume_) {
+            std::shared_ptr<IInputReset> node = wptr.lock();
+            if (node) {
+                node->resetInput();
+            }
+        }
+        cv_.notify_all();
     }
     bool checkPauseNonRecursive(const av::Timestamp& ts) {
         std::lock_guard<decltype(mutex_)> lock(mutex_);
