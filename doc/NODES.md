@@ -552,7 +552,11 @@ input stream changes parameters.
 
 1 input, multi outputs: anything
 
--   `drop` (bool) - drop packets if output queue is full, disabled by default
+-   `drop` (bool, or a list of names from `dst`; default `false`) - drop a packet for an output
+    whose queue is full instead of waiting for room. `true` applies to every output, a list to the
+    outputs it names. An output that waits holds back the input and every other output for as long
+    as its consumer is stopped or slow; one that drops loses only its own packets, counted in
+    `dropped_total` of its queue in `queues.json`. EOF is never dropped.
 
 ### `one_to_many`, `one_to_many_nb`
 

@@ -50,8 +50,10 @@ class DownstreamKeyer:
         keyed = program
         if clean:
             keyed, feeds["clean"] = "dsk_program", "program_clean"
+            # Only the clean feed drops when its edge is full: its renditions may be stopped or
+            # slow, and the split must not wait for them with the keyer's frame. The keyer waits.
             self.avp.addNode(self.api.Split({"name": "split_clean", "src": program, "dst": [feeds["clean"], keyed],
-                                             "group": self.group, "on_error": "panic"}))
+                                             "drop": [feeds["clean"]], "group": self.group, "on_error": "panic"}))
         for edge in self.edges:
             # A real paint can supersede a held copy at the same timestamp.
             # Retain both until the keyer drains them and selects the newest.

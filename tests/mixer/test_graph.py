@@ -353,6 +353,8 @@ def test_record_and_janus_outputs_split_program_video():
 
     # Both flags become renditions of the one program, like a config document's.
     assert nodes["split_renditions"]["dst"] == ["program_rendition_program", "program_rendition_janus"]
+    # Neither output is waited for: a stopped one drops on its own edge.
+    assert nodes["split_renditions"]["drop"] is True
     assert nodes["program_encoder"]["codec"] == "h264_nvenc" and nodes["program_encoder"]["options"]["b"] == "8000k"
 
 
@@ -1597,7 +1599,7 @@ def test_renditions_encode_the_one_composited_program(tmp_path, monkeypatch):
         "type": "cuda_transform", "name": "transform_renditions", "src": "program_transform",
         "dst": ["program_sized_square"], "hwaccel": "mixer_gpu", "group": "output", "on_error": "panic",
         "outputs": [{"dst": ["program_sized_square"], "width": 1080, "height": 1080, "sw_format": "nv12",
-                     "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1080, "dst_h": 1080}]}]}
+                     "drop": True, "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1080, "dst_h": 1080}]}]}
     # Colour follows the transform, on the smaller picture; the filter no longer scales.
     square = nodes["scale_square"]
     assert (square["src"], square["dst"], square["graph"]) == (
@@ -1638,7 +1640,7 @@ def test_renditions_of_one_size_share_one_draw_and_replace_the_split(tmp_path):
     assert transform["src"] == "program_measured"
     assert [(o["dst"], o["width"], o["height"]) for o in transform["outputs"]] == [
         (["program_sized_low", "program_sized_file"], 1280, 720), (["program_sized_tiny"], 640, 360)]
-    assert all("fps" not in o and "drop" not in o for o in transform["outputs"])
+    assert all("fps" not in o for o in transform["outputs"])
     # What the graph manager orders the group by: every scale_<id> comes after the transform.
     assert transform["dst"] == ["program_sized_low", "program_sized_file", "program_sized_tiny"]
     assert [nodes[f"scale_{rid}"]["src"] for rid in ("low", "file", "tiny")] == [
@@ -1673,7 +1675,7 @@ def test_a_scaled_rendition_converts_color_after_the_transform(tmp_path):
     assert nodes["split_renditions"]["dst"] == ["program_rendition_hdr", "program_transform"]
     assert nodes["transform_renditions"]["outputs"] == [
         {"dst": ["program_sized_sdr"], "width": 1280, "height": 720, "sw_format": "p210le",
-         "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1280, "dst_h": 720}]}]
+         "drop": True, "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": 1280, "dst_h": 720}]}]
     sdr = nodes["scale_sdr"]
     assert sdr["src"] == "program_sized_sdr"
     assert sdr["graph"].startswith(Color("hlg").setparams + ",tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12")
@@ -1695,6 +1697,64 @@ def test_clean_and_dirty_feeds_scale_through_their_own_transform(tmp_path, monke
     clean = nodes["transform_renditions_clean"]
     assert clean["src"] == "program_clean" and clean["outputs"][0]["dst"] == ["program_sized_sdr_clean"]
     assert nodes["scale_sdr_clean"]["src"] == "program_sized_sdr_clean"
+
+
+def _waits_for(nodes, edge):
+    """Whether a node that others depend on waits for room in *edge*; False when the frame is dropped."""
+    def writes(p):
+        dst = p.get("dst") or []
+        return edge in ([dst] if isinstance(dst, str) else dst)
+    producer = next(p for p in nodes.values() if writes(p))
+    if producer["type"] == "split":
+        drop = producer.get("drop", False)
+        return not (drop is True or (drop is not False and edge in drop))
+    if producer["type"] == "cuda_transform":
+        return not next(o for o in producer["outputs"] if edge in o["dst"]).get("drop", False)
+    if producer["type"] == "one_to_many":
+        return not producer.get("drop", False)
+    # mixer_delivery waits, and holds back nothing else: only program_fps writes for it, and a
+    # force_fps drops the frame a full edge has no room for (force_fps.cpp).
+    assert producer["type"] == "mixer_delivery", producer
+    assert nodes["program_fps"]["type"] == "force_fps" and nodes["program_fps"]["dst"] == producer["src"]
+    return False
+
+
+def _edges_a_stopped_rendition_fills(nodes, ids):
+    """The edge each rendition's first node reads, and the one a shared transform reads."""
+    edges = [nodes[f"scale_{rid}"]["src"] for rid in ids]
+    return edges + [p["src"] for name, p in nodes.items() if (name or "").startswith("transform_renditions")]
+
+
+def test_no_node_waits_for_a_record_or_janus_rendition(tmp_path):
+    """Stopping a rendition's nodes leaves its edge full. Whatever writes that edge must drop the
+    frame: a writer that waits holds back the program and every other rendition with it."""
+    canvas_size = [{"id": "air", "port": 5004}, {"id": "rec", "target": "/rec/air.ts"}]
+    scaled = [{"id": "low", "port": 5006, "width": 1280, "height": 720},
+              {"id": "low_rec", "target": "/rec/low.ts", "width": 1280, "height": 720},
+              {"id": "tiny", "target": "/rec/tiny.ts", "width": 640, "height": 360}]
+    for renditions in (canvas_size, canvas_size + scaled, scaled, canvas_size[:1], scaled[:1]):
+        nodes = _rendition_nodes(tmp_path, renditions)
+        edges = _edges_a_stopped_rendition_fills(nodes, [r["id"] for r in renditions])
+        assert [edge for edge in edges if _waits_for(nodes, edge)] == [], renditions
+    nodes = _rendition_nodes(tmp_path, canvas_size + scaled)
+    assert nodes["split_renditions"]["drop"] is True
+    assert [o.get("drop") for o in nodes["transform_renditions"]["outputs"]] == [True, True]
+
+
+@pytest.mark.parametrize("clean", [
+    [{"id": "clean", "port": 5010, "feed": "clean"}],
+    [{"id": "clean", "port": 5010, "feed": "clean", "width": 1280, "height": 720}],
+    [{"id": "clean", "port": 5010, "feed": "clean"}, {"id": "clean_rec", "target": "/rec/clean.ts", "feed": "clean"}],
+])
+def test_a_stopped_clean_rendition_does_not_hold_back_the_keyer(tmp_path, monkeypatch, clean):
+    renditions = [{"id": "sdr", "port": 5004}, *clean]
+    _, nodes = _dsk_app(tmp_path, monkeypatch, renditions)
+    # The split that feeds the keyer drops for the clean feed only, and keeps both in their order.
+    assert nodes["split_clean"]["dst"] == ["program_clean", "dsk_program"]
+    assert nodes["split_clean"]["drop"] == ["program_clean"]
+    assert _waits_for(nodes, "dsk_program") and not _waits_for(nodes, "program_clean")
+    edges = _edges_a_stopped_rendition_fills(nodes, [r["id"] for r in renditions])
+    assert [edge for edge in edges if _waits_for(nodes, edge)] == []
 
 
 def test_a_rendition_may_not_ask_for_more_than_the_composer_renders():
