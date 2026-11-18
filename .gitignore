@@ -2,6 +2,7 @@
 /.cache
 compile_commands.json
 graph_factory.generated.cpp
+graph_factory.python.generated.cpp
 builddate.h
 compile_flags.txt
 *.o

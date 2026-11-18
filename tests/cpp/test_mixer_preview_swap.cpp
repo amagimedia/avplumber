@@ -65,13 +65,17 @@ int main() {
     assert(state.preview.revision == revision + 3 && state.preview.pvw == "b" && state.preview.pgm == "c");
     assert(state.preview.effective_ns == 5 && state.preview.kind == "fade");
 
-    // A dip is still Crossfade mode, but takeKind / PreviewChange report "dip".
-    state.pvw_slot_scene = "a";
-    state.transition_mode = MixerState::TransitionMode::Crossfade;
-    state.take_dip = std::array<uint8_t, 3>{0, 0, 0};
-    state.completeTransition(true, "a", 0);
-    assert(state.preview.kind == "dip");
-    state.take_dip.reset();
+    // A dip is still Crossfade mode, but takeKind / PreviewChange report "dip". On a state of its
+    // own: one more take here would move program and the revision the checks below count from.
+    {
+        MixerState dip;
+        dip.pgm_scene_name = "c";
+        dip.pvw_slot_scene = "a";
+        dip.transition_mode = MixerState::TransitionMode::Crossfade;
+        dip.take_dip = std::array<uint8_t, 3>{0, 0, 0};
+        dip.completeTransition(true, "a", 0);
+        assert(dip.preview.kind == "dip");
+    }
 
     // An explicit preview publishes at once (effective 0), untimed, beside the current program.
     state.publishPreview("a", 0);

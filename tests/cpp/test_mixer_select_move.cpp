@@ -55,12 +55,16 @@ int main() {
     assert(state->move_on_air && state->take_phase == MixerState::TakePhase::Fade);
     const auto clock = state->clock();
     assert(clock->generation == generation + 1 && clock->end == TakeClock::End::Running);
-    assert(clock->on_air_ns == ns(T + 1) && std::fabs(clock->progress(ns(T + 31)) - 0.5) < 1e-9);
+    // The clock runs on the take's schedule, which is in whole ms (rampTimesNs) like the alpha
+    // expression and the keys that evaluate it: a 1/60 tick's start is up to 1 ms early, so half
+    // way is 0.5 to within 1 ms of this 1 s take.
+    const double one_ms = 1e-3;
+    assert(clock->on_air_ns == ns(T + 1) && std::fabs(clock->progress(ns(T + 31)) - 0.5) < one_ms);
 
     // Half way: the destination's frame goes out directly, at the clock's progress.
     const av::VideoFrame half = frameAt(T + 31, "7"), program31 = frameAt(T + 31);
     assert(control.selectFrame(false, {&program31, &half, nullptr}, 1, ns(T + 30)) == 1);
-    assert(std::fabs(state->take_progress - 0.5) < 1e-9 && state->move_on_air);
+    assert(std::fabs(state->take_progress - 0.5) < one_ms && state->move_on_air);
 
     // A tick already out goes nowhere; the take stays on air.
     assert(control.selectFrame(false, {&program31, &half, nullptr}, 1, ns(T + 31)) == -1);

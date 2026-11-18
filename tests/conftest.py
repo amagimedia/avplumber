@@ -26,6 +26,11 @@ def cpp_binary(tmp_path):
                 pytest.skip(f"development files not found: {' '.join(libs)}")
             flags = probe.stdout.split()
         binary = tmp_path / name
+        if "src/util.cpp" in sources:
+            # util.cpp logs APP_VERSION, which the Makefile builds from src/app_version.cpp
+            # with the git version and build date it generates; give it fixed ones here.
+            sources = (*sources, "src/app_version.cpp")
+            flags = ['-DGIT_VERSION="test"', '-DCOMPILE_DATE=""', *flags]
         subprocess.run([compiler, "-std=c++17", "-D__STDC_CONSTANT_MACROS", "-O0", "-g", "-Wall", "-Wextra", *(["-pthread"] if pthread else []),
                         "-I", str(ROOT / "src"), "-I", str(ROOT / "deps/avcpp/src"), "-I", str(ROOT / "deps/include"),
                         str(ROOT / "tests/cpp" / f"{name}.cpp"), *(str(ROOT / s) for s in sources),

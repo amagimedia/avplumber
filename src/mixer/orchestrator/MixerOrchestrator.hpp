@@ -16,6 +16,8 @@ namespace avp::mixer {
 
 
 class MixerOrchestrator {
+// Spelled out (the default for a class) so tests reach these with #define private public.
+private:
     std::shared_ptr<MixerGraph> nodes_;
     std::shared_ptr<MixerState> state_;
 
