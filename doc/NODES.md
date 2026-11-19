@@ -200,14 +200,11 @@ Recommended options for displaying live video:
         but allow use of any
     -   if doesn't start with `?`, force specified pixel format, fail if
         it's incompatible with codec or stream
--   `reinterpret_width` (int) and `reinterpret_pixel_format` (string) - optional, for
-    `dec_video` with `codec: rawvideo` on a stream whose packets are already raw bytes
-    but whose stream parameters describe something else. The decoder context takes
-    this width and pixel format, the `rawvideo` codec id and no codec tag instead of
-    the stream's own. An MXL flow reports codec `v210` at the picture width, so
-    `reinterpret_width` = the v210 row stride in bytes with
-    `reinterpret_pixel_format: gray` hands each grain to
-    `hwupload_cuda=v210_width=<picture width>` for unpacking on the GPU
+-   `codec: rawvideo` on a video stream of another codec reads its packets as raw
+    bytes; give their geometry and format in `options` (`video_size`,
+    `pixel_format`). An MXL flow reports `v210` at the picture width, so
+    `video_size: <v210 row stride>x<height>` with `pixel_format: gray` hands each
+    grain to `hwupload_cuda=v210_width=<picture width>` for unpacking on the GPU
 -   `hwaccel` (string, name of instance-shared object) - optional, name of
     hwaccel previously created with `hwaccel.init`
 -   `hwaccel_only_for_codecs` (list of strings) - use hwaccel only for

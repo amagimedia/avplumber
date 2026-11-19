@@ -911,16 +911,10 @@ public:
         if (params.count("options")) {
             options = parametersToDict(params["options"]);
         }
-        const bool reinterpret = params.count("reinterpret_width") || params.count("reinterpret_pixel_format");
-        if (reinterpret) {
-            if (codec_name != "rawvideo" || cpar.codec_type != AVMEDIA_TYPE_VIDEO)
-                throw Error("Packet reinterpretation requires an explicit rawvideo decoder on a video stream");
-            // libavcodec's own options replace the stream's geometry and format when the decoder opens.
-            if (params.count("reinterpret_width"))
-                options.set("video_size", std::to_string(params["reinterpret_width"].get<int>()) + "x" + std::to_string(cpar.height));
-            if (params.count("reinterpret_pixel_format"))
-                options.set("pixel_format", params["reinterpret_pixel_format"].get<std::string>());
-        }
+        // rawvideo forced onto another codec's video stream reads its packets as raw bytes, whose
+        // geometry and format come from options (video_size, pixel_format) when the decoder opens.
+        const bool reinterpret = codec_name == "rawvideo" && cpar.codec_type == AVMEDIA_TYPE_VIDEO &&
+                                 cpar.codec_id != AV_CODEC_ID_RAWVIDEO;
         std::shared_ptr<Child> r = std::make_shared<Child>(src_edge->makeSource(), dst_edge->makeSink(), md->source_stream, codec_name, options, pixel_format, hwaccel, reinterpret);
         if (params.count("flush_magic")) {
             r->flush_magic_ = params["flush_magic"];
