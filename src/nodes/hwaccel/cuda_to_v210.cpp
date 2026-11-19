@@ -1,208 +1,158 @@
-#include "v210_cuda.hpp"
+#include "../node_common.hpp"
+#include "../../cuda.hpp"
+#include "../../../objs/src/nodes/hwaccel/v210_pack.ptx.h"
 
 #include <avcpp/codec.h>
 
 extern "C" {
 #include <libavcodec/codec_par.h>
-#include <libavutil/buffer.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
-#include <libavutil/pixdesc.h>
+#include <libavutil/imgutils.h>
 }
 
 #include <cstring>
-#include <memory>
-#include "../../../objs/src/nodes/hwaccel/v210_pack.ptx.h"
+#include <limits>
 
 namespace {
 
-constexpr const char* kNode = "cuda_to_v210";
-
-// Download buffers outlive the node: a packet can still sit in a queue, or in
-// the muxer, when the graph is torn down. The pool therefore keeps its own
-// reference to the CUDA device context, so cuMemFreeHost always runs against a
-// live context.
-struct PinnedPool {
-    CUcontext context = nullptr;
-    AVBufferRef* device_ref = nullptr;
-    size_t payload = 0;
-};
-
-void releasePinned(void* opaque, uint8_t* data) {
-    auto* pool = static_cast<PinnedPool*>(opaque);
-    if (CHECK_CU(cuCtxPushCurrent(pool->context))) return;
-    CHECK_CU(cuMemFreeHost(data));
-    CUcontext previous;
-    CHECK_CU(cuCtxPopCurrent(&previous));
+AVCUDADeviceContext* cuda(AVBufferRef* device) {
+    return static_cast<AVCUDADeviceContext*>(reinterpret_cast<AVHWDeviceContext*>(device->data)->hwctx);
 }
 
-AVBufferRef* allocPinned(void* opaque, size_t size) {
-    auto* pool = static_cast<PinnedPool*>(opaque);
-    if (CHECK_CU(cuCtxPushCurrent(pool->context))) return nullptr;
-    AVBufferRef* buffer = nullptr;
-    void* data = nullptr;
-    if (!CHECK_CU(cuMemHostAlloc(&data, size, 0))) {
-        // Only the payload is written per frame; zero the AVPacket padding once.
-        std::memset(static_cast<uint8_t*>(data) + pool->payload, 0, size - pool->payload);
-        buffer = av_buffer_create(static_cast<uint8_t*>(data), size, releasePinned, opaque, 0);
-        if (!buffer) CHECK_CU(cuMemFreeHost(data));
+// Never throws, because libavutil's buffer callbacks use it too: check `ok`.
+struct ContextScope {
+    const bool ok;
+    explicit ContextScope(AVBufferRef* device) : ok(!CHECK_CU(cuCtxPushCurrent(cuda(device)->cuda_ctx))) {}
+    ~ContextScope() {
+        CUcontext previous;
+        if (ok) CHECK_CU(cuCtxPopCurrent(&previous));
     }
-    CUcontext previous;
-    CHECK_CU(cuCtxPopCurrent(&previous));
+};
+
+// Download buffers outlive the node: a packet can still sit in a queue, or in
+// the muxer, when the graph is torn down. The pool's opaque is therefore its
+// own reference to the CUDA device, released after the last buffer, so
+// cuMemFreeHost always runs against a live context.
+void freePinned(void* device, uint8_t* data) {
+    if (ContextScope scope(static_cast<AVBufferRef*>(device)); scope.ok) CHECK_CU(cuMemFreeHost(data));
+}
+
+AVBufferRef* allocPinned(void* device, size_t size) {
+    void* host = nullptr;
+    if (ContextScope scope(static_cast<AVBufferRef*>(device)); !scope.ok || CHECK_CU(cuMemHostAlloc(&host, size, 0)))
+        return nullptr;
+    auto* data = static_cast<uint8_t*>(host);
+    // Only the payload is written per frame; zero the AVPacket padding once.
+    std::memset(data + size - AV_INPUT_BUFFER_PADDING_SIZE, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    AVBufferRef* buffer = av_buffer_create(data, size, freePinned, device, 0);
+    if (!buffer) freePinned(device, data);
     return buffer;
 }
 
-void destroyPinnedPool(void* opaque) {
-    auto* pool = static_cast<PinnedPool*>(opaque);
-    av_buffer_unref(&pool->device_ref);
-    delete pool;
-}
-
-struct PacketDeleter {
-    void operator()(AVPacket* packet) const { av_packet_free(&packet); }
-};
-
-// Everything the pack needs on the device, released in one place so that a
-// failed initialization leaves nothing behind for the next attempt.
-struct PackResources {
-    CUcontext context = nullptr;
-    CUstream stream = nullptr; // Borrowed: the frames arrive on it already.
+// Everything the pack holds on one device, released in one place so that a
+// failed setup leaves nothing behind.
+struct Gpu {
+    AVBufferRef* device = nullptr; // Keeps the CUDA context alive.
     CUmodule module = nullptr;
     CUfunction kernel = nullptr;
     CUdeviceptr packed = 0;
     AVBufferPool* pool = nullptr;
-    // Keeps the CUDA device alive for as long as this node holds resources.
-    AVBufferRef* device_ref = nullptr;
 
-    void release() {
+    ~Gpu() {
         // Buffers still referenced by packets survive this; the pool waits.
-        if (pool) av_buffer_pool_uninit(&pool);
-        if (context && !CHECK_CU(cuCtxPushCurrent(context))) {
-            if (stream) CHECK_CU(cuStreamSynchronize(stream));
+        av_buffer_pool_uninit(&pool);
+        if (!device) return;
+        if (ContextScope scope(device); scope.ok) {
             if (packed) CHECK_CU(cuMemFree(packed));
             if (module) CHECK_CU(cuModuleUnload(module));
-            CUcontext previous;
-            CHECK_CU(cuCtxPopCurrent(&previous));
         }
-        packed = 0;
-        module = nullptr;
-        kernel = nullptr;
-        stream = nullptr;
-        context = nullptr;
-        if (device_ref) av_buffer_unref(&device_ref);
+        av_buffer_unref(&device);
     }
-
-    ~PackResources() { release(); }
 };
+
+bool positive(const av::Rational& ratio) {
+    return ratio.getNumerator() > 0 && ratio.getDenominator() > 0;
+}
 
 } // namespace
 
 // The mirror of FFmpeg's hwupload_cuda=v210_width unpack: packs CUDA 10-bit
-// 4:2:2 frames into v210 packets
-// with a PTX kernel and DMAs each one straight into the buffer the muxer will
-// read, which replaces both a hwdownload and the libavcodec v210 encoder.
+// 4:2:2 frames into v210 packets with a PTX kernel and DMAs each one straight
+// into the buffer the muxer will read, which replaces both a hwdownload and
+// the libavcodec v210 encoder.
 //
 // It implements IEncoder without an encoder: v210 is a memory layout, so the
 // muxer only needs codec parameters and a stream rate, and those are known at
 // node creation — which is when the output node opens the format context.
 class CudaToV210 : public NodeSISO<av::VideoFrame, av::Packet>, public IEncoder,
                    public ReportsFinishByFlag {
-    v210cuda::Layout layout_;
+    // Packed v210 carries no header, so a frame is exactly stride * height bytes.
+    // The kernel reads these as int arguments.
+    int width_, height_, stride_;
     av::Rational fps_, timebase_;
-    av::Codec codec_;
-    AVCodecParameters* codecpar_ = nullptr;
-    int semiplanar_ = 0;
-    PackResources gpu_;
+    av::Codec codec_ = av::findEncodingCodec("v210");
+    AVCodecParameters* codecpar_ = avcodec_parameters_alloc();
+    std::unique_ptr<Gpu> gpu_;
 
-    void prepare(const av::VideoFrame& frame) {
-        const AVFrame* raw = frame.raw();
-        if (!raw || !raw->hw_frames_ctx)
-            throw Error(std::string(kNode) + ": requires CUDA frames with a hardware frames context");
-        auto* frames = reinterpret_cast<AVHWFramesContext*>(raw->hw_frames_ctx->data);
-        if (frames->format != AV_PIX_FMT_CUDA ||
-            (frames->sw_format != AV_PIX_FMT_P210LE && frames->sw_format != AV_PIX_FMT_YUV422P10LE))
-            throw Error("cuda_to_v210: requires CUDA p210le or yuv422p10le frames");
-        if (!frames->device_ref || !frames->device_ctx || !frames->device_ctx->hwctx)
-            throw Error("cuda_to_v210: frames carry no CUDA device context");
-        semiplanar_ = frames->sw_format == AV_PIX_FMT_P210LE;
-        if (gpu_.device_ref && gpu_.device_ref->data == frames->device_ref->data) return;
-        gpu_.release();
+    size_t size() const { return size_t(stride_) * height_; }
 
-        try {
-            gpu_.device_ref = av_buffer_ref(frames->device_ref);
-            if (!gpu_.device_ref) throw Error(std::string(kNode) + ": cannot reference the CUDA device");
-            auto* device = static_cast<AVCUDADeviceContext*>(frames->device_ctx->hwctx);
-            gpu_.context = device->cuda_ctx;
-            // Pack on the device context's stream. Whatever produced this frame
-            // used it too, so the ordering needs no extra synchronization.
-            gpu_.stream = device->stream;
-
-            v210cuda::CurrentContext context(gpu_.context, kNode);
-            v210cuda::check(cuMemAlloc(&gpu_.packed, layout_.size), kNode, "allocate packed buffer");
-            // The kernel writes whole words and never the row padding, so
-            // zeroing once keeps that padding defined for every frame.
-            v210cuda::check(cuMemsetD8(gpu_.packed, 0, layout_.size), kNode, "clear packed buffer");
-
-            auto* pool = new PinnedPool{gpu_.context, av_buffer_ref(gpu_.device_ref), layout_.size};
-            if (!pool->device_ref) {
-                delete pool;
-                throw Error("cuda_to_v210: cannot retain CUDA device for the packet pool");
-            }
-            gpu_.pool = av_buffer_pool_init2(layout_.size + AV_INPUT_BUFFER_PADDING_SIZE, pool,
-                                             allocPinned, destroyPinnedPool);
-            if (!gpu_.pool) {
-                destroyPinnedPool(pool);
-                throw Error(std::string(kNode) + ": cannot create the download buffer pool");
-            }
-
-            const std::string image(avpl_v210_pack_ptx, avpl_v210_pack_ptx + avpl_v210_pack_ptx_len);
-            v210cuda::check(cuModuleLoadDataEx(&gpu_.module, image.c_str(), 0, nullptr, nullptr),
-                            kNode, "load kernel");
-            v210cuda::check(cuModuleGetFunction(&gpu_.kernel, gpu_.module, "pack_v210"), kNode, "find kernel");
-        } catch (...) {
-            gpu_.release();
-            throw;
+    // Frames may arrive from another device at any time, so this runs per frame.
+    void useDevice(AVBufferRef* device) {
+        if (gpu_ && gpu_->device->data == device->data) return;
+        auto gpu = std::make_unique<Gpu>();
+        if (!(gpu->device = av_buffer_ref(device))) throw Error("cuda_to_v210: cannot reference the CUDA device");
+        AVBufferRef* pool_device = av_buffer_ref(device);
+        if (pool_device)
+            gpu->pool = av_buffer_pool_init2(size() + AV_INPUT_BUFFER_PADDING_SIZE, pool_device, allocPinned, [](void* opaque) {
+                auto* owned = static_cast<AVBufferRef*>(opaque);
+                av_buffer_unref(&owned);
+            });
+        if (!gpu->pool) {
+            av_buffer_unref(&pool_device);
+            throw Error("cuda_to_v210: cannot create the download buffer pool");
         }
+        const std::string image(avpl_v210_pack_ptx, avpl_v210_pack_ptx + avpl_v210_pack_ptx_len);
+        // The kernel writes whole words and never the row padding, so zeroing
+        // once keeps that padding defined for every frame.
+        if (ContextScope scope(device); !scope.ok ||
+            CHECK_CU(cuMemAlloc(&gpu->packed, size())) || CHECK_CU(cuMemsetD8(gpu->packed, 0, size())) ||
+            CHECK_CU(cuModuleLoadDataEx(&gpu->module, image.c_str(), 0, nullptr, nullptr)) ||
+            CHECK_CU(cuModuleGetFunction(&gpu->kernel, gpu->module, "pack_v210")))
+            throw Error("cuda_to_v210: cannot set up the pack on the CUDA device");
+        gpu_ = std::move(gpu);
     }
 
-    av::Packet pack(av::VideoFrame& frame) {
-        AVBufferRef* buffer = av_buffer_pool_get(gpu_.pool);
-        if (!buffer) throw Error(std::string(kNode) + ": cannot allocate a pinned download buffer");
-        std::unique_ptr<AVPacket, PacketDeleter> raw(av_packet_alloc());
-        if (!raw) {
-            av_buffer_unref(&buffer);
-            throw Error(std::string(kNode) + ": cannot allocate a packet");
-        }
+    av::Packet pack(av::VideoFrame& frame, int semiplanar) {
+        av::Packet packet;
+        AVPacket* raw = packet.raw();
         // The packet owns the pinned buffer from here, including on failure.
-        raw->buf = buffer;
-        raw->data = buffer->data;
-        raw->size = static_cast<int>(layout_.size);
+        if (!(raw->buf = av_buffer_pool_get(gpu_->pool)))
+            throw Error("cuda_to_v210: cannot allocate a pinned download buffer");
+        raw->data = raw->buf->data;
+        raw->size = static_cast<int>(size());
 
-        {
-            AVFrame* input = frame.raw();
-            void* args[] = {&gpu_.packed, &layout_.stride, &layout_.width, &layout_.height,
-                            &input->data[0], &input->linesize[0],
-                            &input->data[1], &input->linesize[1],
-                            &input->data[2], &input->linesize[2], &semiplanar_};
-            const int blocks = (layout_.width + 5) / 6;
-            v210cuda::CurrentContext context(gpu_.context, kNode);
-            try {
-                v210cuda::check(cuLaunchKernel(gpu_.kernel, (blocks + 31) / 32, (layout_.height + 7) / 8, 1,
-                                               32, 8, 1, 0, gpu_.stream, args, nullptr), kNode, "pack");
-                // Straight into the packet's payload: the muxer's copy into the
-                // grain is the only time a CPU touches these bytes.
-                v210cuda::check(cuMemcpyDtoHAsync(raw->data, gpu_.packed, layout_.size, gpu_.stream),
-                                kNode, "download");
-                v210cuda::check(cuStreamSynchronize(gpu_.stream), kNode, "complete frame");
-            } catch (...) {
-                // Do not recycle the buffer while a queued operation writes it.
-                CHECK_CU(cuStreamSynchronize(gpu_.stream));
-                throw;
-            }
-        }
+        AVFrame* input = frame.raw();
+        void* args[] = {&gpu_->packed, &stride_, &width_, &height_,
+                        &input->data[0], &input->linesize[0],
+                        &input->data[1], &input->linesize[1],
+                        &input->data[2], &input->linesize[2], &semiplanar};
+        const int blocks = (width_ + 5) / 6;
+        // Pack on the device context's stream. Whatever produced this frame
+        // used it too, so the ordering needs no extra synchronization.
+        const CUstream stream = cuda(gpu_->device)->stream;
+        ContextScope scope(gpu_->device);
+        if (!scope.ok) throw Error("cuda_to_v210: cannot enter the CUDA context");
+        // Straight into the packet's payload: the muxer's copy into the grain
+        // is the only time a CPU touches these bytes.
+        const bool queued =
+            !CHECK_CU(cuLaunchKernel(gpu_->kernel, (blocks + 31) / 32, (height_ + 7) / 8, 1, 32, 8, 1, 0,
+                                     stream, args, nullptr)) &&
+            !CHECK_CU(cuMemcpyDtoHAsync(raw->data, gpu_->packed, size(), stream));
+        // Also after a failure: the buffer must not be recycled while a queued operation writes it.
+        if (CHECK_CU(cuStreamSynchronize(stream)) || !queued) throw Error("cuda_to_v210: cannot pack the frame");
 
-        raw->duration = av_rescale_q(frame.raw()->duration, frame.timeBase(), timebase_);
-        av::Packet packet(raw.get()); // References the pinned payload, no copy.
+        raw->duration = av_rescale_q(input->duration, frame.timeBase(), timebase_);
         packet.setTimeBase(timebase_);
         packet.setPts(frame.pts());
         packet.setDts(frame.pts()); // Uncompressed: no reordering, every frame a key frame.
@@ -213,16 +163,15 @@ class CudaToV210 : public NodeSISO<av::VideoFrame, av::Packet>, public IEncoder,
 
 public:
     CudaToV210(std::unique_ptr<SourceType>&& source, std::unique_ptr<SinkType>&& sink,
-               const v210cuda::Layout& layout, av::Rational fps, av::Rational timebase)
-        : NodeSISO(std::move(source), std::move(sink)), layout_(layout), fps_(fps), timebase_(timebase),
-          codec_(av::findEncodingCodec("v210")) {
-        codecpar_ = avcodec_parameters_alloc();
-        if (!codecpar_) throw Error(std::string(kNode) + ": cannot allocate codec parameters");
+               int width, int height, int stride, av::Rational fps, av::Rational timebase)
+        : NodeSISO(std::move(source), std::move(sink)), width_(width), height_(height), stride_(stride),
+          fps_(fps), timebase_(timebase) {
+        if (!codecpar_) throw Error("cuda_to_v210: cannot allocate codec parameters");
         codecpar_->codec_type = AVMEDIA_TYPE_VIDEO;
         codecpar_->codec_id = AV_CODEC_ID_V210;
         codecpar_->codec_tag = MKTAG('v', '2', '1', '0');
-        codecpar_->width = layout_.width;
-        codecpar_->height = layout_.height;
+        codecpar_->width = width_;
+        codecpar_->height = height_;
         // The layout libavcodec's v210 decoder produces, which is what a reader
         // of these packets gets; the packets themselves are packed, not planar.
         codecpar_->format = AV_PIX_FMT_YUV422P10LE;
@@ -234,16 +183,14 @@ public:
         this->auto_eof_ = false;
     }
 
-    ~CudaToV210() override {
-        if (codecpar_) avcodec_parameters_free(&codecpar_);
-    }
+    ~CudaToV210() override { avcodec_parameters_free(&codecpar_); }
 
     av::Codec& encodingCodec() override { return codec_; }
     AVCodecParameters* codecParameters() override { return codecpar_; }
 
     void setOutput(av::Stream& stream, av::FormatContext& octx) override {
         if (!codec_.isNull() && !octx.outputFormat().codecSupported(codec_))
-            throw Error(std::string(kNode) + ": codec v210 not supported by container " +
+            throw Error(std::string("cuda_to_v210: codec v210 not supported by container ") +
                         octx.outputFormat().name());
         stream.setTimeBase(timebase_);
         // The MXL muxer reads the flow's grain rate off the stream, so leaving
@@ -251,27 +198,29 @@ public:
         stream.setAverageFrameRate(fps_);
         stream.setFrameRate(fps_);
         if (avcodec_parameters_copy(stream.raw()->codecpar, codecpar_) < 0)
-            throw Error(std::string(kNode) + ": cannot set the stream codec parameters");
+            throw Error("cuda_to_v210: cannot set the stream codec parameters");
     }
 
     void process() override {
         av::VideoFrame frame = source_->get();
         if (frame.isNull()) return; // Input queue interrupted during shutdown.
         if (isEofMarker(frame)) {
-            onEofConsumed();
             sink_->put(createEofPacket());
             markFinished();
             return;
         }
-        if (frame.pixelFormat().get() != AV_PIX_FMT_CUDA)
-            throw Error(std::string(kNode) + ": requires CUDA frames, got " + frame.pixelFormat().name());
-        if (frame.width() != layout_.width || frame.height() != layout_.height)
-            throw Error(std::string(kNode) + ": input geometry changed, expected " +
-                        std::to_string(layout_.width) + "x" + std::to_string(layout_.height));
-        if (frame.timeBase().getNumerator() <= 0 || frame.timeBase().getDenominator() <= 0)
-            throw Error(std::string(kNode) + ": input frame needs a positive time base");
-        prepare(frame);
-        sink_->put(pack(frame));
+        // Nothing is remembered from earlier frames: each one names its own layout and device.
+        const AVFrame* raw = frame.raw();
+        const auto* frames = raw->hw_frames_ctx ? reinterpret_cast<AVHWFramesContext*>(raw->hw_frames_ctx->data) : nullptr;
+        if (raw->format != AV_PIX_FMT_CUDA || !frames ||
+            (frames->sw_format != AV_PIX_FMT_P210LE && frames->sw_format != AV_PIX_FMT_YUV422P10LE))
+            throw Error("cuda_to_v210: requires CUDA p210le or yuv422p10le frames");
+        if (raw->width != width_ || raw->height != height_)
+            throw Error("cuda_to_v210: input geometry changed, expected " +
+                        std::to_string(width_) + "x" + std::to_string(height_));
+        if (!positive(frame.timeBase())) throw Error("cuda_to_v210: input frame needs a positive time base");
+        useDevice(frames->device_ref);
+        sink_->put(pack(frame, frames->sw_format == AV_PIX_FMT_P210LE));
     }
 
     static std::shared_ptr<CudaToV210> create(NodeCreationInfo& nci) {
@@ -282,35 +231,33 @@ public:
         // is still being created, so none of them can wait for the first frame.
         // Parameters override the upstream metadata, and stand in for it when a
         // node that reports none sits above.
-        int width = 0, height = 0;
-        if (params.count("width") && params.count("height")) {
-            width = params.at("width").get<int>();
-            height = params.at("height").get<int>();
-        } else if (auto video = src_edge->findNodeUp<IVideoFormatSource>()) {
-            width = video->width();
-            height = video->height();
-        } else {
-            throw Error(std::string(kNode) + ": no upstream video format, pass width and height");
-        }
-        av::Rational fps;
-        if (params.count("fps")) {
-            fps = v210cuda::positiveRatio(params.at("fps"), kNode);
-        } else if (auto rate = src_edge->findNodeUp<IFrameRateSource>()) {
-            fps = rate->frameRate();
-        }
-        if (fps.getNumerator() <= 0 || fps.getDenominator() <= 0)
-            throw Error(std::string(kNode) + ": no upstream frame rate, pass fps");
-        av::Rational timebase;
-        if (params.count("timebase")) {
-            timebase = v210cuda::positiveRatio(params.at("timebase"), kNode);
-        } else if (auto tb = src_edge->findNodeUp<ITimeBaseSource>()) {
-            timebase = tb->timeBase();
-        }
-        if (timebase.getNumerator() <= 0 || timebase.getDenominator() <= 0)
+        const bool sized = params.count("width") && params.count("height");
+        auto video = src_edge->findNodeUp<IVideoFormatSource>();
+        if (!sized && !video) throw Error("cuda_to_v210: no upstream video format, pass width and height");
+        const int width = sized ? params.at("width").get<int>() : video->width();
+        const int height = sized ? params.at("height").get<int>() : video->height();
+        if (width <= 0 || height <= 0 || width % 2 || av_image_check_size(width, height, 0, nullptr) < 0)
+            throw Error("cuda_to_v210: requires valid dimensions and an even width");
+        // Six pixels per 16 bytes. The default pads rows to 128 bytes, the pitch
+        // that SDI-style hardware and the libavcodec v210 codecs use; the minimum
+        // is the packed width alone, which is what libavcodec writes before it
+        // pads the row out.
+        int64_t stride = params.value("stride", int64_t(0));
+        if (stride <= 0) stride = (width + 47) / 48 * 128;
+        if (stride < (int64_t(width) * 2 + 2) / 3 * 4 || stride % 4 || stride > std::numeric_limits<int>::max() / height)
+            throw Error("cuda_to_v210: stride must be a multiple of four, fit a v210 row and an AVPacket");
+
+        auto rate = src_edge->findNodeUp<IFrameRateSource>();
+        const av::Rational fps = params.count("fps") ? parseRatio(params.at("fps")) : rate ? rate->frameRate() : av::Rational();
+        if (!positive(fps)) throw Error("cuda_to_v210: no positive frame rate from above, pass fps");
+        auto tb = src_edge->findNodeUp<ITimeBaseSource>();
+        av::Rational timebase = params.count("timebase") ? parseRatio(params.at("timebase")) : tb ? tb->timeBase() : av::Rational();
+        if (!positive(timebase)) {
+            if (params.count("timebase")) throw Error("cuda_to_v210: timebase must be positive");
             timebase = av::Rational(fps.getDenominator(), fps.getNumerator());
-        const auto layout = v210cuda::makeLayout(kNode, width, height, params.value("stride", int64_t(0)));
-        return std::make_shared<CudaToV210>(src_edge->makeSource(), dst_edge->makeSink(),
-                                            layout, fps, timebase);
+        }
+        return std::make_shared<CudaToV210>(src_edge->makeSource(), dst_edge->makeSink(), width, height,
+                                            static_cast<int>(stride), fps, timebase);
     }
 };
 
