@@ -339,12 +339,23 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop, native_rate=native_rate)
 
 
+# The MXL demuxer's options for a live source: wait up to a frame period for the next grain (a
+# non-blocking read between grains returns EAGAIN, and a few in a row fail the input); start at
+# the newest grain, and go back to it when the reader falls out of the ring (`on_too_late=reset`),
+# with timestamps that run on from the last grain (`reset_on_drop`, FFmpeg patch
+# deps/ffmpeg/mxl/resume-pts.patch), not a jump that realtime would wait out. Grains are copied:
+# a `zero_copy` packet points into the ring with no reference held, and the decoded frame that
+# wraps it waits in queues the writer's ring history does not bound.
+MXL_READER_OPTIONS = {"blocking": "1", "grain_index_init": "head", "on_too_late": "reset", "reset_on_drop": "1"}
+
+
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                      fps: int, fps_den: int = 1, hwaccel: str = "@gpu", loop: bool = False,
                      color: Optional[dict] = None, event_loop: Optional[str] = None,
                      native_rate: bool = False, frame_metadata: Optional[Sequence[str]] = None,
-                     demux: bool = True) -> str:
-    """Headerless packed v210 file -> GPU unpack (P210, 10-bit 4:2:2) -> paced output edge.
+                     demux: bool = True, mxl: bool = False) -> str:
+    """Packed v210, a headerless file or with ``mxl`` the live MXL flow at the reader URL *path*
+    (``mxl://<domain>?id=<flow>``) -> GPU unpack (P210, 10-bit 4:2:2) -> paced output edge.
 
     ``input_rec -> demux -> dec_video(rawvideo/gray) ->
     filter(hwupload_cuda=v210_width=...) -> realtime(set_pts) -> force_fps``.
@@ -354,12 +365,22 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
     decoded picture, and whether a ``demux`` node splits the file's one stream.
     """
     stride = v210_row_stride(width)
-    packets = _raw_file_packets(avp, api, tag, path, pixel_format="gray", video_size=f"{stride}x{height}",
-                                group=group, fps=fps, fps_den=fps_den, loop=loop, frame_metadata=frame_metadata, demux=demux)
+    if mxl:
+        packets = f"input_{tag}_packed"
+        # The reader restarts the group itself: when it fails (no grain for several frame periods),
+        # no end of stream reaches the decoder to restart it from there.
+        _add_packet_input(avp, api, tag, {"url": path, "format": "mxl", "options": MXL_READER_OPTIONS,
+                                          "auto_restart": "group", **_frame_metadata(frame_metadata)},
+                          group=group, routing={"v:0": packets}, demux=demux, restart=_raw_file_restart(loop))
+    else:
+        packets = _raw_file_packets(avp, api, tag, path, pixel_format="gray", video_size=f"{stride}x{height}",
+                                    group=group, fps=fps, fps_den=fps_den, loop=loop, frame_metadata=frame_metadata, demux=demux)
     decoded = f"input_{tag}_decoded"
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": packets, "dst": decoded,
-        "codec": "rawvideo", "pixel_format": "gray",
+        # Gray rows of the v210 stride. An MXL flow reports codec v210 at the picture width:
+        # the explicit rawvideo codec reinterprets its bytes in this same shape.
+        "codec": "rawvideo", "options": {"video_size": f"{stride}x{height}", "pixel_format": "gray"},
         "group": group, **_raw_file_restart(loop),
     }))
     # Gray wraps the packed bytes; the patched uploader performs v210 unpacking

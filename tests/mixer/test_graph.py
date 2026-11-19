@@ -161,7 +161,7 @@ class FakeRtcpFeedbackListener:
 
 def fake_api():
     types = {
-        "AssumeVideoFormat": "assume_video_format", "Bsf": "bsf", "ClipCache": "clip_cache",
+        "AssumeVideoFormat": "assume_video_format", "Bsf": "bsf", "ClipCache": "clip_cache", "CudaToV210": "cuda_to_v210",
         "AudioMixer": "audio_mixer",
         "CudaTransform": "cuda_transform", "DecAudio": "dec_audio", "DecVideo": "dec_video", "Demux": "demux",
         "DrmPrimeToCuda": "drm_prime_to_cuda", "EncAudio": "enc_audio", "EncVideo": "enc_video",
@@ -1402,7 +1402,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         "source_count": 2, "browser_frame_queue": 6,
         "preview_codecs": [],
         "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
-        "source_counts": {"video": 1, "browser": 1, "v210": 0, "nv12": 0, "p010": 0}, "hdr_video": 0,
+        "source_counts": {"video": 1, "browser": 1, "mxl": 0, "v210": 0, "nv12": 0, "p010": 0}, "hdr_video": 0,
         "inputs": [["cam", "video"], ["cam", "video"], ["page", "browser"]],
         "audio_sources": [],
         "direct": False, "fade_seconds": 0.8, "fade_curve": "linear", "fade_color": None, "move_unmatched": "fade", "transition": "cut",
@@ -1819,18 +1819,23 @@ def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path, sdr_co
     assert not any(listener.started for listener in feedback.listeners)
 
 
-def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path):
-    """NVDEC only yields 4:2:0; generated v210 content is the 4:2:2 path. It must
-    reach the P210 canvas untouched and be subsampled once, at the encoder."""
+FLOW = "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+
+
+@pytest.mark.parametrize("raw", [{"kind": "v210", "path": "/media/gen.v210"},
+                                 {"kind": "mxl", "url": "/dev/shm/mxl", "flow": FLOW}])
+def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path, raw):
+    """NVDEC only yields 4:2:0; generated v210 content and MXL flows are the 4:2:2 path. It must
+    reach the P210 canvas untouched and be subsampled once, at the encoder; MXL out keeps 4:2:2."""
     doc = {**CONFIG, "wipes": [], "initial_scene": "full",
-           "sources": [{"id": "gen", "kind": "v210", "path": "/media/gen.v210", "width": 1920,
-                        "height": 1080, "color": "hlg"}, CONFIG["sources"][0]],
+           "sources": [{"id": "gen", **raw, "width": 1920, "height": 1080, "color": "hlg"}, CONFIG["sources"][0]],
            "scenes": [{"id": "full", "items": [
                {"source": "gen", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}},
                {"source": "cam", "dst": {"x": 0, "y": 0, "w": 960, "h": 540}}]}],
            "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "p210le", "color": "hlg"},
            "renditions": [{"id": "hdr", "target": "janus"},
-                          {"id": "sdr", "target": "/rec/sdr.mp4", "codec": "h264_nvenc", "tonemap": "hable"}]}
+                          {"id": "sdr", "target": "/rec/sdr.mp4", "codec": "h264_nvenc", "tonemap": "hable"},
+                          {"id": "flow", "target": "mxl", "url": "/dev/shm/mxl", "flow": FLOW, "codec": "h264_nvenc"}]}
     path = tmp_path / "gen.json"
     path.write_text(json.dumps(doc))
     FakeMixer.instances.clear()
@@ -1840,8 +1845,27 @@ def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path):
     assert nodes["unpack_0"]["type"] == "filter_video"
     assert "hwupload_cuda=v210_width=1920" in nodes["unpack_0"]["graph"]
     assert "color_trc=arib-std-b67" in nodes["unpack_0"]["graph"]
-    assert nodes["decode_0"]["pixel_format"] == "gray"
+    # Gray rows of the 5120-byte v210 stride; for MXL, the flow's v210 grains reinterpreted.
+    assert nodes["decode_0"]["codec"] == "rawvideo"
+    assert nodes["decode_0"]["options"] == {"video_size": "5120x1080", "pixel_format": "gray"}
+    if raw["kind"] == "mxl":
+        assert (nodes["input_0"]["url"], nodes["input_0"]["format"]) == (f"mxl:///dev/shm/mxl?id={FLOW}", "mxl")
+        assert nodes["input_0"]["options"] == {"blocking": "1", "grain_index_init": "head", "on_too_late": "reset",
+                                               "reset_on_drop": "1"}
+        # Live: never looped, a stalled flow restarts the source's chain.
+        assert "loop" not in nodes["input_0"] and nodes["input_0"]["auto_restart"] == nodes["decode_0"]["auto_restart"] == "group"
     assert sources["gen"]["pixel_format"] == "p210le" and sources["gen"]["color"] == Color("hlg")
+    assert sources["gen"]["color_tagged"] is True
+    # MXL out: the canvas colour and storage need no conversion; packed on the GPU, no encoder.
+    assert nodes["scale_flow"]["graph"] == Color("hlg").setparams
+    assert [nodes[f"flow_{n}"]["type"] for n in ("fps", "pack", "mux", "output")] == [
+        "force_fps", "cuda_to_v210", "mux", "output"]
+    assert {k: nodes["flow_pack"][k] for k in ("src", "dst", "width", "height", "fps")} == {
+        "src": "flow_fps", "dst": "flow_encoded", "width": 1920, "height": 1080, "fps": "60/1"}
+    assert {k: nodes["flow_output"][k] for k in ("url", "format", "options")} == {
+        "url": "/dev/shm/mxl", "format": "mxl", "options": {"video_flow_id": FLOW}}
+    assert [e["codec"] for e in json.loads(app.avp.commands_registered["mixer.settings"](""))["encode_by_codec"]] == [
+        "h264", "hevc"]   # NVENC sessions only
     assert sources["cam"]["pixel_format"] is None and sources["cam"]["color"] is None   # NVDEC, tags from the frames
     # HDR out: one chroma subsample to P010 for NVENC, no tone-map pass.
     assert nodes["scale_hdr"]["graph"] == Color("hlg").setparams + ",scale_cuda=format=p010le"
