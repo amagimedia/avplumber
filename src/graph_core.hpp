@@ -225,25 +225,35 @@ public:
 };
 
 template <typename T> class EdgeSink: public Sink<T>, public EdgeWrapper<T> {
-public:
-    using EdgeWrapper<T>::EdgeWrapper;
-    virtual bool put(const T &data, bool drop_if_full = false) {
+    void warnIfNoPts(const T &data) {
         if (!data.pts()) {
             logstream << "Warning: putting NOPTS into sink";
         }
-        if (drop_if_full) {
-            if (!this->edge_->try_enqueue(data)) {
-                //logstream << "Enqueue failed, queue full, dropping!";
-                this->edge_->countDrop();
-                return false;
-            } else {
-                return true;
-            }
-        } else {
+    }
+public:
+    using EdgeWrapper<T>::EdgeWrapper;
+    virtual bool put(const T &data, bool drop_if_full = false) {
+        warnIfNoPts(data);
+        if (!drop_if_full) {
             this->edge_->enqueue(data);
             return true;
         }
-    };
+        if (this->edge_->try_enqueue(data)) {
+            return true;
+        }
+        this->edge_->countDrop();
+        return false;
+    }
+
+    // On backpressure the caller retains the item and tries again later.
+    bool tryPutForRetry(const T &data) {
+        warnIfNoPts(data);
+        if (this->edge_->try_enqueue(data)) {
+            return true;
+        }
+        this->edge_->countRetry();
+        return false;
+    }
 };
 
 class EdgeBase: public std::enable_shared_from_this<EdgeBase> {
@@ -385,6 +395,7 @@ protected:
     std::atomic<uint64_t> enqueued_total_{0};
     std::atomic<uint64_t> dequeued_total_{0};
     std::atomic<uint64_t> dropped_total_{0};
+    std::atomic<uint64_t> retry_total_{0};
 
     // Occupancy stats (items currently in queue) since last reset.
     // Updated on every enqueue/dequeue to avoid missing peaks.
@@ -485,9 +496,13 @@ public:
     void countDrop() {
         dropped_total_++;
     }
+    void countRetry() {
+        retry_total_++;
+    }
     uint64_t enqueuedTotal() const { return enqueued_total_.load(); }
     uint64_t dequeuedTotal() const { return dequeued_total_.load(); }
     uint64_t droppedTotal() const { return dropped_total_.load(); }
+    uint64_t retryTotal() const { return retry_total_.load(); }
 
     void resetOccupancyStats() {
         occ_min_.store(std::numeric_limits<int>::max(), std::memory_order_relaxed);
@@ -723,6 +738,7 @@ public:
             item["enqueued_total"] = edge->enqueuedTotal();
             item["dequeued_total"] = edge->dequeuedTotal();
             item["dropped_total"] = edge->droppedTotal();
+            item["retry_total"] = edge->retryTotal();
             {
                 auto rates = edge->ratesPps();
                 // prefer dequeue rate for "flow across the edge"

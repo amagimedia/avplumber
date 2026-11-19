@@ -23,7 +23,7 @@ public:
             this->source_->pop();
             return;
         }
-        if (this->sink_->put(output, true)) {
+        if (this->edgeSink()->tryPutForRetry(output)) {
             this->source_->pop();
             if (output.isValid() && output.pts().isValid()) last_pts_ = output.pts();
         } else {

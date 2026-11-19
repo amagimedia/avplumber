@@ -24,7 +24,7 @@ public:
         auto lineage = frame->isValid() ? avp::mixer::sourceFrames(frame->raw()) : avp::mixer::SourceFrames{};
         for (auto& [name, frames] : lineage)
             if (on_change_.count(name)) for (auto& capture : frames) capture.period_ns = 0;
-        if (this->sink_->put(*frame, true)) {
+        if (this->edgeSink()->tryPutForRetry(*frame)) {
             if (frame->isValid() && frame->pts().isValid()) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (enabled_) delivery_.observe(frame->pts().timestamp({1, 1000000000}), period_ns_, lineage);
