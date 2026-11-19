@@ -487,7 +487,7 @@ protected:
 #endif
     }
 public:
-    template<typename ...Ts> Decoder(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<OutputFrame>> &&sink, av::Stream &stream, const std::string codec_name, av::Dictionary options, std::string pixel_format, std::shared_ptr<HWAccelDevice> hwaccel, int reinterpret_width = 0, std::string reinterpret_pixel_format = ""):
+    template<typename ...Ts> Decoder(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<OutputFrame>> &&sink, av::Stream &stream, const std::string codec_name, av::Dictionary options, std::string pixel_format, std::shared_ptr<HWAccelDevice> hwaccel, bool reinterpret = false):
         NodeSISO<av::Packet, OutputFrame>(std::move(source), std::move(sink)),
         codec_(codecFromName(codec_name)),
         hwaccel_(hwaccel)
@@ -503,16 +503,11 @@ public:
             dec_.raw()->height = stream.raw()->codecpar->height;
             dec_.raw()->pix_fmt = static_cast<AVPixelFormat>(stream.raw()->codecpar->format);
         }
-        if (reinterpret_width > 0 || !reinterpret_pixel_format.empty()) {
-            // rawdec infers a format from the original stream fourcc unless it is cleared.
-            auto *ctx = dec_.raw();
-            ctx->codec_id = AV_CODEC_ID_RAWVIDEO;
-            ctx->codec_tag = 0;
-            if (reinterpret_width > 0) ctx->width = reinterpret_width;
-            if (!reinterpret_pixel_format.empty()) {
-                ctx->pix_fmt = av_get_pix_fmt(reinterpret_pixel_format.c_str());
-                if (ctx->pix_fmt == AV_PIX_FMT_NONE) throw Error("Unknown rawvideo pixel format: " + reinterpret_pixel_format);
-            }
+        if (reinterpret) {
+            // Packets read as raw bytes: libavcodec refuses a foreign codec id, and rawdec would
+            // infer the pixel format from the stream's fourcc.
+            dec_.raw()->codec_id = AV_CODEC_ID_RAWVIDEO;
+            dec_.raw()->codec_tag = 0;
         }
         this->auto_eof_ = false;
         if (!pixel_format.empty()) {
@@ -901,14 +896,6 @@ public:
         if (params.count("pixel_format")) {
             pixel_format = params["pixel_format"];
         }
-        const int reinterpret_width = params.value("reinterpret_width", 0);
-        const auto reinterpret_pixel_format = params.value("reinterpret_pixel_format", std::string{});
-        if (params.count("reinterpret_width") || params.count("reinterpret_pixel_format")) {
-            if (codec_name != "rawvideo" || cpar.codec_type != AVMEDIA_TYPE_VIDEO)
-                throw Error("Packet reinterpretation requires an explicit rawvideo decoder on a video stream");
-            if (params.count("reinterpret_width") && reinterpret_width <= 0)
-                throw Error("reinterpret_width must be positive");
-        }
         std::shared_ptr<HWAccelDevice> hwaccel;
         if (params.count("hwaccel")) {
             bool use_hw = true;
@@ -924,7 +911,17 @@ public:
         if (params.count("options")) {
             options = parametersToDict(params["options"]);
         }
-        std::shared_ptr<Child> r = std::make_shared<Child>(src_edge->makeSource(), dst_edge->makeSink(), md->source_stream, codec_name, options, pixel_format, hwaccel, reinterpret_width, reinterpret_pixel_format);
+        const bool reinterpret = params.count("reinterpret_width") || params.count("reinterpret_pixel_format");
+        if (reinterpret) {
+            if (codec_name != "rawvideo" || cpar.codec_type != AVMEDIA_TYPE_VIDEO)
+                throw Error("Packet reinterpretation requires an explicit rawvideo decoder on a video stream");
+            // libavcodec's own options replace the stream's geometry and format when the decoder opens.
+            if (params.count("reinterpret_width"))
+                options.set("video_size", std::to_string(params["reinterpret_width"].get<int>()) + "x" + std::to_string(cpar.height));
+            if (params.count("reinterpret_pixel_format"))
+                options.set("pixel_format", params["reinterpret_pixel_format"].get<std::string>());
+        }
+        std::shared_ptr<Child> r = std::make_shared<Child>(src_edge->makeSource(), dst_edge->makeSink(), md->source_stream, codec_name, options, pixel_format, hwaccel, reinterpret);
         if (params.count("flush_magic")) {
             r->flush_magic_ = params["flush_magic"];
         }
