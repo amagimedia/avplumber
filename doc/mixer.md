@@ -151,9 +151,10 @@ with a colour contract (`color` or the four tags; the grains carry none) is read
 stride, `hwupload_cuda=v210_width=<width>` unpacks it to P210 and `realtime` puts it on the host clock.
 It takes `transform` and `filter` like the other raw kinds. The reader starts at the newest grain
 and returns to it when it falls out of the ring, whose `history_duration` therefore bounds how far
-behind the writer a stalled source can run. A reader that stops getting grains fails, and its
-reading node is set to restart the source's group (`auto_restart: group`); the compositor repeats
-the source's last frame meanwhile. Grains are copied out
+behind the writer a stalled source can run. A reader whose writer stalls waits for it, and the
+compositor repeats the source's last frame meanwhile. When the writer recreates the flow, the reading
+node restarts the source's group (`auto_restart: group`); an `assume_video_format` with `ignore_eof`
+before the source's fan-out keeps that restart's EOF from ending the program. Grains are copied out
 of the ring (inputs.py `MXL_READER_OPTIONS` says why zero-copy stays off).
 
 A rendition `{"target": "mxl", "url": <domain directory>, "flow": <video flow id>}` publishes the

@@ -1852,7 +1852,7 @@ def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path, raw):
         assert (nodes["input_0"]["url"], nodes["input_0"]["format"]) == (f"mxl:///dev/shm/mxl?id={FLOW}", "mxl")
         assert nodes["input_0"]["options"] == {"blocking": "1", "grain_index_init": "head", "on_too_late": "reset",
                                                "reset_on_drop": "1"}
-        # Live: never looped, a stalled flow restarts the source's chain.
+        # Live: never looped; a recreated flow restarts the source's chain.
         assert "loop" not in nodes["input_0"] and nodes["input_0"]["auto_restart"] == nodes["decode_0"]["auto_restart"] == "group"
     assert sources["gen"]["pixel_format"] == "p210le" and sources["gen"]["color"] == Color("hlg")
     assert sources["gen"]["color_tagged"] is True

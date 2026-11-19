@@ -340,7 +340,7 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
 
 
 # The MXL demuxer's options for a live source: wait up to a frame period for the next grain (a
-# non-blocking read between grains returns EAGAIN, and a few in a row fail the input); start at
+# non-blocking read between grains returns EAGAIN; input_rec waits a stalled writer out); start at
 # the newest grain, and go back to it when the reader falls out of the ring (`on_too_late=reset`),
 # with timestamps that run on from the last grain (`reset_on_drop`, FFmpeg patch
 # 0027 of deps/ffmpeg/9), not a jump that realtime would wait out. Grains are copied:
@@ -367,8 +367,8 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
     stride = v210_row_stride(width)
     if mxl:
         packets = f"input_{tag}_packed"
-        # The reader restarts the group itself: when it fails (no grain for several frame periods),
-        # no end of stream reaches the decoder to restart it from there.
+        # A stalled writer is waited out. When the flow is recreated or the read fails, the reader
+        # restarts the group itself: no end of stream reaches the decoder to restart it from there.
         _add_packet_input(avp, api, tag, {"url": path, "format": "mxl", "options": MXL_READER_OPTIONS,
                                           "auto_restart": "group", **_frame_metadata(frame_metadata)},
                           group=group, routing={"v:0": packets}, demux=demux, restart=_raw_file_restart(loop))
