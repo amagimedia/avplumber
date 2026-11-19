@@ -967,13 +967,18 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         # with it. audio_router_node names another router instead.
         from .audio_mixer import AUDIO_MIXER
         options = replace(options, audio_router_node=AUDIO_MIXER)
-    browsers = [s for s in cfg.sources if s.kind == "browser"]
+    external = dict(options.cuda_ipc_inputs)
+    if set(external) - {s.id for s in cfg.sources}:
+        raise ValueError("CUDA IPC input does not name a declared source")
+    if options.cuda_ipc_output and (cfg.dsk_keys or cfg.wipes or options.wipe_file):
+        raise ValueError("CUDA IPC output expects stingers rendered in the scene")
+    browsers = {i: s for i, s in enumerate(cfg.sources) if s.kind == "browser" and s.id not in external}
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
                                             "height": s.height, "fps": mixer_config.paint_rate(s.fps or cfg.fps),
                                             "ringSize": cfg.browser_frame_queue,
-                                            "holdLastFrame": s.hold_last_frame} for s in browsers])
-        wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
+                                            "holdLastFrame": s.hold_last_frame} for s in browsers.values()])
+        wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers.values()],
                          options.preheat_timeout_sec)
 
     # Browser REST failures must occur before native control threads exist;
@@ -982,11 +987,6 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     canvas = (cfg.canvas_w, cfg.canvas_h)
     mixer = _make_builder(avp, api, options, canvas=canvas, fps=cfg.fps, working_format=cfg.working_format,
                           color=cfg.out_color, wipe_color=cfg.wipe_color or None)
-    external = dict(options.cuda_ipc_inputs)
-    if set(external) - {s.id for s in cfg.sources}:
-        raise ValueError("CUDA IPC input does not name a declared source")
-    if options.cuda_ipc_output and (cfg.dsk_keys or cfg.wipes or options.wipe_file):
-        raise ValueError("CUDA IPC output expects stingers rendered in the scene")
     if options.cuda_ipc_output:
         mixer.vmm_slots = options.cuda_ipc_slots
     optional_input_edges = []
@@ -1006,7 +1006,6 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             edge = f"input_{index}_vmm"
             avp.addNode(source_type({"name": f"input_{index}_vmm_source", "socket": external[source.id],
                                      "hwaccel": HWACCEL, "dst": edge, "group": group}))
-            optional_input_edges.append(edge)
         elif source.kind == "browser":
             nodes, edge = dmabuf_cuda_input_nodes(
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
@@ -1075,6 +1074,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             if not isinstance(edge, str) or not edge.strip():
                 raise ValueError(f"process_source for {source.id!r} must return a non-empty video edge name")
         input_edges.append(edge)
+        if source.id in external:
+            optional_input_edges.append(edge)
         compositor_inputs.append(tuple(range(next_input, next_input + aliases[source.id])))
         next_input += aliases[source.id]
         for k in range(1, aliases[source.id] + 1):
@@ -1211,8 +1212,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     avp.registerControlCommand("mixer.debug_overlay", debug_overlay, True)
     held = []
     # Purge idle imports left by the capture pool's start-up churn.
-    importers = tuple(
-        f"input_{index}_to_cuda" for index, source in enumerate(cfg.sources) if source.kind == "browser")
+    importers = tuple(f"input_{index}_to_cuda" for index in browsers)
     if options.cuda_ipc_output:
         from pyplumber.node import InternalNode
         sink_type = type("CudaIpcSink", (InternalNode,), {"TYPE": "cuda_ipc_sink"})
@@ -1250,8 +1250,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             group=OUTPUT_GROUP, prefix="janus_audio")
     return _application(avp, mixer, options, input_edges, listener, compositor_inputs=tuple(compositor_inputs),
                         routed_inputs=False, held_outputs=tuple(held), browser_importers=importers,
-                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers),
-                        browser_input_edges=tuple(input_edges[i] for i, s in enumerate(cfg.sources) if s.kind == "browser"),
+                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers.values()),
+                        browser_input_edges=tuple(input_edges[i] for i in browsers),
                         delivery_monitor=True,
                         aux_buses=aux, audio_edges=tuple(audio_edges), optional_input_edges=tuple(optional_input_edges))
 
