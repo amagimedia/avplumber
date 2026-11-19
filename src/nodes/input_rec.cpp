@@ -132,8 +132,10 @@ protected:
     av::Packet readPacket() {
         std::error_code error;
         av::Packet packet = ictx_.readPacket(error);
-        // A live MXL writer may miss several grain periods without ending its flow.
-        while (error == std::error_code(AVERROR(EAGAIN), av::ffmpeg_category()) &&
+        // A live MXL writer may miss several grain periods without ending its flow, and a read
+        // can catch a grain it has opened but not yet committed (the demuxer's "invalid data").
+        while ((error == std::error_code(AVERROR(EAGAIN), av::ffmpeg_category()) ||
+                error == std::error_code(AVERROR_INVALIDDATA, av::ffmpeg_category())) &&
                std::string_view(ictx_.inputFormat().name()) == "mxl") {
             const auto &interrupt = ictx_.raw()->interrupt_callback;
             if (interrupt.callback(interrupt.opaque)) {
