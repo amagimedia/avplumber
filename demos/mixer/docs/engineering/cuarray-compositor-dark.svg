@@ -1,1 +1,99 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360"><rect x="0" y="0" width="1200" height="360" rx="0" fill="#111820" stroke="none" stroke-width="2"/><g font-family="Arial, sans-serif"><text x="32" y="52" fill="#edf3f8" font-size="32" font-weight="700">Decode once, compose from the same CUarray</text><defs><g id="frame"><rect x="0" y="0" width="146" height="78" rx="4" fill="#1c2833" stroke="#81bbcf" stroke-width="2"/><circle cx="104" cy="23" r="8" fill="#e6a6ca"/><path d="M3 69 38 33 71 64 89 42 141 72H3Z" fill="#81bbcf"/></g></defs><rect x="32" y="83" width="282" height="242" rx="13" fill="#1c2833" stroke="#adc3d1" stroke-width="2"/><rect x="389" y="83" width="380" height="242" rx="13" fill="#1c2833" stroke="#adc3d1" stroke-width="2"/><rect x="847" y="83" width="321" height="242" rx="13" fill="#1c2833" stroke="#adc3d1" stroke-width="2"/><text x="54" y="121" fill="#edf3f8" font-size="24" font-weight="700">NVDEC</text><use href="#frame" x="0" y="0" transform="translate(74 153) scale(1.25)"/><text x="54" y="292" fill="#81bbcf" font-size="22" font-weight="700">Decoded CUarray</text><text x="412" y="121" fill="#edf3f8" font-size="24" font-weight="700">CUDA compositor</text><use href="#frame" x="0" y="0" transform="translate(423 148) scale(1.5)"/><rect x="455" y="161" width="110" height="78" fill="none" stroke="#b2d67f" stroke-width="3" stroke-dasharray="7 4" transform="rotate(-9 510 200)"/><text x="412" y="276" fill="#edf3f8" font-size="23" font-weight="400">Crop · pad · rotate · scale</text><text x="412" y="305" fill="#adc3d1" font-size="19" font-weight="400">Blend into the output canvas</text><text x="869" y="121" fill="#edf3f8" font-size="24" font-weight="700">Output canvases</text><use href="#frame" x="0" y="0" transform="translate(873 153) scale(0.9)"/><text x="1025" y="199" fill="#edf3f8" font-size="21" font-weight="400">Program</text><rect x="873" y="242" width="130" height="58" rx="7" fill="#111820" stroke="#81bbcf" stroke-width="2"/><use href="#frame" x="0" y="0" transform="translate(910 247) scale(0.59)"/><text x="1025" y="279" fill="#edf3f8" font-size="21" font-weight="400">AUX</text><path d="M315 206h68m-10 -7 10 7 -10 7" fill="none" stroke="#b2d67f" stroke-width="3"/><path d="M770 206h68m-10 -7 10 7 -10 7" fill="none" stroke="#b2d67f" stroke-width="3"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="1348" height="591" viewBox="0 0 1348 591" role="img" aria-labelledby="fig-title fig-desc">
+<title id="fig-title">Decode once. Share references. Reuse safely.</title>
+<desc id="fig-desc">Compressed video is decoded by NVDEC directly into a registered CUarray surface pool. The CUDA compositing engine takes references to that one decoded picture instead of copying it, samples its Y and UV planes as textures, and applies each layer’s crop, padding, rotation and scale as it writes separate 16:9 output canvases: Program with the full frame and a tilted picture-in-picture layer, an AUX close-up crop, and an AUX with a vertical crop padded into a pillarbox. NVENC encodes each canvas. Source references are released when GPU reads finish, so NVDEC can reuse the surface; NVENC releases each output canvas after encoding.</desc>
+<style>
+ text{font-family:Arial,Helvetica,sans-serif}
+ .title{font-size:30px;font-weight:700;letter-spacing:-.5px;fill:#e6edf3}
+ .footer{font-size:13px;fill:#a7b7c4}
+ .kicker{font-size:11px;letter-spacing:.7px;fill:#8fb3c6}
+ .box{fill:#1c2833;stroke:#586c7c}
+ .eng-box{fill:#1d2e3c;stroke:#76a4bd}
+ .engine{font-size:25px;font-weight:700;fill:#9dcde8}
+ .heading{font-size:18px;font-weight:700;fill:#e6edf3}
+ .name{font-size:15px;font-weight:700;fill:#e6edf3}
+ .sub{font-size:14px;fill:#c4d4de}
+ .note{font-size:12px;fill:#a7b7c4}
+ .ref{font-size:13px;font-weight:700;fill:#9dcde8}
+ .pixels{stroke:#76a4bd;stroke-width:2.3;fill:none;marker-end:url(#arrow-pixels)}
+ .release{stroke:#7d9d55;stroke-width:2;fill:none;marker-end:url(#arrow-release)}
+ .release-label{font-size:15px;font-weight:700;fill:#a9d568}
+ .pill{fill:#22384a}
+ .pill-t{font-size:13px;font-weight:700;fill:#9dcde8}
+ .icon{fill:none;stroke:#9dcde8;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;color:#9dcde8}
+ .thumb{fill:none;stroke:#76a4bd;stroke-width:1.5}
+</style>
+<defs>
+ <marker id="arrow-pixels" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#76a4bd"/></marker>
+ <marker id="arrow-release" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#7d9d55"/></marker>
+ <pattern id="pixel-grid" width="12" height="12" patternUnits="userSpaceOnUse"><path d="M12 0H0V12" fill="none" stroke="#fff" stroke-opacity=".16" stroke-width="1"/></pattern>
+ <pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="#0b151d"/><path d="M0 0V5" stroke="#22384a" stroke-width="2"/></pattern>
+ <g id="court">
+ <rect width="175" height="98" fill="#b98e5a"/>
+ <path d="M5 6H169V92H5ZM87 6V92M5 24H32V74H5M169 24H142V74H169" fill="none" stroke="#f8e6c6" stroke-width="1.6"/>
+ <circle cx="87" cy="49" r="17" fill="none" stroke="#f8e6c6" stroke-width="1.6"/>
+ <g fill="#173b67"><circle cx="60" cy="31" r="5"/><circle cx="115" cy="73" r="5"/><circle cx="132" cy="42" r="5"/></g>
+ <g fill="#fff4de"><circle cx="75" cy="63" r="5"/><circle cx="114" cy="25" r="5"/><circle cx="136" cy="63" r="5"/></g>
+ <circle cx="89" cy="58" r="3" fill="#f0a02c"/>
+</g>
+</defs>
+<rect width="1348" height="591" fill="#111820"/>
+<text x="48" y="65" class="title">Decode once. Share references. Reuse safely.</text>
+<g transform="translate(48 99)">
+<rect x="0.5" y="0.5" width="1251" height="417" rx="10" fill="#1a2530" stroke="#3c4c5a"/>
+<text x="18" y="23" class="kicker">GPU PIXELS STAY IN VRAM</text>
+<text x="1234" y="23" text-anchor="end" class="kicker">AVPLUMBER MIXER · CUARRAY COMPOSITING</text>
+
+<rect x="18" y="74" width="138" height="37" rx="5" class="box"/>
+<text x="87" y="97" text-anchor="middle" class="sub">Compressed video</text>
+<path d="M87 111V142" class="pixels"/>
+<rect x="18" y="143" width="138" height="100" rx="7" class="eng-box"/>
+<text x="87" y="178" text-anchor="middle" class="engine">NVDEC</text>
+<text x="87" y="203" text-anchor="middle" class="sub">Hardware decode</text>
+<text x="87" y="223" text-anchor="middle" class="note">writes directly</text>
+<path d="M156 193H201" class="pixels"/>
+
+<text x="310" y="80" text-anchor="middle" class="heading">One decoded picture</text>
+<text x="310" y="100" text-anchor="middle" class="note">Registered CUarray surface pool</text>
+<rect x="202" y="142" width="193" height="116" rx="6" fill="#2b3d4c" stroke="#40576a"/>
+<rect x="211" y="132" width="193" height="116" rx="6" fill="#36505f" stroke="#557187"/>
+<rect x="220" y="122" width="193" height="116" rx="6" fill="#1d3d4c" stroke="#1d3d4c"/>
+<svg x="229" y="131" width="175" height="98" viewBox="0 0 175 98"><use href="#court"/></svg>
+<rect x="229" y="131" width="175" height="98" fill="url(#pixel-grid)"/>
+<rect x="294" y="135" width="50" height="89" fill="none" stroke="#dcff8b" stroke-width="2" stroke-dasharray="4 3"/>
+<text x="310" y="281" text-anchor="middle" class="sub">Same pixels · multiple readers</text>
+<rect x="223" y="291" width="174" height="28" rx="14" class="pill"/>
+<text x="310" y="310" text-anchor="middle" class="ref">+ref ≠ copy pixels</text>
+
+<path d="M413 180H448M448 150V298" stroke="#76a4bd" stroke-width="2.3" fill="none"/>
+
+<rect x="518" y="48" width="566" height="292" rx="8" fill="#1c2833" stroke="#8db05c" stroke-width="1.5"/>
+<text x="536" y="76" class="heading">CUDA compositing engine</text>
+<text x="536" y="96" class="note">Samples the CUarray’s Y + UV planes as textures. Writes a new canvas per output.</text>
+<rect x="536" y="137" width="72" height="26" rx="13" class="pill"/><g transform="translate(545 144)" class="icon"><path d="M2 10L10 2M6 2H10V6M2 6V10H6"/></g><text x="562" y="154.5" class="pill-t">scale</text><rect x="615" y="137" width="77" height="26" rx="13" class="pill"/><g transform="translate(624 144)" class="icon"><path d="M10.2 7.5A4.6 4.6 0 1 1 8.6 2.4"/><path d="M6.4 0.6L8.9 2.5L6.9 4.8"/></g><text x="641" y="154.5" class="pill-t">rotate</text><rect x="699" y="137" width="73" height="26" rx="13" class="pill"/><g transform="translate(708 144)" class="icon"><rect x="0.75" y="0.75" width="7" height="7"/><rect x="4.25" y="4.25" width="7" height="7" fill="currentColor" fill-opacity=".35"/></g><text x="725" y="154.5" class="pill-t">blend</text><path d="M800 150H846" class="pixels"/>
+ <svg x="860" y="120.75" width="104" height="58.5" viewBox="0 0 175 98" preserveAspectRatio="xMidYMid slice"><use href="#court"/></svg>
+ <g transform="rotate(-8 940 163.75)">
+  <rect x="920" y="152.25" width="40" height="23" rx="1.5" fill="#000" fill-opacity=".35" transform="translate(2 2)"/>
+  <svg x="920" y="152.25" width="40" height="23" viewBox="62 38 56 32" preserveAspectRatio="xMidYMid slice"><use href="#court"/></svg>
+  <rect x="920" y="152.25" width="40" height="23" fill="none" stroke="#e6edf3" stroke-width="1.5"/>
+ </g>
+ <rect x="860" y="120.75" width="104" height="58.5" rx="2" class="thumb"/><text x="980" y="148" class="name">Program</text><text x="980" y="166" class="note">PGM · 16:9</text><path d="M1084 150H1110" class="pixels"/><text x="462" y="143" class="ref">+ref</text><path d="M448 150H516" class="pixels"/><rect x="536" y="211" width="67" height="26" rx="13" class="pill"/><g transform="translate(545 218)" class="icon"><path d="M3 0V9H12M0 3H9V12"/></g><text x="562" y="228.5" class="pill-t">crop</text><rect x="610" y="211" width="72" height="26" rx="13" class="pill"/><g transform="translate(619 218)" class="icon"><path d="M2 10L10 2M6 2H10V6M2 6V10H6"/></g><text x="636" y="228.5" class="pill-t">scale</text><path d="M800 224H846" class="pixels"/>
+ <svg x="860" y="194.75" width="104" height="58.5" viewBox="52 26 72 40.5" preserveAspectRatio="xMidYMid slice"><use href="#court"/></svg>
+ <rect x="860" y="194.75" width="104" height="58.5" rx="2" class="thumb"/><text x="980" y="222" class="name">AUX 1</text><text x="980" y="240" class="note">Close-up · 16:9</text><path d="M1084 224H1110" class="pixels"/><text x="462" y="217" class="ref">+ref</text><path d="M448 224H516" class="pixels"/><rect x="536" y="285" width="67" height="26" rx="13" class="pill"/><g transform="translate(545 292)" class="icon"><path d="M3 0V9H12M0 3H9V12"/></g><text x="562" y="302.5" class="pill-t">crop</text><rect x="610" y="285" width="61" height="26" rx="13" class="pill"/><g transform="translate(619 292)" class="icon"><rect x="0.75" y="0.75" width="10.5" height="10.5" rx="1"/><rect x="0.75" y="3.75" width="10.5" height="4.5" fill="currentColor" stroke="none"/></g><text x="636" y="302.5" class="pill-t">pad</text><path d="M800 298H846" class="pixels"/>
+ <rect x="860" y="268.75" width="104" height="58.5" fill="url(#hatch)"/>
+ <svg x="895.57" y="268.75" width="32.87" height="58.5" viewBox="65 4 50 89" preserveAspectRatio="xMidYMid slice"><use href="#court"/></svg>
+ <rect x="860" y="268.75" width="104" height="58.5" rx="2" class="thumb"/><text x="980" y="296" class="name">AUX 2</text><text x="980" y="314" class="note">Pillarbox · 16:9</text><path d="M1084 298H1110" class="pixels"/><text x="462" y="291" class="ref">+ref</text><path d="M448 298H516" class="pixels"/>
+
+<rect x="1112" y="120" width="122" height="210" rx="7" class="eng-box"/>
+<text x="1173" y="214" text-anchor="middle" class="engine">NVENC</text>
+<text x="1173" y="240" text-anchor="middle" class="sub">Encode each</text>
+<text x="1173" y="258" text-anchor="middle" class="sub">output canvas</text>
+
+<rect x="201" y="352" width="574" height="52" rx="6" fill="#233125" stroke="#56703a"/>
+<text x="219" y="374" class="release-label">GPU reads complete → release references (−ref)</text>
+<text x="219" y="393" class="note">NVDEC reuses the surface when all compositor + codec holds are gone.</text>
+<path d="M201 378H179V250H201" class="release"/>
+<path d="M1173 330V384H912V342" class="release"/>
+<text x="1080" y="404" text-anchor="middle" class="note">NVENC done → release the output canvas</text>
+</g>
+<text x="48" y="548" class="footer">AVPlumber · Amagi Engineering · architecture schematic</text>
+</svg>
