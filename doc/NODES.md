@@ -200,6 +200,14 @@ Recommended options for displaying live video:
         but allow use of any
     -   if doesn't start with `?`, force specified pixel format, fail if
         it's incompatible with codec or stream
+-   `reinterpret_width` (int) and `reinterpret_pixel_format` (string) - optional, for
+    `dec_video` with `codec: rawvideo` on a stream whose packets are already raw bytes
+    but whose stream parameters describe something else. The decoder context takes
+    this width and pixel format, the `rawvideo` codec id and no codec tag instead of
+    the stream's own. An MXL flow reports codec `v210` at the picture width, so
+    `reinterpret_width` = the v210 row stride in bytes with
+    `reinterpret_pixel_format: gray` hands each grain to
+    `hwupload_cuda=v210_width=<picture width>` for unpacking on the GPU
 -   `hwaccel` (string, name of instance-shared object) - optional, name of
     hwaccel previously created with `hwaccel.init`
 -   `hwaccel_only_for_codecs` (list of strings) - use hwaccel only for
@@ -1165,6 +1173,20 @@ could not be created; the frame is dropped) and instance-wide cleanup counts. Th
 drops from EGL/CUDA import work without per-frame logs. `allocations` counts the distinct producer
 allocations ever imported and `reimports` the registrations of one seen before (it had expired or
 been evicted): a producer recycling a fixed pool stops adding `allocations` once its pool is seen.
+
+### `cuda_to_v210`
+
+Packs CUDA 10-bit 4:2:2 frames into headerless `v210` packets with a CUDA kernel, one packet per frame, and DMAs each one into pinned memory the muxer reads directly - so a GPU graph can publish uncompressed video (an MXL flow, an SDI-style feed) without `hwdownload` and without the CPU `v210` encoder.
+
+The node acts as the encoder for the muxer below it, so no `enc_video` belongs in between. Geometry, frame rate and time base are taken from the nodes above at creation time, because the `output` node opens its format context then; the parameters override them, or stand in when the node above reports none.
+
+1 input: `av::VideoFrame` (hardware "pixel format" `cuda`, `p210le` or `yuv422p10le`), 1 output: `av::Packet` (`stride * height` bytes each)
+
+Parameters:
+-   `width`, `height` (int) - even width, default the geometry reported from above
+-   `stride` (int) - row pitch in bytes, default the 128-byte aligned v210 pitch
+-   `fps` (rational string) - stream frame rate, default the frame rate reported from above; required if nothing above reports one, because the MXL muxer derives the flow's grain rate from it
+-   `timebase` (rational string) - default the time base reported from above, else `1/fps`
 
 ### `object_tracker`
 
