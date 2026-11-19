@@ -172,13 +172,16 @@ checks the decoded hashes. AVPlumber's existing `input` and `output` nodes
 select the transport with `format="mxl"`.
 
 Outside the fork's own files, `0026` only adds the `configure`,
-`libavformat/Makefile` and `allformats.c` registration for this series. Our one
-change to the fork is `0027`: after a ring reset the demuxer resumes at the end
-of the preceding packet, so PTS stays monotonic.
+`libavformat/Makefile` and `allformats.c` registration for this series.
+Patch `0027` resumes at the end of the preceding packet after a ring reset, so
+PTS stays monotonic. Patch `0028` starts tail reads at the oldest readable
+grain in SDK 1.1.0. The five-frame FATE fixture uses six slots
+because the SDK reserves one for the next write. Its hashes match a direct
+v210 encode and decode.
 
 To move the pin, apply `0001`–`0025`, run `git restore --source=<pin>` on the
 fork's files listed in `0026`'s diffstat, keep `0026`'s registration hunks,
-commit, re-apply `0027`, regenerate both with
+commit, re-apply `0027` and `0028`, regenerate the series with
 `git format-patch --zero-commit --no-numbered --no-signature`, then update
 `9/bases.env` from `verify.sh`.
 
