@@ -965,6 +965,10 @@ The renderer needs to:
 
 ### `cuda_ipc_sink` and `cuda_ipc_source`
 
+Build these optional nodes with `HAVE_CUDA=1 HAVE_CUDA_VMM_IPC=1` and the CUDA SDK
+headers under `CUDA_ROOT` or on the compiler include path. The default CUDA build
+includes the legacy `ipc_cuda_source` using the bundled CUDA loader.
+
 Share linear CUDA video frames between Linux processes on the same GPU. Use
 `src` on the sink, `dst` on the source, and the same absolute `socket` path
 on both. Set `hwaccel` to the CUDA device name in each graph. For containers,

@@ -13,7 +13,6 @@
 #include "../../mixer/primitives/SourceDelivery.hpp"
 #include "cuda_rect_draw.hpp"
 #include "cuda_rect_frame.hpp"
-#include "CudaVmmFrames.hpp"
 #include "cuda_rect_texture.h"
 
 #include <atomic>
@@ -26,6 +25,7 @@ extern "C" {
 }
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -61,7 +61,7 @@ public:
         // (FFmpeg filters and NVENC use it; compositors wait for their producers' streams).
         bool hand_off = false;
         unsigned vmm_slots = 0;
-        std::shared_ptr<avp::vmm::FramePool> vmm_pool;
+        std::function<av::VideoFrame()> acquire_canvas;
     };
 
     /// `type` is the node type, the prefix of errors and logs.
@@ -71,7 +71,7 @@ protected:
     const char *const type_;
     std::shared_ptr<Edge<av::VideoFrame>> output_edge_;
     avp::AvBufferRef out_frames_ref_;
-    std::shared_ptr<avp::vmm::FramePool> vmm_pool_;
+    std::function<av::VideoFrame()> acquire_canvas_;
     CudaRectDraw draw_;   // owns the canvas geometry, format and color contract
 
     std::vector<LayerSpec> default_layers_;
@@ -271,7 +271,7 @@ protected:
         avp::timeline::Scope issue("issue");
         CUstream stream = draw_.stream();
 
-        av::VideoFrame outf = vmm_pool_ ? vmm_pool_->acquire()
+        av::VideoFrame outf = acquire_canvas_ ? acquire_canvas_()
                                        : avp::mixer::canvasFrame(out_frames_ref_.get(), type_);
         if (outf.isNull()) throw avp::mixer::NoCanvasFrame("CUDA VMM pool is full");
 
@@ -405,17 +405,14 @@ public:
         : NodeSingleOutput<av::VideoFrame>(make_unique<EdgeSink<av::VideoFrame>>(config.output)),
           type_(type),
           output_edge_(config.output),
+          acquire_canvas_(config.acquire_canvas),
           draw_(config.hw, config.canvas, config.max_layers,
                 config.hand_off ? CudaRectDraw::TableCompletion::Event : CudaRectDraw::TableCompletion::Stream),
           default_layers_(config.layers),
           metadata_key_(config.metadata_key),
           debug_log_every_n_(config.debug_log_every_n),
           hand_off_(config.hand_off) {
-        if (config.vmm_slots) {
-            if (config.hand_off) throw Error("vmm_slots requires synchronous compositor output");
-            vmm_pool_ = config.vmm_pool ? config.vmm_pool : std::make_shared<avp::vmm::FramePool>(
-                config.hw, config.canvas.sw_fmt, config.canvas.width, config.canvas.height, config.vmm_slots);
-        } else {
+        if (!acquire_canvas_) {
             out_frames_ref_ = avp::mixer::allocCanvasFrames(*config.hw, config.canvas, type_);
         }
         this->auto_eof_ = false;

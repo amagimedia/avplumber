@@ -14,6 +14,8 @@ HAVE_NVCC = 0
 # The NV12 encoder API used by nvjpeg_enc is unavailable in older CUDA
 # toolkits. Enable the node independently from the other CUDA nodes.
 HAVE_NVJPEG ?= 0
+# Shareable CUDA VMM pools require the CUDA Driver API SDK headers.
+HAVE_CUDA_VMM_IPC ?= 0
 # Build the retained drawing, tracking and reframing nodes. Model inference and
 # its TensorRT flags live in out-of-tree nodes (see EXTRA_NODES_MK below).
 # HAVE_TENSORRT and TENSORRT_ROOT are not read here; those fragments read them.
@@ -213,10 +215,6 @@ endif
 CUDA_ROOT ?= /usr/local/cuda
 ifeq ($(HAVE_CUDA),1)
 NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_ipc.cpp
-override CPPSRC += nodes/hwaccel/CudaVmmMemory.cpp
-# The VMM adapter uses the CUDA SDK headers, while existing nodes use the bundled loader.
-objs/src/nodes/hwaccel/CudaVmmMemory.o: override CXXFLAGS += -fno-lto
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/raw_video_file_cuda.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_rect_overlay.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_transform.cpp
@@ -229,6 +227,17 @@ objs/$(SRCDIR)/timeline_cuda.o: override CXXFLAGS += -Ideps/cuda_loader
 else
 # The mixer's compositor nodes draw with cuda_rect_draw.
 NODES_SRC := $(filter-out $(SRCDIR)/nodes/mixer_compositor.cpp $(SRCDIR)/nodes/mixer_keyer.cpp,$(NODES_SRC))
+endif
+
+ifeq ($(HAVE_CUDA_VMM_IPC),1)
+ifneq ($(HAVE_CUDA),1)
+$(error HAVE_CUDA_VMM_IPC=1 requires HAVE_CUDA=1)
+endif
+objs/src/nodes/mixer_compositor.o: override CXXFLAGS += -DHAVE_CUDA_VMM_IPC=1
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_ipc.cpp
+override CPPSRC += nodes/hwaccel/CudaVmmMemory.cpp
+# The VMM adapter uses the CUDA SDK headers, while existing nodes use the bundled loader.
+objs/src/nodes/hwaccel/CudaVmmMemory.o: override CXXFLAGS += -fno-lto
 endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVJPEG),11)
@@ -381,6 +390,15 @@ objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 	$(CXX) $(CXXFLAGS) -c -o $@ $< -include $(BUILD_DATE_FILE)
 
 
+# Switching the VMM option changes the registered nodes and compositor allocation path.
+vmm_stamp := objs/.cuda-vmm-ipc-$(HAVE_CUDA_VMM_IPC)
+$(vmm_stamp):
+	@mkdir -p $(@D)
+	@rm -f objs/.cuda-vmm-ipc-0 objs/.cuda-vmm-ipc-1
+	@touch $@
+
+objs/src/nodes/mixer_compositor.o $(nodes_list_file): $(vmm_stamp)
+
 $(nodes_list_file): ./generate_node_list Makefile src/edge_types.hpp $(NODES_SRC)
 	./generate_node_list $(NODES_SRC) > $(nodes_list_file)
 
@@ -391,7 +409,9 @@ build: $(EXE) compile_flags.txt
 
 
 $(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version.o $(DEPS_LIBS) $(ALL_PTX_H)
-	ar -rcs $@ $^
+	@rm -f $@.tmp
+	ar -rcs $@.tmp $^
+	mv -f $@.tmp $@
 
 static_library: $(STATIC_LIBRARY)
 
