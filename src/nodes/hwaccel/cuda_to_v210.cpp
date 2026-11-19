@@ -58,6 +58,10 @@ struct Gpu {
     CUfunction kernel = nullptr;
     CUdeviceptr packed = 0;
     AVBufferPool* pool = nullptr;
+    // The pack's own stream: on the device's stream (the legacy NULL stream in
+    // the mixer) the download would delay every later kernel of the context.
+    CUstream stream = nullptr;
+    CUevent produced = nullptr;
 
     ~Gpu() {
         // Buffers still referenced by packets survive this; the pool waits.
@@ -66,6 +70,8 @@ struct Gpu {
         if (ContextScope scope(device); scope.ok) {
             if (packed) CHECK_CU(cuMemFree(packed));
             if (module) CHECK_CU(cuModuleUnload(module));
+            if (produced) CHECK_CU(cuEventDestroy(produced));
+            if (stream) CHECK_CU(cuStreamDestroy(stream));
         }
         av_buffer_unref(&device);
     }
@@ -118,7 +124,10 @@ class CudaToV210 : public NodeSISO<av::VideoFrame, av::Packet>, public IEncoder,
         if (ContextScope scope(device); !scope.ok ||
             CHECK_CU(cuMemAlloc(&gpu->packed, size())) || CHECK_CU(cuMemsetD8(gpu->packed, 0, size())) ||
             CHECK_CU(cuModuleLoadDataEx(&gpu->module, image.c_str(), 0, nullptr, nullptr)) ||
-            CHECK_CU(cuModuleGetFunction(&gpu->kernel, gpu->module, "pack_v210")))
+            CHECK_CU(cuModuleGetFunction(&gpu->kernel, gpu->module, "pack_v210")) ||
+            // The bundled dynamic-loader header omits CU_STREAM_NON_BLOCKING (0x1).
+            CHECK_CU(cuStreamCreate(&gpu->stream, 0x1)) ||
+            CHECK_CU(cuEventCreate(&gpu->produced, CU_EVENT_DISABLE_TIMING)))
             throw Error("cuda_to_v210: cannot set up the pack on the CUDA device");
         gpu_ = std::move(gpu);
     }
@@ -138,14 +147,16 @@ class CudaToV210 : public NodeSISO<av::VideoFrame, av::Packet>, public IEncoder,
                         &input->data[1], &input->linesize[1],
                         &input->data[2], &input->linesize[2], &semiplanar};
         const int blocks = (width_ + 5) / 6;
-        // Pack on the device context's stream. Whatever produced this frame
-        // used it too, so the ordering needs no extra synchronization.
-        const CUstream stream = cuda(gpu_->device)->stream;
+        // Whatever produced this frame queued it on the device context's
+        // stream: the pack waits for that point only, on its own stream.
+        const CUstream stream = gpu_->stream;
         ContextScope scope(gpu_->device);
         if (!scope.ok) throw Error("cuda_to_v210: cannot enter the CUDA context");
         // Straight into the packet's payload: the muxer's copy into the grain
         // is the only time a CPU touches these bytes.
         const bool queued =
+            !CHECK_CU(cuEventRecord(gpu_->produced, cuda(gpu_->device)->stream)) &&
+            !CHECK_CU(cuStreamWaitEvent(stream, gpu_->produced, 0)) &&
             !CHECK_CU(cuLaunchKernel(gpu_->kernel, (blocks + 31) / 32, (height_ + 7) / 8, 1, 32, 8, 1, 0,
                                      stream, args, nullptr)) &&
             !CHECK_CU(cuMemcpyDtoHAsync(raw->data, gpu_->packed, size(), stream));
