@@ -165,23 +165,20 @@ The first ten patches, in order:
 ### MXL shared-memory transport
 
 Patch `0026` imports the MXL muxer, demuxer and tests from
-[CBC's FFmpeg fork](https://github.com/cbcrc/FFmpeg/tree/16abbf041307fd08db2566e488c1f4e0714a158a).
+[CBC's FFmpeg fork](https://github.com/cbcrc/FFmpeg/tree/6a2a757db4c05842082d32eceef5b255acd9c878).
 Build the Fedora mixer image with `--build-arg WITH_MXL=1` to include the SDK.
 The image runs `fate-mxl-video-encdec`, which publishes five v210 frames and
 checks the decoded hashes. AVPlumber's existing `input` and `output` nodes
 select the transport with `format="mxl"`.
 
 Outside the fork's own files, `0026` only adds the `configure`,
-`libavformat/Makefile` and `allformats.c` registration for this series.
-Patch `0027` resumes at the end of the preceding packet after a ring reset, so
-PTS stays monotonic. Patch `0028` starts tail reads at the oldest readable
-grain in SDK 1.1.0. The five-frame FATE fixture uses six slots
-because the SDK reserves one for the next write. Its hashes match a direct
-v210 encode and decode.
+`libavformat/Makefile` and `allformats.c` registration for this series; the
+fork's MXL code is otherwise unchanged (`dmf-mxl/9.0`, which takes PTS from MXL
+read indices and keeps them monotonic across ring resets).
 
 To move the pin, apply `0001`–`0025`, run `git restore --source=<pin>` on the
 fork's files listed in `0026`'s diffstat, keep `0026`'s registration hunks,
-commit, re-apply `0027` and `0028`, regenerate the series with
+commit, regenerate it with
 `git format-patch --zero-commit --no-numbered --no-signature`, then update
 `9/bases.env` from `verify.sh`.
 
