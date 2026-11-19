@@ -1,6 +1,7 @@
 #include "node_common.hpp"
 #include "stream_routing.hpp"
 #include <mutex>
+#include <string_view>
 #include <iostream>
 #include <fstream>
 
@@ -131,6 +132,17 @@ protected:
     av::Packet readPacket() {
         std::error_code error;
         av::Packet packet = ictx_.readPacket(error);
+        // A live MXL writer may miss several grain periods without ending its flow.
+        while (error == std::error_code(AVERROR(EAGAIN), av::ffmpeg_category()) &&
+               std::string_view(ictx_.inputFormat().name()) == "mxl") {
+            const auto &interrupt = ictx_.raw()->interrupt_callback;
+            if (interrupt.callback(interrupt.opaque)) {
+                error = std::error_code(AVERROR_EXIT, av::ffmpeg_category());
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            packet = ictx_.readPacket(error);
+        }
         if (!error) {
             return packet;
         }
