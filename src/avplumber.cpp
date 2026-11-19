@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <atomic>
+#include <condition_variable>
 #include <thread>
 #include <chrono>
 #include <boost/asio/io_context.hpp>
@@ -156,7 +157,16 @@ private:
     // Queries a page polls several times a second: their runs are not logged, their failures are.
     std::unordered_set<std::string> quiet_commands_;
     std::mutex cmd_run_lock_;
+    // Control clients wait here until setReady(). A condition variable, not a mutex held since
+    // construction: shutdown() must be able to open the gate too, from any thread, any number of times.
     std::mutex server_ready_;
+    std::condition_variable server_ready_cv_;
+    bool ready_ = false;
+    std::atomic<bool> shutting_down_{false};
+    void waitReady() {
+        std::unique_lock<decltype(server_ready_)> lock(server_ready_);
+        server_ready_cv_.wait(lock, [this]() { return ready_; });
+    }
     std::list<std::thread> detached_threads_;
     #ifdef EMBED_IN_OBS
         std::shared_ptr<TickSource> tick_source_;
@@ -198,10 +208,9 @@ public:
         servers_.push_back(make_unique<Server>(std::forward<Args>(args)...));
     }
     void communicate(ClientPipe &pipe) {
-        bool disconnect = false;
-        {
-            std::lock_guard<decltype(server_ready_)> lock(server_ready_);
-        }
+        waitReady();
+        // Released by shutdown(), not by setReady(): leave without greeting or running queued commands.
+        bool disconnect = shutting_down_;
         while (!disconnect) {
             ControlPacket pkt;
             pipe.from_client.wait_dequeue(pkt);
@@ -232,7 +241,7 @@ public:
         bool all_good = true;
         if (!is_subcommand) {
             if (!is_terminal) {
-                std::lock_guard<decltype(server_ready_)> lock(server_ready_);
+                waitReady();
             }
             //out << "100 VTR Ready\n";
         }
@@ -276,7 +285,7 @@ public:
             if (cmd == "retry") {
                 do {
                     std::istringstream substream(arg);
-                    if (manager_->shouldWork() && (!readExecCommands(substream, out, is_terminal, true))) {
+                    if (manager_->shouldWork() && !shutting_down_ && (!readExecCommands(substream, out, is_terminal, true))) {
                         wallclock.sleepms(1000);
                     } else {
                         break;
@@ -330,7 +339,11 @@ public:
         return all_good;
     }
     void setReady() {
-        server_ready_.unlock();
+        {
+            std::lock_guard<decltype(server_ready_)> lock(server_ready_);
+            ready_ = true;
+        }
+        server_ready_cv_.notify_all();
     }
     std::unordered_map<std::string, uint64_t> logged_drops_;   // logQueueDrops: last dropped_total per queue
     void logQueueDrops(const std::string &period) {
@@ -357,6 +370,11 @@ public:
         manager_->edges()->clearEdges();
     }
     void shutdown() {
+        // The servers' destructors join their client threads. A shutdown before setReady() (failed
+        // startup) would wait forever for clients still parked at the readiness gate, so open it;
+        // shutting_down_ makes them, and a client looping in "retry", return instead of working on.
+        shutting_down_ = true;
+        setReady();
         logstream << "Closing server sockets";
         servers_.clear();
         if (manager_) {
@@ -404,7 +422,6 @@ public:
     };
     ControlImpl(std::shared_ptr<NodeManager> manager):
         manager_(manager) {
-        server_ready_.lock();
         commands_["hello"] = [](ClientStream &cs, std::string&) {
             cs << "HELLO\n";
         };
