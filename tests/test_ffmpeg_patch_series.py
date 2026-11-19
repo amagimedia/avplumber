@@ -29,3 +29,23 @@ def test_band_blur_registered_with_cuda_kernel():
                      "ff_vf_band_blur_cuda", "vf_band_blur_cuda.cu",
                      "BandBlurCompositeY", "BandBlurCompositeUV"):
         assert required in patch
+
+
+def test_libmxl_patch_is_opt_in():
+    """Nothing of the MXL patch is compiled unless FFmpeg is configured with libmxl."""
+    patch = (SERIES / "0026-avformat-libmxl-demuxer-muxer.patch").read_text()
+    for required in ('mxl_muxer_deps="libmxl swresample"', 'mxl_demuxer_deps="libmxl swresample"',
+                     "enabled libmxl            && require_pkg_config libmxl",
+                     "OBJS-$(CONFIG_MXL_DEMUXER)", "OBJS-$(CONFIG_MXL_MUXER)",
+                     "ff_mxl_demuxer", "ff_mxl_muxer"):
+        assert required in patch
+    # Outside its own sources the patch only adds lines.
+    removed = [line for line in patch.splitlines() if line.startswith("-") and not line.startswith(("---", "-- "))]
+    assert removed == []
+
+
+def test_mixer_image_builds_mxl_only_on_request():
+    dockerfile = (ROOT / "docker-compose/mixer/Dockerfile.fedora44").read_text()
+    assert "ARG WITH_MXL=0\n" in dockerfile
+    assert "FROM mxl-${WITH_MXL} AS ffmpeg\n" in dockerfile
+    assert 'if [ "${WITH_MXL}" = 1 ]; then mxl=--enable-libmxl;' in dockerfile

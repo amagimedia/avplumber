@@ -32,7 +32,8 @@ their previous close behavior. See the upstream [live shutdown discussion](https
 The series carries seven custom CUDA filters: `convert_cuda`, `crop_cuda`,
 `overlay_many_cuda`, `pad_cuda`, `transition_cuda` (including 10-bit and dip),
 `tonemap_cuda` and `band_blur_cuda`, plus the RFC 4175, V4L2, optional NDI registration
-and AArch64 patches. Notes:
+and AArch64 patches, and the opt-in [libmxl demuxer and muxer](#the-series)
+(`--enable-libmxl`; nothing of it is compiled otherwise). Notes:
 
 - NPP compatibility is omitted because upstream removed NPP filter support.
   `--enable-libnpp` now only warns and does nothing. This is a feature removal
@@ -160,6 +161,27 @@ The first ten patches, in order:
     which the filter scales to each frame's depth and range. A dip sample
     reads only the picture still visible, none at 0.5; fade and wipe modes
     are unchanged.
+
+### MXL shared-memory transport
+
+Patch `0026` imports the MXL muxer, demuxer and tests from
+[CBC's FFmpeg fork](https://github.com/cbcrc/FFmpeg/tree/16abbf041307fd08db2566e488c1f4e0714a158a).
+Build the Fedora mixer image with `--build-arg WITH_MXL=1` to include the SDK.
+The image runs `fate-mxl-video-encdec`, which publishes five v210 frames and
+checks the decoded hashes. AVPlumber's existing `input` and `output` nodes
+select the transport with `format="mxl"`.
+
+Review our FFmpeg changes in `mxl/register.diff` (configure, build and format
+registration) and `mxl/resume-pts.patch` (resume at the preceding packet's end
+after a ring reset). The generator imports the remaining files from the pinned
+fork. After changing the pin or either local patch, run:
+
+```sh
+deps/ffmpeg/mkpatch-mxl.sh /path/to/FFmpeg
+deps/ffmpeg/verify.sh master-1bfb9160 /path/to/FFmpeg
+```
+
+Update `9/bases.env` if the patched tree changes.
 
 ## Notes
 
