@@ -35,6 +35,15 @@ class BrowserStartupUnsettled(RuntimeError):
     prefix = "Browser show failed its startup stability check: "
 
 
+# A registration keeps its buffer's GPU memory after Chromium has dropped the buffer. When the
+# mixer stalls for longer than a frame each window is handed a buffer it has not shown before
+# and stops using an old one: 57 dead registrations, 0.6 GB, for one 250 ms stall of a 40-window
+# show (2026-11-18, L4). Kept for ever they fill the GPU's memory after a few stalls, and with
+# it full the next stall is never recovered from. A page that paints twice a second comes back
+# to each of its buffers within five seconds, so half a minute only ever finds dead ones.
+IMPORT_IDLE_MS = 30_000
+
+
 def hold_frames(frame_queue: int) -> int:
     """Frames a window keeps out with the mixer: its *frame_queue* less one."""
     return max(0, frame_queue - HOLD_SLACK)
@@ -85,18 +94,17 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str,
     nodes = [
         api.IpcDmabufSource(source),
         # The compositor samples the mapped DMA-BUF directly. With the hold above the browser
-        # recycles a fixed set of buffers, so every registration is kept (import_ttl_ms 0): a
+        # recycles a fixed set of buffers, so a registration in use is never released: a
         # release takes the CUDA library's context lock exclusively and stalls every other
-        # thread in the context, and a page that paints now and then comes back to the same
-        # buffers seconds later. Three registrations beyond the frame queue cover Chromium's
+        # thread in the context. Three registrations beyond the frame queue cover Chromium's
         # own idle and delivering buffers and a fourth one that dies (a resize or reload) until
         # it is evicted, so a full pool never churns. Start-up allocations are purged before
-        # going on air.
+        # going on air. A registration nothing has used for IMPORT_IDLE_MS is released.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": drm_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group",
                             "max_imports": browser_frame_queue + 4,
-                            "import_ttl_ms": 0}),
+                            "import_ttl_ms": IMPORT_IDLE_MS}),
         # Number paints on the paint grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two

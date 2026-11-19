@@ -508,7 +508,7 @@ def test_browser_holds_all_but_one_frame_and_keeps_its_imports():
     importer = next(n.parameters for n in nodes if n.parameters["name"] == "input_0_to_cuda")
     assert receive["hold_frames"] == 8 and "return_queue" not in receive
     assert importer["max_imports"] == 13
-    assert importer["import_ttl_ms"] == 0
+    assert importer["import_ttl_ms"] == dmabuf_inputs.IMPORT_IDLE_MS > 0
 
 
 def test_browser_chain_stays_on_its_whole_paint_rate_on_an_ntsc_canvas():
@@ -1387,8 +1387,8 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     # All but one of the six frames of this show's queue stay with the mixer.
     assert nodes["input_1_receive"]["hold_frames"] == 5
     assert nodes["input_1_to_cuda"]["max_imports"] == 10
-    # A fixed set of browser buffers: their registrations are never released on air.
-    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 0
+    # A fixed set of browser buffers: only a registration left unused for half a minute goes.
+    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 30_000
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}
     assert mixer.parameters["canvas"] == (1920, 1080)
     assert application.wipe_files == ("/media/swoosh.mov",)
