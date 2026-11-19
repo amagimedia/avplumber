@@ -1103,6 +1103,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             # The reusable builder shares conversion and fan-out for identical edges.
             mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=edge,
                              input_group=group, picture=source.picture,
+                             reconnects=(source.width, source.height) if source.kind == "mxl" else None,
                              fan_out_loop=_pacing_loop(index) if cfg.source_fan_out == "event_loop" else None,
                              color=None if source.filter_graph else source.color,
                              # Raw upload stamps tags; transforms preserve frame properties.

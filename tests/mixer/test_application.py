@@ -74,6 +74,25 @@ assert not any(name.startswith('demos.') for name in sys.modules)
     subprocess.run([sys.executable, "-I", "-c", script], cwd=tmp_path, check=True, capture_output=True, text=True)
 
 
+def test_an_mxl_writer_restart_never_ends_the_program(native_boundary):
+    """A writer coming back restarts the MXL input group, and its colour stage then sends an EOF
+    that would end a program showing only that source. A format declaration that ignores EOF,
+    restarting with the group, drops it before the fan-out."""
+    api = fake_api()
+    api.MixerGraphBuilder = native_boundary[1]
+    cfg = config.parse({"canvas": CONFIG["canvas"], "renditions": [{"id": "record", "target": "program.ts"}],
+                        "sources": [{"id": "cam", "kind": "mxl", "url": "/dev/shm/mxl", "flow": "f",
+                                     "width": 1920, "height": 1080, "color": "sdr"}],
+                        "scenes": [{"id": "one", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]})
+    app = build_application(cfg, api=api)
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    live = next(n for n in nodes.values() if n.get("dst") == nodes["mixer_otm_cam"]["src"])
+    assert live["src"] == nodes["mixer_color_cam"]["dst"]
+    assert {k: live[k] for k in ("type", "ignore_eof", "group", "pixel_format", "real_pixel_format")} == {
+        "type": "assume_video_format", "ignore_eof": True, "group": nodes["mixer_otm_cam"]["group"], "pixel_format": "cuda",
+        "real_pixel_format": cfg.working_format}
+
+
 def test_a_declared_decoded_format_lets_the_fanout_tag_the_frames(native_boundary):
     """A decoded source whose colour and storage are declared and match the canvas has no colour
     filter: the fan-out stamps the tags. Undeclared storage keeps the filter, which converts."""
