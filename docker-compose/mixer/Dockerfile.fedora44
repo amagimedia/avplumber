@@ -87,38 +87,21 @@ RUN mkdir -p /opt/mxl/lib
 FROM base AS mxl-1
 
 ARG MXL_TAG=v1.1.0
-# builtin-baseline from the SDK v1.1.0 manifest.
-ARG VCPKG_COMMIT=4002e3abc6d3e468c73d2d9777a7dd96af5dc224
+# This registry revision supplies the SDK's fmt 12.1 and spdlog 1.17.
+ARG VCPKG_COMMIT=2fc5b0d06b6575491a8b06c18904316ec331926c
 ARG BUILD_JOBS=4
 
-# The SDK takes its dependencies from vcpkg in manifest mode; one of them
-# (ada-url) needs a Rust compiler, and its tools want GStreamer, libpcap and X11.
-# VCPKG_FORCE_SYSTEM_BINARIES makes vcpkg use Fedora's cmake and ninja.
+# The SDK manifest includes its CLI, tests and GStreamer tools even when their
+# build switches are off. Install only the four dependencies of libmxl.
 ENV VCPKG_ROOT=/opt/vcpkg
 ENV VCPKG_FORCE_SYSTEM_BINARIES=1
-RUN dnf -y install --setopt=install_weak_deps=False \
-        autoconf \
-        automake \
-        bison \
-        cargo \
-        curl \
-        flex \
-        gstreamer1-devel \
-        gstreamer1-plugins-base-devel \
-        kernel-headers \
-        libpcap-devel \
-        libtool \
-        libX11-devel \
-        ninja-build \
-        perl \
-        rust \
-        tar \
-        unzip \
-        zip \
+RUN dnf -y install --setopt=install_weak_deps=False ninja-build tar unzip zip \
     && dnf clean all \
-    && git clone --quiet https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT" \
-    && git -C "$VCPKG_ROOT" checkout --quiet --detach "$VCPKG_COMMIT" \
-    && "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+    && git init --quiet "$VCPKG_ROOT" \
+    && git -C "$VCPKG_ROOT" fetch --quiet --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_COMMIT" \
+    && git -C "$VCPKG_ROOT" checkout --quiet --detach FETCH_HEAD \
+    && "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics \
+    && VCPKG_MAX_CONCURRENCY="${BUILD_JOBS}" "$VCPKG_ROOT/vcpkg" install --classic fmt picojson spdlog stduuid
 
 # Installed into /usr/local, beside FFmpeg (libdir forced to lib: Fedora's
 # default is lib64). libmxl links spdlog statically, so the private Requires is
@@ -133,7 +116,7 @@ RUN git clone --quiet --branch "${MXL_TAG}" --depth 1 \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DCMAKE_INSTALL_LIBDIR=lib \
         -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-        -DVCPKG_MANIFEST_MODE=ON \
+        -DVCPKG_MANIFEST_MODE=OFF \
         -DBUILD_DOCS=OFF \
         -DBUILD_TOOLS=OFF -DBUILD_UTILS=OFF -DBUILD_TESTS=OFF \
     && cmake --build /tmp/mxl/build --parallel "${BUILD_JOBS}" \
