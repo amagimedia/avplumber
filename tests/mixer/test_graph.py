@@ -1850,8 +1850,7 @@ def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path, raw):
     assert nodes["decode_0"]["options"] == {"video_size": "5120x1080", "pixel_format": "gray"}
     if raw["kind"] == "mxl":
         assert (nodes["input_0"]["url"], nodes["input_0"]["format"]) == (f"mxl:///dev/shm/mxl?id={FLOW}", "mxl")
-        assert nodes["input_0"]["options"] == {"blocking": "1", "grain_index_init": "head", "on_too_late": "reset",
-                                               "reset_on_drop": "1"}
+        assert nodes["input_0"]["options"] == {"blocking": "1", "mxl_read_index_init": "head", "on_too_late": "reset"}
         # Live: never looped; a recreated flow restarts the source's chain.
         assert "loop" not in nodes["input_0"] and nodes["input_0"]["auto_restart"] == nodes["decode_0"]["auto_restart"] == "group"
     assert sources["gen"]["pixel_format"] == "p210le" and sources["gen"]["color"] == Color("hlg")

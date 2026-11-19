@@ -341,12 +341,11 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
 
 # The MXL demuxer's options for a live source: wait up to a frame period for the next grain (a
 # non-blocking read between grains returns EAGAIN; input_rec waits a stalled writer out); start at
-# the newest grain, and go back to it when the reader falls out of the ring (`on_too_late=reset`),
-# with timestamps that run on from the last grain (`reset_on_drop`, FFmpeg patch
-# 0027 of deps/ffmpeg/9), not a jump that realtime would wait out. Grains are copied:
-# a `zero_copy` packet points into the ring with no reference held, and the decoded frame that
-# wraps it waits in queues the writer's ring history does not bound.
-MXL_READER_OPTIONS = {"blocking": "1", "grain_index_init": "head", "on_too_late": "reset", "reset_on_drop": "1"}
+# the newest grain, and go back to it when the reader falls out of the ring (`on_too_late=reset`).
+# The demuxer stamps each grain with its MXL index, so timestamps follow the writer's clock across
+# such a jump. Grains are copied: a `zero_copy` packet points into the ring with no reference
+# held, and the decoded frame that wraps it waits in queues the writer's ring history does not bound.
+MXL_READER_OPTIONS = {"blocking": "1", "mxl_read_index_init": "head", "on_too_late": "reset"}
 
 
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
