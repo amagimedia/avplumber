@@ -1,0 +1,86 @@
+diff --git a/configure b/configure
+index 069c9744d9..74e9652758 100755
+--- a/configure
++++ b/configure
+@@ -2081,6 +2081,7 @@ EXTERNAL_LIBRARY_LIST="
+     liblcevc_dec
+     libmodplug
+     libmp3lame
++    libmxl
+     libmysofa
+     liboapv
+     libonnxruntime
+@@ -3888,6 +3889,8 @@ libxevd_decoder_deps_any="libxevd libxevdb"
+ libxeve_encoder_deps_any="libxeve libxeveb"
+ libxvid_encoder_deps="libxvid"
+ libzvbi_teletext_decoder_deps="libzvbi"
++mxl_muxer_deps="libmxl swresample"
++mxl_demuxer_deps="libmxl swresample"
+ vapoursynth_demuxer_deps="vapoursynth"
+ videotoolbox_suggest="coreservices"
+ videotoolbox_deps="corefoundation coremedia corevideo VTDecompressionSessionDecodeFrame"
+@@ -7324,6 +7327,7 @@ enabled libmodplug        && require_pkg_config libmodplug libmodplug libmodplug
+ enabled libmp3lame        && { check_pkg_config libmp3lame "lame >= 3.98.3" lame/lame.h lame_set_VBR_quality ||
+                                require "libmp3lame >= 3.98.3" lame/lame.h lame_set_VBR_quality -lmp3lame $libm_extralibs; }
+ enabled libmpeghdec       && require_pkg_config libmpeghdec "mpeghdec >= 3.0.0" mpeghdec/mpeghdecoder.h mpeghdecoder_init
++enabled libmxl            && require_pkg_config libmxl libmxl mxl/mxl.h mxlCreateInstance
+ enabled libmysofa         && { check_pkg_config libmysofa libmysofa mysofa.h mysofa_neighborhood_init_withstepdefine ||
+                                require libmysofa mysofa.h mysofa_neighborhood_init_withstepdefine -lmysofa $zlib_extralibs; }
+ enabled libonnxruntime    && require libonnxruntime onnxruntime_c_api.h OrtGetApiBase -lonnxruntime
+@@ -7459,6 +7463,8 @@ enabled mmal              && { check_lib mmal interface/mmal/mmal.h mmal_port_co
+                                  check_lib mmal interface/mmal/mmal.h mmal_port_connect -lmmal_core -lmmal_util -lmmal_vc_client -lbcm_host; } ||
+                                die "ERROR: mmal not found" &&
+                                check_func_headers interface/mmal/mmal.h "MMAL_PARAMETER_VIDEO_MAX_NUM_CALLBACKS"; }
++enabled mxl_demuxer       && prepend avformat_deps "swresample"
++enabled mxl_muxer         && prepend avformat_deps "swresample"
+ enabled ohcodec           && { check_lib ohcodec "multimedia/player_framework/native_avcodec_videodecoder.h multimedia/player_framework/native_avcodec_videoencoder.h" \
+                                     "OH_VideoDecoder_CreateByName OH_VideoEncoder_CreateByName" \
+                                     -lnative_media_vdec -lnative_media_venc -lnative_media_codecbase -lnative_media_core -lnative_window ||
+diff --git a/libavformat/Makefile b/libavformat/Makefile
+index ae8baaa12f..cbb46ed1a9 100644
+--- a/libavformat/Makefile
++++ b/libavformat/Makefile
+@@ -686,6 +686,10 @@ OBJS-$(CONFIG_LIBMODPLUG_DEMUXER)        += libmodplug.o
+ OBJS-$(CONFIG_LIBOPENMPT_DEMUXER)        += libopenmpt.o
+ OBJS-$(CONFIG_VAPOURSYNTH_DEMUXER)       += vapoursynth.o
+ 
++# MXL demuxer/muxer
++OBJS-$(CONFIG_MXL_DEMUXER)               += mxldec.o mxl_dump.o mxl_diag.o mxl_uri.o mxl_loc.o mxl_json.o jsmn.o
++OBJS-$(CONFIG_MXL_MUXER)                 += mxlenc.o mxl_diag.o mxl_json.o jsmn.o
++
+ # protocols I/O
+ OBJS-$(CONFIG_ANDROID_CONTENT_PROTOCOL)  += file.o
+ OBJS-$(CONFIG_ASYNC_PROTOCOL)            += async.o
+@@ -805,6 +809,7 @@ TESTPROGS-$(CONFIG_IMF_DEMUXER)          += imf
+ TESTPROGS-$(CONFIG_MP3_MUXER)            += id3v2enc id3v2chap
+ TESTPROGS-$(CONFIG_AU_MUXER)             += auenc
+ TESTPROGS-$(CONFIG_OGG_MUXER)            += ogg_pages
++TESTPROGS-$(CONFIG_MXL_DEMUXER)          += mxl_diag mxl_uri mxl_loc mxl_json
+ 
+ TOOLS     = aviocat                                                     \
+             ismindex                                                    \
+diff --git a/libavformat/allformats.c b/libavformat/allformats.c
+index a4e859da33..f9e990da68 100644
+--- a/libavformat/allformats.c
++++ b/libavformat/allformats.c
+@@ -584,6 +584,8 @@ extern const FFInputFormat  ff_image_webp_pipe_demuxer;
+ extern const FFInputFormat  ff_image_xbm_pipe_demuxer;
+ extern const FFInputFormat  ff_image_xpm_pipe_demuxer;
+ extern const FFInputFormat  ff_image_xwd_pipe_demuxer;
++extern const FFInputFormat  ff_mxl_demuxer;
++extern const FFOutputFormat ff_mxl_muxer;
+ 
+ /* external libraries */
+ extern const FFInputFormat  ff_avisynth_demuxer;
+diff --git a/tests/Makefile b/tests/Makefile
+index 7d1597bdf7..e30cda3622 100644
+--- a/tests/Makefile
++++ b/tests/Makefile
+@@ -242,6 +242,7 @@ include $(SRC_PATH)/tests/fate/mpeg4.mak
+ include $(SRC_PATH)/tests/fate/mpegps.mak
+ include $(SRC_PATH)/tests/fate/mpegts.mak
+ include $(SRC_PATH)/tests/fate/mxf.mak
++include $(SRC_PATH)/tests/fate/mxl.mak
+ include $(SRC_PATH)/tests/fate/ogg-vorbis.mak
+ include $(SRC_PATH)/tests/fate/ogg-flac.mak
+ include $(SRC_PATH)/tests/fate/ogg-opus.mak
