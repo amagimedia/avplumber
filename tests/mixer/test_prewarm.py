@@ -30,7 +30,8 @@ class NativeEngine:
         self.wipes = WipeLoaderSim()
         self.loaded_clips = self.wipes.loads   # what the running clip cache was told to load
         self.edges = SimpleNamespace(planCapacity=lambda *_: None)
-        self.manager = SimpleNamespace(shouldWork=True)
+        self.manager = SimpleNamespace(shouldWork=True, node_if_exists=lambda name: (
+            SimpleNamespace(parameters=self.nodes[name]) if name in self.nodes else None))
 
     def addNode(self, node):
         self.nodes[node.parameters["name"]] = node.parameters
@@ -142,6 +143,67 @@ def test_native_startup_error_aborts_without_waiting_for_frames(native_boundary,
     assert received == [failure]
     assert engine.on_exception is original
     assert not engine.ready
+
+
+@pytest.mark.parametrize("phase", ["input", "transition"])
+def test_a_source_restarting_its_group_while_starting_is_waited_for(native_boundary, monkeypatch, phase):
+    app = application(native_boundary)
+    engine = app.avp
+    group = app.input_groups[0]
+    reader = next(name for name, params in engine.nodes.items() if params["group"] == group and "src" not in params)
+    engine.nodes[reader]["auto_restart"] = "group"   # a live source: its reader restarts the group
+    edge = app.input_edges[0] if phase == "input" else "mixer_trans_out"
+    engine.missing.add(edge)
+    inspect = engine.getEdge
+    def get_edge(name, data_type=None):
+        if name == edge and edge in engine.missing:
+            engine.on_exception(reader, "input_rec", "Invalid data found when processing input")
+            engine.on_exception(group, "NodeGroup", "Error while changing state: flow not found")   # the writer is away
+            engine.missing.discard(edge)
+        return inspect(name, data_type)
+    monkeypatch.setattr(engine, "getEdge", get_edge)
+    monkeypatch.setattr("pyplumber.mixer.cli.time.sleep", lambda _: None)
+    app.start()
+    assert engine.ready
+
+
+@pytest.mark.parametrize("failure", [
+    ("{group}", "NodeGroup", "Error while changing state: flow not found"),   # never started: configuration
+    ("{reader}", "input_rec", "Invalid data found when processing input"),   # no restart policy
+])
+def test_a_source_that_cannot_start_or_restart_still_aborts(native_boundary, monkeypatch, failure):
+    app = application(native_boundary)
+    engine = app.avp
+    group = app.input_groups[0]
+    reader = next(name for name, params in engine.nodes.items() if params["group"] == group and "src" not in params)
+    engine.nodes[reader].pop("auto_restart", None)
+    engine.missing.add(app.input_edges[0])
+    inspect = engine.getEdge
+    def get_edge(name, data_type=None):
+        engine.on_exception(failure[0].format(group=group, reader=reader), *failure[1:])
+        return inspect(name, data_type)
+    monkeypatch.setattr(engine, "getEdge", get_edge)
+    monkeypatch.setattr("pyplumber.mixer.cli.time.sleep", lambda _: None)
+    with pytest.raises(RuntimeError, match="Mixer startup failed at"):
+        app.start()
+    assert not engine.ready
+
+
+def test_a_source_group_that_gave_a_frame_may_fail_to_start_again(native_boundary, monkeypatch):
+    """A writer that leaves cleanly ends its reader without an error; only the reopen fails."""
+    app = application(native_boundary)
+    engine = app.avp
+    engine.missing.add("mixer_trans_out")
+    inspect = engine.getEdge
+    def get_edge(name, data_type=None):
+        if name == "mixer_trans_out" and name in engine.missing:
+            engine.missing.discard(name)
+            engine.on_exception(app.input_groups[0], "NodeGroup", "Error while changing state: flow not found")
+        return inspect(name, data_type)
+    monkeypatch.setattr(engine, "getEdge", get_edge)
+    monkeypatch.setattr("pyplumber.mixer.cli.time.sleep", lambda _: None)
+    app.start()
+    assert engine.ready
 
 
 def test_static_browser_retries_its_first_paint_until_the_input_is_ready(native_boundary, monkeypatch):

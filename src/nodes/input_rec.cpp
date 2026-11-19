@@ -134,15 +134,23 @@ protected:
         av::Packet packet = ictx_.readPacket(error);
         // A live MXL writer may miss several grain periods without ending its flow, and a read
         // can catch a grain it has opened but not yet committed (the demuxer's "invalid data").
-        while ((error == std::error_code(AVERROR(EAGAIN), av::ffmpeg_category()) ||
-                error == std::error_code(AVERROR_INVALIDDATA, av::ffmpeg_category())) &&
+        // The demuxer stays on that grain, so the next read returns it whole, or resets to the
+        // newest grain once the writer has passed it (`on_too_late=reset`).
+        const std::error_code half_written(AVERROR_INVALIDDATA, av::ffmpeg_category());
+        std::chrono::milliseconds wait(1);
+        while ((error == std::error_code(AVERROR(EAGAIN), av::ffmpeg_category()) || error == half_written) &&
                std::string_view(ictx_.inputFormat().name()) == "mxl") {
             const auto &interrupt = ictx_.raw()->interrupt_callback;
             if (interrupt.callback(interrupt.opaque)) {
                 error = std::error_code(AVERROR_EXIT, av::ffmpeg_category());
                 break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::this_thread::sleep_for(wait);
+            if (error == half_written) {
+                // Unlike the wait for a grain, this read returns at once and logs an error: a
+                // writer stopped inside a grain must not make this a busy loop of them.
+                wait = std::min(wait * 2, std::chrono::milliseconds(100));
+            }
             packet = ictx_.readPacket(error);
         }
         if (!error) {

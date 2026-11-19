@@ -217,14 +217,42 @@ class MixerApplication:
     absent_inputs: tuple[str, ...] = field(default=(), init=False)   # edges of sources that gave no frame
     startup: dict | None = field(default=None, init=False)   # how going on air went; `mixer.startup` answers with it
     _startup_error: str | None = field(default=None, init=False, repr=False)
+    _startup_failures: list = field(default_factory=list, init=False, repr=False)   # (node, kind, message) to classify
+    _restarting_sources: set = field(default_factory=set, init=False, repr=False)   # groups of sources that failed a read
     # Audio edges held empty while preheating, see _drain_preheat_audio: set once the
     # inputs start, emptied again as soon as the router consumes them.
     _audio_preheat_drain: tuple[str, ...] = field(default=(), init=False, repr=False)
     optional_input_edges: tuple[str, ...] = ()
 
     def _check_startup(self) -> None:
+        # Classified here, on the starting thread: the native callback only records.
+        while self._startup_failures and not self._startup_error:
+            name, kind, message = self._startup_failures.pop(0)
+            if self._source_restarts(name, kind):
+                log.warning("Source %s failed while starting and restarts its group: %s", name, message)
+            else:
+                self._startup_error = f"Mixer startup failed at {name} ({kind}): {message}"
         if self._startup_error:
             raise RuntimeError(self._startup_error)
+
+    def _source_restarts(self, name: str, kind: str) -> bool:
+        """Whether a failure reported while starting is a live source restarting its group, which
+        the start waits out like on air: the input wait gives a source up at the preheat timeout.
+        That is a failed read of a source's reader (the node of a source group without `src`)
+        whose policy restarts the group, and a source group's failed attempts to start again (the
+        writer is still away) after such a read or after it gave a frame: a writer that leaves
+        cleanly ends the reader without an error. A source group that cannot start the first time,
+        and any other node, is a configuration error and stays fatal."""
+        if kind == "NodeGroup":   # a group reports under its own name, which is also its reader's
+            return name in self._restarting_sources or (name in self.input_groups and self.avp.getEdge(
+                self.input_edges[self.input_groups.index(name)]).enqueued_total > 0)
+        node = self.avp.manager.node_if_exists(name)
+        params = node.parameters if node is not None else {}
+        if (params.get("on_error") or params.get("auto_restart")) not in ("group", "restart_group") \
+                or "src" in params or params.get("group") not in self.input_groups:
+            return False
+        self._restarting_sources.add(params["group"])
+        return True
 
     def _drain_preheat_audio(self) -> None:
         """Keep the per-source audio queues empty until the router drains them itself.
@@ -344,9 +372,10 @@ class MixerApplication:
         # while preheating. Abort here on the native error instead of waiting for frames.
         original = self.avp.on_exception
         self._startup_error = None
+        self._startup_failures.clear()
+        self._restarting_sources.clear()
         def failed(name, kind, message):
-            if self._startup_error is None:
-                self._startup_error = f"Mixer startup failed at {name} ({kind}): {message}"
+            self._startup_failures.append((name, kind, message))
             original(name, kind, message)
         self.avp.on_exception = failed
         try:

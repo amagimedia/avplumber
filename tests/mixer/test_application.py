@@ -91,6 +91,9 @@ def test_an_mxl_writer_restart_never_ends_the_program(native_boundary):
     assert {k: live[k] for k in ("type", "ignore_eof", "group", "pixel_format", "real_pixel_format")} == {
         "type": "assume_video_format", "ignore_eof": True, "group": nodes["mixer_otm_cam"]["group"], "pixel_format": "cuda",
         "real_pixel_format": cfg.working_format}
+    # Its reader is what a start waits for when a read fails (MixerApplication._source_restarts).
+    app.avp.manager = SimpleNamespace(node_if_exists=lambda name: SimpleNamespace(parameters=nodes[name]))
+    assert app._source_restarts("input_0", "input_rec") and not app._source_restarts("decode_0", "dec_video")
 
 
 def test_a_declared_decoded_format_lets_the_fanout_tag_the_frames(native_boundary):
