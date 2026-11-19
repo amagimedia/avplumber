@@ -28,6 +28,29 @@ def show(storage="cuda", **source_changes):
     })
 
 
+def test_processed_cuda_ipc_input_uses_final_edge_for_optional_startup(native_boundary):
+    options = MixerOptions(cuda_ipc_inputs=(("cam", "/tmp/playout.sock"),))
+    app = build_application(show(), options, api=fake_api(),
+                            process_source=lambda ctx: f"processed_{ctx.source.id}")
+    assert app.optional_input_edges == ("processed_cam",)
+    app.absent_inputs = app.optional_input_edges
+    app._release_absent_inputs()
+
+
+def test_cuda_ipc_override_only_opens_remaining_browser(native_boundary, monkeypatch):
+    cfg = show()
+    cfg = replace(cfg, sources=tuple(replace(s, kind="browser", location="about:blank") for s in cfg.sources))
+    opened, sockets = [], []
+    monkeypatch.setattr(mixer_application, "open_windows", lambda url, windows: opened.extend(windows))
+    monkeypatch.setattr(mixer_application, "wait_for_sockets", lambda paths, timeout: sockets.extend(paths))
+    app = build_application(cfg, MixerOptions(cuda_ipc_inputs=(("cam", "/tmp/playout.sock"),)), api=fake_api())
+    assert [window["id"] for window in opened] == ["idle"]
+    assert [Path(path).name for path in sockets] == ["idle.sock"]
+    assert app.browser_windows == ("idle",)
+    assert app.browser_importers == ("input_1_to_cuda",)
+    assert app.browser_input_edges == (app.input_edges[1],)
+
+
 def test_public_import_needs_neither_demo_nor_native_engine(tmp_path):
     source = Path(__file__).resolve().parents[2] / "pyplumber"
     shutil.copytree(source, tmp_path / "pyplumber", ignore=shutil.ignore_patterns("__pycache__"))

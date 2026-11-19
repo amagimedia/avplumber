@@ -122,6 +122,9 @@ class MixerOptions:
     # leaves this name alone and skips the audio_mixer-specific gain controller.
     audio_router_node: str = ""
     build_audio_mixer: bool = True
+    cuda_ipc_inputs: tuple[tuple[str, str], ...] = ()
+    cuda_ipc_output: str = ""
+    cuda_ipc_slots: int = 12
 
     def __post_init__(self):
         if self.browser_frame_queue is None:
@@ -217,6 +220,7 @@ class MixerApplication:
     # Audio edges held empty while preheating, see _drain_preheat_audio: set once the
     # inputs start, emptied again as soon as the router consumes them.
     _audio_preheat_drain: tuple[str, ...] = field(default=(), init=False, repr=False)
+    optional_input_edges: tuple[str, ...] = ()
 
     def _check_startup(self) -> None:
         if self._startup_error:
@@ -378,10 +382,11 @@ class MixerApplication:
                 refresh_windows(self.dmabuf_rest, windows)
             # Freeze each page once its own first frame is usable; waiting for the
             # slowest decoder lets early pages churn through entire capture pools.
-            waiting = tuple(edge for edge in self.input_edges if edge not in failed)
+            waiting = tuple(edge for edge in self.input_edges
+                            if edge not in failed and edge not in self.optional_input_edges)
             silent = self._wait_for_edges(waiting, "input readiness", browser_pages=pages, required=False,
                                           browser_before=browser_before, on_ready=pause_ready if windows else None)
-            self.absent_inputs = (*failed, *silent)
+            self.absent_inputs = (*failed, *silent, *self.optional_input_edges)
             log.info("Inputs ready: %d in %.1f s", len(waiting) - len(silent), time.monotonic() - started)
             remaining = [name for name in windows if name not in paused]
             if remaining:
@@ -972,13 +977,18 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         # with it. audio_router_node names another router instead.
         from .audio_mixer import AUDIO_MIXER
         options = replace(options, audio_router_node=AUDIO_MIXER)
-    browsers = [s for s in cfg.sources if s.kind == "browser"]
+    external = dict(options.cuda_ipc_inputs)
+    if set(external) - {s.id for s in cfg.sources}:
+        raise ValueError("CUDA IPC input does not name a declared source")
+    if options.cuda_ipc_output and (cfg.dsk_keys or cfg.wipes or options.wipe_file):
+        raise ValueError("CUDA IPC output expects stingers rendered in the scene")
+    browsers = {i: s for i, s in enumerate(cfg.sources) if s.kind == "browser" and s.id not in external}
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
                                             "height": s.height, "fps": mixer_config.paint_rate(s.fps or cfg.fps),
                                             "ringSize": cfg.browser_frame_queue,
-                                            "holdLastFrame": s.hold_last_frame} for s in browsers])
-        wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
+                                            "holdLastFrame": s.hold_last_frame} for s in browsers.values()])
+        wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers.values()],
                          options.preheat_timeout_sec)
 
     # Browser REST failures must occur before native control threads exist;
@@ -987,6 +997,9 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     canvas = (cfg.canvas_w, cfg.canvas_h)
     mixer = _make_builder(avp, api, options, canvas=canvas, fps=cfg.fps, working_format=cfg.working_format,
                           color=cfg.out_color, wipe_color=cfg.wipe_color or None)
+    if options.cuda_ipc_output:
+        mixer.vmm_slots = options.cuda_ipc_slots
+    optional_input_edges = []
     aliases = cfg.alias_counts
     blended_sources = {item.source for scene in cfg.scenes for item in scene.items if item.blend}
     blended_sources |= {key.source for key in cfg.dsk_keys}
@@ -997,7 +1010,13 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     audio_edges: list[tuple[str, str]] = []  # (source.id, audio edge), only sources with has_audio
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
-        if source.kind == "browser":
+        if source.id in external:
+            from pyplumber.node import InternalNode
+            source_type = type("CudaIpcSource", (InternalNode,), {"TYPE": "cuda_ipc_source"})
+            edge = f"input_{index}_vmm"
+            avp.addNode(source_type({"name": f"input_{index}_vmm_source", "socket": external[source.id],
+                                     "hwaccel": HWACCEL, "dst": edge, "group": group}))
+        elif source.kind == "browser":
             nodes, edge = dmabuf_cuda_input_nodes(
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
                 fps=cfg.fps, drm_hwaccel=None,
@@ -1065,6 +1084,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             if not isinstance(edge, str) or not edge.strip():
                 raise ValueError(f"process_source for {source.id!r} must return a non-empty video edge name")
         input_edges.append(edge)
+        if source.id in external:
+            optional_input_edges.append(edge)
         compositor_inputs.append(tuple(range(next_input, next_input + aliases[source.id])))
         next_input += aliases[source.id]
         for k in range(1, aliases[source.id] + 1):
@@ -1075,14 +1096,14 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                              color=None if source.filter_graph else source.color,
                              # Raw upload stamps tags; transforms preserve frame properties.
                              # User filters/hooks can change them, so keep normalization there.
-                             color_tagged=(source.kind in ("nv12", "p010", "v210") and
+                             color_tagged=((source.kind in ("nv12", "p010", "v210") or source.id in external) and
                                            not source.filter_graph and process_source is None),
                              packed_rgb=source.kind == "browser" or source.alpha,
                              # Decoded alpha is straight; only browser pages arrive premultiplied.
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
                              pixel_format="rgba" if source.alpha else source.filter_output_format or
                              (source.transform.sw_format if source.transform
-                              else source.decoded_format or mixer_config.RAW_STORAGE.get(source.kind)))
+                              else source.decoded_format or ("nv12" if source.id in external else mixer_config.RAW_STORAGE.get(source.kind))))
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
@@ -1172,7 +1193,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     if processor_controller is None:
         settings.pop("audio_processors", None)   # likewise for mixer.audio_processor_status
     try:
-        settings["decode"] = mixer_config.decode_load(cfg.sources)
+        settings["decode"] = mixer_config.decode_load([s for s in cfg.sources if s.id not in external])
     except Exception as exc:   # a missing ffprobe or an unreadable header must not stop the show
         log.warning("Decode load unknown: %s", exc)
     settings = json.dumps(settings, separators=(",", ":")) + "\n"
@@ -1201,10 +1222,16 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     avp.registerControlCommand("mixer.debug_overlay", debug_overlay, True)
     held = []
     # Purge idle imports left by the capture pool's start-up churn.
-    importers = tuple(
-        f"input_{index}_to_cuda" for index, source in enumerate(cfg.sources) if source.kind == "browser")
-    listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
-                                 working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend, held=held)
+    importers = tuple(f"input_{index}_to_cuda" for index in browsers)
+    if options.cuda_ipc_output:
+        from pyplumber.node import InternalNode
+        sink_type = type("CudaIpcSink", (InternalNode,), {"TYPE": "cuda_ipc_sink"})
+        avp.addNode(sink_type({"name": "program_vmm", "socket": options.cuda_ipc_output,
+                               "hwaccel": HWACCEL, "src": feeds["dirty"], "group": OUTPUT_GROUP}))
+        listener = None
+    else:
+        listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
+                                     working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend, held=held)
     if program_audio_edge and options.janus_output:
         from .janus import JanusAudioConfig, build_janus_audio_output
         # Renditions beyond the legacy single audio leg that opt into their own audio_port (e.g.
@@ -1233,10 +1260,10 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             group=OUTPUT_GROUP, prefix="janus_audio")
     return _application(avp, mixer, options, input_edges, listener, compositor_inputs=tuple(compositor_inputs),
                         routed_inputs=False, held_outputs=tuple(held), browser_importers=importers,
-                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers),
-                        browser_input_edges=tuple(input_edges[i] for i, s in enumerate(cfg.sources) if s.kind == "browser"),
+                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers.values()),
+                        browser_input_edges=tuple(input_edges[i] for i in browsers),
                         delivery_monitor=True,
-                        aux_buses=aux, audio_edges=tuple(audio_edges))
+                        aux_buses=aux, audio_edges=tuple(audio_edges), optional_input_edges=tuple(optional_input_edges))
 
 
 def _startup_result(error=None):
