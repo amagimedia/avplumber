@@ -32,6 +32,11 @@ constexpr AVRational Wallclock::time_base;
 
 Wallclock wallclock;
 
+void warnUnusedInputOptions(av::Dictionary &options) {
+    for (auto &entry : options)
+        logstream << "WARNING: input option not consumed by libavformat: " << entry.key();
+}
+
 av::Dictionary parametersToDict(const json &params) {
     av::Dictionary r;
     if (params.empty()) return r;

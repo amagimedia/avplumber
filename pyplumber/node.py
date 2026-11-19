@@ -125,6 +125,10 @@ class DecVideo(InternalNode):
     TYPE = "dec_video"
 
 
+class CudaToV210(InternalNode):
+    TYPE = "cuda_to_v210"
+
+
 class DecAudio(InternalNode):
     TYPE = "dec_audio"
 

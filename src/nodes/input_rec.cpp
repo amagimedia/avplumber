@@ -1205,6 +1205,7 @@ public:
         }
 
         ictx_.openInput(params["url"], opts, ifmt);
+        warnUnusedInputOptions(opts);
         ictx_.findStreamInfo();
         logstream << "Opened URL " << params["url"] << " . Streams:";
         for (unsigned i=0; i<ictx_.streamsCount(); i++) {
