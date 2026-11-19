@@ -209,7 +209,7 @@ class Rect:
 
 
 # What a raw source's frames are stored as on the GPU; a decoded file's storage is known only per frame.
-RAW_STORAGE = {"v210": "p210le", "nv12": "nv12", "p010": "p010le"}
+RAW_STORAGE = {"v210": "p210le", "mxl": "p210le", "nv12": "nv12", "p010": "p010le"}
 TRANSFORM_FORMATS = ("nv12", "p010le", "p210le")   # the canvases cuda_transform draws a video source on
 
 
@@ -226,8 +226,8 @@ class SourceTransform(NamedTuple):
 @dataclass(frozen=True)
 class Source:
     id: str
-    kind: str                      # "browser" | "video" | "v210" | "nv12" | "p010"
-    location: str                  # browser URL or media path (v210/nv12/p010 are raw files)
+    kind: str                      # "browser" | "video" | "v210" | "mxl" | "nv12" | "p010"
+    location: str                  # browser URL, media path (v210/nv12/p010 are raw files) or MXL reader URL
     width: int = 0
     height: int = 0
     fps: Any = 0                   # browser source rate (parse_rate); 0 = canvas fps
@@ -284,7 +284,7 @@ class Rendition:
     """One encoded output. The compositor renders once, at the canvas rate;
     each rendition re-times and rescales that program for its own target."""
     id: str
-    target: str = "janus"            # "janus" or a file path
+    target: str = "janus"            # "janus", "mxl" or a file path
     width: int = 0                   # 0 keeps the canvas size
     height: int = 0
     fps: Any = 0                     # parse_rate; 0 keeps the canvas rate
@@ -311,6 +311,8 @@ class Rendition:
     color: str = ""                # empty: inherit canvas, except H.264/tonemap imply SDR
     feed: str = "dirty"            # "clean" omits the downstream keys; without keys both are the program
     dpb_size: int = 0              # NVENC reference frames kept (dpb_size); 0 lets NVENC choose
+    url: str = ""                  # mxl target: the MXL domain directory
+    flow: str = ""                 # mxl target: the id of the video flow it publishes
 
     @property
     def aspect(self) -> str:
@@ -478,7 +480,7 @@ class MixerConfig:
                       **({"audio": True} if b.renditions[0].audio_port else {}),
                       **({"group": "Thumbnails", "width": r.width, "height": r.height}
                          if b.layout.get("preset") == "source_thumbnails" else {})}
-                     for b in self.aux_buses for r in b.renditions]
+                     for b in self.aux_buses for r in b.renditions if r.target == "janus"]
         aliases = self.alias_counts
         return {"source_count": len(self.sources), "browser_frame_queue": self.browser_frame_queue,
                 "preview_codecs": preview_codecs, **({"program_outputs": programs} if programs else {}),
@@ -577,8 +579,16 @@ def _rect(obj: Any, where: str) -> Rect:
     return r
 
 
-_SOURCE_KEYS = {"browser": ("url", "width", "height"), "video": ("path",),
+_SOURCE_KEYS = {"browser": ("url", "width", "height"), "video": ("path",), "mxl": ("url", "flow", "width", "height"),
                 **{kind: ("path", "width", "height") for kind in ("v210", "nv12", "p010")}}
+
+
+def _mxl_flow(obj: Dict[str, Any], where: str) -> str:
+    """The MXL reader URL of an object's `url` (the domain directory) and `flow` (a video flow id)."""
+    url, flow = str(obj.get("url", "")), str(obj.get("flow", ""))
+    if not (url.startswith("/") and flow):
+        raise ConfigError(f"{where}: mxl needs url, the absolute path of the MXL domain, and flow, a video flow id")
+    return f"mxl://{url}?id={flow}"
 
 
 def _parse_source_transform(t: Any, kind: str, where: str) -> SourceTransform:
@@ -674,9 +684,12 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     except ValueError as e:
         raise ConfigError(f"{where}: {e}") from e
     picture = _parse_picture(s["picture"], s, where) if "picture" in s else None
-    return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)), picture=picture,
+    location = _mxl_flow(s, where) if kind == "mxl" else str(s.get("url", s.get("path")))
+    return Source(sid, kind, location, width=int(s.get("width", 0)), picture=picture,
                   height=int(s.get("height", 0)), fps=parse_rate(s.get("fps", fps), f"{where}.fps") if kind == "browser" else 0,
-                  loop=bool(s.get("loop", True)), capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
+                  # A live flow never ends: it restarts its group when it stalls instead (inputs.py).
+                  loop=bool(s.get("loop", True)) and kind != "mxl",
+                  capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
                   has_audio=has_audio, deinterlace=deinterlace, alpha=alpha,
                   decoded_format=decoded_format,
@@ -694,6 +707,12 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
                                  for f in fields(Rendition) if f.name in r and f.name not in ("id", "fps")})
     if "fps" in r:
         rendition = replace(rendition, fps=parse_rate(r["fps"], f"{where}.fps"))
+    if rendition.target == "mxl":
+        _mxl_flow(r, where)
+        # Packed to v210 on the GPU, not encoded: the NVENC and Janus fields do not apply.
+        rendition = replace(rendition, codec="v210", audio_port=0)
+    elif rendition.codec == "v210":
+        raise ConfigError(f"{where}: v210 is the codec of an mxl target")
     if rendition.tonemap and rendition.tonemap not in OPERATORS:
         raise ConfigError(f"{where}: unsupported tone-map operator")
     if rendition.color:
@@ -1053,17 +1072,17 @@ def parse_aux_buses(values, cfg):
         fps = aux_fps(cfg.fps, timing["full_rate"])
         renditions = obj.get("renditions", [])
         if len(renditions) != 1:
-            raise ConfigError("aux requires one SDR H.264 or HEVC Janus rendition")
+            raise ConfigError("aux requires one SDR rendition: H.264 or HEVC to Janus, or v210 to MXL")
         # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
         r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
                              f"aux {bid}", cfg.canvas_w, cfg.canvas_h, fps)
         expected = (*thumbnail.size_of(layouts[0]), thumbnail.FPS) if thumbnails else (cfg.canvas_w, cfg.canvas_h, fps)
         if thumbnails and (r.codec != "h264_nvenc" or r.profile != "baseline" or getattr(r, "audio_port", 0)):
             raise ConfigError("thumbnail banks require silent H.264 baseline video")
-        if (r.target != "janus" or r.codec not in ("h264_nvenc", "hevc_nvenc") or r.color != "sdr" or
+        if (r.target not in ("janus", "mxl") or r.codec not in ("h264_nvenc", "hevc_nvenc", "v210") or r.color != "sdr" or
                 (r.width, r.height, r.fps) != expected):
-            raise ConfigError("aux rendition must be SDR H.264 or HEVC at canvas size and the aux frame rate")
-        if not r.port:
+            raise ConfigError("aux rendition must be SDR H.264 or HEVC to Janus, or v210 to MXL, at canvas size and the aux frame rate")
+        if not r.port and r.target == "janus":
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
         if not isinstance(obj.get("label", ""), str):
             raise ConfigError(f"aux {bid}: label must be a string")
@@ -1162,8 +1181,8 @@ def decode_load(sources, probe=None) -> Dict[str, Any]:
 def encode_by_codec(renditions, working_format: str) -> List[Dict[str, Any]]:
     """The NVENC sessions a show's encoded outputs (*renditions*) open and the frames they encode per
     second, by codec, most sessions first. Codecs are named like decode_load's ("h264", "hevc")."""
-    return _by_codec((((r.codec or default_codec(working_format)).removesuffix("_nvenc"), r.fps) for r in renditions),
-                     "sessions")
+    return _by_codec((((r.codec or default_codec(working_format)).removesuffix("_nvenc"), r.fps)
+                      for r in renditions if r.codec != "v210"), "sessions")
 
 
 def _by_codec(streams, count_key: str) -> List[Dict[str, Any]]:

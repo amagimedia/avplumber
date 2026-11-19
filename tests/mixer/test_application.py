@@ -429,7 +429,7 @@ def go_on_air(monkeypatch, counters, buses=("aux_1",), *, start=True, **options)
     engine = CountingEngine(clock, counters)
     app = mixer_application.MixerApplication(
         avp=engine, mixer=None, input_groups=(), input_edges=(), routed_inputs=False, preheat_timeout_sec=1,
-        held_outputs=("janus",), aux_buses=[SimpleNamespace(prefix=prefix) for prefix in buses], **options)
+        held_outputs=("janus",), aux_buses=[SimpleNamespace(prefix=prefix, listener=True) for prefix in buses], **options)
     if start:
         app._go_on_air()
     return app, engine, clock

@@ -674,19 +674,20 @@ def test_a_bus_without_the_pgm_pad_draws_any_layout_but_pgm_cells(cfg):
     assert [l.get("preset") for l in listed.bus.layouts] == ["source_pages", "pgm_pvw_grid"]
 
 
-def _built_bus(cfg, monkeypatch):
+def _built_bus(cfg, monkeypatch, **spec):
     import pyplumber.mixer.janus as janus
     from pyplumber.mixer.backends.cuda import CudaMixerBackend
     nodes, outputs = [], []
     monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: outputs.append(a[2]))
     avp = SimpleNamespace(addNode=lambda node, **kw: nodes.append(node), edges=SimpleNamespace(planCapacity=lambda *a: None))
-    api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
+    api = SimpleNamespace(**{kind: (lambda kind: lambda params: SimpleNamespace(parameters={"type": kind, **params}))(kind)
+                             for kind in ("FilterVideo", "ForceFPS", "CudaToV210", "Mux", "Output")})
     mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
                             canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
                             backend=CudaMixerBackend())
     options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="")
-    AuxBus(avp, api, mixer, cfg, parse_aux_buses([bus_json(scenes=["repeat"])], cfg)[0]).build(options)
-    return {node.parameters["name"]: node.parameters for node in nodes}, outputs[0]
+    AuxBus(avp, api, mixer, cfg, parse_aux_buses([bus_json(scenes=["repeat"], **spec)], cfg)[0]).build(options)
+    return {node.parameters["name"]: node.parameters for node in nodes}, next(iter(outputs), None)
 
 
 def _built_compositor(cfg, monkeypatch):
@@ -710,6 +711,24 @@ def test_aux_only_converts_when_canvas_is_not_already_sdr_nv12(cfg, monkeypatch,
         assert node["src"] == nodes["aux_multiview_comp"]["dst"]
         assert output == node["dst"]
         assert conversion in node["graph"]
+
+
+def test_an_mxl_bus_packs_sdr_v210_for_its_flow_instead_of_janus(cfg, monkeypatch):
+    from pyplumber.mixer.color import Color
+    flow = "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+    rendition = {"id": "monitor", "target": "mxl", "url": "/dev/shm/mxl", "flow": flow}
+    nodes, janus = _built_bus(replace(cfg, out_color=Color("hlg"), working_format="p210le"), monkeypatch,
+                              renditions=[rendition])
+    assert janus is None
+    assert "tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=p210le" in nodes["aux_multiview_sdr"]["graph"]
+    assert [(nodes[n]["type"], nodes[n]["src"]) for n in ("aux_multiview_fps", "aux_multiview_pack")] == [
+        ("ForceFPS", "aux_multiview_sdr"), ("CudaToV210", "aux_multiview_fps")]
+    output = nodes["aux_multiview_output"]
+    assert (output["url"], output["format"], output["options"], output["auto_restart"]) == (
+        "/dev/shm/mxl", "mxl", {"video_flow_id": flow}, "off")   # a bus never takes the show down
+    assert {n["group"] for n in nodes.values()} == {"aux_multiview"}
+    # No Janus preview, mountpoint or RTP port for it.
+    assert "preview_outputs" not in replace(cfg, aux_buses=parse_aux_buses([bus_json(renditions=[rendition])], cfg)).settings()
 
 
 def test_bus_compositor_wakes_for_every_frame_unless_told_how_often_to_look(cfg, monkeypatch):

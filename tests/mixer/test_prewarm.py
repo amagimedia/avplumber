@@ -285,7 +285,7 @@ def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boun
     app = application(native_boundary)
     class Aux:
         def __iter__(self):
-            return iter([SimpleNamespace(prefix="aux_test")])
+            return iter([SimpleNamespace(prefix="aux_test", listener=True)])   # a held Janus bus
 
         def start(self, ready):
             app.avp.events.append("start aux_test")
