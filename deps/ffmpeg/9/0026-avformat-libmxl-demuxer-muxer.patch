@@ -3,7 +3,7 @@ From: avplumber mxl builder <avplumber-mxl@local>
 Date: Thu, 3 Sep 2026 15:38:09 -0400
 Subject: [PATCH] avformat/mxl: import libmxl muxer and demuxer
 
-Source: https://github.com/cbcrc/FFmpeg.git at 16abbf041307fd08db2566e488c1f4e0714a158a (dmf-mxl/9.0). AVPlumber supplies registration and PTS reset handling.
+Source: https://github.com/cbcrc/FFmpeg.git at 16abbf041307fd08db2566e488c1f4e0714a158a (dmf-mxl/9.0). Registration hunks adapted to this series; the PTS reset fix is 0027.
 
 Co-authored-by: jpt <jim.trainor@jptrainor.com>
 ---
@@ -26,7 +26,7 @@ Co-authored-by: jpt <jim.trainor@jptrainor.com>
  libavformat/mxl_status.h        |   59 +
  libavformat/mxl_uri.c           |  304 +++++
  libavformat/mxl_uri.h           |  118 ++
- libavformat/mxldec.c            | 1984 +++++++++++++++++++++++++++++++
+ libavformat/mxldec.c            | 1974 +++++++++++++++++++++++++++++++
  libavformat/mxlenc.c            |  893 ++++++++++++++
  libavformat/tests/mxl_diag.c    | 1471 +++++++++++++++++++++++
  libavformat/tests/mxl_json.c    | 1076 +++++++++++++++++
@@ -47,7 +47,7 @@ Co-authored-by: jpt <jim.trainor@jptrainor.com>
  tests/ref/fate/mxl-uri          | 1176 ++++++++++++++++++
  tests/ref/fate/mxl-video-encdec |   14 +
  tests/ref/fate/mxl-video-probe  |   10 +
- 40 files changed, 13703 insertions(+)
+ 40 files changed, 13693 insertions(+)
  create mode 100644 libavformat/jsmn.c
  create mode 100644 libavformat/jsmn.h
  create mode 100644 libavformat/mxl_common.h
@@ -3268,10 +3268,10 @@ index 0000000000..ce0e67131a
 +#endif /* AVFORMAT_MXL_URI_H */
 diff --git a/libavformat/mxldec.c b/libavformat/mxldec.c
 new file mode 100644
-index 0000000000..681170bd6f
+index 0000000000..404f0577fd
 --- /dev/null
 +++ b/libavformat/mxldec.c
-@@ -0,0 +1,1984 @@
+@@ -0,0 +1,1974 @@
 +/*
 + * MXL demuxer for Media eXchange Layer flows
 + *
@@ -3353,8 +3353,6 @@ index 0000000000..681170bd6f
 +    uint64_t mxl_start_grain_index;
 +    uint64_t mxl_grain_index;
 +    uint64_t last_pts;
-+    uint64_t pts_offset;
-+    uint64_t next_packet_pts;
 +    int frame_count;
 +} VideoState;
 +
@@ -3365,8 +3363,6 @@ index 0000000000..681170bd6f
 +    struct SwrContext *swr_context;
 +    int sample_point_count;
 +    uint64_t last_pts;
-+    uint64_t pts_offset;
-+    uint64_t next_packet_pts;
 +} AudioState;
 +
 +typedef enum FlowType {
@@ -4556,8 +4552,7 @@ index 0000000000..681170bd6f
 +        }
 +
 +        if (p->reset_on_drop) {
-+            // Resume after the complete previous packet, including a packet at PTS zero.
-+            stream_ctx->flow.video.pts_offset = stream_ctx->flow.video.next_packet_pts;
++            // presentation timestamp is mxl_start_grain_index relative
 +            stream_ctx->flow.video.mxl_start_grain_index = stream_ctx->flow.video.mxl_grain_index;
 +        }
 +    }
@@ -4666,8 +4661,7 @@ index 0000000000..681170bd6f
 +    }
 +
 +    int64_t next_pts =
-+        stream_ctx->flow.video.mxl_grain_index - stream_ctx->flow.video.mxl_start_grain_index
-+        + stream_ctx->flow.video.pts_offset;
++        stream_ctx->flow.video.mxl_grain_index - stream_ctx->flow.video.mxl_start_grain_index;
 +
 +    // monotonic pts sanity check
 +    av_assert0(next_pts >= 0 &&
@@ -4678,7 +4672,6 @@ index 0000000000..681170bd6f
 +        logi(s, "video pts jumped %d frames\n", next_pts - stream_ctx->flow.video.last_pts);
 +
 +    stream_ctx->flow.video.last_pts = next_pts;
-+    stream_ctx->flow.video.next_packet_pts = next_pts + 1;
 +
 +    pkt->pos = -1;
 +    pkt->pts = next_pts;
@@ -4930,8 +4923,7 @@ index 0000000000..681170bd6f
 +        }
 +
 +        if (p->reset_on_drop) {
-+            // Resume after the complete previous packet, including a packet at PTS zero.
-+            stream_ctx->flow.audio.pts_offset = stream_ctx->flow.audio.next_packet_pts;
++            // presentation timestamp is mxl_start_grain_index relative
 +            stream_ctx->flow.audio.mxl_start_sample_index = stream_ctx->flow.audio.mxl_sample_index;
 +        }
 +    }
@@ -5037,8 +5029,7 @@ index 0000000000..681170bd6f
 +    }
 +
 +    int64_t next_pts =
-+        stream_ctx->flow.audio.mxl_sample_index - stream_ctx->flow.audio.mxl_start_sample_index
-+        + stream_ctx->flow.audio.pts_offset;
++        stream_ctx->flow.audio.mxl_sample_index - stream_ctx->flow.audio.mxl_start_sample_index;
 +
 +    // monotonic pts sanity check
 +    av_assert0(next_pts >= 0 &&
@@ -5049,7 +5040,6 @@ index 0000000000..681170bd6f
 +        logi(s, "audio pts jumped %d samples\n", next_pts - stream_ctx->flow.audio.last_pts);
 +
 +    stream_ctx->flow.audio.last_pts = next_pts;
-+    stream_ctx->flow.audio.next_packet_pts = next_pts + samples_this_read;
 +
 +    pkt->pts      = next_pts;
 +    pkt->dts      = next_pts;

@@ -171,17 +171,16 @@ The image runs `fate-mxl-video-encdec`, which publishes five v210 frames and
 checks the decoded hashes. AVPlumber's existing `input` and `output` nodes
 select the transport with `format="mxl"`.
 
-Review our FFmpeg changes in `mxl/register.diff` (configure, build and format
-registration) and `mxl/resume-pts.patch` (resume at the preceding packet's end
-after a ring reset). The generator imports the remaining files from the pinned
-fork. After changing the pin or either local patch, run:
+Outside the fork's own files, `0026` only adds the `configure`,
+`libavformat/Makefile` and `allformats.c` registration for this series. Our one
+change to the fork is `0027`: after a ring reset the demuxer resumes at the end
+of the preceding packet, so PTS stays monotonic.
 
-```sh
-deps/ffmpeg/mkpatch-mxl.sh /path/to/FFmpeg
-deps/ffmpeg/verify.sh master-1bfb9160 /path/to/FFmpeg
-```
-
-Update `9/bases.env` if the patched tree changes.
+To move the pin, apply `0001`–`0025`, run `git restore --source=<pin>` on the
+fork's files listed in `0026`'s diffstat, keep `0026`'s registration hunks,
+commit, re-apply `0027`, regenerate both with
+`git format-patch --zero-commit --no-numbered --no-signature`, then update
+`9/bases.env` from `verify.sh`.
 
 ## Notes
 

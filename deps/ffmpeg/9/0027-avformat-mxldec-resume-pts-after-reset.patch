@@ -1,4 +1,4 @@
-From 963896d3cbb121e83e3bc802c660c00f25eee693 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: avplumber mxl builder <avplumber-mxl@local>
 Date: Thu, 19 Nov 2026 12:50:18 +0100
 Subject: [PATCH] avformat/mxldec: resume after the full preceding packet on
