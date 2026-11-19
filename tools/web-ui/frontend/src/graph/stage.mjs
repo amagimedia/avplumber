@@ -5,7 +5,7 @@
 import Sigma from 'sigma';
 import Graph from 'graphology';
 import {CW, SOURCE_KINDS, selectionPath, isProblem, nodeInputs} from './model.mjs';
-import {esc, fmtK, framesText, queueText, fillPct, fillClass, kindClass} from './format.mjs';
+import {esc, fmtK, framesText, queueText, fillPct, fillClass, kindClass, nodeTypeLabel} from './format.mjs';
 
 const LEVELS = [0, 12, 30, 90];  // px per row where Overview / Groups / Nodes / Details start
 const JUMP_PY = [0, 18, 44, 120];       // px per row a level button or key jumps to
@@ -181,7 +181,7 @@ export function createGraphStage(els, {onSelect, onLevel}) {
     const tag = src ? kindHTML(src) : esc(m.zone === 'out' ? 'output' : model.areaById.get(m.d).tag);
     const name = detail || !m.n.startsWith(m.g + '_') ? m.n : m.n.slice(m.g.length + 1);
     return `<span class="gv-tag">${tag} · ${esc(m.g)}</span><span class="gv-name">${esc(name)}</span>`
-      + `<span class="gv-sub">${esc(m.t)}${q ? ` · ${q.pps.toFixed(0)} pps` : ''}${m.w ? '' : ' · OFF'}</span>`
+      + `<span class="gv-sub">${esc(nodeTypeLabel(m.t))}${q ? ` · ${q.pps.toFixed(0)} pps` : ''}${m.w ? '' : ' · OFF'}</span>`
       + (q ? `<span class="gv-sub">${framesText(q)}${ins.length > 1 ? ` · +${ins.length - 1} in` : ''}</span><span class="gv-meter ${fillClass(q)}"><i style="width:${fillPct(q)}%"></i></span>` : '');
   };
 
@@ -337,7 +337,7 @@ export function createGraphStage(els, {onSelect, onLevel}) {
   renderer.on('enterNode', ({node: n}) => {
     st.hoverNode = n; st.hover = null;
     const m = model.meta.get(n);
-    showTip(`<b>${esc(n)}</b><code>${esc(m.t)} · ${esc(m.g)} · ${(model.inQ.get(n) || []).length} in · ${(model.outQ.get(n) || []).length} out</code>`);
+    showTip(`<b>${esc(n)}</b><code>${esc(nodeTypeLabel(m.t))} · ${esc(m.g)} · ${(model.inQ.get(n) || []).length} in · ${(model.outQ.get(n) || []).length} out</code>`);
     container.style.cursor = 'pointer'; redrawNodes();
   });
   renderer.on('leaveNode', () => { st.hoverNode = null; hideTip(); container.style.cursor = ''; redrawNodes(); });
@@ -448,6 +448,8 @@ export function createGraphStage(els, {onSelect, onLevel}) {
     // Esc: a pinned source kind highlight is cleared first; false when there was none.
     clearKindPin() { if (!st.kindPin) return false; setKind(st.kindHover, null); return true; },
     jumpLevel,
+    getCamera: () => cam.getState(),
+    restoreCamera: (camera = {x: 0.5, y: 0.5, ratio: 1, angle: 0}) => cam.animate(camera, {duration: 0}),
     zoomIn: () => cam.animatedZoom({duration: 140, factor: 2}),
     zoomOut: () => cam.animatedUnzoom({duration: 140, factor: 2}),
     fit: () => cam.animatedReset({duration: 180}),
