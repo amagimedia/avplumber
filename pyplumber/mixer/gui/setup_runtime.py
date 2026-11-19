@@ -18,6 +18,7 @@ import threading
 import time
 
 from .storage import write_atomic
+from ..dmabuf_inputs import BrowserStartupUnsettled
 from ..thumbnail import encode_options, is_thumbnail, reserve_buses
 from pyplumber.mixer.tools.extra_aux import aux_encode, extra_buses
 import pyplumber.mixer.tools.janus_mountpoints as janus_mountpoints
@@ -389,16 +390,22 @@ class SetupRuntime:
     def _start_recovering(self, config, previous_show):
         shows = [json.loads(config.read_bytes()), previous_show or {}]
         self._recover_browsers(shows)
-        self._close_removed_browsers(shows[1], shows[0])
+        self._close_show_browsers(shows)
         for attempt in range(2):
             try:
                 self._start(config)
                 break
-            except Exception:
+            except Exception as exc:
                 self._stop(timeout=FAILED_START_STOP_TIMEOUT_SEC)
                 # Disconnect/quarantine notification can arrive after the first
                 # status check. Retry only when a worker was actually recovered.
-                if attempt or self.closing.is_set() or not self._recover_browsers(shows):
+                if attempt or self.closing.is_set():
+                    raise
+                recovered = self._recover_browsers(shows)
+                if isinstance(exc, BrowserStartupUnsettled):
+                    self._status("starting", f"{exc}. Retrying with fresh browser windows…")
+                    self._close_show_browsers(shows)
+                elif not recovered:
                     raise
         # Every mixer that reached air is watched, a restored previous show included.
         threading.Thread(target=self._watch, args=(self.process,), daemon=True).start()
@@ -488,7 +495,10 @@ class SetupRuntime:
             if select.select([startup], [], [], 0)[0]:
                 error = startup.read(4000)
                 if error:
-                    raise RuntimeError("Mixer startup failed: " + error.decode(errors="replace"))
+                    message = error.decode(errors="replace")
+                    if message.startswith(BrowserStartupUnsettled.prefix):
+                        raise BrowserStartupUnsettled(message)
+                    raise RuntimeError("Mixer startup failed: " + message)
                 startup_complete = True
             process = self.process
             if process is None:
@@ -535,13 +545,14 @@ class SetupRuntime:
                 return
         raise RuntimeError("Setup server is stopping")
 
-    def _close_removed_browsers(self, old_show, new_show):
+    def _close_show_browsers(self, shows):
+        """Recreate the show’s capture pools after the previous consumer has stopped."""
         from pyplumber.mixer.dmabuf_inputs import rest_request
-        removed = _browser_ids(old_show) - _browser_ids(new_show)
-        if removed:
+        owned = _browser_ids(*shows)
+        if owned:
             status = rest_request(self.browser_url, "GET", "/status") or {}
             existing = {w["id"] for w in status.get("windows", [])}
-            for name in sorted(removed & existing):
+            for name in sorted(owned & existing):
                 rest_request(self.browser_url, "POST", "/window/close", {"id": name})
 
     def _mountpoints(self, show, extra_aux=0, prune=False, replace=False):

@@ -29,6 +29,12 @@ SCHEME = "dmabuf://"
 HOLD_SLACK = 1
 
 
+class BrowserStartupUnsettled(RuntimeError):
+    """Sent over the child startup pipe before graph teardown."""
+
+    prefix = "Browser show failed its startup stability check: "
+
+
 def hold_frames(frame_queue: int) -> int:
     """Frames a window keeps out with the mixer: its *frame_queue* less one."""
     return max(0, frame_queue - HOLD_SLACK)

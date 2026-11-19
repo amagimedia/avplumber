@@ -23,7 +23,7 @@ from .backend import mixer_backend
 from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, rendition_color, rendition_format
 from .config import FEEDS
 from .audio_gain import AudioGainController, register_audio_gain_commands
-from .dmabuf_inputs import (dmabuf_cuda_input_nodes, open_windows, paint_windows,
+from .dmabuf_inputs import (BrowserStartupUnsettled, dmabuf_cuda_input_nodes, open_windows, paint_windows,
                             refresh_windows, rest_request, wait_for_sockets)
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .inputs import build_input, build_v210_input, build_raw420_input
@@ -56,7 +56,7 @@ JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 4_500
 PREHEAT_POLL_INTERVAL_SEC = 0.02
 # Going on air: the outputs are released after START_STABLE_SEC (MixerOptions.start_stable_sec) in
 # which no compositor missed a deadline and every bus drew; output drops are counted, not gated
-# on. After START_STABLE_TIMEOUT_SEC without settling they are released anyway, flagged. The
+# on except for browser shows supervised by Setup, which retry offline on timeout. The
 # first 60 output frames of a bus can pass before its frame count is published (4 s at 15 fps),
 # so a shorter window waits for that.
 START_STABLE_SEC = 10.0
@@ -102,7 +102,7 @@ class MixerOptions:
     janus_rtcp_port: int = 0
     preheat_timeout_sec: float = 60.0
     start_stable_sec: float = START_STABLE_SEC            # clean stretch every compositor must show before the outputs are released
-    start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC   # release unsettled, flagged, after this
+    start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC   # time allowed to reach a stable window
     wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
     wipe_color: str = ""                 # explicit SDR override; empty preserves tags with an SDR fallback
     cut_latency_encoder: str = ""        # opt-in cut-to-output observer on this encoder
@@ -464,8 +464,8 @@ class MixerApplication:
         are released only after start_stable_sec in which no compositor missed a deadline and
         every bus drew, so the load of starting (decoder opens, CUDA contexts, browser pages, raw
         files being page-locked) has calmed down before anything goes out; after
-        start_stable_timeout_sec they are released anyway, with a warning naming the bus that
-        could not settle and `settled` false in `startup`. The
+        start_stable_timeout_sec a managed browser show reports failure to Setup while its
+        outputs are still held. Other shows release with a warning and `settled` false. The
         compositors count from zero first, then the outputs start together on a key frame: what
         viewers get and what the counters say both begin with the stable show, and nothing on air
         is ever reset away. What the start counted is kept in `startup` (`mixer.startup`)."""
@@ -481,7 +481,11 @@ class MixerApplication:
         # The PVW slot is built with no active input and does not tick until a scene is loaded
         # into it: one program slot drawing is the program drawing. Every bus must draw.
         ticking = [tuple(program), *((bus,) for bus in buses)]
-        report = self._wait_until_settled(compositors, self.start_stable_sec, self.start_stable_timeout_sec, ticking)
+        managed_browser = bool(self.browser_windows and "AVP_MIXER_STARTUP_FD" in os.environ)
+        report = self._wait_until_settled(compositors, self.start_stable_sec, self.start_stable_timeout_sec,
+                                          ticking, strict=managed_browser)
+        if managed_browser and not report["settled"]:
+            raise BrowserStartupUnsettled(BrowserStartupUnsettled.prefix + report["reason"])
         prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
         browser = self._browser_snapshot()
         self.avp.executeCommandsFromString("\n".join(
@@ -559,16 +563,16 @@ class MixerApplication:
                                   "frames": status["playout"].get("frames", 0)}
         return counters or None
 
-    def _wait_until_settled(self, compositors, window_sec: float, timeout_sec: float, ticking=()) -> dict:
+    def _wait_until_settled(self, compositors, window_sec: float, timeout_sec: float, ticking=(), *, strict=False) -> dict:
         """Wait for *window_sec* in which no compositor missed a deadline, and in which, for every
-        group of names in *ticking*, one of them drew frames. A miss starts the window again, an
-        output drop does not; a group that has not drawn keeps the wait going without restarting
-        it. Gives up *timeout_sec* after it began. Returns ``settled`` (whether the window was
+        group of names in *ticking*, one of them drew frames. Strict mode also requires all
+        compositor counters and restarts the window on an output drop. Gives up *timeout_sec* after it began. Returns ``settled`` (whether the window was
         seen), ``waited_sec``, ``reason`` (what kept it waiting, "" when settled) and ``counters``
         (every compositor's, as last read)."""
         at_start = self._counters(compositors)
-        if at_start is None:
+        if at_start is None and not strict:
             return {"settled": True, "waited_sec": 0.0, "reason": "", "counters": {}}
+        at_start = at_start or {}
         started = window_started = time.monotonic()
         deadline = started + timeout_sec
         counters, reason = at_start, ""
@@ -576,14 +580,20 @@ class MixerApplication:
             self._check_startup()
             time.sleep(SETTLE_POLL_SEC)
             now = time.monotonic()
-            counters = self._counters(compositors) or counters
+            sample = self._counters(compositors)
+            if strict and (not sample or set(sample) != set(compositors)):
+                reason = "missing compositor startup counters"
+                window_started, at_start = now, {}
+                if now >= deadline:
+                    return {"settled": False, "waited_sec": now - started, "reason": reason, "counters": {}}
+                continue
+            counters = sample or counters
+            if strict and set(at_start) != set(compositors):
+                window_started, at_start = now, counters
             late = {node: {key: counters[node][key] - at_start[node][key] for key in ("missed_deadlines", "output_drops")}
                     for node in counters if node in at_start
-                    and counters[node]["missed_deadlines"] > at_start[node]["missed_deadlines"]}
-                    # Output drops are reported in the reason but do not restart the window: a start
-                    # inside a GPU time-sharing episode dropped about 15 output frames a minute on every
-                    # bus with no missed deadline, no start could settle and the setup manager gave up
-                    # with no mixer running (2026-10-15). Misses still gate the start.
+                    and (counters[node]["missed_deadlines"] > at_start[node]["missed_deadlines"] or
+                         (strict and counters[node]["output_drops"] > at_start[node]["output_drops"]))}
             if late:
                 window_started, at_start = now, counters
                 node, delta = max(late.items(), key=lambda item: sum(item[1].values()))

@@ -662,3 +662,22 @@ def test_no_tick_waits_for_an_absent_source_on_any_of_its_aliases():
     app.absent_inputs = ("edge_1",)
     app._release_absent_inputs()
     assert avp.commands == [f"node.object.set mixer_comp_{slot} release_input {i}" for slot in "ab" for i in (2, 3)]
+
+
+@pytest.mark.parametrize("fault", ["missed", "dropped", "missing"])
+def test_managed_browser_start_keeps_outputs_held_on_unstable_graph(monkeypatch, fault):
+    monkeypatch.setenv("AVP_MIXER_STARTUP_FD", "7")
+    counters = {
+        "mixer_comp_a": lambda now: (published(30)(now), 0, 0),
+        "mixer_comp_b": idle,
+        "aux_1_comp": lambda now: (published(30)(now), int(now) if fault == "missed" else 0,
+                                   int(now) if fault == "dropped" else 0),
+    }
+    if fault == "missing":
+        del counters["aux_1_comp"]
+    app, engine, _ = go_on_air(monkeypatch, counters, start=False, browser_windows=("browser",),
+                               start_stable_sec=3, start_stable_timeout_sec=10)
+    with pytest.raises(mixer_application.BrowserStartupUnsettled):
+        app._go_on_air()
+    assert not engine.at(" hold false")
+    assert not engine.at(" reset_counters true")

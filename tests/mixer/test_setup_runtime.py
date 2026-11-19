@@ -80,7 +80,7 @@ def runtime(tmp_path, monkeypatch):
     manager = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777), InstanceType.TESLA_T4)
     manager.process = SimpleNamespace(poll=lambda: None)
     monkeypatch.setattr(manager, '_stop', lambda **kwargs: None)
-    monkeypatch.setattr(manager, '_close_removed_browsers', lambda *_: None)
+    monkeypatch.setattr(manager, '_close_show_browsers', lambda *_: None)
     monkeypatch.setattr(manager, '_recover_browsers', lambda *_: False)
     monkeypatch.setattr(manager, '_start', lambda _: setattr(manager, 'process', SimpleNamespace(poll=lambda: None)))
     monkeypatch.setattr(manager, '_watch', lambda _: None)
@@ -1027,10 +1027,10 @@ def test_recovery_precedes_removing_quarantined_windows(runtime, monkeypatch):
     config.write_text(json.dumps(current))
     events = []
     monkeypatch.setattr(runtime, '_recover_browsers', lambda shows: events.append(('recover', shows)))
-    monkeypatch.setattr(runtime, '_close_removed_browsers', lambda *shows: events.append(('close', shows)))
+    monkeypatch.setattr(runtime, '_close_show_browsers', lambda shows: events.append(('close', shows)))
     monkeypatch.setattr(runtime, '_start', lambda _: events.append(('start', None)))
     runtime._start_recovering(config, previous)
-    assert events == [('recover', [current, previous]), ('close', (previous, current)), ('start', None)]
+    assert events == [('recover', [current, previous]), ('close', [current, previous]), ('start', None)]
 
 
 def test_unreaped_process_blocks_browser_recovery(tmp_path, monkeypatch):
@@ -1646,3 +1646,38 @@ def test_janus_replacement_failure_does_not_start_a_mismatched_encoder(runtime, 
     assert runtime.status()["phase"] == "error"
     assert "mountpoint protected" in runtime.status()["message"]
     assert not (runtime.media_dir / "mixer.demo.json").exists()
+
+
+def test_unsettled_browser_show_recreates_pools_and_retries_once(runtime, monkeypatch):
+    from pyplumber.mixer.dmabuf_inputs import BrowserStartupUnsettled
+    config = runtime.media_dir / 'mixer.demo.json'
+    config.write_text('{"sources":[{"id":"browser","kind":"browser"}]}')
+    events = []
+    monkeypatch.setattr(runtime, '_recover_browsers', lambda _: False)
+    monkeypatch.setattr(runtime, '_close_show_browsers', lambda _: events.append('close windows'))
+    monkeypatch.setattr(runtime, '_stop', lambda **_: events.append('stop mixer'))
+    def launch(*args, pass_fds, **kwargs):
+        import os
+        events.append('start mixer')
+        os.write(pass_fds[0], (BrowserStartupUnsettled.prefix + 'aux missed deadlines').encode())
+        return SimpleNamespace(pid=1234, poll=lambda: None)
+    monkeypatch.setattr('pyplumber.mixer.gui.setup_runtime.subprocess.Popen', launch)
+    monkeypatch.setattr(runtime.closing, 'wait', lambda _: False)
+    monkeypatch.setattr(runtime, '_start', lambda path: SetupRuntime._start(runtime, path))
+    with pytest.raises(BrowserStartupUnsettled):
+        runtime._start_recovering(config, None)
+    assert events == ['close windows', 'start mixer', 'stop mixer',
+                      'close windows', 'start mixer', 'stop mixer']
+
+
+def test_capture_reset_closes_only_current_and_previous_show_windows(runtime, monkeypatch):
+    calls = []
+    def request(url, method, path, body=None):
+        if method == 'GET':
+            return {'windows': [{'id': name} for name in ('kept', 'removed', 'unrelated')]}
+        calls.append((path, body))
+    monkeypatch.setattr('pyplumber.mixer.dmabuf_inputs.rest_request', request)
+    shows = [{'sources': [{'id': name, 'kind': 'browser'} for name in names]}
+             for names in [('kept', 'new'), ('removed', 'kept')]]
+    SetupRuntime._close_show_browsers(runtime, shows)
+    assert calls == [('/window/close', {'id': 'kept'}), ('/window/close', {'id': 'removed'})]
