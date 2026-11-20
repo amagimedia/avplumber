@@ -13,6 +13,8 @@ ZONES="${ZONES:-europe-west2-b europe-west2-a europe-west4-c europe-west4-b euro
 MACHINE_TYPE="${MACHINE_TYPE:-g2-standard-16}"
 GPU="${GPU:-nvidia-l4}"
 DISK_GB="${DISK_GB:-256}"
+ENABLE_NDI="${ENABLE_NDI:-0}"
+[[ "$ENABLE_NDI" = 0 || "$ENABLE_NDI" = 1 ]] || { echo "ERROR: ENABLE_NDI must be 0 or 1" >&2; exit 2; }
 HOST_SETUP_MODE="${HOST_SETUP_MODE:-verify}"
 case "$HOST_SETUP_MODE" in
   verify)
@@ -73,6 +75,12 @@ echo "waiting for host-setup (log: /var/log/avplumber-host-setup.log)"
 for _ in $(seq 60); do
   if gcloud compute ssh "$name" --project "$PROJECT" --zone "$zone" --quiet \
       --command 'test "$(cat /var/lib/avplumber-host/ready-boot-id)" = "$(cat /proc/sys/kernel/random/boot_id)" && cat /var/lib/avplumber-host/ready' 2>/dev/null; then
+    if [[ "$ENABLE_NDI" = 1 ]]; then
+      COPYFILE_DISABLE=1 tar -C "$here/../../../.." -czf - deps/ffmpeg/install-ndi-sdk.sh docker-compose/mixer/deploy/l4/setup-ndi.sh \
+        docker-compose/mixer/deploy/l4/avplumber-ndi-discovery.service |
+        gcloud compute ssh "$name" --project "$PROJECT" --zone "$zone" --quiet --command \
+          'set -e; work=$(mktemp -d); trap "rm -rf -- \"$work\"" EXIT; cd "$work"; tar xzf -; sudo bash docker-compose/mixer/deploy/l4/setup-ndi.sh'
+    fi
     exit 0
   fi
   sleep 20

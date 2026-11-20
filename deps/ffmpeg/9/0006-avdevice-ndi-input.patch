@@ -1,0 +1,349 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: x <x@y>
+Date: Wed, 16 Sep 2026 19:56:02 +0200
+Subject: [PATCH] avdevice: receive audio and video with the NDI 6.4 SDK
+
+---
+ configure                       |   5 +
+ doc/indevs.texi                 |  52 ++++++++
+ libavdevice/Makefile            |   1 +
+ libavdevice/alldevices.c        |   1 +
+ libavdevice/libndi_newtek_dec.c | 205 ++++++++++++++++++++++++++++++++
+ 5 files changed, 264 insertions(+)
+ create mode 100644 libavdevice/libndi_newtek_dec.c
+
+diff --git a/configure b/configure
+index c06480dce0..b2d8ee89a5 100755
+--- a/configure
++++ b/configure
+@@ -325,6 +325,7 @@ External library support:
+   --enable-lv2             enable LV2 audio filtering [no]
+   --disable-lzma           disable lzma [autodetect]
+   --enable-decklink        enable Blackmagic DeckLink I/O support [no]
++  --enable-libndi_newtek   enable NDI SDK input support [no]
+   --enable-mbedtls         enable mbedTLS, needed for https support
+                            if openssl, gnutls or libtls is not used [no]
+   --enable-mediacodec      enable Android MediaCodec support [no]
+@@ -2020,6 +2021,7 @@ EXTERNAL_LIBRARY_GPL_LIST="
+ 
+ EXTERNAL_LIBRARY_NONFREE_LIST="
+     decklink
++    libndi_newtek
+     libfdk_aac
+     libfdk_xhe_aac
+     libmpeghdec
+@@ -4018,6 +4020,8 @@ decklink_indev_suggest="libzvbi"
+ decklink_outdev_deps="decklink threads"
+ decklink_outdev_suggest="libklvanc"
+ decklink_outdev_extralibs="-lstdc++"
++libndi_newtek_indev_deps="libndi_newtek"
++libndi_newtek_indev_extralibs="-lndi"
+ dshow_indev_deps="IBaseFilter"
+ dshow_indev_extralibs="-lpsapi -lole32 -lstrmiids -luuid -loleaut32 -lshlwapi"
+ fbdev_indev_deps="linux_fb_h"
+@@ -7214,6 +7218,7 @@ enabled chromaprint       && { check_pkg_config chromaprint libchromaprint "chro
+ enabled decklink          && { { test_cxxflags_cc "" DeckLinkAPI.h 1 || die "ERROR: DeckLinkAPI.h not found"; } &&
+                                { test_cpp_condition DeckLinkAPIVersion.h "BLACKMAGIC_DECKLINK_API_VERSION >= 0x0a0b0000" &&
+                                  test_cxxflags_cc "" DeckLinkAPIVersion.h "BLACKMAGIC_DECKLINK_API_VERSION >= 0x0a0b0000" || die "ERROR: Decklink API version must be >= 10.11"; } }
++enabled libndi_newtek     && require libndi_newtek Processing.NDI.Lib.h NDIlib_initialize -lndi
+ enabled frei0r            && require_headers "frei0r.h"
+ enabled gmp               && require gmp gmp.h mpz_export -lgmp
+ enabled gnutls            && require_pkg_config gnutls gnutls gnutls/gnutls.h gnutls_global_init
+diff --git a/doc/indevs.texi b/doc/indevs.texi
+index dc4b92a0a0..87c199a3bb 100644
+--- a/doc/indevs.texi
++++ b/doc/indevs.texi
+@@ -1136,6 +1136,58 @@ Set the video size given as a string such as @code{640x480} or @code{hd720}.
+ Default is @code{qvga}.
+ @end table
+ 
++@section libndi_newtek
++
++The libndi_newtek input device provides capture capabilities for using NDI (Network
++Device Interface, standard created by NewTek).
++
++Input filename is a NDI source name that could be found by sending -find_sources 1
++to command line - it has no specific syntax but human-readable formatted.
++
++To enable this input device, you need the NDI SDK and you
++need to configure with the appropriate @code{--extra-cflags}
++and @code{--extra-ldflags}.
++
++@subsection Options
++
++@table @option
++
++@item find_sources
++If set to @option{true}, print a list of found/available NDI sources and exit.
++Defaults to @option{false}.
++
++@item wait_sources
++Override time to wait until the number of online sources have changed.
++Defaults to @option{0.5}.
++
++@item allow_video_fields
++When this flag is @option{false}, all video that you receive will be progressive.
++Defaults to @option{true}.
++
++@item extra_ips
++If is set to list of comma separated ip addresses, scan for sources not only
++using mDNS but also use unicast ip addresses specified by this list.
++
++@end table
++
++@subsection Examples
++
++@itemize
++
++@item
++List input devices:
++@example
++ffmpeg -f libndi_newtek -find_sources 1 -i dummy
++@end example
++
++@item
++List local and remote input devices:
++@example
++ffmpeg -f libndi_newtek -extra_ips "<host>" -find_sources 1 -i dummy
++@end example
++
++@end itemize
++
+ @section openal
+ 
+ The OpenAL input device provides audio capture on all systems with a
+diff --git a/libavdevice/Makefile b/libavdevice/Makefile
+index 256c8e7bea..319abb50f0 100644
+--- a/libavdevice/Makefile
++++ b/libavdevice/Makefile
+@@ -21,6 +21,7 @@ OBJS-$(CONFIG_AVFOUNDATION_INDEV)        += avfoundation.o
+ OBJS-$(CONFIG_CACA_OUTDEV)               += caca.o
+ OBJS-$(CONFIG_DECKLINK_OUTDEV)           += decklink_enc.o decklink_enc_c.o decklink_common.o
+ OBJS-$(CONFIG_DECKLINK_INDEV)            += decklink_dec.o decklink_dec_c.o decklink_common.o
++OBJS-$(CONFIG_LIBNDI_NEWTEK_INDEV)       += libndi_newtek_dec.o
+ OBJS-$(CONFIG_DSHOW_INDEV)               += dshow_crossbar.o dshow.o dshow_enummediatypes.o \
+                                             dshow_enumpins.o dshow_filter.o \
+                                             dshow_pin.o dshow_common.o
+diff --git a/libavdevice/alldevices.c b/libavdevice/alldevices.c
+index 573595f416..3fc15e933e 100644
+--- a/libavdevice/alldevices.c
++++ b/libavdevice/alldevices.c
+@@ -35,6 +35,7 @@ extern const FFInputFormat  ff_avfoundation_demuxer;
+ extern const FFOutputFormat ff_caca_muxer;
+ extern const FFInputFormat  ff_decklink_demuxer;
+ extern const FFOutputFormat ff_decklink_muxer;
++extern const FFInputFormat  ff_libndi_newtek_demuxer;
+ extern const FFInputFormat  ff_dshow_demuxer;
+ extern const FFInputFormat  ff_fbdev_demuxer;
+ extern const FFOutputFormat ff_fbdev_muxer;
+diff --git a/libavdevice/libndi_newtek_dec.c b/libavdevice/libndi_newtek_dec.c
+new file mode 100644
+index 0000000000..639528befe
+--- /dev/null
++++ b/libavdevice/libndi_newtek_dec.c
+@@ -0,0 +1,205 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include <Processing.NDI.Lib.h>
++#include "libavcodec/avcodec.h"
++#include "libavformat/demux.h"
++#include "libavformat/internal.h"
++#include "libavutil/imgutils.h"
++#include "libavutil/opt.h"
++#include "libavutil/time.h"
++
++typedef struct {
++    const AVClass *class;
++    char *extra_ips;
++    int list, fields;
++    int64_t wait;
++    NDIlib_recv_instance_t receiver;
++    AVStream *video, *audio;
++} NDIInput;
++
++static int interrupted(AVFormatContext *s)
++{
++    return s->interrupt_callback.callback &&
++           s->interrupt_callback.callback(s->interrupt_callback.opaque);
++}
++
++static int ndi_open(AVFormatContext *s)
++{
++    NDIInput *n = s->priv_data;
++    NDIlib_find_create_t opts = { .show_local_sources = true, .p_extra_ips = n->extra_ips };
++    NDIlib_find_instance_t finder;
++    int64_t until = av_gettime_relative() + n->wait;
++    int ret = AVERROR(ENOENT);
++
++    if (!NDIlib_initialize() || !(finder = NDIlib_find_create_v2(&opts)))
++        return AVERROR_EXTERNAL;
++    for (;;) {
++        uint32_t count = 0;
++        const NDIlib_source_t *sources = NDIlib_find_get_current_sources(finder, &count);
++        int64_t remaining = until - av_gettime_relative();
++
++        if (interrupted(s)) {
++            ret = AVERROR_EXIT;
++            break;
++        }
++        for (uint32_t i = 0; i < count; i++) {
++            if (n->list) {
++                if (remaining <= 0)
++                    av_log(s, AV_LOG_INFO, "%s\n", sources[i].p_ndi_name);
++            } else if (!strcmp(sources[i].p_ndi_name, s->url)) {
++                NDIlib_recv_create_v3_t cfg = {
++                    .source_to_connect_to = sources[i],
++                    .color_format = NDIlib_recv_color_format_UYVY_BGRA,
++                    .bandwidth = NDIlib_recv_bandwidth_highest,
++                    .allow_video_fields = n->fields,
++                };
++                n->receiver = NDIlib_recv_create_v3(&cfg);
++                ret = n->receiver ? 0 : AVERROR_EXTERNAL;
++                goto done;
++            }
++        }
++        if (remaining <= 0) {
++            if (n->list)
++                ret = AVERROR_EXIT;
++            break;
++        }
++        NDIlib_find_wait_for_sources(finder, FFMIN(40, (remaining + 999) / 1000));
++    }
++done:
++    NDIlib_find_destroy(finder);
++    s->ctx_flags |= AVFMTCTX_NOHEADER;
++    return ret;
++}
++
++static AVStream *new_stream(AVFormatContext *s, enum AVMediaType type, enum AVCodecID codec)
++{
++    AVStream *st = avformat_new_stream(s, NULL);
++    if (st) {
++        st->codecpar->codec_type = type;
++        st->codecpar->codec_id = codec;
++        avpriv_set_pts_info(st, 64, 1, 10000000);
++    }
++    return st;
++}
++
++static int video_packet(AVFormatContext *s, AVPacket *pkt, NDIlib_video_frame_v2_t *v)
++{
++    NDIInput *n = s->priv_data;
++    AVStream *st = n->video;
++    enum AVPixelFormat fmt;
++    int bytes, stride, ret;
++
++    switch (v->FourCC) {
++    case NDIlib_FourCC_video_type_UYVY: fmt = AV_PIX_FMT_UYVY422; break;
++    case NDIlib_FourCC_video_type_BGRA: fmt = AV_PIX_FMT_BGRA; break;
++    case NDIlib_FourCC_video_type_BGRX: fmt = AV_PIX_FMT_BGR0; break;
++    default: return AVERROR_INVALIDDATA;
++    }
++    bytes = av_image_get_buffer_size(fmt, v->xres, v->yres, 1);
++    stride = av_image_get_linesize(fmt, v->xres, 0);
++    if (bytes < 0 || stride <= 0 || stride > v->line_stride_in_bytes ||
++        !v->p_data || v->frame_rate_N <= 0 || v->frame_rate_D <= 0)
++        return AVERROR_INVALIDDATA;
++    if (!st) {
++        st = n->video = new_stream(s, AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_RAWVIDEO);
++        if (!st)
++            return AVERROR(ENOMEM);
++        st->codecpar->format = fmt;
++        st->codecpar->codec_tag = avcodec_pix_fmt_to_codec_tag(fmt);
++        st->codecpar->width = v->xres;
++        st->codecpar->height = v->yres;
++        st->avg_frame_rate = (AVRational){ v->frame_rate_N, v->frame_rate_D };
++        st->codecpar->field_order = v->frame_format_type == NDIlib_frame_format_type_interleaved ?
++                                    AV_FIELD_TT : AV_FIELD_PROGRESSIVE;
++    }
++    if (st->codecpar->format != fmt || st->codecpar->width != v->xres || st->codecpar->height != v->yres)
++        return AVERROR_INPUT_CHANGED;
++    if ((ret = av_new_packet(pkt, bytes)) < 0)
++        return ret;
++    av_image_copy_plane(pkt->data, stride, v->p_data, v->line_stride_in_bytes, stride, v->yres);
++    pkt->stream_index = st->index;
++    pkt->pts = pkt->dts = v->timecode;
++    pkt->duration = av_rescale_q(1, (AVRational){v->frame_rate_D, v->frame_rate_N}, st->time_base);
++    pkt->flags |= AV_PKT_FLAG_KEY;
++    return 0;
++}
++
++static int audio_packet(AVFormatContext *s, AVPacket *pkt, NDIlib_audio_frame_v2_t *a)
++{
++    NDIInput *n = s->priv_data;
++    AVStream *st = n->audio;
++    NDIlib_audio_frame_interleaved_16s_t dst = { 0 };
++    int bytes = av_samples_get_buffer_size(NULL, a->no_channels, a->no_samples, AV_SAMPLE_FMT_S16, 1);
++    int ret;
++
++    if (bytes <= 0 || !a->p_data || a->sample_rate <= 0)
++        return AVERROR_INVALIDDATA;
++    if (!st) {
++        st = n->audio = new_stream(s, AVMEDIA_TYPE_AUDIO, AV_CODEC_ID_PCM_S16LE);
++        if (!st)
++            return AVERROR(ENOMEM);
++        st->codecpar->format = AV_SAMPLE_FMT_S16;
++        st->codecpar->sample_rate = a->sample_rate;
++        av_channel_layout_default(&st->codecpar->ch_layout, a->no_channels);
++    }
++    if (st->codecpar->ch_layout.nb_channels != a->no_channels || st->codecpar->sample_rate != a->sample_rate)
++        return AVERROR_INPUT_CHANGED;
++    if ((ret = av_new_packet(pkt, bytes)) < 0)
++        return ret;
++    dst.p_data = (int16_t *)pkt->data;
++    NDIlib_util_audio_to_interleaved_16s_v2(a, &dst);
++    pkt->stream_index = st->index;
++    pkt->pts = pkt->dts = a->timecode;
++    pkt->duration = av_rescale_q(a->no_samples, (AVRational){1, a->sample_rate}, st->time_base);
++    return 0;
++}
++
++static int ndi_read(AVFormatContext *s, AVPacket *pkt)
++{
++    NDIInput *n = s->priv_data;
++    while (!interrupted(s)) {
++        NDIlib_video_frame_v2_t v;
++        NDIlib_audio_frame_v2_t a;
++        int ret;
++        switch (NDIlib_recv_capture_v2(n->receiver, &v, &a, NULL, 40)) {
++        case NDIlib_frame_type_video:
++            ret = video_packet(s, pkt, &v);
++            NDIlib_recv_free_video_v2(n->receiver, &v);
++            return ret;
++        case NDIlib_frame_type_audio:
++            ret = audio_packet(s, pkt, &a);
++            NDIlib_recv_free_audio_v2(n->receiver, &a);
++            return ret;
++        case NDIlib_frame_type_error: return AVERROR(EIO);
++        default: break;
++        }
++    }
++    return AVERROR_EXIT;
++}
++
++static int ndi_close(AVFormatContext *s)
++{
++    NDIInput *n = s->priv_data;
++    if (n->receiver)
++        NDIlib_recv_destroy(n->receiver);
++    return 0;
++}
++
++#define OFFSET(x) offsetof(NDIInput, x)
++#define DEC AV_OPT_FLAG_DECODING_PARAM
++static const AVOption options[] = {
++    { "find_sources", "List discovered NDI sources", OFFSET(list), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, DEC },
++    { "wait_sources", "Source discovery timeout", OFFSET(wait), AV_OPT_TYPE_DURATION, {.i64=500000}, 0, INT_MAX, DEC },
++    { "extra_ips", "Additional discovery addresses", OFFSET(extra_ips), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, DEC },
++    { "allow_video_fields", "Allow interlaced video", OFFSET(fields), AV_OPT_TYPE_BOOL, {.i64=1}, 0, 1, DEC },
++    { NULL }
++};
++static const AVClass ndi_class = {
++    .class_name = "NDI input", .item_name = av_default_item_name, .option = options,
++    .version = LIBAVUTIL_VERSION_INT, .category = AV_CLASS_CATEGORY_DEVICE_VIDEO_INPUT,
++};
++const FFInputFormat ff_libndi_newtek_demuxer = {
++    .p.name = "libndi_newtek", .p.long_name = NULL_IF_CONFIG_SMALL("NDI SDK input"),
++    .p.flags = AVFMT_NOFILE, .p.priv_class = &ndi_class,
++    .priv_data_size = sizeof(NDIInput), .read_header = ndi_open,
++    .read_packet = ndi_read, .read_close = ndi_close,
++};

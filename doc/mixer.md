@@ -188,13 +188,16 @@ rendition may be an MXL target instead of Janus: SDR like every bus, with no web
 The demo setup (`demos/mixer`) offers MXL as a source type on an image built `WITH_MXL=1`, for an
 instance whose profile has `mxl_sources`: the eighth source count, one upload unit each beside the
 raw NV12 and P010 files. Each MXL source has its own generated clip, a loop of packed v210 pictures,
-and its own writer (`demos/mixer/mxl_writers.py`: an FFmpeg that copies the loop's packets to the `mxl`
-muxer at the canvas rate), which like a producer outside the mixer uses no GPU: each picture goes
-from the page cache into the flow. A loop is `generation.seconds` long, 5.5 MB a 1080p
+and its own flow, written by `demos/mixer/mxl_writers.py`: one process for all flows, which maps the
+loops and at every grain of the MXL clock copies each flow's next picture into its ring through
+libmxl. Like a producer outside the mixer it uses no GPU: each picture goes from the page cache
+into the flow in one copy, all flows on one thread, so the copies of all flows have to fit in a
+grain period (a late grain is written as soon as it can be; a writer further behind than a flow's
+ring holds skips to the clock and leaves a hole, which the mixer's reader passes over). A loop is `generation.seconds` long, 5.5 MB a 1080p
 picture: 332 MB of disk and page cache per source for 2 s at 30 fps, twice that at 60 fps.
-The writers are one process group beside the mixer, which the setup runtime starts
-before the mixer and stops after it; an Apply restarts both, and writers that exit on their own
-are started again.
+The writer is a process beside the mixer, which the setup runtime starts
+before the mixer and stops after it; an Apply restarts both, and a writer that exits on its own
+(it does when a flow cannot be written) is started again.
 
 ## Input CPU and scheduling
 

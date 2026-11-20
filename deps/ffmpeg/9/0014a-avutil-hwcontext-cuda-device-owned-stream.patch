@@ -11,43 +11,17 @@ streams and contexts.
 
 Add a transfer roundtrip test that also verifies the borrowed context
 remains usable after the wrapper is destroyed.
+
+Backport the functional change to the pinned FFmpeg 9.1 release. The standalone
+upstream submission also carries its API version and changelog updates.
 ---
- Changelog                        |  1 +
- doc/APIchanges                   |  3 +++
  libavutil/hwcontext_cuda.c       | 32 ++++++++++++++++++++++++++++++
  libavutil/hwcontext_cuda.h       |  8 ++++++++
  libavutil/tests/hwcontext_cuda.c | 34 ++++++++++++++++++++++++++++++++
- libavutil/version.h              |  2 +-
- 6 files changed, 79 insertions(+), 1 deletion(-)
+ 3 files changed, 74 insertions(+)
 
-diff --git a/Changelog b/Changelog
-index aba49d2..7a39e27 100644
---- a/Changelog
-+++ b/Changelog
-@@ -4,6 +4,7 @@ releases are sorted from youngest to oldest.
- version <next>:
- - DTS:X height channels in the DCA decoder
- - extra_hw_frames_only flag for NVDEC unsafe CUarray surface budgeting
-+- device-owned non-blocking streams in the CUDA hardware context
- 
- version 9.1:
- - ASTC image encoding and decoding via libastcenc, with .astc and KTX 1.0 muxers and demuxers
-diff --git a/doc/APIchanges b/doc/APIchanges
-index ff4c8b3..209dc04 100644
---- a/doc/APIchanges
-+++ b/doc/APIchanges
-@@ -2,6 +2,9 @@ The last version increases of all libraries were on 2026-06-23.
- 
- API changes, most recent first:
- 
-+2026-11-02 - xxxxxxxxxx - lavu 61.21.100 - hwcontext_cuda.h
-+  Add AVCUDADeviceContext.create_stream for device-owned non-blocking streams.
-+
- 2026-11-02 - xxxxxxxxxx - lavc 63.26.100 - avcodec.h
-   Add AV_HWACCEL_FLAG_EXTRA_HW_FRAMES_ONLY.
- 
 diff --git a/libavutil/hwcontext_cuda.c b/libavutil/hwcontext_cuda.c
-index bea4abd..cc27c60 100644
+index bea4abd424..cc27c60a78 100644
 --- a/libavutil/hwcontext_cuda.c
 +++ b/libavutil/hwcontext_cuda.c
 @@ -42,6 +42,7 @@ typedef struct CUDAFramesContext {
@@ -104,7 +78,7 @@ index bea4abd..cc27c60 100644
  
  error:
 diff --git a/libavutil/hwcontext_cuda.h b/libavutil/hwcontext_cuda.h
-index 38e5369..ccdb143 100644
+index 38e5369794..ccdb143b06 100644
 --- a/libavutil/hwcontext_cuda.h
 +++ b/libavutil/hwcontext_cuda.h
 @@ -45,6 +45,14 @@ typedef struct AVCUDADeviceContext {
@@ -123,7 +97,7 @@ index 38e5369..ccdb143 100644
  
  /**
 diff --git a/libavutil/tests/hwcontext_cuda.c b/libavutil/tests/hwcontext_cuda.c
-index 4a179b6..d9268f5 100644
+index 4a179b6ecd..d9268f5675 100644
 --- a/libavutil/tests/hwcontext_cuda.c
 +++ b/libavutil/tests/hwcontext_cuda.c
 @@ -252,6 +252,33 @@ static int test_rejected(AVBufferRef *device_ref, enum AVPixelFormat fmt)
@@ -174,16 +148,3 @@ index 4a179b6..d9268f5 100644
      av_buffer_unref(&device_ref);
  
      if (failures)
-diff --git a/libavutil/version.h b/libavutil/version.h
-index cbdd0ad..3a39a0b 100644
---- a/libavutil/version.h
-+++ b/libavutil/version.h
-@@ -79,7 +79,7 @@
-  */
- 
- #define LIBAVUTIL_VERSION_MAJOR  61
--#define LIBAVUTIL_VERSION_MINOR  20
-+#define LIBAVUTIL_VERSION_MINOR  21
- #define LIBAVUTIL_VERSION_MICRO 100
- 
- #define LIBAVUTIL_VERSION_INT   AV_VERSION_INT(LIBAVUTIL_VERSION_MAJOR, \

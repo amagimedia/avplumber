@@ -1703,17 +1703,69 @@ def test_mxl_sources_take_raw_upload_units_up_to_the_profile_limit(tmp_path):
     assert recipe_for(L4, {**MXL_SHOW, "weights": [105, 0, 0, 0, 36, 47, 0]})["setup"]["weights"] == [105, 0, 0, 0, 36, 47, 0, 0]
 
 
-def test_mxl_writers_copy_each_loop_into_its_flow_without_decoding(tmp_path, monkeypatch):
+def test_mxl_writers_plan_one_v210_flow_per_mxl_source_with_a_clip():
+    import ctypes
     from demos.mixer import mxl_writers
-    commands, exited = [], SimpleNamespace(poll=lambda: 0, send_signal=lambda sig: None, wait=lambda: 0)
-    monkeypatch.setattr(mxl_writers.subprocess, "Popen", lambda command: commands.append(command) or exited)
+    rate, flows = mxl_writers.plan({"canvas": {"fps": "30000/1001"}, "sources": [{"id": "cam", "kind": "video"}, {
+        "id": "sdr_mxl_000", "kind": "mxl", "url": "/domain", "flow": "f1", "clip": "/media/clip.v210", "width": 1920, "height": 1080},
+        {"id": "outside", "kind": "mxl", "url": "/domain", "flow": "f2", "width": 1920, "height": 1080}]})
+    (flow,) = flows   # a flow without a clip has its own producer
+    definition = flow.pop("definition")
+    assert (rate.numerator, rate.denominator) == (30000, 1001)
+    assert flow == {"domain": "/domain", "clip": "/media/clip.v210", "stride": 5120, "grain_bytes": 5120 * 1080}
+    # What the mixer's reader (mxl_flow_reader.hpp) requires of a flow.
+    assert {key: definition[key] for key in ("id", "media_type", "interlace_mode", "frame_width", "frame_height", "grain_rate")} == {
+        "id": "f1", "media_type": "video/v210", "interlace_mode": "progressive", "frame_width": 1920, "frame_height": 1080,
+        "grain_rate": {"numerator": 30000, "denominator": 1001}}
+    assert [(c["name"], c["width"], c["height"]) for c in definition["components"]] == [("Y", 1920, 1080), ("Cb", 960, 1080), ("Cr", 960, 1080)]
+    # The sizes of libmxl 1.1.0's structures.
+    assert [ctypes.sizeof(t) for t in (mxl_writers.Rational, mxl_writers.GrainInfo, mxl_writers.FlowConfigInfo)] == [16, 4096, 192]
+    assert mxl_writers.FlowConfigInfo.discrete.offset == 128
+
+
+def test_mxl_writers_follow_the_clock_within_the_ring_and_release_the_flows(tmp_path, monkeypatch, capsys):
+    import ctypes
+    from demos.mixer import mxl_writers
     config = tmp_path / "mixer.demo.json"
-    config.write_text(json.dumps({"canvas": {"fps": "30000/1001"}, "sources": [{"id": "cam", "kind": "video"}, {
-        "id": "sdr_mxl_000", "kind": "mxl", "url": "/domain", "flow": "f1", "clip": "/media/clip.v210", "width": 1920, "height": 1080}]}))
-    mxl_writers.main(config)
-    assert [command[command.index("-f"):] for command in commands] == [[
-        "-f", "v210", "-video_size", "1920x1080", "-framerate", "30000/1001", "-i", "/media/clip.v210",
-        "-c", "copy", "-f", "mxl", "-video_flow_id", "f1", "/domain"]]
+    config.write_text(json.dumps({"canvas": {"fps": 30}, "sources": [{
+        "id": "sdr_mxl_000", "kind": "mxl", "url": "/domain", "flow": "f1", "clip": "clip.v210", "width": 48, "height": 2}]}))
+    grain_bytes = 2 * mxl_writers.v210_row_stride(48)
+    clip, ring = ctypes.create_string_buffer(b"".join(bytes([picture]) * grain_bytes for picture in range(3))), ctypes.create_string_buffer(grain_bytes)
+    monkeypatch.setattr(mxl_writers, "map_clip", lambda path, size: (ctypes.addressof(clip), 3))
+    handlers = {}
+    monkeypatch.setattr(mxl_writers.signal, "signal", handlers.__setitem__)
+    def run(clock, commit_status=0, location=0):
+        written, closed, clock = [], [], iter(clock)
+        def create(instance, definition, options, writer, info, created):
+            info._obj.common.format, info._obj.common.payloadLocation = 1, location
+            info._obj.discrete.sliceSizes[0], info._obj.discrete.grainCount = grain_bytes // 2, 6   # a ring of 4 to catch up in
+            return 0
+        def open_grain(writer, index, info, payload):
+            info._obj.grainSize, payload._obj.value = grain_bytes, ctypes.addressof(ring)
+            return 0
+        def commit(writer, info):
+            written.append((info._obj.validSlices == info._obj.totalSlices, ring.raw))
+            if len(written) == 3:
+                handlers[mxl_writers.signal.SIGTERM]()
+            return commit_status
+        monkeypatch.setattr(mxl_writers, "load_mxl", lambda: SimpleNamespace(
+            mxlCreateInstance=lambda domain, options: 7, mxlDestroyInstance=closed.append, mxlCreateFlowWriter=create,
+            mxlReleaseFlowWriter=lambda instance, writer: closed.append("flow"), mxlFlowWriterOpenGrain=open_grain,
+            mxlFlowWriterCommitGrain=commit, mxlGetCurrentIndex=lambda rate: next(clock), mxlGetNsUntilIndex=lambda index, rate: 0,
+            mxlSleepForNs=lambda ns: None))
+        try:
+            mxl_writers.main(config)
+        finally:
+            assert closed == ["flow", 7]
+        return written
+    # Two periods late (grain 101 at 103) is made up for; ten late, more than the ring holds, is not:
+    # grains 100, 101 and 114 (pictures 1, 2 and 0 of the loop), not 102 to 113.
+    assert run([100, 103, 114, 115]) == [(True, bytes([picture]) * grain_bytes) for picture in (1, 2, 0)]
+    assert "1 flows closed, 12 grain periods skipped" in capsys.readouterr().out
+    with pytest.raises(RuntimeError, match="f1: cannot commit grain 100"):
+        run([100], commit_status=1)
+    with pytest.raises(RuntimeError, match="f1: it is not video in host memory"):   # the mixer's reader would refuse it
+        run([100], location=1)
 
 
 def test_mxl_writers_start_before_the_mixer_and_stop_after_it(tmp_path, monkeypatch):

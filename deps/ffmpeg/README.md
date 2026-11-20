@@ -1,22 +1,21 @@
 # FFmpeg patch series
 
-`9/` is the one patch series. It targets the exact development revision
-`1bfb91609d921d1df949b111edfb43a378ca072e` (`master-1bfb9160`), with libavcodec 63,
+`9/` is the one patch series. It targets the official FFmpeg 9.1 release
+(`n9.1`, commit `74e4393595cf2b5857f0da925c4e0dd74ea306e5`), with libavcodec 63,
 libavfilter 12 and libavutil 61, and includes opt-in pinned CUDA upload and GPU v210
 unpacking. It does **not** apply to release n9.0.2; that release also lacks the
-opaque CUDA array decode path. Pin the commit, not the moving `master` branch.
+opaque CUDA array decode path.
 `9/bases.env` pins the base commit and the exact patched tree; `patch_count` guards
 against stray files.
 
 ```bash
 deps/ffmpeg/apply.sh <ffmpeg-checkout>
-deps/ffmpeg/verify.sh master-1bfb9160 <ffmpeg-repo>
+deps/ffmpeg/verify.sh n9.1 <ffmpeg-repo>
 ```
 
 Build it with nv-codec-headers **n13.1.15.0**
 (`0a6fba9a2820628b8103464f4c8753ee05838baa`) to enable its SDK 13.1 CUARRAY path.
-A revision hash needs an explicit fetch/checkout; `git clone --branch` accepts a branch
-or tag, not a commit hash. The Fedora mixer Dockerfile fetches both pinned revisions.
+The Fedora mixer Dockerfile fetches both pinned revisions.
 Rebuild avcpp, the AVP binary and Python module against the selected library ABI, and
 keep runtime library selection consistent.
 
@@ -31,7 +30,7 @@ their previous close behavior. See the upstream [live shutdown discussion](https
 
 The series carries seven custom CUDA filters: `convert_cuda`, `crop_cuda`,
 `overlay_many_cuda`, `pad_cuda`, `transition_cuda` (including 10-bit and dip),
-`tonemap_cuda` and `band_blur_cuda`, plus the RFC 4175, V4L2, optional NDI registration
+`tonemap_cuda` and `band_blur_cuda`, plus the RFC 4175, V4L2, optional NDI input
 and AArch64 patches, and the opt-in [libmxl demuxer and muxer](#the-series)
 (`--enable-libmxl`; nothing of it is compiled otherwise). Notes:
 
@@ -49,7 +48,9 @@ and AArch64 patches, and the opt-in [libmxl demuxer and muxer](#the-series)
   The retained CUVID intra-only patch still recognizes the existing
   `gop_size=100000` convention to set `ulIntraDecodeOnly`, with the existing
   decoder-initialization logging.
-- `0012`, `0014a` and `0014b` are the NVDEC changes as prepared for upstream. They
+- `0012`, `0014a` and `0014b` are the NVDEC changes as prepared for upstream, without
+  the `Changelog`, `doc/APIchanges` and library version hunks of those submissions:
+  they number entries after the 9.1 release and do not belong on its tag. They
   change no default: each control is an `hwaccel_flags` opt-in, and both flags are
   rejected for caller-supplied frame pools and other NVDEC output modes. The mixer
   sets both (`pyplumber/mixer/config.py`); any other decoder using `unsafe_output`
@@ -141,8 +142,11 @@ The first ten patches, in order:
 3. **NVDEC intra-only handling.**
 4. **RFC 4175 RTP frame handling.**
 5. **V4L2 source timestamps.**
-6. **NDI v5 registration** — registers the optional integration only; no SDK
-   or device implementation is supplied, and NDI stays disabled in demo builds.
+6. **NDI input** — the `libndi_newtek` input device, receiving audio and video
+   with the official NDI 6.4 SDK (`--enable-libndi_newtek`; nothing of it is
+   compiled otherwise). `install-ndi-sdk.sh` installs the checksum-pinned SDK
+   under `/opt/ndi/6.4`, which accepts its license; build the Fedora mixer image
+   with `--build-arg ENABLE_NDI=1` to include it.
 7. **10-bit CUDA transitions** — YUV420P10/422P10/444P10, P010 and P210 (plus
    8-bit 4:2:2/4:4:4) in a word-sample `transition_cuda` kernel.
 8. **`tonemap_cuda`** — SDR BT.709 / HLG / PQ conversion on CUDA semiplanar
@@ -181,7 +185,7 @@ v210 encode and decode.
 
 To move the pin, apply `0001`–`0025`, run `git restore --source=<pin>` on the
 fork's files listed in `0026`'s diffstat, keep `0026`'s registration hunks,
-commit, re-apply `0027` and `0028`, regenerate the series with
+commit, re-apply `0027`–`0029`, regenerate the series with
 `git format-patch --zero-commit --no-numbered --no-signature`, then update
 `9/bases.env` from `verify.sh`.
 
@@ -205,7 +209,8 @@ commit, re-apply `0027` and `0028`, regenerate the series with
 
 Compilation, linking and filter registration are the acceptance criteria for
 the series itself; runtime behaviour is covered by the demo and `tests/cuda`
-suites. NDI and AArch64 paths are not compiled in the demo images.
+suites. The AArch64 path is not compiled in the demo images, and NDI only with
+`ENABLE_NDI=1`; `WITH_MXL=1` and `ENABLE_NDI=1` may be combined.
 
 For the band-blur pixel smoke on an NVIDIA host (requires NumPy):
 

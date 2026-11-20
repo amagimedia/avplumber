@@ -40,6 +40,34 @@ The image is built with MXL (`WITH_MXL=1`, set `WITH_MXL=0` in `.env` to leave i
 offers MXL sources among the HW uploads, up to the profile's `mxl_sources`. The mixer container
 runs their writers beside the mixer and holds their flows in its own `/dev/shm` (`shm_size`).
 
+## Optional NDI input
+
+Set `ENABLE_NDI=1` in the L4 stack's `.env`. On the Ubuntu L4 host run:
+
+```sh
+sudo docker-compose/mixer/deploy/l4/setup-ndi.sh
+docker-compose/mixer/deploy/l4/stack.sh build mixer
+docker-compose/mixer/deploy/l4/stack.sh run --rm --no-deps --entrypoint ffmpeg mixer -hide_banner -devices
+```
+
+Enabling NDI installs the checksum-pinned official Linux SDK 6.4 under
+`/opt/ndi/6.4` and accepts its SDK license. The mixer image builds FFmpeg
+with the AVP binary and Python module and carries the NDI runtime library.
+Host networking and an Avahi-only D-Bus proxy provide local source discovery.
+For a source outside the local discovery domain, set `extra_ips` to the
+sender address. An AVP `input` node takes the discovered source name as
+`url`, `libndi_newtek` as `format`, and device options in `options`.
+
+To verify AVP against a live sender with audio and video:
+
+```sh
+docker-compose/mixer/deploy/l4/stack.sh run --rm --no-deps --entrypoint ffmpeg mixer \
+  -hide_banner -f libndi_newtek -find_sources 1 -wait_sources 3 -i dummy
+docker-compose/mixer/deploy/l4/stack.sh run --rm --no-deps --entrypoint python3 \
+  -v "$PWD/tests/smoke_ndi_input.py:/tmp/smoke_ndi_input.py:ro" mixer \
+  /tmp/smoke_ndi_input.py '<discovered source name>'
+```
+
 Open `http://<host>:7681/setup/`, controls at `/`, outputs at `/wall`.
 The controls' **Graph** link opens the read-only Sigma.js viewer at `/graph/`.
 If viewers use a DNS name instead of the configured public address, set

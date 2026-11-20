@@ -16,6 +16,10 @@ Toolkit, configures DRM/GBM and reboots. Run before application workloads;
 it refuses to replace a different loaded driver. DKMS may compile modules.
 See [host-setup.sh](host-setup.sh) for current versions and overrides.
 
+Set `ENABLE_NDI=1` when creating a host to install NDI SDK 6.4 and start Avahi
+after GPU readiness verification. Use the same flag in the L4 stack’s `.env`
+to include NDI input in the mixer image.
+
 CPU mitigations and automatic upgrades stay enabled by default. Benchmark-only
 `DISABLE_MITIGATIONS` / `DISABLE_AUTO_UPGRADES` are explicit operator choices.
 

@@ -1,0 +1,12 @@
+services:
+  mixer:
+    build:
+      args:
+        ENABLE_NDI: "1"
+    volumes:
+      - type: bind
+        source: /run/avplumber-ndi-discovery
+        target: /run/dbus
+        read_only: true
+        bind:
+          create_host_path: false

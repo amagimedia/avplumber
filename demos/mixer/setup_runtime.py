@@ -256,7 +256,8 @@ def mxl_available(ffmpeg="ffmpeg"):
     return any(line.split()[1:2] == ["mxl"] for line in demuxers.splitlines())
 
 
-# The writers create every flow within seconds of their start.
+# The writers create every flow once its loop is read into the page cache: within seconds of their
+# start when the loops are cached, as after their rendering.
 MXL_WRITERS_START_TIMEOUT_SEC = 120
 MXL_WRITERS_STOP_TIMEOUT_SEC = 10
 
@@ -291,9 +292,9 @@ class SetupRuntime(BaseSetupRuntime):
         self._stop_writers()
 
     def _start_writers(self, config):
-        """One writer per MXL source of the show at *config*, replacing any still running (a mixer
-        restarted after it exited on its own has not stopped them). Returns once every flow exists:
-        a mixer that opens a missing flow fails its source."""
+        """The writers process for the MXL sources of the show at *config*, replacing one still running
+        (a mixer restarted after it exited on its own has not stopped it). Returns once every flow
+        exists: a mixer that opens a missing flow fails its source."""
         self._stop_writers()
         flows = _mxl_flows(json.loads(config.read_text()))
         if not flows:
@@ -313,8 +314,8 @@ class SetupRuntime(BaseSetupRuntime):
         threading.Thread(target=self._watch_writers, args=(process, config), daemon=True).start()
 
     def _watch_writers(self, process, config):
-        """Writers that exit on their own start again; the mixer repeats each source's last frame
-        meanwhile and reopens the flows the new writers create."""
+        """A writers process that exits on its own starts again; the mixer repeats each source's last
+        frame meanwhile and reopens the flows the new process creates."""
         code = process.wait()
         # Checked after the pause: a stop or an Apply meanwhile owns the writers.
         if not self.closing.wait(2) and self.writers is process:
@@ -328,8 +329,8 @@ class SetupRuntime(BaseSetupRuntime):
         with self.writers_lock:
             process, self.writers = self.writers, None
             if process:
-                # The whole group, whether or not the launcher still runs: writers outlive a launcher
-                # that died without them, and a second set would write the same flows.
+                # The whole group (the process leads its own session), so that nothing it started
+                # is left: a second writer would write the same flows.
                 with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGINT)
                     deadline = time.monotonic() + MXL_WRITERS_STOP_TIMEOUT_SEC
