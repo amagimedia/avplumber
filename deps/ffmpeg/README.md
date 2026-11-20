@@ -185,7 +185,7 @@ v210 encode and decode.
 
 To move the pin, apply `0001`–`0025`, run `git restore --source=<pin>` on the
 fork's files listed in `0026`'s diffstat, keep `0026`'s registration hunks,
-commit, re-apply `0027` and `0028`, regenerate the series with
+commit, re-apply `0027`–`0029`, regenerate the series with
 `git format-patch --zero-commit --no-numbered --no-signature`, then update
 `9/bases.env` from `verify.sh`.
 
