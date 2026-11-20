@@ -163,7 +163,12 @@ hook reads the frames first; otherwise it writes P210, every 10-bit 4:2:2 sample
 colour conversion.
 It takes `transform` and `filter` like the other raw kinds. The reader starts at the newest grain
 and returns to it when it falls out of the ring, whose `history_duration` therefore bounds how far
-behind the writer a stalled source can run. A reader whose writer stalls waits for it, and the
+behind the writer a stalled source can run. The native reader's pictures are released 40 ms after
+their grains' times on the flow's clock (TAI; `realtime`'s `tai_delay`), whenever they arrive, so
+every source of a writer that commits on that clock keeps the same output tick through stalls and
+restarts. The demuxer's timestamps run on across grains it left out: its pictures are held a frame
+after the first one's arrival instead, and a stall shorter than a resync leaves that source late, in
+repeat and drop pairs. It is also the reader for a writer whose grain indices do not follow TAI. A reader whose writer stalls waits for it, and the
 compositor repeats the source's last frame meanwhile. When the writer recreates the flow, the reading
 node restarts the source's group (`auto_restart: group`); an `assume_video_format` with `ignore_eof`
 before the source's fan-out keeps that restart's EOF from ending the program. A grain the writer

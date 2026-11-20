@@ -118,6 +118,14 @@ Input tolerance parameters:
     `jitter_margin` to use for the first frame received after node start,
     after discontinuity or after `leak_after`-triggered bypass, **but
     not** after "*negative time to wait (...), resyncing*"
+-   `tai_delay` (float, seconds) - the source's timestamps are TAI times, as
+    `raw_video_file_cuda`'s of an MXL flow are, and each frame is released
+    this long after its own time on this host's clock, never after its
+    arrival: a frame that arrives later goes at once (or is dropped past
+    `negative_time_tolerance`) and the next one is on time again. It fixes
+    the offset of the node's `team`, which must be its own and carry no
+    `sync`, at `CLOCK_TAI` - `CLOCK_MONOTONIC` minus the delay; a step of the
+    system clock moves it along within a few seconds.
 
 Inter-stream synchronization parameters:
 
@@ -1028,15 +1036,18 @@ With `url: mxl://<domain directory>?id=<video flow id>` (a `HAVE_MXL=1` build, w
 the pictures are the grains of that [MXL](https://github.com/dmf-mxl/mxl) flow instead: each is
 copied once out of the flow's shared-memory ring into the page-locked memory (CUDA does not register
 the ring's own mapping). The flow must exist when the node starts and be progressive `video/v210` of
-`video_size`; timestamps count its grains at its own rate. The node starts at the newest grain and
-waits for the next one for as long as a stalled writer takes. When it falls out of the ring it
-returns to the newest grain, and timestamps run on without a jump. A grain the writer overwrote
-during the copy is dropped. When the flow is gone or was created again the node fails, for
+`video_size`; timestamps are its grains' indices, their times on the flow's clock (TAI) in grain
+periods, to be paced by `realtime` with `tai_delay`, which releases each picture at its own time
+(paced by arrival, a source whose start stalled leaves grains out and freezes). The node starts at the
+newest grain and waits for the next one for as long as a stalled writer takes. When it falls out of
+the ring it returns to the newest grain, and the grains it left behind are a gap in the timestamps.
+A grain the writer overwrote during the copy is dropped. When the flow is gone or was created again the node fails, for
 `auto_restart` to open it again. All such nodes of a process share one libmxl instance per domain
 (each instance holds an inotify instance, of which a user has 128 by default). `stats` adds `lapped`
 (grains dropped as overwritten), `resets` (returns to the newest grain) and `skipped` (grains the
-writer left out), and `read_us` is the copy of a grain without the wait for it. `loop`, `resident`
-and `send_eof` do not apply to a flow.
+writer left out), `read_us` is the copy of a grain without the wait for it, and `due_us` is how long
+after its grain's time the last picture went out (`due_max_us` the longest since `stats` was last
+read): what `tai_delay` must cover. `loop`, `resident` and `send_eof` do not apply to a flow.
 
 1 output: `av::VideoFrame` (hardware "pixel format" `cuda`). The node blocks while its output
 queue is full, so the consumer (typically `realtime`) paces the reading; give the queue a

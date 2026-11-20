@@ -86,6 +86,25 @@ protected:
     AVTS fixed_step_ = 0;                    // the last ordinary step between two frames
     AVTS jump_handled_at_ = AV_NOPTS_VALUE;  // the frame whose jump is already handled
     AVTS shift_wait_since_ = AV_NOPTS_VALUE;
+    // "tai_delay": the source's timestamps are TAI times. Each frame is released this long after its
+    // own: the team's offset is CLOCK_TAI - CLOCK_MONOTONIC (sampled now) minus it. Team units.
+    AVTS tai_delay_ = AV_NOPTS_VALUE;
+    int64_t tai_minus_monotonic_ns_ = 0;
+    AVTS tai_checked_ = AV_NOPTS_VALUE;
+    void fixTaiOffset() {
+        tai_minus_monotonic_ns_ = avp::clock_origin_detail::taiMinusMonotonicNs();
+        team_->setFixedOffset(rescaleTS({tai_minus_monotonic_ns_, {1, 1000000000}}, timebase_).timestamp() - tai_delay_);
+    }
+    // A step of the system clock moves TAI against the monotonic clock, and the source's writer
+    // steps with it: so does the offset, checked every few seconds.
+    void followTaiClock(AVTS now_ts) {
+        if (tai_checked_ != AV_NOPTS_VALUE && now_ts - tai_checked_ < secondsToTs(5.0f)) return;
+        tai_checked_ = now_ts;
+        const int64_t moved = avp::clock_origin_detail::taiMinusMonotonicNs() - tai_minus_monotonic_ns_;
+        if (moved < 1000000 && moved > -1000000) return;
+        logstream << "TAI moved by " << moved / 1000 << " us against the monotonic clock; the release times follow it";
+        fixTaiOffset();
+    }
 
     /// Follow a jump in this source's timestamps under a fixed team offset. Returns true while a
     /// follower (an audio node) waits for its master's correction for the same jump.
@@ -281,6 +300,7 @@ public:
                 }
                 bool waiting_for_shift = false;
                 if (fixed) {
+                    if (tai_delay_ != AV_NOPTS_VALUE) followTaiClock(now_ts);
                     waiting_for_shift = followSourceJump(pkt_ts, now_ts, ticks);
                     offset_ = team_->fixedOffset() + shift_;
                     ready_ = true;
@@ -728,6 +748,16 @@ public:
                 }
                 r->team_->syncHosts(fps, std::optional<AVTS>(sync.at("offset").get<AVTS>()), show);
             }
+        }
+        // "tai_delay" (seconds): the source stamps its frames with their TAI times, as an MXL flow's
+        // grain indices are, and each is released that long after its own time, never after its
+        // arrival: a frame late for it goes at once (or is dropped past negative_time_tolerance)
+        // and the next one is on time again. It fixes the team's offset, so the team is this
+        // node's alone, and a "sync" does not go with it.
+        if (params.count("tai_delay")) {
+            if (!r->team_ || params.count("sync")) throw Error("realtime: tai_delay needs a team of its own and no sync");
+            r->tai_delay_ = secondsToTs(params["tai_delay"]);
+            r->fixTaiOffset();
         }
         if (params.count("master")) {
             r->is_master_ = params["master"];

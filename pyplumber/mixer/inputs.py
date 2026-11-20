@@ -355,14 +355,21 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
 
 
 # The MXL demuxer's options for a live source, when `canvas.mxl_reader` is "demuxer" (the native
-# reader, raw_video_file_cuda, behaves the same without them): wait up to a frame period for the next grain (a
+# reader, raw_video_file_cuda, reads the same way without them, and stamps grain indices): wait up to a frame period for the next grain (a
 # non-blocking read between grains returns EAGAIN; input_rec waits a stalled writer out); start at
 # the newest grain, and go back to it when the reader falls out of the ring (`on_too_late=reset`),
 # with timestamps that run on from the last grain (`reset_on_drop`, FFmpeg patch
-# 0027 of deps/ffmpeg/9), not a jump that realtime would wait out. Grains are copied:
+# 0027 of deps/ffmpeg/9), not a jump that arrival pacing would wait out. Grains are copied:
 # a `zero_copy` packet points into the ring with no reference held, and the decoded frame that
 # wraps it waits in queues the writer's ring history does not bound.
 MXL_READER_OPTIONS = {"blocking": "1", "grain_index_init": "head", "on_too_late": "reset", "reset_on_drop": "1"}
+
+# Seconds after its grain's time (TAI) that the native reader's picture is released, whatever the
+# rate: it covers the writer's commit, the copy and the upload, which take as long at 60 fps as at
+# 25 (`due_us` of the reader's stats: 7-40 ms, 81 ms at most, on an L4 beside the 192-source show).
+# The nearest output tick then lies 40 ms +- half a frame after the grain, ahead of the playout
+# latency; a frame period instead would leave 8 ms of that at 60 fps.
+MXL_RELEASE_DELAY = 0.040
 
 
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
@@ -387,15 +394,25 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
     ``frame_metadata`` and ``demux`` are ``build_input``'s: the keys ``input_rec`` stamps on each
     decoded picture, and whether a ``demux`` node splits the file's one stream.
     """
-    # A live flow's pictures arrive as their writer commits them, not ahead of time as a file's do:
-    # pacing holds them one frame (a jitter buffer), so a source that started fast does not land
-    # its later pictures on the far side of their output ticks (repeat and drop pairs).
-    jitter = {"jitter_margin": fps_den / fps, "initial_jitter_margin": fps_den / fps} if mxl else None
+    # A live flow's pictures arrive as their writer commits them, not ahead of time as a file's do.
+    # The native reader stamps each with its grain's time on the flow's clock (TAI), and pacing
+    # releases it MXL_RELEASE_DELAY after that time, whenever it arrived: a reader that fell out of
+    # the ring and left grains out, or a start that stalled, moves no later picture off its output
+    # tick. (Paced by arrival instead, such grain timestamps freeze a source whose start stalled.)
+    # The demuxer's timestamps run on across what it left out, so its pictures are held a frame
+    # after the first one's arrival instead (a jitter buffer), and such a stall leaves the source
+    # late, in repeat and drop pairs on the output ticks, until it is late enough to resync.
+    if mxl and direct:
+        pacing = {"team": f"input_{tag}_tai", "tai_delay": MXL_RELEASE_DELAY}
+    elif mxl:
+        pacing = {"jitter_margin": fps_den / fps, "initial_jitter_margin": fps_den / fps}
+    else:
+        pacing = None
     if direct:
         return _direct_raw_input(
             avp, api, tag, path, pixel_format="v210", storage=storage, width=width, height=height, group=group,
             fps=fps, fps_den=fps_den, hwaccel=hwaccel, loop=loop, color=color, pool_frames=pool_frames,
-            event_loop=event_loop, native_rate=native_rate, realtime_params=jitter)
+            event_loop=event_loop, native_rate=native_rate, realtime_params=pacing)
     stride = v210_row_stride(width)
     if mxl:
         packets = f"input_{tag}_packed"
@@ -431,4 +448,4 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
         "group": group, **_raw_file_restart(loop),
     }))
     return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop,
-                 native_rate=native_rate, realtime_params=jitter)
+                 native_rate=native_rate, realtime_params=pacing)
