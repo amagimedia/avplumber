@@ -5,3 +5,4 @@
 # Preserve whitespace in imported patch payloads and vendored SDK sources.
 demos/dmabuf-browser/chromium/*.patch whitespace=-trailing-space
 deps/Optical_Flow_SDK_5.0.7/** whitespace=-trailing-space
+deps/ffmpeg/9/0026-avformat-libmxl-demuxer-muxer.patch linguist-generated=true whitespace=-trailing-space

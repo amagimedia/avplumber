@@ -6,6 +6,11 @@
 #   TENSORRT_URL=<url of your tensorrt-minimal tgz> docker build \
 #       -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44-trt \
 #       --build-arg WITH_TENSORRT=1 --secret id=tensorrt_url,env=TENSORRT_URL .
+#   docker build -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44-mxl \
+#       --build-arg WITH_MXL=1 .
+#
+# WITH_MXL=1 adds the MXL SDK and FFmpeg's libmxl demuxer/muxer.
+# Without it the image carries neither, and FFmpeg is configured as before.
 #
 # The host driver must be R615 or newer (CUDA 13.4): FFmpeg ships its CUDA
 # filters as PTX that the driver JIT-compiles, and an older driver rejects
@@ -16,6 +21,7 @@
 # gcc15-c++ installed, since nvcc 13.2 supports GCC up to 15.
 
 ARG WITH_TENSORRT=0
+ARG WITH_MXL=0
 
 FROM fedora:44 AS base
 
@@ -71,8 +77,62 @@ ENV NVCC_PREPEND_FLAGS=${NVCC_PREPEND_FLAGS}
 # compares toolchains, not hardening.
 ENV HARDENING_FLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fcf-protection"
 
-FROM base AS ffmpeg
+# MXL is optional so the default image carries no MXL SDK. WITH_MXL selects one
+# of the two stages below; the ffmpeg stage builds on it. /opt/mxl holds what the
+# runtime stage needs, and exists empty without MXL so its COPY always works.
+FROM base AS mxl-0
 
+RUN mkdir -p /opt/mxl/lib
+
+FROM base AS mxl-1
+
+ARG MXL_TAG=v1.1.0
+# This registry revision supplies the SDK's fmt 12.1 and spdlog 1.17.
+ARG VCPKG_COMMIT=2fc5b0d06b6575491a8b06c18904316ec331926c
+ARG BUILD_JOBS=4
+
+# The SDK manifest includes its CLI, tests and GStreamer tools even when their
+# build switches are off. Install only the four dependencies of libmxl.
+ENV VCPKG_ROOT=/opt/vcpkg
+ENV VCPKG_FORCE_SYSTEM_BINARIES=1
+RUN dnf -y install --setopt=install_weak_deps=False ninja-build tar unzip zip \
+    && dnf clean all \
+    && git init --quiet "$VCPKG_ROOT" \
+    && git -C "$VCPKG_ROOT" fetch --quiet --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_COMMIT" \
+    && git -C "$VCPKG_ROOT" checkout --quiet --detach FETCH_HEAD \
+    && "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics \
+    && VCPKG_MAX_CONCURRENCY="${BUILD_JOBS}" "$VCPKG_ROOT/vcpkg" install --classic fmt picojson spdlog stduuid
+
+# Installed into /usr/local, beside FFmpeg (libdir forced to lib: Fedora's
+# default is lib64). libmxl links spdlog statically, so the private Requires is
+# scrubbed from its pkg-config file before FFmpeg's configure reads it. /opt/mxl
+# gets the shared libraries for the runtime stage, and a pkg-config directory
+# holding libmxl.pc alone, so that enabling MXL does not change where configure
+# finds anything else.
+RUN git clone --quiet --branch "${MXL_TAG}" --depth 1 \
+        https://github.com/dmf-mxl/mxl.git /tmp/mxl \
+    && cmake -S /tmp/mxl -B /tmp/mxl/build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+        -DVCPKG_MANIFEST_MODE=OFF \
+        -DBUILD_DOCS=OFF \
+        -DBUILD_TOOLS=OFF -DBUILD_UTILS=OFF -DBUILD_TESTS=OFF \
+    && cmake --build /tmp/mxl/build --parallel "${BUILD_JOBS}" \
+    && cmake --install /tmp/mxl/build \
+    && test -f /usr/local/lib/pkgconfig/libmxl.pc \
+    && sed -i '/^Requires.private: spdlog$/d' /usr/local/lib/pkgconfig/libmxl.pc \
+    && mkdir -p /opt/mxl/lib /opt/mxl/pkgconfig \
+    && cp -a /usr/local/lib/libmxl*.so* /opt/mxl/lib/ \
+    && cp /usr/local/lib/pkgconfig/libmxl.pc /opt/mxl/pkgconfig/ \
+    && echo /opt/mxl/lib >> /etc/ld.so.conf.d/avplumber.conf \
+    && ldconfig \
+    && rm -rf /tmp/mxl "$VCPKG_ROOT" /root/.cache/vcpkg
+
+FROM mxl-${WITH_MXL} AS ffmpeg
+
+ARG WITH_MXL
 ARG FFMPEG_TAG=master-1bfb9160
 ARG BUILD_JOBS=4
 # Empty: the nv-codec-headers pinned in deps/ffmpeg/9/bases.env (see there for driver 595 hosts).
@@ -112,9 +172,13 @@ RUN dnf -y install --setopt=install_weak_deps=False opus-devel \
 # update. configure hardcodes -ptx; the fatbin keeps the .ptx file name, and
 # ff_cuda_load_module's cuModuleLoadData() accepts either. CUDA 13 has no Volta
 # target, so the old compute_70 is gone.
+# WITH_MXL=1 adds --enable-libmxl, which is what makes configure build the mxl
+# demuxer and muxer, and points pkg-config at libmxl.pc alone. Without it the
+# configure line and its environment are the ones below, unchanged.
 RUN cd /tmp/ffmpeg \
     && grep -q 'nvccflags="$nvccflags -ptx"' configure \
     && sed -i 's/nvccflags="$nvccflags -ptx"/nvccflags="$nvccflags -fatbin"/' configure \
+    && if [ "${WITH_MXL}" = 1 ]; then mxl=--enable-libmxl; export PKG_CONFIG_PATH=/opt/mxl/pkgconfig; else mxl=; fi \
     && ./configure \
         --prefix=/usr/local \
         --libdir=/usr/local/lib \
@@ -133,6 +197,7 @@ RUN cd /tmp/ffmpeg \
         --enable-nvdec \
         --enable-nvenc \
         --disable-libnpp \
+        $mxl \
         --disable-doc \
         --disable-htmlpages \
         --disable-manpages \
@@ -153,6 +218,7 @@ RUN cd /tmp/ffmpeg \
     done \
     && make install \
     && ldconfig \
+    && if [ "${WITH_MXL}" = 1 ]; then make TARGET_PATH="$PWD" fate-mxl-video-encdec; fi \
     && rm -rf /tmp/ffmpeg
 
 # Required mixer filters: color/storage conversion and transitions.
@@ -166,6 +232,12 @@ RUN ffmpeg="/usr/local/bin/ffmpeg -hide_banner" \
     && $ffmpeg -h filter=transition_cuda \
        | awk '$1 == "mode" && $3 ~ /T/ { m = 1 } $1 == "dip" { d = 1 } $1 == "color" && $3 ~ /T/ { c = 1 } \
               END { exit !(m && d && c) }'
+
+# With MXL the demuxer and muxer must be registered; without it neither may be.
+RUN ffmpeg="/usr/local/bin/ffmpeg -hide_banner" \
+    && if $ffmpeg -demuxers | awk '$1 ~ /D/ && $2 == "mxl" { found = 1 } END { exit !found }'; then d=1; else d=0; fi \
+    && if $ffmpeg -muxers | awk '$1 ~ /E/ && $2 == "mxl" { found = 1 } END { exit !found }'; then e=1; else e=0; fi \
+    && test "$d$e" = "${WITH_MXL}${WITH_MXL}"
 
 # TensorRT is optional so the default image carries no inference stack.
 # WITH_TENSORRT selects one of the two stages below; the builder inherits it.
@@ -243,7 +315,7 @@ RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
        | grep -q '/usr/local/lib/libavfilter' \
     && for node in ipc_dmabuf_source drm_prime_to_egl_image drm_prime_to_cuda \
                    egl_image_cuda_overlay; do \
-           grep -q "\"${node}\"" /build/graph_factory.generated.cpp || exit 1; \
+           grep -q "\"${node}\"" /build/graph_factory.python.generated.cpp || exit 1; \
        done \
     && PYTHONPATH=/build python3 -c 'import _avplumber'
 
@@ -287,6 +359,7 @@ COPY --from=builder /etc/ld.so.conf.d/avplumber.conf /etc/ld.so.conf.d/
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
 COPY --from=builder /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/libpostproc.so* /usr/local/lib/
 COPY --from=builder /opt/tensorrt /opt/tensorrt
+COPY --from=builder /opt/mxl /opt/mxl
 COPY --from=builder /build/_avplumber*.so /build/
 COPY --from=builder /build/pyplumber /build/pyplumber
 COPY demos/mixer /build/demos/mixer
