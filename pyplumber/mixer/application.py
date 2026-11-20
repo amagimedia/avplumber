@@ -42,6 +42,8 @@ HWACCEL = "mixer_gpu"
 # An alpha source's frames to the GPU as RGBA. Not pinned: pinned staging needs
 # nv-codec-headers >= 13.1, which the FFmpeg 9 build (n13.0) does not have.
 ALPHA_UPLOAD = "format=rgba,hwupload_cuda"
+# NDI (FFmpeg's libndi_newtek, ENABLE_NDI=1 images): source discovery waits this long when opening.
+NDI_INPUT_OPTIONS = {"wait_sources": "5"}
 # Nothing in a show reads what input_rec stamps on decoded frames (realtime's frame counters serve
 # its teams and the OBS embedding, speed nodes read frame_ts); stamping costs every hop a copy.
 SOURCE_FRAME_METADATA: list = []
@@ -1061,24 +1063,30 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                     direct=cfg.raw_upload in ("direct", "resident"), resident=cfg.raw_upload == "resident",
                     pool_frames=cfg.raw_pool_frames, color=source.color, **file_params)
             else:
+                ndi = source.kind == "ndi"
                 edge, audio_edge = build_input(
                     avp, api, str(index), source.location, continuous_loop=True,
+                    **({"input_params": {"format": "libndi_newtek", "options": {
+                        **NDI_INPUT_OPTIONS, **({"extra_ips": source.extra_ips} if source.extra_ips else {})}}} if ndi else {}),
                     # NVDEC drops alpha: an alpha source decodes in software, in its codec's own
-                    # format (argb, yuva444p12...), and is uploaded as RGBA after its chain.
-                    decoder_params={**_decoder_params(source, cfg), **({"hwaccel_only_for_codecs": []} if source.alpha else {})},
+                    # format (argb, yuva444p12...), and is uploaded as RGBA after its chain. NDI's
+                    # packed 4:2:2 (UYVY) is no codec NVDEC has: its frames go the same way, as NV12.
+                    decoder_params={**_decoder_params(source, cfg), **({"hwaccel_only_for_codecs": []} if source.alpha or ndi else {})},
                     decoded_ahead=cfg.decoded_frames_ahead,
                     has_audio=source.has_audio, sync_team=(f"input_{index}_av_sync" if source.has_audio else None),
                     **file_params)
                 if audio_edge:
                     audio_edges.append((source.id, audio_edge))
-                if source.alpha:
+                if source.alpha or ndi:
                     # After pacing, not between decoder and pacing: a seek walks up from the realtime
                     # node to the decoder, and a filter in that path stops it.
+                    stored = "nv12" if ndi else "rgba"
                     avp.addNode(api.FilterVideo({
-                        "name": f"alpha_upload_{index}", "src": edge, "dst": f"input_{index}_rgba",
-                        "graph": ALPHA_UPLOAD, "hwaccel": HWACCEL, "group": group, "auto_restart": "group",
+                        "name": f"{'ndi' if ndi else 'alpha'}_upload_{index}", "src": edge, "dst": f"input_{index}_{stored}",
+                        "graph": f"format=nv12,{source.color.setparams},hwupload_cuda" if ndi else ALPHA_UPLOAD,
+                        "hwaccel": HWACCEL, "group": group, "auto_restart": "group",
                     }))
-                    edge = f"input_{index}_rgba"
+                    edge = f"input_{index}_{stored}"
         if source.transform:
             transformed_edge = f"input_{index}_transformed"
             # pass_arrays: the color stage and the compositors read arrays, so a frame that already

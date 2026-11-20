@@ -213,7 +213,8 @@ class Rect:
 
 
 # What a raw source's frames are stored as on the GPU; a decoded file's storage is known only per frame.
-RAW_STORAGE = {"v210": "p210le", "mxl": "p210le", "nv12": "nv12", "p010": "p010le"}
+# NDI's packed 4:2:2 is converted to NV12 on the CPU and uploaded.
+RAW_STORAGE = {"v210": "p210le", "mxl": "p210le", "nv12": "nv12", "p010": "p010le", "ndi": "nv12"}
 TRANSFORM_FORMATS = ("nv12", "p010le", "p210le")   # the canvases cuda_transform draws a video source on
 
 
@@ -230,8 +231,8 @@ class SourceTransform(NamedTuple):
 @dataclass(frozen=True)
 class Source:
     id: str
-    kind: str                      # "browser" | "video" | "v210" | "mxl" | "nv12" | "p010"
-    location: str                  # browser URL, media path (v210/nv12/p010 are raw files) or MXL reader URL
+    kind: str                      # "browser" | "video" | "v210" | "mxl" | "nv12" | "p010" | "ndi"
+    location: str                  # browser URL, media path (v210/nv12/p010 are raw files), MXL reader URL or NDI source name
     width: int = 0
     height: int = 0
     fps: Any = 0                   # browser source rate (parse_rate); 0 = canvas fps
@@ -259,7 +260,8 @@ class Source:
     # the show; the oldest beyond this many more than the show's peak go.
     park_limit: int = 0
     capture_cadence: str = "continuous"  # browser: "on_change" permits intentional static holds
-    has_audio: bool = False        # demux/decode an audio track alongside video (kind == "video" only)
+    has_audio: bool = False        # demux/decode an audio track alongside video (kind "video" or "ndi")
+    extra_ips: str = ""            # ndi: addresses (comma-separated) to find the source at besides mDNS
     # Video with an alpha channel (QuickTime Animation, ProRes 4444, PNG...): decoded on the CPU to
     # straight RGBA and uploaded, the way wipe clips are, then composited as packed RGB like a
     # browser page, so a scene item with blend draws it over what is beneath. SDR only.
@@ -585,6 +587,7 @@ def _rect(obj: Any, where: str) -> Rect:
 
 
 _SOURCE_KEYS = {"browser": ("url", "width", "height"), "video": ("path",), "mxl": ("url", "flow", "width", "height"),
+                "ndi": ("name",),
                 **{kind: ("path", "width", "height") for kind in ("v210", "nv12", "p010")}}
 
 
@@ -663,8 +666,11 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     if not isinstance(hold_last_frame, bool) or "hold_last_frame" in s and kind != "browser":
         raise ConfigError(f"{where}: hold_last_frame must be a boolean on a browser source")
     has_audio = s.get("has_audio", False)
-    if not isinstance(has_audio, bool) or has_audio and kind != "video":
-        raise ConfigError(f"{where}: has_audio must be a boolean, and only applies to kind video")
+    if not isinstance(has_audio, bool) or has_audio and kind not in ("video", "ndi"):
+        raise ConfigError(f"{where}: has_audio must be a boolean, and only applies to kinds video and ndi")
+    extra_ips = s.get("extra_ips", "")
+    if not isinstance(extra_ips, str) or extra_ips and kind != "ndi":
+        raise ConfigError(f"{where}: extra_ips must be a string of comma-separated addresses on an ndi source")
     alpha = s.get("alpha", False)
     if not isinstance(alpha, bool) or alpha and kind != "video":
         raise ConfigError(f"{where}: alpha must be a boolean, and only applies to kind video")
@@ -681,6 +687,8 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
             raise ValueError("raw input has no color metadata; declare an explicit color setting")
         if kind == "browser" and color != Color():
             raise ValueError("browser input supports SDR only")
+        if kind == "ndi" and color != Color():
+            raise ValueError("ndi input supports SDR only (it is converted to 8-bit NV12)")
         if kind in ("nv12", "p010"):
             if kind == "nv12" and color != Color():
                 raise ValueError("nv12 input supports SDR only")
@@ -689,14 +697,14 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     except ValueError as e:
         raise ConfigError(f"{where}: {e}") from e
     picture = _parse_picture(s["picture"], s, where) if "picture" in s else None
-    location = _mxl_flow(s, where) if kind == "mxl" else str(s.get("url", s.get("path")))
+    location = _mxl_flow(s, where) if kind == "mxl" else str(s["name"]) if kind == "ndi" else str(s.get("url", s.get("path")))
     return Source(sid, kind, location, width=int(s.get("width", 0)), picture=picture,
                   height=int(s.get("height", 0)), fps=parse_rate(s.get("fps", fps), f"{where}.fps") if kind == "browser" else 0,
-                  # A live flow never ends: it restarts its group when it stalls instead (inputs.py).
-                  loop=bool(s.get("loop", True)) and kind != "mxl",
+                  # A live flow or NDI source never ends: it restarts its group when it stalls instead (inputs.py).
+                  loop=bool(s.get("loop", True)) and kind not in ("mxl", "ndi"),
                   capture_cadence=cadence, hold_last_frame=hold_last_frame, filter_graph=source_filter,
                   filter_output_format=filter_format, decode_storage=storage, extra_hw_frames=extra,
-                  has_audio=has_audio, deinterlace=deinterlace, alpha=alpha,
+                  has_audio=has_audio, deinterlace=deinterlace, alpha=alpha, extra_ips=extra_ips,
                   decoded_format=decoded_format,
                   transform=_parse_source_transform(s["transform"], kind, where) if "transform" in s else None,
                   **(color.tags if color else {}))

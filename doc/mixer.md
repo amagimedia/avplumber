@@ -140,6 +140,16 @@ from that configuration. This is a derived count, not a newly measured deployed
 graph or a throughput claim. See the [cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 for revision-specific evidence and the ranked optimization list.
 
+## NDI sources
+
+A source `{"kind": "ndi", "name": "HOST (stream)", "color": "sdr"}` receives that NDI sender with
+FFmpeg's `libndi_newtek` device, which images built with `ENABLE_NDI=1` have (see
+`docker-compose/mixer/deploy/l4/README.md` for the discovery service). `extra_ips` lists addresses to
+find the sender at besides mDNS, e.g. `"127.0.0.1"` for one on the same host. NDI video is packed
+4:2:2 (UYVY), no codec NVDEC has: it decodes in software, is converted to NV12 with the declared
+colour tags and uploaded after pacing, as an alpha source is RGBA. `has_audio` takes its audio into
+the show like a video file's. The source never loops; when the sender is lost the chain restarts.
+
 ## MXL sources and outputs
 
 [MXL](https://github.com/dmf-mxl/mxl) flows carry uncompressed v210 (10-bit 4:2:2) video in
